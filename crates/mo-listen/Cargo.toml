@@ -1,0 +1,14 @@
+[package]
+name = "mo-listen"
+description = "Listening to a track's audio live: the shared analyser behind the listener plugin and the main plugin's \"listen to its own track\". A tap for the audio thread that only copies, and an ear for a low-priority thread that sums up the newest audio (levels, low/mid/high, the notes heard, hits). No window, host or files in it."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The FFT and the chroma the sound analysis uses, so the live listener hears notes as the Sounds page does. Without
+# its sound output (`play`), so nothing here needs the system's sound libraries.
+mo-audio = { path = "../mo-audio", default-features = false }

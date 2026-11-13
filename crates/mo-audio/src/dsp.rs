@@ -51,6 +51,51 @@ pub fn fft(re: &mut [f64], im: &mut [f64]) {
     }
 }
 
+/// The MIDI note number of a frequency (69 is A4 at 440 Hz), with the cents as the fraction.
+pub fn hz_to_midi(hz: f64) -> f64 {
+    69.0 + 12.0 * (hz / 440.0).log2()
+}
+
+/// One frame's 12-note chroma (C first) from its power spectrum: `power` holds the `n_fft / 2 + 1` bins of one FFT
+/// frame, `bin_hz` apart. Spectral peaks between 50 Hz and 5 kHz (their exact frequency found by a parabola through
+/// the log magnitudes) each add to their note, higher ones a little less, which damps overtones; a peak a quarter-tone
+/// off adds nothing. `mag` is room to work in, at least as long as `power` (a shorter one gives an empty chroma).
+/// Shared by the sound analysis (mo-sounds) and the live listener (mo-listen), so both hear notes the same way.
+pub fn chroma_of(power: &[f32], bin_hz: f64, mag: &mut [f64]) -> [f64; 12] {
+    let mut c = [0f64; 12];
+    if power.len() < 3 || mag.len() < power.len() || bin_hz.is_nan() || bin_hz <= 0.0 {
+        return c;
+    }
+    // At least bin 1, so the bin below the lowest exists (C# assumed it; only a rate over 400 kHz breaks that).
+    let lo = ((50.0 / bin_hz) as usize).max(1);
+    let hi = (power.len() - 2).min((5000.0 / bin_hz) as usize);
+    if lo > hi {
+        return c;
+    }
+    let mut peak = 0f64;
+    for k in lo - 1..=hi + 1 {
+        mag[k] = f64::from(power[k]).sqrt();
+        peak = peak.max(mag[k]);
+    }
+    let floor = peak * 0.01;
+    for k in lo..=hi {
+        if mag[k] < floor || mag[k] <= mag[k - 1] || mag[k] < mag[k + 1] {
+            continue;
+        }
+        let (a, b, g) = ((mag[k - 1] + 1e-12).ln(), (mag[k] + 1e-12).ln(), (mag[k + 1] + 1e-12).ln());
+        let den = a - 2.0 * b + g;
+        let delta = if den.abs() > 1e-12 { 0.5 * (a - g) / den } else { 0.0 };
+        let hz = (k as f64 + delta) * bin_hz;
+        let midi = hz_to_midi(hz);
+        let pc = (midi.round_ties_even() as i64).rem_euclid(12) as usize;
+        let cents = (midi - midi.round_ties_even()).abs();
+        // 1 in tune, 0 a quarter-tone off.
+        let weight = (PI * cents).cos().powi(2);
+        c[pc] += weight * (mag[k] / peak).sqrt() / (1.0 + hz / 2000.0);
+    }
+    c
+}
+
 /// Periodic Hann window (as numpy, librosa and transformers use for spectrograms).
 pub fn hann(n: usize) -> Vec<f64> {
     (0..n).map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos()).collect()
