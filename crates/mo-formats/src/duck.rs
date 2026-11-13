@@ -230,7 +230,7 @@ fn thumbnail(text: &str) -> Option<Vec<f32>> {
     if bytes.len() != THUMBNAIL_VALUES * 4 {
         return None;
     }
-    bytes.chunks_exact(4).map(|b| Some(f32::from_le_bytes(b.try_into().ok()?))).collect()
+    Some(bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect())
 }
 
 /// Plain base64 (`A-Z a-z 0-9 + /`, `=` padding), or none if it isn't.
