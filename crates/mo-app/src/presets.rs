@@ -154,6 +154,37 @@ pub fn bitwig_curves_folder(bitwig: &[PathBuf]) -> Option<PathBuf> {
 /// The curve files (`.bwcurve`) under `roots`, for the Curves section (Bitwig's curves library). Folders starting
 /// with "." are skipped, as the preset finder does; asks the disk, so never on the window's thread.
 pub fn curve_files(roots: &[PathBuf]) -> Vec<String> {
+    files_ending(roots, |name| name.ends_with(".bwcurve"))
+}
+
+/// Where Xfer's plugins keep their LFO shapes: Serum 2's and Serum 1's `LFO Shapes` (Serum 2 keeps a copy of Serum
+/// 1's too) and LFOTool's presets, which hold its shapes and graphs. On Windows they're in `Documents\Xfer`; on a Mac
+/// Serum 2's are there too, and Serum 1's and LFOTool's in the audio presets folder (`~/Library/Audio/Presets/Xfer
+/// Records`), so both places are looked in. Only the folders that are there, each once.
+pub fn shape_folders(documents: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut xfer: Vec<PathBuf> = documents.map(|d| d.join("Xfer")).into_iter().collect();
+    xfer.extend(home.map(|h| h.join("Library").join("Audio").join("Presets").join("Xfer Records")));
+    let mut out: Vec<PathBuf> = Vec::new();
+    for x in xfer {
+        let serum2 = x.join("Serum 2 Presets").join("LFO Shapes");
+        for f in [serum2, x.join("Serum Presets").join("LFO Shapes"), x.join("LFOTool Presets")] {
+            if f.is_dir() && !out.contains(&f) {
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+/// The plugins' shape files under `roots` ([`shape_folders`]): Serum's `.XferShape` and `.shp`, and LFOTool's presets
+/// (`.fxp`). Asks the disk, so never on the window's thread.
+pub fn shape_files(roots: &[PathBuf]) -> Vec<String> {
+    files_ending(roots, mo_formats::serum::is_shape_file)
+}
+
+/// The files under `roots` whose name (in small letters) `wanted` takes, sorted, each folder once (a link back up isn't
+/// followed round), at most 16 folders deep; folders starting with "." are skipped.
+fn files_ending(roots: &[PathBuf], wanted: impl Fn(&str) -> bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut todo: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
@@ -169,7 +200,7 @@ pub fn curve_files(roots: &[PathBuf]) -> Vec<String> {
                 if !name.starts_with('.') {
                     todo.push((path, depth + 1));
                 }
-            } else if name.to_lowercase().ends_with(".bwcurve")
+            } else if wanted(&name.to_lowercase())
                 && let Some(p) = path.to_str()
             {
                 out.push(p.to_owned());
@@ -1414,10 +1445,12 @@ pub fn kind_label(k: SourceKind) -> &'static str {
         SourceKind::FlKnobMoves => "FL knob moves",
         SourceKind::BitwigClip => "Bitwig clips",
         SourceKind::BitwigCurve => "Bitwig's library",
+        SourceKind::PluginShape => "Plugin shapes",
     }
 }
 
-pub const KINDS: [SourceKind; 3] = [SourceKind::FlKnobMoves, SourceKind::BitwigClip, SourceKind::BitwigCurve];
+pub const KINDS: [SourceKind; 4] =
+    [SourceKind::FlKnobMoves, SourceKind::BitwigClip, SourceKind::BitwigCurve, SourceKind::PluginShape];
 
 pub fn kind_from(l: &str) -> Option<SourceKind> {
     KINDS.into_iter().find(|k| kind_label(*k) == l)
@@ -1540,16 +1573,23 @@ pub fn beats_words(beats: f64) -> String {
 
 /// Where a curve was found, in a few words.
 pub fn found_words(c: &Curve) -> String {
-    let songs: HashSet<&str> =
-        c.sources.iter().filter(|s| s.kind != SourceKind::BitwigCurve).map(|s| s.song.as_str()).collect();
-    let library = c.sources.iter().any(|s| s.kind == SourceKind::BitwigCurve);
-    match (songs.len(), library) {
-        (0, _) => "In Bitwig's library".into(),
-        (n, lib) => format!(
+    let songs: HashSet<&str> = c.sources.iter().filter(|s| s.kind.is_song()).map(|s| s.song.as_str()).collect();
+    let has = |k: SourceKind| c.sources.iter().any(|s| s.kind == k);
+    let libraries: Vec<&str> =
+        [(SourceKind::BitwigCurve, "Bitwig's library"), (SourceKind::PluginShape, "plugin shapes")]
+            .into_iter()
+            .filter(|(k, _)| has(*k))
+            .map(|(_, l)| l)
+            .collect();
+    let libraries = libraries.join(" and ");
+    match songs.len() {
+        0 if libraries.is_empty() => String::new(),
+        0 => format!("In {libraries}"),
+        n => format!(
             "In {} song{}{}",
             thousands(n),
             if n == 1 { "" } else { "s" },
-            if lib { " and Bitwig's library" } else { "" }
+            if libraries.is_empty() { String::new() } else { format!(" and {libraries}") }
         ),
     }
 }
@@ -1649,7 +1689,7 @@ pub fn curve_card(c: &Curve) -> CurveCard {
             if !what.is_empty() {
                 about.push(what.join(" · "));
             }
-            if s.kind != SourceKind::BitwigCurve {
+            if s.kind.is_song() {
                 about.push(bar_words(s.at));
             }
             let title = if s.name.is_empty() || s.name == s.song {
@@ -1677,7 +1717,7 @@ pub fn curve_card(c: &Curve) -> CurveCard {
 
 /// What the picked curve offers, in the card's order.
 pub fn curve_offers(c: &Curve, has_bitwig: bool) -> Vec<Offer> {
-    let in_song = c.sources.iter().any(|s| s.kind != SourceKind::BitwigCurve);
+    let in_song = c.sources.iter().any(|s| s.kind.is_song());
     vec![
         offer("Save to Bitwig's curves", curve_act::TO_BITWIG, has_bitwig),
         offer("Show curve file", curve_act::REVEAL, true),
@@ -2225,7 +2265,12 @@ mod tests {
             chips.chips.iter().map(|c| (c.text.as_str(), c.count.as_str(), c.on)).collect();
         assert_eq!(
             words,
-            [("FL knob moves", "1", true), ("Bitwig clips", "1", false), ("Bitwig's library", "1", true)]
+            [
+                ("FL knob moves", "1", true),
+                ("Bitwig clips", "1", false),
+                ("Bitwig's library", "1", true),
+                ("Plugin shapes", "0", false)
+            ]
         );
         both.toggle_kind("FL knob moves");
         assert_eq!(both.kinds, [SourceKind::BitwigCurve]);
@@ -2262,7 +2307,58 @@ mod tests {
         let lib = curve("Wobble", SourceKind::BitwigCurve, "Wobble", 5);
         assert_eq!(found_words(&lib), "In Bitwig's library");
         assert!(!curve_offers(&lib, true).iter().any(|o| o.id == curve_act::OPEN_SONG && o.enabled));
+        // A plugin's shape is found in no song either, and a shape in a song too says both.
+        let shape = curve("SC1", SourceKind::PluginShape, "SC1", 5);
+        assert_eq!(found_words(&shape), "In plugin shapes");
+        assert!(!curve_offers(&shape, true).iter().any(|o| o.id == curve_act::SHOW_IN_SONGS && o.enabled));
+        assert_eq!(curve_card(&shape).places, [("SC1".to_owned(), "Plugin shapes · Serum · Cutoff".to_owned())]);
+        let mut both = c.clone();
+        both.sources.extend(lib.sources.iter().chain(&shape.sources).cloned());
+        assert_eq!(found_words(&both), "In 1 song and Bitwig's library and plugin shapes");
+        let mut libraries = lib.clone();
+        libraries.sources.extend(shape.sources.iter().cloned());
+        assert_eq!(found_words(&libraries), "In Bitwig's library and plugin shapes");
         assert!(!curve_offers(&c, false)[0].enabled, "no Bitwig folder, nowhere to save it");
+    }
+
+    #[test]
+    fn the_shape_folders_are_xfers_and_only_the_plugins_shape_files_are_listed() {
+        let docs = std::env::temp_dir().join(format!("mo-shape-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&docs);
+        let serum2 = docs.join("Xfer").join("Serum 2 Presets").join("LFO Shapes");
+        let lfotool = docs.join("Xfer").join("LFOTool Presets");
+        for d in [
+            serum2.join("Rhythmic"),
+            lfotool.join("Sidechain"),
+            docs.join("Xfer").join("Serum 2 Presets").join("Presets"),
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        for f in [
+            serum2.join("Rhythmic").join("Bar Backbeat.XferShape"),
+            serum2.join("SC1.shp"),
+            serum2.join("readme.txt"),
+            lfotool.join("Sidechain").join("Sidechain-1.fxp"),
+            docs.join("Xfer").join("Serum 2 Presets").join("Presets").join("Lead.SerumPreset"),
+        ] {
+            std::fs::write(f, b"").unwrap();
+        }
+        let folders = shape_folders(Some(&docs), None);
+        assert_eq!(folders, [serum2.clone(), lfotool.clone()], "Serum 1's folder isn't there, so isn't listed");
+        // A Mac's audio presets folder, and the same folder given twice.
+        let mac = docs.join("Library").join("Audio").join("Presets").join("Xfer Records");
+        let mac = mac.join("Serum Presets").join("LFO Shapes");
+        std::fs::create_dir_all(&mac).unwrap();
+        assert_eq!(shape_folders(Some(&docs), Some(&docs)), [serum2.clone(), lfotool.clone(), mac]);
+        assert_eq!(shape_folders(None, None), Vec::<PathBuf>::new());
+        let names: Vec<String> = shape_files(&folders)
+            .iter()
+            .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let mut names = names;
+        names.sort();
+        assert_eq!(names, ["Bar Backbeat.XferShape", "SC1.shp", "Sidechain-1.fxp"]);
+        std::fs::remove_dir_all(&docs).unwrap();
     }
 
     #[test]
