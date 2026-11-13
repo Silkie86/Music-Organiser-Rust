@@ -13,7 +13,7 @@ use mo_app::sounds::{self, Filters, LikeFavourites, Order, SoundChips, SoundCoun
 use mo_sounds::Sound;
 use mo_sounds::index::SoundIndex;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 /// A sound's own tempo, as the library knows it.
 pub fn own_tempo(sound: &Sound) -> crate::audition::Own {
@@ -229,26 +229,30 @@ pub enum Read {
     Not(String),
 }
 
-static SHARED: Mutex<Weak<Library>> = Mutex::new(Weak::new());
+/// The library read last, kept while the plugin is loaded ([`crate::kept`]).
+pub(crate) static KEPT: crate::kept::Kept<Library> = crate::kept::Kept::new();
 
-/// The sound library, read once for every copy of the plugin while any of them holds it. Slow the first time
-/// (call it off the panel's thread).
+/// The sound library, read once for every copy of the plugin, and kept while the plugin is loaded until the app
+/// changes it. Slow the first time (call it off the panel's thread).
 pub fn read() -> Read {
-    if let Some(library) = lock(&SHARED).upgrade() {
+    let sounds_db = mo_app::paths::data_dir().join("sounds.db");
+    let files = [mo_sounds::compact::copy_of(&sounds_db)];
+    if let Some(library) = KEPT.get(&files) {
         return Read::Ready(library);
     }
     // One read at a time: a second asker (another copy of the plugin, or a window made again) waits for the first
     // and takes what it read.
     static READING: Mutex<()> = Mutex::new(());
     let _reading = lock(&READING);
-    if let Some(library) = lock(&SHARED).upgrade() {
+    if let Some(library) = KEPT.get(&files) {
         return Read::Ready(library);
     }
     let started = std::time::Instant::now();
-    let read = read_from(&mo_app::paths::data_dir().join("sounds.db"));
+    let stamp = crate::kept::Stamp::of(&files);
+    let read = read_from(&sounds_db);
     match &read {
         Read::Ready(library) => {
-            *lock(&SHARED) = Arc::downgrade(library);
+            KEPT.keep(stamp, library);
             crate::log::took("Library", &format!("Read {} sounds", library.list.len()), started);
         }
         Read::Not(why) => crate::log::took("Library", &format!("Not read: {why}"), started),

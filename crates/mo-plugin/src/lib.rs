@@ -26,6 +26,7 @@ pub mod entry;
 pub mod favourites;
 pub mod galaxy;
 mod gpu;
+mod kept;
 pub mod knobs;
 pub mod library;
 pub mod listen;
@@ -95,6 +96,10 @@ pub struct Instance {
     pub listener: Arc<listen::Listener>,
     /// The chords played into its note input ([`chordcheck`]).
     pub chords: Arc<chordcheck::Checker>,
+    /// The tab the window showed last: it opens on it again.
+    pub view: std::sync::atomic::AtomicI32,
+    /// Keeps what the window read while the plugin is loaded ([`kept`]).
+    _alive: kept::Alive,
 }
 
 pub struct MoPlugin;
@@ -154,6 +159,8 @@ impl DefaultPluginFactory for MoPlugin {
                 recorder: Arc::default(),
                 listener: Arc::default(),
                 chords: Arc::default(),
+                view: std::sync::atomic::AtomicI32::new(0),
+                _alive: kept::Alive::new(),
             }),
             _card: real.then(gpu::hold),
         })

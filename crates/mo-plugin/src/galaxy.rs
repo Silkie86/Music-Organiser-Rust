@@ -151,6 +151,25 @@ pub fn read(library: &Library) -> Result<Map, String> {
     read_from(&mo_app::paths::data_dir().join("sounds.db"), library)
 }
 
+/// The map read last and the library it was read for, kept while the plugin is loaded ([`crate::kept`]).
+pub(crate) static KEPT: crate::kept::Kept<(std::sync::Weak<Library>, Map)> = crate::kept::Kept::new();
+
+/// [`read`], kept while the plugin is loaded: a window opened again with the same library takes the map it had, until
+/// the app changes the sound library.
+pub fn read_kept(library: &Arc<Library>) -> Result<Map, String> {
+    let sounds_db = mo_app::paths::data_dir().join("sounds.db");
+    let files = [mo_sounds::compact::copy_of(&sounds_db)];
+    if let Some(kept) = KEPT.get(&files)
+        && kept.0.upgrade().is_some_and(|l| Arc::ptr_eq(&l, library))
+    {
+        return Ok(kept.1.clone());
+    }
+    let stamp = crate::kept::Stamp::of(&files);
+    let map = read_from(&sounds_db, library)?;
+    KEPT.keep(stamp, &Arc::new((Arc::downgrade(library), map.clone())));
+    Ok(map)
+}
+
 /// [`read`] from the app's own sound library beside `sounds_db`: opened, read and let go again.
 pub fn read_from(sounds_db: &std::path::Path, library: &Library) -> Result<Map, String> {
     const NONE: &str = "No galaxy yet: open the Galaxy on the app's Sounds page once to lay it out";
