@@ -19,6 +19,7 @@ pub mod files;
 pub mod filters;
 pub mod finder;
 pub mod gpu;
+pub mod helper;
 mod in_flight;
 pub mod midi;
 pub mod note;

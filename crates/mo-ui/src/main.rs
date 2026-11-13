@@ -13,7 +13,14 @@ use slint::ComponentHandle;
 fn main() -> Result<(), slint::PlatformError> {
     // Started by the Space page as the administrator step: do it and stop, before any window, log or setting. This also
     // tells the Space page it may ask Windows for administrator rights.
-    if mo_space::admin::run_step(&std::env::args().skip(1).collect::<Vec<_>>()) {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if mo_space::admin::run_step(&args) {
+        return Ok(());
+    }
+    // Started as the background helper (at login, or by the app): no window at all, only the helper.
+    if mo_ui::helper::asked(&args) {
+        log_crashes();
+        mo_ui::helper::run();
         return Ok(());
     }
     mo_ui::startup::begin();

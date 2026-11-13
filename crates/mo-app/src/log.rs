@@ -41,6 +41,11 @@ use crate::tidy::Tidied;
 pub const PREFIX: &str = "rust-session-";
 /// How many runs' logs are kept.
 pub const KEPT: usize = 30;
+/// The background helper's logs ([`crate::helper`]) start with this instead, so its runs (each can last days) never
+/// push out the app's.
+pub const HELPER_PREFIX: &str = "rust-helper-";
+/// How many of the helper's runs' logs are kept.
+pub const HELPER_KEPT: usize = 10;
 /// A run that writes this much stops writing (and says so).
 const MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// How much more a run writes for crashes, once it has stopped writing everything else: a crash always reaches the
@@ -248,6 +253,13 @@ pub fn start(folder: &Path, header: &str) -> &'static SessionLog {
     CURRENT.get_or_init(|| SessionLog::new(folder, Local::now(), header))
 }
 
+/// Starts the background helper's log in the usual folder: named [`HELPER_PREFIX`]…, so it's kept apart from the
+/// app's.
+pub fn start_helper() -> &'static SessionLog {
+    let header = crate::version::log_header_of("Music Organiser helper", Local::now());
+    CURRENT.get_or_init(|| SessionLog::named(&crate::paths::logs_dir(), HELPER_PREFIX, Local::now(), &header))
+}
+
 /// Starts this run's log in the usual folder, with the usual header (version, build, system).
 pub fn start_session() -> &'static SessionLog {
     start(&crate::paths::logs_dir(), &crate::version::log_header(Local::now()))
@@ -320,7 +332,12 @@ impl SessionLog {
     /// Opens a new log file for a run that started at `start`. If the folder can't be written, the log only keeps its
     /// recent lines in memory: no log is better than no app.
     pub fn new(folder: &Path, start: DateTime<Local>, header: &str) -> SessionLog {
-        let file = create_file(folder, start);
+        SessionLog::named(folder, PREFIX, start, header)
+    }
+
+    /// [`SessionLog::new`] with the file named `prefix`… ([`PREFIX`] or [`HELPER_PREFIX`]).
+    pub fn named(folder: &Path, prefix: &str, start: DateTime<Local>, header: &str) -> SessionLog {
+        let file = create_file(folder, prefix, start);
         let path = file.as_ref().map(|(p, _)| p.clone());
         let (tx, writer) = match file {
             Some((_, f)) => {
@@ -556,12 +573,12 @@ fn time_of_day(now: SystemTime, offset: i32) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", secs / 3600, secs / 60 % 60, secs % 60, since.subsec_millis())
 }
 
-fn create_file(folder: &Path, start: DateTime<Local>) -> Option<(PathBuf, File)> {
+fn create_file(folder: &Path, prefix: &str, start: DateTime<Local>) -> Option<(PathBuf, File)> {
     std::fs::create_dir_all(folder).ok()?;
     let stamp = start.format("%Y-%m-%d_%H-%M-%S");
     // Two runs started in the same second (tests, or a quick restart) each get their own file.
     for n in 1..100 {
-        let name = if n == 1 { format!("{PREFIX}{stamp}.log") } else { format!("{PREFIX}{stamp}-{n}.log") };
+        let name = if n == 1 { format!("{prefix}{stamp}.log") } else { format!("{prefix}{stamp}-{n}.log") };
         let path = folder.join(name);
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -676,6 +693,11 @@ fn write_queued(file: File, rx: Receiver<Msg>) {
 /// (`2026-11-02_14-30-05`), perhaps `-` and a number, then `.log`. A copy ("… - Copy.log") isn't one.
 pub fn is_session_log(name: &str) -> bool {
     name.strip_prefix(PREFIX).and_then(|r| r.strip_suffix(".log")).is_some_and(is_name_time)
+}
+
+/// Whether `name` is one of the background helper's logs: as [`is_session_log`], with [`HELPER_PREFIX`].
+pub fn is_helper_log(name: &str) -> bool {
+    name.strip_prefix(HELPER_PREFIX).and_then(|r| r.strip_suffix(".log")).is_some_and(is_name_time)
 }
 
 /// Whether `s` is a time as the app puts it in a file's name (`2026-11-02_14-30-05`, from `%Y-%m-%d_%H-%M-%S`),

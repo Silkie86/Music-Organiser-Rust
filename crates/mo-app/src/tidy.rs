@@ -84,7 +84,7 @@ use mo_space::clean::{Bin, CANT_LOOK, IN_USE, KEPT_BY_YOU, NOT_IN_BIN, ONLINE_ON
 use crate::backup::{
     PART_ENDING, SETTINGS_FILE, SONGS_FILE, WRITTEN_WHOLE, WRITTEN_WHOLE_BESIDE_FIRST, is_whole_part_of,
 };
-use crate::log::{is_crash_log, is_name_time, is_session_log};
+use crate::log::{is_crash_log, is_helper_log, is_name_time, is_session_log};
 use crate::paths;
 
 /// Crash logs kept: the newest 30, as for the session logs ([`crate::log::KEPT`]).
@@ -338,7 +338,8 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
 
 /// Keeps the logs folder in bounds, as it is at `now` (see the top of this file): this app's session logs past the
 /// newest [`crate::log::KEPT`] (never `just_made`, this run's, nor one changed in the last 10 minutes, which may be
-/// another copy's, still being written), crash logs past the newest [`CRASH_LOGS_KEPT`], and each tool's reports past
+/// another copy's, still being written), the background helper's logs past the newest [`crate::log::HELPER_KEPT`]
+/// (the same way), crash logs past the newest [`CRASH_LOGS_KEPT`], and each tool's reports past
 /// the newest [`REPORTS_KEPT`] of that kind. The session log calls it at each start, on a low-priority thread. The
 /// folder is listed once, and may be a link: the app writes its logs through it.
 pub fn prune_logs(folder: &Path, just_made: Option<&Path>, now: SystemTime) -> Tidied {
@@ -347,12 +348,14 @@ pub fn prune_logs(folder: &Path, just_made: Option<&Path>, now: SystemTime) -> T
     if !fs::metadata(folder).is_ok_and(|m| m.is_dir()) {
         return done;
     }
-    let all =
-        own_files(folder, |n| is_session_log(n) || is_crash_log(n) || REPORTS.iter().any(|start| is_report(n, start)));
+    let all = own_files(folder, |n| {
+        is_session_log(n) || is_helper_log(n) || is_crash_log(n) || REPORTS.iter().any(|start| is_report(n, start))
+    });
     let of = |is_kind: &dyn Fn(&str) -> bool| -> Vec<(PathBuf, Metadata)> {
         all.iter().filter(|(p, _)| p.file_name().and_then(|n| n.to_str()).is_some_and(is_kind)).cloned().collect()
     };
     done.add(keep_newest(of(&is_session_log), crate::log::KEPT, now, just_made, LIVE));
+    done.add(keep_newest(of(&is_helper_log), crate::log::HELPER_KEPT, now, just_made, LIVE));
     done.add(keep_newest(of(&is_crash_log), CRASH_LOGS_KEPT, now, None, Duration::ZERO));
     for start in REPORTS {
         done.add(keep_newest(of(&|n| is_report(n, start)), REPORTS_KEPT, now, None, Duration::ZERO));
@@ -1399,6 +1402,24 @@ mod tests {
             assert!(left.contains(&name.to_owned()), "{name} stays");
         }
         assert!(!bin.0.exists(), "nothing of the logs goes to the bin");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_helpers_logs_keep_their_newest_10_apart_from_the_apps() {
+        let dir = test_folder("helper-logs");
+        let logs = dir.join("logs");
+        let now = SystemTime::now();
+        for i in 0..12u32 {
+            changed_at(&logs.join(format!("rust-helper-2026-10-{:02}_12-00-00.log", i + 1)), now - MINUTE * (50 - i));
+            changed_at(&logs.join(format!("rust-session-2026-10-{:02}_12-00-00.log", i + 1)), now - MINUTE * (50 - i));
+        }
+        let done = prune_logs(&logs, None, now + MINUTE * 11);
+        assert_eq!(done.removed, 2, "only the helper's 2 oldest: the app keeps 30 of its own");
+        let left = names(&logs);
+        assert_eq!(left.iter().filter(|n| crate::log::is_helper_log(n)).count(), crate::log::HELPER_KEPT);
+        assert_eq!(left.iter().filter(|n| is_session_log(n)).count(), 12);
+        assert!(!left.contains(&"rust-helper-2026-10-01_12-00-00.log".to_owned()));
         let _ = fs::remove_dir_all(&dir);
     }
 
