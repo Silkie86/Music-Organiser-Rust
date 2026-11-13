@@ -3379,6 +3379,7 @@ dependencies = [
  "mo-app",
  "mo-audio",
  "mo-catch",
+ "mo-dawlink",
  "mo-formats",
  "mo-library",
  "mo-midi",

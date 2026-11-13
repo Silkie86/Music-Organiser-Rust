@@ -278,6 +278,8 @@ final class Link {
     private CursorTrack cursorTrack;
     private InsertionPoint cursorEnd;
     private PinnableCursorDevice cursorDevice;
+    /** What takes the selected device's place (extension 3.25): a sample put there makes a Sampler in its stead. */
+    private InsertionPoint cursorReplace;
     private DirectParameterValueDisplayObserver displayObserver;
     /** The selected device's drum pads, when it's a Drum Machine. */
     private DrumPadBank drumPads;
@@ -506,6 +508,7 @@ final class Link {
 
         feature("cursor device", () -> {
             cursorDevice = cursorTrack.createCursorDevice();
+            cursorReplace = cursorDevice.replaceDeviceInsertionPoint();
             watchDevice(cursorDevice);
             cursorDevice.position().markInterested();
             cursorDevice.hasDrumPads().markInterested();
@@ -1851,18 +1854,26 @@ final class Link {
      * Inserts something into a device chain: a plugin by its ID (as the app's plugin scanner reads it), a Bitwig
      * device by its ID, or a file (a preset, or a sample, which Bitwig loads into a Sampler). It goes at the end
      * of the selected track's chain, or of `track`'s (at its start with `at: "start"`). With a track, the answer
-     * waits to say whether Bitwig added a device, since it quietly ignores what it can't use.
+     * waits to say whether Bitwig added a device, since it quietly ignores what it can't use. With `at: "replace"`
+     * (extension 3.25) it takes the selected device's place instead (no track: the selected device is the one); the
+     * app reads the selected device again to see what Bitwig made of it.
      */
     private void insert(Map<String, Object> request, Finish finish) {
         // The track by its place, or (extension 3.21) by the ID Bitwig keeps it under, which holds however tracks move.
         Object t = absent(field(request, "trackId")) ? field(request, "track") : field(request, "trackId");
         Object at = field(request, "at");
         boolean start = "start".equals(at);
-        if (!absent(at) && !start && !"end".equals(at)) throw new LinkError("Insert at the \"start\" or the \"end\" of the chain.");
+        boolean replace = "replace".equals(at);
+        // The JavaScript script's words (ParityTest); "replace" is the extension's own (3.25).
+        if (!absent(at) && !start && !replace && !"end".equals(at)) throw new LinkError("Insert at the \"start\" or the \"end\" of the chain.");
         InsertionPoint point;
         DeviceBank chain = null;
         int before = 0;
-        if (absent(t)) {
+        if (replace) {
+            if (!absent(t)) throw new LinkError("Replace takes the selected device's place: give no track.");
+            if (cursorReplace == null || !cursorDevice.exists().get()) throw new LinkError("No device is selected in Bitwig.");
+            point = cursorReplace;
+        } else if (absent(t)) {
             if (start) throw new LinkError("Say which track's chain to insert at the start of.");
             if (!cursorTrack.exists().get()) throw new LinkError("No track is selected in Bitwig.");
             point = cursorEnd;

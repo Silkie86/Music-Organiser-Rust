@@ -141,6 +141,8 @@ struct Slots {
     /// first filter.
     track_types: Mutex<Vec<String>>,
     played: Mutex<Option<Played>>,
+    /// How putting a sound in Bitwig's Sampler went, in words.
+    sampler: Mutex<Option<String>>,
     /// A line dragged out: which, and its file, once it's been checked to be there (or written, for a MIDI part),
     /// or why it can't go.
     drag: Mutex<Option<(Carried, Result<std::path::PathBuf, String>)>>,
@@ -723,6 +725,35 @@ impl Shown {
         let lines = Rc::clone(&self.lines);
         let slots = Arc::clone(&self.slots);
         let player = Arc::clone(&self.instance.player);
+        panel.set_in_bitwig(self.instance.host.starts_with("Bitwig"));
+        let sampler_slots = Arc::clone(&self.slots);
+        let sampler_lines = Rc::clone(&self.lines);
+        let weak = panel.as_weak();
+        panel.on_try_in_sampler(move || {
+            let Some(panel) = weak.upgrade() else { return };
+            let Some(path) = usize::try_from(panel.get_picked()).ok().and_then(|row| sampler_lines.path(row)) else {
+                return;
+            };
+            panel.set_playing(format!("Putting {} in Bitwig's Sampler", library::name(&path)).into());
+            let slots = Arc::clone(&sampler_slots);
+            background("mo-plugin-sampler", move || {
+                let turn = mo_dawlink::bitwig::ticket().wait();
+                let said = match mo_dawlink::bitwig::Bitwig::default().swap_into_sampler(&path, &turn) {
+                    Ok(swapped) => {
+                        crate::log::line(
+                            "Sampler",
+                            &format!("{} went in: {}", library::name(&path), swapped.summary()),
+                        );
+                        swapped.summary()
+                    }
+                    Err(e) => {
+                        crate::log::line("Sampler", &format!("{} didn't go in: {e}", library::name(&path)));
+                        e.to_string()
+                    }
+                };
+                *lock(&slots.sampler) = Some(said);
+            });
+        });
         panel.on_drag_out(move |row| {
             let Some((row, path)) = usize::try_from(row).ok().and_then(|r| Some((r, lines.path(r)?))) else { return };
             let slots = Arc::clone(&slots);
@@ -1476,6 +1507,9 @@ impl Shown {
                 }
             };
             self.panel.set_playing(line.into());
+        }
+        if let Some(said) = take(&self.slots.sampler) {
+            self.panel.set_playing(said.into());
         }
         if let Some(n) = self.playing.get()
             && !self.instance.player.still_playing(n)

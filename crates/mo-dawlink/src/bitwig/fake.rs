@@ -165,6 +165,10 @@ pub struct World {
     pub drum_pads: Vec<FakeDevice>,
     /// The device an audio file goes into when the app adds it to a track's chain: Bitwig's "Sampler".
     pub sample_device: String,
+    /// The parameters a Sampler Bitwig makes in a device's place comes with (extension 3.25's `insert` at `replace`).
+    pub new_sampler: Vec<FakeParam>,
+    /// Parameters (by ID) Bitwig doesn't change when the link sets them.
+    pub fixed_params: Vec<String>,
     /// Files (by the last part of their path) Bitwig quietly doesn't load.
     pub unloadable: Vec<String>,
     /// What the stand-in does when the app connects.
@@ -332,6 +336,8 @@ impl Default for World {
             selected_device: Some((2, 0)),
             drum_pads: Vec::new(),
             sample_device: "Sampler".into(),
+            new_sampler: Vec::new(),
+            fixed_params: Vec::new(),
             unloadable: Vec::new(),
             on_connect: OnConnect::Greet,
             lengths: true,
@@ -401,6 +407,23 @@ pub struct FakeDevice {
     pub sample: String,
     /// A Drum Machine's pads, by note; none for any other device.
     pub pads: Option<BTreeMap<u8, FakePad>>,
+    /// Its parameters, as `device` shows them when it's selected.
+    pub params: Vec<FakeParam>,
+}
+
+/// One of a device's parameters.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FakeParam {
+    pub id: String,
+    pub name: String,
+    /// From 0 to 1, in millionths (as the link sets it); none when Bitwig doesn't tell it.
+    pub value: Option<u32>,
+}
+
+impl FakeParam {
+    pub fn new(id: &str, name: &str, value: f64) -> FakeParam {
+        FakeParam { id: id.into(), name: name.into(), value: Some((value.clamp(0.0, 1.0) * 1e6).round() as u32) }
+    }
 }
 
 impl FakeDevice {
@@ -497,10 +520,10 @@ impl World {
         };
         let cmd = map.get("cmd");
         let changes = match cmd.and_then(Value::as_str) {
-            Some("hello" | "selectedtrack" | "transport" | "recordabort" | "watch") => false,
+            Some("hello" | "selectedtrack" | "transport" | "recordabort" | "watch" | "device") => false,
             Some(
-                "newtrack" | "insert" | "pads" | "clip" | "deleteclip" | "deletetrack" | "stoptracks" | "record"
-                | "playstart",
+                "set" | "newtrack" | "insert" | "pads" | "clip" | "deleteclip" | "deletetrack" | "stoptracks"
+                | "record" | "playstart",
             ) => true,
             _ => return Err(format!("Unknown command: {}", js(cmd))),
         };
@@ -514,6 +537,8 @@ impl World {
             Some("insert") => self.insert(map),
             Some("clip") => self.add_clip(map),
             Some("selectedtrack") => Ok(self.selected()),
+            Some("device") => Ok(self.selected_device_now()),
+            Some("set") => self.set_param(map),
             Some("watch") => match map.get("on") {
                 None | Some(Value::Null | Value::Bool(true)) => {
                     Ok(json!({ "watching": true, "every": 50, "sections": WATCH_SECTIONS }))
@@ -1112,9 +1137,52 @@ impl World {
         Ok(Some(bars))
     }
 
+    /// The selected device with its parameters, as the link's `device`.
+    fn selected_device_now(&self) -> Value {
+        let track = self.selected_track.and_then(|t| self.tracks.get(t));
+        let device = self.selected_device.and_then(|(t, d)| Some((d, self.tracks.get(t)?.devices.get(d)?)));
+        match device {
+            Some((index, device)) => json!({
+                "track": track.map(|t| t.name.as_str()).unwrap_or_default(),
+                "device": device.described(index),
+                "params": device.params.iter().map(|p| json!({
+                    "id": p.id, "name": p.name, "value": p.value.map(|v| f64::from(v) / 1e6), "display": "",
+                })).collect::<Vec<_>>(),
+                "drumPads": device.pads.is_some(),
+            }),
+            None => json!({
+                "track": track.map(|t| t.name.as_str()).unwrap_or_default(), "device": null, "params": [],
+                "drumPads": false,
+            }),
+        }
+    }
+
+    /// Sets one of the selected device's parameters, as the link's `set`.
+    fn set_param(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
+        let id = request.get("param").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let value = request.get("value").and_then(Value::as_f64).filter(|v| (0.0..=1.0).contains(v));
+        let fixed = self.fixed_params.contains(&id);
+        let (t, d) = self.selected_device.ok_or("No device is selected in Bitwig.")?;
+        let device =
+            self.tracks.get_mut(t).and_then(|t| t.devices.get_mut(d)).ok_or("No device is selected in Bitwig.")?;
+        let param = device
+            .params
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| format!("The selected device has no parameter {}.", js(request.get("param"))))?;
+        let value = value.ok_or("The value has to be a number from 0 to 1.")?;
+        if !fixed {
+            param.value = Some((value * 1e6).round() as u32);
+        }
+        Ok(json!({}))
+    }
+
     fn insert(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
         let at = request.get("at").filter(|a| !a.is_null());
         let start = at.and_then(Value::as_str) == Some("start");
+        if at.and_then(Value::as_str) == Some("replace") {
+            return self.replace_selected(request);
+        }
         if at.is_some() && !start && at.and_then(Value::as_str) != Some("end") {
             return Err("Insert at the \"start\" or the \"end\" of the chain.".into());
         }
@@ -1185,6 +1253,33 @@ impl World {
             }
             None => json!({}),
         })
+    }
+
+    /// A file in the selected device's place (extension 3.25): a sample makes a Sampler with [`World::new_sampler`]'s
+    /// parameters instead of it; what Bitwig can't load leaves the device as it was.
+    fn replace_selected(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
+        if request.get("track").or(request.get("trackId")).is_some_and(|t| !t.is_null()) {
+            return Err("Replace takes the selected device's place: give no track.".into());
+        }
+        if request.get("kind").and_then(Value::as_str) != Some("file") {
+            return Err("The stand-in only puts files in a device's place.".into());
+        }
+        let path = given(request.get("path"), "file")?.to_owned();
+        let (t, d) = self.selected_device.ok_or("No device is selected in Bitwig.")?;
+        let loads = self.loads(&path) && !self.loads_preset(&path);
+        let sampler = FakeDevice {
+            name: self.sample_device.clone(),
+            preset: sample_name(&path).to_owned(),
+            params: self.new_sampler.clone(),
+            ..FakeDevice::sampler(&path)
+        };
+        let device =
+            self.tracks.get_mut(t).and_then(|t| t.devices.get_mut(d)).ok_or("No device is selected in Bitwig.")?;
+        if loads {
+            *device = sampler;
+            self.modified = true;
+        }
+        Ok(json!({}))
     }
 
     fn fill_pads(&mut self, request: &Map<String, Value>) -> Result<Value, String> {

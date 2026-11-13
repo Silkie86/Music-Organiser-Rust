@@ -2095,6 +2095,22 @@ final class FakeBitwig {
             super(PinnableCursorDevice.class);
         }
 
+        /** What takes the selected device's place: a sample put there makes a Sampler in its stead, a moment later. */
+        Point replaceDeviceInsertionPoint() {
+            return new Point("selected device", (method, arg) -> {
+                TrackSpec track = cursorSpec();
+                if (!method.equals("insertFile") || !AUDIO.matcher((String) arg).find() || track == null) return;
+                later(40, () -> {
+                    int at = track.devices.indexOf(FakeBitwig.this.cursorSpec);
+                    if (at < 0) return;
+                    DeviceSpec sampler = builtIn.get(SAMPLER).copy();
+                    sampler.sample = (String) arg;
+                    track.devices.set(at, sampler);
+                    FakeBitwig.this.cursorSpec = sampler;
+                });
+            });
+        }
+
         void addDirectParameterIdObserver(StringArrayValueChangedCallback callback) {
             idObserver = callback;
         }

@@ -55,6 +55,8 @@ i-slint-core = { version = "=1.18.1", default-features = false, features = ["ima
 rtrb = "0.3"
 thread-priority.workspace = true
 mo-app = { workspace = true }
+# The Bitwig link: a sound tried in the Sampler selected in Bitwig (`window.rs`, "In Bitwig's Sampler").
+mo-dawlink = { path = "../mo-dawlink" }
 # Decoding sounds, and MIDI parts played with a SoundFont (`gm`): the DAW plays them, not the system's sound output.
 mo-audio = { path = "../mo-audio", default-features = false, features = ["gm", "stretch"] }
 mo-catch = { path = "../mo-catch" }
