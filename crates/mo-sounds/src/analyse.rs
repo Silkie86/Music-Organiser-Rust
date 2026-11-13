@@ -276,10 +276,7 @@ pub fn analyse(audio: &AudioData, path: &str) -> Analysed {
             (a.bpm, a.bpm_source) = (Some(bt), "detected".into());
         }
         // A tag or a tempo heard that doesn't fit the loop's length gives way to a written one that does.
-        if let Some(written) = checked_tempo(a.seconds, a.bpm, path).filter(|w| Some(*w) != a.bpm) {
-            let from = if types::tempo_from_name(path).is_some() { "file name" } else { "folder name" };
-            (a.bpm, a.bpm_source) = (Some(written), from.into());
-        }
+        check_loop_tempo(&mut a, path);
     }
 
     // Key: written in the name, else (for a one-shot) its root note. Finding it in the audio waits for the harmony
@@ -523,6 +520,20 @@ pub fn checked_tempo(seconds: f64, found: Option<f64>, path: &str) -> Option<f64
     }
 }
 
+/// A loop's tempo put right by [`checked_tempo`], saying where the new one is from: what reading the loop at `path`
+/// again would give it. The analyser does it as it reads a sound; a list does it for the sounds analysed before the
+/// check came in (13 Nov), whose kept tempo can be a tag's or a heard one that doesn't fit, so they show and filter by
+/// the same tempo a new read would give, with nothing read again. Anything but a loop is left as it is.
+pub fn check_loop_tempo(a: &mut SoundAnalysis, path: &str) {
+    if !a.is_loop {
+        return;
+    }
+    if let Some(written) = checked_tempo(a.seconds, a.bpm, path).filter(|w| Some(*w) != a.bpm) {
+        let from = if types::tempo_from_name(path).is_some() { "file name" } else { "folder name" };
+        (a.bpm, a.bpm_source) = (Some(written), from.into());
+    }
+}
+
 /// When a loop is a whole number of bars at a sensible tempo, the tempo that fits (sample packs cut loops exactly).
 /// With a `hint` (the tempo heard in the onsets), the fit closest to it, if one is close.
 pub fn bar_fit(seconds: f64, hint: Option<f64>) -> Option<f64> {
@@ -715,6 +726,31 @@ mod tests {
         assert_eq!(checked_tempo(flow, Some(120.0), r"D:\Loops\Flow.wav"), Some(120.0));
         // Nothing found: a written one that fits is taken.
         assert_eq!(checked_tempo(bar, None, r"D:\Loops 128 BPM\Hit.wav"), Some(128.0));
+    }
+
+    #[test]
+    fn a_loop_read_before_the_check_gets_the_tempo_a_new_read_gives() {
+        let flow = 16.0 * 60.0 / 162.0;
+        let kept = |is_loop, bpm, source: &str| SoundAnalysis {
+            seconds: flow,
+            is_loop,
+            bpm,
+            bpm_source: source.into(),
+            ..SoundAnalysis::default()
+        };
+        let mut a = kept(true, Some(120.0), "file tag");
+        check_loop_tempo(&mut a, r"D:\VOL 1\Straight Loops\Flow 162.wav");
+        assert_eq!((a.bpm, a.bpm_source.as_str()), (Some(162.0), "file name"));
+        let mut a = kept(true, None, "");
+        check_loop_tempo(&mut a, r"D:\Loops 162BPM\Flow.wav");
+        assert_eq!((a.bpm, a.bpm_source.as_str()), (Some(162.0), "folder name"));
+        // One that fits stays as it is, and so does anything but a loop.
+        let mut a = kept(true, Some(81.0), "detected");
+        check_loop_tempo(&mut a, r"D:\Loops\Flow 162.wav");
+        assert_eq!((a.bpm, a.bpm_source.as_str()), (Some(81.0), "detected"));
+        let mut a = kept(false, Some(120.0), "file tag");
+        check_loop_tempo(&mut a, r"D:\Loops\Flow 162.wav");
+        assert_eq!((a.bpm, a.bpm_source.as_str()), (Some(120.0), "file tag"));
     }
 
     #[test]

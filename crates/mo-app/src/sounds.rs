@@ -537,10 +537,14 @@ impl Drop for SoundList {
 
 impl SoundList {
     /// The list from the library's sounds: all but the copies you've hidden as duplicates, and the files programs left
-    /// in a temp folder that an older scan took in ([`mo_sounds::scan::in_temp_folder`]).
+    /// in a temp folder that an older scan took in ([`mo_sounds::scan::in_temp_folder`]). Each loop has the tempo a new
+    /// read gives it ([`with_checked_tempo`]).
     pub fn new(sounds: Vec<Sound>) -> SoundList {
-        let mut sounds: Vec<Sound> =
-            sounds.into_par_iter().filter(|s| !s.hidden && !mo_sounds::scan::in_temp_folder(&s.path)).collect();
+        let mut sounds: Vec<Sound> = sounds
+            .into_par_iter()
+            .filter(|s| !s.hidden && !mo_sounds::scan::in_temp_folder(&s.path))
+            .map(with_checked_tempo)
+            .collect();
         // Leaving out the hidden copies keeps the room they took: give it back.
         sounds.shrink_to_fit();
         let hay = sounds.par_iter().map(|s| hay_of(&Now::of(s, None))).collect();
@@ -1242,6 +1246,17 @@ impl<'a> Test<'a> {
             show_silent: f.show_silent,
         }
     }
+}
+
+/// `s` with its loop's tempo as a new read of it gives it ([`mo_sounds::analyse::check_loop_tempo`]): a tempo written
+/// in its name or folder's that fits its length wins over a tag or a heard one that doesn't ("Flow 162.wav" kept at 120
+/// shows 162, 13 Nov). For the sounds analysed before that check came in: they show, filter, count and light the
+/// galaxy by it, as the test plugin's list does, with nothing read again and nothing written to the library.
+fn with_checked_tempo(mut s: Sound) -> Sound {
+    if let Some(a) = s.analysis.as_mut() {
+        mo_sounds::analyse::check_loop_tempo(a, &s.path);
+    }
+    s
 }
 
 /// How many of the chips' filters there are, and each one's place in [`facets`]' answer.
@@ -2093,6 +2108,28 @@ mod tests {
             [0.0, 0.06, 0.07, 0.5, 1.0, 2.0, -1.0, f32::NAN].map(like_favourites_step),
             [0, 0, 1, 4, LIKE_STEPS, LIKE_STEPS, 0, 0]
         );
+    }
+
+    #[test]
+    fn a_loop_shows_and_filters_by_the_tempo_written_in_its_name_when_that_fits_its_length() {
+        // 16 beats at 162 BPM, kept at 120 (a tag that's wrong) from before the check; a hit's tempo is left alone.
+        let flow = 16.0 * 60.0 / 162.0;
+        let kept =
+            |is_loop| Some(SoundAnalysis { seconds: flow, is_loop, bpm: Some(120.0), ..SoundAnalysis::default() });
+        let list = SoundList::new(vec![
+            sound(1, r"I:\Loops\Flow 162.wav", "Drums", kept(true)),
+            sound(2, r"I:\Hits\Flow 162.wav", "Drums", kept(false)),
+        ]);
+        let loop_ = list.sound(list.find(1).unwrap()).unwrap();
+        assert_eq!(facts_line(loop_), "Drums · 162 BPM · 5.9 s");
+        assert_eq!(loop_.analysis.as_ref().map(|a| a.bpm_source.as_str()), Some("file name"));
+        assert_eq!(list.sound(list.find(2).unwrap()).unwrap().bpm(), Some(120.0));
+        let at = |lo: f64, hi: f64| {
+            let f = Filters { tempo: (Some(lo), Some(hi)), ..Filters::default() };
+            ids(&list, &list.view(&f, Order::Name, 0))
+        };
+        assert_eq!(at(160.0, 165.0), [1]);
+        assert_eq!(at(115.0, 125.0), [2]);
     }
 
     #[test]
