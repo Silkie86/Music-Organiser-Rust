@@ -26,6 +26,7 @@ pub mod galaxy;
 mod gpu;
 pub mod knobs;
 pub mod library;
+pub mod listen;
 pub mod log;
 pub mod midi;
 pub mod preset_files;
@@ -87,6 +88,8 @@ pub struct Instance {
     pub knobs: knobs::Knobs,
     /// Takes recorded from the DAW's input or a sound card ([`record`]).
     pub recorder: Arc<record::Recorder>,
+    /// What it hears at its input ([`listen`]).
+    pub listener: Arc<listen::Listener>,
 }
 
 pub struct MoPlugin;
@@ -144,6 +147,7 @@ impl DefaultPluginFactory for MoPlugin {
                 player: Arc::new(Player::default()),
                 knobs: knobs::Knobs::default(),
                 recorder: Arc::default(),
+                listener: Arc::default(),
             }),
             _card: real.then(gpu::hold),
         })
@@ -343,6 +347,10 @@ pub struct Processor {
     spare: Vec<f32>,
     /// The take of the DAW's input under way, while there is one ([`record::Recorder::feed_for`]).
     feed: Option<mo_audio::record::Feed>,
+    /// The listener's half on the audio thread: each block of the input goes in ([`listen`]).
+    tap: mo_listen::Tap,
+    /// The sample rate, for where the song is at a block's end.
+    rate: f64,
 }
 
 impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
@@ -361,8 +369,12 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
             ),
         );
         shared.instance.recorder.set_rate(rate);
+        let (tap, ear) = mo_listen::tap(audio_config.sample_rate, 2);
+        shared.instance.listener.start(ear);
         Ok(Processor {
             feed: None,
+            tap,
+            rate: audio_config.sample_rate,
             instance: Arc::clone(&shared.instance),
             playing: shared.instance.player.start(rate),
             player: Arc::clone(&shared.instance.player),
@@ -396,17 +408,31 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
         // The DAW's knobs turned, and the panel's changes told back. (A knob turned partway through the block counts
         // from its start: a knob here picks and switches, it doesn't shape the sound.)
         self.instance.knobs.exchange(events.input, events.output, &self.instance.player, Some(&mut self.playing));
-        // A take of the DAW's input under way: the block goes in, as it came.
+        // The input: listened to always, and recorded while a take of the DAW's input is under way, as it came.
         self.instance.recorder.feed_for(&mut self.feed);
-        if let Some(feed) = &mut self.feed
-            && let Some(input) = audio.input_port(0)
+        let mut frames = 0;
+        if let Some(input) = audio.input_port(0)
             && let Ok(channels) = input.channels()
             && let Some(channels) = channels.into_f32()
         {
             let first = channels.channel(0).unwrap_or(&[]);
             let second = channels.channel(1).unwrap_or(first);
-            feed.push(&[first, second]);
+            frames = first.len().max(second.len());
+            self.tap.push(&[first, second]);
+            if let Some(feed) = &mut self.feed {
+                feed.push(&[first, second]);
+            }
         }
+        // Where the song is at the block's end, for the bar the heard notes go in.
+        let place = song.filter(|s| s.playing).map(|s| {
+            let speed = s.tempo.unwrap_or(120.0) / 60.0;
+            listen::Place {
+                beat: s.beats + frames as f64 / self.rate * speed,
+                beats_a_second: speed,
+                bar: s.bar.map(|(_, len)| len),
+            }
+        });
+        self.instance.listener.tell(self.tap.frames(), place);
         let Some(mut port) = audio.output_port(0) else { return Ok(ProcessStatus::Continue) };
         let Some(mut channels) = port.channels()?.into_f32() else { return Ok(ProcessStatus::Continue) };
         if channels.channel_count() >= 2 {
@@ -440,6 +466,7 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
 
     fn deactivate(self, main_thread: &MainThread<'a>) {
         main_thread.shared.instance.player.stop_all();
+        main_thread.shared.instance.listener.stop();
         log::line("Audio", "The DAW stopped the track's audio");
     }
 }

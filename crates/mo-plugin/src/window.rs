@@ -999,11 +999,14 @@ impl Shown {
         });
     }
 
-    /// What Record has to tell: how the take is going, or what became of it.
+    /// What Record has to tell (how the take is going, or what became of it), and what Listen hears.
     fn record_said(&self) {
         if let Some(inputs) = take(&self.slots.inputs) {
             let names: Vec<SharedString> = inputs.into_iter().map(SharedString::from).collect();
             self.panel.set_record_from_choices(ModelRc::new(VecModel::from(names)));
+        }
+        if let Some(hears) = lock(&self.instance.listener.hears).take() {
+            self.panel.set_hears(hears.words().into());
         }
         let Some(said) = lock(&self.instance.recorder.said).take() else { return };
         self.panel.set_record_said(said.words().into());
