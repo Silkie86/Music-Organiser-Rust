@@ -258,14 +258,114 @@ impl Item {
     }
 }
 
+/// What the library knows of the plugins: what each is (a synth or an effect) and its name, by the id it's saved
+/// under and by its name. A preset file often doesn't say what its plugin is (a VST2 `.fxp` never does, nor names it),
+/// and a song's Bitwig plugin doesn't either; the installed plugin's own file and your songs do (Solomon, 13 Nov:
+/// "things that are obviously not synths are labeled synth", "I can see more synths in the app's plugin page").
+#[derive(Clone, Debug, Default)]
+pub struct KnownPlugins {
+    /// By the id the scanner read from the installed plugin (in small letters, no dashes): its name and kind.
+    by_id: HashMap<String, (String, PluginKind)>,
+    /// By name key, as the scanner read the installed plugin.
+    scanned: HashMap<String, PluginKind>,
+    /// By name key, as your songs' saves have it most often.
+    in_songs: HashMap<String, PluginKind>,
+}
+
+impl KnownPlugins {
+    /// Read from the library: the plugins the scanner found, and every plugin your saves use. What can't be read is
+    /// left out (the lines keep what they say).
+    pub fn read(lib: &mo_library::Library) -> KnownPlugins {
+        let mut known = KnownPlugins::default();
+        for (id, name, kind) in lib.scanned_kinds().unwrap_or_default() {
+            let kind = scanned_kind(&kind);
+            if kind == PluginKind::Unknown {
+                continue;
+            }
+            known.scanned.entry(mo_formats::plugins::name_key(&name)).or_insert(kind);
+            if !id.is_empty() {
+                known.by_id.entry(id_key(&id)).or_insert((name, kind));
+            }
+        }
+        let mut tally: HashMap<String, [usize; 3]> = HashMap::new();
+        for used in lib.plugin_uses().unwrap_or_default() {
+            let at = match used.kind {
+                PluginKind::Instrument => 0,
+                PluginKind::Effect => 1,
+                PluginKind::NoteEffect => 2,
+                PluginKind::Unknown => continue,
+            };
+            tally.entry(used.key).or_default()[at] += 1;
+        }
+        for (key, [synth, effect, note]) in tally {
+            let kind = if synth >= effect && synth >= note {
+                PluginKind::Instrument
+            } else if effect >= note {
+                PluginKind::Effect
+            } else {
+                PluginKind::NoteEffect
+            };
+            known.in_songs.insert(key, kind);
+        }
+        known
+    }
+
+    /// Puts what's known of `row`'s plugin in: the installed plugin's own kind wins over what a preset file says (it
+    /// knows best), and fills in a song's that its save doesn't say; your songs' fill in what's left unknown. A file
+    /// named only by its plugin's id gets the plugin's name.
+    pub fn fill(&self, row: &mut PresetRow) {
+        let by_id = self.by_id.get(&id_key(&row.plugin));
+        if let Some((name, _)) = by_id
+            && !name.is_empty()
+        {
+            row.plugin = name.clone();
+        }
+        let key = mo_formats::plugins::name_key(&row.plugin);
+        let scanned = by_id.map(|(_, k)| *k).or_else(|| self.scanned.get(&key).copied());
+        let is_file = matches!(row.source, Source::File { .. });
+        match scanned {
+            Some(kind) if is_file || row.kind == PluginKind::Unknown => row.kind = kind,
+            _ if row.kind == PluginKind::Unknown => {
+                row.kind = self.in_songs.get(&key).copied().unwrap_or(PluginKind::Unknown);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A plugin id to match by: small letters, no dashes or braces (a VST3 id is written both ways).
+fn id_key(id: &str) -> String {
+    id.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase()
+}
+
+/// The scanner's word for what a plugin is.
+fn scanned_kind(kind: &str) -> PluginKind {
+    match kind {
+        "instrument" => PluginKind::Instrument,
+        "effect" | "analyzer" => PluginKind::Effect,
+        "note-effect" => PluginKind::NoteEffect,
+        _ => PluginKind::Unknown,
+    }
+}
+
 /// The list's lines for preset files found (`mo_presets::file_store`'s `files`, with when each was last changed, in
 /// the same order), each with its year, in the list's order ([`sort_files`]). Files that aren't presets are left out.
 pub fn file_items(found: &[mo_presets::library::FoundPreset], modified: &[Option<std::time::SystemTime>]) -> Vec<Item> {
+    file_items_with(found, modified, &KnownPlugins::default())
+}
+
+/// [`file_items`], with what the library knows of their plugins put in ([`KnownPlugins::fill`]).
+pub fn file_items_with(
+    found: &[mo_presets::library::FoundPreset],
+    modified: &[Option<std::time::SystemTime>],
+    known: &KnownPlugins,
+) -> Vec<Item> {
     let years: HashMap<&str, Option<i32>> =
         found.iter().zip(modified).map(|(f, at)| (f.path.as_str(), at.and_then(year_of_time))).collect();
     let mut items: Vec<Item> = mo_presets::library::rows(&[], found)
         .into_iter()
-        .map(|row| {
+        .map(|mut row| {
+            known.fill(&mut row);
             let year = match &row.source {
                 Source::File { path } => years.get(path.as_str()).copied().flatten(),
                 Source::Song { .. } => None,
@@ -1693,6 +1793,33 @@ mod tests {
             ),
             Item::new(file("Warm Pad", "/b/Presets/Warm Pad.bwpreset"), String::new(), Some(2024)),
         ]
+    }
+
+    #[test]
+    fn what_the_library_knows_of_a_plugin_tells_a_synth_from_an_effect() {
+        let mut known = KnownPlugins::default();
+        known.by_id.insert(id_key("XfsX"), ("Serum".into(), PluginKind::Instrument));
+        known.scanned.insert(mo_formats::plugins::name_key("bx_roomMS"), PluginKind::Effect);
+        known.in_songs.insert(mo_formats::plugins::name_key("Vital"), PluginKind::Instrument);
+        // A VST2 file names its plugin by its id only: it gets the name and the kind.
+        let mut fxp = PresetRow { kind: PluginKind::Unknown, plugin: "XfsX".into(), ..file("Wobble", "/p/Wobble.fxp") };
+        known.fill(&mut fxp);
+        assert_eq!((fxp.plugin.as_str(), fxp.kind), ("Serum", PluginKind::Instrument));
+        // The installed plugin's own file wins over what a preset file says.
+        let mut room = PresetRow { plugin: "bx_roomMS".into(), ..file("Hall", "/p/Hall.vstpreset") };
+        known.fill(&mut room);
+        assert_eq!(room.kind, PluginKind::Effect);
+        // A song's plugin keeps what its save says; one it doesn't say gets what your songs say.
+        let mut song = PresetRow { plugin: "bx_roomMS".into(), ..row("Verb", "x", None, "/s/A.flp") };
+        known.fill(&mut song);
+        assert_eq!(song.kind, PluginKind::Instrument);
+        let mut bitwig = PresetRow { kind: PluginKind::Unknown, ..row("Keys", "Vital", None, "/s/A.bwproject") };
+        known.fill(&mut bitwig);
+        assert_eq!(bitwig.kind, PluginKind::Instrument);
+        // Nothing known: as it was.
+        let mut other = PresetRow { kind: PluginKind::Unknown, ..file("X", "/p/X.fxp") };
+        known.fill(&mut other);
+        assert_eq!(other.kind, PluginKind::Unknown);
     }
 
     #[test]
