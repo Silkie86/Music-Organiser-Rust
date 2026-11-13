@@ -275,6 +275,11 @@ pub fn analyse(audio: &AudioData, path: &str) -> Analysed {
         } else if let Some(bt) = estimate_tempo(&onset, frame_rate, a.seconds) {
             (a.bpm, a.bpm_source) = (Some(bt), "detected".into());
         }
+        // A tag or a tempo heard that doesn't fit the loop's length gives way to a written one that does.
+        if let Some(written) = checked_tempo(a.seconds, a.bpm, path).filter(|w| Some(*w) != a.bpm) {
+            let from = if types::tempo_from_name(path).is_some() { "file name" } else { "folder name" };
+            (a.bpm, a.bpm_source) = (Some(written), from.into());
+        }
     }
 
     // Key: written in the name, else (for a one-shot) its root note. Finding it in the audio waits for the harmony
@@ -491,6 +496,33 @@ fn count_peaks(onset: &[f64]) -> usize {
     count
 }
 
+/// How far a loop `seconds` long at `bpm` is from a whole number of bars of four beats (at least one), in beats.
+fn off_bars(seconds: f64, bpm: f64) -> f64 {
+    let beats = seconds * bpm / 60.0;
+    let whole = ((beats / 4.0).round() * 4.0).max(4.0);
+    (beats - whole).abs()
+}
+
+/// How near a whole number of bars a loop must be for its tempo to fit: a tenth of a beat (a loop's tail or a
+/// few milliseconds cut aside).
+const FITS_BARS: f64 = 0.1;
+
+/// The tempo to trust for a loop `seconds` long at `path`, given the one `found` (from the file's tag, its name or
+/// heard): the tempo written in its name, else in its folder's ("Flow 162.wav", "Loops 128BPM"), when that one fits
+/// the loop's length in whole bars and the found one doesn't. A file's tag often says 120 whatever the loop is, and a
+/// tempo heard can be off; a pack's written tempo with a length that agrees is surer (Solomon, 13 Nov: "Flow 162" at
+/// 120, a 1.9 s loop in "VEE2 Loops 128BPM" at 86).
+pub fn checked_tempo(seconds: f64, found: Option<f64>, path: &str) -> Option<f64> {
+    let written = types::tempo_from_name(path).or_else(|| types::tempo_from_folders(path));
+    let (Some(written), true) = (written, seconds.is_finite() && seconds > 0.0) else { return found };
+    let fits = |bpm: f64| off_bars(seconds, bpm) <= FITS_BARS;
+    match found {
+        Some(bpm) if fits(bpm) || !fits(written) => Some(bpm),
+        _ if fits(written) => Some(written),
+        other => other,
+    }
+}
+
 /// When a loop is a whole number of bars at a sensible tempo, the tempo that fits (sample packs cut loops exactly).
 /// With a `hint` (the tempo heard in the onsets), the fit closest to it, if one is close.
 pub fn bar_fit(seconds: f64, hint: Option<f64>) -> Option<f64> {
@@ -666,6 +698,23 @@ mod tests {
                 level * ((s >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0)
             })
             .collect()
+    }
+
+    #[test]
+    fn a_written_tempo_that_fits_the_length_wins_over_one_that_doesnt() {
+        // 16 beats at 162 BPM; a tag saying 120 doesn't fit.
+        let flow = 16.0 * 60.0 / 162.0;
+        assert_eq!(checked_tempo(flow, Some(120.0), r"D:\VOL 1\Straight Loops\Flow 162.wav"), Some(162.0));
+        // A bar at 128 BPM, written in the folder's name; heard at 86.
+        let bar = 4.0 * 60.0 / 128.0;
+        assert_eq!(checked_tempo(bar, Some(86.0), r"D:\VEE2\VEE2 Loops 128BPM\VEE2 Electro Loop 028.wav"), Some(128.0));
+        // The found one fits too: it stays (half or double time is the loop's own call).
+        assert_eq!(checked_tempo(flow, Some(81.0), r"D:\Loops\Flow 162.wav"), Some(81.0));
+        // A written tempo that doesn't fit the length changes nothing; nor does no written one.
+        assert_eq!(checked_tempo(5.0, Some(93.0), r"D:\Loops\Flow 162.wav"), Some(93.0));
+        assert_eq!(checked_tempo(flow, Some(120.0), r"D:\Loops\Flow.wav"), Some(120.0));
+        // Nothing found: a written one that fits is taken.
+        assert_eq!(checked_tempo(bar, None, r"D:\Loops 128 BPM\Hit.wav"), Some(128.0));
     }
 
     #[test]

@@ -19,9 +19,17 @@ use std::sync::{Arc, Mutex, Weak};
 pub fn own_tempo(sound: &Sound) -> crate::audition::Own {
     use crate::audition::Own;
     match &sound.analysis {
-        Some(a) if a.is_loop => a.bpm.map_or(Own::Unknown, Own::Bpm),
+        // Checked against its length: a sound read before the check came in has the tempo it was read with.
+        Some(a) if a.is_loop => tempo(sound).map_or(Own::Unknown, Own::Bpm),
         _ => Own::NotALoop,
     }
+}
+
+/// A loop's tempo, with a written one that fits its length winning over a tag or a tempo heard that doesn't
+/// (`mo_sounds::analyse::checked_tempo`).
+pub fn tempo(sound: &Sound) -> Option<f64> {
+    let a = sound.analysis.as_ref()?;
+    mo_sounds::analyse::checked_tempo(a.seconds, a.bpm, &sound.path)
 }
 
 /// The orders the panel offers, as the app names them.
@@ -53,7 +61,7 @@ pub fn facts(sound: &Sound) -> String {
         facts.push(kind.to_owned());
     }
     if let Some(analysis) = &sound.analysis {
-        if let Some(bpm) = analysis.bpm.filter(|_| analysis.is_loop) {
+        if let Some(bpm) = tempo(sound).filter(|_| analysis.is_loop) {
             facts.push(sounds::bpm_text(bpm));
         }
         let key = sounds::key_text(sound);
