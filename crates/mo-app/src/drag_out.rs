@@ -3,21 +3,25 @@
 //! A sound goes out as its own file, exactly where it is on disk, so the DAW gets the real sample (rule 2: never a
 //! copy, never moved; the C# app's `SoundsViewModel.MakeDrag`). A clip or a track from a song's arrangement goes out as
 //! what the DAW needs to play it: its notes as a new MIDI file (`.mid`) the app writes, its audio as the samples' own
-//! files, found on this computer the way the arrangement found them (rule 13).
+//! files, found on this computer the way the arrangement found them (rule 13). A preset from the Presets page goes out
+//! as a Bitwig preset wherever one can be made (mo-presets' `drag` says what it carries), else as its own file; a
+//! curve as its curve file in the app's Curves folder.
 //!
 //! Each drag also says what the card that follows the mouse shows ([`Payload::cards`], drawn by `drag_card`): one
 //! line per thing carried, with its name, a few facts and a small picture of it.
 //!
-//! **The MIDI files** (rule 28, Solomon 2026-11-02: the app cleans up after itself). A DAW takes a MIDI file's notes into its project and
-//! names the clip after the file, so each file is named after its clip ("Chords.mid"). Two drags can both carry a
-//! "Chords", so each drag gets a new folder of its own right in the system's Temp folder, `mo-drag-<process>-<count>`,
-//! never one that's there already. In it, before any MIDI file, goes `mo-drag.txt`: a first line saying it's the
-//! app's, then each file's exact name and size. Only what that list names is ever cleared ([`sweep`]): a plain file
-//! (never a link), named as listed, of exactly the size the app wrote, a day after it was made (a DAW may be slow to
-//! read it, or keep an import box open), then the list, then the folder if it's empty. Never a folder by its name or
-//! age alone: the Temp folder can be anywhere, even the home folder. When the app closes it clears its own drags'
-//! files a minute after they were made ([`finish_up`]). Audio never goes through Temp: a DAW plays a sample from where
-//! it is, so a copy there would go missing from the song a day later.
+//! **The files a drag makes** (rule 28, Solomon 2026-11-02: the app cleans up after itself): a clip's MIDI file, a
+//! preset made for the drag. A DAW takes a MIDI file's notes into its project and names the clip after the file, so
+//! each file is named after its clip ("Chords.mid"), and a preset after itself ("Serum - Lead.bwpreset"). Two drags
+//! can both carry a "Chords", so each drag gets a new folder of its own right in the system's Temp folder,
+//! `mo-drag-<process>-<count>`, never one that's there already. In it, before any file, goes `mo-drag.txt`: a first
+//! line saying it's the app's, then each file's exact name and size. Only what that list names is ever cleared
+//! ([`sweep`]): a plain file (never a link), named as listed with one of the endings the app gives ([`MADE_ENDINGS`]),
+//! of exactly the size the app wrote, a day after it was made (a DAW may be slow to read it, or keep an import box
+//! open), then the list, then the folder if it's empty. Never a folder by its name or age alone: the Temp folder can be
+//! anywhere, even the home folder. When the app closes it clears its own drags' files a minute after they were made
+//! ([`finish_up`]). Audio never goes through Temp, nor a preset file that goes as it is: a DAW plays a sample from
+//! where it is, so a copy there would go missing from the song a day later.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -30,15 +34,19 @@ use mo_formats::arrangement::{Arrangement, LaneKind, PreviewClip, PreviewLane};
 use mo_formats::midi::write::write_clip;
 use mo_formats::textscan::{is_device_name, safe_file_name};
 use mo_formats::{MidiClip, NoteAttribute, NoteEvent};
+use mo_presets::curves::Curve;
+use mo_presets::drag::{Carried, File};
 
 use crate::songs::thousands;
 
-/// What a line on the card is: a sound file, or a MIDI clip or track.
+/// What a line on the card is: a sound file, a MIDI clip or track, a preset, or a curve.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
     #[default]
     Audio,
     Midi,
+    Preset,
+    Curve,
 }
 
 /// A note in a card's small piano roll: where it starts and how long it lasts, as parts of the whole thing shown (0 to
@@ -60,9 +68,11 @@ pub enum Thumb {
     Wave(Vec<f32>),
     /// A clip's notes.
     Notes(Vec<ThumbNote>),
+    /// A curve's shape: points across (0 to 1) and up (0 to 1, 1 at the top), joined by straight lines.
+    Line(Vec<(f32, f32)>),
 }
 
-/// One line on the card: a sound, a clip or a track.
+/// One line on the card: a sound, a clip or a track, a preset or a curve.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Card {
     /// Its name: "Kick 04", "Chords".
@@ -220,11 +230,77 @@ pub fn from_part(name: &str, notes: &[NoteEvent], bars: i32, tint: u32) -> Resul
         thumb: Thumb::Notes(thumb_notes(&beats, length)),
     };
     Ok(Outgoing {
-        midi: vec![MidiFile { name: format!("{}.mid", safe_file_name(name)), bytes }],
+        made: vec![MadeFile { name: format!("{}.mid", safe_file_name(name)), bytes }],
         cards: vec![card],
         caption: "1 MIDI clip".to_owned(),
         ..Outgoing::default()
     })
+}
+
+// ---- Presets and curves from the Presets page ------------------------------------------------------------------
+
+/// A preset to drag out of the Presets page, as mo-presets says it goes ([`mo_presets::drag`]: a Bitwig preset
+/// wherever one can be made, else its own file), with its line on the card: its name, then what it goes as and its
+/// plugin ("Bitwig preset · Serum"), in its part's colour (`tint`, 0xRRGGBB; 0 for none).
+pub fn preset(carried: Carried, name: &str, plugin: &str, tint: u32) -> Outgoing {
+    let what = if carried.bitwig {
+        "Bitwig preset"
+    } else {
+        match &carried.file {
+            File::There(path) => preset_words(&path.file_name().unwrap_or_default().to_string_lossy()),
+            File::Made { name, .. } => preset_words(name),
+        }
+    };
+    let card = Card {
+        title: name.to_owned(),
+        detail: [what, plugin].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" · "),
+        kind: Kind::Preset,
+        tint,
+        thumb: Thumb::None,
+    };
+    let mut out = Outgoing { cards: vec![card], caption: "1 preset".to_owned(), ..Outgoing::default() };
+    match carried.file {
+        File::There(path) => out.as_they_are.push(path),
+        File::Made { name, bytes } => out.made.push(MadeFile { name, bytes }),
+    }
+    out
+}
+
+/// What a preset file is, by its ending, in a few words: "VST2 preset", "VST3 preset".
+fn preset_words(file_name: &str) -> &'static str {
+    const WORDS: [(&str, &str); 8] = [
+        (".bwpreset", "Bitwig preset"),
+        (".fxp", "VST2 preset"),
+        (".fxb", "VST2 bank"),
+        (".vstpreset", "VST3 preset"),
+        (".vst3state", "VST3 settings"),
+        (".clap-preset", "CLAP preset"),
+        (".flstate", "FL Studio settings"),
+        (".aupreset", "AU preset"),
+    ];
+    let lower = file_name.to_ascii_lowercase();
+    WORDS.iter().find(|(ending, _)| lower.ends_with(ending)).map_or("Preset", |(_, words)| words)
+}
+
+/// A curve's line on the card: its name, "Curve · 2 bars", and its shape.
+pub fn curve_card(curve: &Curve) -> Card {
+    Card {
+        title: curve.name.clone(),
+        detail: ["Curve".to_owned(), crate::presets::beats_words(curve.length_beats)]
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · "),
+        kind: Kind::Curve,
+        tint: 0,
+        thumb: Thumb::Line(crate::presets::curve_line_points(&curve.points)),
+    }
+}
+
+/// A curve to drag out: its file (which mo-presets writes in the app's Curves folder, so it goes as it is) and its
+/// line on the card ([`curve_card`]).
+pub fn curve(path: PathBuf, card: Card) -> Payload {
+    Payload { files: vec![path], cards: vec![card], caption: "1 curve".to_owned(), numbered: false }
 }
 
 // ---- Clips and tracks from a song's arrangement ----------------------------------------------------------------
@@ -237,20 +313,23 @@ pub enum Pick {
     Lane(usize),
 }
 
-/// A MIDI file a drag writes: its name in the drag's folder ("Chords.mid") and its bytes.
+/// A file a drag writes, a MIDI file or a preset: its name in the drag's folder with its ending ("Chords.mid",
+/// "Serum - Lead.bwpreset"; one of [`MADE_ENDINGS`]) and its bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MidiFile {
+pub struct MadeFile {
     pub name: String,
     pub bytes: Vec<u8>,
 }
 
-/// A clip or track made ready to drag out, before anything is written: the MIDI file to write, the samples it plays,
-/// and the card. [`Outgoing::write`] writes the MIDI and gives the [`Payload`].
+/// What a drag carries, made ready before anything is written: the files to make (a clip's MIDI file, a preset made
+/// for the drag), the files that go as they are (the samples a clip plays, a preset file), and the card.
+/// [`Outgoing::write`] writes the made ones and gives the [`Payload`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Outgoing {
-    pub midi: Vec<MidiFile>,
-    /// The samples, as found on this computer, each once, in the order they first play.
-    pub samples: Vec<PathBuf>,
+    pub made: Vec<MadeFile>,
+    /// The files that go as they are on this computer: a clip's samples as found, each once, in the order they first
+    /// play; a preset file.
+    pub as_they_are: Vec<PathBuf>,
     pub cards: Vec<Card>,
     pub caption: String,
     pub numbered: bool,
@@ -335,7 +414,7 @@ pub fn from_arrangement(
     if notes > 0 {
         let midi = midi_clip(&name, &gathered.parts, length);
         let bytes = write_clip(&midi).map_err(|e| format!("Couldn't make the MIDI file: {e}."))?.bytes;
-        out.midi.push(MidiFile { name: format!("{}.mid", safe_file_name(&name)), bytes });
+        out.made.push(MadeFile { name: format!("{}.mid", safe_file_name(&name)), bytes });
         for (part, part_notes) in &gathered.parts {
             out.cards.push(Card {
                 // One part is the whole MIDI file, named as the DAW names the clip it makes; several are its tracks,
@@ -362,10 +441,10 @@ pub fn from_arrangement(
                 .filter(|w| !w.is_empty())
                 .map_or(Thumb::None, |w| Thumb::Wave(fewer_peaks(&w, THUMB_PEAKS))),
         });
-        out.samples.push(path);
+        out.as_they_are.push(path);
     }
     let tracks = gathered.parts.len();
-    out.caption = match (notes > 0, out.samples.len()) {
+    out.caption = match (notes > 0, out.as_they_are.len()) {
         (true, 0) if tracks == 1 => "1 MIDI clip".to_owned(),
         (true, 0) => format!("1 MIDI file with {tracks} tracks"),
         (true, n) => format!("1 MIDI file and {}", count_of(n, "sample", "samples")),
@@ -521,12 +600,12 @@ fn bars_text(beats: f64, beats_per_bar: u32) -> String {
 }
 
 impl Outgoing {
-    /// Writes the MIDI files into a new drag folder in `temp` (none when there's no MIDI) and gives what the drag
-    /// carries: the MIDI file first, then the samples, in the order they land. Writes to the disk, so never on the
-    /// window's thread.
+    /// Writes the files to make into a new drag folder in `temp` (none when there are none) and gives what the drag
+    /// carries: the made files first (a clip's MIDI file), then the ones that go as they are, in the order they land.
+    /// Writes to the disk, so never on the window's thread.
     pub fn write(self, temp: &Path) -> io::Result<Payload> {
-        let mut files = if self.midi.is_empty() { Vec::new() } else { write_drag_files(temp, &self.midi)? };
-        files.extend(self.samples);
+        let mut files = if self.made.is_empty() { Vec::new() } else { write_drag_files(temp, &self.made)? };
+        files.extend(self.as_they_are);
         Ok(Payload { files, cards: self.cards, caption: self.caption, numbered: self.numbered })
     }
 }
@@ -554,22 +633,23 @@ const SKEW: Duration = DAY;
 /// Counts the drag folders this run makes, so each has a name of its own.
 static FOLDERS_MADE: AtomicU64 = AtomicU64::new(1);
 
-/// Writes `files` (their names are made safe and kept apart here: "Chords.mid", "Chords 2.mid") into a new drag
-/// folder in `temp`: the list first, with each file's exact name and size from the bytes in hand, then the files, so
-/// a crash between them leaves nothing unlisted. A write that fails (Temp full, say) takes back everything this one
-/// made: a file cut short doesn't have the size on its list, so the sweep would leave it for good. Gives the files'
-/// paths, in order.
-pub fn write_drag_files(temp: &Path, files: &[MidiFile]) -> io::Result<Vec<PathBuf>> {
+/// Writes `files` (their names are made safe and kept apart here, each keeping its ending: "Chords.mid",
+/// "Chords 2.mid", "Lead.bwpreset") into a new drag folder in `temp`: the list first, with each file's exact name and
+/// size from the bytes in hand, then the files, so a crash between them leaves nothing unlisted. A write that fails
+/// (Temp full, say) takes back everything this one made: a file cut short doesn't have the size on its list, so the
+/// sweep would leave it for good. Gives the files' paths, in order. An error before anything is made for a file
+/// without one of the [`MADE_ENDINGS`].
+pub fn write_drag_files(temp: &Path, files: &[MadeFile]) -> io::Result<Vec<PathBuf>> {
     write_drag_files_with(temp, files, |file, bytes| file.write_all(bytes))
 }
 
 /// [`write_drag_files`], putting each file's bytes in with `put` (a test's fails part way, as a full disk does).
 fn write_drag_files_with(
     temp: &Path,
-    files: &[MidiFile],
+    files: &[MadeFile],
     mut put: impl FnMut(&mut fs::File, &[u8]) -> io::Result<()>,
 ) -> io::Result<Vec<PathBuf>> {
-    let names = unique_names(files.iter().map(|f| f.name.as_str()));
+    let names = unique_names(files.iter().map(|f| f.name.as_str()))?;
     let folder = new_folder(temp)?;
     let mut list = format!("{MANIFEST_HEADER}\n");
     for (name, f) in names.iter().zip(files) {
@@ -613,18 +693,19 @@ fn take_back(folder: &Path, made: &[PathBuf]) {
     let _ = fs::remove_dir(folder);
 }
 
-/// What a drag file may end with: a MIDI file, or, from the plugin, a Bitwig preset made for a drop into Bitwig (which
-/// takes only its own) or a curve. Any other name ends `.mid`.
-const ENDINGS: [&str; 3] = [".mid", ".bwpreset", ".bwcurve"];
-
-/// The names made safe for a file ending as [`ENDINGS`] says and kept apart, letter case aside (Windows doesn't tell
-/// "a" from "A").
-fn unique_names<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+/// The names made safe, each keeping its ending (one of [`MADE_ENDINGS`], in small letters), and kept apart, letter
+/// case aside (Windows doesn't tell "a" from "A"). An error for a name without one of those endings: a drag makes no
+/// other kind of file.
+fn unique_names<'a>(names: impl Iterator<Item = &'a str>) -> io::Result<Vec<String>> {
     let mut used = HashSet::new();
     names
         .map(|name| {
-            let ending = ENDINGS.into_iter().find(|e| name.ends_with(e)).unwrap_or(ENDINGS[0]);
-            let stem = name.strip_suffix(ending).unwrap_or(name);
+            let Some((stem, ending)) = made_ending(name) else {
+                let ending = mo_formats::paths::extension(name);
+                let what =
+                    if ending.is_empty() { "files without an ending".to_owned() } else { format!("{ending} files") };
+                return Err(io::Error::new(ErrorKind::InvalidInput, format!("a drag doesn't make {what}")));
+            };
             let stem = safe_file_name(stem);
             let mut out = format!("{stem}{ending}");
             let mut n = 2;
@@ -632,9 +713,38 @@ fn unique_names<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
                 out = format!("{stem} {n}{ending}");
                 n += 1;
             }
-            out
+            Ok(out)
         })
         .collect()
+}
+
+/// The endings of the files a drag makes ([`MadeFile`]): a clip's MIDI file; a Bitwig preset made for the drag; a
+/// curve the test plugin hands Bitwig; a song's sound as the plugin preset an export writes (as FL Studio, Studio One
+/// and Bitwig keep them: Bitwig keeps a CLAP plugin's as `.clap-preset`). The sweep only ever clears a file with one
+/// of these.
+pub const MADE_ENDINGS: [&str; 12] = [
+    ".mid",
+    ".bwpreset",
+    ".bwcurve",
+    ".fxp",
+    ".fxb",
+    ".vstpreset",
+    ".vst3state",
+    ".clap-preset",
+    ".flstate",
+    ".aupreset",
+    ".preset",
+    ".multipreset",
+];
+
+/// A drag file's name cut into what comes before its ending and that ending (one of [`MADE_ENDINGS`], letter case
+/// aside): None when it has none of them, or nothing before it.
+fn made_ending(name: &str) -> Option<(&str, &'static str)> {
+    MADE_ENDINGS.iter().find_map(|&ending| {
+        let cut = name.len().checked_sub(ending.len())?;
+        let (stem, end) = (name.get(..cut)?, name.get(cut..)?);
+        (!stem.is_empty() && end.eq_ignore_ascii_case(ending)).then_some((stem, ending))
+    })
 }
 
 /// A new folder for one drag, right in `temp`, never one that's there already.
@@ -771,7 +881,7 @@ fn sweep_folder(folder: &Path, now: SystemTime, kept: Duration) -> Swept {
 }
 
 /// A drag folder's list, as (size, name) for each file; None when it isn't one the app wrote (another first line, a
-/// line that doesn't read, a name that isn't a plain MIDI file's).
+/// line that doesn't read, a name that isn't one the app gives a drag's file).
 fn read_manifest(text: &str) -> Option<Vec<(u64, String)>> {
     let mut lines = text.lines();
     if lines.next()? != MANIFEST_HEADER {
@@ -789,16 +899,15 @@ fn read_manifest(text: &str) -> Option<Vec<(u64, String)>> {
     Some(out)
 }
 
-/// A name the app gives a drag file: one name with no folder in it (no slashes, no ':' for an NTFS stream, not
-/// "." or ".."), no control letters, not a Windows device's, ending as [`ENDINGS`] says (".mid", ".bwpreset", ".bwcurve").
+/// A name the app gives a drag's file: one name with no folder in it (no slashes, no ':' for an NTFS stream, not "."
+/// or ".."), no control letters, not a Windows device's, ending in one of [`MADE_ENDINGS`] with something before it.
 fn plain_drag_name(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    ENDINGS.iter().any(|e| lower.len() > e.len() && lower.ends_with(e))
+    made_ending(name).is_some()
         && !name.contains(['/', '\\', ':'])
         && !name.chars().any(|c| c < ' ')
         && !name.starts_with(' ')
         && !is_device_name(name)
-        && lower != MANIFEST
+        && !name.eq_ignore_ascii_case(MANIFEST)
 }
 
 /// How old a file is, from the latest of when it was made and last changed (and, off Windows, when its details last
@@ -847,9 +956,9 @@ mod tests {
             attribute: NoteAttribute::NONE,
         };
         let out = from_part("Keys · Pattern 3", &[n(0, false), n(96, false), n(192, true)], 2, 0x33aa77).unwrap();
-        assert_eq!(out.midi.len(), 1);
-        assert!(out.midi[0].name.ends_with(".mid"));
-        assert!(out.midi[0].bytes.starts_with(b"MThd"));
+        assert_eq!(out.made.len(), 1);
+        assert!(out.made[0].name.ends_with(".mid"));
+        assert!(out.made[0].bytes.starts_with(b"MThd"));
         assert_eq!(out.caption, "1 MIDI clip");
         assert_eq!(out.cards[0].detail, "MIDI · 2 notes · 2 bars");
         assert!(matches!(&out.cards[0].thumb, Thumb::Notes(t) if t.len() == 2));
@@ -935,13 +1044,13 @@ mod tests {
         lane.clips = vec![clip];
         let out =
             from_arrangement(&song(vec![lane]), Pick::Clip { lane: 0, clip: 0 }, &HashMap::new(), &no_waves).unwrap();
-        assert_eq!(out.midi.len(), 1);
-        assert_eq!(out.midi[0].name, "Drums.mid");
+        assert_eq!(out.made.len(), 1);
+        assert_eq!(out.made[0].name, "Drums.mid");
         assert_eq!(out.caption, "1 MIDI file with 2 tracks");
         assert!(out.numbered);
         assert_eq!(out.cards.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Kick", "Hat"]);
         assert_eq!(out.cards[0].detail, "MIDI · 2 notes · 1 bar");
-        let (ppq, notes) = read_back(&out.midi[0].bytes);
+        let (ppq, notes) = read_back(&out.made[0].bytes);
         // FL's own 96 ticks a beat places every note exactly.
         assert_eq!(ppq, 96);
         // Timed from the clip's start; each step plays a sixteenth (24 ticks), as FL plays a short sample; the muted
@@ -964,12 +1073,12 @@ mod tests {
         let b = PreviewClip { start: 12.0, length: 4.0, notes: vec![note(1.5, 0.25, 38)], ..PreviewClip::default() };
         lane.clips = vec![a, muted, b];
         let out = from_arrangement(&song(vec![lane]), Pick::Lane(0), &HashMap::new(), &no_waves).unwrap();
-        assert_eq!(out.midi[0].name, "Bass.mid");
+        assert_eq!(out.made[0].name, "Bass.mid");
         assert_eq!(out.caption, "1 MIDI clip");
         assert!(!out.numbered);
         assert_eq!(out.cards[0].tint, 0x4FB3FF);
         assert_eq!(out.cards[0].detail, "MIDI · 2 notes · 4 bars");
-        let (ppq, notes) = read_back(&out.midi[0].bytes);
+        let (ppq, notes) = read_back(&out.made[0].bytes);
         let at = |beats: f64| (beats * f64::from(ppq)).round() as i64;
         let mut got: Vec<_> = notes.iter().map(|n| (n.1, n.2, n.3)).collect();
         got.sort_unstable();
@@ -985,7 +1094,7 @@ mod tests {
         }];
         let out =
             from_arrangement(&song(vec![lane]), Pick::Clip { lane: 0, clip: 0 }, &HashMap::new(), &no_waves).unwrap();
-        assert_eq!(out.midi[0].name, "Bass line.mid");
+        assert_eq!(out.made[0].name, "Bass line.mid");
         assert_eq!(out.cards[0].title, "Bass line");
     }
 
@@ -1000,7 +1109,7 @@ mod tests {
         }];
         let out =
             from_arrangement(&song(vec![lane]), Pick::Clip { lane: 0, clip: 0 }, &HashMap::new(), &no_waves).unwrap();
-        let (ppq, notes) = read_back(&out.midi[0].bytes);
+        let (ppq, notes) = read_back(&out.made[0].bytes);
         assert_eq!(ppq, 960);
         assert_eq!(notes[0].1, 119);
         // Triplets fit 96.
@@ -1008,7 +1117,7 @@ mod tests {
         lane.clips =
             vec![PreviewClip { length: 1.0, notes: vec![note(1.0 / 3.0, 1.0 / 3.0, 60)], ..PreviewClip::default() }];
         let out = from_arrangement(&song(vec![lane]), Pick::Lane(0), &HashMap::new(), &no_waves).unwrap();
-        assert_eq!(read_back(&out.midi[0].bytes).0, 96);
+        assert_eq!(read_back(&out.made[0].bytes).0, 96);
     }
 
     #[test]
@@ -1049,8 +1158,8 @@ mod tests {
         ];
         let waves = |p: &str| (p == "Kick.wav").then(|| vec![0.2, 0.8]);
         let out = from_arrangement(&song(vec![lane]), Pick::Lane(0), &found, &waves).unwrap();
-        assert!(out.midi.is_empty());
-        assert_eq!(out.samples, [kick, odd]);
+        assert!(out.made.is_empty());
+        assert_eq!(out.as_they_are, [kick, odd]);
         assert_eq!(out.missing, 3);
         assert_eq!(out.caption, "2 samples · 3 samples not on this computer");
         assert_eq!(out.cards[0].title, "Kick.wav");
@@ -1138,8 +1247,8 @@ mod tests {
         dir
     }
 
-    fn midi(name: &str, bytes: &[u8]) -> MidiFile {
-        MidiFile { name: name.into(), bytes: bytes.to_vec() }
+    fn midi(name: &str, bytes: &[u8]) -> MadeFile {
+        MadeFile { name: name.into(), bytes: bytes.to_vec() }
     }
 
     #[test]
@@ -1213,8 +1322,107 @@ mod tests {
     }
 
     #[test]
+    fn presets_keep_their_endings_and_go_once_a_day_old() {
+        let temp = test_temp("presets");
+        let files = [
+            midi("Serum - Lead.bwpreset", b"BtWg"),
+            midi("serum - lead.BWPRESET", b"12"),
+            midi("Serum - Lead.fxp", b"CcnK"),
+            midi("Pad.vstpreset", b"VST3"),
+            midi("Fruity Limiter.flstate", b"1"),
+            midi("Surge.clap-preset", b"12345"),
+        ];
+        let paths = write_drag_files(&temp, &files).unwrap();
+        let names: Vec<_> = paths.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            names,
+            [
+                "Serum - Lead.bwpreset",
+                "serum - lead 2.bwpreset",
+                "Serum - Lead.fxp",
+                "Pad.vstpreset",
+                "Fruity Limiter.flstate",
+                "Surge.clap-preset"
+            ]
+        );
+        let done = sweep(&temp, SystemTime::now() + DAY * 2);
+        assert_eq!((done.removed, done.failed), (7, 0));
+        assert!(!paths.iter().any(|p| p.exists()));
+        assert!(!paths[0].parent().unwrap().exists());
+    }
+
+    #[test]
+    fn a_drag_makes_no_other_kind_of_file() {
+        let temp = test_temp("endings");
+        for name in ["notes.txt", "Lead.exe", ".bwpreset", "Lead", "", "Surge.clap"] {
+            let e = write_drag_files(&temp, &[midi(name, b"1")]).unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::InvalidInput, "{name}");
+        }
+        let said = write_drag_files(&temp, &[midi("Lead.exe", b"1")]).unwrap_err().to_string();
+        assert_eq!(said, "a drag doesn't make .exe files");
+        // Nothing was made for them, not even a folder.
+        assert_eq!(fs::read_dir(&temp).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_preset_goes_as_mo_presets_says_with_its_card() {
+        let made = Carried {
+            file: File::Made { name: "Serum - Lead.bwpreset".into(), bytes: b"BtWg".to_vec() },
+            bitwig: true,
+            why_not: None,
+        };
+        let out = preset(made, "Lead", "Serum", 0x00FF00);
+        assert_eq!(out.made, [midi("Serum - Lead.bwpreset", b"BtWg")]);
+        assert!(out.as_they_are.is_empty());
+        let c = &out.cards[0];
+        assert_eq!((c.title.as_str(), c.detail.as_str()), ("Lead", "Bitwig preset · Serum"));
+        assert_eq!((c.kind, c.tint, &c.thumb), (Kind::Preset, 0x00FF00, &Thumb::None));
+        assert_eq!(out.caption, "1 preset");
+        // A file that goes as it is: nothing is written for it.
+        let there = Carried {
+            file: File::There(PathBuf::from("/p/Pad.vstpreset")),
+            bitwig: false,
+            why_not: Some("no template".into()),
+        };
+        let out = preset(there, "Pad", "Diva", 0);
+        assert!(out.made.is_empty());
+        assert_eq!(out.cards[0].detail, "VST3 preset · Diva");
+        let temp = test_temp("preset-payload");
+        assert_eq!(out.write(&temp.join("not there")).unwrap().files, [PathBuf::from("/p/Pad.vstpreset")]);
+        // An FL plugin's own settings, by their ending; no plugin, no plugin words.
+        let fl = Carried {
+            file: File::Made { name: "Fruity Limiter.flstate".into(), bytes: vec![1] },
+            bitwig: false,
+            why_not: None,
+        };
+        assert_eq!(preset(fl, "Fruity Limiter", "", 0).cards[0].detail, "FL Studio settings");
+        assert_eq!(preset_words("Odd.multipreset"), "Preset");
+        assert_eq!(preset_words("Track - Surge.clap-preset"), "CLAP preset");
+    }
+
+    #[test]
+    fn a_curve_goes_as_its_file_with_its_shape_on_the_card() {
+        use mo_formats::bitwig::curve::CurvePoint;
+        let c = Curve {
+            id: "x".into(),
+            name: "Rise".into(),
+            points: vec![CurvePoint { x: 0.0, y: 0.0, bend: 0.0 }, CurvePoint { x: 1.0, y: 1.0, bend: 0.0 }],
+            length_beats: 8.0,
+            hidden: false,
+            sources: Vec::new(),
+        };
+        let card = curve_card(&c);
+        assert_eq!((card.title.as_str(), card.detail.as_str(), card.kind), ("Rise", "Curve · 2 bars", Kind::Curve));
+        assert_eq!(card.thumb, Thumb::Line(vec![(0.0, 0.0), (0.0, 0.0), (1.0, 1.0), (1.0, 1.0)]));
+        let file = PathBuf::from("/d/Curves/Rise 0123.bwcurve");
+        let p = curve(file.clone(), card.clone());
+        assert_eq!(p, Payload { files: vec![file], cards: vec![card], caption: "1 curve".into(), numbered: false });
+    }
+
+    #[test]
     fn a_bitwig_preset_or_curve_keeps_its_ending_and_is_cleared_as_a_midi_file_is() {
-        // The plugin hands Bitwig a preset it made, or a curve, through a drag folder.
+        // The plugin hands Bitwig a preset it made, or a curve, through a drag folder; a plugin's own preset keeps
+        // its ending too, as the app's drag hands one out.
         let temp = test_temp("bwpreset");
         let files = [
             midi("Serum - Lead.bwpreset", b"bw"),
@@ -1224,7 +1432,7 @@ mod tests {
         ];
         let paths = write_drag_files(&temp, &files).unwrap();
         let names: Vec<_> = paths.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-        assert_eq!(names, ["Serum - Lead.bwpreset", "Serum - Lead 2.bwpreset", "Rise.bwcurve", "x.fxp.mid"]);
+        assert_eq!(names, ["Serum - Lead.bwpreset", "Serum - Lead 2.bwpreset", "Rise.bwcurve", "x.fxp"]);
         assert!(!plain_drag_name(".bwpreset"));
         let done = sweep(&temp, SystemTime::now() + DAY * 2);
         assert_eq!(done.removed, 5);
@@ -1251,9 +1459,18 @@ mod tests {
         let temp = test_temp("traversal");
         let outside = temp.join("Outside.mid");
         fs::write(&outside, b"12").unwrap();
-        for (i, name) in
-            ["../Outside.mid", "..\\Outside.mid", "a:b.mid", "notes.txt", "CON.mid", ".mid"].iter().enumerate()
-        {
+        let names = [
+            "../Outside.mid",
+            "..\\Outside.mid",
+            "a:b.mid",
+            "notes.txt",
+            "CON.mid",
+            ".mid",
+            ".bwpreset",
+            "aux.fxp",
+            "Lead.bwpreset.exe",
+        ];
+        for (i, name) in names.iter().enumerate() {
             let folder = temp.join(format!("mo-drag-7-{i}"));
             fs::create_dir_all(&folder).unwrap();
             fs::write(folder.join(MANIFEST), format!("{MANIFEST_HEADER}\n2\t{name}\n")).unwrap();
@@ -1334,8 +1551,8 @@ mod tests {
     fn written_files_go_out_midi_first_then_samples() {
         let temp = test_temp("payload");
         let out = Outgoing {
-            midi: vec![midi("Lead.mid", b"MThd")],
-            samples: vec![PathBuf::from("/s/Vox.wav")],
+            made: vec![midi("Lead.mid", b"MThd")],
+            as_they_are: vec![PathBuf::from("/s/Vox.wav")],
             cards: vec![card("Lead"), card("Vox.wav")],
             caption: "1 MIDI file and 1 sample".into(),
             numbered: true,
@@ -1346,7 +1563,7 @@ mod tests {
         assert!(p.files[0].ends_with("Lead.mid"));
         assert_eq!(p.files[1], PathBuf::from("/s/Vox.wav"));
         // Audio alone writes nothing.
-        let audio = Outgoing { samples: vec![PathBuf::from("/s/Vox.wav")], ..Outgoing::default() };
+        let audio = Outgoing { as_they_are: vec![PathBuf::from("/s/Vox.wav")], ..Outgoing::default() };
         assert_eq!(audio.write(&temp.join("not there")).unwrap().files, [PathBuf::from("/s/Vox.wav")]);
     }
 }

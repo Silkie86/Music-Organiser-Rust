@@ -14,6 +14,8 @@
 //! (`mo-dawlink`, [`send_to_bitwig`]); when Bitwig isn't there, the preset is shown in its folder to drag in.
 //! Audition in Bitwig does the same on a track of its own with a short part playing on it
 //! (`mo_app::preset_audition`), to hear it first: Stop in Bitwig takes the track out again, Keep in Bitwig leaves it.
+//! A sound or a curve can be dragged out too, from its line or its card's handle (`drag_out`): a sound as a Bitwig
+//! preset wherever one can be made, so Bitwig loads it on the track it's dropped on.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -49,6 +51,9 @@ use crate::{
     ActionKey, AppWindow, CardAction, CurveCardInfo, CurveLineInfo, CurvePlace, MenuItem, PartChip, PresetCard,
     PresetFact, PresetLine, PresetsData, YearBar,
 };
+
+mod drag_out;
+pub use drag_out::{card_at_row, curve_card_at_row};
 
 /// How many saves are read before what they hold is shown.
 const BATCH: usize = 24;
@@ -472,18 +477,6 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
-    data.on_curve_drag(move || {
-        if let Some(app) = weak.upgrade() {
-            carry_curve(&app);
-        }
-    });
-    let weak = app.as_weak();
-    data.on_curve_drag_let_go(move || {
-        if let Some(app) = weak.upgrade() {
-            crate::drag::let_go(&app);
-        }
-    });
-    let weak = app.as_weak();
     data.on_curve_chosen(move |id| {
         if let Some(app) = weak.upgrade() {
             run_curve_action(&app, &id);
@@ -496,6 +489,7 @@ fn wire(app: &AppWindow) {
             rename_curve(&app, name.to_string());
         }
     });
+    drag_out::wire(app);
 }
 
 /// The page came into view: the sounds are read the first time.
@@ -2324,50 +2318,6 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         _ => return false,
     }
     true
-}
-
-/// Drags the picked curve's file (in the app's Curves folder, made on a thread of its own as the drag gets going) out,
-/// onto an automation lane in Bitwig (X3-15).
-fn carry_curve(app: &AppWindow) {
-    let Some((curve, folder)) = PAGE.with(|p| {
-        let p = p.borrow();
-        let c = p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id)).cloned()?;
-        Some((c, p.data_dir.join(curves::FOLDER)))
-    }) else {
-        return;
-    };
-    let under_way = crate::drag::start(
-        app,
-        crate::drag::Drag {
-            make: Box::new(move || {
-                let path = curves::file(&curve, &folder)?;
-                let card = mo_app::drag_out::Card {
-                    title: curve.name.clone(),
-                    detail: ["Curve".to_owned(), logic::beats_words(curve.length_beats)]
-                        .into_iter()
-                        .filter(|t| !t.is_empty())
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                    ..Default::default()
-                };
-                Ok(mo_app::drag_out::Payload {
-                    files: vec![path],
-                    cards: vec![card],
-                    caption: "1 curve".into(),
-                    numbered: false,
-                })
-            }),
-            done: Box::new(|app, outcome| {
-                app.global::<PresetsData>().set_curve_lifted(false);
-                if outcome == crate::drag::Outcome::Landed {
-                    crate::drag::glow(app, |app, on| app.global::<PresetsData>().set_curve_landed(on));
-                }
-            }),
-        },
-    );
-    if under_way {
-        app.global::<PresetsData>().set_curve_lifted(true);
-    }
 }
 
 /// Opens the Songs page on the song a save belongs to (X3-10, as Plugins' Show in Songs does).

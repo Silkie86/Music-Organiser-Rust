@@ -1670,16 +1670,10 @@ pub fn curve_path(points: &[CurvePoint], w: f64, h: f64) -> String {
     out += &format!("M 0 {} L {} {}", num(y0), num(x0), num(y0));
     for pair in points.windows(2) {
         let [a, b] = pair else { continue };
-        let ((ax, ay), (bx, by)) = (at(a), at(b));
-        let bend = a.bend.clamp(-1.0, 1.0);
-        if bend.abs() < 0.01 || (ay - by).abs() < 0.01 {
-            out += &format!(" L {} {}", num(bx), num(by));
-        } else {
-            let (mx, my) = ((ax + bx) / 2.0, (ay + by) / 2.0);
-            // Above 0: late (stays near the first value, then moves); below: early.
-            let (cx, cy) = if bend > 0.0 { (bx, ay) } else { (ax, by) };
-            let t = bend.abs();
-            out += &format!(" Q {} {} {} {}", num(mx + (cx - mx) * t), num(my + (cy - my) * t), num(bx), num(by));
+        let (from, (bx, by)) = (at(a), at(b));
+        match bend_handle(from, (bx, by), a.bend) {
+            None => out += &format!(" L {} {}", num(bx), num(by)),
+            Some((cx, cy)) => out += &format!(" Q {} {} {} {}", num(cx), num(cy), num(bx), num(by)),
         }
     }
     if let Some(last) = points.last() {
@@ -1687,6 +1681,51 @@ pub fn curve_path(points: &[CurvePoint], w: f64, h: f64) -> String {
         out += &format!(" L {} {}", num(w), num(y));
     }
     out
+}
+
+/// Where a bent line from `a` to `b` (in the box's points) leans: the handle of the quadratic curve [`curve_path`]
+/// draws it as. None when it's drawn straight: no bend to speak of (or a broken one), or no rise.
+fn bend_handle(a: (f64, f64), b: (f64, f64), bend: f64) -> Option<(f64, f64)> {
+    // A broken bend (not a number) is straight.
+    let bend = if bend.is_finite() { bend.clamp(-1.0, 1.0) } else { 0.0 };
+    if bend.abs() < 0.01 || (a.1 - b.1).abs() < 0.01 {
+        return None;
+    }
+    let (mx, my) = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+    // Above 0: late (stays near the first value, then moves); below: early.
+    let (cx, cy) = if bend > 0.0 { (b.0, a.1) } else { (a.0, b.1) };
+    let t = bend.abs();
+    Some((mx + (cx - mx) * t, my + (cy - my) * t))
+}
+
+/// A curve's shape as points across (0 to 1) and up (0 to 1, 1 at the top), joined by straight lines: the line
+/// [`curve_path`] draws, each bend in short steps. For a drag's card, which draws it small.
+pub fn curve_line_points(points: &[CurvePoint]) -> Vec<(f32, f32)> {
+    /// The steps a bend is drawn in: smooth at the card's size.
+    const STEPS: u32 = 8;
+    let (w, h) = SHAPE_BOX;
+    // In the page's box, so a bend is straight where the page draws it straight; up from the bottom.
+    let at = |p: &CurvePoint| (p.x.clamp(0.0, 1.0) * w, p.y.clamp(0.0, 1.0) * h);
+    let Some(first) = points.first() else { return Vec::new() };
+    let (x0, y0) = at(first);
+    // Held from the start, as on the page.
+    let mut out = vec![(0.0, y0), (x0, y0)];
+    for pair in points.windows(2) {
+        let [a, b] = pair else { continue };
+        let (from, to) = (at(a), at(b));
+        match bend_handle(from, to, a.bend) {
+            None => out.push(to),
+            Some(c) => out.extend((1..=STEPS).map(|i| {
+                let t = f64::from(i) / f64::from(STEPS);
+                let u = 1.0 - t;
+                (u * u * from.0 + 2.0 * u * t * c.0 + t * t * to.0, u * u * from.1 + 2.0 * u * t * c.1 + t * t * to.1)
+            })),
+        }
+    }
+    if let Some(last) = points.last() {
+        out.push((w, at(last).1));
+    }
+    out.into_iter().map(|(x, y)| ((x / w) as f32, (y / h) as f32)).collect()
 }
 
 fn num(v: f64) -> String {
@@ -2443,6 +2482,27 @@ mod tests {
         // Bent up to the top (late, so its middle leans to the low corner), straight down, then held to the end.
         assert_eq!(p, "M 0 100 L 0 100 Q 37.5 75 50 0 L 100 75 L 100 75");
         assert_eq!(curve_path(&[], 100.0, 100.0), "");
+    }
+
+    #[test]
+    fn a_drag_card_draws_the_curve_the_page_draws() {
+        let c = curve("Rise", SourceKind::FlKnobMoves, "A", 1);
+        let line = curve_line_points(&c.points);
+        // Held from the start, the bend in 8 steps, straight down, then held to the end: up from the bottom.
+        assert_eq!(line.len(), 2 + 8 + 1 + 1);
+        assert_eq!((line[0], line[1]), ((0.0, 0.0), (0.0, 0.0)));
+        assert_eq!(line[9], (0.5, 1.0));
+        assert_eq!(line[10..], [(1.0, 0.25), (1.0, 0.25)]);
+        // Halfway through the bend it's late, as on the page: below the straight line, leaning to the low corner.
+        let (x, y) = line[5];
+        assert!((x - 0.3125).abs() < 1e-6 && (y - 0.375).abs() < 1e-6, "{x} {y}");
+        assert!(y < x / 0.5);
+        // A broken bend is drawn straight, here as on the page.
+        let mut broken = c.points.clone();
+        broken[0].bend = f64::NAN;
+        assert_eq!(curve_line_points(&broken).len(), 2 + 1 + 1 + 1);
+        assert!(!curve_path(&broken, 100.0, 100.0).contains("NaN"));
+        assert!(curve_line_points(&[]).is_empty());
     }
 
     #[test]

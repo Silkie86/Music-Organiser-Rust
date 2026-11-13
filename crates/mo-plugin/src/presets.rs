@@ -248,7 +248,7 @@ impl Presets {
             }
             Err(e) => return Err(format!("Its Bitwig preset couldn't be made: {e}")),
         };
-        let file = mo_app::drag_out::MidiFile { name: format!("{name}.bwpreset"), bytes };
+        let file = mo_app::drag_out::MadeFile { name: format!("{name}.bwpreset"), bytes };
         let mut written = mo_app::drag_out::write_drag_files(temp, &[file])
             .map_err(|e| format!("Its Bitwig preset couldn't be saved in Temp: {e}"))?;
         written.pop().ok_or_else(|| "Its Bitwig preset couldn't be saved in Temp".to_owned())

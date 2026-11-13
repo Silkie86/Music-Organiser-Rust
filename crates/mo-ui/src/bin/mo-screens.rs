@@ -614,7 +614,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     capture(&window);
     space_keys_checks(&app, &window, &mut shots)?;
     mo_ui::space::show_sample(&app, sample_space(), "");
-    presets_shots(&app, &window, &mut shots)?;
+    presets_shots(&app, &window, &graphite, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -1455,10 +1455,12 @@ fn held(app: &mo_ui::AppWindow, key: impl Into<slint::SharedString>) {
     slint::platform::update_timers_and_animations();
 }
 
-/// The Presets page: made-up sounds with one picked, then the Curves section with a curve picked.
+/// The Presets page: made-up sounds with one picked, then the Curves section with a curve picked; a sound and a curve
+/// dragged out from their lines.
 fn presets_shots(
     app: &mo_ui::AppWindow,
     window: &MinimalSoftwareWindow,
+    graphite: &Look,
     shots: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use mo_app::presets::Section;
@@ -1485,10 +1487,29 @@ fn presets_shots(
     mo_ui::presets::show_audition_sample(app, true);
     shots.push(("presets-auditioning.png".into(), capture(window)));
     mo_ui::presets::show_audition_sample(app, false);
+    // A sound dragged out onto a track from its line: dimmed while it's carried, with the card that follows the mouse
+    // (a Bitwig preset made of it).
+    let still = capture(window);
+    data.set_lifted_row(1);
+    let lifted = capture(window);
+    let card = mo_ui::presets::card_at_row(app, 1).ok_or("presets-drag.png: no sound on the second line")?;
+    let (x, y, w, h) = changed_box(&still, &lifted).ok_or("presets-drag.png: the second line didn't dim")?;
+    shots.push(("presets-drag.png".into(), with_card(lifted, &card, graphite, (x + w / 3, y + h / 2 + 20))));
+    data.set_lifted_row(-1);
+    capture(window);
     mo_ui::presets::show_section(app, Section::Curves);
     shots.push(("presets-curves.png".into(), capture(window)));
     mo_ui::presets::pick_row(app, 0);
     shots.push(("presets-curve-picked.png".into(), capture(window)));
+    // A curve dragged out onto an automation lane from its line, its shape on the card.
+    let still = capture(window);
+    data.set_curve_lifted_row(1);
+    let lifted = capture(window);
+    let card = mo_ui::presets::curve_card_at_row(1).ok_or("presets-curve-drag.png: no curve on the second line")?;
+    let (x, y, w, h) = changed_box(&still, &lifted).ok_or("presets-curve-drag.png: the second line didn't dim")?;
+    shots.push(("presets-curve-drag.png".into(), with_card(lifted, &card, graphite, (x + w / 3, y + h / 2 + 20))));
+    data.set_curve_lifted_row(-1);
+    capture(window);
     mo_ui::presets::show_section(app, Section::Sounds);
     mo_ui::presets::pick_row(app, usize::MAX);
     Ok(())

@@ -60,7 +60,7 @@ impl Curves {
     pub fn to_drag(&self, at: usize, temp: &Path) -> Result<PathBuf, String> {
         let c = self.curves.get(at).ok_or("That curve isn't in the list any more")?;
         let name = if c.name.trim().is_empty() { "Curve" } else { c.name.as_str() };
-        let file = mo_app::drag_out::MidiFile { name: format!("{name}.bwcurve"), bytes: curves::curve_bytes(c)? };
+        let file = mo_app::drag_out::MadeFile { name: format!("{name}.bwcurve"), bytes: curves::curve_bytes(c)? };
         let mut written = mo_app::drag_out::write_drag_files(temp, &[file])
             .map_err(|e| format!("The curve couldn't be saved in Temp: {e}"))?;
         written.pop().ok_or_else(|| "The curve couldn't be saved in Temp".to_owned())

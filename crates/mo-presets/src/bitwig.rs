@@ -165,6 +165,20 @@ pub fn template_for<'a>(preset: &PresetBlob, templates: &'a Templates) -> Option
     templates.get(&key(&preset.plugin, state_format(&preset.extension))?)
 }
 
+/// The template saved for the plugin with this id (a VST2's four letters, a VST3's class id, as a preset file's
+/// settings give it) in this format, the newest when there are several: a VST2 preset file names its plugin only by
+/// its id, which [`template_for`] can't match by name. The ids must be the same to the letter: a VST2's are four
+/// bytes, so "abcd" and "ABCD" are two plugins (a VST3's are always written in capitals).
+pub fn template_by_id<'a>(plugin_id: &str, format: &str, templates: &'a Templates) -> Option<&'a Template> {
+    if plugin_id.is_empty() || format.is_empty() {
+        return None;
+    }
+    templates
+        .values()
+        .filter(|t| t.format() == format && t.plugin_id == plugin_id)
+        .min_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)))
+}
+
 /// A stand-in template for a sound whose plugin has no template of its own: the newest template of the same format
 /// (VST2 or VST3) for another plugin. [`build_for_other`] gives it the sound's plugin. (Solomon, 5 Nov 2026: Send to
 /// Bitwig never sent Hive or WAVESTATION, as he had saved no Bitwig preset of either.)
@@ -307,7 +321,8 @@ fn build_with(
         return Err(format!("the template is for {}, not {state_extension}", t.format()));
     }
     let new_id = files::read_bytes(state, &format!("x{state_extension}")).map(|f| f.plugin_id).unwrap_or_default();
-    if other.is_none() && !t.plugin_id.is_empty() && !new_id.is_empty() && !t.plugin_id.eq_ignore_ascii_case(&new_id) {
+    // To the letter, as [`template_by_id`] matches them: a VST2's "abcd" and "ABCD" are two plugins.
+    if other.is_none() && !t.plugin_id.is_empty() && !new_id.is_empty() && t.plugin_id != new_id {
         return Err(format!(
             "the sound is for plugin \"{new_id}\", the template's {} is \"{}\"",
             t.plugin, t.plugin_id

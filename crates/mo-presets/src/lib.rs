@@ -9,6 +9,7 @@
 //! - [`filter`]: the page's choices and counts.
 //! - [`export`]: a song's sounds as preset files in the export folder (copy, check, rename).
 //! - [`bitwig`]: Send to Bitwig, a `.bwpreset` for an exported sound, from a preset Bitwig saved for its plugin.
+//! - [`drag`]: what a preset dragged out of the page carries: a Bitwig preset wherever one can be made.
 //! - [`fixes`]: your fixes to the part guess, in the app's own `presets.db`.
 //! - [`curves`]: the curves library: shapes settings were moved in, from songs and Bitwig's library, as curve files.
 //! - [`sound_store`]: what the page found in each save, kept in `preset-sounds.db` so only changed saves are read.
@@ -22,6 +23,7 @@
 
 pub mod bitwig;
 pub mod curves;
+pub mod drag;
 pub mod export;
 pub mod file_store;
 pub mod files;
