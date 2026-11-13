@@ -46,6 +46,11 @@ pub struct Voice {
     beats: Option<(f64, f64)>,
     /// Put in step with the DAW since the DAW last started playing.
     in_step: bool,
+    /// Not yet looked at by the audio thread: when it comes while the DAW plays, it waits for the next beat or bar
+    /// ([`Voice::lock_to`]).
+    fresh: bool,
+    /// Frames of quiet still to go before it plays: the wait for the next beat or bar.
+    wait: usize,
 }
 
 impl Voice {
@@ -66,6 +71,8 @@ impl Voice {
             always: false,
             beats: None,
             in_step: false,
+            fresh: true,
+            wait: 0,
         }
     }
 
@@ -105,6 +112,28 @@ impl Voice {
             self.at = want;
             self.in_step = true;
         }
+    }
+
+    /// Come while the DAW plays at `song`: a sound of unknown beats waits for the song's next beat (a hit) or bar (a
+    /// loop) so it starts in time, at `rate` frames a second. A sound of known beats is put in step instead
+    /// ([`Voice::follow`]), and nothing waits while the DAW is stopped or doesn't say its tempo.
+    fn lock_to(&mut self, song: Song, rate: u32) {
+        self.wait = 0;
+        let Some(tempo) = song.tempo.filter(|t| t.is_finite() && *t > 0.0) else { return };
+        if self.beats.is_some() || !song.playing || !song.beats.is_finite() || rate == 0 {
+            return;
+        }
+        let (start, step) = if self.looping {
+            let (start, len) =
+                song.bar.filter(|(s, l)| s.is_finite() && l.is_finite() && *l > 0.0).unwrap_or((0.0, 4.0));
+            (start, len)
+        } else {
+            (0.0, 1.0)
+        };
+        // A hair past a beat counts as on it (the DAW's block began just after it): it starts straight away.
+        let into = (song.beats - start).rem_euclid(step);
+        let to_go = if into < 0.01 || step - into < 1e-9 { 0.0 } else { step - into };
+        self.wait = (to_go * 60.0 / tempo * f64::from(rate)).round() as usize;
     }
 
     /// The Loop switch turned on or off while it plays: a sound plays on round, or to its end this time round.
@@ -180,6 +209,9 @@ pub struct Song {
     pub beats: f64,
     /// Its tempo, when it says.
     pub tempo: Option<f64>,
+    /// Where the bar the play head is in starts, in beats, and how many beats a bar has, when it says (else bars of
+    /// four from the song's start).
+    pub bar: Option<(f64, f64)>,
 }
 
 /// What the panel asks the audio thread to do.
@@ -212,6 +244,8 @@ pub struct Playing {
     counts: Arc<Counts>,
     /// The DAW was playing at the last block.
     was_playing: bool,
+    /// The DAW's frames a second.
+    rate: u32,
 }
 
 impl Playing {
@@ -255,6 +289,9 @@ impl Playing {
         }
         if let Some(song) = song {
             if let Some(voice) = &mut self.now {
+                if std::mem::take(&mut voice.fresh) {
+                    voice.lock_to(song, self.rate);
+                }
                 if song.playing {
                     voice.follow(song);
                 } else {
@@ -267,7 +304,16 @@ impl Playing {
         }
         let mut written = 0;
         if let Some(voice) = &mut self.now {
+            // Without a song, or once looked at, a new sound plays straight away.
+            voice.fresh = false;
             for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+                if voice.wait > 0 {
+                    voice.wait -= 1;
+                    *l = 0.0;
+                    *r = 0.0;
+                    written += 1;
+                    continue;
+                }
                 voice.wrap();
                 if voice.done() {
                     break;
@@ -478,7 +524,7 @@ impl Player {
         *lock(&self.done) = Some(done_out);
         self.rate.store(rate, Ordering::Release);
         self.settle();
-        Playing { asks, done, now: None, waiting: None, counts: Arc::clone(&self.counts), was_playing: false }
+        Playing { asks, done, now: None, waiting: None, counts: Arc::clone(&self.counts), was_playing: false, rate }
     }
 
     /// The DAW stopped the track's audio (its side of the queues has gone with it, and what was playing).
@@ -910,35 +956,74 @@ mod tests {
         let part = Voice::new(&[samples], 48_000, 48_000).always_looped().in_beats(Some((4.0, 120.0)));
         player.hand_over(Box::new(part), "a".into());
         let (mut l, mut r) = (vec![9.0; 2], vec![9.0; 2]);
-        let stopped = Some(Song { playing: false, beats: 0.0, tempo: Some(120.0) });
+        let stopped = Some(Song { playing: false, beats: 0.0, tempo: Some(120.0), bar: None });
         // The DAW stopped: it plays from where it was clicked, on its own.
         playing.fill_in_song(&mut l, &mut r, stopped);
         assert_eq!(l, [0.0, 0.1].map(|x| x * LEVEL).to_vec());
         // The DAW starts at beat 5 (bar 2's second beat): the part jumps to its second beat, frame 2.
-        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 5.0, tempo: Some(120.0) }));
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 5.0, tempo: Some(120.0), bar: None }));
         assert_eq!(l, [0.2, 0.3].map(|x| x * LEVEL).to_vec());
         // In step, it plays on as it is.
-        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 6.0, tempo: Some(120.0) }));
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 6.0, tempo: Some(120.0), bar: None }));
         assert_eq!(l, [0.4, 0.5].map(|x| x * LEVEL).to_vec());
         // The DAW stops: so does the part.
         playing.fill_in_song(&mut l, &mut r, stopped);
         assert_eq!(l, vec![0.0; 2]);
         assert!(playing.now.is_none());
-        // A sound of unknown beats isn't moved, but stops with the DAW too.
+        // A sound of unknown beats isn't moved (clicked on a bar's start, it doesn't wait), but stops with the DAW too.
         let sound = Voice::new(&[vec![0.1, 0.2, 0.3]], 48_000, 48_000).looped();
         player.hand_over(Box::new(sound), "b".into());
         let (mut l, mut r) = (vec![9.0; 1], vec![9.0; 1]);
-        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 2.5, tempo: Some(120.0) }));
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 4.0, tempo: Some(120.0), bar: None }));
         assert_eq!(l, vec![0.1 * LEVEL]);
         playing.fill_in_song(&mut l, &mut r, stopped);
         assert!(playing.now.is_none());
         // Made at 120 BPM, the DAW now at 124: it isn't jumped about, it plays on as it is (and still stops).
         let part = Voice::new(&[vec![0.1, 0.2, 0.3, 0.4]], 48_000, 48_000).always_looped().in_beats(Some((4.0, 120.0)));
         player.hand_over(Box::new(part), "c".into());
-        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 3.0, tempo: Some(124.0) }));
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 3.0, tempo: Some(124.0), bar: None }));
         assert_eq!(l, vec![0.1 * LEVEL]);
-        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: false, beats: 3.0, tempo: Some(124.0) }));
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: false, beats: 3.0, tempo: Some(124.0), bar: None }));
         assert!(playing.now.is_none());
+    }
+
+    #[test]
+    fn a_sound_clicked_while_the_daw_plays_waits_for_the_next_beat_or_bar() {
+        let player = Player::default();
+        // Four frames a second at 120 BPM: two frames a beat, so the waits are short to check.
+        let mut playing = player.start(4);
+        let song = |beats: f64, bar: Option<(f64, f64)>| Some(Song { playing: true, beats, tempo: Some(120.0), bar });
+        let (mut l, mut r) = (vec![9.0; 4], vec![9.0; 4]);
+        // A hit clicked half a beat after beat 5: one frame of quiet, then it plays.
+        player.hand_over(Box::new(Voice::new(&[vec![0.1, 0.2, 0.3]], 4, 4)), "hit".into());
+        playing.fill_in_song(&mut l, &mut r, song(5.5, None));
+        assert_eq!(l, [0.0, 0.1, 0.2, 0.3].map(|x| x * LEVEL).to_vec());
+        // A loop clicked at beat 5 of bars of four: three beats (six frames) of quiet to bar 3, over two blocks.
+        player.hand_over(Box::new(Voice::new(&[vec![0.5, 0.6]], 4, 4).looped()), "loop".into());
+        playing.fill_in_song(&mut l, &mut r, song(5.0, None));
+        assert_eq!(l, vec![0.0; 4]);
+        playing.fill_in_song(&mut l, &mut r, song(7.0, None));
+        assert_eq!(l, [0.0, 0.0, 0.5, 0.6].map(|x| x * LEVEL).to_vec());
+        // In 3/4 with the bar begun at beat 3: clicked at beat 5, it waits one beat (two frames) for beat 6.
+        player.hand_over(Box::new(Voice::new(&[vec![0.5, 0.6]], 4, 4).looped()), "waltz".into());
+        playing.fill_in_song(&mut l, &mut r, song(5.0, Some((3.0, 3.0))));
+        assert_eq!(l, [0.0, 0.0, 0.5, 0.6].map(|x| x * LEVEL).to_vec());
+        // Right on a beat, a hit plays straight away; so does one clicked while the DAW is stopped.
+        player.hand_over(Box::new(Voice::new(&[vec![0.1, 0.2, 0.3, 0.4]], 4, 4)), "on".into());
+        playing.fill_in_song(&mut l, &mut r, song(8.0, None));
+        assert_eq!(l, [0.1, 0.2, 0.3, 0.4].map(|x| x * LEVEL).to_vec());
+        let stopped = Some(Song { playing: false, beats: 8.5, tempo: Some(120.0), bar: None });
+        playing.fill_in_song(&mut l, &mut r, stopped);
+        player.hand_over(Box::new(Voice::new(&[vec![0.1, 0.2, 0.3, 0.4]], 4, 4)), "stopped".into());
+        playing.fill_in_song(&mut l, &mut r, stopped);
+        assert_eq!(l, [0.1, 0.2, 0.3, 0.4].map(|x| x * LEVEL).to_vec());
+        // The DAW stops during the wait: the sound stops too, never heard.
+        player.hand_over(Box::new(Voice::new(&[vec![0.5, 0.6]], 4, 4).looped()), "late".into());
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 9.0, tempo: Some(120.0), bar: None }));
+        assert_eq!(l, vec![0.0; 4]);
+        playing.fill_in_song(&mut l, &mut r, stopped);
+        assert!(playing.now.is_none());
+        assert_eq!(l, vec![0.0; 4]);
     }
 
     #[test]
