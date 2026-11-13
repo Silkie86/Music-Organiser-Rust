@@ -156,7 +156,7 @@ impl PresetsTab {
 
     /// The tab's list and what its filters, orders and lines do. A dragged preset's file is checked to be there on a
     /// background thread and handed to the window's drag (`slots.drag`).
-    pub(super) fn fill_in(&self, panel: &Panel, window_slots: &Arc<Slots>) {
+    pub(super) fn fill_in(&self, panel: &Panel, window_slots: &Arc<Slots>, instance: &Arc<crate::Instance>) {
         panel.set_presets(ModelRc::from(Rc::clone(&self.lines) as Rc<dyn Model<Data = PresetLine>>));
         panel.set_preset_status("Looking for your preset files".into());
         panel.set_preset_orders(ModelRc::new(VecModel::from(
@@ -206,8 +206,13 @@ impl PresetsTab {
         });
         let lines = Rc::clone(&self.lines);
         let weak = panel.as_weak();
+        let instance = Arc::clone(instance);
         panel.on_preset_click(move |row| {
             let Some(panel) = weak.upgrade() else { return };
+            if let Ok(row) = usize::try_from(row) {
+                // The DAW's Preset knob moves to it.
+                instance.knobs.tell_line(crate::knobs::Knob::Preset, row, panel.get_presets().row_count());
+            }
             let presets = lines.presets.borrow().clone();
             let item = usize::try_from(row).ok().and_then(|r| lines.at(r)).and_then(|at| presets.as_ref()?.item(at));
             panel.set_preset_said(item.map(presets::hint).unwrap_or_default().into());

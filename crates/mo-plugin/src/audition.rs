@@ -231,6 +231,8 @@ struct Counts {
     ended: AtomicU64,
     /// Where the sound playing is in its whole file ([`Voice::place`]), as an `f32`'s bits.
     place: AtomicU32,
+    /// How far the Volume knob is turned down (0 full, 1 silent), as an `f32`'s bits.
+    down: AtomicU32,
 }
 
 /// The audio thread's side: on the DAW's audio thread, from when the DAW starts the track's audio to when it stops it.
@@ -303,6 +305,7 @@ impl Playing {
             self.was_playing = song.playing || self.was_playing;
         }
         let mut written = 0;
+        let level = LEVEL * (1.0 - f32::from_bits(self.counts.down.load(Ordering::Acquire))).clamp(0.0, 1.0);
         if let Some(voice) = &mut self.now {
             // Without a song, or once looked at, a new sound plays straight away.
             voice.fresh = false;
@@ -318,8 +321,8 @@ impl Playing {
                 if voice.done() {
                     break;
                 }
-                *l = voice.left[voice.at] * LEVEL;
-                *r = voice.right[voice.at] * LEVEL;
+                *l = voice.left[voice.at] * level;
+                *r = voice.right[voice.at] * level;
                 voice.at += 1;
                 written += 1;
             }
@@ -329,6 +332,14 @@ impl Playing {
         right[written..].fill(0.0);
         if self.now.as_ref().is_some_and(|v| v.done()) && self.waiting.is_none() {
             self.retire(None);
+        }
+    }
+
+    /// The Loop switch turned from the DAW (its knob), on the audio thread: as [`Player::set_loop`], without the
+    /// queue.
+    pub fn switch_loop(&mut self, on: bool) {
+        if let Some(voice) = &mut self.now {
+            voice.switch_loop(on);
         }
     }
 
@@ -461,6 +472,17 @@ impl Player {
         self.looping.store(on, Ordering::Release);
         // Nothing playing (the track's audio not started) is nothing to change.
         let _ = self.ask(Ask::Loop(on));
+    }
+
+    /// The Loop switch's setting only, for the one playing changed on the audio thread ([`Playing::switch_loop`]).
+    pub fn note_loop(&self, on: bool) {
+        self.looping.store(on, Ordering::Release);
+    }
+
+    /// Turns the sounds up or down: 1 as loud as they play, 0 silent (the Volume knob). From the next block.
+    pub fn set_volume(&self, volume: f64) {
+        let down = (1.0 - volume.clamp(0.0, 1.0)) as f32;
+        self.counts.down.store(down.to_bits(), Ordering::Release);
     }
 
     /// Whether the Loop switch is on.

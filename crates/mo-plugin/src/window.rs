@@ -16,6 +16,7 @@ mod presets_tab;
 use crate::audition::{Own, Played};
 use crate::galaxy::{self, Sky};
 use crate::gpu::Gpu;
+use crate::knobs::Knob;
 use crate::library::{self, Asked, Library, Like, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
@@ -621,6 +622,14 @@ impl Shown {
             _timer: timer,
         };
         shown.fill_in();
+        // What the knobs were turned to while no panel was open isn't acted on now (a sound would play as it opens);
+        // the DAW's knobs are moved to what the panel shows instead.
+        let (knobs, player) = (&shown.instance.knobs, &shown.instance.player);
+        knobs.turned();
+        knobs.tell(Knob::Like, f64::from(shown.panel.get_like_favourites()));
+        knobs.tell(Knob::Loop, f64::from(u8::from(player.looping())));
+        knobs.tell(Knob::Match, f64::from(u8::from(player.matching())));
+        knobs.tell(Knob::InTime, f64::from(u8::from(player.in_time())));
         shown.resize_to(shown.context.size());
         Ok(shown)
     }
@@ -651,6 +660,7 @@ impl Shown {
         let last_played = Rc::clone(&self.played);
         let stop = self.stopper();
         let (right_now, heard, stop_it) = (Rc::clone(&self.right_now), Rc::clone(&self.heard), Rc::clone(&stop));
+        let instance = Arc::clone(&self.instance);
         panel.on_play(move |row, from| {
             let Some(row) = usize::try_from(row).ok() else { return };
             let Some(sound) = lines.sound(row) else { return };
@@ -661,6 +671,8 @@ impl Shown {
                 Click::Nothing => return,
             };
             let Some(path) = lines.path(row) else { return };
+            // The DAW's Sound knob moves to it.
+            instance.knobs.tell_line(Knob::Sound, row, lines.row_count());
             *last_played.borrow_mut() = Some((row, sound, path.clone().into()));
             heard.set(Some((Heard::Line(sound), false)));
             let slots = Arc::clone(&slots);
@@ -674,14 +686,23 @@ impl Shown {
             mo_audio::trim::choices().into_iter().map(SharedString::from).collect::<Vec<_>>(),
         )));
         panel.set_loop_on(self.instance.player.looping());
-        let player = Arc::clone(&self.instance.player);
-        panel.on_loop_changed(move |on| player.set_loop(on));
+        let instance = Arc::clone(&self.instance);
+        panel.on_loop_changed(move |on| {
+            instance.player.set_loop(on);
+            instance.knobs.tell(Knob::Loop, f64::from(u8::from(on)));
+        });
         panel.set_in_time(self.instance.player.in_time());
-        let player = Arc::clone(&self.instance.player);
-        panel.on_in_time_changed(move |on| player.set_in_time(on));
+        let instance = Arc::clone(&self.instance);
+        panel.on_in_time_changed(move |on| {
+            instance.player.set_in_time(on);
+            instance.knobs.tell(Knob::InTime, f64::from(u8::from(on)));
+        });
         panel.set_match_tempo(self.instance.player.matching());
-        let player = Arc::clone(&self.instance.player);
-        panel.on_match_tempo_changed(move |on| player.set_matching(on));
+        let instance = Arc::clone(&self.instance);
+        panel.on_match_tempo_changed(move |on| {
+            instance.player.set_matching(on);
+            instance.knobs.tell(Knob::Match, f64::from(u8::from(on)));
+        });
         if let Some(db) = self.instance.player.trim() {
             panel.set_trim_level_db(db);
             panel.set_trim_silence(true);
@@ -770,7 +791,9 @@ impl Shown {
         let change = Rc::clone(&changed);
         panel.on_toggle(move |line| change(&|a, _| a.filters.toggle(&line)));
         let change = Rc::clone(&changed);
+        let instance = Arc::clone(&self.instance);
         panel.on_like_favourites_set(move |share| {
+            instance.knobs.tell(Knob::Like, f64::from(share));
             change(&|a, _| a.filters.like_favourites = mo_app::sounds::like_favourites_step(share));
         });
         let change = Rc::clone(&changed);
@@ -812,7 +835,7 @@ impl Shown {
 
         self.fill_in_sky();
         self.midi.fill_in(panel, &self.slots);
-        self.presets.fill_in(panel, &self.slots);
+        self.presets.fill_in(panel, &self.slots, &self.instance);
         self.fill_in_midi_play();
         let slots = Arc::clone(&self.slots);
         let track = lock(&self.instance.track).clone();
@@ -832,6 +855,56 @@ impl Shown {
 
     /// A click on a MIDI part plays it as a loop with the app's SoundFont, at the DAW's tempo, through the track; a
     /// click on the one playing stops it (the same rule as a sound's line, which has no waveform here).
+    /// The DAW's knobs turned ([`crate::knobs`]): a list's line picked (and played) as a click on it would, the Sounds
+    /// like slider moved, a switch shown as it now is.
+    fn knobs(&self) {
+        let (knobs, panel) = (&self.instance.knobs, &self.panel);
+        let lines = [
+            (Knob::Sound, panel.get_sounds().row_count()),
+            (Knob::Part, panel.get_parts().row_count()),
+            (Knob::Preset, panel.get_presets().row_count()),
+        ];
+        for (knob, count) in lines {
+            knobs.set_lines(knob, count);
+        }
+        let count = |knob| lines.iter().find(|(k, _)| *k == knob).map_or(0, |(_, n)| *n);
+        let player = &self.instance.player;
+        for knob in knobs.turned() {
+            let value = knobs.get(knob);
+            let line = crate::knobs::line_at(value, count(knob)).and_then(|at| i32::try_from(at).ok());
+            // A line is brought into sight in its list (48 points a line).
+            let top = |at: i32| at as f32 * 48.0;
+            match (knob, line) {
+                (Knob::Sound, Some(at)) if at != panel.get_picked() => {
+                    panel.set_picked(at);
+                    panel.set_sounds_show_top(top(at));
+                    panel.set_sounds_show_ask(panel.get_sounds_show_ask().wrapping_add(1));
+                    panel.invoke_play(at, 0.0);
+                }
+                (Knob::Part, Some(at)) if at != panel.get_midi_picked() => {
+                    panel.set_midi_picked(at);
+                    panel.set_parts_show_top(top(at));
+                    panel.set_parts_show_ask(panel.get_parts_show_ask().wrapping_add(1));
+                    panel.invoke_midi_play(at);
+                }
+                (Knob::Preset, Some(at)) if at != panel.get_preset_picked() => {
+                    panel.set_preset_picked(at);
+                    panel.set_presets_show_top(top(at));
+                    panel.set_presets_show_ask(panel.get_presets_show_ask().wrapping_add(1));
+                    panel.invoke_preset_click(at);
+                }
+                (Knob::Like, _) => {
+                    panel.set_like_favourites(value as f32);
+                    panel.invoke_like_favourites_set(value as f32);
+                }
+                (Knob::Loop, _) => panel.set_loop_on(player.looping()),
+                (Knob::Match, _) => panel.set_match_tempo(player.matching()),
+                (Knob::InTime, _) => panel.set_in_time(player.in_time()),
+                _ => {}
+            }
+        }
+    }
+
     fn fill_in_midi_play(&self) {
         let player = Arc::clone(&self.instance.player);
         let slots = Arc::clone(&self.slots);
@@ -840,8 +913,12 @@ impl Shown {
         let last_played = Rc::clone(&self.played);
         let roll = self.midi.roll_drawer(&self.panel);
         let scale = Rc::clone(&self.scale);
+        let (instance, weak) = (Arc::clone(&self.instance), self.panel.as_weak());
         self.panel.on_midi_play(move |row| {
             let Some((parts, at)) = usize::try_from(row).ok().and_then(&midi) else { return };
+            if let (Some(panel), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
+                instance.knobs.tell_line(Knob::Part, row, panel.get_parts().row_count());
+            }
             // Its piano roll, whether it plays or stops.
             roll(Arc::clone(&parts), at, scale.get());
             let playing = heard.get().is_some_and(|(what, _)| what == Heard::Part(at));
@@ -1329,6 +1406,7 @@ impl Shown {
 
     /// Takes in what background threads found, frees sounds done playing, and runs Slint's timers.
     fn tick(&self) {
+        self.knobs();
         if let Some(read) = take(&self.slots.library) {
             match read {
                 Read::Ready(library) => {

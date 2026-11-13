@@ -24,7 +24,9 @@ clack-extensions = { version = "0.2", features = [
     "gui",
     "log",
     "note-ports",
+    "params",
     "raw-window-handle_06",
+    "remote-controls",
     "state",
     "track-info",
 ] }
@@ -86,7 +88,15 @@ windows-core = "0.62"
 [dev-dependencies]
 # A stand-in DAW for the tests: clack's host side.
 clack-host = { version = "0.2", features = ["clack-plugin"] }
-clack-extensions = { version = "0.2", features = ["audio-ports", "clack-host", "gui", "note-ports", "state"] }
+clack-extensions = { version = "0.2", features = [
+    "audio-ports",
+    "clack-host",
+    "gui",
+    "note-ports",
+    "params",
+    "remote-controls",
+    "state",
+] }
 # The MIDI tab's test makes a small MIDI index of made-up files, as the app's indexer does.
 rayon.workspace = true
 
