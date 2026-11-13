@@ -2114,22 +2114,27 @@ mod tests {
     fn a_loop_shows_and_filters_by_the_tempo_written_in_its_name_when_that_fits_its_length() {
         // 16 beats at 162 BPM, kept at 120 (a tag that's wrong) from before the check; a hit's tempo is left alone.
         let flow = 16.0 * 60.0 / 162.0;
-        let kept =
-            |is_loop| Some(SoundAnalysis { seconds: flow, is_loop, bpm: Some(120.0), ..SoundAnalysis::default() });
+        let kept = |is_loop, bpm| Some(SoundAnalysis { seconds: flow, is_loop, bpm, ..SoundAnalysis::default() });
         let list = SoundList::new(vec![
-            sound(1, r"I:\Loops\Flow 162.wav", "Drums", kept(true)),
-            sound(2, r"I:\Hits\Flow 162.wav", "Drums", kept(false)),
+            sound(1, r"I:\Loops\Flow 162.wav", "Drums", kept(true, Some(120.0))),
+            sound(2, r"I:\Hits\Flow 162.wav", "Drums", kept(false, Some(120.0))),
+            // A pack's numbered loop in a folder with its tempo, with a wrong tag or none at all.
+            sound(3, r"I:\Pack Loops 162BPM\Loop 096.wav", "Drums", kept(true, Some(120.0))),
+            sound(4, r"I:\Pack Loops 162BPM\Loop 097.wav", "Drums", kept(true, None)),
         ]);
-        let loop_ = list.sound(list.find(1).unwrap()).unwrap();
-        assert_eq!(facts_line(loop_), "Drums · 162 BPM · 5.9 s");
-        assert_eq!(loop_.analysis.as_ref().map(|a| a.bpm_source.as_str()), Some("file name"));
-        assert_eq!(list.sound(list.find(2).unwrap()).unwrap().bpm(), Some(120.0));
-        let at = |lo: f64, hi: f64| {
+        let at = |id: i64| list.sound(list.find(id).unwrap()).unwrap();
+        assert_eq!(facts_line(at(1)), "Drums · 162 BPM · 5.9 s");
+        let source = |id: i64| at(id).analysis.as_ref().map(|a| (a.bpm, a.bpm_source.as_str()));
+        assert_eq!(source(1), Some((Some(162.0), "file name")));
+        assert_eq!(source(3), Some((Some(162.0), "folder name")));
+        assert_eq!(source(4), Some((Some(162.0), "folder name")));
+        assert_eq!(at(2).bpm(), Some(120.0));
+        let tempo = |lo: f64, hi: f64| {
             let f = Filters { tempo: (Some(lo), Some(hi)), ..Filters::default() };
             ids(&list, &list.view(&f, Order::Name, 0))
         };
-        assert_eq!(at(160.0, 165.0), [1]);
-        assert_eq!(at(115.0, 125.0), [2]);
+        assert_eq!(tempo(160.0, 165.0), [1, 3, 4]);
+        assert_eq!(tempo(115.0, 125.0), [2]);
     }
 
     #[test]
