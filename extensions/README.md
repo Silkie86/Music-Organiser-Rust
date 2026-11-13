@@ -93,8 +93,8 @@ clicked parameter, not for every parameter by its ID, and it doesn't say which p
 So `device` lists the remote controls of the page Bitwig shows for the selected device, and the link matches
 each to the one parameter with its name and value (`param`), whose entry then carries the same details.
 
-The extension also keeps reports in `%LOCALAPPDATA%\MusicOrganiser\reports\bitwig` (the app's data folder;
-see [its README](bitwig-java/README.md#reports) for macOS and Linux): a line for each command (but the app's
+The extension also keeps reports in `%LOCALAPPDATA%\MusicOrganiser\reports\bitwig` (the app's data folder, or from 3.26 the
+folder Settings moved it to; see [its README](bitwig-java/README.md#reports) for macOS and Linux): a line for each command (but the app's
 regular hellos) in
 `<date>-link.jsonl`, and a self-check of each part of Bitwig's API it uses in `<time>-selfcheck.json`, written
 when Bitwig starts it and on `selftest`. A Bitwig problem in a real session can be read there afterwards.

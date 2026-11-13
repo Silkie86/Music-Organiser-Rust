@@ -60,6 +60,11 @@ The extension writes to the app's data folder, next to MO Probe's reports:
 | macOS | `~/Library/Application Support/MusicOrganiser/reports/bitwig` |
 | Linux | `$XDG_DATA_HOME/MusicOrganiser/reports/bitwig` (or `~/.local/share/...`) |
 
+That's where the data folder starts out. When the app's Settings moved it to another drive, the reports go to
+`reports/bitwig` in the new folder (from 3.26): the extension reads `MusicOrganiser-folder.txt` beside the first
+folder, as the app does, and follows it only to a folder the move finished in (one with the app's `moved-in.json`).
+It looks once, when Bitwig starts the extension. Reports already written in the first folder stay there.
+
 - **`<date>-link.jsonl`** (UTC date): one line for each command the app sent (but a `hello` that went well: the
   app says hello every couple of seconds), with `time`, `cmd`, `ms` (how long
   the answer took), `ok` and `error`, and a line when the extension starts (`event: "start"`, with Bitwig's
@@ -262,6 +267,9 @@ press never runs the command, except a late `button` press, whose command Bitwig
 hears of it. `hello` says `loopback`:
 whether the link's own MIDI has come back, from the message it sends itself as Bitwig starts it and each time
 the app connects.
+
+New in 3.26: the reports follow the app's data folder when Settings moved it (see [Reports](#reports)). Before,
+they stayed in the first folder on the system drive.
 
 New in 3.25: `insert` with `at: "replace"` puts what it inserts in the selected device's place (Bitwig's replace
 insertion point of the cursor device). A sample put there makes a Sampler with it, instead of the device; the app

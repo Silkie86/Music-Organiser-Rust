@@ -44,6 +44,34 @@ class ReportsTest {
     }
 
     @Test
+    void followsTheDataFolderTheAppMovedTo() throws IOException {
+        Path local = Files.createDirectories(temp.resolve("Local"));
+        Path first = local.resolve("MusicOrganiser");
+        Path moved = Files.createDirectories(temp.resolve("other drive").resolve("MusicOrganiser"));
+        Path pointer = local.resolve(Reports.POINTER_FILE);
+        Map<String, String> env = Map.of("LOCALAPPDATA", local.toString());
+
+        assertEquals(first, Reports.dataFolder(first), "no pointer: the first folder");
+
+        // The app writes the folder on one line, and leaves moved-in.json in it once the move is done.
+        Files.write(pointer, (moved + "\r\n").getBytes(StandardCharsets.UTF_8));
+        assertEquals(first, Reports.dataFolder(first), "a folder no move finished in isn't followed");
+        Files.write(moved.resolve(Reports.MOVED_IN_FILE), "{}".getBytes(StandardCharsets.UTF_8));
+        assertEquals(moved, Reports.dataFolder(first));
+        assertEquals(moved.resolve("reports").resolve("bitwig"), Reports.defaultFolder("Windows 11", env, "", "/tmp"));
+
+        Files.write(pointer, "MusicData".getBytes(StandardCharsets.UTF_8));
+        assertEquals(first, Reports.dataFolder(first), "not a whole path");
+        Files.write(pointer, new byte[0]);
+        assertEquals(first, Reports.dataFolder(first), "an empty pointer");
+        Files.write(pointer, "\u0000:*?".getBytes(StandardCharsets.UTF_8));
+        assertEquals(first, Reports.dataFolder(first), "no path at all");
+        Files.write(pointer, temp.resolve("gone").resolve("MusicOrganiser").toString().getBytes(StandardCharsets.UTF_8));
+        assertEquals(first, Reports.dataFolder(first), "the new folder's drive is missing: the first folder, as the app");
+        assertEquals(first.resolve("reports").resolve("bitwig"), Reports.defaultFolder("Windows 11", env, "", "/tmp"));
+    }
+
+    @Test
     void logsOneLineForEachEntry() throws IOException {
         Reports reports = new Reports(temp.resolve("reports"), CLOCK);
         Map<String, Object> line = new LinkedHashMap<>();
