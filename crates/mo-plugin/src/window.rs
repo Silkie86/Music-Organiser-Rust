@@ -10,6 +10,7 @@
 //! On Windows and Mac the window's thread is the DAW's main thread, so nothing slow ever runs on it: reading the
 //! library, searching it and reading a sound all run on background threads at low priority.
 
+mod curves_tab;
 mod midi_tab;
 mod presets_tab;
 
@@ -174,6 +175,8 @@ enum Carried {
     Sound(usize),
     Part(usize),
     Preset(usize),
+    /// A curve of the Curves tab's (its place in the list).
+    Curve(usize),
     /// The last take Record saved.
     Recording,
 }
@@ -544,6 +547,7 @@ struct Shown {
     midi: midi_tab::MidiTab,
     /// The Presets tab.
     presets: presets_tab::PresetsTab,
+    curves: curves_tab::CurvesTab,
     /// What's being dragged out now.
     carried: Cell<Option<Carried>>,
     /// The last take Record saved, shown as a line to hear and drag out.
@@ -623,6 +627,7 @@ impl Shown {
             column: Rc::new(Column::default()),
             midi: midi_tab::MidiTab::new(),
             presets: presets_tab::PresetsTab::new(),
+            curves: curves_tab::CurvesTab::new(),
             carried: Cell::new(None),
             recorded: Rc::default(),
             chords_seen: Cell::new(u64::MAX),
@@ -892,6 +897,7 @@ impl Shown {
         self.fill_in_sky();
         self.midi.fill_in(panel, &self.slots);
         self.presets.fill_in(panel, &self.slots, &self.instance);
+        self.curves.fill_in(panel, &self.slots);
         self.fill_in_midi_play();
         self.fill_in_record();
         self.fill_in_chords();
@@ -1786,6 +1792,7 @@ impl Shown {
         }
         self.midi.tick(&self.panel);
         self.presets.tick(&self.panel);
+        self.curves.tick(&self.panel);
         self.drag();
         self.waves();
         self.sky();
@@ -1809,6 +1816,7 @@ impl Shown {
                     Carried::Sound(row) => self.panel.set_carried(i32::try_from(row).unwrap_or(-1)),
                     Carried::Part(at) => self.panel.set_midi_carried(self.midi.row_of(at)),
                     Carried::Preset(at) => self.panel.set_preset_carried(self.presets.row_of(at)),
+                    Carried::Curve(at) => self.panel.set_curve_carried(self.curves.row_of(at)),
                     Carried::Recording => self.panel.set_recorded_carried(true),
                 }
                 let (slots, started) = (Arc::clone(&self.slots), Instant::now());
@@ -1835,6 +1843,7 @@ impl Shown {
         self.panel.set_carried(-1);
         self.panel.set_midi_carried(-1);
         self.panel.set_preset_carried(-1);
+        self.panel.set_curve_carried(-1);
         self.panel.set_recorded_carried(false);
         // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't left
         // pressed.
@@ -1853,6 +1862,7 @@ impl Shown {
         match self.carried.get() {
             Some(Carried::Part(_)) => return self.panel.set_midi_said(why.into()),
             Some(Carried::Preset(_)) => return self.panel.set_preset_said(why.into()),
+            Some(Carried::Curve(_)) => return self.panel.set_curve_said(why.into()),
             Some(Carried::Recording) => return self.panel.set_record_said(why.into()),
             _ => {}
         }
