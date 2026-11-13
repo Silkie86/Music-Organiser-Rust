@@ -2210,6 +2210,8 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
                 let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
                 let mut folders = logic::shape_folders(documents.as_deref(), home.as_deref());
                 folders.extend(logic::vital_folders(documents.as_deref(), home.as_deref(), app_data.as_deref()));
+                let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
+                folders.extend(logic::duck_folders(program_data.as_deref(), home.as_deref()));
                 logic::shape_files(&folders)
             },
         )

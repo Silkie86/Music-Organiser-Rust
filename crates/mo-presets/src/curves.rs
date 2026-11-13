@@ -6,8 +6,8 @@
 //! - Bitwig's automation clips, on any setting's lane whose values run 0 to 1 (not the tempo lane, in BPM).
 //! - Curve files you saved in Bitwig's library (a pack's curves are locked and left out).
 //! - Plugins' LFO shapes: Serum 2's and Serum 1's shape files, and the graphs in LFOTool's presets
-//!   ([`mo_formats::serum`]), and Vital's shape files and the LFOs drawn in its presets ([`mo_formats::vital`]). A
-//!   shape repeats, so it's kept as one bar.
+//!   ([`mo_formats::serum`]), Vital's shape files and the LFOs drawn in its presets ([`mo_formats::vital`]), and
+//!   Duck's shape files and its presets' envelopes ([`mo_formats::duck`]). A shape repeats, so it's kept as one bar.
 //!
 //! Each shape is kept once ([`shape_id`]): two clips are the same curve when their points match once stretched to the
 //! same length and height (to three decimals), wherever they sit, whichever song, track or knob they're on. So a clip
@@ -33,7 +33,7 @@ use mo_formats::bitwig::{self, automation, curve};
 use mo_formats::fl::automation::FlAutomation;
 use mo_formats::fl::events;
 use mo_formats::fl::song::read_song;
-use mo_formats::{serum, vital};
+use mo_formats::{duck, serum, vital};
 
 use crate::fixes::{FixesError, is_there, make_new, text_at};
 use crate::{export, names};
@@ -84,7 +84,7 @@ impl SourceKind {
             Some(SourceKind::BitwigClip)
         } else if lower.ends_with(".bwcurve") {
             Some(SourceKind::BitwigCurve)
-        } else if serum::is_shape_file(&lower) || vital::is_shape_file(&lower) {
+        } else if serum::is_shape_file(&lower) || vital::is_shape_file(&lower) || duck::is_shape_file(&lower) {
             Some(SourceKind::PluginShape)
         } else {
             None
@@ -112,6 +112,7 @@ fn read_version(path: &str) -> i64 {
         Some(SourceKind::BitwigClip) => automation::VERSION * 1000 + bitwig::VERSION,
         Some(SourceKind::BitwigCurve) => curve::VERSION * 1000 + bitwig::VERSION,
         Some(SourceKind::PluginShape) if vital::is_shape_file(path) => vital::VERSION,
+        Some(SourceKind::PluginShape) if duck::is_shape_file(path) => duck::VERSION,
         Some(SourceKind::PluginShape) => serum::VERSION,
         None => 0,
     };
@@ -227,7 +228,13 @@ pub fn found_in(path: &str, raw: Vec<u8>, modified: i64) -> Vec<Found> {
             let source = place.source(SourceKind::BitwigCurve, &c.name, "", "", 0.0);
             found(shape(&points, 1.0), c.beat_length.unwrap_or(4.0), source).into_iter().collect()
         } else if kind == Some(SourceKind::PluginShape) {
-            let shapes = if vital::is_shape_file(path) { vital::read(path, &raw) } else { serum::read(path, &raw) };
+            let shapes = if vital::is_shape_file(path) {
+                vital::read(path, &raw)
+            } else if duck::is_shape_file(path) {
+                duck::read(path, &raw)
+            } else {
+                serum::read(path, &raw)
+            };
             shapes
                 .into_iter()
                 .filter_map(|s| {
@@ -1198,6 +1205,35 @@ mod tests {
         assert_eq!(names, ["Saw Up", "Wob - Vital - LFO 2"]);
         assert_eq!(list[0].points, [p(0.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(1.0, 0.0, 0.0)]);
         assert!(list.iter().all(|c| c.sources[0].device == "Vital" && c.length_beats == SHAPE_BEATS));
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ducks_shapes_and_preset_bands_are_plugin_shapes() {
+        let dir = temp_dir("duck");
+        let machines = dir.join("DeviousMachines").join("Duck 2");
+        std::fs::create_dir_all(&machines).unwrap();
+        let env = r#"<MultipointEnvelopeData><node x="0.0" value="0.0" curve="0.5" shape="0"/>
+            <node x="0.5" value="1.0" curve="0.5" shape="0"/><node x="1.0" value="1.0" curve="0.5" shape="0"/>
+            </MultipointEnvelopeData>"#;
+        std::fs::write(machines.join("4.dmlfo"), env).unwrap();
+        // The preset's band falls back half way instead: another shape.
+        let band = env.replace(r#"x="1.0" value="1.0""#, r#"x="1.0" value="0.5""#);
+        let preset = format!(
+            r#"<state><parameters/><data><Duck2EnvelopeData><MultibandEnvelopeData>{band}</MultibandEnvelopeData>
+            </Duck2EnvelopeData></data></state>"#
+        );
+        std::fs::write(machines.join("Pump.preset"), preset).unwrap();
+        let paths: Vec<String> =
+            ["4.dmlfo", "Pump.preset"].map(|f| machines.join(f).to_string_lossy().into_owned()).into();
+        assert!(paths.iter().all(|p| SourceKind::of(p) == Some(SourceKind::PluginShape)));
+        assert_eq!(SourceKind::of("C:/Presets/Lead.preset"), None, "another plugin's preset");
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        assert_eq!(db.scan(&paths, &Progress::default()).unwrap(), 2);
+        let mut names: Vec<String> = db.list().unwrap().into_iter().map(|c| c.name).collect();
+        names.sort();
+        assert_eq!(names, ["4", "Pump - Duck - Band 1"]);
         drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
     }
