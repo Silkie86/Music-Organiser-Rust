@@ -572,7 +572,6 @@ fn change(app: &AppWindow, f: impl FnOnce(&mut Filters)) {
     show_all(app);
 }
 
-/// Works out the curves shown and their filters' chips again, from the filters as they are now.
 /// The shown curve at `row` as it's sent (dragged, saved to Bitwig, its file shown): stretched to the speed "Other
 /// speeds too" shows it at.
 fn row_curve_as_sent(p: &Page, row: usize) -> Option<Curve> {
@@ -589,6 +588,7 @@ fn picked_curve_as_sent(p: &Page) -> Option<Curve> {
     }
 }
 
+/// Works out the curves shown and their filters' chips again, from the filters as they are now.
 fn reshow_curves(p: &mut Page) {
     let shown = logic::shown_curves_all(&p.curves, &p.curve_keys, &p.curve_filters);
     p.curve_shown = shown.lines;
