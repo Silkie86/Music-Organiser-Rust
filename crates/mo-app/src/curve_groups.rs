@@ -141,6 +141,28 @@ impl Rhythm {
             Rhythm::Mixed | Rhythm::Longer | Rhythm::Free => return None,
         })
     }
+
+    /// What this note length becomes played at `speed` times its speed (0.5 half, 2 double): a 1/16 at half speed
+    /// is a 1/8, a 1/8 triplet at half speed a 1/4 triplet. None when no note length is that long.
+    pub fn at_speed(self, speed: f64) -> Option<Rhythm> {
+        let beats = self.beats()? / speed;
+        Rhythm::ALL.into_iter().find(|r| r.beats().is_some_and(|b| (b - beats).abs() < 1e-9))
+    }
+}
+
+/// The other speeds "Other speeds too" shows a curve at: half and double (Solomon, 13 Nov: "if I filter for 8th
+/// notes you can include one that is 16th but put it at half speed").
+pub const OTHER_SPEEDS: [f64; 2] = [0.5, 2.0];
+
+/// How a speed reads by a curve's line: "half speed", "double speed"; nothing at its own speed.
+pub fn speed_words(speed: f64) -> &'static str {
+    if speed == 0.5 {
+        "half speed"
+    } else if speed == 2.0 {
+        "double speed"
+    } else {
+        ""
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

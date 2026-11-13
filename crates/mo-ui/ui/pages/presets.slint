@@ -179,6 +179,9 @@ export global PresetsData {
     in property <FilterView> curve-feel;
     in property <bool> curve-hidden;
     callback curve-hidden-toggled(bool);
+    // "Other speeds too": the rhythms picked show curves at half and double speed as well, sent stretched.
+    in property <bool> curve-other-speeds;
+    callback curve-other-speeds-toggled(bool);
     in property <[CurveLineInfo]> curve-lines;
     in property <int> curves-shown;
     in property <string> curve-empty-title;
@@ -1017,6 +1020,11 @@ export component PresetsPage inherits Rectangle {
                     filter: PresetsData.curve-rhythm;
                     toggled(text) => { PresetsData.toggle("curve-rhythm", text); }
                     cleared => { PresetsData.clear-chip("curve-rhythm"); }
+                }
+                if PresetsData.section == 1: TickLine {
+                    text: "Other speeds too";
+                    on: PresetsData.curve-other-speeds;
+                    clicked => { PresetsData.curve-other-speeds-toggled(!PresetsData.curve-other-speeds); }
                 }
                 if PresetsData.section == 1: FilterList {
                     name: "FEEL";

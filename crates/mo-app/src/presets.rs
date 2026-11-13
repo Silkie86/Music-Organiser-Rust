@@ -1513,6 +1513,9 @@ pub struct CurveFilters {
     pub shapes: Vec<Shape>,
     pub rhythms: Vec<Rhythm>,
     pub feels: Vec<Feel>,
+    /// "Other speeds too": the rhythms picked let through curves that go at them played at half or double speed
+    /// ([`curve_groups::OTHER_SPEEDS`]); they're sent stretched.
+    pub other_speeds: bool,
     /// Show the curves you hid.
     pub hidden: bool,
 }
@@ -1576,8 +1579,20 @@ impl CurveFilters {
     /// Whether its shape, rhythm and feel let it through, leaving out the filter `but` (to count that one's choices).
     fn groups_pass(&self, g: &Groups, but: Option<&str>) -> bool {
         (but == Some(CURVE_SHAPE) || self.shapes.is_empty() || self.shapes.contains(&g.shape))
-            && (but == Some(CURVE_RHYTHM) || self.rhythms.is_empty() || self.rhythms.iter().any(|r| g.goes_at(*r)))
+            && (but == Some(CURVE_RHYTHM) || self.speed(g).is_some())
             && (but == Some(CURVE_FEEL) || self.feels.is_empty() || self.feels.contains(&g.feel))
+    }
+
+    /// The speed a curve is shown at for the rhythms picked: 1 at its own (or when none is picked), half or double
+    /// with "Other speeds too" when that's how it goes at one; None when it doesn't go at any.
+    pub fn speed(&self, g: &Groups) -> Option<f64> {
+        if self.rhythms.is_empty() || self.rhythms.iter().any(|r| g.goes_at(*r)) {
+            return Some(1.0);
+        }
+        if !self.other_speeds {
+            return None;
+        }
+        curve_groups::OTHER_SPEEDS.into_iter().find(|&s| self.rhythms.iter().any(|r| goes_at_speed(g, *r, s)))
     }
 }
 
@@ -1634,10 +1649,17 @@ pub fn shown_curves(curves: &[Curve], keys: &[CurveKey], f: &CurveFilters) -> (V
     (shown.lines, shown.found_in)
 }
 
+/// Whether a curve played at `speed` goes at the note length `r` (each note length of it, the parts of a Mixed one).
+fn goes_at_speed(g: &Groups, r: Rhythm, speed: f64) -> bool {
+    g.rhythms.iter().any(|x| x.at_speed(speed) == Some(r))
+}
+
 /// The curves shown and every filter's chips: [`shown_curves`], with the shape, rhythm and feel filters too.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShownCurves {
     pub lines: Vec<usize>,
+    /// The speed each line is shown at, beside [`ShownCurves::lines`]: 1, or half or double with "Other speeds too".
+    pub speeds: Vec<f64>,
     pub found_in: Filter,
     pub shape: Filter,
     pub rhythm: Filter,
@@ -1672,7 +1694,8 @@ pub fn shown_curves_all(curves: &[Curve], keys: &[CurveKey], f: &CurveFilters) -
         }
         if found_in && f.groups_pass(g, Some(CURVE_RHYTHM)) {
             for (n, r) in rhythms.iter_mut().zip(Rhythm::ALL) {
-                *n += usize::from(g.goes_at(r));
+                let other = || f.other_speeds && curve_groups::OTHER_SPEEDS.iter().any(|&s| goes_at_speed(g, r, s));
+                *n += usize::from(g.goes_at(r) || other());
             }
         }
         if found_in && f.groups_pass(g, Some(CURVE_FEEL)) {
@@ -1681,15 +1704,17 @@ pub fn shown_curves_all(curves: &[Curve], keys: &[CurveKey], f: &CurveFilters) -
             }
         }
         if found_in && f.groups_pass(g, None) {
-            out.push(i);
+            out.push((i, f.speed(g).unwrap_or(1.0)));
         }
     }
-    out.sort_by(|&a, &b| keys[b].newest.cmp(&keys[a].newest).then_with(|| keys[a].name.cmp(&keys[b].name)));
+    out.sort_by(|&(a, _), &(b, _)| keys[b].newest.cmp(&keys[a].newest).then_with(|| keys[a].name.cmp(&keys[b].name)));
+    let (out, speeds) = out.into_iter().unzip();
     let choices: Vec<(String, String)> =
         KINDS.iter().zip(found).map(|(&k, n)| (kind_label(k).to_owned(), thousands(n))).collect();
     let picked: Vec<String> = f.kinds.iter().map(|&k| kind_label(k).to_owned()).collect();
     ShownCurves {
         lines: out,
+        speeds,
         found_in: chips::show(&choices, &picked),
         shape: group_chips(&Shape::ALL, &shapes, &f.shapes, |s| s.label()),
         rhythm: group_chips(&Rhythm::ALL, &rhythms, &f.rhythms, |r| r.label()),
@@ -1767,11 +1792,21 @@ fn under_words(c: &Curve) -> String {
 }
 
 pub fn curve_line(c: &Curve) -> CurveLine {
+    curve_line_at(c, 1.0)
+}
+
+/// [`curve_line`] for a curve shown at `speed` ([`ShownCurves::speeds`]): its length as it's sent, and the speed,
+/// "2 beats · half speed".
+pub fn curve_line_at(c: &Curve, speed: f64) -> CurveLine {
+    let length = match curve_groups::speed_words(speed) {
+        "" => beats_words(c.length_beats),
+        words => format!("{} · {words}", beats_words(c.length_beats / speed)),
+    };
     CurveLine {
         name: c.name.clone(),
         under: under_words(c),
         found: found_words(c),
-        length: beats_words(c.length_beats),
+        length,
         hidden: c.hidden,
         shape: curve_path(&c.points, SHAPE_BOX.0, SHAPE_BOX.1),
     }
@@ -2484,6 +2519,40 @@ mod tests {
         // What's shown is set against every line, preset files too (5 sounds from 2 songs and 3 preset files).
         assert_eq!(summary(8, 8, 2, 3, false), "5 sounds from 2 songs, 3 preset files");
         assert_eq!(summary(8, 6, 2, 3, false), "Showing 6 of 8: 5 sounds from 2 songs, 3 preset files");
+    }
+
+    #[test]
+    fn other_speeds_show_curves_at_half_and_double_speed() {
+        // Saws 2 beats long, at 1/16, 1/8 and 1/4: 8, 4 and 2 repeats.
+        let saws = |name: &str, times: usize, modified: i64| {
+            let mut c = curve(name, SourceKind::BitwigClip, name, modified);
+            c.points = (0..times)
+                .flat_map(|k| {
+                    let (from, to) = (k as f64 / times as f64, (k + 1) as f64 / times as f64);
+                    [CurvePoint { x: from, y: 0.0, bend: 0.0 }, CurvePoint { x: to, y: 1.0, bend: 0.0 }]
+                })
+                .collect();
+            c.length_beats = 2.0;
+            c
+        };
+        let list = vec![saws("Sixteenths", 8, 3), saws("Eighths", 4, 2), saws("Quarters", 2, 1)];
+        let keys = CurveKey::all(&list);
+        let rhythms: Vec<Rhythm> = keys.iter().map(|k| k.groups.rhythm).collect();
+        assert_eq!(rhythms, [Rhythm::Sixteenth, Rhythm::Eighth, Rhythm::Quarter]);
+        let mut f = CurveFilters::default();
+        f.toggle_group(CURVE_RHYTHM, "1/8");
+        let shown = shown_curves_all(&list, &keys, &f);
+        assert_eq!((shown.lines, shown.speeds), (vec![1], vec![1.0]));
+        f.other_speeds = true;
+        let shown = shown_curves_all(&list, &keys, &f);
+        assert_eq!(shown.lines, [0, 1, 2]);
+        assert_eq!(shown.speeds, [0.5, 1.0, 2.0], "1/16 at half speed and 1/4 at double are 1/8s");
+        let count = |label: &str| shown.rhythm.chips.iter().find(|c| c.text == label).map(|c| c.count.clone());
+        assert_eq!(count("1/8").as_deref(), Some("3"));
+        assert_eq!(curve_line_at(&list[0], 0.5).length, "1 bar · half speed");
+        assert_eq!(curve_line_at(&list[2], 2.0).length, "1 beat · double speed");
+        assert_eq!(Rhythm::EighthTriplet.at_speed(0.5), Some(Rhythm::QuarterTriplet), "triplets stay triplets");
+        assert_eq!(Rhythm::DottedEighth.at_speed(0.5), None);
     }
 
     #[test]

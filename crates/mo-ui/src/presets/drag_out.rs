@@ -23,7 +23,7 @@ use mo_presets::drag::{self as carried, Carried, File};
 use mo_presets::library::Source;
 use slint::ComponentHandle;
 
-use super::{PAGE, export_setup, templates_now, without_template};
+use super::{PAGE, export_setup, picked_curve_as_sent, row_curve_as_sent, templates_now, without_template};
 use crate::drag::{self, Drag, Outcome};
 use crate::{AppWindow, PresetsData};
 
@@ -62,7 +62,7 @@ pub(super) fn wire(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         let curve = PAGE.with(|p| {
             let p = p.borrow();
-            usize::try_from(row).ok().and_then(|r| p.curve_shown.get(r)).and_then(|&at| p.curves.get(at)).cloned()
+            usize::try_from(row).ok().and_then(|r| row_curve_as_sent(&p, r))
         });
         if let Some(curve) = curve {
             carry_curve(&app, curve, Spot::CurveRow(row));
@@ -71,10 +71,7 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_curve_drag(move || {
         let Some(app) = weak.upgrade() else { return };
-        let curve = PAGE.with(|p| {
-            let p = p.borrow();
-            p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id)).cloned()
-        });
+        let curve = PAGE.with(|p| picked_curve_as_sent(&p.borrow()));
         if let Some(curve) = curve {
             carry_curve(&app, curve, Spot::CurvePicked);
         }
