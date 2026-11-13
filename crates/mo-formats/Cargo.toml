@@ -19,6 +19,8 @@ regex = { version = "1", default-features = false, features = ["std", "unicode"]
 roxmltree = "0.21"
 # A map that keeps the order things went in: a project's details, listed as the reader found them.
 indexmap = "2"
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
+serde_json = "1.0.154"
 
 [dev-dependencies]
 # Random Bitwig files and object trees for the round-trip tests (spec 11.2).

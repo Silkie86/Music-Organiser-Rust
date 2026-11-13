@@ -5,6 +5,8 @@
 //! - FL Studio's edit events: knob moves recorded into a pattern, one curve per place the pattern plays.
 //! - Bitwig's automation clips, on any setting's lane whose values run 0 to 1 (not the tempo lane, in BPM).
 //! - Curve files you saved in Bitwig's library (a pack's curves are locked and left out).
+//! - Plugins' LFO shapes: Serum 2's and Serum 1's shape files, and the graphs in LFOTool's presets
+//!   ([`mo_formats::serum`]). A shape repeats, so it's kept as one bar.
 //!
 //! Each shape is kept once ([`shape_id`]): two clips are the same curve when their points match once stretched to the
 //! same length and height (to three decimals), wherever they sit, whichever song, track or knob they're on. So a clip
@@ -30,6 +32,7 @@ use mo_formats::bitwig::{self, automation, curve};
 use mo_formats::fl::automation::FlAutomation;
 use mo_formats::fl::events;
 use mo_formats::fl::song::read_song;
+use mo_formats::serum;
 
 use crate::fixes::{FixesError, is_there, make_new, text_at};
 use crate::{export, names};
@@ -66,6 +69,8 @@ pub enum SourceKind {
     BitwigClip,
     /// A curve file in Bitwig's library.
     BitwigCurve,
+    /// A plugin's LFO shape: a Serum shape file, or a graph in an LFOTool preset.
+    PluginShape,
 }
 
 impl SourceKind {
@@ -78,11 +83,22 @@ impl SourceKind {
             Some(SourceKind::BitwigClip)
         } else if lower.ends_with(".bwcurve") {
             Some(SourceKind::BitwigCurve)
+        } else if serum::is_shape_file(&lower) {
+            Some(SourceKind::PluginShape)
         } else {
             None
         }
     }
+
+    /// Whether curves of this kind come from a song (a place in it to show), rather than a library of shapes.
+    pub fn is_song(self) -> bool {
+        matches!(self, SourceKind::FlKnobMoves | SourceKind::BitwigClip)
+    }
 }
+
+/// How long a plugin's LFO shape is kept as, in beats: one bar (a shape has no length of its own; it's as long as the
+/// LFO's rate makes it).
+pub const SHAPE_BEATS: f64 = 4.0;
 
 /// Goes up by one whenever this file finds other curves in the same saves (its filters and shapes; rule 7).
 const CURVES_VERSION: i64 = 1;
@@ -94,6 +110,7 @@ fn read_version(path: &str) -> i64 {
         Some(SourceKind::FlKnobMoves) => mo_formats::fl::VERSION,
         Some(SourceKind::BitwigClip) => automation::VERSION * 1000 + bitwig::VERSION,
         Some(SourceKind::BitwigCurve) => curve::VERSION * 1000 + bitwig::VERSION,
+        Some(SourceKind::PluginShape) => serum::VERSION,
         None => 0,
     };
     CURVES_VERSION * 1_000_000_000 + i64::from(reader)
@@ -207,6 +224,16 @@ pub fn found_in(path: &str, raw: Vec<u8>, modified: i64) -> Vec<Found> {
             let points: Vec<(f64, f64, f64)> = c.points.iter().map(|p| (p.x, p.y, p.bend)).collect();
             let source = place.source(SourceKind::BitwigCurve, &c.name, "", "", 0.0);
             found(shape(&points, 1.0), c.beat_length.unwrap_or(4.0), source).into_iter().collect()
+        } else if kind == Some(SourceKind::PluginShape) {
+            let name = song_of(path);
+            serum::read(path, &raw)
+                .into_iter()
+                .filter_map(|s| {
+                    let points: Vec<(f64, f64, f64)> = s.points.iter().map(|p| (p.x, p.value, p.bend)).collect();
+                    let source = place.source(SourceKind::PluginShape, &name, &s.product, &s.part, 0.0);
+                    found(shape(&points, 1.0), SHAPE_BEATS, source)
+                })
+                .collect()
         } else if kind == Some(SourceKind::BitwigClip)
             && let Ok(doc) = bitwig::decode(raw)
             && doc.body_error.is_none()
@@ -598,8 +625,8 @@ fn parse_points(text: &str) -> Option<Vec<curve::CurvePoint>> {
 
 /// The curve file's bytes for `c`.
 fn curve_bytes(c: &Curve) -> Result<Vec<u8>, String> {
-    let periodic = c.sources.iter().all(|s| s.kind == SourceKind::BitwigCurve)
-        && c.points.first().map(|p| p.y) == c.points.last().map(|p| p.y);
+    let periodic =
+        c.sources.iter().all(|s| !s.kind.is_song()) && c.points.first().map(|p| p.y) == c.points.last().map(|p| p.y);
     curve::write(&curve::Curve {
         name: c.name.clone(),
         creator: "Music Organiser".into(),
@@ -1075,5 +1102,49 @@ mod tests {
         assert!(found_in("x.flp", b"FLhd garbage".to_vec(), 0).is_empty());
         assert!(found_in("x.bwproject", b"BtWg garbage".to_vec(), 0).is_empty());
         assert!(found_in("x.txt", b"hello".to_vec(), 0).is_empty());
+        assert!(found_in("x.shp", vec![0; 2056], 0).is_empty());
+        assert!(found_in("x.XferShape", b"XferJson\0garbage".to_vec(), 0).is_empty());
+    }
+
+    /// A Serum 1 shape file (`.shp`): points in its pixels (388 across, 240 high, 0 at the top) with their bends.
+    fn shp(points: &[(f64, f64, f64)]) -> Vec<u8> {
+        let mut lists = [[0.0f64; 64]; 4];
+        for (i, (x, y, c)) in points.iter().enumerate() {
+            (lists[0][i], lists[1][i], lists[2][i]) = (*c, *x, *y);
+        }
+        let mut out: Vec<u8> = lists.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+        out.push(points.len() as u8);
+        out.extend([0; 7]);
+        out
+    }
+
+    #[test]
+    fn a_plugin_shape_is_a_one_bar_curve_found_in_no_song() {
+        let dir = temp_dir("shapes");
+        // Serum's Triangle: bottom, top half way, and back down, kept once though it's in two files.
+        let triangle = shp(&[(0.0, 240.0, 0.5), (194.0, 0.0, 0.5)]);
+        let (a, b) = (dir.join("triangle.shp"), dir.join("Copy.SHP"));
+        std::fs::write(&a, &triangle).unwrap();
+        std::fs::write(&b, &triangle).unwrap();
+        // A flat line isn't a curve.
+        std::fs::write(dir.join("flat 25.shp"), shp(&[(0.0, 180.0, 0.5)])).unwrap();
+        let paths: Vec<String> =
+            ["triangle.shp", "Copy.SHP", "flat 25.shp"].map(|f| dir.join(f).to_string_lossy().into_owned()).into();
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        assert_eq!(db.scan(&paths, &Progress::default()).unwrap(), 3);
+        let list = db.list().unwrap();
+        assert_eq!(list.len(), 1);
+        let c = &list[0];
+        assert_eq!(c.points, [p(0.0, 0.0, 0.0), p(0.5, 1.0, 0.0), p(1.0, 0.0, 0.0)]);
+        assert_eq!(c.length_beats, SHAPE_BEATS);
+        assert_eq!(c.sources.len(), 2);
+        assert!(c.sources.iter().all(|s| s.kind == SourceKind::PluginShape && !s.kind.is_song()));
+        assert!(c.sources.iter().all(|s| s.device == "Serum" && s.setting.is_empty()));
+        assert!(["triangle", "Copy"].contains(&c.name.as_str()), "named after its file: {}", c.name);
+        // Its curve file says it repeats.
+        let file = file(c, &dir.join(FOLDER)).unwrap();
+        assert_eq!(curve::read(std::fs::read(file).unwrap()).unwrap().category, "Periodic");
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

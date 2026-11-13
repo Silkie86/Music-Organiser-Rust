@@ -2207,6 +2207,8 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
     drop(saves);
     let library_roots: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).collect();
     paths.extend(background::on_pool(|| logic::curve_files(&library_roots)));
+    // The plugins' LFO shapes (Serum, LFOTool), from the Documents folder.
+    paths.extend(background::on_pool(|| logic::shape_files(&logic::shape_folders(&crate::files::documents()))));
     {
         let folders = bitwig_folders.clone();
         on_window(move |_| PAGE.with(|p| p.borrow_mut().bitwig = folders));
@@ -2258,13 +2260,13 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             curve_db_change(curve.id.clone(), move |db, id| db.set_hidden(id, hidden));
         }
         curve_act::OPEN_SONG => {
-            let Some(s) = curve.sources.iter().find(|s| s.kind != curves::SourceKind::BitwigCurve) else {
+            let Some(s) = curve.sources.iter().find(|s| s.kind.is_song()) else {
                 return false;
             };
             crate::files::reveal(&feed, &s.path, mo_app::shell::folder_of(&s.path));
         }
         curve_act::SHOW_IN_SONGS => {
-            let Some(s) = curve.sources.iter().find(|s| s.kind != curves::SourceKind::BitwigCurve) else {
+            let Some(s) = curve.sources.iter().find(|s| s.kind.is_song()) else {
                 return false;
             };
             show_in_songs(app, &s.path);
