@@ -100,7 +100,7 @@ theorybench octave <labelled.jsonl>... [--bars <n>] [--folds <folds>]
   --per-segment  mir_eval's scores per labelled chord too, each counted once
   --by       the chords named whole split by a tag convert/voice.py gives each chord it plays: set, recipe, texture,
              tune, push, chart or quality (and context and role in its sweep); given twice, by both
-  --misses   list each labelled chord the last engine gets wrong (root and every interval, or the bass): where,
+  --misses   list each labelled chord of the Chord check takes that the last engine gets wrong (root and every interval, or the bass): where,
              the label and the chord read. A labelled file can also be a folder of Chord check's takes (the
              Chord check folder in the data folder): only the chords labelled there are scored, and they're never learned from
   --dump     write every piece's labels, chords read and scores to a file, for convert/check_mir_eval.py

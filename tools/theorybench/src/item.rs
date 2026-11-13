@@ -219,7 +219,9 @@ pub fn read(path: &Path) -> Result<Vec<Item>, String> {
 /// Every take in a folder of Chord check's (the data folder's `Chord check`): each `take <when>.json` is one piece
 /// (a half-written `.mo-part` is left alone), in order of when it was played. Only the chords he labelled are scored:
 /// a stretch with no label (skipped, or not labelled yet) is marked unknown ("X"), which mir_eval's scores leave out.
-/// They're his own (rule 5, [`OWN`]): measured on, never learned from ([`Item::may_learn`]).
+/// They're his own (rule 5, [`OWN`]): measured on, never learned from ([`Item::may_learn`]). A take that won't read
+/// (cut short, or from a plugin that wrote it otherwise), or isn't marked his own, is left out with a warning, so one
+/// bad file never stops the rest being scored.
 pub fn read_takes(folder: &Path) -> Result<Vec<Item>, String> {
     let names = std::fs::read_dir(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     let mut paths: Vec<std::path::PathBuf> = names
@@ -233,13 +235,23 @@ pub fn read_takes(folder: &Path) -> Result<Vec<Item>, String> {
     paths.sort();
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut item: Item = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        if item.licence != OWN {
-            return Err(format!("{}: a Chord check take should be marked \"{OWN}\"", path.display()));
+        let read = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| serde_json::from_str::<Item>(&text).map_err(|e| e.to_string()))
+            .and_then(|item| {
+                if item.licence == OWN {
+                    Ok(item)
+                } else {
+                    Err(format!("a Chord check take should be marked \"{OWN}\""))
+                }
+            });
+        match read {
+            Ok(mut item) => {
+                item.chords = unknown_between(std::mem::take(&mut item.chords), item.length);
+                out.push(item);
+            }
+            Err(why) => eprintln!("{}: left out ({why})", path.display()),
         }
-        item.chords = unknown_between(std::mem::take(&mut item.chords), item.length);
-        out.push(item);
     }
     Ok(out)
 }
@@ -282,9 +294,17 @@ mod tests {
 
     #[test]
     fn a_folder_of_takes_is_read_with_only_the_chords_labelled_scored() {
+        /// The test's folder, removed when the test ends, passed or failed.
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
         let folder = std::env::temp_dir().join(format!("theorybench-takes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
         std::fs::create_dir_all(&folder).unwrap();
+        let _gone = Gone(folder.clone());
         // As the plugin writes it (mo_app::chord_check::TakeFile): the bench's fields and its own besides.
         let take = r#"{"source":"chord-check","id":"2026-11-13 07-12-03-250","ppq":960,"length":7680,
             "beats_per_bar":4,"first_downbeat":0,"aligned":true,
@@ -294,13 +314,13 @@ mod tests {
         std::fs::write(folder.join("take 2026-11-13 07-12-03-250.json"), take).unwrap();
         std::fs::write(folder.join("take 2026-11-13 07-15-00-000.json.mo-part"), "half").unwrap();
         std::fs::write(folder.join("notes.txt"), "his").unwrap();
+        std::fs::write(folder.join("take 2026-11-13 07-20-00-000.json"), "{\"cut short").unwrap();
         let items = read(&folder).unwrap();
         assert_eq!(items.len(), 1);
         let item = &items[0];
         assert_eq!(item.source, CHORD_CHECK);
         assert!(!item.may_learn() && item.is_own(), "rule 5: measured on, never learned from");
         assert_eq!(item.chords, [(0, 3840, "X".to_owned()), (3840, 7680, "D:maj".to_owned())]);
-        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

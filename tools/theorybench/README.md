@@ -422,7 +422,8 @@ cargo run --release -p mo-theorybench -- chords "%LOCALAPPDATA%\MusicOrganiser\C
 
 Only the chords he labelled are scored: a chord skipped, or not labelled yet, is marked unknown ("X") and left out.
 `--misses` lists each labelled chord the reader gets wrong (root and every interval, or the bass), by take and
-bar.beat. The takes are his own (rule 5): they're only measured on, never learned from (Solomon, 13 Nov), and nothing
+bar.beat. (Where the chords change, mir_eval's segmentation, still counts a take's unlabelled stretches, each as one
+unknown chord: read it on the datasets, not on the takes.) The takes are his own (rule 5): they're only measured on, never learned from (Solomon, 13 Nov), and nothing
 from them goes in code but counts. The reader's design wants at least 300 answers before a change to it is judged
 on them; the bench prints how many there are.
 

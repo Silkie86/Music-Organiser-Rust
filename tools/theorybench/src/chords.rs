@@ -298,7 +298,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
         );
     }
     let bars: f64 = items.iter().map(|i| i.length as f64 / i.bar() as f64).sum();
-    let label_changes: usize = items.iter().map(|i| harte::join(&reference(i)).len()).sum();
+    // The stretches marked unknown (a Chord check take's chords not labelled) aren't labels.
+    let label_changes: usize = items
+        .iter()
+        .map(|i| harte::join(&reference(i).into_iter().filter(|s| !s.2.is_unknown()).collect::<Vec<_>>()).len())
+        .sum();
     println!("The labels change chord {:.2} times a bar.", label_changes as f64 / bars);
     if engines.iter().any(Option::is_none) {
         println!("{}", rust.how());
@@ -396,15 +400,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
 /// How many Chord check answers the reader's design wants before a change to it is judged on them.
 const CHECK_GATE: usize = 300;
 
-/// The chords labelled in Chord check's takes (skipped and unlabelled stretches, "X", left out).
+/// The chords labelled in Chord check's takes that are scored (skipped and unlabelled stretches, "X", and any label
+/// that doesn't read, left out).
 fn chord_check_answers(items: &[Item]) -> usize {
-    items.iter().filter(|i| i.source == item::CHORD_CHECK).flat_map(|i| &i.chords).filter(|c| c.2 != "X").count()
+    items
+        .iter()
+        .filter(|i| i.source == item::CHORD_CHECK)
+        .flat_map(|i| &i.chords)
+        .filter(|c| harte::parse(&c.2).is_some_and(|l| !l.is_unknown()))
+        .count()
 }
 
-/// Where a tick is in a piece: "3.1" is bar 3, beat 1.
+/// Where a tick is in a piece, on its bar lines: "3.1" is bar 3, beat 1 (a pickup is bar 0).
 fn place(item: &Item, tick: i64) -> String {
     let (bar, beat) = (item.bar().max(1), i64::from(item.ppq.max(1)));
-    format!("{}.{}", tick.div_euclid(bar) + 1, tick.rem_euclid(bar) / beat + 1)
+    let at = tick - item.grid_origin();
+    format!("{}.{}", at.div_euclid(bar) + 1, at.rem_euclid(bar) / beat + 1)
 }
 
 /// A labelled chord an engine got wrong: where it starts, the label, and what it read over most of it ("" none).
@@ -442,7 +453,9 @@ fn misses_in(item: &Item, read: &[Read]) -> Vec<Miss> {
         .zip(by_label)
         .filter(|(_, (wrong, scored, _))| *scored > 0 && 2 * wrong > *scored)
         .map(|(((start, _, _), (_, _, label)), (_, _, lies))| {
-            let most = lies.into_iter().max_by_key(|&(e, t)| (t, std::cmp::Reverse(e))).and_then(|(e, _)| e);
+            // The chord read over most of it; at a tie, a chord read before none, then the first.
+            let most =
+                lies.into_iter().max_by_key(|&(e, t)| (t, e.is_some(), std::cmp::Reverse(e))).and_then(|(e, _)| e);
             Miss {
                 start: *start,
                 label: label.clone(),
@@ -452,7 +465,8 @@ fn misses_in(item: &Item, read: &[Read]) -> Vec<Miss> {
         .collect()
 }
 
-/// `--misses`: each labelled chord `engine` got wrong, piece by piece, for a look at what the reader misses.
+/// `--misses`: each labelled chord `engine` got wrong in the Chord check takes, take by take, for a look at what the
+/// reader misses in what Solomon plays (a dataset's thousands are left out: `--dump` has those).
 fn print_misses(items: &[Item], engine: &Engine) {
     println!();
     println!(
@@ -460,7 +474,7 @@ fn print_misses(items: &[Item], engine: &Engine) {
         engine.name
     );
     let mut count = 0;
-    for item in items {
+    for item in items.iter().filter(|i| i.source == item::CHORD_CHECK) {
         let misses = misses_in(item, engine.read.get(&key(item)).map_or(&[][..], Vec::as_slice));
         if misses.is_empty() {
             continue;
@@ -1067,6 +1081,11 @@ mod tests {
         let misses = misses_in(&item, &read);
         assert_eq!(misses, [Miss { start: 384, label: "G:maj".to_owned(), read: "G7".to_owned() }]);
         assert_eq!(place(&item, 384), "2.1");
+        let pickup = Item { first_downbeat: 96, ..item.clone() };
+        assert_eq!(
+            (place(&pickup, 0), place(&pickup, 96), place(&pickup, 480)),
+            ("0.4".into(), "1.1".into(), "2.1".into())
+        );
         assert_eq!(chord_check_answers(&[item.clone()]), 0, "not a Chord check take");
         item.source = item::CHORD_CHECK.to_owned();
         assert_eq!(chord_check_answers(&[item]), 3, "the unknown stretch isn't an answer");
