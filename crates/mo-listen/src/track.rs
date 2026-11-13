@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::ear::Heard;
+use crate::ear::{Ear, Heard};
 
 /// The most bars a track keeps (the ones furthest from the newest go first): 1,024 bars is over half an hour at 120
 /// beats a minute, and a few hundred kB.
@@ -14,6 +14,9 @@ const TEMPO_SECONDS: f64 = 16.0;
 const TEMPO_HITS: usize = 8;
 /// The tempos it chooses between, in beats a minute, and the step between them.
 const TEMPO_RANGE: (f64, f64, f64) = (70.0, 180.0, 0.5);
+/// The score a tempo needs (1 is every gap whole beats), and how far above the average of all the tempos.
+const TEMPO_SCORE: f64 = 0.7;
+const TEMPO_CLEAR: f64 = 0.2;
 
 /// What a track heard in one bar.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -34,18 +37,27 @@ pub struct Track {
     all: Bar,
     /// The newest hits: stream seconds and how sharp.
     hits: VecDeque<(f64, f32)>,
+    /// The last summary's end: its stream sample and the song's beat then (when playing).
+    last: Option<(u64, Option<f64>)>,
 }
 
 impl Track {
-    /// A track listened to at `sample_rate` (the ear's), counting 4 beats a bar.
+    /// A track listened to by `ear`, counting 4 beats a bar.
+    pub fn for_ear(ear: &Ear) -> Track {
+        Track::new(ear.sample_rate())
+    }
+
+    /// A track listened to at `sample_rate` (the ear's: [`Track::for_ear`] can't get it wrong), counting 4 beats a
+    /// bar.
     pub fn new(sample_rate: f64) -> Track {
         Track {
-            rate: if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 48_000.0 },
+            rate: crate::rate(sample_rate),
             beats_per_bar: 4.0,
             bars: BTreeMap::new(),
             newest_bar: None,
             all: Bar::default(),
             hits: VecDeque::new(),
+            last: None,
         }
     }
 
@@ -64,12 +76,20 @@ impl Track {
 
     /// Adds one summary. `beat` is where the song was (the host's play position, in beats from the song's start) at
     /// the end of the audio it covers, when the song is playing; without one the notes count only towards
-    /// [`Track::all`].
+    /// [`Track::all`]. The notes go to the bar the middle of their window was in: worked out from the beat the last
+    /// summary ended at when the song played on smoothly since, else the bar `beat` is in.
     pub fn add(&mut self, heard: &Heard, beat: Option<f64>) {
-        let weight = heard.seconds as f32;
+        let beat = beat.filter(|b| b.is_finite());
+        if self.last.is_some_and(|(to, _)| heard.samples_to < to) {
+            // The stream began again (a new tap): the hits before belong to another count.
+            self.hits.clear();
+        }
+        let weight = heard.chroma_seconds.min(heard.seconds) as f32;
         if heard.chroma.iter().any(|c| *c > 0.0) && weight > 0.0 {
             add_into(&mut self.all, &heard.chroma, weight);
-            if let Some(bar) = beat.filter(|b| b.is_finite()).map(|b| (b / self.beats_per_bar).floor() as i64) {
+            if let Some(end) = beat {
+                let middle = end - f64::from(weight) / 2.0 * self.beats_a_second(heard, end).unwrap_or(0.0);
+                let bar = (middle / self.beats_per_bar).floor() as i64;
                 add_into(self.bars.entry(bar).or_default(), &heard.chroma, weight);
                 self.newest_bar = Some(bar);
                 self.keep_bars(bar);
@@ -82,6 +102,16 @@ impl Track {
         while self.hits.front().is_some_and(|(at, _)| *at < now - TEMPO_SECONDS) {
             self.hits.pop_front();
         }
+        self.last = Some((heard.samples_to, beat));
+    }
+
+    /// How fast the song's beats went during `heard`, when it played on smoothly from the last summary (between 30
+    /// and 600 beats a minute; a jump, a loop or a stop gives none).
+    fn beats_a_second(&self, heard: &Heard, end: f64) -> Option<f64> {
+        let (to, Some(was)) = self.last? else { return None };
+        let seconds = heard.samples_to.checked_sub(to)? as f64 / self.rate;
+        let speed = (end - was) / seconds;
+        (seconds > 0.0 && (0.5..=10.0).contains(&speed)).then_some(speed)
     }
 
     /// Everything the track heard, bar or no bar.
@@ -110,43 +140,42 @@ impl Track {
         self.newest_bar = None;
         self.all = Bar::default();
         self.hits.clear();
+        self.last = None;
     }
 
     /// A rough tempo from how the newest hits are spaced, in beats a minute (70 to 180), for when the host gives
-    /// none; `None` with too few hits or no steady beat. Inside a DAW, take the host's tempo instead.
+    /// none; `None` with too few hits or no steady beat. Inside a DAW, take the host's tempo instead. It weighs every
+    /// tempo against every pair of hits, so call it now and then (once a second), not on every summary.
     pub fn tempo(&self) -> Option<f64> {
         if self.hits.len() < TEMPO_HITS {
             return None;
         }
-        let hits: Vec<(f64, f32)> = self.hits.iter().copied().collect();
         let (low, high, step) = TEMPO_RANGE;
-        let (mut best, mut best_score, mut total) = (None, 0f64, 0f64);
-        let mut bpm = low;
-        while bpm <= high {
-            let beat = 60.0 / bpm;
-            let mut score = 0f64;
-            let mut weights = 0f64;
-            for (i, &(a, ra)) in hits.iter().enumerate() {
-                for &(b, rb) in &hits[i + 1..] {
+        let steps = ((high - low) / step).round() as usize;
+        let mut scores = Vec::with_capacity(steps + 1);
+        for n in 0..=steps {
+            let beat = 60.0 / (low + n as f64 * step);
+            let (mut score, mut weights) = (0f64, 0f64);
+            for (i, &(a, ra)) in self.hits.iter().enumerate() {
+                for &(b, rb) in self.hits.range(i + 1..) {
                     let gap = b - a;
                     if gap > 4.0 * beat {
                         break;
                     }
-                    // A gap of whole beats scores 1, one half a beat off scores -1.
+                    // A gap of whole beats scores 1, one of half a beat (off-beats, eighth notes) 0.5, anything else
+                    // less: the beat and its halves line up, scattered hits don't.
+                    let turn = 2.0 * std::f64::consts::PI * gap / beat;
                     let w = f64::from(ra.min(rb));
-                    score += w * (2.0 * std::f64::consts::PI * gap / beat).cos();
+                    score += w * (2.0 + turn.cos() + (2.0 * turn).cos()) / 4.0;
                     weights += w;
                 }
             }
-            let score = if weights > 0.0 { score / weights } else { 0.0 };
-            total = total.max(weights);
-            if score > best_score {
-                (best, best_score) = (Some(bpm), score);
-            }
-            bpm += step;
+            scores.push(if weights > 0.0 { score / weights } else { 0.0 });
         }
-        // A steady beat lines most gaps up; scattered hits never get near.
-        best.filter(|_| best_score >= 0.5 && total > 0.0)
+        let mean = scores.iter().sum::<f64>() / scores.len().max(1) as f64;
+        let (best, score) = scores.iter().copied().enumerate().max_by(|a, b| a.1.total_cmp(&b.1))?;
+        // A steady beat stands well clear of the other tempos; scattered hits score about the same for all.
+        (score >= TEMPO_SCORE && score - mean >= TEMPO_CLEAR).then_some(low + best as f64 * step)
     }
 
     fn keep_bars(&mut self, newest: i64) {

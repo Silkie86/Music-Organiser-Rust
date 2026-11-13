@@ -29,12 +29,16 @@ impl Ring {
 
     /// Puts samples `from..to` of the stream into `out` (cleared first), as far as the ring still holds them; a
     /// sample from before the stream began reads as silence. Returns the first sample put in. A sample the audio
-    /// thread overwrote while this read (only when the ear fell a whole ring behind) is newer audio, not damage.
+    /// thread overwrote while this read (only when the ear fell a whole ring behind) is left out, so what's put in
+    /// is always one unbroken run of the stream.
     pub(crate) fn read(&self, from: u64, to: u64, out: &mut Vec<f32>) -> u64 {
         out.clear();
         let from = from.max(to.saturating_sub(RING as u64));
         out.extend((from..to).map(|n| f32::from_bits(self.samples[(n & MASK) as usize].load(Ordering::Relaxed))));
-        from
+        // Anything before written - RING may have been overwritten while this copied.
+        let lost = (self.written().saturating_sub(RING as u64).saturating_sub(from) as usize).min(out.len());
+        out.drain(..lost);
+        from + lost as u64
     }
 
     /// The newest `n` samples up to sample `to` into `out`, oldest first, with silence before the stream began.

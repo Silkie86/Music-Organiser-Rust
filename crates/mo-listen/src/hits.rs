@@ -62,7 +62,7 @@ impl Hits {
             if self.before.len() == BEFORE {
                 let average = self.before.iter().sum::<f32>() / BEFORE as f32;
                 let rise = db - average;
-                let rising = self.before.back().is_none_or(|b| db > *b);
+                let rising = self.before.back().is_some_and(|b| db > *b);
                 let apart = self.last.is_none_or(|l| self.partial_at.saturating_sub(l) >= self.gap);
                 if rise >= RISE_DB && db >= FLOOR_DB && rising && apart {
                     out.push(Hit { at: self.partial_at, rise_db: rise });

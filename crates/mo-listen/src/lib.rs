@@ -32,3 +32,8 @@ pub fn tap(sample_rate: f64, channels: usize) -> (Tap, Ear) {
     let ring = Arc::new(ring::Ring::new());
     (Tap::new(Arc::clone(&ring), channels.max(1)), Ear::new(ring, sample_rate))
 }
+
+/// A sample rate that can be one: the host's, or 48 kHz when it gave none that makes sense.
+fn rate(sample_rate: f64) -> f64 {
+    if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 48_000.0 }
+}

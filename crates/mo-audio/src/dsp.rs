@@ -119,15 +119,25 @@ pub fn power_spectrogram(x: &[f32], n_fft: usize, hop: usize, center: bool) -> V
     let mut im = vec![0.0; n_fft];
     let mut spec = Vec::with_capacity(frames);
     for f in 0..frames {
-        let frame = &x[f * hop..f * hop + n_fft];
-        for ((r, &s), w) in re.iter_mut().zip(frame).zip(&window) {
-            *r = f64::from(s) * w;
-        }
-        im.fill(0.0);
-        fft(&mut re, &mut im);
-        spec.push(re.iter().zip(&im).take(bins).map(|(r, i)| (r * r + i * i) as f32).collect());
+        let mut row = vec![0f32; bins];
+        power_frame(&x[f * hop..f * hop + n_fft], &window, &mut re, &mut im, &mut row);
+        spec.push(row);
     }
     spec
+}
+
+/// One frame's power spectrum: `frame` times `window`, through the FFT, into `out` (`n_fft / 2 + 1` bins). `re` and
+/// `im` are room to work in, `n_fft` long (a power of two), like `frame` and `window`. Shared by the spectrogram and the
+/// live listener (mo-listen), so both measure a frame the same way.
+pub fn power_frame(frame: &[f32], window: &[f64], re: &mut [f64], im: &mut [f64], out: &mut [f32]) {
+    for ((r, &s), w) in re.iter_mut().zip(frame).zip(window) {
+        *r = f64::from(s) * w;
+    }
+    im.fill(0.0);
+    fft(re, im);
+    for ((p, r), i) in out.iter_mut().zip(re.iter()).zip(im.iter()) {
+        *p = (r * r + i * i) as f32;
+    }
 }
 
 fn reflect_pad(x: &[f32], pad: usize) -> Vec<f32> {

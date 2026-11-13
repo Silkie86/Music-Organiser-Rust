@@ -147,6 +147,48 @@ fn finds_hits_and_the_tempo_they_make() {
 }
 
 #[test]
+fn eighth_notes_still_give_the_beat() {
+    let (mut tap, mut ear) = tap(RATE, 1);
+    let mut track = Track::for_ear(&ear);
+    for part in clicks(0.25, 8.0).chunks(4800) {
+        push_all(&mut tap, part, 480);
+        track.add(&ear.hear().unwrap(), None);
+    }
+    // 240 is out of the range, so the beat is 120 (eighth notes at 120 a minute).
+    let tempo = track.tempo().unwrap();
+    assert!((tempo - 120.0).abs() <= 1.0, "{tempo}");
+}
+
+#[test]
+fn a_new_tap_forgets_the_old_hits() {
+    let (mut tap, mut ear) = tap(RATE, 1);
+    let mut track = Track::for_ear(&ear);
+    for part in clicks(0.5, 8.0).chunks(4800) {
+        push_all(&mut tap, part, 480);
+        track.add(&ear.hear().unwrap(), None);
+    }
+    assert!(track.tempo().is_some());
+    // The plugin made a new tap (the host restarted it): its count starts again.
+    let (mut tap, mut ear) = mo_listen::tap(RATE, 1);
+    push_all(&mut tap, &clicks(0.5, 1.0), 480);
+    track.add(&ear.hear().unwrap(), None);
+    assert_eq!(track.tempo(), None, "2 new hits, the old ones forgotten");
+}
+
+#[test]
+fn a_late_ear_counts_only_the_notes_it_heard() {
+    let (mut tap, mut ear) = tap(RATE, 1);
+    let mut track = Track::for_ear(&ear);
+    // 0.5 s in one go: the notes come from the newest window only (8,192 samples).
+    push_all(&mut tap, &notes(&[60.0], 0.5, 0.5), 480);
+    let heard = ear.hear().unwrap();
+    assert!((heard.seconds - 0.5).abs() < 1e-9);
+    assert!((heard.chroma_seconds - FFT as f64 / RATE).abs() < 1e-9);
+    track.add(&heard, Some(1.0));
+    assert!((f64::from(track.all().seconds) - FFT as f64 / RATE).abs() < 1e-6);
+}
+
+#[test]
 fn no_tempo_from_too_few_or_scattered_hits() {
     let (mut tap, mut ear) = tap(RATE, 1);
     let mut track = Track::new(RATE);
@@ -183,8 +225,8 @@ fn a_track_adds_up_the_notes_per_bar() {
         for part in audio.chunks(4800) {
             push_all(&mut tap, part, 480);
             beat += part.len() as f64 / RATE * 2.0;
-            // The beat at the end of the audio heard; a hair before the bar line so the last piece stays in its bar.
-            track.add(&ear.hear().unwrap(), Some(beat - 1e-6));
+            // The beat at the end of the audio heard: the last piece of each chord ends right on the bar line.
+            track.add(&ear.hear().unwrap(), Some(beat));
         }
     }
     let bars: Vec<i64> = track.bars().map(|(n, _)| n).collect();
@@ -220,6 +262,7 @@ fn the_audio_thread_and_the_ear_can_run_at_once() {
             last = h.samples_to;
             heard_any = true;
         }
+        std::thread::yield_now();
     }
     let frames = writer.join().unwrap();
     let h = ear.hear();

@@ -23,6 +23,9 @@ pub struct Heard {
     pub samples_to: u64,
     /// How much new audio it covers, in seconds (at most the ring's length).
     pub seconds: f64,
+    /// How much of that audio the notes ([`Heard::chroma`]) were heard in, in seconds: the newest part, at most one
+    /// FFT window. Less than `seconds` only when the ear was called late.
+    pub chroma_seconds: f64,
     /// The new audio's RMS level and its peak, as fractions of full scale.
     pub rms: f32,
     pub peak: f32,
@@ -53,7 +56,7 @@ pub struct Ear {
 
 impl Ear {
     pub(crate) fn new(ring: Arc<Ring>, sample_rate: f64) -> Ear {
-        let rate = if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 48_000.0 };
+        let rate = crate::rate(sample_rate);
         Ear {
             ring,
             rate,
@@ -83,7 +86,9 @@ impl Ear {
         }
         let from = self.ring.read(self.heard_to, to, &mut self.fresh);
         self.heard_to = to;
-        let mut heard = Heard { samples_to: to, seconds: self.fresh.len() as f64 / self.rate, ..Heard::default() };
+        let seconds = self.fresh.len() as f64 / self.rate;
+        let chroma_seconds = seconds.min(FFT as f64 / self.rate);
+        let mut heard = Heard { samples_to: to, seconds, chroma_seconds, ..Heard::default() };
         let mut sum = 0f64;
         for &s in &self.fresh {
             sum += f64::from(s) * f64::from(s);
@@ -93,16 +98,8 @@ impl Ear {
         self.hits.feed(from, &self.fresh, &mut heard.hits);
 
         self.ring.newest(to, FFT, &mut self.frame);
-        let mut window_power = 0f64;
-        for ((r, &s), w) in self.re.iter_mut().zip(&self.frame).zip(&self.window) {
-            *r = f64::from(s) * w;
-            window_power += f64::from(s) * f64::from(s);
-        }
-        self.im.fill(0.0);
-        dsp::fft(&mut self.re, &mut self.im);
-        for ((p, r), i) in self.power.iter_mut().zip(&self.re).zip(&self.im) {
-            *p = (r * r + i * i) as f32;
-        }
+        let window_power: f64 = self.frame.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
+        dsp::power_frame(&self.frame, &self.window, &mut self.re, &mut self.im, &mut self.power);
         let bin_hz = self.rate / FFT as f64;
         heard.bands = bands(&self.power, bin_hz);
         if (window_power / FFT as f64).sqrt() >= f64::from(QUIET) {
