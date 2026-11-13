@@ -33,6 +33,10 @@ pub struct Presets {
     pub songs_missed: usize,
     /// The plugins among them, most used first: the plugin filter's order.
     pub plugins: Vec<(String, usize)>,
+    /// The Bitwig presets among the files that load a plugin: what a preset dragged into Bitwig is made from.
+    template_files: Vec<mo_presets::library::FoundPreset>,
+    /// The templates, read from them at the first drag into Bitwig.
+    templates: std::sync::OnceLock<mo_presets::bitwig::Templates>,
 }
 
 /// How reading the presets went.
@@ -182,6 +186,8 @@ fn read_with(roots: &[PathBuf], store: &Path, known: &page::KnownPlugins, songs:
     crate::log::line("Presets", &format!("{} of {} preset files read from their files", found.read, found.files.len()));
     let mut items = songs;
     items.extend(page::file_items_with(&found.files, &found.modified, known));
+    let template_files: Vec<_> =
+        found.files.iter().filter(|f| mo_presets::bitwig::may_be_template(f)).cloned().collect();
     if items.is_empty() {
         return Read::Not(
             "No preset files found in your plugins' and Bitwig's preset folders (VST3 Presets, Bitwig's Library)"
@@ -189,7 +195,13 @@ fn read_with(roots: &[PathBuf], store: &Path, known: &page::KnownPlugins, songs:
         );
     }
     let plugins = page::plugins(&items);
-    Read::Ready(Arc::new(Presets { items, songs_missed: missed, plugins }))
+    Read::Ready(Arc::new(Presets {
+        items,
+        songs_missed: missed,
+        plugins,
+        template_files,
+        templates: std::sync::OnceLock::new(),
+    }))
 }
 
 impl Presets {
@@ -203,13 +215,53 @@ impl Presets {
         self.items.get(at)
     }
 
+    /// What a drag of the preset at `at` carries out: into Bitwig (`into_bitwig`), which takes only its own presets
+    /// dropped on a track (Solomon, 13 Nov), a Bitwig preset made from a plugin's preset file or a song's sound, in a
+    /// drag folder of its own in `temp` that is cleared a day later as a dragged MIDI file is
+    /// ([`mo_app::drag_out::write_drag_files`]); a Bitwig preset file, or any drag outside Bitwig, carries the preset
+    /// file as it is. Reads and writes the disk: call it off the panel's thread.
+    pub fn to_drag(&self, at: usize, into_bitwig: bool, temp: &Path) -> Result<PathBuf, String> {
+        let item = self.item(at).ok_or("That preset isn't in the list any more")?;
+        if !into_bitwig || (item.is_file() && item.row.extension.eq_ignore_ascii_case(".bwpreset")) {
+            return self.file(at);
+        }
+        let templates = self.templates.get_or_init(|| mo_presets::bitwig::templates(&self.template_files));
+        let made = match &item.row.source {
+            plib::Source::File { path } => mo_presets::export::bitwig_preset_bytes_from_file(
+                Path::new(path),
+                &item.row.plugin,
+                item.row.kind,
+                templates,
+            )
+            .map(|b| b.map(|b| (drag_name(&item.row.plugin, &item.row.name), b))),
+            plib::Source::Song { save, key } => mo_presets::export::bitwig_preset_bytes_from_save(save, key, templates),
+        };
+        let (name, bytes) = match made {
+            Ok(Some(made)) => made,
+            Ok(None) => {
+                let format = mo_presets::bitwig::state_format(&item.row.extension);
+                let plugin = if format.is_empty() { "this plugin".to_owned() } else { format!("a {format} plugin") };
+                return Err(format!(
+                    "No Bitwig preset of {plugin} was found to make one from: save any preset of one in Bitwig, then \
+                     drag again"
+                ));
+            }
+            Err(e) => return Err(format!("Its Bitwig preset couldn't be made: {e}")),
+        };
+        let file = mo_app::drag_out::MidiFile { name: format!("{name}.bwpreset"), bytes };
+        let mut written = mo_app::drag_out::write_drag_files(temp, &[file])
+            .map_err(|e| format!("Its Bitwig preset couldn't be saved in Temp: {e}"))?;
+        written.pop().ok_or_else(|| "Its Bitwig preset couldn't be saved in Temp".to_owned())
+    }
+
     /// The preset file at `at`, checked to be there still: what a drag carries out. Asks the disk: call it off the
     /// panel's thread.
     pub fn file(&self, at: usize) -> Result<PathBuf, String> {
         let item = self.item(at).ok_or("That preset isn't in the list any more")?;
         if !item.is_file() {
             return Err(format!(
-                "{} is a sound inside a song: dragging one out isn't built yet (a preset file drags)",
+                "{} is a sound inside a song: it drags into Bitwig only, made into a Bitwig preset (a preset file drags \
+                 anywhere)",
                 item.row.name
             ));
         }
@@ -221,6 +273,12 @@ impl Presets {
     pub fn chips(&self, counts: Option<&ChoiceCounts>, filters: &Filters) -> FilterChips {
         page::filter_chips(counts.unwrap_or(&ChoiceCounts::default()), &self.plugins, filters)
     }
+}
+
+/// A dragged Bitwig preset's name (without ".bwpreset"): "Serum - Big Bass", or the preset's own name when the plugin
+/// isn't known or is the name.
+fn drag_name(plugin: &str, name: &str) -> String {
+    if plugin.is_empty() || plugin == name { name.to_owned() } else { format!("{plugin} - {name}") }
 }
 
 /// The status line over the list: "1,234 preset files", or "40 of 1,234 preset files" when filters narrow it.

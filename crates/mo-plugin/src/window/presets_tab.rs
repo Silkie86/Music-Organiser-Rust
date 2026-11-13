@@ -209,6 +209,8 @@ impl PresetsTab {
                 _ => f.order_by(order),
             });
         });
+        // Bitwig takes only its own presets on a drop: the others are made into one there.
+        let into_bitwig = instance.host.starts_with("Bitwig");
         let lines = Rc::clone(&self.lines);
         let weak = panel.as_weak();
         let instance = Arc::clone(instance);
@@ -235,7 +237,7 @@ impl PresetsTab {
             let slots = Arc::clone(&slots);
             // Checked to be there off the window's thread (a drive may be asleep).
             background("mo-plugin-drag", move || {
-                let file = presets.file(at);
+                let file = presets.to_drag(at, into_bitwig, &std::env::temp_dir());
                 *lock(&slots.drag) = Some((Carried::Preset(at), file));
             });
         });
