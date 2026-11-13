@@ -73,6 +73,22 @@ impl Tab {
     }
 }
 
+/// What the Background helper card says it is: on Windows it starts at login and shows by the clock; elsewhere the
+/// app starts it and there's no icon yet.
+pub fn helper_intro(windows: bool) -> &'static str {
+    if windows {
+        "A small part of the app that starts when you log in to Windows and stays by the clock as a dot (green when \
+         Bitwig is connected). It keeps the live link to Bitwig, so the plugins can use it with the app closed, and \
+         the app has less to do when it opens. It's built to stay light: no window, no lists in memory, low priority. \
+         Right-click the dot to pause or quit it. Turning this off quits it and takes it out of Windows' startup list."
+    } else {
+        "A small part of the app that keeps running after the app closes. It keeps the live link to Bitwig, so the \
+         plugins can use it with the app closed, and the app has less to do when it opens. It's built to stay light: \
+         no window, no lists in memory, low priority. The app starts it each time it opens (starting at login and \
+         its icon are only on Windows for now). Turning this off quits it."
+    }
+}
+
 /// One theme to pick, drawn as a little picture of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemeCard {
