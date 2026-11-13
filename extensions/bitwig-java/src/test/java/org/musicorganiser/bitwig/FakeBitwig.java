@@ -5,6 +5,7 @@ import com.bitwig.extension.callback.ConnectionEstablishedCallback;
 import com.bitwig.extension.callback.DataReceivedCallback;
 import com.bitwig.extension.callback.DirectParameterDisplayedValueChangedCallback;
 import com.bitwig.extension.callback.DirectParameterNameChangedCallback;
+import com.bitwig.extension.callback.IntegerValueChangedCallback;
 import com.bitwig.extension.callback.DirectParameterNormalizedValueChangedCallback;
 import com.bitwig.extension.callback.NoArgsCallback;
 import com.bitwig.extension.callback.StringArrayValueChangedCallback;
@@ -19,6 +20,8 @@ import com.bitwig.extension.controller.api.Clip;
 import com.bitwig.extension.controller.api.ClipLauncherSlot;
 import com.bitwig.extension.controller.api.ClipLauncherSlotBank;
 import com.bitwig.extension.controller.api.ControllerHost;
+import com.bitwig.extension.controller.api.CueMarker;
+import com.bitwig.extension.controller.api.CueMarkerBank;
 import com.bitwig.extension.controller.api.CursorRemoteControlsPage;
 import com.bitwig.extension.controller.api.CursorTrack;
 import com.bitwig.extension.controller.api.Device;
@@ -305,6 +308,9 @@ final class FakeBitwig {
         NoteClip arrangerNotes;
         NoteClip launcherNotes;
     }
+
+    /** A cue marker in the arranger: its name, where it is in beats, and its colour (red, green, blue, each 0 to 1). */
+    record Marker(String name, double at, float r, float g, float b) {}
 
     /**
      * A clip as a note grid shows it (extension 3.15): the name of its track, its loop start and length in beats, and its
@@ -1009,6 +1015,62 @@ final class FakeBitwig {
             if (at >= n[0] - 1e-9 && at < n[0] + n[1] - 1e-9) into.add(playingNote((int) n[2]));
     }
 
+    /** The nth cue marker as Bitwig shows it: Model.markers' nth, or none. */
+    private Stand cueMarker(int n) {
+        Value present = new Value(BooleanValue.class, false);
+        Value name = new Value(SettableStringValue.class, "");
+        Value at = new Value(SettableBeatTimeValue.class, 0.0);
+        Colour colour = new Colour(rgb -> {});
+        present.live = () -> n < model.markers.size();
+        name.live = () -> n < model.markers.size() ? model.markers.get(n).name() : "";
+        at.live = () -> n < model.markers.size() ? model.markers.get(n).at() : 0.0;
+        return new Stand(CueMarker.class) {
+            Value exists() {
+                return present;
+            }
+
+            Value name() {
+                return name;
+            }
+
+            Value position() {
+                return at;
+            }
+
+            Colour getColor() {
+                if (n < model.markers.size()) {
+                    Marker m = model.markers.get(n);
+                    colour.r = m.r();
+                    colour.g = m.g();
+                    colour.b = m.b();
+                }
+                return colour;
+            }
+        };
+    }
+
+    /** Moves a track's level meters, as Bitwig does as it sounds: left and right, out of the range the extension asked for. */
+    void meter(int track, int left, int right) {
+        FakeTrack t = trackItems.get(track);
+        in(Context.TASK, () -> {
+            for (IntegerValueChangedCallback c : t.leftMeters) c.valueChanged(left);
+            for (IntegerValueChangedCallback c : t.rightMeters) c.valueChanged(right);
+        });
+    }
+
+    /** A note a track plays, at a velocity (0 to 127), for a test that sets what a track plays itself. */
+    static PlayingNote playing(int key, int velocity) {
+        return (PlayingNote) new Stand(PlayingNote.class) {
+            int pitch() {
+                return key;
+            }
+
+            int velocity() {
+                return velocity;
+            }
+        }.api;
+    }
+
     private static PlayingNote playingNote(int key) {
         return (PlayingNote) new Stand(PlayingNote.class) {
             int pitch() {
@@ -1325,6 +1387,8 @@ final class FakeBitwig {
         boolean armIgnored;
         /** Whether the notes a track plays never show, as on a track Bitwig might not say them for. */
         boolean notesHidden;
+        /** The arranger's cue markers (extension 3.24's watch feed), as Bitwig shows them whenever the extension looks. */
+        final List<Marker> markers = new ArrayList<>();
         /** Whether Bitwig's play position stays where it started while it plays (the link then goes by the clock). */
         boolean positionStill;
         /**
@@ -2416,6 +2480,9 @@ final class FakeBitwig {
         /** Whether no launcher clip plays on it, and the notes it plays (extension 3.9), as they are whenever the extension looks. */
         final Value stopped = new Value(BooleanValue.class, true);
         final Value notes = new Value(PlayingNoteArrayValue.class, new PlayingNote[0]);
+        /** What the extension asked to hear of the track's level meters (extension 3.24): by channel, 0 left and 1 right. */
+        final List<IntegerValueChangedCallback> leftMeters = new ArrayList<>();
+        final List<IntegerValueChangedCallback> rightMeters = new ArrayList<>();
         final Colour colour;
         final Param volume = new Param(Parameter.class, 0.79, "0.0 dB");
         final Param pan = new Param(Parameter.class, 0.5, "C");
@@ -2541,6 +2608,16 @@ final class FakeBitwig {
 
         void returnToArrangement() {
             FakeBitwig.this.returnToArrangement(index);
+        }
+
+        /** The level meter Bitwig moves as the track sounds: the range asked for, one channel (0 or 1), RMS, not peak. */
+        void addVuMeterObserver(int range, int channel, boolean peak, IntegerValueChangedCallback callback) {
+            if (model.broken.contains("addVuMeterObserver")) throw new AbstractMethodError("The stand-in Bitwig has no level meters, as asked.");
+            if (range != Watch.LEVEL_RANGE) throw new IllegalArgumentException("expected a range of " + Watch.LEVEL_RANGE);
+            if (peak) throw new IllegalArgumentException("expected the RMS meter, not the peak");
+            if (channel == 0) leftMeters.add(callback);
+            else if (channel == 1) rightMeters.add(callback);
+            else throw new IllegalArgumentException("expected channel 0 or 1, not " + channel);
         }
 
         /** Deletes the track a moment later: the tracks after it move up one (extension 3.20's deletetrack). */
@@ -3280,6 +3357,17 @@ final class FakeBitwig {
 
             Value isClipLauncherVisible() {
                 return launcher;
+            }
+
+            /** The arranger's cue markers (extension 3.24), each reading Model.markers whenever the extension looks. */
+            Stand createCueMarkerBank(int size) {
+                List<Stand> items = new ArrayList<>();
+                for (int i = 0; i < size; i++) items.add(cueMarker(i));
+                return new Stand(CueMarkerBank.class) {
+                    Stand getItemAt(int i) {
+                        return items.get(i);
+                    }
+                };
             }
         };
 

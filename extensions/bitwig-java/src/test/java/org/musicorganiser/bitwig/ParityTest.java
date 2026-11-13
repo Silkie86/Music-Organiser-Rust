@@ -137,6 +137,7 @@ class ParityTest {
                 m.remove("loadedFrom");
                 m.remove("loopback");
                 m.remove("songLoop");
+                m.remove("watch");
             }
             if (m.containsKey("params") && m.containsKey("drumPads")) {
                 m.remove("page");

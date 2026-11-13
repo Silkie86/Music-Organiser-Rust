@@ -796,17 +796,51 @@ impl Link {
     /// The next whole message from Bitwig, waiting until `deadline` for it. Messages that aren't JSON objects are
     /// passed over, as the C# app did: the request they answer then runs out of time.
     fn next_message(&mut self, deadline: Instant) -> Result<Value, Failure> {
+        self.next_message_until(Some(deadline))
+    }
+
+    /// Starts the watch feed on this connection (extension 3.24): from now on the link sends a `watch` event whenever
+    /// something it watches changes, the first holding the whole picture. Answers what the link said (`watching`,
+    /// `every`, `sections`).
+    pub(super) fn start_watch(&mut self) -> Result<Value, Error> {
+        self.request(ask("watch", []), self.timeout)
+    }
+
+    /// Another handle on this connection, which can close it from another thread (to end a wait in
+    /// [`Link::next_event`]).
+    pub(super) fn closer(&self) -> io::Result<TcpStream> {
+        self.stream.try_clone()
+    }
+
+    /// The next message from Bitwig, waiting as long as it takes: the watch feed is quiet while nothing changes, and
+    /// a read that runs out of time can't be trusted on Windows (see [`Link`]). It ends when Bitwig closes the
+    /// connection, or another thread closes it with [`Link::closer`].
+    pub(super) fn next_event(&mut self) -> Result<Value, Failure> {
+        let got = self.next_message_until(None);
+        if got.is_err() {
+            self.close();
+        }
+        got
+    }
+
+    fn next_message_until(&mut self, deadline: Option<Instant>) -> Result<Value, Failure> {
         loop {
             while let Some(bytes) = take_message(&mut self.pending, &mut self.scanned)? {
                 if let Ok(message @ Value::Object(_)) = serde_json::from_slice::<Value>(&bytes) {
                     return Ok(message);
                 }
             }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(Failure::TimedOut);
-            }
-            self.stream.set_read_timeout(Some(left)).map_err(|e| Failure::Broken(e.to_string()))?;
+            let left = match deadline {
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(Failure::TimedOut);
+                    }
+                    Some(left)
+                }
+                None => None,
+            };
+            self.stream.set_read_timeout(left).map_err(|e| Failure::Broken(e.to_string()))?;
             let mut chunk = [0u8; 16 * 1024];
             match self.stream.read(&mut chunk) {
                 Ok(0) => return Err(Failure::Closed),

@@ -74,7 +74,7 @@ The extension writes to the app's data folder, next to MO Probe's reports:
   clicked parameter, parameter steps, origins and automation, the master recorder, the arranger (its timeline
   and clip launcher, the panel layout, the play start, the clip selected there and launcher clips' colours, for
   `arrange`), the clips selected in the arranger and the clip launcher with their notes (for `notes`), where a file can go after each track (for `filetrack`) and Bitwig's
-  actions, the command routes (the loopback's MIDI ports, the buttons the link made, and whether its own MIDI
+  actions, the watch feed's parts (the notes each track plays, its level meters and the arranger's cue markers, each on its own), the command routes (the loopback's MIDI ports, the buttons the link made, and whether its own MIDI
   has come back, with how to set the loopback up when it hasn't), then whether the app can connect (port 19791)
   and whether the reports folder takes files. Each part
   is set up on its own, so one that fails in a future Bitwig leaves the rest working, and the self-check says
@@ -263,6 +263,15 @@ hears of it. `hello` says `loopback`:
 whether the link's own MIDI has come back, from the message it sends itself as Bitwig starts it and each time
 the app connects.
 
+New in 3.24, the watch feed: `watch` starts sending the connection what changes in Bitwig as it changes (the
+project, the transport, the tracks with their devices, the selection, the arranger's cue markers, the notes each
+track plays and each track's level), each message with only what changed, the first with all of it. It's for the
+app's live picture of the song (see [the extensions README](../README.md#bitwig-link)): one connection asks once,
+instead of asking for each part many times a second. The link looks every 50 ms for the notes and every 100 ms for
+the rest, and sends nothing while nothing changes. `hello` says which parts this Bitwig gives (`watch`). Only
+Solomon's PC can show how often Bitwig 6.1 really updates the notes playing and the meters for an extension, and
+what the feed costs with many tracks.
+
 ## Code
 
 `src/main/java/org/musicorganiser/bitwig`:
@@ -271,6 +280,7 @@ the app connects.
   `META-INF/services/com.bitwig.extension.ExtensionDefinition`).
 - `Link`: the link itself, a port of `MusicOrganiser.control.js` function by function, plus the newer API,
   the self-check and the command routes. Everything runs on Bitwig's controller thread.
+- `Watch`: what one app watching has been told, so the link sends it only what changed (3.24).
 - `Json`, `Framing`: a small JSON reader and writer (so the extension needs nothing but the JDK) and how
   messages travel.
 - `Reports`: the reports folder and its files. The folder and the clock are handed in, so tests use their own.
@@ -324,6 +334,9 @@ the app connects.
   by the buttons, refused routes and no paste when the copy didn't run. From 3.8, a command with no route runs
   from the flush, and arrange's checks stop before their paste and Duplicate when the launcher's focus action
   doesn't come back (its first run, or the one that would show the launcher again after it hid it).
+- `WatchTest`: the watch feed: the whole picture first, nothing while nothing changes, the notes on the next look,
+  levels and markers on the slow ones, two apps each told what changed for them, stopping (asked, or the
+  connection gone), and a Bitwig without level meters.
 - `SelfCheckTest`, `LinkLogTest`, `ReportsTest`: the self-check and the reports, in a temporary folder,
   including a Bitwig missing part of the API (each part fails on its own), another port, an older API and a
   folder that can't be written.

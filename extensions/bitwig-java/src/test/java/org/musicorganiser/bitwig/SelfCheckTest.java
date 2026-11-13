@@ -32,7 +32,7 @@ class SelfCheckTest {
     static final List<String> CHECKS = List.of(
         "API version", "application", "project", "transport", "following", "arranger loop", "cursor track", "cursor device", "drum pads", "track bank",
         "Sampler and Note Transpose pitch", "track IDs", "popup browser", "settings", "remote controls", "last clicked parameter",
-        "parameter steps, origins and automation", "master recorder", "arranger", "clip notes", "files as tracks", "recording into the arranger", "command routes", "remote connection", "actions",
+        "parameter steps, origins and automation", "master recorder", "arranger", "clip notes", "files as tracks", "recording into the arranger", "watch: notes playing", "watch: level meters", "watch: cue markers", "command routes", "remote connection", "actions",
         "reports folder");
 
     @TempDir
