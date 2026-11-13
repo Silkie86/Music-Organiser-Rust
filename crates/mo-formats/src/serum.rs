@@ -60,7 +60,7 @@ pub struct ShapePoint {
 /// An LFO shape.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shape {
-    /// Which plugin saved it: "Serum 2", "Serum 2 FX", "Serum", "LFOTool" or "Vital" (a `.shp` file is Serum 1's format, which
+    /// Which plugin saved it: "Serum 2", "Serum 2 FX", "Serum", "LFOTool", "Vital" or "Duck" (a `.shp` file is Serum 1's format, which
     /// LFOTool shares: it's called Serum's).
     pub product: String,
     /// Which of a preset's graphs or LFOs it is ("Graph 3", "LFO 2"); "" for a shape file, which holds one.

@@ -217,11 +217,41 @@ fn vital_data_directory(raw: &[u8]) -> Option<PathBuf> {
     (!dir.is_empty()).then(|| PathBuf::from(dir))
 }
 
-/// The plugins' shape files under `roots` ([`shape_folders`], [`vital_folders`]): Serum's `.XferShape` and `.shp`,
-/// LFOTool's presets (`.fxp`), and Vital's `.vitallfo` and presets (`.vital`). Asks the disk, so never on the window's
-/// thread.
+/// Where Devious Machines' Duck keeps its shapes and presets: its `DeviousMachines` folder's `Duck` and `Duck 2`, in
+/// `program_data` (`%ProgramData%` on Windows), and on a Mac in `/Library/Application Support` and the one under
+/// `home`. Only the folders that are there, each once. Asks the disk, so never on the window's thread.
+pub fn duck_folders(program_data: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut places: Vec<PathBuf> = program_data.map(Path::to_path_buf).into_iter().collect();
+    if cfg!(target_os = "macos") {
+        places.push(PathBuf::from("/Library/Application Support"));
+        places.extend(home.map(|h| h.join("Library").join("Application Support")));
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in places {
+        for duck in ["Duck", "Duck 2"] {
+            let f = p.join("DeviousMachines").join(duck);
+            if f.is_dir() && !out.contains(&f) {
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+/// The plugins' shape files under `roots` ([`shape_folders`], [`vital_folders`], [`duck_folders`]): Serum's
+/// `.XferShape` and `.shp`, LFOTool's presets (`.fxp`), Vital's `.vitallfo` and presets (`.vital`), and Duck's
+/// `.dmlfo` and presets. Asks the disk, so never on the window's thread.
 pub fn shape_files(roots: &[PathBuf]) -> Vec<String> {
-    files_ending(roots, |name| mo_formats::serum::is_shape_file(name) || mo_formats::vital::is_shape_file(name))
+    use mo_formats::{duck, serum, vital};
+    // A name is checked in small letters, so Duck's presets are known by their folder: the whole path is checked.
+    let mut out = files_ending(roots, |name| {
+        serum::is_shape_file(name)
+            || vital::is_shape_file(name)
+            || name.ends_with(".dmlfo")
+            || name.ends_with(".preset")
+    });
+    out.retain(|p| !p.to_lowercase().ends_with(".preset") || duck::is_shape_file(p));
+    out
 }
 
 /// The files under `roots` whose name (in small letters) `wanted` takes, sorted, each folder once (a link back up isn't
@@ -2400,6 +2430,39 @@ mod tests {
         libraries.sources.extend(shape.sources.iter().cloned());
         assert_eq!(found_words(&libraries), "In Bitwig's library and plugin shapes");
         assert!(!curve_offers(&c, false)[0].enabled, "no Bitwig folder, nowhere to save it");
+    }
+
+    #[test]
+    fn ducks_folders_are_its_two_in_program_data_and_only_its_files_are_listed() {
+        let root = std::env::temp_dir().join(format!("mo-duck-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let machines = root.join("DeviousMachines");
+        let (duck, duck2) = (machines.join("Duck"), machines.join("Duck 2"));
+        for d in [duck.join("shapes"), duck2.join("Library").join("Presets").join("main"), duck2.join("languages")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        for f in [
+            duck.join("shapes").join("0.dmlfo"),
+            duck2.join("Library").join("Presets").join("main").join("Default.preset"),
+            duck2.join("languages").join("de.json"),
+        ] {
+            std::fs::write(f, b"").unwrap();
+        }
+        let folders = duck_folders(Some(&root), None);
+        assert_eq!(folders, [duck.clone(), duck2.clone()]);
+        let mut names: Vec<String> = shape_files(&folders)
+            .iter()
+            .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["0.dmlfo", "Default.preset"]);
+        // Another plugin's .preset, outside Duck's folder, isn't a shape file.
+        let other = root.join("Other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("Lead.preset"), b"").unwrap();
+        assert_eq!(shape_files(std::slice::from_ref(&other)), Vec::<String>::new());
+        assert_eq!(duck_folders(None, None).iter().filter(|f| f.starts_with(&root)).count(), 0);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

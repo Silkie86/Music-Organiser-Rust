@@ -1,0 +1,11 @@
+{
+  "format": "Devious Machines Duck shapes (.dmlfo shape files, and the envelopes in Duck 1 and Duck 2 .preset files)",
+  "about": "Worked out 2026-11-13 from Solomon's C:\\ProgramData\\DeviousMachines (Duck 2's 14 default shapes, Duck 1's 8, about 30 presets), by laying each line's points over the picture Duck saves with it. The reader is crates/mo-formats/src/duck.rs. Not loaded by Format Lab: plain XML, kept here as notes.",
+  "files": [
+    { "ending": ".dmlfo", "seen": "Duck 1, Duck 2 2.0.9", "layout": "<MultipointEnvelopeData thumbnail=base64> <node x value curve [curveAux] shape/>... [<lfoSettings start end offset/>]. thumbnail: 129 f32 LE, the drawn line at x = k/128 (Duck 1 shape files have one too). Values upright (1 top). After the last node the line runs on to the first node's value at x = 1, drawn as the last node says.", "proof": "Defaults 6/7 (saws), 9 (triangle), 11/12 (sine S) and the presets' pictures" },
+    { "ending": "shape 0", "layout": "bent line; curve 0..1, 0.5 straight; below 0.5 late, above early, whichever way the line goes. t' = a t / (1 + (a-1) t), ln a = 2.15 ln(c/(1-c)) (25 lines fitted, each 2.05-2.24, error about 1%). curveAux doesn't change it.", "app": "bend = (0.5 - a/(1+a)) * 4, kept to -1..1." },
+    { "ending": "shape 1, 9", "layout": "S lines: 1 a steep S (steepness by curve), 9 a smooth one like half a sine (curve 1.0 seen).", "app": "split at the middle into two bent halves, measured on the picture; without one, halves bent 0.5." },
+    { "ending": "shape 7, 2", "layout": "7 bends by curve and curveAux together (not worked out); 2 seen once in Duck 1.", "app": "one bend measured on the picture; without one, as shape 0." },
+    { "ending": ".preset", "seen": "Duck 1, Duck 2", "layout": "<state><parameters><PARAM id value/>...</parameters><data>... Duck 2: <Duck2EnvelopeData><MultibandEnvelopeData> one MultipointEnvelopeData per band (3); bands 2-3 are their own only with unlinkEnvelopes 1 and crossoverMode not 0. A MultipointEnvelopeData __id=\"curve\" is Duck 1's envelope (no thumbnail), left over in Duck 2 presets." }
+  ]
+}
