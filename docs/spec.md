@@ -680,6 +680,7 @@ music-organiser-rs/
     mo-midi        index, phrases, catalogue, CLaMP 3, harmony match
     mo-playground  session, timeline, groove, energy, section matcher
     mo-dawlink     Bitwig TCP, FL SysEx, scripts, watch, send, live tests, probe
+    mo-listen      a track's audio heard live (levels, low/mid/high, notes, hits), for the plugins
     mo-convert     song conversion: FL song -> a plan in no DAW's terms -> Bitwig writer (DAWproject later)
     mo-app         every screen's logic and state (like today's ViewModels), no UI framework in it
     mo-ui          the Slint screens and custom-drawn views, and main()
