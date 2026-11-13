@@ -18,13 +18,17 @@ import java.util.Map;
 
 /**
  * The extension's reports, in the app's data folder next to MO Probe's, so what happened in a real Bitwig can
- * be read afterwards:
+ * be read afterwards. The data folder starts out here:
  *
  * <pre>
  *   Windows  %LOCALAPPDATA%\MusicOrganiser\reports\bitwig
  *   macOS    ~/Library/Application Support/MusicOrganiser/reports/bitwig
  *   Linux    $XDG_DATA_HOME/MusicOrganiser/reports/bitwig (or ~/.local/share/...)
  * </pre>
+ *
+ * When the app's Settings moved the data folder to another drive, the reports go there too (extension 3.26):
+ * {@code MusicOrganiser-folder.txt} beside the first folder names the new one, as the app reads it
+ * (crates/mo-app/src/paths.rs). The folder is chosen once, when Bitwig starts the extension.
  *
  * {@code <date>-link.jsonl} has a line for each command the app sent (time, cmd, ms, ok, error) and for
  * connections coming and going; {@code <time>-selfcheck.json} is a self-check of the API features the link
@@ -38,6 +42,14 @@ final class Reports {
     static final int KEEP_DAYS = 14;
     static final String LOG = "-link.jsonl";
     static final String SELF_CHECK = "-selfcheck.json";
+    /** The app's data folder's name, where the system keeps an app's data. */
+    static final String DATA_FOLDER = "MusicOrganiser";
+    /** Beside the first data folder: one line, the folder the app's data moved to (the app's paths::POINTER_FILE). */
+    static final String POINTER_FILE = "MusicOrganiser-folder.txt";
+    /** In a folder a move finished in (the app's paths::MOVED_IN_FILE): a pointer to a folder without it isn't followed. */
+    static final String MOVED_IN_FILE = "moved-in.json";
+    /** A pointer file is one path: anything bigger isn't one, and isn't read. */
+    private static final long POINTER_MOST_BYTES = 64 * 1024;
 
     /** A self-check's file name starts with the time, without colons, which Windows doesn't allow in names. */
     private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HHmmss.SSS'Z'", Locale.ROOT)
@@ -84,7 +96,27 @@ final class Reports {
             if (base == null && h != null) base = h.resolve(".local").resolve("share");
         }
         if (base == null) base = Paths.get(temp);
-        return base.resolve("MusicOrganiser").resolve("reports").resolve("bitwig");
+        return dataFolder(base.resolve(DATA_FOLDER)).resolve("reports").resolve("bitwig");
+    }
+
+    /**
+     * The app's data folder, given the one it starts out with: the folder the app's Settings moved it to, when the
+     * pointer file beside {@code first} names one and the move there finished (the app leaves {@link #MOVED_IN_FILE}
+     * in it); else {@code first}. The same rule as the app's own (crates/mo-app/src/paths.rs), so the reports never
+     * go to a folder the app isn't using: with the new drive missing, both use the first folder.
+     */
+    static Path dataFolder(Path first) {
+        try {
+            Path pointer = first.resolveSibling(POINTER_FILE);
+            if (!Files.isRegularFile(pointer) || Files.size(pointer) > POINTER_MOST_BYTES) return first;
+            String text = new String(Files.readAllBytes(pointer), StandardCharsets.UTF_8).trim();
+            if (text.isEmpty()) return first;
+            Path named = Paths.get(text);
+            return named.isAbsolute() && Files.isRegularFile(named.resolve(MOVED_IN_FILE)) ? named : first;
+        } catch (IOException | RuntimeException e) {
+            // A pointer that can't be read or names no path: the app falls back to the first folder too.
+            return first;
+        }
     }
 
     private static Path path(String text) {

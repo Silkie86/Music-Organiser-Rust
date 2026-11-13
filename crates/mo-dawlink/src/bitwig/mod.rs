@@ -1,7 +1,7 @@
 //! The Bitwig link: the app talks to the Music Organiser extension (or the script it took over from) running inside
 //! Bitwig Studio, over a connection on this computer, and Send to Bitwig puts things into the project open there.
 //!
-//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.25; the C# app's copy is frozen):
+//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.26; the C# app's copy is frozen):
 //! Bitwig only runs Java extensions. Settings > DAWs installs it. Changing anything needs "Let the app make changes"
 //! on in Bitwig (Settings > Controllers > Music Organiser); reading never does.
 //!
