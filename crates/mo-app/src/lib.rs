@@ -23,6 +23,7 @@ pub mod galaxy_look;
 pub mod galaxy_names;
 pub mod galaxy_picture;
 pub mod galaxy_view;
+pub mod helper;
 pub mod live;
 pub mod log;
 pub mod midi;
