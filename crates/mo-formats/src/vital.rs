@@ -72,11 +72,12 @@ const S_BEND: f64 = 0.5;
 /// (it eases in) and the second early (it eases out). The last line runs on to the first point's value at the end.
 fn as_s(points: &[(f64, f64, f64)]) -> Vec<(f64, f64, f64)> {
     let mut out = Vec::with_capacity(points.len() * 2);
+    let first = points.first().map_or(0.0, |p| p.1);
     for (i, &(x, y, _)) in points.iter().enumerate() {
         out.push((x, y, S_BEND));
         let next = match points.get(i + 1) {
             Some(&(nx, ny, _)) => (nx, ny),
-            None if x < 1.0 => (1.0, points[0].1),
+            None if x < 1.0 => (1.0, first),
             None => continue,
         };
         out.push(((x + next.0) / 2.0, (y + next.1) / 2.0, -S_BEND));

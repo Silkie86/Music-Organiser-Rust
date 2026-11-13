@@ -2378,7 +2378,7 @@ mod tests {
         std::fs::write(app_data.join("vital").join("Vital.config"), config).unwrap();
         assert_eq!(
             vital_folders(Some(&docs), None, Some(&app_data)),
-            [moved.clone()],
+            std::slice::from_ref(&moved),
             "moved: the old folder isn't read"
         );
         std::fs::write(moved.join("Wob.vital"), b"").unwrap();
