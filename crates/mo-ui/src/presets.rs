@@ -1298,7 +1298,38 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
 
 /// Space on the page: auditions the picked sound in Bitwig, or stops it (as Audition in Bitwig does). Whether it did.
 pub fn toggle_play(app: &AppWindow) -> bool {
-    PAGE.with(|p| p.borrow().section) == Section::Sounds && run_sound_action(app, act::AUDITION)
+    match PAGE.with(|p| p.borrow().section) {
+        Section::Sounds => run_sound_action(app, act::AUDITION),
+        // Space hears the picked curve on its tone, or stops it.
+        Section::Curves => run_curve_action(app, curve_act::HEAR),
+    }
+}
+
+/// The player's key for a curve heard on its tone: this, then the curve's id.
+const CURVE_TONE_KEY: &str = "curve-tone:";
+
+/// Hears `sent` (the picked curve, at the speed it's shown at) as the volume of a tone, going round; or stops it when
+/// it's the one playing. The tone is made on a thread of its own.
+fn hear_curve(app: &AppWindow, sent: Curve) {
+    let player = crate::sounds::player();
+    let key = format!("{CURVE_TONE_KEY}{}", sent.id);
+    if player.playing().as_deref() == Some(key.as_str()) {
+        player.stop();
+        curve_message(String::new());
+        return;
+    }
+    crate::sounds::stop_for_another(app);
+    let started = background::spawn("Curve tone", move || {
+        let tone = logic::curve_tone(&sent);
+        crate::sounds::player().play_looped(std::sync::Arc::new(tone), key, 0.0);
+        curve_message(format!(
+            "Playing the curve as a tone's volume, round and round at {} BPM. Space stops it.",
+            logic::HEAR_BPM
+        ));
+    });
+    if let Err(e) = started {
+        log::error("Curves", &format!("Couldn't start making the curve's tone: {e}"));
+    }
 }
 
 /// Runs one of the Sounds section's actions (from its key, its card or its menu). Returns whether it did anything.
@@ -2337,6 +2368,7 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             };
             show_in_songs(app, &s.path);
         }
+        curve_act::HEAR => hear_curve(app, sent),
         curve_act::REVEAL => {
             let folder = data_dir.join(curves::FOLDER);
             let started = background::spawn("Curve file", move || match curves::file(&sent, &folder) {
