@@ -104,7 +104,7 @@ pub fn typed(text: &str, lowest: Option<u8>) -> Option<Spelled> {
 /// A take that's over.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ended {
-    /// When it started, as its file is named: "2026-11-13 07-12-03".
+    /// When it started, to the millisecond, as its file is named: "2026-11-13 07-12-03-250".
     pub id: String,
     /// The day, for the bench's group, and the time for the panel ("07:12").
     pub day: String,
@@ -116,6 +116,9 @@ pub struct Ended {
     pub chords: Vec<ToLabel>,
     /// What became of its saving ("" not saved yet).
     pub saved: String,
+    /// Counted up at each label, and the count last saved: a take whose labels aren't all saved yet is never let go.
+    pub revision: u64,
+    pub saved_revision: u64,
 }
 
 impl Ended {
@@ -139,7 +142,7 @@ impl Ended {
                     .filter(|c| shown.is_none_or(|s| s.name() != c.name()))
                     .take(CHOICES)
                     .collect();
-                let lowest = notes.iter().filter(|n| n.start < span.end && n.end() > span.start).map(|n| n.key).min();
+                let lowest = lowest_in(&notes, span.start, span.end);
                 // A stretch with nothing played and nothing to offer isn't worth a label.
                 if shown.is_none() && choices.is_empty() {
                     continue;
@@ -157,7 +160,7 @@ impl Ended {
         }
         let started = take.started;
         Some(Ended {
-            id: started.format("%Y-%m-%d %H-%M-%S").to_string(),
+            id: started.format("%Y-%m-%d %H-%M-%S-%3f").to_string(),
             day: started.format("%Y-%m-%d").to_string(),
             time: started.format("%H:%M").to_string(),
             song: take.song,
@@ -166,7 +169,14 @@ impl Ended {
             notes,
             chords,
             saved: String::new(),
+            revision: 0,
+            saved_revision: 0,
         })
+    }
+
+    /// Whether it has labels not saved yet.
+    pub fn unsaved(&self) -> bool {
+        self.saved_revision != self.revision
     }
 
     /// How many of its chords are labelled.
@@ -207,6 +217,7 @@ impl Ended {
                 start: c.start,
                 end: c.end,
                 read: c.read.map(|r| r.name()).unwrap_or_default(),
+                read_harte: c.read.map(|r| r.harte()).unwrap_or_default(),
                 how: c.label.map(|l| l.how().to_owned()).unwrap_or_default(),
                 said: c.said().flatten().map(|s| s.name()).unwrap_or_default(),
             })
@@ -236,6 +247,20 @@ impl Ended {
             },
         }
     }
+}
+
+/// The lowest key of the notes in `start..end` that start in it or sound for at least half of it: a note held over
+/// from the chord before, or one just touched on as it ends, isn't its bass.
+fn lowest_in(notes: &[Note], start: i64, end: i64) -> Option<u8> {
+    let half = (end - start).max(1) / 2;
+    notes
+        .iter()
+        .filter(|n| {
+            let starts_in = n.start >= start && n.start < end;
+            starts_in || n.end().min(end) - n.start.max(start) >= half
+        })
+        .map(|n| n.key)
+        .min()
 }
 
 /// Where in a bar of `grid` a tick is: "3.1" is bar 3, beat 1.
@@ -302,6 +327,16 @@ mod tests {
         assert_eq!(typed("C/G", Some(40)).unwrap().chord().bass(), PitchClass::of_key(43));
         assert_eq!(typed("C6/9", Some(36)).unwrap().chord().bass(), PitchClass::of_key(36));
         assert!(typed("not a chord", None).is_none());
+    }
+
+    #[test]
+    fn the_lowest_key_is_one_that_belongs_to_the_chord() {
+        let note = |start, length, key| Note { start, length, key, velocity: 40_000 };
+        // A bass held 10 ticks into the bar from the bar before, and the chord's own from its start.
+        let notes = [note(0, 970, 36), note(960, 960, 43), note(960, 960, 60)];
+        assert_eq!(lowest_in(&notes, 960, 1920), Some(43));
+        // Held over for most of it: it's its bass too.
+        assert_eq!(lowest_in(&[note(0, 1800, 36), note(1200, 720, 60)], 960, 1920), Some(36));
     }
 
     #[test]

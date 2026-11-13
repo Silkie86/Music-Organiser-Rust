@@ -376,8 +376,8 @@ export component Panel inherits Window {
     callback take-pick(int);
     // Chord `row` of the take picked: "right", "choice" (with which, from 0), "not a chord" or "skip".
     callback label(int, string, int);
-    // Chord `row` named as typed.
-    callback label-typed(int, string);
+    // Chord `row` named as typed: whether the name was read (the box is cleared only then, so a slip can be mended).
+    callback label-typed(int, string) -> bool;
 
     // The Presets tab: the preset files, the status line, the filter column as the app's Presets page has it (mo-app's
     // `presets::filter_chips`), the orders, the year strip and the line picked.
@@ -1491,13 +1491,14 @@ export component Panel inherits Window {
                     horizontal-stretch: 1;
                     spacing: Space.xs;
                     Text {
-                        text: "The last bars";
+                        text: "The last bars  (? not sure, ≈ the same notes have another name)";
                         color: Theme.muted;
                         font-size: Type.meta;
                         font-weight: 600;
                     }
                     // The chords of the newest bars, in order: the one sounding now in the accent colour; a chord the reader
-                    // isn't sure of is fainter, with a question mark by where it starts.
+                    // isn't sure of is fainter, with a question mark by where it starts; one whose notes have another
+                    // name too has "≈" there.
                     HorizontalLayout {
                         spacing: Space.sm;
                         alignment: start;
@@ -1517,7 +1518,7 @@ export component Panel inherits Window {
                                     font-weight: 600;
                                 }
                                 Text {
-                                    text: c.sure == 2 ? c.at + "  ?" : c.at;
+                                    text: c.sure == 2 ? c.at + "  ?" : c.sure == 1 ? c.at + "  ≈" : c.at;
                                     color: Theme.faint;
                                     font-size: Type.small;
                                     font-family: Theme.number-font;
@@ -1644,8 +1645,9 @@ export component Panel inherits Window {
                                         hint: "Type it";
                                         key(k) => {
                                             if (k == Key.Return && self.text != "") {
-                                                root.label-typed(i, self.text);
-                                                self.text = "";
+                                                if (root.label-typed(i, self.text)) {
+                                                    self.text = "";
+                                                }
                                                 return true;
                                             }
                                             return false;

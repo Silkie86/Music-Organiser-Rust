@@ -1,7 +1,8 @@
 //! Chord check's takes on disk: what Solomon played into the test plugin and what he said each chord really is
 //! (the plan "Chord test bench in the plugin", 13 Nov). Each take is one small file in the data folder's
 //! [`FOLDER`], in the theory bench's own format (one labelled piece: `tools/theorybench/src/item.rs`), so the bench
-//! reads the folder as it reads a dataset. They're his (like his recordings), so the start-up tidy (rule 28) never
+//! can read the folder as it reads a dataset (its next step). The bench scores only the stretches labelled
+//! ([`TakeFile::chords`]): what isn't labelled, or was skipped, isn't counted right or wrong. They're his (like his recordings), so the start-up tidy (rule 28) never
 //! removes them; it only clears a take whose writing was cut short ([`is_half_written`]). Rule 4: never committed.
 //! Rule 5 (Solomon, 13 Nov): only measured on, never learned from.
 
@@ -15,7 +16,7 @@ pub const FOLDER: &str = "Chord check";
 pub const OWN: &str = "Solomon's own (rule 5)";
 /// Where a take came from, as the bench lists it.
 pub const SOURCE: &str = "chord-check";
-/// What a take file's name starts and ends with: `take 2026-11-13 07-12-03.json`.
+/// What a take file's name starts and ends with: `take 2026-11-13 07-12-03-250.json`.
 const START: &str = "take ";
 const END: &str = ".json";
 /// What a take is written as first, before it's checked and renamed (copy, check, rename).
@@ -38,7 +39,7 @@ pub struct TakeFile {
     /// [`Check::velocities`]).
     pub parts: Vec<TakePart>,
     /// Each labelled chord: start, end (ticks) and the chord in Harte's syntax ("C:(1,3,5,7,9)", "N" for no chord).
-    /// A chord skipped isn't here.
+    /// A chord skipped isn't here, and only the stretches here are scored.
     pub chords: Vec<(i64, i64, String)>,
     pub chord_labels: String,
     pub licence: String,
@@ -75,13 +76,16 @@ pub struct CheckSpan {
     pub end: i64,
     /// What the reader showed ("" for no chord): the one fact that can't be worked out again later, what he judged.
     pub read: String,
+    /// The same in Harte's syntax, as the bench compares chords ("" for no chord).
+    #[serde(default)]
+    pub read_harte: String,
     /// How he labelled it: "right", "choice", "typed", "not a chord", "skipped", or "" not yet.
     pub how: String,
     /// The chord he said, by name ("" for none or not yet).
     pub said: String,
 }
 
-/// A take file's name for a take started at `id` ("2026-11-13 07-12-03").
+/// A take file's name for a take started at `id` ("2026-11-13 07-12-03-250").
 pub fn file_name(id: &str) -> String {
     format!("{START}{id}{END}")
 }
@@ -102,7 +106,16 @@ pub fn save(take: &TakeFile, folder: &Path) -> Result<PathBuf, String> {
     let path = folder.join(file_name(&take.id));
     let part = folder.join(format!("{}{PART}", file_name(&take.id)));
     let text = serde_json::to_string(take).map_err(|e| bad("writing it out", &e))?;
-    std::fs::write(&part, &text).map_err(|e| bad("writing it", &e))?;
+    let written = std::fs::File::create(&part).and_then(|mut f| {
+        use std::io::Write;
+        f.write_all(text.as_bytes())?;
+        // On the disk before it's renamed over the take: a power cut never leaves an empty take in its place.
+        f.sync_all()
+    });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&part);
+        return Err(bad("writing it", &e));
+    }
     let back = std::fs::read_to_string(&part).map_err(|e| bad("reading it back", &e))?;
     if serde_json::from_str::<TakeFile>(&back).ok().as_ref() != Some(take) {
         let _ = std::fs::remove_file(&part);
@@ -138,7 +151,14 @@ mod tests {
                 reader_version: 5,
                 on_song: false,
                 velocities: vec![50_000, 50_000],
-                spans: vec![CheckSpan { start: 0, end: 3840, read: "C".into(), how: "right".into(), said: "C".into() }],
+                spans: vec![CheckSpan {
+                    start: 0,
+                    end: 3840,
+                    read: "C".into(),
+                    read_harte: "C:(1,3,5)".into(),
+                    how: "right".into(),
+                    said: "C".into(),
+                }],
             },
         }
     }

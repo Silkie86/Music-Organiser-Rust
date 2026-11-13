@@ -554,6 +554,11 @@ struct Shown {
     /// again), and the take picked, by its name.
     takes_seen: Rc<Cell<u64>>,
     take_picked: Rc<RefCell<Option<String>>>,
+    /// The takes as the list shows them, by name, so a click picks the take it was on even if one came in since.
+    takes_shown: Rc<RefCell<Vec<String>>>,
+    /// The take whose chords are shown and their rows, changed in place while it's the same take (so a list
+    /// scrolled down stays where it is).
+    take_rows: RefCell<Option<(String, Rc<VecModel<LabelLine>>)>>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
     /// The line last clicked to play: its row, its sound and its file.
@@ -623,6 +628,8 @@ impl Shown {
             chords_seen: Cell::new(u64::MAX),
             takes_seen: Rc::new(Cell::new(u64::MAX)),
             take_picked: Rc::default(),
+            takes_shown: Rc::default(),
+            take_rows: RefCell::default(),
             playing: Cell::new(None),
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
@@ -963,10 +970,10 @@ impl Shown {
         let chords_ = Arc::clone(chords);
         self.panel.on_chord_thru_changed(move |on| chords_.thru.store(on, Ordering::Release));
         self.chords_seen.set(u64::MAX);
-        let (seen, picked) = (Rc::clone(&self.takes_seen), Rc::clone(&self.take_picked));
-        let chords_ = Arc::clone(chords);
+        let (seen, picked, shown) =
+            (Rc::clone(&self.takes_seen), Rc::clone(&self.take_picked), Rc::clone(&self.takes_shown));
         self.panel.on_take_pick(move |row| {
-            let id = chords_.takes(u64::MAX).and_then(|(_, t)| t.get(row as usize).map(|t| t.id.clone()));
+            let id = usize::try_from(row).ok().and_then(|row| shown.borrow().get(row).cloned());
             *picked.borrow_mut() = id;
             seen.set(u64::MAX);
         });
@@ -984,19 +991,20 @@ impl Shown {
         let (picked, weak) = (Rc::clone(&self.take_picked), self.panel.as_weak());
         let chords_ = Arc::clone(chords);
         self.panel.on_label_typed(move |row, text| {
-            let Some(id) = picked.borrow().clone() else { return };
-            let lowest = chords_
-                .takes(u64::MAX)
-                .and_then(|(_, t)| t.into_iter().find(|t| t.id == id))
-                .and_then(|t| t.chords.get(row as usize).and_then(|c| c.lowest));
+            let Some(id) = picked.borrow().clone() else { return false };
+            let lowest = usize::try_from(row).ok().and_then(|row| chords_.lowest(&id, row));
             match crate::takes::typed(&text, lowest) {
-                Some(chord) => label_take(&chords_, Some(&id), row, Label::Typed(chord), &weak),
+                Some(chord) => {
+                    label_take(&chords_, Some(&id), row, Label::Typed(chord), &weak);
+                    true
+                }
                 None => {
                     if let Some(panel) = weak.upgrade() {
                         panel.set_take_said(
                             format!("Can't read \"{}\" as a chord: try Cmaj9, G7#9 or D/C", text.trim()).into(),
                         );
                     }
+                    false
                 }
             }
         });
@@ -1005,37 +1013,54 @@ impl Shown {
 
     /// Chord check's takes, when they changed: the list, and the chords of the one picked.
     fn takes_said(&self) {
-        let Some((number, takes)) = self.instance.chords.takes(self.takes_seen.get()) else { return };
+        let chords = &self.instance.chords;
+        let Some((number, takes)) = chords.takes(self.takes_seen.get()) else { return };
         self.takes_seen.set(number);
         let panel = &self.panel;
-        let lines: Vec<TakeLine> =
-            takes.iter().map(|t| TakeLine { title: t.title().into(), details: t.details().into() }).collect();
+        let lines: Vec<TakeLine> = takes
+            .iter()
+            .map(|t| TakeLine { title: t.title.as_str().into(), details: t.details.as_str().into() })
+            .collect();
         panel.set_takes(ModelRc::new(VecModel::from(lines)));
+        *self.takes_shown.borrow_mut() = takes.iter().map(|t| t.id.clone()).collect();
         let picked = self.take_picked.borrow().clone();
         let at = picked.as_ref().and_then(|id| takes.iter().position(|t| &t.id == id));
         panel.set_take_picked(at.map_or(-1, |i| i32::try_from(i).unwrap_or(-1)));
-        let Some(take) = at.and_then(|i| takes.get(i)) else {
+        let Some((id, (grid, labels))) =
+            picked.filter(|_| at.is_some()).and_then(|id| Some((id.clone(), chords.chords_of(&id)?)))
+        else {
+            *self.take_rows.borrow_mut() = None;
             panel.set_take_chords(ModelRc::default());
             return;
         };
-        let rows: Vec<LabelLine> = take
-            .chords
+        let rows: Vec<LabelLine> = labels
             .iter()
             .map(|c| LabelLine {
-                at: crate::takes::place(take.grid, c.start).into(),
+                at: crate::takes::place(grid, c.start).into(),
                 read: c.read.map(|r| r.name()).unwrap_or_default().into(),
-                sure: match c.sure {
-                    crate::chordcheck::Sure::Yes => 0,
-                    crate::chordcheck::Sure::Mostly => 1,
-                    _ => 2,
-                },
+                sure: c.sure.shade(),
                 choices: ModelRc::new(VecModel::from(
                     c.choices.iter().map(|s| SharedString::from(s.name())).collect::<Vec<_>>(),
                 )),
                 said: c.said_words().into(),
             })
             .collect();
-        panel.set_take_chords(ModelRc::new(VecModel::from(rows)));
+        let mut shown = self.take_rows.borrow_mut();
+        if let Some((was, model)) = shown.as_ref()
+            && *was == id
+            && model.row_count() == rows.len()
+        {
+            // The same take: only the rows that changed (what was said), so the list stays where it was.
+            for (i, row) in rows.into_iter().enumerate() {
+                if model.row_data(i).is_none_or(|old| old.said != row.said) {
+                    model.set_row_data(i, row);
+                }
+            }
+            return;
+        }
+        let model = Rc::new(VecModel::from(rows));
+        panel.set_take_chords(ModelRc::from(Rc::clone(&model)));
+        *shown = Some((id, model));
     }
 
     /// The newest chord Chord check read, when there's a new one.
@@ -1054,11 +1079,7 @@ impl Shown {
             .map(|c| ChordBox {
                 name: c.name.as_str().into(),
                 at: c.at.as_str().into(),
-                sure: match c.sure {
-                    crate::chordcheck::Sure::Yes => 0,
-                    crate::chordcheck::Sure::Mostly => 1,
-                    _ => 2,
-                },
+                sure: c.sure.shade(),
                 now: c.now,
             })
             .collect();
@@ -2219,7 +2240,8 @@ fn key_text(key: &Key) -> Option<SharedString> {
 }
 
 /// Labels chord `row` of the take `id` (the one picked) and saves the take off the window's thread, in the data
-/// folder's Chord check folder: a take is saved once something in it is labelled, and again at each label after.
+/// folder's Chord check folder: a take is saved once something in it is labelled, and again at each label after
+/// (one save at a time, the newest last: [`crate::chordcheck::Checker::save`]).
 fn label_take(
     chords: &Arc<crate::chordcheck::Checker>,
     id: Option<&str>,
@@ -2228,21 +2250,15 @@ fn label_take(
     weak: &slint::Weak<Panel>,
 ) {
     let (Some(id), Ok(row)) = (id, usize::try_from(row)) else { return };
-    let Some(file) = chords.label(id, row, label) else { return };
+    if !chords.label(id, row, label) {
+        return;
+    }
     if let Some(panel) = weak.upgrade() {
         panel.set_take_said(SharedString::new());
     }
     let (chords, id) = (Arc::clone(chords), id.to_owned());
     background("mo-plugin-take", move || {
-        let folder = mo_app::paths::data_dir().join(mo_app::chord_check::FOLDER);
-        let said = match mo_app::chord_check::save(&file, &folder) {
-            Ok(_) => "Saved".to_owned(),
-            Err(why) => {
-                crate::log::line("Chord check", &why);
-                why
-            }
-        };
-        chords.saved(&id, said);
+        chords.save(&id, &mo_app::paths::data_dir().join(mo_app::chord_check::FOLDER));
     });
 }
 
