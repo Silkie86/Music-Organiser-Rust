@@ -30,6 +30,7 @@ pub mod log;
 pub mod midi;
 pub mod preset_files;
 pub mod presets;
+pub mod record;
 pub mod state;
 mod threads;
 mod track;
@@ -84,6 +85,8 @@ pub struct Instance {
     pub player: Arc<Player>,
     /// The plugin's knobs in the DAW ([`knobs`]).
     pub knobs: knobs::Knobs,
+    /// Takes recorded from the DAW's input or a sound card ([`record`]).
+    pub recorder: Arc<record::Recorder>,
 }
 
 pub struct MoPlugin;
@@ -140,6 +143,7 @@ impl DefaultPluginFactory for MoPlugin {
                 track_colour: Mutex::new(None),
                 player: Arc::new(Player::default()),
                 knobs: knobs::Knobs::default(),
+                recorder: Arc::default(),
             }),
             _card: real.then(gpu::hold),
         })
@@ -337,6 +341,8 @@ pub struct Processor {
     player: Arc<Player>,
     /// Room for the right side when the DAW gives only one output channel (made here, not on the audio thread).
     spare: Vec<f32>,
+    /// The take of the DAW's input under way, while there is one ([`record::Recorder::feed_for`]).
+    feed: Option<mo_audio::record::Feed>,
 }
 
 impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
@@ -354,7 +360,9 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
                 audio_config.max_frames_count
             ),
         );
+        shared.instance.recorder.set_rate(rate);
         Ok(Processor {
+            feed: None,
             instance: Arc::clone(&shared.instance),
             playing: shared.instance.player.start(rate),
             player: Arc::clone(&shared.instance.player),
@@ -388,6 +396,17 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
         // The DAW's knobs turned, and the panel's changes told back. (A knob turned partway through the block counts
         // from its start: a knob here picks and switches, it doesn't shape the sound.)
         self.instance.knobs.exchange(events.input, events.output, &self.instance.player, Some(&mut self.playing));
+        // A take of the DAW's input under way: the block goes in, as it came.
+        self.instance.recorder.feed_for(&mut self.feed);
+        if let Some(feed) = &mut self.feed
+            && let Some(input) = audio.input_port(0)
+            && let Ok(channels) = input.channels()
+            && let Some(channels) = channels.into_f32()
+        {
+            let first = channels.channel(0).unwrap_or(&[]);
+            let second = channels.channel(1).unwrap_or(first);
+            feed.push(&[first, second]);
+        }
         let Some(mut port) = audio.output_port(0) else { return Ok(ProcessStatus::Continue) };
         let Some(mut channels) = port.channels()?.into_f32() else { return Ok(ProcessStatus::Continue) };
         if channels.channel_count() >= 2 {
@@ -426,11 +445,23 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
 }
 
 impl PluginAudioPortsImpl for MainThread<'_> {
-    fn count(&self, is_input: bool) -> u32 {
-        if is_input { 0 } else { 1 }
+    fn count(&self, _is_input: bool) -> u32 {
+        1
     }
 
     fn get(&self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
+        // In: what Record takes from the DAW (Bitwig's sidechain for an instrument). Not the main input: the plugin
+        // makes its sound, it doesn't change the track's.
+        if is_input && index == 0 {
+            writer.set(&AudioPortInfo {
+                id: ClapId::new(3),
+                name: b"In",
+                channel_count: 2,
+                flags: AudioPortFlags::empty(),
+                port_type: Some(AudioPortType::STEREO),
+                in_place_pair: None,
+            });
+        }
         if !is_input && index == 0 {
             writer.set(&AudioPortInfo {
                 id: ClapId::new(1),

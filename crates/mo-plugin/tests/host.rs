@@ -34,16 +34,20 @@ fn says_what_it_is() {
 }
 
 #[test]
-fn one_stereo_output_a_note_input_and_output_and_a_window() {
+fn a_stereo_output_and_input_a_note_input_and_output_and_a_window() {
     let entry = entry();
     let mut plugin = instance(&entry);
     let handle = plugin.plugin_handle();
 
     let audio = handle.get_extension::<PluginAudioPorts>().unwrap();
-    assert_eq!((audio.count(&handle, true), audio.count(&handle, false)), (0, 1));
+    assert_eq!((audio.count(&handle, true), audio.count(&handle, false)), (1, 1));
     let mut buffer = AudioPortInfoBuffer::new();
     let port = audio.get(&handle, 0, false, &mut buffer).unwrap();
     assert_eq!(port.channel_count, 2);
+    // The input Record takes from (Bitwig's sidechain): stereo, and not the main one.
+    let port = audio.get(&handle, 0, true, &mut buffer).unwrap();
+    assert_eq!((port.channel_count, port.name), (2, &b"In"[..]));
+    assert!(!port.flags.contains(clack_extensions::audio_ports::AudioPortFlags::IS_MAIN));
 
     let notes = handle.get_extension::<PluginNotePorts>().unwrap();
     // One in, and one out: a MIDI part's notes with Send MIDI on.
