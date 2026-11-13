@@ -106,6 +106,8 @@ struct Page {
     /// The curve whose places the card shows: they're only made again when another curve is picked or it changes.
     curve_places_of: Option<String>,
     curve_shown: Vec<usize>,
+    /// The speed each shown curve is at, beside `curve_shown`: 1, or half or double with "Other speeds too".
+    curve_speeds: Vec<f64>,
     curve_filters: CurveFilters,
     /// The Found in filter as its chips show it now.
     curve_found_in: mo_app::filters::Filter,
@@ -247,7 +249,7 @@ impl Model for CurveLines {
         PAGE.with(|p| {
             let p = p.try_borrow().ok()?;
             let c = p.curves.get(*p.curve_shown.get(row)?)?;
-            let l = logic::curve_line(c);
+            let l = logic::curve_line_at(c, p.curve_speeds.get(row).copied().unwrap_or(1.0));
             Some(CurveLineInfo {
                 row: row as i32,
                 name: l.name.into(),
@@ -472,6 +474,12 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_curve_other_speeds_toggled(move |on| {
+        if let Some(app) = weak.upgrade() {
+            change_curves(&app, |f| f.other_speeds = on);
+        }
+    });
+    let weak = app.as_weak();
     data.on_curve_select(move |row| {
         if let Some(app) = weak.upgrade() {
             let id = PAGE.with(|p| {
@@ -565,9 +573,26 @@ fn change(app: &AppWindow, f: impl FnOnce(&mut Filters)) {
 }
 
 /// Works out the curves shown and their filters' chips again, from the filters as they are now.
+/// The shown curve at `row` as it's sent (dragged, saved to Bitwig, its file shown): stretched to the speed "Other
+/// speeds too" shows it at.
+fn row_curve_as_sent(p: &Page, row: usize) -> Option<Curve> {
+    let c = p.curves.get(*p.curve_shown.get(row)?)?;
+    Some(curves::at_speed(c, p.curve_speeds.get(row).copied().unwrap_or(1.0)))
+}
+
+/// The picked curve as it's sent: [`row_curve_as_sent`] for its line (at its own speed when it isn't shown).
+fn picked_curve_as_sent(p: &Page) -> Option<Curve> {
+    let id = p.curve_picked.as_deref()?;
+    match p.curve_shown.iter().position(|&i| p.curves.get(i).is_some_and(|c| c.id == id)) {
+        Some(row) => row_curve_as_sent(p, row),
+        None => p.curves.iter().find(|c| c.id == id).cloned(),
+    }
+}
+
 fn reshow_curves(p: &mut Page) {
     let shown = logic::shown_curves_all(&p.curves, &p.curve_keys, &p.curve_filters);
     p.curve_shown = shown.lines;
+    p.curve_speeds = shown.speeds;
     p.curve_found_in = shown.found_in;
     p.curve_shape = shown.shape;
     p.curve_rhythm = shown.rhythm;
@@ -795,6 +820,7 @@ fn show_everything(app: &AppWindow) {
 
         // The curves.
         data.set_curve_hidden(p.curve_filters.hidden);
+        data.set_curve_other_speeds(p.curve_filters.other_speeds);
         data.set_curves_shown(p.curve_shown.len() as i32);
         let (title, text) = logic::curves_empty(
             p.curves.len(),
@@ -2285,9 +2311,10 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
     let (curve, data_dir, bitwig_folders, feed) = PAGE.with(|p| {
         let p = p.borrow();
         let c = p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id)).cloned();
-        (c, p.data_dir.clone(), p.bitwig.clone(), p.feed.clone())
+        (c.zip(picked_curve_as_sent(&p)), p.data_dir.clone(), p.bitwig.clone(), p.feed.clone())
     });
-    let Some(curve) = curve else { return false };
+    // `curve` is the curve as it's kept (renamed, hidden); `sent` as it goes out, at the speed it's shown at.
+    let Some((curve, sent)) = curve else { return false };
     match id {
         curve_act::RENAME => {
             let data = app.global::<PresetsData>();
@@ -2312,7 +2339,7 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         }
         curve_act::REVEAL => {
             let folder = data_dir.join(curves::FOLDER);
-            let started = background::spawn("Curve file", move || match curves::file(&curve, &folder) {
+            let started = background::spawn("Curve file", move || match curves::file(&sent, &folder) {
                 Ok(path) => {
                     let path = path.to_string_lossy().into_owned();
                     crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
@@ -2331,7 +2358,7 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         }
         curve_act::TO_BITWIG => {
             let Some(folder) = logic::bitwig_curves_folder(&bitwig_folders) else { return false };
-            let started = background::spawn("Curve to Bitwig", move || match curves::save_to_bitwig(&curve, &folder) {
+            let started = background::spawn("Curve to Bitwig", move || match curves::save_to_bitwig(&sent, &folder) {
                 Ok(path) => {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let text = format!("Saved {name} in Bitwig's curves. It shows in Bitwig's browser under Curves.");

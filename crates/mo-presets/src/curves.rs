@@ -159,6 +159,22 @@ pub struct Curve {
     pub sources: Vec<CurveSource>,
 }
 
+/// `c` played at `speed` times its speed (0.5 half, 2 double), as "Other speeds too" sends it: the same points over
+/// a length divided by `speed`, named for the speed, under an id of its own (so its curve file sits beside the
+/// curve's own and neither replaces the other). `c` itself at a speed of 1 (or a broken one).
+pub fn at_speed(c: &Curve, speed: f64) -> Curve {
+    if speed == 1.0 || !speed.is_finite() || speed <= 0.0 {
+        return c.clone();
+    }
+    let words = if speed < 1.0 { "half speed" } else { "double speed" };
+    let words = if speed == 0.5 || speed == 2.0 { words.to_owned() } else { format!("{speed}x speed") };
+    let mut h = Sha256::new();
+    h.update(c.id.as_bytes());
+    h.update(speed.to_le_bytes());
+    let id = h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect();
+    Curve { id, name: format!("{} ({words})", c.name), length_beats: c.length_beats / speed, ..c.clone() }
+}
+
 /// A shape's fingerprint: the points stretched to the same length and height and rounded to three decimals, hashed
 /// (SHA-256, the first 16 bytes as hex), so the same shape gives the same id on every computer.
 pub fn shape_id(points: &[curve::CurvePoint]) -> String {
@@ -1236,5 +1252,27 @@ mod tests {
         assert_eq!(names, ["4", "Pump - Duck - Band 1"]);
         drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_curve_at_another_speed_is_stretched_under_its_own_id() {
+        let c = Curve {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            name: "Pump".into(),
+            points: vec![
+                curve::CurvePoint { x: 0.0, y: 1.0, bend: 0.0 },
+                curve::CurvePoint { x: 1.0, y: 0.0, bend: 0.0 },
+            ],
+            length_beats: 1.0,
+            hidden: false,
+            sources: Vec::new(),
+        };
+        assert_eq!(at_speed(&c, 1.0), c);
+        let half = at_speed(&c, 0.5);
+        assert_eq!((half.name.as_str(), half.length_beats, &half.points), ("Pump (half speed)", 2.0, &c.points));
+        assert_eq!(half.id.len(), 32);
+        assert_ne!(half.id[..16], c.id[..16], "its file mustn't replace the curve's own");
+        assert_ne!(at_speed(&c, 2.0).id, half.id);
+        assert_eq!(at_speed(&c, 2.0).length_beats, 0.5);
     }
 }
