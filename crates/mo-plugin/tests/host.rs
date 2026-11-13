@@ -6,7 +6,10 @@
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui};
 use clack_extensions::note_ports::{NotePortInfoBuffer, PluginNotePorts};
+use clack_extensions::params::{ParamInfoBuffer, PluginParams};
+use clack_extensions::remote_controls::{PluginRemoteControls, RemoteControlsPageBuffer};
 use clack_extensions::state::PluginState;
+use clack_host::events::event_types::ParamValueEvent;
 use clack_host::factory::plugin::PluginFactory;
 use clack_host::prelude::*;
 use clack_plugin::entry::SinglePluginEntry;
@@ -96,6 +99,45 @@ fn its_state_goes_into_the_project_and_comes_back() {
     state.load(&handle, &mut &b"not this plugin's state \xff\xfe"[..]).unwrap();
     state.load(&handle, &mut &b""[..]).unwrap();
     assert_eq!(gui.get_size(&handle), Some(dragged_to));
+}
+
+/// Eight knobs on one page, as Bitwig shows a device's remote controls; turned by the DAW, they take.
+#[test]
+fn eight_knobs_on_one_page_that_the_daw_can_turn() {
+    let entry = entry();
+    let mut plugin = instance(&entry);
+    let handle = plugin.plugin_handle();
+    let params = handle.get_extension::<PluginParams>().unwrap();
+    assert_eq!(params.count(&handle), 8);
+    let mut buffer = ParamInfoBuffer::new();
+    let mut names = Vec::new();
+    for index in 0..8 {
+        let info = params.get_info(&handle, index, &mut buffer).unwrap();
+        assert_eq!(info.id.get(), index + 1);
+        assert_eq!((info.min_value, info.max_value), (0.0, 1.0));
+        names.push(String::from_utf8_lossy(info.name).into_owned());
+    }
+    let want = ["Sound", "Sounds like", "MIDI part", "Preset", "Volume", "Loop", "Match tempo", "In time"];
+    assert_eq!(names, want);
+    let remote = handle.get_extension::<PluginRemoteControls>().unwrap();
+    assert_eq!(remote.count(&handle), 1);
+    let mut page = RemoteControlsPageBuffer::new();
+    let page = remote.get(&handle, 0, &mut page).unwrap();
+    assert_eq!(page.param_ids.map(|id| id.map(|id| id.get())), [1, 2, 3, 4, 5, 6, 7, 8].map(Some));
+    let in_time = ClapId::new(8);
+    assert_eq!(params.get_value(&handle, in_time), Some(1.0));
+    let mut words = [0u8; 64];
+    assert_eq!(params.value_to_text(&handle, in_time, 1.0, &mut words).unwrap(), b"On");
+
+    // The DAW turns In time off while the track's audio is stopped: it takes, and nothing is told back.
+    let mut turned = EventBuffer::new();
+    turned.push(&ParamValueEvent::new(0, in_time, Pckn::match_all(), 0.0));
+    let mut told = EventBuffer::new();
+    let mut inactive = plugin.inactive_plugin_handle().unwrap();
+    params.flush(&mut inactive, &turned.as_input(), &mut told.as_output());
+    assert!(told.is_empty());
+    let handle = plugin.plugin_handle();
+    assert_eq!(params.get_value(&handle, in_time), Some(0.0));
 }
 
 #[test]

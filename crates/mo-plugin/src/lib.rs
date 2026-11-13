@@ -22,6 +22,7 @@ pub mod check;
 pub mod drag;
 pub mod galaxy;
 mod gpu;
+pub mod knobs;
 pub mod library;
 pub mod log;
 pub mod midi;
@@ -53,8 +54,13 @@ use clack_extensions::log::{HostLog, LogSeverity};
 use clack_extensions::note_ports::{
     NoteDialect, NoteDialects, NotePortInfo, NotePortInfoWriter, PluginNotePorts, PluginNotePortsImpl,
 };
+use clack_extensions::params::{
+    ParamDisplayWriter, ParamInfoWriter, PluginAudioProcessorParams, PluginMainThreadParams, PluginParams,
+};
+use clack_extensions::remote_controls::{PluginRemoteControls, PluginRemoteControlsImpl, RemoteControlsPageWriter};
 use clack_extensions::state::{PluginState, PluginStateImpl};
 use clack_extensions::track_info::{HostTrackInfo, PluginTrackInfo, PluginTrackInfoImpl, TrackInfoBuffer};
+use clack_plugin::events::io::{InputEvents, OutputEvents};
 use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
 use std::cell::{Cell, RefCell};
@@ -72,6 +78,8 @@ pub struct Instance {
     /// The track's colour (red, green, blue), when the DAW says.
     pub track_colour: Mutex<Option<[u8; 3]>>,
     pub player: Arc<Player>,
+    /// The plugin's knobs in the DAW ([`knobs`]).
+    pub knobs: knobs::Knobs,
 }
 
 pub struct MoPlugin;
@@ -87,6 +95,8 @@ impl Plugin for MoPlugin {
             .register::<PluginNotePorts>()
             .register::<PluginGui>()
             .register::<PluginTrackInfo>()
+            .register::<PluginParams>()
+            .register::<PluginRemoteControls>()
             .register::<PluginState>();
     }
 }
@@ -124,6 +134,7 @@ impl DefaultPluginFactory for MoPlugin {
                 track: Mutex::new(String::new()),
                 track_colour: Mutex::new(None),
                 player: Arc::new(Player::default()),
+                knobs: knobs::Knobs::default(),
             }),
             _card: real.then(gpu::hold),
         })
@@ -247,8 +258,58 @@ impl PluginTrackInfoImpl for MainThread<'_> {
     }
 }
 
+/// The DAW's knobs for the plugin ([`knobs`]): what they are, and their changes while the track's audio is stopped.
+impl PluginMainThreadParams for MainThread<'_> {
+    fn count(&self) -> u32 {
+        knobs::Knob::ALL.len() as u32
+    }
+
+    fn get_info(&self, param_index: u32, info: &mut ParamInfoWriter) {
+        knobs::Knobs::info(param_index, info);
+    }
+
+    fn get_value(&self, param_id: ClapId) -> Option<f64> {
+        self.shared.instance.knobs.value(param_id)
+    }
+
+    fn value_to_text(&self, param_id: ClapId, value: f64, writer: &mut ParamDisplayWriter) -> std::fmt::Result {
+        self.shared.instance.knobs.words(param_id, value, writer)
+    }
+
+    fn text_to_value(&self, param_id: ClapId, text: &std::ffi::CStr) -> Option<f64> {
+        knobs::Knobs::read_words(param_id, &text.to_string_lossy())
+    }
+
+    fn flush(&self, input: &InputEvents, output: &mut OutputEvents) {
+        let instance = &self.shared.instance;
+        instance.knobs.exchange(input, output, &instance.player, None);
+    }
+}
+
+/// The page the DAW shows the knobs on (Bitwig: the device's remote controls).
+impl PluginRemoteControlsImpl for MainThread<'_> {
+    fn count(&self) -> u32 {
+        1
+    }
+
+    fn get(&self, page_index: u32, writer: &mut RemoteControlsPageWriter) {
+        if page_index == 0 {
+            knobs::Knobs::page(writer);
+        }
+    }
+}
+
+/// The knobs' changes between blocks of sound, while the track's audio runs.
+impl PluginAudioProcessorParams for Processor {
+    fn flush(&mut self, input: &InputEvents, output: &mut OutputEvents) {
+        self.instance.knobs.exchange(input, output, &self.instance.player, Some(&mut self.playing));
+    }
+}
+
 /// The audio thread's part: plays what the panel picked.
 pub struct Processor {
+    /// What the threads share: the knobs.
+    instance: Arc<Instance>,
     playing: Playing,
     /// The panel's player: told the DAW's tempo.
     player: Arc<Player>,
@@ -272,13 +333,14 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
             ),
         );
         Ok(Processor {
+            instance: Arc::clone(&shared.instance),
             playing: shared.instance.player.start(rate),
             player: Arc::clone(&shared.instance.player),
             spare: vec![0.0; audio_config.max_frames_count as usize],
         })
     }
 
-    fn process(&mut self, process: Process, mut audio: Audio, _events: Events) -> Result<ProcessStatus, PluginError> {
+    fn process(&mut self, process: Process, mut audio: Audio, events: Events) -> Result<ProcessStatus, PluginError> {
         use clack_plugin::events::event_types::TransportFlags;
         // The DAW's tempo, for MIDI parts played at it (a plain store: nothing here waits).
         if let Some(transport) = process.transport
@@ -301,6 +363,9 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
                 ),
             }
         });
+        // The DAW's knobs turned, and the panel's changes told back. (A knob turned partway through the block counts
+        // from its start: a knob here picks and switches, it doesn't shape the sound.)
+        self.instance.knobs.exchange(events.input, events.output, &self.instance.player, Some(&mut self.playing));
         let Some(mut port) = audio.output_port(0) else { return Ok(ProcessStatus::Continue) };
         let Some(mut channels) = port.channels()?.into_f32() else { return Ok(ProcessStatus::Continue) };
         if channels.channel_count() >= 2 {

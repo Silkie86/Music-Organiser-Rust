@@ -211,6 +211,14 @@ export component Panel inherits Window {
     // Where the sound playing is in its file, for the line on its waveform: the row it's on (-1 for none) and how
     // far through the whole sound (0 the start, 1 the end).
     in property <int> playing-row: -1;
+    // A line to bring into sight in each list (the DAW's knobs pick lines): its top, and a count that goes up each
+    // time it's asked.
+    in property <length> sounds-show-top;
+    in property <int> sounds-show-ask;
+    in property <length> parts-show-top;
+    in property <int> parts-show-ask;
+    in property <length> presets-show-top;
+    in property <int> presets-show-ask;
     in property <float> playing-at;
     // What's typed in the search box: kept while another tab shows, as the list keeps it.
     in-out property <string> search-text;
@@ -849,6 +857,8 @@ export component Panel inherits Window {
                         visible: !root.galaxy;
                         row-height: 48px;
                         rows: root.sounds.length;
+                        show-top: root.sounds-show-top;
+                        show-ask: root.sounds-show-ask;
                         // The waveforms take a bit under half of a line, in steps (so dragging the window's edge
                         // doesn't ask for new pictures at every pixel), and never less than 120.
                         function fit() {
@@ -1032,6 +1042,8 @@ export component Panel inherits Window {
                         height: parent.height;
                         row-height: 48px;
                         rows: root.parts.length;
+                        show-top: root.parts-show-top;
+                        show-ask: root.parts-show-ask;
                         for part[i] in root.parts: ListLine {
                             height: 48px;
                             selected: i == root.midi-picked;
@@ -1221,6 +1233,8 @@ export component Panel inherits Window {
                         height: parent.height;
                         row-height: 48px;
                         rows: root.presets.length;
+                        show-top: root.presets-show-top;
+                        show-ask: root.presets-show-ask;
                         for preset[i] in root.presets: ListLine {
                             height: 48px;
                             selected: i == root.preset-picked;
