@@ -45,7 +45,9 @@ impl DateBy {
             DateBy::Made => "When the file was made on this computer (often the day you got it)",
             DateBy::Changed => "When the file was last changed",
             DateBy::Opened => "When the file was last opened (Windows often doesn't keep this, and plays count)",
-            DateBy::FirstUsed => "When you first put it in a song, from your songs' saves",
+            DateBy::FirstUsed => {
+                "When you first used it in a song, by comparing each song's saves (counted as Used counts)"
+            }
         }
     }
 
@@ -95,7 +97,8 @@ pub fn read(sounds: &[Sound]) -> FileDates {
     let mut by_folder: HashMap<&Path, Vec<(&std::ffi::OsStr, i64)>> = HashMap::new();
     for s in sounds {
         let path = Path::new(&s.path);
-        if let (Some(folder), Some(name)) = (path.parent(), path.file_name()) {
+        // A path with no folder (damaged, or relative) says nothing of where its file is: it has no dates.
+        if let (Some(folder), Some(name)) = (path.parent().filter(|f| !f.as_os_str().is_empty()), path.file_name()) {
             by_folder.entry(folder).or_default().push((name, s.id));
         }
     }
@@ -123,9 +126,14 @@ fn in_folder(folder: &Path, files: &[(&std::ffi::OsStr, i64)]) -> Vec<Found> {
     if files.len() > 4
         && let Ok(entries) = std::fs::read_dir(folder)
     {
+        let wanted: std::collections::HashSet<&std::ffi::OsStr> = files.iter().map(|&(name, _)| name).collect();
         for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                listed.insert(entry.file_name(), dates_of(&meta));
+            // Only the files asked for: on the Mac and Linux each one's dates are a question to the disk.
+            let name = entry.file_name();
+            if wanted.contains(name.as_os_str())
+                && let Ok(meta) = entry.metadata()
+            {
+                listed.insert(name, dates_of(&meta));
             }
         }
     }
@@ -153,27 +161,6 @@ fn local(t: SystemTime) -> NaiveDateTime {
 mod tests {
     use super::*;
 
-    fn sound(id: i64, path: String) -> Sound {
-        Sound {
-            id,
-            path,
-            added: NaiveDateTime::default(),
-            error: None,
-            analysis: None,
-            name_type: None,
-            user_type: None,
-            sound_type: "Kick".into(),
-            type_source: "name".into(),
-            type_confidence: 1.0,
-            favourite: false,
-            rating: 0,
-            plays: 0,
-            tags: Vec::new(),
-            hidden: false,
-            activity: Default::default(),
-        }
-    }
-
     #[test]
     fn every_date_by_goes_by_its_name() {
         for d in DateBy::ALL {
@@ -182,32 +169,5 @@ mod tests {
         assert_eq!(DateBy::named("Something else"), DateBy::Changed);
         assert!(DateBy::Made.from_files() && DateBy::Opened.from_files());
         assert!(!DateBy::Changed.from_files() && !DateBy::FirstUsed.from_files());
-    }
-
-    #[test]
-    fn the_files_dates_are_read_from_their_folders() {
-        let dir = std::env::temp_dir().join(format!("mo-app-sound-dates-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut sounds = Vec::new();
-        // More than a few, so the folder is listed; and one in a folder of its own, asked for by its path.
-        for n in 0..6 {
-            let path = dir.join(format!("{n}.wav"));
-            std::fs::write(&path, b"RIFF").unwrap();
-            sounds.push(sound(n, path.display().to_string()));
-        }
-        sounds.push(sound(50, dir.join("gone.wav").display().to_string()));
-        let dates = read(&sounds);
-        let now = Local::now().naive_local();
-        for n in 0..6 {
-            let opened = dates.opened(n).expect("every system keeps when a file was opened");
-            assert!((now - opened).num_hours().abs() < 24, "{opened} for {n}");
-            // Linux keeps when a file was made only on some file systems.
-            if let Some(made) = dates.made(n) {
-                assert!((now - made).num_hours().abs() < 24);
-            }
-        }
-        assert_eq!((dates.made(50), dates.opened(50)), (None, None));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

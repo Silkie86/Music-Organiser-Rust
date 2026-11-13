@@ -571,13 +571,8 @@ impl Library {
         // them elsewhere) are left out too.
         let real = RealDates::now();
         let leave_muted_out = rules.not_muted_in_newest && has_unplayed;
-        // The saves as songs, read once: for the songs' newest saves, and to date each sample's first use by. When
-        // only the first uses need them, saves that can't be read leave the samples undated, not uncounted.
-        let songs = match self.saves().and_then(|saves| Ok((saves, self.song_choices()?))) {
-            Ok((saves, choices)) => crate::songs::group_songs(&saves, &choices, &real),
-            Err(e) if leave_muted_out => return Err(e),
-            Err(_) => Vec::new(),
-        };
+        // The saves as songs, read once: for the songs' newest saves, and to date each sample's first use by.
+        let songs = crate::songs::group_songs(&self.saves()?, &self.song_choices()?, &real);
         let first_uses = crate::first_use::FirstUses::new(&songs, &real);
         let mut newest: HashMap<i64, i64> = HashMap::new();
         let mut muted: HashSet<(i64, String)> = HashSet::new();

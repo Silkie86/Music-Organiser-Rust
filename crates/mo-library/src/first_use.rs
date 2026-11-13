@@ -8,7 +8,10 @@
 //!   is earlier).
 //!
 //! A sound's first use is the earliest of those over every song that uses it. Only saves that can say a sound isn't
-//! in them count as not having it: one whose file has gone, or that couldn't be read, says nothing.
+//! in them count as not having it: one whose file has gone, that couldn't be read, or that lists no samples at all
+//! (a reader that doesn't list them, or a song not started yet), says nothing. A save "has" a sound as the use counts
+//! say it does ([`crate::UsageRules`]): with Settings asking for notes, a sound loaded but never played in a save
+//! isn't used in it yet.
 
 use std::collections::{HashMap, HashSet};
 
@@ -36,7 +39,7 @@ struct Timeline {
 struct Dated {
     id: i64,
     when: NaiveDateTime,
-    /// The save can say a sound isn't in it: its file is there and it was read.
+    /// The save can say a sound isn't in it: its file is there, it was read, and its samples were listed.
     tells: bool,
 }
 
@@ -50,7 +53,11 @@ impl FirstUses {
             let all = || song.saves().chain(&song.copies);
             let mut saves: Vec<Dated> = all()
                 .filter(|s| real.local(s.modified))
-                .map(|s| Dated { id: s.id, when: s.modified, tells: !s.file_missing && s.error.is_none() })
+                .map(|s| Dated {
+                    id: s.id,
+                    when: s.modified,
+                    tells: !s.file_missing && s.error.is_none() && s.sample_count > 0,
+                })
                 .collect();
             saves.sort_by_key(|d| (d.when, d.id));
             for d in &saves {
@@ -95,7 +102,7 @@ mod tests {
     }
 
     fn save(id: i64, when: NaiveDateTime) -> Save {
-        Save { id, modified: when, ..Save::default() }
+        Save { id, modified: when, sample_count: 3, ..Save::default() }
     }
 
     fn song(mut saves: Vec<Save>) -> Song {
@@ -146,6 +153,14 @@ mod tests {
         let uses = FirstUses::new(&songs, &real);
         // Neither older save can say it lacked the sound, so it counts from the song's start.
         assert_eq!(uses.of(&ids(&[3])), Some(day(2019, 3, 1)));
+    }
+
+    #[test]
+    fn a_save_that_lists_no_samples_says_nothing_of_what_is_not_in_it() {
+        let real = RealDates::now();
+        let empty = Save { sample_count: 0, ..save(1, day(2019, 3, 1)) };
+        let uses = FirstUses::new(&[song(vec![empty, save(2, day(2024, 6, 1))])], &real);
+        assert_eq!(uses.of(&ids(&[2])), Some(day(2019, 3, 1)));
     }
 
     #[test]

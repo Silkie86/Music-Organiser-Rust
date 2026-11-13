@@ -2154,7 +2154,10 @@ struct After {
 /// sound (`moved`: each old place's new one; `None` when every sound kept its place). `retyped`: a sound has another
 /// type, so the galaxy, which colours its stars and names its neighbourhoods by type, is laid out again.
 fn take_refreshed(p: &mut Page, library: Library, moved: Option<&[Option<usize>]>, retyped: bool) -> After {
-    p.list = library.list;
+    // When the files were made and opened goes on showing (by sound id) while it's read again for these sounds.
+    let mut list = (*library.list).clone();
+    list.keep_file_dates_of(&p.list);
+    p.list = Arc::new(list);
     p.places = library.places;
     p.types = library.types;
     p.tags = library.tags;

@@ -1,6 +1,6 @@
 //! When the sounds' files were made and last opened, for the year strip's Made and Opened ([`mo_app::sound_dates`]):
 //! read away from the window's thread, on the low-priority pool for work that waits on disks, once for each library
-//! read, and only once one of them is picked. Picking another date lets a read under way finish (it's kept for when
+//! read (the dates read before go on showing meanwhile), and only once one of them is picked. Picking another date lets a read under way finish (it's kept for when
 //! you pick one of them again); the list it was for going away drops it.
 
 use std::cell::RefCell;
@@ -37,7 +37,8 @@ pub(super) fn wanted(app: &AppWindow) {
         let p = p.borrow();
         (p.list.clone(), p.filters.date_by.from_files(), p.read && p.partial.is_none() && !p.list.is_empty())
     });
-    if !on || !whole || list.knows_file_dates() {
+    // A list read again keeps the old list's dates meanwhile: they're read again once for its sounds.
+    if !on || !whole {
         return;
     }
     let read = READ.with(|r| {

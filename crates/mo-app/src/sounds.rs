@@ -269,9 +269,8 @@ impl Filters {
 
     /// Turns one of the on/off chips on or off, by the name the page gives it: "mix-well", "unused", "used",
     /// "favourites", [`HIDE_COPIES`], [`HIDE_SILENT`] or "folder" (which only goes off; any other name changes
-    /// nothing). Used and Unused are never both on. When Used goes on or off, the years picked on the year strip go
-    /// too: its years then mean something else (the years of the songs that use each sound, or the year each was
-    /// added), so a span picked for one isn't kept for the other.
+    /// nothing). Used and Unused are never both on. The years picked on the year strip stay: what they mean changes
+    /// only with the date it goes by ([`Filters::set_date_by`]).
     pub fn toggle(&mut self, chip: &str) {
         match chip {
             "mix-well" => self.mix_well = !self.mix_well,
@@ -786,16 +785,12 @@ impl SoundList {
         list
     }
 
-    /// The file dates `other` knows, when it shares this list's sounds and this list doesn't know them yet.
+    /// The file dates `other` knows, when this list doesn't know them yet. They're by sound id, so they hold for the
+    /// sounds read again too (a sound new since has none until they're read again for these sounds).
     pub fn keep_file_dates_of(&mut self, other: &SoundList) {
-        if self.file_dates.is_none() && self.shares_with(other) {
+        if self.file_dates.is_none() {
             self.file_dates = other.file_dates.clone();
         }
-    }
-
-    /// Whether this list knows when its sounds' files were made and last opened.
-    pub fn knows_file_dates(&self) -> bool {
-        self.file_dates.is_some()
     }
 
     /// The sound at `i`'s date by `by`, when it has a real one: a date still to come, or before 1981, is none. Made and
