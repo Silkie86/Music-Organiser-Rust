@@ -309,6 +309,14 @@ pub fn ask_to_quit(port: u16) -> bool {
     ask(port, &json!({ "ask": "quit" })).is_ok()
 }
 
+/// Held by each test that starts a helper or asks a port it has just let go: tests run side by side, and a port one
+/// let go can be the next one another is given (seen on Windows: a test asked another test's helper to quit).
+#[cfg(test)]
+pub(crate) fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +335,7 @@ mod tests {
 
     #[test]
     fn says_hello_and_only_one_runs() {
+        let _one = one_at_a_time();
         let helper = started(0);
         let hello = hello(helper.port()).unwrap();
         assert_eq!(hello.pid, std::process::id());
@@ -338,6 +347,7 @@ mod tests {
 
     #[test]
     fn says_when_bitwig_isnt_open() {
+        let _one = one_at_a_time();
         let helper = started(0);
         let deadline = Instant::now() + Duration::from_secs(5);
         while helper.bitwig() != Some(State::NoBitwig) {
@@ -350,6 +360,7 @@ mod tests {
 
     #[test]
     fn pauses_and_watches_again() {
+        let _one = one_at_a_time();
         let helper = started(0);
         assert_eq!(ask(helper.port(), &json!({ "ask": "pause", "on": true })).unwrap(), json!({ "paused": true }));
         assert!(helper.paused());
@@ -364,6 +375,7 @@ mod tests {
 
     #[test]
     fn quits_when_asked_and_lets_the_port_go() {
+        let _one = one_at_a_time();
         let helper = started(0);
         let port = helper.port();
         assert!(ask_to_quit(port));
@@ -382,6 +394,7 @@ mod tests {
 
     #[test]
     fn odd_requests_get_an_error_not_a_hang() {
+        let _one = one_at_a_time();
         let helper = started(0);
         for request in [json!({ "ask": "dance" }), json!({ "nothing": 1 }), json!([1, 2]), json!("quit")] {
             let answer = ask(helper.port(), &request).unwrap();
@@ -401,6 +414,7 @@ mod tests {
 
     #[test]
     fn a_quitting_helper_never_watches_again() {
+        let _one = one_at_a_time();
         let helper = started(0);
         helper.pause(true);
         helper.quit();

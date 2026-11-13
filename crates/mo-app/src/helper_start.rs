@@ -361,6 +361,7 @@ mod tests {
 
     #[test]
     fn the_startup_line_quotes_the_program() {
+        let _one = crate::helper::one_at_a_time();
         assert_eq!(
             command(Path::new(r"C:\My Apps\music-organiser.exe")),
             r#""C:\My Apps\music-organiser.exe" --helper"#
@@ -369,6 +370,7 @@ mod tests {
 
     #[test]
     fn off_unless_turned_on() {
+        let _one = crate::helper::one_at_a_time();
         let mut settings = AppSettings::default();
         assert!(!wanted(&settings));
         settings.set(KEY, "1");
@@ -379,6 +381,7 @@ mod tests {
 
     #[test]
     fn turning_on_writes_the_list_and_starts_the_helper_once() {
+        let _one = crate::helper::one_at_a_time();
         let list = FakeList::default();
         let port = free_port();
         let exe = this_exe();
@@ -405,6 +408,7 @@ mod tests {
 
     #[test]
     fn a_helper_from_another_build_is_replaced() {
+        let _one = crate::helper::one_at_a_time();
         let list = FakeList::default();
         *list.line.lock().unwrap() = Some("\"C:\\old\\music-organiser.exe\" --helper".into());
         let port = free_port();
@@ -422,6 +426,7 @@ mod tests {
 
     #[test]
     fn says_when_the_list_or_the_start_fails() {
+        let _one = crate::helper::one_at_a_time();
         let list = FakeList { broken: true, ..FakeList::default() };
         let done = turn_on(&list, free_port(), &this_exe(), "1", |_| Err(io::Error::other("no such program")));
         assert_eq!(done.running, Running::Failed("no such program".into()));
@@ -431,6 +436,7 @@ mod tests {
 
     #[test]
     fn a_line_that_cant_be_read_is_still_written_and_removed() {
+        let _one = crate::helper::one_at_a_time();
         struct Unreadable(FakeList);
         impl LoginList for Unreadable {
             fn get(&self) -> io::Result<Option<String>> {
@@ -453,6 +459,7 @@ mod tests {
 
     #[test]
     fn a_helper_that_never_answers_is_a_failed_start() {
+        let _one = crate::helper::one_at_a_time();
         // Nothing is started at all: the port stays silent.
         let done = turn_on(&FakeList::default(), free_port(), &this_exe(), "1", |_| Ok(()));
         assert_eq!(done.running, Running::Failed("it started but doesn't answer".into()));
@@ -460,12 +467,14 @@ mod tests {
 
     #[test]
     fn the_same_program_whatever_its_spelling_on_windows() {
+        let _one = crate::helper::one_at_a_time();
         assert!(same_program("/a/b", "/a/b"));
         assert_eq!(same_program(r"\\?\C:\Run\App.exe", r"c:\run\app.exe"), cfg!(windows));
     }
 
     #[test]
     fn a_system_without_a_list_still_runs_the_helper() {
+        let _one = crate::helper::one_at_a_time();
         struct NoList;
         impl LoginList for NoList {
             fn get(&self) -> io::Result<Option<String>> {
