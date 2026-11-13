@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::Datelike;
+use chrono::{Datelike, NaiveDateTime};
 use mo_formats::dates::RealDates;
 use mo_library::ProjectFile;
 use mo_sounds::compact::Synced;
@@ -18,6 +18,7 @@ use mo_space::size::size_text;
 use rayon::prelude::*;
 
 use crate::filters::{self as chips, Filter};
+use crate::sound_dates::{DateBy, FileDates};
 
 /// Hits, loops or both (the C# Length radio buttons).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -196,9 +197,11 @@ pub struct Filters {
     /// Only the sounds right in this folder (not in a folder inside it), as Rediscover's forgotten folders count them:
     /// one clicked there.
     pub folder: Option<String>,
-    /// Only sounds from these years, first to last: the years of the songs that use them when Used is on (and the
-    /// use counts are in), otherwise the year the file was added.
+    /// Only sounds from these years, first to last, by the date `date_by` says.
     pub years: Option<(i32, i32)>,
+    /// Which of a sound's dates the year strip goes by (Solomon, 13 Nov 2026). Not a filter the Clear chip takes off:
+    /// it stays as you set it ([`Filters::set_date_by`]).
+    pub date_by: DateBy,
     /// Hide duplicates: of sounds whose audio is exactly the same ([`mo_sounds::copies`]), only one shows, the one to
     /// keep of those the other filters let through ([`SoundList::set_copies`]). Not a filter the Clear chip takes off:
     /// it stays as you set it.
@@ -270,7 +273,6 @@ impl Filters {
     /// too: its years then mean something else (the years of the songs that use each sound, or the year each was
     /// added), so a span picked for one isn't kept for the other.
     pub fn toggle(&mut self, chip: &str) {
-        let by_use = self.used;
         match chip {
             "mix-well" => self.mix_well = !self.mix_well,
             "unused" => {
@@ -288,7 +290,12 @@ impl Filters {
             "folder" => self.folder = None,
             _ => {}
         }
-        if self.used != by_use {
+    }
+
+    /// The year strip goes by `date_by` from now on: the years picked by another date are let go.
+    pub fn set_date_by(&mut self, date_by: DateBy) {
+        if self.date_by != date_by {
+            self.date_by = date_by;
             self.years = None;
         }
     }
@@ -311,6 +318,7 @@ impl Filters {
             hide_copies: self.hide_copies,
             show_silent: self.show_silent,
             like_favourites: self.like_favourites,
+            date_by: self.date_by,
             ..Filters::default()
         }
     }
@@ -363,6 +371,9 @@ pub struct SoundList {
     /// How close each sound is to your favourites of its type, once worked out ([`SoundList::like_favourites_in`]):
     /// for the Favourites filter's sounds like them. Kept by [`SoundList::sharing`], as it's of the same sounds.
     like: Option<Arc<LikeFavourites>>,
+    /// When each sound's file was made and last opened, once read ([`crate::sound_dates::read`]): by sound id, so
+    /// kept by [`SoundList::sharing`] and [`SoundList::keep_file_dates_of`].
+    file_dates: Option<Arc<FileDates>>,
 }
 
 /// How close each sound of a list is to your favourites of its type ([`mo_sounds::near::reach`]), by place: how many
@@ -545,6 +556,7 @@ impl SoundList {
             copies: None,
             say: None,
             like: None,
+            file_dates: None,
         }
     }
 
@@ -560,6 +572,7 @@ impl SoundList {
             copies: self.copies.clone(),
             say: self.say.clone(),
             like: self.like.clone(),
+            file_dates: self.file_dates.clone(),
         }
     }
 
@@ -764,6 +777,38 @@ impl SoundList {
         if self.like.is_none() && self.shares_with(other) {
             self.like = other.like.clone();
         }
+    }
+
+    /// This list with when its sounds' files were made and last opened ([`crate::sound_dates::read`] on its sounds).
+    pub fn with_file_dates(&self, dates: Arc<FileDates>) -> SoundList {
+        let mut list = self.clone();
+        list.file_dates = Some(dates);
+        list
+    }
+
+    /// The file dates `other` knows, when it shares this list's sounds and this list doesn't know them yet.
+    pub fn keep_file_dates_of(&mut self, other: &SoundList) {
+        if self.file_dates.is_none() && self.shares_with(other) {
+            self.file_dates = other.file_dates.clone();
+        }
+    }
+
+    /// Whether this list knows when its sounds' files were made and last opened.
+    pub fn knows_file_dates(&self) -> bool {
+        self.file_dates.is_some()
+    }
+
+    /// The sound at `i`'s date by `by`, when it has a real one: a date still to come, or before 1981, is none. Made and
+    /// Opened are none until the files' dates are read; First used until the use counts are in.
+    pub fn date_of(&self, i: usize, by: DateBy) -> Option<NaiveDateTime> {
+        let s = self.shared.sounds.get(i)?;
+        let date = match by {
+            DateBy::Changed => Some(s.added),
+            DateBy::Made => self.file_dates.as_ref()?.made(s.id),
+            DateBy::Opened => self.file_dates.as_ref()?.opened(s.id),
+            DateBy::FirstUsed => self.used.as_ref()?.get(&s.id)?.first_used,
+        };
+        date.filter(|d| self.shared.dates.local(*d))
     }
 
     /// This list with `like` (from [`SoundList::like_favourites_in`] on a list sharing its sounds): the Favourites
@@ -1077,15 +1122,10 @@ impl SoundList {
         if t.folder.is_some_and(|folder| !rediscover::in_folder(&s.path, folder)) {
             return false;
         }
-        if let Some((first, last)) = t.years {
-            let within = |y: i32| y >= first && y <= last;
-            let ok = match (&self.used, t.used) {
-                (Some(used), true) => used.get(&s.id).is_some_and(|u| u.years.iter().any(|&y| within(y))),
-                _ => self.shared.dates.local(s.added) && within(s.added.year()),
-            };
-            if !ok {
-                return false;
-            }
+        if let Some((first, last)) = t.years
+            && !self.date_of(i, t.date_by).is_some_and(|d| (first..=last).contains(&d.year()))
+        {
+            return false;
         }
         if t.words.is_empty() {
             return true;
@@ -1096,25 +1136,13 @@ impl SoundList {
         t.words.iter().all(|w| hay.contains(w.as_str()))
     }
 
-    /// How many sounds there are in each year, newest first, as the year filter reads them: by the years of the songs
-    /// that use them when `by_use` (and the use counts are in), otherwise by the year each was added.
-    pub fn year_counts(&self, by_use: bool) -> Vec<(i32, usize)> {
+    /// How many sounds there are in each year, newest first, as the year filter reads them: by the date `by` says. A
+    /// sound with no real date by it is in no year.
+    pub fn year_counts(&self, by: DateBy) -> Vec<(i32, usize)> {
         let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
-        match (&self.used, by_use) {
-            (Some(used), true) => {
-                for s in self.shared.sounds.iter() {
-                    let mut years = used.get(&s.id).map(|u| u.years.clone()).unwrap_or_default();
-                    years.dedup();
-                    for y in years {
-                        *counts.entry(y).or_default() += 1;
-                    }
-                }
-            }
-            _ => {
-                // A date that isn't real is in no year.
-                for s in self.shared.sounds.iter().filter(|s| self.shared.dates.local(s.added)) {
-                    *counts.entry(s.added.year()).or_default() += 1;
-                }
+        for i in 0..self.shared.sounds.len() {
+            if let Some(d) = self.date_of(i, by) {
+                *counts.entry(d.year()).or_default() += 1;
             }
         }
         crate::year_strip::strip(counts)
@@ -1180,6 +1208,7 @@ struct Test<'a> {
     /// The lowest and highest tempo let through.
     tempo: (Option<f64>, Option<f64>),
     years: Option<(i32, i32)>,
+    date_by: DateBy,
     folder: Option<&'a str>,
     words: Vec<String>,
     show_silent: bool,
@@ -1212,6 +1241,7 @@ impl<'a> Test<'a> {
             keys,
             tempo: f.tempo,
             years: f.years,
+            date_by: f.date_by,
             folder: f.folder.as_deref(),
             words: f.search.split_whitespace().map(str::to_lowercase).collect(),
             show_silent: f.show_silent,
@@ -1498,6 +1528,10 @@ fn key_order(s: &Sound) -> i32 {
 
 /// The setting Hide duplicates is kept in, in the app's own settings ("on" or "off").
 pub const HIDE_COPIES_KEY: &str = "sounds_hide_duplicates";
+
+/// The setting the date the year strip goes by is kept in, in the app's own settings: its name
+/// ([`DateBy::name`]).
+pub const YEARS_BY_KEY: &str = "sounds_years_by";
 
 /// The setting Hide silent sounds is kept in, in the app's own settings ("on" or "off"): on until you turn it off.
 pub const HIDE_SILENT_KEY: &str = "sounds_hide_silent";
@@ -2214,49 +2248,54 @@ mod tests {
     }
 
     #[test]
-    fn the_year_filter_reads_the_added_year_or_the_songs_years() {
+    fn the_year_filter_goes_by_the_date_picked() {
         let year = |y: i32| NaiveDate::from_ymd_opt(y, 6, 1).and_then(|d| d.and_hms_opt(0, 0, 0)).unwrap();
         let mut sounds: Vec<Sound> = (1..=4).map(|i| sound(i, &format!(r"I:\S\{i}.wav"), "Kick", None)).collect();
         for (s, y) in sounds.iter_mut().zip([2019, 2021, 2021, 2024]) {
             s.added = year(y);
         }
         let mut list = SoundList::new(sounds);
-        assert_eq!(list.year_counts(false), [(2024, 1), (2021, 2), (2019, 1)]);
+        assert_eq!(list.year_counts(DateBy::Changed), [(2024, 1), (2021, 2), (2019, 1)]);
         let by = |list: &SoundList, f: Filters| ids(list, &list.view(&f, Order::Newest, 0));
         assert_eq!(by(&list, Filters { years: Some((2020, 2023)), ..Filters::default() }), [2, 3]);
-        // With Used on, the songs' years count instead.
-        let used = |years: Vec<i32>| Usage { projects: years.len() as u32, recent: 0, years, ..Usage::default() };
-        list.set_used(HashMap::from([(1, used(vec![2025, 2026])), (4, used(vec![2020]))]));
-        assert_eq!(list.year_counts(true), [(2026, 1), (2025, 1), (2020, 1)]);
-        let used_then = Filters { used: true, years: Some((2025, 2026)), ..Filters::default() };
-        assert_eq!(by(&list, used_then), [1]);
+        // First used: none until the use counts are in, then each used sound once, by its first use (not by every year
+        // a song that has it was saved in).
+        assert!(list.year_counts(DateBy::FirstUsed).is_empty());
+        let used = |years: Vec<i32>| Usage {
+            projects: years.len() as u32,
+            first_used: years.first().map(|&y| year(y)),
+            years,
+            ..Usage::default()
+        };
+        list.set_used(HashMap::from([(1, used(vec![2020, 2026])), (4, used(vec![2025]))]));
+        assert_eq!(list.year_counts(DateBy::FirstUsed), [(2025, 1), (2020, 1)]);
+        let first_used = Filters { date_by: DateBy::FirstUsed, years: Some((2020, 2020)), ..Filters::default() };
+        assert_eq!(by(&list, first_used), [1]);
+        // Made and Opened, once the files' dates are read.
+        assert!(list.year_counts(DateBy::Made).is_empty());
+        let mut dates = FileDates::default();
+        dates.set(2, Some(year(2022)), Some(year(2026)));
+        dates.set(3, None, Some(year(2026)));
+        let list = list.with_file_dates(Arc::new(dates));
+        assert_eq!(list.year_counts(DateBy::Made), [(2022, 1)]);
+        assert_eq!(list.year_counts(DateBy::Opened), [(2026, 2)]);
+        let opened = Filters { date_by: DateBy::Opened, years: Some((2026, 2026)), ..Filters::default() };
+        assert_eq!(by(&list, opened), [2, 3]);
     }
 
     #[test]
-    fn turning_used_on_or_off_lets_go_of_the_years_picked() {
-        let picked = Filters { years: Some((2020, 2022)), ..Filters::default() };
-        // Used on: the strip counts the songs' years now, so years picked from the years added go.
-        let mut f = picked.clone();
+    fn picking_another_date_lets_the_picked_years_go_and_clear_keeps_it() {
+        let mut f = Filters { years: Some((2020, 2021)), ..Filters::default() };
+        f.set_date_by(DateBy::Changed);
+        assert_eq!(f.years, Some((2020, 2021)));
+        f.set_date_by(DateBy::FirstUsed);
+        assert_eq!(f.years, None);
+        // Used on or off keeps them now: the years no longer change their meaning with it.
+        f.years = Some((2020, 2021));
         f.toggle("used");
-        assert!(f.used);
-        assert_eq!(f.years, None);
-        // And off again: years picked from the songs' years go too.
-        f.years = Some((2025, 2026));
-        f.toggle("used");
-        assert!(!f.used);
-        assert_eq!(f.years, None);
-        // Unused on turns Used off, so it lets go of them as well.
-        let mut f = Filters { used: true, ..picked.clone() };
-        f.toggle("unused");
-        assert!(f.unused && !f.used);
-        assert_eq!(f.years, None);
-        // Unused with Used off and the other chips keep them: the strip still reads the years added.
-        let mut f = picked.clone();
-        for chip in ["unused", "mix-well", "favourites", "unused", "no such chip"] {
-            f.toggle(chip);
-        }
-        assert!(!f.unused && !f.used && f.mix_well && f.favourites);
-        assert_eq!(f.years, Some((2020, 2022)));
+        assert_eq!(f.years, Some((2020, 2021)));
+        assert_eq!(f.cleared().date_by, DateBy::FirstUsed);
+        assert!(!Filters { date_by: DateBy::Made, ..Filters::default() }.any());
     }
 
     #[test]
@@ -2863,7 +2902,7 @@ mod tests {
         list.turn_round(&mut oldest, Order::Newest);
         assert_eq!(ids(&list, &oldest), vec![2, 4, 3, 1]);
         // It's in no year: not on the strip, and no span of years lets it through.
-        assert_eq!(list.year_counts(false), [(2024, 1), (2019, 1)]);
+        assert_eq!(list.year_counts(DateBy::Changed), [(2024, 1), (2019, 1)]);
         let every_year = Filters { years: Some((1, 9999)), ..Filters::default() };
         assert_eq!(ids(&list, &list.view(&every_year, Order::Newest, 0)), vec![4, 2]);
 

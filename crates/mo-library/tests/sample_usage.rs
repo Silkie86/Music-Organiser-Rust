@@ -107,3 +107,18 @@ fn an_older_library_without_unplayed_counts_everything() {
         assert_eq!(by_name(&uses, "pad.wav").0, 2);
     }
 }
+
+#[test]
+fn a_samples_first_use_compares_the_saves_of_one_song() {
+    use chrono::Datelike;
+    let lib = Library::open_read_only(&make("first-use.db", true)).unwrap();
+    let uses = lib.sample_usage(since(), UsageRules::default()).unwrap();
+    let first = |name: &str| {
+        uses.iter().find(|u| u.path.to_lowercase().ends_with(name)).and_then(|u| u.first_used).map(|d| d.year())
+    };
+    // The kick is in Song's first save (2020) and its newer save (2025): it's dated by the first.
+    assert_eq!(first("kick.wav"), Some(2020));
+    // The snare is only in the newer save: put in later, so it's dated by that save.
+    assert_eq!(first("snare.wav"), Some(2025));
+    assert_eq!(first("pad.wav"), Some(2020));
+}

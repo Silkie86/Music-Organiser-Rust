@@ -1898,6 +1898,11 @@ fn sounds_shots(
     capture(window);
     shots.push(("sounds-years.png".into(), capture(window)));
     data.invoke_years_cleared();
+    // The strip going by when each sound was first used in a song, not when its file was changed.
+    data.invoke_years_by_picked("First used".into());
+    capture(window);
+    shots.push(("sounds-years-first-used.png".into(), capture(window)));
+    data.invoke_years_by_picked("Changed".into());
     data.invoke_pick_view(3);
     shots.push(("sounds-history.png".into(), capture(window)));
     data.invoke_close_panel();
@@ -2897,7 +2902,19 @@ fn sample_sounds() -> mo_ui::sounds::Library {
             // Which of the made-up projects below: each a different one.
             let mut project_ids: Vec<i64> = (0..i64::from(projects)).map(|n| (id * 3 + n) % 12).collect();
             project_ids.sort_unstable();
-            (id, mo_sounds::usage::Usage { projects, recent: projects / 2, years: vec![2025, 2026], project_ids })
+            // First used a year or so apart, back to 2019.
+            let first_used =
+                chrono::NaiveDate::from_ymd_opt(2019 + (id % 8) as i32, 3, 1).and_then(|d| d.and_hms_opt(12, 0, 0));
+            (
+                id,
+                mo_sounds::usage::Usage {
+                    projects,
+                    recent: projects / 2,
+                    years: vec![2025, 2026],
+                    project_ids,
+                    first_used,
+                },
+            )
         })
         .filter(|(_, u)| u.projects > 0)
         .collect();

@@ -569,11 +569,20 @@ impl Library {
 
         // A sound muted in a song's newest save doesn't count for that song at all: its older saves (and copies of
         // them elsewhere) are left out too.
+        let real = RealDates::now();
+        let leave_muted_out = rules.not_muted_in_newest && has_unplayed;
+        // The saves as songs, read once: for the songs' newest saves, and to date each sample's first use by. When
+        // only the first uses need them, saves that can't be read leave the samples undated, not uncounted.
+        let songs = match self.saves().and_then(|saves| Ok((saves, self.song_choices()?))) {
+            Ok((saves, choices)) => crate::songs::group_songs(&saves, &choices, &real),
+            Err(e) if leave_muted_out => return Err(e),
+            Err(_) => Vec::new(),
+        };
+        let first_uses = crate::first_use::FirstUses::new(&songs, &real);
         let mut newest: HashMap<i64, i64> = HashMap::new();
         let mut muted: HashSet<(i64, String)> = HashSet::new();
-        if rules.not_muted_in_newest && has_unplayed {
-            let saves = self.saves()?;
-            for song in crate::songs::group_songs(&saves, &self.song_choices()?, &RealDates::now()) {
+        if leave_muted_out {
+            for song in &songs {
                 for save in song.older.iter().chain(&song.copies).chain([&song.latest]) {
                     newest.insert(save.id, song.latest.id);
                 }
@@ -641,6 +650,7 @@ impl Library {
             .map(|mut g| {
                 g.years.sort_unstable();
                 g.years.dedup();
+                let first_used = first_uses.of(&g.projects);
                 let mut project_ids: Vec<i64> = g.projects.into_iter().collect();
                 project_ids.sort_unstable();
                 SampleUse {
@@ -649,6 +659,7 @@ impl Library {
                     recent: g.recent,
                     years: g.years,
                     project_ids,
+                    first_used,
                 }
             })
             .collect();
@@ -696,6 +707,9 @@ pub struct SampleUse {
     pub years: Vec<i32>,
     /// The projects themselves, by id, smallest first.
     pub project_ids: Vec<i64>,
+    /// When you first used it in a song, comparing each song's saves ([`crate::first_use`]): a newer save of an old
+    /// song doesn't make it newer. None when no save that has it has a real date. Local time.
+    pub first_used: Option<NaiveDateTime>,
 }
 
 /// The C# app's list query: each save's own columns (as many as this library has, leaving out `info`) with its

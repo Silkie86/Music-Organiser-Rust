@@ -44,6 +44,7 @@ pub mod song_library;
 pub mod song_panel;
 pub mod song_room;
 pub mod songs;
+pub mod sound_dates;
 pub mod sound_library;
 pub mod sound_notes;
 pub mod sound_scan;
