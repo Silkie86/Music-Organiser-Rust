@@ -176,10 +176,44 @@ pub fn shape_folders(documents: Option<&Path>, home: Option<&Path>) -> Vec<PathB
     out
 }
 
-/// The plugins' shape files under `roots` ([`shape_folders`]): Serum's `.XferShape` and `.shp`, and LFOTool's presets
-/// (`.fxp`). Asks the disk, so never on the window's thread.
+/// Where Vital keeps its shapes and presets: the data folder its settings name (`Vital.config`'s `data_directory`, as
+/// when it's been moved to another drive), else its own start, `Documents\Vital` (`~/Music/Vital` on a Mac too). The
+/// settings are looked for in `app_data` (`%APPDATA%` on Windows) and a Mac's and Linux's places under `home`. Only
+/// the folders that are there, each once. Asks the disk, so never on the window's thread.
+pub fn vital_folders(documents: Option<&Path>, home: Option<&Path>, app_data: Option<&Path>) -> Vec<PathBuf> {
+    let mut configs: Vec<PathBuf> = app_data.map(|a| a.join("vital")).into_iter().collect();
+    if let Some(h) = home {
+        configs.push(h.join("Library").join("Application Support").join("vital"));
+        configs.push(h.join(".local").join("share").join("vital"));
+    }
+    let mut wanted: Vec<PathBuf> = configs
+        .iter()
+        .filter_map(|c| std::fs::read(c.join("Vital.config")).ok())
+        .filter_map(|raw| vital_data_directory(&raw))
+        .collect();
+    wanted.extend(documents.map(|d| d.join("Vital")));
+    wanted.extend(home.map(|h| h.join("Music").join("Vital")));
+    let mut out: Vec<PathBuf> = Vec::new();
+    for f in wanted {
+        if f.is_dir() && !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+/// The data folder Vital's settings file (`Vital.config`, JSON) names, if it names one.
+fn vital_data_directory(raw: &[u8]) -> Option<PathBuf> {
+    let json: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    let dir = json.get("data_directory")?.as_str()?.trim();
+    (!dir.is_empty()).then(|| PathBuf::from(dir))
+}
+
+/// The plugins' shape files under `roots` ([`shape_folders`], [`vital_folders`]): Serum's `.XferShape` and `.shp`,
+/// LFOTool's presets (`.fxp`), and Vital's `.vitallfo` and presets (`.vital`). Asks the disk, so never on the window's
+/// thread.
 pub fn shape_files(roots: &[PathBuf]) -> Vec<String> {
-    files_ending(roots, mo_formats::serum::is_shape_file)
+    files_ending(roots, |name| mo_formats::serum::is_shape_file(name) || mo_formats::vital::is_shape_file(name))
 }
 
 /// The files under `roots` whose name (in small letters) `wanted` takes, sorted, each folder once (a link back up isn't
@@ -2319,6 +2353,35 @@ mod tests {
         libraries.sources.extend(shape.sources.iter().cloned());
         assert_eq!(found_words(&libraries), "In Bitwig's library and plugin shapes");
         assert!(!curve_offers(&c, false)[0].enabled, "no Bitwig folder, nowhere to save it");
+    }
+
+    #[test]
+    fn vitals_folders_are_its_settings_data_folder_and_its_own_start() {
+        let root = std::env::temp_dir().join(format!("mo-vital-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (docs, app_data, moved) =
+            (root.join("Documents"), root.join("AppData"), root.join("Plugin Data").join("Vital"));
+        let start = docs.join("Vital");
+        for d in [&start, &moved, &app_data.join("vital")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        assert_eq!(vital_folders(Some(&docs), None, Some(&app_data)), std::slice::from_ref(&start), "no settings yet");
+        let config = serde_json::json!({ "data_directory": moved.to_string_lossy() }).to_string();
+        std::fs::write(app_data.join("vital").join("Vital.config"), config).unwrap();
+        assert_eq!(vital_folders(Some(&docs), None, Some(&app_data)), [moved.clone(), start.clone()]);
+        std::fs::write(moved.join("Wob.vital"), b"").unwrap();
+        std::fs::write(moved.join("Saw.vitallfo"), b"").unwrap();
+        std::fs::write(moved.join("Pad.wav"), b"").unwrap();
+        let mut names: Vec<String> = shape_files(std::slice::from_ref(&moved))
+            .iter()
+            .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Saw.vitallfo", "Wob.vital"]);
+        assert_eq!(vital_data_directory(br#"{"data_directory":"  "}"#), None);
+        assert_eq!(vital_data_directory(b"not json"), None);
+        assert_eq!(vital_folders(None, None, None), Vec::<PathBuf>::new());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
