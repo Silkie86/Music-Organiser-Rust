@@ -547,6 +547,8 @@ struct Shown {
     carried: Cell<Option<Carried>>,
     /// The last take Record saved, shown as a line to hear and drag out.
     recorded: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// The number of the newest chord Chord check read that the panel shows ([`crate::chordcheck::Checker::newest`]).
+    chords_seen: Cell<u64>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
     /// The line last clicked to play: its row, its sound and its file.
@@ -613,6 +615,7 @@ impl Shown {
             presets: presets_tab::PresetsTab::new(),
             carried: Cell::new(None),
             recorded: Rc::default(),
+            chords_seen: Cell::new(u64::MAX),
             playing: Cell::new(None),
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
@@ -946,24 +949,24 @@ impl Shown {
         }
     }
 
-    /// Chord check: the Thru switch, and what was heard while the panel was shut.
+    /// Chord check: the Thru switch, and the newest chord read (while the panel was shut too).
     fn fill_in_chords(&self) {
         let chords = &self.instance.chords;
         self.panel.set_chord_thru(chords.thru.load(Ordering::Acquire));
         let chords_ = Arc::clone(chords);
         self.panel.on_chord_thru_changed(move |on| chords_.thru.store(on, Ordering::Release));
-        self.panel.set_chord_line("No keys held".into());
-        self.panel.set_chord_sure("Play a chord into the plugin".into());
+        self.chords_seen.set(u64::MAX);
+        self.chords_said();
     }
 
     /// The newest chord Chord check read, when there's a new one.
     fn chords_said(&self) {
-        let Some(heard) = lock(&self.instance.chords.heard).take() else { return };
+        let Some((number, heard)) = self.instance.chords.newest(self.chords_seen.get()) else { return };
+        self.chords_seen.set(number);
         let panel = &self.panel;
         panel.set_chord_name(heard.name.clone().unwrap_or_default().into());
-        panel.set_chord_sure(
-            if heard.name.is_some() { heard.sure.words() } else { "Play a chord into the plugin" }.into(),
-        );
+        let sure = if heard.name.is_some() { heard.sure.words() } else { "Play a chord into the plugin" };
+        panel.set_chord_sure(sure.into());
         panel.set_chord_line(heard.line().into());
         let strip: Vec<ChordBox> = heard
             .strip

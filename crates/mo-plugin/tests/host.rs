@@ -267,8 +267,8 @@ fn a_preset_that_isnt_the_plugins_doesnt_load() {
     assert!(load.load_from_location(handle, Location::File { path: c"/a.wav" }, None).is_err());
 }
 
-/// Chord check's Thru: notes played in (CLAP's own and MIDI 1.0) go on out of the note output, in the order of their
-/// place in the block, and the plugin stays silent.
+/// Chord check's Thru: what's played in (CLAP's own notes and MIDI 1.0) goes on out of the note output as it came, in
+/// the order of its place in the block, and the plugin stays silent.
 #[test]
 fn notes_played_in_go_on_out() {
     use clack_host::events::event_types::{MidiEvent, NoteOnEvent};
@@ -296,6 +296,11 @@ fn notes_played_in_go_on_out() {
         .filter_map(|e| match e.as_core_event() {
             Some(CoreEventSpace::NoteOn(n)) => {
                 Some((n.header().time(), *n.channel().as_specific()?, *n.key().as_specific()?))
+            }
+            // MIDI goes on as it came.
+            Some(CoreEventSpace::Midi(m)) => {
+                let [status, key, _] = m.data();
+                Some((m.header().time(), u16::from(status & 0x0F), u16::from(key)))
             }
             _ => None,
         })

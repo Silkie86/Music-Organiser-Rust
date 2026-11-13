@@ -467,33 +467,32 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
             // More frames than the DAW said it would ever ask for: the rest stays quiet.
             only[len..].fill(0.0);
         }
-        // A part's notes going out (Send MIDI) and the notes played in passed on (Thru), after the knobs' changes
-        // (all at the block's start), in the order of their place in the block: the DAW wants them in order.
-        let (mut sent, mut thru) = (self.playing.sent().iter().peekable(), self.catch.thru().iter().peekable());
+        // A part's notes going out (Send MIDI) and what was played in passed on as it came (Thru), after the knobs'
+        // changes (all at the block's start), in the order of their place in the block: the DAW wants them in order.
+        let mut sent = self.playing.sent().iter().peekable();
+        let mut played = events.input.iter().filter(|e| self.catch.passes(e)).peekable();
         loop {
             use clack_plugin::events::event_types::{NoteOffEvent, NoteOnEvent};
             use clack_plugin::events::{Match, Pckn};
-            let sent_first = match (sent.peek(), thru.peek()) {
-                (Some(s), Some(t)) => s.offset <= t.offset,
+            // No room left in the DAW's list: the rest go with nothing said (the DAW's list is far bigger than a
+            // block's notes).
+            let sent_first = match (sent.peek(), played.peek()) {
+                (Some(s), Some(p)) => s.offset <= p.header().time(),
                 (Some(_), None) => true,
                 (None, Some(_)) => false,
                 (None, None) => break,
             };
-            let (offset, channel, key, velocity, on) = if sent_first {
-                let Some(n) = sent.next() else { break };
-                (n.offset, 0u16, n.key, n.velocity, n.on)
-            } else {
-                let Some(n) = thru.next() else { break };
-                (n.offset, n.channel, n.key, n.velocity, n.on)
-            };
-            let at = Pckn::new(0u16, channel, u16::from(key), Match::<u32>::All);
-            // No room left in the DAW's list: the rest go with nothing said (the DAW's list is far bigger than a
-            // block's notes).
-            let _ = if on {
-                events.output.try_push(NoteOnEvent::new(offset, at, velocity))
-            } else {
-                events.output.try_push(NoteOffEvent::new(offset, at, velocity))
-            };
+            if sent_first {
+                let Some(note) = sent.next() else { break };
+                let at = Pckn::new(0u16, 0u16, u16::from(note.key), Match::<u32>::All);
+                let _ = if note.on {
+                    events.output.try_push(NoteOnEvent::new(note.offset, at, note.velocity))
+                } else {
+                    events.output.try_push(NoteOffEvent::new(note.offset, at, note.velocity))
+                };
+            } else if let Some(event) = played.next() {
+                let _ = events.output.try_push(event);
+            }
         }
         // Always on: a pick can start playing at any moment.
         Ok(ProcessStatus::Continue)
