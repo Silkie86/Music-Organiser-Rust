@@ -238,6 +238,8 @@ export component Panel inherits Window {
     in property <string> record-from;
     in property <bool> recording;
     in property <string> record-said;
+    // Listen: what the plugin hears at its input (the notes the track plays most, the hits' tempo), in words.
+    in property <string> hears;
     // The last take saved, by its file name ("" for none), dragged out like a sound; `recorded-carried` while it is.
     in property <string> recorded-name;
     in property <bool> recorded-carried;
@@ -641,6 +643,12 @@ export component Panel inherits Window {
                             overflow: elide;
                         }
                     }
+                }
+                if root.hears != "": Text {
+                    text: root.hears;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    overflow: elide;
                 }
                 HorizontalLayout {
                     spacing: Space.md;

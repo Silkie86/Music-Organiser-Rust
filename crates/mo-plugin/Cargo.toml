@@ -62,6 +62,10 @@ mo-audio = { path = "../mo-audio", default-features = false, features = ["gm", "
 mo-catch = { path = "../mo-catch" }
 # A MIDI part's notes, as the index hands them.
 mo-formats = { path = "../mo-formats" }
+# Note names for what Listen hears.
+mo-harmony = { path = "../mo-harmony" }
+# Listening to the plugin's input: the notes heard, bar by bar, and the hits' tempo (`listen.rs`).
+mo-listen = { path = "../mo-listen" }
 # The app's MIDI index, read-only, for the MIDI tab.
 mo-midi = { path = "../mo-midi" }
 # The library's saves (read-only), whose Bitwig folders the Presets tab looks in.
