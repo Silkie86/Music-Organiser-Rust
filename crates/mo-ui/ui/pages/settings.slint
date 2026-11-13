@@ -138,6 +138,10 @@ export global SettingsData {
     in property <bool> daws-checking;
     in property <string> daws-note;
     callback check-daws();
+    // The background helper: whether it's wanted, and how it's doing, in words.
+    in property <bool> helper-on;
+    in property <string> helper-note;
+    callback toggle-helper();
     // What the last Install did; whether one is running now.
     in property <string> daws-message;
     in property <bool> daws-installing;
@@ -867,6 +871,24 @@ component DawsTab inherits VerticalLayout {
                 tip: "Pick another of Bitwig's Library folders (the one with Multisamples, Wavetables and Presets in it), an old one on another drive say. Space's Bitwig copies and Fix look in it too.";
                 clicked => { SettingsData.add-bitwig-library(); }
             }
+        }
+    }
+    SettingsCard {
+        title: "Background helper";
+        intro: "A small part of the app that starts when you log in to Windows and stays by the clock as a dot (green when Bitwig is connected). It keeps the live link to Bitwig, so the plugins can use it with the app closed, and the app has less to do when it opens. It's built to stay light: no window, no lists in memory, low priority. Right-click the dot to pause or quit it. Turning this off quits it and takes it out of Windows' startup list.";
+        HorizontalLayout {
+            alignment: start;
+            ToggleChip {
+                text: "Keep the helper running";
+                on: SettingsData.helper-on;
+                clicked => { SettingsData.toggle-helper(); }
+            }
+        }
+        if SettingsData.helper-note != "": Text {
+            text: SettingsData.helper-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
         }
     }
 }

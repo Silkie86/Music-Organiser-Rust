@@ -50,6 +50,10 @@ pub struct Hello {
     pub helper: String,
     /// Its process id.
     pub pid: u32,
+    /// The program it runs from (the launcher puts each build in a folder of its own), so the app can tell a helper
+    /// left from an older build. Empty when it can't be told.
+    #[serde(default)]
+    pub exe: String,
     /// Whether it has Bitwig, in words ([`bitwig_words`]).
     pub bitwig: String,
     /// Whether watching is paused (from the tray icon).
@@ -109,6 +113,7 @@ impl Helper {
         Hello {
             helper: crate::version::version(),
             pid: std::process::id(),
+            exe: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
             bitwig: bitwig_words(self.bitwig().as_ref()),
             paused: self.paused(),
         }

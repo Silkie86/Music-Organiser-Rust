@@ -190,6 +190,11 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     let start_output = setup.settings.get(SOUND_OUTPUT_KEY).filter(|s| !s.is_empty()).map(str::to_owned);
     crate::sounds::choose_output(start_output);
     crate::sounds::hold_sweeps(sweep_hold(&setup.settings));
+    // The background helper, when it's wanted: this build's, running, and in the startup list (never for the
+    // screenshots' made-up app).
+    if setup.live && mo_app::helper_start::wanted(&setup.settings) {
+        apply_helper(true, app.as_weak());
+    }
     crate::midi::smallest_part(None, smallest_part(&setup.settings));
     PAGE.with(|p| {
         *p.borrow_mut() = Some(Page {
@@ -462,6 +467,21 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         }
     });
     let weak = app.as_weak();
+    data.on_toggle_helper(move || {
+        let on = !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| mo_app::helper_start::wanted(&p.settings)));
+        // The screenshots' made-up app starts nothing: there the chip only changes.
+        let real = PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live));
+        change(mo_app::helper_start::KEY, if on { "1" } else { "0" });
+        if let Some(app) = weak.upgrade() {
+            let data = app.global::<SettingsData>();
+            data.set_helper_on(on);
+            data.set_helper_note(if on { "Starting the helper\u{2026}" } else { "Stopping the helper\u{2026}" }.into());
+        }
+        if real {
+            apply_helper(on, weak.clone());
+        }
+    });
+    let weak = app.as_weak();
     data.on_smallest_picked(move |i| {
         let Some(&notes) = usize::try_from(i).ok().and_then(|i| SMALLEST_PART_CHOICES.get(i)) else { return };
         change(SMALLEST_PART_KEY, &notes.to_string());
@@ -591,6 +611,17 @@ fn strings<S: Into<SharedString>>(items: impl IntoIterator<Item = S>) -> ModelRc
 /// The MIDI page's smallest part, in notes (3 unless picked).
 pub fn smallest_part(settings: &AppSettings) -> usize {
     mo_app::midi::smallest_part_from(settings.get(SMALLEST_PART_KEY))
+}
+
+/// Starts or stops the background helper as chosen, and puts how it went under the choice in Settings.
+fn apply_helper(on: bool, weak: slint::Weak<AppWindow>) {
+    crate::helper::apply(on, move |line| {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.global::<SettingsData>().set_helper_note(line.into());
+            }
+        });
+    });
 }
 
 /// Whether a Galaxy sweep holds the pointer to the star that's playing (off unless turned on).
@@ -1461,6 +1492,7 @@ fn show(app: &AppWindow) {
         data.set_pace(Pace::ALL.iter().position(|x| *x == pace).unwrap_or(2) as i32);
         data.set_pace_note(page::pace_note(pace, p.running_pace, background::cores()).into());
         data.set_sweep_hold(sweep_hold(s));
+        data.set_helper_on(mo_app::helper_start::wanted(s));
         let smallest = smallest_part(s);
         data.set_smallest_index(mo_app::midi::smallest_part_index(smallest) as i32);
         data.set_outputs(strings(p.outputs.labels.iter().cloned()));
