@@ -16,9 +16,10 @@
 //!   For these, a line is taken from the picture when there is one (an S is split at its middle into two bent
 //!   halves); without one, an S is drawn as two halves bent a fixed amount and the others as `shape` 0.
 //! - `curveAux` (Duck 2 only) changes nothing for `shape` 0.
-//! - A Duck 2 preset keeps one envelope for each band of its crossover (`Duck2EnvelopeData`); bands 2 and 3 are only
-//!   its own when the bands are unlinked and the crossover is on. Its `MultipointEnvelopeData __id="curve"` is left
+//! - A Duck 2 preset keeps one envelope for each band of its crossover (`Duck2EnvelopeData`, always three); band 2
+//!   (and 3, when `crossover3Bands` is 1) is only its own when the bands are unlinked and the crossover is on. Its `MultipointEnvelopeData __id="curve"` is left
 //!   over from Duck 1 and isn't read. A Duck 1 preset has just that one, with no picture.
+//! - `<lfoSettings start end offset/>` has been 0, 1 and 0 in every file seen, so it isn't used.
 
 use crate::serum::{Shape, closed_with};
 
@@ -57,9 +58,14 @@ pub fn read(path: &str, raw: &[u8]) -> Vec<Shape> {
     }
     let Some(data) = root.children().find(|c| c.has_tag_name("data")) else { return Vec::new() };
     let duck2 = data.children().find(|c| c.has_tag_name("Duck2EnvelopeData"));
-    if let Some(bands) = duck2.and_then(|d| d.children().find(|c| c.has_tag_name("MultibandEnvelopeData"))) {
-        let used = if bands_unlinked(root) { 3 } else { 1 };
-        envelopes(bands).take(used).enumerate().filter_map(|(i, e)| envelope(e, format!("Band {}", i + 1))).collect()
+    if let Some(duck2) = duck2 {
+        // Duck 2's own envelopes only: the Duck 1 one beside them is a leftover.
+        let Some(bands) = duck2.children().find(|c| c.has_tag_name("MultibandEnvelopeData")) else { return Vec::new() };
+        envelopes(bands)
+            .take(bands_used(root))
+            .enumerate()
+            .filter_map(|(i, e)| envelope(e, format!("Band {}", i + 1)))
+            .collect()
     } else {
         envelopes(data)
             .find(|e| e.attribute("__id") == Some("curve"))
@@ -69,11 +75,13 @@ pub fn read(path: &str, raw: &[u8]) -> Vec<Shape> {
     }
 }
 
-/// Whether a file's name says it may hold Duck shapes ([`read`]): a `.dmlfo`, or a `.preset` in a `DeviousMachines`
-/// folder (other plugins name their presets `.preset` too).
+/// Whether a file's name says it may hold Duck shapes ([`read`]): a `.dmlfo`, or a `.preset` in Duck's own folder
+/// (`DeviousMachines/Duck` or `Duck 2`: other plugins, Devious Machines' own among them, name theirs `.preset` too).
 pub fn is_shape_file(path: &str) -> bool {
     let lower = path.to_lowercase().replace('\\', "/");
-    lower.ends_with(".dmlfo") || (lower.ends_with(".preset") && lower.contains("/deviousmachines/"))
+    lower.ends_with(".dmlfo")
+        || (lower.ends_with(".preset")
+            && (lower.contains("/deviousmachines/duck/") || lower.contains("/deviousmachines/duck 2/")))
 }
 
 /// The envelopes right inside `n`.
@@ -81,18 +89,22 @@ fn envelopes<'a, 'i>(n: roxmltree::Node<'a, 'i>) -> impl Iterator<Item = roxmltr
     n.children().filter(|c| c.has_tag_name("MultipointEnvelopeData"))
 }
 
-/// Whether a Duck 2 preset's bands each have their own envelope: unlinked, with the crossover on.
-fn bands_unlinked(state: roxmltree::Node) -> bool {
-    let param = |id: &str| {
-        state
-            .descendants()
-            .find(|n| n.has_tag_name("PARAM") && n.attribute("id") == Some(id))
-            .and_then(|n| n.attribute("value")?.parse::<f64>().ok())
-    };
-    let unlinked =
-        state.descendants().find(|n| n.attribute("__id") == Some("unlinkEnvelopes")).and_then(|n| n.attribute("value"))
-            == Some("1");
-    unlinked && param("crossoverMode").is_some_and(|m| m != 0.0)
+/// How many of a Duck 2 preset's band envelopes it plays: one when they're linked (every band plays the first) or the
+/// crossover is off, else two, or three when it's split three ways (`crossover3Bands`).
+fn bands_used(state: roxmltree::Node) -> usize {
+    let data =
+        |id: &str| state.descendants().find(|n| n.attribute("__id") == Some(id)).and_then(|n| n.attribute("value"));
+    let crossover = state
+        .descendants()
+        .find(|n| n.has_tag_name("PARAM") && n.attribute("id") == Some("crossoverMode"))
+        .and_then(|n| n.attribute("value")?.parse::<f64>().ok());
+    if data("unlinkEnvelopes") != Some("1") || crossover.is_none_or(|m| m == 0.0) {
+        1
+    } else if data("crossover3Bands") == Some("1") {
+        3
+    } else {
+        2
+    }
 }
 
 /// One point of Duck's.
@@ -205,7 +217,7 @@ fn bend(curve: f64) -> f64 {
 
 /// The picture's value at `x` (0 to 1), between its two nearest values.
 fn sample(picture: &[f32], x: f64) -> Option<f64> {
-    let at = (x.clamp(0.0, 1.0) * (THUMBNAIL_VALUES - 1) as f64).max(0.0);
+    let at = x.clamp(0.0, 1.0) * (THUMBNAIL_VALUES - 1) as f64;
     let (i, frac) = (at.floor() as usize, at.fract());
     let a = f64::from(*picture.get(i)?);
     let b = picture.get(i + 1).map_or(a, |v| f64::from(*v));
@@ -233,7 +245,9 @@ fn base64(text: &str) -> Option<Vec<u8>> {
             _ => return None,
         } as u32)
     };
-    let body = text.trim().trim_end_matches('=').as_bytes();
+    // Line breaks and spaces are passed over, as some writers wrap it.
+    let text: Vec<u8> = text.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
+    let body = text.strip_suffix(b"==").or_else(|| text.strip_suffix(b"=")).unwrap_or(&text);
     let mut out = Vec::with_capacity(body.len() * 3 / 4);
     for chunk in body.chunks(4) {
         if chunk.len() == 1 {
@@ -347,7 +361,7 @@ mod tests {
         let duck2 = |unlink: &str, crossover: &str| {
             format!(
                 r#"<state><parameters><PARAM id="crossoverMode" value="{crossover}"/></parameters><data>
-                <unlinkEnvelopes value="{unlink}" __id="unlinkEnvelopes"/>
+                <unlinkEnvelopes value="{unlink}" __id="unlinkEnvelopes"/><crossover3Bands value="1" __id="crossover3Bands"/>
                 <Duck2EnvelopeData teamIndex="0" __id="envelopeData"><MultibandEnvelopeData>{}{}{}</MultibandEnvelopeData>
                 </Duck2EnvelopeData>{}</data></state>"#,
                 env("0.0"),
@@ -365,6 +379,15 @@ mod tests {
         assert_eq!(parts(duck2("1", "1.0")), ["Band 1", "Band 2", "Band 3"]);
         assert_eq!(parts(duck2("0", "1.0")), ["Band 1"], "linked: every band is band 1's");
         assert_eq!(parts(duck2("1", "0.0")), ["Band 1"], "no crossover: one band");
+        let two = duck2("1", "1.0").replace(r#"crossover3Bands value="1""#, r#"crossover3Bands value="0""#);
+        assert_eq!(parts(two), ["Band 1", "Band 2"], "split in two");
+        // A Duck 2 preset with no bands doesn't fall back on its Duck 1 leftover.
+        let no_bands = duck2("1", "1.0");
+        let cut =
+            no_bands.find("<MultibandEnvelopeData>").unwrap()..no_bands.find("</MultibandEnvelopeData>").unwrap() + 23;
+        let mut no_bands = no_bands;
+        no_bands.replace_range(cut, "");
+        assert_eq!(parts(no_bands), Vec::<String>::new());
         // Duck 1: just the curve, no picture.
         let duck1 = format!(
             "<state><parameters/><data>{}</data></state>",
@@ -374,6 +397,7 @@ mod tests {
         // Another plugin's .preset, outside Duck's folder, isn't read.
         assert_eq!(read("C:/Presets/Lead.preset", duck1.as_bytes()), []);
         assert!(!is_shape_file("D:\\Other\\Lead.preset"));
+        assert!(!is_shape_file("C:\\ProgramData\\DeviousMachines\\Infiltrator\\Library\\Presets\\X.preset"));
         assert!(is_shape_file(
             "C:\\ProgramData\\DeviousMachines\\Duck\\Library\\Presets\\main\\Rhythms\\Clave 01.preset"
         ));
@@ -395,5 +419,7 @@ mod tests {
         assert_eq!(base64("A"), None);
         assert_eq!(base64("AAA="), Some(vec![0, 0]));
         assert_eq!(base64("TWFu"), Some(b"Man".to_vec()));
+        assert_eq!(base64("TW\nFu\r\n"), Some(b"Man".to_vec()), "wrapped");
+        assert_eq!(base64("AA==="), None);
     }
 }

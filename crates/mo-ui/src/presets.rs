@@ -2200,7 +2200,7 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
     let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     drop(saves);
     let library_roots: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).collect();
-    // Bitwig's curves library and the plugins' LFO shapes (Serum, LFOTool), looked through side by side.
+    // Bitwig's curves library and the plugins' LFO shapes (Serum, LFOTool, Vital, Duck), looked through side by side.
     let (library, shapes) = background::on_pool(|| {
         rayon::join(
             || logic::curve_files(&library_roots),

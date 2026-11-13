@@ -218,12 +218,14 @@ fn vital_data_directory(raw: &[u8]) -> Option<PathBuf> {
 }
 
 /// Where Devious Machines' Duck keeps its shapes and presets: its `DeviousMachines` folder's `Duck` and `Duck 2`, in
-/// `program_data` (`%ProgramData%` on Windows) and on a Mac in `/Library/Application Support` and the one under
+/// `program_data` (`%ProgramData%` on Windows), and on a Mac in `/Library/Application Support` and the one under
 /// `home`. Only the folders that are there, each once. Asks the disk, so never on the window's thread.
 pub fn duck_folders(program_data: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
     let mut places: Vec<PathBuf> = program_data.map(Path::to_path_buf).into_iter().collect();
-    places.push(PathBuf::from("/Library/Application Support"));
-    places.extend(home.map(|h| h.join("Library").join("Application Support")));
+    if cfg!(target_os = "macos") {
+        places.push(PathBuf::from("/Library/Application Support"));
+        places.extend(home.map(|h| h.join("Library").join("Application Support")));
+    }
     let mut out: Vec<PathBuf> = Vec::new();
     for p in places {
         for duck in ["Duck", "Duck 2"] {

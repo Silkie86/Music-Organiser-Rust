@@ -70,7 +70,7 @@ pub enum SourceKind {
     BitwigClip,
     /// A curve file in Bitwig's library.
     BitwigCurve,
-    /// A plugin's LFO shape: a Serum shape file, or a graph in an LFOTool preset.
+    /// A plugin's LFO shape: a shape file (Serum, Vital, Duck), or one drawn in a preset (LFOTool, Vital, Duck).
     PluginShape,
 }
 
