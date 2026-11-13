@@ -666,6 +666,8 @@ impl Shown {
     /// The panel's words and lists, and what its buttons do; then the sound library is read in the background.
     fn fill_in(&self) {
         let panel = &self.panel;
+        // Opened again on the tab it was closed on.
+        panel.set_view(self.instance.view.load(Ordering::Relaxed));
         panel.set_host(self.instance.host.as_str().into());
         panel.set_track(lock(&self.instance.track).as_str().into());
         panel.set_track_colour(match *lock(&self.instance.track_colour) {
@@ -1434,7 +1436,7 @@ impl Shown {
             self.sky_asked.set(true);
             self.panel.set_sky_note("Reading the galaxy".into());
             let slots = Arc::clone(&self.slots);
-            background("mo-plugin-galaxy", move || *lock(&slots.map) = Some(galaxy::read(&library)));
+            background("mo-plugin-galaxy", move || *lock(&slots.map) = Some(galaxy::read_kept(&library)));
         }
         let mut sky = self.sky.borrow_mut();
         match take(&self.slots.map) {
@@ -1677,6 +1679,7 @@ impl Shown {
 
     /// Takes in what background threads found, frees sounds done playing, and runs Slint's timers.
     fn tick(&self) {
+        self.instance.view.store(self.panel.get_view(), Ordering::Relaxed);
         self.knobs();
         if let Some(read) = take(&self.slots.library) {
             match read {

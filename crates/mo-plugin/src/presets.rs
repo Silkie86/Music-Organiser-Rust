@@ -19,7 +19,7 @@ use mo_app::presets::{self as page, ChoiceCounts, FilterChips, Filtered, Filters
 use mo_presets::file_store;
 use mo_presets::library as plib;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 /// The orders the tab offers, with their words: as the files were found (by folder), or by a column of the app's list.
 pub const ORDERS: [(Order, &str); 4] =
@@ -46,21 +46,35 @@ pub enum Read {
     Not(String),
 }
 
-static SHARED: Mutex<Weak<Presets>> = Mutex::new(Weak::new());
+/// The presets read last, kept while the plugin is loaded ([`crate::kept`]).
+pub(crate) static KEPT: crate::kept::Kept<Presets> = crate::kept::Kept::new();
 
-/// The preset files, read once for every copy of the plugin while any of them holds them. Slow the first time (the
-/// folders are walked): call it off the panel's thread.
+/// The app's files the presets are read from: the library, the songs' sounds the app keeps, and its preset files'
+/// store. A preset file added to a folder since shows once one of them changes, or the plugin is loaded again.
+fn read_from_files(data: &Path) -> Vec<PathBuf> {
+    vec![
+        mo_library::songs_db::to_read(data),
+        data.join(mo_presets::sound_store::FILE_NAME),
+        data.join(file_store::FILE_NAME),
+    ]
+}
+
+/// The preset files and your songs' presets, read once for every copy of the plugin, and kept while the plugin is
+/// loaded until the app changes what they're read from. Slow the first time (the folders are walked): call it off
+/// the panel's thread.
 pub fn read() -> Read {
-    if let Some(presets) = lock(&SHARED).upgrade() {
+    let data = mo_app::paths::data_dir();
+    let files = read_from_files(&data);
+    if let Some(presets) = KEPT.get(&files) {
         return Read::Ready(presets);
     }
     static READING: Mutex<()> = Mutex::new(());
     let _reading = lock(&READING);
-    if let Some(presets) = lock(&SHARED).upgrade() {
+    if let Some(presets) = KEPT.get(&files) {
         return Read::Ready(presets);
     }
     let started = std::time::Instant::now();
-    let data = mo_app::paths::data_dir();
+    let stamp = crate::kept::Stamp::of(&files);
     let library = library_facts(&mo_library::songs_db::to_read(&data));
     let defaults = plib::default_folders();
     let bitwig = page::bitwig_folders(&defaults, library.saves.iter().map(|s| s.path.as_str()));
@@ -72,7 +86,7 @@ pub fn read() -> Read {
     });
     match &read {
         Read::Ready(presets) => {
-            *lock(&SHARED) = Arc::downgrade(presets);
+            KEPT.keep(stamp, presets);
             crate::log::took("Presets", &format!("Read {} preset files", presets.items.len()), started);
         }
         Read::Not(why) => crate::log::took("Presets", &format!("Not read: {why}"), started),

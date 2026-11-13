@@ -17,7 +17,7 @@ use mo_midi::catalogue::{Catalogue, Entry};
 use mo_midi::store::MidiStore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 /// The orders the tab offers, as the app's MIDI page names them.
 pub const ORDERS: [Order; 4] = [Order::Newest, Order::Name, Order::Key, Order::Bars];
@@ -70,25 +70,29 @@ pub struct Asked {
     pub order: Order,
 }
 
-static SHARED: Mutex<Weak<Parts>> = Mutex::new(Weak::new());
+/// The parts read last, kept while the plugin is loaded ([`crate::kept`]).
+pub(crate) static KEPT: crate::kept::Kept<Parts> = crate::kept::Kept::new();
 
-/// The app's MIDI parts, read once for every copy of the plugin while any of them holds them. Slow the first time
-/// (call it off the panel's thread).
+/// The app's MIDI parts, read once for every copy of the plugin, and kept while the plugin is loaded until the app
+/// changes them. Slow the first time (call it off the panel's thread).
 pub fn read() -> Read {
-    if let Some(parts) = lock(&SHARED).upgrade() {
+    let data = mo_app::paths::data_dir();
+    let store = MidiStore::path_beside(&data.join("library.db"));
+    let files = [store.clone()];
+    if let Some(parts) = KEPT.get(&files) {
         return Read::Ready(parts);
     }
     static READING: Mutex<()> = Mutex::new(());
     let _reading = lock(&READING);
-    if let Some(parts) = lock(&SHARED).upgrade() {
+    if let Some(parts) = KEPT.get(&files) {
         return Read::Ready(parts);
     }
     let started = std::time::Instant::now();
-    let data = mo_app::paths::data_dir();
-    let read = read_from(&MidiStore::path_beside(&data.join("library.db")), smallest_part(&data));
+    let stamp = crate::kept::Stamp::of(&files);
+    let read = read_from(&store, smallest_part(&data));
     match &read {
         Read::Ready(parts) => {
-            *lock(&SHARED) = Arc::downgrade(parts);
+            KEPT.keep(stamp, parts);
             crate::log::took("MIDI", &format!("Read {} parts", parts.cat.entries.len()), started);
         }
         Read::Not(why) => crate::log::took("MIDI", &format!("Not read: {why}"), started),
