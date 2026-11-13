@@ -172,11 +172,16 @@ fn silent_until_something_is_picked_and_starts_again_cleanly() {
 #[derive(Default)]
 struct Browser {
     places: Vec<(String, bool)>,
+    types: Vec<String>,
     presets: Vec<String>,
 }
 
 impl clack_extensions::preset_discovery::prelude::IndexerImpl for Browser {
-    fn declare_filetype(&mut self, _: clack_extensions::preset_discovery::prelude::FileType) -> Result<(), HostError> {
+    fn declare_filetype(
+        &mut self,
+        file_type: clack_extensions::preset_discovery::prelude::FileType,
+    ) -> Result<(), HostError> {
+        self.types.push(file_type.file_extension.map(|e| e.to_string_lossy().into_owned()).unwrap_or_default());
         Ok(())
     }
 
@@ -223,16 +228,26 @@ fn lists_favourites_in_the_daws_browser() {
     use clack_extensions::preset_discovery::prelude::{Location, PresetDiscoveryFactory, Provider};
     let entry = entry();
     let factory = entry.get_factory::<PresetDiscoveryFactory>().expect("a preset discovery factory");
-    let descriptors: Vec<_> = factory.provider_descriptors().collect();
-    assert_eq!(descriptors.len(), 1);
-    let id = descriptors[0].id().unwrap();
-    assert_eq!(id.to_bytes(), mo_plugin::favourites::PROVIDER_ID.as_bytes());
+    let ids: Vec<&[u8]> = factory.provider_descriptors().map(|d| d.id().unwrap().to_bytes()).collect();
+    assert_eq!(ids, [mo_plugin::favourites::PROVIDER_ID.as_bytes(), mo_plugin::preset_files::PROVIDER_ID.as_bytes()]);
     let info = HostInfo::new("Stand-in DAW", mo_plugin::TESTS_VENDOR, "", "1.0").unwrap();
-    let mut provider = Provider::instantiate(Browser::default(), &entry, id, &info).unwrap();
+    let id = std::ffi::CString::new(mo_plugin::favourites::PROVIDER_ID).unwrap();
+    let mut provider = Provider::instantiate(Browser::default(), &entry, &id, &info).unwrap();
     assert_eq!(provider.indexer().places, [("Favourite sounds".to_owned(), true)]);
     // The stand-in DAW has no library (tests never read a real folder): nothing listed, and no error.
     let mut browser = Browser::default();
     provider.get_metadata(Location::Plugin, &mut browser);
+    assert!(browser.presets.is_empty());
+
+    // The preset files: the types the DAW is to hand back, and no folders in the stand-in DAW.
+    let id = std::ffi::CString::new(mo_plugin::preset_files::PROVIDER_ID).unwrap();
+    let mut provider = Provider::instantiate(Browser::default(), &entry, &id, &info).unwrap();
+    assert_eq!(provider.indexer().types, ["vstpreset", "fxp", "fxb"]);
+    assert!(provider.indexer().places.is_empty());
+    // A file that isn't a preset is described as nothing.
+    let mut browser = Browser::default();
+    let not_one = std::ffi::CString::new(env!("CARGO_MANIFEST_DIR").to_owned() + "/Cargo.toml").unwrap();
+    provider.get_metadata(Location::File { path: &not_one }, &mut browser);
     assert!(browser.presets.is_empty());
 }
 

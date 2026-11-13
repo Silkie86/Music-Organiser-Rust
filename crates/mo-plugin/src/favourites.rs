@@ -103,45 +103,24 @@ pub fn sounds_db(vendor: Option<&CStr>) -> Option<PathBuf> {
     (!tests).then(|| mo_app::paths::data_dir().join("sounds.db"))
 }
 
-/// The preset discovery factory: the one provider, the favourites.
-pub struct Factory {
-    descriptor: ProviderDescriptor,
+/// How the DAW names the favourites' provider.
+pub fn descriptor() -> ProviderDescriptor {
+    ProviderDescriptor::new(PROVIDER_ID, "Music Organiser favourites").with_vendor("Music Organiser")
 }
 
-impl Default for Factory {
-    fn default() -> Self {
-        Factory {
-            descriptor: ProviderDescriptor::new(PROVIDER_ID, "Music Organiser favourites")
-                .with_vendor("Music Organiser"),
-        }
-    }
-}
-
-impl PresetDiscoveryFactoryImpl for Factory {
-    fn provider_count(&self) -> u32 {
-        1
-    }
-
-    fn provider_descriptor(&self, index: u32) -> Option<&ProviderDescriptor> {
-        (index == 0).then_some(&self.descriptor)
-    }
-
-    fn create_provider<'a>(&'a self, indexer: IndexerInfo<'a>, provider_id: &CStr) -> Option<ProviderInstance<'a>> {
-        if self.descriptor.id() != Some(provider_id) {
-            return None;
-        }
-        let sounds_db = sounds_db(indexer.vendor());
-        Some(ProviderInstance::new(indexer, &self.descriptor, move |mut indexer| {
-            indexer
-                .declare_location(LocationInfo {
-                    name: PLACE,
-                    flags: Flags::IS_USER_CONTENT | Flags::IS_FAVORITE,
-                    location: Location::Plugin,
-                })
-                .map_err(|_| PluginError::Message("The DAW didn't take the favourites' place"))?;
-            Ok(Provider { sounds_db })
-        }))
-    }
+/// The favourites' provider, made when the DAW asks for it.
+pub fn provider<'a>(indexer: IndexerInfo<'a>, descriptor: &'a ProviderDescriptor) -> ProviderInstance<'a> {
+    let sounds_db = sounds_db(indexer.vendor());
+    ProviderInstance::new(indexer, descriptor, move |mut indexer| {
+        indexer
+            .declare_location(LocationInfo {
+                name: PLACE,
+                flags: Flags::IS_USER_CONTENT | Flags::IS_FAVORITE,
+                location: Location::Plugin,
+            })
+            .map_err(|_| PluginError::Message("The DAW didn't take the favourites' place"))?;
+        Ok(Provider { sounds_db })
+    })
 }
 
 /// Lists the favourites when the DAW asks.
