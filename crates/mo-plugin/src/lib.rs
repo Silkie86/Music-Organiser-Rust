@@ -380,6 +380,19 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
             // More frames than the DAW said it would ever ask for: the rest stays quiet.
             only[len..].fill(0.0);
         }
+        // A part's notes going out (Send MIDI), in order, after the knobs' changes (all at the block's start).
+        for note in self.playing.sent() {
+            use clack_plugin::events::event_types::{NoteOffEvent, NoteOnEvent};
+            use clack_plugin::events::{Match, Pckn};
+            let at = Pckn::new(0u16, 0u16, u16::from(note.key), Match::<u32>::All);
+            // No room left in the DAW's list: the rest go with nothing said (the DAW's list is far bigger than a
+            // block's notes).
+            let _ = if note.on {
+                events.output.try_push(NoteOnEvent::new(note.offset, at, note.velocity))
+            } else {
+                events.output.try_push(NoteOffEvent::new(note.offset, at, note.velocity))
+            };
+        }
         // Always on: a pick can start playing at any moment.
         Ok(ProcessStatus::Continue)
     }
@@ -410,19 +423,21 @@ impl PluginAudioPortsImpl for MainThread<'_> {
 }
 
 impl PluginNotePortsImpl for MainThread<'_> {
-    fn count(&self, is_input: bool) -> u32 {
-        if is_input { 1 } else { 0 }
+    fn count(&self, _is_input: bool) -> u32 {
+        // One in (for later steps), one out: a MIDI part's notes with Send MIDI on.
+        1
     }
 
     fn get(&self, index: u32, is_input: bool, writer: &mut NotePortInfoWriter) {
-        if is_input && index == 0 {
-            writer.set(&NotePortInfo {
-                id: ClapId::new(1),
-                name: b"Notes",
-                preferred_dialect: Some(NoteDialect::Clap),
-                supported_dialects: NoteDialects::CLAP | NoteDialects::MIDI,
-            });
+        if index != 0 {
+            return;
         }
+        writer.set(&NotePortInfo {
+            id: ClapId::new(if is_input { 1 } else { 2 }),
+            name: if is_input { b"Notes" } else { b"Parts out" },
+            preferred_dialect: Some(NoteDialect::Clap),
+            supported_dialects: NoteDialects::CLAP | NoteDialects::MIDI,
+        });
     }
 }
 

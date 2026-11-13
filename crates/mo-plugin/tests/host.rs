@@ -35,7 +35,7 @@ fn says_what_it_is() {
 }
 
 #[test]
-fn one_stereo_output_one_note_input_and_a_window() {
+fn one_stereo_output_a_note_input_and_output_and_a_window() {
     let entry = entry();
     let mut plugin = instance(&entry);
     let handle = plugin.plugin_handle();
@@ -47,9 +47,12 @@ fn one_stereo_output_one_note_input_and_a_window() {
     assert_eq!(port.channel_count, 2);
 
     let notes = handle.get_extension::<PluginNotePorts>().unwrap();
-    assert_eq!((notes.count(&handle, true), notes.count(&handle, false)), (1, 0));
+    // One in, and one out: a MIDI part's notes with Send MIDI on.
+    assert_eq!((notes.count(&handle, true), notes.count(&handle, false)), (1, 1));
     let mut buffer = NotePortInfoBuffer::new();
     assert!(notes.get(&handle, 0, true, &mut buffer).is_some());
+    let out = notes.get(&handle, 0, false, &mut buffer).unwrap();
+    assert_eq!((out.id.get(), out.name), (2, &b"Parts out"[..]));
 
     let gui = handle.get_extension::<PluginGui>().unwrap();
     let api = GuiApiType::default_for_current_platform().unwrap();

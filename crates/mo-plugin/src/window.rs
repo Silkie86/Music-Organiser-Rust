@@ -697,6 +697,9 @@ impl Shown {
             instance.player.set_in_time(on);
             instance.knobs.tell(Knob::InTime, f64::from(u8::from(on)));
         });
+        panel.set_midi_out(self.instance.player.midi_out());
+        let player = Arc::clone(&self.instance.player);
+        panel.on_midi_out_changed(move |on| player.set_midi_out(on));
         panel.set_match_tempo(self.instance.player.matching());
         let instance = Arc::clone(&self.instance);
         panel.on_match_tempo_changed(move |on| {
@@ -932,8 +935,14 @@ impl Shown {
             // No sound's line shows where this plays.
             *last_played.borrow_mut() = None;
             let tempo = player.tempo();
-            let make: crate::audition::Made =
-                Box::new(move || parts.sound(at, crate::midi::soundfont().as_deref(), tempo));
+            let make: crate::audition::Made = if player.midi_out() {
+                Box::new(move || parts.notes_out(at, tempo))
+            } else {
+                Box::new(move || {
+                    let (audio, beats) = parts.sound(at, crate::midi::soundfont().as_deref(), tempo)?;
+                    Ok((crate::audition::MadeLoop::Sound(audio), beats))
+                })
+            };
             let slots = Arc::clone(&slots);
             player.play_made(name, make, move |played| *lock(&slots.played) = Some(played));
         });

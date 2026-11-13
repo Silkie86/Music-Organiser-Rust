@@ -303,6 +303,10 @@ export component Panel inherits Window {
     // The roll follows the playing: a long part is drawn a few bars to the room, and scrolls under the play head.
     in-out property <bool> midi-follow: true;
     callback midi-follow-changed();
+    // Send MIDI: a part clicked plays as notes out of the plugin, for an instrument after it, in time with the DAW,
+    // instead of with the SoundFont.
+    in-out property <bool> midi-out;
+    callback midi-out-changed(bool);
 
     // The Presets tab: the preset files, the status line, the filter column as the app's Presets page has it (mo-app's
     // `presets::filter_chips`), the orders, the year strip and the line picked.
@@ -1123,6 +1127,16 @@ export component Panel inherits Window {
                         color: root.midi-said != "" || root.playing != "" ? Theme.accent : Theme.faint;
                         font-size: Type.meta;
                         overflow: elide;
+                    }
+                    TickLine {
+                        horizontal-stretch: 0;
+                        width: 120px;
+                        text: "Send MIDI";
+                        on: root.midi-out;
+                        clicked => {
+                            root.midi-out = !root.midi-out;
+                            root.midi-out-changed(root.midi-out);
+                        }
                     }
                     if root.midi-picked >= 0: TickLine {
                         horizontal-stretch: 0;
