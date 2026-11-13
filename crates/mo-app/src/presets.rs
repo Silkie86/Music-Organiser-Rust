@@ -177,22 +177,30 @@ pub fn shape_folders(documents: Option<&Path>, home: Option<&Path>) -> Vec<PathB
 }
 
 /// Where Vital keeps its shapes and presets: the data folder its settings name (`Vital.config`'s `data_directory`, as
-/// when it's been moved to another drive), else its own start, `Documents\Vital` (`~/Music/Vital` on a Mac too). The
-/// settings are looked for in `app_data` (`%APPDATA%` on Windows) and a Mac's and Linux's places under `home`. Only
-/// the folders that are there, each once. Asks the disk, so never on the window's thread.
+/// when it's been moved to another drive), else where it starts out: `Documents\Vital`, `~/Music/Vital` on a Mac, or
+/// `~/.local/share/vital` on Linux. The settings are looked for in `app_data` (`%APPDATA%` on Windows) and a Mac's and
+/// Linux's places under `home`. Only the folders that are there, each once. Asks the disk, so never on the window's
+/// thread.
 pub fn vital_folders(documents: Option<&Path>, home: Option<&Path>, app_data: Option<&Path>) -> Vec<PathBuf> {
     let mut configs: Vec<PathBuf> = app_data.map(|a| a.join("vital")).into_iter().collect();
     if let Some(h) = home {
         configs.push(h.join("Library").join("Application Support").join("vital"));
-        configs.push(h.join(".local").join("share").join("vital"));
+        configs.push(h.join(".config").join("vital"));
+        configs.push(h.join(".vital"));
     }
     let mut wanted: Vec<PathBuf> = configs
         .iter()
         .filter_map(|c| std::fs::read(c.join("Vital.config")).ok())
         .filter_map(|raw| vital_data_directory(&raw))
         .collect();
-    wanted.extend(documents.map(|d| d.join("Vital")));
-    wanted.extend(home.map(|h| h.join("Music").join("Vital")));
+    // Where it starts out only counts when the settings name no folder that's there (Vital has moved away from it).
+    if !wanted.iter().any(|f| f.is_dir()) {
+        wanted.extend(documents.map(|d| d.join("Vital")));
+        if let Some(h) = home {
+            wanted.push(h.join("Music").join("Vital"));
+            wanted.push(h.join(".local").join("share").join("vital"));
+        }
+    }
     let mut out: Vec<PathBuf> = Vec::new();
     for f in wanted {
         if f.is_dir() && !out.contains(&f) {
@@ -2368,7 +2376,11 @@ mod tests {
         assert_eq!(vital_folders(Some(&docs), None, Some(&app_data)), std::slice::from_ref(&start), "no settings yet");
         let config = serde_json::json!({ "data_directory": moved.to_string_lossy() }).to_string();
         std::fs::write(app_data.join("vital").join("Vital.config"), config).unwrap();
-        assert_eq!(vital_folders(Some(&docs), None, Some(&app_data)), [moved.clone(), start.clone()]);
+        assert_eq!(
+            vital_folders(Some(&docs), None, Some(&app_data)),
+            [moved.clone()],
+            "moved: the old folder isn't read"
+        );
         std::fs::write(moved.join("Wob.vital"), b"").unwrap();
         std::fs::write(moved.join("Saw.vitallfo"), b"").unwrap();
         std::fs::write(moved.join("Pad.wav"), b"").unwrap();

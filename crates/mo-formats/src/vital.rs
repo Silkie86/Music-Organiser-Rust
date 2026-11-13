@@ -10,7 +10,8 @@
 //!   it stays and then moves (late), below 0 it moves early, whichever way the line goes. The app's bend is a curve
 //!   through the same middle: bend = (0.5 - t'(0.5)) * 4, so a power of about ±2.2 is a full bend.
 //! - The last point joins the first again at the end, bent by the last point's power (the shape repeats).
-//! - `smooth` draws every line as an S; that isn't kept (the lines are drawn as their powers bend them).
+//! - `smooth` draws every line as an S (its powers then don't count): it's kept near enough, each line split at its
+//!   middle into a late half and an early half ([`as_s`]).
 //!
 //! An LFO nobody changed in a preset is Vital's own start, a plain triangle (named "Triangle", (0, 1), (0.5, 0),
 //! (1, 1), straight): nearly every preset has several, so they're passed over.
@@ -55,13 +56,32 @@ fn lfo(l: &serde_json::Value, part: String) -> Option<Shape> {
     let n = usize::try_from(l.get("num_points")?.as_u64()?).ok().filter(|n| *n <= MOST_POINTS)?;
     let points = l.get("points")?.as_array()?;
     let powers = l.get("powers")?.as_array()?;
-    if points.len() < n * 2 || powers.len() < n {
-        return None;
+    let num = |v: Option<&serde_json::Value>| v?.as_f64();
+    let read: Vec<(f64, f64, f64)> = (0..n)
+        .map(|i| Some((num(points.get(2 * i))?, num(points.get(2 * i + 1))?, bend(num(powers.get(i))?))))
+        .collect::<Option<_>>()?;
+    let smooth = l.get("smooth").and_then(|s| s.as_bool()).unwrap_or(false);
+    let read = if smooth { as_s(&read) } else { read };
+    Some(Shape { product: "Vital".into(), part, points: closed_with(read.into_iter(), |b| b)? })
+}
+
+/// How far each half of a smooth line bends: in late, then out early.
+const S_BEND: f64 = 0.5;
+
+/// A smooth shape's lines drawn as an S, near enough: each line is split at its middle, the first half bent late
+/// (it eases in) and the second early (it eases out). The last line runs on to the first point's value at the end.
+fn as_s(points: &[(f64, f64, f64)]) -> Vec<(f64, f64, f64)> {
+    let mut out = Vec::with_capacity(points.len() * 2);
+    for (i, &(x, y, _)) in points.iter().enumerate() {
+        out.push((x, y, S_BEND));
+        let next = match points.get(i + 1) {
+            Some(&(nx, ny, _)) => (nx, ny),
+            None if x < 1.0 => (1.0, points[0].1),
+            None => continue,
+        };
+        out.push(((x + next.0) / 2.0, (y + next.1) / 2.0, -S_BEND));
     }
-    let num = |v: &serde_json::Value| v.as_f64();
-    let read: Option<Vec<(f64, f64, f64)>> =
-        (0..n).map(|i| Some((num(points.get(2 * i)?)?, num(points.get(2 * i + 1)?)?, num(powers.get(i)?)?))).collect();
-    Some(Shape { product: "Vital".into(), part, points: closed_with(read?.into_iter(), bend)? })
+    out
 }
 
 /// The app's bend for one of Vital's powers: a curve through the same middle.
@@ -78,8 +98,9 @@ fn bend(power: f64) -> f64 {
 /// Whether a preset's LFO is Vital's own start: the plain triangle every new preset has.
 fn is_untouched(l: &serde_json::Value) -> bool {
     let triangle = [0.0, 1.0, 0.5, 0.0, 1.0, 1.0];
+    // Each of the first six numbers in its place: something that isn't a number there isn't the triangle.
     let points: Option<Vec<f64>> =
-        l.get("points").and_then(|p| p.as_array()).map(|p| p.iter().filter_map(|v| v.as_f64()).collect());
+        l.get("points").and_then(|p| p.as_array()).and_then(|p| p.get(..6)?.iter().map(|v| v.as_f64()).collect());
     let powers_flat = l
         .get("powers")
         .and_then(|p| p.as_array())
@@ -87,7 +108,7 @@ fn is_untouched(l: &serde_json::Value) -> bool {
     l.get("num_points").and_then(|n| n.as_u64()) == Some(3)
         && l.get("name").and_then(|n| n.as_str()).is_none_or(|n| n == "Triangle")
         && !l.get("smooth").and_then(|s| s.as_bool()).unwrap_or(false)
-        && points.is_some_and(|p| p.get(..6) == Some(&triangle[..]))
+        && points.is_some_and(|p| p[..] == triangle[..])
         && powers_flat
 }
 
@@ -144,5 +165,21 @@ mod tests {
         assert_eq!(read("a.vitallfo", br#"{"num_points":1,"points":["a",1.0],"powers":[0]}"#), []);
         assert_eq!(read("a.vital", br#"{"settings":{}}"#), []);
         assert_eq!(read("a.vital", b"not json"), []);
+        // A damaged triangle (a word where a number goes) isn't taken for the untouched one.
+        let odd = r#"{"name":"Triangle","num_points":3,"points":[null,0.0,1.0,0.5,0.0,1.0,1.0],"powers":[0,0,0]}"#;
+        assert!(!is_untouched(&serde_json::from_str(odd).unwrap()));
+    }
+
+    #[test]
+    fn a_smooth_shape_is_drawn_as_an_s_and_isnt_the_same_as_a_straight_one() {
+        let smooth = br#"{"num_points":2,"points":[0.0,1.0,0.5,0.0],"powers":[0.0,0.0],"smooth":true}"#;
+        let s = read("Round.vitallfo", smooth).remove(0);
+        assert_eq!(
+            values(&s),
+            [(0.0, 0.0, 0.5), (0.25, 0.5, -0.5), (0.5, 1.0, 0.5), (0.75, 0.5, -0.5), (1.0, 0.0, 0.0)]
+        );
+        // A last point already at the end has no line after it to split.
+        let saw = br#"{"num_points":2,"points":[0.0,1.0,1.0,0.0],"powers":[0.0,0.0],"smooth":true}"#;
+        assert_eq!(values(&read("Saw.vitallfo", saw).remove(0)), [(0.0, 0.0, 0.5), (0.5, 0.5, -0.5), (1.0, 1.0, 0.5)]);
     }
 }
