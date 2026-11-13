@@ -15,6 +15,15 @@ use mo_sounds::index::SoundIndex;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
+/// A sound's own tempo, as the library knows it.
+pub fn own_tempo(sound: &Sound) -> crate::audition::Own {
+    use crate::audition::Own;
+    match &sound.analysis {
+        Some(a) if a.is_loop => a.bpm.map_or(Own::Unknown, Own::Bpm),
+        _ => Own::NotALoop,
+    }
+}
+
 /// The orders the panel offers, as the app names them.
 pub const ORDERS: [Order; 4] = [Order::Shuffled, Order::MostLiked, Order::Name, Order::Newest];
 

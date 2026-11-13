@@ -373,6 +373,16 @@ fn same_answers(old: &Path, copy: &Path) {
     assert_eq!(ea.features, eb.features);
     assert_eq!(as_kept(ea.clap.clone()), eb.clap);
     assert_eq!(ea.analysed(), eb.analysed());
+    // The favourites alone, from either: the same sounds, and the ones the whole list marks.
+    let mut favourites = (a.favourite_ids().unwrap(), b.favourite_ids().unwrap());
+    favourites.0.sort_unstable();
+    favourites.1.sort_unstable();
+    assert_eq!(favourites.0, favourites.1);
+    let hidden = a.hidden().unwrap();
+    let mut marked: Vec<i64> =
+        ea.sounds.iter().filter(|s| s.favourite && !hidden.contains(&s.id)).map(|s| s.id).collect();
+    marked.sort_unstable();
+    assert_eq!(favourites.0, marked);
     // "Sounds like this" from either: the same index, to the last bit.
     assert_eq!(
         SoundIndex::from_gathered(ea.features.clone(), ea.clap.clone(), ea.analysed()),

@@ -240,10 +240,7 @@ impl Lines {
     /// The tempo of the sound at place `at` in the whole list, as the library knows it.
     fn tempo_at(&self, at: usize) -> Own {
         let library = self.library.borrow();
-        match library.as_ref().and_then(|l| l.list.sound(at)?.analysis.as_ref()) {
-            Some(a) if a.is_loop => a.bpm.map_or(Own::Unknown, Own::Bpm),
-            _ => Own::NotALoop,
-        }
+        library.as_ref().and_then(|l| l.list.sound(at)).map_or(Own::NotALoop, library::own_tempo)
     }
 
     /// [`Lines::tempo_at`] for the sound on `row`.

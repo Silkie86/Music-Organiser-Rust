@@ -449,6 +449,24 @@ impl SoundsDb {
         Ok(ids)
     }
 
+    /// The ids of your favourite sounds (the heart), leaving out a copy you've hidden as a duplicate: for listing
+    /// them on their own (the plugin's presets in a DAW's browser), with [`SoundsDb::some`].
+    pub fn favourite_ids(&self) -> Result<Vec<i64>, SoundsError> {
+        let _turn = turns::turn();
+        let snapshot = self.conn.unchecked_transaction()?;
+        let hidden = self.hidden()?;
+        let mut st = self.conn.prepare("SELECT id FROM sounds WHERE favourite = 1")?;
+        let ids: Vec<i64> = st
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<i64>, _>>()?
+            .into_iter()
+            .filter(|id| !hidden.contains(id))
+            .collect();
+        drop(st);
+        snapshot.finish()?;
+        Ok(ids)
+    }
+
     /// The sounds with these ids (any it doesn't have are left out), each just as [`SoundsDb::all`] gives it, in the
     /// same order: for showing a few at once while the rest are read. Only what's theirs is read (their rows, tags,
     /// plays and hidden marks), so it's quick for a few hundred whatever the size of the library. With their

@@ -20,6 +20,8 @@
 pub mod audition;
 pub mod check;
 pub mod drag;
+pub mod entry;
+pub mod favourites;
 pub mod galaxy;
 mod gpu;
 pub mod knobs;
@@ -57,6 +59,7 @@ use clack_extensions::note_ports::{
 use clack_extensions::params::{
     ParamDisplayWriter, ParamInfoWriter, PluginAudioProcessorParams, PluginMainThreadParams, PluginParams,
 };
+use clack_extensions::preset_discovery::prelude::{HostPresetLoad, Location, PluginPresetLoad, PluginPresetLoadImpl};
 use clack_extensions::remote_controls::{PluginRemoteControls, PluginRemoteControlsImpl, RemoteControlsPageWriter};
 use clack_extensions::state::{PluginState, PluginStateImpl};
 use clack_extensions::track_info::{HostTrackInfo, PluginTrackInfo, PluginTrackInfoImpl, TrackInfoBuffer};
@@ -97,6 +100,7 @@ impl Plugin for MoPlugin {
             .register::<PluginTrackInfo>()
             .register::<PluginParams>()
             .register::<PluginRemoteControls>()
+            .register::<PluginPresetLoad>()
             .register::<PluginState>();
     }
 }
@@ -145,6 +149,7 @@ impl DefaultPluginFactory for MoPlugin {
             host,
             track_info: host.shared().info().get_extension::<HostTrackInfo>(),
             log: host.shared().info().get_extension::<HostLog>(),
+            preset_load: host.shared().info().get_extension::<HostPresetLoad>(),
             shared,
             window: RefCell::new(None),
             scale: Cell::new(1.0),
@@ -170,6 +175,7 @@ pub struct MainThread<'a> {
     host: HostMainThreadHandle<'a>,
     track_info: Option<HostTrackInfo>,
     log: Option<HostLog>,
+    preset_load: Option<HostPresetLoad>,
     shared: &'a Shared,
     window: RefCell<Option<baseview::Window>>,
     /// The screen's scaling the DAW gave (Windows and Linux): the window's size in pixels is the panel's times it.
@@ -247,6 +253,21 @@ impl PluginStateImpl for MainThread<'_> {
             self.panel.set(fit_panel(width, height));
         }
         log::line("State", &format!("The DAW handed back the plugin's state: {kept:?}"));
+        Ok(())
+    }
+}
+
+/// A favourite picked in the DAW's browser ([`favourites`]): it plays.
+impl PluginPresetLoadImpl for MainThread<'_> {
+    fn load_from_location(&self, location: Location, load_key: Option<&std::ffi::CStr>) -> Result<(), PluginError> {
+        let id =
+            favourites::sound_of(location, load_key).ok_or(PluginError::Message("Not one of the plugin's presets"))?;
+        if let Some(sounds_db) = favourites::sounds_db(self.host.shared().info().vendor()) {
+            favourites::play(&self.shared.instance.player, sounds_db, id);
+        }
+        if let Some(preset_load) = self.preset_load {
+            preset_load.loaded(&self.host, location, load_key);
+        }
         Ok(())
     }
 }
@@ -569,7 +590,7 @@ impl PluginGuiImpl for MainThread<'_> {
     }
 }
 
-clack_export_entry!(SinglePluginEntry<MoPlugin>);
+clack_export_entry!(entry::MoEntry);
 
 #[cfg(test)]
 mod tests {

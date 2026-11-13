@@ -25,6 +25,7 @@ clack-extensions = { version = "0.2", features = [
     "log",
     "note-ports",
     "params",
+    "preset-discovery",
     "raw-window-handle_06",
     "remote-controls",
     "state",
@@ -94,6 +95,7 @@ clack-extensions = { version = "0.2", features = [
     "gui",
     "note-ports",
     "params",
+    "preset-discovery",
     "remote-controls",
     "state",
 ] }
