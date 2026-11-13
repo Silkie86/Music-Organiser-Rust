@@ -38,6 +38,19 @@ export struct PartLine {
 }
 
 // A preset file, as a line of the Presets tab (mo-app's `presets::line`).
+// One line of the Curves tab, in words (mo-app's `presets::curve_line`).
+export struct CurveLine {
+    name: string,
+    // What it moved: "Serum · Cutoff".
+    under: string,
+    // "In 3 songs", "In Bitwig's library".
+    found: string,
+    // "4 bars".
+    length: string,
+    // Its shape as path commands in a 300 by 100 box.
+    shape: string,
+}
+
 export struct PresetLine {
     name: string,
     // "Serum · Bass  ·  Synth  ·  fxp".
@@ -388,6 +401,10 @@ export component Panel inherits Window {
     in property <FilterView> preset-kind-filter;
     in property <FilterView> preset-format-filter;
     in property <FilterView> preset-plugin-filter;
+    // Where a preset was found (in a song, or a file on disk), and the synths whose track plays nothing, shown or not.
+    in property <FilterView> preset-from-filter;
+    in property <bool> preset-unused;
+    callback preset-unused-toggled(bool);
     in property <[string]> preset-orders;
     in property <int> preset-order;
     in property <[YearBar]> preset-years;
@@ -408,6 +425,23 @@ export component Panel inherits Window {
     callback preset-click(int);
     // A line is being dragged out (onto a track or a device): its row.
     callback preset-drag-out(int);
+
+    // The Curves tab: the curves the app's Presets › Curves keeps, its search, Found in filter and Show hidden, as the
+    // app's list has them, and a curve dragged out as a Bitwig curve file.
+    in property <[CurveLine]> curves;
+    in property <string> curve-status;
+    in property <string> curve-empty;
+    in property <FilterView> curve-from-filter;
+    in property <bool> curve-hidden;
+    in-out property <int> curve-picked: -1;
+    in property <int> curve-carried: -1;
+    in property <string> curve-said;
+    in-out property <string> curve-search-text;
+    callback curve-search(string);
+    callback curve-pick(string);
+    callback curve-clear();
+    callback curve-hidden-toggled(bool);
+    callback curve-drag-out(int);
 
     title: "Music Organiser";
     preferred-width: 760px;
@@ -448,10 +482,12 @@ export component Panel inherits Window {
                 }
             }
             Rectangle { }
+            // Curves sits beside Presets, as the app's Presets page has them, but is view 5 (the views before it kept
+            // their numbers).
             Segmented {
-                choices: ["Sounds", "MIDI", "Presets", "Chords", "DAW check"];
-                current: root.view;
-                picked(i) => { root.view = i; }
+                choices: ["Sounds", "MIDI", "Presets", "Curves", "Chords", "DAW check"];
+                current: root.view == 5 ? 3 : root.view >= 3 ? root.view + 1 : root.view;
+                picked(i) => { root.view = i == 3 ? 5 : i > 3 ? i - 1 : i; }
             }
         }
 
@@ -1311,6 +1347,18 @@ export component Panel inherits Window {
                         cleared => { root.preset-clear("type"); }
                     }
                     FilterList {
+                        name: "FOUND IN";
+                        filter: root.preset-from-filter;
+                        toggled(text) => { root.preset-pick("from", text); }
+                        cleared => { root.preset-clear("from"); }
+                    }
+                    // As the app's page has it, on the page and not in a menu.
+                    TickLine {
+                        text: "Synths that play nothing";
+                        on: root.preset-unused;
+                        clicked => { root.preset-unused-toggled(!root.preset-unused); }
+                    }
+                    FilterList {
                         name: "FORMAT";
                         filter: root.preset-format-filter;
                         toggled(text) => { root.preset-pick("format", text); }
@@ -1431,6 +1479,126 @@ export component Panel inherits Window {
                     text: root.preset-said != "" ? root.preset-said
                         : root.can-drag ? "Drag a preset onto a track or a device to load it" : "Click a preset to see where it loads";
                     color: root.preset-said != "" ? Theme.accent : Theme.faint;
+                    font-size: Type.meta;
+                    overflow: elide;
+                }
+            }
+        }
+
+        if root.view == 5: HorizontalLayout {
+            spacing: Space.lg;
+            VerticalLayout {
+                width: 196px;
+                alignment: start;
+                spacing: Space.md;
+                FilterList {
+                    name: "FOUND IN";
+                    filter: root.curve-from-filter;
+                    toggled(text) => { root.curve-pick(text); }
+                    cleared => { root.curve-clear(); }
+                }
+                TickLine {
+                    text: "Show hidden curves";
+                    on: root.curve-hidden;
+                    clicked => { root.curve-hidden-toggled(!root.curve-hidden); }
+                }
+            }
+            VerticalLayout {
+                spacing: Space.md;
+                SearchBox {
+                    hint: "Search curves";
+                    text <=> root.curve-search-text;
+                    edited(text) => { root.curve-search(text); }
+                }
+                Text {
+                    text: root.curve-status;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    overflow: elide;
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    if root.curve-empty != "": Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: root.curve-empty;
+                        color: Theme.muted;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    ListView {
+                        width: parent.width;
+                        height: parent.height;
+                        row-height: 48px;
+                        rows: root.curves.length;
+                        for curve[i] in root.curves: ListLine {
+                            height: 48px;
+                            selected: i == root.curve-picked;
+                            draggable: root.can-drag;
+                            lifted: i == root.curve-carried;
+                            clicked => { root.curve-picked = i; }
+                            drag-out => { root.curve-drag-out(i); }
+                            HorizontalLayout {
+                                padding-left: Space.md;
+                                padding-right: Space.md;
+                                spacing: Space.md;
+                                Rectangle {
+                                    horizontal-stretch: 0;
+                                    width: 84px;
+                                    Path {
+                                        x: 2px;
+                                        y: 8px;
+                                        width: parent.width - 4px;
+                                        height: parent.height - 16px;
+                                        viewbox-width: 300;
+                                        viewbox-height: 100;
+                                        commands: curve.shape;
+                                        stroke: Theme.accent;
+                                        stroke-width: 1.5px;
+                                        fill: transparent;
+                                    }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    Text {
+                                        text: curve.name;
+                                        color: Theme.text;
+                                        font-size: Type.row-title;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: curve.under;
+                                        color: Theme.faint;
+                                        font-size: Type.meta;
+                                        overflow: elide;
+                                    }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 0;
+                                    alignment: center;
+                                    Text {
+                                        text: curve.found;
+                                        color: Theme.muted;
+                                        font-size: Type.meta;
+                                        horizontal-alignment: right;
+                                    }
+                                    Text {
+                                        text: curve.length;
+                                        color: Theme.faint;
+                                        font-size: Type.meta;
+                                        horizontal-alignment: right;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: root.curve-said != "" ? root.curve-said
+                        : root.can-drag ? "Drag a curve onto a Curves device or an automation lane" : "Drag a curve out in Bitwig";
+                    color: root.curve-said != "" ? Theme.accent : Theme.faint;
                     font-size: Type.meta;
                     overflow: elide;
                 }

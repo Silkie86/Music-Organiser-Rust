@@ -90,6 +90,7 @@ struct PresetColumn {
     kind: Choices,
     format: Choices,
     plugin: Choices,
+    from: Choices,
     counts: RefCell<Option<ChoiceCounts>>,
     /// The year strip's years for the list last worked out (with every filter but the years on, as the app's page
     /// counts them), newest first, with how many each.
@@ -119,6 +120,8 @@ impl PresetColumn {
         panel.set_preset_kind_filter(self.kind.view(&chips.kind));
         panel.set_preset_format_filter(self.format.view(&chips.format));
         panel.set_preset_plugin_filter(self.plugin.view(&chips.plugin));
+        panel.set_preset_from_filter(self.from.view(&chips.from));
+        panel.set_preset_unused(filters.unused);
         let (from, to) = mo_app::year_strip::picked_places(&self.years.borrow(), filters.years).unwrap_or((-1, -1));
         panel.set_preset_years_from(from);
         panel.set_preset_years_to(to);
@@ -158,7 +161,7 @@ impl PresetsTab {
     /// background thread and handed to the window's drag (`slots.drag`).
     pub(super) fn fill_in(&self, panel: &Panel, window_slots: &Arc<Slots>, instance: &Arc<crate::Instance>) {
         panel.set_presets(ModelRc::from(Rc::clone(&self.lines) as Rc<dyn Model<Data = PresetLine>>));
-        panel.set_preset_status("Looking for your preset files".into());
+        panel.set_preset_status("Looking for your presets".into());
         panel.set_preset_orders(ModelRc::new(VecModel::from(
             ORDERS.iter().map(|(_, words)| SharedString::from(*words)).collect::<Vec<_>>(),
         )));
@@ -185,6 +188,8 @@ impl PresetsTab {
         let change = Rc::clone(&changed);
         panel.on_preset_pick(move |filter, choice| change(&|f, _| f.toggle(&filter, &choice)));
         let change = Rc::clone(&changed);
+        panel.on_preset_unused_toggled(move |on| change(&|f, _| f.unused = on));
+        let change = Rc::clone(&changed);
         panel.on_preset_clear(move |filter| change(&|f, _| f.clear_chip(&filter)));
         let change = Rc::clone(&changed);
         panel.on_preset_years_picked(move |a, b| {
@@ -204,6 +209,8 @@ impl PresetsTab {
                 _ => f.order_by(order),
             });
         });
+        // Bitwig takes only its own presets on a drop: the others are made into one there.
+        let into_bitwig = instance.host.starts_with("Bitwig");
         let lines = Rc::clone(&self.lines);
         let weak = panel.as_weak();
         let instance = Arc::clone(instance);
@@ -230,7 +237,7 @@ impl PresetsTab {
             let slots = Arc::clone(&slots);
             // Checked to be there off the window's thread (a drive may be asleep).
             background("mo-plugin-drag", move || {
-                let file = presets.file(at);
+                let file = presets.to_drag(at, into_bitwig, &std::env::temp_dir());
                 *lock(&slots.drag) = Some((Carried::Preset(at), file));
             });
         });
@@ -270,7 +277,8 @@ impl PresetsTab {
             let presets = self.lines.presets.borrow().clone();
             let total = presets.as_ref().map_or(0, |p| p.items.len());
             let narrowed = self.filters.borrow().any() || !self.filters.borrow().search.is_empty();
-            panel.set_preset_status(presets::count_line(total, narrowed.then_some(found.len())).into());
+            let missed = presets.as_ref().map_or(0, |p| p.songs_missed);
+            panel.set_preset_status(presets::status_line(total, narrowed.then_some(found.len()), missed).into());
             panel.set_preset_picked(-1);
             panel.set_preset_said(SharedString::new());
             let empty = if found.is_empty() { "No presets match: take a filter or a word away" } else { "" };

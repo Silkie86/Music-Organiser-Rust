@@ -20,6 +20,7 @@
 pub mod audition;
 pub mod check;
 pub mod chordcheck;
+pub mod curves;
 pub mod drag;
 pub mod entry;
 pub mod favourites;
@@ -45,8 +46,8 @@ mod ui {
     slint::include_modules!();
 }
 pub use ui::{
-    ChordBox, ExtensionLine, FilterChoice, FilterView, LabelLine, Panel, PartLine, PresetLine, SkyName, SoundLine,
-    SweptLine, TakeLine, Theme, TrailDot, YearBar,
+    ChordBox, CurveLine, ExtensionLine, FilterChoice, FilterView, LabelLine, Panel, PartLine, PresetLine, SkyName,
+    SoundLine, SweptLine, TakeLine, Theme, TrailDot, YearBar,
 };
 
 use audition::{Player, Playing};

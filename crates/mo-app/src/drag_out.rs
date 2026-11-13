@@ -719,11 +719,13 @@ fn unique_names<'a>(names: impl Iterator<Item = &'a str>) -> io::Result<Vec<Stri
 }
 
 /// The endings of the files a drag makes ([`MadeFile`]): a clip's MIDI file; a Bitwig preset made for the drag; a
-/// song's sound as the plugin preset an export writes (as FL Studio, Studio One and Bitwig keep them: Bitwig keeps a
-/// CLAP plugin's as `.clap-preset`). The sweep only ever clears a file with one of these.
-pub const MADE_ENDINGS: [&str; 11] = [
+/// curve the test plugin hands Bitwig; a song's sound as the plugin preset an export writes (as FL Studio, Studio One
+/// and Bitwig keep them: Bitwig keeps a CLAP plugin's as `.clap-preset`). The sweep only ever clears a file with one
+/// of these.
+pub const MADE_ENDINGS: [&str; 12] = [
     ".mid",
     ".bwpreset",
+    ".bwcurve",
     ".fxp",
     ".fxb",
     ".vstpreset",
@@ -1415,6 +1417,26 @@ mod tests {
         let file = PathBuf::from("/d/Curves/Rise 0123.bwcurve");
         let p = curve(file.clone(), card.clone());
         assert_eq!(p, Payload { files: vec![file], cards: vec![card], caption: "1 curve".into(), numbered: false });
+    }
+
+    #[test]
+    fn a_bitwig_preset_or_curve_keeps_its_ending_and_is_cleared_as_a_midi_file_is() {
+        // The plugin hands Bitwig a preset it made, or a curve, through a drag folder; a plugin's own preset keeps
+        // its ending too, as the app's drag hands one out.
+        let temp = test_temp("bwpreset");
+        let files = [
+            midi("Serum - Lead.bwpreset", b"bw"),
+            midi("Serum - Lead.bwpreset", b"bw2"),
+            midi("Rise.bwcurve", b"c"),
+            midi("x.fxp", b"1"),
+        ];
+        let paths = write_drag_files(&temp, &files).unwrap();
+        let names: Vec<_> = paths.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["Serum - Lead.bwpreset", "Serum - Lead 2.bwpreset", "Rise.bwcurve", "x.fxp"]);
+        assert!(!plain_drag_name(".bwpreset"));
+        let done = sweep(&temp, SystemTime::now() + DAY * 2);
+        assert_eq!(done.removed, 5);
+        assert!(paths.iter().all(|p| !p.exists()));
     }
 
     #[test]

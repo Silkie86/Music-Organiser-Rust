@@ -264,3 +264,32 @@ fn export_uses_a_stand_in_when_the_plugin_has_no_template() {
     let e = export::export(&[hive], "/songs/Song.flp", &out, Some(&templates)).unwrap();
     assert!(e.files.iter().any(|f| f.ends_with(".bwpreset")), "{:?} {:?}", e.files, e.failed);
 }
+
+#[test]
+fn a_plugins_own_preset_file_becomes_a_bitwig_preset_to_drag() {
+    // Solomon, 13 Nov: Bitwig takes only its own presets dropped on a track.
+    let dir = folder("from-file");
+    let t = send::inspect(&saved_in_bitwig(&dir, "Init Lead", "Serum", "Init Lead", "0f1e2d.fxb")).unwrap();
+    let templates = one(t);
+    let file = dir.join("Big Bass.fxp");
+    std::fs::write(&file, serum_sound("Big Bass", "Serum").data).unwrap();
+    let to = dir.join("Big Bass.bwpreset");
+    let made = export::bitwig_preset_from_file(&file, "Serum", mo_formats::PluginKind::Instrument, &templates, &to);
+    assert_eq!(made.unwrap(), Some(()));
+    let doc = bitwig::decode(std::fs::read(&to).unwrap()).unwrap();
+    assert_eq!(doc.meta_str("preset_name"), "Big Bass");
+    assert_eq!(std::fs::read(&file).unwrap(), serum_sound("Big Bass", "Serum").data, "the file is only read");
+    // No template of its format: nothing made, nothing written.
+    let none = dir.join("None.bwpreset");
+    let made =
+        export::bitwig_preset_from_file(&file, "Serum", mo_formats::PluginKind::Instrument, &Templates::new(), &none);
+    assert_eq!(made.unwrap(), None);
+    assert!(!none.exists());
+    // Not a preset: an error, nothing written.
+    let junk = dir.join("Junk.fxp");
+    std::fs::write(&junk, b"not a preset").unwrap();
+    assert!(
+        export::bitwig_preset_from_file(&junk, "Serum", mo_formats::PluginKind::Instrument, &templates, &none).is_err()
+    );
+    assert!(!none.exists());
+}

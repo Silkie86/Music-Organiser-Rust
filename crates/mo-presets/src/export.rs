@@ -205,20 +205,72 @@ pub(crate) fn bitwig_bytes(
 /// nothing is left behind but `to` if the app stops part way (the 10 Nov review's D-4). Gives the name the sound's
 /// `.bwpreset` would have in an export, without ".bwpreset", or `None` when `templates` has no template for its plugin.
 pub fn bitwig_preset_from_save(save: &str, key: &str, templates: &Templates, to: &Path) -> io::Result<Option<String>> {
+    let Some((name, bytes)) = bitwig_preset_bytes_from_save(save, key, templates)? else { return Ok(None) };
+    write_new(to, &bytes)?;
+    Ok(Some(name))
+}
+
+/// [`bitwig_preset_from_save`]'s name and Bitwig preset, kept in memory (for a drag's own folder): nothing is written.
+pub fn bitwig_preset_bytes_from_save(
+    save: &str,
+    key: &str,
+    templates: &Templates,
+) -> io::Result<Option<(String, Vec<u8>)>> {
     let (p, name) = sound_in_save(save, key)?;
     let Some(built) = bitwig_bytes(&p, "", templates, &mut HashMap::new()) else { return Ok(None) };
     let bytes = built.map_err(io::Error::other)?;
-    // A new file of the caller's own, so nothing is written over: written, then read back and checked.
-    let written = std::fs::write(to, &bytes).and_then(|()| match std::fs::read(to)? == bytes {
+    let bw = bitwig_name(&name, &safe_extension(&p.extension));
+    Ok(Some((bw.strip_suffix(".bwpreset").unwrap_or(&bw).to_owned(), bytes)))
+}
+
+/// A plugin's preset file (a VST2 `.fxp`/`.fxb` or a VST3 `.vstpreset`) for `plugin` (as the list names it; `kind`
+/// what it is) as a Bitwig preset written straight to `to`, a file of the caller's own: Bitwig takes a `.bwpreset`
+/// dropped on a track, where it refuses the plugin's own files (Solomon, 13 Nov: "dragging preset from plugin doesnt
+/// work unless its a bitwigpreset"). Built from the plugin's template, or another plugin's of the same format
+/// ([`bitwig::stand_in_for`]). `None` when `templates` has none for it; an error when the file doesn't read as a
+/// preset. The file itself is only read.
+pub fn bitwig_preset_from_file(
+    path: &Path,
+    plugin: &str,
+    kind: mo_formats::PluginKind,
+    templates: &Templates,
+    to: &Path,
+) -> io::Result<Option<()>> {
+    let Some(bytes) = bitwig_preset_bytes_from_file(path, plugin, kind, templates)? else { return Ok(None) };
+    write_new(to, &bytes)?;
+    Ok(Some(()))
+}
+
+/// [`bitwig_preset_from_file`]'s Bitwig preset, kept in memory (for a drag's own folder): nothing is written.
+pub fn bitwig_preset_bytes_from_file(
+    path: &Path,
+    plugin: &str,
+    kind: mo_formats::PluginKind,
+    templates: &Templates,
+) -> io::Result<Option<Vec<u8>>> {
+    let raw = std::fs::read(path)?;
+    let name = paths::file_name(&path.to_string_lossy()).to_owned();
+    let file =
+        files::read_bytes(&raw, &name).map_err(|e| io::Error::other(format!("it doesn't read as a preset: {e}")))?;
+    let extension = paths::extension(&name).to_lowercase();
+    let mut p = PresetBlob::new(paths::stem(&name), plugin, extension, raw);
+    p.kind = kind;
+    // Its template found by the plugin's id its settings give first: a VST2 file names its plugin only by that id.
+    let Some(built) = bitwig_bytes(&p, &file.plugin_id, templates, &mut HashMap::new()) else { return Ok(None) };
+    built.map(Some).map_err(io::Error::other)
+}
+
+/// Writes `bytes` to `to`, a new file of the caller's own (so nothing is written over), then reads it back and checks
+/// it; on a failure nothing is left there.
+fn write_new(to: &Path, bytes: &[u8]) -> io::Result<()> {
+    let written = std::fs::write(to, bytes).and_then(|()| match std::fs::read(to)? == bytes {
         true => Ok(()),
         false => Err(io::Error::other("the file didn't read back as it was written")),
     });
-    if let Err(e) = written {
+    if written.is_err() {
         let _ = std::fs::remove_file(to);
-        return Err(e);
     }
-    let bw = bitwig_name(&name, &safe_extension(&p.extension));
-    Ok(Some(bw.strip_suffix(".bwpreset").unwrap_or(&bw).to_owned()))
+    written
 }
 
 /// Reads a save again and gives the sound with this key ([`crate::list::place_keys`]) with the name an export gives

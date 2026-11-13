@@ -2200,7 +2200,19 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
     let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     drop(saves);
     let library_roots: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).collect();
-    paths.extend(background::on_pool(|| logic::curve_files(&library_roots)));
+    // Bitwig's curves library and the plugins' LFO shapes (Serum, LFOTool), looked through side by side.
+    let (library, shapes) = background::on_pool(|| {
+        rayon::join(
+            || logic::curve_files(&library_roots),
+            || {
+                let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+                let documents = mo_app::bitwig_convert::documents();
+                logic::shape_files(&logic::shape_folders(documents.as_deref(), home.as_deref()))
+            },
+        )
+    });
+    paths.extend(library);
+    paths.extend(shapes);
     {
         let folders = bitwig_folders.clone();
         on_window(move |_| PAGE.with(|p| p.borrow_mut().bitwig = folders));
@@ -2252,13 +2264,13 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             curve_db_change(curve.id.clone(), move |db, id| db.set_hidden(id, hidden));
         }
         curve_act::OPEN_SONG => {
-            let Some(s) = curve.sources.iter().find(|s| s.kind != curves::SourceKind::BitwigCurve) else {
+            let Some(s) = curve.sources.iter().find(|s| s.kind.is_song()) else {
                 return false;
             };
             crate::files::reveal(&feed, &s.path, mo_app::shell::folder_of(&s.path));
         }
         curve_act::SHOW_IN_SONGS => {
-            let Some(s) = curve.sources.iter().find(|s| s.kind != curves::SourceKind::BitwigCurve) else {
+            let Some(s) = curve.sources.iter().find(|s| s.kind.is_song()) else {
                 return false;
             };
             show_in_songs(app, &s.path);

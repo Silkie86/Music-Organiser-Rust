@@ -65,8 +65,8 @@ fn preset_files_are_listed_and_filtered_as_the_app_lists_them() {
     assert_eq!(presets.view(&this_year).shown.len(), 2);
     let chips = presets.chips(Some(&all.counts), &Filters::default());
     assert!(chips.part.chips.iter().chain(&chips.part.more).any(|c| c.text == "Bass" && c.count == "1"));
-    assert_eq!(presets::count_line(2, None), "2 preset files");
-    assert_eq!(presets::count_line(2, Some(1)), "1 of 2 preset files");
+    assert_eq!(presets::count_line(2, None), "2 presets");
+    assert_eq!(presets::count_line(2, Some(1)), "1 of 2 presets");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -81,6 +81,22 @@ fn a_dragged_preset_is_its_own_file() {
     assert!(presets.file(0).is_err(), "a file gone since is said, not carried");
     assert!(presets.file(9).is_err());
     assert!(presets::hint(&presets.items[1]).contains("VST2"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_preset_dragged_into_bitwig_needs_a_bitwig_preset_to_be_made_from() {
+    // Outside Bitwig the file itself goes; into Bitwig, a VST2 preset is made into a Bitwig preset, which needs a
+    // Bitwig preset of a VST2 plugin to build on: none here, so it says what to do, and nothing is written.
+    let dir = folder("presets-into-bitwig");
+    let store = dir.join("data").join(mo_presets::file_store::FILE_NAME);
+    let presets = ready(presets::read_from(&[dir.join("presets")], &store));
+    let temp = dir.join("temp");
+    std::fs::create_dir_all(&temp).unwrap();
+    assert_eq!(presets.to_drag(0, false, &temp).unwrap(), dir.join("presets/Synth/Deep Bass.fxp"));
+    let why = presets.to_drag(0, true, &temp).unwrap_err();
+    assert!(why.contains("No Bitwig preset of a VST2 plugin"), "{why}");
+    assert_eq!(std::fs::read_dir(&temp).unwrap().count(), 0, "nothing is left in Temp");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
