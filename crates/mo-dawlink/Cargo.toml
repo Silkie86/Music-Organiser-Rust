@@ -20,6 +20,8 @@ midi-port = ["dep:midir"]
 # File names as the C# app reads them, whichever way the folders are written (`paths::file_name`).
 mo-formats = { path = "../mo-formats" }
 serde_json = "1"
+# The watch feed's thread runs at low priority (rules 12 and 21), as the library's folder watch does.
+thread-priority.workspace = true
 # MIDI ports on every system (WinMM on Windows, CoreMIDI on a Mac, ALSA on Linux). MIT.
 midir = { version = "0.11", optional = true }
 # The Bitwig extension is a zip (a Java archive): its version is in its manifest.

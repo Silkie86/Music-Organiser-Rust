@@ -8,7 +8,10 @@ import com.bitwig.extension.controller.api.BooleanValue;
 import com.bitwig.extension.controller.api.Clip;
 import com.bitwig.extension.controller.api.ClipLauncherSlot;
 import com.bitwig.extension.controller.api.ClipLauncherSlotBank;
+import com.bitwig.extension.controller.api.ColorValue;
 import com.bitwig.extension.controller.api.ControllerHost;
+import com.bitwig.extension.controller.api.CueMarker;
+import com.bitwig.extension.controller.api.CueMarkerBank;
 import com.bitwig.extension.controller.api.CursorRemoteControlsPage;
 import com.bitwig.extension.controller.api.CursorTrack;
 import com.bitwig.extension.controller.api.Device;
@@ -342,6 +345,21 @@ final class Link {
     /** The record job running now, if any: recordabort and Bitwig stopping the link reach it here. */
     private Recording recording;
 
+    // The watch feed (extension 3.24): what's sent to the apps that watch, as Bitwig changes it.
+    /** Whether the notes each track plays could be followed. */
+    private boolean watchNotes;
+    /** Each track's level meters, left and right, out of Watch.LEVEL_RANGE (null when Bitwig wouldn't give them). */
+    private int[][] meters;
+    /** The arranger's first cue markers (null when Bitwig wouldn't give them). */
+    private CueMarker[] markers;
+    /** The apps watching, each with what it has been told. */
+    private final Map<Client, Watch> watching = new LinkedHashMap<>();
+    /** Whether the link is looking at Bitwig for them now, and how many looks it has made. */
+    private boolean watchTicking;
+    private long watchLooks;
+    /** Whether a look has failed and Bitwig's console has been told (once is enough). */
+    private boolean watchWarned;
+
     /**
      * The selected device's parameters, as Bitwig reports them. Display texts are only asked for while a request
      * waits for them, since Bitwig advises against watching them all the time.
@@ -428,6 +446,10 @@ final class Link {
         // Extension 3.23: playstart moves where Play starts from, for a part sent from the app's "Fits my song" list: the
         // play start then marks the first of the song's bars it was found for, where its clip goes in the arranger.
         commands.put("playstart", Command.job(this::markPlayStart));
+        // Extension 3.24: the watch feed. The app asks once, and the link then sends it what changes in Bitwig as it
+        // changes (see Watch): the tracks, the selection, the transport, the cue markers, the notes each track plays and
+        // each track's level. It only reads, so it doesn't need changes allowed.
+        commands.put("watch", Command.answer(false, this::watch));
     }
 
     // ---- Starting and stopping ----
@@ -752,6 +774,47 @@ final class Link {
                  + ", automation write mode " + str(transport.automationWriteMode().get()) + "; the master track is "
                  + (master.mute().get() ? "muted." : "not muted."));
 
+        // The watch feed (extension 3.24): the notes each track plays, its level meters and the arranger's cue markers, each
+        // set up on its own so a Bitwig without one still sends the rest.
+        feature("watch: notes playing", () -> {
+            for (int t = 0; t < MAX_TRACKS; t++) trackItems[t].playingNotes().markInterested();
+            watchNotes = true;
+        }, () -> {
+            int playing = 0;
+            for (int t = 0; t < MAX_TRACKS; t++)
+                if (trackItems[t].exists().get() && trackItems[t].playingNotes().get().length > 0) playing++;
+            return playing + " tracks are playing notes now.";
+        });
+
+        feature("watch: level meters", () -> {
+            int[][] made = new int[MAX_TRACKS][2];
+            for (int t = 0; t < MAX_TRACKS; t++) {
+                final int[] lr = made[t];
+                trackItems[t].addVuMeterObserver(Watch.LEVEL_RANGE, 0, false, v -> lr[0] = v);
+                trackItems[t].addVuMeterObserver(Watch.LEVEL_RANGE, 1, false, v -> lr[1] = v);
+            }
+            meters = made;
+        }, () -> {
+            int sounding = 0;
+            for (int t = 0; t < MAX_TRACKS; t++)
+                if (trackItems[t].exists().get() && Watch.level(meters[t][0], meters[t][1]) > 0) sounding++;
+            return sounding + " tracks show a level now.";
+        });
+
+        feature("watch: cue markers", () -> {
+            CueMarkerBank bank = (arranger != null ? arranger : host.createArranger()).createCueMarkerBank(Watch.MARKERS);
+            CueMarker[] made = new CueMarker[Watch.MARKERS];
+            for (int i = 0; i < Watch.MARKERS; i++) {
+                CueMarker marker = bank.getItemAt(i);
+                marker.exists().markInterested();
+                marker.name().markInterested();
+                marker.getColor().markInterested();
+                marker.position().markInterested();
+                made[i] = marker;
+            }
+            markers = made;
+        }, () -> watchMarkers().size() + " cue markers in the arranger (the link follows the first " + Watch.MARKERS + ").");
+
         // The routes that run Bitwig's commands other than straight away (see ROUTES): the loopback's MIDI ports, and two
         // buttons for each command of ROUTED Bitwig has, which notes on channel 16 coming back through the loopback press.
         feature("command routes", () -> {
@@ -841,6 +904,7 @@ final class Link {
         }
         // Nor do a song's bars stay looped for a part the link can no longer take out: put back, as far as can be.
         loopLeft();
+        watching.clear();
         for (Client client : clients) client.open = false;
         clients.clear();
         jobs.clear();
@@ -1159,6 +1223,8 @@ final class Link {
         // Extension 3.22: whether a `clip` may come with `loop` (this Bitwig let the link reach the arranger's loop and
         // the play start), so the app plays the part alone where it may not, without asking first.
         m.put("songLoop", loops && followed);
+        // Extension 3.24: the watch command, and which of its sections this Bitwig gives.
+        m.put("watch", watchSections());
         return m;
     }
 
@@ -2387,6 +2453,215 @@ final class Link {
         m.put("tempo", transport.tempo().getRaw());
         m.put("timeSignature", str(transport.timeSignature().get()));
         reply(ask, m, null);
+    }
+
+    // ---- The watch feed (extension 3.24) ----
+
+    /**
+     * Starts (or with `on: false`, stops) sending this app what changes in Bitwig as it changes: a `watch` event with
+     * the sections that changed (see Watch), the first holding them all. Answers `watching`, `every` (how often the link
+     * looks, in milliseconds) and `sections` (those this Bitwig gives). Asking again while watching starts again from
+     * the whole picture. A watch ends with its connection.
+     */
+    private void watch(Ask ask, Map<String, Object> request) {
+        Object on = field(request, "on");
+        if (!absent(on) && !(on instanceof Boolean)) throw new LinkError("on has to be true or false.");
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (Boolean.FALSE.equals(on)) {
+            watching.remove(ask.client());
+            m.put("watching", false);
+            reply(ask, m, null);
+            return;
+        }
+        Watch watch = new Watch(clock.millis());
+        watching.put(ask.client(), watch);
+        m.put("watching", true);
+        m.put("every", Watch.TICK);
+        m.put("sections", watchSections());
+        reply(ask, m, null);
+        // The looks start first, so a first picture that can't be read is sent by the next look instead.
+        if (!watchTicking) {
+            watchTicking = true;
+            host.scheduleTask(this::watchLook, Watch.TICK);
+        }
+        // The whole picture straight away, then what changes.
+        Map<String, Object> first = watch.changed(watchNow(true), clock.millis());
+        send(ask.client(), watchEvent(first != null ? first : new LinkedHashMap<>()));
+    }
+
+    /** The sections the watch feed gives in this Bitwig. */
+    private List<Object> watchSections() {
+        List<Object> list = new ArrayList<>();
+        if (app != null && project != null) list.add("project");
+        if (tracks != null) list.add("tracks");
+        if (tracks != null && cursorTrack != null) list.add("selected");
+        if (followed) list.add("transport");
+        if (markers != null) list.add("markers");
+        if (watchNotes) list.add(Watch.NOTES);
+        if (meters != null) list.add("levels");
+        return list;
+    }
+
+    /** One look at Bitwig for the apps that watch: each gets what changed for it, and the next look is scheduled. */
+    private void watchLook() {
+        watching.keySet().removeIf(c -> !c.open);
+        if (watching.isEmpty()) {
+            watchTicking = false;
+            return;
+        }
+        watchLooks++;
+        Map<String, Object> now = watchNow(watchLooks % Watch.SLOW_EVERY == 0);
+        long time = clock.millis();
+        for (Map.Entry<Client, Watch> e : new ArrayList<>(watching.entrySet())) {
+            Map<String, Object> changed = e.getValue().changed(now, time);
+            // Null: nothing to send. Empty: nothing changed for a while, and the app hears the link still answers.
+            if (changed != null) send(e.getKey(), watchEvent(changed));
+        }
+        host.scheduleTask(this::watchLook, Watch.TICK);
+    }
+
+    private Map<String, Object> watchEvent(Map<String, Object> changed) {
+        Map<String, Object> m = event("watch");
+        m.put("time", clock.millis());
+        m.put("result", changed);
+        return m;
+    }
+
+    /**
+     * The song as Bitwig shows it now: the notes playing, and with `slow` every other section this Bitwig gives. Each
+     * section is read on its own, so one that fails now leaves the rest going: it's left out of this look (the app
+     * keeps what it had), and Bitwig's console hears of the first failure.
+     */
+    private Map<String, Object> watchNow(boolean slow) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        List<Object> sections = watchSections();
+        if (slow) {
+            if (sections.contains("project")) watchSection(m, "project", () -> {
+                Map<String, Object> p = new LinkedHashMap<>();
+                p.put("name", str(app.projectName().get()));
+                p.put("modified", project.isModified().get());
+                return p;
+            });
+            if (sections.contains("transport")) watchSection(m, "transport", () -> {
+                Map<String, Object> t = new LinkedHashMap<>();
+                t.put("playing", transport.isPlaying().get());
+                t.put("position", Watch.beats(transport.playPosition().get()));
+                t.put("playStart", Watch.beats(transport.playStartPosition().get()));
+                t.put("tempo", transport.tempo().getRaw());
+                t.put("timeSignature", str(transport.timeSignature().get()));
+                return t;
+            });
+            if (sections.contains("tracks")) watchSection(m, "tracks", this::watchTracks);
+            if (sections.contains("selected")) watchSection(m, "selected", this::watchSelected);
+            if (sections.contains("markers")) watchSection(m, "markers", this::watchMarkers);
+            if (sections.contains("levels")) watchSection(m, "levels", this::watchLevels);
+        }
+        if (sections.contains(Watch.NOTES)) watchSection(m, Watch.NOTES, this::watchPlaying);
+        return m;
+    }
+
+    private void watchSection(Map<String, Object> into, String name, Supplier<Object> read) {
+        try {
+            into.put(name, read.get());
+        } catch (RuntimeException | LinkageError e) {
+            if (!watchWarned) host.errorln("Music Organiser: the watch feed couldn't read the " + name + " (" + e + ").");
+            watchWarned = true;
+        }
+    }
+
+    /**
+     * Each track as the watch feed gives it: what `project` says of it without its volume and pan, which automation
+     * moves all the time (the levels say how loud it is).
+     */
+    private List<Object> watchTracks() {
+        List<Object> list = new ArrayList<>();
+        for (int t = 0; t < MAX_TRACKS; t++) {
+            Track track = trackItems[t];
+            if (!track.exists().get()) continue;
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("index", t);
+            String id = idOf(t);
+            if (!id.isEmpty()) m.put("id", id);
+            m.put("name", str(track.name().get()));
+            m.put("type", str(track.trackType().get()));
+            m.put("group", track.isGroup().get());
+            m.put("color", colour(track.color()));
+            m.put("active", track.isActivated().get());
+            m.put("mute", track.mute().get());
+            m.put("solo", track.solo().get());
+            List<Object> devices = new ArrayList<>();
+            for (int d = 0; d < MAX_DEVICES; d++) {
+                Device device = (Device) trackDevices[t].getItemAt(d);
+                if (device.exists().get()) devices.add(describeDevice(d, device));
+            }
+            m.put("devices", devices);
+            list.add(m);
+        }
+        return list;
+    }
+
+    /** The track and device selected in Bitwig: `track` (its index, or null), its `id` and `name`, and `device` (or null). */
+    private Map<String, Object> watchSelected() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        int found = -1;
+        for (int t = 0; t < MAX_TRACKS; t++)
+            if (trackItems[t].exists().get() && trackSelected[t] != null && trackSelected[t].get()) {
+                found = t;
+                break;
+            }
+        m.put("track", found < 0 ? null : found);
+        if (found >= 0) {
+            String id = idOf(found);
+            if (!id.isEmpty()) m.put("id", id);
+            m.put("name", str(trackItems[found].name().get()));
+        }
+        Map<String, Object> device = null;
+        if (cursorDevice != null && cursorDevice.exists().get()) device = describeDevice(cursorDevice.position().get(), cursorDevice);
+        m.put("device", device);
+        return m;
+    }
+
+    /** The arranger's cue markers, by where they are: `name`, `at` (in beats from the start) and `color`. */
+    private List<Object> watchMarkers() {
+        List<Object> list = new ArrayList<>();
+        for (CueMarker marker : markers) {
+            if (!marker.exists().get()) continue;
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("name", str(marker.name().get()));
+            m.put("at", Watch.beats(marker.position().get()));
+            m.put("color", colour(marker.getColor()));
+            list.add(m);
+        }
+        list.sort(Comparator.comparingDouble(m -> (Double) ((Map<?, ?>) m).get("at")));
+        return list;
+    }
+
+    /** The tracks playing notes now: each one's `track` (index), `id` and `notes`, as [key, velocity] pairs. */
+    private List<Object> watchPlaying() {
+        List<Object> list = new ArrayList<>();
+        for (int t = 0; t < MAX_TRACKS; t++) {
+            if (!trackItems[t].exists().get()) continue;
+            List<Object> notes = Watch.notes(trackItems[t].playingNotes().get());
+            if (notes.isEmpty()) continue;
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("track", t);
+            String id = idOf(t);
+            if (!id.isEmpty()) m.put("id", id);
+            m.put("notes", notes);
+            list.add(m);
+        }
+        return list;
+    }
+
+    /** The tracks that show a level now, as [index, level] pairs, the level from 0 to 1 (see Watch.level). */
+    private List<Object> watchLevels() {
+        List<Object> list = new ArrayList<>();
+        for (int t = 0; t < MAX_TRACKS; t++) {
+            if (!trackItems[t].exists().get()) continue;
+            double level = Watch.level(meters[t][0], meters[t][1]);
+            if (level > 0) list.add(List.of(t, level));
+        }
+        return list;
     }
 
     /** The first empty slot in a scene that exists, else the first of the scenes still to come; -1 if none. */
@@ -4498,7 +4773,7 @@ final class Link {
         return count < 0 ? "continuous" : count + " steps";
     }
 
-    static String colour(SettableColorValue c) {
+    static String colour(ColorValue c) {
         return "#" + hex(c.red()) + hex(c.green()) + hex(c.blue());
     }
 

@@ -1,6 +1,6 @@
 //! A stand-in for the Music Organiser link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
-//! on a free port on this computer, greets each connection as extension 3.23 does, and answers `hello`, `newtrack`,
-//! `insert`, `pads`, `clip`, `selectedtrack`, `transport`, `stoptracks`, `deleteclip` and `deletetrack` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
+//! on a free port on this computer, greets each connection as extension 3.24 does, and answers `hello`, `newtrack`,
+//! `insert`, `pads`, `clip`, `selectedtrack`, `transport`, `watch`, `stoptracks`, `deleteclip` and `deletetrack` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
 //! whichever connection it came on, as the extension makes changes one at a time.
 //!
@@ -32,6 +32,9 @@ use super::{Bitwig, DRUM_MACHINE_NAME, DeviceId, Hello, Metre, PLAY_START_NEEDS,
 pub const CHANGES_OFF: &str = "Changes are turned off. To let the app change things, turn on \"Let the app make \
                                changes\" in Bitwig: Settings > Controllers > Music Organiser.";
 
+/// The sections the stand-in's watch feed gives (extension 3.24), as a Bitwig with every part of the API does.
+const WATCH_SECTIONS: [&str; 7] = ["project", "tracks", "selected", "transport", "markers", "notes", "levels"];
+
 /// How long the app waits for the stand-in: it answers at once, unless a test makes it wait.
 const WAIT: Duration = Duration::from_secs(2);
 
@@ -45,6 +48,8 @@ pub struct FakeBitwig {
     world: Arc<Mutex<World>>,
     stop: Arc<AtomicBool>,
     connections: Arc<Mutex<Vec<TcpStream>>>,
+    /// The connections that asked to `watch` (extension 3.24), which [`FakeBitwig::send_watch`] sends to.
+    watching: Arc<Mutex<Vec<TcpStream>>>,
     accepting: Option<JoinHandle<()>>,
 }
 
@@ -63,13 +68,32 @@ impl FakeBitwig {
         let world = Arc::new(Mutex::new(world));
         let stop = Arc::new(AtomicBool::new(false));
         let connections = Arc::new(Mutex::new(Vec::new()));
+        let watching = Arc::new(Mutex::new(Vec::new()));
         let accepting = {
-            let (world, stop, connections) = (Arc::clone(&world), Arc::clone(&stop), Arc::clone(&connections));
+            let (world, stop, connections, watching) =
+                (Arc::clone(&world), Arc::clone(&stop), Arc::clone(&connections), Arc::clone(&watching));
             thread::Builder::new()
                 .name("fake Bitwig".into())
-                .spawn(move || accept(&listener, &world, &stop, &connections))?
+                .spawn(move || accept(&listener, &world, &stop, &connections, &watching))?
         };
-        Ok(FakeBitwig { port, world, stop, connections, accepting: Some(accepting) })
+        Ok(FakeBitwig { port, world, stop, connections, watching, accepting: Some(accepting) })
+    }
+
+    /// Sends every connection watching (extension 3.24) a `watch` event with these sections, as the link does when
+    /// they change in Bitwig. It sends no keep-alive of its own (the link sends an empty event every 5 s): a test
+    /// that waits past [`super::watch::SILENT`] sends one with `json!({})`. Says how many it went to. (The stand-in sends it from the test's thread: a test that
+    /// watches on a connection doesn't send requests on it meanwhile.)
+    pub fn send_watch(&self, result: Value) -> usize {
+        let lengths = lock(&self.world).lengths;
+        let event = json!({ "event": "watch", "time": 0, "result": result });
+        let mut watching = lock(&self.watching);
+        watching.retain_mut(|stream| write_message(stream, &event, lengths).is_ok());
+        watching.len()
+    }
+
+    /// How many connections are watching now.
+    pub fn watchers(&self) -> usize {
+        lock(&self.watching).len()
     }
 
     pub fn port(&self) -> u16 {
@@ -97,6 +121,7 @@ impl Drop for FakeBitwig {
         for stream in lock(&self.connections).drain(..) {
             let _ = stream.shutdown(Shutdown::Both);
         }
+        lock(&self.watching).clear();
     }
 }
 
@@ -275,15 +300,15 @@ pub struct FakeSongLoop {
 }
 
 impl Default for World {
-    /// "Night Drive" open, changes allowed, extension 3.23 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
+    /// "Night Drive" open, changes allowed, extension 3.24 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
     /// Drums (a group), Kick (audio, with EQ+), Bass (an instrument: Serum, then a Compressor, selected) and the
     /// Master (with a Peak Limiter). The arranger's loop is off, over the first 4 bars, and Play starts at the start.
     /// 120 BPM in 4/4, with nothing recorded into the arranger.
     fn default() -> World {
         let hello = json!({
             "link": 3, "product": "Bitwig Studio", "version": "6.1.5", "api": 23, "platform": "WINDOWS",
-            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.23", "loopback": true,
-            "songLoop": true,
+            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.24", "loopback": true,
+            "songLoop": true, "watch": WATCH_SECTIONS,
         });
         let mut serum = FakeDevice::new("Serum", "instrument");
         serum.preset = "Reese".into();
@@ -472,7 +497,7 @@ impl World {
         };
         let cmd = map.get("cmd");
         let changes = match cmd.and_then(Value::as_str) {
-            Some("hello" | "selectedtrack" | "transport" | "recordabort") => false,
+            Some("hello" | "selectedtrack" | "transport" | "recordabort" | "watch") => false,
             Some(
                 "newtrack" | "insert" | "pads" | "clip" | "deleteclip" | "deletetrack" | "stoptracks" | "record"
                 | "playstart",
@@ -489,6 +514,13 @@ impl World {
             Some("insert") => self.insert(map),
             Some("clip") => self.add_clip(map),
             Some("selectedtrack") => Ok(self.selected()),
+            Some("watch") => match map.get("on") {
+                None | Some(Value::Null | Value::Bool(true)) => {
+                    Ok(json!({ "watching": true, "every": 50, "sections": WATCH_SECTIONS }))
+                }
+                Some(Value::Bool(false)) => Ok(json!({ "watching": false })),
+                Some(_) => Err("on has to be true or false.".into()),
+            },
             Some("transport") => Ok(json!({
                 "playing": self.playing, "position": self.transport.play_start,
                 "playStart": self.transport.play_start, "tempo": self.tempo, "timeSignature": self.time_signature,
@@ -576,6 +608,54 @@ impl World {
         self.selected_track = Some(at);
         self.selected_device = None;
         Ok(answer)
+    }
+
+    /// The whole picture the link sends first when the app starts watching (extension 3.24).
+    pub fn picture(&self) -> Value {
+        let tracks: Vec<Value> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(t, track)| {
+                let devices: Vec<Value> = track
+                    .devices
+                    .iter()
+                    .enumerate()
+                    .map(|(d, device)| {
+                        json!({ "index": d, "name": device.name, "preset": device.preset, "kind": device.kind,
+                                "plugin": device.plugin, "enabled": true })
+                    })
+                    .collect();
+                json!({ "index": t, "id": track.id, "name": track.name, "type": track.kind,
+                        "group": track.kind == "Group", "color": "#808080", "active": true, "mute": false,
+                        "solo": false, "devices": devices })
+            })
+            .collect();
+        let selected = match self.selected_track.and_then(|t| self.tracks.get(t).map(|track| (t, track))) {
+            Some((t, track)) => {
+                let device = self
+                    .selected_device
+                    .filter(|(on, _)| *on == t)
+                    .and_then(|(_, d)| track.devices.get(d).map(|device| (d, device)))
+                    .map(|(d, device)| {
+                        json!({ "index": d, "name": device.name, "preset": device.preset, "kind": device.kind,
+                                "plugin": device.plugin, "enabled": true })
+                    });
+                json!({ "track": t, "id": track.id, "name": track.name, "device": device })
+            }
+            None => json!({ "track": null, "device": null }),
+        };
+        json!({
+            "project": { "name": self.project, "modified": self.modified },
+            "transport": { "playing": self.playing, "position": self.transport.play_start,
+                           "playStart": self.transport.play_start, "tempo": self.tempo,
+                           "timeSignature": self.time_signature },
+            "tracks": tracks,
+            "selected": selected,
+            "markers": [],
+            "levels": [],
+            "notes": [],
+        })
     }
 
     /// The selected track, as the link's `selectedTrack` (extension 3.19).
@@ -1258,7 +1338,13 @@ impl World {
 }
 
 /// Takes the app's connections, each on a thread of its own, until the stand-in stops.
-fn accept(listener: &TcpListener, world: &Arc<Mutex<World>>, stop: &AtomicBool, connections: &Mutex<Vec<TcpStream>>) {
+fn accept(
+    listener: &TcpListener,
+    world: &Arc<Mutex<World>>,
+    stop: &AtomicBool,
+    connections: &Mutex<Vec<TcpStream>>,
+    watching: &Arc<Mutex<Vec<TcpStream>>>,
+) {
     while !stop.load(Ordering::Relaxed) {
         let Ok((stream, _)) = listener.accept() else {
             thread::sleep(Duration::from_millis(5));
@@ -1270,8 +1356,10 @@ fn accept(listener: &TcpListener, world: &Arc<Mutex<World>>, stop: &AtomicBool, 
         if let Ok(copy) = stream.try_clone() {
             lock(connections).push(copy);
         }
-        let world = Arc::clone(world);
-        let _ = thread::Builder::new().name("fake Bitwig connection".into()).spawn(move || serve(stream, &world));
+        let (world, watching) = (Arc::clone(world), Arc::clone(watching));
+        let _ = thread::Builder::new()
+            .name("fake Bitwig connection".into())
+            .spawn(move || serve(stream, &world, &watching));
     }
 }
 
@@ -1284,7 +1372,7 @@ enum Reply {
 }
 
 /// One connection: the greeting, then each request answered in turn, until the app or the stand-in closes it.
-fn serve(mut stream: TcpStream, world: &Mutex<World>) {
+fn serve(mut stream: TcpStream, world: &Mutex<World>, watching: &Mutex<Vec<TcpStream>>) {
     let (on_connect, greeting, lengths) = {
         let w = lock(world);
         (w.on_connect.clone(), w.greeting(), w.lengths)
@@ -1336,8 +1424,25 @@ fn serve(mut stream: TcpStream, world: &Mutex<World>) {
                     if recording && let Some(answer) = messages.last_mut() {
                         lock(world).end_recording(answer);
                     }
+                    // A watch that started (extension 3.24): the whole picture after the answer, and this connection
+                    // joins those the test's events go to.
+                    let watch = messages.last().and_then(|m| m.pointer("/result/watching")).and_then(Value::as_bool);
+                    let watched = watch == Some(true);
+                    if watched {
+                        messages.push(json!({ "event": "watch", "time": 0, "result": lock(world).picture() }));
+                    }
                     if messages.iter().any(|m| write_message(&mut stream, m, lengths).is_err()) {
                         return;
+                    }
+                    // As the link keeps one watch for each connection: asked again, or stopped, this connection's goes
+                    // (by the app's end of it, which its copies share); a new one only once the whole picture is out,
+                    // so the test's events come after it.
+                    if watch.is_some() {
+                        let me = stream.peer_addr().ok();
+                        lock(watching).retain(|other| other.peer_addr().ok() != me);
+                    }
+                    if watched && let Ok(copy) = stream.try_clone() {
+                        lock(watching).push(copy);
                     }
                 }
                 Reply::Nothing => {}

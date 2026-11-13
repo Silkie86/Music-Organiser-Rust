@@ -793,6 +793,30 @@ impl Link {
         let _ = self.stream.shutdown(Shutdown::Both);
     }
 
+    /// Starts the watch feed on this connection (extension 3.24): from now on the link sends a `watch` event whenever
+    /// something it watches changes, the first holding the whole picture. Answers what the link said (`watching`,
+    /// `every`, `sections`).
+    pub(super) fn start_watch(&mut self) -> Result<Value, Error> {
+        self.request(ask("watch", []), self.timeout)
+    }
+
+    /// Another handle on this connection, which can close it from another thread (to end a wait in
+    /// [`Link::next_event`]).
+    pub(super) fn closer(&self) -> io::Result<TcpStream> {
+        self.stream.try_clone()
+    }
+
+    /// The next message from Bitwig, waiting up to `silent` for it (the watch feed sends at least every few seconds).
+    /// It also ends when Bitwig closes the connection, or another thread closes it with [`Link::closer`]. Whatever
+    /// ends it closes the connection: a read that ran out of time can't be trusted on Windows (see [`Link`]).
+    pub(super) fn next_event(&mut self, silent: Duration) -> Result<Value, Failure> {
+        let got = self.next_message(Instant::now() + silent.min(LONGEST_WAIT));
+        if got.is_err() {
+            self.close();
+        }
+        got
+    }
+
     /// The next whole message from Bitwig, waiting until `deadline` for it. Messages that aren't JSON objects are
     /// passed over, as the C# app did: the request they answer then runs out of time.
     fn next_message(&mut self, deadline: Instant) -> Result<Value, Failure> {
