@@ -225,6 +225,10 @@ pub fn of(points: &[CurvePoint], length_beats: f64, loops: bool) -> Groups {
         let shape = shape(&one, true, feel == Feel::Smooth);
         return Groups { shape, rhythm, rhythms: vec![rhythm], feel };
     }
+    // For timing hits: a 1/64 note, and what it was just before its start (its end, for a loop; its bottom for a
+    // clip, so a clip that starts on a hit has one there).
+    let window = ((n as f64 / length_beats / 16.0).round() as usize).max(1);
+    let start_before = if loops { drawn[n - window.min(n)..n].iter().copied().fold(f64::MAX, f64::min) } else { 0.0 };
     // Not one repeat all through: the note lengths its half bars go at, each half bar on its own.
     let parts = (length_beats / PART_BEATS).floor() as usize;
     let mut rhythms: Vec<Rhythm> = Vec::new();
@@ -238,13 +242,16 @@ pub fn of(points: &[CurvePoint], length_beats: f64, loops: bool) -> Groups {
             if hi - lo < MOVE {
                 continue;
             }
-            let part: Vec<f64> = part.iter().map(|v| (v - lo) / (hi - lo)).collect();
-            let found = match repeat(&part, PART_BEATS) {
-                Some((r, samples)) => Some((r, Some(shape(&part[..=samples], true, feel == Feel::Smooth)))),
+            let scaled: Vec<f64> = part.iter().map(|v| (v - lo) / (hi - lo)).collect();
+            // What it was just before the half bar: a hit held on from the last one isn't a new hit.
+            let before = drawn[from.saturating_sub(window)..from.max(1)].iter().copied().fold(f64::MAX, f64::min);
+            let before = if from == 0 { start_before } else { before };
+            let found = match repeat(&scaled, PART_BEATS) {
+                Some((r, samples)) => Some((r, Some(shape(&scaled[..=samples], true, feel == Feel::Smooth)))),
                 // Hits that don't all reach the same height never repeat exactly: timed instead.
                 // On the whole curve's scale, so a small wiggle in a quiet half bar isn't taken for hits; its shape is
                 // the whole curve's.
-                None => hit_rhythm(drawn.get(from..=to).unwrap_or_default(), PART_BEATS, false, 3).map(|r| (r, None)),
+                None => hit_rhythm(part, PART_BEATS, before, false, 3).map(|r| (r, None)),
             };
             if let Some((r, part_shape)) = found {
                 if !rhythms.contains(&r) {
@@ -264,7 +271,8 @@ pub fn of(points: &[CurvePoint], length_beats: f64, loops: bool) -> Groups {
     match rhythms.as_slice() {
         [] => {
             // Its hits timed all through, before it's named by its whole length.
-            let rhythm = hit_rhythm(&drawn, length_beats, loops, 3).unwrap_or(whole);
+            // (Its drawing as it was before a loop's start was put on its end.)
+            let rhythm = hit_rhythm(&drawn[..=n], length_beats, start_before, loops, 3).unwrap_or(whole);
             Groups { shape: shape_of_all, rhythm, rhythms: vec![rhythm], feel }
         }
         [one] => Groups { shape: most(&shapes).unwrap_or(shape_of_all), rhythm: *one, rhythms: vec![*one], feel },
@@ -339,9 +347,7 @@ fn bent(t: f64, bend: f64) -> f64 {
 /// repeat is. A repeat must move (half the drawing's height at least), so a slow ramp isn't taken for a fast one.
 fn repeat(drawn: &[f64], length_beats: f64) -> Option<(Rhythm, usize)> {
     let n = drawn.len() - 1;
-    let mut candidates: Vec<(Rhythm, f64)> = Rhythm::ALL.iter().filter_map(|r| Some((*r, r.beats()?))).collect();
-    candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
-    for (r, beats) in candidates {
+    for (r, beats) in note_lengths() {
         let times = length_beats / beats;
         if times < 1.5 || (times - times.round()).abs() > 0.02 {
             continue;
@@ -380,33 +386,36 @@ fn back_to_bottom(runs: &[f64]) -> bool {
 /// The note length a drawing's hits go at (`length_beats` long; `loops`: its end runs on into its start), timed from
 /// where each hit starts, whatever height it reaches (Solomon, 13 Nov, on gates whose hits aren't all as loud): the
 /// longest note length every hit lands on, counting from the first, with a hit on at least half its places. A hit
-/// is a climb of at least [`MOVE`] within a 1/64 note. None with fewer than `fewest` hits.
-fn hit_rhythm(drawn: &[f64], length_beats: f64, loops: bool, fewest: usize) -> Option<Rhythm> {
+/// is a climb of at least [`MOVE`] within a 1/64 note. `before`: the lowest it was just before its start (a clip's
+/// start counts as coming from its bottom, so one that starts on a hit has one there). None with fewer than
+/// `fewest` hits.
+fn hit_rhythm(drawn: &[f64], length_beats: f64, before: f64, loops: bool, fewest: usize) -> Option<Rhythm> {
     let n = drawn.len().checked_sub(1).filter(|n| *n > 0)?;
     let per_beat = n as f64 / length_beats;
     let window = ((per_beat / 16.0).round() as usize).max(1);
-    // What it was just before its start: its end, for a loop; nothing (its bottom) for a clip, so a clip that starts
-    // with a hit has one there.
-    let before_start =
-        if loops { drawn[n.saturating_sub(window)..n].iter().copied().fold(f64::MAX, f64::min) } else { 0.0 };
     let mut hits: Vec<usize> = Vec::new();
     let mut rising = false;
     for i in 0..n {
-        let low = drawn[i.saturating_sub(window)..=i].iter().copied().fold(f64::MAX, f64::min);
-        let low = if i < window { low.min(before_start) } else { low };
+        // The lowest just before (the last place it was that low, where the climb starts) and how far it climbed.
+        let from = i.saturating_sub(window);
+        let (mut low, mut low_at) = (if i < window { before } else { f64::MAX }, from);
+        for (j, &v) in drawn.iter().enumerate().take(i + 1).skip(from) {
+            if v <= low {
+                (low, low_at) = (v, j);
+            }
+        }
         let hit = drawn[i] - low >= MOVE;
         if hit && !rising {
-            hits.push(i);
+            // Timed from where the climb starts, so a soft hit isn't later than a loud one.
+            hits.push(if drawn[low_at] <= low { low_at } else { i });
         }
         rising = hit;
     }
     if hits.len() < fewest {
         return None;
     }
-    let mut lengths: Vec<(Rhythm, f64)> = Rhythm::ALL.iter().filter_map(|r| Some((*r, r.beats()?))).collect();
-    lengths.sort_by(|a, b| b.1.total_cmp(&a.1));
     let first = hits[0] as f64;
-    lengths.into_iter().find_map(|(r, beats)| {
+    note_lengths().into_iter().rev().find_map(|(r, beats)| {
         let places = length_beats / beats;
         // At least two places, and a loop holds a whole number of them (so it goes round on time).
         if places < 2.0 - 1e-9 || (loops && (places - places.round()).abs() > 0.02) {
@@ -414,12 +423,26 @@ fn hit_rhythm(drawn: &[f64], length_beats: f64, loops: bool, fewest: usize) -> O
         }
         let step = beats * per_beat;
         let near = (step * 0.06).max(2.0);
-        let on = hits.iter().all(|&h| {
+        // The places hit (two hits on one place are one).
+        let mut hit_places: Vec<i64> = Vec::new();
+        for &h in &hits {
             let k = (h as f64 - first) / step;
-            (k - k.round()).abs() * step <= near
-        });
-        (on && hits.len() as f64 >= (places.floor() / 2.0).max(2.0)).then_some(r)
+            if (k - k.round()).abs() * step > near {
+                return None;
+            }
+            if !hit_places.contains(&(k.round() as i64)) {
+                hit_places.push(k.round() as i64);
+            }
+        }
+        (hit_places.len() as f64 >= (places.floor() / 2.0).max(2.0)).then_some(r)
     })
+}
+
+/// The note lengths (with their beats), shortest first.
+fn note_lengths() -> Vec<(Rhythm, f64)> {
+    let mut lengths: Vec<(Rhythm, f64)> = Rhythm::ALL.iter().filter_map(|r| Some((*r, r.beats()?))).collect();
+    lengths.sort_by(|a, b| a.1.total_cmp(&b.1));
+    lengths
 }
 
 /// The name of a curve's whole length, when it doesn't repeat: a note length, Longer than a bar, or Free.
