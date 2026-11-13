@@ -39,7 +39,7 @@ theorybench keycheck <folder or file.mid>... [--changed | --counts]
 theorybench songkeys <songs.db> [--misses | --counts]
 theorybench chords <labelled.jsonl>... [--answers <name>=<answers.jsonl>]... [--engine rust] [--part <role>]
                    [--roles on|off] [--oracle-cuts] [--timing] [--weights <weights.json>] [--folds <folds>]
-                   [--per-segment] [--by <tag>]... [--dump <file>]
+                   [--per-segment] [--by <tag>]... [--misses] [--dump <file>]
 theorybench chordfit <labelled.jsonl>... [--inputs <kinds>] [--weigh <source>=<w>]... [--train <folds>]
                    [--test <folds>] [--lambda <x>] [--steps <n>] [--from <weights.json>] [--fix <numbers>]
                    [--hand <mu>] [--hold <rounds>] [--out <weights.json>]
@@ -100,6 +100,9 @@ theorybench octave <labelled.jsonl>... [--bars <n>] [--folds <folds>]
   --per-segment  mir_eval's scores per labelled chord too, each counted once
   --by       the chords named whole split by a tag convert/voice.py gives each chord it plays: set, recipe, texture,
              tune, push, chart or quality (and context and role in its sweep); given twice, by both
+  --misses   list each labelled chord the last engine gets wrong (root and every interval, or the bass): where,
+             the label and the chord read. A labelled file can also be a folder of Chord check's takes (the
+             Chord check folder in the data folder): only the chords labelled there are scored, and they're never learned from
   --dump     write every piece's labels, chords read and scores to a file, for convert/check_mir_eval.py
   chordfit   fits mo-harmony's chord reader's 39 numbers on the chords labelled in folds 2 to 4 (the pieces whose
              licence lets fitted numbers ship), keeping every rule they keep, and measures the fit on fold 1
