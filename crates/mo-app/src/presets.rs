@@ -21,6 +21,7 @@ use mo_presets::curves::{Curve, SourceKind};
 use mo_presets::export::Exported;
 use mo_presets::filter::{self, Choice, Maker, Type};
 
+use crate::curve_groups::{self, Feel, Groups, Rhythm, Shape};
 use crate::filters::{self as chips, Filter};
 use mo_presets::library::{PresetRow, Source};
 use mo_presets::role::{Basis, Role};
@@ -1508,9 +1509,18 @@ pub struct CurveFilters {
     pub search: String,
     /// Only curves found in one of these ways; none for every way.
     pub kinds: Vec<SourceKind>,
+    /// Only curves of these shapes, rhythms and feels ([`curve_groups`]); none for any.
+    pub shapes: Vec<Shape>,
+    pub rhythms: Vec<Rhythm>,
+    pub feels: Vec<Feel>,
     /// Show the curves you hid.
     pub hidden: bool,
 }
+
+/// The curves list's filters by what kind of curve it is, by their chip ids.
+pub const CURVE_SHAPE: &str = "curve-shape";
+pub const CURVE_RHYTHM: &str = "curve-rhythm";
+pub const CURVE_FEEL: &str = "curve-feel";
 
 pub fn kind_label(k: SourceKind) -> &'static str {
     match k {
@@ -1545,12 +1555,39 @@ impl CurveFilters {
     }
 
     pub fn any(&self) -> bool {
-        !self.kinds.is_empty()
+        !self.kinds.is_empty() || !self.shapes.is_empty() || !self.rhythms.is_empty() || !self.feels.is_empty()
     }
 
     /// Picks or unpicks a way curves are found, by its words: more than one can be picked.
     pub fn toggle_kind(&mut self, label: &str) {
         chips::toggle_as(&mut self.kinds, label, true, kind_label, kind_from);
+    }
+
+    /// Picks or unpicks a shape, rhythm or feel (by its chip id and words): more than one of each can be picked.
+    pub fn toggle_group(&mut self, chip: &str, label: &str) {
+        match chip {
+            CURVE_SHAPE => chips::toggle_as(&mut self.shapes, label, true, |s| s.label(), Shape::from_label),
+            CURVE_RHYTHM => chips::toggle_as(&mut self.rhythms, label, true, |r| r.label(), Rhythm::from_label),
+            CURVE_FEEL => chips::toggle_as(&mut self.feels, label, true, |f| f.label(), Feel::from_label),
+            _ => {}
+        }
+    }
+
+    /// Takes off a shape, rhythm or feel filter's picks, by its chip id.
+    pub fn clear_group(&mut self, chip: &str) {
+        match chip {
+            CURVE_SHAPE => self.shapes.clear(),
+            CURVE_RHYTHM => self.rhythms.clear(),
+            CURVE_FEEL => self.feels.clear(),
+            _ => {}
+        }
+    }
+
+    /// Whether its shape, rhythm and feel let it through, leaving out the filter `but` (to count that one's choices).
+    fn groups_pass(&self, g: &Groups, but: Option<&str>) -> bool {
+        (but == Some(CURVE_SHAPE) || self.shapes.is_empty() || self.shapes.contains(&g.shape))
+            && (but == Some(CURVE_RHYTHM) || self.rhythms.is_empty() || self.rhythms.iter().any(|r| g.goes_at(*r)))
+            && (but == Some(CURVE_FEEL) || self.feels.is_empty() || self.feels.contains(&g.feel))
     }
 }
 
@@ -1572,19 +1609,29 @@ pub struct CurveKey {
     newest: i64,
     /// Its name in lower case.
     name: String,
+    /// What kind of curve it is.
+    pub groups: Groups,
 }
 
 impl CurveKey {
+    /// Draws the curve to sort it into its kinds ([`curve_groups::of`]), so not on the window's thread for many.
     pub fn of(c: &Curve) -> CurveKey {
         CurveKey {
             words: curve_texts(c).iter().map(|t| t.to_lowercase()).collect::<Vec<_>>().join("\u{1f}"),
             newest: c.sources.iter().map(|s| s.modified).max().unwrap_or(0),
             name: c.name.to_lowercase(),
+            groups: curve_groups::of(
+                &c.points,
+                c.length_beats,
+                c.sources.iter().any(|s| s.kind == SourceKind::PluginShape),
+            ),
         }
     }
 
+    /// Every curve's, side by side on the shared threads. Not on the window's thread.
     pub fn all(curves: &[Curve]) -> Vec<CurveKey> {
-        curves.iter().map(CurveKey::of).collect()
+        use rayon::prelude::*;
+        curves.par_iter().map(CurveKey::of).collect()
     }
 }
 
@@ -1593,18 +1640,57 @@ impl CurveKey {
 /// let through. Both come from one look at each curve, as this runs with each key typed in the search. `keys` are
 /// [`CurveKey::all`] of `curves`.
 pub fn shown_curves(curves: &[Curve], keys: &[CurveKey], f: &CurveFilters) -> (Vec<usize>, Filter) {
+    let shown = shown_curves_all(curves, keys, f);
+    (shown.lines, shown.found_in)
+}
+
+/// The curves shown and every filter's chips: [`shown_curves`], with the shape, rhythm and feel filters too.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ShownCurves {
+    pub lines: Vec<usize>,
+    pub found_in: Filter,
+    pub shape: Filter,
+    pub rhythm: Filter,
+    pub feel: Filter,
+}
+
+/// [`shown_curves`] with the shape, rhythm and feel chips: each choice with how many curves it would show with every
+/// other filter as it is (Solomon's rule for every filter); a choice nothing has isn't shown, unless it's picked.
+pub fn shown_curves_all(curves: &[Curve], keys: &[CurveKey], f: &CurveFilters) -> ShownCurves {
     let words: Vec<String> = f.search.split_whitespace().map(str::to_lowercase).collect();
     let passes =
         |c: &Curve, k: &CurveKey| (f.hidden || !c.hidden) && words.iter().all(|w| k.words.contains(w.as_str()));
     let mut found = [0usize; KINDS.len()];
+    let mut shapes = [0usize; Shape::ALL.len()];
+    let mut rhythms = [0usize; Rhythm::ALL.len()];
+    let mut feels = [0usize; Feel::ALL.len()];
     let mut out = Vec::new();
-    for (i, (c, _)) in curves.iter().zip(keys).enumerate().filter(|(_, (c, k))| passes(c, k)) {
-        for (n, kind) in found.iter_mut().zip(KINDS) {
-            if c.sources.iter().any(|s| s.kind == kind) {
-                *n += 1;
+    for (i, (c, k)) in curves.iter().zip(keys).enumerate().filter(|(_, (c, k))| passes(c, k)) {
+        let g = &k.groups;
+        let found_in = f.found_in(c);
+        if f.groups_pass(g, None) {
+            for (n, kind) in found.iter_mut().zip(KINDS) {
+                if c.sources.iter().any(|s| s.kind == kind) {
+                    *n += 1;
+                }
             }
         }
-        if f.found_in(c) {
+        if found_in && f.groups_pass(g, Some(CURVE_SHAPE)) {
+            for (n, s) in shapes.iter_mut().zip(Shape::ALL) {
+                *n += usize::from(g.shape == s);
+            }
+        }
+        if found_in && f.groups_pass(g, Some(CURVE_RHYTHM)) {
+            for (n, r) in rhythms.iter_mut().zip(Rhythm::ALL) {
+                *n += usize::from(g.goes_at(r));
+            }
+        }
+        if found_in && f.groups_pass(g, Some(CURVE_FEEL)) {
+            for (n, x) in feels.iter_mut().zip(Feel::ALL) {
+                *n += usize::from(g.feel == x);
+            }
+        }
+        if found_in && f.groups_pass(g, None) {
             out.push(i);
         }
     }
@@ -1612,7 +1698,25 @@ pub fn shown_curves(curves: &[Curve], keys: &[CurveKey], f: &CurveFilters) -> (V
     let choices: Vec<(String, String)> =
         KINDS.iter().zip(found).map(|(&k, n)| (kind_label(k).to_owned(), thousands(n))).collect();
     let picked: Vec<String> = f.kinds.iter().map(|&k| kind_label(k).to_owned()).collect();
-    (out, chips::show(&choices, &picked))
+    ShownCurves {
+        lines: out,
+        found_in: chips::show(&choices, &picked),
+        shape: group_chips(&Shape::ALL, &shapes, &f.shapes, |s| s.label()),
+        rhythm: group_chips(&Rhythm::ALL, &rhythms, &f.rhythms, |r| r.label()),
+        feel: group_chips(&Feel::ALL, &feels, &f.feels, |x| x.label()),
+    }
+}
+
+/// A kind filter's chips: its choices that some curve has (or that are picked), with their counts.
+fn group_chips<T: Copy + PartialEq>(all: &[T], counts: &[usize], picked: &[T], label: fn(T) -> &'static str) -> Filter {
+    let choices: Vec<(String, String)> = all
+        .iter()
+        .zip(counts)
+        .filter(|(t, n)| **n > 0 || picked.contains(t))
+        .map(|(t, n)| (label(*t).to_owned(), thousands(*n)))
+        .collect();
+    let picked: Vec<String> = picked.iter().map(|t| label(*t).to_owned()).collect();
+    chips::show(&choices, &picked)
 }
 
 /// One line of the curves list, in words.

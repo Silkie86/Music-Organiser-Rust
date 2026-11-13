@@ -173,6 +173,10 @@ export global PresetsData {
     // The Curves section (the search box is shared: `search` holds the section's words on show).
     // Found in: its chips go through `toggle` and `clear-chip`, as "found-in".
     in property <FilterView> curve-found-in;
+    // What kind of curve: its shape, its rhythm (as a note length) and its feel.
+    in property <FilterView> curve-shape;
+    in property <FilterView> curve-rhythm;
+    in property <FilterView> curve-feel;
     in property <bool> curve-hidden;
     callback curve-hidden-toggled(bool);
     in property <[CurveLineInfo]> curve-lines;
@@ -1001,6 +1005,24 @@ export component PresetsPage inherits Rectangle {
                     filter: PresetsData.curve-found-in;
                     toggled(text) => { PresetsData.toggle("found-in", text); }
                     cleared => { PresetsData.clear-chip("found-in"); }
+                }
+                if PresetsData.section == 1: FilterList {
+                    name: "SHAPE";
+                    filter: PresetsData.curve-shape;
+                    toggled(text) => { PresetsData.toggle("curve-shape", text); }
+                    cleared => { PresetsData.clear-chip("curve-shape"); }
+                }
+                if PresetsData.section == 1: FilterList {
+                    name: "RHYTHM";
+                    filter: PresetsData.curve-rhythm;
+                    toggled(text) => { PresetsData.toggle("curve-rhythm", text); }
+                    cleared => { PresetsData.clear-chip("curve-rhythm"); }
+                }
+                if PresetsData.section == 1: FilterList {
+                    name: "FEEL";
+                    filter: PresetsData.curve-feel;
+                    toggled(text) => { PresetsData.toggle("curve-feel", text); }
+                    cleared => { PresetsData.clear-chip("curve-feel"); }
                 }
                 if PresetsData.section == 1: TickLine {
                     text: "The curves I hid";

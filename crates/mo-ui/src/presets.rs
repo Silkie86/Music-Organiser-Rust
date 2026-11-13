@@ -109,6 +109,10 @@ struct Page {
     curve_filters: CurveFilters,
     /// The Found in filter as its chips show it now.
     curve_found_in: mo_app::filters::Filter,
+    /// The shape, rhythm and feel filters as their chips show them now.
+    curve_shape: mo_app::filters::Filter,
+    curve_rhythm: mo_app::filters::Filter,
+    curve_feel: mo_app::filters::Filter,
     /// The picked curve, by its id (a rescan may move it in the list).
     curve_picked: Option<String>,
     curves_started: bool,
@@ -183,6 +187,9 @@ struct ChipModels {
     kind: FilterModels,
     from: FilterModels,
     found_in: FilterModels,
+    curve_shape: FilterModels,
+    curve_rhythm: FilterModels,
+    curve_feel: FilterModels,
 }
 
 /// The sounds list, made a line at a time as the list asks.
@@ -269,7 +276,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         p.shortcuts = shortcuts.clone();
         // The filters show from the start, before any song is read (with no lines, each choice counts none).
         refilter(&mut p);
-        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
+        reshow_curves(&mut p);
     });
     wire(app);
     finder_opens();
@@ -357,6 +364,8 @@ fn wire(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         if chip == logic::FOUND_IN {
             change_curves(&app, |f| f.toggle_kind(&choice));
+        } else if [logic::CURVE_SHAPE, logic::CURVE_RHYTHM, logic::CURVE_FEEL].contains(&chip.as_str()) {
+            change_curves(&app, |f| f.toggle_group(&chip, &choice));
         } else {
             change(&app, |f| f.toggle(&chip, &choice));
         }
@@ -366,6 +375,8 @@ fn wire(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         if chip == logic::FOUND_IN {
             change_curves(&app, |f| f.kinds.clear());
+        } else if [logic::CURVE_SHAPE, logic::CURVE_RHYTHM, logic::CURVE_FEEL].contains(&chip.as_str()) {
+            change_curves(&app, |f| f.clear_group(&chip));
         } else {
             change(&app, |f| f.clear_chip(&chip));
         }
@@ -553,11 +564,21 @@ fn change(app: &AppWindow, f: impl FnOnce(&mut Filters)) {
     show_all(app);
 }
 
+/// Works out the curves shown and their filters' chips again, from the filters as they are now.
+fn reshow_curves(p: &mut Page) {
+    let shown = logic::shown_curves_all(&p.curves, &p.curve_keys, &p.curve_filters);
+    p.curve_shown = shown.lines;
+    p.curve_found_in = shown.found_in;
+    p.curve_shape = shown.shape;
+    p.curve_rhythm = shown.rhythm;
+    p.curve_feel = shown.feel;
+}
+
 fn change_curves(app: &AppWindow, f: impl FnOnce(&mut CurveFilters)) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         f(&mut p.curve_filters);
-        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
+        reshow_curves(&mut p);
     });
     show_all(app);
 }
@@ -726,6 +747,9 @@ fn show_everything(app: &AppWindow) {
             data.set_type_filter(m.kind.view(&p.chips.kind));
             data.set_from_filter(m.from.view(&p.chips.from));
             data.set_curve_found_in(m.found_in.view(&p.curve_found_in));
+            data.set_curve_shape(m.curve_shape.view(&p.curve_shape));
+            data.set_curve_rhythm(m.curve_rhythm.view(&p.curve_rhythm));
+            data.set_curve_feel(m.curve_feel.view(&p.curve_feel));
         });
         // The song's name as Songs gave it: no looking through every line on each show.
         data.set_song(
@@ -2154,7 +2178,7 @@ fn read_curves(_app: &AppWindow) {
                 let mut p = p.borrow_mut();
                 p.curves_reading = None;
                 match result {
-                    Ok(list) => set_curves(&mut p, list),
+                    Ok((list, keys)) => set_curves(&mut p, list, keys),
                     Err(e) => {
                         log::warning("Curves", &e);
                         p.curves_failed = Some(e);
@@ -2169,13 +2193,14 @@ fn read_curves(_app: &AppWindow) {
     }
 }
 
-fn set_curves(p: &mut Page, list: Vec<Curve>) {
-    // Worked out once here, then each key typed in the search makes no copies; the old list goes on its own thread.
-    p.curve_keys = logic::CurveKey::all(&list);
+/// `keys`: [`logic::CurveKey::all`] of `list`, worked out on the thread that read it (each curve is drawn to sort it
+/// into its kinds), so each key typed in the search makes no copies; the old list goes on its own thread.
+fn set_curves(p: &mut Page, list: Vec<Curve>, keys: Vec<logic::CurveKey>) {
+    p.curve_keys = keys;
     background::free_later(std::mem::replace(&mut p.curves, list));
     p.curve_places_of = None;
     p.curves_failed = None;
-    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
+    reshow_curves(p);
     if let Some(id) = &p.curve_picked
         && !p.curves.iter().any(|c| &c.id == id)
     {
@@ -2184,12 +2209,17 @@ fn set_curves(p: &mut Page, list: Vec<Curve>) {
 }
 
 /// Shows what `curves.db` holds at once, then reads the saves that changed and gives the list as it is now.
-fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
+fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String> {
     let mut db = CurvesDb::open(&at.data_dir.join(curves::FILE_NAME))
         .map_err(|e| format!("Couldn't open the curves: {}", e.0))?;
-    let first = db.list().map_err(|e| format!("Couldn't read the curves: {}", e.0))?;
+    // Each curve is drawn to sort it into its kinds: on the shared threads, at low priority.
+    let with_keys = |list: Vec<Curve>| {
+        let keys = background::on_pool(|| logic::CurveKey::all(&list));
+        (list, keys)
+    };
+    let (first, keys) = with_keys(db.list().map_err(|e| format!("Couldn't read the curves: {}", e.0))?);
     on_window(move |app| {
-        PAGE.with(|p| set_curves(&mut p.borrow_mut(), first));
+        PAGE.with(|p| set_curves(&mut p.borrow_mut(), first, keys));
         show_all(app);
     });
     let lib = Library::open_read_only(&at.library).map_err(|e| format!("Couldn't open your library: {e}"))?;
@@ -2224,7 +2254,7 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
     }
     let (changed, gone) = db.out_of_date(&paths).map_err(|e| format!("Couldn't read the curves: {}", e.0))?;
     if changed.is_empty() && !gone {
-        return db.list().map_err(|e| format!("Couldn't read the curves: {}", e.0));
+        return db.list().map(with_keys).map_err(|e| format!("Couldn't read the curves: {}", e.0));
     }
     // How far it's got, on the header, while the saves are read.
     let progress = Arc::new(curves::Progress::default());
@@ -2248,7 +2278,7 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
         Ok(n) => log::info("Curves", &format!("Read {n} saves for their curves")),
         Err(e) => log::warning("Curves", &format!("Couldn't read every save for its curves: {}", e.0)),
     }
-    db.list().map_err(|e| format!("Couldn't read the curves: {}", e.0))
+    db.list().map(with_keys).map_err(|e| format!("Couldn't read the curves: {}", e.0))
 }
 
 fn run_curve_action(app: &AppWindow, id: &str) -> bool {
@@ -2354,18 +2384,21 @@ fn curve_db_change(
     let started = background::spawn("Curve change", move || {
         let changed = CurvesDb::open(&db).and_then(|db| change(&db, &id));
         match changed {
-            Ok(Some(c)) => on_window(move |app| {
-                PAGE.with(|p| {
-                    let mut p = p.borrow_mut();
-                    if let Some(at) = p.curves.iter().position(|o| o.id == c.id) {
-                        p.curve_keys[at] = logic::CurveKey::of(&c);
-                        p.curve_places_of = None;
-                        p.curves[at] = c;
-                    }
-                    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
+            Ok(Some(c)) => {
+                let key = logic::CurveKey::of(&c);
+                on_window(move |app| {
+                    PAGE.with(|p| {
+                        let mut p = p.borrow_mut();
+                        if let Some(at) = p.curves.iter().position(|o| o.id == c.id) {
+                            p.curve_keys[at] = key;
+                            p.curve_places_of = None;
+                            p.curves[at] = c;
+                        }
+                        reshow_curves(&mut p);
+                    });
+                    show_all(app);
                 });
-                show_all(app);
-            }),
+            }
             Ok(None) => {}
             Err(e) => {
                 log::warning("Curves", &e.0);
@@ -2398,7 +2431,7 @@ pub fn show_sample(app: &AppWindow) {
         p.curve_keys = logic::CurveKey::all(&p.curves);
         p.bitwig = vec![PathBuf::from(r"K:\Bitwig Studio")];
         refilter(&mut p);
-        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
+        reshow_curves(&mut p);
     });
     show_all(app);
 }
