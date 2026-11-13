@@ -73,6 +73,7 @@ pub enum Rhythm {
     Eighth,
     Sixteenth,
     ThirtySecond,
+    HalfTriplet,
     QuarterTriplet,
     EighthTriplet,
     SixteenthTriplet,
@@ -87,13 +88,14 @@ pub enum Rhythm {
 }
 
 impl Rhythm {
-    pub const ALL: [Rhythm; 13] = [
+    pub const ALL: [Rhythm; 14] = [
         Rhythm::Bar,
         Rhythm::Half,
         Rhythm::Quarter,
         Rhythm::Eighth,
         Rhythm::Sixteenth,
         Rhythm::ThirtySecond,
+        Rhythm::HalfTriplet,
         Rhythm::QuarterTriplet,
         Rhythm::EighthTriplet,
         Rhythm::SixteenthTriplet,
@@ -111,6 +113,7 @@ impl Rhythm {
             Rhythm::Eighth => "1/8",
             Rhythm::Sixteenth => "1/16",
             Rhythm::ThirtySecond => "1/32",
+            Rhythm::HalfTriplet => "1/2 triplet",
             Rhythm::QuarterTriplet => "1/4 triplet",
             Rhythm::EighthTriplet => "1/8 triplet",
             Rhythm::SixteenthTriplet => "1/16 triplet",
@@ -134,6 +137,7 @@ impl Rhythm {
             Rhythm::Eighth => 0.5,
             Rhythm::Sixteenth => 0.25,
             Rhythm::ThirtySecond => 0.125,
+            Rhythm::HalfTriplet => 4.0 / 3.0,
             Rhythm::QuarterTriplet => 2.0 / 3.0,
             Rhythm::EighthTriplet => 1.0 / 3.0,
             Rhythm::SixteenthTriplet => 1.0 / 6.0,
@@ -235,11 +239,18 @@ pub fn of(points: &[CurvePoint], length_beats: f64, loops: bool) -> Groups {
                 continue;
             }
             let part: Vec<f64> = part.iter().map(|v| (v - lo) / (hi - lo)).collect();
-            if let Some((r, samples)) = repeat(&part, PART_BEATS) {
+            let found = match repeat(&part, PART_BEATS) {
+                Some((r, samples)) => Some((r, Some(shape(&part[..=samples], true, feel == Feel::Smooth)))),
+                // Hits that don't all reach the same height never repeat exactly: timed instead.
+                // On the whole curve's scale, so a small wiggle in a quiet half bar isn't taken for hits; its shape is
+                // the whole curve's.
+                None => hit_rhythm(drawn.get(from..=to).unwrap_or_default(), PART_BEATS, false, 3).map(|r| (r, None)),
+            };
+            if let Some((r, part_shape)) = found {
                 if !rhythms.contains(&r) {
                     rhythms.push(r);
                 }
-                shapes.push(shape(&part[..=samples], true, feel == Feel::Smooth));
+                shapes.extend(part_shape);
             }
         }
     }
@@ -251,7 +262,11 @@ pub fn of(points: &[CurvePoint], length_beats: f64, loops: bool) -> Groups {
     }
     let shape_of_all = shape(&drawn, round, feel == Feel::Smooth);
     match rhythms.as_slice() {
-        [] => Groups { shape: shape_of_all, rhythm: whole, rhythms: vec![whole], feel },
+        [] => {
+            // Its hits timed all through, before it's named by its whole length.
+            let rhythm = hit_rhythm(&drawn, length_beats, loops, 3).unwrap_or(whole);
+            Groups { shape: shape_of_all, rhythm, rhythms: vec![rhythm], feel }
+        }
         [one] => Groups { shape: most(&shapes).unwrap_or(shape_of_all), rhythm: *one, rhythms: vec![*one], feel },
         _ => {
             rhythms.sort_by_key(|r| Rhythm::ALL.iter().position(|a| a == r));
@@ -352,6 +367,61 @@ fn repeat(drawn: &[f64], length_beats: f64) -> Option<(Rhythm, usize)> {
     None
 }
 
+/// Whether flat stretches at `runs`' heights (in order) are a gate whose hits aren't all as loud: it goes back to
+/// the bottom between hits (steps climb or fall from one height to the next). A hit or two held into the next, with
+/// no gap between, still counts: at most one in five stretches goes from one hit straight to another.
+fn back_to_bottom(runs: &[f64]) -> bool {
+    let bottom = runs.iter().copied().fold(f64::MAX, f64::min);
+    let at_bottom = |l: &f64| (l - bottom).abs() < 0.05;
+    let hit_to_hit = runs.windows(2).filter(|w| !at_bottom(&w[0]) && !at_bottom(&w[1])).count();
+    runs.len() >= 4 && runs.iter().filter(|l| at_bottom(l)).count() >= 2 && hit_to_hit * 5 <= runs.len()
+}
+
+/// The note length a drawing's hits go at (`length_beats` long; `loops`: its end runs on into its start), timed from
+/// where each hit starts, whatever height it reaches (Solomon, 13 Nov, on gates whose hits aren't all as loud): the
+/// longest note length every hit lands on, counting from the first, with a hit on at least half its places. A hit
+/// is a climb of at least [`MOVE`] within a 1/64 note. None with fewer than `fewest` hits.
+fn hit_rhythm(drawn: &[f64], length_beats: f64, loops: bool, fewest: usize) -> Option<Rhythm> {
+    let n = drawn.len().checked_sub(1).filter(|n| *n > 0)?;
+    let per_beat = n as f64 / length_beats;
+    let window = ((per_beat / 16.0).round() as usize).max(1);
+    // What it was just before its start: its end, for a loop; nothing (its bottom) for a clip, so a clip that starts
+    // with a hit has one there.
+    let before_start =
+        if loops { drawn[n.saturating_sub(window)..n].iter().copied().fold(f64::MAX, f64::min) } else { 0.0 };
+    let mut hits: Vec<usize> = Vec::new();
+    let mut rising = false;
+    for i in 0..n {
+        let low = drawn[i.saturating_sub(window)..=i].iter().copied().fold(f64::MAX, f64::min);
+        let low = if i < window { low.min(before_start) } else { low };
+        let hit = drawn[i] - low >= MOVE;
+        if hit && !rising {
+            hits.push(i);
+        }
+        rising = hit;
+    }
+    if hits.len() < fewest {
+        return None;
+    }
+    let mut lengths: Vec<(Rhythm, f64)> = Rhythm::ALL.iter().filter_map(|r| Some((*r, r.beats()?))).collect();
+    lengths.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let first = hits[0] as f64;
+    lengths.into_iter().find_map(|(r, beats)| {
+        let places = length_beats / beats;
+        // At least two places, and a loop holds a whole number of them (so it goes round on time).
+        if places < 2.0 - 1e-9 || (loops && (places - places.round()).abs() > 0.02) {
+            return None;
+        }
+        let step = beats * per_beat;
+        let near = (step * 0.06).max(2.0);
+        let on = hits.iter().all(|&h| {
+            let k = (h as f64 - first) / step;
+            (k - k.round()).abs() * step <= near
+        });
+        (on && hits.len() as f64 >= (places.floor() / 2.0).max(2.0)).then_some(r)
+    })
+}
+
 /// The name of a curve's whole length, when it doesn't repeat: a note length, Longer than a bar, or Free.
 fn whole_length(length_beats: f64) -> Rhythm {
     let named = Rhythm::ALL.into_iter().find(|r| r.beats().is_some_and(|b| (b - length_beats).abs() < 0.01));
@@ -369,30 +439,38 @@ fn shape(one: &[f64], repeats: bool, smooth: bool) -> Shape {
     if n < 3 {
         return Shape::Other;
     }
-    // Flat stretches: where the value holds (to half a hundredth) for at least 1/40 of the repeat (a 1/32 step).
+    // Flat stretches: where the value holds (to half a hundredth) for at least 1/40 of the repeat (a 1/32 step); a
+    // shorter one (a 1/64 pulse is 8 places) only where it holds still, as a gate's does, not the slow start of a bend.
     let mut flat_levels: Vec<f64> = Vec::new();
+    // The heights of the flat stretches in order (one for stretches next to each other at one height).
+    let mut runs: Vec<f64> = Vec::new();
     let mut flat = 0usize;
     let (mut run, mut run_level) = (1usize, one[0]);
+    let mut still = true; // whether the stretch so far holds still (to a ten-thousandth)
     // Each value, then a last None that ends the last stretch.
     for v in one.iter().skip(1).map(Some).chain([None]) {
         if let Some(v) = v
             && (v - run_level).abs() < 0.005
         {
             run += 1;
+            still &= (v - run_level).abs() < 1e-4;
             continue;
         }
-        if run * 40 >= n {
+        if run * 40 >= n || (still && run >= 6) {
             flat += run;
+            if runs.last().is_none_or(|l: &f64| (l - run_level).abs() >= 0.05) {
+                runs.push(run_level);
+            }
             if !flat_levels.iter().any(|l| (l - run_level).abs() < 0.05) {
                 flat_levels.push(run_level);
             }
         }
         if let Some(v) = v {
-            (run, run_level) = (1, *v);
+            (run, run_level, still) = (1, *v, true);
         }
     }
     if flat * 10 >= n * 7 && flat_levels.len() >= 2 {
-        return if flat_levels.len() == 2 { Shape::Gate } else { Shape::Steps };
+        return if flat_levels.len() == 2 || back_to_bottom(&runs) { Shape::Gate } else { Shape::Steps };
     }
     // The moves of at least MOVE, each with how long it took (as a share of the repeat): from the last time it was at
     // the level it left to the first time it reached the one it got to (a hold in between isn't moving).
@@ -518,6 +596,34 @@ mod tests {
             of(&repeated(&[(0.0, 0.0, 0.0), (0.6, 1.0, 0.0), (1.0, 1.0, 0.0)], 6), 4.0, false).rhythm,
             Rhythm::QuarterTriplet
         );
+    }
+
+    /// A gate with a hit at each of `starts` (across 0 to 1), each `long` across, as loud as `levels` in turn.
+    fn hits(starts: &[f64], long: f64, levels: &[f64]) -> Vec<CurvePoint> {
+        let mut out = vec![p(0.0, 0.0, 0.0)];
+        for (k, &x) in starts.iter().enumerate() {
+            let y = levels[k % levels.len()];
+            out.extend([p(x, 0.0, 0.0), p(x, y, 0.0), p(x + long, y, 0.0), p(x + long, 0.0, 0.0)]);
+        }
+        out.push(p(1.0, 0.0, 0.0));
+        out
+    }
+
+    #[test]
+    fn a_gate_whose_hits_arent_all_as_loud_goes_at_its_hits() {
+        // A bar of 1/8 hits, loud, soft, medium, soft..., one left out: it never repeats exactly.
+        let eighths: Vec<f64> = (0..8).filter(|k| *k != 5).map(|k| f64::from(k) / 8.0).collect();
+        let gate = hits(&eighths, 1.0 / 16.0, &[1.0, 0.4, 0.7, 0.3, 0.9, 0.5]);
+        assert_eq!(of(&gate, 4.0, true), g(Shape::Gate, Rhythm::Eighth, Feel::Sharp));
+        // 1/8 triplets, uneven: a triplet length, not a straight one.
+        let triplets: Vec<f64> = (0..12).map(|k| f64::from(k) / 12.0).collect();
+        let gate = hits(&triplets, 1.0 / 24.0, &[1.0, 0.5, 0.75, 0.6, 0.9]);
+        assert_eq!(of(&gate, 4.0, true).rhythm, Rhythm::EighthTriplet);
+        // Three hits in a bar: 1/2 triplets.
+        let gate = hits(&[0.0, 1.0 / 3.0, 2.0 / 3.0], 1.0 / 6.0, &[1.0, 0.8, 0.6]);
+        assert_eq!(of(&gate, 4.0, true).rhythm, Rhythm::HalfTriplet);
+        // A slow climb isn't a hit, so a ramp still has no note length of its own.
+        assert_eq!(of(&[p(0.0, 0.0, 0.0), p(1.0, 1.0, 0.0)], 8.0, false).rhythm, Rhythm::Longer);
     }
 
     #[test]
