@@ -125,6 +125,17 @@ export global PresetsData {
     callback years-picked(int, int);
     callback years-cleared();
     callback select(int);
+    // Dragging a sound out onto a track in a DAW, or into a folder (mo-ui's presets/drag_out.rs): a line by its place
+    // among those shown, or the picked one by its card's handle; then `drag-let-go` if the button comes up before the
+    // drag has got going. The one carried is dimmed (`lifted-…`) and glows for a moment once it has landed
+    // (`landed-…`); -1 for none.
+    callback drag-row(int);
+    callback drag-picked();
+    callback drag-let-go();
+    in property <int> lifted-row: -1;
+    in property <int> landed-row: -1;
+    in property <bool> lifted-picked;
+    in property <bool> landed-picked;
     // Up and down the list: -1 or 1.
     callback step(int);
     // Bring the picked line into view: its place, and a count that goes up each time it's asked.
@@ -183,10 +194,14 @@ export global PresetsData {
     in property <[MenuItem]> curve-menu;
     in property <string> curve-message;
     callback curve-chosen(string);
-    // The card's handle drags the picked curve's file out (onto a Bitwig automation lane): `curve-drag`, then
-    // `curve-drag-let-go` if the button comes up before the drag has got going. Dimmed while carried, glows once landed.
+    // A curve's file dragged out (onto a Bitwig automation lane), by its line (`curve-drag-row`, its place among those
+    // shown) or the card's handle (`curve-drag`); then `curve-drag-let-go` if the button comes up before the drag has
+    // got going. Dimmed while carried, glows once landed; -1 for no line.
+    callback curve-drag-row(int);
     callback curve-drag();
     callback curve-drag-let-go();
+    in property <int> curve-lifted-row: -1;
+    in property <int> curve-landed-row: -1;
     in property <bool> curve-lifted;
     in property <bool> curve-landed;
     // Renaming the picked curve: the box shows while this is on.
@@ -206,6 +221,11 @@ component PresetLineView inherits ListLine {
     tip: line.part-tip;
     // The part column carries the reason (spec: the reason on hover).
     tip-from: self.width * 0.5;
+    draggable: true;
+    lifted: root.line.row == PresetsData.lifted-row;
+    landed: root.line.row == PresetsData.landed-row;
+    drag-out => { PresetsData.drag-row(root.line.row); }
+    drag-let-go => { PresetsData.drag-let-go(); }
     clicked => {
         root.chosen();
         PresetsData.select(root.line.row);
@@ -348,6 +368,11 @@ component CurveLineView inherits ListLine {
     callback chosen();
     height: 48px;
     selected: line.picked;
+    draggable: true;
+    lifted: root.line.row == PresetsData.curve-lifted-row;
+    landed: root.line.row == PresetsData.curve-landed-row;
+    drag-out => { PresetsData.curve-drag-row(root.line.row); }
+    drag-let-go => { PresetsData.curve-drag-let-go(); }
     clicked => {
         root.chosen();
         PresetsData.curve-select(root.line.row);
@@ -427,6 +452,16 @@ component PresetPanel inherits SidePanel {
         font-size: Type.body;
         wrap: word-wrap;
         min-width: 0px;
+    }
+    // Where to take the sound from to drag it onto a track (Solomon, 13 Nov 2026): Bitwig loads only its own presets
+    // dropped there, so it goes as one wherever one can be made.
+    DragHandle {
+        text: "Drag onto a track or into a folder";
+        tip: "It goes as a Bitwig preset where one can be made, so Bitwig loads it; else as its preset file";
+        lifted: PresetsData.lifted-picked;
+        landed: PresetsData.landed-picked;
+        drag-out => { PresetsData.drag-picked(); }
+        drag-let-go => { PresetsData.drag-let-go(); }
     }
     // Every card's buttons: the lit one first, in even columns (the UX review of 10 Nov, B2).
     CardActions {

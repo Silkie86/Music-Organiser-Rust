@@ -42,7 +42,7 @@ pub fn file_label(p: &PresetBlob) -> String {
 }
 
 /// A preset's file ending, made safe as a name is: a Bitwig project names its plugin states' files itself.
-fn safe_extension(ext: &str) -> String {
+pub(crate) fn safe_extension(ext: &str) -> String {
     let cleaned: String = ext.chars().map(|c| if names::unsafe_in_file_name(c) { '_' } else { c }).collect();
     cleaned.trim_end_matches([' ', '.']).to_owned()
 }
@@ -76,7 +76,7 @@ pub fn file_names(presets: &[PresetBlob]) -> Vec<String> {
 
 /// The Bitwig preset's name beside an exported preset, from its name and (safe) ending: "Serum - Wobble.fxp" gives
 /// "Serum - Wobble.bwpreset". Only the ending is taken off, never what's after a dot in the sound's own name.
-fn bitwig_name(file_name: &str, extension: &str) -> String {
+pub(crate) fn bitwig_name(file_name: &str, extension: &str) -> String {
     format!("{}.bwpreset", file_name.strip_suffix(extension).unwrap_or(file_name))
 }
 
@@ -202,26 +202,8 @@ fn bitwig_bytes(
 /// nothing is left behind but `to` if the app stops part way (the 10 Nov review's D-4). Gives the name the sound's
 /// `.bwpreset` would have in an export, without ".bwpreset", or `None` when `templates` has no template for its plugin.
 pub fn bitwig_preset_from_save(save: &str, key: &str, templates: &Templates, to: &Path) -> io::Result<Option<String>> {
-    let raw = std::fs::read(save)?;
-    let (sounds, _) = crate::library::sounds_in(save, raw, &Thresholds::default()).map_err(io::Error::other)?;
-    let keys = crate::list::place_keys(&sounds);
-    let blobs: Vec<PresetBlob> = sounds.into_iter().map(|s| s.blob).collect();
-    // Named among all the save's sounds, as an export names it.
-    let names = file_names(&blobs);
-    let Some(((p, name), _)) = blobs.iter().zip(names).zip(&keys).find(|(_, k)| k.as_str() == key) else {
-        return Err(io::Error::other("the sound isn't in the save any more (was it saved again since?)"));
-    };
-    if p.data.is_empty() {
-        return Err(io::Error::other("its settings were let go after it was listed"));
-    }
-    // Only settings that read back as a preset go to Bitwig, as an export only makes a Bitwig preset beside a plugin
-    // preset that read back.
-    if files::FileFormat::of(&name).is_some()
-        && let Err(e) = files::read_bytes(&p.data, &name)
-    {
-        return Err(io::Error::other(format!("its settings don't read as a preset: {e}")));
-    }
-    let Some(built) = bitwig_bytes(p, templates, &mut HashMap::new()) else { return Ok(None) };
+    let (p, name) = sound_in_save(save, key)?;
+    let Some(built) = bitwig_bytes(&p, templates, &mut HashMap::new()) else { return Ok(None) };
     let bytes = built.map_err(io::Error::other)?;
     // A new file of the caller's own, so nothing is written over: written, then read back and checked.
     let written = std::fs::write(to, &bytes).and_then(|()| match std::fs::read(to)? == bytes {
@@ -234,6 +216,33 @@ pub fn bitwig_preset_from_save(save: &str, key: &str, templates: &Templates, to:
     }
     let bw = bitwig_name(&name, &safe_extension(&p.extension));
     Ok(Some(bw.strip_suffix(".bwpreset").unwrap_or(&bw).to_owned()))
+}
+
+/// Reads a save again and gives the sound with this key ([`crate::list::place_keys`]) with the name an export gives
+/// its plugin preset ("Serum - Lead.fxp", worked out among all the save's sounds). An error when the save can't be
+/// read, the sound isn't in it any more, or its settings don't read back as a preset (as an export only writes one
+/// that does).
+pub(crate) fn sound_in_save(save: &str, key: &str) -> io::Result<(PresetBlob, String)> {
+    let raw = std::fs::read(save)?;
+    let (sounds, _) = crate::library::sounds_in(save, raw, &Thresholds::default()).map_err(io::Error::other)?;
+    let keys = crate::list::place_keys(&sounds);
+    let blobs: Vec<PresetBlob> = sounds.into_iter().map(|s| s.blob).collect();
+    // Named among all the save's sounds, as an export names it.
+    let names = file_names(&blobs);
+    let Some(((p, name), _)) = blobs.into_iter().zip(names).zip(&keys).find(|(_, k)| k.as_str() == key) else {
+        return Err(io::Error::other("the sound isn't in the save any more (was it saved again since?)"));
+    };
+    if p.data.is_empty() {
+        return Err(io::Error::other("its settings were let go after it was listed"));
+    }
+    // Only settings that read back as a preset go to Bitwig, as an export only makes a Bitwig preset beside a plugin
+    // preset that read back.
+    if files::FileFormat::of(&name).is_some()
+        && let Err(e) = files::read_bytes(&p.data, &name)
+    {
+        return Err(io::Error::other(format!("its settings don't read as a preset: {e}")));
+    }
+    Ok((p, name))
 }
 
 /// Why a Bitwig preset wasn't made, saying when one from an earlier export is still there with older settings.

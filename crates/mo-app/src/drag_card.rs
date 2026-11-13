@@ -24,7 +24,7 @@ use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source};
 use swash::shape::ShapeContext;
 use swash::zeno::{Format, Vector};
-use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::drag_out::{Card, Kind, Payload, Thumb, ThumbNote, loudest, loudness};
 use crate::songs::thousands;
@@ -86,11 +86,12 @@ const BODY_ROOM: f32 = 14.0;
 /// The picture is never more than this many pixels a side: on a very big screen scale the card is drawn a little
 /// smaller instead.
 const MOST_PIXELS: f32 = 1200.0;
-/// The most characters of a name or fact kept, and the most waveform slices and notes a little picture keeps: far
-/// more than the card has room for, so a strange payload can't make drawing slow.
+/// The most characters of a name or fact kept, and the most waveform slices, notes and curve points a little picture
+/// keeps: far more than the card has room for, so a strange payload can't make drawing slow.
 const MOST_CHARS: usize = 200;
 const MOST_PEAKS: usize = 1024;
 const MOST_NOTES: usize = 4096;
+const MOST_POINTS: usize = 4096;
 
 // ---- How it flies ------------------------------------------------------------------------------------------------
 
@@ -479,6 +480,21 @@ fn tidy_thumb(thumb: &Thumb) -> Thumb {
                 })
                 .collect();
             if kept.is_empty() { Thumb::None } else { Thumb::Notes(kept) }
+        }
+        Thumb::Line(points) => {
+            let mut kept: Vec<(f32, f32)> = points
+                .iter()
+                .filter(|(x, y)| x.is_finite() && y.is_finite())
+                .map(|&(x, y)| (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)))
+                .collect();
+            if kept.len() > MOST_POINTS {
+                // Every so many, and always the last: the line still ends where it ends.
+                let last = kept.last().copied();
+                let step = kept.len().div_ceil(MOST_POINTS - 1);
+                kept = kept.into_iter().step_by(step).chain(last).collect();
+            }
+            // One point is no line.
+            if kept.len() < 2 { Thumb::None } else { Thumb::Line(kept) }
         }
         _ => Thumb::None,
     }
@@ -1005,6 +1021,7 @@ fn draw_thumb(pm: &mut Pixmap, line: &Line, face: &Face, area: Area, s: f32) {
     match &line.thumb {
         Thumb::Wave(peaks) => draw_wave(pm, peaks, inner, line.tint, s),
         Thumb::Notes(notes) => draw_notes(pm, notes, inner, line.tint, s),
+        Thumb::Line(points) => draw_line(pm, points, inner, line.tint, s),
         Thumb::None => draw_sign(pm, line.kind, inner, line.tint, s, theme.square),
     }
 }
@@ -1053,7 +1070,27 @@ fn draw_notes(pm: &mut Pixmap, notes: &[ThumbNote], area: Area, rgb: u32, s: f32
     }
 }
 
-/// The plain sign for a line without a picture of its own: level bars for a sound, note dashes for MIDI.
+/// A curve's shape: its points joined, from the box's left to its right, 0 at the bottom and 1 at the top.
+fn draw_line(pm: &mut Pixmap, points: &[(f32, f32)], area: Area, rgb: u32, s: f32) {
+    let mut path = PathBuilder::new();
+    for (i, &(x, y)) in points.iter().enumerate() {
+        let (px, py) = (area.x + x * area.w, area.y + (1.0 - y) * area.h);
+        if i == 0 {
+            path.move_to(px, py);
+        } else {
+            path.line_to(px, py);
+        }
+    }
+    if let Some(path) = path.finish() {
+        stroke(pm, &path, rgb, CURVE_LINE * s);
+    }
+}
+
+/// How thick a curve's line is on the card, in points: as the Curves list draws it.
+const CURVE_LINE: f32 = 1.5;
+
+/// The plain sign for a line without a picture of its own: level bars for a sound, note dashes for MIDI, a knob for
+/// a preset, a rising line for a curve.
 fn draw_sign(pm: &mut Pixmap, kind: Kind, area: Area, rgb: u32, s: f32, square: bool) {
     let (mx, my) = (area.x + area.w / 2.0, area.y + area.h / 2.0);
     let radius = if square { 0.5 } else { 1.5 } * s;
@@ -1074,6 +1111,31 @@ fn draw_sign(pm: &mut Pixmap, kind: Kind, area: Area, rgb: u32, s: f32, square: 
             let (w, h) = (7.0 * s, 3.0 * s);
             for (dx, dy) in DASHES {
                 fill_round(pm, Area { x: mx + dx * s, y: my + dy * s - h / 2.0, w, h }, radius, rgb, 1.0);
+            }
+        }
+        Kind::Preset => {
+            // A knob: its ring, and its pointer turned up and to the right, as a plugin's knob is at two o'clock.
+            let r = (9.0 * s).min(area.h / 2.0 - CURVE_LINE * s).max(1.0);
+            if let Some(ring) = PathBuilder::from_circle(mx, my, r) {
+                stroke(pm, &ring, rgb, CURVE_LINE * s);
+            }
+            let (dx, dy) = (std::f32::consts::FRAC_PI_6.cos(), -std::f32::consts::FRAC_PI_6.sin());
+            let mut pointer = PathBuilder::new();
+            pointer.move_to(mx + dx * r * 0.2, my + dy * r * 0.2);
+            pointer.line_to(mx + dx * r * 0.75, my + dy * r * 0.75);
+            if let Some(pointer) = pointer.finish() {
+                stroke(pm, &pointer, rgb, 2.0 * s);
+            }
+        }
+        Kind::Curve => {
+            // A line that holds low, rises, then holds high, in points from the box's middle.
+            let (w, h) = (24.0 * s, 14.0 * s);
+            let (left, bottom) = (mx - w / 2.0, my + h / 2.0);
+            let mut path = PathBuilder::new();
+            path.move_to(left, bottom);
+            path.cubic_to(left + w * 0.55, bottom, left + w * 0.45, bottom - h, left + w, bottom - h);
+            if let Some(path) = path.finish() {
+                stroke(pm, &path, rgb, CURVE_LINE * s);
             }
         }
     }
@@ -1139,6 +1201,12 @@ fn round_box(area: Area, radius: f32) -> Option<Path> {
     pb.cubic_to(x, y + k, x + k, y, x + r, y);
     pb.close();
     pb.finish()
+}
+
+/// Draws a path's line in a colour, `width` pixels thick, with round ends and corners.
+fn stroke(pm: &mut Pixmap, path: &Path, rgb: u32, width: f32) {
+    let stroke = Stroke { width, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
+    pm.stroke_path(path, &paint(rgb, 1.0), &stroke, Transform::identity(), None);
 }
 
 /// Fills a path in a colour, `alpha` strong, with smooth edges.
@@ -1904,6 +1972,30 @@ mod tests {
     }
 
     #[test]
+    fn a_curve_goes_from_its_start_on_the_left_to_its_end_on_the_right() {
+        let mut payload = sounds(1);
+        payload.cards[0].kind = Kind::Curve;
+        payload.cards[0].tint = 0xFF0000;
+        // Low, then up to the top halfway, held there.
+        payload.cards[0].thumb = Thumb::Line(vec![(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)]);
+        let p = settled(&payload, &graphite(), true, 2.0);
+        let g = geometry(&payload, 2.0);
+        let left = PAD + 1.0 + LINE_PAD_X + THUMB_INSET_X;
+        let inner_w = THUMB_WIDTH - 2.0 * THUMB_INSET_X;
+        let top = line_top(0) + (LINE_HEIGHT - THUMB_HEIGHT) / 2.0 + THUMB_INSET_Y;
+        let bottom = top + THUMB_HEIGHT - 2.0 * THUMB_INSET_Y;
+        let red = |x: f32, y: f32| {
+            let (x, y) = on_card(&g, x, y);
+            let [r, g, _, _] = pixel(&p, x, y);
+            r > 200 && g < 100
+        };
+        assert!(red(left + 0.25 * inner_w, (top + bottom) / 2.0));
+        assert!(red(left + 0.75 * inner_w, top));
+        assert!(!red(left + 0.75 * inner_w, bottom - 1.0));
+        assert!(!red(left + 0.25 * inner_w, top + 1.0));
+    }
+
+    #[test]
     fn the_loudest_slice_reaches_the_boxs_edges() {
         let mut payload = sounds(1);
         payload.cards[0].tint = 0xFF0000;
@@ -1962,12 +2054,23 @@ mod tests {
             },
             Card { kind: Kind::Midi, thumb: Thumb::Notes(vec![notes(f32::NAN, 0.0, 9)]), ..Card::default() },
             Card { thumb: Thumb::Wave(vec![]), ..Card::default() },
+            Card {
+                kind: Kind::Curve,
+                thumb: Thumb::Line(vec![(f32::NAN, 0.0), (f32::INFINITY, -2.0), (0.5, 9.0), (-1.0, f32::MAX)]),
+                ..Card::default()
+            },
+            Card { kind: Kind::Curve, thumb: Thumb::Line(vec![(0.5, 0.5)]), ..Card::default() },
+            Card { kind: Kind::Curve, ..Card::default() },
+            Card { kind: Kind::Preset, ..Card::default() },
         ];
         odd.cards.extend((0..100_000).map(|_| Card::default()));
         odd.caption = " ".repeat(10);
         let mut long = sounds(1);
         long.cards[0].thumb = Thumb::Wave((0..1_000_000).map(|i| (i % 7) as f32).collect());
         long.cards[0].kind = Kind::Midi;
+        let mut long_line = sounds(1);
+        long_line.cards[0].thumb =
+            Thumb::Line((0..1_000_000).map(|i| (i as f32 / 1e6, (i % 5) as f32 / 4.0)).collect());
         let regular = fonts().regular;
         let broken = [
             fonts(),
@@ -1976,7 +2079,7 @@ mod tests {
             Fonts { regular: &regular[..1000], bold: &regular[..30_000] },
             Fonts { regular: &regular[..12], bold: fonts().bold },
         ];
-        for payload in [Payload::default(), odd, long] {
+        for payload in [Payload::default(), odd, long, long_line] {
             for f in broken {
                 for theme in &THEMES {
                     let t0 = Instant::now();
