@@ -36,6 +36,9 @@ pub const VERSION: u32 = 1;
 const MAGIC: &[u8] = b"XferJson\0";
 /// The biggest header or unpacked body read: a shape's are a few hundred bytes, so anything near this is no shape.
 const MOST_BYTES: usize = 1 << 20;
+/// The biggest zstd window a body may ask for: a shape's body is a few hundred bytes, so its window is too; this
+/// keeps a damaged file from making the decoder set aside its usual 100 MB.
+const MOST_WINDOW: u64 = 8 << 20;
 /// The most points a shape is read with (Serum 1 holds 64; Serum 2's own limit isn't known, so this is generous).
 const MOST_POINTS: usize = 4096;
 /// A `.shp` file's size, and the size of its box in pixels.
@@ -142,12 +145,12 @@ pub fn read_lfotool(raw: &[u8]) -> Vec<Shape> {
         && raw.get(8..12) == Some(b"FPCh")
         && raw.get(16..20) == Some(b"XFRa")
         && raw.get(56..60) == Some(&18816u32.to_be_bytes()[..]);
-    let (Some(graphs), Some(counts)) = (raw.get(LFOTOOL_GRAPHS..), raw.get(LFOTOOL_COUNTS..LFOTOOL_COUNTS + 12)) else {
+    // Always there in a file of the right size; `get` all the same, as every reader here (no slicing past the end).
+    let (true, Some(graphs), Some(counts)) =
+        (preset, raw.get(LFOTOOL_GRAPHS..), raw.get(LFOTOOL_COUNTS..LFOTOOL_COUNTS + 12))
+    else {
         return Vec::new();
     };
-    if !preset {
-        return Vec::new();
-    }
     let mut out = Vec::new();
     for (g, &n) in counts.iter().enumerate() {
         let n = usize::from(n);
@@ -155,11 +158,12 @@ pub fn read_lfotool(raw: &[u8]) -> Vec<Shape> {
             continue;
         }
         let Some(points) = pixel_points(graphs, n, 12, g) else { continue };
-        // LFOTool's own start, in a graph nobody drew: top, then any value half way, straight.
+        // LFOTool's own start, in a graph nobody drew: top, then the middle or the bottom half way, straight (the
+        // presets show both, by the version that saved them). A shape drawn just so is passed over with them.
         let untouched = n == 2
             && points.iter().all(|p| (p.2 - 0.5).abs() < 1e-3)
             && points.first().is_some_and(|p| p.0 == 0.0 && p.1 == 0.0)
-            && points.get(1).is_some_and(|p| p.0 == 0.5);
+            && points.get(1).is_some_and(|p| p.0 == 0.5 && (p.1 == 0.5 || p.1 == 1.0));
         if untouched {
             continue;
         }
@@ -216,7 +220,7 @@ fn split_le(raw: &[u8], bytes: usize) -> Option<(u64, &[u8])> {
 /// A zstd frame unpacked, when it's `size` bytes as the file says.
 fn unzstd(packed: &[u8], size: usize) -> Option<Vec<u8>> {
     let mut packed = packed;
-    let decoder = ruzstd::decoding::StreamingDecoder::new(&mut packed).ok()?;
+    let decoder = ruzstd::decoding::StreamingDecoder::new_with_max_window_size(&mut packed, MOST_WINDOW).ok()?;
     let mut out = Vec::with_capacity(size);
     decoder.take(size as u64 + 1).read_to_end(&mut out).ok()?;
     (out.len() == size).then_some(out)
@@ -274,7 +278,8 @@ impl Cbor {
             27 => take(at, 8)?,
             _ => return None,
         };
-        // Each item takes a byte at least, so a list can't hold more than the bytes left.
+        // Each item takes a byte at least, so a list can't hold more than the bytes left; room is set aside for a few
+        // only, so a damaged count costs nothing before it's found out.
         let count = |n: u64, at: &[u8]| usize::try_from(n).ok().filter(|n| *n <= at.len());
         Some(match major {
             0 => Cbor::Int(i128::from(n)),
@@ -287,7 +292,7 @@ impl Cbor {
             }
             4 => {
                 let len = count(n, at)?;
-                let mut list = Vec::with_capacity(len);
+                let mut list = Vec::with_capacity(len.min(64));
                 for _ in 0..len {
                     list.push(Cbor::value(at, depth + 1)?);
                 }
@@ -295,7 +300,7 @@ impl Cbor {
             }
             5 => {
                 let len = count(n.checked_mul(2)?, at)? / 2;
-                let mut map = Vec::with_capacity(len);
+                let mut map = Vec::with_capacity(len.min(64));
                 for _ in 0..len {
                     let k = Cbor::value(at, depth + 1)?;
                     map.push((k, Cbor::value(at, depth + 1)?));
@@ -495,6 +500,9 @@ mod tests {
         assert_eq!(shapes.len(), 1);
         assert_eq!((shapes[0].product.as_str(), shapes[0].part.as_str()), ("LFOTool", "Graph 1"));
         assert_eq!(values(&shapes[0]), [(0.0, 0.3583, 0.2916), (0.5, 0.8542, -0.1584), (1.0, 1.0, 0.0)]);
+        // A V drawn by hand is kept, though it starts as LFOTool's own does.
+        let v = lfotool(&[(0, &[(0.0, 0.0, 0.5), (194.0, 180.0, 0.5)])]);
+        assert_eq!(read_lfotool(&v).len(), 1);
         // Graph 12 drawn too, and nothing at all.
         let two =
             lfotool(&[(0, &[(0.0, 0.0, 0.5), (388.0, 240.0, 0.5)]), (11, &[(0.0, 240.0, 0.5), (97.0, 0.0, 0.3)])]);

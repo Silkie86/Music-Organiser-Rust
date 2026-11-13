@@ -2206,9 +2206,19 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
     let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     drop(saves);
     let library_roots: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).collect();
-    paths.extend(background::on_pool(|| logic::curve_files(&library_roots)));
-    // The plugins' LFO shapes (Serum, LFOTool), from the Documents folder.
-    paths.extend(background::on_pool(|| logic::shape_files(&logic::shape_folders(&crate::files::documents()))));
+    // Bitwig's curves library and the plugins' LFO shapes (Serum, LFOTool), looked through side by side.
+    let (library, shapes) = background::on_pool(|| {
+        rayon::join(
+            || logic::curve_files(&library_roots),
+            || {
+                let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+                let documents = mo_app::bitwig_convert::documents();
+                logic::shape_files(&logic::shape_folders(documents.as_deref(), home.as_deref()))
+            },
+        )
+    });
+    paths.extend(library);
+    paths.extend(shapes);
     {
         let folders = bitwig_folders.clone();
         on_window(move |_| PAGE.with(|p| p.borrow_mut().bitwig = folders));

@@ -225,11 +225,13 @@ pub fn found_in(path: &str, raw: Vec<u8>, modified: i64) -> Vec<Found> {
             let source = place.source(SourceKind::BitwigCurve, &c.name, "", "", 0.0);
             found(shape(&points, 1.0), c.beat_length.unwrap_or(4.0), source).into_iter().collect()
         } else if kind == Some(SourceKind::PluginShape) {
-            let name = song_of(path);
             serum::read(path, &raw)
                 .into_iter()
                 .filter_map(|s| {
                     let points: Vec<(f64, f64, f64)> = s.points.iter().map(|p| (p.x, p.value, p.bend)).collect();
+                    // A shape file's name is the shape's; a preset's graphs are named by the preset and the graph
+                    // ("Sidechain-1 - LFOTool - Graph 3"), so each has its own.
+                    let name = if s.part.is_empty() { place.song.clone() } else { String::new() };
                     let source = place.source(SourceKind::PluginShape, &name, &s.product, &s.part, 0.0);
                     found(shape(&points, 1.0), SHAPE_BEATS, source)
                 })

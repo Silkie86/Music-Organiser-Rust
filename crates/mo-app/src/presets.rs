@@ -157,19 +157,23 @@ pub fn curve_files(roots: &[PathBuf]) -> Vec<String> {
     files_ending(roots, |name| name.ends_with(".bwcurve"))
 }
 
-/// Where Xfer's plugins keep their LFO shapes, in the Documents folder `documents`: Serum 2's and Serum 1's `LFO
-/// Shapes` (Serum 2 keeps a copy of Serum 1's there too) and LFOTool's presets, which hold its shapes and graphs.
-/// Only the folders that are there.
-pub fn shape_folders(documents: &Path) -> Vec<PathBuf> {
-    let xfer = documents.join("Xfer");
-    [
-        xfer.join("Serum 2 Presets").join("LFO Shapes"),
-        xfer.join("Serum Presets").join("LFO Shapes"),
-        xfer.join("LFOTool Presets"),
-    ]
-    .into_iter()
-    .filter(|p| p.is_dir())
-    .collect()
+/// Where Xfer's plugins keep their LFO shapes: Serum 2's and Serum 1's `LFO Shapes` (Serum 2 keeps a copy of Serum
+/// 1's too) and LFOTool's presets, which hold its shapes and graphs. On Windows they're in `Documents\Xfer`; on a Mac
+/// Serum 2's are there too, and Serum 1's and LFOTool's in the audio presets folder (`~/Library/Audio/Presets/Xfer
+/// Records`), so both places are looked in. Only the folders that are there, each once.
+pub fn shape_folders(documents: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut xfer: Vec<PathBuf> = documents.map(|d| d.join("Xfer")).into_iter().collect();
+    xfer.extend(home.map(|h| h.join("Library").join("Audio").join("Presets").join("Xfer Records")));
+    let mut out: Vec<PathBuf> = Vec::new();
+    for x in xfer {
+        let serum2 = x.join("Serum 2 Presets").join("LFO Shapes");
+        for f in [serum2, x.join("Serum Presets").join("LFO Shapes"), x.join("LFOTool Presets")] {
+            if f.is_dir() && !out.contains(&f) {
+                out.push(f);
+            }
+        }
+    }
+    out
 }
 
 /// The plugins' shape files under `roots` ([`shape_folders`]): Serum's `.XferShape` and `.shp`, and LFOTool's presets
@@ -2212,8 +2216,14 @@ mod tests {
         ] {
             std::fs::write(f, b"").unwrap();
         }
-        let folders = shape_folders(&docs);
+        let folders = shape_folders(Some(&docs), None);
         assert_eq!(folders, [serum2.clone(), lfotool.clone()], "Serum 1's folder isn't there, so isn't listed");
+        // A Mac's audio presets folder, and the same folder given twice.
+        let mac = docs.join("Library").join("Audio").join("Presets").join("Xfer Records");
+        let mac = mac.join("Serum Presets").join("LFO Shapes");
+        std::fs::create_dir_all(&mac).unwrap();
+        assert_eq!(shape_folders(Some(&docs), Some(&docs)), [serum2.clone(), lfotool.clone(), mac]);
+        assert_eq!(shape_folders(None, None), Vec::<PathBuf>::new());
         let names: Vec<String> = shape_files(&folders)
             .iter()
             .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
