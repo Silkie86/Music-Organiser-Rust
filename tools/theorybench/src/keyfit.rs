@@ -3067,14 +3067,14 @@ mod tests {
         // Every other stream keeps the built-in weights exactly: the pieces never sound them.
         for (s, scale) in scales.iter().enumerate().skip(1) {
             assert_eq!(*scale, 1.0, "{s}");
-            for i in s * 24..(s + 1) * 24 {
-                assert_eq!(model.weights[i].to_bits(), keyfind::SHIPPED.weights[i].to_bits());
+            let stream = s * 24..(s + 1) * 24;
+            for (got, built_in) in model.weights[stream.clone()].iter().zip(&keyfind::SHIPPED.weights[stream]) {
+                assert_eq!(got.to_bits(), built_in.to_bits());
             }
         }
         // The tune's weights keep their shape: each is the built-in one times the same number.
-        for i in 0..24 {
-            let built_in = keyfind::SHIPPED.weights[i];
-            assert!((model.weights[i] - scales[0] * built_in).abs() < 1e-9 * built_in.abs().max(1.0));
+        for (got, &built_in) in model.weights[..24].iter().zip(&keyfind::SHIPPED.weights[..24]) {
+            assert!((got - scales[0] * built_in).abs() < 1e-9 * built_in.abs().max(1.0));
         }
         // Only 15 of the tunes are labelled minor: the minor weight keeps its built-in number.
         assert_eq!(model.weights[MINOR].to_bits(), keyfind::SHIPPED.weights[MINOR].to_bits());

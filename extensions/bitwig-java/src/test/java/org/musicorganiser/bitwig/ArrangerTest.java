@@ -491,7 +491,8 @@ class ArrangerTest {
 
         Map<String, Object> result = SelfCheckTest.map(app.ask(obj("id", 4, "cmd", "selftest")).get("result"));
         assertEquals(SelfCheckTest.CHECKS, SelfCheckTest.names(result));
-        assertEquals(List.of("arranger"), listAt(result, "checks").stream().filter(c -> !(Boolean) at(c, "ok")).map(c -> at(c, "name"))
+        // The watch feed's cue markers are the arranger's too (extension 3.24).
+        assertEquals(List.of("arranger", "watch: cue markers"), listAt(result, "checks").stream().filter(c -> !(Boolean) at(c, "ok")).map(c -> at(c, "name"))
                                                                   .collect(Collectors.toList()));
         assertMatches("^Couldn't set it up: java.lang.AbstractMethodError: ", SelfCheckTest.detail(result, "arranger"));
         assertMatches("couldn't set up the arranger", bitwig.errors.get(0));

@@ -141,8 +141,9 @@ class SelfCheckTest {
         Map<String, Object> result = map(app.ask(obj("id", 4, "cmd", "selftest")).get("result"));
         List<Object> failed = listAt(result, "checks").stream().filter(c -> !(Boolean) at(c, "ok")).map(c -> at(c, "name"))
                                                       .collect(Collectors.toList());
-        // Recording into the arranger (extension 3.9) needs the tracks too.
-        assertEquals(List.of("track bank", "Sampler and Note Transpose pitch", "track IDs", "recording into the arranger"), failed);
+        // Recording into the arranger (extension 3.9) needs the tracks too, and so do the watch feed's notes and levels (3.24).
+        assertEquals(List.of("track bank", "Sampler and Note Transpose pitch", "track IDs", "recording into the arranger",
+                             "watch: notes playing", "watch: level meters"), failed);
         assertEquals("Couldn't set it up: org.musicorganiser.bitwig.LinkError: The track bank wasn't made, so there's no track to record.",
                      detail(result, "recording into the arranger"));
     }
