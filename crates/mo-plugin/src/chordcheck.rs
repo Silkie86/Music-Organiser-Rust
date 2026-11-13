@@ -14,6 +14,7 @@
 //!   last [`READ_BARS`] bars about ten times a second.
 //! - The panel shows the newest [`Heard`] (`window.rs`, the Chords tab).
 
+use crate::takes::{Ended, Label};
 use crate::threads::{background, lock};
 use clack_plugin::events::spaces::CoreEventSpace;
 use clack_plugin::events::{Match, UnknownEvent};
@@ -28,8 +29,8 @@ use std::time::Duration;
 pub const PPQ: i64 = 960;
 /// How many of the newest bars are read and shown.
 pub const READ_BARS: i64 = 4;
-/// The most chords the strip shows: the newest (the panel has room for about this many side by side).
-pub const STRIP_MOST: usize = 8;
+/// The most chords the strip shows: the newest (the panel has room for about this many beside the chord now).
+pub const STRIP_MOST: usize = 5;
 /// A take ends after this many bars with no key sounding.
 pub const GAP_BARS: f64 = 2.0;
 /// How often the reading thread looks at what came in.
@@ -260,6 +261,8 @@ pub struct Take {
     pub notes: Vec<Note>,
     /// The beat the last key sounding ended on.
     last_up: f64,
+    /// When it started, by the computer's clock: its name once saved.
+    pub started: chrono::DateTime<chrono::Local>,
 }
 
 /// The grid for bars of `quarters` quarter notes: on quarter beats when a bar is a whole number of them, else on
@@ -291,6 +294,7 @@ impl Take {
             pedal: false,
             notes: Vec::new(),
             last_up: now.beat,
+            started: chrono::Local::now(),
         }
     }
 
@@ -415,7 +419,7 @@ impl Take {
     /// The chords of the newest [`READ_BARS`] bars up to `beat`, as the panel shows them.
     pub fn read(&self, reader: &mut ChordReader, beat: f64) -> Heard {
         let now = self.tick(beat).max(0);
-        let (bar, beat_ticks) = (self.grid.bar(), self.grid.beat());
+        let bar = self.grid.bar();
         let this_bar = now.div_euclid(bar);
         let from = (this_bar - (READ_BARS - 1)).max(0) * bar;
         let notes: Vec<Note> =
@@ -436,7 +440,7 @@ impl Take {
             let sounds = span.start <= at && at <= span.end;
             let chord = StripChord {
                 name: name.name(),
-                at: format!("{}.{}", start.div_euclid(bar) + 1, start.rem_euclid(bar) / beat_ticks + 1),
+                at: crate::takes::place(self.grid, start),
                 sure: sure_of(span.answer),
                 now: sounds,
             };
@@ -479,9 +483,18 @@ impl Sure {
             Sure::No => "no chord",
         }
     }
+
+    /// How the panel shades it: 0 sure, 1 the same notes have another name, 2 not sure (or none).
+    pub fn shade(self) -> i32 {
+        match self {
+            Sure::Yes => 0,
+            Sure::Mostly => 1,
+            Sure::Unsure | Sure::No => 2,
+        }
+    }
 }
 
-fn sure_of(answer: ChordAnswer) -> Sure {
+pub(crate) fn sure_of(answer: ChordAnswer) -> Sure {
     match answer {
         ChordAnswer::Chord => Sure::Yes,
         ChordAnswer::SameNotes | ChordAnswer::Implied => Sure::Mostly,
@@ -532,11 +545,29 @@ pub struct Checker {
     pub thru: AtomicBool,
     /// The newest for the panel, and its number (counted up each time): kept, so a panel opened later shows it too.
     heard: Mutex<(u64, Heard)>,
+    /// The takes that are over, newest first (at most [`crate::takes::KEPT`]), and a number counted up at each change.
+    takes: Mutex<(u64, Vec<Ended>)>,
+    /// Held while a take is saved: saves go one at a time, so an older label never lands over a newer one.
+    saving: Mutex<()>,
+}
+
+/// A take's line in the panel's list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TakeSummary {
+    pub id: String,
+    pub title: String,
+    pub details: String,
 }
 
 impl Default for Checker {
     fn default() -> Checker {
-        Checker { run: AtomicU64::new(0), thru: AtomicBool::new(true), heard: Mutex::new((0, Heard::default())) }
+        Checker {
+            run: AtomicU64::new(0),
+            thru: AtomicBool::new(true),
+            heard: Mutex::new((0, Heard::default())),
+            takes: Mutex::new((0, Vec::new())),
+            saving: Mutex::new(()),
+        }
     }
 }
 
@@ -556,19 +587,114 @@ impl Checker {
         self.run.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// A take that's over, in the list by when it started (newest first). Past [`crate::takes::KEPT`] the oldest
+    /// goes, but never one with labels not saved yet.
+    pub fn add_take(&self, mut ended: Ended) {
+        let mut takes = lock(&self.takes);
+        let list = &mut takes.1;
+        // Two takes started in the same millisecond (a song going back as a key goes down): each its own name.
+        let base = ended.id.clone();
+        let mut n = 2;
+        while list.iter().any(|t| t.id == ended.id) {
+            ended.id = format!("{base}-{n}");
+            n += 1;
+        }
+        let at = list.iter().position(|t| t.id < ended.id).unwrap_or(list.len());
+        list.insert(at, ended);
+        while list.len() > crate::takes::KEPT {
+            let Some(old) = list.iter().rposition(|t| !t.unsaved()) else { break };
+            list.remove(old);
+        }
+        takes.0 = takes.0.wrapping_add(1);
+    }
+
+    /// The takes' lines, newest first, when they changed since the list numbered `seen`, with its number.
+    pub fn takes(&self, seen: u64) -> Option<(u64, Vec<TakeSummary>)> {
+        let takes = lock(&self.takes);
+        (takes.0 != seen).then(|| {
+            let lines = takes
+                .1
+                .iter()
+                .map(|t| TakeSummary { id: t.id.clone(), title: t.title(), details: t.details() })
+                .collect();
+            (takes.0, lines)
+        })
+    }
+
+    /// The take `id`'s grid and chords to label, while it's kept.
+    pub fn chords_of(&self, id: &str) -> Option<(Grid, Vec<crate::takes::ToLabel>)> {
+        let takes = lock(&self.takes);
+        takes.1.iter().find(|t| t.id == id).map(|t| (t.grid, t.chords.clone()))
+    }
+
+    /// The lowest key sounding in chord `index` of the take `id`.
+    pub fn lowest(&self, id: &str, index: usize) -> Option<u8> {
+        let takes = lock(&self.takes);
+        takes.1.iter().find(|t| t.id == id)?.chords.get(index)?.lowest
+    }
+
+    /// Labels chord `index` of the take `id`: whether it's still kept (then it wants saving: [`Checker::save`]).
+    pub fn label(&self, id: &str, index: usize, label: Label) -> bool {
+        let mut takes = lock(&self.takes);
+        let Some(ended) = takes.1.iter_mut().find(|t| t.id == id) else { return false };
+        let Some(chord) = ended.chords.get_mut(index) else { return false };
+        chord.label = Some(label);
+        ended.revision += 1;
+        takes.0 = takes.0.wrapping_add(1);
+        true
+    }
+
+    /// Saves the take `id` as it is now in `folder`, one save at a time (off the window's thread: it waits for the
+    /// one before). A save that finds the take saved as it is already does nothing, so labels in a quick row save
+    /// once or twice, the newest always last.
+    pub fn save(&self, id: &str, folder: &std::path::Path) {
+        let _one = lock(&self.saving);
+        let (file, revision) = {
+            let takes = lock(&self.takes);
+            let Some(ended) = takes.1.iter().find(|t| t.id == id) else { return };
+            if ended.saved_revision == ended.revision {
+                return;
+            }
+            (ended.file(), ended.revision)
+        };
+        let said = match mo_app::chord_check::save(&file, folder) {
+            Ok(_) => Ok("Saved".to_owned()),
+            Err(why) => {
+                crate::log::line("Chord check", &why);
+                Err(why)
+            }
+        };
+        let mut takes = lock(&self.takes);
+        if let Some(ended) = takes.1.iter_mut().find(|t| t.id == id) {
+            match said {
+                Ok(words) => {
+                    ended.saved_revision = revision;
+                    ended.saved = words;
+                }
+                Err(why) => ended.saved = why,
+            }
+            takes.0 = takes.0.wrapping_add(1);
+        }
+    }
+
     /// The newest [`Heard`] when it's newer than the one numbered `seen`, with its number.
     pub fn newest(&self, seen: u64) -> Option<(u64, Heard)> {
         let heard = lock(&self.heard);
         (heard.0 != seen).then(|| heard.clone())
     }
 
-    /// The reading thread: takes in what came every [`READ_EVERY`] and reads the take while one is under way.
-    fn read_on(&self, run: u64, mut from: rtrb::Consumer<Came>) {
+    /// The reading thread: takes in what came every [`READ_EVERY`] and reads the take while one is under way. A take
+    /// that's over is read whole on a thread of its own, so the live chord never waits for it; when the DAW stops
+    /// the track's audio, what came last is taken in and the take under way is handed on too.
+    fn read_on(self: Arc<Self>, run: u64, mut from: rtrb::Consumer<Came>) {
         let mut reader = ChordReader::new();
         let mut steps = Steps::default();
         let mut came = Vec::new();
-        while self.run.load(Ordering::Acquire) == run {
-            std::thread::sleep(READ_EVERY);
+        loop {
+            let running = self.run.load(Ordering::Acquire) == run;
+            if running {
+                std::thread::sleep(READ_EVERY);
+            }
             came.clear();
             while let Ok(c) = from.pop() {
                 came.push(c);
@@ -576,6 +702,21 @@ impl Checker {
             if let Some(heard) = steps.step(&came, &mut reader) {
                 let mut newest = lock(&self.heard);
                 *newest = (newest.0.wrapping_add(1), heard);
+            }
+            if !running && let Some(take) = steps.take.take() {
+                let beat = steps.now.map_or(take.last_up, |n| n.beat);
+                steps.finished.push((take, beat));
+            }
+            for (take, beat) in std::mem::take(&mut steps.finished) {
+                let me = Arc::clone(&self);
+                background("mo-plugin-take-read", move || {
+                    if let Some(ended) = Ended::of(&take, beat, &mut ChordReader::new()) {
+                        me.add_take(ended);
+                    }
+                });
+            }
+            if !running {
+                return;
             }
         }
     }
@@ -590,6 +731,8 @@ pub struct Steps {
     changed: bool,
     /// The bar the take was last read in: a chord sounding is read again each bar, so the strip moves on.
     read_in: i64,
+    /// The takes that ended, with the beat each ended on, for [`crate::takes::Ended`].
+    pub finished: Vec<(Take, f64)>,
 }
 
 impl Steps {
@@ -610,6 +753,8 @@ impl Steps {
                             self.take = Some(Take::carry(&old, now));
                             self.changed = true;
                         }
+                        let ended_at = self.now.map_or(now.beat, |was| was.beat);
+                        self.finished.push((old, ended_at));
                     }
                     self.now = Some(*now);
                 }
@@ -633,7 +778,9 @@ impl Steps {
         let take = self.take.as_ref()?;
         if take.over(beat) {
             // Ended: the last reading stays on the panel until the next take starts.
-            self.take = None;
+            if let Some(old) = self.take.take() {
+                self.finished.push((old, beat));
+            }
             return None;
         }
         let bar = take.tick(beat).max(0).div_euclid(take.grid().bar());
@@ -764,6 +911,11 @@ mod tests {
         // Two bars later with nothing held, the take is over.
         assert!(steps.step(&[free(24.0)], &mut reader).is_none());
         assert!(steps.take.is_none());
+        // It's handed on to be labelled, read whole.
+        let (take, ended_at) = steps.finished.pop().unwrap();
+        assert_eq!(ended_at, 24.0);
+        let ended = crate::takes::Ended::of(&take, ended_at, &mut reader).unwrap();
+        assert_eq!(ended.chords.len(), 4);
     }
 
     #[test]
@@ -800,6 +952,8 @@ mod tests {
         // The loop goes back with nothing held: the take ends; the next key starts the next one.
         steps.step(&[song(32.0)], &mut reader);
         assert!(steps.take.is_none());
+        // The take before the song started, and the one on the song, are both over now.
+        assert_eq!(steps.finished.len(), 2);
         steps.step(&[press(64, 32.5), song(33.0)], &mut reader);
         assert_eq!(steps.take.as_ref().unwrap().origin, 32.0);
     }
@@ -821,6 +975,44 @@ mod tests {
         assert!(catch.passes(MidiEvent::new(0, 0, [0xB0, 123, 0]).as_ref()), "all notes off always goes");
         assert!(!catch.passes(MidiEvent::new(0, 0, [0xE0, 0, 64]).as_ref()), "a bend with Thru off doesn't");
         checker.stop();
+    }
+
+    #[test]
+    fn takes_keep_their_own_names_and_a_label_not_saved_is_never_let_go() {
+        let checker = Checker::default();
+        let mut take = Take::start(&Now { beat: 0.0, song: false, bar: None });
+        for c in chord(&[48, 52, 55], 0.0, 4.0) {
+            take.add(&c);
+        }
+        let ended = crate::takes::Ended::of(&take, 12.0, &mut ChordReader::new()).unwrap();
+        checker.add_take(ended.clone());
+        checker.add_take(ended.clone());
+        let (_, lines) = checker.takes(u64::MAX).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_ne!(lines[0].id, lines[1].id, "the same start: each its own name");
+        // The oldest is labelled and not saved: past the most kept, a newer one goes instead.
+        let oldest = lines[1].id.clone();
+        assert!(checker.label(&oldest, 0, Label::Right));
+        for n in 0..crate::takes::KEPT {
+            let mut newer = ended.clone();
+            newer.id = format!("9999-{n:03}");
+            checker.add_take(newer);
+        }
+        let (_, lines) = checker.takes(u64::MAX).unwrap();
+        assert_eq!(lines.len(), crate::takes::KEPT);
+        assert!(lines.iter().any(|t| t.id == oldest));
+        // Saved: then it's like any other.
+        let folder = std::env::temp_dir().join(format!("mo-plugin-chord-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        checker.save(&oldest, &folder);
+        let (_, lines) = checker.takes(u64::MAX).unwrap();
+        assert!(lines.iter().find(|t| t.id == oldest).unwrap().details.ends_with("Saved"));
+        assert!(folder.join(mo_app::chord_check::file_name(&oldest)).is_file());
+        let mut newest = ended;
+        newest.id = "9999-999".into();
+        checker.add_take(newest);
+        assert!(!checker.takes(u64::MAX).unwrap().1.iter().any(|t| t.id == oldest));
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod backup_older;
 pub mod binned;
 pub mod bitwig_convert;
 pub mod bitwig_favourites;
+pub mod chord_check;
 pub mod data_move;
 pub mod drag_card;
 pub mod drag_out;
