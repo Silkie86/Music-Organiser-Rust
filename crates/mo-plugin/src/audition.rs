@@ -46,8 +46,8 @@ pub struct Voice {
     beats: Option<(f64, f64)>,
     /// Put in step with the DAW since the DAW last started playing.
     in_step: bool,
-    /// Not yet looked at by the audio thread: when it comes while the DAW plays, it waits for the next beat or bar
-    /// ([`Voice::lock_to`]).
+    /// Not yet looked at by the audio thread, with In time on: when it comes while the DAW plays, it waits for the
+    /// next beat or bar ([`Voice::lock_to`]).
     fresh: bool,
     /// Frames of quiet still to go before it plays: the wait for the next beat or bar.
     wait: usize,
@@ -432,6 +432,8 @@ pub struct Player {
     looping: AtomicBool,
     /// Match tempo: while looping, a loop whose tempo is known plays at the DAW's, its pitch kept.
     matching: AtomicBool,
+    /// In time turned off: a sound clicked while the song plays starts straight away, not on the next beat or bar.
+    free: AtomicBool,
 }
 
 impl Player {
@@ -469,6 +471,17 @@ impl Player {
     /// Turns Match tempo on or off: from the next sound played.
     pub fn set_matching(&self, on: bool) {
         self.matching.store(on, Ordering::Release);
+    }
+
+    /// Turns In time on or off: from the next sound played. On, a sound clicked while the song plays starts on its
+    /// next beat (a hit) or bar (a loop).
+    pub fn set_in_time(&self, on: bool) {
+        self.free.store(!on, Ordering::Release);
+    }
+
+    /// Whether In time is on (it starts on).
+    pub fn in_time(&self) -> bool {
+        !self.free.load(Ordering::Acquire)
     }
 
     /// Whether Match tempo is on.
@@ -715,7 +728,9 @@ impl Player {
         }
     }
 
-    fn hand_over(&self, voice: Box<Voice>, name: String) -> Played {
+    fn hand_over(&self, mut voice: Box<Voice>, name: String) -> Played {
+        // With In time off, it isn't held for the next beat.
+        voice.fresh = self.in_time();
         match self.ask(Ask::Play(voice)) {
             Ok(()) => Played::Playing(name, self.handed.fetch_add(1, Ordering::AcqRel) + 1),
             Err(why) => Played::Not(why),
@@ -1017,6 +1032,12 @@ mod tests {
         player.hand_over(Box::new(Voice::new(&[vec![0.1, 0.2, 0.3, 0.4]], 4, 4)), "stopped".into());
         playing.fill_in_song(&mut l, &mut r, stopped);
         assert_eq!(l, [0.1, 0.2, 0.3, 0.4].map(|x| x * LEVEL).to_vec());
+        // In time off: a hit clicked between beats plays straight away.
+        player.set_in_time(false);
+        player.hand_over(Box::new(Voice::new(&[vec![0.1, 0.2, 0.3, 0.4]], 4, 4)), "free".into());
+        playing.fill_in_song(&mut l, &mut r, song(8.5, None));
+        assert_eq!(l, [0.1, 0.2, 0.3, 0.4].map(|x| x * LEVEL).to_vec());
+        player.set_in_time(true);
         // The DAW stops during the wait: the sound stops too, never heard.
         player.hand_over(Box::new(Voice::new(&[vec![0.5, 0.6]], 4, 4).looped()), "late".into());
         playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 9.0, tempo: Some(120.0), bar: None }));
