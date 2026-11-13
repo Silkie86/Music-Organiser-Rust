@@ -65,8 +65,8 @@ fn preset_files_are_listed_and_filtered_as_the_app_lists_them() {
     assert_eq!(presets.view(&this_year).shown.len(), 2);
     let chips = presets.chips(Some(&all.counts), &Filters::default());
     assert!(chips.part.chips.iter().chain(&chips.part.more).any(|c| c.text == "Bass" && c.count == "1"));
-    assert_eq!(presets::count_line(2, None), "2 preset files");
-    assert_eq!(presets::count_line(2, Some(1)), "1 of 2 preset files");
+    assert_eq!(presets::count_line(2, None), "2 presets");
+    assert_eq!(presets::count_line(2, Some(1)), "1 of 2 presets");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

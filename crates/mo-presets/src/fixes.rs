@@ -119,6 +119,19 @@ impl RoleFixes {
         Ok(RoleFixes { conn })
     }
 
+    /// Opens the database at `path` read-only, as it is (nothing made or changed): for a program that never writes
+    /// the app's files, the test plugin. An error when it isn't there.
+    pub fn open_read_only(path: &Path) -> Result<RoleFixes, FixesError> {
+        if !is_there(path)? {
+            return Err(FixesError(format!("{} isn't there yet", path.display())));
+        }
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
+        conn.busy_timeout(Duration::from_secs(2))?;
+        conn.pragma_update(None, "query_only", true)?;
+        Ok(RoleFixes { conn })
+    }
+
     /// Every fix, by fingerprint. A row whose part this app doesn't know (written by a newer one) is left out, and left
     /// alone.
     pub fn all(&self) -> Result<HashMap<String, Role>, FixesError> {

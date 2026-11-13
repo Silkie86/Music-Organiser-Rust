@@ -388,6 +388,10 @@ export component Panel inherits Window {
     in property <FilterView> preset-kind-filter;
     in property <FilterView> preset-format-filter;
     in property <FilterView> preset-plugin-filter;
+    // Where a preset was found (in a song, or a file on disk), and the synths whose track plays nothing, shown or not.
+    in property <FilterView> preset-from-filter;
+    in property <bool> preset-unused;
+    callback preset-unused-toggled(bool);
     in property <[string]> preset-orders;
     in property <int> preset-order;
     in property <[YearBar]> preset-years;
@@ -1309,6 +1313,18 @@ export component Panel inherits Window {
                         filter: root.preset-kind-filter;
                         toggled(text) => { root.preset-pick("type", text); }
                         cleared => { root.preset-clear("type"); }
+                    }
+                    FilterList {
+                        name: "FOUND IN";
+                        filter: root.preset-from-filter;
+                        toggled(text) => { root.preset-pick("from", text); }
+                        cleared => { root.preset-clear("from"); }
+                    }
+                    // As the app's page has it, on the page and not in a menu.
+                    TickLine {
+                        text: "Synths that play nothing";
+                        on: root.preset-unused;
+                        clicked => { root.preset-unused-toggled(!root.preset-unused); }
                     }
                     FilterList {
                         name: "FORMAT";
