@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::NaiveDateTime;
 use mo_formats::case;
 use mo_library::SampleUse;
 
@@ -23,11 +24,14 @@ pub struct Usage {
     pub years: Vec<i32>,
     /// The projects, by id, smallest first, each once (the card lists them).
     pub project_ids: Vec<i64>,
+    /// When you first used it in a song: the earliest of its paths' ([`SampleUse::first_used`]).
+    pub first_used: Option<NaiveDateTime>,
 }
 
 impl Usage {
     fn add(&mut self, u: &SampleUse) {
         merge(&mut self.years, &u.years);
+        self.first_used = self.first_used.into_iter().chain(u.first_used).min();
         if u.project_ids.is_empty() {
             // A use that doesn't say which projects (the twin tool's, made from the C# app's counts) adds its count.
             self.projects += u.projects;
@@ -106,7 +110,7 @@ mod tests {
     fn used(path: &str, projects: u32, recent: u32, years: &[i32]) -> SampleUse {
         // Projects numbered from the first year they were saved in, one each.
         let project_ids = (0..i64::from(projects)).map(|n| i64::from(years[0]) * 100 + n).collect();
-        SampleUse { path: path.into(), projects, recent, years: years.to_vec(), project_ids }
+        SampleUse { path: path.into(), projects, recent, years: years.to_vec(), project_ids, first_used: None }
     }
 
     #[test]
@@ -129,10 +133,45 @@ mod tests {
             used("Kick 1.wav", 9, 9, &[2010]),
         ];
         let u = usage(&sounds, &uses);
-        assert_eq!(u[&1], Usage { projects: 2, recent: 1, years: vec![2024, 2025], project_ids: vec![202400, 202401] });
+        assert_eq!(
+            u[&1],
+            Usage {
+                projects: 2,
+                recent: 1,
+                years: vec![2024, 2025],
+                project_ids: vec![202400, 202401],
+                first_used: None
+            }
+        );
         // Which projects too, from both paths.
-        assert_eq!(u[&2], Usage { projects: 2, recent: 1, years: vec![2019, 2025], project_ids: vec![201900, 202500] });
+        assert_eq!(
+            u[&2],
+            Usage {
+                projects: 2,
+                recent: 1,
+                years: vec![2019, 2025],
+                project_ids: vec![201900, 202500],
+                first_used: None
+            }
+        );
         assert!(!u.contains_key(&3) && !u.contains_key(&4) && !u.contains_key(&5));
+    }
+
+    #[test]
+    fn a_sound_named_by_two_paths_was_first_used_by_the_earlier() {
+        let sounds = [sound(1, "D:\\Samples\\Pads\\Warm.wav")];
+        let day = |y: i32| chrono::NaiveDate::from_ymd_opt(y, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0));
+        let with =
+            |path: &str, first: Option<NaiveDateTime>| SampleUse { first_used: first, ..used(path, 1, 0, &[2025]) };
+        let u = usage(
+            &sounds,
+            &[
+                with("samples/warm.wav", day(2024)),
+                with("D:\\Samples\\Pads\\Warm.wav", day(2019)),
+                with("Warm.wav", None),
+            ],
+        );
+        assert_eq!(u[&1].first_used, day(2019));
     }
 
     #[test]
@@ -144,10 +183,11 @@ mod tests {
             recent: 1,
             years: vec![2025],
             project_ids: vec![7],
+            first_used: None,
         };
         // Project 7 has a Bitwig copy of the pad and names it by a relative path too.
         let u = usage(&sounds, &[one("C:\\Bitwig\\Song\\samples\\Warm.wav"), one("samples/warm.wav")]);
-        assert_eq!(u[&1], Usage { projects: 1, recent: 1, years: vec![2025], project_ids: vec![7] });
+        assert_eq!(u[&1], Usage { projects: 1, recent: 1, years: vec![2025], project_ids: vec![7], first_used: None });
         // A use that doesn't say which projects (the twin tool's) adds its count, as before.
         let counted = |path: &str| SampleUse { project_ids: Vec::new(), ..one(path) };
         let u = usage(&sounds, &[counted("C:\\Bitwig\\Song\\samples\\Warm.wav"), counted("samples/warm.wav")]);

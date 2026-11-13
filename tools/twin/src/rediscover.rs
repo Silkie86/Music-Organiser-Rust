@@ -216,6 +216,7 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
             recent: u[1].as_u64().unwrap_or(0) as u32,
             years: Vec::new(),
             project_ids: Vec::new(),
+            first_used: None,
         })
         .collect();
     let usage = usage(&sounds, &uses);

@@ -9,6 +9,7 @@ mod copies;
 mod did;
 mod drag_out;
 pub use drag_out::card_at_row;
+mod file_dates;
 mod galaxy;
 mod grid;
 mod kit;
@@ -34,6 +35,7 @@ use mo_app::filters::{self, Filter, Shown};
 use mo_app::finder::{self, Kind};
 use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
+use mo_app::sound_dates::DateBy;
 use mo_app::sound_notes::{Held, Holds, Noter};
 use mo_app::sounds::{
     self as list, AUTOPLAY_KEY, Filters, Order, REDISCOVER_COUNT_KEY as COUNT_KEY, SoundCounts, SoundList, VIEW_KEY,
@@ -192,6 +194,8 @@ struct Page {
     hide_copies_chosen: bool,
     /// Hide silent sounds has been set: by you, or from its setting as the sounds were first read.
     silent_chosen: bool,
+    /// The date the year strip goes by has been set since the app started (or read from the settings).
+    date_by_chosen: bool,
     /// How far the sounds like your favourites reach has been set: by you, or from its setting when the sounds first
     /// showed.
     like_chosen: bool,
@@ -260,6 +264,7 @@ impl Default for Page {
             re_likes: HashMap::new(),
             hide_copies_chosen: false,
             silent_chosen: false,
+            date_by_chosen: false,
             like_chosen: false,
             trim: false,
             trim_db: mo_audio::trim::DEFAULT_DB,
@@ -692,6 +697,7 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
             // order meanwhile, nor with Hide duplicates on: copies among the first would go again once the copies
             // are known, and the tiles after them move (review B-5).
             PAGE.with(|p| silent_as_left(&mut p.borrow_mut()));
+            PAGE.with(|p| date_by_as_left(&mut p.borrow_mut()));
             let opening = PAGE.with(|p| {
                 let p = p.borrow();
                 let hiding = if p.hide_copies_chosen {
@@ -2029,6 +2035,7 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
         let mut with_use = (*list).clone();
         with_use.keep_copies_of(&p.list);
         with_use.keep_like_favourites_of(&p.list);
+        with_use.keep_file_dates_of(&p.list);
         p.list = Arc::new(with_use);
         // Your say since the sounds were read stays over them.
         yours::keep_showing(&mut p);
@@ -2147,7 +2154,10 @@ struct After {
 /// sound (`moved`: each old place's new one; `None` when every sound kept its place). `retyped`: a sound has another
 /// type, so the galaxy, which colours its stars and names its neighbourhoods by type, is laid out again.
 fn take_refreshed(p: &mut Page, library: Library, moved: Option<&[Option<usize>]>, retyped: bool) -> After {
-    p.list = library.list;
+    // When the files were made and opened goes on showing (by sound id) while it's read again for these sounds.
+    let mut list = (*library.list).clone();
+    list.keep_file_dates_of(&p.list);
+    p.list = Arc::new(list);
     p.places = library.places;
     p.types = library.types;
     p.tags = library.tags;
@@ -2315,6 +2325,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
             p.filters.hide_copies = crate::settings::value(list::HIDE_COPIES_KEY).as_deref() == Some("on");
         }
         silent_as_left(&mut p);
+        date_by_as_left(&mut p);
         // How far the sounds like your favourites reach too.
         if !p.like_chosen {
             p.like_chosen = true;
@@ -2522,6 +2533,14 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     });
     let weak = app.as_weak();
     data.on_years_cleared(move || change(&weak, |f| f.years = None));
+    // Which date the year strip goes by: kept for next time (the app's own settings file).
+    let weak = app.as_weak();
+    data.on_years_by_picked(move |name| {
+        let by = DateBy::named(&name);
+        PAGE.with(|p| p.borrow_mut().date_by_chosen = true);
+        crate::settings::remember(list::YEARS_BY_KEY, by.name());
+        change(&weak, |f| f.set_date_by(by));
+    });
     let weak = app.as_weak();
     data.on_open_project(move |id| {
         let Some(app) = weak.upgrade() else { return };
@@ -3181,6 +3200,7 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
 fn refresh(app: &AppWindow) {
     copies::wanted(app);
     like::wanted(app);
+    file_dates::wanted(app);
     show_chips(app);
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -3200,7 +3220,7 @@ fn refresh(app: &AppWindow) {
         if ask.reversed {
             ask.list.turn_round(&mut shown, ask.order);
         }
-        let years = ask.list.year_counts(ask.filters.used);
+        let years = ask.list.year_counts(ask.filters.date_by);
         let history = ask.list.played(&ask.played, &ask.filters);
         listed(app, ask.id, Listed { shown, counts, years, history, played: ask.played });
         return;
@@ -3209,21 +3229,21 @@ fn refresh(app: &AppWindow) {
         let mut w = w.borrow_mut();
         if w.is_none() {
             let weak = app.as_weak();
-            // The year strip's counts change only with the sounds and the Used chip, not with each search or other
-            // filter: kept here (only this worker uses them) and counted again only when either changes. The list
+            // The year strip's counts change only with the sounds and the date it goes by, not with each search or
+            // other filter: kept here (only this worker uses them) and counted again only when either changes. The list
             // they were counted from is known by a weak hold: it never keeps an old list alive (a big one takes a
             // while to free), and while it's held no new list can be given the same place in memory, so a new list is
             // never taken for the old one.
-            let mut counted: Option<(Weak<SoundList>, bool, YearCounts)> = None;
+            let mut counted: Option<(Weak<SoundList>, DateBy, YearCounts)> = None;
             match Newest::start("Sounds list", move |ask: Ask| {
                 let kept = counted
                     .as_ref()
-                    .filter(|(list, used, _)| {
-                        std::ptr::eq(list.as_ptr(), Arc::as_ptr(&ask.list)) && *used == ask.filters.used
+                    .filter(|(list, by, _)| {
+                        std::ptr::eq(list.as_ptr(), Arc::as_ptr(&ask.list)) && *by == ask.filters.date_by
                     })
                     .map(|(_, _, years)| years.clone());
                 let new = background::on_pool(|| {
-                    let years = kept.unwrap_or_else(|| ask.list.year_counts(ask.filters.used));
+                    let years = kept.unwrap_or_else(|| ask.list.year_counts(ask.filters.date_by));
                     let history = ask.list.played(&ask.played, &ask.filters);
                     let (mut shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
                     if ask.reversed {
@@ -3231,7 +3251,7 @@ fn refresh(app: &AppWindow) {
                     }
                     Listed { shown, counts, years, history, played: ask.played.clone() }
                 });
-                counted = Some((Arc::downgrade(&ask.list), ask.filters.used, new.years.clone()));
+                counted = Some((Arc::downgrade(&ask.list), ask.filters.date_by, new.years.clone()));
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
@@ -3382,6 +3402,15 @@ fn silent_as_left(p: &mut Page) {
     }
 }
 
+/// The date the year strip goes by as you left it, unless it's been picked since the app started.
+fn date_by_as_left(p: &mut Page) {
+    if !p.date_by_chosen {
+        p.date_by_chosen = true;
+        let left = crate::settings::value(list::YEARS_BY_KEY).map(|v| DateBy::named(&v)).unwrap_or_default();
+        p.filters.set_date_by(left);
+    }
+}
+
 /// Shows one of the views by its name (Ctrl+K's "Sounds › Galaxy"), as the view switch does.
 pub fn show_view(app: &AppWindow, name: &str) {
     if let Some(v) = VIEWS.iter().position(|n| *n == name) {
@@ -3450,14 +3479,22 @@ pub fn known() -> Known {
 
 /// The year strip: each year, how full it is, and whether the filter has it.
 fn show_years(app: &AppWindow) {
-    let (bars, (from, to)) = PAGE.with(|p| {
+    let (bars, (from, to), by) = PAGE.with(|p| {
         let p = p.borrow();
-        (year_bars(&p.years), year_strip::picked_places(&p.years, p.filters.years).unwrap_or((-1, -1)))
+        let picked = year_strip::picked_places(&p.years, p.filters.years).unwrap_or((-1, -1));
+        (year_bars(&p.years), picked, p.filters.date_by)
     });
     let data = app.global::<SoundsData>();
     data.set_years(ModelRc::new(VecModel::from(bars)));
     data.set_years_from(from);
     data.set_years_to(to);
+    data.set_years_by(by.name().into());
+    data.set_years_by_about(by.about().into());
+    data.set_years_by_usual(by == DateBy::default());
+    if data.get_years_by_choices().row_count() == 0 {
+        let names: Vec<SharedString> = DateBy::ALL.iter().map(|d| d.name().into()).collect();
+        data.set_years_by_choices(ModelRc::new(VecModel::from(names)));
+    }
 }
 
 fn show_lists(app: &AppWindow) {

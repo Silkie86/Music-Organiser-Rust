@@ -216,6 +216,13 @@ export global SoundsData {
     in property <int> years-to: -1;
     callback years-picked(int, int);
     callback years-cleared();
+    // Which date the year strip goes by (mo_app::sound_dates::DateBy), its choices and what the one picked means.
+    in property <string> years-by: "Changed";
+    in property <[string]> years-by-choices;
+    in property <string> years-by-about;
+    // Whether the strip goes by its usual date: with another picked, the strip stays to pick it back even with no years.
+    in property <bool> years-by-usual: true;
+    callback years-by-picked(string);
     // What makes a star bigger and brighter, each choice on show.
     in property <FilterView> light-filter;
     callback galaxy-light-by(string);
@@ -1599,7 +1606,7 @@ export component SoundsPage inherits Rectangle {
                 // what was played whatever the filters say, nor Kits, which picks its own. Rediscover has one too, the
                 // same strip, for the years it digs in (apart from the filters').
                 property <bool> re-strip: SoundsData.view == 4;
-                property <length> years-width: (SoundsData.view <= 2 ? SoundsData.years.length > 1 : self.re-strip && SoundsData.re-years.length > 1)
+                property <length> years-width: (SoundsData.view <= 2 ? SoundsData.years.length > 1 || !SoundsData.years-by-usual : self.re-strip && SoundsData.re-years.length > 1)
                     && SoundsData.empty-title == ""
                     ? 56px
                     : 0px;
@@ -1610,6 +1617,11 @@ export component SoundsPage inherits Rectangle {
                     years: area.re-strip ? SoundsData.re-years : SoundsData.years;
                     picked-from: area.re-strip ? SoundsData.re-years-from : SoundsData.years-from;
                     picked-to: area.re-strip ? SoundsData.re-years-to : SoundsData.years-to;
+                    // Rediscover digs by the files' dates: the pick is the other views'.
+                    by: SoundsData.years-by;
+                    by-choices: area.re-strip ? [] : SoundsData.years-by-choices;
+                    by-about: SoundsData.years-by-about;
+                    by-picked(c) => { SoundsData.years-by-picked(c); }
                     picked(a, b) => {
                         if (area.re-strip) {
                             SoundsData.re-years-picked(a, b);

@@ -2290,9 +2290,15 @@ export struct YearBar {
 // every year again. The page says which are picked. In a short window the years' lines get shorter, so every year
 // and All years still fit: the bars go when they'd run into the names, and when the lines are too short for every
 // year's name, only every second (or third...) one is named, plus the one under the mouse and the first and last
-// picked.
+// picked. A page can let you pick which date the years go by (`by-choices`, Sounds): the date's name shows above the
+// years, and a click on it opens the choices, with what the one picked means under them (`by-about`).
 export component YearRange inherits VerticalLayout {
     in property <[YearBar]> years;
+    // Which date the years go by, the choices of it, and what the one picked means (no choices: none shown).
+    in property <string> by;
+    in property <[string]> by-choices;
+    in property <string> by-about;
+    callback by-picked(string);
     // The places in `years` of the first and the last year picked, top first (-1 when none are).
     in property <int> picked-from: -1;
     in property <int> picked-to: -1;
@@ -2329,6 +2335,53 @@ export component YearRange inherits VerticalLayout {
     // Whether a name at place `a` would come too close to the one at place `b` (when there is one, -1 when not).
     pure function crowds(a: int, b: int) -> bool {
         return b >= 0 && a != b && abs(a - b) * root.line < root.name-room;
+    }
+    if root.by-choices.length > 0: Rectangle {
+        height: by-name.preferred-height;
+        by-name := Text {
+            // The strip's whole width, its padding too: a date's name is short, but the strip is narrow.
+            x: -Space.xs;
+            width: parent.width + 2 * Space.xs;
+            text: root.by + " ▾";
+            color: by-touch.has-hover ? Theme.text : Theme.muted;
+            font-size: Type.caps;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+        by-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { by-menu.show(); }
+        }
+        by-menu := PopupWindow {
+            // The strip is at the list's right edge: the menu opens leftwards, over the list.
+            x: parent.width - self.width;
+            y: parent.height + 4px;
+            width: 300px;
+            close-policy: close-on-click-outside;
+            MenuCard {
+                Text {
+                    text: "Years by";
+                    color: Theme.faint;
+                    font-size: Type.caps;
+                    horizontal-alignment: left;
+                }
+                for c in root.by-choices: MenuLine {
+                    text: c;
+                    on: root.by == c;
+                    tickable: true;
+                    clicked => {
+                        by-menu.close();
+                        root.by-picked(c);
+                    }
+                }
+                Text {
+                    text: root.by-about;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    wrap: word-wrap;
+                }
+            }
+        }
     }
     strip := Rectangle {
         // Every year at its full line, but it gives way when the room is short, so All years is never pushed off the

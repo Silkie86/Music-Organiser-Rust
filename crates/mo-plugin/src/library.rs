@@ -105,7 +105,7 @@ impl Library {
         let types = list.type_counts();
         let tags = list.tags();
         // By the year each sound was added (the plugin doesn't read which songs use a sound).
-        let years = list.year_counts(false);
+        let years = list.year_counts(mo_app::sound_dates::DateBy::Changed);
         Library { list, types, tags, years, from: None, like: Mutex::default() }
     }
 

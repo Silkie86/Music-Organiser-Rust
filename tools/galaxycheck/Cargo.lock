@@ -2922,6 +2922,7 @@ name = "mo-audio"
 version = "0.1.0"
 dependencies = [
  "mo-catch",
+ "rtrb",
  "symphonia",
  "windows",
 ]
@@ -2962,6 +2963,7 @@ version = "0.1.0"
 dependencies = [
  "mo-formats",
  "serde_json",
+ "thread-priority",
  "zip",
 ]
 
@@ -4222,6 +4224,12 @@ checksum = "353b74f9810d5b085b6c42c9d86a5f0fdb795553235cdd48753b32e3809d18a7"
 dependencies = [
  "thiserror 2.0.21",
 ]
+
+[[package]]
+name = "rtrb"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "342e1478a6e1c839e7405033eabfdc954d4d5dabd39f34e83420a43a95acfb04"
 
 [[package]]
 name = "rusqlite"
