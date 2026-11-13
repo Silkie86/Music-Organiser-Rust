@@ -34,6 +34,7 @@ pub mod preset_files;
 pub mod presets;
 pub mod record;
 pub mod state;
+pub mod takes;
 mod threads;
 mod track;
 pub mod waves;
@@ -44,8 +45,8 @@ mod ui {
     slint::include_modules!();
 }
 pub use ui::{
-    ChordBox, ExtensionLine, FilterChoice, FilterView, Panel, PartLine, PresetLine, SkyName, SoundLine, SweptLine,
-    Theme, TrailDot, YearBar,
+    ChordBox, ExtensionLine, FilterChoice, FilterView, LabelLine, Panel, PartLine, PresetLine, SkyName, SoundLine,
+    SweptLine, TakeLine, Theme, TrailDot, YearBar,
 };
 
 use audition::{Player, Playing};

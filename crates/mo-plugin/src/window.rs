@@ -18,11 +18,12 @@ use crate::galaxy::{self, Sky};
 use crate::gpu::Gpu;
 use crate::knobs::Knob;
 use crate::library::{self, Asked, Library, Like, ORDERS, Read};
+use crate::takes::Label;
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
 use crate::{
-    ChordBox, ExtensionLine, FilterChoice, FilterView, Instance, Panel, SkyName, SoundLine, SweptLine, TrailDot,
-    YearBar,
+    ChordBox, ExtensionLine, FilterChoice, FilterView, Instance, LabelLine, Panel, SkyName, SoundLine, SweptLine,
+    TakeLine, TrailDot, YearBar,
 };
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
@@ -549,6 +550,10 @@ struct Shown {
     recorded: Rc<RefCell<Option<std::path::PathBuf>>>,
     /// The number of the newest chord Chord check read that the panel shows ([`crate::chordcheck::Checker::newest`]).
     chords_seen: Cell<u64>,
+    /// The number of Chord check's list of takes the panel shows (a pick or a label sets it to none, so it's shown
+    /// again), and the take picked, by its name.
+    takes_seen: Rc<Cell<u64>>,
+    take_picked: Rc<RefCell<Option<String>>>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
     /// The line last clicked to play: its row, its sound and its file.
@@ -616,6 +621,8 @@ impl Shown {
             carried: Cell::new(None),
             recorded: Rc::default(),
             chords_seen: Cell::new(u64::MAX),
+            takes_seen: Rc::new(Cell::new(u64::MAX)),
+            take_picked: Rc::default(),
             playing: Cell::new(None),
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
@@ -956,11 +963,84 @@ impl Shown {
         let chords_ = Arc::clone(chords);
         self.panel.on_chord_thru_changed(move |on| chords_.thru.store(on, Ordering::Release));
         self.chords_seen.set(u64::MAX);
+        let (seen, picked) = (Rc::clone(&self.takes_seen), Rc::clone(&self.take_picked));
+        let chords_ = Arc::clone(chords);
+        self.panel.on_take_pick(move |row| {
+            let id = chords_.takes(u64::MAX).and_then(|(_, t)| t.get(row as usize).map(|t| t.id.clone()));
+            *picked.borrow_mut() = id;
+            seen.set(u64::MAX);
+        });
+        let (picked, weak) = (Rc::clone(&self.take_picked), self.panel.as_weak());
+        let chords_ = Arc::clone(chords);
+        self.panel.on_label(move |row, how, choice| {
+            let label = match how.as_str() {
+                "right" => Label::Right,
+                "choice" => Label::Choice(usize::try_from(choice).unwrap_or(0)),
+                "not a chord" => Label::NotAChord,
+                _ => Label::Skip,
+            };
+            label_take(&chords_, picked.borrow().as_deref(), row, label, &weak);
+        });
+        let (picked, weak) = (Rc::clone(&self.take_picked), self.panel.as_weak());
+        let chords_ = Arc::clone(chords);
+        self.panel.on_label_typed(move |row, text| {
+            let Some(id) = picked.borrow().clone() else { return };
+            let lowest = chords_
+                .takes(u64::MAX)
+                .and_then(|(_, t)| t.into_iter().find(|t| t.id == id))
+                .and_then(|t| t.chords.get(row as usize).and_then(|c| c.lowest));
+            match crate::takes::typed(&text, lowest) {
+                Some(chord) => label_take(&chords_, Some(&id), row, Label::Typed(chord), &weak),
+                None => {
+                    if let Some(panel) = weak.upgrade() {
+                        panel.set_take_said(
+                            format!("Can't read \"{}\" as a chord: try Cmaj9, G7#9 or D/C", text.trim()).into(),
+                        );
+                    }
+                }
+            }
+        });
         self.chords_said();
+    }
+
+    /// Chord check's takes, when they changed: the list, and the chords of the one picked.
+    fn takes_said(&self) {
+        let Some((number, takes)) = self.instance.chords.takes(self.takes_seen.get()) else { return };
+        self.takes_seen.set(number);
+        let panel = &self.panel;
+        let lines: Vec<TakeLine> =
+            takes.iter().map(|t| TakeLine { title: t.title().into(), details: t.details().into() }).collect();
+        panel.set_takes(ModelRc::new(VecModel::from(lines)));
+        let picked = self.take_picked.borrow().clone();
+        let at = picked.as_ref().and_then(|id| takes.iter().position(|t| &t.id == id));
+        panel.set_take_picked(at.map_or(-1, |i| i32::try_from(i).unwrap_or(-1)));
+        let Some(take) = at.and_then(|i| takes.get(i)) else {
+            panel.set_take_chords(ModelRc::default());
+            return;
+        };
+        let rows: Vec<LabelLine> = take
+            .chords
+            .iter()
+            .map(|c| LabelLine {
+                at: crate::takes::place(take.grid, c.start).into(),
+                read: c.read.map(|r| r.name()).unwrap_or_default().into(),
+                sure: match c.sure {
+                    crate::chordcheck::Sure::Yes => 0,
+                    crate::chordcheck::Sure::Mostly => 1,
+                    _ => 2,
+                },
+                choices: ModelRc::new(VecModel::from(
+                    c.choices.iter().map(|s| SharedString::from(s.name())).collect::<Vec<_>>(),
+                )),
+                said: c.said_words().into(),
+            })
+            .collect();
+        panel.set_take_chords(ModelRc::new(VecModel::from(rows)));
     }
 
     /// The newest chord Chord check read, when there's a new one.
     fn chords_said(&self) {
+        self.takes_said();
         let Some((number, heard)) = self.instance.chords.newest(self.chords_seen.get()) else { return };
         self.chords_seen.set(number);
         let panel = &self.panel;
@@ -2136,6 +2216,34 @@ fn key_text(key: &Key) -> Option<SharedString> {
         _ => return None,
     };
     Some(key.into())
+}
+
+/// Labels chord `row` of the take `id` (the one picked) and saves the take off the window's thread, in the data
+/// folder's Chord check folder: a take is saved once something in it is labelled, and again at each label after.
+fn label_take(
+    chords: &Arc<crate::chordcheck::Checker>,
+    id: Option<&str>,
+    row: i32,
+    label: Label,
+    weak: &slint::Weak<Panel>,
+) {
+    let (Some(id), Ok(row)) = (id, usize::try_from(row)) else { return };
+    let Some(file) = chords.label(id, row, label) else { return };
+    if let Some(panel) = weak.upgrade() {
+        panel.set_take_said(SharedString::new());
+    }
+    let (chords, id) = (Arc::clone(chords), id.to_owned());
+    background("mo-plugin-take", move || {
+        let folder = mo_app::paths::data_dir().join(mo_app::chord_check::FOLDER);
+        let said = match mo_app::chord_check::save(&file, &folder) {
+            Ok(_) => "Saved".to_owned(),
+            Err(why) => {
+                crate::log::line("Chord check", &why);
+                why
+            }
+        };
+        chords.saved(&id, said);
+    });
 }
 
 #[cfg(test)]

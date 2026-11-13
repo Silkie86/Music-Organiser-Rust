@@ -14,6 +14,7 @@
 //!   last [`READ_BARS`] bars about ten times a second.
 //! - The panel shows the newest [`Heard`] (`window.rs`, the Chords tab).
 
+use crate::takes::{Ended, Label};
 use crate::threads::{background, lock};
 use clack_plugin::events::spaces::CoreEventSpace;
 use clack_plugin::events::{Match, UnknownEvent};
@@ -28,8 +29,8 @@ use std::time::Duration;
 pub const PPQ: i64 = 960;
 /// How many of the newest bars are read and shown.
 pub const READ_BARS: i64 = 4;
-/// The most chords the strip shows: the newest (the panel has room for about this many side by side).
-pub const STRIP_MOST: usize = 8;
+/// The most chords the strip shows: the newest (the panel has room for about this many beside the chord now).
+pub const STRIP_MOST: usize = 5;
 /// A take ends after this many bars with no key sounding.
 pub const GAP_BARS: f64 = 2.0;
 /// How often the reading thread looks at what came in.
@@ -260,6 +261,8 @@ pub struct Take {
     pub notes: Vec<Note>,
     /// The beat the last key sounding ended on.
     last_up: f64,
+    /// When it started, by the computer's clock: its name once saved.
+    pub started: chrono::DateTime<chrono::Local>,
 }
 
 /// The grid for bars of `quarters` quarter notes: on quarter beats when a bar is a whole number of them, else on
@@ -291,6 +294,7 @@ impl Take {
             pedal: false,
             notes: Vec::new(),
             last_up: now.beat,
+            started: chrono::Local::now(),
         }
     }
 
@@ -481,7 +485,7 @@ impl Sure {
     }
 }
 
-fn sure_of(answer: ChordAnswer) -> Sure {
+pub(crate) fn sure_of(answer: ChordAnswer) -> Sure {
     match answer {
         ChordAnswer::Chord => Sure::Yes,
         ChordAnswer::SameNotes | ChordAnswer::Implied => Sure::Mostly,
@@ -532,11 +536,18 @@ pub struct Checker {
     pub thru: AtomicBool,
     /// The newest for the panel, and its number (counted up each time): kept, so a panel opened later shows it too.
     heard: Mutex<(u64, Heard)>,
+    /// The takes that are over, newest first (at most [`crate::takes::KEPT`]), and a number counted up at each change.
+    takes: Mutex<(u64, Vec<Ended>)>,
 }
 
 impl Default for Checker {
     fn default() -> Checker {
-        Checker { run: AtomicU64::new(0), thru: AtomicBool::new(true), heard: Mutex::new((0, Heard::default())) }
+        Checker {
+            run: AtomicU64::new(0),
+            thru: AtomicBool::new(true),
+            heard: Mutex::new((0, Heard::default())),
+            takes: Mutex::new((0, Vec::new())),
+        }
     }
 }
 
@@ -554,6 +565,40 @@ impl Checker {
     /// The DAW stopped the track's audio: the reading thread ends.
     pub fn stop(&self) {
         self.run.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// A take that's over, at the top of the list; the oldest goes past [`crate::takes::KEPT`] (saved already when it
+    /// was labelled).
+    pub fn add_take(&self, ended: Ended) {
+        let mut takes = lock(&self.takes);
+        takes.1.insert(0, ended);
+        takes.1.truncate(crate::takes::KEPT);
+        takes.0 = takes.0.wrapping_add(1);
+    }
+
+    /// The takes, newest first, when they changed since the list numbered `seen`, with its number.
+    pub fn takes(&self, seen: u64) -> Option<(u64, Vec<Ended>)> {
+        let takes = lock(&self.takes);
+        (takes.0 != seen).then(|| takes.clone())
+    }
+
+    /// Labels chord `index` of the take `id`: what to save then, when it's still kept.
+    pub fn label(&self, id: &str, index: usize, label: Label) -> Option<mo_app::chord_check::TakeFile> {
+        let mut takes = lock(&self.takes);
+        let ended = takes.1.iter_mut().find(|t| t.id == id)?;
+        ended.chords.get_mut(index)?.label = Some(label);
+        let file = ended.file();
+        takes.0 = takes.0.wrapping_add(1);
+        Some(file)
+    }
+
+    /// What became of saving the take `id`, for its line.
+    pub fn saved(&self, id: &str, words: String) {
+        let mut takes = lock(&self.takes);
+        if let Some(ended) = takes.1.iter_mut().find(|t| t.id == id) {
+            ended.saved = words;
+            takes.0 = takes.0.wrapping_add(1);
+        }
     }
 
     /// The newest [`Heard`] when it's newer than the one numbered `seen`, with its number.
@@ -577,6 +622,11 @@ impl Checker {
                 let mut newest = lock(&self.heard);
                 *newest = (newest.0.wrapping_add(1), heard);
             }
+            for (take, beat) in std::mem::take(&mut steps.finished) {
+                if let Some(ended) = Ended::of(&take, beat, &mut reader) {
+                    self.add_take(ended);
+                }
+            }
         }
     }
 }
@@ -590,6 +640,8 @@ pub struct Steps {
     changed: bool,
     /// The bar the take was last read in: a chord sounding is read again each bar, so the strip moves on.
     read_in: i64,
+    /// The takes that ended, with the beat each ended on, for [`crate::takes::Ended`].
+    pub finished: Vec<(Take, f64)>,
 }
 
 impl Steps {
@@ -610,6 +662,8 @@ impl Steps {
                             self.take = Some(Take::carry(&old, now));
                             self.changed = true;
                         }
+                        let ended_at = self.now.map_or(now.beat, |was| was.beat);
+                        self.finished.push((old, ended_at));
                     }
                     self.now = Some(*now);
                 }
@@ -633,7 +687,9 @@ impl Steps {
         let take = self.take.as_ref()?;
         if take.over(beat) {
             // Ended: the last reading stays on the panel until the next take starts.
-            self.take = None;
+            if let Some(old) = self.take.take() {
+                self.finished.push((old, beat));
+            }
             return None;
         }
         let bar = take.tick(beat).max(0).div_euclid(take.grid().bar());
@@ -764,6 +820,11 @@ mod tests {
         // Two bars later with nothing held, the take is over.
         assert!(steps.step(&[free(24.0)], &mut reader).is_none());
         assert!(steps.take.is_none());
+        // It's handed on to be labelled, read whole.
+        let (take, ended_at) = steps.finished.pop().unwrap();
+        assert_eq!(ended_at, 24.0);
+        let ended = crate::takes::Ended::of(&take, ended_at, &mut reader).unwrap();
+        assert_eq!(ended.chords.len(), 4);
     }
 
     #[test]
@@ -800,6 +861,8 @@ mod tests {
         // The loop goes back with nothing held: the take ends; the next key starts the next one.
         steps.step(&[song(32.0)], &mut reader);
         assert!(steps.take.is_none());
+        // The take before the song started, and the one on the song, are both over now.
+        assert_eq!(steps.finished.len(), 2);
         steps.step(&[press(64, 32.5), song(33.0)], &mut reader);
         assert_eq!(steps.take.as_ref().unwrap().origin, 32.0);
     }

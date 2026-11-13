@@ -18,6 +18,8 @@
 //! - `old-databases\`: a copy of one of the old app's databases that was being put away when the app stopped
 //!   (`sounds.db.part-<number>`, [`crate::old_databases`]), an hour old. Never the databases put away there.
 //! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
+//! - `Chord check\`: a take the test plugin was still saving (`take <time>.json.mo-part`), an hour old. Never the takes,
+//!   which are yours.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
 //! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old;
 //!   and the Play in Bitwig files (`MO Play <n>-<n>.mid`, and `.bwpreset` for an audition, removed once Bitwig has
@@ -310,6 +312,10 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     // A copy of an old database that was being put away when the app stopped (its own name, only while it's written).
     if let Some(archive) = real_folder(&places.data, &[crate::old_databases::FOLDER]) {
         done.add(remove_older(&archive, crate::old_databases::is_part, WRITING, now, false));
+    }
+    // A Chord check take whose writing was cut short (its own name, only while it's written). Never the takes.
+    if let Some(takes) = real_folder(&places.data, &[crate::chord_check::FOLDER]) {
+        done.add(remove_older(&takes, crate::chord_check::is_half_written, WRITING, now, false));
     }
     if let Some(twin) = real_folder(&places.data, &["twin", "cs"]) {
         done.add(remove_older(&twin, is_library_copy, DAY, now, false));
@@ -1602,6 +1608,30 @@ mod tests {
             changed_at(file, now);
         }
         // Being written just now, for all the sweep knows.
+        assert_eq!(sweep(&places, now, &bin).removed, 0);
+        assert_eq!(sweep(&places, now + WRITING * 2, &bin).removed, 1);
+        assert!(!part.exists());
+        assert!(kept.iter().all(|file| file.exists()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_half_saved_chord_check_take_goes_and_the_takes_never() {
+        let dir = test_folder("chord-check");
+        let places = test_places(&dir);
+        let bin = TestBin(dir.join("bin"));
+        let now = SystemTime::now();
+        let takes = places.data.join(crate::chord_check::FOLDER);
+        let part = takes.join("take 2026-11-13 07-12-03.json.mo-part");
+        let kept = [
+            takes.join("take 2026-11-13 07-12-03.json"),
+            takes.join("my notes.json.mo-part"),
+            // The same name anywhere else is nobody's.
+            places.data.join("take 2026-11-13 07-12-03.json.mo-part"),
+        ];
+        for file in kept.iter().chain([&part]) {
+            changed_at(file, now);
+        }
         assert_eq!(sweep(&places, now, &bin).removed, 0);
         assert_eq!(sweep(&places, now + WRITING * 2, &bin).removed, 1);
         assert!(!part.exists());
