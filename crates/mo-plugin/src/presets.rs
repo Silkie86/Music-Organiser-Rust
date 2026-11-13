@@ -52,9 +52,7 @@ pub fn read() -> Read {
     }
     let started = std::time::Instant::now();
     let data = mo_app::paths::data_dir();
-    let defaults = plib::default_folders();
-    let bitwig = page::bitwig_folders(&defaults, bitwig_saves(&mo_library::songs_db::to_read(&data)));
-    let roots = page::preset_folders(&defaults, &bitwig);
+    let roots = folders();
     // On the app's low-priority threads, as the app reads them: never at the DAW's own priority.
     let read = mo_app::background::on_pool(|| read_from(&roots, &data.join(file_store::FILE_NAME)));
     match &read {
@@ -65,6 +63,15 @@ pub fn read() -> Read {
         Read::Not(why) => crate::log::took("Presets", &format!("Not read: {why}"), started),
     }
     read
+}
+
+/// The folders the app's Presets page looks in for preset files: the plugins' and Bitwig's usual ones, and every
+/// Bitwig folder a song of the library sits in. Reads the library: off the DAW's threads.
+pub fn folders() -> Vec<PathBuf> {
+    let defaults = plib::default_folders();
+    let data = mo_app::paths::data_dir();
+    let bitwig = page::bitwig_folders(&defaults, bitwig_saves(&mo_library::songs_db::to_read(&data)));
+    page::preset_folders(&defaults, &bitwig)
 }
 
 /// The library's saves' paths (opened read-only, read and let go): the Bitwig folders are found from them. None when

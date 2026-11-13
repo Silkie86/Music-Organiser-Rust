@@ -28,6 +28,7 @@ pub mod knobs;
 pub mod library;
 pub mod log;
 pub mod midi;
+pub mod preset_files;
 pub mod presets;
 pub mod state;
 mod threads;
