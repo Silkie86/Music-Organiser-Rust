@@ -237,6 +237,9 @@ export component Panel inherits Window {
     // Match tempo: while looping, a loop whose tempo is known plays at the DAW's, its pitch kept.
     in-out property <bool> match-tempo;
     callback match-tempo-changed(bool);
+    // In time: a sound clicked while the song plays starts on the next beat (a hit) or bar (a loop).
+    in-out property <bool> in-time: true;
+    callback in-time-changed(bool);
     // A choice was picked or unpicked on a filter ("type", "length", "key", "tag"): its words.
     callback pick(string, string);
     // Nothing picked on a filter (or "more-types": only the types in the More menu).
@@ -518,6 +521,16 @@ export component Panel inherits Window {
                         none-text: "Off: play the whole file";
                         choices: root.trim-choices;
                         picked(t) => { root.pick-trim(t); }
+                    }
+                    StudioButton {
+                        horizontal-stretch: 0;
+                        text: "In time";
+                        main: root.in-time;
+                        tip: root.in-time ? "In time: while the song plays, a sound starts on the next beat, a loop on the next bar" : "Start sounds on the next beat while the song plays";
+                        clicked => {
+                            root.in-time = !root.in-time;
+                            root.in-time-changed(root.in-time);
+                        }
                     }
                     StudioButton {
                         horizontal-stretch: 0;

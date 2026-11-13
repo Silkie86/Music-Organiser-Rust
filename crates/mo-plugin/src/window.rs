@@ -676,6 +676,9 @@ impl Shown {
         panel.set_loop_on(self.instance.player.looping());
         let player = Arc::clone(&self.instance.player);
         panel.on_loop_changed(move |on| player.set_loop(on));
+        panel.set_in_time(self.instance.player.in_time());
+        let player = Arc::clone(&self.instance.player);
+        panel.on_in_time_changed(move |on| player.set_in_time(on));
         panel.set_match_tempo(self.instance.player.matching());
         let player = Arc::clone(&self.instance.player);
         panel.on_match_tempo_changed(move |on| player.set_matching(on));

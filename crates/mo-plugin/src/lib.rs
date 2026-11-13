@@ -292,6 +292,13 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
                 playing: t.flags.contains(TransportFlags::IS_PLAYING),
                 beats: t.song_pos_beats.to_float(),
                 tempo: t.flags.contains(TransportFlags::HAS_TEMPO).then_some(t.tempo),
+                // Beats a bar: a 6/8 bar is three (quarter-note) beats.
+                bar: (t.flags.contains(TransportFlags::HAS_TIME_SIGNATURE) && t.time_signature_denominator > 0).then(
+                    || {
+                        let len = f64::from(t.time_signature_numerator) * 4.0 / f64::from(t.time_signature_denominator);
+                        (t.bar_start.to_float(), len)
+                    },
+                ),
             }
         });
         let Some(mut port) = audio.output_port(0) else { return Ok(ProcessStatus::Continue) };
