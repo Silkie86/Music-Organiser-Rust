@@ -266,3 +266,46 @@ fn a_preset_that_isnt_the_plugins_doesnt_load() {
     assert!(load.load_from_location(handle, Location::Plugin, Some(c"not a sound")).is_err());
     assert!(load.load_from_location(handle, Location::File { path: c"/a.wav" }, None).is_err());
 }
+
+/// Chord check's Thru: what's played in (CLAP's own notes and MIDI 1.0) goes on out of the note output as it came, in
+/// the order of its place in the block, and the plugin stays silent.
+#[test]
+fn notes_played_in_go_on_out() {
+    use clack_host::events::event_types::{MidiEvent, NoteOnEvent};
+    use clack_host::events::spaces::CoreEventSpace;
+    use clack_host::events::{Match, Pckn};
+    let entry = entry();
+    let mut plugin = instance(&entry);
+    let configuration = PluginAudioConfiguration { sample_rate: 48_000.0, min_frames_count: 1, max_frames_count: 64 };
+    let processor = plugin.activate(|_, _| (), configuration).unwrap();
+    let mut processor = processor.start_processing().unwrap();
+    let mut out = [vec![0.0f32; 64], vec![0.0f32; 64]];
+    let mut out_ports = AudioPorts::with_capacity(2, 1);
+    let mut outputs = out_ports.with_output_buffers([AudioPortBuffer {
+        channels: AudioPortBufferType::f32_output_only(out.iter_mut().map(|b| b.as_mut_slice())),
+        latency: 0,
+    }]);
+    let inputs = InputAudioBuffers::empty();
+    let mut events_in = EventBuffer::new();
+    events_in.push(&NoteOnEvent::new(3, Pckn::new(0u16, 0u16, 60u16, Match::<u32>::All), 0.8));
+    events_in.push(&MidiEvent::new(10, 0, [0x91, 64, 100]));
+    let mut events_out = EventBuffer::new();
+    processor.process(&inputs, &mut outputs, &events_in.as_input(), &mut events_out.as_output(), None, None).unwrap();
+    let out_notes: Vec<(u32, u16, u16)> = events_out
+        .iter()
+        .filter_map(|e| match e.as_core_event() {
+            Some(CoreEventSpace::NoteOn(n)) => {
+                Some((n.header().time(), *n.channel().as_specific()?, *n.key().as_specific()?))
+            }
+            // MIDI goes on as it came.
+            Some(CoreEventSpace::Midi(m)) => {
+                let [status, key, _] = m.data();
+                Some((m.header().time(), u16::from(status & 0x0F), u16::from(key)))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(out_notes, [(3, 0, 60), (10, 1, 64)]);
+    assert!(out.iter().all(|side| side.iter().all(|s| *s == 0.0)));
+    plugin.deactivate(processor.stop_processing());
+}

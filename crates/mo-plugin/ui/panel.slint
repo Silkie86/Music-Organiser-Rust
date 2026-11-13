@@ -1,7 +1,8 @@
 // The test plugin's panel: what shows inside the DAW's plugin window. Built from the app's own style (studio.slint),
-// so it looks like the app. Two views: Sounds (the app's sound library as a list or as the Galaxy, click to play
-// through the track, with the app's own filters and orders)
-// and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
+// so it looks like the app. Its views: Sounds (the app's sound library as a list or as the Galaxy, click to play
+// through the track, with the app's own filters and orders), MIDI, Presets,
+// Chords (Chord check: the chord the notes played in make, as the app's chord reader names it) and DAW check (every
+// CLAP extension the DAW was asked for, and whether it has it).
 
 import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
 export { FilterView, FilterChoice, YearBar, Theme }
@@ -45,6 +46,17 @@ export struct PresetLine {
     part: string,
     // The part's colour (a place in the theme's sound type colours; -1 for grey).
     colour: int,
+}
+
+// A chord Chord check read, on its strip of the newest bars (mo-plugin's `chordcheck`).
+export struct ChordBox {
+    name: string,
+    // Where it starts: "3.1" is bar 3, beat 1 of the take.
+    at: string,
+    // How sure the reader is: 0 sure, 1 the same notes have another name too, 2 not sure.
+    sure: int,
+    // It sounds now.
+    now: bool,
 }
 
 export struct ExtensionLine {
@@ -327,6 +339,17 @@ export component Panel inherits Window {
     in-out property <bool> midi-out;
     callback midi-out-changed(bool);
 
+    // The Chords tab (Chord check): the chord the notes played into the plugin make, as the app's chord reader names
+    // it ("" for none yet), how sure it is in words, the keys held and how far the take is, and the chords of the
+    // newest bars.
+    in property <string> chord-name;
+    in property <string> chord-sure;
+    in property <string> chord-line;
+    in property <[ChordBox]> chord-strip;
+    // Thru: the notes played in go on out of the plugin's note output, for an instrument after it.
+    in-out property <bool> chord-thru: true;
+    callback chord-thru-changed(bool);
+
     // The Presets tab: the preset files, the status line, the filter column as the app's Presets page has it (mo-app's
     // `presets::filter_chips`), the orders, the year strip and the line picked.
     in property <[PresetLine]> presets;
@@ -397,7 +420,7 @@ export component Panel inherits Window {
             }
             Rectangle { }
             Segmented {
-                choices: ["Sounds", "MIDI", "Presets", "DAW check"];
+                choices: ["Sounds", "MIDI", "Presets", "Chords", "DAW check"];
                 current: root.view;
                 picked(i) => { root.view = i; }
             }
@@ -1386,6 +1409,90 @@ export component Panel inherits Window {
         }
 
         if root.view == 3: VerticalLayout {
+            spacing: Space.lg;
+            HorizontalLayout {
+                spacing: Space.md;
+                Text {
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    text: "Play into the plugin: the chord the app's chord reader hears shows here as you play.";
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    wrap: word-wrap;
+                }
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Thru";
+                    main: root.chord-thru;
+                    tip: root.chord-thru
+                        ? "The notes you play go on out of the plugin, for an instrument after it"
+                        : "Pass the notes you play on out of the plugin, for an instrument after it";
+                    clicked => {
+                        root.chord-thru = !root.chord-thru;
+                        root.chord-thru-changed(root.chord-thru);
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: Space.xs;
+                Text {
+                    text: root.chord-name == "" ? "No chord yet" : root.chord-name;
+                    color: root.chord-name == "" ? Theme.faint : Theme.text;
+                    font-size: Type.page-title;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.chord-sure;
+                    color: Theme.muted;
+                    font-size: Type.body;
+                }
+                Text {
+                    text: root.chord-line;
+                    color: Theme.faint;
+                    font-size: Type.meta;
+                    font-family: Theme.number-font;
+                    overflow: elide;
+                }
+            }
+            Text {
+                text: "The last bars";
+                color: Theme.muted;
+                font-size: Type.meta;
+                font-weight: 600;
+            }
+            // The chords of the newest bars, in order: the one sounding now in the accent colour; a chord the reader
+            // isn't sure of is fainter.
+            HorizontalLayout {
+                spacing: Space.sm;
+                alignment: start;
+                for c in root.chord-strip: Rectangle {
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: c.now ? Theme.accent : Theme.stroke;
+                    background: Theme.surface;
+                    min-width: 72px;
+                    VerticalLayout {
+                        padding: Space.sm;
+                        spacing: 2px;
+                        Text {
+                            text: c.name;
+                            color: c.now ? Theme.accent : c.sure == 2 ? Theme.faint : Theme.text;
+                            font-size: Type.body;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: c.sure == 0 ? c.at : c.sure == 1 ? c.at + "  ·  or another name" : c.at + "  ·  not sure";
+                            color: Theme.faint;
+                            font-size: Type.small;
+                            font-family: Theme.number-font;
+                        }
+                    }
+                }
+            }
+            Rectangle { vertical-stretch: 1; }
+        }
+
+        if root.view == 4: VerticalLayout {
             spacing: Space.md;
             HorizontalLayout {
                 spacing: Space.md;

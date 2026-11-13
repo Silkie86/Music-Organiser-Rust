@@ -21,7 +21,8 @@ use crate::library::{self, Asked, Library, Like, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
 use crate::{
-    ExtensionLine, FilterChoice, FilterView, Instance, Panel, SkyName, SoundLine, SweptLine, TrailDot, YearBar,
+    ChordBox, ExtensionLine, FilterChoice, FilterView, Instance, Panel, SkyName, SoundLine, SweptLine, TrailDot,
+    YearBar,
 };
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
@@ -546,6 +547,8 @@ struct Shown {
     carried: Cell<Option<Carried>>,
     /// The last take Record saved, shown as a line to hear and drag out.
     recorded: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// The number of the newest chord Chord check read that the panel shows ([`crate::chordcheck::Checker::newest`]).
+    chords_seen: Cell<u64>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
     /// The line last clicked to play: its row, its sound and its file.
@@ -612,6 +615,7 @@ impl Shown {
             presets: presets_tab::PresetsTab::new(),
             carried: Cell::new(None),
             recorded: Rc::default(),
+            chords_seen: Cell::new(u64::MAX),
             playing: Cell::new(None),
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
@@ -876,6 +880,7 @@ impl Shown {
         self.presets.fill_in(panel, &self.slots, &self.instance);
         self.fill_in_midi_play();
         self.fill_in_record();
+        self.fill_in_chords();
         let slots = Arc::clone(&self.slots);
         let track = lock(&self.instance.track).clone();
         background("mo-plugin-library", move || {
@@ -942,6 +947,42 @@ impl Shown {
                 _ => {}
             }
         }
+    }
+
+    /// Chord check: the Thru switch, and the newest chord read (while the panel was shut too).
+    fn fill_in_chords(&self) {
+        let chords = &self.instance.chords;
+        self.panel.set_chord_thru(chords.thru.load(Ordering::Acquire));
+        let chords_ = Arc::clone(chords);
+        self.panel.on_chord_thru_changed(move |on| chords_.thru.store(on, Ordering::Release));
+        self.chords_seen.set(u64::MAX);
+        self.chords_said();
+    }
+
+    /// The newest chord Chord check read, when there's a new one.
+    fn chords_said(&self) {
+        let Some((number, heard)) = self.instance.chords.newest(self.chords_seen.get()) else { return };
+        self.chords_seen.set(number);
+        let panel = &self.panel;
+        panel.set_chord_name(heard.name.clone().unwrap_or_default().into());
+        let sure = if heard.name.is_some() { heard.sure.words() } else { "Play a chord into the plugin" };
+        panel.set_chord_sure(sure.into());
+        panel.set_chord_line(heard.line().into());
+        let strip: Vec<ChordBox> = heard
+            .strip
+            .iter()
+            .map(|c| ChordBox {
+                name: c.name.as_str().into(),
+                at: c.at.as_str().into(),
+                sure: match c.sure {
+                    crate::chordcheck::Sure::Yes => 0,
+                    crate::chordcheck::Sure::Mostly => 1,
+                    _ => 2,
+                },
+                now: c.now,
+            })
+            .collect();
+        panel.set_chord_strip(ModelRc::new(VecModel::from(strip)));
     }
 
     /// Record: what it records from, its button, and the last take as a line to hear and drag into the project.
@@ -1598,6 +1639,7 @@ impl Shown {
             self.panel.set_playing(said.into());
         }
         self.record_said();
+        self.chords_said();
         if let Some(n) = self.playing.get()
             && !self.instance.player.still_playing(n)
         {
