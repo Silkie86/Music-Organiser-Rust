@@ -410,6 +410,23 @@ texture, tune, push, chart or quality, and context and role in its sweep. Given 
 mir_eval itself on them and prints both sets of numbers (they matched exactly on all 909 POP909 songs, 2026-10-31, and
 on POP909-CL pooled in beats, 2026-11-01).
 
+### Solomon's own chord answers (Chord check, on his computer only)
+
+The test plugin's Chords tab keeps each take Solomon plays into it, and he says what each chord really is. Each take
+is one file in the data folder's `Chord check` folder (`mo_app::chord_check`). Give that folder to `chords` in place
+of a labelled file:
+
+```
+cargo run --release -p mo-theorybench -- chords "%LOCALAPPDATA%\MusicOrganiser\Chord check" --engine rust --misses
+```
+
+Only the chords he labelled are scored: a chord skipped, or not labelled yet, is marked unknown ("X") and left out.
+`--misses` lists each labelled chord the reader gets wrong (root and every interval, or the bass), by take and
+bar.beat. (Where the chords change, mir_eval's segmentation, still counts a take's unlabelled stretches, each as one
+unknown chord: read it on the datasets, not on the takes.) The takes are his own (rule 5): they're only measured on, never learned from (Solomon, 13 Nov), and nothing
+from them goes in code but counts. The reader's design wants at least 300 answers before a change to it is judged
+on them; the bench prints how many there are.
+
 ### The chord reader's candidates
 
 mo-harmony's chord reader scores only the readings the notes let in for each stretch of music (its candidates), so a

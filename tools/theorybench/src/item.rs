@@ -1,6 +1,7 @@
 //! The labelled music the bench reads: one JSON object a line, made from a public dataset by a script in `convert/`,
-//! or from Solomon's own MIDI packs by `theorybench packs` on his computer ([`OWN`]). The files stay outside the
-//! repository.
+//! or from Solomon's own MIDI packs by `theorybench packs` on his computer ([`OWN`]); or a folder of Chord check's
+//! takes, one file each, that he played into the test plugin and labelled ([`read_takes`]). The files stay outside
+//! the repository.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
@@ -207,9 +208,70 @@ pub fn cut(notes: &[Note], from: i64, length: i64) -> Vec<Note> {
         .collect()
 }
 
-/// Reads every item in a JSON-lines file.
+/// Where Chord check's takes come from (`mo_app::chord_check::SOURCE`).
+pub const CHORD_CHECK: &str = "chord-check";
+
+/// Reads every item in a JSON-lines file, or every take in a folder of Chord check's ([`read_takes`]).
 pub fn read(path: &Path) -> Result<Vec<Item>, String> {
-    read_lines(path)
+    if path.is_dir() { read_takes(path) } else { read_lines(path) }
+}
+
+/// Every take in a folder of Chord check's (the data folder's `Chord check`): each `take <when>.json` is one piece
+/// (a half-written `.mo-part` is left alone), in order of when it was played. Only the chords he labelled are scored:
+/// a stretch with no label (skipped, or not labelled yet) is marked unknown ("X"), which mir_eval's scores leave out.
+/// They're his own (rule 5, [`OWN`]): measured on, never learned from ([`Item::may_learn`]). A take that won't read
+/// (cut short, or from a plugin that wrote it otherwise), or isn't marked his own, is left out with a warning, so one
+/// bad file never stops the rest being scored.
+pub fn read_takes(folder: &Path) -> Result<Vec<Item>, String> {
+    let names = std::fs::read_dir(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    let mut paths: Vec<std::path::PathBuf> = names
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            name.starts_with("take ") && name.ends_with(".json") && p.is_file()
+        })
+        .collect();
+    paths.sort();
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let read = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| serde_json::from_str::<Item>(&text).map_err(|e| e.to_string()))
+            .and_then(|item| {
+                if item.licence == OWN {
+                    Ok(item)
+                } else {
+                    Err(format!("a Chord check take should be marked \"{OWN}\""))
+                }
+            });
+        match read {
+            Ok(mut item) => {
+                item.chords = unknown_between(std::mem::take(&mut item.chords), item.length);
+                out.push(item);
+            }
+            Err(why) => eprintln!("{}: left out ({why})", path.display()),
+        }
+    }
+    Ok(out)
+}
+
+/// `chords` (in order) with every stretch between them, and before and after them up to `length`, marked unknown.
+fn unknown_between(mut chords: Vec<(i64, i64, String)>, length: i64) -> Vec<(i64, i64, String)> {
+    chords.sort_by_key(|c| c.0);
+    let mut out = Vec::with_capacity(chords.len() * 2 + 1);
+    let mut at = 0;
+    for (start, end, label) in chords {
+        if start > at {
+            out.push((at, start, "X".to_owned()));
+        }
+        at = at.max(end);
+        out.push((start, end, label));
+    }
+    if length > at && !out.is_empty() {
+        out.push((at, length, "X".to_owned()));
+    }
+    out
 }
 
 /// Reads a file of one JSON object a line (blank lines skipped); an error names the file and the line.
@@ -229,6 +291,45 @@ pub fn read_lines<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_of_takes_is_read_with_only_the_chords_labelled_scored() {
+        /// The test's folder, removed when the test ends, passed or failed.
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let folder = std::env::temp_dir().join(format!("theorybench-takes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let _gone = Gone(folder.clone());
+        // As the plugin writes it (mo_app::chord_check::TakeFile): the bench's fields and its own besides.
+        let take = r#"{"source":"chord-check","id":"2026-11-13 07-12-03-250","ppq":960,"length":7680,
+            "beats_per_bar":4,"first_downbeat":0,"aligned":true,
+            "parts":[{"role":"chords","notes":[[0,3840,60,100],[0,3840,64,100],[3840,3840,62,90]]}],
+            "chords":[[3840,7680,"D:maj"]],"chord_labels":"Solomon","licence":"Solomon's own (rule 5)",
+            "group":"chord-check/2026-11-13","whole":"song","check":{"reader_version":5,"spans":[]}}"#;
+        std::fs::write(folder.join("take 2026-11-13 07-12-03-250.json"), take).unwrap();
+        std::fs::write(folder.join("take 2026-11-13 07-15-00-000.json.mo-part"), "half").unwrap();
+        std::fs::write(folder.join("notes.txt"), "his").unwrap();
+        std::fs::write(folder.join("take 2026-11-13 07-20-00-000.json"), "{\"cut short").unwrap();
+        let items = read(&folder).unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.source, CHORD_CHECK);
+        assert!(!item.may_learn() && item.is_own(), "rule 5: measured on, never learned from");
+        assert_eq!(item.chords, [(0, 3840, "X".to_owned()), (3840, 7680, "D:maj".to_owned())]);
+    }
+
+    #[test]
+    fn the_stretches_between_labels_are_unknown() {
+        let l = |s, e, t: &str| (s, e, t.to_owned());
+        let got = unknown_between(vec![l(100, 200, "C:maj"), l(300, 400, "N")], 500);
+        assert_eq!(got, [l(0, 100, "X"), l(100, 200, "C:maj"), l(200, 300, "X"), l(300, 400, "N"), l(400, 500, "X")]);
+        assert!(unknown_between(Vec::new(), 500).is_empty(), "nothing labelled: nothing scored");
+    }
 
     #[test]
     fn only_licences_that_let_fitted_weights_ship_are_learned_from() {
