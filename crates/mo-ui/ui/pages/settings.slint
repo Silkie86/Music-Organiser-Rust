@@ -140,6 +140,7 @@ export global SettingsData {
     callback check-daws();
     // The background helper: whether it's wanted, and how it's doing, in words.
     in property <bool> helper-on;
+    in property <string> helper-intro;
     in property <string> helper-note;
     callback toggle-helper();
     // What the last Install did; whether one is running now.
@@ -875,7 +876,7 @@ component DawsTab inherits VerticalLayout {
     }
     SettingsCard {
         title: "Background helper";
-        intro: "A small part of the app that starts when you log in to Windows and stays by the clock as a dot (green when Bitwig is connected). It keeps the live link to Bitwig, so the plugins can use it with the app closed, and the app has less to do when it opens. It's built to stay light: no window, no lists in memory, low priority. Right-click the dot to pause or quit it. Turning this off quits it and takes it out of Windows' startup list.";
+        intro: SettingsData.helper-intro;
         HorizontalLayout {
             alignment: start;
             ToggleChip {

@@ -468,16 +468,27 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     });
     let weak = app.as_weak();
     data.on_toggle_helper(move || {
-        let on = !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| mo_app::helper_start::wanted(&p.settings)));
-        // The screenshots' made-up app starts nothing: there the chip only changes.
-        let real = PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live));
-        change(mo_app::helper_start::KEY, if on { "1" } else { "0" });
-        if let Some(app) = weak.upgrade() {
-            let data = app.global::<SettingsData>();
-            data.set_helper_on(on);
-            data.set_helper_note(if on { "Starting the helper\u{2026}" } else { "Stopping the helper\u{2026}" }.into());
+        let Some((was, live, writable)) =
+            PAGE.with(|p| p.borrow().as_ref().map(|p| (mo_app::helper_start::wanted(&p.settings), p.live, p.writable)))
+        else {
+            return;
+        };
+        let Some(app) = weak.upgrade() else { return };
+        let data = app.global::<SettingsData>();
+        // A choice that can't be kept isn't acted on: the helper would start at every login with the switch showing
+        // off at the next start.
+        if live && !writable {
+            data.set_helper_note(
+                "Your settings can't be saved this run, so this can't be changed until the app starts again.".into(),
+            );
+            return;
         }
-        if real {
+        let on = !was;
+        change(mo_app::helper_start::KEY, if on { "1" } else { "0" });
+        data.set_helper_on(on);
+        // The screenshots' made-up app starts nothing: there the chip only changes.
+        if live {
+            data.set_helper_note(if on { "Starting the helper\u{2026}" } else { "Stopping the helper\u{2026}" }.into());
             apply_helper(on, weak.clone());
         }
     });
@@ -1493,6 +1504,7 @@ fn show(app: &AppWindow) {
         data.set_pace_note(page::pace_note(pace, p.running_pace, background::cores()).into());
         data.set_sweep_hold(sweep_hold(s));
         data.set_helper_on(mo_app::helper_start::wanted(s));
+        data.set_helper_intro(page::helper_intro(cfg!(windows)).into());
         let smallest = smallest_part(s);
         data.set_smallest_index(mo_app::midi::smallest_part_index(smallest) as i32);
         data.set_outputs(strings(p.outputs.labels.iter().cloned()));

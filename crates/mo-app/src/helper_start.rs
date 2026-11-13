@@ -10,7 +10,6 @@
 
 use std::io;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::app_settings::AppSettings;
@@ -23,6 +22,8 @@ pub const ENTRY: &str = "MusicOrganiserHelper";
 /// How long a helper from another build gets to quit before this build's is started all the same (it then finds the
 /// port taken and stops, and the next start of the app tries again).
 const QUIT_WAIT: Duration = Duration::from_secs(5);
+/// How long a helper just started gets to answer, before the start counts as failed.
+const ANSWER_WAIT: Duration = Duration::from_secs(8);
 
 /// Whether the helper is wanted.
 pub fn wanted(settings: &AppSettings) -> bool {
@@ -101,16 +102,18 @@ pub fn turn_on(
     start: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Done {
     let wanted = command(exe);
+    // Written whenever it isn't already right, even when it couldn't be read (another kind of value under the name).
     let (login_problem, login_list) = match list.get() {
         Ok(Some(there)) if there == wanted => (None, true),
-        Ok(_) => change(list.set(&wanted)),
-        Err(e) => change(Err(e)),
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => (None, false),
+        _ => change(list.set(&wanted)),
     };
     let exe_text = exe.display().to_string();
+    let ours = |hello: &helper::Hello| {
+        hello.helper == version && (hello.exe.is_empty() || same_program(&hello.exe, &exe_text))
+    };
     let replaced = match helper::hello(port) {
-        Some(hello) if hello.helper == version && (hello.exe.is_empty() || hello.exe == exe_text) => {
-            return Done { login_problem, login_list, running: Running::Already };
-        }
+        Some(hello) if ours(&hello) => return Done { login_problem, login_list, running: Running::Already },
         Some(hello) => {
             helper::ask_to_quit(port);
             let until = Instant::now() + QUIT_WAIT;
@@ -121,21 +124,41 @@ pub fn turn_on(
         }
         None => None,
     };
-    let running = match (start(exe), replaced) {
-        (Err(e), _) => Running::Failed(e.to_string()),
-        (Ok(()), Some(old)) => Running::Replaced(old),
-        (Ok(()), None) => Running::Started,
+    let running = match start(exe) {
+        Err(e) => Running::Failed(e.to_string()),
+        // Started isn't running: only this build's helper answering on the port is.
+        Ok(()) => {
+            let until = Instant::now() + ANSWER_WAIT;
+            loop {
+                match helper::hello(port) {
+                    Some(hello) if ours(&hello) => break replaced.map_or(Running::Started, Running::Replaced),
+                    Some(hello) if Instant::now() >= until => {
+                        break Running::Failed(format!("the helper from another build ({}) didn't quit", hello.helper));
+                    }
+                    None if Instant::now() >= until => break Running::Failed("it started but doesn't answer".into()),
+                    _ => std::thread::sleep(Duration::from_millis(100)),
+                }
+            }
+        }
     };
     Done { login_problem, login_list, running }
 }
 
+/// Whether two paths name the same program: as Windows compares them (any case, with or without the `\\?\` in
+/// front), exactly elsewhere.
+fn same_program(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        let plain = |p: &str| p.strip_prefix(r"\\?\").unwrap_or(p).replace('/', "\\").to_lowercase();
+        plain(a) == plain(b)
+    } else {
+        a == b
+    }
+}
+
 /// Takes the helper out of the startup list and asks the one running to quit.
 pub fn turn_off(list: &dyn LoginList, port: u16) -> Done {
-    let (login_problem, login_list) = match list.get() {
-        Ok(None) => (None, true),
-        Ok(Some(_)) => change(list.remove()),
-        Err(e) => change(Err(e)),
-    };
+    // Taken out without looking first: removing is fine when it isn't there, and works on a line that can't be read.
+    let (login_problem, login_list) = change(list.remove());
     let running = if helper::ask_to_quit(port) { Running::Stopped } else { Running::NotRunning };
     Done { login_problem, login_list, running }
 }
@@ -149,19 +172,15 @@ fn change(done: io::Result<()>) -> (Option<String>, bool) {
     }
 }
 
-/// Starts `exe` as the helper, cut loose from this app: it has no console (the launcher's would end it when its
-/// window closes, and Ctrl+C there would reach it) and outlives the app.
+/// Starts `exe` as the helper, cut loose from this app as a DAW the app opens is ([`crate::shell::run`]): it has no
+/// console (the launcher's would end it when its window closes, and Ctrl+C there would reach it), runs at the app's
+/// own priority until it lowers its own, and outlives the app.
 pub fn start_detached(exe: &Path) -> io::Result<()> {
-    let mut command = Command::new(exe);
-    command.arg(FLAG).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    command.spawn().map(drop)
+    crate::shell::run(&crate::shell::Launch {
+        program: exe.display().to_string(),
+        args: vec![FLAG.to_owned()],
+        check: crate::shell::Check::Started,
+    })
 }
 
 /// The system's own startup list: on Windows the current user's `Run` key in the registry; elsewhere there's none
@@ -321,9 +340,14 @@ mod tests {
 
     /// A helper in this test's own process, standing in for the program `start` would run.
     fn helper_on(port: u16) -> Arc<Helper> {
+        helper_as(&crate::version::version(), port)
+    }
+
+    /// One that says it's build `version`.
+    fn helper_as(version: &str, port: u16) -> Arc<Helper> {
         let until = Instant::now() + Duration::from_secs(5);
         loop {
-            match Helper::start(port, free_port()).unwrap() {
+            match Helper::start_as(version.to_owned(), port, free_port()).unwrap() {
                 Start::Started(h) => return h,
                 Start::AlreadyRunning => assert!(Instant::now() < until, "the port stayed taken"),
             }
@@ -387,7 +411,7 @@ mod tests {
         let old = helper_on(port);
         let new = Mutex::new(None);
         let done = turn_on(&list, port, &this_exe(), "9.9.9 (newer)", |_| {
-            *new.lock().unwrap() = Some(helper_on(port));
+            *new.lock().unwrap() = Some(helper_as("9.9.9 (newer)", port));
             Ok(())
         });
         assert_eq!(done.running, Running::Replaced(crate::version::version()));
@@ -406,6 +430,41 @@ mod tests {
     }
 
     #[test]
+    fn a_line_that_cant_be_read_is_still_written_and_removed() {
+        struct Unreadable(FakeList);
+        impl LoginList for Unreadable {
+            fn get(&self) -> io::Result<Option<String>> {
+                Err(io::Error::other("another kind of value"))
+            }
+            fn set(&self, command: &str) -> io::Result<()> {
+                self.0.set(command)
+            }
+            fn remove(&self) -> io::Result<()> {
+                self.0.remove()
+            }
+        }
+        let list = Unreadable(FakeList::default());
+        let done = turn_on(&list, free_port(), &this_exe(), "1", |_| Err(io::Error::other("no")));
+        assert_eq!(done.login_problem, None);
+        assert_eq!(list.0.get().unwrap(), Some(command(&this_exe())));
+        assert_eq!(turn_off(&list, free_port()).login_problem, None);
+        assert_eq!(list.0.get().unwrap(), None);
+    }
+
+    #[test]
+    fn a_helper_that_never_answers_is_a_failed_start() {
+        // Nothing is started at all: the port stays silent.
+        let done = turn_on(&FakeList::default(), free_port(), &this_exe(), "1", |_| Ok(()));
+        assert_eq!(done.running, Running::Failed("it started but doesn't answer".into()));
+    }
+
+    #[test]
+    fn the_same_program_whatever_its_spelling_on_windows() {
+        assert!(same_program("/a/b", "/a/b"));
+        assert_eq!(same_program(r"\\?\C:\Run\App.exe", r"c:\run\app.exe"), cfg!(windows));
+    }
+
+    #[test]
     fn a_system_without_a_list_still_runs_the_helper() {
         struct NoList;
         impl LoginList for NoList {
@@ -419,8 +478,14 @@ mod tests {
                 Err(io::ErrorKind::Unsupported.into())
             }
         }
-        let done = turn_on(&NoList, free_port(), &this_exe(), "1", |_| Ok(()));
+        let port = free_port();
+        let started = Mutex::new(None);
+        let done = turn_on(&NoList, port, &this_exe(), &crate::version::version(), |_| {
+            *started.lock().unwrap() = Some(helper_on(port));
+            Ok(())
+        });
         assert_eq!(done, Done { login_problem: None, login_list: false, running: Running::Started });
         assert!(done.line().ends_with("only on Windows for now"));
+        assert_eq!(turn_off(&NoList, port), Done { login_problem: None, login_list: false, running: Running::Stopped });
     }
 }

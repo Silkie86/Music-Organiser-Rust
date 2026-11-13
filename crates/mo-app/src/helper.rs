@@ -70,6 +70,8 @@ pub enum Start {
 
 /// A running helper: the watch on Bitwig, and the thread answering on the port.
 pub struct Helper {
+    /// What it says its version is: [`crate::version::version`], but for a test standing in for another build.
+    version: String,
     port: u16,
     bitwig_port: u16,
     watch: Mutex<Option<Watch>>,
@@ -83,6 +85,11 @@ impl Helper {
     /// Starts a helper answering on `port`, watching the Bitwig extension on `bitwig_port`. Only fails when the system
     /// won't start a thread or the port can't be opened for another reason than a helper having it.
     pub fn start(port: u16, bitwig_port: u16) -> io::Result<Start> {
+        Helper::start_as(crate::version::version(), port, bitwig_port)
+    }
+
+    /// [`Helper::start`], saying it's build `version`.
+    pub(crate) fn start_as(version: String, port: u16, bitwig_port: u16) -> io::Result<Start> {
         let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
             Ok(l) => l,
             Err(e) if e.kind() == io::ErrorKind::AddrInUse => return Ok(Start::AlreadyRunning),
@@ -90,6 +97,7 @@ impl Helper {
         };
         let port = listener.local_addr()?.port();
         let helper = Arc::new(Helper {
+            version,
             port,
             bitwig_port,
             watch: Mutex::new(Some(Watch::start(bitwig_port))),
@@ -111,7 +119,7 @@ impl Helper {
     /// What it would say to `hello`.
     pub fn hello(&self) -> Hello {
         Hello {
-            helper: crate::version::version(),
+            helper: self.version.clone(),
             pid: std::process::id(),
             exe: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
             bitwig: bitwig_words(self.bitwig().as_ref()),
