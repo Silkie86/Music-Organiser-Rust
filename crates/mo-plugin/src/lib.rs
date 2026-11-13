@@ -7,8 +7,8 @@
 //! - it lists every CLAP extension the DAW has ([`check`]), to settle which of the plan's extensions Bitwig 6.1
 //!   offers.
 //!
-//! It shows in the DAW as the instrument "Music Organiser (test)". It takes notes in (for later steps) but doesn't use
-//! them yet. It never writes any of the app's files.
+//! It shows in the DAW as the instrument "Music Organiser (test)". The notes played into it are read for their chords
+//! ([`chordcheck`]) and passed on out with Thru on. It never writes any of the app's files.
 //!
 //! A DAW calls a plugin from several threads: the main thread (opening the window, starting and stopping the audio)
 //! and the audio thread ([`Processor`]). What they share lives in [`Instance`].
@@ -19,6 +19,7 @@
 
 pub mod audition;
 pub mod check;
+pub mod chordcheck;
 pub mod drag;
 pub mod entry;
 pub mod favourites;
@@ -43,8 +44,8 @@ mod ui {
     slint::include_modules!();
 }
 pub use ui::{
-    ExtensionLine, FilterChoice, FilterView, Panel, PartLine, PresetLine, SkyName, SoundLine, SweptLine, Theme,
-    TrailDot, YearBar,
+    ChordBox, ExtensionLine, FilterChoice, FilterView, Panel, PartLine, PresetLine, SkyName, SoundLine, SweptLine,
+    Theme, TrailDot, YearBar,
 };
 
 use audition::{Player, Playing};
@@ -90,6 +91,8 @@ pub struct Instance {
     pub recorder: Arc<record::Recorder>,
     /// What it hears at its input ([`listen`]).
     pub listener: Arc<listen::Listener>,
+    /// The chords played into its note input ([`chordcheck`]).
+    pub chords: Arc<chordcheck::Checker>,
 }
 
 pub struct MoPlugin;
@@ -148,6 +151,7 @@ impl DefaultPluginFactory for MoPlugin {
                 knobs: knobs::Knobs::default(),
                 recorder: Arc::default(),
                 listener: Arc::default(),
+                chords: Arc::default(),
             }),
             _card: real.then(gpu::hold),
         })
@@ -351,6 +355,8 @@ pub struct Processor {
     tap: mo_listen::Tap,
     /// The sample rate, for where the song is at a block's end.
     rate: f64,
+    /// Chord check's half on the audio thread: the notes played in, with their beats ([`chordcheck`]).
+    catch: chordcheck::Catch,
 }
 
 impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
@@ -371,7 +377,9 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
         shared.instance.recorder.set_rate(rate);
         let (tap, ear) = mo_listen::tap(audio_config.sample_rate, 2);
         shared.instance.listener.start(ear);
+        let catch = shared.instance.chords.start();
         Ok(Processor {
+            catch,
             feed: None,
             tap,
             rate: audio_config.sample_rate,
@@ -405,6 +413,18 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
                 ),
             }
         });
+        // The notes played in, for Chord check (and Thru), each with its beat: the song's while it plays.
+        let clock = chordcheck::Clock {
+            song: song
+                .filter(|s| s.playing)
+                .map(|s| chordcheck::SongAt { beat: s.beats, bar: s.bar.filter(|(_, len)| *len > 0.0) }),
+            beats_a_frame: chordcheck::Clock::beats_a_frame(
+                process.transport.filter(|t| t.flags.contains(TransportFlags::HAS_TEMPO)).map(|t| t.tempo),
+                self.rate,
+            ),
+            frames: audio.frames_count(),
+        };
+        self.catch.block(events.input, clock);
         // The DAW's knobs turned, and the panel's changes told back. (A knob turned partway through the block counts
         // from its start: a knob here picks and switches, it doesn't shape the sound.)
         self.instance.knobs.exchange(events.input, events.output, &self.instance.player, Some(&mut self.playing));
@@ -447,17 +467,32 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
             // More frames than the DAW said it would ever ask for: the rest stays quiet.
             only[len..].fill(0.0);
         }
-        // A part's notes going out (Send MIDI), in order, after the knobs' changes (all at the block's start).
-        for note in self.playing.sent() {
+        // A part's notes going out (Send MIDI) and the notes played in passed on (Thru), after the knobs' changes
+        // (all at the block's start), in the order of their place in the block: the DAW wants them in order.
+        let (mut sent, mut thru) = (self.playing.sent().iter().peekable(), self.catch.thru().iter().peekable());
+        loop {
             use clack_plugin::events::event_types::{NoteOffEvent, NoteOnEvent};
             use clack_plugin::events::{Match, Pckn};
-            let at = Pckn::new(0u16, 0u16, u16::from(note.key), Match::<u32>::All);
+            let sent_first = match (sent.peek(), thru.peek()) {
+                (Some(s), Some(t)) => s.offset <= t.offset,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            let (offset, channel, key, velocity, on) = if sent_first {
+                let Some(n) = sent.next() else { break };
+                (n.offset, 0u16, n.key, n.velocity, n.on)
+            } else {
+                let Some(n) = thru.next() else { break };
+                (n.offset, n.channel, n.key, n.velocity, n.on)
+            };
+            let at = Pckn::new(0u16, channel, u16::from(key), Match::<u32>::All);
             // No room left in the DAW's list: the rest go with nothing said (the DAW's list is far bigger than a
             // block's notes).
-            let _ = if note.on {
-                events.output.try_push(NoteOnEvent::new(note.offset, at, note.velocity))
+            let _ = if on {
+                events.output.try_push(NoteOnEvent::new(offset, at, velocity))
             } else {
-                events.output.try_push(NoteOffEvent::new(note.offset, at, note.velocity))
+                events.output.try_push(NoteOffEvent::new(offset, at, velocity))
             };
         }
         // Always on: a pick can start playing at any moment.
@@ -467,6 +502,7 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
     fn deactivate(self, main_thread: &MainThread<'a>) {
         main_thread.shared.instance.player.stop_all();
         main_thread.shared.instance.listener.stop();
+        main_thread.shared.instance.chords.stop();
         log::line("Audio", "The DAW stopped the track's audio");
     }
 }
@@ -504,7 +540,8 @@ impl PluginAudioPortsImpl for MainThread<'_> {
 
 impl PluginNotePortsImpl for MainThread<'_> {
     fn count(&self, _is_input: bool) -> u32 {
-        // One in (for later steps), one out: a MIDI part's notes with Send MIDI on.
+        // One in (the notes Chord check reads), one out: a MIDI part's notes with Send MIDI on, and the notes played in
+        // with Thru on.
         1
     }
 
