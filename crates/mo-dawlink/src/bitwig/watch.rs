@@ -3,8 +3,9 @@
 //! [`Watch::start`] opens a connection of its own to the link, on a thread of its own, and asks it to `watch`. The link
 //! then sends what changes in Bitwig as it changes: the notes each track plays (looked at every 50 ms), and the
 //! project, the transport, the tracks with their devices, the selection, the cue markers and each track's level
-//! (every 100 ms). Nothing comes while nothing changes. Each event is merged into one picture, a [`Live`], which
-//! [`Watch::now`] hands out as it stands: the newest always wins, and reading it never waits for Bitwig (rule 12).
+//! (every 100 ms). While nothing changes only an empty event comes, every 5 s, and a feed silent for [`SILENT`] counts
+//! as Bitwig gone. Each event is merged into one picture, a [`Live`], which [`Watch::now`] hands out as it stands: the
+//! newest always wins, and reading it never waits for Bitwig (rule 12).
 //!
 //! When Bitwig isn't there, closes, or runs an extension older than [`WATCH_NEEDS`], the picture says so
 //! ([`Live::state`]) and the thread tries again every [`RETRY`]. Dropping the [`Watch`] ends it: its connection is
@@ -27,6 +28,14 @@ pub const WATCH_NEEDS: &str = "3.24";
 
 /// How long the watch waits before trying Bitwig again, after it wasn't there or the connection ended.
 pub const RETRY: Duration = Duration::from_secs(2);
+
+/// How long it waits when the extension is too old or refused: it can't change until Bitwig loads it again, and each
+/// try is a connection in the extension's report log.
+pub const RETRY_OLD: Duration = Duration::from_secs(60);
+
+/// How long the feed may be silent before the watch takes Bitwig as gone: the link sends at least an empty event
+/// every 5 seconds (`Watch.KEEP_ALIVE`), so a Bitwig that hangs with its connection open is noticed.
+pub const SILENT: Duration = Duration::from_secs(15);
 
 /// Whether the watch has Bitwig now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -57,8 +66,9 @@ pub struct Live {
     pub modified: bool,
     /// Where Bitwig is playing and how fast; none until the link says.
     pub transport: Option<Transport>,
-    /// The tracks in Bitwig's flat list (the first 128), by their place in it.
-    pub tracks: Vec<Track>,
+    /// The tracks in Bitwig's flat list (the first 128), by their place in it. Shared between pictures: an event
+    /// without tracks (most are only notes) doesn't copy them.
+    pub tracks: Arc<Vec<Track>>,
     /// The track and device selected in Bitwig.
     pub selected: Selected,
     /// The arranger's cue markers, by where they are.
@@ -67,8 +77,8 @@ pub struct Live {
     pub notes: Vec<Playing>,
     /// The tracks that show a level now: (place in the list, level from 0 to 1, the louder of left and right).
     pub levels: Vec<(usize, f32)>,
-    /// How many events have come in since the watch started: a reader that kept the number it saw last knows
-    /// whether anything changed.
+    /// How many events have come in since the watch started, over every connection: a reader that kept the number
+    /// it saw last knows whether anything changed ([`Watch::version`] says the same without taking the picture).
     pub events: u64,
 }
 
@@ -180,7 +190,11 @@ impl Watch {
         });
         let theirs = Arc::clone(&shared);
         // A thread that can't start leaves the picture saying it's connecting, which is true enough: nothing comes.
-        let _ = thread::Builder::new().name("bitwig watch".into()).spawn(move || run(port, &theirs));
+        let _ = thread::Builder::new().name("bitwig watch".into()).spawn(move || {
+            // Low priority (rules 12 and 21): the feed must never hold up the screens or the DAW.
+            let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
+            run(port, &theirs);
+        });
         Watch { shared }
     }
 
@@ -209,12 +223,16 @@ impl Drop for Watch {
 fn run(port: u16, shared: &Shared) {
     while !shared.stop.load(Ordering::Acquire) {
         watch_once(port, shared);
+        let wait = match lock(&shared.live).state {
+            State::TooOld(_) | State::Refused(_) => RETRY_OLD,
+            _ => RETRY,
+        };
         // Wait for the next try, unless the watch is dropped meanwhile.
         let held = lock(&shared.waiting);
         if shared.stop.load(Ordering::Acquire) {
             return;
         }
-        let _ = shared.wake.wait_timeout(held, RETRY);
+        let _ = shared.wake.wait_timeout(held, wait);
     }
 }
 
@@ -223,13 +241,13 @@ fn watch_once(port: u16, shared: &Shared) {
     let mut link = match Link::connect(port, CONNECT_TIMEOUT) {
         Ok(link) => link,
         Err(_) => {
-            publish(shared, |live| *live = Live { state: State::NoBitwig, ..Live::default() });
+            publish(shared, |live| *live = fresh(live, State::NoBitwig));
             return;
         }
     };
     if !link.hello().at_least(WATCH_NEEDS) {
         let answering = link.hello().answering();
-        publish(shared, |live| *live = Live { state: State::TooOld(answering), ..Live::default() });
+        publish(shared, |live| *live = fresh(live, State::TooOld(answering)));
         return;
     }
     // Kept before asking, so a drop from now on closes the connection; checked after, as the drop may have come first.
@@ -243,7 +261,7 @@ fn watch_once(port: u16, shared: &Shared) {
         Ok(answer) => answer,
         Err(error) => {
             let words = error.to_string();
-            publish(shared, |live| *live = Live { state: State::Refused(words), ..Live::default() });
+            publish(shared, |live| *live = fresh(live, State::Refused(words)));
             return;
         }
     };
@@ -252,8 +270,8 @@ fn watch_once(port: u16, shared: &Shared) {
         .and_then(Value::as_array)
         .map(|list| list.iter().filter_map(Value::as_str).map(str::to_owned).collect())
         .unwrap_or_default();
-    publish(shared, |live| *live = Live { state: State::Watching, sections, ..Live::default() });
-    while let Ok(message) = link.next_event() {
+    publish(shared, |live| *live = Live { sections, ..fresh(live, State::Watching) });
+    while let Ok(message) = link.next_event(SILENT) {
         if message.get("event").and_then(Value::as_str) != Some("watch") {
             continue;
         }
@@ -265,8 +283,13 @@ fn watch_once(port: u16, shared: &Shared) {
     }
     lock(&shared.connection).take();
     if !shared.stop.load(Ordering::Acquire) {
-        publish(shared, |live| *live = Live { state: State::Connecting, ..Live::default() });
+        publish(shared, |live| *live = fresh(live, State::Connecting));
     }
+}
+
+/// A picture with nothing in it but `state`, keeping the count of events (see [`Live::events`]).
+fn fresh(live: &Live, state: State) -> Live {
+    Live { state, events: live.events, ..Live::default() }
 }
 
 /// Changes the picture (a copy of it: readers holding the old one keep it) and says it changed.
@@ -294,7 +317,7 @@ pub(super) fn merge(live: &mut Live, result: &Value) {
         });
     }
     if let Some(list) = result.get("tracks").and_then(Value::as_array) {
-        live.tracks = list.iter().filter_map(track).collect();
+        live.tracks = Arc::new(list.iter().filter_map(track).collect());
     }
     if let Some(s) = result.get("selected") {
         live.selected = Selected {

@@ -268,7 +268,7 @@ project, the transport, the tracks with their devices, the selection, the arrang
 track plays and each track's level), each message with only what changed, the first with all of it. It's for the
 app's live picture of the song (see [the extensions README](../README.md#bitwig-link)): one connection asks once,
 instead of asking for each part many times a second. The link looks every 50 ms for the notes and every 100 ms for
-the rest, and sends nothing while nothing changes. `hello` says which parts this Bitwig gives (`watch`). Only
+the rest; while nothing changes it sends only an empty event every 5 seconds, so the app notices a Bitwig that stopped answering. `hello` says which parts this Bitwig gives (`watch`). Only
 Solomon's PC can show how often Bitwig 6.1 really updates the notes playing and the meters for an extension, and
 what the feed costs with many tracks.
 
@@ -334,7 +334,7 @@ what the feed costs with many tracks.
   by the buttons, refused routes and no paste when the copy didn't run. From 3.8, a command with no route runs
   from the flush, and arrange's checks stop before their paste and Duplicate when the launcher's focus action
   doesn't come back (its first run, or the one that would show the launcher again after it hid it).
-- `WatchTest`: the watch feed: the whole picture first, nothing while nothing changes, the notes on the next look,
+- `WatchTest`: the watch feed: the whole picture first, nothing while nothing changes but the 5-second keep-alive, the notes on the next look,
   levels and markers on the slow ones, two apps each told what changed for them, stopping (asked, or the
   connection gone), and a Bitwig without level meters.
 - `SelfCheckTest`, `LinkLogTest`, `ReportsTest`: the self-check and the reports, in a temporary folder,

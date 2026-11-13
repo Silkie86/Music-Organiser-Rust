@@ -793,12 +793,6 @@ impl Link {
         let _ = self.stream.shutdown(Shutdown::Both);
     }
 
-    /// The next whole message from Bitwig, waiting until `deadline` for it. Messages that aren't JSON objects are
-    /// passed over, as the C# app did: the request they answer then runs out of time.
-    fn next_message(&mut self, deadline: Instant) -> Result<Value, Failure> {
-        self.next_message_until(Some(deadline))
-    }
-
     /// Starts the watch feed on this connection (extension 3.24): from now on the link sends a `watch` event whenever
     /// something it watches changes, the first holding the whole picture. Answers what the link said (`watching`,
     /// `every`, `sections`).
@@ -812,35 +806,31 @@ impl Link {
         self.stream.try_clone()
     }
 
-    /// The next message from Bitwig, waiting as long as it takes: the watch feed is quiet while nothing changes, and
-    /// a read that runs out of time can't be trusted on Windows (see [`Link`]). It ends when Bitwig closes the
-    /// connection, or another thread closes it with [`Link::closer`].
-    pub(super) fn next_event(&mut self) -> Result<Value, Failure> {
-        let got = self.next_message_until(None);
+    /// The next message from Bitwig, waiting up to `silent` for it (the watch feed sends at least every few seconds).
+    /// It also ends when Bitwig closes the connection, or another thread closes it with [`Link::closer`]. Whatever
+    /// ends it closes the connection: a read that ran out of time can't be trusted on Windows (see [`Link`]).
+    pub(super) fn next_event(&mut self, silent: Duration) -> Result<Value, Failure> {
+        let got = self.next_message(Instant::now() + silent.min(LONGEST_WAIT));
         if got.is_err() {
             self.close();
         }
         got
     }
 
-    fn next_message_until(&mut self, deadline: Option<Instant>) -> Result<Value, Failure> {
+    /// The next whole message from Bitwig, waiting until `deadline` for it. Messages that aren't JSON objects are
+    /// passed over, as the C# app did: the request they answer then runs out of time.
+    fn next_message(&mut self, deadline: Instant) -> Result<Value, Failure> {
         loop {
             while let Some(bytes) = take_message(&mut self.pending, &mut self.scanned)? {
                 if let Ok(message @ Value::Object(_)) = serde_json::from_slice::<Value>(&bytes) {
                     return Ok(message);
                 }
             }
-            let left = match deadline {
-                Some(deadline) => {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        return Err(Failure::TimedOut);
-                    }
-                    Some(left)
-                }
-                None => None,
-            };
-            self.stream.set_read_timeout(left).map_err(|e| Failure::Broken(e.to_string()))?;
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(Failure::TimedOut);
+            }
+            self.stream.set_read_timeout(Some(left)).map_err(|e| Failure::Broken(e.to_string()))?;
             let mut chunk = [0u8; 16 * 1024];
             match self.stream.read(&mut chunk) {
                 Ok(0) => return Err(Failure::Closed),

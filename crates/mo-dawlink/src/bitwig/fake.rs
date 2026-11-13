@@ -80,7 +80,8 @@ impl FakeBitwig {
     }
 
     /// Sends every connection watching (extension 3.24) a `watch` event with these sections, as the link does when
-    /// they change in Bitwig. Says how many it went to. (The stand-in sends it from the test's thread: a test that
+    /// they change in Bitwig. It sends no keep-alive of its own (the link sends an empty event every 5 s): a test
+    /// that waits past [`super::watch::SILENT`] sends one with `json!({})`. Says how many it went to. (The stand-in sends it from the test's thread: a test that
     /// watches on a connection doesn't send requests on it meanwhile.)
     pub fn send_watch(&self, result: Value) -> usize {
         let lengths = lock(&self.world).lengths;
@@ -609,7 +610,6 @@ impl World {
         Ok(answer)
     }
 
-    /// The selected track, as the link's `selectedTrack` (extension 3.19).
     /// The whole picture the link sends first when the app starts watching (extension 3.24).
     pub fn picture(&self) -> Value {
         let tracks: Vec<Value> = self
@@ -658,6 +658,7 @@ impl World {
         })
     }
 
+    /// The selected track, as the link's `selectedTrack` (extension 3.19).
     fn selected(&self) -> Value {
         match self.selected_track.and_then(|t| self.tracks.get(t).map(|track| (t, track))) {
             Some((t, track)) => json!({ "index": t, "id": track.id, "name": track.name, "type": track.kind }),
@@ -1425,16 +1426,21 @@ fn serve(mut stream: TcpStream, world: &Mutex<World>, watching: &Mutex<Vec<TcpSt
                     }
                     // A watch that started (extension 3.24): the whole picture after the answer, and this connection
                     // joins those the test's events go to.
-                    let watched = messages
-                        .last()
-                        .is_some_and(|m| m.pointer("/result/watching").and_then(Value::as_bool) == Some(true));
+                    let watch = messages.last().and_then(|m| m.pointer("/result/watching")).and_then(Value::as_bool);
+                    let watched = watch == Some(true);
                     if watched {
                         messages.push(json!({ "event": "watch", "time": 0, "result": lock(world).picture() }));
                     }
                     if messages.iter().any(|m| write_message(&mut stream, m, lengths).is_err()) {
                         return;
                     }
-                    // Only once the whole picture is out, so the test's events come after it.
+                    // As the link keeps one watch for each connection: asked again, or stopped, this connection's goes
+                    // (by the app's end of it, which its copies share); a new one only once the whole picture is out,
+                    // so the test's events come after it.
+                    if watch.is_some() {
+                        let me = stream.peer_addr().ok();
+                        lock(watching).retain(|other| other.peer_addr().ok() != me);
+                    }
                     if watched && let Ok(copy) = stream.try_clone() {
                         lock(watching).push(copy);
                     }

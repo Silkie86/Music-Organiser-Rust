@@ -2473,24 +2473,28 @@ final class Link {
             reply(ask, m, null);
             return;
         }
-        Watch watch = new Watch();
+        Watch watch = new Watch(clock.millis());
         watching.put(ask.client(), watch);
         m.put("watching", true);
         m.put("every", Watch.TICK);
         m.put("sections", watchSections());
         reply(ask, m, null);
-        // The whole picture straight away, then what changes.
-        Map<String, Object> now = watchNow(true);
-        send(ask.client(), watchEvent(watch.changed(now)));
+        // The looks start first, so a first picture that can't be read is sent by the next look instead.
         if (!watchTicking) {
             watchTicking = true;
             host.scheduleTask(this::watchLook, Watch.TICK);
         }
+        // The whole picture straight away, then what changes.
+        Map<String, Object> first = watch.changed(watchNow(true), clock.millis());
+        send(ask.client(), watchEvent(first != null ? first : new LinkedHashMap<>()));
     }
 
     /** The sections the watch feed gives in this Bitwig. */
     private List<Object> watchSections() {
-        List<Object> list = new ArrayList<>(List.of("project", "tracks", "selected"));
+        List<Object> list = new ArrayList<>();
+        if (app != null && project != null) list.add("project");
+        if (tracks != null) list.add("tracks");
+        if (tracks != null && cursorTrack != null) list.add("selected");
         if (followed) list.add("transport");
         if (markers != null) list.add("markers");
         if (watchNotes) list.add(Watch.NOTES);
@@ -2506,16 +2510,12 @@ final class Link {
             return;
         }
         watchLooks++;
-        try {
-            Map<String, Object> now = watchNow(watchLooks % Watch.SLOW_EVERY == 0);
-            for (Map.Entry<Client, Watch> e : new ArrayList<>(watching.entrySet())) {
-                Map<String, Object> changed = e.getValue().changed(now);
-                if (!changed.isEmpty()) send(e.getKey(), watchEvent(changed));
-            }
-        } catch (RuntimeException | LinkageError e) {
-            // A part of Bitwig that fails now and then mustn't stop the feed: the next look tries again.
-            if (!watchWarned) host.errorln("Music Organiser: a look for the watch feed failed (" + e + ").");
-            watchWarned = true;
+        Map<String, Object> now = watchNow(watchLooks % Watch.SLOW_EVERY == 0);
+        long time = clock.millis();
+        for (Map.Entry<Client, Watch> e : new ArrayList<>(watching.entrySet())) {
+            Map<String, Object> changed = e.getValue().changed(now, time);
+            // Null: nothing to send. Empty: nothing changed for a while, and the app hears the link still answers.
+            if (changed != null) send(e.getKey(), watchEvent(changed));
         }
         host.scheduleTask(this::watchLook, Watch.TICK);
     }
@@ -2527,30 +2527,46 @@ final class Link {
         return m;
     }
 
-    /** The song as Bitwig shows it now: the notes playing, and with `slow` every other section. */
+    /**
+     * The song as Bitwig shows it now: the notes playing, and with `slow` every other section this Bitwig gives. Each
+     * section is read on its own, so one that fails now leaves the rest going: it's left out of this look (the app
+     * keeps what it had), and Bitwig's console hears of the first failure.
+     */
     private Map<String, Object> watchNow(boolean slow) {
         Map<String, Object> m = new LinkedHashMap<>();
+        List<Object> sections = watchSections();
         if (slow) {
-            Map<String, Object> p = new LinkedHashMap<>();
-            p.put("name", str(app.projectName().get()));
-            p.put("modified", project.isModified().get());
-            m.put("project", p);
-            if (followed) {
+            if (sections.contains("project")) watchSection(m, "project", () -> {
+                Map<String, Object> p = new LinkedHashMap<>();
+                p.put("name", str(app.projectName().get()));
+                p.put("modified", project.isModified().get());
+                return p;
+            });
+            if (sections.contains("transport")) watchSection(m, "transport", () -> {
                 Map<String, Object> t = new LinkedHashMap<>();
                 t.put("playing", transport.isPlaying().get());
                 t.put("position", Watch.beats(transport.playPosition().get()));
                 t.put("playStart", Watch.beats(transport.playStartPosition().get()));
                 t.put("tempo", transport.tempo().getRaw());
                 t.put("timeSignature", str(transport.timeSignature().get()));
-                m.put("transport", t);
-            }
-            m.put("tracks", watchTracks());
-            m.put("selected", watchSelected());
-            if (markers != null) m.put("markers", watchMarkers());
-            if (meters != null) m.put("levels", watchLevels());
+                return t;
+            });
+            if (sections.contains("tracks")) watchSection(m, "tracks", this::watchTracks);
+            if (sections.contains("selected")) watchSection(m, "selected", this::watchSelected);
+            if (sections.contains("markers")) watchSection(m, "markers", this::watchMarkers);
+            if (sections.contains("levels")) watchSection(m, "levels", this::watchLevels);
         }
-        if (watchNotes) m.put(Watch.NOTES, watchPlaying());
+        if (sections.contains(Watch.NOTES)) watchSection(m, Watch.NOTES, this::watchPlaying);
         return m;
+    }
+
+    private void watchSection(Map<String, Object> into, String name, Supplier<Object> read) {
+        try {
+            into.put(name, read.get());
+        } catch (RuntimeException | LinkageError e) {
+            if (!watchWarned) host.errorln("Music Organiser: the watch feed couldn't read the " + name + " (" + e + ").");
+            watchWarned = true;
+        }
     }
 
     /**

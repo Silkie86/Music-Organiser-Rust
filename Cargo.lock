@@ -3281,6 +3281,7 @@ dependencies = [
  "mo-formats",
  "mo-sounds",
  "serde_json",
+ "thread-priority",
  "zip",
 ]
 

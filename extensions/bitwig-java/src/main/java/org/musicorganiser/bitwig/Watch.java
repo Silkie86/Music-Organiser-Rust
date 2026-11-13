@@ -16,8 +16,8 @@ import java.util.Map;
  * While an app watches, the link looks at Bitwig every {@link #TICK} ms and sends it a `watch` event holding only the
  * parts ("sections") that changed since it last told that app: the notes playing on each track on every look, and the
  * rest (the project, the transport, the tracks, the selection, the cue markers and the level meters) every
- * {@link #SLOW_EVERY}th look. The first event after `watch` holds every part. Nothing is sent while nothing changes, so
- * a stopped Bitwig with nobody touching it sends nothing at all.
+ * {@link #SLOW_EVERY}th look. The first event after `watch` holds every part. While nothing changes only an empty event
+ * goes, every {@link #KEEP_ALIVE} ms, so the app can tell a quiet Bitwig from one that stopped answering.
  *
  * This only reads, so it doesn't need changes allowed.
  */
@@ -32,11 +32,25 @@ final class Watch {
     static final int LEVEL_RANGE = 1000;
     /** The cue markers the link follows: the first ones in the arranger. */
     static final int MARKERS = 64;
+    /**
+     * The longest the link goes without sending this app anything, in milliseconds: when nothing has changed for this
+     * long, it sends an event with no sections, so the app can tell a quiet Bitwig from one that stopped answering.
+     */
+    static final long KEEP_ALIVE = 5000;
     /** Where a section's JSON was last told, by the section's name. */
     private final Map<String, String> told = new HashMap<>();
+    /** When this app was last sent anything (clock milliseconds). */
+    private long lastSent;
 
-    /** The sections of `now` this app hasn't been told as they are, which it is now taken to have been told. */
-    Map<String, Object> changed(Map<String, Object> now) {
+    Watch(long now) {
+        lastSent = now;
+    }
+
+    /**
+     * The sections of `now` this app hasn't been told as they are, which it is now taken to have been told; an empty map
+     * when nothing changed for KEEP_ALIVE, and null when there's nothing to send.
+     */
+    Map<String, Object> changed(Map<String, Object> now, long time) {
         Map<String, Object> out = new LinkedHashMap<>();
         for (Map.Entry<String, Object> e : now.entrySet()) {
             String json = Json.write(e.getValue());
@@ -44,6 +58,8 @@ final class Watch {
             told.put(e.getKey(), json);
             out.put(e.getKey(), e.getValue());
         }
+        if (out.isEmpty() && time - lastSent < KEEP_ALIVE) return null;
+        lastSent = time;
         return out;
     }
 

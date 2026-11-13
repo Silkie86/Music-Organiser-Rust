@@ -98,7 +98,22 @@ class WatchTest {
     void staysQuietWhileNothingChanges() {
         start(LinkTest.song());
         watch();
-        assertEquals(List.of(), after(2000));
+        assertEquals(List.of(), after(Watch.KEEP_ALIVE - Watch.TICK));
+    }
+
+    @Test
+    @DisplayName("sends an empty event when nothing has changed for a while, so the app knows it still answers")
+    void keepsTheAppPosted() {
+        start(LinkTest.song());
+        watch();
+        assertEquals(List.of(), after(Watch.KEEP_ALIVE - Watch.TICK));
+        List<Map<String, Object>> fresh = after(Watch.TICK);
+        assertEquals(1, fresh.size());
+        assertJson(obj(), fresh.get(0).get("result"));
+        // Counted from the last thing sent: a change puts the next one off.
+        bitwig.meter(1, 500, 500);
+        assertEquals(1, after(2 * Watch.TICK).size());
+        assertEquals(List.of(), after(Watch.KEEP_ALIVE - 2 * Watch.TICK));
     }
 
     @Test

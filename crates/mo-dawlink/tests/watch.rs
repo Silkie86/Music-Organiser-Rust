@@ -81,3 +81,21 @@ fn dropping_the_watch_closes_its_connection_at_once() {
         thread::sleep(Duration::from_millis(10));
     }
 }
+
+#[test]
+fn the_stand_in_keeps_one_watch_for_each_connection() {
+    let bitwig = FakeBitwig::start().unwrap();
+    let mut link = mo_dawlink::bitwig::Link::connect(bitwig.port(), Duration::from_secs(2)).unwrap();
+    link.command("watch", json!({})).unwrap();
+    link.command("watch", json!({})).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while bitwig.watchers() != 1 {
+        assert!(Instant::now() < deadline, "asked twice, watched {} times", bitwig.watchers());
+        thread::sleep(Duration::from_millis(5));
+    }
+    link.command("watch", json!({ "on": false })).unwrap();
+    while bitwig.watchers() != 0 {
+        assert!(Instant::now() < deadline, "still watching after on: false");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
