@@ -274,6 +274,27 @@ pub struct Device {
     pub enabled: bool,
 }
 
+/// The device selected in Bitwig, with its parameters ([`Link::selected_device`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SelectedDevice {
+    /// The selected track's name.
+    pub track: String,
+    pub device: Device,
+    pub params: Vec<DeviceParam>,
+}
+
+/// One of a device's parameters, as Bitwig shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeviceParam {
+    /// Bitwig's ID for it ("CONTENTS/PID3e8"), which [`Link::set_parameter`] takes.
+    pub id: String,
+    pub name: String,
+    /// From 0 to 1; none when Bitwig hasn't told it (or the link knows its value is out of date).
+    pub value: Option<f64>,
+    /// As Bitwig writes it ("-6.0 dB").
+    pub display: String,
+}
+
 /// What Bitwig added to a track's chain ([`Link::insert_file`], [`Link::insert_device`]). Bitwig quietly ignores a
 /// file or ID it can't use, so `added` is false then.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -648,6 +669,43 @@ impl Link {
         index(answer.get("slot")).ok_or(Error::Unexpected)
     }
 
+    /// The device selected in Bitwig with all its parameters (`device`), or none when no device is. Only reads.
+    pub fn selected_device(&mut self) -> Result<Option<SelectedDevice>, Error> {
+        let answer = self.request(ask("device", []), self.timeout)?;
+        let Some(device) = answer.get("device").filter(|d| d.is_object()) else {
+            return Ok(None);
+        };
+        let params = answer.get("params").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        Ok(Some(SelectedDevice {
+            track: text(&answer, "track"),
+            device: device_of(device),
+            params: params
+                .iter()
+                .map(|p| DeviceParam {
+                    id: text(p, "id"),
+                    name: text(p, "name"),
+                    value: p.get("value").and_then(Value::as_f64).filter(|v| v.is_finite()),
+                    display: text(p, "display"),
+                })
+                .filter(|p| !p.id.is_empty())
+                .collect(),
+        }))
+    }
+
+    /// Sets one of the selected device's parameters, by its ID, to `value` from 0 to 1 (`set`).
+    pub fn set_parameter(&mut self, id: &str, value: f64) -> Result<(), Error> {
+        let value = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
+        self.change(ask("set", [("param", id.into()), ("value", value.into())])).map(|_| ())
+    }
+
+    /// Puts a file in the selected device's place, as if dropped on it: a sample makes a Sampler with it instead of
+    /// the device (`insert` at `replace`, extension 3.25). Bitwig quietly ignores a file it can't use: read the
+    /// selected device again to see what it made.
+    pub fn replace_selected_with_file(&mut self, path: &str) -> Result<(), Error> {
+        let fields = [("kind", "file".into()), ("path", path.into()), ("at", "replace".into())];
+        self.change(ask("insert", fields)).map(|_| ())
+    }
+
     /// Adds one of Bitwig's own devices to the end of a track's chain, by its ID.
     pub fn insert_device(&mut self, track: usize, device: DeviceId) -> Result<Inserted, Error> {
         let fields = [("track", track.into()), ("kind", "bitwig".into()), ("device", device.to_string().into())];
@@ -924,14 +982,19 @@ fn inserted(answer: &Value) -> Result<Inserted, Error> {
     if !answer.is_object() {
         return Err(Error::Unexpected);
     }
-    let device = answer.get("device").filter(|d| d.is_object()).map(|d| Device {
+    let device = answer.get("device").filter(|d| d.is_object()).map(device_of);
+    Ok(Inserted { added: flag(answer, "added"), index: index(answer.get("index")), device })
+}
+
+/// A device as the link describes it.
+fn device_of(d: &Value) -> Device {
+    Device {
         name: text(d, "name"),
         preset: text(d, "preset"),
         kind: text(d, "kind"),
         plugin: flag(d, "plugin"),
         enabled: d.get("enabled").and_then(Value::as_bool).unwrap_or(true),
-    });
-    Ok(Inserted { added: flag(answer, "added"), index: index(answer.get("index")), device })
+    }
 }
 
 /// A text field, or "" when it's missing or something else.

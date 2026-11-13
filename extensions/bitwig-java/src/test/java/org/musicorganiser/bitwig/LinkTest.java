@@ -370,6 +370,24 @@ class LinkTest {
     }
 
     @Test
+    @DisplayName("puts a sample in the selected device's place (extension 3.25)")
+    void replacesTheSelectedDevice() {
+        FakeBitwig bitwig = start(song());
+        bitwig.allowChanges(true);
+        App app = bitwig.connect();
+        app.take();
+        // Nothing selected yet: nothing to replace.
+        assertMatches("No device is selected", error(app.ask(obj("id", 1, "cmd", "insert", "kind", "file", "path", "a.wav", "at", "replace"))));
+        app.waitFor(obj("id", 2, "cmd", "select", "track", 1, "device", 0));
+        assertEquals(true, app.waitFor(obj("id", 3, "cmd", "insert", "kind", "file", "path", "C:\\Samples\\Kick.wav", "at", "replace")).get("ok"));
+        assertTrue(bitwig.calls.contains(Arrays.asList("insertFile", "C:\\Samples\\Kick.wav", "selected device")), bitwig.calls.toString());
+        // Bitwig makes a Sampler with the sample in the Serum's place.
+        Object after = app.waitFor(obj("id", 4, "cmd", "device")).get("result");
+        assertEquals("Sampler", at(after, "device", "name"));
+        assertMatches("give no track", error(app.ask(obj("id", 5, "cmd", "insert", "kind", "file", "path", "a.wav", "at", "replace", "track", 0))));
+    }
+
+    @Test
     @DisplayName("lists and runs Bitwig's actions")
     void listsAndRunsActions() {
         FakeBitwig bitwig = start(song());

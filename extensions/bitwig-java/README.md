@@ -263,6 +263,11 @@ hears of it. `hello` says `loopback`:
 whether the link's own MIDI has come back, from the message it sends itself as Bitwig starts it and each time
 the app connects.
 
+New in 3.25: `insert` with `at: "replace"` puts what it inserts in the selected device's place (Bitwig's replace
+insertion point of the cursor device). A sample put there makes a Sampler with it, instead of the device; the app
+reads the selected device again to see what Bitwig made. It's for auditioning a sound in a Sampler that's already
+set up: the app reads the old Sampler's parameters, puts the sample in its place and sets them again.
+
 New in 3.24, the watch feed: `watch` starts sending the connection what changes in Bitwig as it changes (the
 project, the transport, the tracks with their devices, the selection, the arranger's cue markers, the notes each
 track plays and each track's level), each message with only what changed, the first with all of it. It's for the

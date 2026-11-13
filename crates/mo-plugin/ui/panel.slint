@@ -232,6 +232,9 @@ export component Panel inherits Window {
     in property <bool> can-drag;
     in property <int> carried: -1;
     callback stop();
+    // In Bitwig: the picked sound goes in the place of the Sampler selected there, keeping its settings.
+    in property <bool> in-bitwig;
+    callback try-in-sampler();
     // Trim silence: sounds play without the silence at their start and end (the files stay as they are), with how
     // quiet counts as silence in dB below full scale, and a pick from its menu ("-50").
     in property <bool> trim-silence;
@@ -568,6 +571,12 @@ export component Panel inherits Window {
                         horizontal-stretch: 0;
                         text: "Stop";
                         clicked => { root.stop(); }
+                    }
+                    if root.in-bitwig && root.picked >= 0: StudioButton {
+                        horizontal-stretch: 0;
+                        text: "In Bitwig's Sampler";
+                        tip: "Put the picked sound in the Sampler selected in Bitwig, keeping its settings (a first try)";
+                        clicked => { root.try-in-sampler(); }
                     }
                 }
                 HorizontalLayout {
