@@ -12,11 +12,10 @@ use clack_extensions::state::PluginState;
 use clack_host::events::event_types::ParamValueEvent;
 use clack_host::factory::plugin::PluginFactory;
 use clack_host::prelude::*;
-use clack_plugin::entry::SinglePluginEntry;
-use mo_plugin::MoPlugin;
+use mo_plugin::entry::MoEntry;
 
 fn entry() -> PluginEntry {
-    PluginEntry::load_from_clack::<SinglePluginEntry<MoPlugin>>(c"").unwrap()
+    PluginEntry::load_from_clack::<MoEntry>(c"").unwrap()
 }
 
 fn instance(entry: &PluginEntry) -> PluginInstance<()> {
@@ -167,4 +166,84 @@ fn silent_until_something_is_picked_and_starts_again_cleanly() {
         assert!(out.iter().all(|side| side.iter().all(|s| *s == 0.0)));
         plugin.deactivate(processor.stop_processing());
     }
+}
+
+/// The stand-in DAW's side of preset discovery: what the plugin declares and lists.
+#[derive(Default)]
+struct Browser {
+    places: Vec<(String, bool)>,
+    presets: Vec<String>,
+}
+
+impl clack_extensions::preset_discovery::prelude::IndexerImpl for Browser {
+    fn declare_filetype(&mut self, _: clack_extensions::preset_discovery::prelude::FileType) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    fn declare_location(
+        &mut self,
+        location: clack_extensions::preset_discovery::prelude::LocationInfo,
+    ) -> Result<(), HostError> {
+        use clack_extensions::preset_discovery::prelude::Location;
+        self.places.push((location.name.to_string_lossy().into_owned(), location.location == Location::Plugin));
+        Ok(())
+    }
+
+    fn declare_soundpack(
+        &mut self,
+        _: clack_extensions::preset_discovery::prelude::Soundpack,
+    ) -> Result<(), HostError> {
+        Ok(())
+    }
+}
+
+impl clack_extensions::preset_discovery::prelude::MetadataReceiverImpl for Browser {
+    fn on_error(&mut self, _: i32, _: Option<&std::ffi::CStr>) {}
+    fn begin_preset(&mut self, name: Option<&std::ffi::CStr>, _: Option<&std::ffi::CStr>) -> Result<(), HostError> {
+        self.presets.push(name.map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        Ok(())
+    }
+    fn add_plugin_id(&mut self, _: clack_extensions::preset_discovery::prelude::UniversalPluginId) {}
+    fn set_soundpack_id(&mut self, _: &std::ffi::CStr) {}
+    fn set_flags(&mut self, _: clack_extensions::preset_discovery::prelude::Flags) {}
+    fn add_creator(&mut self, _: &std::ffi::CStr) {}
+    fn set_description(&mut self, _: &std::ffi::CStr) {}
+    fn set_timestamps(
+        &mut self,
+        _: Option<clack_extensions::preset_discovery::prelude::Timestamp>,
+        _: Option<clack_extensions::preset_discovery::prelude::Timestamp>,
+    ) {
+    }
+    fn add_feature(&mut self, _: &std::ffi::CStr) {}
+    fn add_extra_info(&mut self, _: &std::ffi::CStr, _: &std::ffi::CStr) {}
+}
+
+#[test]
+fn lists_favourites_in_the_daws_browser() {
+    use clack_extensions::preset_discovery::prelude::{Location, PresetDiscoveryFactory, Provider};
+    let entry = entry();
+    let factory = entry.get_factory::<PresetDiscoveryFactory>().expect("a preset discovery factory");
+    let descriptors: Vec<_> = factory.provider_descriptors().collect();
+    assert_eq!(descriptors.len(), 1);
+    let id = descriptors[0].id().unwrap();
+    assert_eq!(id.to_bytes(), mo_plugin::favourites::PROVIDER_ID.as_bytes());
+    let info = HostInfo::new("Stand-in DAW", mo_plugin::TESTS_VENDOR, "", "1.0").unwrap();
+    let mut provider = Provider::instantiate(Browser::default(), &entry, id, &info).unwrap();
+    assert_eq!(provider.indexer().places, [("Favourite sounds".to_owned(), true)]);
+    // The stand-in DAW has no library (tests never read a real folder): nothing listed, and no error.
+    let mut browser = Browser::default();
+    provider.get_metadata(Location::Plugin, &mut browser);
+    assert!(browser.presets.is_empty());
+}
+
+#[test]
+fn a_preset_that_isnt_the_plugins_doesnt_load() {
+    use clack_extensions::preset_discovery::prelude::{Location, PluginPresetLoad};
+    let entry = entry();
+    let mut plugin = instance(&entry);
+    let mut handle = plugin.plugin_handle();
+    let load = handle.get_extension::<PluginPresetLoad>().expect("preset load");
+    let handle = &mut handle;
+    assert!(load.load_from_location(handle, Location::Plugin, Some(c"not a sound")).is_err());
+    assert!(load.load_from_location(handle, Location::File { path: c"/a.wav" }, None).is_err());
 }
