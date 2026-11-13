@@ -613,17 +613,23 @@ fn take_back(folder: &Path, made: &[PathBuf]) {
     let _ = fs::remove_dir(folder);
 }
 
-/// The names made safe for a file ending `.mid` and kept apart, letter case aside (Windows doesn't tell "a" from "A").
+/// What a drag file may end with: a MIDI file, or, from the plugin, a Bitwig preset made for a drop into Bitwig (which
+/// takes only its own) or a curve. Any other name ends `.mid`.
+const ENDINGS: [&str; 3] = [".mid", ".bwpreset", ".bwcurve"];
+
+/// The names made safe for a file ending as [`ENDINGS`] says and kept apart, letter case aside (Windows doesn't tell
+/// "a" from "A").
 fn unique_names<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut used = HashSet::new();
     names
         .map(|name| {
-            let stem = name.strip_suffix(".mid").unwrap_or(name);
+            let ending = ENDINGS.into_iter().find(|e| name.ends_with(e)).unwrap_or(ENDINGS[0]);
+            let stem = name.strip_suffix(ending).unwrap_or(name);
             let stem = safe_file_name(stem);
-            let mut out = format!("{stem}.mid");
+            let mut out = format!("{stem}{ending}");
             let mut n = 2;
             while !used.insert(out.to_lowercase()) {
-                out = format!("{stem} {n}.mid");
+                out = format!("{stem} {n}{ending}");
                 n += 1;
             }
             out
@@ -775,7 +781,7 @@ fn read_manifest(text: &str) -> Option<Vec<(u64, String)>> {
     for line in lines.filter(|l| !l.is_empty()) {
         let (size, name) = line.split_once('\t')?;
         let size = size.parse::<u64>().ok()?;
-        if !plain_midi_name(name) {
+        if !plain_drag_name(name) {
             return None;
         }
         out.push((size, name.to_owned()));
@@ -783,12 +789,11 @@ fn read_manifest(text: &str) -> Option<Vec<(u64, String)>> {
     Some(out)
 }
 
-/// A name the app gives a drag's MIDI file: one name with no folder in it (no slashes, no ':' for an NTFS stream, not
-/// "." or ".."), no control letters, not a Windows device's, ending ".mid".
-fn plain_midi_name(name: &str) -> bool {
+/// A name the app gives a drag file: one name with no folder in it (no slashes, no ':' for an NTFS stream, not
+/// "." or ".."), no control letters, not a Windows device's, ending as [`ENDINGS`] says (".mid", ".bwpreset", ".bwcurve").
+fn plain_drag_name(name: &str) -> bool {
     let lower = name.to_lowercase();
-    name.len() > 4
-        && lower.ends_with(".mid")
+    ENDINGS.iter().any(|e| lower.len() > e.len() && lower.ends_with(e))
         && !name.contains(['/', '\\', ':'])
         && !name.chars().any(|c| c < ' ')
         && !name.starts_with(' ')
@@ -1205,6 +1210,25 @@ mod tests {
         fs::remove_file(folder.join("Mine.txt")).unwrap();
         assert_eq!(sweep(&temp, later), Swept::default());
         assert!(folder.exists());
+    }
+
+    #[test]
+    fn a_bitwig_preset_or_curve_keeps_its_ending_and_is_cleared_as_a_midi_file_is() {
+        // The plugin hands Bitwig a preset it made, or a curve, through a drag folder.
+        let temp = test_temp("bwpreset");
+        let files = [
+            midi("Serum - Lead.bwpreset", b"bw"),
+            midi("Serum - Lead.bwpreset", b"bw2"),
+            midi("Rise.bwcurve", b"c"),
+            midi("x.fxp", b"1"),
+        ];
+        let paths = write_drag_files(&temp, &files).unwrap();
+        let names: Vec<_> = paths.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["Serum - Lead.bwpreset", "Serum - Lead 2.bwpreset", "Rise.bwcurve", "x.fxp.mid"]);
+        assert!(!plain_drag_name(".bwpreset"));
+        let done = sweep(&temp, SystemTime::now() + DAY * 2);
+        assert_eq!(done.removed, 5);
+        assert!(paths.iter().all(|p| !p.exists()));
     }
 
     #[test]

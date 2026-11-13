@@ -149,6 +149,20 @@ pub fn tempo_from_name(path: &str) -> Option<f64> {
         .filter(|bpm| (70.0..=200.0).contains(bpm))
 }
 
+/// A tempo written in the name of one of the two folders a file is in ("VEE2 Loops 128BPM\\Loop 028.wav"), the
+/// nearer first, if any.
+pub fn tempo_from_folders(path: &str) -> Option<f64> {
+    let mut folders = path.rsplit(['\\', '/']).skip(1);
+    folders.by_ref().take(2).find_map(|folder| {
+        let folder = folder.trim();
+        // A folder's name has no extension: a dot in it ("Vol.2") isn't one.
+        BPM_TAG
+            .captures(folder)
+            .and_then(|c| c.get(1)?.as_str().parse::<f64>().ok())
+            .filter(|bpm| (50.0..=220.0).contains(bpm))
+    })
+}
+
 /// A key written in the file name ("Am", "F# minor", "_Cmaj_") as (tonic, minor), if any.
 pub fn key_from_name(path: &str) -> Option<(i32, bool)> {
     let name = stem(file_name(path));

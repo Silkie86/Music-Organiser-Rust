@@ -187,6 +187,17 @@ impl Library {
         Ok(oldest.and_then(local))
     }
 
+    /// Every installed plugin the plugin scanner found, as (its id, its name, its kind): "instrument", "effect",
+    /// "note-effect", "analyzer", or "" when its file doesn't say. For telling a preset file's plugin by its id.
+    pub fn scanned_kinds(&self) -> Result<Vec<(String, String, String)>, LibraryError> {
+        if !self.has("scanned_plugins") {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare("SELECT id, name, kind FROM scanned_plugins")?;
+        let rows = st.query_map([], |r| Ok((text(r, "id"), text(r, "name"), text(r, "kind"))))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Each plugin's maker as the plugin scanner read it from its files, by name key (the first one found).
     pub fn scanned_vendors(&self) -> Result<HashMap<String, String>, LibraryError> {
         if !self.has("scanned_plugins") {

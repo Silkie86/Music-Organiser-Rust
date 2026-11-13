@@ -406,6 +406,19 @@ impl CurvesDb {
         Ok(CurvesDb { conn })
     }
 
+    /// Opens the database at `path` only to read it, as the CLAP plugin does (it never writes the app's files): nothing
+    /// is made or changed, and an error when it isn't there yet (the app makes it when its Curves are first opened).
+    pub fn open_read_only(path: &Path) -> Result<CurvesDb, CurvesError> {
+        if !is_there(path)? {
+            return Err(CurvesError(format!("{} isn't there yet", path.display())));
+        }
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
+        conn.busy_timeout(Duration::from_secs(2))?;
+        conn.pragma_update(None, "query_only", true)?;
+        Ok(CurvesDb { conn })
+    }
+
     /// Each save read before: its date, size and what read it.
     fn known(&self) -> Result<HashMap<String, (i64, i64, i64)>, CurvesError> {
         let mut st = self.conn.prepare("SELECT path, modified, size, version FROM curve_reads")?;
@@ -626,7 +639,8 @@ fn parse_points(text: &str) -> Option<Vec<curve::CurvePoint>> {
 }
 
 /// The curve file's bytes for `c`.
-fn curve_bytes(c: &Curve) -> Result<Vec<u8>, String> {
+/// `c` as a Bitwig curve file's bytes (`.bwcurve`), as [`file`] writes it: what a drag out of the plugin carries.
+pub fn curve_bytes(c: &Curve) -> Result<Vec<u8>, String> {
     let periodic =
         c.sources.iter().all(|s| !s.kind.is_song()) && c.points.first().map(|p| p.y) == c.points.last().map(|p| p.y);
     curve::write(&curve::Curve {
@@ -887,7 +901,15 @@ mod tests {
         let second = save_to_bitwig(&rise, &library).unwrap();
         assert_eq!(first.file_name().unwrap(), "My rise.bwcurve");
         assert_eq!(second.file_name().unwrap(), "My rise (2).bwcurve");
+        // The plugin reads it without changing it: the same curves, and a write refused.
+        let read_only = CurvesDb::open_read_only(&dir.join(FILE_NAME)).unwrap();
+        assert_eq!(read_only.list().unwrap(), db.list().unwrap());
+        assert!(read_only.rename(&rise.id, "Not mine").is_err());
+        assert!(CurvesDb::open_read_only(&dir.join("none.db")).is_err());
+        assert!(!dir.join("none.db").exists(), "nothing is made");
+        assert_eq!(curve::read(curve_bytes(&rise).unwrap()).unwrap().points, rise.points);
         // Windows won't remove a folder while the database in it is open.
+        drop(read_only);
         drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
     }

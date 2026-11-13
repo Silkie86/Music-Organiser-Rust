@@ -145,6 +145,62 @@ impl SoundStore {
         Ok(SoundStore { conn })
     }
 
+    /// What the store at `path` kept of the saves at `paths`, opened read-only (nothing made, emptied or changed,
+    /// for a program that never writes the app's files, the test plugin): those unchanged since they were kept, in
+    /// that order, and how many of `paths` weren't (changed since, never kept, or not there). An error when the store
+    /// isn't there or was kept by other readers or `limits`.
+    pub fn kept_read_only(
+        path: &Path,
+        limits: &Thresholds,
+        paths: &[String],
+    ) -> Result<(Vec<SaveSounds>, usize), FixesError> {
+        let err = |e: rusqlite::Error| FixesError(e.to_string());
+        if !is_there(path)? {
+            return Err(FixesError(format!("{} isn't there yet", path.display())));
+        }
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags).map_err(err)?;
+        conn.busy_timeout(Duration::from_secs(2)).map_err(err)?;
+        conn.pragma_update(None, "query_only", true).map_err(err)?;
+        conn.pragma_update(None, "temp_store", "MEMORY").map_err(err)?;
+        let version =
+            format!("{VERSION}/fl {}/bitwig {}/{limits:?}", mo_formats::fl::VERSION, mo_formats::bitwig::VERSION);
+        let kept: Option<String> = conn
+            .query_row("SELECT value FROM sound_meta WHERE key = 'version'", [], |r| r.get(0))
+            .optional()
+            .map_err(err)?;
+        if kept.as_deref() != Some(version.as_str()) {
+            return Err(FixesError(format!("{} was kept by other readers", path.display())));
+        }
+        let store = SoundStore { conn };
+        let looked: Vec<Option<(i64, i64)>> = paths.par_iter().map(|p| stamp(p)).collect();
+        let mut st = store
+            .conn
+            .prepare_cached("SELECT id, modified, size, warning FROM sound_reads WHERE path = ?1")
+            .map_err(err)?;
+        let mut saves = Vec::new();
+        for (p, now) in paths.iter().zip(looked) {
+            let found = st
+                .query_row([p], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?),
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .optional()
+                .map_err(err)?;
+            if let (Some((id, was, warning)), Some(now)) = (found, now)
+                && was == now
+                && let Ok(sounds) = store.sounds_of(id)
+            {
+                saves.push(SaveSounds { path: p.clone(), sounds, error: None, warning });
+            }
+        }
+        let missed = paths.len() - saves.len();
+        Ok((saves, missed))
+    }
+
     /// The saves at `paths`, in that order: those kept and unchanged from the store, the others read by `read` (over
     /// every core, as [`crate::library::read_saves`] does) and kept for next time. Like `read`, a save of a DAW whose
     /// projects keep no settings is left out. Call it on a pool of low-priority threads: the files are looked at over
@@ -402,6 +458,43 @@ mod tests {
         let sounds: i64 = store.conn.query_row("SELECT count(*) FROM sounds", [], |r| r.get(0)).unwrap();
         assert_eq!((left, sounds), (1, 2));
         drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_read_only_look_gives_the_saves_unchanged_since_and_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("mo-presets-sound-store-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, c) = (dir.join("a.flp"), dir.join("b.flp"), dir.join("c.flp"));
+        for (p, text) in [(&a, "one"), (&b, "two"), (&c, "three")] {
+            std::fs::write(p, text).unwrap();
+        }
+        let paths: Vec<String> = [&a, &b, &c].iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let limits = Thresholds::default();
+        let at = dir.join(FILE_NAME);
+        // Not there yet: an error, and nothing made.
+        assert!(SoundStore::kept_read_only(&at, &limits, &paths).is_err());
+        assert!(!at.exists());
+        let mut store = SoundStore::open(&at, &limits).unwrap();
+        let reader = |asked: &[String]| -> Vec<SaveSounds> {
+            asked
+                .iter()
+                .map(|p| SaveSounds {
+                    path: p.clone(),
+                    sounds: vec![sound("Wobble", Some(Role::Bass))],
+                    error: None,
+                    warning: None,
+                })
+                .collect()
+        };
+        store.saves(&paths[..2], reader).unwrap();
+        drop(store);
+        std::fs::write(&b, "two, changed").unwrap();
+        let (kept, missed) = SoundStore::kept_read_only(&at, &limits, &paths).unwrap();
+        assert_eq!(kept.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(), [paths[0].as_str()]);
+        assert_eq!(kept[0].sounds[0].blob.name, "Wobble");
+        assert_eq!(missed, 2, "b changed since, c never kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
