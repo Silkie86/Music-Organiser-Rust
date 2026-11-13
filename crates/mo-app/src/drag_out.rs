@@ -268,12 +268,13 @@ pub fn preset(carried: Carried, name: &str, plugin: &str, tint: u32) -> Outgoing
 
 /// What a preset file is, by its ending, in a few words: "VST2 preset", "VST3 preset".
 fn preset_words(file_name: &str) -> &'static str {
-    const WORDS: [(&str, &str); 7] = [
+    const WORDS: [(&str, &str); 8] = [
         (".bwpreset", "Bitwig preset"),
         (".fxp", "VST2 preset"),
         (".fxb", "VST2 bank"),
         (".vstpreset", "VST3 preset"),
         (".vst3state", "VST3 settings"),
+        (".clap-preset", "CLAP preset"),
         (".flstate", "FL Studio settings"),
         (".aupreset", "AU preset"),
     ];
@@ -700,7 +701,10 @@ fn unique_names<'a>(names: impl Iterator<Item = &'a str>) -> io::Result<Vec<Stri
     names
         .map(|name| {
             let Some((stem, ending)) = made_ending(name) else {
-                return Err(io::Error::new(ErrorKind::InvalidInput, format!("a drag doesn't make files like {name}")));
+                let ending = mo_formats::paths::extension(name);
+                let what =
+                    if ending.is_empty() { "files without an ending".to_owned() } else { format!("{ending} files") };
+                return Err(io::Error::new(ErrorKind::InvalidInput, format!("a drag doesn't make {what}")));
             };
             let stem = safe_file_name(stem);
             let mut out = format!("{stem}{ending}");
@@ -715,15 +719,16 @@ fn unique_names<'a>(names: impl Iterator<Item = &'a str>) -> io::Result<Vec<Stri
 }
 
 /// The endings of the files a drag makes ([`MadeFile`]): a clip's MIDI file; a Bitwig preset made for the drag; a
-/// song's sound as the plugin preset an export writes (as FL Studio, Studio One and Bitwig keep them). The sweep only
-/// ever clears a file with one of these.
-pub const MADE_ENDINGS: [&str; 10] = [
+/// song's sound as the plugin preset an export writes (as FL Studio, Studio One and Bitwig keep them: Bitwig keeps a
+/// CLAP plugin's as `.clap-preset`). The sweep only ever clears a file with one of these.
+pub const MADE_ENDINGS: [&str; 11] = [
     ".mid",
     ".bwpreset",
     ".fxp",
     ".fxb",
     ".vstpreset",
     ".vst3state",
+    ".clap-preset",
     ".flstate",
     ".aupreset",
     ".preset",
@@ -1323,6 +1328,7 @@ mod tests {
             midi("Serum - Lead.fxp", b"CcnK"),
             midi("Pad.vstpreset", b"VST3"),
             midi("Fruity Limiter.flstate", b"1"),
+            midi("Surge.clap-preset", b"12345"),
         ];
         let paths = write_drag_files(&temp, &files).unwrap();
         let names: Vec<_> = paths.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
@@ -1333,11 +1339,12 @@ mod tests {
                 "serum - lead 2.bwpreset",
                 "Serum - Lead.fxp",
                 "Pad.vstpreset",
-                "Fruity Limiter.flstate"
+                "Fruity Limiter.flstate",
+                "Surge.clap-preset"
             ]
         );
         let done = sweep(&temp, SystemTime::now() + DAY * 2);
-        assert_eq!((done.removed, done.failed), (6, 0));
+        assert_eq!((done.removed, done.failed), (7, 0));
         assert!(!paths.iter().any(|p| p.exists()));
         assert!(!paths[0].parent().unwrap().exists());
     }
@@ -1345,10 +1352,12 @@ mod tests {
     #[test]
     fn a_drag_makes_no_other_kind_of_file() {
         let temp = test_temp("endings");
-        for name in ["notes.txt", "Lead.exe", ".bwpreset", "Lead", ""] {
+        for name in ["notes.txt", "Lead.exe", ".bwpreset", "Lead", "", "Surge.clap"] {
             let e = write_drag_files(&temp, &[midi(name, b"1")]).unwrap_err();
             assert_eq!(e.kind(), ErrorKind::InvalidInput, "{name}");
         }
+        let said = write_drag_files(&temp, &[midi("Lead.exe", b"1")]).unwrap_err().to_string();
+        assert_eq!(said, "a drag doesn't make .exe files");
         // Nothing was made for them, not even a folder.
         assert_eq!(fs::read_dir(&temp).unwrap().count(), 0);
     }
@@ -1386,6 +1395,7 @@ mod tests {
         };
         assert_eq!(preset(fl, "Fruity Limiter", "", 0).cards[0].detail, "FL Studio settings");
         assert_eq!(preset_words("Odd.multipreset"), "Preset");
+        assert_eq!(preset_words("Track - Surge.clap-preset"), "CLAP preset");
     }
 
     #[test]

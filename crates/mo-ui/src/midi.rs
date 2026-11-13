@@ -4377,7 +4377,7 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
     }) else {
         return;
     };
-    let tint = tint(app, colour);
+    let tint = crate::drag::tint(app, colour);
     let under_way = crate::drag::start(
         app,
         crate::drag::Drag {
@@ -4412,14 +4412,8 @@ pub fn card_at_row(app: &AppWindow, row: usize) -> Option<mo_app::drag_out::Payl
         Some((p.part_out(at)?, page::role_colour(p.cat.entry(at)?.role())))
     })?;
     let notes = part.notes(&mut None).ok()?;
-    let out = mo_app::drag_out::from_part(&part.name, &notes, part.bars, tint(app, colour)).ok()?;
+    let out = mo_app::drag_out::from_part(&part.name, &notes, part.bars, crate::drag::tint(app, colour)).ok()?;
     Some(mo_app::drag_out::Payload { files: Vec::new(), cards: out.cards, caption: out.caption, numbered: false })
-}
-
-/// A kind's colour as the drag card takes it: 0xRRGGBB.
-fn tint(app: &AppWindow, colour: i32) -> u32 {
-    let c = app.global::<crate::Theme>().invoke_sound_type(colour);
-    u32::from_be_bytes([0, c.red(), c.green(), c.blue()])
 }
 
 /// Dims the part at `spot` while it's carried, or brings it back.

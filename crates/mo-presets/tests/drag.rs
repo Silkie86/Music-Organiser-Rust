@@ -105,6 +105,19 @@ fn another_plugins_preset_file_gets_a_stand_in_of_its_format() {
 }
 
 #[test]
+fn a_plugin_id_matches_only_to_the_letter() {
+    let dir = folder("id-case");
+    let templates = one(serum_template(&dir));
+    // Another plugin, whose id is Serum's in other capitals: a VST2's id is four bytes, so it's another plugin.
+    let path = dir.join("Other.fxp");
+    std::fs::write(&path, fxp::wrap_chunk(&[1, 2], "Other", i32::from_be_bytes(*b"xfsx"))).unwrap();
+    let c = drag::from_file(&path, "xfsx", Some(&templates)).unwrap();
+    let got = send::inspect_doc(&bitwig::decode(made(&c).1.to_vec()).unwrap()).unwrap();
+    // Serum's template stands in and is made the other plugin's: never Serum loaded with the other one's settings.
+    assert_eq!((got.plugin.as_str(), got.plugin_id.as_str()), ("xfsx", "xfsx"));
+}
+
+#[test]
 fn a_bitwig_preset_or_one_none_can_be_made_of_goes_as_it_is() {
     let dir = folder("as-it-is");
     let t = serum_template(&dir);

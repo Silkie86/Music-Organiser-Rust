@@ -258,6 +258,13 @@ pub fn glow(app: &AppWindow, glow: impl Fn(&AppWindow, bool) + 'static) {
     });
 }
 
+/// A colour from the theme's list of sound colours (by its place there, as a line's dot takes it), as the card that
+/// follows the mouse takes it: 0xRRGGBB. One for every page, so a sound, a part and a preset are tinted alike.
+pub fn tint(app: &AppWindow, colour: i32) -> u32 {
+    let c = app.global::<crate::Theme>().invoke_sound_type(colour);
+    u32::from_be_bytes([0, c.red(), c.green(), c.blue()])
+}
+
 fn tell(why: &str) {
     FEED.with(|f| {
         if let Some(feed) = f.borrow().as_ref() {

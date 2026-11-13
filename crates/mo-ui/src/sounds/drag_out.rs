@@ -15,7 +15,7 @@ use slint::ComponentHandle;
 
 use super::{PAGE, did, kit};
 use crate::drag::{self, Drag, Outcome};
-use crate::{AppWindow, SoundsData, Theme};
+use crate::{AppWindow, SoundsData};
 
 /// Where the sound was picked up, so it's dimmed there while it's carried and glows there once it has landed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,7 +76,7 @@ fn item(app: &AppWindow, at: usize) -> Option<(SoundItem, Option<Unread>)> {
         let p = p.borrow();
         let now = p.list.now(at)?;
         let s = now.sound;
-        let tint = tint(app, list::type_colour(now.sound_type));
+        let tint = drag::tint(app, list::type_colour(now.sound_type));
         let card = super::peaks::with(s, |wave| drag_out::sound_card(s, wave, tint));
         let unread = match (&card, &s.analysis, &p.galaxy.db) {
             (None, Some(_), Some(db)) => Some(Unread { db: db.clone(), id: s.id }),
@@ -174,11 +174,4 @@ fn glow(app: &AppWindow, spot: Spot, on: bool) {
         Spot::Alike(i) => data.set_landed_alike(if on { i } else { -1 }),
         Spot::Picked => data.set_landed_picked(on),
     }
-}
-
-/// A sound type's colour (by its place in the theme's list, as `list::type_colour` gives it), as the card takes it:
-/// 0xRRGGBB.
-fn tint(app: &AppWindow, colour: i32) -> u32 {
-    let c = app.global::<Theme>().invoke_sound_type(colour);
-    u32::from_be_bytes([0, c.red(), c.green(), c.blue()])
 }

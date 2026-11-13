@@ -13,6 +13,7 @@
 //!
 //! Nothing here writes a file: what's made is handed back, and the drag writes it into a folder of its own.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -122,24 +123,9 @@ fn no_template(format: &str) -> String {
     format!("no preset Bitwig saved for a {format} plugin was found to make a Bitwig preset from")
 }
 
-/// A Bitwig preset of `blob`, named as it is: from a template saved for its plugin (by `plugin_id`, the id its
-/// settings give, when there is one, else by its name), else from one saved for another plugin of its format (whose
-/// device becomes its plugin). `None` when there's neither.
+/// A Bitwig preset of `blob`, named as it is, made as an export makes one ([`export::bitwig_bytes`]): from a
+/// template saved for its plugin (by `plugin_id`, the id its settings give, when there is one, else by its name), else
+/// from one saved for another plugin of its format (whose device becomes its plugin). `None` when there's neither.
 fn made(blob: &PresetBlob, plugin_id: &str, templates: &Templates) -> Option<Result<Vec<u8>, String>> {
-    let format = bitwig::state_format(&blob.extension);
-    let own = bitwig::template_by_id(plugin_id, format, templates).or_else(|| bitwig::template_for(blob, templates));
-    let (template, other) =
-        own.map(|t| (t, false)).or_else(|| bitwig::stand_in_for(blob, templates).map(|t| (t, true)))?;
-    let raw = match std::fs::read(&template.path) {
-        Ok(raw) => raw,
-        Err(e) => return Some(Err(format!("its template couldn't be read: {e}"))),
-    };
-    // A template changed since it was found could trip the reader: that's this one's failure.
-    Some(
-        mo_catch::catch(|| match other {
-            false => bitwig::build(&raw, &template.path, blob, &blob.name),
-            true => bitwig::build_for_other(&raw, &template.path, blob, &blob.name),
-        })
-        .unwrap_or_else(|_| Err("its template stopped the reader".to_owned())),
-    )
+    export::bitwig_bytes(blob, plugin_id, templates, &mut HashMap::new())
 }

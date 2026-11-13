@@ -144,7 +144,7 @@ fn write_all(
                 files.push(name);
                 // Send to Bitwig: only beside a plugin preset that was written.
                 let Some(templates) = templates else { continue };
-                let made = bitwig_bytes(p, templates, &mut template_bytes)
+                let made = bitwig_bytes(p, "", templates, &mut template_bytes)
                     .map(|built| built.map_err(io::Error::other).and_then(|b| write_checked(&folder.join(&bw), &b)));
                 match made {
                     Some(Ok(())) => files.push(bw),
@@ -172,14 +172,17 @@ fn write_all(
     Ok(Exported { folder, files, failed, warning: None })
 }
 
-/// A sound's Bitwig preset, made from its plugin's own template, else a stand-in of the same format that becomes its
-/// plugin; `None` when `templates` has neither. Each template's file is read once into `read` (for a whole export).
-fn bitwig_bytes(
+/// A sound's Bitwig preset, made from its plugin's own template (found by `plugin_id`, the id its settings give, when
+/// the caller has one, else by its name), else a stand-in of the same format that becomes its plugin; `None` when
+/// `templates` has neither. Each template's file is read once into `read` (for a whole export).
+pub(crate) fn bitwig_bytes(
     p: &PresetBlob,
+    plugin_id: &str,
     templates: &Templates,
     read: &mut HashMap<PathBuf, Result<Vec<u8>, String>>,
 ) -> Option<Result<Vec<u8>, String>> {
-    let own = bitwig::template_for(p, templates);
+    let own = bitwig::template_by_id(plugin_id, bitwig::state_format(&p.extension), templates)
+        .or_else(|| bitwig::template_for(p, templates));
     let (template, other) =
         own.map(|t| (t, false)).or_else(|| bitwig::stand_in_for(p, templates).map(|t| (t, true)))?;
     let raw = read
@@ -203,7 +206,7 @@ fn bitwig_bytes(
 /// `.bwpreset` would have in an export, without ".bwpreset", or `None` when `templates` has no template for its plugin.
 pub fn bitwig_preset_from_save(save: &str, key: &str, templates: &Templates, to: &Path) -> io::Result<Option<String>> {
     let (p, name) = sound_in_save(save, key)?;
-    let Some(built) = bitwig_bytes(&p, templates, &mut HashMap::new()) else { return Ok(None) };
+    let Some(built) = bitwig_bytes(&p, "", templates, &mut HashMap::new()) else { return Ok(None) };
     let bytes = built.map_err(io::Error::other)?;
     // A new file of the caller's own, so nothing is written over: written, then read back and checked.
     let written = std::fs::write(to, &bytes).and_then(|()| match std::fs::read(to)? == bytes {

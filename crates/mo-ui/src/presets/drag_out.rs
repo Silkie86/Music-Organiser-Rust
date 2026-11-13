@@ -10,11 +10,13 @@
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use mo_app::drag_out::{self, Payload};
-use mo_app::log;
 use mo_app::presets::{self as logic, Item};
+use mo_app::{background, log};
 use mo_presets::bitwig::{self as bw, Templates};
 use mo_presets::curves::{self, Curve};
 use mo_presets::drag::{self as carried, Carried, File};
@@ -23,7 +25,7 @@ use slint::ComponentHandle;
 
 use super::{PAGE, export_setup, templates_now, without_template};
 use crate::drag::{self, Drag, Outcome};
-use crate::{AppWindow, PresetsData, Theme};
+use crate::{AppWindow, PresetsData};
 
 /// Where the preset or curve was picked up, so it's dimmed there while it's carried and glows there once it has landed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,14 +79,9 @@ pub(super) fn wire(app: &AppWindow) {
             carry_curve(&app, curve, Spot::CurvePicked);
         }
     });
+    // One for a sound's line or card and a curve's: only one drag goes at a time.
     let weak = app.as_weak();
     data.on_drag_let_go(move || {
-        if let Some(app) = weak.upgrade() {
-            drag::let_go(&app);
-        }
-    });
-    let weak = app.as_weak();
-    data.on_curve_drag_let_go(move || {
         if let Some(app) = weak.upgrade() {
             drag::let_go(&app);
         }
@@ -98,7 +95,7 @@ fn item(app: &AppWindow, at: usize) -> Option<(Item, u32)> {
         let p = p.borrow();
         p.items.get(at).map(|i| i.as_fixed(&p.fixed_now).into_owned())
     })?;
-    let tint = tint(app, logic::line(&item).colour);
+    let tint = drag::tint(app, logic::line(&item).colour);
     Some((item, tint))
 }
 
@@ -137,7 +134,10 @@ fn carry_preset(app: &AppWindow, at: usize, spot: Spot) {
                 if let Some(why) = &carried.why_not {
                     log::info(
                         "Presets",
-                        &format!("{} went out as it is, not as a Bitwig preset: {why}", item.row.name),
+                        &format!(
+                            "{} went out as its plugin's own preset, not as a Bitwig preset: {why}",
+                            item.row.name
+                        ),
                     );
                 }
                 drag_out::preset(carried, &item.row.name, &item.row.plugin, tint)
@@ -157,24 +157,78 @@ fn carry_preset(app: &AppWindow, at: usize, spot: Spot) {
     }
 }
 
-/// What dragging `item` carries. The Bitwig presets to make one from are the page's own, looked for again when they
-/// don't have one for its plugin's format, so "save a preset in Bitwig, then try again" works without a restart, as
-/// for an export (H-2). An error is what to tell the user instead.
-fn carry_of(item: &Item, templates: Option<Arc<Templates>>, bitwig_folders: &[PathBuf]) -> Result<Carried, String> {
+/// What dragging `item` carries, made from the Bitwig presets the page has (`have`). A drag never waits long on a
+/// look through the preset folders, as the mouse is held meanwhile: when the page has none of its plugin's format, the
+/// folders are looked through again behind it ([`look_again`]), and what that finds is used when it's quick, or by
+/// the next drag. So "save a preset in Bitwig, then drag it again" works without a restart, as for an export (H-2).
+/// An error is what to tell the user instead.
+fn carry_of(item: &Item, have: Option<Arc<Templates>>, bitwig_folders: &[PathBuf]) -> Result<Carried, String> {
     // Only a VST2 or VST3 preset can be made a Bitwig one: for anything else there's nothing to look for.
-    let templates = (!bw::state_format(&item.row.extension).is_empty())
-        .then(|| templates_now(templates, bitwig_folders, |t| without_template(&[item], t).is_empty()));
-    let name = &item.row.name;
-    match &item.row.source {
-        Source::File { path } => {
-            carried::from_file(Path::new(path), &item.row.plugin, templates.as_deref()).map_err(|e| match e.kind() {
-                ErrorKind::NotFound => format!("{name} isn't on this computer any more, so there's nothing to drag."),
-                _ => format!("{name} couldn't be read to drag it: {e}."),
+    let can_be_bitwig = !bw::state_format(&item.row.extension).is_empty();
+    // The page reads them once its songs are read: a drag meanwhile goes without, rather than read them a second time.
+    let reading = can_be_bitwig && have.is_none();
+    let mut looking = false;
+    let templates = match have {
+        Some(t) if can_be_bitwig && !without_template(&[item], &t).is_empty() => {
+            look_again(Arc::clone(&t), bitwig_folders.to_vec()).unwrap_or_else(|| {
+                looking = true;
+                t
             })
         }
-        Source::Song { save, key } => carried::from_save(save, key, templates.as_deref())
-            .map_err(|e| format!("{name} couldn't be read from its song again: {e}")),
+        Some(t) => t,
+        None => Arc::default(),
+    };
+    let name = &item.row.name;
+    let mut carried = match &item.row.source {
+        Source::File { path } => {
+            carried::from_file(Path::new(path), &item.row.plugin, Some(&*templates)).map_err(|e| match e.kind() {
+                ErrorKind::NotFound => format!("{name} isn't on this computer any more, so there's nothing to drag."),
+                _ => format!("{name} couldn't be read to drag it: {e}."),
+            })?
+        }
+        Source::Song { save, key } => carried::from_save(save, key, Some(&*templates))
+            .map_err(|e| format!("{name} couldn't be read from its song again: {e}"))?,
+    };
+    if let Some(why) = carried.why_not.as_mut() {
+        if reading {
+            *why =
+                "the presets Bitwig saved, to make one from, are still being read (drag it again in a moment)".into();
+        } else if looking {
+            why.push_str(", so the preset folders are being looked through again for the next drag");
+        }
     }
+    Ok(carried)
+}
+
+/// The longest a drag waits for the look through the preset folders it started ([`look_again`]).
+const LOOK_WAIT: Duration = Duration::from_millis(400);
+
+/// Looks through the preset folders again for the Bitwig presets to make others from, on a thread of its own, and
+/// waits up to [`LOOK_WAIT`] for it: what it found when it was that quick, else `None` (the page keeps what it finds
+/// when it's done, for the next drag). One look at a time: `None` at once while one is still going.
+fn look_again(have: Arc<Templates>, bitwig_folders: Vec<PathBuf>) -> Option<Arc<Templates>> {
+    static LOOKING: AtomicBool = AtomicBool::new(false);
+    /// Lets the next look start once this one is over, however it ended.
+    struct Over;
+    impl Drop for Over {
+        fn drop(&mut self) {
+            LOOKING.store(false, Ordering::Release);
+        }
+    }
+    if LOOKING.swap(true, Ordering::AcqRel) {
+        return None;
+    }
+    let over = Over;
+    let (found, heard) = mpsc::sync_channel(1);
+    let started = background::spawn("Preset look", move || {
+        let _over = over;
+        let _ = found.send(templates_now(Some(have), &bitwig_folders, |_| false));
+    });
+    if let Err(e) = started {
+        log::warning("Presets", &format!("Couldn't look through the preset folders again: {e}"));
+        return None;
+    }
+    heard.recv_timeout(LOOK_WAIT).ok()
 }
 
 /// Drags `curve` out of the app as its curve file (made in the app's Curves folder on the drag's own thread), onto an
@@ -218,10 +272,4 @@ fn glow(app: &AppWindow, spot: Spot, on: bool) {
         Spot::CurveRow(i) => data.set_curve_landed_row(if on { i } else { -1 }),
         Spot::CurvePicked => data.set_curve_landed(on),
     }
-}
-
-/// A part's colour (by its place in the theme's list, as the line's dot takes it), as the card takes it: 0xRRGGBB.
-fn tint(app: &AppWindow, colour: i32) -> u32 {
-    let c = app.global::<Theme>().invoke_sound_type(colour);
-    u32::from_be_bytes([0, c.red(), c.green(), c.blue()])
 }
