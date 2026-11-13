@@ -12,12 +12,16 @@
 //! Only one runs at a time: the port is the proof. A second helper finds it taken and stops at once
 //! ([`Start::AlreadyRunning`]).
 //!
-//! Everything here is quiet: the threads run at low priority, and while nothing asks and Bitwig sends nothing, none of
-//! them wakes.
+//! Everything here is quiet: the threads run at low priority, and while nothing asks and Bitwig sends nothing, they
+//! only wake every few seconds to look whether it has Bitwig (for its log, and the icon on Windows).
+//!
+//! Only this computer can reach the port, but a web page in a browser can still send it lines: so a connection ends
+//! at its first line that isn't a request (an HTTP request's first line never is), and only a few are answered at
+//! once.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -36,6 +40,8 @@ pub const FLAG: &str = "--helper";
 pub const ASK_TIMEOUT: Duration = Duration::from_secs(2);
 /// The longest request line the helper reads: anything longer isn't one of its requests.
 const MOST_LINE: u64 = 64 * 1024;
+/// The most connections answered at once; more are closed at once.
+pub const MOST_CONNECTIONS: usize = 16;
 
 /// What `{"ask":"hello"}` answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +70,7 @@ pub struct Helper {
     bitwig_port: u16,
     watch: Mutex<Option<Watch>>,
     paused: AtomicBool,
+    connections: AtomicUsize,
     quitting: Mutex<bool>,
     quit_now: Condvar,
 }
@@ -83,6 +90,7 @@ impl Helper {
             bitwig_port,
             watch: Mutex::new(Some(Watch::start(bitwig_port))),
             paused: AtomicBool::new(false),
+            connections: AtomicUsize::new(0),
             quitting: Mutex::new(false),
             quit_now: Condvar::new(),
         });
@@ -119,6 +127,10 @@ impl Helper {
     /// Stops watching Bitwig (`true`: its connection closes at once) or starts again (`false`).
     pub fn pause(&self, on: bool) {
         let mut watch = self.watch.lock().unwrap_or_else(PoisonError::into_inner);
+        // A helper on its way out never watches again.
+        if self.quitting() {
+            return;
+        }
         if on == self.paused.swap(on, Ordering::Relaxed) {
             return;
         }
@@ -164,9 +176,19 @@ impl Helper {
                 break;
             }
             let Ok(stream) = stream else { continue };
-            let helper = Arc::clone(&self);
             // One thread a connection: only the app, the plugins and the launcher connect, a few at a time.
-            if crate::background::spawn("Helper: one connection", move || helper.answer(stream)).is_err() {
+            if self.connections.fetch_add(1, Ordering::Relaxed) >= MOST_CONNECTIONS {
+                self.connections.fetch_sub(1, Ordering::Relaxed);
+                let _ = stream.shutdown(Shutdown::Both);
+                continue;
+            }
+            let helper = Arc::clone(&self);
+            let answering = crate::background::spawn("Helper: one connection", move || {
+                helper.answer(stream);
+                helper.connections.fetch_sub(1, Ordering::Relaxed);
+            });
+            if answering.is_err() {
+                self.connections.fetch_sub(1, Ordering::Relaxed);
                 log::warning("Helper", "Couldn't start a thread to answer a connection");
             }
         }
@@ -188,9 +210,13 @@ impl Helper {
                 Ok(0) | Err(_) => return,
                 Ok(_) => {}
             }
-            let (answer, quit) = self.reply(line.trim());
+            let (answer, then) = self.reply(line.trim());
             let sent = writeln!(out, "{answer}").and_then(|()| out.flush());
-            if quit {
+            if then == Then::Close {
+                let _ = out.shutdown(Shutdown::Both);
+                return;
+            }
+            if then == Then::Quit {
                 log::info("Helper", "Asked to quit");
                 let _ = out.shutdown(Shutdown::Both);
                 self.quit();
@@ -202,25 +228,37 @@ impl Helper {
         }
     }
 
-    /// The answer to one request line, and whether the helper ends after sending it.
-    fn reply(&self, line: &str) -> (Value, bool) {
-        let Ok(request) = serde_json::from_str::<Value>(line) else {
-            return (json!({ "error": "not a request (one JSON object a line)" }), false);
+    /// The answer to one request line, and what happens after it's sent.
+    fn reply(&self, line: &str) -> (Value, Then) {
+        let request = serde_json::from_str::<Value>(line).ok().filter(Value::is_object);
+        let Some(request) = request else {
+            return (json!({ "error": "not a request (one JSON object a line)" }), Then::Close);
         };
         match request.get("ask").and_then(Value::as_str) {
-            Some("hello") => (serde_json::to_value(self.hello()).unwrap_or(Value::Null), false),
+            Some("hello") => (serde_json::to_value(self.hello()).unwrap_or(Value::Null), Then::More),
             Some("pause") => match request.get("on").and_then(Value::as_bool) {
                 Some(on) => {
                     self.pause(on);
-                    (json!({ "paused": on }), false)
+                    (json!({ "paused": self.paused() }), Then::More)
                 }
-                None => (json!({ "error": "pause needs on: true or false" }), false),
+                None => (json!({ "error": "pause needs on: true or false" }), Then::More),
             },
-            Some("quit") => (json!({ "quitting": true }), true),
-            Some(other) => (json!({ "error": format!("the helper doesn't know \"{other}\"") }), false),
-            None => (json!({ "error": "a request needs an ask" }), false),
+            Some("quit") => (json!({ "quitting": true }), Then::Quit),
+            Some(other) => (json!({ "error": format!("the helper doesn't know \"{other}\"") }), Then::More),
+            None => (json!({ "error": "a request needs an ask" }), Then::More),
         }
     }
+}
+
+/// What happens to a connection after an answer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Then {
+    /// It may ask more.
+    More,
+    /// It ends: what it sent wasn't a request.
+    Close,
+    /// The helper ends.
+    Quit,
 }
 
 /// Whether the helper has Bitwig, in words for the tray icon and the log ("Bitwig connected").
@@ -332,17 +370,29 @@ mod tests {
     #[test]
     fn odd_requests_get_an_error_not_a_hang() {
         let helper = started(0);
-        for request in [json!({ "ask": "dance" }), json!({ "nothing": 1 }), json!([1, 2])] {
+        for request in [json!({ "ask": "dance" }), json!({ "nothing": 1 }), json!([1, 2]), json!("quit")] {
             let answer = ask(helper.port(), &request).unwrap();
             assert!(answer.get("error").is_some(), "{request}: {answer}");
         }
-        // Not JSON at all.
+        // A web page's request: the first line isn't one, so the connection ends there and the quit in its body is
+        // never read.
         let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, helper.port())).unwrap();
-        writeln!(stream, "hello there").unwrap();
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).unwrap();
-        assert!(line.contains("error"));
-        assert!(!helper.wait(Some(Duration::from_millis(10))));
+        write!(stream, "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n{{\"ask\":\"quit\"}}\n").unwrap();
+        let mut answer = String::new();
+        let _ = BufReader::new(stream).read_to_string(&mut answer);
+        assert_eq!(answer.lines().count(), 1, "{answer}");
+        assert!(answer.contains("error"));
+        assert!(!helper.wait(Some(Duration::from_millis(200))), "the body's quit was read");
         helper.quit();
+    }
+
+    #[test]
+    fn a_quitting_helper_never_watches_again() {
+        let helper = started(0);
+        helper.pause(true);
+        helper.quit();
+        helper.pause(false);
+        assert!(helper.paused());
+        assert_eq!(helper.bitwig(), None);
     }
 }

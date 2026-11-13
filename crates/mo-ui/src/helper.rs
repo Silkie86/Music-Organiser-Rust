@@ -26,7 +26,16 @@ pub fn run() {
     let started = match Helper::start(helper::PORT, mo_dawlink::bitwig::PORT) {
         Ok(Start::Started(h)) => h,
         // Before its log starts, so a helper started twice (at login and by the app) leaves no empty logs.
-        Ok(Start::AlreadyRunning) => return,
+        Ok(Start::AlreadyRunning) if helper::hello(helper::PORT).is_some() => return,
+        Ok(Start::AlreadyRunning) => {
+            log::start_helper();
+            log::error(
+                "Helper",
+                &format!("Port {} is taken by something that doesn't answer as the helper: not starting", helper::PORT),
+            );
+            close_log();
+            return;
+        }
         Err(e) => {
             log::start_helper();
             log::error("Helper", &format!("Couldn't start: {e}"));

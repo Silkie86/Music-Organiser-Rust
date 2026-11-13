@@ -7,6 +7,11 @@ pub fn version() -> String {
 
 /// The session log's first lines, like the C# app's.
 pub fn log_header(start: chrono::DateTime<chrono::Local>) -> String {
+    log_header_of("Music Organiser", start)
+}
+
+/// [`log_header`] for a run of `what` ("Music Organiser", or "Music Organiser helper").
+pub fn log_header_of(what: &str, start: chrono::DateTime<chrono::Local>) -> String {
     let build = if cfg!(debug_assertions) { "Debug" } else { "Release" };
     let watched = if std::env::var_os("MO_WATCH").is_some() {
         "the launcher (rebuilds and restarts on every push)"
@@ -18,7 +23,7 @@ pub fn log_header(start: chrono::DateTime<chrono::Local>) -> String {
     let folder =
         std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.display().to_string())).unwrap_or_default();
     format!(
-        "Music Organiser started {}\n  Version:    {}\n  Build:      {build}\n  Watched by: {watched}\n  System:     {} {}\n  Folder:     {folder}",
+        "{what} started {}\n  Version:    {}\n  Build:      {build}\n  Watched by: {watched}\n  System:     {} {}\n  Folder:     {folder}",
         start.format("%Y-%m-%d %H:%M:%S %:z"),
         version(),
         std::env::consts::OS,

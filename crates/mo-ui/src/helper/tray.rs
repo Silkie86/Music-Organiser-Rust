@@ -64,7 +64,8 @@ pub fn run(helper: &Arc<Helper>) {
     let mut msg = MSG::default();
     // SAFETY: the usual message loop on the thread that made the window; `msg` lives across the calls.
     unsafe {
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+        // 0 is the end (WM_QUIT) and -1 an error: either ends the loop, rather than spin on an error.
+        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -114,16 +115,18 @@ fn show(helper: &Arc<Helper>) -> windows::core::Result<()> {
 /// Puts the icon's colour and words right; `again` puts the icon in afresh (at the start, and when Explorer came
 /// back).
 fn refresh(again: bool) {
+    let ending = TRAY.with(|t| t.borrow().as_ref().filter(|t| t.helper.quitting()).map(|t| t.window));
+    if let Some(window) = ending {
+        // Outside the borrow: destroying the window calls window_proc (WM_DESTROY) straight away, which borrows too.
+        // SAFETY: the window is this thread's own.
+        unsafe {
+            let _ = DestroyWindow(window);
+        }
+        return;
+    }
     TRAY.with(|t| {
         let mut t = t.borrow_mut();
         let Some(tray) = t.as_mut() else { return };
-        if tray.helper.quitting() {
-            // SAFETY: the window is this thread's own.
-            unsafe {
-                let _ = DestroyWindow(tray.window);
-            }
-            return;
-        }
         let state = tray.helper.bitwig();
         let colour = match &state {
             None => AMBER,
@@ -231,10 +234,11 @@ fn menu(window: HWND) {
     let chosen = unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let pause_flags = if helper.paused() { MF_STRING | MF_CHECKED } else { MF_STRING };
-        let _ = AppendMenuW(menu, MF_STRING, OPEN, w!("Open Music Organiser"));
-        let _ = AppendMenuW(menu, pause_flags, PAUSE, w!("Pause watching Bitwig"));
+        // Windows' own menu by the clock, not one of the app's: its keys are the underlined letters (O, P, Q).
+        let _ = AppendMenuW(menu, MF_STRING, OPEN, w!("&Open Music Organiser"));
+        let _ = AppendMenuW(menu, pause_flags, PAUSE, w!("&Pause watching Bitwig"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, QUIT, w!("Quit the helper"));
+        let _ = AppendMenuW(menu, MF_STRING, QUIT, w!("&Quit the helper"));
         let mut at = POINT::default();
         let _ = GetCursorPos(&mut at);
         // Without this the menu stays up when the mouse clicks elsewhere.
@@ -260,9 +264,13 @@ fn menu(window: HWND) {
     }
 }
 
-/// Starts the full app: this same program, without the helper's flag.
+/// Starts the full app: this same program, without the helper's flag, at normal priority (it would take on the
+/// helper's below-normal otherwise).
 fn open_app() {
-    let opened = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn());
+    use std::os::windows::process::CommandExt;
+    const NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
+    let opened = std::env::current_exe()
+        .and_then(|exe| std::process::Command::new(exe).creation_flags(NORMAL_PRIORITY_CLASS).spawn());
     if let Err(e) = opened {
         log::warning("Helper", &format!("Couldn't open Music Organiser: {e}"));
     }
