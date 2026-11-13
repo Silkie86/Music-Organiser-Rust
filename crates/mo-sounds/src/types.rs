@@ -115,6 +115,13 @@ pub fn from_path(path: &str) -> Option<&'static str> {
     })
 }
 
+/// Every type whose clues `text` has (a track's name: "Kick & CH" is Kick and Closed hat), in the order they're
+/// tried; none for a text with no clue in it. Unlike [`from_path`], not just the first.
+pub fn all_named(text: &str) -> Vec<&'static str> {
+    let text = normalise(text);
+    PATTERNS.iter().filter(|(_, p)| p.is_match(&text)).map(|(t, _)| *t).collect()
+}
+
 /// `Some(true)` when the path says it's a loop, `Some(false)` when it says one-shot, else `None`.
 pub fn loop_from_path(path: &str) -> Option<bool> {
     let t = normalise(path);
@@ -162,6 +169,15 @@ fn normalise(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_type_a_text_names() {
+        assert_eq!(all_named("Kick & CH"), ["Kick", "Closed hat"]);
+        assert_eq!(all_named("OHH"), ["Open hat"]);
+        assert_eq!(all_named("HiHats"), ["Hi-hat"]);
+        assert_eq!(all_named("BD_02"), ["Kick"]);
+        assert!(all_named("Audio 3").is_empty());
+    }
 
     #[test]
     fn every_pattern_builds() {
