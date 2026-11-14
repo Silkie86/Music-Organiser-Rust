@@ -922,6 +922,90 @@ export component ToggleChip inherits Rectangle {
     }
 }
 
+// A speed to play at, as minus, "120 BPM", plus: a pill the height of a ToggleChip, to sit beside one (the MIDI card's
+// and the curve editor's Metronome). `stepped(-1)` or `stepped(1)` asks for one step slower or faster; the page does
+// the sum. `changed` says the speed isn't the part's (or the curve's) own: its words take the accent, and a click on
+// them asks to go back to it (`reset`).
+export component TempoStepper inherits Rectangle {
+    in property <string> bpm-text;
+    in property <bool> enabled: true;
+    in property <bool> changed;
+    callback stepped(int);
+    callback reset();
+    height: 28px;
+    width: minus.width + value.width + plus.width;
+    border-radius: 14px;
+    border-width: 2px;
+    border-color: root.changed && root.enabled ? Theme.accent : Theme.edge;
+    background: Theme.surface-raised;
+    animate border-color { duration: Motion.tap; }
+    minus := Rectangle {
+        x: 0;
+        width: 28px;
+        border-top-left-radius: 14px;
+        border-bottom-left-radius: 14px;
+        background: minus-touch.has-hover && root.enabled ? Theme.hover : transparent;
+        Text {
+            text: "−";
+            color: root.enabled ? Theme.text : Theme.faint;
+            font-size: Type.body;
+            font-weight: 600;
+        }
+        minus-touch := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.stepped(-1); }
+        }
+        Tip {
+            text: "Slower";
+            hovering: minus-touch.has-hover && !minus-touch.pressed;
+            at-y: root.height + Space.xs;
+        }
+    }
+    value := Rectangle {
+        x: minus.width;
+        width: max(64px, words.preferred-width + 12px);
+        background: value-touch.has-hover && root.changed && root.enabled ? Theme.hover : transparent;
+        words := Text {
+            text: root.bpm-text;
+            color: !root.enabled ? Theme.faint : root.changed ? Theme.text : Theme.muted;
+            font-size: Type.meta;
+            font-weight: 500;
+            font-family: Theme.number-font;
+        }
+        value-touch := TouchArea {
+            enabled: root.enabled && root.changed;
+            clicked => { root.reset(); }
+        }
+        Tip {
+            text: root.changed ? "Back to its own tempo" : "The tempo it plays at";
+            hovering: value-touch.has-hover && !value-touch.pressed;
+            at-y: root.height + Space.xs;
+        }
+    }
+    plus := Rectangle {
+        x: minus.width + value.width;
+        width: 28px;
+        border-top-right-radius: 14px;
+        border-bottom-right-radius: 14px;
+        background: plus-touch.has-hover && root.enabled ? Theme.hover : transparent;
+        Text {
+            text: "+";
+            color: root.enabled ? Theme.text : Theme.faint;
+            font-size: Type.body;
+            font-weight: 600;
+        }
+        plus-touch := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.stepped(1); }
+        }
+        Tip {
+            text: "Faster";
+            hovering: plus-touch.has-hover && !plus-touch.pressed;
+            at-y: root.height + Space.xs;
+        }
+    }
+}
+
 // One line of a drop-down or right-click menu, with its key at the right (rule 15: every menu line shows its key). In
 // a menu that picks (`tickable`), each line keeps room for a tick, and the one that's picked (`on`) is ticked, in bold,
 // on a tint of the accent, so it's easy to see (Solomon's note, 4 Nov 2026).
