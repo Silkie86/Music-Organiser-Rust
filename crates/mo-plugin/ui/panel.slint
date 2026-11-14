@@ -452,6 +452,10 @@ export component Panel inherits Window {
     callback curve-open(int);
     callback curve-back();
     callback curve-edit-drag-out();
+    // "Swing as the song": the song's Groove in Bitwig given to the curve. The button's tip: what it would do, or why
+    // it can't (a click then says the same below: a greyed button would show no tip).
+    in property <string> curve-groove-says;
+    callback curve-groove();
 
     title: "Music Organiser";
     preferred-width: 760px;
@@ -1565,6 +1569,12 @@ export component Panel inherits Window {
                 }
                 Rectangle {
                     horizontal-stretch: 1;
+                }
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Swing as the song";
+                    tip: root.curve-groove-says;
+                    clicked => { root.curve-groove(); }
                 }
             }
             HorizontalLayout {

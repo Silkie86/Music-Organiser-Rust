@@ -14,6 +14,7 @@ pub mod bitwig_favourites;
 pub mod chord_check;
 pub mod curve_card;
 pub mod curve_edit;
+pub mod curve_groove;
 pub mod curve_groups;
 pub mod curve_hear;
 pub mod curve_hold;

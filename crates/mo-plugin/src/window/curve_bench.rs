@@ -9,11 +9,13 @@ use crate::threads::{background, lock};
 use crate::{ClipTile, CurveEditorData, EditorDot, MenuItem, Panel, RulerMark, Theme};
 use mo_app::background::Newest;
 use mo_app::curve_card::{self, Card, Heard};
+use mo_app::curve_groove::{self, Swing};
 use mo_app::curve_hear::{self, Hear};
 use mo_app::curve_picture::{self, Colours};
 use mo_app::curve_touch::Keys;
 use mo_app::presets::Offer;
 use mo_app::shapes::{self, Colour};
+use mo_dawlink::bitwig::Watch;
 use mo_presets::curves::Curve;
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
@@ -90,6 +92,11 @@ pub(super) struct Bench {
     /// The tone playing, as the player numbers it, and what it was made from.
     tone: Cell<Option<u64>>,
     heard: RefCell<Option<Heard>>,
+    /// The song as Bitwig shows it, watched only while the editor is in sight (for "Swing as the song"); how many
+    /// changes of it the button has taken in; and the swing it would give.
+    watch: RefCell<Option<Watch>>,
+    watched: Cell<Option<u64>>,
+    groove: Cell<Option<Swing>>,
 }
 
 impl Bench {
@@ -105,6 +112,9 @@ impl Bench {
             making: Cell::new(None),
             tone: Cell::new(None),
             heard: RefCell::new(None),
+            watch: RefCell::new(None),
+            watched: Cell::new(None),
+            groove: Cell::new(None),
         })
     }
 
@@ -178,6 +188,25 @@ impl Bench {
                 me.stop(&panel);
             } else {
                 me.play(&panel, false);
+            }
+        });
+        let (me, weak) = (Rc::clone(self), panel.as_weak());
+        panel.on_curve_groove(move || {
+            let Some(panel) = weak.upgrade() else { return };
+            let Some(swing) = me.groove.get() else {
+                // No swing to give: the click says why, as the tip does.
+                panel.set_curve_said(panel.get_curve_groove_says());
+                return;
+            };
+            let done = me.card.borrow_mut().swing_by(swing.step, swing.amount);
+            {
+                me.redraw(&panel);
+                me.show(&panel, true);
+                panel.set_curve_said(if done {
+                    SharedString::new()
+                } else {
+                    "That swing changes nothing here: the curve has no points on the lines it moves.".into()
+                });
             }
         });
         let (me, weak) = (Rc::clone(self), panel.as_weak());
@@ -342,9 +371,33 @@ impl Bench {
         data.set_playhead(-1.0);
     }
 
+    /// Watches the song in Bitwig while the editor is in sight (`wanted`), for the swing "Swing as the song" would
+    /// give: the button follows the song's Groove as it changes. Out of sight, nothing is watched.
+    fn watch_song(&self, panel: &Panel, wanted: bool) {
+        let mut watch = self.watch.borrow_mut();
+        if !wanted {
+            if watch.take().is_some() {
+                self.watched.set(None);
+            }
+            return;
+        }
+        let watch = watch.get_or_insert_with(|| Watch::start(mo_dawlink::bitwig::PORT));
+        let version = watch.version();
+        if self.watched.replace(Some(version)) == Some(version) {
+            return;
+        }
+        let (swing, says) = match curve_groove::of(&watch.now()) {
+            Ok((swing, says)) => (Some(swing), says),
+            Err(why) => (None, why),
+        };
+        self.groove.set(swing);
+        panel.set_curve_groove_says(says.into());
+    }
+
     /// Takes in a picture worked out, and moves the play line. A curve edited while its tone plays has the tone made
     /// again once the mouse lets go (Solomon, 14 Nov 2026: what's heard follows the edits).
-    pub(super) fn tick(&self, panel: &Panel) {
+    pub(super) fn tick(&self, panel: &Panel, in_sight: bool) {
+        self.watch_song(panel, in_sight && panel.get_curve_editing());
         let data = panel.global::<CurveEditorData>();
         if let Some(drawn) = lock(&self.drawn).take()
             && drawn.shown == self.card.borrow().shown()
