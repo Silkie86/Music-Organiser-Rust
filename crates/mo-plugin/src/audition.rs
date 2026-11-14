@@ -249,6 +249,21 @@ impl Voice {
         !(self.looping && len > 0) && self.at >= len
     }
 
+    /// Carries on from where `old` was, at the same share of its length (an edited curve's tone, swapped in as it
+    /// plays, goes on from there instead of starting again), still in step with the DAW and waiting as it was.
+    fn take_place_of(&mut self, old: &Voice) {
+        let (len, old_len) = (self.len(), old.len());
+        if len == 0 || old_len == 0 {
+            return;
+        }
+        let share = old.at.min(old_len) as f64 / old_len as f64;
+        self.at = ((share * len as f64) as usize).min(len - 1);
+        self.wait = old.wait;
+        self.in_step = old.in_step;
+        self.fresh = old.fresh;
+        self.timed = old.timed;
+    }
+
     /// At its end: a loop starts again.
     fn wrap(&mut self) {
         if self.looping && self.at >= self.len() {
@@ -297,6 +312,9 @@ pub struct Song {
 /// What the panel asks the audio thread to do.
 pub enum Ask {
     Play(Box<Voice>),
+    /// Plays this in place of the sound playing, from the same place in it ([`Player::swap_made`]); with nothing
+    /// playing, as [`Ask::Play`].
+    Swap(Box<Voice>),
     Stop,
     /// The Loop switch, turned on or off.
     Loop(bool),
@@ -369,6 +387,14 @@ impl Playing {
         while self.waiting.is_none() && self.done.slots() >= 2 {
             match self.asks.pop() {
                 Ok(Ask::Play(voice)) => {
+                    self.counts.started.fetch_add(1, Ordering::AcqRel);
+                    self.let_cue_go();
+                    self.retire(Some(voice));
+                }
+                Ok(Ask::Swap(mut voice)) => {
+                    if let Some(old) = &self.now {
+                        voice.take_place_of(old);
+                    }
                     self.counts.started.fetch_add(1, Ordering::AcqRel);
                     self.let_cue_go();
                     self.retire(Some(voice));
@@ -911,19 +937,35 @@ impl Player {
     /// slow one holds up no other pick, and plays only if it's still the newest pick once it's made; `told` hears how
     /// it went, unless a newer pick came first.
     pub fn play_made(self: &Arc<Self>, name: String, make: Made, told: impl FnOnce(Played) + Send + 'static) {
+        self.make_and_play(name, make, false, told);
+    }
+
+    /// [`Player::play_made`], played in place of what plays from the same place in it (as the app's
+    /// `Player::swap_looped`): an edit to a curve while Hear plays goes on where the tone was, not from its start.
+    pub fn swap_made(self: &Arc<Self>, name: String, make: Made, told: impl FnOnce(Played) + Send + 'static) {
+        self.make_and_play(name, make, true, told);
+    }
+
+    fn make_and_play(
+        self: &Arc<Self>,
+        name: String,
+        make: Made,
+        swap: bool,
+        told: impl FnOnce(Played) + Send + 'static,
+    ) {
         let number = self.picks.fetch_add(1, Ordering::AcqRel) + 1;
         // A file still to be read is no longer the newest pick.
         lock(&self.next).take();
         let me = Arc::clone(self);
         crate::threads::background("mo-plugin-make", move || {
-            if let Some(played) = me.made(&name, make, number) {
+            if let Some(played) = me.made(&name, make, number, swap) {
                 told(played);
             }
         });
     }
 
     /// Makes a sound to loop and plays it, if its pick is still the newest when it's made (none when it isn't).
-    fn made(&self, name: &str, make: Made, number: u64) -> Option<Played> {
+    fn made(&self, name: &str, make: Made, number: u64, swap: bool) -> Option<Played> {
         let started = std::time::Instant::now();
         let made = make();
         if self.picks.load(Ordering::Acquire) != number {
@@ -941,7 +983,7 @@ impl Player {
                         Voice::notes_only(frames.max(1), &notes, rate)
                     }
                 };
-                self.hand_over(Box::new(voice.always_looped().in_beats(beats)), name.into())
+                self.hand_over_as(Box::new(voice.always_looped().in_beats(beats)), name.into(), swap)
             }
         };
         match &played {
@@ -998,11 +1040,16 @@ impl Player {
         }
     }
 
-    fn hand_over(&self, mut voice: Box<Voice>, name: String) -> Played {
+    fn hand_over(&self, voice: Box<Voice>, name: String) -> Played {
+        self.hand_over_as(voice, name, false)
+    }
+
+    /// Hands `voice` to the audio thread to play, in place of what plays from its place when `swap`.
+    fn hand_over_as(&self, mut voice: Box<Voice>, name: String, swap: bool) -> Played {
         // With In time off, it isn't held for the next beat.
         voice.fresh = self.in_time();
         voice.timed = voice.fresh;
-        match self.ask(Ask::Play(voice)) {
+        match self.ask(if swap { Ask::Swap(voice) } else { Ask::Play(voice) }) {
             Ok(()) => Played::Playing(name, self.handed.fetch_add(1, Ordering::AcqRel) + 1),
             Err(why) => Played::Not(why),
         }
@@ -1442,6 +1489,33 @@ mod tests {
         playing.fill(&mut l, &mut r);
         assert_eq!(l, vec![0.0; 5]);
         assert!(!player.still_playing(n));
+    }
+
+    #[test]
+    fn a_swapped_loop_goes_on_from_where_the_last_one_was() {
+        // A curve edited while Hear plays: the new tone takes over at the same place, not from its start.
+        let player = Arc::new(Player::default());
+        let mut playing = player.start(4);
+        player.hand_over(Box::new(Voice::new(&[vec![0.1, 0.2, 0.3, 0.4]], 4, 4).always_looped()), "a".into());
+        let (mut l, mut r) = (vec![0.0; 2], vec![0.0; 2]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.1 * LEVEL, 0.2 * LEVEL]);
+        // Twice as long: halfway through is its 5th frame.
+        let longer: Vec<f32> = (1..=8).map(|n| n as f32).collect();
+        let n = match player.hand_over_as(Box::new(Voice::new(&[longer], 4, 4).always_looped()), "b".into(), true) {
+            Played::Playing(_, n) => n,
+            other => panic!("{other:?}"),
+        };
+        let (mut l, mut r) = (vec![0.0; 2], vec![0.0; 2]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![5.0 * LEVEL, 6.0 * LEVEL]);
+        assert!(player.still_playing(n));
+        // With nothing playing, a swap plays from the start.
+        player.stop();
+        playing.fill(&mut l, &mut r);
+        player.hand_over_as(Box::new(Voice::new(&[vec![0.7, 0.8]], 4, 4).always_looped()), "c".into(), true);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.7 * LEVEL, 0.8 * LEVEL]);
     }
 
     #[test]
