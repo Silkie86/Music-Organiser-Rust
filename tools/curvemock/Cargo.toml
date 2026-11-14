@@ -1,0 +1,19 @@
+# Design mock-ups for the curve editor (thread "Design the curve editor screens"). A workspace of its own, like the
+# galaxy check, so its build never mixes with the app's. Draws ui/curve-editor.slint, which uses the app's real
+# tokens and parts from crates/mo-ui/ui/studio.slint, to PNG files with Slint's software renderer.
+[workspace]
+
+[package]
+name = "curvemock"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "renderer-software", "image-default-formats"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+# The shared style draws a few SVG icons (std-widgets); only Slint's window backends turn SVG on, so ask for it here.
+i-slint-core = { version = "=1.18.1", features = ["svg", "image-decoders"] }
+
+[build-dependencies]
+slint-build = "=1.18.1"

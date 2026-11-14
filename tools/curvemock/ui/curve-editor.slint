@@ -1,0 +1,1364 @@
+// Design mock-ups of the Curves page's editor (build steps 3 to 6 and Randomise). Made from the app's real tokens and
+// shared parts in crates/mo-ui/ui/studio.slint, so sizes, colours and fonts are the app's. The pieces drawn here
+// (Picture, Ruler, ClipStrip, HintLine, KeyLamp, ReadOut) are the design: the curves thread builds the real ones.
+// Not part of the app; nothing here takes input. tools/curvemock/src/main.rs sets each state and saves a PNG.
+
+import { Theme, Type, Space, Motion, Well, StudioButton, ToggleChip, TickLine, Caps, Groove, StudioSlider, Icons,
+    FilterList, FilterView, FilterChoice, SearchBox, Heights } from "../../../crates/mo-ui/ui/studio.slint";
+
+import "../../../crates/mo-ui/fonts/IBMPlexSans-400.ttf";
+import "../../../crates/mo-ui/fonts/IBMPlexSans-500.ttf";
+import "../../../crates/mo-ui/fonts/IBMPlexSans-600.ttf";
+import "../../../crates/mo-ui/fonts/IBMPlexMono-400.ttf";
+import "../../../crates/mo-ui/fonts/IBMPlexMono-500.ttf";
+import "../../../crates/mo-ui/fonts/SpaceGrotesk-500.ttf";
+import "../../../crates/mo-ui/fonts/SpaceGrotesk-600.ttf";
+
+// A point of the curve, as fractions of the picture: x is time (0 start, 1 end), y the value (0 bottom, 1 top).
+export struct Pt {
+    x: float,
+    y: float,
+    // 0 a plain dot, 1 under the mouse, 2 held (being dragged), -1 not drawn (too close to its neighbours to show).
+    state: int,
+}
+
+// A clip on the strip: a remembered stretch of the one curve.
+export struct Clip {
+    start: float,
+    end: float,
+    name: string,
+    length: string,
+    pinned: bool,
+    // Clicked, so the highlight is exactly its part.
+    picked: bool,
+    // A curve from the list is held over it: it would swap in.
+    drop: bool,
+    // The mouse is over it (its pin shows).
+    hover: bool,
+}
+
+// A line across the picture: 0 a bar, 1 a beat, 2 a grid square.
+export struct GridLine {
+    x: float,
+    kind: int,
+}
+
+export struct RulerMark {
+    x: float,
+    text: string,
+}
+
+// A piece of the hint line: words, or a key in a keycap before its words.
+export struct HintPart {
+    key: string,
+    text: string,
+}
+
+// The highlight: a stretch of time, and the height its top and bottom handles have reached.
+export struct Highlight {
+    on: bool,
+    start: float,
+    end: float,
+    low: float,
+    high: float,
+    // Which handle the mouse is on or holds: "" none, "bar", "left", "right", "top", "bottom", "corner-tl",
+    // "corner-tr", "corner-bl", "corner-br".
+    hot: string,
+    held: bool,
+}
+
+export struct CurveLine {
+    name: string,
+    second: string,
+    shape: string,
+    picked: bool,
+    lifted: bool,
+}
+
+// A keycap, as on the rail's Ctrl+K: a held key lights in the accent.
+component KeyCap inherits Rectangle {
+    in property <string> text;
+    in property <bool> lit;
+    width: label.preferred-width + 12px;
+    height: 20px;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: root.lit ? Theme.accent : Theme.edge;
+    background: root.lit ? Theme.accent.transparentize(78%) : Theme.well;
+    label := Text {
+        text: root.text;
+        color: root.lit ? Theme.text : Theme.muted;
+        font-family: Theme.number-font;
+        font-size: Type.tiny;
+        font-weight: 500;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
+// One of the three held keys at the hint line's right, always on show with what it means: they teach the page's
+// three rules, and light while held.
+component KeyLamp inherits HorizontalLayout {
+    in property <string> key;
+    in property <string> means;
+    in property <bool> lit;
+    // On a narrow hint line only the held key says what it means.
+    in property <bool> compact;
+    spacing: Space.xs;
+    alignment: start;
+    VerticalLayout {
+        alignment: center;
+        KeyCap {
+            text: root.key;
+            lit: root.lit;
+        }
+    }
+    if !root.compact || root.lit: Text {
+        text: root.means;
+        color: root.lit ? Theme.text : Theme.faint;
+        font-size: Type.meta;
+        font-weight: root.lit ? 600 : 400;
+        vertical-alignment: center;
+    }
+}
+
+// The hint line under the picture: what's under the mouse, what a drag does, and what each held key does there.
+component HintLine inherits Rectangle {
+    in property <string> title;
+    in property <[HintPart]> parts;
+    in property <bool> shift;
+    in property <bool> alt;
+    in property <bool> ctrl;
+    in property <bool> mac;
+    in property <bool> compact;
+    height: 34px;
+    border-radius: Theme.radius;
+    background: Theme.surface-raised;
+    border-width: 1px;
+    border-color: Theme.edge;
+    HorizontalLayout {
+        padding-left: Space.md;
+        padding-right: Space.md;
+        spacing: Space.sm;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Type.body;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        parts-box := Rectangle {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            clip: true;
+            HorizontalLayout {
+                x: 0;
+                width: self.preferred-width;
+                spacing: Space.sm;
+        for p in root.parts: HorizontalLayout {
+            spacing: Space.xs;
+            if p.key != "": VerticalLayout {
+                alignment: center;
+                KeyCap {
+                    text: p.key;
+                }
+            }
+            Text {
+                text: p.text;
+                color: Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+        }
+            }
+        }
+        KeyLamp {
+            key: "Shift";
+            compact: root.compact;
+            means: "free";
+            lit: root.shift;
+        }
+        KeyLamp {
+            key: root.mac ? "Option" : "Alt";
+            compact: root.compact;
+            means: "bend";
+            lit: root.alt;
+        }
+        KeyLamp {
+            key: root.mac ? "Cmd" : "Ctrl";
+            compact: root.compact;
+            means: "make";
+            lit: root.ctrl;
+        }
+    }
+}
+
+// The small label by the mouse while dragging: what the drag is doing, in numbers.
+component ReadOut inherits Rectangle {
+    in property <string> text;
+    width: label.preferred-width + 16px;
+    height: 24px;
+    border-radius: Theme.radius;
+    background: Theme.surface-raised;
+    border-width: 1px;
+    border-color: Theme.accent.transparentize(40%);
+    drop-shadow-blur: 8px;
+    drop-shadow-color: Theme.shadow;
+    label := Text {
+        text: root.text;
+        color: Theme.text;
+        font-family: Theme.number-font;
+        font-size: Type.small;
+        font-weight: 500;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
+// A handle on the highlight's frame: a pill on a side, a dot on a corner. Faint until the mouse comes near; filled
+// and a size up under the mouse or held.
+component Handle inherits Rectangle {
+    in property <bool> across;
+    in property <bool> corner;
+    in property <bool> hot;
+    in property <bool> near: true;
+    property <length> long: root.hot ? 34px : 28px;
+    property <length> thin: root.hot ? 8px : 6px;
+    width: root.corner ? (root.hot ? 12px : 10px) : root.across ? root.long : root.thin;
+    height: root.corner ? (root.hot ? 12px : 10px) : root.across ? root.thin : root.long;
+    border-radius: self.height < self.width ? self.height / 2 : self.width / 2;
+    background: root.hot ? Theme.accent : Theme.well;
+    border-width: root.hot ? 0px : 1.5px;
+    border-color: Theme.accent.transparentize(root.near ? 0% : 55%);
+}
+
+// The ruler over the clip strip: bar numbers, the swing marks and the end mark.
+component Ruler inherits Rectangle {
+    in property <length> inset;
+    in property <[RulerMark]> marks;
+    in property <[float]> swing;
+    in property <bool> swing-hot;
+    in property <float> playhead: -1;
+    property <length> span: root.width - 2 * root.inset;
+    height: 24px;
+    for m in root.marks: Rectangle {
+        x: root.inset + m.x * root.span;
+        width: 1px;
+        y: root.height - 8px;
+        height: 8px;
+        background: Theme.stroke;
+        Text {
+            x: 4px;
+            y: -14px;
+            text: m.text;
+            color: Theme.faint;
+            font-family: Theme.number-font;
+            font-size: Type.small;
+        }
+    }
+    for s in root.swing: Path {
+        x: root.inset + s * root.span - 5px;
+        y: 7px;
+        width: 10px;
+        height: 10px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: "M 5 0 L 10 5 L 5 10 L 0 5 Z";
+        fill: root.swing-hot ? Theme.accent : Theme.muted.transparentize(30%);
+    }
+    // The end mark: how long the whole curve is.
+    Rectangle {
+        x: root.width - root.inset - 3px;
+        y: 3px;
+        width: 6px;
+        height: root.height - 3px;
+        border-radius: 2px;
+        background: Theme.text;
+    }
+    if root.playhead >= 0: Path {
+        x: root.inset + root.playhead * root.span - 5px;
+        y: root.height - 7px;
+        width: 10px;
+        height: 7px;
+        viewbox-width: 10;
+        viewbox-height: 7;
+        commands: "M 0 0 L 10 0 L 5 7 Z";
+        fill: Theme.accent;
+    }
+}
+
+// The clip strip: the curve's parts, end to end. Neighbours take turns between two plain shades (a place colour
+// names a place, so clips don't wear one); the clip whose part is highlighted is lit.
+component ClipStrip inherits Rectangle {
+    in property <length> inset;
+    in property <[Clip]> clips;
+    in property <float> insert: -1;
+    property <length> span: root.width - 2 * root.inset;
+    height: 30px;
+    for c[i] in root.clips: Rectangle {
+        x: root.inset + c.start * root.span + 1px;
+        width: (c.end - c.start) * root.span - 2px;
+        height: root.height;
+        border-radius: Theme.radius;
+        background: c.drop ? Theme.accent.transparentize(80%) : c.picked ? Theme.accent.transparentize(86%) : Math.mod(i, 2) == 0 ? Theme.surface-raised : Theme.hover.brighter(6%);
+        border-width: c.drop ? 2px : c.picked ? 1.5px : 1px;
+        border-color: c.drop || c.picked ? Theme.accent : Theme.edge;
+        clip: true;
+        HorizontalLayout {
+            padding-left: Space.sm;
+            padding-right: Space.xs;
+            spacing: Space.sm;
+            Text {
+                text: c.name;
+                color: Theme.text;
+                font-size: Type.small;
+                font-weight: 500;
+                vertical-alignment: center;
+                overflow: elide;
+                min-width: 0px;
+            }
+            // A narrow clip drops its length first, then shortens its name.
+            if (c.end - c.start) * root.span > 200px: Text {
+                text: c.length;
+                color: Theme.faint;
+                font-family: Theme.number-font;
+                font-size: Type.tiny;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            // The pin: shows on a clip under the mouse, stays lit on a pinned one (Randomise leaves it be).
+            if c.pinned || c.hover: VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 14px;
+                    height: 14px;
+                    viewbox-width: 16;
+                    viewbox-height: 16;
+                    commands: "M 6 2 L 10 2 L 10 6 L 12.5 9 L 3.5 9 L 6 6 Z M 8 9 L 8 14.5";
+                    stroke: c.pinned ? Theme.accent : Theme.muted;
+                    fill: c.pinned ? Theme.accent : transparent;
+                    stroke-width: 1.4px;
+                }
+            }
+        }
+        // The trim edges: a short grip at each end under the mouse.
+        if c.hover: Rectangle {
+            x: parent.width - 5px;
+            y: 7px;
+            width: 3px;
+            height: parent.height - 14px;
+            border-radius: 1.5px;
+            background: Theme.muted;
+        }
+    }
+    if root.insert >= 0: Rectangle {
+        x: root.inset + root.insert * root.span - 1.5px;
+        width: 3px;
+        border-radius: 1.5px;
+        background: Theme.accent;
+    }
+}
+
+// The big picture: a sunken screen with the grid, the curve and what's being worked on.
+component Picture inherits Well {
+    in property <length> inset-x;
+    in property <length> inset-y;
+    in property <[GridLine]> grid;
+    in property <[float]> seams;
+    in property <string> fill-path;
+    in property <string> curve;
+    in property <string> curve-lit;
+    in property <string> ghost;
+    in property <string> paint;
+    in property <[Pt]> points;
+    in property <Highlight> hl;
+    in property <bool> whole-handles;
+    // A line under the mouse (drawn thicker), and the bend knob while Alt is held over it.
+    in property <string> hot-line;
+    in property <bool> bend-knob;
+    in property <float> knob-x;
+    in property <float> knob-y;
+    in property <float> playhead: -1;
+    in property <float> insert: -1;
+    in property <string> readout;
+    in property <float> readout-x;
+    in property <float> readout-y;
+    // The mouse, for the mock only: a drawn pointer (the real one is the system's).
+    in property <float> mouse-x: -1;
+    in property <float> mouse-y;
+    in property <string> cursor;
+    in property <string> empty-title;
+    out property <length> pw: root.width - 2 * root.inset-x;
+    out property <length> ph: root.height - 2 * root.inset-y;
+    clip: true;
+    // Value guides: the middle line a little stronger, quarters faint.
+    for g in [0.25, 0.5, 0.75]: Rectangle {
+        x: root.inset-x;
+        width: root.pw;
+        y: root.inset-y + (1 - g) * root.ph;
+        height: 1px;
+        background: g == 0.5 ? Theme.stroke.transparentize(30%) : Theme.stroke.transparentize(65%);
+    }
+    for g in root.grid: Rectangle {
+        x: root.inset-x + g.x * root.pw;
+        width: 1px;
+        y: root.inset-y;
+        height: root.ph;
+        background: g.kind == 0 ? Theme.stroke.brighter(20%) : g.kind == 1 ? Theme.stroke.transparentize(15%) : Theme.stroke.transparentize(60%);
+    }
+    // The 0 and 1 lines: where the curve can go.
+    Rectangle {
+        x: root.inset-x;
+        width: root.pw;
+        y: root.inset-y;
+        height: 1px;
+        background: Theme.stroke.transparentize(40%);
+    }
+    Rectangle {
+        x: root.inset-x;
+        width: root.pw;
+        y: root.inset-y + root.ph;
+        height: 1px;
+        background: Theme.stroke.transparentize(40%);
+    }
+    // The seams between clips, running down from the strip.
+    for s in root.seams: Rectangle {
+        x: root.inset-x + s * root.pw;
+        width: 1px;
+        y: 0;
+        height: root.height;
+        background: Theme.muted.transparentize(55%);
+    }
+    // The highlight's band: the stretch of time being worked on, the full height.
+    if root.hl.on: Rectangle {
+        x: root.inset-x + root.hl.start * root.pw;
+        width: (root.hl.end - root.hl.start) * root.pw;
+        y: 0;
+        height: root.height;
+        background: Theme.accent.transparentize(93%);
+    }
+    // The fill under the curve, so a level reads at a glance.
+    Path {
+        x: root.inset-x;
+        y: root.inset-y;
+        width: root.pw;
+        height: root.ph;
+        viewbox-width: root.pw / 1px;
+        viewbox-height: root.ph / 1px;
+        commands: root.fill-path;
+        fill: Theme.text.transparentize(93%);
+    }
+    // The curve as it was, while a drag is going.
+    if root.ghost != "": Path {
+        x: root.inset-x;
+        y: root.inset-y;
+        width: root.pw;
+        height: root.ph;
+        viewbox-width: root.pw / 1px;
+        viewbox-height: root.ph / 1px;
+        commands: root.ghost;
+        stroke: Theme.faint.transparentize(45%);
+        stroke-width: 1.5px;
+    }
+    Path {
+        x: root.inset-x;
+        y: root.inset-y;
+        width: root.pw;
+        height: root.ph;
+        viewbox-width: root.pw / 1px;
+        viewbox-height: root.ph / 1px;
+        commands: root.curve;
+        stroke: Theme.text;
+        stroke-width: 2px;
+    }
+    // The highlighted part of the curve, lit.
+    if root.curve-lit != "": Path {
+        x: root.inset-x;
+        y: root.inset-y;
+        width: root.pw;
+        height: root.ph;
+        viewbox-width: root.pw / 1px;
+        viewbox-height: root.ph / 1px;
+        commands: root.curve-lit;
+        stroke: Theme.accent;
+        stroke-width: 2px;
+    }
+    if root.hot-line != "": Path {
+        x: root.inset-x;
+        y: root.inset-y;
+        width: root.pw;
+        height: root.ph;
+        viewbox-width: root.pw / 1px;
+        viewbox-height: root.ph / 1px;
+        commands: root.hot-line;
+        stroke: Theme.accent;
+        stroke-width: 3.5px;
+    }
+    // Ctrl-painted steps, as they're laid down.
+    if root.paint != "": Path {
+        x: root.inset-x;
+        y: root.inset-y;
+        width: root.pw;
+        height: root.ph;
+        viewbox-width: root.pw / 1px;
+        viewbox-height: root.ph / 1px;
+        commands: root.paint;
+        fill: Theme.accent.transparentize(75%);
+        stroke: Theme.accent;
+        stroke-width: 2px;
+    }
+    for p in root.points: Rectangle {
+        property <length> d: p.state >= 1 ? 11px : 6px;
+        visible: p.state >= 0;
+        x: root.inset-x + p.x * root.pw - self.d / 2;
+        y: root.inset-y + (1 - p.y) * root.ph - self.d / 2;
+        width: self.d;
+        height: self.d;
+        border-radius: self.d / 2;
+        background: p.state == 2 ? Theme.accent : p.state == 1 ? Theme.well : Theme.text;
+        border-width: p.state == 1 ? 2px : 1.5px;
+        border-color: p.state >= 1 ? Theme.accent : Theme.well;
+    }
+    if root.bend-knob: Path {
+        x: root.inset-x + root.knob-x * root.pw - 6px;
+        y: root.inset-y + (1 - root.knob-y) * root.ph - 6px;
+        width: 12px;
+        height: 12px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        commands: "M 6 0.8 L 11.2 6 L 6 11.2 L 0.8 6 Z";
+        fill: Theme.accent;
+        stroke: Theme.well;
+        stroke-width: 1.5px;
+    }
+    // The highlight's frame, its bar and handles.
+    if root.hl.on: Rectangle {
+        property <length> l: root.inset-x + root.hl.start * root.pw;
+        property <length> r: root.inset-x + root.hl.end * root.pw;
+        property <length> t: root.inset-y + (1 - root.hl.high) * root.ph;
+        property <length> b: root.inset-y + (1 - root.hl.low) * root.ph;
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        // The frame.
+        Rectangle {
+            x: parent.l;
+            y: parent.t;
+            width: parent.r - parent.l;
+            height: parent.b - parent.t;
+            border-width: 1px;
+            border-color: Theme.accent.transparentize(30%);
+        }
+        // The bar along the top, in the room above the 1 line: grab it to move the part.
+        Rectangle {
+            x: parent.l;
+            y: 3px;
+            width: parent.r - parent.l;
+            height: root.inset-y - 6px;
+            border-radius: 3px;
+            background: root.hl.hot == "bar" ? Theme.accent : Theme.accent.transparentize(50%);
+            Path {
+                x: (parent.width - 16px) / 2;
+                y: (parent.height - 8px) / 2;
+                width: 16px;
+                height: 8px;
+                viewbox-width: 16;
+                viewbox-height: 8;
+                commands: "M 3 2 L 13 2 M 3 6 L 13 6";
+                stroke: Theme.accent-text;
+                stroke-width: 1.4px;
+            }
+        }
+        Handle {
+            x: parent.l - self.width / 2;
+            y: (parent.t + parent.b - self.height) / 2;
+            hot: root.hl.hot == "left";
+        }
+        Handle {
+            x: parent.r - self.width / 2;
+            y: (parent.t + parent.b - self.height) / 2;
+            hot: root.hl.hot == "right";
+        }
+        Handle {
+            across: true;
+            x: (parent.l + parent.r - self.width) / 2;
+            y: parent.t - self.height / 2;
+            hot: root.hl.hot == "top";
+        }
+        Handle {
+            across: true;
+            x: (parent.l + parent.r - self.width) / 2;
+            y: parent.b - self.height / 2;
+            hot: root.hl.hot == "bottom";
+        }
+        Handle {
+            corner: true;
+            x: parent.l - self.width / 2;
+            y: parent.t - self.height / 2;
+            hot: root.hl.hot == "corner-tl";
+        }
+        Handle {
+            corner: true;
+            x: parent.r - self.width / 2;
+            y: parent.t - self.height / 2;
+            hot: root.hl.hot == "corner-tr";
+        }
+        Handle {
+            corner: true;
+            x: parent.l - self.width / 2;
+            y: parent.b - self.height / 2;
+            hot: root.hl.hot == "corner-bl";
+        }
+        Handle {
+            corner: true;
+            x: parent.r - self.width / 2;
+            y: parent.b - self.height / 2;
+            hot: root.hl.hot == "corner-br";
+        }
+    }
+    // With nothing highlighted the handles sit faintly round the whole curve.
+    if root.whole-handles: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        Handle {
+            near: false;
+            x: root.inset-x - self.width / 2;
+            y: root.inset-y + (root.ph - self.height) / 2;
+        }
+        Handle {
+            near: false;
+            x: root.inset-x + root.pw - self.width / 2;
+            y: root.inset-y + (root.ph - self.height) / 2;
+        }
+        Handle {
+            near: false;
+            across: true;
+            x: root.inset-x + (root.pw - self.width) / 2;
+            y: root.inset-y - self.height / 2;
+        }
+        Handle {
+            near: false;
+            across: true;
+            x: root.inset-x + (root.pw - self.width) / 2;
+            y: root.inset-y + root.ph - self.height / 2;
+        }
+    }
+    if root.insert >= 0: Rectangle {
+        x: root.inset-x + root.insert * root.pw - 1.5px;
+        width: 3px;
+        background: Theme.accent.transparentize(40%);
+    }
+    if root.playhead >= 0: Rectangle {
+        x: root.inset-x + root.playhead * root.pw;
+        width: 1px;
+        background: Theme.accent;
+    }
+    if root.readout != "": ReadOut {
+        x: min(root.width - self.width - 6px, root.inset-x + root.readout-x * root.pw + 14px);
+        y: max(4px, root.inset-y + (1 - root.readout-y) * root.ph - self.height - 10px);
+        text: root.readout;
+    }
+    // The mouse pointer, drawn for the mock-up (a small arrow, or the shape it takes: "ew", "ns", "grab", "cross").
+    if root.mouse-x >= 0: Rectangle {
+        x: root.inset-x + root.mouse-x * root.pw;
+        y: root.inset-y + (1 - root.mouse-y) * root.ph;
+        width: 0;
+        height: 0;
+        if root.cursor == "arrow": Path {
+            x: 0;
+            y: 0;
+            width: 13px;
+            height: 19px;
+            viewbox-width: 13;
+            viewbox-height: 19;
+            commands: "M 0.5 0.5 L 0.5 15.5 L 4.3 12 L 7 18 L 9.4 17 L 6.8 11.2 L 12 11.2 Z";
+            fill: #ffffff;
+            stroke: #000000;
+            stroke-width: 1px;
+        }
+        if root.cursor == "ew": Path {
+            x: -11px;
+            y: -6px;
+            width: 22px;
+            height: 12px;
+            viewbox-width: 22;
+            viewbox-height: 12;
+            commands: "M 0.5 6 L 6 0.5 L 6 3.8 L 16 3.8 L 16 0.5 L 21.5 6 L 16 11.5 L 16 8.2 L 6 8.2 L 6 11.5 Z";
+            fill: #ffffff;
+            stroke: #000000;
+            stroke-width: 1px;
+        }
+        if root.cursor == "ns": Path {
+            x: -6px;
+            y: -11px;
+            width: 12px;
+            height: 22px;
+            viewbox-width: 12;
+            viewbox-height: 22;
+            commands: "M 6 0.5 L 11.5 6 L 8.2 6 L 8.2 16 L 11.5 16 L 6 21.5 L 0.5 16 L 3.8 16 L 3.8 6 L 0.5 6 Z";
+            fill: #ffffff;
+            stroke: #000000;
+            stroke-width: 1px;
+        }
+        if root.cursor == "cross": Path {
+            x: -9px;
+            y: -9px;
+            width: 18px;
+            height: 18px;
+            viewbox-width: 18;
+            viewbox-height: 18;
+            commands: "M 9 0 L 9 7 M 9 11 L 9 18 M 0 9 L 7 9 M 11 9 L 18 9";
+            stroke: #ffffff;
+            stroke-width: 1.6px;
+        }
+        if root.cursor == "grab": Path {
+            x: -8px;
+            y: -8px;
+            width: 18px;
+            height: 18px;
+            viewbox-width: 18;
+            viewbox-height: 18;
+            commands: "M 4 8 L 4 5 A 1.2 1.2 0 0 1 6.4 5 L 6.4 8 L 6.4 3.5 A 1.2 1.2 0 0 1 8.8 3.5 L 8.8 8 L 8.8 4 A 1.2 1.2 0 0 1 11.2 4 L 11.2 8.5 L 11.2 6 A 1.2 1.2 0 0 1 13.6 6 L 13.6 11 A 5 5 0 0 1 8.6 16 L 7.5 16 A 4.5 4.5 0 0 1 4 14 L 1.8 10.5 A 1.2 1.2 0 0 1 4 9 Z";
+            fill: #ffffff;
+            stroke: #000000;
+            stroke-width: 1px;
+        }
+    }
+    if root.empty-title != "": VerticalLayout {
+        alignment: center;
+        spacing: Space.sm;
+        Text {
+            text: root.empty-title;
+            color: Theme.text;
+            font-family: Theme.title-font;
+            font-size: Type.heading;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "Pick one from the list to change it here, drag a few in to join them, or press Randomise.";
+            color: Theme.muted;
+            font-size: Type.body;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// A line of the curves list (a stand-in for the real CurveLineView, same sizes).
+component CurveListLine inherits Rectangle {
+    in property <CurveLine> line;
+    height: 48px;
+    border-radius: Theme.radius;
+    background: root.line.picked ? Theme.surface-raised : transparent;
+    opacity: root.line.lifted ? 0.4 : 1;
+    if root.line.picked: Rectangle {
+        x: 0;
+        width: 2px;
+        background: Theme.accent;
+    }
+    HorizontalLayout {
+        padding-left: Space.md;
+        padding-right: Space.sm;
+        spacing: Space.md;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 64px;
+                height: 22px;
+                viewbox-width: 300;
+                viewbox-height: 100;
+                commands: root.line.shape;
+                stroke: Theme.text;
+                stroke-width: 1.5px;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.line.name;
+                color: Theme.text;
+                font-size: Type.row-title;
+                overflow: elide;
+            }
+            Text {
+                text: root.line.second;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// A stand-in for the rail, at its real width, with Curves picked.
+component RailStandIn inherits Rectangle {
+    in property <color> curves-colour;
+    width: 208px;
+    background: Theme.sidebar;
+    VerticalLayout {
+        padding: Space.sm;
+        padding-top: Space.lg;
+        spacing: Space.xs;
+        alignment: start;
+        Rectangle {
+            height: 40px;
+            Text {
+                x: 36px;
+                text: "Music Organiser";
+                color: Theme.text;
+                font-family: Theme.title-font;
+                font-size: Type.row-title;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+        for p[i] in [
+            { name: "Songs", icon: Icons.songs, c: Theme.place(0) },
+            { name: "Sounds", icon: Icons.sounds, c: Theme.place(1) },
+            { name: "Presets", icon: Icons.presets, c: Theme.place(2) },
+            { name: "Curves", icon: "M 1 13 C 4 13 5 3 8 3 C 11 3 12 13 15 13", c: root.curves-colour },
+            { name: "MIDI", icon: Icons.midi, c: Theme.place(3) },
+            { name: "Plugins", icon: Icons.plugins, c: Theme.place(4) },
+            { name: "Space", icon: Icons.space, c: Theme.place(5) },
+            { name: "Backup", icon: Icons.backup, c: Theme.place(6) },
+        ]: Rectangle {
+            height: 36px;
+            border-radius: Theme.radius;
+            background: i == 3 ? Theme.surface-raised : transparent;
+            if i == 3: Rectangle {
+                x: 0;
+                width: 3px;
+                y: 8px;
+                height: parent.height - 16px;
+                border-radius: 1.5px;
+                background: p.c;
+            }
+            Path {
+                x: 12px;
+                y: (parent.height - 16px) / 2;
+                width: 16px;
+                height: 16px;
+                viewbox-width: 16;
+                viewbox-height: 16;
+                commands: p.icon;
+                stroke: i == 3 ? p.c : p.c.transparentize(45%);
+                stroke-width: 1.5px;
+            }
+            Text {
+                x: 40px;
+                text: p.name;
+                color: i == 3 ? Theme.text : Theme.muted;
+                font-size: Type.row-title;
+                vertical-alignment: center;
+                height: parent.height;
+            }
+        }
+    }
+}
+
+export component Mock inherits Window {
+    in property <color> curves-colour: #E0A0E8;
+    in property <bool> mac;
+    // Solomon's wide screen: the hint line has room for what every key means.
+    in property <bool> wide;
+    // The list and its filters.
+    in property <FilterView> shape;
+    in property <FilterView> rhythm;
+    in property <FilterView> feel;
+    in property <[CurveLine]> lines;
+    in property <int> shown: 19;
+    // A curve from the list being carried over the editor: its name by the mouse.
+    in property <string> carried;
+    in property <length> carried-x;
+    in property <length> carried-y;
+    // Randomise's settings at the foot of the filter column.
+    in property <int> length-pick: 1;
+    in property <float> wild: 0.45;
+    in property <string> wild-word: "Halfway";
+    in property <bool> mixed;
+    in property <bool> randomise-hot;
+    // The editor.
+    in property <string> name: "SC 1";
+    in property <string> state-words: "edited, not saved";
+    in property <bool> playing;
+    in property <int> grid-pick: 2;
+    in property <[RulerMark]> ruler;
+    in property <[float]> swing;
+    in property <[Clip]> clips;
+    in property <float> insert: -1;
+    in property <[GridLine]> grid;
+    in property <[float]> seams;
+    in property <string> fill-path;
+    in property <string> curve;
+    in property <string> curve-lit;
+    in property <string> ghost;
+    in property <string> paint;
+    in property <[Pt]> points;
+    in property <Highlight> hl;
+    in property <bool> whole-handles;
+    in property <string> hot-line;
+    in property <bool> bend-knob;
+    in property <float> knob-x;
+    in property <float> knob-y;
+    in property <float> playhead: -1;
+    in property <string> readout;
+    in property <float> readout-x;
+    in property <float> readout-y;
+    in property <float> mouse-x: -1;
+    in property <float> mouse-y;
+    in property <string> cursor: "arrow";
+    in property <string> hint-title;
+    in property <[HintPart]> hint;
+    in property <bool> shift;
+    in property <bool> alt;
+    in property <bool> ctrl;
+    in property <string> empty-title;
+    in property <bool> menu-open;
+    in property <length> menu-x;
+    in property <length> menu-y;
+    property <length> inset-x: 14px;
+    // The picture's drawing room, read back so the curve's lines can be laid out in its own points.
+    out property <length> plot-width: picture.pw;
+    out property <length> plot-height: picture.ph;
+    background: Theme.background;
+    default-font-family: Theme.text-font;
+    HorizontalLayout {
+        RailStandIn {
+            curves-colour: root.curves-colour;
+        }
+        Rectangle {
+            width: 1px;
+            background: Theme.edge;
+        }
+        VerticalLayout {
+            padding: Space.xl;
+            padding-top: Space.lg;
+            spacing: Space.lg;
+            // The page's name, its mark, and the top row: search, then the page's own action at the far right.
+            HorizontalLayout {
+                height: 40px;
+                spacing: Space.md;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 4px;
+                        height: 22px;
+                        border-radius: 2px;
+                        background: root.curves-colour;
+                    }
+                }
+                Text {
+                    text: "Curves";
+                    color: Theme.text;
+                    font-family: Theme.title-font;
+                    font-size: Type.page-title;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    width: Space.lg;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    SearchBox {
+                        width: 300px;
+                        hint: "Search curves";
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    StudioButton {
+                        text: "Randomise";
+                        icon: "";
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: Space.lg;
+                // The filter column, with Randomise's settings at its foot.
+                Rectangle {
+                    width: 208px;
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: Space.md;
+                        padding-right: Space.md;
+                        FilterList {
+                            name: "SHAPE";
+                            filter: root.shape;
+                        }
+                        FilterList {
+                            name: "RHYTHM";
+                            filter: root.rhythm;
+                        }
+                        TickLine {
+                            text: "Other speeds too";
+                        }
+                        FilterList {
+                            name: "FEEL";
+                            filter: root.feel;
+                        }
+                        Groove { }
+                        // Randomise: what it makes, from the curves the filters show.
+                        VerticalLayout {
+                            spacing: Space.sm;
+                            Rectangle {
+                                height: 22px;
+                                border-radius: Theme.radius;
+                                background: root.randomise-hot ? Theme.accent.transparentize(90%) : transparent;
+                                Caps {
+                                    x: 0;
+                                    text: "RANDOMISE";
+                                    color: root.randomise-hot ? Theme.text : Theme.muted;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Text {
+                                text: "Makes a new curve from parts of the " + root.shown + " shown above.";
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 0;
+                                alignment: start;
+                                Rectangle {
+                                    width: 52px;
+                                    height: 28px;
+                                    border-top-left-radius: 14px;
+                                    border-bottom-left-radius: 14px;
+                                    border-width: 2px;
+                                    border-color: Theme.edge;
+                                    background: Theme.well;
+                                    Text {
+                                        text: "Bars";
+                                        color: Theme.muted;
+                                        font-size: Type.meta;
+                                        font-weight: 500;
+                                    }
+                                }
+                                for b[i] in ["1", "2", "4", "8"]: ToggleChip {
+                                    text: b;
+                                    on: i == root.length-pick;
+                                    joined-left: true;
+                                    joined-right: i < 3;
+                                }
+                            }
+                            HorizontalLayout {
+                                height: 22px;
+                                Text {
+                                    text: "How wild";
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: root.wild-word;
+                                    color: Theme.text;
+                                    font-size: Type.meta;
+                                    font-weight: 600;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                            StudioSlider {
+                                low: "";
+                                high: "";
+                                value: root.wild;
+                            }
+                            TickLine {
+                                text: "Mixed beat divisions";
+                                on: root.mixed;
+                            }
+                        }
+                    }
+                    Rectangle {
+                        x: parent.width - 1px;
+                        width: 1px;
+                        background: Theme.edge;
+                    }
+                }
+                // The curves list.
+                VerticalLayout {
+                    width: 268px;
+                    spacing: 2px;
+                    alignment: start;
+                    HorizontalLayout {
+                        height: 26px;
+                        padding-left: Space.md;
+                        Caps {
+                            text: "CURVE";
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: root.shown + " shown";
+                            color: Theme.faint;
+                            font-size: Type.meta;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    for l in root.lines: CurveListLine {
+                        line: l;
+                    }
+                }
+                // The editor card: the picked curve, always ready to change.
+                Rectangle {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    border-radius: Theme.radius;
+                    background: Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.edge;
+                    VerticalLayout {
+                        padding: Space.lg;
+                        spacing: Space.sm;
+                        // Its name plate: name, whether it's changed, Undo and Redo.
+                        HorizontalLayout {
+                            height: 32px;
+                            spacing: Space.sm;
+                            Text {
+                                text: root.name;
+                                color: Theme.text;
+                                font-family: Theme.title-font;
+                                font-size: Type.heading;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.state-words;
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                            StudioButton {
+                                width: 32px;
+                                icon: "M 5.5 3 L 2 6.5 L 5.5 10 M 2 6.5 L 10 6.5 A 4 4 0 0 1 10 14.5 L 7 14.5";
+                                enabled: root.state-words != "";
+                            }
+                            StudioButton {
+                                width: 32px;
+                                icon: "M 10.5 3 L 14 6.5 L 10.5 10 M 14 6.5 L 6 6.5 A 4 4 0 0 0 6 14.5 L 9 14.5";
+                                enabled: false;
+                            }
+                        }
+                        Ruler {
+                            inset: root.inset-x;
+                            marks: root.ruler;
+                            swing: root.swing;
+                            playhead: root.playhead;
+                        }
+                        ClipStrip {
+                            inset: root.inset-x;
+                            clips: root.clips;
+                            insert: root.insert;
+                        }
+                        picture := Picture {
+                            vertical-stretch: 1;
+                            inset-x: root.inset-x;
+                            inset-y: 18px;
+                            grid: root.grid;
+                            seams: root.seams;
+                            fill-path: root.fill-path;
+                            curve: root.curve;
+                            curve-lit: root.curve-lit;
+                            ghost: root.ghost;
+                            paint: root.paint;
+                            points: root.points;
+                            hl: root.hl;
+                            whole-handles: root.whole-handles;
+                            hot-line: root.hot-line;
+                            bend-knob: root.bend-knob;
+                            knob-x: root.knob-x;
+                            knob-y: root.knob-y;
+                            playhead: root.playhead;
+                            insert: root.insert;
+                            readout: root.readout;
+                            readout-x: root.readout-x;
+                            readout-y: root.readout-y;
+                            mouse-x: root.mouse-x;
+                            mouse-y: root.mouse-y;
+                            cursor: root.cursor;
+                            empty-title: root.empty-title;
+                        }
+                        HintLine {
+                            title: root.hint-title;
+                            parts: root.hint;
+                            shift: root.shift;
+                            alt: root.alt;
+                            ctrl: root.ctrl;
+                            mac: root.mac;
+                            compact: !root.wide;
+                        }
+                        // The drag strip, straight under the picture, as on every card.
+                        Rectangle {
+                            height: 32px;
+                            border-radius: Theme.radius;
+                            border-width: 1px;
+                            border-color: Theme.edge;
+                            HorizontalLayout {
+                                padding-left: Space.sm;
+                                spacing: Space.sm;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Path {
+                                        width: 16px;
+                                        height: 16px;
+                                        viewbox-width: 16;
+                                        viewbox-height: 16;
+                                        commands: Icons.grip;
+                                        stroke: Theme.muted;
+                                        stroke-width: 1.5px;
+                                    }
+                                }
+                                Text {
+                                    text: "Drag onto a Bitwig automation lane";
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        // The card's buttons: the lit play button first, the grid, then the way out.
+                        HorizontalLayout {
+                            spacing: Space.md;
+                            height: 32px;
+                            StudioButton {
+                                horizontal-stretch: 0;
+                                text: root.playing ? "Stop" : "Hear";
+                                main: root.playing;
+                                key: "Space";
+                            }
+                            HorizontalLayout {
+                                spacing: 0;
+                                alignment: start;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 52px;
+                                        height: 28px;
+                                        border-top-left-radius: 14px;
+                                        border-bottom-left-radius: 14px;
+                                        border-width: 2px;
+                                        border-color: Theme.edge;
+                                        background: Theme.well;
+                                        Text {
+                                            text: "Grid";
+                                            color: Theme.muted;
+                                            font-size: Type.meta;
+                                            font-weight: 500;
+                                        }
+                                    }
+                                }
+                                for g[i] in ["1/4", "1/8", "1/16", "1/32", "Triplet", "Off"]: VerticalLayout {
+                                    alignment: center;
+                                    ToggleChip {
+                                        text: g;
+                                        on: i == root.grid-pick || (i == 4 && root.grid-pick == 6);
+                                        joined-left: true;
+                                        joined-right: i < 5;
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                            StudioButton {
+                                horizontal-stretch: 0;
+                                text: "Save as new curve";
+                                main: !root.playing;
+                                enabled: root.state-words != "";
+                            }
+                        }
+                    }
+                    // The right-click menu on a highlight, when shown.
+                    if root.menu-open: Rectangle {
+                        x: root.menu-x;
+                        y: root.menu-y;
+                        width: 250px;
+                        height: menu-lines.preferred-height;
+                        border-radius: Theme.radius;
+                        background: Theme.surface-raised;
+                        border-width: 1px;
+                        border-color: Theme.edge;
+                        drop-shadow-blur: 16px;
+                        drop-shadow-color: Theme.shadow;
+                        menu-lines := VerticalLayout {
+                            padding: Space.xs;
+                            for m in [
+                                { t: "Make into steps", k: "" },
+                                { t: "Randomise this part", k: "Ctrl+R" },
+                                { t: "", k: "" },
+                                { t: "Reverse", k: "R" },
+                                { t: "Flip upside down", k: "F" },
+                                { t: "Repeat after itself", k: "Ctrl+D" },
+                                { t: "", k: "" },
+                                { t: "Copy", k: "Ctrl+C" },
+                                { t: "Paste over it", k: "Ctrl+V" },
+                                { t: "Delete", k: "Delete" },
+                            ]: Rectangle {
+                                height: m.t == "" ? 9px : 30px;
+                                if m.t == "": Rectangle {
+                                    y: 4px;
+                                    height: 1px;
+                                    background: Theme.edge;
+                                }
+                                if m.t != "": HorizontalLayout {
+                                    padding-left: Space.md;
+                                    padding-right: Space.md;
+                                    Text {
+                                        text: m.t;
+                                        color: Theme.text;
+                                        font-size: Type.body;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: m.k;
+                                        color: Theme.faint;
+                                        font-family: Theme.number-font;
+                                        font-size: Type.meta;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // A curve carried from the list: its name rides with the mouse.
+    if root.carried != "": Rectangle {
+        x: root.carried-x;
+        y: root.carried-y;
+        width: carried-label.preferred-width + 20px;
+        height: 28px;
+        border-radius: Theme.radius;
+        background: Theme.surface-raised;
+        border-width: 1px;
+        border-color: Theme.edge;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: Theme.shadow;
+        carried-label := Text {
+            text: root.carried;
+            color: Theme.text;
+            font-size: Type.meta;
+            font-weight: 500;
+        }
+    }
+}
