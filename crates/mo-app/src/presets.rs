@@ -1505,6 +1505,12 @@ pub mod curve_act {
     pub const UNDO: &str = "curves.undo";
     pub const REDO: &str = "curves.redo";
     pub const SAVE_AS_NEW: &str = "curves.saveAsNew";
+    pub const REVERSE: &str = "curves.reverse";
+    pub const FLIP: &str = "curves.flip";
+    pub const STEPS: &str = "curves.steps";
+    pub const KEEP_CLIP: &str = "curves.keepClip";
+    pub const CUT_TIME: &str = "curves.cutTime";
+    pub const HIGHLIGHT_ALL: &str = "curves.highlightAll";
 }
 
 /// The tempo a curve is heard at on its tone (Solomon, 13 Nov: "preview the curve maybe as a volume curve on a

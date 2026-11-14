@@ -307,7 +307,7 @@ fn short(n: f64) -> String {
 }
 
 /// A length in beats as words: "1 bar", "2 bars", "1 beat", "1/2 beat", "1.5 beats".
-fn length_words(beats: f64) -> String {
+pub fn length_words(beats: f64) -> String {
     let bars = beats / crate::curve_picture::BAR;
     if bars >= 1.0 && (bars - bars.round()).abs() < 1e-6 {
         return format!("{} bar{}", bars.round() as u64, if bars.round() == 1.0 { "" } else { "s" });

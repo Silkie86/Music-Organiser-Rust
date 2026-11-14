@@ -1547,6 +1547,16 @@ fn presets_shots(
     if mo_ui::curve_editor::highlight_sample() != Some((4.0, 6.0)) || !mo_ui::curve_editor::undo(app, true) {
         return Err("curves-highlight-speed.png: the dragged side didn't speed the part up".into());
     }
+    // The highlight kept as a clip: it shows on the strip over the picture, picked.
+    if mo_ui::curve_editor::highlight_sample() != Some((4.0, 8.0))
+        || !mo_ui::curve_editor::act(app, mo_app::presets::curve_act::KEEP_CLIP)
+    {
+        return Err("curves-clip.png: the highlight wasn't kept as a clip".into());
+    }
+    shots.push(("curves-clip.png".into(), capture(window)));
+    if !mo_ui::curve_editor::undo(app, true) {
+        return Err("curves-clip.png: keeping the clip left nothing to undo".into());
+    }
     mo_ui::curve_editor::mouse_sample(app, 1, 14.0, 0.9, keys);
     mo_ui::curve_editor::mouse_sample(app, 2, 14.0, 0.9, keys);
     mo_ui::curve_editor::mouse_sample(app, 4, 14.0, 0.9, keys);

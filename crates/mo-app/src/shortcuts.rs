@@ -139,6 +139,12 @@ pub const CURVES_ACTIONS: &[Action] = &[
     action("curves.undo", "Undo the last change to the curve in the editor", "Ctrl+Z"),
     action("curves.redo", "Redo the change to the curve that was undone", "Ctrl+Shift+Z"),
     action("curves.saveAsNew", "Save the edited curve as a new curve of its own", "Ctrl+S"),
+    action("curves.reverse", "Play the highlighted part of the curve backwards (the whole curve with none)", "Alt+R"),
+    action("curves.flip", "Turn the highlighted part of the curve upside down", "Alt+F"),
+    action("curves.steps", "Make the highlighted part of the curve into steps, one a grid square", "Alt+G"),
+    action("curves.keepClip", "Keep the highlighted part as a clip with a name, or forget that clip", "Alt+K"),
+    action("curves.cutTime", "Cut the highlighted time out of the curve: what follows moves up", "Shift+Delete"),
+    action("curves.highlightAll", "Highlight the whole curve in the editor", "Alt+A"),
 ];
 
 /// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
