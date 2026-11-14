@@ -282,7 +282,7 @@ pub fn randomise(
 
 /// A curve from the list is added to the one in the editor: in place of the highlighted part, or at its end. False
 /// when there's no curve open or it can't be added.
-pub fn add(app: &AppWindow, piece: mo_app::curve_edit::Piece) -> bool {
+pub fn add(app: &AppWindow, piece: mo_app::curve_edit::Piece) -> Result<(), &'static str> {
     let done = card(|c| c.add(piece));
     // Drawn again either way: a drag in hand was given up.
     redraw(app);
@@ -292,10 +292,15 @@ pub fn add(app: &AppWindow, piece: mo_app::curve_edit::Piece) -> bool {
 
 /// Undo (`back`) or Redo.
 fn step_back(app: &AppWindow, back: bool) {
-    if card(|c| c.step_back(back)) {
+    let stepped = card(|c| c.step_back(back));
+    if stepped {
         redraw(app);
     }
     show_touch(app);
+    if stepped {
+        // "Added ..." on the card may no longer be so. (After the touch is shown: the card reads it.)
+        crate::presets::curve_stepped(app);
+    }
 }
 
 /// Esc: a drag in hand is put back as it was before it began; else the highlight is dropped. Whether it did either.

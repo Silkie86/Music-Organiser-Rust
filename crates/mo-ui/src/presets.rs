@@ -1192,14 +1192,31 @@ pub fn add_curve(app: &AppWindow, row: usize) -> bool {
         name: c.name.clone(),
     };
     let done = crate::curve_editor::add(app, piece);
-    let said = if done {
-        format!("Added {}. Undo takes it out again; Save as new curve keeps the joined curve.", c.name)
-    } else {
-        format!("{} wasn't added: it's there already, or the curve would be too long.", c.name)
+    let said = match done {
+        Ok(()) => format!("{ADDED}{}. Undo takes it out again; Save as new curve keeps the joined curve.", c.name),
+        Err(why) => format!("{} wasn't added: {why}.", c.name),
     };
     PAGE.with(|p| p.borrow_mut().curve_message = said);
     show_curve_card(app);
-    done
+    done.is_ok()
+}
+
+/// How the card's words begin after a curve was added: Undo and Redo take those words away again.
+const ADDED: &str = "Added ";
+
+/// Undo or Redo took a step in the editor: the card no longer says a curve was added.
+pub(crate) fn curve_stepped(app: &AppWindow) {
+    let said = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let said = p.curve_message.starts_with(ADDED);
+        if said {
+            p.curve_message.clear();
+        }
+        said
+    });
+    if said {
+        show_curve_card(app);
+    }
 }
 
 /// Randomise's words and whether it can roll: two curves shown, and one open to roll into.
@@ -1211,8 +1228,6 @@ fn show_random_can(data: &PresetsData, p: &Page) {
         mo_app::curve_random::says(p.curve_shown.len()).into()
     });
     data.set_random_can(p.curve_shown.len() >= 2 && open);
-    // And the + on each line: there's a curve to add to.
-    data.set_curve_adds(open);
 }
 
 fn step_curve(app: &AppWindow, by: i32) {

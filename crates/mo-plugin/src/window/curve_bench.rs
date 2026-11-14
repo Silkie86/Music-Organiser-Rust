@@ -313,6 +313,8 @@ impl Bench {
         let Some((points, length, hear)) = self.card.borrow().to_hear() else { return };
         let song = self.player.tempo().filter(|bpm| (curve_hear::BPM_LOW..=curve_hear::BPM_HIGH).contains(bpm));
         let hear = Hear { bpm: song.unwrap_or(hear.bpm), ..hear };
+        // The same place only means the same thing in a curve of the same length: another length starts afresh.
+        let again = again && self.heard.borrow().as_ref().is_some_and(|(_, was, _)| (was - length).abs() < 1e-9);
         *self.heard.borrow_mut() = Some((points.clone(), length, hear));
         self.making.set(Some(Instant::now()));
         panel.global::<CurveEditorData>().set_playing(true);
