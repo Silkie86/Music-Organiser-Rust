@@ -106,9 +106,11 @@ component Ruler inherits Rectangle {
 // The grid's chips, joined in one strip after its name: one step is always picked unless it's off, and Triplet is
 // on or off beside it.
 component GridStrip inherits HorizontalLayout {
+    // Whether its name leads the chips: left out where the card is too narrow for it and the buttons beside it.
+    in property <bool> named: true;
     spacing: 0;
     alignment: start;
-    VerticalLayout {
+    if root.named: VerticalLayout {
         alignment: center;
         Rectangle {
             width: name.preferred-width + 2 * Space.md;
@@ -135,7 +137,7 @@ component GridStrip inherits HorizontalLayout {
                 : i == 5 ? CurveEditorData.grid-dotted && CurveEditorData.grid-step >= 0
                 : CurveEditorData.grid-step < 0;
             dim: (i == 4 || i == 5) && CurveEditorData.grid-step < 0;
-            joined-left: true;
+            joined-left: root.named || i > 0;
             joined-right: i < 6;
             clicked => { CurveEditorData.grid-picked(i); }
         }
@@ -342,7 +344,9 @@ export component CurveEditor inherits SidePanel {
             key: CurveEditorData.hear-key;
             clicked => { CurveEditorData.hear(); }
         }
-        GridStrip { }
+        GridStrip {
+            named: root.inside >= 680px;
+        }
         Rectangle {
             horizontal-stretch: 1;
         }
