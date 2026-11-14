@@ -167,7 +167,6 @@ export global PresetsData {
     in property <FilterView> curve-feel;
     in property <bool> curve-hidden;
     callback curve-hidden-toggled(bool);
-    // "Other speeds too": the rhythms picked show curves at half and double speed as well, sent stretched.
     // Randomise: its words, whether it can roll, its length (a place in 1, 2, 4, 8 bars), how wild (0 to 1) and
     // that in a word, and whether its parts have mixed lengths.
     in property <string> random-says;
@@ -181,6 +180,7 @@ export global PresetsData {
     callback random-wild-moved(float);
     callback random-mixed-toggled(bool);
     callback randomise();
+    // "Other speeds too": the rhythms picked show curves at half and double speed as well, sent stretched.
     in property <bool> curve-other-speeds;
     callback curve-other-speeds-toggled(bool);
     in property <[CurveLineInfo]> curve-lines;

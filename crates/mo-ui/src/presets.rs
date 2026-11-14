@@ -2622,16 +2622,16 @@ pub fn randomise_with(app: &AppWindow, seed: u64) -> bool {
             .collect();
         (sources, p.random, shown)
     });
-    if !crate::curve_editor::randomise(app, &sources, settings, seed) {
-        return false;
-    }
-    let from = mo_app::drag_out::count_of(shown, "curve", "curves");
-    PAGE.with(|p| {
-        p.borrow_mut().curve_message =
-            format!("Rolled from the {from} shown. Undo brings the old one back; Save as new curve keeps this one.");
-    });
+    let rolled = crate::curve_editor::randomise(app, &sources, settings, seed);
+    // What happened, or why nothing did: a click never goes by with no word.
+    let words = if rolled {
+        mo_app::curve_random::rolled_words(sources.len(), shown)
+    } else {
+        mo_app::curve_random::NOTHING_ROLLED.to_owned()
+    };
+    PAGE.with(|p| p.borrow_mut().curve_message = words);
     show_curve_card(app);
-    true
+    rolled
 }
 
 /// Keeps the editor's curve as a new curve of its own in `curves.db`, puts it in the list and picks it: the editor

@@ -671,20 +671,19 @@ pub fn randomise(
         let lit = editor.highlight();
         let Some(rolled) = curve_random::roll(editor.shape(), lit, sources, settings, seed) else { return false };
         let length = rolled.length();
-        let longer = (length - editor.shape().length()).abs() > 1e-9;
+        let another = (length - editor.shape().length()).abs() > 1e-9;
         if !editor.put(rolled, lit) {
             return false;
         }
         // Another length: the whole of it in sight.
-        if longer {
+        if another {
             s.view = View::whole(length);
         }
         true
     });
-    if done {
-        redraw(app);
-        show_touch(app);
-    }
+    // Drawn again either way: a drag in hand was given up above, even when nothing could be rolled.
+    redraw(app);
+    show_touch(app);
     done
 }
 
@@ -713,7 +712,15 @@ fn step_back(app: &AppWindow, back: bool) {
     let done = STATE.with(|s| {
         let s = &mut *s.borrow_mut();
         s.hands_off();
-        s.open.as_mut().is_some_and(|(_, e)| if back { e.undo() } else { e.redo() })
+        let Some((_, e)) = s.open.as_mut() else { return false };
+        let was = e.shape().length();
+        let done = if back { e.undo() } else { e.redo() };
+        // A step that changes the curve's length (a roll, the end mark): the whole of it in sight again.
+        let length = e.shape().length();
+        if done && (length - was).abs() > 1e-9 {
+            s.view = View::whole(length);
+        }
+        done
     });
     if done {
         redraw(app);

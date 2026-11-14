@@ -7,7 +7,7 @@
 //! It's built from the editor's own edits ([`crate::curve_edit::apply`]), so a rolled curve is nothing the handles
 //! couldn't have made.
 
-use crate::curve_edit::{Edit, Piece, SHORTEST, Shape, Span, apply};
+use crate::curve_edit::{Edit, MAX_BEATS, Piece, SHORTEST, Shape, Span, apply};
 use crate::curve_picture::BAR;
 use mo_formats::bitwig::curve::CurvePoint;
 
@@ -59,6 +59,17 @@ pub fn says(shown: usize) -> String {
         format!("From the {shown} curves shown.")
     }
 }
+
+/// What the card says after a roll cut from `used` of the `shown` curves (a long list is sampled).
+pub fn rolled_words(used: usize, shown: usize) -> String {
+    let from =
+        if used < shown { format!("{used} of the {shown} curves shown") } else { format!("the {shown} curves shown") };
+    format!("Rolled from {from}. Undo brings the old one back; Save as new curve keeps this one.")
+}
+
+/// What the card says when a roll made nothing.
+pub const NOTHING_ROLLED: &str =
+    "Nothing was rolled: it takes two curves with a shape, and room that isn't in a pinned clip.";
 
 /// SplitMix64: a small, fast random sequence.
 struct Rng(u64);
@@ -112,32 +123,43 @@ fn with(shape: Shape, highlight: Span, edit: &Edit) -> Shape {
     }
 }
 
-/// `length` beats of a curve from `start`, as a curve of its own: its points 0 to 1 across, and how long it is.
-fn window(points: &[CurvePoint], whole: f64, start: f64, length: f64) -> (Vec<CurvePoint>, f64) {
+/// How long a source is for cutting: its own length, a bar when that isn't known, never past what the editor holds.
+fn usable(length_beats: f64) -> f64 {
+    if length_beats.is_finite() && length_beats > 0.0 { length_beats.clamp(SHORTEST, MAX_BEATS) } else { BAR }
+}
+
+/// `length` beats of a curve from `start`, as a curve of its own: its points 0 to 1 across, and how long it is. A
+/// curve shorter than `length` goes round again to fill it (never stretched). None when that much can't be cut (a
+/// sliver shorter than the editor's shortest).
+fn window(points: &[CurvePoint], whole: f64, start: f64, length: f64) -> Option<(Vec<CurvePoint>, f64)> {
     let mut s = Shape::from_curve(points, whole);
-    let end = (start + length).min(s.length());
-    if end < s.length() - 1e-9
-        && let Some((cut, _)) = apply(&s, None, &Edit::SetLength(end))
-    {
-        s = cut;
+    let whole = s.length();
+    if length > whole + 1e-9 {
+        // Made as long as asked, then its own length repeated across.
+        s = apply(&s, None, &Edit::SetLength(length))?.0;
+        let all = Span::new(0.0, s.length());
+        s = apply(&s, Some(all), &Edit::Repeat { start: 0.0, end: whole })?.0;
+    } else {
+        let end = (start + length).min(whole);
+        if end < whole - 1e-9 {
+            s = apply(&s, None, &Edit::SetLength(end))?.0;
+        }
+        if start > 1e-9 {
+            s = apply(&s, Some(Span::new(0.0, start)), &Edit::RemoveTime)?.0;
+        }
     }
-    if start > 1e-9
-        && let Some((cut, _)) = apply(&s, Some(Span::new(0.0, start)), &Edit::RemoveTime)
-    {
-        s = cut;
-    }
-    (s.curve_points(), s.length())
+    ((s.length() - length).abs() < 1e-6).then(|| (s.curve_points(), s.length()))
 }
 
 /// The lengths of the parts that fill `room` beats. Not mixed: all `unit` long (the last one what's left). Mixed:
-/// each drawn afresh, dotted ones too.
-fn part_lengths(rng: &mut Rng, room: f64, unit: f64, mixed: bool) -> Vec<f64> {
+/// each drawn afresh, dotted ones too, none longer than `most`.
+fn part_lengths(rng: &mut Rng, room: f64, unit: f64, mixed: bool, most: f64) -> Vec<f64> {
     const MIXED: [f64; 6] = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0];
     let mut out: Vec<f64> = Vec::new();
     let mut left = room;
     while left > SHORTEST {
         let len = if mixed {
-            let fits: Vec<f64> = MIXED.iter().copied().filter(|l| *l <= left + 1e-9).collect();
+            let fits: Vec<f64> = MIXED.iter().copied().filter(|l| *l <= left.min(most) + 1e-9).collect();
             if fits.is_empty() { left } else { fits.get(rng.below(fits.len())).copied().unwrap_or(left) }
         } else {
             unit.min(left)
@@ -153,10 +175,14 @@ fn part_lengths(rng: &mut Rng, room: f64, unit: f64, mixed: bool) -> Vec<f64> {
     out
 }
 
-/// A new recipe for a part `len` beats long.
-fn recipe(rng: &mut Rng, sources: &[Source], len: f64, wild: f64) -> Recipe {
-    let source = rng.below(sources.len());
-    let whole = sources.get(source).map_or(BAR, |s| s.length_beats.max(SHORTEST));
+/// A new recipe for a part `len` beats long, not cut from the curve `not` (the part before it came from that one: a
+/// roll mixes its curves).
+fn recipe(rng: &mut Rng, sources: &[Source], len: f64, wild: f64, not: Option<usize>) -> Recipe {
+    let source = match not {
+        Some(not) if sources.len() > 1 => (not + 1 + rng.below(sources.len() - 1)) % sources.len(),
+        _ => rng.below(sources.len()),
+    };
+    let whole = sources.get(source).map_or(BAR, |s| usable(s.length_beats));
     let speed = if rng.chance(0.5 * wild) { if rng.chance(0.5) { 2.0 } else { 0.5 } } else { 1.0 };
     // Cut on the source's own rhythm: a whole number of the cut's length from its start.
     let cut = len * speed;
@@ -180,10 +206,11 @@ fn recipe(rng: &mut Rng, sources: &[Source], len: f64, wild: f64) -> Recipe {
 /// Puts a part made by `r` over `span` of `shape`, as a clip named after its source.
 fn put(shape: Shape, span: Span, r: Recipe, sources: &[Source]) -> Shape {
     let Some(src) = sources.get(r.source) else { return shape };
-    let whole = if src.length_beats.is_finite() && src.length_beats > 0.0 { src.length_beats } else { BAR };
-    let cut = (span.len() * r.speed).min(whole);
-    let start = (r.window as f64 * cut).min((whole - cut).max(0.0));
-    let (points, length_beats) = window(&src.points, whole, start, cut);
+    let whole = usable(src.length_beats);
+    // A curve shorter than the cut goes round again from its start.
+    let cut = span.len() * r.speed;
+    let start = if cut > whole { 0.0 } else { (r.window as f64 * cut).min(whole - cut) };
+    let Some((points, length_beats)) = window(&src.points, whole, start, cut) else { return shape };
     let piece = Piece { points, length_beats, source: Some(src.id.clone()), name: src.name.clone() };
     let mut shape = with(shape, span, &Edit::Swap { piece, keep_length: false });
     if r.reverse {
@@ -236,11 +263,14 @@ pub fn roll(now: &Shape, only: Option<Span>, sources: &[Source], settings: Setti
             let level = [CurvePoint { x: 0.0, y: 0.5, bend: 0.0 }, CurvePoint { x: 1.0, y: 0.5, bend: 0.0 }];
             let mut shape = Shape::from_curve(&level, total);
             // The pinned clips that fit stay: their parts are carried over as they are.
+            let kept = now.curve_points();
             for c in now.clips().iter().filter(|c| c.pinned && c.span.end <= total + 1e-9) {
-                let (points, length_beats) = window(&now.curve_points(), now.length(), c.span.start, c.span.len());
+                let Some((points, length_beats)) = window(&kept, now.length(), c.span.start, c.span.len()) else {
+                    continue;
+                };
                 let piece = Piece { points, length_beats, source: c.source.clone(), name: c.name.clone() };
                 shape = with(shape, c.span, &Edit::Swap { piece, keep_length: false });
-                if let Some(clip) = shape.clips().iter().position(|n| n.span == c.span) {
+                if let Some(clip) = shape.clips().iter().position(|n| n.span.same(c.span)) {
                     shape = with(shape, c.span, &Edit::Pin { clip, pinned: true });
                 }
             }
@@ -258,19 +288,12 @@ pub fn roll(now: &Shape, only: Option<Span>, sources: &[Source], settings: Setti
     let mut used: Vec<(f64, Recipe)> = Vec::new();
     for gap in gaps {
         let mut at = gap.start;
-        for len in part_lengths(&mut rng, gap.len(), unit, settings.mixed) {
+        for len in part_lengths(&mut rng, gap.len(), unit, settings.mixed, (room.len() / 2.0).max(0.5)) {
             // A phrase comes back: a part of this length made before is used again.
             let again: Vec<Recipe> = used.iter().filter(|(l, _)| (l - len).abs() < 1e-9).map(|(_, r)| *r).collect();
             let r = match again.get(rng.below(again.len())) {
                 Some(r) if rng.chance(0.35) => *r,
-                _ => {
-                    let mut r = recipe(&mut rng, sources, len, wild);
-                    // A new part isn't cut from the curve the part before it came from: a roll mixes its curves.
-                    if used.last().is_some_and(|(_, last)| last.source == r.source) {
-                        r.source = (r.source + 1 + rng.below(sources.len() - 1)) % sources.len();
-                    }
-                    r
-                }
+                _ => recipe(&mut rng, sources, len, wild, used.last().map(|(_, last)| last.source)),
             };
             used.push((len, r));
             shape = put(shape, Span::new(at, at + len), r, sources);
@@ -388,6 +411,8 @@ mod tests {
         assert_eq!(roll(&level(), None, &sources()[..1], s, 1), None);
         assert_eq!(says(1), "Show at least 2 curves to randomise.");
         assert_eq!(says(19), "From the 19 curves shown.");
+        assert!(rolled_words(4, 4).starts_with("Rolled from the 4 curves shown."));
+        assert!(rolled_words(64, 500).starts_with("Rolled from 64 of the 500 curves shown."));
         assert_eq!(
             (wild_name(0.0), wild_name(0.3), wild_name(0.6), wild_name(1.0)),
             ("Spliced", "A little", "Halfway", "Wild")
@@ -396,5 +421,42 @@ mod tests {
         let (clip, _) = apply(&level(), Some(Span::new(0.0, 4.0)), &Edit::Remember { name: "All".into() }).unwrap();
         let (pinned, _) = apply(&clip, None, &Edit::Pin { clip: 0, pinned: true }).unwrap();
         assert_eq!(roll(&pinned, None, &sources(), Settings { bars: 1, ..s }, 1), None);
+    }
+
+    #[test]
+    fn a_short_curve_goes_round_again_and_is_never_stretched() {
+        // A one-beat ramp cut for four beats: four ramps, each a beat long.
+        let ramp = [p(0.0, 0.0), p(1.0, 1.0)];
+        let (points, length) = window(&ramp, 1.0, 0.0, 4.0).expect("cut");
+        assert!((length - 4.0).abs() < 1e-9);
+        let s = Shape::from_curve(&points, length);
+        for beat in 0..4 {
+            assert!(s.value_at(f64::from(beat) + 0.5) > 0.4 && s.value_at(f64::from(beat) + 0.5) < 0.6, "beat {beat}");
+        }
+    }
+
+    #[test]
+    fn mixed_parts_are_never_longer_than_half_the_room() {
+        for seed in 0..200 {
+            let mut rng = Rng(seed);
+            let parts = part_lengths(&mut rng, 4.0, 1.0, true, 2.0);
+            assert!(parts.len() >= 2, "seed {seed}: {parts:?}");
+            assert!((parts.iter().sum::<f64>() - 4.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn a_new_part_is_not_cut_from_the_curve_before_it() {
+        let sources = [
+            Source { id: "a".into(), name: "A".into(), points: vec![p(0.0, 0.0), p(1.0, 1.0)], length_beats: 8.0 },
+            Source { id: "b".into(), name: "B".into(), points: vec![p(0.0, 1.0), p(1.0, 0.0)], length_beats: 2.5 },
+        ];
+        for seed in 0..200 {
+            let mut rng = Rng(seed);
+            let r = recipe(&mut rng, &sources, 1.0, 1.0, Some(0));
+            assert_eq!(r.source, 1, "seed {seed}");
+            // Its window is one of that curve's own.
+            assert!(r.window == 0 || (r.window + 1) as f64 * r.speed <= 2.5 + 1e-9, "seed {seed}");
+        }
     }
 }
