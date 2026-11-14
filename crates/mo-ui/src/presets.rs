@@ -558,6 +558,12 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_curve_add(move |row| {
+        if let (Some(app), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
+            add_curve(&app, row);
+        }
+    });
+    let weak = app.as_weak();
     data.on_curve_step(move |by| {
         if let Some(app) = weak.upgrade() {
             step_curve(&app, by);
@@ -1173,6 +1179,44 @@ fn pick_curve(app: &AppWindow, id: Option<String>) {
     PAGE.with(|p| show_random_can(&data, &p.borrow()));
     show_curve_card(app);
     CURVE_LINES.with(|m| m.notify.reset());
+}
+
+/// The + on the shown curve at `row`: it's added to the curve in the editor (as its line shows it: at that speed), in
+/// place of the highlighted part or at its end, and the card says so. Whether it was.
+pub fn add_curve(app: &AppWindow, row: usize) -> bool {
+    let Some(c) = PAGE.with(|p| row_curve_as_sent(&p.borrow(), row)) else { return false };
+    let piece = mo_app::curve_edit::Piece {
+        points: c.points.clone(),
+        length_beats: c.length_beats,
+        source: Some(c.id.clone()),
+        name: c.name.clone(),
+    };
+    let done = crate::curve_editor::add(app, piece);
+    let said = match done {
+        Ok(()) => format!("{ADDED}{}. Undo takes it out again; Save as new curve keeps the joined curve.", c.name),
+        Err(why) => format!("{} wasn't added: {why}.", c.name),
+    };
+    PAGE.with(|p| p.borrow_mut().curve_message = said);
+    show_curve_card(app);
+    done.is_ok()
+}
+
+/// How the card's words begin after a curve was added: Undo and Redo take those words away again.
+const ADDED: &str = "Added ";
+
+/// Undo or Redo took a step in the editor: the card no longer says a curve was added.
+pub(crate) fn curve_stepped(app: &AppWindow) {
+    let said = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let said = p.curve_message.starts_with(ADDED);
+        if said {
+            p.curve_message.clear();
+        }
+        said
+    });
+    if said {
+        show_curve_card(app);
+    }
 }
 
 /// Randomise's words and whether it can roll: two curves shown, and one open to roll into.

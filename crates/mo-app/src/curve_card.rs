@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use mo_formats::bitwig::curve::CurvePoint;
 
-use crate::curve_edit::{Edit, Editor, Grid, Shape, Span, Step};
+use crate::curve_edit::{Edit, Editor, Grid, Piece, Shape, Span, Step};
 use crate::curve_hear::{self, Hear};
 use crate::curve_hold::{self, Hold, Over, Part};
 use crate::curve_paint::{self, Stroke};
@@ -956,6 +956,42 @@ impl Card {
         true
     }
 
+    /// A curve from the list is added to the one in the editor (the + on its line): in place of the highlighted
+    /// part, fitted to its length, or with nothing highlighted at the curve's end, where it lands as a clip of its
+    /// own. One step of undo. One added at the end isn't left highlighted, so the next + joins on after it. When it
+    /// isn't added, why, in words that end "X wasn't added: ...". Draw the picture again either way: a drag in hand
+    /// is given up first.
+    pub fn add(&mut self, piece: Piece) -> Result<(), &'static str> {
+        let s = self;
+        let was = s.grab;
+        s.hands_off();
+        s.mouse = None;
+        let Some((_, editor)) = s.open.as_mut() else { return Err("no curve is open in the editor") };
+        given_up(editor, was, &mut s.lit_whole);
+        // As Randomise has it: a curve of one point or none is nothing to add.
+        if piece.points.len() < 2 {
+            return Err("it has no shape to add");
+        }
+        let before = editor.shape().length();
+        if editor.highlight().is_some() {
+            if !editor.edit(&Edit::Swap { piece, keep_length: false }) {
+                return Err("the highlighted part is that curve already");
+            }
+        } else {
+            if !editor.edit(&Edit::Insert { at: before, piece }) {
+                return Err("the joined curve would be too long, or this one is too short to add");
+            }
+            editor.set_highlight(None);
+            s.lit_whole = false;
+        }
+        // Longer now: the whole of it in sight.
+        let length = editor.shape().length();
+        if (length - before).abs() > 1e-9 {
+            s.view = View::whole(length);
+        }
+        Ok(())
+    }
+
     /// Esc: a drag in hand is put back as it was before it began; else the highlight is dropped. Whether it did
     /// either.
     pub fn escape(&mut self) -> bool {
@@ -1508,6 +1544,37 @@ mod tests {
         card.show_all();
         let all = card.showing(false);
         assert!(all.dots.is_some() && all.tiles.is_some() && all.swing_marks.is_some());
+    }
+
+    #[test]
+    fn a_curve_from_the_list_lands_at_the_end_or_in_the_highlights_place() {
+        let piece = || Piece { points: rise(), length_beats: 2.0, source: Some("b".into()), name: "Other".into() };
+        let mut card = card();
+        assert!(card.add(piece()).is_ok());
+        assert!((card.length() - 6.0).abs() < 1e-9, "added at the end: 4 beats and its 2");
+        assert!((card.frame().view.span - 6.0).abs() < 1e-9, "all of it in sight");
+        assert!(card.highlight().is_none(), "not left highlighted: the next one joins on after it");
+        let tiles = card.showing(false).tiles.expect("the first time");
+        assert!(tiles.iter().any(|t| t.name == "Other"), "it lands as a clip");
+        // The same one again joins on after it.
+        assert!(card.add(piece()).is_ok());
+        assert!((card.length() - 8.0).abs() < 1e-9);
+        // With a part highlighted, another takes that part's place, fitted: the curve is no longer. (The same one
+        // again would change nothing, and isn't a step.)
+        let x = card.frame().x(7.0);
+        card.strip(mouse::PRESSED, x, Keys::default());
+        card.strip(mouse::LET_GO, x, Keys::default());
+        assert_eq!(card.highlight().map(|h| (h.start, h.end)), Some((6.0, 8.0)));
+        assert!(card.add(piece()).is_err());
+        let fall = vec![CurvePoint { x: 0.0, y: 1.0, bend: 0.0 }, CurvePoint { x: 1.0, y: 0.0, bend: 0.0 }];
+        assert!(card.add(Piece { points: fall, length_beats: 8.0, source: None, name: "Fall".into() }).is_ok());
+        assert!((card.length() - 8.0).abs() < 1e-9);
+        assert!(card.step_back(true) && card.step_back(true) && card.step_back(true));
+        assert!(card.edited().is_none(), "each was one step");
+        // One point is no shape to add; nor is there anything to add to with no curve open.
+        let dot = Piece { points: vec![CurvePoint { x: 0.0, y: 0.5, bend: 0.0 }], ..piece() };
+        assert!(card.add(dot).is_err());
+        assert!(Card::default().add(piece()).is_err());
     }
 
     #[test]
