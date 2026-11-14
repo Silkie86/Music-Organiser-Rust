@@ -1510,6 +1510,11 @@ fn presets_shots(
     shots.push(("curves-list.png".into(), capture(window)));
     mo_ui::presets::pick_row(app, 0);
     shots.push(("curves-picked.png".into(), capture(window)));
+    // Hear: the play line on the picture and its marker on the ruler, the button saying Stop.
+    mo_ui::curve_editor::show_playing_sample(app, Some(5.5));
+    shots.push(("curves-hear.png".into(), capture(window)));
+    mo_ui::curve_editor::show_playing_sample(app, None);
+    capture(window);
     // A curve dragged out onto an automation lane from its line, its shape on the card.
     let still = capture(window);
     data.set_curve_lifted_row(1);

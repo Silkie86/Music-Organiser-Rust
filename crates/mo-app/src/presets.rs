@@ -1964,15 +1964,68 @@ fn bar_words(at: f64) -> String {
 /// How many places a curve's card lists, newest first.
 pub const PLACES_UP_TO: usize = 20;
 
-pub fn curve_card(c: &Curve) -> CurveCard {
-    let mut facts =
-        vec![("LENGTH".to_owned(), beats_words(c.length_beats)), ("POINTS".into(), c.points.len().to_string())];
-    facts.push(("FOUND".into(), found_words(c)));
-    // The newest places only: a common shape (any ramp) can be found in hundreds, and the card isn't a list (H-7).
+/// A curve's newest places, and how many more there are: a common shape (any ramp) can be found in hundreds, and
+/// neither the card nor a menu is a list (H-7).
+fn newest_sources(c: &Curve) -> (Vec<&mo_presets::curves::CurveSource>, usize) {
     let mut sources: Vec<&mo_presets::curves::CurveSource> = c.sources.iter().collect();
     sources.sort_by_key(|s| std::cmp::Reverse(s.modified));
     let more = sources.len().saturating_sub(PLACES_UP_TO);
     sources.truncate(PLACES_UP_TO);
+    (sources, more)
+}
+
+/// The words "N more places" for the places a card or menu leaves out.
+fn more_places(more: usize) -> String {
+    format!("And {} more {}", thousands(more), if more == 1 { "place" } else { "places" })
+}
+
+/// The editor card's line of facts about the picked curve, as found: its length and points ("1 bar · 9 points"),
+/// then where it was found ("In 2 songs"; empty for one found nowhere).
+pub fn curve_facts_line(c: &Curve) -> (String, String) {
+    let points = format!("{} point{}", thousands(c.points.len()), if c.points.len() == 1 { "" } else { "s" });
+    let length = beats_words(c.length_beats);
+    let facts = if length.is_empty() { points } else { format!("{length} · {points}") };
+    (facts, found_words(c))
+}
+
+/// One line of the menu under the editor card's "In 2 songs": a place the curve was found, and its save when it's a
+/// song's (the line then shows that song on the Songs page).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoundLine {
+    pub text: String,
+    pub save: Option<String>,
+}
+
+/// The places a curve was found, newest first, for the menu under the editor card's "In 2 songs": each song with
+/// the clip's name and its bar, a library's by what kind it is, and a last line counting the ones left out.
+pub fn curve_found_lines(c: &Curve) -> Vec<FoundLine> {
+    let (sources, more) = newest_sources(c);
+    let mut lines: Vec<FoundLine> = sources
+        .into_iter()
+        .map(|s| {
+            let mut words = vec![s.song.clone()];
+            if !s.name.is_empty() && s.name != s.song {
+                words.push(s.name.clone());
+            }
+            if s.kind.is_song() {
+                words.push(bar_words(s.at));
+            } else {
+                words.push(kind_label(s.kind).to_owned());
+            }
+            FoundLine { text: words.join(" · "), save: s.kind.is_song().then(|| s.path.clone()) }
+        })
+        .collect();
+    if more > 0 {
+        lines.push(FoundLine { text: more_places(more), save: None });
+    }
+    lines
+}
+
+pub fn curve_card(c: &Curve) -> CurveCard {
+    let mut facts =
+        vec![("LENGTH".to_owned(), beats_words(c.length_beats)), ("POINTS".into(), c.points.len().to_string())];
+    facts.push(("FOUND".into(), found_words(c)));
+    let (sources, more) = newest_sources(c);
     let mut places: Vec<(String, String)> = sources
         .into_iter()
         .map(|s| {
@@ -1994,10 +2047,7 @@ pub fn curve_card(c: &Curve) -> CurveCard {
         })
         .collect();
     if more > 0 {
-        places.push((
-            format!("And {} more {}", thousands(more), if more == 1 { "place" } else { "places" }),
-            String::new(),
-        ));
+        places.push((more_places(more), String::new()));
     }
     CurveCard {
         name: c.name.clone(),
@@ -2625,6 +2675,29 @@ mod tests {
         assert_eq!(curve_tone(&c).len(), 88_200);
         c.length_beats = 1_000.0;
         assert_eq!(curve_tone(&c).len(), 44_100 * 64);
+    }
+
+    #[test]
+    fn the_editor_card_says_what_a_curve_is_and_where_it_was_found() {
+        let c = curve("Rise", SourceKind::FlKnobMoves, "Didums", 10);
+        assert_eq!(curve_facts_line(&c), ("4 bars · 3 points".to_owned(), "In 1 song".to_owned()));
+        let lines = curve_found_lines(&c);
+        assert_eq!(lines, [FoundLine { text: "Didums · bar 17".into(), save: Some("/s/Didums.flp".into()) }]);
+        // A library's curve leads to no song; a clip's own name is said after its song's.
+        let mut lib = curve("Wobble", SourceKind::BitwigCurve, "Wobble", 5);
+        assert_eq!(curve_found_lines(&lib), [FoundLine { text: "Wobble · Bitwig's library".into(), save: None }]);
+        lib.sources[0].kind = SourceKind::BitwigClip;
+        lib.sources[0].name = "Pump".into();
+        assert_eq!(curve_found_lines(&lib)[0].text, "Wobble · Pump · bar 17");
+        // The newest places only, then how many more; one point is "1 point", and no length says none.
+        let mut many = c.clone();
+        many.sources = (0..25).map(|n| CurveSource { modified: n, ..c.sources[0].clone() }).collect();
+        many.points.truncate(1);
+        many.length_beats = 0.0;
+        let lines = curve_found_lines(&many);
+        assert_eq!(lines.len(), PLACES_UP_TO + 1);
+        assert_eq!(lines[PLACES_UP_TO], FoundLine { text: "And 5 more places".into(), save: None });
+        assert_eq!(curve_facts_line(&many).0, "1 point");
     }
 
     #[test]

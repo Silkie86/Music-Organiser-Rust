@@ -3098,6 +3098,8 @@ export component PanelDivider inherits Rectangle {
     in property <length> room;
     in property <length> min-list: 380px;
     in property <length> min-panel: 320px;
+    // Off where the page sets the widths itself: the seam is only a gap then.
+    in property <bool> enabled: true;
     // The new width while dragging, and once more when let go (to save it).
     callback resizing(length);
     callback resized(length);
@@ -3115,6 +3117,7 @@ export component PanelDivider inherits Rectangle {
         background: touch.pressed ? Theme.accent : touch.has-hover ? Theme.stroke : transparent;
     }
     touch := TouchArea {
+        enabled: root.enabled;
         mouse-cursor: MouseCursor.col-resize;
         pointer-event(e) => {
             if e.button != PointerEventButton.left {

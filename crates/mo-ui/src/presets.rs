@@ -48,8 +48,8 @@ use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedSt
 
 use crate::filters::FilterModels;
 use crate::{
-    ActionKey, AppWindow, CardAction, CurveCardInfo, CurveLineInfo, CurvePlace, MenuItem, PartChip, PresetCard,
-    PresetFact, PresetLine, PresetsData, YearBar,
+    ActionKey, AppWindow, CardAction, CurveEditorData, CurveLineInfo, MenuItem, PartChip, PresetCard, PresetFact,
+    PresetLine, PresetsData, YearBar,
 };
 
 mod drag_out;
@@ -103,8 +103,8 @@ struct Page {
     curves: Vec<Curve>,
     /// What the search and the order go by, one for each of `curves`, worked out once (H-5).
     curve_keys: Vec<logic::CurveKey>,
-    /// The curve whose places the card shows: they're only made again when another curve is picked or it changes.
-    curve_places_of: Option<String>,
+    /// The saves behind the lines of the picked curve's "found in" menu (none for a line that's no song's).
+    curve_found: Vec<Option<String>>,
     curve_shown: Vec<usize>,
     /// The speed each shown curve is at, beside `curve_shown`: 1, or half or double with "Other speeds too".
     curve_speeds: Vec<f64>,
@@ -347,6 +347,7 @@ fn wire(app: &AppWindow) {
     let data = app.global::<PresetsData>();
     data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = PresetLine>>));
     data.set_curve_lines(ModelRc::from(CURVE_LINES.with(|m| m.clone()) as Rc<dyn Model<Data = CurveLineInfo>>));
+    crate::curve_editor::connect(app);
     let key = PAGE.with(|p| p.borrow().shortcuts.key_of(act::EXPORT_SHOWN).to_owned());
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
 
@@ -934,36 +935,55 @@ fn show_card(app: &AppWindow) {
     });
 }
 
+/// The id of a line in the "found in" menu: this, then the line's place among the picked curve's places.
+const FOUND_LINE: &str = "found:";
+
+/// Shows the picked curve on the editor card: the curve as it's sent (at the speed its line shows) in the editor,
+/// its facts as found, where it was found, and what can be done with it.
 fn show_curve_card(app: &AppWindow) {
     let data = app.global::<PresetsData>();
+    let editor = app.global::<CurveEditorData>();
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let Some(c) = p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id)) else {
+        let picked = p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id));
+        let Some((c, sent)) = picked.zip(picked_curve_as_sent(&p)) else {
             data.set_curve_panel_shown(false);
-            p.curve_places_of = None;
+            p.curve_found.clear();
+            crate::curve_editor::open(app, None);
             return;
         };
-        let card = logic::curve_card(c);
-        let new_places = p.curve_places_of.as_deref() != Some(c.id.as_str());
-        let id = c.id.clone();
         data.set_curve_panel_shown(true);
-        data.set_curve_card(CurveCardInfo { name: card.name.into(), shape: card.shape.into(), hidden: card.hidden });
-        data.set_curve_facts(ModelRc::new(VecModel::from(
-            card.facts.into_iter().map(|(n, v)| PresetFact { name: n.into(), value: v.into() }).collect::<Vec<_>>(),
-        )));
-        if new_places {
-            data.set_curve_places(ModelRc::new(VecModel::from(
-                card.places
-                    .into_iter()
-                    .map(|(t, a)| CurvePlace { title: t.into(), about: a.into() })
-                    .collect::<Vec<_>>(),
-            )));
-        }
+        crate::curve_editor::open(app, Some((&sent, curve_tone_key(&sent))));
+        editor.set_state_words(if c.hidden { "hidden" } else { "" }.into());
+        let (facts, found) = logic::curve_facts_line(&sent);
+        editor.set_facts(facts.into());
+        editor.set_found(found.into());
         let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some());
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
+        // The places it was found, each showing its song on the Songs page, then the way to the song's file.
+        let found = logic::curve_found_lines(c);
+        let mut found_menu: Vec<MenuItem> = found
+            .iter()
+            .enumerate()
+            .map(|(i, l)| MenuItem {
+                what: l.text.as_str().into(),
+                key: SharedString::new(),
+                id: format!("{FOUND_LINE}{i}").into(),
+                enabled: l.save.is_some(),
+            })
+            .collect();
+        found_menu.extend(offers.iter().filter(|o| o.id == curve_act::OPEN_SONG && o.enabled).map(|o| MenuItem {
+            what: o.text.as_str().into(),
+            key: key(o.id),
+            id: o.id.into(),
+            enabled: true,
+        }));
+        data.set_curve_found_menu(ModelRc::new(VecModel::from(found_menu)));
+        // Hear has a button of its own on the card (and stays in the right-click menu).
         data.set_curve_actions(ModelRc::new(VecModel::from(
             offers
                 .iter()
+                .filter(|o| o.id != curve_act::HEAR)
                 .map(|o| CardAction {
                     text: o.text.as_str().into(),
                     tip: what_of(o.id).into(),
@@ -982,7 +1002,7 @@ fn show_curve_card(app: &AppWindow) {
                 .collect::<Vec<_>>(),
         )));
         data.set_curve_message(p.curve_message.as_str().into());
-        p.curve_places_of = Some(id);
+        p.curve_found = found.into_iter().map(|l| l.save).collect();
     });
 }
 
@@ -1306,17 +1326,23 @@ pub fn toggle_play(app: &AppWindow) -> bool {
 /// The player's key for a curve heard on its tone: this, then the curve's id.
 const CURVE_TONE_KEY: &str = "curve-tone:";
 
+/// The player's key for `sent` heard on its tone.
+fn curve_tone_key(sent: &Curve) -> String {
+    format!("{CURVE_TONE_KEY}{}", sent.id)
+}
+
 /// Hears `sent` (the picked curve, at the speed it's shown at) as the volume of a tone, going round; or stops it when
 /// it's the one playing. The tone is made on a thread of its own.
 fn hear_curve(app: &AppWindow, sent: Curve) {
     let player = crate::sounds::player();
-    let key = format!("{CURVE_TONE_KEY}{}", sent.id);
+    let key = curve_tone_key(&sent);
     if player.playing().as_deref() == Some(key.as_str()) {
         player.stop();
         curve_message(String::new());
         return;
     }
     crate::sounds::stop_for_another(app);
+    crate::curve_editor::follow_tone(app, key.clone());
     let started = background::spawn("Curve tone", move || {
         let tone = logic::curve_tone(&sent);
         crate::sounds::player().play_looped(std::sync::Arc::new(tone), key, 0.0);
@@ -2253,7 +2279,6 @@ fn read_curves(_app: &AppWindow) {
 fn set_curves(p: &mut Page, list: Vec<Curve>, keys: Vec<logic::CurveKey>) {
     p.curve_keys = keys;
     background::free_later(std::mem::replace(&mut p.curves, list));
-    p.curve_places_of = None;
     p.curves_failed = None;
     reshow_curves(p);
     if let Some(id) = &p.curve_picked
@@ -2404,7 +2429,13 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
                 log::error("Curves", &format!("Couldn't start saving the curve: {e}"));
             }
         }
-        _ => return false,
+        _ => {
+            // A line of the "found in" menu: its song on the Songs page.
+            let line = id.strip_prefix(FOUND_LINE).and_then(|i| i.parse::<usize>().ok());
+            let save = line.and_then(|i| PAGE.with(|p| p.borrow().curve_found.get(i).cloned().flatten()));
+            let Some(save) = save else { return false };
+            show_in_songs(app, &save);
+        }
     }
     true
 }
@@ -2448,7 +2479,6 @@ fn curve_db_change(
                         let mut p = p.borrow_mut();
                         if let Some(at) = p.curves.iter().position(|o| o.id == c.id) {
                             p.curve_keys[at] = key;
-                            p.curve_places_of = None;
                             p.curves[at] = c;
                         }
                         reshow_curves(&mut p);
@@ -2473,6 +2503,7 @@ fn curve_db_change(
 
 /// Shows made-up sounds and curves, with Ctrl+K opening them, for mo-screens (no library, nothing read).
 pub fn show_sample(app: &AppWindow) {
+    crate::curve_editor::draw_here();
     wire(app);
     finder_opens();
     PAGE.with(|p| {

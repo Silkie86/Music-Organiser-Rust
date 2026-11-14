@@ -1,0 +1,360 @@
+// The Curves page's side card: the curve editor (the screen design of 14 Nov 2026, built on the plan Solomon
+// approved that day). From the top, as every card reads: the name plate with Undo and Redo, the picked curve's facts,
+// the ruler, the picture, the drag strip, then Hear, the grid and Save as new curve, and the picked curve's own
+// buttons. The picture's still layers (grid, fill, curve) are one picture drawn off the window's thread
+// (mo_app::curve_picture, mo-ui/src/curve_editor.rs); what moves with the mouse or the sound is laid over it here.
+// Only shared parts from studio.slint.
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, CardAction, CardActions, SidePanel } from "../studio.slint";
+
+// One of the ruler's marks: where (from the picture's left) and its bar and beat ("1", "1.2"; none when the marks are
+// too close to number each).
+export struct RulerMark {
+    x: length,
+    text: string,
+    bar: bool,
+}
+
+export global CurveEditorData {
+    // The curve on the card and, in muted words after it, whether it's been changed ("edited, not saved").
+    in property <string> name;
+    in property <string> state-words;
+    // The picked curve as found, on one line: "1 bar · 9 points ·" then where ("In 2 songs").
+    in property <string> facts;
+    in property <string> found;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    in property <bool> changed;
+    in property <string> undo-key;
+    in property <string> redo-key;
+    in property <string> save-key;
+    in property <string> hear-key;
+    // The still layers, drawn to fit the room the page reports (`laid-out`), and the ruler's marks over them.
+    in property <image> picture;
+    in property <[RulerMark]> ruler;
+    // Where the curve ends, from the picture's left; under 0 when its end isn't in sight.
+    in property <length> end-x: -1px;
+    // The grid: its step (0 is 1/4, 1 is 1/8, 2 is 1/16, 3 is 1/32, -1 is off) and whether it's triplets.
+    in property <int> grid-step: 2;
+    in property <bool> grid-triplet;
+    // Hear: whether the tone plays, and where it is now, from the picture's left (under 0 when not in sight).
+    in property <bool> playing;
+    in property <length> playhead: -1px;
+    // The picture's room, each time it or the window's scale changes.
+    callback laid-out(length, length);
+    // The wheel over the ruler or the picture: where (from the picture's left), how far, and whether Shift is held
+    // (Shift moves along; without it the wheel zooms round the mouse).
+    callback wheel(length, length, bool);
+    // A grid chip: 0 to 3 a step, 4 Triplet (on or off), 5 Off.
+    callback grid-picked(int);
+    callback undo();
+    callback redo();
+    callback hear();
+    callback save-as-new();
+}
+
+// The ruler: a mark at each beat with its place, the end mark, and the play marker while Hear plays. It keeps the
+// picture's room at its sides (the marks' places are the picture's own), so a bar line runs straight down both.
+component Ruler inherits Rectangle {
+    height: 24px;
+    clip: true;
+    for m in CurveEditorData.ruler: Rectangle {
+        x: m.x - 0.5px;
+        y: root.height - (m.bar ? 10px : 8px);
+        width: 1px;
+        height: m.bar ? 10px : 8px;
+        background: Theme.stroke;
+        Text {
+            x: 4px;
+            y: -(root.height - parent.height) + 1px;
+            text: m.text;
+            color: Theme.faint;
+            font-family: Theme.number-font;
+            font-size: Type.small;
+        }
+    }
+    // The end mark: how long the whole curve is.
+    if CurveEditorData.end-x >= 0: Rectangle {
+        x: CurveEditorData.end-x - 3px;
+        y: 3px;
+        width: 6px;
+        height: root.height - 3px;
+        border-radius: 2px;
+        background: Theme.text;
+    }
+    if CurveEditorData.playing && CurveEditorData.playhead >= 0: Path {
+        x: CurveEditorData.playhead - 5px;
+        y: root.height - 7px;
+        width: 10px;
+        height: 7px;
+        viewbox-width: 10;
+        viewbox-height: 7;
+        commands: "M 0 0 L 10 0 L 5 7 Z";
+        fill: Theme.accent;
+    }
+    TouchArea {
+        scroll-event(e) => {
+            CurveEditorData.wheel(self.mouse-x, e.delta-y != 0 ? e.delta-y : e.delta-x, e.modifiers.shift);
+            EventResult.accept
+        }
+    }
+}
+
+// The grid's chips, joined in one strip after its name: one step is always picked unless it's off, and Triplet is
+// on or off beside it.
+component GridStrip inherits HorizontalLayout {
+    spacing: 0;
+    alignment: start;
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: name.preferred-width + 2 * Space.md;
+            height: 28px;
+            border-top-left-radius: 14px;
+            border-bottom-left-radius: 14px;
+            border-width: 1px;
+            border-color: Theme.edge;
+            background: Theme.well;
+            name := Text {
+                text: "Grid";
+                color: Theme.muted;
+                font-size: Type.meta;
+                font-weight: 500;
+            }
+        }
+    }
+    for g[i] in ["1/4", "1/8", "1/16", "1/32", "Triplet", "Off"]: VerticalLayout {
+        alignment: center;
+        ToggleChip {
+            text: g;
+            on: i < 4 ? CurveEditorData.grid-step == i : i == 4 ? CurveEditorData.grid-triplet && CurveEditorData.grid-step >= 0 : CurveEditorData.grid-step < 0;
+            dim: i == 4 && CurveEditorData.grid-step < 0;
+            joined-left: true;
+            joined-right: i < 5;
+            clicked => { CurveEditorData.grid-picked(i); }
+        }
+    }
+}
+
+// The editor card. `close` puts the curve away; the page gives the picked curve's own parts (its rename box, its drag
+// strip, its buttons and message) as it has them, since they act on the curve as found in the list.
+export component CurveEditor inherits SidePanel {
+    // Renaming: the name plate shows a box instead of the name while this is on.
+    in property <bool> renaming;
+    in-out property <string> rename-text;
+    // Whether the rename box has the keys: when it goes with them, the page gives them back to its list.
+    in-out property <bool> rename-keys;
+    callback rename-done(string);
+    callback rename-dropped();
+    // The drag strip: the curve's file carried out to a Bitwig automation lane.
+    in property <bool> lifted;
+    in property <bool> landed;
+    callback drag-out();
+    callback drag-let-go();
+    // The picked curve's own buttons, and a line of what just happened.
+    in property <[CardAction]> actions;
+    in property <string> message;
+    callback chosen(string);
+    // Whether "In 2 songs" opens a list of those places, and a click on it: where the list opens (as the window has
+    // it), under the words.
+    in property <bool> found-opens;
+    callback found-clicked(length, length);
+
+    // The name plate: the curve's name, whether it's changed, Undo and Redo.
+    HorizontalLayout {
+        height: 32px;
+        spacing: Space.sm;
+        if !root.renaming: Text {
+            text: CurveEditorData.name;
+            color: Theme.text;
+            font-family: Theme.title-font;
+            font-size: Type.heading;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+            min-width: 0px;
+        }
+        if !root.renaming && CurveEditorData.state-words != "": Text {
+            text: CurveEditorData.state-words;
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+        if root.renaming: SearchBox {
+            horizontal-stretch: 1;
+            search: false;
+            hint: "A name for this curve";
+            text <=> root.rename-text;
+            // It takes the keys as it's made, and a change handler starts from what `init` leaves, so the one below
+            // would never see them come: it's said here, and the handler sees them go (or come back).
+            init => {
+                self.focus();
+                root.rename-keys = true;
+            }
+            // Not while another app's window is in front: the box gets them back with the window.
+            changed has-keys => {
+                if (self.has-keys || AppKeys.window-active) {
+                    root.rename-keys = self.has-keys;
+                }
+            }
+            key(k) => {
+                if (k == Key.Return) {
+                    root.rename-done(root.rename-text);
+                    return true;
+                }
+                if (k == Key.Escape) {
+                    root.rename-dropped();
+                    return true;
+                }
+                false
+            }
+        }
+        if !root.renaming: Rectangle {
+            horizontal-stretch: 1;
+        }
+        StudioButton {
+            horizontal-stretch: 0;
+            width: 32px;
+            icon: "M 5.5 3 L 2 6.5 L 5.5 10 M 2 6.5 L 10 6.5 A 4 4 0 0 1 10 14.5 L 7 14.5";
+            tip: "Undo";
+            key: CurveEditorData.undo-key;
+            enabled: CurveEditorData.can-undo;
+            clicked => { CurveEditorData.undo(); }
+        }
+        StudioButton {
+            horizontal-stretch: 0;
+            width: 32px;
+            icon: "M 10.5 3 L 14 6.5 L 10.5 10 M 14 6.5 L 6 6.5 A 4 4 0 0 0 6 14.5 L 9 14.5";
+            tip: "Redo";
+            key: CurveEditorData.redo-key;
+            enabled: CurveEditorData.can-redo;
+            clicked => { CurveEditorData.redo(); }
+        }
+        // Room for the card's own × at its top right corner.
+        Rectangle {
+            width: Space.lg;
+        }
+    }
+    // The picked curve's facts, as found (not as edited): its length and points, then where it was found.
+    if CurveEditorData.facts != "" || CurveEditorData.found != "": HorizontalLayout {
+        height: 20px;
+        spacing: Space.xs;
+        Text {
+            text: CurveEditorData.facts;
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+        found := Text {
+            text: CurveEditorData.found + (root.found-opens ? "  ▾" : "");
+            color: Theme.text;
+            font-size: Type.meta;
+            font-weight: 500;
+            vertical-alignment: center;
+            overflow: elide;
+            min-width: 0px;
+            found-touch := TouchArea {
+                enabled: root.found-opens;
+                mouse-cursor: root.found-opens ? MouseCursor.pointer : MouseCursor.default;
+                clicked => {
+                    root.found-clicked(found.absolute-position.x, found.absolute-position.y + found.height);
+                }
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+    VerticalLayout {
+        vertical-stretch: 1;
+        spacing: Space.sm;
+        Ruler { }
+        // The picture: a sunken screen, all the height that's left.
+        screen := Well {
+            vertical-stretch: 1;
+            min-height: 160px;
+            clip: true;
+            function laid-out() {
+                CurveEditorData.laid-out(self.width, self.height);
+            }
+            init => {
+                self.laid-out();
+            }
+            changed width => {
+                self.laid-out();
+            }
+            changed height => {
+                self.laid-out();
+            }
+            // Drawn at the window's own pixels, so its lines stay sharp.
+            Image {
+                x: 0;
+                y: 0;
+                width: self.source.width * 1phx;
+                height: self.source.height * 1phx;
+                source: CurveEditorData.picture;
+            }
+            // The play line, only while Hear plays.
+            if CurveEditorData.playing && CurveEditorData.playhead >= 0: Rectangle {
+                x: CurveEditorData.playhead - 0.5px;
+                y: 0;
+                width: 1px;
+                height: parent.height;
+                background: Theme.accent;
+            }
+            TouchArea {
+                scroll-event(e) => {
+                    CurveEditorData.wheel(self.mouse-x, e.delta-y != 0 ? e.delta-y : e.delta-x, e.modifiers.shift);
+                    EventResult.accept
+                }
+            }
+        }
+    }
+    // Where to take the curve from to drag it onto an automation lane: its file in the app's Curves folder.
+    DragHandle {
+        text: "Drag onto a Bitwig automation lane";
+        tip: "Drag the curve's file onto an automation lane in Bitwig, or save it to Bitwig's curves to find it in its browser";
+        lifted: root.lifted;
+        landed: root.landed;
+        drag-out => { root.drag-out(); }
+        drag-let-go => { root.drag-let-go(); }
+    }
+    // The card's buttons: Hear first, the grid, then the way out.
+    HorizontalLayout {
+        height: 32px;
+        spacing: Space.md;
+        StudioButton {
+            horizontal-stretch: 0;
+            text: CurveEditorData.playing ? "Stop" : "Hear";
+            main: CurveEditorData.playing;
+            tip: CurveEditorData.playing ? "Stop the tone" : "Hear the curve as the volume of a tone, round and round";
+            key: CurveEditorData.hear-key;
+            clicked => { CurveEditorData.hear(); }
+        }
+        GridStrip { }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+        StudioButton {
+            horizontal-stretch: 0;
+            text: "Save as new curve";
+            main: !CurveEditorData.playing;
+            tip: CurveEditorData.changed ? "Keep the curve as it is now, as a new curve of its own" : "Nothing has been changed yet";
+            key: CurveEditorData.save-key;
+            enabled: CurveEditorData.changed;
+            clicked => { CurveEditorData.save-as-new(); }
+        }
+    }
+    // The picked curve's own buttons, as on every card: they act on the curve as found, not on the edits.
+    CardActions {
+        room: root.inside;
+        actions: root.actions;
+        chosen(id) => { root.chosen(id); }
+    }
+    if root.message != "": Text {
+        text: root.message;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+}

@@ -3,6 +3,7 @@
 // to drop onto a Bitwig lane (Solomon, 2 Nov 2026). Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
+import { CurveEditor } from "curve_editor.slint";
 import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
 
 // One line of the sounds list.
@@ -65,18 +66,6 @@ export struct CurveLineInfo {
     // Path commands in a 300 by 100 box (mo_app::presets::SHAPE_BOX).
     shape: string,
     picked: bool,
-}
-
-// One place a curve was found.
-export struct CurvePlace {
-    title: string,
-    about: string,
-}
-
-export struct CurveCardInfo {
-    name: string,
-    shape: string,
-    hidden: bool,
 }
 
 export global PresetsData {
@@ -193,9 +182,8 @@ export global PresetsData {
     // Where the curves' list is turned to, kept the same way.
     in-out property <length> curve-list-y;
     in property <bool> curve-panel-shown;
-    in property <CurveCardInfo> curve-card;
-    in property <[PresetFact]> curve-facts;
-    in property <[CurvePlace]> curve-places;
+    // The lines under the editor card's "In 2 songs".
+    in property <[MenuItem]> curve-found-menu;
     in property <[CardAction]> curve-actions;
     in property <[MenuItem]> curve-menu;
     in property <string> curve-message;
@@ -371,6 +359,9 @@ component CurveShape inherits Rectangle {
 component CurveLineView inherits ListLine {
     in property <CurveLineInfo> line;
     callback chosen();
+    // The list is a narrow column beside the editor: where it was found is on the card then, and the name gets the
+    // room.
+    property <bool> tight: self.width < 420px;
     height: 48px;
     selected: line.picked;
     draggable: true;
@@ -389,7 +380,7 @@ component CurveLineView inherits ListLine {
         padding-right: Space.md;
         spacing: Space.md;
         Well {
-            width: 84px;
+            width: root.tight ? 64px : 84px;
             height: 28px;
             y: (parent.height - self.height) / 2;
             CurveShape {
@@ -416,9 +407,9 @@ component CurveLineView inherits ListLine {
                 overflow: elide;
             }
         }
-        Text {
-            horizontal-stretch: 2;
-            preferred-width: 0px;
+        if !root.tight || root.line.hidden: Text {
+            horizontal-stretch: root.tight ? 0 : 2;
+            preferred-width: root.tight ? self.min-width : 0px;
             min-width: 0px;
             text: root.line.hidden ? "Hidden" : root.line.found;
             color: Theme.muted;
@@ -427,7 +418,7 @@ component CurveLineView inherits ListLine {
             overflow: elide;
         }
         Text {
-            width: 72px;
+            width: root.tight ? 52px : 72px;
             text: root.line.length;
             color: Theme.muted;
             font-family: Theme.number-font;
@@ -546,125 +537,6 @@ component PresetPanel inherits SidePanel {
     }
     Text {
         text: PresetsData.card.path;
-        color: Theme.faint;
-        font-size: Type.small;
-        wrap: word-wrap;
-        min-width: 0px;
-    }
-    Rectangle { vertical-stretch: 1; }
-}
-
-// The picked curve: its shape large, its name (rename in place), what can be done with it and where it was found.
-component CurvePanel inherits SidePanel {
-    close => { PresetsData.curve-select(-1); }
-    // Whether the rename box has the keys: when it goes with them, the page gives them back to its list.
-    in-out property <bool> rename-keys;
-    Caps { text: PresetsData.curve-card.hidden ? "CURVE · HIDDEN" : "CURVE"; }
-    if !PresetsData.renaming: Text {
-        text: PresetsData.curve-card.name;
-        color: Theme.text;
-        font-family: Theme.title-font;
-        font-size: Type.panel-title;
-        font-weight: 600;
-        wrap: word-wrap;
-        min-width: 0px;
-    }
-    if PresetsData.renaming: rename := SearchBox {
-        search: false;
-        hint: "A name for this curve";
-        text <=> PresetsData.rename-text;
-        // It takes the keys as it's made, and a change handler starts from what `init` leaves, so the one below would
-        // never see them come: it's said here, and the handler sees them go (or come back).
-        init => {
-            self.focus();
-            root.rename-keys = true;
-        }
-        // Not while another app's window is in front: the box gets them back with the window.
-        changed has-keys => {
-            if (self.has-keys || AppKeys.window-active) {
-                root.rename-keys = self.has-keys;
-            }
-        }
-        key(k) => {
-            if (k == Key.Return) {
-                PresetsData.rename-done(PresetsData.rename-text);
-                return true;
-            }
-            if (k == Key.Escape) {
-                PresetsData.renaming = false;
-                return true;
-            }
-            false
-        }
-    }
-    Well {
-        // Three wide to one high, as the curve's box is.
-        height: (self.width - 2 * Space.md) / 3 + 2 * Space.md;
-        CurveShape {
-            x: Space.md;
-            y: Space.md;
-            width: parent.width - 2 * Space.md;
-            height: parent.height - 2 * Space.md;
-            shape: PresetsData.curve-card.shape;
-            line: 2px;
-        }
-    }
-    // Where to take the curve from to drag it onto an automation lane: its file in the app's Curves folder.
-    DragHandle {
-        text: "Drag onto an automation lane";
-        tip: "Drag the curve's file onto an automation lane in Bitwig";
-        lifted: PresetsData.curve-lifted;
-        landed: PresetsData.curve-landed;
-        drag-out => { PresetsData.curve-drag(); }
-        drag-let-go => { PresetsData.drag-let-go(); }
-    }
-    CardActions {
-        room: root.inside;
-        actions: PresetsData.curve-actions;
-        chosen(id) => { PresetsData.curve-chosen(id); }
-    }
-    if PresetsData.curve-message != "": Text {
-        text: PresetsData.curve-message;
-        color: Theme.muted;
-        font-size: Type.meta;
-        wrap: word-wrap;
-        min-width: 0px;
-    }
-    HorizontalLayout {
-        spacing: Space.md;
-        for f in PresetsData.curve-facts: VerticalLayout {
-            spacing: Space.xs;
-            horizontal-stretch: 1;
-            Caps { text: f.name; }
-            Text {
-                text: f.value;
-                color: Theme.text;
-                font-size: Type.meta;
-                wrap: word-wrap;
-                min-width: 0px;
-            }
-        }
-    }
-    Caps { text: "FOUND IN"; }
-    for p in PresetsData.curve-places: VerticalLayout {
-        spacing: Space.xs;
-        Text {
-            text: p.title;
-            color: Theme.text;
-            font-size: Type.body;
-            wrap: word-wrap;
-            min-width: 0px;
-        }
-        Text {
-            text: p.about;
-            color: Theme.muted;
-            font-size: Type.meta;
-            wrap: word-wrap;
-            min-width: 0px;
-        }
-    }
-    Text {
-        text: "Drag the curve onto an automation lane in Bitwig, or save it to Bitwig's curves to find it in its browser.";
         color: Theme.faint;
         font-size: Type.small;
         wrap: word-wrap;
@@ -792,7 +664,11 @@ export component PresetsPage inherits Rectangle {
                 height: split.height;
                 property <bool> panel: PresetsData.section == 0 ? PresetsData.panel-shown : PresetsData.curve-panel-shown;
                 // The card's place is always there (empty until something is picked), so nothing moves when it is.
-                property <length> list-width: min(Fit.list-max, max(380px, self.width - PresetsData.panel-width - divider.width));
+                // On Curves the list is a narrow column (268, up to 360 in a wide window) and the editor card has all
+                // the rest: the picture is what the page is for.
+                property <length> list-width: PresetsData.section == 1
+                    ? max(268px, min(360px, self.width * 22%))
+                    : min(Fit.list-max, max(380px, self.width - PresetsData.panel-width - divider.width));
                 property <length> card-width: self.width - self.list-width - divider.width;
                 property <length> years-width: PresetsData.section == 0 && PresetsData.years.length > 1 && PresetsData.empty-title == "" ? 56px : 0px;
                 if area.years-width > 0: YearRange {
@@ -902,6 +778,8 @@ export component PresetsPage inherits Rectangle {
                     // widest, so in a wide window the seam only goes left of there.
                     panel-width: area.card-width;
                     room: area.width;
+                    // The Curves list keeps its own width: only the Presets seam can be dragged.
+                    enabled: PresetsData.section == 0;
                     resizing(w) => { PresetsData.panel-width = w; }
                     resized(w) => { PresetsData.panel-resized(w); }
                 }
@@ -910,11 +788,25 @@ export component PresetsPage inherits Rectangle {
                     width: area.card-width;
                     height: parent.height;
                 }
-                if PresetsData.section == 1 && PresetsData.curve-panel-shown: CurvePanel {
+                if PresetsData.section == 1 && PresetsData.curve-panel-shown: CurveEditor {
                     x: area.list-width + divider.width;
                     width: area.card-width;
                     height: parent.height;
+                    close => { PresetsData.curve-select(-1); }
+                    renaming: PresetsData.renaming;
+                    rename-text <=> PresetsData.rename-text;
                     rename-keys <=> root.rename-keys;
+                    rename-done(name) => { PresetsData.rename-done(name); }
+                    rename-dropped => { PresetsData.renaming = false; }
+                    lifted: PresetsData.curve-lifted;
+                    landed: PresetsData.curve-landed;
+                    drag-out => { PresetsData.curve-drag(); }
+                    drag-let-go => { PresetsData.drag-let-go(); }
+                    actions: PresetsData.curve-actions;
+                    message: PresetsData.curve-message;
+                    chosen(id) => { PresetsData.curve-chosen(id); }
+                    found-opens: PresetsData.curve-found-menu.length > 0;
+                    found-clicked(x, y) => { found-menu.open-at(x, y); }
                 }
                 if !area.panel: SidePanel {
                     x: area.list-width + divider.width;
@@ -935,6 +827,11 @@ export component PresetsPage inherits Rectangle {
                 }
                 curve-menu := RightClickMenu {
                     items: PresetsData.curve-menu;
+                    chosen(id) => { PresetsData.curve-chosen(id); }
+                }
+                // Under the editor card's "In 2 songs": the places the picked curve was found.
+                found-menu := RightClickMenu {
+                    items: PresetsData.curve-found-menu;
                     chosen(id) => { PresetsData.curve-chosen(id); }
                 }
             }

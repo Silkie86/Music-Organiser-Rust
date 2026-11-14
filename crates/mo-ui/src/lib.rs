@@ -13,6 +13,7 @@ pub mod arrangement;
 pub mod backup;
 mod canvas;
 pub mod cards;
+pub mod curve_editor;
 pub mod daws;
 pub mod drag;
 pub mod files;
@@ -470,6 +471,7 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
     });
     arrangement::set_look(app, look);
     piano_roll::look_changed(app);
+    curve_editor::look_changed(app);
 }
 
 pub(crate) fn rgb(c: u32) -> Color {
