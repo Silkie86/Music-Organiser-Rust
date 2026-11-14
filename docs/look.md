@@ -130,6 +130,10 @@ light that means something. It should feel like a rack unit on a desk, not a web
   flat ones (`StudioButton.quiet`: no raised face, a thin outline) for those that only show or copy where a thing is.
   `mo_app::themes::quiet_button` says which from the button's words ("Show ...", "Copy ..."), so every page agrees.
   Same sizes and places as before.
+- No empty row under a page's title (the frontend-design pass, step 3): the page's own job line ("Listening to new
+  sounds: 458 of 1,204") used to keep a row of its own, empty nearly all the time, so every page but Songs started
+  23 px lower with a gap under its name. It now sits on the title's row after the summary (`PageHeader`), which
+  shortens to make room; nothing jumps when a job starts or ends, and every page starts at the same height as Songs.
 
 ## Next steps
 

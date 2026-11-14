@@ -2838,16 +2838,20 @@ export component PageHeader inherits VerticalLayout {
             color: Theme.muted;
             font-size: Type.body;
             vertical-alignment: center;
-            horizontal-stretch: 1;
+            horizontal-stretch: 0;
             overflow: elide;
         }
-    }
-    // Always there, so the page doesn't jump when a job starts or ends; only seen while one runs. A page that never
-    // runs a job of its own (Songs) leaves `job-line` off and keeps the room.
-    if root.job-line: ProgressLine {
-        visible: root.busy != "";
-        text: root.busy;
-        done: root.done;
+        // The page's own job, beside what the page holds: on the title's row, so it takes no row of its own and the
+        // page doesn't jump when a job starts or ends (the frontend-design pass, step 3: the row kept empty for it
+        // left a gap under every title). The summary shortens to make room. A page that never runs a job of its own
+        // (Songs) leaves `job-line` off.
+        if root.job-line && root.busy != "": ProgressLine {
+            text: root.busy;
+            done: root.done;
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
     }
 }
 
