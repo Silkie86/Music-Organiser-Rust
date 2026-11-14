@@ -186,6 +186,12 @@ export global SettingsData {
     callback output-picked(string);
     callback refresh-outputs();
     callback toggle-sweep-hold();
+    // The curve editor's keys: what each meaning covers (free, bend, make), the keys' names, the key each meaning
+    // has (a place in the names), and a key picked for a meaning.
+    in property <[string]> curve-key-lines;
+    in property <[string]> curve-key-names;
+    in property <[int]> curve-keys;
+    callback curve-key-picked(int, int);
     callback smallest-picked(int);
     // The look back to the app's own: Graphite, its accent and font, at 100%.
     callback back-to-normal();
@@ -736,6 +742,28 @@ component ShortcutsTab inherits VerticalLayout {
     spacing: Space.lg;
     alignment: start;
     HowItWorks { text: SettingsData.keys-note; }
+    // The curve editor's three keys: which of Shift, Alt and Ctrl is free, bend and make.
+    SettingsCard {
+        title: "Curve editor: keys held with the mouse";
+        intro: "Each key has one meaning everywhere in the curve editor. Choose a key for a meaning, and the meaning that had that key takes the other one.";
+        for line[i] in SettingsData.curve-key-lines: HorizontalLayout {
+            spacing: Space.md;
+            Segmented {
+                horizontal-stretch: 0;
+                choices: SettingsData.curve-key-names;
+                current: SettingsData.curve-keys[i];
+                picked(key) => { SettingsData.curve-key-picked(i, key); }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: line;
+                color: Theme.text;
+                font-size: Type.body;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+    }
     HorizontalLayout {
         spacing: Space.md;
         SearchBox {

@@ -11,6 +11,7 @@ use mo_formats::bitwig::curve::CurvePoint;
 use crate::curve_edit::{self, Edit, Editor, Grid, Piece, Point, Shape, Span, Step};
 use crate::curve_hear::{self, Hear};
 use crate::curve_hold::{self, Hold, Over, Part};
+use crate::curve_keys::{KeyMap, Role};
 use crate::curve_paint::{self, Stroke};
 use crate::curve_picture::{self, Frame, View};
 use crate::curve_random;
@@ -168,8 +169,10 @@ pub struct Showing {
     pub hint_name: String,
     pub hint_does: String,
     pub hint_keys: String,
-    /// The keys held: their lamps.
+    /// The keys held, as their meanings (free, bend, make): their lamps. And the names of the keys that have those
+    /// meanings.
     pub keys: Keys,
+    pub key_names: [&'static str; 3],
     /// The read-out's words while dragging, and where the mouse is (when it's on the picture).
     pub read_out: String,
     pub mouse: Option<(f32, f32)>,
@@ -269,6 +272,9 @@ macro_rules! show_curve_card {
             $data.set_shift($now.keys.shift);
             $data.set_alt($now.keys.alt);
             $data.set_ctrl($now.keys.ctrl);
+            $data.set_key_free($now.key_names[0].into());
+            $data.set_key_bend($now.key_names[1].into());
+            $data.set_key_make($now.key_names[2].into());
             $data.set_read_out($now.read_out.into());
             if let Some((x, y)) = $now.mouse {
                 $data.set_read_x(x);
@@ -310,6 +316,8 @@ pub struct Card {
     open: Option<(String, Editor)>,
     /// The grid, kept from curve to curve.
     grid: Grid,
+    /// Which key does what (Settings > Shortcuts).
+    key_map: KeyMap,
     /// What's in sight of the curve.
     view: View,
     /// The picture's room on the page, in points.
@@ -381,6 +389,7 @@ impl Default for Card {
         Card {
             open: None,
             grid: Grid::default(),
+            key_map: KeyMap::default(),
             view: View::whole(curve_picture::BAR),
             width: 0.0,
             height: 0.0,
@@ -527,6 +536,12 @@ impl Card {
         self.read_out.clear();
     }
 
+    /// Which key does what from here on.
+    pub fn set_keys(&mut self, map: KeyMap) {
+        self.key_map = map;
+        self.keys = Keys::default();
+    }
+
     /// The picked points: none once the curve is another than the one they were picked in.
     fn picked_now(&self) -> &[usize] {
         match self.open.as_ref() {
@@ -659,6 +674,7 @@ impl Card {
     /// (`curve_touch` and `curve_hold` say which). Whether the picture is to be drawn again.
     pub fn mouse(&mut self, kind: i32, x: f64, y: f64, keys: Keys) -> bool {
         let s = self;
+        let keys = s.key_map.roles(keys);
         let frame = s.frame();
         let Some((_, editor)) = s.open.as_mut() else { return false };
         if kind < mouse::LEFT {
@@ -961,6 +977,7 @@ impl Card {
     /// The mouse on the ruler (`kind` one of [`mouse`]), `x` points from the picture's left. A press on a swing mark
     /// takes hold of them all: the drag goes on as the picture's drags do. Whether the picture is to be drawn again.
     pub fn ruler(&mut self, kind: i32, x: f64, keys: Keys) -> bool {
+        let keys = self.key_map.roles(keys);
         let mut drawn = false;
         let dragging = matches!(self.grab, Some((Held::Swing(..), _, _)));
         if dragging && matches!(kind, mouse::MOVED | mouse::LET_GO | mouse::TAKEN_AWAY) {
@@ -993,6 +1010,7 @@ impl Card {
     /// or lets it go; a double-click keeps the highlight as a clip; a right-click highlights the clip under it, for
     /// the menu. Whether the picture is to be drawn again.
     pub fn strip(&mut self, kind: i32, x: f64, keys: Keys) -> bool {
+        let keys = self.key_map.roles(keys);
         // A drag begun here goes on as the bar's. The picture isn't told the mouse is on it for longer than that.
         if self.grab.is_some() && matches!(kind, mouse::MOVED | mouse::LET_GO | mouse::TAKEN_AWAY) {
             let drawn = self.mouse(kind, x, BAR_Y, keys);
@@ -1530,9 +1548,10 @@ impl Card {
             height: frame.height as f32,
             pointer,
             hint_name,
-            hint_does,
-            hint_keys,
+            hint_does: s.key_map.words(&hint_does, mac),
+            hint_keys: s.key_map.words(&hint_keys, mac),
             keys: s.keys,
+            key_names: Role::ALL.map(|r| s.key_map.key(r).name(mac)),
             read_out: s.read_out.clone(),
             mouse: s.mouse.map(|(x, y)| (x as f32, y as f32)),
             swing_hot,
@@ -1962,6 +1981,32 @@ mod tests {
         assert_eq!(card.picked(), 0);
         assert!(card.step_back(true), "one step");
         assert_eq!(card.edited().map(|e| e.0.len()), None);
+    }
+
+    #[test]
+    fn chosen_keys_change_what_is_held_and_what_the_hint_says() {
+        use crate::curve_keys::Key;
+        let mut card = five();
+        // Alt is the make key now, Ctrl bends: Alt-click picks more, and a Ctrl-drag draws the box.
+        card.set_keys(KeyMap::default().with(Role::Make, Key::Alt));
+        let (none, alt, ctrl) =
+            (Keys::default(), Keys { alt: true, ..Keys::default() }, Keys { ctrl: true, ..Keys::default() });
+        click(&mut card, 1.1, 0.5, none);
+        click(&mut card, 3.0, 0.25, alt);
+        assert_eq!(card.picked(), 2);
+        let (a, b) = (at(&card, 1.5, 0.95), at(&card, 2.5, 0.6));
+        card.mouse(mouse::PRESSED, a.0, a.1, ctrl);
+        card.mouse(mouse::MOVED, b.0, b.1, ctrl);
+        let shown = card.showing(false);
+        assert!(shown.band.is_some() && shown.keys.alt, "the bend key's lamp");
+        assert_eq!(shown.key_names, ["Shift", "Ctrl", "Alt"]);
+        card.mouse(mouse::LET_GO, b.0, b.1, ctrl);
+        assert_eq!(card.picked(), 1);
+        assert!(card.edited().is_none(), "no paint");
+        let (x, y) = at(&card, 0.5, 0.9);
+        card.mouse(mouse::MOVED, x, y, none);
+        let hint = card.showing(false).hint_keys;
+        assert!(hint.contains("Alt: paint steps") && hint.contains("Ctrl-drag: pick points"), "{hint}");
     }
 
     #[test]

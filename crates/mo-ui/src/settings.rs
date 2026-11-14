@@ -458,6 +458,19 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         }
     });
     let weak = app.as_weak();
+    data.on_curve_key_picked(move |role, key| {
+        use mo_app::curve_keys::{Key, KeyMap, Role, SETTING};
+        let pick = |i: i32, n: usize| usize::try_from(i).ok().filter(|i| *i < n);
+        let (Some(role), Some(key)) = (pick(role, Role::ALL.len()), pick(key, Key::ALL.len())) else { return };
+        let was = KeyMap::from_setting(value(SETTING).as_deref());
+        let now = was.with(Role::ALL[role], Key::ALL[key]);
+        change(SETTING, &now.to_setting());
+        if let Some(app) = weak.upgrade() {
+            show_curve_keys(&app.global::<SettingsData>(), now);
+            crate::curve_editor::set_keys(&app, now);
+        }
+    });
+    let weak = app.as_weak();
     data.on_toggle_sweep_hold(move || {
         let on = !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| sweep_hold(&p.settings)));
         change(SWEEP_HOLD_KEY, if on { "1" } else { "0" });
@@ -633,6 +646,19 @@ fn apply_helper(on: bool, weak: slint::Weak<AppWindow>) {
             }
         });
     });
+}
+
+/// The curve editor's keys on the Shortcuts tab: each meaning's line and the key it has.
+fn show_curve_keys(data: &SettingsData, map: mo_app::curve_keys::KeyMap) {
+    use mo_app::curve_keys::{Key, Role};
+    let mac = cfg!(target_os = "macos");
+    let lines: Vec<SharedString> = Role::ALL.iter().map(|r| r.words().1.into()).collect();
+    let names: Vec<SharedString> = Key::ALL.iter().map(|k| k.name(mac).into()).collect();
+    let keys: Vec<i32> =
+        Role::ALL.iter().map(|r| Key::ALL.iter().position(|k| *k == map.key(*r)).map_or(0, |i| i as i32)).collect();
+    data.set_curve_key_lines(ModelRc::new(VecModel::from(lines)));
+    data.set_curve_key_names(ModelRc::new(VecModel::from(names)));
+    data.set_curve_keys(ModelRc::new(VecModel::from(keys)));
 }
 
 /// Whether a Galaxy sweep holds the pointer to the star that's playing (off unless turned on).
@@ -1503,6 +1529,7 @@ fn show(app: &AppWindow) {
         data.set_pace(Pace::ALL.iter().position(|x| *x == pace).unwrap_or(2) as i32);
         data.set_pace_note(page::pace_note(pace, p.running_pace, background::cores()).into());
         data.set_sweep_hold(sweep_hold(s));
+        show_curve_keys(&data, mo_app::curve_keys::KeyMap::from_setting(s.get(mo_app::curve_keys::SETTING)));
         data.set_helper_on(mo_app::helper_start::wanted(s));
         data.set_helper_intro(page::helper_intro(cfg!(windows)).into());
         let smallest = smallest_part(s);
