@@ -1530,6 +1530,27 @@ fn presets_shots(
         return Err("curves-edited.png: the dragged point left nothing to undo".into());
     }
     capture(window);
+    // Empty space dragged: a stretch of time is highlighted, with its frame, its bar and its handles.
+    mo_ui::curve_editor::mouse_sample(app, 1, 4.0, 0.8, keys);
+    mo_ui::curve_editor::mouse_sample(app, 0, 8.0, 0.8, keys);
+    mo_ui::curve_editor::mouse_sample(app, 2, 8.0, 0.8, keys);
+    if mo_ui::curve_editor::highlight_sample() != Some((4.0, 8.0)) {
+        return Err("curves-highlight.png: dragging empty space didn't highlight beats 4 to 8".into());
+    }
+    mo_ui::curve_editor::mouse_sample(app, 0, 8.0, 0.3, keys);
+    shots.push(("curves-highlight.png".into(), capture(window)));
+    // Its right side dragged in: the part plays at double speed, and holds where it ends.
+    mo_ui::curve_editor::mouse_sample(app, 1, 8.0, 0.3, keys);
+    mo_ui::curve_editor::mouse_sample(app, 0, 6.0, 0.3, keys);
+    shots.push(("curves-highlight-speed.png".into(), capture(window)));
+    mo_ui::curve_editor::mouse_sample(app, 2, 6.0, 0.3, keys);
+    if mo_ui::curve_editor::highlight_sample() != Some((4.0, 6.0)) || !mo_ui::curve_editor::undo(app, true) {
+        return Err("curves-highlight-speed.png: the dragged side didn't speed the part up".into());
+    }
+    mo_ui::curve_editor::mouse_sample(app, 1, 14.0, 0.9, keys);
+    mo_ui::curve_editor::mouse_sample(app, 2, 14.0, 0.9, keys);
+    mo_ui::curve_editor::mouse_sample(app, 4, 14.0, 0.9, keys);
+    capture(window);
     // A curve dragged out onto an automation lane from its line, its shape on the card.
     let still = capture(window);
     data.set_curve_lifted_row(1);

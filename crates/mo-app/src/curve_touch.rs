@@ -263,7 +263,7 @@ pub fn place_words(beat: f64) -> String {
 }
 
 /// A value (0 to 1) as a whole percent.
-fn percent(value: f64) -> String {
+pub fn percent(value: f64) -> String {
     format!("{}%", (value * 100.0).round() as i64)
 }
 

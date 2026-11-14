@@ -2137,11 +2137,15 @@ fn stop_audition_now(app: &AppWindow) {
 }
 
 /// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, one step a press
-/// once nothing plays ([`stop_on_escape`]; the whole-app review of 6 Nov, X3-12): the search is cleared; else the
-/// picked line's card closes (a sound's, or a curve's on Curves). Says whether it did either (when not, the key goes
+/// once nothing plays ([`stop_on_escape`]; the whole-app review of 6 Nov, X3-12): on Curves a drag in the editor is put
+/// back, else its highlight is dropped; else the search is cleared; else the picked line's card closes (a sound's, or a curve's on Curves). Says whether it did either (when not, the key goes
 /// on).
 pub fn escape(app: &AppWindow) -> bool {
     let data = app.global::<PresetsData>();
+    // The editor first: a drag in hand is put back, else the highlight is dropped.
+    if PAGE.with(|p| p.borrow().section == Section::Curves) && crate::curve_editor::escape(app) {
+        return true;
+    }
     if !data.get_search().is_empty() {
         data.set_search(SharedString::new());
         data.invoke_search_edited(SharedString::new());

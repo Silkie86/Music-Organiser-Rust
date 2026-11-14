@@ -4,7 +4,7 @@
 // buttons. The picture's still layers (grid, fill, curve) are one picture drawn off the window's thread
 // (mo_app::curve_picture, mo-ui/src/curve_editor.rs); what moves with the mouse or the sound is laid over it here.
 // Only shared parts from studio.slint.
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, CardAction, CardActions, SidePanel, MouseField } from "../studio.slint";
+import { Theme, Motion, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, CardAction, CardActions, SidePanel, MouseField } from "../studio.slint";
 
 // One of the ruler's marks: where (from the picture's left) and its bar and beat ("1", "1.2"; none when the marks are
 // too close to number each).
@@ -62,8 +62,20 @@ export global CurveEditorData {
     in property <string> ghost;
     in property <length> picture-width;
     in property <length> picture-height;
-    // The pointer over the picture: 0 arrow, 1 open hand, 2 closed hand, 3 up and down.
+    // The pointer over the picture: 0 arrow, 1 open hand, 2 closed hand, 3 up and down, 4 left and right, 5 and 6
+    // the two diagonals (top left to bottom right, top right to bottom left), 7 copy.
     in property <int> pointer;
+    // The highlight's frame in the picture's points (round the whole curve when nothing is highlighted: `hl-whole`),
+    // the handle under the mouse or held (0 none, 1 the bar, 2 left, 3 right, 4 top, 5 bottom, 6 to 9 the corners:
+    // top left, top right, bottom left, bottom right), and whether the mouse is on the picture.
+    in property <bool> hl-shown;
+    in property <bool> hl-whole;
+    in property <length> hl-left;
+    in property <length> hl-right;
+    in property <length> hl-top;
+    in property <length> hl-bottom;
+    in property <int> hl-hot;
+    in property <bool> hl-near;
     // The hint line: what's under the mouse, what it does, what the keys change; and the keys held.
     in property <string> hint-name;
     in property <string> hint-does;
@@ -82,6 +94,29 @@ export global CurveEditorData {
     callback redo();
     callback hear();
     callback save-as-new();
+}
+
+// A handle on the highlight's frame: a pill on a side, a dot on a corner; filled and a size up under the mouse or
+// held. `mid-x` and `mid-y` are where its middle sits. Faint (`near` off) round the whole curve until the mouse comes.
+component FrameHandle inherits Rectangle {
+    in property <bool> across;
+    in property <bool> corner;
+    in property <bool> hot;
+    in property <bool> near: true;
+    in property <length> mid-x;
+    in property <length> mid-y;
+    property <length> long: root.hot ? 34px : 28px;
+    property <length> thin: root.hot ? 8px : 6px;
+    property <length> dot: root.hot ? 12px : 10px;
+    x: root.mid-x - self.width / 2;
+    y: root.mid-y - self.height / 2;
+    width: root.corner ? root.dot : root.across ? root.long : root.thin;
+    height: root.corner ? root.dot : root.across ? root.thin : root.long;
+    border-radius: min(self.width, self.height) / 2;
+    background: root.hot ? Theme.accent : Theme.well;
+    border-width: root.hot ? 0px : 1.5px;
+    border-color: Theme.accent.transparentize(root.near ? 0% : 55%);
+    animate width, height { duration: Motion.tap; }
 }
 
 // A key's cap, as on the hint line: lit while it's held.
@@ -489,6 +524,96 @@ export component CurveEditor inherits SidePanel {
                 stroke-width: 3.5px;
                 fill: transparent;
             }
+            // The highlight: its frame from the part's floor to its top, its bar in the room above the picture's top
+            // line, and its handles. With nothing highlighted, pills round the whole curve.
+            if CurveEditorData.hl-shown: hl := Rectangle {
+                property <length> l: CurveEditorData.hl-left;
+                property <length> r: CurveEditorData.hl-right;
+                property <length> t: CurveEditorData.hl-top;
+                property <length> b: CurveEditorData.hl-bottom;
+                property <int> hot: CurveEditorData.hl-hot;
+                property <bool> whole: CurveEditorData.hl-whole;
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                clip: true;
+                if !hl.whole: Rectangle {
+                    x: hl.l;
+                    y: hl.t;
+                    width: max(1px, hl.r - hl.l);
+                    height: max(1px, hl.b - hl.t);
+                    border-width: 1px;
+                    border-color: Theme.accent.transparentize(30%);
+                }
+                if !hl.whole: Rectangle {
+                    x: hl.l;
+                    y: 3px;
+                    width: max(1px, hl.r - hl.l);
+                    height: 12px;
+                    border-radius: 3px;
+                    background: Theme.accent.transparentize(hl.hot == 1 ? 0% : 50%);
+                    // Two grip lines.
+                    for i in 2: Rectangle {
+                        x: (parent.width - 12px) / 2;
+                        y: 4px + i * 3px;
+                        width: 12px;
+                        height: 1px;
+                        background: Theme.accent-text;
+                        visible: parent.width >= 20px;
+                    }
+                }
+                FrameHandle {
+                    mid-x: hl.l;
+                    mid-y: (hl.t + hl.b) / 2;
+                    hot: hl.hot == 2;
+                    near: !hl.whole || CurveEditorData.hl-near;
+                }
+                FrameHandle {
+                    mid-x: hl.r;
+                    mid-y: (hl.t + hl.b) / 2;
+                    hot: hl.hot == 3;
+                    near: !hl.whole || CurveEditorData.hl-near;
+                }
+                FrameHandle {
+                    across: true;
+                    mid-x: (hl.l + hl.r) / 2;
+                    mid-y: hl.t;
+                    hot: hl.hot == 4;
+                    near: !hl.whole || CurveEditorData.hl-near;
+                }
+                FrameHandle {
+                    across: true;
+                    mid-x: (hl.l + hl.r) / 2;
+                    mid-y: hl.b;
+                    hot: hl.hot == 5;
+                    near: !hl.whole || CurveEditorData.hl-near;
+                }
+                if !hl.whole: FrameHandle {
+                    corner: true;
+                    mid-x: hl.l;
+                    mid-y: hl.t;
+                    hot: hl.hot == 6;
+                }
+                if !hl.whole: FrameHandle {
+                    corner: true;
+                    mid-x: hl.r;
+                    mid-y: hl.t;
+                    hot: hl.hot == 7;
+                }
+                if !hl.whole: FrameHandle {
+                    corner: true;
+                    mid-x: hl.l;
+                    mid-y: hl.b;
+                    hot: hl.hot == 8;
+                }
+                if !hl.whole: FrameHandle {
+                    corner: true;
+                    mid-x: hl.r;
+                    mid-y: hl.b;
+                    hot: hl.hot == 9;
+                }
+            }
             // The points: small and plain, a size up with an accent ring under the mouse, filled while held.
             for d in CurveEditorData.dots: Rectangle {
                 property <length> across: d.hot || d.held ? 11px : 6px;
@@ -511,6 +636,10 @@ export component CurveEditor inherits SidePanel {
                 mouse-cursor: CurveEditorData.pointer == 1 ? MouseCursor.grab
                     : CurveEditorData.pointer == 2 ? MouseCursor.grabbing
                     : CurveEditorData.pointer == 3 ? MouseCursor.ns-resize
+                    : CurveEditorData.pointer == 4 ? MouseCursor.ew-resize
+                    : CurveEditorData.pointer == 5 ? MouseCursor.nwse-resize
+                    : CurveEditorData.pointer == 6 ? MouseCursor.nesw-resize
+                    : CurveEditorData.pointer == 7 ? MouseCursor.copy
                     : MouseCursor.default;
                 function tell(kind: int, shift: bool, alt: bool, ctrl: bool) {
                     CurveEditorData.mouse(kind, self.mouse-x, self.mouse-y, shift, alt, ctrl);
