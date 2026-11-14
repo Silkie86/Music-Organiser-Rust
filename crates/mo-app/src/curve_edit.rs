@@ -164,6 +164,12 @@ impl Shape {
         value_at(&self.points, beat)
     }
 
+    /// The value at `beat` on the line that starts at the point at `line` in [`Shape::points`] (its own value when
+    /// it's the last point, or half of a jump).
+    pub fn line_value(&self, line: usize, beat: f64) -> f64 {
+        on_line(&self.points, line, beat)
+    }
+
     /// The value just before `beat` (at a jump, the value before it).
     pub fn value_before(&self, beat: f64) -> f64 {
         value_before(&self.points, beat)
