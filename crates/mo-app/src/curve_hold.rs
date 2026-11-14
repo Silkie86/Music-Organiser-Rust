@@ -7,7 +7,7 @@
 
 use crate::curve_edit::{Edit, Grid, Shape, Span};
 use crate::curve_picture::{Frame, TOP};
-use crate::curve_touch::{self, Hint, Keys, Under, place_words};
+use crate::curve_touch::{self, Hint, Keys, Under, percent, place_words};
 
 /// How far outside the frame a handle is still grabbed (its grab area is 24 across), and how far inside: a dot on
 /// the frame's edge is reached by coming at it from inside.
@@ -123,18 +123,24 @@ fn part_at(b: Box, x: f64, y: f64) -> Option<Part> {
 }
 
 /// What's under the mouse at `x`, `y`. What wins, first to last: a corner, a side or the top or bottom, a dot, the
-/// bar, a line, the highlight's inside. With nothing highlighted the handles round the whole curve come after the
-/// dots.
+/// bar, a line, the highlight's inside. With nothing highlighted the pills round the whole curve come after the
+/// dots and the lines, so the curve under a pill can still be dragged and given points.
 pub fn over(shape: &Shape, highlight: Option<Span>, frame: Frame, x: f64, y: f64) -> Over {
+    over_in(shape, frame_of(shape, highlight, frame), frame, x, y)
+}
+
+/// [`over`] with the highlight's frame already worked out ([`frame_of`]).
+pub fn over_in(shape: &Shape, b: Option<Box>, frame: Frame, x: f64, y: f64) -> Over {
     if !frame.fits() || !x.is_finite() || !y.is_finite() {
         return Over::Empty;
     }
-    let b = frame_of(shape, highlight, frame);
+    let whole = b.is_none_or(|b| b.whole);
     let part = b.and_then(|b| part_at(b, x, y));
     let under = curve_touch::under(shape, frame, x, y);
     match (part, under) {
         (Some(Part::Bar), Under::Dot(point)) => Over::Dot(point),
-        (Some(_), Under::Dot(point)) if highlight.is_none() => Over::Dot(point),
+        (Some(_), Under::Dot(point)) if whole => Over::Dot(point),
+        (Some(_), Under::Line(line)) if whole => Over::Line(line),
         (Some(part), _) => Over::Part(part),
         (None, Under::Dot(point)) => Over::Dot(point),
         (None, Under::Line(line)) => Over::Line(line),
@@ -172,7 +178,9 @@ pub fn drag(hold: Hold, length: f64, frame: Frame, grid: Grid, keys: Keys, x: f6
     let beats = frame.beat_at(x) - frame.beat_at(hold.x);
     let fine = if keys.shift { FINE } else { 1.0 };
     let values = (frame.value_at(y) - frame.value_at(hold.y)) * fine;
-    let tall = (high - low).max(1e-9);
+    // A level part has no height: it moves as it is, and a fade is counted against the picture's height.
+    let level = high - low < 1e-6;
+    let tall = if level { 1.0 } else { high - low };
     match hold.part {
         Part::Bar if keys.alt => {
             let amount = ((hold.y - y) / SMOOTH_REACH).clamp(-1.0, 1.0);
@@ -189,13 +197,27 @@ pub fn drag(hold: Hold, length: f64, frame: Frame, grid: Grid, keys: Keys, x: f6
             let left = hold.part == Part::Left;
             let edge = if left { span.start } else { span.end };
             let edge = grid.snap(edge + beats, keys.shift).clamp(0.0, length.max(0.0));
+            // A repeat has no backwards: its side stops at the other one.
+            let edge = match (keys.ctrl, left) {
+                (true, true) => edge.min(span.end),
+                (true, false) => edge.max(span.start),
+                _ => edge,
+            };
             let (start, end) = if left { (edge, span.end) } else { (span.start, edge) };
             let now = (end - start).abs();
-            if keys.ctrl {
-                (Edit::Repeat { start: start.min(end), end: start.max(end) }, repeat_words(span.len(), now))
+            if now < 1e-9 {
+                // On the other side itself there's nothing left of it: the curve shows as it was.
+                let edit = if keys.ctrl { Edit::Repeat { start, end } } else { Edit::Speed { start, end } };
+                (edit, "nothing left".to_owned())
+            } else if keys.ctrl {
+                (Edit::Repeat { start, end }, repeat_words(span.len(), now))
             } else {
                 (Edit::Speed { start, end }, speed_words(span.len(), now, start > end))
             }
+        }
+        Part::Top | Part::Bottom if level => {
+            let to = (high + values).clamp(0.0, 1.0);
+            (Edit::Squash { low: to, high: to }, format!("level at {}", percent(to)))
         }
         Part::Top => {
             let to = (high + values).clamp(0.0, 1.0);
@@ -276,11 +298,6 @@ pub fn hint(over: Over, mac: bool) -> Hint {
             Hint { name: "Empty", does: "drag to highlight · double-click adds a point", keys: "Shift: off the grid" }
         }
     }
-}
-
-/// A part of a whole as a percent.
-fn percent(part: f64) -> String {
-    format!("{}%", (part * 100.0).round() as i64)
 }
 
 /// A number with at most two decimals, none when it's whole ("2", "1.5", "0.67").
@@ -423,6 +440,14 @@ mod tests {
         assert_eq!(over(&s, None, f, x, y), Over::Part(Part::Right));
         let (x, y) = at(4.0, 0.0);
         assert_eq!(over(&s, None, f, x, y + 4.0), Over::Part(Part::Bottom));
+        // On the curve itself the line is held, pill or no pill: the top pill sits on the level part's line.
+        let flat = Shape::from_curve(
+            &[CurvePoint { x: 0.0, y: 0.5, bend: 0.0 }, CurvePoint { x: 1.0, y: 0.5, bend: 0.0 }],
+            8.0,
+        );
+        let (x, y) = at(4.0, 0.5);
+        assert_eq!(over(&flat, None, f, x, y), Over::Line(0));
+        assert_eq!(over(&flat, None, f, x, y - 9.0), Over::Part(Part::Top));
         // Off the pill the edge is nothing to hold, and there's no bar.
         let (x, y) = at(0.0, 0.75);
         assert_eq!(over(&s, None, f, x - 6.0, y), Over::Empty);
@@ -467,6 +492,13 @@ mod tests {
         let (edit, words) = drag(h, s.length(), f, GRID, CTRL, at(1.9, 0.0).0, y);
         assert!(apply(&s, lit(), &edit).is_some());
         assert_eq!((edit, words.as_str()), (Edit::Repeat { start: 1.0, end: 2.0 }, "repeat ×2 · 1 beat"));
+        // A repeat has no backwards: the side stops at the other one, and there nothing is left to repeat.
+        let (edit, words) = drag(h, s.length(), f, GRID, CTRL, at(0.0, 0.0).0, y);
+        assert!(apply(&s, lit(), &edit).is_none());
+        assert_eq!((edit, words.as_str()), (Edit::Repeat { start: 1.0, end: 1.0 }, "nothing left"));
+        // The same without Ctrl, on the other side itself.
+        let (_, words) = drag(h, s.length(), f, GRID, NO_KEYS, at(1.0, 0.0).0, y);
+        assert_eq!(words, "nothing left");
     }
 
     #[test]
@@ -487,6 +519,14 @@ mod tests {
         let (edit, _) = drag(h, s.length(), f, GRID, SHIFT, x, at(2.0, 0.2).1);
         let Edit::Squash { high, .. } = edit else { panic!("not a squash") };
         assert!((high - 0.5).abs() < 1e-6);
+        // A level part moves as it is, and follows the mouse.
+        let level = Some(Span::new(5.0, 7.0));
+        let (x, y) = at(6.0, 0.2);
+        let h = hold(&s, level, Part::Top, x, y);
+        let (edit, words) = drag(h, s.length(), f, GRID, NO_KEYS, x, at(6.0, 0.5).1);
+        assert_eq!(words, "level at 50%");
+        let (after, _) = apply(&s, level, &edit).unwrap();
+        assert!((after.value_at(6.0) - 0.5).abs() < 1e-6);
         // The bottom says where the floor is.
         let (x, y) = at(2.0, 0.2);
         let h = hold(&s, lit(), Part::Bottom, x, y);
