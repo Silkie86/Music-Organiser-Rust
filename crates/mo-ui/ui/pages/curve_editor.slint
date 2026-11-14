@@ -67,9 +67,12 @@ component Ruler inherits Rectangle {
             x: 4px;
             y: -(root.height - parent.height) + 1px;
             text: m.text;
-            color: Theme.faint;
+            // The bars stand out; the beats between them ("1.2") are smaller and fainter, so the eye finds the bars
+            // first (Solomon, 14 Nov 2026).
+            color: m.bar ? Theme.text : Theme.faint;
             font-family: Theme.number-font;
-            font-size: Type.small;
+            font-size: m.bar ? Type.meta : Type.tiny;
+            font-weight: m.bar ? 600 : 400;
         }
     }
     // The end mark: how long the whole curve is.
