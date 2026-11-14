@@ -546,12 +546,12 @@ mod tests {
                 .count()
         };
         // Off: the beats (3) and the bars (2, each drawn twice to be brighter).
-        let off = uprights(Grid { step: None, triplet: false });
+        let off = uprights(Grid { step: None, triplet: false, dotted: false });
         assert_eq!(off, 3 + 2 * 2);
         // 1/16: three more between each pair of beats.
-        assert_eq!(uprights(Grid { step: Some(Step::Sixteenth), triplet: false }), off + 12);
+        assert_eq!(uprights(Grid { step: Some(Step::Sixteenth), triplet: false, dotted: false }), off + 12);
         // Triplet eighths: two more between each pair of beats.
-        assert_eq!(uprights(Grid { step: Some(Step::Eighth), triplet: true }), off + 8);
+        assert_eq!(uprights(Grid { step: Some(Step::Eighth), triplet: true, dotted: false }), off + 8);
         // The fill: a column a pixel wide under the curve, the tallest at its peak.
         let scene = picture(&triangle(), None, Grid::default(), f, 2.0, &c);
         let fill: Vec<(f32, f32)> = scene

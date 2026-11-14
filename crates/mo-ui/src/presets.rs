@@ -103,8 +103,10 @@ struct Page {
     curves: Vec<Curve>,
     /// What the search and the order go by, one for each of `curves`, worked out once (H-5).
     curve_keys: Vec<logic::CurveKey>,
-    /// The saves behind the lines of the picked curve's "found in" menu (none for a line that's no song's).
+    /// The saves behind the lines of the picked curve's "found in" menu (none for a line that's no song's), and the
+    /// curve they're of: the menu is only made again when another curve is picked or the curves change.
     curve_found: Vec<Option<String>>,
+    curve_found_of: Option<String>,
     curve_shown: Vec<usize>,
     /// The speed each shown curve is at, beside `curve_shown`: 1, or half or double with "Other speeds too".
     curve_speeds: Vec<f64>,
@@ -348,6 +350,13 @@ fn wire(app: &AppWindow) {
     data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = PresetLine>>));
     data.set_curve_lines(ModelRc::from(CURVE_LINES.with(|m| m.clone()) as Rc<dyn Model<Data = CurveLineInfo>>));
     crate::curve_editor::connect(app);
+    // The editor card's Hear: the picked curve on its tone, as Space and the menu do.
+    let weak = app.as_weak();
+    app.global::<CurveEditorData>().on_hear(move || {
+        if let Some(app) = weak.upgrade() {
+            run_curve_action(&app, curve_act::HEAR);
+        }
+    });
     let key = PAGE.with(|p| p.borrow().shortcuts.key_of(act::EXPORT_SHOWN).to_owned());
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
 
@@ -949,6 +958,7 @@ fn show_curve_card(app: &AppWindow) {
         let Some((c, sent)) = picked.zip(picked_curve_as_sent(&p)) else {
             data.set_curve_panel_shown(false);
             p.curve_found.clear();
+            p.curve_found_of = None;
             crate::curve_editor::open(app, None);
             return;
         };
@@ -960,25 +970,29 @@ fn show_curve_card(app: &AppWindow) {
         editor.set_found(found.into());
         let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some());
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
-        // The places it was found, each showing its song on the Songs page, then the way to the song's file.
-        let found = logic::curve_found_lines(c);
-        let mut found_menu: Vec<MenuItem> = found
-            .iter()
-            .enumerate()
-            .map(|(i, l)| MenuItem {
-                what: l.text.as_str().into(),
-                key: SharedString::new(),
-                id: format!("{FOUND_LINE}{i}").into(),
-                enabled: l.save.is_some(),
-            })
-            .collect();
-        found_menu.extend(offers.iter().filter(|o| o.id == curve_act::OPEN_SONG && o.enabled).map(|o| MenuItem {
-            what: o.text.as_str().into(),
-            key: key(o.id),
-            id: o.id.into(),
-            enabled: true,
-        }));
-        data.set_curve_found_menu(ModelRc::new(VecModel::from(found_menu)));
+        editor.set_hear_key(key(curve_act::HEAR));
+        // The places it was found, each showing its song on the Songs page, then the way to the song's file. A common
+        // shape is found in hundreds: only made again for another curve.
+        let found = (p.curve_found_of.as_deref() != Some(c.id.as_str())).then(|| logic::curve_found_lines(c));
+        if let Some(found) = &found {
+            let mut found_menu: Vec<MenuItem> = found
+                .iter()
+                .enumerate()
+                .map(|(i, l)| MenuItem {
+                    what: l.text.as_str().into(),
+                    key: SharedString::new(),
+                    id: format!("{FOUND_LINE}{i}").into(),
+                    enabled: l.save.is_some(),
+                })
+                .collect();
+            found_menu.extend(offers.iter().filter(|o| o.id == curve_act::OPEN_SONG && o.enabled).map(|o| MenuItem {
+                what: o.text.as_str().into(),
+                key: key(o.id),
+                id: o.id.into(),
+                enabled: true,
+            }));
+            data.set_curve_found_menu(ModelRc::new(VecModel::from(found_menu)));
+        }
         // Hear has a button of its own on the card (and stays in the right-click menu).
         data.set_curve_actions(ModelRc::new(VecModel::from(
             offers
@@ -1002,7 +1016,10 @@ fn show_curve_card(app: &AppWindow) {
                 .collect::<Vec<_>>(),
         )));
         data.set_curve_message(p.curve_message.as_str().into());
-        p.curve_found = found.into_iter().map(|l| l.save).collect();
+        if let Some(found) = found {
+            p.curve_found_of = Some(c.id.clone());
+            p.curve_found = found.into_iter().map(|l| l.save).collect();
+        }
     });
 }
 
@@ -2279,6 +2296,7 @@ fn read_curves(_app: &AppWindow) {
 fn set_curves(p: &mut Page, list: Vec<Curve>, keys: Vec<logic::CurveKey>) {
     p.curve_keys = keys;
     background::free_later(std::mem::replace(&mut p.curves, list));
+    p.curve_found_of = None;
     p.curves_failed = None;
     reshow_curves(p);
     if let Some(id) = &p.curve_picked
@@ -2479,6 +2497,7 @@ fn curve_db_change(
                         let mut p = p.borrow_mut();
                         if let Some(at) = p.curves.iter().position(|o| o.id == c.id) {
                             p.curve_keys[at] = key;
+                            p.curve_found_of = None;
                             p.curves[at] = c;
                         }
                         reshow_curves(&mut p);

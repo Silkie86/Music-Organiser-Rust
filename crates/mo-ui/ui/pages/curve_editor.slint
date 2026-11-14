@@ -33,9 +33,10 @@ export global CurveEditorData {
     in property <[RulerMark]> ruler;
     // Where the curve ends, from the picture's left; under 0 when its end isn't in sight.
     in property <length> end-x: -1px;
-    // The grid: its step (0 is 1/4, 1 is 1/8, 2 is 1/16, 3 is 1/32, -1 is off) and whether it's triplets.
+    // The grid: its step (0 is 1/4, 1 is 1/8, 2 is 1/16, 3 is 1/32, -1 is off) and whether it's triplets or dotted.
     in property <int> grid-step: 2;
     in property <bool> grid-triplet;
+    in property <bool> grid-dotted;
     // Hear: whether the tone plays, and where it is now, from the picture's left (under 0 when not in sight).
     in property <bool> playing;
     in property <length> playhead: -1px;
@@ -44,7 +45,7 @@ export global CurveEditorData {
     // The wheel over the ruler or the picture: where (from the picture's left), how far, and whether Shift is held
     // (Shift moves along; without it the wheel zooms round the mouse).
     callback wheel(length, length, bool);
-    // A grid chip: 0 to 3 a step, 4 Triplet (on or off), 5 Off.
+    // A grid chip: 0 to 3 a step, 4 Triplet (on or off), 5 Dotted (on or off), 6 Off.
     callback grid-picked(int);
     callback undo();
     callback redo();
@@ -125,14 +126,17 @@ component GridStrip inherits HorizontalLayout {
             }
         }
     }
-    for g[i] in ["1/4", "1/8", "1/16", "1/32", "Triplet", "Off"]: VerticalLayout {
+    for g[i] in ["1/4", "1/8", "1/16", "1/32", "Triplet", "Dotted", "Off"]: VerticalLayout {
         alignment: center;
         ToggleChip {
             text: g;
-            on: i < 4 ? CurveEditorData.grid-step == i : i == 4 ? CurveEditorData.grid-triplet && CurveEditorData.grid-step >= 0 : CurveEditorData.grid-step < 0;
-            dim: i == 4 && CurveEditorData.grid-step < 0;
+            on: i < 4 ? CurveEditorData.grid-step == i
+                : i == 4 ? CurveEditorData.grid-triplet && CurveEditorData.grid-step >= 0
+                : i == 5 ? CurveEditorData.grid-dotted && CurveEditorData.grid-step >= 0
+                : CurveEditorData.grid-step < 0;
+            dim: (i == 4 || i == 5) && CurveEditorData.grid-step < 0;
             joined-left: true;
-            joined-right: i < 5;
+            joined-right: i < 6;
             clicked => { CurveEditorData.grid-picked(i); }
         }
     }
@@ -286,6 +290,11 @@ export component CurveEditor inherits SidePanel {
                 self.laid-out();
             }
             changed height => {
+                self.laid-out();
+            }
+            // The window moved to a screen with another scale: the same room in points is other pixels.
+            property <float> scale: 1px / 1phx;
+            changed scale => {
                 self.laid-out();
             }
             // Drawn at the window's own pixels, so its lines stay sharp.

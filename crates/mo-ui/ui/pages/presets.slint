@@ -359,9 +359,6 @@ component CurveShape inherits Rectangle {
 component CurveLineView inherits ListLine {
     in property <CurveLineInfo> line;
     callback chosen();
-    // The list is a narrow column beside the editor: where it was found is on the card then, and the name gets the
-    // room.
-    property <bool> tight: self.width < 420px;
     height: 48px;
     selected: line.picked;
     draggable: true;
@@ -380,7 +377,7 @@ component CurveLineView inherits ListLine {
         padding-right: Space.md;
         spacing: Space.md;
         Well {
-            width: root.tight ? 64px : 84px;
+            width: 64px;
             height: 28px;
             y: (parent.height - self.height) / 2;
             CurveShape {
@@ -407,18 +404,18 @@ component CurveLineView inherits ListLine {
                 overflow: elide;
             }
         }
-        if !root.tight || root.line.hidden: Text {
-            horizontal-stretch: root.tight ? 0 : 2;
-            preferred-width: root.tight ? self.min-width : 0px;
-            min-width: 0px;
-            text: root.line.hidden ? "Hidden" : root.line.found;
+        // The list is a narrow column beside the editor: where a curve was found is on its card, and the name gets
+        // the room.
+        if root.line.hidden: Text {
+            horizontal-stretch: 0;
+            text: "Hidden";
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
             overflow: elide;
         }
         Text {
-            width: root.tight ? 52px : 72px;
+            width: 52px;
             text: root.line.length;
             color: Theme.muted;
             font-family: Theme.number-font;

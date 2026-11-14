@@ -1512,7 +1512,7 @@ const TONE_HZ: f64 = 220.0;
 const TONE_LEVEL: f64 = 0.5;
 const TONE_RATE: u32 = 44_100;
 /// The longest stretch heard: 32 bars (a minute at 120); a longer curve is heard from its start.
-const TONE_MOST_BEATS: f64 = 128.0;
+pub const TONE_MOST_BEATS: f64 = 128.0;
 /// How fast the tone's volume follows a jump in the curve, in seconds: quick, but with no click.
 const TONE_GLIDE: f64 = 0.002;
 
@@ -1945,17 +1945,6 @@ fn num(v: f64) -> String {
     if r == r.trunc() { format!("{}", r as i64) } else { format!("{r}") }
 }
 
-/// The picked curve's card, in words.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct CurveCard {
-    pub name: String,
-    pub shape: String,
-    pub facts: Vec<(String, String)>,
-    /// Each place it was found: (song or file, what it moved and where).
-    pub places: Vec<(String, String)>,
-    pub hidden: bool,
-}
-
 /// The beat a curve starts at in its song, as "bar 17".
 fn bar_words(at: f64) -> String {
     format!("bar {}", (at / 4.0).floor() as i64 + 1)
@@ -2007,10 +1996,13 @@ pub fn curve_found_lines(c: &Curve) -> Vec<FoundLine> {
             if !s.name.is_empty() && s.name != s.song {
                 words.push(s.name.clone());
             }
+            if !s.kind.is_song() {
+                words.push(kind_label(s.kind).to_owned());
+            }
+            // What it moved: two places in one song at one bar are told apart by it.
+            words.extend([&s.device, &s.setting].into_iter().filter(|t| !t.is_empty()).cloned());
             if s.kind.is_song() {
                 words.push(bar_words(s.at));
-            } else {
-                words.push(kind_label(s.kind).to_owned());
             }
             FoundLine { text: words.join(" · "), save: s.kind.is_song().then(|| s.path.clone()) }
         })
@@ -2019,43 +2011,6 @@ pub fn curve_found_lines(c: &Curve) -> Vec<FoundLine> {
         lines.push(FoundLine { text: more_places(more), save: None });
     }
     lines
-}
-
-pub fn curve_card(c: &Curve) -> CurveCard {
-    let mut facts =
-        vec![("LENGTH".to_owned(), beats_words(c.length_beats)), ("POINTS".into(), c.points.len().to_string())];
-    facts.push(("FOUND".into(), found_words(c)));
-    let (sources, more) = newest_sources(c);
-    let mut places: Vec<(String, String)> = sources
-        .into_iter()
-        .map(|s| {
-            let what =
-                [s.device.as_str(), s.setting.as_str()].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>();
-            let mut about = vec![kind_label(s.kind).to_owned()];
-            if !what.is_empty() {
-                about.push(what.join(" · "));
-            }
-            if s.kind.is_song() {
-                about.push(bar_words(s.at));
-            }
-            let title = if s.name.is_empty() || s.name == s.song {
-                s.song.clone()
-            } else {
-                format!("{} · {}", s.song, s.name)
-            };
-            (title, about.join(" · "))
-        })
-        .collect();
-    if more > 0 {
-        places.push((more_places(more), String::new()));
-    }
-    CurveCard {
-        name: c.name.clone(),
-        shape: curve_path(&c.points, SHAPE_BOX.0, SHAPE_BOX.1),
-        facts,
-        places,
-        hidden: c.hidden,
-    }
 }
 
 /// What the picked curve offers, in the card's order.
@@ -2682,20 +2637,28 @@ mod tests {
         let c = curve("Rise", SourceKind::FlKnobMoves, "Didums", 10);
         assert_eq!(curve_facts_line(&c), ("4 bars · 3 points".to_owned(), "In 1 song".to_owned()));
         let lines = curve_found_lines(&c);
-        assert_eq!(lines, [FoundLine { text: "Didums · bar 17".into(), save: Some("/s/Didums.flp".into()) }]);
+        assert_eq!(
+            lines,
+            [FoundLine { text: "Didums · Serum · Cutoff · bar 17".into(), save: Some("/s/Didums.flp".into()) }]
+        );
         // A library's curve leads to no song; a clip's own name is said after its song's.
         let mut lib = curve("Wobble", SourceKind::BitwigCurve, "Wobble", 5);
-        assert_eq!(curve_found_lines(&lib), [FoundLine { text: "Wobble · Bitwig's library".into(), save: None }]);
+        assert_eq!(
+            curve_found_lines(&lib),
+            [FoundLine { text: "Wobble · Bitwig's library · Serum · Cutoff".into(), save: None }]
+        );
         lib.sources[0].kind = SourceKind::BitwigClip;
         lib.sources[0].name = "Pump".into();
-        assert_eq!(curve_found_lines(&lib)[0].text, "Wobble · Pump · bar 17");
+        assert_eq!(curve_found_lines(&lib)[0].text, "Wobble · Pump · Serum · Cutoff · bar 17");
         // The newest places only, then how many more; one point is "1 point", and no length says none.
         let mut many = c.clone();
-        many.sources = (0..25).map(|n| CurveSource { modified: n, ..c.sources[0].clone() }).collect();
+        many.sources =
+            (0..25).map(|n| CurveSource { song: format!("Song {n}"), modified: n, ..c.sources[0].clone() }).collect();
         many.points.truncate(1);
         many.length_beats = 0.0;
         let lines = curve_found_lines(&many);
         assert_eq!(lines.len(), PLACES_UP_TO + 1);
+        assert!(lines[0].text.starts_with("Song 24 · "), "{}", lines[0].text);
         assert_eq!(lines[PLACES_UP_TO], FoundLine { text: "And 5 more places".into(), save: None });
         assert_eq!(curve_facts_line(&many).0, "1 point");
     }
@@ -2708,21 +2671,6 @@ mod tests {
         assert_eq!(beats_words(3.0), "3 beats");
         assert_eq!(beats_words(4.0), "1 bar");
         assert_eq!(beats_words(6.0), "6 beats");
-        let card = curve_card(&c);
-        assert_eq!(card.places, [("Didums".to_owned(), "FL knob moves · Serum · Cutoff · bar 17".to_owned())]);
-        let mut many = c.clone();
-        many.sources = (0..25)
-            .map(|n| CurveSource {
-                song: format!("Song {n}"),
-                name: String::new(),
-                modified: n,
-                ..c.sources[0].clone()
-            })
-            .collect();
-        let card = curve_card(&many);
-        assert_eq!(card.places.len(), PLACES_UP_TO + 1);
-        assert_eq!(card.places[0].0, "Song 24");
-        assert_eq!(card.places[PLACES_UP_TO].0, "And 5 more places");
         let lib = curve("Wobble", SourceKind::BitwigCurve, "Wobble", 5);
         assert_eq!(found_words(&lib), "In Bitwig's library");
         assert!(!curve_offers(&lib, true).iter().any(|o| o.id == curve_act::OPEN_SONG && o.enabled));
@@ -2730,7 +2678,7 @@ mod tests {
         let shape = curve("SC1", SourceKind::PluginShape, "SC1", 5);
         assert_eq!(found_words(&shape), "In plugin shapes");
         assert!(!curve_offers(&shape, true).iter().any(|o| o.id == curve_act::SHOW_IN_SONGS && o.enabled));
-        assert_eq!(curve_card(&shape).places, [("SC1".to_owned(), "Plugin shapes · Serum · Cutoff".to_owned())]);
+        assert_eq!(curve_found_lines(&shape)[0].text, "SC1 · Plugin shapes · Serum · Cutoff");
         let mut both = c.clone();
         both.sources.extend(lib.sources.iter().chain(&shape.sources).cloned());
         assert_eq!(found_words(&both), "In 1 song and Bitwig's library and plugin shapes");

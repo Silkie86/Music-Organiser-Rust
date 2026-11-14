@@ -12,7 +12,7 @@ use mo_app::background::Newest;
 use mo_app::curve_edit::{Editor, Grid, Shape, Span, Step};
 use mo_app::curve_picture::{self, Colours, Frame, View};
 use mo_app::log;
-use mo_app::presets::HEAR_BPM;
+use mo_app::presets::{HEAR_BPM, TONE_MOST_BEATS};
 use mo_presets::curves::Curve;
 use slint::{ComponentHandle, Image, ModelRc, VecModel};
 
@@ -28,8 +28,6 @@ const NOTCH_MOVES: f64 = 0.125;
 /// How often the play line moves while the tone plays, and how long it waits for a tone to be made and start.
 const PLAY_TICK: Duration = Duration::from_millis(33);
 const TONE_WAIT: Duration = Duration::from_secs(5);
-/// The longest stretch of a curve the tone plays, in beats (`mo_app::presets::curve_tone`).
-const TONE_MOST_BEATS: f64 = 128.0;
 
 /// A picture to work out: of which curve and which picture (both are counted), the shape as it is now, what's
 /// highlighted, the grid, the room and what's in sight, the colours, pixels to a point, and whether the card draws it
@@ -123,7 +121,6 @@ pub fn connect(app: &AppWindow) {
         return;
     }
     let data = app.global::<CurveEditorData>();
-    data.set_hear_key("Space".into());
     show_grid(app);
     let weak = app.as_weak();
     data.on_laid_out(move |width, height| {
@@ -147,8 +144,16 @@ pub fn connect(app: &AppWindow) {
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             match usize::try_from(chip).ok() {
-                Some(4) => s.grid.triplet = s.grid.step.is_some() && !s.grid.triplet,
-                Some(5) => s.grid.step = None,
+                // Triplet and Dotted: one at most, and only with a step.
+                Some(4) => {
+                    s.grid.triplet = s.grid.step.is_some() && !s.grid.triplet;
+                    s.grid.dotted = false;
+                }
+                Some(5) => {
+                    s.grid.dotted = s.grid.step.is_some() && !s.grid.dotted;
+                    s.grid.triplet = false;
+                }
+                Some(6) => s.grid.step = None,
                 Some(i) => {
                     if let Some(step) = Step::ALL.get(i) {
                         s.grid.step = Some(*step);
@@ -244,6 +249,7 @@ fn show_grid(app: &AppWindow) {
     let step = grid.step.and_then(|step| Step::ALL.iter().position(|s| *s == step));
     data.set_grid_step(step.map_or(-1, |i| i as i32));
     data.set_grid_triplet(grid.triplet);
+    data.set_grid_dotted(grid.dotted && !grid.triplet);
 }
 
 /// The wheel over the ruler or the picture, `x` points from the picture's left: zooms round the mouse, or moves along
