@@ -38,6 +38,8 @@ fn short(offer: &Offer) -> &'static str {
         act::REVERSE => "Reverse",
         act::FLIP => "Flip",
         act::STEPS => "Steps",
+        act::QUANTISE => "Quantise",
+        act::REMOVE_POINTS => "Remove points",
         act::KEEP_CLIP if offer.text.starts_with("Forget") => "Forget clip",
         act::KEEP_CLIP => "Keep as clip",
         act::CUT_TIME => "Cut time out",
@@ -91,8 +93,9 @@ pub(super) struct Bench {
     open: RefCell<Option<(usize, Curve)>>,
     drawer: RefCell<Option<Newest<Ask>>>,
     drawn: Arc<Mutex<Option<Drawn>>>,
-    /// The part's actions as the buttons last showed them.
+    /// The part's actions as the buttons last showed them, and how many points were picked then.
     offers: RefCell<Vec<Offer>>,
+    picked: Cell<usize>,
     player: Arc<Player>,
     /// How asking for the tone went, once that's known; and since when one is asked for and not answered yet.
     played: Arc<Mutex<Option<Played>>>,
@@ -118,6 +121,7 @@ impl Bench {
             drawer: RefCell::new(None),
             drawn: Arc::default(),
             offers: RefCell::default(),
+            picked: Cell::new(0),
             player,
             played: Arc::default(),
             making: Cell::new(None),
@@ -142,11 +146,14 @@ impl Bench {
             let (me, weak) = (Rc::clone(self), panel.as_weak());
             move |told: (i32, f64, f64, Keys)| {
                 let drawn = what(&mut me.card.borrow_mut(), told);
+                // Points picked or let go change what the part's buttons would do, with no change to the curve.
+                let picked = me.card.borrow().picked();
+                let repicked = me.picked.replace(picked) != picked;
                 if let Some(panel) = weak.upgrade() {
                     if drawn {
                         me.redraw(&panel);
                     }
-                    me.show(&panel, drawn);
+                    me.show(&panel, drawn || repicked);
                 }
             }
         };
@@ -330,8 +337,10 @@ impl Bench {
         }
         let offers = self.card.borrow().part_offers();
         if *self.offers.borrow() != offers {
+            // "Remove points" only while there are points picked: the row must fit the panel.
             let lines: Vec<MenuItem> = offers
                 .iter()
+                .filter(|o| o.enabled || o.id != mo_app::presets::curve_act::REMOVE_POINTS)
                 .map(|o| MenuItem {
                     what: short(o).into(),
                     key: o.text.as_str().into(),

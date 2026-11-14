@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use mo_formats::bitwig::curve::CurvePoint;
 
-use crate::curve_edit::{Edit, Editor, Grid, Piece, Shape, Span, Step};
+use crate::curve_edit::{self, Edit, Editor, Grid, Piece, Point, Shape, Span, Step};
 use crate::curve_hear::{self, Hear};
 use crate::curve_hold::{self, Hold, Over, Part};
 use crate::curve_paint::{self, Stroke};
@@ -91,6 +91,8 @@ enum Held {
     Paint,
     /// A swing mark on the ruler: every second line of a grid this many beats apart, and the beat it was taken at.
     Swing(f64, f64),
+    /// A box drawn over empty space (Alt): the points inside it are picked.
+    Band,
 }
 
 /// A point's dot on the picture, in points from its left and top.
@@ -102,6 +104,8 @@ pub struct Dot {
     pub hot: bool,
     /// It's in hand.
     pub held: bool,
+    /// It's one of the picked points.
+    pub picked: bool,
 }
 
 /// A tile of the clip strip as it's shown.
@@ -142,6 +146,8 @@ pub struct Showing {
     pub open: bool,
     /// The dots, when they've changed.
     pub dots: Option<Vec<Dot>>,
+    /// The box being drawn to pick points: its left, top, width and height in the picture's points.
+    pub band: Option<(f32, f32, f32, f32)>,
     /// The highlight's frame and its handles, or the pills round the whole curve.
     pub frame: Option<curve_hold::Box>,
     /// Which handle is lit: 0 none, 1 the bar, 2 left, 3 right, 4 top, 5 bottom, 6 to 9 the corners (top left, top
@@ -188,6 +194,7 @@ macro_rules! show_curve_card {
         if !$now.open {
             $data.set_clips(::slint::ModelRc::default());
             $data.set_dots(::slint::ModelRc::default());
+            $data.set_band_shown(false);
             $data.set_swing_marks(::slint::ModelRc::default());
             $data.set_hl_shown(false);
             $data.set_hot_line("".into());
@@ -197,9 +204,21 @@ macro_rules! show_curve_card {
             $data.set_can_redo(false);
         } else {
             if let Some(dots) = $now.dots {
-                let dots: Vec<$dot> =
-                    dots.into_iter().map(|d| $dot { x: d.x, y: d.y, hot: d.hot, held: d.held }).collect();
+                let dots: Vec<$dot> = dots
+                    .into_iter()
+                    .map(|d| $dot { x: d.x, y: d.y, hot: d.hot, held: d.held, picked: d.picked })
+                    .collect();
                 $data.set_dots(::slint::ModelRc::new(::slint::VecModel::from(dots)));
+            }
+            match $now.band {
+                Some((x, y, width, height)) => {
+                    $data.set_band_x(x);
+                    $data.set_band_y(y);
+                    $data.set_band_width(width);
+                    $data.set_band_height(height);
+                    $data.set_band_shown(true);
+                }
+                None => $data.set_band_shown(false),
             }
             // The highlight's frame and its handles, or the pills round the whole curve.
             match $now.frame {
@@ -322,6 +341,16 @@ pub struct Card {
     read_out: String,
     /// The point in hand, as the drag has left it in the list.
     held_dot: Option<usize>,
+    /// The picked points (their places in the curve's list, in order), and the curve's points as they were when
+    /// those were picked: any other change to the curve and nothing is picked. As they were at the press, for a
+    /// drag that moves them together (or a box that adds to them); and the box being drawn, corner to corner.
+    picked: Vec<usize>,
+    picked_of: Vec<Point>,
+    picked_from: Vec<usize>,
+    band: Option<((f64, f64), (f64, f64))>,
+    /// The points picked before the last click on a point, and when: a double-click on one of several picked
+    /// points begins with a click that picks it alone.
+    clicked: Option<(Vec<usize>, Instant)>,
     /// The curve's name, for the strip's one tile when it has no clips.
     name: String,
     /// Where the mouse is on the clip strip, from the picture's left (none when it isn't there).
@@ -370,6 +399,11 @@ impl Default for Card {
             before: None,
             read_out: String::new(),
             held_dot: None,
+            picked: Vec::new(),
+            picked_of: Vec::new(),
+            picked_from: Vec::new(),
+            band: None,
+            clicked: None,
             name: String::new(),
             on_strip: None,
             tiles: None,
@@ -488,8 +522,22 @@ impl Card {
         self.before = None;
         self.ghost = None;
         self.stroke = None;
+        self.band = None;
         self.swing = 0.0;
         self.read_out.clear();
+    }
+
+    /// The picked points: none once the curve is another than the one they were picked in.
+    fn picked_now(&self) -> &[usize] {
+        match self.open.as_ref() {
+            Some((_, e)) if !self.picked.is_empty() && e.shape().points() == self.picked_of.as_slice() => &self.picked,
+            _ => &[],
+        }
+    }
+
+    /// How many points are picked.
+    pub fn picked(&self) -> usize {
+        self.picked_now().len()
     }
 
     /// Where the swing marks stand on the ruler, in points from the picture's left: on every second grid line of
@@ -617,6 +665,10 @@ impl Card {
             s.keys = keys;
             s.mouse = Some((x, y));
         }
+        // The curve was changed some other way since points were picked: nothing is picked.
+        if !s.picked.is_empty() && editor.shape().points() != s.picked_of.as_slice() {
+            s.picked.clear();
+        }
         match kind {
             mouse::MOVED => {
                 let Some((held, from, moved)) = s.grab.as_mut() else { return false };
@@ -631,7 +683,7 @@ impl Card {
                         editor.set_highlight(Some(hold.span));
                         s.lit_whole = true;
                     }
-                    if !matches!(held, Held::Sweep(_)) && s.before.is_none() {
+                    if !matches!(held, Held::Sweep(_) | Held::Band) && s.before.is_none() {
                         s.before = Some(editor.shape().clone());
                     }
                 }
@@ -640,12 +692,56 @@ impl Card {
                     Held::Touch(grab) => {
                         let before = s.before.as_ref().unwrap_or_else(|| editor.shape());
                         let (edit, words) = curve_touch::drag(grab, before, frame, s.grid, keys, x, y);
-                        s.read_out = words;
-                        editor.drag(&edit);
-                        if matches!(grab, Grab::Dot { .. }) {
-                            s.held_dot =
-                                s.before.as_ref().and_then(|b| curve_touch::held_point(editor.shape(), b, &edit));
+                        // One of several picked points: they all go, by as much as this one.
+                        let together = match (grab, &edit) {
+                            (Grab::Dot { point, .. }, Edit::MovePoint { beat, value, .. })
+                                if s.picked_from.len() > 1 && s.picked_from.contains(&point) =>
+                            {
+                                before.points().get(point).map(|p| {
+                                    let points = s.picked_from.clone();
+                                    (point, Edit::MovePoints { points, beats: beat - p.beat, value: value - p.value })
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let Some((point, edit)) = together {
+                            let before = before.clone();
+                            editor.drag(&edit);
+                            let now = curve_edit::landed(&before, None, &edit, editor.shape());
+                            s.held_dot = now.iter().find(|(from, _)| *from == point).map(|(_, to)| *to);
+                            s.picked = now.iter().map(|(_, to)| *to).collect();
+                            s.picked.dedup();
+                            s.picked_of = editor.shape().points().to_vec();
+                            let held = s.held_dot.and_then(|i| editor.shape().points().get(i));
+                            s.read_out = held.map_or_else(String::new, |p| {
+                                let place = curve_touch::place_words(p.beat);
+                                format!("{} points · {place} · {}", s.picked_from.len(), curve_touch::percent(p.value))
+                            });
+                        } else {
+                            s.read_out = words;
+                            editor.drag(&edit);
+                            if matches!(grab, Grab::Dot { .. }) {
+                                s.held_dot =
+                                    s.before.as_ref().and_then(|b| curve_touch::held_point(editor.shape(), b, &edit));
+                                // The one point in hand stays the picked one.
+                                s.picked = s.held_dot.into_iter().collect();
+                                s.picked_of = editor.shape().points().to_vec();
+                            }
                         }
+                    }
+                    Held::Band => {
+                        let mut picked = curve_touch::in_box(editor.shape(), frame, *from, (x, y));
+                        picked.extend(s.picked_from.iter().copied());
+                        picked.sort_unstable();
+                        picked.dedup();
+                        s.read_out = match picked.len() {
+                            1 => "1 point".to_owned(),
+                            n => format!("{n} points"),
+                        };
+                        s.picked = picked;
+                        s.picked_of = editor.shape().points().to_vec();
+                        s.band = Some((*from, (x, y)));
+                        return false;
                     }
                     Held::Part(hold) => {
                         let (edit, words) = curve_hold::drag(hold, length, frame, s.grid, keys, x, y);
@@ -696,6 +792,21 @@ impl Card {
                 s.grab = Some((Held::Paint, (x, y), true));
                 true
             }
+            // Alt on empty space draws a box: the points in it are picked (with Shift, as well as those picked).
+            mouse::PRESSED
+                if keys.alt
+                    && matches!(
+                        curve_hold::over(editor.shape(), editor.highlight(), frame, x, y),
+                        Over::Inside | Over::Empty
+                    ) =>
+            {
+                s.picked_from = if keys.shift { s.picked.clone() } else { Vec::new() };
+                s.dropped = None;
+                s.lit_whole = false;
+                s.held_dot = None;
+                s.grab = Some((Held::Band, (x, y), false));
+                false
+            }
             mouse::PRESSED => {
                 let held = match curve_hold::over(editor.shape(), editor.highlight(), frame, x, y) {
                     Over::Part(part) => {
@@ -710,6 +821,16 @@ impl Card {
                     Some(Held::Touch(Grab::Dot { point, .. })) => Some(point),
                     _ => None,
                 };
+                // A point that isn't one of the picked ones is the picked one from here on (with Ctrl it joins
+                // them, once the click is let go).
+                if let Some(point) = s.held_dot
+                    && !keys.ctrl
+                    && !s.picked.contains(&point)
+                {
+                    s.picked = vec![point];
+                    s.picked_of = editor.shape().points().to_vec();
+                }
+                s.picked_from = s.picked.clone();
                 false
             }
             mouse::LET_GO => {
@@ -717,12 +838,37 @@ impl Card {
                 s.before = None;
                 s.ghost = None;
                 s.stroke = None;
+                s.band = None;
                 s.swing = 0.0;
                 s.read_out.clear();
                 match was {
-                    Some((Held::Sweep(lit), _, moved)) => {
-                        // A click on empty space drops the highlight; a drag has left its own.
+                    // A box leaves its points picked; a click with the box's key picks nothing.
+                    Some((Held::Band, _, moved)) => {
                         if !moved {
+                            s.picked.clear();
+                        }
+                        false
+                    }
+                    // A click on a point picks it: alone, or with Ctrl in or out of the picked ones.
+                    Some((Held::Touch(Grab::Dot { point, .. }), _, false)) => {
+                        // A double-click begins with such a click: it's done to the points picked before it.
+                        s.clicked = Some((s.picked.clone(), Instant::now()));
+                        if !keys.ctrl {
+                            s.picked = vec![point];
+                        } else if let Some(at) = s.picked.iter().position(|p| *p == point) {
+                            s.picked.remove(at);
+                        } else {
+                            s.picked.push(point);
+                            s.picked.sort_unstable();
+                        }
+                        s.picked_of = editor.shape().points().to_vec();
+                        false
+                    }
+                    Some((Held::Sweep(lit), _, moved)) => {
+                        // A click on empty space drops the highlight and the picked points; a drag has left its
+                        // own highlight.
+                        if !moved {
+                            s.picked.clear();
                             editor.set_highlight(None);
                             if let Some(lit) = lit {
                                 s.dropped = Some((lit, Instant::now()));
@@ -768,8 +914,18 @@ impl Card {
                 if editor.highlight().is_some() && matches!(over, Over::Part(_)) {
                     return back.is_some();
                 }
-                let added = curve_touch::double_click(editor.shape(), frame, s.grid, keys, x, y)
-                    .is_some_and(|e| editor.edit(&e));
+                // On one of several picked points: they all go.
+                // (As they were before the click this double-click began with, which picked this one alone.)
+                let before = s.clicked.take().filter(|(_, when)| when.elapsed() < DOUBLE_CLICK).map(|(p, _)| p);
+                let all = before.unwrap_or_else(|| s.picked.clone());
+                let edit = match curve_touch::double_click(editor.shape(), frame, s.grid, keys, x, y) {
+                    Some(Edit::RemovePoint(point)) if all.len() > 1 && all.contains(&point) => {
+                        s.picked.clear();
+                        Some(Edit::RemovePoints(all))
+                    }
+                    edit => edit,
+                };
+                let added = edit.is_some_and(|e| editor.edit(&e));
                 added || back.is_some()
             }
             mouse::TAKEN_AWAY => {
@@ -781,7 +937,14 @@ impl Card {
                 s.read_out.clear();
                 s.mouse = None;
                 s.keys = Keys::default();
-                given_up(editor, was, &mut s.lit_whole)
+                s.band = None;
+                let given = given_up(editor, was, &mut s.lit_whole);
+                // The curve is as it was at the press, and so is what's picked.
+                if matches!(was, Some((Held::Touch(_) | Held::Band, ..))) {
+                    s.picked = std::mem::take(&mut s.picked_from);
+                    s.picked_of = editor.shape().points().to_vec();
+                }
+                given
             }
             _ => {
                 // The mouse left; while something is held the drag goes on outside the picture.
@@ -893,8 +1056,10 @@ impl Card {
     /// What the right-click menu offers for the highlighted part (the whole curve with none); empty with no curve
     /// open.
     pub fn part_offers(&self) -> Vec<Offer> {
-        let step = self.grid.beats().unwrap_or(0.25);
-        self.open.as_ref().map_or_else(Vec::new, |(_, e)| curve_strip::part_offers(e.shape(), e.highlight(), step))
+        let (grid, picked) = (self.grid.beats(), self.picked_now());
+        self.open
+            .as_ref()
+            .map_or_else(Vec::new, |(_, e)| curve_strip::part_offers(e.shape(), e.highlight(), grid, picked))
     }
 
     /// One of the editor's own actions (the right-click menu's, or its key): reverse, flip, steps, keep or forget a
@@ -909,7 +1074,31 @@ impl Card {
         let Some((_, editor)) = s.open.as_mut() else { return false };
         given_up(editor, was, &mut s.lit_whole);
         let lit = editor.highlight();
+        // The picked points, if the curve is still the one they were picked in.
+        let picked = if editor.shape().points() == s.picked_of.as_slice() { s.picked.clone() } else { Vec::new() };
         match id {
+            // With the grid off there's nothing to quantise to.
+            curve_act::QUANTISE if s.grid.beats().is_none() => false,
+            curve_act::QUANTISE => {
+                let edit = Edit::Quantise { points: picked.clone(), step };
+                let before = editor.shape().clone();
+                let done = editor.edit(&edit);
+                // The picked points stay picked where they went.
+                if done && !picked.is_empty() {
+                    s.picked =
+                        curve_edit::landed(&before, lit, &edit, editor.shape()).into_iter().map(|p| p.1).collect();
+                    s.picked.dedup();
+                    s.picked_of = editor.shape().points().to_vec();
+                }
+                done
+            }
+            curve_act::REMOVE_POINTS => {
+                let done = editor.edit(&Edit::RemovePoints(picked));
+                if done {
+                    s.picked.clear();
+                }
+                done
+            }
             curve_act::REVERSE => editor.edit(&Edit::Reverse),
             curve_act::FLIP => editor.edit(&Edit::Flip),
             curve_act::STEPS => editor.edit(&Edit::Steps { step }),
@@ -1005,14 +1194,28 @@ impl Card {
         editor.edit(&Edit::Swing { step, amount })
     }
 
-    /// Esc: a drag in hand is put back as it was before it began; else the highlight is dropped. Whether it did
-    /// either.
+    /// Esc: a drag in hand is put back as it was before it began; else the picked points are let go; else the
+    /// highlight is dropped. Whether it did any of them.
     pub fn escape(&mut self) -> bool {
         let s = self;
         let was = s.grab;
         s.hands_off();
         let Some((_, editor)) = s.open.as_mut() else { return false };
+        let same = |picked_of: &[Point], editor: &Editor| editor.shape().points() == picked_of;
         if given_up(editor, was, &mut s.lit_whole) {
+            // The curve is as it was at the press, and so is what's picked (a drag of points or a box changed it;
+            // after any other drag it's as it was by itself).
+            if matches!(was, Some((Held::Touch(_) | Held::Band, ..))) {
+                s.picked = std::mem::take(&mut s.picked_from);
+                s.picked_of = editor.shape().points().to_vec();
+            }
+            true
+        } else if matches!(was, Some((Held::Band, ..))) {
+            s.picked = std::mem::take(&mut s.picked_from);
+            s.picked_of = editor.shape().points().to_vec();
+            true
+        } else if !s.picked.is_empty() && same(&s.picked_of, editor) {
+            s.picked.clear();
             true
         } else if editor.highlight().is_some() {
             editor.set_highlight(None);
@@ -1156,22 +1359,42 @@ impl Card {
                 (part, _) => part,
             }),
             (Some(Held::Part(hold)), None) => Over::Part(hold.part),
-            (Some(Held::Sweep(_) | Held::Paint | Held::Swing(..)), _) => Over::Empty,
+            (Some(Held::Sweep(_) | Held::Paint | Held::Swing(..) | Held::Band), _) => Over::Empty,
             (None, Some((x, y))) => curve_hold::over_in(shape, hl, frame, x, y),
             _ => Over::Empty,
         };
-        let on_show = match (held, over) {
-            (Some(_), Over::Dot(point)) => curve_touch::dots_with(shape, frame, Some(point)),
-            (Some(_), _) => curve_touch::dots_with(shape, frame, None),
-            (None, _) => curve_touch::dots(shape, frame, s.mouse),
+        // The picked points, if the curve is still the one they were picked in.
+        let picked: &[usize] = if shape.points() == s.picked_of.as_slice() { &s.picked } else { &[] };
+        let near = match (held, over, s.mouse) {
+            (Some(_), Over::Dot(point), _) => Some(point),
+            (Some(_), ..) => None,
+            (None, _, Some((x, y))) => match curve_touch::under(shape, frame, x, y) {
+                curve_touch::Under::Dot(point) => Some(point),
+                _ => None,
+            },
+            (None, _, None) => None,
         };
-        let dots: Vec<Dot> = on_show
+        let dots: Vec<Dot> = curve_touch::dots_also(shape, frame, near, picked)
             .into_iter()
             .map(|d| {
                 let hot = over == Over::Dot(d.point);
-                Dot { x: d.x as f32, y: d.y as f32, hot: hot && held.is_none(), held: hot && held.is_some() }
+                Dot {
+                    x: d.x as f32,
+                    y: d.y as f32,
+                    hot: hot && held.is_none(),
+                    held: hot && held.is_some(),
+                    picked: picked.binary_search(&d.point).is_ok(),
+                }
             })
             .collect();
+        let band = s.band.map(|(a, b)| {
+            ((a.0.min(b.0)) as f32, (a.1.min(b.1)) as f32, (a.0 - b.0).abs() as f32, (a.1 - b.1).abs() as f32)
+        });
+        // Several picked points under the mouse or in hand: what's done to one is done to them all.
+        let many = match over {
+            Over::Dot(point) if picked.len() > 1 && picked.binary_search(&point).is_ok() => Some(picked.len()),
+            _ => None,
+        };
         let new_dots = (s.dots.as_ref() != Some(&dots)).then(|| dots.clone());
         s.dots = Some(dots);
         let handle = match over {
@@ -1240,6 +1463,21 @@ impl Card {
             hint_keys = more.into();
             pointer = pointer::PAINT;
         }
+        if let Some(n) = many {
+            hint_name = format!("{n} points");
+            hint_does = "drag moves them together · double-click removes them".into();
+            hint_keys = if mac {
+                "Shift: off the grid · Cmd-click: let this one go"
+            } else {
+                "Shift: off the grid · Ctrl-click: let this one go"
+            }
+            .into();
+        }
+        if held == Some(Held::Band) {
+            hint_name = "Pick".into();
+            hint_does = "the points in the box are picked".into();
+            hint_keys = "Shift: as well as those picked".into();
+        }
         let swing_hot = matches!(held, Some(Held::Swing(..))) || (held.is_none() && s.on_swing);
         if swing_hot {
             hint_name = "Swing".into();
@@ -1282,6 +1520,7 @@ impl Card {
         Showing {
             open: true,
             dots: new_dots,
+            band,
             frame: hl,
             handle,
             near: on,
@@ -1588,6 +1827,153 @@ mod tests {
         let dot = Piece { points: vec![CurvePoint { x: 0.0, y: 0.5, bend: 0.0 }], ..piece() };
         assert!(card.add(dot).is_err());
         assert!(Card::default().add(piece()).is_err());
+    }
+
+    /// A card with five points open: beats 0 to 4, values 0, 0.5, 0.75, 0.25, 1.
+    fn five() -> Card {
+        let p = |x: f64, y: f64| CurvePoint { x: x / 4.0, y, bend: 0.0 };
+        let mut card = Card::default();
+        card.laid_out(400.0, 200.0);
+        assert!(card.open("f", "Five", &[p(0.0, 0.0), p(1.1, 0.5), p(2.0, 0.75), p(3.0, 0.25), p(4.0, 1.0)], 4.0));
+        card
+    }
+
+    fn click(card: &mut Card, beat: f64, value: f64, keys: Keys) {
+        let (x, y) = at(card, beat, value);
+        card.mouse(mouse::MOVED, x, y, keys);
+        card.mouse(mouse::PRESSED, x, y, keys);
+        card.mouse(mouse::LET_GO, x, y, keys);
+    }
+
+    fn picked_dots(card: &mut Card) -> usize {
+        card.show_all();
+        card.showing(false).dots.expect("all given").iter().filter(|d| d.picked).count()
+    }
+
+    #[test]
+    fn points_are_picked_by_a_click_with_ctrl_more_and_in_a_box() {
+        let (none, ctrl) = (Keys::default(), Keys { ctrl: true, ..Keys::default() });
+        let (alt, alt_shift) = (Keys { alt: true, ..none }, Keys { alt: true, shift: true, ..none });
+        let mut card = five();
+        click(&mut card, 1.1, 0.5, none);
+        assert_eq!(card.picked(), 1);
+        click(&mut card, 3.0, 0.25, ctrl);
+        assert_eq!(card.picked(), 2);
+        assert_eq!(picked_dots(&mut card), 2);
+        assert!(card.edited().is_none(), "picking is no edit");
+        // Ctrl-click on a picked one lets it go; a plain click picks only that one.
+        click(&mut card, 1.1, 0.5, ctrl);
+        assert_eq!(card.picked(), 1);
+        click(&mut card, 2.0, 0.75, none);
+        assert_eq!(card.picked(), 1);
+        // A box drawn with Alt over empty space: the points in it, with Shift as well as those picked.
+        let (a, b) = (at(&card, 2.5, 0.05), at(&card, 3.5, 0.5));
+        card.mouse(mouse::PRESSED, a.0, a.1, alt_shift);
+        card.mouse(mouse::MOVED, b.0, b.1, alt_shift);
+        assert!(card.showing(false).band.is_some());
+        assert_eq!(card.picked(), 2);
+        card.mouse(mouse::LET_GO, b.0, b.1, alt_shift);
+        assert!(card.showing(false).band.is_none());
+        assert_eq!(card.picked(), 2);
+        assert!(card.highlight().is_none(), "a box highlights no time");
+        card.mouse(mouse::PRESSED, a.0, a.1, alt);
+        card.mouse(mouse::MOVED, b.0, b.1, alt);
+        card.mouse(mouse::LET_GO, b.0, b.1, alt);
+        assert_eq!(card.picked(), 1, "without Shift only the box's own");
+        // Esc lets them go; so does a click on empty space.
+        assert!(card.escape());
+        assert_eq!(card.picked(), 0);
+        click(&mut card, 2.0, 0.75, none);
+        click(&mut card, 0.5, 0.9, none);
+        assert_eq!(card.picked(), 0);
+    }
+
+    #[test]
+    fn picked_points_are_dragged_quantised_and_removed_together() {
+        let (none, ctrl) = (Keys::default(), Keys { ctrl: true, ..Keys::default() });
+        let mut card = five();
+        click(&mut card, 1.1, 0.5, none);
+        click(&mut card, 2.0, 0.75, ctrl);
+        // Dragging one of them moves both, by the same (the held one goes to the grid).
+        press_drag(&mut card, (2.0, 0.75), (2.5, 0.5), none);
+        assert!(card.showing(false).read_out.starts_with("2 points"));
+        let b = at(&card, 2.5, 0.5);
+        card.mouse(mouse::LET_GO, b.0, b.1, none);
+        let (points, _) = card.edited().expect("moved");
+        let has = |points: &[CurvePoint], beat: f64, value: f64| {
+            points.iter().any(|p| (p.x * 4.0 - beat).abs() < 1e-6 && (p.y - value).abs() < 1e-6)
+        };
+        assert!(has(&points, 1.6, 0.25) && has(&points, 2.5, 0.5), "{points:?}");
+        assert_eq!(card.picked(), 2, "they stay picked");
+        // Quantise puts the picked ones on the grid (a sixteenth), and leaves the others.
+        assert!(card.act(curve_act::QUANTISE));
+        let (points, _) = card.edited().expect("quantised");
+        assert!(has(&points, 1.5, 0.25) && has(&points, 2.5, 0.5), "{points:?}");
+        assert_eq!(card.picked(), 2);
+        assert!(!card.act(curve_act::QUANTISE), "on the grid already");
+        // Undo: the curve is another, so nothing is picked any more.
+        assert!(card.step_back(true));
+        assert_eq!(card.picked(), 0);
+        assert!(!card.act(curve_act::REMOVE_POINTS), "nothing picked, nothing removed");
+        // Removed together, as one step.
+        click(&mut card, 3.0, 0.25, none);
+        click(&mut card, 1.6, 0.25, ctrl);
+        assert_eq!(card.picked(), 2);
+        assert!(card.act(curve_act::REMOVE_POINTS));
+        assert_eq!(card.edited().expect("removed").0.len(), 3);
+        assert_eq!(card.picked(), 0);
+        assert!(card.step_back(true));
+        assert_eq!(card.edited().expect("back").0.len(), 5);
+        // A drag given up leaves the curve and what was picked as they were.
+        click(&mut card, 3.0, 0.25, none);
+        click(&mut card, 1.6, 0.25, ctrl);
+        let before = card.edited();
+        press_drag(&mut card, (3.0, 0.25), (3.5, 0.6), none);
+        assert_ne!(card.edited(), before);
+        assert!(card.escape());
+        assert_eq!(card.edited(), before);
+        assert_eq!(card.picked(), 2);
+        // With nothing picked, Quantise takes every point (the menu says so).
+        assert!(card.escape());
+        assert!(
+            card.part_offers().iter().any(|o| o.id == curve_act::QUANTISE && o.enabled && o.text.contains("whole"))
+        );
+        assert!(card.part_offers().iter().any(|o| o.id == curve_act::REMOVE_POINTS && !o.enabled));
+        assert!(card.act(curve_act::QUANTISE));
+        // With the grid off there's nothing to quantise to.
+        assert!(card.step_back(true));
+        card.pick_grid(6);
+        assert!(card.part_offers().iter().any(|o| o.id == curve_act::QUANTISE && !o.enabled));
+        assert!(!card.act(curve_act::QUANTISE));
+    }
+
+    #[test]
+    fn a_double_click_on_one_of_the_picked_points_removes_them_all() {
+        let (none, ctrl) = (Keys::default(), Keys { ctrl: true, ..Keys::default() });
+        let mut card = five();
+        click(&mut card, 1.1, 0.5, none);
+        click(&mut card, 2.0, 0.75, ctrl);
+        // As a screen sends a double-click: a click, a press, then the double-click.
+        click(&mut card, 2.0, 0.75, none);
+        let (x, y) = at(&card, 2.0, 0.75);
+        card.mouse(mouse::PRESSED, x, y, none);
+        assert!(card.mouse(mouse::DOUBLE_CLICKED, x, y, none));
+        assert_eq!(card.edited().expect("removed").0.len(), 3);
+        assert_eq!(card.picked(), 0);
+        assert!(card.step_back(true), "one step");
+        assert_eq!(card.edited().map(|e| e.0.len()), None);
+    }
+
+    #[test]
+    fn a_stroke_of_paint_given_up_brings_no_old_pick_back() {
+        let (none, ctrl) = (Keys::default(), Keys { ctrl: true, ..Keys::default() });
+        let mut card = five();
+        click(&mut card, 3.0, 0.25, none);
+        click(&mut card, 0.5, 0.9, none);
+        assert_eq!(card.picked(), 0);
+        press_drag(&mut card, (0.4, 0.9), (0.9, 0.8), ctrl);
+        assert!(card.escape());
+        assert_eq!(card.picked(), 0);
     }
 
     #[test]

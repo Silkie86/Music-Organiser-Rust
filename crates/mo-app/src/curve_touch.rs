@@ -64,17 +64,35 @@ pub fn dots(shape: &Shape, frame: Frame, mouse: Option<(f64, f64)>) -> Vec<Dot> 
 
 /// [`dots`] with the point that shows whatever its neighbours given (`near`): the one under the mouse, or in hand.
 pub fn dots_with(shape: &Shape, frame: Frame, near: Option<usize>) -> Vec<Dot> {
+    dots_also(shape, frame, near, &[])
+}
+
+/// [`dots_with`], and the points at `also` (in order) show whatever their neighbours too: the picked ones.
+pub fn dots_also(shape: &Shape, frame: Frame, near: Option<usize>, also: &[usize]) -> Vec<Dot> {
     if !frame.fits() {
         return Vec::new();
     }
     let mut shown: Vec<Dot> = Vec::new();
     for d in places(shape, frame) {
         let room = shown.last().is_none_or(|last| apart(last, d.x, d.y) >= DOT_APART);
-        if room || near == Some(d.point) {
+        if room || near == Some(d.point) || also.binary_search(&d.point).is_ok() {
             shown.push(d);
         }
     }
     shown
+}
+
+/// The points in sight whose dots lie in the box from one corner to the other (points from the picture's left and
+/// top), in order: what a box drawn over the picture picks.
+pub fn in_box(shape: &Shape, frame: Frame, a: (f64, f64), b: (f64, f64)) -> Vec<usize> {
+    if !frame.fits() || ![a.0, a.1, b.0, b.1].iter().all(|v| v.is_finite()) {
+        return Vec::new();
+    }
+    let (left, right, top, bottom) = (a.0.min(b.0), a.0.max(b.0), a.1.min(b.1), a.1.max(b.1));
+    places(shape, frame)
+        .filter(|d| d.x >= left && d.x <= right && d.y >= top && d.y <= bottom)
+        .map(|d| d.point)
+        .collect()
 }
 
 /// The point in sight nearest `x`, `y`, and how far it is.
@@ -228,9 +246,14 @@ pub struct Hint {
 pub fn hint(under: Under, mac: bool) -> Hint {
     let alt = |pc: &'static str, on_mac: &'static str| if mac { on_mac } else { pc };
     match under {
-        Under::Dot(_) => {
-            Hint { name: "Point", does: "drag to move · double-click removes it", keys: "Shift: off the grid" }
-        }
+        Under::Dot(_) => Hint {
+            name: "Point",
+            does: "click picks it · drag to move · double-click removes it",
+            keys: alt(
+                "Shift: off the grid · Ctrl-click: pick it with others",
+                "Shift: off the grid · Cmd-click: pick it with others",
+            ),
+        },
         Under::Line(_) => Hint {
             name: "Line",
             does: "drag moves it up or down · double-click adds a point",

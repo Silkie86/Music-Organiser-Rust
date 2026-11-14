@@ -133,7 +133,11 @@ pub const CURVES_ACTIONS: &[Action] = &[
     action("curves.reveal", "Show the picked curve's file, to drag onto a Bitwig lane", "Ctrl+Shift+F"),
     action("curves.hear", "Hear the picked curve as the volume of a tone, or stop it", "Ctrl+P"),
     action("curves.rename", "Rename the picked curve", "F2"),
-    action("curves.hide", "Hide the picked curve, or show it again", "Delete"),
+    action(
+        "curves.hide",
+        "Hide the picked curve, or show it again (with points picked in the editor: remove those)",
+        "Delete",
+    ),
     action("curves.revealSong", "Show the file of the song the picked curve came from in its folder", "Ctrl+Shift+E"),
     action("curves.showInSongs", "Show the song the picked curve came from on the Songs page", "Ctrl+O"),
     action("curves.undo", "Undo the last change to the curve in the editor", "Ctrl+Z"),
@@ -145,6 +149,12 @@ pub const CURVES_ACTIONS: &[Action] = &[
     action("curves.keepClip", "Keep the highlighted part as a clip with a name, or forget that clip", "Alt+K"),
     action("curves.cutTime", "Cut the highlighted time out of the curve: what follows moves up", "Shift+Delete"),
     action("curves.highlightAll", "Highlight the whole curve in the editor", "Alt+A"),
+    action(
+        "curves.quantise",
+        "Quantise: put the picked points on the grid (with none picked, the highlighted part's, or all)",
+        "Alt+Q",
+    ),
+    action("curves.removePoints", "Remove the points picked in the curve editor", "Backspace"),
     action(
         "curves.randomise",
         "Make a new curve from parts of the curves shown; with a highlight, roll only that part again",

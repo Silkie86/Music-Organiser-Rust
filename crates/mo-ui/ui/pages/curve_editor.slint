@@ -20,6 +20,8 @@ export struct EditorDot {
     y: length,
     hot: bool,
     held: bool,
+    // It's one of the picked points.
+    picked: bool,
 }
 
 // A tile of the clip strip: a clip (a remembered highlight) on the picture's own time line.
@@ -95,6 +97,12 @@ export global CurveEditorData {
     // The points' dots on show, the line under the mouse and the curve as it was when a drag began (both as path
     // commands in the picture's own points; "" for none), and the picture's size they're drawn in.
     in property <[EditorDot]> dots;
+    // The box being drawn to pick points (Alt-drag over empty space), in the picture's points.
+    in property <bool> band-shown;
+    in property <length> band-x;
+    in property <length> band-y;
+    in property <length> band-width;
+    in property <length> band-height;
     in property <string> hot-line;
     in property <string> ghost;
     in property <length> picture-width;
@@ -661,17 +669,28 @@ export component CurveBench inherits VerticalLayout {
                 hot: hl.hot == 9;
             }
         }
-        // The points: small and plain, a size up with an accent ring under the mouse, filled while held.
+        // The box that picks points, while it's drawn.
+        if CurveEditorData.band-shown: Rectangle {
+            x: CurveEditorData.band-x;
+            y: CurveEditorData.band-y;
+            width: CurveEditorData.band-width;
+            height: CurveEditorData.band-height;
+            background: Theme.accent.with-alpha(0.12);
+            border-width: 1px;
+            border-color: Theme.accent;
+        }
+        // The points: small and plain, a size up with an accent ring under the mouse, filled while held. A picked
+        // one is in the accent colour, a size up too.
         for d in CurveEditorData.dots: Rectangle {
-            property <length> across: d.hot || d.held ? 11px : 6px;
+            property <length> across: d.hot || d.held ? 11px : d.picked ? 8px : 6px;
             x: d.x - self.width / 2;
             y: d.y - self.height / 2;
             width: self.across + (d.hot || d.held ? 0px : 3px);
             height: self.width;
             border-radius: self.width / 2;
-            background: d.held ? Theme.accent : d.hot ? Theme.well : Theme.text;
+            background: d.held || d.picked ? Theme.accent : d.hot ? Theme.well : Theme.text;
             border-width: d.held ? 0px : d.hot ? 2px : 1.5px;
-            border-color: d.hot ? Theme.accent : Theme.well;
+            border-color: d.hot ? (d.picked ? Theme.text : Theme.accent) : Theme.well;
         }
         touch := MouseField {
             // The mouse left: what showed under it is put away.
