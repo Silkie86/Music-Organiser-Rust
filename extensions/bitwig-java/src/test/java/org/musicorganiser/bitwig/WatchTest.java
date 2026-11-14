@@ -67,13 +67,13 @@ class WatchTest {
         List<Map<String, Object>> fresh = app.take();
         assertJson(obj("id", 1, "ok", true,
                        "result", obj("watching", true, "every", 50,
-                                     "sections", list("project", "tracks", "selected", "transport", "markers", "notes", "levels"))),
+                                     "sections", list("project", "tracks", "selected", "transport", "markers", "notes", "levels", "groove"))),
                    fresh.get(0));
         Map<String, Object> first = fresh.get(1);
         assertEquals("watch", first.get("event"));
         assertTrue(first.get("time") instanceof Number);
         Object result = first.get("result");
-        assertEquals(List.of("project", "transport", "tracks", "selected", "markers", "levels", "notes"),
+        assertEquals(List.of("project", "transport", "tracks", "selected", "markers", "levels", "groove", "notes"),
                      List.copyOf(((Map<?, ?>) result).keySet()));
         assertJson(obj("name", "Night Drive", "modified", false), at(result, "project"));
         assertJson(obj("playing", false, "position", 0, "playStart", 0, "tempo", 124, "timeSignature", "7/8"), at(result, "transport"));
@@ -90,6 +90,7 @@ class WatchTest {
                    at(result, "markers"));
         assertJson(list(), at(result, "notes"));
         assertJson(list(), at(result, "levels"));
+        assertJson(obj("on", false, "shuffle", 0.5, "rate", "1/16"), at(result, "groove"));
         assertEquals(List.of(), bitwig.errors);
     }
 
@@ -154,6 +155,43 @@ class WatchTest {
         bitwig.model.markers.set(0, new Marker("Verse 1", 16.5, 0, 1, 0));
         assertJson(obj("markers", list(obj("name", "Verse 1", "at", 16.5, "color", "#00ff00"))),
                    after(2 * Watch.TICK).get(0).get("result"));
+    }
+
+    @Test
+    @DisplayName("sends the song's Groove when it's turned on, its shuffle moves or its rate changes (extension 3.27)")
+    void sendsTheGroove() {
+        start(LinkTest.song());
+        watch();
+        bitwig.model.grooveOn = true;
+        bitwig.model.grooveShuffle = 0.6204;
+        assertJson(obj("groove", obj("on", true, "shuffle", 0.62, "rate", "1/16")), after(2 * Watch.TICK).get(0).get("result"));
+        bitwig.model.grooveShuffle = 0.62041;
+        assertEquals(List.of(), after(2 * Watch.TICK), "a knob that barely moved sends nothing");
+        bitwig.model.grooveRate = "1/8";
+        assertJson(obj("groove", obj("on", true, "shuffle", 0.62, "rate", "1/8")), after(2 * Watch.TICK).get(0).get("result"));
+    }
+
+    @Test
+    @DisplayName("reads the Groove's rate from Bitwig's words, or else from the knob")
+    void readsTheGrooveRate() {
+        assertEquals("1/16", Watch.grooveRate("1/16", 0));
+        assertEquals("1/8", Watch.grooveRate("1/8", 1));
+        assertEquals("1/8", Watch.grooveRate("", 0));
+        assertEquals("1/16", Watch.grooveRate("?", 1));
+        assertEquals(0.0, Watch.amount(Double.NaN));
+        assertEquals(1.0, Watch.amount(1.2));
+    }
+
+    @Test
+    @DisplayName("gives the rest when this Bitwig has no Groove")
+    void goesOnWithoutTheGroove() {
+        Model m = LinkTest.song();
+        m.broken.add("createGroove");
+        start(m);
+        Object result = watch().get("result");
+        assertFalse(((Map<?, ?>) result).containsKey("groove"));
+        assertTrue(((Map<?, ?>) result).containsKey("levels"));
+        assertEquals(false, at(app.ask(obj("id", 2, "cmd", "hello")), "result", "watch").toString().contains("groove"));
     }
 
     @Test

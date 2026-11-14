@@ -33,7 +33,8 @@ pub const CHANGES_OFF: &str = "Changes are turned off. To let the app change thi
                                changes\" in Bitwig: Settings > Controllers > Music Organiser.";
 
 /// The sections the stand-in's watch feed gives (extension 3.24), as a Bitwig with every part of the API does.
-const WATCH_SECTIONS: [&str; 7] = ["project", "tracks", "selected", "transport", "markers", "notes", "levels"];
+const WATCH_SECTIONS: [&str; 8] =
+    ["project", "tracks", "selected", "transport", "markers", "notes", "levels", "groove"];
 
 /// How long the app waits for the stand-in: it answers at once, unless a test makes it wait.
 const WAIT: Duration = Duration::from_secs(2);
@@ -679,6 +680,7 @@ impl World {
             "selected": selected,
             "markers": [],
             "levels": [],
+            "groove": { "on": false, "shuffle": 0.5, "rate": "1/16" },
             "notes": [],
         })
     }

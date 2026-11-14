@@ -15,7 +15,7 @@
 
   <groupId>org.musicorganiser</groupId>
   <artifactId>music-organiser-bitwig</artifactId>
-  <version>3.26</version>
+  <version>3.27</version>
   <packaging>jar</packaging>
   <name>Music Organiser extension for Bitwig Studio</name>
 

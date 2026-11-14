@@ -131,7 +131,7 @@ class LinkTest {
                        // Extension 3.22: a clip may come with the bars of its song to loop.
                        "songLoop", true,
                        // Extension 3.24: the watch feed's sections this Bitwig gives.
-                       "watch", List.of("project", "tracks", "selected", "transport", "markers", "notes", "levels")),
+                       "watch", List.of("project", "tracks", "selected", "transport", "markers", "notes", "levels", "groove")),
                    hello.get("result"));
         assertJson(obj("id", 1, "ok", true, "result", hello.get("result")), app.ask(obj("id", 1, "cmd", "hello")));
         assertEquals(List.of(), bitwig.popups);

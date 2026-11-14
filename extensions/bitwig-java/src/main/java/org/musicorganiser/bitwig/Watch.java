@@ -70,6 +70,22 @@ final class Watch {
     }
 
     /** A beat position to the thousandth of a beat, so a position that hasn't moved reads the same each look. */
+    /** A knob's place from 0 to 1 to three decimals, so a knob that barely moves sends nothing. */
+    static double amount(double value) {
+        if (!(value > 0)) return 0;
+        return Math.min(1, Math.round(value * 1000) / 1000.0);
+    }
+
+    /**
+     * The Groove's shuffle rate, "1/8" or "1/16": from the words Bitwig shows for it, and when they name neither, from
+     * the knob's place (the 1/8 comes first).
+     */
+    static String grooveRate(String shown, double value) {
+        if (shown.contains("16")) return "1/16";
+        if (shown.contains("8")) return "1/8";
+        return value >= 0.5 ? "1/16" : "1/8";
+    }
+
     static double beats(double at) {
         return Math.round(at * 1000.0) / 1000.0;
     }

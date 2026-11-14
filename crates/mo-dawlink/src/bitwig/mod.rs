@@ -1,7 +1,7 @@
 //! The Bitwig link: the app talks to the Music Organiser extension (or the script it took over from) running inside
 //! Bitwig Studio, over a connection on this computer, and Send to Bitwig puts things into the project open there.
 //!
-//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.26; the C# app's copy is frozen):
+//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.27; the C# app's copy is frozen):
 //! Bitwig only runs Java extensions. Settings > DAWs installs it. Changing anything needs "Let the app make changes"
 //! on in Bitwig (Settings > Controllers > Music Organiser); reading never does.
 //!
@@ -57,4 +57,4 @@ pub use send::{
     SentKit, SentPart, SentSound, Ticket, Turn, kit_name, kit_pads, note_name, send_kit, send_part, send_preset,
     send_sound, sending_kit, sending_part, sending_sound, ticket,
 };
-pub use watch::{Live, WATCH_NEEDS, Watch};
+pub use watch::{GROOVE_NEEDS, Groove, GrooveRate, Live, WATCH_NEEDS, Watch};
