@@ -255,8 +255,13 @@ pub fn part_offers() -> Vec<Offer> {
     card(|c| c.part_offers())
 }
 
-/// One of the editor's own actions (the right-click menu's, or its key): reverse, flip, steps, keep or forget a
-/// clip, cut the time out, highlight all. Whether it did anything.
+/// How many points are picked in the editor.
+pub fn picked() -> usize {
+    card(|c| c.picked())
+}
+
+/// One of the editor's own actions (the right-click menu's, or its key): reverse, flip, steps, quantise, remove the
+/// picked points, keep or forget a clip, cut the time out, highlight all. Whether it did anything.
 pub fn act(app: &AppWindow, id: &str) -> bool {
     let done = card(|c| c.act(id));
     // Shown again either way: a drag may have been put back.

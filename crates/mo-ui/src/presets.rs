@@ -2579,6 +2579,10 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             data.set_rename_text(curve.name.as_str().into());
             data.set_renaming(true);
         }
+        // Delete with points picked in the editor takes those out: the key means the nearest thing picked.
+        curve_act::HIDE if crate::curve_editor::picked() > 0 => {
+            return crate::curve_editor::act(app, curve_act::REMOVE_POINTS);
+        }
         curve_act::HIDE => {
             let hidden = !curve.hidden;
             curve_db_change(curve.id.clone(), move |db, id| db.set_hidden(id, hidden));
@@ -2604,7 +2608,9 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         | curve_act::STEPS
         | curve_act::KEEP_CLIP
         | curve_act::CUT_TIME
-        | curve_act::HIGHLIGHT_ALL => return crate::curve_editor::act(app, id),
+        | curve_act::HIGHLIGHT_ALL
+        | curve_act::QUANTISE
+        | curve_act::REMOVE_POINTS => return crate::curve_editor::act(app, id),
         curve_act::RANDOMISE => return randomise(app),
         curve_act::METRONOME => crate::curve_editor::set_hear(app, None, None),
         curve_act::FASTER => crate::curve_editor::set_hear(app, None, Some(1)),

@@ -38,6 +38,8 @@ fn short(offer: &Offer) -> &'static str {
         act::REVERSE => "Reverse",
         act::FLIP => "Flip",
         act::STEPS => "Steps",
+        act::QUANTISE => "Quantise",
+        act::REMOVE_POINTS => "Remove points",
         act::KEEP_CLIP if offer.text.starts_with("Forget") => "Forget clip",
         act::KEEP_CLIP => "Keep as clip",
         act::CUT_TIME => "Cut time out",
@@ -330,8 +332,10 @@ impl Bench {
         }
         let offers = self.card.borrow().part_offers();
         if *self.offers.borrow() != offers {
+            // "Remove points" only while there are points picked: the row must fit the panel.
             let lines: Vec<MenuItem> = offers
                 .iter()
+                .filter(|o| o.enabled || o.id != mo_app::presets::curve_act::REMOVE_POINTS)
                 .map(|o| MenuItem {
                     what: short(o).into(),
                     key: o.text.as_str().into(),

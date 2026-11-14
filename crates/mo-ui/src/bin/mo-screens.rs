@@ -1613,6 +1613,19 @@ fn presets_shots(
         return Err("curves-joined.png: the join left nothing to undo".into());
     }
     capture(window);
+    // Points picked in a box (Alt-drag over empty space), the box still in hand.
+    let pick = mo_app::curve_touch::Keys { alt: true, ..keys };
+    mo_ui::curve_editor::mouse_sample(app, 0, 1.0, 0.97, pick);
+    mo_ui::curve_editor::mouse_sample(app, 1, 1.0, 0.97, pick);
+    mo_ui::curve_editor::mouse_sample(app, 0, 15.0, 0.0, pick);
+    if mo_ui::curve_editor::picked() == 0 {
+        return Err("curves-picked.png: the box picked no points".into());
+    }
+    shots.push(("curves-picked.png".into(), capture(window)));
+    mo_ui::curve_editor::mouse_sample(app, 2, 15.0, 0.0, pick);
+    mo_ui::curve_editor::escape(app);
+    mo_ui::curve_editor::mouse_sample(app, 4, 12.0, 0.9, keys);
+    capture(window);
     // A curve dragged out onto an automation lane from its line, its shape on the card.
     let still = capture(window);
     data.set_curve_lifted_row(1);

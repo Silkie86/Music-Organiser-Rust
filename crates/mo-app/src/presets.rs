@@ -1511,6 +1511,8 @@ pub mod curve_act {
     pub const KEEP_CLIP: &str = "curves.keepClip";
     pub const CUT_TIME: &str = "curves.cutTime";
     pub const HIGHLIGHT_ALL: &str = "curves.highlightAll";
+    pub const QUANTISE: &str = "curves.quantise";
+    pub const REMOVE_POINTS: &str = "curves.removePoints";
     pub const RANDOMISE: &str = "curves.randomise";
     pub const METRONOME: &str = "curves.metronome";
     pub const FASTER: &str = "curves.faster";

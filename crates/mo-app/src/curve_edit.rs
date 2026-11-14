@@ -375,6 +375,121 @@ pub enum Edit {
     },
     /// The end mark dragged: the curve's length. Shorter cuts it; longer holds its last value.
     SetLength(f64),
+
+    /// Picked points (their places in [`Shape::points`]) move together, by this many beats and this much value.
+    /// They keep their shape: the move stops where the first of them meets a point that isn't picked, an end of the
+    /// curve, the top or the bottom.
+    MovePoints {
+        points: Vec<usize>,
+        beats: f64,
+        value: f64,
+    },
+    /// Picked points go; the curve keeps one point at least.
+    RemovePoints(Vec<usize>),
+    /// Quantise: picked points go to their nearest line of a grid `step` beats apart (never past a point that
+    /// isn't picked). With none picked: every point of the highlighted part, or of the whole curve.
+    Quantise {
+        points: Vec<usize>,
+        step: f64,
+    },
+}
+
+/// `which` as places in a list of `len` points: in order, each once, none past the end.
+fn places(which: &[usize], len: usize) -> Vec<usize> {
+    let mut out: Vec<usize> = which.iter().copied().filter(|i| *i < len).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// How far each of the points at `which` (in order) may go in time: back to and on to the nearest point that isn't
+/// one of them, or the curve's ends.
+fn room(points: &[Point], which: &[usize], length: f64) -> Vec<(f64, f64)> {
+    let free = |i: usize| which.binary_search(&i).is_err();
+    which
+        .iter()
+        .map(|&i| {
+            let low = (0..i).rev().find(|j| free(*j)).and_then(|j| points.get(j)).map_or(0.0, |p| p.beat);
+            let high = (i + 1..points.len()).find(|j| free(*j)).and_then(|j| points.get(j)).map_or(length, |p| p.beat);
+            (low, high.max(low))
+        })
+        .collect()
+}
+
+/// A [`Edit::MovePoints`] or [`Edit::Quantise`] done to `shape`'s points, before they're tidied: the points, and the
+/// places of the ones the edit is about. None for another edit, or one that can't be done.
+fn moved_points(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(Vec<Point>, Vec<usize>)> {
+    let mut points = shape.points.clone();
+    match edit {
+        Edit::MovePoints { points: which, beats, value } => {
+            let which = places(which, points.len());
+            if which.is_empty() || !beats.is_finite() || !value.is_finite() {
+                return None;
+            }
+            let room = room(&points, &which, shape.length);
+            let (mut back, mut on, mut down, mut up) =
+                (f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY);
+            for (&i, (low, high)) in which.iter().zip(&room) {
+                let p = points.get(i)?;
+                back = back.max(low - p.beat);
+                on = on.min(high - p.beat);
+                down = down.max(-p.value);
+                up = up.min(1.0 - p.value);
+            }
+            // A point already past a neighbour by a hair leaves no room: then nothing moves that way.
+            let beats = beats.clamp(back.min(0.0), on.max(0.0));
+            let value = value.clamp(down.min(0.0), up.max(0.0));
+            for &i in &which {
+                let p = points.get_mut(i)?;
+                p.beat += beats;
+                p.value = (p.value + value).clamp(0.0, 1.0);
+            }
+            Some((points, which))
+        }
+        Edit::Quantise { points: which, step } => {
+            if !step.is_finite() || *step <= 0.0 {
+                return None;
+            }
+            let part = highlight.unwrap_or(shape.whole());
+            let which = if which.is_empty() {
+                let inside = |p: &Point| p.beat >= part.start - EPS && p.beat <= part.end + EPS;
+                points.iter().enumerate().filter(|(_, p)| inside(p)).map(|(i, _)| i).collect()
+            } else {
+                places(which, points.len())
+            };
+            if which.is_empty() {
+                return None;
+            }
+            let room = room(&points, &which, shape.length);
+            for (&i, (low, high)) in which.iter().zip(&room) {
+                let p = points.get_mut(i)?;
+                p.beat = ((p.beat / step).round() * step).clamp(*low, *high);
+            }
+            Some((points, which))
+        }
+        _ => None,
+    }
+}
+
+/// Where the points a [`Edit::MovePoints`] or [`Edit::Quantise`] is about are in `after`, the curve that edit made
+/// of `before` (points that met become one, so the places in the list change): each one's place before and its
+/// place now, for keeping them picked. Empty for another edit.
+pub fn landed(before: &Shape, highlight: Option<Span>, edit: &Edit, after: &Shape) -> Vec<(usize, usize)> {
+    let highlight = highlight.map(|h| h.within(before.length)).filter(|h| !h.is_empty());
+    let Some((points, which)) = moved_points(before, highlight, edit) else { return Vec::new() };
+    which
+        .iter()
+        .filter_map(|&i| {
+            let p = points.get(i)?;
+            after
+                .points
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| (q.beat - p.beat).abs() < 1e-6 && (q.value - p.value).abs() < 1e-6)
+                .min_by_key(|(j, _)| j.abs_diff(i))
+                .map(|(j, _)| (i, j))
+        })
+        .collect()
 }
 
 /// `edit` done to `shape` with `highlight`: the new shape and its highlight, or None when it can't be done (no such
@@ -697,6 +812,23 @@ fn edited(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(Shape,
             let mut clips = shape.clips.clone();
             clips.get_mut(clip)?.pinned = pinned;
             Some((Shape { clips, ..shape.clone() }, highlight))
+        }
+        Edit::MovePoints { .. } | Edit::Quantise { .. } => with(moved_points(shape, highlight, edit)?.0),
+        Edit::RemovePoints(ref which) => {
+            let which = places(which, shape.points.len());
+            if which.is_empty() {
+                return None;
+            }
+            // One point at least stays: the first of them, when every point was picked.
+            let keep = (which.len() == shape.points.len()).then_some(0);
+            let points = shape
+                .points
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| which.binary_search(i).is_err() || keep == Some(*i))
+                .map(|(_, p)| *p)
+                .collect();
+            with(points)
         }
         Edit::SetLength(beats) => {
             if !beats.is_finite() {
@@ -1546,6 +1678,67 @@ mod tests {
                 same_picture(&whole, &cut, 0.012);
             }
         }
+    }
+
+    #[test]
+    fn picked_points_move_together_and_stop_at_the_others() {
+        let s = Shape::new(vec![pt(0.0, 0.0), pt(1.0, 0.5), pt(2.0, 0.8), pt(3.0, 0.2), pt(4.0, 1.0)], 4.0);
+        let edit = Edit::MovePoints { points: vec![2, 1, 2], beats: 0.5, value: 0.1 };
+        let (m, _) = done(&s, None, edit.clone());
+        assert!(near(m.points()[1].beat, 1.5) && near(m.points()[1].value, 0.6));
+        assert!(near(m.points()[2].beat, 2.5) && near(m.points()[2].value, 0.9));
+        assert_eq!(landed(&s, None, &edit, &m), [(1, 1), (2, 2)]);
+        // Too far: they stop together, where the first meets the point at 3 and the top, their shape kept.
+        let far = Edit::MovePoints { points: vec![1, 2], beats: 9.0, value: 9.0 };
+        let (m, _) = done(&s, None, far.clone());
+        let at = |b: f64, v: f64| m.points().iter().any(|p| near(p.beat, b) && near(p.value, v));
+        assert!(at(2.0, 0.7) && at(3.0, 1.0), "{:?}", m.points());
+        assert_eq!(landed(&s, None, &far, &m).len(), 2);
+        let (m, _) = done(&s, None, Edit::MovePoints { points: vec![1, 2], beats: -9.0, value: -9.0 });
+        assert!(near(m.points()[0].beat, 0.0) && near(m.points()[0].value, 0.0), "onto the start: it is the start");
+        assert!(m.points().iter().any(|p| near(p.beat, 1.0) && near(p.value, 0.3)));
+        // Every point picked, from end to end and bottom to top: nowhere to go.
+        let every = Edit::MovePoints { points: vec![0, 1, 2, 3, 4], beats: 1.0, value: -0.5 };
+        assert!(apply(&s, None, &every).is_none(), "no room either way");
+        assert!(apply(&s, None, &Edit::MovePoints { points: vec![9], beats: 1.0, value: 0.0 }).is_none());
+        assert!(apply(&s, None, &Edit::MovePoints { points: vec![1], beats: f64::NAN, value: 0.0 }).is_none());
+        assert!(apply(&s, None, &Edit::MovePoints { points: vec![1], beats: 0.0, value: 0.0 }).is_none());
+    }
+
+    #[test]
+    fn picked_points_are_removed_and_one_point_always_stays() {
+        let s = Shape::new(vec![pt(0.0, 0.0), pt(1.0, 0.5), pt(2.0, 0.8), pt(4.0, 1.0)], 4.0);
+        let (r, _) = done(&s, None, Edit::RemovePoints(vec![2, 1, 7]));
+        assert_eq!(r, ramp());
+        let (r, _) = done(&s, None, Edit::RemovePoints(vec![0, 1, 2, 3]));
+        assert_eq!(r.points().len(), 1);
+        assert!(apply(&s, None, &Edit::RemovePoints(vec![])).is_none());
+        assert!(apply(&s, None, &Edit::RemovePoints(vec![9])).is_none());
+    }
+
+    #[test]
+    fn quantise_puts_points_on_the_grid_and_never_past_the_others() {
+        let s = Shape::new(vec![pt(0.1, 0.0), pt(0.9, 0.5), pt(1.4, 0.8), pt(1.6, 0.2), pt(3.1, 1.0)], 4.0);
+        // Nothing picked, nothing highlighted: every point.
+        let all = Edit::Quantise { points: vec![], step: 1.0 };
+        let (q, _) = done(&s, None, all.clone());
+        let beats: Vec<f64> = q.points().iter().map(|p| p.beat).collect();
+        assert_eq!(beats, [0.0, 1.0, 1.0, 2.0, 3.0], "two that meet make a jump");
+        let now: Vec<usize> = landed(&s, None, &all, &q).into_iter().map(|(_, to)| to).collect();
+        assert_eq!(now, [0, 1, 2, 3, 4]);
+        // Only the highlighted part's points.
+        let (q, _) = done(&s, Some(Span::new(0.5, 1.5)), Edit::Quantise { points: vec![], step: 1.0 });
+        let beats: Vec<f64> = q.points().iter().map(|p| p.beat).collect();
+        assert_eq!(beats, [0.1, 1.0, 1.0, 1.6, 3.1]);
+        // Only the picked one, and it stops at the point before it that isn't picked.
+        let one = Edit::Quantise { points: vec![3], step: 4.0 };
+        let (q, _) = done(&s, None, one.clone());
+        assert!(near(q.points()[3].beat, 1.4), "{:?}", q.points());
+        assert!(!landed(&s, None, &one, &q).is_empty());
+        // On the grid already: nothing to do. And no grid at all.
+        assert!(apply(&ramp(), None, &Edit::Quantise { points: vec![], step: 0.25 }).is_none());
+        assert!(apply(&s, None, &Edit::Quantise { points: vec![], step: 0.0 }).is_none());
+        assert!(landed(&s, None, &Edit::Flip, &s).is_empty());
     }
 
     #[test]

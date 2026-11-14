@@ -297,7 +297,10 @@ pub fn hint(over: Over, mac: bool) -> Hint {
         Over::Empty => Hint {
             name: "Empty",
             does: "drag to highlight · double-click adds a point",
-            keys: key("Shift: off the grid · Ctrl: paint steps", "Shift: off the grid · Cmd: paint steps"),
+            keys: key(
+                "Shift: off the grid · Ctrl: paint steps · Alt-drag: pick points in a box",
+                "Shift: off the grid · Cmd: paint steps · Option-drag: pick points in a box",
+            ),
         },
     }
 }
