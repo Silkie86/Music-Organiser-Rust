@@ -243,9 +243,8 @@ pub struct Card {
     name: String,
     /// Where the mouse is on the clip strip, from the picture's left (none when it isn't there).
     on_strip: Option<f64>,
-    /// The strip's tiles as they were last shown, and as `curve_strip` worked them out.
+    /// The strip's tiles as they were last shown.
     tiles: Option<Vec<TileShown>>,
-    strip: Vec<curve_strip::Tile>,
     /// The drag in hand highlighted the whole curve to work on it (a pill round the whole curve): given up or
     /// changing nothing, it leaves nothing highlighted again.
     lit_whole: bool,
@@ -291,7 +290,6 @@ impl Default for Card {
             name: String::new(),
             on_strip: None,
             tiles: None,
-            strip: Vec::new(),
             lit_whole: false,
             dropped: None,
             ghost: None,
@@ -733,6 +731,7 @@ impl Card {
             let taken = self.frame().beat_at(x);
             self.before = Some(editor.shape().clone());
             self.keys = keys;
+            self.lit_whole = false;
             self.grab = Some((Held::Swing(step, taken), (x, 0.0), true));
         }
         drawn
@@ -746,17 +745,23 @@ impl Card {
         // A drag begun here goes on as the bar's. The picture isn't told the mouse is on it for longer than that.
         if self.grab.is_some() && matches!(kind, mouse::MOVED | mouse::LET_GO | mouse::TAKEN_AWAY) {
             let drawn = self.mouse(kind, x, BAR_Y, keys);
-            self.mouse = None;
+            // While it's dragged the read-out follows the mouse; after that it's on the strip, not the picture.
+            if kind != mouse::MOVED {
+                self.mouse = None;
+            }
             self.on_strip = (kind != mouse::TAKEN_AWAY).then_some(x);
             return drawn;
         }
         let s = self;
+        let frame = s.frame();
         let Some((_, editor)) = s.open.as_mut() else { return false };
         if kind < mouse::LEFT {
             s.keys = keys;
             s.on_strip = Some(x);
         }
-        let on = curve_strip::strip_at(&s.strip, x);
+        // The tiles as they are now, not as they were last shown: the curve or what's in sight may be new.
+        let tiles = curve_strip::tiles(editor.shape(), editor.highlight(), frame, &s.name);
+        let on = curve_strip::strip_at(&tiles, x);
         match (kind, on) {
             (mouse::PRESSED, OnStrip::Pin(clip)) => {
                 let pinned = editor.shape().clips().get(clip).is_some_and(|c| c.pinned);
@@ -889,6 +894,7 @@ impl Card {
     pub fn step_back(&mut self, back: bool) -> bool {
         let s = self;
         s.hands_off();
+        s.lit_whole = false;
         let Some((_, e)) = s.open.as_mut() else { return false };
         let was = e.shape().length();
         let done = if back { e.undo() } else { e.redo() };
@@ -918,6 +924,7 @@ impl Card {
         let open = self.open.as_ref().is_some_and(|(open, _)| open == id);
         if open {
             self.hands_off();
+            self.lit_whole = false;
             let origin = self.origin.clone();
             if let (Some((_, editor)), Some(origin)) = (self.open.as_mut(), origin) {
                 let grid = editor.grid;
@@ -958,6 +965,17 @@ impl Card {
         Some(Ask { shown: self.shown, number: self.pictures, shape, highlight, grid: self.grid, frame })
     }
 
+    /// The screen has nothing of the card on it any more (its window was closed and opened again): the next
+    /// [`Card::showing`] gives all its lists again, changed or not.
+    pub fn show_all(&mut self) {
+        self.dots = None;
+        self.tiles = None;
+        self.swing_marks = None;
+        self.ghost = None;
+        // A faint old curve may be on the screen still: taken away, or given again if a drag is in hand.
+        self.ghost_shown = true;
+    }
+
     /// What lies over the picture as the mouse and the edits have it now. `mac`: the keys are named as a Mac's are.
     pub fn showing(&mut self, mac: bool) -> Showing {
         let s = self;
@@ -965,7 +983,6 @@ impl Card {
         let Some((_, editor)) = s.open.as_ref() else {
             s.dots = None;
             s.tiles = None;
-            s.strip.clear();
             s.ghost = None;
             s.ghost_shown = false;
             s.swing_marks = None;
@@ -1120,7 +1137,6 @@ impl Card {
         let can_undo = editor.can_undo();
         let can_redo = editor.can_redo();
         let changed = differs(editor, s.origin.as_ref());
-        s.strip = tiles;
         let new_tiles = (s.tiles.as_ref() != Some(&shown)).then(|| shown.clone());
         s.tiles = Some(shown);
         let marks = s.swing_xs();
@@ -1201,6 +1217,7 @@ impl Card {
         let s = self;
         let frame = s.frame();
         let length_now = s.length();
+        let wanted = s.to_hear();
         let Some((key, since, seen)) = s.tone.as_mut() else { return PlayLine { over: true, ..PlayLine::default() } };
         if playing != Some(key.as_str()) {
             // Not playing: still being made, or stopped (or another sound took its place).
@@ -1213,7 +1230,6 @@ impl Card {
         // The curve was edited, or is heard another way, since the tone was made: it's made again and put in the
         // tone's place at the same beat, so what's heard follows the editor as it plays (Solomon, 14 Nov 2026).
         let mut again = None;
-        let wanted = s.open.as_ref().map(|(_, e)| (e.shape().curve_points(), e.shape().length(), s.hear));
         if let Some(wanted) = wanted
             && !s.heard.as_ref().is_some_and(|h| same_heard(h, &wanted))
             && may_make()
@@ -1379,6 +1395,31 @@ mod tests {
         card.close();
         assert!(card.open("a", "Rise", &rise(), 2.0));
         assert!(card.edited().is_none());
+    }
+
+    #[test]
+    fn a_clip_on_the_strip_is_pressed_as_the_strip_is_now_and_dragged_with_the_read_out() {
+        let mut card = card();
+        // Beats 1 to 2 kept as a clip, with nothing shown since: the press still finds it.
+        press_drag(&mut card, (1.0, 0.9), (2.0, 0.9), Keys::default());
+        let b = at(&card, 2.0, 0.9);
+        card.mouse(mouse::LET_GO, b.0, b.1, Keys::default());
+        assert!(card.act(curve_act::KEEP_CLIP));
+        assert!(card.escape(), "the highlight is dropped");
+        let x = card.frame().x(1.5);
+        assert!(card.strip(mouse::PRESSED, x, Keys::default()));
+        assert_eq!(card.highlight().map(|h| (h.start, h.end)), Some((1.0, 2.0)));
+        // Dragged along: the read-out is where the mouse is. Let go: the mouse is on the strip, not the picture.
+        card.strip(mouse::MOVED, card.frame().x(2.5), Keys::default());
+        let shown = card.showing(false);
+        assert!(shown.mouse.is_some() && !shown.read_out.is_empty());
+        card.strip(mouse::LET_GO, card.frame().x(2.5), Keys::default());
+        assert!(card.showing(false).mouse.is_none());
+        // A window opened again is given everything again.
+        assert!(card.showing(false).dots.is_none());
+        card.show_all();
+        let all = card.showing(false);
+        assert!(all.dots.is_some() && all.tiles.is_some() && all.swing_marks.is_some());
     }
 
     #[test]

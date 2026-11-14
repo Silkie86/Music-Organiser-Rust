@@ -172,6 +172,8 @@ pub fn connect(app: &AppWindow) {
         if let Some(app) = weak.upgrade() {
             show_grid(&app);
             redraw(&app);
+            // The swing marks stand on the grid's lines.
+            show_touch(&app);
         }
     });
     let weak = app.as_weak();
