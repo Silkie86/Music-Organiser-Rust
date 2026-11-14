@@ -105,8 +105,9 @@ struct State {
     name: String,
     /// Where the mouse is on the clip strip, from the picture's left (none when it isn't there).
     on_strip: Option<f64>,
-    /// The strip's tiles as they were last put on it.
+    /// The strip's tiles as they were last put on it, and as `mo_app::curve_strip` worked them out.
     tiles: Vec<ClipTile>,
+    strip: Vec<curve_strip::Tile>,
     /// The drag in hand highlighted the whole curve to work on it (a pill round the whole curve): given up or
     /// changing nothing, it leaves nothing highlighted again.
     lit_whole: bool,
@@ -151,6 +152,7 @@ impl Default for State {
             name: String::new(),
             on_strip: None,
             tiles: Vec::new(),
+            strip: Vec::new(),
             lit_whole: false,
             dropped: None,
             ghost: None,
@@ -338,6 +340,8 @@ pub fn open(app: &AppWindow, curve: Option<(&Curve, String)>) {
     STATE.with(|s| s.borrow_mut().name.clone_from(&curve.name));
     let same = STATE.with(|s| s.borrow().open.as_ref().is_some_and(|(id, _)| *id == curve.id));
     if same {
+        // Its name may be new (renamed): the strip's tile says it too.
+        show_touch(app);
         return;
     }
     STATE.with(|s| {
@@ -528,33 +532,31 @@ const BAR_Y: f64 = 6.0;
 
 /// The mouse on the clip strip (`kind` as [`mouse`] has it), `x` points from the picture's left. A click on a clip
 /// highlights its part, and a drag from there moves it as the highlight's bar does; a click on its pin pins it or
-/// lets it go; a click on the one tile of a curve with no clips drops the highlight; a double-click keeps the
-/// highlight as a clip.
+/// lets it go; a double-click keeps the highlight as a clip; `kind` 6 is a right-click, which highlights the clip
+/// under it for the menu.
 fn strip(app: &AppWindow, kind: i32, x: f64, keys: Keys) {
-    // A drag begun here goes on as the bar's.
+    // A drag begun here goes on as the bar's. The picture isn't told the mouse is on it for longer than that.
     let dragging = STATE.with(|s| s.borrow().grab.is_some());
     if dragging && matches!(kind, 0 | 2 | 5) {
         mouse(app, kind, x, BAR_Y, keys);
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            s.mouse = None;
+            s.on_strip = (kind != 5).then_some(x);
+        });
         if kind != 0 {
-            STATE.with(|s| {
-                let mut s = s.borrow_mut();
-                s.mouse = None;
-                s.on_strip = (kind == 2).then_some(x);
-            });
             show_touch(app);
         }
         return;
     }
     let drawn = STATE.with(|s| {
         let s = &mut *s.borrow_mut();
-        let frame = s.frame();
         let Some((_, editor)) = s.open.as_mut() else { return false };
         if kind < 4 {
             s.keys = keys;
             s.on_strip = Some(x);
         }
-        let tiles = curve_strip::tiles(editor.shape(), editor.highlight(), frame, &s.name);
-        let on = curve_strip::strip_at(&tiles, x);
+        let on = curve_strip::strip_at(&s.strip, x);
         match (kind, on) {
             (1, OnStrip::Pin(clip)) => {
                 let pinned = editor.shape().clips().get(clip).is_some_and(|c| c.pinned);
@@ -569,11 +571,15 @@ fn strip(app: &AppWindow, kind: i32, x: f64, keys: Keys) {
                 s.lit_whole = false;
                 true
             }
-            (1, OnStrip::Whole) => {
-                let had = editor.highlight().is_some();
-                editor.set_highlight(None);
-                had
+            // A right-click on a clip: its part is the highlight, so the menu is about the clip under the mouse.
+            (6, OnStrip::Clip(clip) | OnStrip::Pin(clip)) => {
+                let Some(span) = editor.shape().clips().get(clip).map(|c| c.span) else { return false };
+                let was = editor.highlight();
+                editor.set_highlight(Some(span));
+                editor.highlight() != was
             }
+            // Two quick clicks on a pin pin and unpin: nothing more.
+            (3, OnStrip::Pin(_)) => false,
             (3, _) => {
                 // The highlight is kept as a clip, unless it's one already.
                 let lit = editor.highlight();
@@ -600,7 +606,8 @@ fn strip(app: &AppWindow, kind: i32, x: f64, keys: Keys) {
 pub fn part_offers() -> Vec<Offer> {
     STATE.with(|s| {
         let s = s.borrow();
-        s.open.as_ref().map_or_else(Vec::new, |(_, e)| curve_strip::part_offers(e.shape(), e.highlight()))
+        let step = s.grid.beats().unwrap_or(0.25);
+        s.open.as_ref().map_or_else(Vec::new, |(_, e)| curve_strip::part_offers(e.shape(), e.highlight(), step))
     })
 }
 
@@ -610,8 +617,12 @@ pub fn act(app: &AppWindow, id: &str) -> bool {
     let done = STATE.with(|s| {
         let s = &mut *s.borrow_mut();
         let step = s.grid.beats().unwrap_or(0.25);
+        let was = s.grab;
         s.hands_off();
+        s.mouse = None;
         let Some((_, editor)) = s.open.as_mut() else { return false };
+        // A drag in hand is put back first: the action is done to the curve as it was before it.
+        given_up(editor, was, &mut s.lit_whole);
         let lit = editor.highlight();
         match id {
             curve_act::REVERSE => editor.edit(&Edit::Reverse),
@@ -635,10 +646,9 @@ pub fn act(app: &AppWindow, id: &str) -> bool {
             _ => false,
         }
     });
-    if done {
-        redraw(app);
-        show_touch(app);
-    }
+    // Shown again either way: a drag may have been put back.
+    redraw(app);
+    show_touch(app);
     done
 }
 
@@ -708,18 +718,27 @@ pub fn undo(app: &AppWindow, back: bool) -> bool {
     can
 }
 
+/// Whether the curve in the editor is another shape than the one opened. Its clips and pins don't count: they're
+/// names for stretches of time, and aren't kept with a saved curve yet.
+fn differs(editor: &Editor, origin: Option<&Shape>) -> bool {
+    origin.is_none_or(|o| editor.shape().points() != o.points() || editor.shape().length() != o.length())
+}
+
 /// The curve as it's been edited, when it has been: its points and its length in beats.
 pub fn edited() -> Option<(Vec<CurvePoint>, f64)> {
     STATE.with(|s| {
         let s = s.borrow();
         let (_, editor) = s.open.as_ref()?;
-        editor.changed().then(|| (editor.shape().curve_points(), editor.shape().length()))
+        differs(editor, s.origin.as_ref()).then(|| (editor.shape().curve_points(), editor.shape().length()))
     })
 }
 
 /// The id of the curve on the card, when it has edits that aren't saved.
 pub fn edited_id() -> Option<String> {
-    STATE.with(|s| s.borrow().open.as_ref().filter(|(_, e)| e.changed()).map(|(id, _)| id.clone()))
+    STATE.with(|s| {
+        let s = s.borrow();
+        s.open.as_ref().filter(|(_, e)| differs(e, s.origin.as_ref())).map(|(id, _)| id.clone())
+    })
 }
 
 /// A curve's edits were saved as a new curve: the curve they were made on is as it was found again, on the card or
@@ -775,6 +794,7 @@ fn show_touch(app: &AppWindow) {
         let Some((_, editor)) = s.open.as_ref() else {
             s.dots.clear();
             s.tiles.clear();
+            s.strip.clear();
             data.set_clips(ModelRc::default());
             s.ghost = None;
             data.set_dots(ModelRc::default());
@@ -911,6 +931,7 @@ fn show_touch(app: &AppWindow) {
         // The clip strip: its tiles, and its own hint while the mouse is on it.
         let tiles = curve_strip::tiles(shape, editor.highlight(), frame, &s.name);
         let on_strip = s.on_strip.filter(|_| held.is_none()).map(|x| curve_strip::strip_at(&tiles, x));
+        s.strip.clone_from(&tiles);
         if let Some(on) = on_strip {
             let (name, does) = curve_strip::hint(on, &tiles);
             data.set_hint_name(name.into());
@@ -947,7 +968,7 @@ fn show_touch(app: &AppWindow) {
         }
         data.set_can_undo(editor.can_undo());
         data.set_can_redo(editor.can_redo());
-        editor.changed()
+        differs(editor, s.origin.as_ref())
     });
     data.set_changed(changed);
     if changed != was_changed {

@@ -3,7 +3,7 @@
 //! and the highlight's right-click menu. A clip is a remembered highlight: a part of the curve with a name. A curve
 //! with no clips shows one tile with its own name across its whole length, so the strip is always there.
 
-use crate::curve_edit::{Shape, Span};
+use crate::curve_edit::{Edit, Shape, Span, apply};
 use crate::curve_hold::length_words;
 use crate::curve_picture::Frame;
 use crate::presets::{Offer, curve_act};
@@ -39,7 +39,6 @@ pub fn tiles(shape: &Shape, highlight: Option<Span>, frame: Frame, name: &str) -
         return Vec::new();
     }
     let view = frame.view;
-    let same = |a: Span, b: Span| (a.start - b.start).abs() < 1e-6 && (a.end - b.end).abs() < 1e-6;
     let tile = |clip: Option<usize>, span: Span, name: &str, pinned: bool, lighter: bool| {
         let from = span.start.max(view.start);
         let to = span.end.min(view.start + view.span);
@@ -51,7 +50,7 @@ pub fn tiles(shape: &Shape, highlight: Option<Span>, frame: Frame, name: &str) -
             name: name.to_owned(),
             words: length_words(span.len()),
             pinned,
-            picked: highlight.is_some_and(|h| same(h, span)),
+            picked: highlight.is_some_and(|h| h.same(span)),
             lighter,
         })
     };
@@ -86,34 +85,40 @@ pub fn strip_at(tiles: &[Tile], x: f64) -> OnStrip {
 /// The clip whose part is exactly `highlight`, if one is.
 pub fn clip_of(shape: &Shape, highlight: Option<Span>) -> Option<usize> {
     let h = highlight?;
-    shape.clips().iter().position(|c| (c.span.start - h.start).abs() < 1e-6 && (c.span.end - h.end).abs() < 1e-6)
+    shape.clips().iter().position(|c| c.span.same(h))
 }
 
 /// The name a highlight kept as a clip gets: "Part 1", "Part 2", the first not taken.
 pub fn part_name(shape: &Shape) -> String {
-    (1..)
-        .map(|n| format!("Part {n}"))
-        .find(|name| shape.clips().iter().all(|c| c.name != *name))
-        .unwrap_or_else(|| "Part".to_owned())
+    let mut n = 1;
+    loop {
+        let name = format!("Part {n}");
+        if shape.clips().iter().all(|c| c.name != name) {
+            return name;
+        }
+        n += 1;
+    }
 }
 
 /// The right-click menu on the picture and the strip: what can be done to the highlighted part (the whole curve
-/// when nothing is highlighted), each line with its key.
-pub fn part_offers(shape: &Shape, highlight: Option<Span>) -> Vec<Offer> {
+/// when nothing is highlighted), each line with its key. `step` is a grid square in beats, for the steps. A line
+/// that would change nothing (a level part flipped, a part that reads the same backwards) is greyed.
+pub fn part_offers(shape: &Shape, highlight: Option<Span>, step: f64) -> Vec<Offer> {
     let lit = highlight.is_some();
     let clip = clip_of(shape, highlight);
     let offer = |text: &str, id: &'static str, enabled: bool| Offer { text: text.to_owned(), id, enabled };
+    let does = |edit: Edit| apply(shape, highlight, &edit).is_some();
     let of = if lit { "this part" } else { "the whole curve" };
     vec![
-        offer(&format!("Reverse {of}"), curve_act::REVERSE, true),
-        offer(&format!("Flip {of} upside down"), curve_act::FLIP, true),
-        offer(&format!("Make {of} into steps"), curve_act::STEPS, true),
+        offer(&format!("Reverse {of}"), curve_act::REVERSE, does(Edit::Reverse)),
+        offer(&format!("Flip {of} upside down"), curve_act::FLIP, does(Edit::Flip)),
+        offer(&format!("Make {of} into steps"), curve_act::STEPS, does(Edit::Steps { step })),
         match clip {
             Some(_) => offer("Forget this clip (the curve stays)", curve_act::KEEP_CLIP, true),
             None => offer("Keep this part as a clip", curve_act::KEEP_CLIP, lit),
         },
-        offer("Cut this time out", curve_act::CUT_TIME, lit && highlight.is_some_and(|h| h.len() < shape.length())),
-        offer("Highlight the whole curve", curve_act::HIGHLIGHT_ALL, true),
+        offer("Cut this time out", curve_act::CUT_TIME, lit && does(Edit::RemoveTime)),
+        offer("Highlight the whole curve", curve_act::HIGHLIGHT_ALL, highlight.is_none_or(|h| !h.same(shape.whole()))),
     ]
 }
 
@@ -125,7 +130,7 @@ pub fn hint(on: OnStrip, tiles: &[Tile]) -> (String, &'static str) {
         OnStrip::Clip(i) => (named(i).unwrap_or_default(), "click highlights it · drag moves it · Ctrl-drag copies it"),
         OnStrip::Whole => (
             tiles.first().map(|t| t.name.clone()).unwrap_or_default(),
-            "the whole curve · highlight a part to keep it as a clip",
+            "no clips yet · double-click keeps the highlight as a clip",
         ),
         OnStrip::Empty => (String::new(), "no clip here · double-click keeps the highlight as a clip"),
     }
@@ -198,16 +203,22 @@ mod tests {
         let s = with_clips();
         assert_eq!(clip_of(&s, Some(Span::new(0.0, 4.0))), Some(0));
         assert_eq!(clip_of(&s, Some(Span::new(0.0, 3.0))), None);
-        let on_clip = part_offers(&s, Some(Span::new(0.0, 4.0)));
+        let on_clip = part_offers(&s, Some(Span::new(0.0, 4.0)), 0.25);
         assert!(on_clip.iter().any(|o| o.id == curve_act::KEEP_CLIP && o.text.starts_with("Forget")));
-        let on_part = part_offers(&s, Some(Span::new(5.0, 6.0)));
+        let on_part = part_offers(&s, Some(Span::new(5.0, 6.0)), 0.25);
         assert!(on_part.iter().any(|o| o.id == curve_act::KEEP_CLIP && o.text.starts_with("Keep") && o.enabled));
         assert!(on_part.iter().any(|o| o.id == curve_act::CUT_TIME && o.enabled));
-        let on_none = part_offers(&s, None);
+        // Beats 5 to 6 of the fall: flipped and reversed it's another shape, and a level part would not be.
+        assert!(on_part.iter().any(|o| o.id == curve_act::FLIP && o.enabled));
+        let level = [CurvePoint { x: 0.0, y: 0.5, bend: 0.0 }, CurvePoint { x: 1.0, y: 0.5, bend: 0.0 }];
+        let on_flat = part_offers(&Shape::from_curve(&level, 4.0), None, 0.25);
+        assert!(on_flat.iter().any(|o| o.id == curve_act::FLIP && !o.enabled));
+        assert!(on_flat.iter().any(|o| o.id == curve_act::REVERSE && !o.enabled));
+        let on_none = part_offers(&s, None, 0.25);
         assert!(on_none.iter().any(|o| o.id == curve_act::KEEP_CLIP && !o.enabled));
         assert!(on_none.iter().any(|o| o.id == curve_act::REVERSE && o.text == "Reverse the whole curve"));
         // The whole curve's time can't be cut out.
-        assert!(part_offers(&s, Some(s.whole())).iter().any(|o| o.id == curve_act::CUT_TIME && !o.enabled));
+        assert!(part_offers(&s, Some(s.whole()), 0.25).iter().any(|o| o.id == curve_act::CUT_TIME && !o.enabled));
         for o in &on_part {
             assert!(crate::shortcuts::CURVES_ACTIONS.iter().any(|a| a.id == o.id), "{}", o.id);
         }

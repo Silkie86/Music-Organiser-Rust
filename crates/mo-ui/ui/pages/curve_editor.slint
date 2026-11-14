@@ -110,7 +110,7 @@ export global CurveEditorData {
     // The mouse on the picture: 0 moved, 1 pressed, 2 let go, 3 double-clicked, 4 left, 5 press taken away; where; Shift, Alt, Ctrl.
     callback mouse(int, length, length, bool, bool, bool);
     // The clip strip's tiles, and the mouse on it: 0 moved, 1 pressed, 2 let go, 3 double-clicked, 4 left, 5 press
-    // taken away; where, from the picture's left; Shift, Alt, Ctrl.
+    // taken away, 6 right-clicked; where, from the picture's left; Shift, Alt, Ctrl.
     in property <[ClipTile]> clips;
     callback strip(int, length, bool, bool, bool);
     // The right-click menu on the picture and the strip: asked for just before it opens, and what was chosen.
@@ -382,6 +382,8 @@ component ClipStrip inherits Rectangle {
                 self.tell(e.kind == PointerEventKind.down ? 1 : 2, e.modifiers.shift, e.modifiers.alt,
                     e.modifiers.control || e.modifiers.meta);
             } else if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                // The clip under the mouse is highlighted first: the menu is about it.
+                self.tell(6, false, false, false);
                 root.menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
