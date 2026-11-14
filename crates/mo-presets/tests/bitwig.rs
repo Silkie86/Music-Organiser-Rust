@@ -7,13 +7,15 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use mo_formats::bitwig;
-use mo_formats::presets::{PresetBlob, fxp};
+use mo_formats::PluginKind;
+use mo_formats::bitwig::{self, Text, Value};
+use mo_formats::presets::{PresetBlob, fxp, vstpreset};
 use mo_presets::bitwig::{self as send, Templates};
-use mo_presets::{export, library};
+use mo_presets::drag::File;
+use mo_presets::{export, files, library};
 
 mod common;
-use common::{bwpreset_field, bwpreset_full};
+use common::{bwpreset_field, bwpreset_full, text, with_fields};
 
 fn folder(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-presets-bitwig").join(name);
@@ -55,6 +57,23 @@ fn one(t: send::Template) -> Templates {
     Templates::from([(send::key(&t.plugin, t.format()).unwrap(), t)])
 }
 
+/// A made preset's settings: the device's state field, its file in the zip, and what that file holds.
+fn settings(doc: &bitwig::Document) -> (String, String, Vec<u8>) {
+    let got = send::inspect_doc(doc).unwrap();
+    let state = zip_file(doc, &got.state_file).unwrap();
+    (got.state_field, got.state_file, state)
+}
+
+/// Whether `name` is a settings file's name made afresh, as Bitwig names them: a version 4 UUID in small letters
+/// ("8b7c6b5b-349f-4805-ae01-e3bcafb33be8"), then `ending`.
+fn is_fresh(name: &str, ending: &str) -> bool {
+    let Some(stem) = name.strip_suffix(ending) else { return false };
+    let lengths: Vec<usize> = stem.split('-').map(str::len).collect();
+    lengths == [8, 4, 4, 4, 12]
+        && stem.chars().all(|c| c == '-' || c.is_ascii_digit() || ('a'..='f').contains(&c))
+        && stem.as_bytes()[14] == b'4'
+}
+
 /// A Bitwig preset of `sound` from the template, read from its file.
 fn build(t: &send::Template, sound: &PresetBlob, name: &str) -> Result<Vec<u8>, String> {
     send::build(&std::fs::read(&t.path).unwrap(), &t.path, sound, name)
@@ -77,9 +96,13 @@ fn builds_a_bitwig_preset_from_one_saved_for_the_same_plugin() {
     assert_eq!(doc.meta_str("preset_name"), "Big Bass");
     assert_eq!(doc.meta_str("creator"), "silkie86");
     let device = doc.objects.iter().find(|o| !o.str(0xbe5).is_empty()).unwrap();
-    // FL's program goes in as a one-program bank, as Bitwig keeps VST2 settings.
-    assert_eq!((device.str(0x9a), device.str(0x12de), device.str(0xbe5)), ("Serum", "Big Bass", "0f1e2d.fxb"));
-    assert_eq!(zip_file(&doc, "plugin-states/0f1e2d.fxb"), send::to_bank(&sound.data, 2));
+    assert_eq!((device.str(0x9a), device.str(0x12de)), ("Serum", "Big Bass"));
+    // FL's program goes in as a one-program bank, as Bitwig keeps VST2 settings, under a name of its own.
+    let (field, file, state) = settings(&doc);
+    assert!(is_fresh(&field, ".fxb"), "{field}");
+    assert_eq!(file, format!("plugin-states/{field}"));
+    assert_eq!(Some(state), send::to_bank(&sound.data, 2));
+    assert_eq!(zip_file(&doc, "plugin-states/0f1e2d.fxb"), None, "the template's own settings aren't kept");
     assert_eq!(zip_file(&doc, "preview.png").as_deref(), Some(&b"png"[..]));
     // The template itself is only read.
     assert_eq!(send::inspect(&t.path).unwrap().preset_name, "Init Lead");
@@ -91,10 +114,32 @@ fn the_settings_file_is_renamed_when_its_type_changes() {
     // A template that keeps its plugin's settings as a program; the new sound goes in as a bank.
     let t = send::inspect(&saved_in_bitwig(&dir, "Init", "Serum", "Init", "c3.fxp")).unwrap();
     let doc = bitwig::decode(build(&t, &serum_sound("Pad", "Serum"), "Pad").unwrap()).unwrap();
-    let device = doc.objects.iter().find(|o| !o.str(0xbe5).is_empty()).unwrap();
-    assert_eq!(device.str(0xbe5), "c3.fxb");
+    let (field, file, _) = settings(&doc);
+    assert!(is_fresh(&field, ".fxb"), "{field}");
+    assert_eq!(file, format!("plugin-states/{field}"));
     assert!(zip_file(&doc, "plugin-states/c3.fxp").is_none());
-    assert!(zip_file(&doc, "plugin-states/c3.fxb").is_some());
+}
+
+#[test]
+fn each_made_preset_names_its_settings_afresh() {
+    // Bitwig opens a preset's settings from its plugin-states folder by their name, so one made under its template's
+    // name (or an earlier drag's) could open with the settings kept there (Solomon, 14 Nov: "Error loading VST3
+    // preset" on that file).
+    let dir = folder("fresh-names");
+    // A template whose state field names its file without the ending, as Bitwig sometimes writes it.
+    let bank = send::to_bank(&fxp::wrap_chunk(&[9], "Init", i32::from_be_bytes(*b"XfsX")), 0).unwrap();
+    let path = dir.join("Init.bwpreset");
+    std::fs::write(&path, bwpreset_field(&[], &[], "Serum", "Init", "0f1e2d", "0f1e2d.fxb", &bank)).unwrap();
+    let t = send::inspect(&path).unwrap();
+    let made = || settings(&bitwig::decode(build(&t, &serum_sound("Pad", "Serum"), "Pad").unwrap()).unwrap());
+    let ((a, a_file, a_state), (b, b_file, _)) = (made(), made());
+    assert_ne!(a, b, "two presets made from one template never share their settings' name");
+    for (field, file) in [(&a, &a_file), (&b, &b_file)] {
+        // The field names it as the template's named its own: without the ending.
+        assert!(is_fresh(&format!("{field}.fxb"), ".fxb"), "{field}");
+        assert_eq!(*file, format!("plugin-states/{field}.fxb"));
+    }
+    assert_eq!(a_state, send::to_bank(&serum_sound("Pad", "Serum").data, 0).unwrap());
 }
 
 #[test]
@@ -292,4 +337,165 @@ fn a_plugins_own_preset_file_becomes_a_bitwig_preset_to_drag() {
         export::bitwig_preset_from_file(&junk, "Serum", mo_formats::PluginKind::Instrument, &templates, &none).is_err()
     );
     assert!(!none.exists());
+}
+
+/// Made-up VST3 class ids.
+const KEYSCAPE: &str = "ABCDEF0123456789ABCDEF0123456789";
+const PRO_Q: &str = "72C4DB717A4D459AB97E51745D84B39D";
+const SERUM_2: &str = "56534558667350736572756D20320000";
+
+/// A preset Bitwig saved for a VST3 plugin of this kind, with what Bitwig 6.1 writes about it: the metadata's device
+/// type, category, maker, name and ids, and the device's kind, category, 0x1809, maker and id. `age` is how long ago it
+/// was saved.
+fn saved_vst3(dir: &Path, plugin: &str, class: &str, kind: PluginKind, age: Duration) -> send::Template {
+    let (device_type, category, kind_field, flag) = match kind {
+        PluginKind::Instrument => ("note_to_audio", "Synth", 2, 1),
+        _ => ("audio_to_audio", "EQ", 0, 0),
+    };
+    let raw = bwpreset_full(
+        &[],
+        &[],
+        plugin,
+        "Init",
+        "aaaa.vstpreset",
+        "aaaa.vstpreset",
+        &vstpreset::build(class, b"comp", b"cont"),
+        &[],
+    );
+    let raw = with_fields(
+        raw,
+        &[
+            ("device_category", text(category)),
+            ("device_creator", text("Some Maker")),
+            ("device_id", text(class)),
+            ("device_name", text(plugin)),
+            ("device_type", text(device_type)),
+            ("referenced_device_ids", Value::Strings(vec![Text::new(&format!("VST3-{class}")), Text::new("other")])),
+        ],
+        &[
+            (0x9b, text("Some Maker")),
+            (0x9c, text(category)),
+            (0x9d, Value::U8(kind_field)),
+            (0x1809, Value::Bool(flag)),
+            (0xce4, text(class)),
+        ],
+    );
+    let path = dir.join(format!("{plugin}.bwpreset"));
+    std::fs::write(&path, raw).unwrap();
+    std::fs::File::options().write(true).open(&path).unwrap().set_modified(SystemTime::now() - age).unwrap();
+    send::inspect(&path).unwrap()
+}
+
+fn keyscape(kind: PluginKind) -> PresetBlob {
+    let mut p = PresetBlob::new("Keys - Keyscape", "Keyscape", ".vstpreset", vstpreset::build(KEYSCAPE, b"keys", b""));
+    p.kind = kind;
+    p
+}
+
+#[test]
+fn a_template_says_what_its_plugin_is() {
+    let dir = folder("template-kind");
+    assert_eq!(saved_vst3(&dir, "Pro-Q 3", PRO_Q, PluginKind::Effect, Duration::ZERO).kind, PluginKind::Effect);
+    assert_eq!(
+        saved_vst3(&dir, "Serum 2", SERUM_2, PluginKind::Instrument, Duration::ZERO).kind,
+        PluginKind::Instrument
+    );
+    // With no device type in its metadata, its device says (the kind field 0x9d, else its category).
+    let raw = bwpreset_full(
+        &[],
+        &[],
+        "Diva",
+        "Init",
+        "a.vstpreset",
+        "a.vstpreset",
+        &vstpreset::build(KEYSCAPE, b"", b""),
+        &[],
+    );
+    let by_field = with_fields(raw.clone(), &[], &[(0x9d, Value::U8(2))]);
+    assert_eq!(send::inspect_bytes(&by_field).unwrap().kind, PluginKind::Instrument);
+    let by_category = with_fields(raw.clone(), &[], &[(0x9c, text("Dynamics"))]);
+    assert_eq!(send::inspect_bytes(&by_category).unwrap().kind, PluginKind::Effect);
+    assert_eq!(send::inspect_bytes(&raw).unwrap().kind, PluginKind::Unknown);
+}
+
+#[test]
+fn a_synths_sound_borrows_a_synths_template_first() {
+    // Solomon, 14 Nov: a dragged Keyscape preset went onto an audio track. His newest VST3 template is an effect's.
+    let dir = folder("stand-in-kind");
+    let effect = saved_vst3(&dir, "Pro-Q 3", PRO_Q, PluginKind::Effect, Duration::ZERO);
+    let synth = saved_vst3(&dir, "Serum 2", SERUM_2, PluginKind::Instrument, Duration::from_secs(3600));
+    let templates = Templates::from([
+        (send::key(&effect.plugin, "VST3").unwrap(), effect.clone()),
+        (send::key(&synth.plugin, "VST3").unwrap(), synth.clone()),
+    ]);
+    assert_eq!(send::stand_in_for(&keyscape(PluginKind::Instrument), &templates), Some(&synth));
+    let soothe_id = "0123456789ABCDEF0123456789ABCDEF";
+    let mut soothe = PresetBlob::new("Vocal - soothe2", "soothe2", ".vstpreset", vstpreset::build(soothe_id, b"", b""));
+    soothe.kind = PluginKind::Effect;
+    assert_eq!(send::stand_in_for(&soothe, &templates), Some(&effect));
+    // Not known what it is: the newest of its format, as before.
+    assert_eq!(send::stand_in_for(&keyscape(PluginKind::Unknown), &templates), Some(&effect));
+    // Only the effect's: it's still used, and made a synth's.
+    assert_eq!(send::stand_in_for(&keyscape(PluginKind::Instrument), &one(effect.clone())), Some(&effect));
+}
+
+#[test]
+fn an_effects_template_standing_in_for_a_synth_becomes_a_synths() {
+    let dir = folder("stand-in-becomes");
+    let effect = saved_vst3(&dir, "Pro-Q 3", PRO_Q, PluginKind::Effect, Duration::ZERO);
+    let raw = std::fs::read(&effect.path).unwrap();
+    let made = send::build_for_other(&raw, &effect.path, &keyscape(PluginKind::Instrument), "Keys - Keyscape").unwrap();
+    let doc = bitwig::decode(made.clone()).unwrap();
+    let got = send::inspect_doc(&doc).unwrap();
+    assert_eq!((got.plugin.as_str(), got.plugin_id.as_str(), got.kind), ("Keyscape", KEYSCAPE, PluginKind::Instrument));
+    // The device: what Bitwig 6.1 saves on an instrument plugin, the kinds of value kept as the template had them.
+    let device = doc.objects.iter().find(|o| !o.str(0xbe5).is_empty()).unwrap();
+    assert_eq!(device.get(0x9d), Some(&Value::U8(2)));
+    assert_eq!(device.get(0x1809), Some(&Value::Bool(1)));
+    assert_eq!((device.str(0x9c), device.str(0x9b), device.str(0xce4)), ("Synth", "", KEYSCAPE));
+    // The metadata, which Bitwig's browser and a drop on the track list go by.
+    let meta = |k: &str| doc.meta_str(k).to_owned();
+    assert_eq!(meta("device_type"), "note_to_audio");
+    assert_eq!(
+        (meta("device_category"), meta("device_name"), meta("device_creator")),
+        ("Synth".into(), "Keyscape".into(), String::new())
+    );
+    assert_eq!(meta("device_id"), KEYSCAPE);
+    assert_eq!(doc.meta_strings("referenced_device_ids"), [format!("VST3-{KEYSCAPE}").as_str(), "other"]);
+    // Read as a preset file, it's a synth's.
+    assert_eq!(files::read_bytes(&made, "Keys.bwpreset").unwrap().kind, PluginKind::Instrument);
+
+    // A synth's template for a synth: what it is stays, category and all.
+    let synth = saved_vst3(&dir, "Serum 2", SERUM_2, PluginKind::Instrument, Duration::ZERO);
+    let raw = std::fs::read(&synth.path).unwrap();
+    let made = send::build_for_other(&raw, &synth.path, &keyscape(PluginKind::Instrument), "Keys").unwrap();
+    let doc = bitwig::decode(made).unwrap();
+    let device = doc.objects.iter().find(|o| !o.str(0xbe5).is_empty()).unwrap();
+    assert_eq!((device.get(0x9d), device.str(0x9c)), (Some(&Value::U8(2)), "Synth"));
+    assert_eq!(doc.meta_str("device_type"), "note_to_audio");
+
+    // Not known what the sound's plugin is: the template's kind stays, only its name and id change.
+    let raw = std::fs::read(&effect.path).unwrap();
+    let made = send::build_for_other(&raw, &effect.path, &keyscape(PluginKind::Unknown), "Keys").unwrap();
+    let doc = bitwig::decode(made).unwrap();
+    assert_eq!((doc.meta_str("device_type"), doc.meta_str("device_name")), ("audio_to_audio", "Keyscape"));
+}
+
+#[test]
+fn a_songs_sound_finds_its_plugins_own_template_by_the_id_in_its_settings() {
+    // The song names it otherwise than the preset Bitwig saved for it: its settings' class id finds that one.
+    let dir = folder("by-settings-id");
+    let own = saved_vst3(&dir, "Keyscape", KEYSCAPE, PluginKind::Instrument, Duration::from_secs(3600));
+    let effect = saved_vst3(&dir, "Pro-Q 3", PRO_Q, PluginKind::Effect, Duration::ZERO);
+    let templates = Templates::from([
+        (send::key(&own.plugin, "VST3").unwrap(), own),
+        (send::key(&effect.plugin, "VST3").unwrap(), effect),
+    ]);
+    let mut sound = keyscape(PluginKind::Instrument);
+    sound.plugin = "Keyscape (Spectrasonics)".into();
+    let c = mo_presets::drag::from_sound(sound, "Keys.vstpreset".into(), Some(&templates));
+    let File::Made { bytes, .. } = &c.file else { panic!("{:?}", c.why_not) };
+    let got = send::inspect_doc(&bitwig::decode(bytes.clone()).unwrap()).unwrap();
+    // Its own template's device, as Bitwig names the plugin: no stand-in's made over.
+    assert_eq!((got.plugin.as_str(), got.plugin_id.as_str()), ("Keyscape", KEYSCAPE));
 }

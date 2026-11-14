@@ -1267,12 +1267,16 @@ fn read_again(app: &AppWindow) {
     read_sounds(app);
 }
 
-/// Reads the library, every song's newest save and the preset files, handing each batch to the window.
+/// Reads the library, every song's newest save and the preset files, handing each batch to the window. What each line's
+/// plugin is (synth or effect) comes from what the library knows of it where the save or file doesn't say, and the
+/// installed plugin's own word wins for a preset file ([`logic::KnownPlugins`], as the test plugin's list has it;
+/// Solomon, 14 Nov: effects still showed under Synths).
 fn read_all(at: &Where) -> Result<(), String> {
     let lib = Library::open_read_only(&at.library).map_err(|e| format!("Couldn't open your library: {e}"))?;
     let saves = lib.saves().map_err(|e| format!("Couldn't read your library: {e}"))?;
     let choices = lib.song_choices().unwrap_or_default();
     let export_root = bitwig::export_left_out(&lib).ok().flatten();
+    let known = logic::KnownPlugins::read(&lib);
     drop(lib);
     let songs = mo_library::songs::group_songs(&saves, &choices, &mo_formats::dates::RealDates::now());
     let newest = logic::newest_saves(&songs, export_root.as_deref());
@@ -1345,7 +1349,11 @@ fn read_all(at: &Where) -> Result<(), String> {
             mo_presets::list::apply_fixes(&mut s.sounds, &fixes);
             let Some(song) = batch.iter().find(|b| b.path == s.path) else { continue };
             songs += usize::from(!s.sounds.is_empty());
-            items.extend(logic::song_items(plib::rows(std::slice::from_ref(&s), &[]), song));
+            let mut rows = plib::rows(std::slice::from_ref(&s), &[]);
+            for row in &mut rows {
+                known.fill(row);
+            }
+            items.extend(logic::song_items(rows, song));
         }
         done += batch.len();
         add(items, songs, 0, Some((done, total)));
@@ -1384,7 +1392,7 @@ fn read_all(at: &Where) -> Result<(), String> {
         ),
     );
     // Each file's year from the time the store looked at already: no second look at every file (X2-4).
-    let items = logic::file_items(&kept.files, &kept.modified);
+    let items = logic::file_items_with(&kept.files, &kept.modified, &known);
     let templates = kept.templates;
     let files = items.len();
     let templates = Arc::new(templates);
@@ -1655,6 +1663,7 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
                 &save,
                 Choice::default(),
                 Some(std::slice::from_ref(&key)),
+                &HashMap::from([(key.clone(), item.row.kind)]),
                 &root,
                 Some(&templates),
             )
@@ -1765,18 +1774,27 @@ fn export_shown(app: &AppWindow) -> bool {
             Err(why) => return export_stopped(job, why),
         };
         // The lines are let go of straight after, so lines read during the export join the list.
-        let (plan, without, templates) = {
+        let (plan, without, templates, kinds) = {
             let (plan, _) = logic::export_plan(&items, &shown);
             let songs: Vec<&Item> = shown.iter().filter_map(|&i| items.get(i)).filter(|i| !i.is_file()).collect();
             let templates = templates_now(templates, &bitwig_folders, |t| without_template(&songs, t).is_empty());
-            (plan, without_template(&songs, &templates), templates)
+            // What each sound is as the page says, by save and key, for its Bitwig preset.
+            let mut kinds: HashMap<String, HashMap<String, mo_formats::PluginKind>> = HashMap::new();
+            for i in &songs {
+                if let Source::Song { save, key } = &i.row.source {
+                    kinds.entry(save.clone()).or_default().insert(key.clone(), i.row.kind);
+                }
+            }
+            (plan, without_template(&songs, &templates), templates, kinds)
         };
         drop((items, shown));
+        let none = HashMap::new();
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         let total = plan.len();
         for (n, (save, keys)) in plan.iter().enumerate() {
             match background::on_pool(|| {
-                export::export_from_save(save, Choice::default(), Some(keys), &root, Some(&templates))
+                let kinds = kinds.get(save).unwrap_or(&none);
+                export::export_from_save(save, Choice::default(), Some(keys), kinds, &root, Some(&templates))
             }) {
                 Ok(e) => done.push(e),
                 Err(e) => failed.push(format!("{}: {e}", mo_formats::paths::stem(save))),
@@ -2058,7 +2076,7 @@ fn audition_preset_of(
 ) -> Result<(PathBuf, String), Option<String>> {
     let to = std::env::temp_dir().join(mo_app::midi::play_preset_name());
     let templates = templates_now(templates, bitwig_folders, |t| without_template(&[item], t).is_empty());
-    let made = background::on_pool(|| export::bitwig_preset_from_save(save, key, &templates, &to));
+    let made = background::on_pool(|| export::bitwig_preset_from_save(save, key, item.row.kind, &templates, &to));
     match made {
         Ok(Some(name)) => Ok((to, name)),
         Ok(None) => Err(Some(no_bitwig_preset(item))),

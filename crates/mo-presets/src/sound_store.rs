@@ -26,8 +26,10 @@ use crate::role::{Basis, Guess, Role, Thresholds};
 pub const FILE_NAME: &str = "preset-sounds.db";
 
 /// What the page's own guessing (`list`, `role`, `octave`) finds. Bump it whenever a change there would list a save's
-/// sounds differently (rule 7), so every save is read again.
-pub const VERSION: i64 = 1;
+/// sounds differently (rule 7), so every save is read again. 2: a Bitwig song's sounds say what their plugin is, as
+/// its device does (14 Nov 2026), which only this list uses, so the Bitwig reader's own version (which the MIDI and
+/// curve lists go by too) stays.
+pub const VERSION: i64 = 2;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS sound_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);

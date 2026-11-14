@@ -10,6 +10,6 @@ pub mod reader;
 pub use encode::{Copier, clone_object, encode};
 pub use format::{Blob, Document, Field, FileBytes, NotBitwig, ObjId, Object, Slot, Text, Value, decode, is_bitwig};
 pub use reader::{
-    DAW, EXTENSIONS, Project, TrackNames, VERSION, ZIP_DAMAGED, extract_midi, extract_presets, read, read_from,
-    read_project, track_names,
+    DAW, EXTENSIONS, Project, TrackNames, VERSION, ZIP_DAMAGED, category_kind, device_kind, extract_midi,
+    extract_presets, read, read_from, read_project, saved_kind, track_names,
 };

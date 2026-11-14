@@ -28,8 +28,9 @@ use crate::library::{FoundPreset, list_preset_files_and_unread};
 pub const FILE_NAME: &str = "preset-files.db";
 
 /// What the preset readers here find (`files`, and `bitwig::inspect` for templates). Bump it whenever a change there
-/// would read a file differently (rule 7), so every file is read again.
-pub const VERSION: i64 = 1;
+/// would read a file differently (rule 7), so every file is read again. 2: a Bitwig preset's kind from Bitwig 6.1's
+/// "note_to_audio" and its device (14 Nov 2026).
+pub const VERSION: i64 = 2;
 
 /// The tables' layout (`PRAGMA user_version`): another one is made again, empty.
 const LAYOUT: i64 = 1;
@@ -354,6 +355,8 @@ fn load_from(conn: &Connection) -> rusqlite::Result<HashMap<String, (i64, i64, E
                 state_file: r.get::<_, Option<String>>(16)?.unwrap_or_default(),
                 preset_name: r.get::<_, Option<String>>(17)?.unwrap_or_default(),
                 plugin_id: r.get::<_, Option<String>>(18)?.unwrap_or_default(),
+                // The file's own kind: a template's is read by the same rule (`files::bwpreset_kind`).
+                kind: kind_of(r.get(8)?),
                 modified: Some(time_of(modified)),
             }),
             None => None,

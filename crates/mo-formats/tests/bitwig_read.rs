@@ -105,7 +105,10 @@ fn extracts_plugin_states_named_by_track() {
     let keys = by_plugin["Keyscape"];
     assert_eq!((keys.name.as_str(), &*keys.extension), ("Keys Display - Keyscape", ".vstpreset"));
     assert_eq!(keys.data, b"VST3 keys state");
-    assert_eq!(by_plugin["FabFilter Pro-L 2"].name, "Master - FabFilter Pro-L 2");
+    let limiter = by_plugin["FabFilter Pro-L 2"];
+    assert_eq!(limiter.name, "Master - FabFilter Pro-L 2");
+    // What each plugin is, from its device (here by its category: Synth, Dynamics).
+    assert_eq!((keys.kind, limiter.kind), (PluginKind::Instrument, PluginKind::Effect));
 }
 
 #[test]

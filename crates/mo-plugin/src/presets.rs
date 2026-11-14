@@ -248,7 +248,9 @@ impl Presets {
                 templates,
             )
             .map(|b| b.map(|b| (drag_name(&item.row.plugin, &item.row.name), b))),
-            plib::Source::Song { save, key } => mo_presets::export::bitwig_preset_bytes_from_save(save, key, templates),
+            plib::Source::Song { save, key } => {
+                mo_presets::export::bitwig_preset_bytes_from_save(save, key, item.row.kind, templates)
+            }
         };
         let (name, bytes) = match made {
             Ok(Some(made)) => made,
