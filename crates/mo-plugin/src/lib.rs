@@ -47,8 +47,9 @@ mod ui {
     slint::include_modules!();
 }
 pub use ui::{
-    ChordBox, CurveLine, ExtensionLine, FilterChoice, FilterView, LabelLine, Panel, PartLine, PresetLine, SkyName,
-    SoundLine, SweptLine, TakeLine, Theme, TrailDot, YearBar,
+    ChordBox, ClipTile, CurveEditorData, CurveLine, EditorDot, ExtensionLine, FilterChoice, FilterView, LabelLine,
+    MenuItem, Panel, PartLine, PresetLine, RulerMark, SkyName, SoundLine, SweptLine, TakeLine, Theme, TrailDot,
+    YearBar,
 };
 
 use audition::{Player, Playing};

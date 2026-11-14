@@ -213,6 +213,8 @@ component KeyLamp inherits HorizontalLayout {
 // The hint line under the picture: what's under the mouse, what a drag or a double-click does there, and what the
 // keys change. A phrase that doesn't fit is cut at the lamps, never laid over them.
 component HintLine inherits Rectangle {
+    // The lamps without their meanings: where there isn't the room for them.
+    in property <bool> compact: self.width < 900px;
     height: 34px;
     border-radius: Theme.radius;
     background: Theme.surface-raised;
@@ -242,19 +244,19 @@ component HintLine inherits Rectangle {
             key: "Shift";
             means: "free";
             lit: CurveEditorData.shift;
-            compact: root.width < 900px;
+            compact: root.compact;
         }
         KeyLamp {
             key: CurveEditorData.mac ? "Option" : "Alt";
             means: "bend";
             lit: CurveEditorData.alt;
-            compact: root.width < 900px;
+            compact: root.compact;
         }
         KeyLamp {
             key: CurveEditorData.mac ? "Cmd" : "Ctrl";
             means: "make";
             lit: CurveEditorData.ctrl;
-            compact: root.width < 900px;
+            compact: root.compact;
         }
     }
 }
@@ -443,7 +445,7 @@ component ClipStrip inherits Rectangle {
 
 // The grid's chips, joined in one strip after its name: one step is always picked unless it's off, and Triplet is
 // on or off beside it.
-component GridStrip inherits HorizontalLayout {
+export component GridStrip inherits HorizontalLayout {
     // Whether its name leads the chips: left out where the card is too narrow for it and the buttons beside it.
     in property <bool> named: true;
     spacing: 0;
@@ -479,6 +481,253 @@ component GridStrip inherits HorizontalLayout {
             joined-right: i < 6;
             clicked => { CurveEditorData.grid-picked(i); }
         }
+    }
+}
+
+// The editor's bench: the ruler, the clip strip, the picture with all that lies over it, and the hint line. All of it
+// is in `CurveEditorData`, so the app's card and the plugin's Curves tab show the same bench. `menus`: a right-click
+// opens the part's menu (not where a window can't open one: the plugin shows the menu's lines as buttons instead).
+export component CurveBench inherits VerticalLayout {
+    in property <bool> menus: true;
+    // The hint line's lamps without their meanings: set where the bench's width follows from what's in it.
+    in property <bool> compact: self.width < 900px;
+    vertical-stretch: 1;
+    spacing: Space.sm;
+    Ruler { }
+    ClipStrip {
+        menu(x, y) => {
+            CurveEditorData.menu-opens();
+            if root.menus {
+                part-menu.open-at(x, y);
+            }
+        }
+    }
+    // The picture: a sunken screen, all the height that's left.
+    screen := Well {
+        vertical-stretch: 1;
+        min-height: 160px;
+        clip: true;
+        // What can be done to the highlighted part, each line with its key.
+        part-menu := RightClickMenu {
+            items: CurveEditorData.part-menu;
+            chosen(id) => { CurveEditorData.menu-chosen(id); }
+        }
+        function laid-out() {
+            CurveEditorData.laid-out(self.width, self.height);
+        }
+        init => {
+            self.laid-out();
+        }
+        changed width => {
+            self.laid-out();
+        }
+        changed height => {
+            self.laid-out();
+        }
+        // The window moved to a screen with another scale: the same room in points is other pixels.
+        property <float> scale: 1px / 1phx;
+        changed scale => {
+            self.laid-out();
+        }
+        // Drawn at the window's own pixels, so its lines stay sharp.
+        Image {
+            x: 0;
+            y: 0;
+            width: self.source.width * 1phx;
+            height: self.source.height * 1phx;
+            source: CurveEditorData.picture;
+        }
+        // The play line, only while Hear plays.
+        if CurveEditorData.playing && CurveEditorData.playhead >= 0: Rectangle {
+            x: CurveEditorData.playhead - 0.5px;
+            y: 0;
+            width: 1px;
+            height: parent.height;
+            background: Theme.accent;
+        }
+        // The curve as it was when the drag began, faint behind the new one.
+        if CurveEditorData.ghost != "": Path {
+            x: 0;
+            y: 0;
+            width: CurveEditorData.picture-width;
+            height: CurveEditorData.picture-height;
+            viewbox-width: CurveEditorData.picture-width / 1px;
+            viewbox-height: CurveEditorData.picture-height / 1px;
+            commands: CurveEditorData.ghost;
+            stroke: Theme.text.transparentize(72%);
+            stroke-width: 1.5px;
+            fill: transparent;
+        }
+        // The line under the mouse, lit.
+        if CurveEditorData.hot-line != "": Path {
+            x: 0;
+            y: 0;
+            width: CurveEditorData.picture-width;
+            height: CurveEditorData.picture-height;
+            viewbox-width: CurveEditorData.picture-width / 1px;
+            viewbox-height: CurveEditorData.picture-height / 1px;
+            commands: CurveEditorData.hot-line;
+            stroke: Theme.accent;
+            stroke-width: 3.5px;
+            fill: transparent;
+        }
+        // The highlight: its frame from the part's floor to its top, its bar in the room above the picture's top
+        // line, and its handles. With nothing highlighted, pills round the whole curve.
+        if CurveEditorData.hl-shown: hl := Rectangle {
+            property <length> l: CurveEditorData.hl-left;
+            property <length> r: CurveEditorData.hl-right;
+            property <length> t: CurveEditorData.hl-top;
+            property <length> b: CurveEditorData.hl-bottom;
+            property <int> hot: CurveEditorData.hl-hot;
+            property <bool> whole: CurveEditorData.hl-whole;
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            clip: true;
+            if !hl.whole: Rectangle {
+                x: hl.l;
+                y: hl.t;
+                width: max(1px, hl.r - hl.l);
+                height: max(1px, hl.b - hl.t);
+                border-width: 1px;
+                border-color: Theme.accent.transparentize(30%);
+            }
+            if !hl.whole: Rectangle {
+                x: hl.l;
+                y: 3px;
+                width: max(1px, hl.r - hl.l);
+                height: 12px;
+                border-radius: 3px;
+                background: Theme.accent.transparentize(hl.hot == 1 ? 0% : 50%);
+                // Two grip lines.
+                for i in 2: Rectangle {
+                    x: (parent.width - 12px) / 2;
+                    y: 4px + i * 3px;
+                    width: 12px;
+                    height: 1px;
+                    background: Theme.accent-text;
+                    visible: parent.width >= 20px;
+                }
+            }
+            FrameHandle {
+                mid-x: hl.l;
+                mid-y: (hl.t + hl.b) / 2;
+                hot: hl.hot == 2;
+                near: !hl.whole || CurveEditorData.hl-near;
+            }
+            FrameHandle {
+                mid-x: hl.r;
+                mid-y: (hl.t + hl.b) / 2;
+                hot: hl.hot == 3;
+                near: !hl.whole || CurveEditorData.hl-near;
+            }
+            FrameHandle {
+                across: true;
+                mid-x: (hl.l + hl.r) / 2;
+                mid-y: hl.t;
+                hot: hl.hot == 4;
+                near: !hl.whole || CurveEditorData.hl-near;
+            }
+            FrameHandle {
+                across: true;
+                mid-x: (hl.l + hl.r) / 2;
+                mid-y: hl.b;
+                hot: hl.hot == 5;
+                near: !hl.whole || CurveEditorData.hl-near;
+            }
+            if !hl.whole: FrameHandle {
+                corner: true;
+                mid-x: hl.l;
+                mid-y: hl.t;
+                hot: hl.hot == 6;
+            }
+            if !hl.whole: FrameHandle {
+                corner: true;
+                mid-x: hl.r;
+                mid-y: hl.t;
+                hot: hl.hot == 7;
+            }
+            if !hl.whole: FrameHandle {
+                corner: true;
+                mid-x: hl.l;
+                mid-y: hl.b;
+                hot: hl.hot == 8;
+            }
+            if !hl.whole: FrameHandle {
+                corner: true;
+                mid-x: hl.r;
+                mid-y: hl.b;
+                hot: hl.hot == 9;
+            }
+        }
+        // The points: small and plain, a size up with an accent ring under the mouse, filled while held.
+        for d in CurveEditorData.dots: Rectangle {
+            property <length> across: d.hot || d.held ? 11px : 6px;
+            x: d.x - self.width / 2;
+            y: d.y - self.height / 2;
+            width: self.across + (d.hot || d.held ? 0px : 3px);
+            height: self.width;
+            border-radius: self.width / 2;
+            background: d.held ? Theme.accent : d.hot ? Theme.well : Theme.text;
+            border-width: d.held ? 0px : d.hot ? 2px : 1.5px;
+            border-color: d.hot ? Theme.accent : Theme.well;
+        }
+        touch := MouseField {
+            // The mouse left: what showed under it is put away.
+            changed inside => {
+                if !self.inside {
+                    self.tell(4, false, false, false);
+                }
+            }
+            mouse-cursor: CurveEditorData.pointer == 1 ? MouseCursor.grab
+                : CurveEditorData.pointer == 2 ? MouseCursor.grabbing
+                : CurveEditorData.pointer == 3 ? MouseCursor.ns-resize
+                : CurveEditorData.pointer == 4 ? MouseCursor.ew-resize
+                : CurveEditorData.pointer == 5 ? MouseCursor.nwse-resize
+                : CurveEditorData.pointer == 6 ? MouseCursor.nesw-resize
+                : CurveEditorData.pointer == 7 ? MouseCursor.copy
+                : CurveEditorData.pointer == 8 ? MouseCursor.crosshair
+                : MouseCursor.default;
+            function tell(kind: int, shift: bool, alt: bool, ctrl: bool) {
+                CurveEditorData.mouse(kind, self.mouse-x, self.mouse-y, shift, alt, ctrl);
+            }
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.move {
+                    self.tell(0, e.modifiers.shift, e.modifiers.alt, e.modifiers.control || e.modifiers.meta);
+                } else if e.kind == PointerEventKind.cancel {
+                    // The press was taken away: what was dragged goes back where it was.
+                    self.tell(5, false, false, false);
+                } else if e.button == PointerEventButton.left {
+                    self.tell(e.kind == PointerEventKind.down ? 1 : 2, e.modifiers.shift, e.modifiers.alt,
+                        e.modifiers.control || e.modifiers.meta);
+                } else if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                    CurveEditorData.menu-opens();
+                    if root.menus {
+                        part-menu.open-at(self.absolute-position.x + self.mouse-x,
+                            self.absolute-position.y + self.mouse-y);
+                    }
+                }
+            }
+            double-clicked => {
+                self.tell(3, CurveEditorData.shift, CurveEditorData.alt, CurveEditorData.ctrl);
+            }
+            scroll-event(e) => {
+                CurveEditorData.wheel(self.mouse-x, e.delta-y != 0 ? e.delta-y : e.delta-x, e.modifiers.shift);
+                EventResult.accept
+            }
+        }
+        // What the drag is doing, by the mouse; flipped to stay inside the picture.
+        if CurveEditorData.read-out != "": ReadOut {
+            text: CurveEditorData.read-out;
+            x: CurveEditorData.read-x + 14px + self.width > parent.width
+                ? CurveEditorData.read-x - 14px - self.width
+                : CurveEditorData.read-x + 14px;
+            y: max(2px, CurveEditorData.read-y - 10px - self.height);
+        }
+    }
+    HintLine {
+        compact: root.compact;
     }
 }
 
@@ -631,240 +880,7 @@ export component CurveEditor inherits SidePanel {
             reset => { CurveEditorData.speed-stepped(0); }
         }
     }
-    VerticalLayout {
-        vertical-stretch: 1;
-        spacing: Space.sm;
-        Ruler { }
-        ClipStrip {
-            menu(x, y) => {
-                CurveEditorData.menu-opens();
-                part-menu.open-at(x, y);
-            }
-        }
-        // The picture: a sunken screen, all the height that's left.
-        screen := Well {
-            vertical-stretch: 1;
-            min-height: 160px;
-            clip: true;
-            // What can be done to the highlighted part, each line with its key.
-            part-menu := RightClickMenu {
-                items: CurveEditorData.part-menu;
-                chosen(id) => { CurveEditorData.menu-chosen(id); }
-            }
-            function laid-out() {
-                CurveEditorData.laid-out(self.width, self.height);
-            }
-            init => {
-                self.laid-out();
-            }
-            changed width => {
-                self.laid-out();
-            }
-            changed height => {
-                self.laid-out();
-            }
-            // The window moved to a screen with another scale: the same room in points is other pixels.
-            property <float> scale: 1px / 1phx;
-            changed scale => {
-                self.laid-out();
-            }
-            // Drawn at the window's own pixels, so its lines stay sharp.
-            Image {
-                x: 0;
-                y: 0;
-                width: self.source.width * 1phx;
-                height: self.source.height * 1phx;
-                source: CurveEditorData.picture;
-            }
-            // The play line, only while Hear plays.
-            if CurveEditorData.playing && CurveEditorData.playhead >= 0: Rectangle {
-                x: CurveEditorData.playhead - 0.5px;
-                y: 0;
-                width: 1px;
-                height: parent.height;
-                background: Theme.accent;
-            }
-            // The curve as it was when the drag began, faint behind the new one.
-            if CurveEditorData.ghost != "": Path {
-                x: 0;
-                y: 0;
-                width: CurveEditorData.picture-width;
-                height: CurveEditorData.picture-height;
-                viewbox-width: CurveEditorData.picture-width / 1px;
-                viewbox-height: CurveEditorData.picture-height / 1px;
-                commands: CurveEditorData.ghost;
-                stroke: Theme.text.transparentize(72%);
-                stroke-width: 1.5px;
-                fill: transparent;
-            }
-            // The line under the mouse, lit.
-            if CurveEditorData.hot-line != "": Path {
-                x: 0;
-                y: 0;
-                width: CurveEditorData.picture-width;
-                height: CurveEditorData.picture-height;
-                viewbox-width: CurveEditorData.picture-width / 1px;
-                viewbox-height: CurveEditorData.picture-height / 1px;
-                commands: CurveEditorData.hot-line;
-                stroke: Theme.accent;
-                stroke-width: 3.5px;
-                fill: transparent;
-            }
-            // The highlight: its frame from the part's floor to its top, its bar in the room above the picture's top
-            // line, and its handles. With nothing highlighted, pills round the whole curve.
-            if CurveEditorData.hl-shown: hl := Rectangle {
-                property <length> l: CurveEditorData.hl-left;
-                property <length> r: CurveEditorData.hl-right;
-                property <length> t: CurveEditorData.hl-top;
-                property <length> b: CurveEditorData.hl-bottom;
-                property <int> hot: CurveEditorData.hl-hot;
-                property <bool> whole: CurveEditorData.hl-whole;
-                x: 0;
-                y: 0;
-                width: parent.width;
-                height: parent.height;
-                clip: true;
-                if !hl.whole: Rectangle {
-                    x: hl.l;
-                    y: hl.t;
-                    width: max(1px, hl.r - hl.l);
-                    height: max(1px, hl.b - hl.t);
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(30%);
-                }
-                if !hl.whole: Rectangle {
-                    x: hl.l;
-                    y: 3px;
-                    width: max(1px, hl.r - hl.l);
-                    height: 12px;
-                    border-radius: 3px;
-                    background: Theme.accent.transparentize(hl.hot == 1 ? 0% : 50%);
-                    // Two grip lines.
-                    for i in 2: Rectangle {
-                        x: (parent.width - 12px) / 2;
-                        y: 4px + i * 3px;
-                        width: 12px;
-                        height: 1px;
-                        background: Theme.accent-text;
-                        visible: parent.width >= 20px;
-                    }
-                }
-                FrameHandle {
-                    mid-x: hl.l;
-                    mid-y: (hl.t + hl.b) / 2;
-                    hot: hl.hot == 2;
-                    near: !hl.whole || CurveEditorData.hl-near;
-                }
-                FrameHandle {
-                    mid-x: hl.r;
-                    mid-y: (hl.t + hl.b) / 2;
-                    hot: hl.hot == 3;
-                    near: !hl.whole || CurveEditorData.hl-near;
-                }
-                FrameHandle {
-                    across: true;
-                    mid-x: (hl.l + hl.r) / 2;
-                    mid-y: hl.t;
-                    hot: hl.hot == 4;
-                    near: !hl.whole || CurveEditorData.hl-near;
-                }
-                FrameHandle {
-                    across: true;
-                    mid-x: (hl.l + hl.r) / 2;
-                    mid-y: hl.b;
-                    hot: hl.hot == 5;
-                    near: !hl.whole || CurveEditorData.hl-near;
-                }
-                if !hl.whole: FrameHandle {
-                    corner: true;
-                    mid-x: hl.l;
-                    mid-y: hl.t;
-                    hot: hl.hot == 6;
-                }
-                if !hl.whole: FrameHandle {
-                    corner: true;
-                    mid-x: hl.r;
-                    mid-y: hl.t;
-                    hot: hl.hot == 7;
-                }
-                if !hl.whole: FrameHandle {
-                    corner: true;
-                    mid-x: hl.l;
-                    mid-y: hl.b;
-                    hot: hl.hot == 8;
-                }
-                if !hl.whole: FrameHandle {
-                    corner: true;
-                    mid-x: hl.r;
-                    mid-y: hl.b;
-                    hot: hl.hot == 9;
-                }
-            }
-            // The points: small and plain, a size up with an accent ring under the mouse, filled while held.
-            for d in CurveEditorData.dots: Rectangle {
-                property <length> across: d.hot || d.held ? 11px : 6px;
-                x: d.x - self.width / 2;
-                y: d.y - self.height / 2;
-                width: self.across + (d.hot || d.held ? 0px : 3px);
-                height: self.width;
-                border-radius: self.width / 2;
-                background: d.held ? Theme.accent : d.hot ? Theme.well : Theme.text;
-                border-width: d.held ? 0px : d.hot ? 2px : 1.5px;
-                border-color: d.hot ? Theme.accent : Theme.well;
-            }
-            touch := MouseField {
-                // The mouse left: what showed under it is put away.
-                changed inside => {
-                    if !self.inside {
-                        self.tell(4, false, false, false);
-                    }
-                }
-                mouse-cursor: CurveEditorData.pointer == 1 ? MouseCursor.grab
-                    : CurveEditorData.pointer == 2 ? MouseCursor.grabbing
-                    : CurveEditorData.pointer == 3 ? MouseCursor.ns-resize
-                    : CurveEditorData.pointer == 4 ? MouseCursor.ew-resize
-                    : CurveEditorData.pointer == 5 ? MouseCursor.nwse-resize
-                    : CurveEditorData.pointer == 6 ? MouseCursor.nesw-resize
-                    : CurveEditorData.pointer == 7 ? MouseCursor.copy
-                    : CurveEditorData.pointer == 8 ? MouseCursor.crosshair
-                    : MouseCursor.default;
-                function tell(kind: int, shift: bool, alt: bool, ctrl: bool) {
-                    CurveEditorData.mouse(kind, self.mouse-x, self.mouse-y, shift, alt, ctrl);
-                }
-                pointer-event(e) => {
-                    if e.kind == PointerEventKind.move {
-                        self.tell(0, e.modifiers.shift, e.modifiers.alt, e.modifiers.control || e.modifiers.meta);
-                    } else if e.kind == PointerEventKind.cancel {
-                        // The press was taken away: what was dragged goes back where it was.
-                        self.tell(5, false, false, false);
-                    } else if e.button == PointerEventButton.left {
-                        self.tell(e.kind == PointerEventKind.down ? 1 : 2, e.modifiers.shift, e.modifiers.alt,
-                            e.modifiers.control || e.modifiers.meta);
-                    } else if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
-                        CurveEditorData.menu-opens();
-                        part-menu.open-at(self.absolute-position.x + self.mouse-x,
-                            self.absolute-position.y + self.mouse-y);
-                    }
-                }
-                double-clicked => {
-                    self.tell(3, CurveEditorData.shift, CurveEditorData.alt, CurveEditorData.ctrl);
-                }
-                scroll-event(e) => {
-                    CurveEditorData.wheel(self.mouse-x, e.delta-y != 0 ? e.delta-y : e.delta-x, e.modifiers.shift);
-                    EventResult.accept
-                }
-            }
-            // What the drag is doing, by the mouse; flipped to stay inside the picture.
-            if CurveEditorData.read-out != "": ReadOut {
-                text: CurveEditorData.read-out;
-                x: CurveEditorData.read-x + 14px + self.width > parent.width
-                    ? CurveEditorData.read-x - 14px - self.width
-                    : CurveEditorData.read-x + 14px;
-                y: max(2px, CurveEditorData.read-y - 10px - self.height);
-            }
-        }
-        HintLine { }
-    }
+    CurveBench { }
     // Where to take the curve from to drag it onto an automation lane: its file in the app's Curves folder.
     DragHandle {
         text: "Drag onto a Bitwig automation lane";

@@ -59,13 +59,25 @@ impl Curves {
     /// What a drag of the curve at `at` carries: its Bitwig curve file, written to a new drag folder in `temp`.
     /// Writes to the disk: call it off the panel's thread.
     pub fn to_drag(&self, at: usize, temp: &Path) -> Result<PathBuf, String> {
-        let c = self.curves.get(at).ok_or("That curve isn't in the list any more")?;
-        let name = if c.name.trim().is_empty() { "Curve" } else { c.name.as_str() };
-        let file = mo_app::drag_out::MadeFile { name: format!("{name}.bwcurve"), bytes: curves::curve_bytes(c)? };
-        let mut written = mo_app::drag_out::write_drag_files(temp, &[file])
-            .map_err(|e| format!("The curve couldn't be saved in Temp: {e}"))?;
-        written.pop().ok_or_else(|| "The curve couldn't be saved in Temp".to_owned())
+        drag_file(self.curves.get(at).ok_or("That curve isn't in the list any more")?, temp)
     }
+}
+
+/// What a drag of `c` carries: its Bitwig curve file, written to a new drag folder in `temp`. Writes to the disk: call
+/// it off the panel's thread.
+pub fn drag_file(c: &Curve, temp: &Path) -> Result<PathBuf, String> {
+    let name = if c.name.trim().is_empty() { "Curve" } else { c.name.as_str() };
+    let file = mo_app::drag_out::MadeFile { name: format!("{name}.bwcurve"), bytes: curves::curve_bytes(c)? };
+    let mut written = mo_app::drag_out::write_drag_files(temp, &[file])
+        .map_err(|e| format!("The curve couldn't be saved in Temp: {e}"))?;
+    written.pop().ok_or_else(|| "The curve couldn't be saved in Temp".to_owned())
+}
+
+/// `c` as the editor has left it: these points, this long, named as an edit of it (so its file doesn't pass for the
+/// curve as found).
+pub fn edited(c: &Curve, points: Vec<mo_formats::bitwig::curve::CurvePoint>, length_beats: f64) -> Curve {
+    let name = if c.name.trim().is_empty() { "Curve (edited)".to_owned() } else { format!("{} (edited)", c.name) };
+    Curve { name, points, length_beats, ..c.clone() }
 }
 
 /// The status line over the list: "120 curves", or "12 of 120 curves" when the search or a filter narrows it.

@@ -332,81 +332,10 @@ fn show_touch(app: &AppWindow) {
     let data = app.global::<CurveEditorData>();
     let was_changed = data.get_changed();
     let now = card(|c| c.showing(cfg!(target_os = "macos")));
-    if !now.open {
-        data.set_clips(ModelRc::default());
-        data.set_dots(ModelRc::default());
-        data.set_swing_marks(ModelRc::default());
-        data.set_hl_shown(false);
-        data.set_hot_line("".into());
-        data.set_ghost("".into());
-        data.set_read_out("".into());
-        data.set_can_undo(false);
-        data.set_can_redo(false);
-    } else {
-        if let Some(dots) = now.dots {
-            let dots: Vec<EditorDot> =
-                dots.into_iter().map(|d| EditorDot { x: d.x, y: d.y, hot: d.hot, held: d.held }).collect();
-            data.set_dots(ModelRc::new(VecModel::from(dots)));
-        }
-        // The highlight's frame and its handles, or the pills round the whole curve.
-        match now.frame {
-            Some(b) => {
-                data.set_hl_shown(true);
-                data.set_hl_whole(b.whole);
-                data.set_hl_left(b.left as f32);
-                data.set_hl_right(b.right as f32);
-                data.set_hl_top(b.top as f32);
-                data.set_hl_bottom(b.bottom as f32);
-            }
-            None => data.set_hl_shown(false),
-        }
-        data.set_hl_hot(now.handle);
-        data.set_hl_near(now.near);
-        data.set_hot_line(now.hot_line.into());
-        if let Some(ghost) = now.ghost {
-            data.set_ghost(ghost.into());
-        }
-        data.set_picture_width(now.width);
-        data.set_picture_height(now.height);
-        data.set_pointer(now.pointer);
-        data.set_hint_name(now.hint_name.into());
-        data.set_hint_does(now.hint_does.into());
-        data.set_hint_keys(now.hint_keys.into());
-        data.set_swing_hot(now.swing_hot);
-        if let Some(marks) = now.swing_marks {
-            data.set_swing_marks(ModelRc::new(VecModel::from(marks)));
-        }
-        if let Some(tiles) = now.tiles {
-            let tiles: Vec<ClipTile> = tiles
-                .into_iter()
-                .map(|t| ClipTile {
-                    x: t.x,
-                    width: t.width,
-                    name: t.name.into(),
-                    words: t.words.into(),
-                    pinned: t.pinned,
-                    picked: t.picked,
-                    lighter: t.lighter,
-                    hot: t.hot,
-                    pin_hot: t.pin_hot,
-                    can_pin: t.can_pin,
-                })
-                .collect();
-            data.set_clips(ModelRc::new(VecModel::from(tiles)));
-        }
-        data.set_shift(now.keys.shift);
-        data.set_alt(now.keys.alt);
-        data.set_ctrl(now.keys.ctrl);
-        data.set_read_out(now.read_out.into());
-        if let Some((x, y)) = now.mouse {
-            data.set_read_x(x);
-            data.set_read_y(y);
-        }
-        data.set_can_undo(now.can_undo);
-        data.set_can_redo(now.can_redo);
-    }
-    data.set_changed(now.changed);
-    if now.changed != was_changed {
+    let changed = now.changed;
+    mo_app::show_curve_card!(data, now, EditorDot, ClipTile);
+    data.set_changed(changed);
+    if changed != was_changed {
         // The card's own buttons follow: some wait for the edits to be saved.
         crate::presets::curve_edits_changed(app);
     }

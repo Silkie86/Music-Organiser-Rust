@@ -4,8 +4,9 @@
 // Chords (Chord check: the chord the notes played in make, as the app's chord reader names it) and DAW check (every
 // CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
-export { FilterView, FilterChoice, YearBar, Theme }
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem } from "../../mo-ui/ui/studio.slint";
+import { CurveBench, GridStrip, CurveEditorData, EditorDot, ClipTile, RulerMark } from "../../mo-ui/ui/pages/curve_editor.slint";
+export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
 import "../../mo-ui/fonts/IBMPlexSans-400.ttf";
@@ -442,6 +443,15 @@ export component Panel inherits Window {
     callback curve-clear();
     callback curve-hidden-toggled(bool);
     callback curve-drag-out(int);
+    // The curve editor, in the list's place while a curve is open in it (the app's own, from `CurveEditorData`): a
+    // click on a curve opens it, Back shows the list again. The edited curve is dragged out from its own strip.
+    in property <bool> curve-editing;
+    // Where the list is turned to: it's made again when the editor closes, and comes back there.
+    property <length> curve-list-y;
+    in property <bool> curve-edit-lifted;
+    callback curve-open(int);
+    callback curve-back();
+    callback curve-edit-drag-out();
 
     title: "Music Organiser";
     preferred-width: 760px;
@@ -1485,7 +1495,108 @@ export component Panel inherits Window {
             }
         }
 
-        if root.view == 5: HorizontalLayout {
+        if root.view == 5 && root.curve-editing: VerticalLayout {
+            spacing: Space.sm;
+            // The name plate: back to the list, the curve's name, how it's heard, Undo and Redo.
+            HorizontalLayout {
+                height: 32px;
+                spacing: Space.sm;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "‹ Curves";
+                    tip: "Back to the list. The edits are kept while the plugin's window is open";
+                    clicked => { root.curve-back(); }
+                }
+                Text {
+                    text: CurveEditorData.name;
+                    color: Theme.text;
+                    font-size: Type.row-title;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    min-width: 0px;
+                }
+                if CurveEditorData.changed: Text {
+                    text: "edited";
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                ToggleChip {
+                    text: "Metronome";
+                    on: CurveEditorData.metronome;
+                    clicked => { CurveEditorData.metronome-toggled(); }
+                }
+                StudioButton {
+                    horizontal-stretch: 0;
+                    width: 32px;
+                    icon: "M 5.5 3 L 2 6.5 L 5.5 10 M 2 6.5 L 10 6.5 A 4 4 0 0 1 10 14.5 L 7 14.5";
+                    tip: "Undo";
+                    enabled: CurveEditorData.can-undo;
+                    clicked => { CurveEditorData.undo(); }
+                }
+                StudioButton {
+                    horizontal-stretch: 0;
+                    width: 32px;
+                    icon: "M 10.5 3 L 14 6.5 L 10.5 10 M 14 6.5 L 6 6.5 A 4 4 0 0 0 6 14.5 L 9 14.5";
+                    tip: "Redo";
+                    enabled: CurveEditorData.can-redo;
+                    clicked => { CurveEditorData.redo(); }
+                }
+            }
+            CurveBench {
+                menus: false;
+                compact: true;
+            }
+            // What the app keeps in its right-click menu, as buttons: a DAW's plugin window opens no menus. Each has a
+            // short name here (the row must fit the panel) and the menu's own words as its tip, in `key`.
+            HorizontalLayout {
+                height: 28px;
+                spacing: Space.xs;
+                for item in CurveEditorData.part-menu: StudioButton {
+                    horizontal-stretch: 0;
+                    text: item.what;
+                    tip: item.key;
+                    enabled: item.enabled;
+                    clicked => { CurveEditorData.menu-chosen(item.id); }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+            HorizontalLayout {
+                height: 32px;
+                spacing: Space.md;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: CurveEditorData.playing ? "Stop" : "Hear";
+                    main: CurveEditorData.playing;
+                    tip: CurveEditorData.playing ? "Stop the tone" : "Hear the curve as the volume of a tone through this track, at the song's speed";
+                    clicked => { CurveEditorData.hear(); }
+                }
+                GridStrip {
+                    named: false;
+                }
+                DragHandle {
+                    horizontal-stretch: 1;
+                    text: root.can-drag ? "Drag the curve as it is now into Bitwig" : "Drag it out in Bitwig";
+                    draggable: root.can-drag;
+                    lifted: root.curve-edit-lifted;
+                    drag-out => { root.curve-edit-drag-out(); }
+                }
+            }
+            if root.curve-said != "": Text {
+                text: root.curve-said;
+                color: Theme.accent;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+
+        if root.view == 5 && !root.curve-editing: HorizontalLayout {
             spacing: Space.lg;
             VerticalLayout {
                 width: 196px;
@@ -1532,12 +1643,16 @@ export component Panel inherits Window {
                         height: parent.height;
                         row-height: 48px;
                         rows: root.curves.length;
+                        kept-y <=> root.curve-list-y;
                         for curve[i] in root.curves: ListLine {
                             height: 48px;
                             selected: i == root.curve-picked;
                             draggable: root.can-drag;
                             lifted: i == root.curve-carried;
-                            clicked => { root.curve-picked = i; }
+                            clicked => {
+                                root.curve-picked = i;
+                                root.curve-open(i);
+                            }
                             drag-out => { root.curve-drag-out(i); }
                             HorizontalLayout {
                                 padding-left: Space.md;
@@ -1597,7 +1712,7 @@ export component Panel inherits Window {
                 }
                 Text {
                     text: root.curve-said != "" ? root.curve-said
-                        : root.can-drag ? "Drag a curve onto a Curves device or an automation lane" : "Drag a curve out in Bitwig";
+                        : root.can-drag ? "Click a curve to edit it · drag one onto a Curves device or an automation lane" : "Click a curve to edit it";
                     color: root.curve-said != "" ? Theme.accent : Theme.faint;
                     font-size: Type.meta;
                     overflow: elide;
