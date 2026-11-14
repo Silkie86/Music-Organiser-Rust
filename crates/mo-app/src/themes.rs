@@ -218,16 +218,16 @@ pub const ACCENTS: [(&str, Option<u32>); 7] = [
 /// like the coloured strips on a mixing desk, so you can tell where you are at a glance. Only the place's mark wears
 /// it: what's picked, playing or working stays in the accent. Settings has none of its own (the theme's grey).
 /// Light themes get darker inks so they read on paper; Terminal gives every place its one phosphor green.
-pub fn place_colours(look: &Look) -> [u32; 8] {
+pub fn place_colours(look: &Look) -> [u32; 9] {
     let t = &look.theme;
     if t.name == "Terminal" {
-        return [t.accent, t.accent, t.accent, t.accent, t.accent, t.accent, t.accent, t.muted];
+        return [t.accent, t.accent, t.accent, t.accent, t.accent, t.accent, t.accent, t.accent, t.muted];
     }
     if t.light {
-        // Songs, Sounds, Presets, MIDI, Plugins, Space, Backup, Settings.
-        [0xD2581F, 0x0E8FB0, 0x8A4FC8, 0xA88200, 0x4A5FD0, 0x4F9A22, 0xC2457E, t.muted]
+        // Songs, Sounds, Presets, Curves, MIDI, Plugins, Space, Backup, Settings.
+        [0xD2581F, 0x0E8FB0, 0x8A4FC8, 0x0F9D8C, 0xA88200, 0x4A5FD0, 0x4F9A22, 0xC2457E, t.muted]
     } else {
-        [0xFF8F5E, 0x46C8E8, 0xC08CF0, 0xF0CF4F, 0x7F95FF, 0x8BD45A, 0xF07FB0, t.muted]
+        [0xFF8F5E, 0x46C8E8, 0xC08CF0, 0x35D0BA, 0xF0CF4F, 0x7F95FF, 0x8BD45A, 0xF07FB0, t.muted]
     }
 }
 
@@ -318,14 +318,14 @@ mod tests {
         for theme in THEMES {
             let look = Look { theme, accent: theme.accent, accent_text: theme.accent_text };
             let colours = place_colours(&look);
-            assert_eq!(colours[7], theme.muted, "{}: Settings is the theme's grey", theme.name);
+            assert_eq!(colours[8], theme.muted, "{}: Settings is the theme's grey", theme.name);
             if theme.name == "Terminal" {
                 // Its own green, whatever accent is picked.
                 let pink = Look { theme, accent: 0xF28CB1, accent_text: 0 };
-                assert!(place_colours(&pink)[..7].iter().all(|c| *c == theme.accent));
+                assert!(place_colours(&pink)[..8].iter().all(|c| *c == theme.accent));
             } else {
-                for (i, c) in colours[..7].iter().enumerate() {
-                    assert!(colours[i + 1..7].iter().all(|d| d != c), "{}: two places share a colour", theme.name);
+                for (i, c) in colours[..8].iter().enumerate() {
+                    assert!(colours[i + 1..8].iter().all(|d| d != c), "{}: two places share a colour", theme.name);
                 }
             }
         }

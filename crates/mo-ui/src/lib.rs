@@ -95,6 +95,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_backup_place(Place::Backup.index() as i32);
     app.set_plugins_place(Place::Plugins.index() as i32);
     app.set_presets_place(Place::Presets.index() as i32);
+    app.set_curves_place(Place::Curves.index() as i32);
     app.set_midi_place(Place::Midi.index() as i32);
     app.set_space_place(Place::Space.index() as i32);
     KEYS.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(shortcuts.clone())));
@@ -162,7 +163,7 @@ fn key_pressed(weak: &Weak<AppWindow>, feed: &Feed, key: &str, repeat: bool) -> 
         return repeat || plugins::run_action(&app, id);
     }
     if let Some(app) = weak.upgrade()
-        && app.get_place() == Place::Presets.index() as i32
+        && on_presets_page(app.get_place())
         && let Some(id) = shortcuts.page_action_for(key, presets::page_actions())
         && (repeat || presets::run_action(&app, id))
     {
@@ -242,7 +243,7 @@ fn connect_finder(app: &AppWindow, shortcuts: &Shortcuts, feed: &Feed) {
                 Place::Songs => songs::run_action(app, id),
                 Place::Sounds => sounds::run_action(app, id),
                 Place::Plugins => plugins::run_action(app, id),
-                Place::Presets => presets::run_action(app, id),
+                Place::Presets | Place::Curves => presets::run_action(app, id),
                 Place::Midi => midi::run_action(app, id),
                 Place::Space => space::run_action(app, id),
                 Place::Backup => backup::run_action(app, id),
@@ -338,6 +339,11 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     app.global::<AppKeys>().set_list_top_key(shortcuts.key_of("app.listTop").into());
 }
 
+/// Whether the place at `index` is one of the Presets page's two (Presets and Curves: one page, a section each).
+pub(crate) fn on_presets_page(index: i32) -> bool {
+    index == Place::Presets.index() as i32 || index == Place::Curves.index() as i32
+}
+
 /// Shows a place, and notes it for the log and the watchdog.
 pub(crate) fn go_to(app: &AppWindow, index: i32) {
     let Some(place) = usize::try_from(index).ok().and_then(Place::from_index) else { return };
@@ -347,8 +353,16 @@ pub(crate) fn go_to(app: &AppWindow, index: i32) {
         log::info("Page", place.name());
     }
     // An audition in Bitwig stops as its page goes (the 6 Nov review's X3-1).
-    if before == Place::Presets.index() && place != Place::Presets {
+    // (Presets and Curves are one page's two sections: only leaving both leaves it.)
+    let presets_page = |p: Place| matches!(p, Place::Presets | Place::Curves);
+    if Place::from_index(before).is_some_and(presets_page) && !presets_page(place) {
         presets::left(app);
+    }
+    // The section first, so the page never shows the other place's list for a frame.
+    match place {
+        Place::Presets => presets::show_section(app, mo_app::presets::Section::Sounds),
+        Place::Curves => presets::show_section(app, mo_app::presets::Section::Curves),
+        _ => {}
     }
     // The place's colour first, so the new page's mark never shows the old place's colour for a frame (the window's
     // own `changed place` comes a frame late).
@@ -374,7 +388,7 @@ pub(crate) fn go_to(app: &AppWindow, index: i32) {
     if place == Place::Space {
         space::shown(app);
     }
-    if place == Place::Presets {
+    if presets_page(place) {
         presets::shown(app);
     }
     refresh_keys(app);
@@ -404,7 +418,8 @@ fn page_actions(place: Place) -> &'static [Action] {
         Place::Songs => SONGS_ACTIONS,
         Place::Sounds => SOUNDS_ACTIONS,
         Place::Plugins => PLUGINS_ACTIONS,
-        Place::Presets => presets::page_actions(),
+        Place::Presets => mo_app::shortcuts::PRESETS_ACTIONS,
+        Place::Curves => mo_app::shortcuts::CURVES_ACTIONS,
         Place::Midi => MIDI_ACTIONS,
         Place::Space => SPACE_ACTIONS,
         Place::Backup => BACKUP_ACTIONS,
@@ -469,6 +484,7 @@ fn icon(app: &AppWindow, place: Place) -> slint::SharedString {
         Place::Songs => icons.get_songs(),
         Place::Sounds => icons.get_sounds(),
         Place::Presets => icons.get_presets(),
+        Place::Curves => icons.get_curves(),
         Place::Midi => icons.get_midi(),
         Place::Plugins => icons.get_plugins(),
         Place::Space => icons.get_space(),
@@ -489,6 +505,7 @@ fn coming(place: Place) -> &'static str {
             "Every sound you made inside your songs, and your preset files, with a guess at each one's part (bass, lead, \
              chords, drums) from the notes it played. Built in phase 5."
         }
+        Place::Curves => "The shapes your settings moved in, in your songs and your plugins, to reuse and reshape.",
         Place::Midi => {
             "Your MIDI packs and the parts in your songs: search, play and drag into a DAW. Built in phase 6."
         }
@@ -502,10 +519,10 @@ fn coming(place: Place) -> &'static str {
 }
 
 /// The places with a list, which Home takes back to its top.
-const LISTED: [Place; 5] = [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins];
+const LISTED: [Place; 6] = [Place::Songs, Place::Sounds, Place::Presets, Place::Curves, Place::Midi, Place::Plugins];
 
 /// The places with a search box, which Ctrl+F puts the keys in.
-const SEARCHED: [Place; 5] = [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins];
+const SEARCHED: [Place; 6] = [Place::Songs, Place::Sounds, Place::Presets, Place::Curves, Place::Midi, Place::Plugins];
 
 /// Runs an app-wide action (`held`: its key is repeating). Returns whether it did anything, so an unused key can go on
 /// to the page.
@@ -533,7 +550,7 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
             let place = app.get_place();
             return (place == Place::Sounds.index() as i32 && sounds::toggle_play(&app))
                 || (place == Place::Midi.index() as i32 && midi::toggle_play(&app))
-                || (place == Place::Presets.index() as i32 && presets::toggle_play(&app));
+                || (on_presets_page(place) && presets::toggle_play(&app));
         }
         // Ctrl+F: the keys go to the page's search box, its words picked (review X3-22). The page on show sees the
         // count change; a page without a search box lets the key go on. Not while Ctrl+K or the F12 note is open, as
@@ -558,7 +575,7 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
             return match place() {
                 Some(Place::Songs) => songs::escape(&app),
                 Some(Place::Sounds) => sounds::escape(&app),
-                Some(Place::Presets) => presets::escape(&app),
+                Some(Place::Presets | Place::Curves) => presets::escape(&app),
                 Some(Place::Midi) => midi::escape(&app),
                 Some(Place::Plugins) => plugins::escape(&app),
                 Some(Place::Space) => space::escape(&app),
@@ -609,7 +626,7 @@ fn step_list(app: &AppWindow, by: i32, held: bool) -> bool {
         Some(Place::Sounds) => app.global::<SoundsData>().invoke_step(by * 2, held),
         Some(Place::Midi) => app.global::<MidiData>().invoke_step(by),
         Some(Place::Plugins) => app.global::<PluginsData>().invoke_step(by),
-        Some(Place::Presets) => {
+        Some(Place::Presets | Place::Curves) => {
             let data = app.global::<PresetsData>();
             if data.get_section() == 0 {
                 data.invoke_step(by);

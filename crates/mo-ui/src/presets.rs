@@ -290,7 +290,11 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         }
     });
     // The app may start on this page: it was shown before the page knew where the library is.
-    if app.get_place() == Place::Presets.index() as i32 {
+    if crate::on_presets_page(app.get_place()) {
+        // On Curves, the curves are read now: the place was noted before the page could read them.
+        if PAGE.with(|p| p.borrow().section) == Section::Curves {
+            pick_section(app, Section::Curves);
+        }
         shown(app);
     }
 }
@@ -346,12 +350,6 @@ fn wire(app: &AppWindow) {
     let key = PAGE.with(|p| p.borrow().shortcuts.key_of(act::EXPORT_SHOWN).to_owned());
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
 
-    let weak = app.as_weak();
-    data.on_section_picked(move |i| {
-        if let (Some(app), Some(s)) = (weak.upgrade(), usize::try_from(i).ok().and_then(Section::from_index)) {
-            pick_section(&app, s);
-        }
-    });
     let weak = app.as_weak();
     data.on_search_edited(move |t| {
         let Some(app) = weak.upgrade() else { return };
@@ -2528,9 +2526,18 @@ pub fn pick_row(app: &AppWindow, row: usize) {
     }
 }
 
-/// Shows a section (screenshots).
+/// Shows a section: Presets and Curves are two places on the rail, each one of this page's sections (and the
+/// screenshots ask for one). Before the page is wired (the app starting on it), the section is only noted: `connect`
+/// shows it.
 pub fn show_section(app: &AppWindow, s: Section) {
-    pick_section(app, s);
+    if APP.with(|a| a.borrow().is_none()) {
+        PAGE.with(|p| p.borrow_mut().section = s);
+        app.global::<PresetsData>().set_section(s.index() as i32);
+        return;
+    }
+    if PAGE.with(|p| p.borrow().section) != s {
+        pick_section(app, s);
+    }
 }
 
 fn sample_items() -> Vec<Item> {

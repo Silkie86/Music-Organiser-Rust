@@ -1,6 +1,7 @@
 //! The places on the left-hand rail. Agreed with Solomon on 2026-10-29: Songs, Sounds, Presets, MIDI, Plugins and
 //! Space, with Settings at the bottom. The Playground becomes an app of its own. Ctrl+K jumps to anything from
-//! anywhere, so the rail stays short.
+//! anywhere, so the rail stays short. Curves got a place of its own after Presets on 2026-11-14 (Solomon: "if curves
+//! are gonna be this fully fledged maybe it should be its own page"); until then it was a section of Presets.
 
 /// The `start_page` setting's value that means "open on the page I last used".
 pub const LAST_PAGE_CHOICE: &str = "Last page I used";
@@ -11,6 +12,7 @@ pub enum Place {
     Songs,
     Sounds,
     Presets,
+    Curves,
     Midi,
     Plugins,
     Space,
@@ -20,10 +22,11 @@ pub enum Place {
 
 impl Place {
     /// Every place, top to bottom. Settings sits apart at the bottom of the rail.
-    pub const ALL: [Place; 8] = [
+    pub const ALL: [Place; 9] = [
         Place::Songs,
         Place::Sounds,
         Place::Presets,
+        Place::Curves,
         Place::Midi,
         Place::Plugins,
         Place::Space,
@@ -36,6 +39,7 @@ impl Place {
             Place::Songs => "Songs",
             Place::Sounds => "Sounds",
             Place::Presets => "Presets",
+            Place::Curves => "Curves",
             Place::Midi => "MIDI",
             Place::Plugins => "Plugins",
             Place::Space => "Space",
@@ -51,6 +55,8 @@ impl Place {
             Place::Songs => "app.goProjects",
             Place::Sounds => "app.goSounds",
             Place::Presets => "app.goPresets",
+            // New in this app.
+            Place::Curves => "app.goCurves",
             Place::Midi => "app.goMidi",
             Place::Plugins => "app.goPlugins",
             Place::Space => "app.goSpace",
@@ -86,6 +92,7 @@ impl Place {
         match value {
             "Sounds" | "Sound Lab" | "Samples" => Place::Sounds,
             "Presets" => Place::Presets,
+            "Curves" => Place::Curves,
             "MIDI" | "Playground" => Place::Midi,
             "Plugins" => Place::Plugins,
             "Space" => Place::Space,

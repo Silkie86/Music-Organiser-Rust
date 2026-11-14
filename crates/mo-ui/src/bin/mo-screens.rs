@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut shots = Vec::new();
     for place in Place::ALL {
-        app.set_place(place.index() as i32);
+        show_place(&app, place);
         shots.push((format!("{}-graphite.png", slug(place.name())), capture(&window)));
     }
     // The MIDI page with a part picked: its card, piano roll and key; then parts shaped like it.
@@ -1093,7 +1093,7 @@ fn wide_shots(
 ) -> Result<(), Box<dyn std::error::Error>> {
     window.set_size(PhysicalSize::new(WIDE.0, WIDE.1));
     for place in Place::ALL {
-        app.set_place(place.index() as i32);
+        show_place(app, place);
         // Once to lay the page out at this width (the tiles' width tells Sounds how many fit in a row), then for real.
         capture_sized(window, WIDE, Duration::from_millis(400));
         let pixels = capture_sized(window, WIDE, Duration::from_millis(400));
@@ -1184,8 +1184,7 @@ fn card_keys_checks(
     front(true);
     keys_work("once the sound's card closed while another app's window was in front, with the keys in its tag box")?;
     // Presets: a curve's Rename, a letter typed, then Esc in the box.
-    start_on(app, Place::Presets);
-    mo_ui::presets::show_section(app, mo_app::presets::Section::Curves);
+    start_on(app, Place::Curves);
     mo_ui::presets::pick_row(app, 0);
     capture(window);
     let presets = app.global::<mo_ui::PresetsData>();
@@ -1415,6 +1414,17 @@ fn start_on_songs(app: &mo_ui::AppWindow) {
     start_on(app, Place::Songs);
 }
 
+/// `place` on show without the keys moving: the rail's light, and the Presets page's section for Presets or Curves.
+fn show_place(app: &mo_ui::AppWindow, place: Place) {
+    use mo_app::presets::Section;
+    match place {
+        Place::Presets => mo_ui::presets::show_section(app, Section::Sounds),
+        Place::Curves => mo_ui::presets::show_section(app, Section::Curves),
+        _ => {}
+    }
+    app.set_place(place.index() as i32);
+}
+
 /// `place` on show, with the keys on the window and nothing open over it, as [`start_on_songs`].
 fn start_on(app: &mo_ui::AppWindow, place: Place) {
     app.invoke_place_chosen(place.index() as i32);
@@ -1455,7 +1465,7 @@ fn held(app: &mo_ui::AppWindow, key: impl Into<slint::SharedString>) {
     slint::platform::update_timers_and_animations();
 }
 
-/// The Presets page: made-up sounds with one picked, then the Curves section with a curve picked; a sound and a curve
+/// The Presets page: made-up sounds with one picked, then the Curves page with a curve picked; a sound and a curve
 /// dragged out from their lines.
 fn presets_shots(
     app: &mo_ui::AppWindow,
@@ -1463,8 +1473,7 @@ fn presets_shots(
     graphite: &Look,
     shots: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use mo_app::presets::Section;
-    app.set_place(Place::Presets.index() as i32);
+    show_place(app, Place::Presets);
     mo_ui::presets::show_sample(app);
     shots.push(("presets-list.png".into(), capture(window)));
     // The Plugin filter's menu, open, with two plugins picked and ticked, and the Synths chip lit; then a click beside
@@ -1497,20 +1506,20 @@ fn presets_shots(
     shots.push(("presets-drag.png".into(), with_card(lifted, &card, graphite, (x + w / 3, y + h / 2 + 20))));
     data.set_lifted_row(-1);
     capture(window);
-    mo_ui::presets::show_section(app, Section::Curves);
-    shots.push(("presets-curves.png".into(), capture(window)));
+    show_place(app, Place::Curves);
+    shots.push(("curves-list.png".into(), capture(window)));
     mo_ui::presets::pick_row(app, 0);
-    shots.push(("presets-curve-picked.png".into(), capture(window)));
+    shots.push(("curves-picked.png".into(), capture(window)));
     // A curve dragged out onto an automation lane from its line, its shape on the card.
     let still = capture(window);
     data.set_curve_lifted_row(1);
     let lifted = capture(window);
-    let card = mo_ui::presets::curve_card_at_row(1).ok_or("presets-curve-drag.png: no curve on the second line")?;
-    let (x, y, w, h) = changed_box(&still, &lifted).ok_or("presets-curve-drag.png: the second line didn't dim")?;
-    shots.push(("presets-curve-drag.png".into(), with_card(lifted, &card, graphite, (x + w / 3, y + h / 2 + 20))));
+    let card = mo_ui::presets::curve_card_at_row(1).ok_or("curves-drag.png: no curve on the second line")?;
+    let (x, y, w, h) = changed_box(&still, &lifted).ok_or("curves-drag.png: the second line didn't dim")?;
+    shots.push(("curves-drag.png".into(), with_card(lifted, &card, graphite, (x + w / 3, y + h / 2 + 20))));
     data.set_curve_lifted_row(-1);
     capture(window);
-    mo_ui::presets::show_section(app, Section::Sounds);
+    show_place(app, Place::Presets);
     mo_ui::presets::pick_row(app, usize::MAX);
     Ok(())
 }
@@ -1563,28 +1572,24 @@ fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
 /// was, and the button over its bottom right corner takes it back to its top, as Home does. Before, a page made again
 /// put its list back at its top. In the short window, where every list turns; each is left at its top for what follows.
 fn lists_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
-    use mo_app::presets::Section;
     use slint::platform::Key;
     let sounds = app.global::<mo_ui::SoundsData>();
-    let (view_before, curves_before) = (sounds.get_view(), app.global::<mo_ui::PresetsData>().get_section() == 1);
+    let view_before = sounds.get_view();
     window.set_size(PhysicalSize::new(WIDTH, SHORT));
     let mut wrong = Vec::new();
     let ((x, y), list) = (SHORT_LIST_WHEEL, SHORT_LIST);
     for (name, place, view, (button_x, button_y)) in LISTS {
         start_on(app, place);
-        match place {
-            Place::Sounds => {
-                sounds.invoke_pick_view(view);
-                // With a sound picked, so its card is at the side, as the Sounds lines in LISTS have it. The Kits
-                // shots let go of the picked sound when the kit they rolled at random didn't hold it; then the tiles
-                // took the card's room too, their button sat at the far right, and the click picked a tile instead
-                // (the check failed on and off, 11 Nov).
-                if !sounds.get_panel_shown() {
-                    pick_sound(app, 0);
-                }
+        // Presets shows its sounds: the place itself picks the section.
+        if place == Place::Sounds {
+            sounds.invoke_pick_view(view);
+            // With a sound picked, so its card is at the side, as the Sounds lines in LISTS have it. The Kits
+            // shots let go of the picked sound when the kit they rolled at random didn't hold it; then the tiles
+            // took the card's room too, their button sat at the far right, and the click picked a tile instead
+            // (the check failed on and off, 11 Nov).
+            if !sounds.get_panel_shown() {
+                pick_sound(app, 0);
             }
-            Place::Presets => mo_ui::presets::show_section(app, Section::Sounds),
-            _ => {}
         }
         // Drawn once first: a list made for another view turns to the picked sound a turn later.
         hover(window, -1.0, -1.0);
@@ -1623,9 +1628,6 @@ fn lists_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow
         }
     }
     sounds.invoke_pick_view(view_before);
-    if curves_before {
-        mo_ui::presets::show_section(app, Section::Curves);
-    }
     window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     start_on_songs(app);
     capture(window);
