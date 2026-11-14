@@ -21,6 +21,11 @@ impl Colour {
         Colour { r: (rgb >> 16) as u8, g: (rgb >> 8) as u8, b: rgb as u8, a }
     }
 
+    /// This colour showing `part` (0 to 1) of what it shows.
+    pub fn showing(self, part: f64) -> Colour {
+        Colour { a: (f64::from(self.a) * part.clamp(0.0, 1.0)).round() as u8, ..self }
+    }
+
     fn skia(self) -> Color {
         Color::from_rgba8(self.r, self.g, self.b, self.a)
     }
