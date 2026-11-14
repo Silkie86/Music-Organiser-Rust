@@ -4,7 +4,7 @@
 // (mo_app::backup), mo-ui/src/backup.rs fills it.
 import { ListView } from "std-widgets.slint";
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, StudioButton, ActionKey, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Groove, ProgressLine, EmptyState, NoticeStrip, ListLine } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, ActionKey, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Panel, Groove, ProgressLine, EmptyState, NoticeStrip, ListLine } from "../studio.slint";
 
 export struct BackupFolderLine {
     path: string,
@@ -115,11 +115,7 @@ export component BackupPage inherits Rectangle {
             }
 
             // The drive.
-            Rectangle {
-                background: Theme.surface;
-                border-radius: Theme.radius;
-                border-width: 1px;
-                border-color: Theme.stroke;
+            Panel {
                 HorizontalLayout {
                     padding: Space.lg;
                     spacing: Space.lg;
@@ -291,11 +287,7 @@ export component BackupPage inherits Rectangle {
                                 overflow: elide;
                             }
                         }
-                        Rectangle {
-                            background: Theme.surface;
-                            border-radius: Theme.radius;
-                            border-width: 1px;
-                            border-color: Theme.stroke;
+                        Panel {
                             VerticalLayout {
                                 padding: Space.xs;
                                 if BackupData.folders.length == 0: EmptyState {
@@ -336,11 +328,7 @@ export component BackupPage inherits Rectangle {
                     max-width: root.wide ? 100000px : 440px;
                     alignment: start;
                     spacing: Space.lg;
-                    Rectangle {
-                        background: Theme.surface;
-                        border-radius: Theme.radius;
-                        border-width: 1px;
-                        border-color: Theme.stroke;
+                    Panel {
                         VerticalLayout {
                             padding: Space.lg;
                             spacing: Space.md;
@@ -411,11 +399,7 @@ export component BackupPage inherits Rectangle {
                     }
 
                     // The older versions on the backup drive.
-                    Rectangle {
-                        background: Theme.surface;
-                        border-radius: Theme.radius;
-                        border-width: 1px;
-                        border-color: Theme.stroke;
+                    Panel {
                         VerticalLayout {
                             padding: Space.lg;
                             spacing: Space.md;

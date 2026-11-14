@@ -526,6 +526,24 @@ export component RailItem inherits Rectangle {
     }
 }
 
+// A raised panel, like a unit's face plate: for a card on a page (a drive, a Settings card, a side card). Its top
+// edge catches the light, as a button's does. Every card on every page is one of these, so they all sit the same
+// way on the page; a card that says something with its outline (a drive that's nearly full, a card with the keys)
+// sets `border-color`.
+export component Panel inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    Rectangle {
+        x: parent.border-radius;
+        y: 1px;
+        width: parent.width - 2 * parent.border-radius;
+        height: 1px;
+        background: Theme.shine;
+    }
+}
+
 // A sunken panel, like a screen set into the hardware: for previews, lists and empty pages.
 export component Well inherits Rectangle {
     background: Theme.well;
@@ -3188,7 +3206,7 @@ export component OptionsButton inherits StudioButton {
 }
 
 // The picked thing's panel beside a page's list: a raised card with a × to put it away (Esc does too).
-export component SidePanel inherits Rectangle {
+export component SidePanel inherits Panel {
     callback close;
     // Whether it has something to close: an empty card ("Pick a part") shows no ×.
     in property <bool> closable: true;
@@ -3214,18 +3232,6 @@ export component SidePanel inherits Rectangle {
         } else if (top < shown-top) {
             flick.content-y = min(0px, flick.content-y + (shown-top - top));
         }
-    }
-    background: Theme.surface;
-    border-radius: Theme.radius;
-    border-width: 1px;
-    border-color: Theme.edge;
-    // The top-lit edge of a raised panel, as on a button.
-    Rectangle {
-        x: parent.border-radius;
-        y: 1px;
-        width: parent.width - 2 * parent.border-radius;
-        height: 1px;
-        background: Theme.shine;
     }
     // Scrolls when what it holds is taller than the panel; fills it otherwise, so a stretch at the end works. Never
     // wider than the panel: something too wide inside (a long path once) made the whole card slide right and lose its

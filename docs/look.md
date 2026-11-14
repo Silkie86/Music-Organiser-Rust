@@ -134,6 +134,11 @@ light that means something. It should feel like a rack unit on a desk, not a web
   sounds: 458 of 1,204") used to keep a row of its own, empty nearly all the time, so every page but Songs started
   23 px lower with a gap under its name. It now sits on the title's row after the summary (`PageHeader`), which
   shortens to make room; nothing jumps when a job starts or ends, and every page starts at the same height as Songs.
+- One raised panel (the frontend-design pass, step 4): every card on a page is a `Panel` (`studio.slint`): the
+  surface colour, the dark edge and a top-lit edge, as a button has. Settings' cards, Backup's, Space's drives,
+  Songs' song card, the Sounds cards and every `SidePanel` are one; before, each page drew its own, some with a grey
+  outline and some with a dark one. A card that says something with its outline (a drive nearly full, the Swept
+  card with the keys) sets `border-color`. A new card on a page starts from `Panel`, never from a plain rectangle.
 
 ## Next steps
 

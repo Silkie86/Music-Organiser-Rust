@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Heights, Well, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -971,11 +971,7 @@ component PadLineView inherits ListLine {
 }
 
 // Rediscover's forgotten folders, beside its list.
-component FoldersCard inherits Rectangle {
-    background: Theme.surface;
-    border-radius: Theme.radius;
-    border-width: 1px;
-    border-color: Theme.edge;
+component FoldersCard inherits Panel {
     VerticalLayout {
         padding: Space.lg;
         spacing: Space.sm;
@@ -1018,11 +1014,7 @@ component FoldersCard inherits Rectangle {
 // Favourites from Bitwig: the multisamples in your Bitwig Library folders, ticked for the ones that hold favourites,
 // and Mark as favourites, which makes every sound in your library that is one of their samples a favourite. In the
 // sound card's place.
-component BitwigCard inherits Rectangle {
-    background: Theme.surface;
-    border-radius: Theme.radius;
-    border-width: 1px;
-    border-color: Theme.edge;
+component BitwigCard inherits Panel {
     VerticalLayout {
         padding: Space.lg;
         spacing: Space.sm;
@@ -1933,14 +1925,11 @@ export component SoundsPage inherits Rectangle {
                                 box-height: SoundsData.galaxy-mini-height;
                                 go(x, y) => { SoundsData.galaxy-mini(x, y); }
                             }
-                            if SoundsData.galaxy-swept.length > 0: Rectangle {
+                            if SoundsData.galaxy-swept.length > 0: Panel {
                                 x: sky.width - self.width - Space.md;
                                 y: Space.md;
                                 width: 250px;
                                 height: min(swept-card.preferred-height, sky.height - 2 * Space.md);
-                                background: Theme.surface;
-                                border-radius: Theme.radius;
-                                border-width: 1px;
                                 // Accent while the arrow keys go through it.
                                 border-color: SoundsData.galaxy-swept-keys && keys.has-focus ? Theme.accent : Theme.edge;
                                 clip: true;
