@@ -59,7 +59,9 @@ const SCHEMA: &str = "\
         device TEXT NOT NULL, setting TEXT NOT NULL, at REAL NOT NULL, length REAL NOT NULL, points TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS curve_places_path ON curve_places (path);
     CREATE INDEX IF NOT EXISTS curve_places_id ON curve_places (id);
-    CREATE TABLE IF NOT EXISTS your_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);";
+    CREATE TABLE IF NOT EXISTS your_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS made_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, length REAL NOT NULL, \
+        points TEXT NOT NULL, made INTEGER NOT NULL);";
 
 /// Where a curve was found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -72,6 +74,8 @@ pub enum SourceKind {
     BitwigCurve,
     /// A plugin's LFO shape: a shape file (Serum, Vital, Duck), or one drawn in a preset (LFOTool, Vital, Duck).
     PluginShape,
+    /// Made in the app's curve editor and saved as a new curve: kept in `curves.db` itself, in no file.
+    Made,
 }
 
 impl SourceKind {
@@ -114,7 +118,8 @@ fn read_version(path: &str) -> i64 {
         Some(SourceKind::PluginShape) if vital::is_shape_file(path) => vital::VERSION,
         Some(SourceKind::PluginShape) if duck::is_shape_file(path) => duck::VERSION,
         Some(SourceKind::PluginShape) => serum::VERSION,
-        None => 0,
+        // No file gives a made curve: it's kept in the database itself.
+        Some(SourceKind::Made) | None => 0,
     };
     CURVES_VERSION * 1_000_000_000 + i64::from(reader)
 }
@@ -185,6 +190,22 @@ pub fn shape_id(points: &[curve::CurvePoint]) -> String {
     h.update(b"mo-presets curve 1\0");
     for p in points {
         for v in [round(p.x), round((p.y - low) / span), round(p.bend)] {
+            h.update(v.to_le_bytes());
+        }
+    }
+    h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
+/// The id of a curve made in the editor: its points as they are (not stretched to one height, as [`shape_id`]'s
+/// are) and its length, hashed. The same curve saved twice is one curve; one that only differs from a found curve in
+/// its height or length is still a curve of its own.
+pub fn made_id(points: &[curve::CurvePoint], length_beats: f64) -> String {
+    let round = |v: f64| (v * 1000.0).round() as i64;
+    let mut h = Sha256::new();
+    h.update(b"mo-presets made curve 1\0");
+    h.update(round(length_beats).to_le_bytes());
+    for p in points {
+        for v in [round(p.x), round(p.y), round(p.bend)] {
             h.update(v.to_le_bytes());
         }
     }
@@ -585,6 +606,7 @@ impl CurvesDb {
             by_id.entry(id).or_default().push((source, length, points));
         }
         let yours = self.yours(only)?;
+        let made = self.made(only)?;
         let mut out: Vec<Curve> = by_id
             .into_iter()
             .filter_map(|(id, found)| {
@@ -603,8 +625,95 @@ impl CurvesDb {
                 })
             })
             .collect();
+        // The curves made in the editor: each its own curve, found in no file.
+        out.extend(made.into_iter().map(|m| {
+            let (name, hidden) = yours.get(&m.id).cloned().unwrap_or((None, false));
+            let source = CurveSource {
+                kind: SourceKind::Made,
+                path: String::new(),
+                song: m.name.clone(),
+                name: String::new(),
+                device: String::new(),
+                setting: String::new(),
+                at: 0.0,
+                modified: m.made,
+            };
+            Curve {
+                name: name.unwrap_or(m.name),
+                id: m.id,
+                points: m.points,
+                length_beats: m.length,
+                hidden,
+                sources: vec![source],
+            }
+        }));
         out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
         Ok(out)
+    }
+
+    /// The curves made in the editor (one, or all). None from a database made before there were any: the plugin opens
+    /// it only to read, so the table isn't added for it.
+    fn made(&self, only: Option<&str>) -> Result<Vec<Made>, CurvesError> {
+        let there: Option<i64> = self
+            .conn
+            .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'made_curves'", [], |r| r.get(0))
+            .optional()?;
+        if there.is_none() {
+            return Ok(Vec::new());
+        }
+        let mut st =
+            self.conn.prepare("SELECT id, name, length, points, made FROM made_curves WHERE ?1 IS NULL OR id = ?1")?;
+        let rows = st.query_map([only], |r| {
+            Ok((r.get::<_, String>(0)?, text_at(r, 1)?, r.get::<_, f64>(2)?, text_at(r, 3)?, r.get::<_, i64>(4)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, length, points, made) = row?;
+            // A line that can't be read (damaged) is passed over, as a damaged place is.
+            let Some(points) = points.as_deref().and_then(parse_points) else { continue };
+            out.push(Made { id, name: name.unwrap_or_default(), length, points, made });
+        }
+        Ok(out)
+    }
+
+    /// Keeps a curve made in the editor as a new curve of its own, named `name`, made at `now` (seconds since 1970);
+    /// returns it as the list has it. The same points and length saved again are the same curve: it keeps its first
+    /// name and date. Refused when it's no curve (fewer than two points, a point out of place, no length).
+    pub fn save_made(
+        &self,
+        name: &str,
+        points: &[curve::CurvePoint],
+        length_beats: f64,
+        now: i64,
+    ) -> Result<Curve, CurvesError> {
+        let whole = |p: &curve::CurvePoint| {
+            (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y) && (-1.0..=1.0).contains(&p.bend)
+        };
+        let in_order = points.iter().zip(points.iter().skip(1)).all(|(a, b)| a.x <= b.x);
+        if points.len() < 2 || !points.iter().all(whole) || !in_order {
+            return Err(CurvesError("that isn't a curve that can be kept (its points are out of place)".into()));
+        }
+        if !length_beats.is_finite() || length_beats <= 0.0 {
+            return Err(CurvesError("that curve has no length".into()));
+        }
+        let name = Some(name.trim()).filter(|n| !n.is_empty()).unwrap_or("New curve");
+        let id = made_id(points, length_beats);
+        self.conn.execute(
+            "INSERT INTO made_curves (id, name, length, points, made) VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(id) DO NOTHING",
+            params![id, name, length_beats, points_text(points), now],
+        )?;
+        self.get(&id)?.ok_or_else(|| CurvesError("the curve was kept but can't be read back".into()))
+    }
+
+    /// Forgets a curve made in the editor (and your name for it); whether there was one. Found curves aren't touched:
+    /// they come from your files.
+    pub fn remove_made(&self, id: &str) -> Result<bool, CurvesError> {
+        let gone = self.conn.execute("DELETE FROM made_curves WHERE id = ?1", [id])? > 0;
+        if gone {
+            self.conn.execute("DELETE FROM your_curves WHERE id = ?1", [id])?;
+        }
+        Ok(gone)
     }
 
     fn yours(&self, only: Option<&str>) -> Result<HashMap<String, (Option<String>, bool)>, CurvesError> {
@@ -635,8 +744,18 @@ impl CurvesDb {
 
     /// Whether a curve with this id is found anywhere now (for a page holding an old id).
     pub fn has(&self, id: &str) -> Result<bool, CurvesError> {
-        Ok(self.conn.query_row("SELECT 1 FROM curve_places WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
+        Ok(self.conn.query_row("SELECT 1 FROM curve_places WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some()
+            || !self.made(Some(id))?.is_empty())
     }
+}
+
+/// A line of `made_curves`.
+struct Made {
+    id: String,
+    name: String,
+    length: f64,
+    points: Vec<curve::CurvePoint>,
+    made: i64,
 }
 
 /// The name made for a curve from where it was found: its clip's name, else the song, plugin and setting.
@@ -869,6 +988,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_curve_saved_from_the_editor_is_a_curve_of_its_own() {
+        let dir = temp_dir("made");
+        let found = library_curve(&dir, "a.bwcurve", "Rise", &[0.0, 1.0, 0.0]);
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        db.scan(std::slice::from_ref(&found), &Progress::default()).unwrap();
+        // The found curve at half its height: the same shape to the scan, but a curve of its own once saved.
+        let points = [p(0.0, 0.0, 0.0), p(0.5, 0.5, 0.25), p(1.0, 0.0, 0.0)];
+        let made = db.save_made("  Half rise ", &points, 8.0, 1_800_000_000).unwrap();
+        assert_eq!((made.name.as_str(), made.length_beats, made.points.as_slice()), ("Half rise", 8.0, &points[..]));
+        assert_eq!(made.sources.len(), 1);
+        assert_eq!((made.sources[0].kind, made.sources[0].modified), (SourceKind::Made, 1_800_000_000));
+        assert!(!made.sources[0].kind.is_song());
+        assert_eq!(db.list().unwrap().len(), 2);
+        assert!(db.has(&made.id).unwrap());
+        // Saved again it's the same curve, with its first name and date; another length is another curve.
+        let again = db.save_made("Other name", &points, 8.0, 1_900_000_000).unwrap();
+        assert_eq!(again, made);
+        assert_ne!(db.save_made("Longer", &points, 16.0, 1).unwrap().id, made.id);
+        assert_eq!(db.list().unwrap().len(), 3);
+        // It's renamed and hidden as any curve, and a scan leaves it be.
+        assert_eq!(db.rename(&made.id, "Mine").unwrap().unwrap().name, "Mine");
+        assert!(db.set_hidden(&made.id, true).unwrap().unwrap().hidden);
+        db.scan(&[], &Progress::default()).unwrap();
+        let kept = db.get(&made.id).unwrap().unwrap();
+        assert_eq!((kept.name.as_str(), kept.hidden), ("Mine", true));
+        assert_eq!(db.list().unwrap().len(), 2, "the found curve went with its file, the made ones stay");
+        // No name gets one; what's no curve is refused; the file it's dragged out as is made as for any curve.
+        assert_eq!(db.save_made(" ", &[p(0.0, 1.0, 0.0), p(1.0, 0.0, 0.0)], 4.0, 2).unwrap().name, "New curve");
+        assert!(db.save_made("One point", &points[..1], 4.0, 2).is_err());
+        assert!(db.save_made("Backwards", &[p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0)], 4.0, 2).is_err());
+        assert!(db.save_made("Too high", &[p(0.0, 0.0, 0.0), p(1.0, 1.5, 0.0)], 4.0, 2).is_err());
+        assert!(db.save_made("No length", &points, 0.0, 2).is_err());
+        assert_eq!(
+            curve::read(std::fs::read(file(&kept, &dir.join(FOLDER)).unwrap()).unwrap()).unwrap().points,
+            points
+        );
+        // The plugin reads them too; and a database from before there were any still opens to read.
+        let read_only = CurvesDb::open_read_only(&dir.join(FILE_NAME)).unwrap();
+        assert_eq!(read_only.list().unwrap(), db.list().unwrap());
+        assert!(db.remove_made(&made.id).unwrap() && !db.remove_made(&made.id).unwrap());
+        assert!(!db.has(&made.id).unwrap());
+        db.conn.execute_batch("DROP TABLE made_curves").unwrap();
+        let old = CurvesDb::open_read_only(&dir.join(FILE_NAME)).unwrap();
+        assert_eq!(old.list().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn library_curve(dir: &Path, file: &str, name: &str, ys: &[f64]) -> String {

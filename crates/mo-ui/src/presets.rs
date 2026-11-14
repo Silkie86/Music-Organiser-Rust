@@ -357,6 +357,12 @@ fn wire(app: &AppWindow) {
             run_curve_action(&app, curve_act::HEAR);
         }
     });
+    let weak = app.as_weak();
+    app.global::<CurveEditorData>().on_save_as_new(move || {
+        if let Some(app) = weak.upgrade() {
+            run_curve_action(&app, curve_act::SAVE_AS_NEW);
+        }
+    });
     let key = PAGE.with(|p| p.borrow().shortcuts.key_of(act::EXPORT_SHOWN).to_owned());
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
 
@@ -968,9 +974,13 @@ fn show_curve_card(app: &AppWindow) {
         let (facts, found) = logic::curve_facts_line(&sent);
         editor.set_facts(facts.into());
         editor.set_found(found.into());
-        let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some());
+        let edited = editor.get_changed();
+        let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some(), edited);
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
         editor.set_hear_key(key(curve_act::HEAR));
+        editor.set_undo_key(key(curve_act::UNDO));
+        editor.set_redo_key(key(curve_act::REDO));
+        editor.set_save_key(key(curve_act::SAVE_AS_NEW));
         // The places it was found, each showing its song on the Songs page, then the way to the song's file. A common
         // shape is found in hundreds: only made again for another curve.
         let found = (p.curve_found_of.as_deref() != Some(c.id.as_str())).then(|| logic::curve_found_lines(c));
@@ -1000,7 +1010,12 @@ fn show_curve_card(app: &AppWindow) {
                 .filter(|o| o.id != curve_act::HEAR)
                 .map(|o| CardAction {
                     text: o.text.as_str().into(),
-                    tip: what_of(o.id).into(),
+                    // These act on the curve as it was found: with edits not saved, Bitwig would get the old shape.
+                    tip: if edited && o.id == curve_act::TO_BITWIG {
+                        "Save as new curve first: this saves the curve as it was found".into()
+                    } else {
+                        what_of(o.id).into()
+                    },
                     key: key(o.id),
                     id: o.id.into(),
                     enabled: o.enabled,
@@ -1021,6 +1036,11 @@ fn show_curve_card(app: &AppWindow) {
             p.curve_found = found.into_iter().map(|l| l.save).collect();
         }
     });
+}
+
+/// The editor's curve became edited, or was put back as it was: the card's own buttons follow.
+pub(crate) fn curve_edits_changed(app: &AppWindow) {
+    show_curve_card(app);
 }
 
 /// Picks a sound (a place in the page's lines), or none.
@@ -2409,7 +2429,20 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             };
             show_in_songs(app, &s.path);
         }
-        curve_act::HEAR => hear_curve(app, sent),
+        // Heard as the editor has it now, edits and all.
+        curve_act::HEAR => {
+            let heard = match crate::curve_editor::edited() {
+                Some((points, length_beats)) => Curve { points, length_beats, ..sent },
+                None => sent,
+            };
+            hear_curve(app, heard);
+        }
+        curve_act::UNDO => return crate::curve_editor::undo(app, true),
+        curve_act::REDO => return crate::curve_editor::undo(app, false),
+        curve_act::SAVE_AS_NEW => {
+            let Some((points, length)) = crate::curve_editor::edited() else { return false };
+            save_as_new(logic::edited_name(&sent.name), points, length);
+        }
         curve_act::REVEAL => {
             let folder = data_dir.join(curves::FOLDER);
             let started = background::spawn("Curve file", move || match curves::file(&sent, &folder) {
@@ -2456,6 +2489,56 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         }
     }
     true
+}
+
+/// Keeps the editor's curve as a new curve of its own in `curves.db`, puts it in the list and picks it: the editor
+/// then shows it as saved.
+fn save_as_new(name: String, points: Vec<mo_formats::bitwig::curve::CurvePoint>, length: f64) {
+    let (db, feed) = PAGE.with(|p| {
+        let p = p.borrow();
+        (p.data_dir.join(curves::FILE_NAME), p.feed.clone())
+    });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let started = background::spawn("Curve save", move || {
+        match CurvesDb::open(&db).and_then(|db| db.save_made(&name, &points, length, now)) {
+            Ok(c) => {
+                let key = logic::CurveKey::of(&c);
+                on_window(move |app| {
+                    let id = c.id.clone();
+                    let text = format!("Saved as a new curve, \"{}\". Rename gives it your own name.", c.name);
+                    PAGE.with(|p| {
+                        let mut p = p.borrow_mut();
+                        match p.curves.iter().position(|o| o.id == c.id) {
+                            // The same shape was saved before: it's that curve.
+                            Some(at) => {
+                                p.curve_keys[at] = key;
+                                p.curves[at] = c;
+                            }
+                            None => {
+                                p.curve_keys.push(key);
+                                p.curves.push(c);
+                            }
+                        }
+                        p.curve_found_of = None;
+                        reshow_curves(&mut p);
+                    });
+                    pick_curve(app, Some(id));
+                    PAGE.with(|p| p.borrow_mut().curve_message = text);
+                    show_all(app);
+                });
+            }
+            Err(e) => {
+                log::warning("Curves", &e.0);
+                feed.start("Couldn't save the curve", "").failed(&e.0);
+                curve_message(format!("Couldn't save the curve: {}", e.0));
+            }
+        }
+    });
+    if let Err(e) = started {
+        log::error("Curves", &format!("Couldn't start saving the curve: {e}"));
+    }
 }
 
 /// Opens the Songs page on the song a save belongs to (X3-10, as Plugins' Show in Songs does).

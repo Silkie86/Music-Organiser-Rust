@@ -1502,6 +1502,9 @@ pub mod curve_act {
     pub const OPEN_SONG: &str = "curves.revealSong";
     pub const SHOW_IN_SONGS: &str = "curves.showInSongs";
     pub const HEAR: &str = "curves.hear";
+    pub const UNDO: &str = "curves.undo";
+    pub const REDO: &str = "curves.redo";
+    pub const SAVE_AS_NEW: &str = "curves.saveAsNew";
 }
 
 /// The tempo a curve is heard at on its tone (Solomon, 13 Nov: "preview the curve maybe as a volume curve on a
@@ -1573,6 +1576,20 @@ pub struct CurveFilters {
     pub hidden: bool,
 }
 
+/// The name a curve saved from the editor starts with: the name of the curve it was made from, marked as edited
+/// once ("Riser (edited)", and again "Riser (edited)", not "Riser (edited) (edited)").
+pub fn edited_name(from: &str) -> String {
+    const MARK: &str = " (edited)";
+    let from = from.trim();
+    if from.is_empty() {
+        "New curve".to_owned()
+    } else if from.ends_with(MARK) {
+        from.to_owned()
+    } else {
+        format!("{from}{MARK}")
+    }
+}
+
 /// The curves list's filters by what kind of curve it is, by their chip ids.
 pub const CURVE_SHAPE: &str = "curve-shape";
 pub const CURVE_RHYTHM: &str = "curve-rhythm";
@@ -1584,11 +1601,17 @@ pub fn kind_label(k: SourceKind) -> &'static str {
         SourceKind::BitwigClip => "Bitwig clips",
         SourceKind::BitwigCurve => "Bitwig's library",
         SourceKind::PluginShape => "Plugin shapes",
+        SourceKind::Made => "Made in the editor",
     }
 }
 
-pub const KINDS: [SourceKind; 4] =
-    [SourceKind::FlKnobMoves, SourceKind::BitwigClip, SourceKind::BitwigCurve, SourceKind::PluginShape];
+pub const KINDS: [SourceKind; 5] = [
+    SourceKind::FlKnobMoves,
+    SourceKind::BitwigClip,
+    SourceKind::BitwigCurve,
+    SourceKind::PluginShape,
+    SourceKind::Made,
+];
 
 pub fn kind_from(l: &str) -> Option<SourceKind> {
     KINDS.into_iter().find(|k| kind_label(*k) == l)
@@ -1826,6 +1849,10 @@ pub fn found_words(c: &Curve) -> String {
             .map(|(_, l)| l)
             .collect();
     let libraries = libraries.join(" and ");
+    // A curve saved from the editor is a curve of its own, found in no file.
+    if songs.is_empty() && libraries.is_empty() && has(SourceKind::Made) {
+        return kind_label(SourceKind::Made).to_owned();
+    }
     match songs.len() {
         0 if libraries.is_empty() => String::new(),
         0 => format!("In {libraries}"),
@@ -2014,10 +2041,12 @@ pub fn curve_found_lines(c: &Curve) -> Vec<FoundLine> {
 }
 
 /// What the picked curve offers, in the card's order.
-pub fn curve_offers(c: &Curve, has_bitwig: bool) -> Vec<Offer> {
+/// `edited`: the curve has changes in the editor that aren't saved. These act on the curve as it was found, so
+/// saving to Bitwig waits until the edits are saved as a curve of their own (it would save the old shape).
+pub fn curve_offers(c: &Curve, has_bitwig: bool, edited: bool) -> Vec<Offer> {
     let in_song = c.sources.iter().any(|s| s.kind.is_song());
     vec![
-        offer("Save to Bitwig's curves", curve_act::TO_BITWIG, has_bitwig),
+        offer("Save to Bitwig's curves", curve_act::TO_BITWIG, has_bitwig && !edited),
         offer("Hear it on a tone", curve_act::HEAR, !c.points.is_empty()),
         offer("Show curve file", curve_act::REVEAL, true),
         offer("Rename", curve_act::RENAME, true),
@@ -2569,7 +2598,8 @@ mod tests {
                 ("FL knob moves", "1", true),
                 ("Bitwig clips", "1", false),
                 ("Bitwig's library", "1", true),
-                ("Plugin shapes", "0", false)
+                ("Plugin shapes", "0", false),
+                ("Made in the editor", "0", false)
             ]
         );
         both.toggle_kind("FL knob moves");
@@ -2654,6 +2684,16 @@ mod tests {
         let mut many = c.clone();
         many.sources =
             (0..25).map(|n| CurveSource { song: format!("Song {n}"), modified: n, ..c.sources[0].clone() }).collect();
+        // With edits not saved, saving to Bitwig waits (it would save the old shape); a saved one is named once.
+        assert!(curve_offers(&c, true, false).iter().any(|o| o.id == curve_act::TO_BITWIG && o.enabled));
+        assert!(curve_offers(&c, true, true).iter().any(|o| o.id == curve_act::TO_BITWIG && !o.enabled));
+        assert_eq!(edited_name("Riser"), "Riser (edited)");
+        assert_eq!(edited_name("Riser (edited) "), "Riser (edited)");
+        assert_eq!(edited_name(" "), "New curve");
+        // One saved from the editor says so, and leads to no song.
+        let made = curve("Random gate", SourceKind::Made, "Random gate", 9);
+        assert_eq!(found_words(&made), "Made in the editor");
+        assert_eq!(curve_found_lines(&made)[0].save, None);
         many.points.truncate(1);
         many.length_beats = 0.0;
         let lines = curve_found_lines(&many);
@@ -2673,11 +2713,11 @@ mod tests {
         assert_eq!(beats_words(6.0), "6 beats");
         let lib = curve("Wobble", SourceKind::BitwigCurve, "Wobble", 5);
         assert_eq!(found_words(&lib), "In Bitwig's library");
-        assert!(!curve_offers(&lib, true).iter().any(|o| o.id == curve_act::OPEN_SONG && o.enabled));
+        assert!(!curve_offers(&lib, true, false).iter().any(|o| o.id == curve_act::OPEN_SONG && o.enabled));
         // A plugin's shape is found in no song either, and a shape in a song too says both.
         let shape = curve("SC1", SourceKind::PluginShape, "SC1", 5);
         assert_eq!(found_words(&shape), "In plugin shapes");
-        assert!(!curve_offers(&shape, true).iter().any(|o| o.id == curve_act::SHOW_IN_SONGS && o.enabled));
+        assert!(!curve_offers(&shape, true, false).iter().any(|o| o.id == curve_act::SHOW_IN_SONGS && o.enabled));
         assert_eq!(curve_found_lines(&shape)[0].text, "SC1 · Plugin shapes · Serum · Cutoff");
         let mut both = c.clone();
         both.sources.extend(lib.sources.iter().chain(&shape.sources).cloned());
@@ -2685,7 +2725,7 @@ mod tests {
         let mut libraries = lib.clone();
         libraries.sources.extend(shape.sources.iter().cloned());
         assert_eq!(found_words(&libraries), "In Bitwig's library and plugin shapes");
-        assert!(!curve_offers(&c, false)[0].enabled, "no Bitwig folder, nowhere to save it");
+        assert!(!curve_offers(&c, false, false)[0].enabled, "no Bitwig folder, nowhere to save it");
     }
 
     #[test]

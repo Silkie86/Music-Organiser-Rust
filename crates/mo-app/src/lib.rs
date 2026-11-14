@@ -15,6 +15,7 @@ pub mod chord_check;
 pub mod curve_edit;
 pub mod curve_groups;
 pub mod curve_picture;
+pub mod curve_touch;
 pub mod data_move;
 pub mod drag_card;
 pub mod drag_out;

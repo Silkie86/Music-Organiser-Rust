@@ -136,6 +136,9 @@ pub const CURVES_ACTIONS: &[Action] = &[
     action("curves.hide", "Hide the picked curve, or show it again", "Delete"),
     action("curves.revealSong", "Show the file of the song the picked curve came from in its folder", "Ctrl+Shift+E"),
     action("curves.showInSongs", "Show the song the picked curve came from on the Songs page", "Ctrl+O"),
+    action("curves.undo", "Undo the last change to the curve in the editor", "Ctrl+Z"),
+    action("curves.redo", "Redo the change to the curve that was undone", "Ctrl+Shift+Z"),
+    action("curves.saveAsNew", "Save the edited curve as a new curve of its own", "Ctrl+S"),
 ];
 
 /// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
