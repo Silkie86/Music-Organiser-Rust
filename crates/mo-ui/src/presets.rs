@@ -558,6 +558,12 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_curve_add(move |row| {
+        if let (Some(app), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
+            add_curve(&app, row);
+        }
+    });
+    let weak = app.as_weak();
     data.on_curve_step(move |by| {
         if let Some(app) = weak.upgrade() {
             step_curve(&app, by);
@@ -1175,6 +1181,27 @@ fn pick_curve(app: &AppWindow, id: Option<String>) {
     CURVE_LINES.with(|m| m.notify.reset());
 }
 
+/// The + on the shown curve at `row`: it's added to the curve in the editor (as its line shows it: at that speed), in
+/// place of the highlighted part or at its end, and the card says so. Whether it was.
+pub fn add_curve(app: &AppWindow, row: usize) -> bool {
+    let Some(c) = PAGE.with(|p| row_curve_as_sent(&p.borrow(), row)) else { return false };
+    let piece = mo_app::curve_edit::Piece {
+        points: c.points.clone(),
+        length_beats: c.length_beats,
+        source: Some(c.id.clone()),
+        name: c.name.clone(),
+    };
+    let done = crate::curve_editor::add(app, piece);
+    let said = if done {
+        format!("Added {}. Undo takes it out again; Save as new curve keeps the joined curve.", c.name)
+    } else {
+        format!("{} wasn't added: it's there already, or the curve would be too long.", c.name)
+    };
+    PAGE.with(|p| p.borrow_mut().curve_message = said);
+    show_curve_card(app);
+    done
+}
+
 /// Randomise's words and whether it can roll: two curves shown, and one open to roll into.
 fn show_random_can(data: &PresetsData, p: &Page) {
     let open = p.curve_picked.is_some();
@@ -1184,6 +1211,8 @@ fn show_random_can(data: &PresetsData, p: &Page) {
         mo_app::curve_random::says(p.curve_shown.len()).into()
     });
     data.set_random_can(p.curve_shown.len() >= 2 && open);
+    // And the + on each line: there's a curve to add to.
+    data.set_curve_adds(open);
 }
 
 fn step_curve(app: &AppWindow, by: i32) {

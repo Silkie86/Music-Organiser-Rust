@@ -1604,6 +1604,15 @@ fn presets_shots(
     }
     mo_ui::curve_editor::ruler_sample(app, 4, 0.0);
     capture(window);
+    // Joining curves: the + on the second line adds its curve at the end of the one in the editor, as a clip.
+    if !mo_ui::presets::add_curve(app, 1) {
+        return Err("curves-joined.png: the second line's curve wasn't added".into());
+    }
+    shots.push(("curves-joined.png".into(), capture(window)));
+    if !mo_ui::curve_editor::undo(app, true) {
+        return Err("curves-joined.png: the join left nothing to undo".into());
+    }
+    capture(window);
     // A curve dragged out onto an automation lane from its line, its shape on the card.
     let still = capture(window);
     data.set_curve_lifted_row(1);

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use mo_formats::bitwig::curve::CurvePoint;
 
-use crate::curve_edit::{Edit, Editor, Grid, Shape, Span, Step};
+use crate::curve_edit::{Edit, Editor, Grid, Piece, Shape, Span, Step};
 use crate::curve_hear::{self, Hear};
 use crate::curve_hold::{self, Hold, Over, Part};
 use crate::curve_paint::{self, Stroke};
@@ -956,6 +956,29 @@ impl Card {
         true
     }
 
+    /// A curve from the list is added to the one in the editor (the + on its line): in place of the highlighted
+    /// part, fitted to its length, or with nothing highlighted at the curve's end, where it lands as a clip of its
+    /// own. One step of undo. False with no curve open, or when it can't be added (the curve would be too long).
+    pub fn add(&mut self, piece: Piece) -> bool {
+        let s = self;
+        let was = s.grab;
+        s.hands_off();
+        s.mouse = None;
+        let Some((_, editor)) = s.open.as_mut() else { return false };
+        given_up(editor, was, &mut s.lit_whole);
+        let before = editor.shape().length();
+        let done = match editor.highlight() {
+            Some(_) => editor.edit(&Edit::Swap { piece, keep_length: false }),
+            None => editor.edit(&Edit::Insert { at: before, piece }),
+        };
+        // Longer now: the whole of it in sight.
+        let length = editor.shape().length();
+        if done && (length - before).abs() > 1e-9 {
+            s.view = View::whole(length);
+        }
+        done
+    }
+
     /// Esc: a drag in hand is put back as it was before it began; else the highlight is dropped. Whether it did
     /// either.
     pub fn escape(&mut self) -> bool {
@@ -1508,6 +1531,27 @@ mod tests {
         card.show_all();
         let all = card.showing(false);
         assert!(all.dots.is_some() && all.tiles.is_some() && all.swing_marks.is_some());
+    }
+
+    #[test]
+    fn a_curve_from_the_list_lands_at_the_end_or_in_the_highlights_place() {
+        let piece = || Piece { points: rise(), length_beats: 2.0, source: Some("b".into()), name: "Other".into() };
+        let mut card = card();
+        assert!(card.add(piece()));
+        assert!((card.length() - 6.0).abs() < 1e-9, "added at the end: 4 beats and its 2");
+        assert!((card.frame().view.span - 6.0).abs() < 1e-9, "all of it in sight");
+        assert_eq!(card.highlight().map(|h| (h.start, h.end)), Some((4.0, 6.0)), "the new part is highlighted");
+        let tiles = card.showing(false).tiles.expect("the first time");
+        assert!(tiles.iter().any(|t| t.name == "Other"), "it lands as a clip");
+        // With a part highlighted, another takes that part's place, fitted: the curve is no longer. (The same one
+        // again would change nothing, and isn't a step.)
+        assert!(!card.add(piece()));
+        let fall = vec![CurvePoint { x: 0.0, y: 1.0, bend: 0.0 }, CurvePoint { x: 1.0, y: 0.0, bend: 0.0 }];
+        assert!(card.add(Piece { points: fall, length_beats: 8.0, source: None, name: "Fall".into() }));
+        assert!((card.length() - 6.0).abs() < 1e-9);
+        assert!(card.step_back(true) && card.step_back(true));
+        assert!(card.edited().is_none(), "each was one step");
+        assert!(!Card::default().add(piece()));
     }
 
     #[test]

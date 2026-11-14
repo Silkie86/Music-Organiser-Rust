@@ -280,6 +280,16 @@ pub fn randomise(
     done
 }
 
+/// A curve from the list is added to the one in the editor: in place of the highlighted part, or at its end. False
+/// when there's no curve open or it can't be added.
+pub fn add(app: &AppWindow, piece: mo_app::curve_edit::Piece) -> bool {
+    let done = card(|c| c.add(piece));
+    // Drawn again either way: a drag in hand was given up.
+    redraw(app);
+    show_touch(app);
+    done
+}
+
 /// Undo (`back`) or Redo.
 fn step_back(app: &AppWindow, back: bool) {
     if card(|c| c.step_back(back)) {
