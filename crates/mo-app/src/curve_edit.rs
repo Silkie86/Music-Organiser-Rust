@@ -68,7 +68,8 @@ impl Span {
         len.is_nan() || len < SHORTEST - EPS
     }
 
-    fn same(self, other: Span) -> bool {
+    /// The same stretch (to a hair).
+    pub fn same(self, other: Span) -> bool {
         same(self.start, other.start) && same(self.end, other.end)
     }
 

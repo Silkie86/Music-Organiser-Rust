@@ -357,6 +357,30 @@ fn wire(app: &AppWindow) {
             run_curve_action(&app, curve_act::HEAR);
         }
     });
+    // The editor's right-click menu: what can be done to the highlighted part, each line with its key.
+    let weak = app.as_weak();
+    app.global::<CurveEditorData>().on_menu_opens(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let items: Vec<MenuItem> = PAGE.with(|p| {
+            let p = p.borrow();
+            crate::curve_editor::part_offers()
+                .into_iter()
+                .map(|o| MenuItem {
+                    what: o.text.as_str().into(),
+                    key: p.shortcuts.key_of(o.id).into(),
+                    id: o.id.into(),
+                    enabled: o.enabled,
+                })
+                .collect()
+        });
+        app.global::<CurveEditorData>().set_part_menu(ModelRc::new(VecModel::from(items)));
+    });
+    let weak = app.as_weak();
+    app.global::<CurveEditorData>().on_menu_chosen(move |id| {
+        if let Some(app) = weak.upgrade() {
+            run_curve_action(&app, &id);
+        }
+    });
     let weak = app.as_weak();
     app.global::<CurveEditorData>().on_save_as_new(move || {
         if let Some(app) = weak.upgrade() {
@@ -2459,6 +2483,12 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             };
             hear_curve(app, heard);
         }
+        curve_act::REVERSE
+        | curve_act::FLIP
+        | curve_act::STEPS
+        | curve_act::KEEP_CLIP
+        | curve_act::CUT_TIME
+        | curve_act::HIGHLIGHT_ALL => return crate::curve_editor::act(app, id),
         curve_act::UNDO => return crate::curve_editor::undo(app, true),
         curve_act::REDO => return crate::curve_editor::undo(app, false),
         curve_act::SAVE_AS_NEW => {

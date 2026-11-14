@@ -4,7 +4,7 @@
 // buttons. The picture's still layers (grid, fill, curve) are one picture drawn off the window's thread
 // (mo_app::curve_picture, mo-ui/src/curve_editor.rs); what moves with the mouse or the sound is laid over it here.
 // Only shared parts from studio.slint.
-import { Theme, Motion, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, CardAction, CardActions, SidePanel, MouseField } from "../studio.slint";
+import { Theme, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, CardAction, CardActions, SidePanel, MouseField } from "../studio.slint";
 
 // One of the ruler's marks: where (from the picture's left) and its bar and beat ("1", "1.2"; none when the marks are
 // too close to number each).
@@ -20,6 +20,25 @@ export struct EditorDot {
     y: length,
     hot: bool,
     held: bool,
+}
+
+// A tile of the clip strip: a clip (a remembered highlight) on the picture's own time line.
+export struct ClipTile {
+    x: length,
+    width: length,
+    name: string,
+    // Its length in words.
+    words: string,
+    pinned: bool,
+    // Its part is the highlight.
+    picked: bool,
+    // Tiles take turns between two plain shades.
+    lighter: bool,
+    // The mouse is on it, and on its pin.
+    hot: bool,
+    pin-hot: bool,
+    // It's a clip wide enough for a pin.
+    can-pin: bool,
 }
 
 export global CurveEditorData {
@@ -90,6 +109,14 @@ export global CurveEditorData {
     in property <length> read-y;
     // The mouse on the picture: 0 moved, 1 pressed, 2 let go, 3 double-clicked, 4 left, 5 press taken away; where; Shift, Alt, Ctrl.
     callback mouse(int, length, length, bool, bool, bool);
+    // The clip strip's tiles, and the mouse on it: 0 moved, 1 pressed, 2 let go, 3 double-clicked, 4 left, 5 press
+    // taken away, 6 right-clicked; where, from the picture's left; Shift, Alt, Ctrl.
+    in property <[ClipTile]> clips;
+    callback strip(int, length, bool, bool, bool);
+    // The right-click menu on the picture and the strip: asked for just before it opens, and what was chosen.
+    in property <[MenuItem]> part-menu;
+    callback menu-opens();
+    callback menu-chosen(string);
     callback undo();
     callback redo();
     callback hear();
@@ -286,6 +313,90 @@ component Ruler inherits Rectangle {
     }
 }
 
+// The clip strip: the curve's clips end to end over the picture, on its time line. A curve with no clips shows one
+// tile with its own name, so the strip is always there.
+component ClipStrip inherits Rectangle {
+    // A right-click, in the window's own points.
+    callback menu(length, length);
+    height: 30px;
+    clip: true;
+    for t in CurveEditorData.clips: Rectangle {
+        x: t.x;
+        width: t.width;
+        height: root.height;
+        border-radius: Theme.radius;
+        border-width: t.picked ? 1.5px : 1px;
+        border-color: t.picked ? Theme.accent : Theme.edge;
+        background: t.picked ? Theme.accent.transparentize(86%)
+            : Theme.surface-raised.brighter((t.lighter ? 22% : 0%) + (t.hot ? 8% : 0%));
+        HorizontalLayout {
+            padding-left: Space.sm;
+            padding-right: t.can-pin ? Space.xl : Space.xs;
+            spacing: Space.sm;
+            Text {
+                horizontal-stretch: 1;
+                text: t.name;
+                overflow: elide;
+                color: Theme.text;
+                font-size: Type.meta;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+            // A narrow tile drops its length first; its name shortens after that.
+            if t.width >= 200px: Text {
+                horizontal-stretch: 0;
+                text: t.words;
+                color: Theme.faint;
+                font-family: Theme.number-font;
+                font-size: Type.tiny;
+                vertical-alignment: center;
+            }
+        }
+        // Its pin: always on show when pinned, else while the mouse is on the tile.
+        if t.can-pin && (t.pinned || t.hot): Rectangle {
+            x: parent.width - 17px;
+            y: (parent.height - self.height) / 2;
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            background: t.pinned ? Theme.accent : transparent;
+            border-width: 1.5px;
+            border-color: t.pinned ? Theme.accent : t.pin-hot ? Theme.text : Theme.muted;
+        }
+    }
+    touch := MouseField {
+        changed inside => {
+            if !self.inside {
+                self.tell(4, false, false, false);
+            }
+        }
+        function tell(kind: int, shift: bool, alt: bool, ctrl: bool) {
+            CurveEditorData.strip(kind, self.mouse-x, shift, alt, ctrl);
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.move {
+                self.tell(0, e.modifiers.shift, e.modifiers.alt, e.modifiers.control || e.modifiers.meta);
+            } else if e.kind == PointerEventKind.cancel {
+                self.tell(5, false, false, false);
+            } else if e.button == PointerEventButton.left {
+                self.tell(e.kind == PointerEventKind.down ? 1 : 2, e.modifiers.shift, e.modifiers.alt,
+                    e.modifiers.control || e.modifiers.meta);
+            } else if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                // The clip under the mouse is highlighted first: the menu is about it.
+                self.tell(6, false, false, false);
+                root.menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+        double-clicked => {
+            self.tell(3, CurveEditorData.shift, CurveEditorData.alt, CurveEditorData.ctrl);
+        }
+        scroll-event(e) => {
+            CurveEditorData.wheel(self.mouse-x, e.delta-y != 0 ? e.delta-y : e.delta-x, e.modifiers.shift);
+            EventResult.accept
+        }
+    }
+}
+
 // The grid's chips, joined in one strip after its name: one step is always picked unless it's off, and Triplet is
 // on or off beside it.
 component GridStrip inherits HorizontalLayout {
@@ -460,11 +571,22 @@ export component CurveEditor inherits SidePanel {
         vertical-stretch: 1;
         spacing: Space.sm;
         Ruler { }
+        ClipStrip {
+            menu(x, y) => {
+                CurveEditorData.menu-opens();
+                part-menu.open-at(x, y);
+            }
+        }
         // The picture: a sunken screen, all the height that's left.
         screen := Well {
             vertical-stretch: 1;
             min-height: 160px;
             clip: true;
+            // What can be done to the highlighted part, each line with its key.
+            part-menu := RightClickMenu {
+                items: CurveEditorData.part-menu;
+                chosen(id) => { CurveEditorData.menu-chosen(id); }
+            }
             function laid-out() {
                 CurveEditorData.laid-out(self.width, self.height);
             }
@@ -653,6 +775,10 @@ export component CurveEditor inherits SidePanel {
                     } else if e.button == PointerEventButton.left {
                         self.tell(e.kind == PointerEventKind.down ? 1 : 2, e.modifiers.shift, e.modifiers.alt,
                             e.modifiers.control || e.modifiers.meta);
+                    } else if e.button == PointerEventButton.right && e.kind == PointerEventKind.down {
+                        CurveEditorData.menu-opens();
+                        part-menu.open-at(self.absolute-position.x + self.mouse-x,
+                            self.absolute-position.y + self.mouse-y);
                     }
                 }
                 double-clicked => {
