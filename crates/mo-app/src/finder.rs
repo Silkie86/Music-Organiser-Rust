@@ -563,7 +563,8 @@ fn also_of_place(p: Place) -> &'static str {
     match p {
         Place::Songs => "projects saves",
         Place::Sounds => "sound lab samples",
-        Place::Presets => "patches curves",
+        Place::Presets => "patches",
+        Place::Curves => "lfo shapes automation envelopes",
         Place::Midi => "playground clips",
         Place::Plugins => "vst clap",
         Place::Space => "disk drives storage clean",

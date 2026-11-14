@@ -82,7 +82,6 @@ export struct CurveCardInfo {
 export global PresetsData {
     // 0 Sounds, 1 Curves.
     in property <int> section;
-    callback section-picked(int);
     in property <string> summary;
     // The work going on, in words, and how far it's got (0 to 1, or -1 when it can't say).
     in property <string> busy;
@@ -696,7 +695,7 @@ export component PresetsPage inherits Rectangle {
         padding-bottom: Space.lg;
         spacing: Space.md;
         PageHeader {
-            title: "Presets";
+            title: PresetsData.section == 0 ? "Presets" : "Curves";
             summary: PresetsData.summary;
             busy: PresetsData.busy;
             done: PresetsData.done;
@@ -704,15 +703,8 @@ export component PresetsPage inherits Rectangle {
         HorizontalLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
-            VerticalLayout {
-                alignment: center;
-                Segmented {
-                    choices: ["Presets", "Curves"];
-                    current: PresetsData.section;
-                    picked(i) => { PresetsData.section-picked(i); }
-                }
-            }
-            // One box for both sections: the page keeps each section's words and puts them back on a switch.
+            // One box for both sections (Presets and Curves are two places on the rail, shown by this one page): the
+            // page keeps each section's words and puts them back on a switch.
             search-box := SearchBox {
                 // Esc goes on to the window's keys (the page's next step back, app.escape), and Ctrl+Up and
                 // Ctrl+Down step through the list from here.

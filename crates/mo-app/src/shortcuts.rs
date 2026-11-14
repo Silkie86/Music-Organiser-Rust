@@ -41,6 +41,8 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.goPlugins", "Go to Plugins", "Ctrl+5"),
     action("app.goSpace", "Go to Space", "Ctrl+6"),
     action("app.goBackup", "Go to Backup", "Ctrl+7"),
+    // After the others, so the keys you know keep their places (Curves sits after Presets on the rail).
+    action("app.goCurves", "Go to Curves", "Ctrl+8"),
     action("app.goSettings", "Go to Settings", "Ctrl+,"),
     action("app.prevPage", "The place above on the rail", "Ctrl+PageUp"),
     action("app.nextPage", "The place below on the rail", "Ctrl+PageDown"),
@@ -250,7 +252,8 @@ pub fn list_keys(place: Place) -> &'static [(&'static str, &'static str)] {
             ("Enter", "Play or stop it"),
             DOWN,
         ],
-        Place::Presets => &[("Up, Down", "The sound or curve above or below in the list"), DOWN],
+        Place::Presets => &[("Up, Down", "The sound above or below in the list"), DOWN],
+        Place::Curves => &[("Up, Down", "The curve above or below in the list"), DOWN],
         Place::Midi => &[("Up, Down", "The part above or below in the list"), DOWN],
         Place::Plugins => &[("Up, Down", "The plugin above or below in the list"), DOWN],
         Place::Space | Place::Backup | Place::Settings => &[],
@@ -812,7 +815,7 @@ mod tests {
         // Held down, an octave key steps once: a held key would fly to the last octave.
         assert!(!repeats("midi.octaveUp") && !repeats("midi.octaveDown") && !repeats("midi.octaveApp"));
         // Each page with a list says what its arrows do on the key sheet; the pages without one say nothing.
-        for place in [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins] {
+        for place in [Place::Songs, Place::Sounds, Place::Presets, Place::Curves, Place::Midi, Place::Plugins] {
             assert!(list_keys(place).iter().any(|(k, _)| k.contains("Up")), "{place:?}");
         }
         assert!(list_keys(Place::Space).is_empty() && list_keys(Place::Settings).is_empty());
