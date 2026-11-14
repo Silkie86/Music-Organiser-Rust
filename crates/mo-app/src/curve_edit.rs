@@ -26,6 +26,8 @@ pub const MAX_BEATS: f64 = 256.0;
 pub const SHORTEST: f64 = 1.0 / 64.0;
 /// How many steps back Undo goes.
 pub const UNDO_STEPS: usize = 200;
+/// The furthest a swung line moves, of a step: three quarters of the way to the next line.
+pub const MOST_SWING: f64 = 0.75;
 
 /// One point of the curve being edited.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -330,6 +332,23 @@ pub enum Edit {
     },
     /// The part becomes a straight line from the value before it to the value after it.
     Flatten,
+    /// Steps painted (Ctrl-drag over empty space): each stretch of time (its start, its end) is held at its value.
+    /// It needs no highlight and pays none any mind.
+    Paint {
+        cells: Vec<(f64, f64, f64)>,
+    },
+    /// A line drawn by hand (Ctrl+Shift-drag): it takes the curve's place from its first beat to its last. Its
+    /// points are (beat, value), in the order of time.
+    Draw {
+        line: Vec<(f64, f64)>,
+    },
+    /// Swing: every second line of a grid `step` beats apart, counted from the part's start, moves by `amount` of
+    /// a step (later above 0, earlier below; a third is triplet swing), and the curve either side of it is
+    /// stretched or squeezed to follow.
+    Swing {
+        step: f64,
+        amount: f64,
+    },
     /// The highlight's time is taken out: what follows moves up and the curve gets shorter.
     RemoveTime,
 
@@ -556,6 +575,57 @@ fn edited(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(Shape,
         Edit::Flatten => {
             let (before, after) = (shape.value_before(part.start), shape.value_at(part.end));
             with(put(&shape.points, part, &[Point::new(0.0, before, 0.0), Point::new(part.len(), after, 0.0)]))
+        }
+        Edit::Paint { ref cells } => {
+            let mut points = shape.points.clone();
+            let mut any = false;
+            for &(start, end, value) in cells {
+                if !finite(&[start, end, value]) {
+                    continue;
+                }
+                let span = Span::new(start, end).within(length);
+                if span.is_empty() {
+                    continue;
+                }
+                let v = value.clamp(0.0, 1.0);
+                points = put(&points, span, &[Point::new(0.0, v, 0.0), Point::new(span.len(), v, 0.0)]);
+                any = true;
+            }
+            if !any {
+                return None;
+            }
+            with(points)
+        }
+        Edit::Draw { ref line } => {
+            // In the order of time, one value a beat (the later one drawn), all inside the curve.
+            let mut drawn: Vec<(f64, f64)> = Vec::with_capacity(line.len());
+            for &(beat, value) in line {
+                if !finite(&[beat, value]) {
+                    continue;
+                }
+                let (beat, value) = (beat.clamp(0.0, length), value.clamp(0.0, 1.0));
+                match drawn.last_mut() {
+                    Some(last) if same(last.0, beat) => last.1 = value,
+                    Some(last) if beat < last.0 => return None,
+                    _ => drawn.push((beat, value)),
+                }
+            }
+            let span = Span { start: drawn.first()?.0, end: drawn.last()?.0 };
+            if span.is_empty() {
+                return None;
+            }
+            let part: Vec<Point> = drawn.iter().map(|&(b, v)| Point::new(b - span.start, v, 0.0)).collect();
+            with(put(&shape.points, span, &part))
+        }
+        Edit::Swing { step, amount } => {
+            if !finite(&[step, amount]) || step < SHORTEST {
+                return None;
+            }
+            let amount = amount.clamp(-MOST_SWING, MOST_SWING);
+            if amount.abs() < EPS {
+                return None;
+            }
+            reshaped(&|part, len| Some(swung(&part, len, step, amount)))
         }
         Edit::RemoveTime => {
             let gone = highlight?;
@@ -1055,6 +1125,30 @@ fn stepped(part: &[Point], len: f64, step: f64) -> Vec<Point> {
         let v = value_at(part, (start + end) / 2.0);
         out.push(Point::new(start, v, 0.0));
         out.push(Point::new(end, v, 0.0));
+        start = end;
+    }
+    out
+}
+
+/// The part swung: in each pair of steps the line between them moves by `amount` of a step, the first step
+/// stretched (or squeezed) up to it and the second after it. A last step with no partner stays as it is.
+fn swung(part: &[Point], len: f64, step: f64, amount: f64) -> Vec<Point> {
+    let mut out = Vec::new();
+    let mut start = 0.0;
+    let moved = |piece: Vec<Point>, by: f64, to: f64| -> Vec<Point> {
+        stretched(&piece, by).into_iter().map(|p| Point { beat: to + p.beat, ..p }).collect()
+    };
+    while start < len - EPS {
+        let end = (start + 2.0 * step).min(len);
+        let mid = start + step;
+        if end - mid < SHORTEST {
+            out.extend(moved(cut(part, Span { start, end }), 1.0, start));
+        } else {
+            // In a pair cut short by the part's end, the line never passes three quarters of what's left.
+            let new_mid = (mid + amount * step).min(mid + (end - mid) * MOST_SWING);
+            out.extend(moved(cut(part, Span { start, end: mid }), (new_mid - start) / step, start));
+            out.extend(moved(cut(part, Span { start: mid, end }), (end - new_mid) / (end - mid), new_mid));
+        }
         start = end;
     }
     out
@@ -1661,6 +1755,48 @@ mod tests {
         let (h, _) = done(&s, None, Edit::Smooth { amount: -1.0, short: 0.05 });
         assert_eq!(h.points()[0].bend, 0.0);
         assert!(near(h.points()[2].beat, 2.1), "a ramp longer than short stays");
+    }
+
+    #[test]
+    fn painted_steps_hold_their_values_and_leave_the_rest() {
+        let (s, _) = done(&ramp(), None, Edit::Paint { cells: vec![(1.0, 1.5, 0.9), (1.5, 2.0, 0.1)] });
+        assert!(near(s.value_at(1.25), 0.9) && near(s.value_at(1.75), 0.1));
+        assert!(near(s.value_at(0.5), 0.125) && near(s.value_at(3.0), 0.75), "the rest stays");
+        assert!(near(s.value_before(1.0), 0.25) && near(s.value_at(2.0), 0.5), "jumps at its edges");
+        // Past the curve's end, or not a number: nothing is painted there.
+        assert!(apply(&ramp(), None, &Edit::Paint { cells: vec![(9.0, 9.5, 0.5), (f64::NAN, 1.0, 0.5)] }).is_none());
+        assert!(apply(&ramp(), None, &Edit::Paint { cells: Vec::new() }).is_none());
+    }
+
+    #[test]
+    fn a_drawn_line_takes_the_curves_place_between_its_ends() {
+        let line = vec![(1.0, 1.0), (2.0, 0.0), (3.0, 1.0)];
+        let (s, _) = done(&ramp(), None, Edit::Draw { line });
+        assert!(near(s.value_at(1.5), 0.5) && near(s.value_at(2.0), 0.0) && near(s.value_at(2.5), 0.5));
+        assert!(near(s.value_at(0.5), 0.125) && near(s.value_at(3.5), 0.875), "the rest stays");
+        // One point, or a line that goes back in time, is no line.
+        assert!(apply(&ramp(), None, &Edit::Draw { line: vec![(1.0, 0.5)] }).is_none());
+        assert!(apply(&ramp(), None, &Edit::Draw { line: vec![(2.0, 0.5), (1.0, 0.5)] }).is_none());
+    }
+
+    #[test]
+    fn swing_moves_every_second_line_and_keeps_the_rest_in_time() {
+        // Steps a beat long at 0.2, 0.8, 0.2, 0.8: the lines at beats 1 and 3 swing.
+        let cells = vec![(0.0, 1.0, 0.2), (1.0, 2.0, 0.8), (2.0, 3.0, 0.2), (3.0, 4.0, 0.8)];
+        let (steps, _) = done(&ramp(), None, Edit::Paint { cells });
+        let (s, _) = done(&steps, None, Edit::Swing { step: 1.0, amount: 0.5 });
+        assert!(near(s.value_at(1.25), 0.2), "the first step lasts to 1.5: {}", s.value_at(1.25));
+        assert!(near(s.value_at(1.75), 0.8));
+        assert!(near(s.value_at(2.25), 0.2), "the line at beat 2 stays");
+        assert!(near(s.value_at(3.25), 0.2) && near(s.value_at(3.75), 0.8));
+        assert!(near(s.length(), 4.0));
+        // Earlier; and never further than three quarters of a step.
+        let (early, _) = done(&steps, None, Edit::Swing { step: 1.0, amount: -0.5 });
+        assert!(near(early.value_at(0.75), 0.8));
+        let (most, _) = done(&steps, None, Edit::Swing { step: 1.0, amount: 5.0 });
+        assert!(near(most.value_at(1.7), 0.2) && near(most.value_at(1.8), 0.8));
+        assert!(apply(&steps, None, &Edit::Swing { step: 1.0, amount: 0.0 }).is_none());
+        assert!(apply(&steps, None, &Edit::Swing { step: 0.0, amount: 0.3 }).is_none());
     }
 
     #[test]

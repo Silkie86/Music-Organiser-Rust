@@ -1581,6 +1581,29 @@ fn presets_shots(
     mo_ui::curve_editor::set_hear(app, Some(false), None);
     mo_ui::curve_editor::set_hear(app, None, Some(0));
     capture(window);
+    // Steps painted with Ctrl held, the stroke still in hand: the old curve faint behind, the read-out by the mouse.
+    let paint = mo_app::curve_touch::Keys { ctrl: true, ..keys };
+    mo_ui::curve_editor::mouse_sample(app, 1, 5.1, 0.7, paint);
+    mo_ui::curve_editor::mouse_sample(app, 0, 6.1, 0.3, paint);
+    mo_ui::curve_editor::mouse_sample(app, 0, 7.1, 0.9, paint);
+    mo_ui::curve_editor::mouse_sample(app, 0, 8.6, 0.5, paint);
+    shots.push(("curves-paint.png".into(), capture(window)));
+    mo_ui::curve_editor::mouse_sample(app, 2, 8.6, 0.5, paint);
+    if !mo_ui::curve_editor::undo(app, true) {
+        return Err("curves-paint.png: the stroke left nothing to undo".into());
+    }
+    mo_ui::curve_editor::mouse_sample(app, 4, 12.0, 0.9, keys);
+    capture(window);
+    // The swing mark dragged a third of a step later (triplet swing), still in hand.
+    mo_ui::curve_editor::ruler_sample(app, 1, 0.25);
+    mo_ui::curve_editor::ruler_sample(app, 0, 0.25 + 0.25 / 3.0);
+    shots.push(("curves-swing.png".into(), capture(window)));
+    mo_ui::curve_editor::ruler_sample(app, 2, 0.25 + 0.25 / 3.0);
+    if !mo_ui::curve_editor::undo(app, true) {
+        return Err("curves-swing.png: the swing left nothing to undo".into());
+    }
+    mo_ui::curve_editor::ruler_sample(app, 4, 0.0);
+    capture(window);
     // A curve dragged out onto an automation lane from its line, its shape on the card.
     let still = capture(window);
     data.set_curve_lifted_row(1);
