@@ -178,6 +178,7 @@ impl CurvesTab {
         self.reading.set(false);
         match read {
             Read::Ready(curves) => {
+                self.bench.set_keys(curves.editor_keys);
                 self.bench.read_again(panel, &curves.curves);
                 *self.shown.lines.curves.borrow_mut() = Some(Arc::new(curves));
                 self.shown.show(panel);

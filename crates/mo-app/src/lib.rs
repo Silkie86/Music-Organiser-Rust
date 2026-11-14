@@ -18,6 +18,7 @@ pub mod curve_groove;
 pub mod curve_groups;
 pub mod curve_hear;
 pub mod curve_hold;
+pub mod curve_keys;
 pub mod curve_paint;
 pub mod curve_picture;
 pub mod curve_random;

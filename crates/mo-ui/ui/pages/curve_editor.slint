@@ -64,10 +64,10 @@ export global CurveEditorData {
     in property <length> end-x: -1px;
     // The swing marks: where they stand on the ruler (on every second grid line), and whether the mouse is on one
     // or holds them (they move as one, so they light as one). The mouse on the ruler: 0 moved, 1 pressed, 2 let go,
-    // 4 left, 5 the press was taken away; where, and whether Shift is held.
+    // 4 left, 5 the press was taken away; where; Shift, Alt, Ctrl (Cmd on a Mac).
     in property <[length]> swing-marks;
     in property <bool> swing-hot;
-    callback ruler-mouse(int, length, bool);
+    callback ruler-mouse(int, length, bool, bool, bool);
     // The grid: its step (0 is 1/4, 1 is 1/8, 2 is 1/16, 3 is 1/32, -1 is off) and whether it's triplets or dotted.
     in property <int> grid-step: 2;
     in property <bool> grid-triplet;
@@ -129,6 +129,10 @@ export global CurveEditorData {
     in property <bool> alt;
     in property <bool> ctrl;
     in property <bool> mac;
+    // The names of the keys that are free, bend and make (Settings > Shortcuts chooses which is which).
+    in property <string> key-free: "Shift";
+    in property <string> key-bend: "Alt";
+    in property <string> key-make: "Ctrl";
     // The read-out by the mouse while dragging ("" for none), and where the mouse is.
     in property <string> read-out;
     in property <length> read-x;
@@ -249,19 +253,19 @@ component HintLine inherits Rectangle {
             overflow: elide;
         }
         KeyLamp {
-            key: "Shift";
+            key: CurveEditorData.key-free;
             means: "free";
             lit: CurveEditorData.shift;
             compact: root.compact;
         }
         KeyLamp {
-            key: CurveEditorData.mac ? "Option" : "Alt";
+            key: CurveEditorData.key-bend;
             means: "bend";
             lit: CurveEditorData.alt;
             compact: root.compact;
         }
         KeyLamp {
-            key: CurveEditorData.mac ? "Cmd" : "Ctrl";
+            key: CurveEditorData.key-make;
             means: "make";
             lit: CurveEditorData.ctrl;
             compact: root.compact;
@@ -348,16 +352,16 @@ component Ruler inherits Rectangle {
         mouse-cursor: CurveEditorData.swing-hot ? MouseCursor.ew-resize : MouseCursor.default;
         changed inside => {
             if !self.inside {
-                CurveEditorData.ruler-mouse(4, self.mouse-x, false);
+                CurveEditorData.ruler-mouse(4, self.mouse-x, false, false, false);
             }
         }
         pointer-event(e) => {
             if e.kind == PointerEventKind.move {
-                CurveEditorData.ruler-mouse(0, self.mouse-x, e.modifiers.shift);
+                CurveEditorData.ruler-mouse(0, self.mouse-x, e.modifiers.shift, e.modifiers.alt, e.modifiers.control || e.modifiers.meta);
             } else if e.kind == PointerEventKind.cancel {
-                CurveEditorData.ruler-mouse(5, self.mouse-x, false);
+                CurveEditorData.ruler-mouse(5, self.mouse-x, false, false, false);
             } else if e.button == PointerEventButton.left {
-                CurveEditorData.ruler-mouse(e.kind == PointerEventKind.down ? 1 : 2, self.mouse-x, e.modifiers.shift);
+                CurveEditorData.ruler-mouse(e.kind == PointerEventKind.down ? 1 : 2, self.mouse-x, e.modifiers.shift, e.modifiers.alt, e.modifiers.control || e.modifiers.meta);
             }
         }
         scroll-event(e) => {

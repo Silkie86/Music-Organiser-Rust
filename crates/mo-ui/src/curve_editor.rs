@@ -137,11 +137,14 @@ pub fn connect(app: &AppWindow) {
     });
     data.set_mac(cfg!(target_os = "macos"));
     let weak = app.as_weak();
-    data.on_ruler_mouse(move |kind, x, shift| {
+    data.on_ruler_mouse(move |kind, x, shift, alt, ctrl| {
         if let Some(app) = weak.upgrade() {
-            ruler(&app, kind, f64::from(x), Keys { shift, ..Keys::default() });
+            ruler(&app, kind, f64::from(x), Keys { shift, alt, ctrl });
         }
     });
+    // The keys as Settings has them (the page tells of a change with `set_keys`).
+    let keys = crate::settings::value(mo_app::curve_keys::SETTING);
+    card(|c| c.set_keys(mo_app::curve_keys::KeyMap::from_setting(keys.as_deref())));
     let weak = app.as_weak();
     data.on_strip(move |kind, x, shift, alt, ctrl| {
         if let Some(app) = weak.upgrade() {
@@ -253,6 +256,12 @@ fn strip(app: &AppWindow, kind: i32, x: f64, keys: Keys) {
 /// What the right-click menu offers for the highlighted part (the whole curve with none); empty with no curve open.
 pub fn part_offers() -> Vec<Offer> {
     card(|c| c.part_offers())
+}
+
+/// Which key does what from here on (Settings > Shortcuts changed it).
+pub fn set_keys(app: &AppWindow, map: mo_app::curve_keys::KeyMap) {
+    card(|c| c.set_keys(map));
+    show_touch(app);
 }
 
 /// How many points are picked in the editor.

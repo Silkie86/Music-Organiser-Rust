@@ -6,6 +6,7 @@
 //! A dragged curve is written to a drag folder of its own in Temp, as a dragged MIDI part is
 //! ([`mo_app::drag_out::write_drag_files`]), and cleared a day later: the app's own Curves folder is the app's.
 
+use mo_app::curve_keys::{self, KeyMap};
 use mo_app::presets::{self as page, CurveFilters, CurveKey};
 use mo_presets::curves::{self, Curve, CurvesDb};
 use std::path::{Path, PathBuf};
@@ -14,6 +15,8 @@ use std::path::{Path, PathBuf};
 pub struct Curves {
     pub curves: Vec<Curve>,
     keys: Vec<CurveKey>,
+    /// Which key does what in the curve editor, as the app's Settings have it.
+    pub editor_keys: KeyMap,
 }
 
 /// How reading the curves went.
@@ -26,7 +29,11 @@ pub enum Read {
 /// The curves in the app's `curves.db`. Asks the disk: call it off the panel's thread.
 pub fn read() -> Read {
     let started = std::time::Instant::now();
-    let read = read_from(&mo_app::paths::data_dir().join(curves::FILE_NAME));
+    let data = mo_app::paths::data_dir();
+    let mut read = read_from(&data.join(curves::FILE_NAME));
+    if let Read::Ready(c) = &mut read {
+        c.editor_keys = KeyMap::from_setting(crate::midi::setting(&data, curve_keys::SETTING).as_deref());
+    }
     match &read {
         Read::Ready(c) => crate::log::took("Curves", &format!("Read {} curves", c.curves.len()), started),
         Read::Not(why) => crate::log::took("Curves", &format!("Not read: {why}"), started),
@@ -44,7 +51,11 @@ pub fn read_from(path: &Path) -> Read {
     match CurvesDb::open_read_only(path).and_then(|db| db.list()) {
         Ok(list) if list.is_empty() => Read::Not("The app has found no curves in your songs yet".into()),
         // Sorting them into groups draws every curve: on the app's low-priority threads, not the host's.
-        Ok(curves) => Read::Ready(Curves { keys: mo_app::background::on_pool(|| CurveKey::all(&curves)), curves }),
+        Ok(curves) => Read::Ready(Curves {
+            keys: mo_app::background::on_pool(|| CurveKey::all(&curves)),
+            curves,
+            editor_keys: KeyMap::default(),
+        }),
         Err(e) => Read::Not(format!("The app's curves couldn't be read: {e}")),
     }
 }

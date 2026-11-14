@@ -162,7 +162,9 @@ impl Bench {
             mouse((kind, f64::from(x), f64::from(y), Keys { shift, alt, ctrl }));
         });
         let ruler = then(|c, (kind, x, _, keys)| c.ruler(kind, x, keys));
-        data.on_ruler_mouse(move |kind, x, shift| ruler((kind, f64::from(x), 0.0, Keys { shift, ..Keys::default() })));
+        data.on_ruler_mouse(move |kind, x, shift, alt, ctrl| {
+            ruler((kind, f64::from(x), 0.0, Keys { shift, alt, ctrl }))
+        });
         let strip = then(|c, (kind, x, _, keys)| c.strip(kind, x, keys));
         data.on_strip(move |kind, x, shift, alt, ctrl| strip((kind, f64::from(x), 0.0, Keys { shift, alt, ctrl })));
         let wheel = then(|c, (along, x, by, _)| c.wheel(x, by, along != 0));
@@ -290,6 +292,11 @@ impl Bench {
         panel.set_curve_editing(true);
         self.redraw(panel);
         self.show(panel, true);
+    }
+
+    /// Which key does what, as the app's Settings have it now.
+    pub(super) fn set_keys(&self, map: mo_app::curve_keys::KeyMap) {
+        self.card.borrow_mut().set_keys(map);
     }
 
     /// The curves were read again: the one open is found among them again (it may have another place), or the
