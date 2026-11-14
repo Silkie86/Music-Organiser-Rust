@@ -446,6 +446,8 @@ export component Panel inherits Window {
     // The curve editor, in the list's place while a curve is open in it (the app's own, from `CurveEditorData`): a
     // click on a curve opens it, Back shows the list again. The edited curve is dragged out from its own strip.
     in property <bool> curve-editing;
+    // Where the list is turned to: it's made again when the editor closes, and comes back there.
+    property <length> curve-list-y;
     in property <bool> curve-edit-lifted;
     callback curve-open(int);
     callback curve-back();
@@ -1549,13 +1551,15 @@ export component Panel inherits Window {
                 menus: false;
                 compact: true;
             }
-            // What the app keeps in its right-click menu, as buttons: a DAW's plugin window opens no menus.
+            // What the app keeps in its right-click menu, as buttons: a DAW's plugin window opens no menus. Each has a
+            // short name here (the row must fit the panel) and the menu's own words as its tip, in `key`.
             HorizontalLayout {
                 height: 28px;
                 spacing: Space.xs;
                 for item in CurveEditorData.part-menu: StudioButton {
                     horizontal-stretch: 0;
                     text: item.what;
+                    tip: item.key;
                     enabled: item.enabled;
                     clicked => { CurveEditorData.menu-chosen(item.id); }
                 }
@@ -1639,6 +1643,7 @@ export component Panel inherits Window {
                         height: parent.height;
                         row-height: 48px;
                         rows: root.curves.length;
+                        kept-y <=> root.curve-list-y;
                         for curve[i] in root.curves: ListLine {
                             height: 48px;
                             selected: i == root.curve-picked;

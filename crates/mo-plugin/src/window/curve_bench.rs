@@ -19,6 +19,25 @@ use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, Shar
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How long an answer about a tone asked for is waited for: one that a newer sound overtook is never answered.
+const TONE_WAIT: Duration = Duration::from_secs(5);
+
+/// A part action's short name on its button (the menu's own words are its tip).
+fn short(offer: &Offer) -> &'static str {
+    use mo_app::presets::curve_act as act;
+    match offer.id {
+        act::REVERSE => "Reverse",
+        act::FLIP => "Flip",
+        act::STEPS => "Steps",
+        act::KEEP_CLIP if offer.text.starts_with("Forget") => "Forget clip",
+        act::KEEP_CLIP => "Keep as clip",
+        act::CUT_TIME => "Cut time out",
+        act::HIGHLIGHT_ALL => "Highlight all",
+        _ => "Do",
+    }
+}
 
 /// A picture to work out: what the card asks for, the colours, and pixels to a point.
 struct Ask {
@@ -65,9 +84,9 @@ pub(super) struct Bench {
     /// The part's actions as the buttons last showed them.
     offers: RefCell<Vec<Offer>>,
     player: Arc<Player>,
-    /// How asking for the tone went, once that's known; whether one is asked for and not answered yet.
+    /// How asking for the tone went, once that's known; and since when one is asked for and not answered yet.
     played: Arc<Mutex<Option<Played>>>,
-    making: Cell<bool>,
+    making: Cell<Option<Instant>>,
     /// The tone playing, as the player numbers it, and what it was made from.
     tone: Cell<Option<u64>>,
     heard: RefCell<Option<Heard>>,
@@ -83,7 +102,7 @@ impl Bench {
             offers: RefCell::default(),
             player,
             played: Arc::default(),
-            making: Cell::new(false),
+            making: Cell::new(None),
             tone: Cell::new(None),
             heard: RefCell::new(None),
         })
@@ -104,7 +123,7 @@ impl Bench {
                     if drawn {
                         me.redraw(&panel);
                     }
-                    me.show(&panel);
+                    me.show(&panel, drawn);
                 }
             }
         };
@@ -133,7 +152,7 @@ impl Bench {
             if let Some(panel) = weak.upgrade() {
                 me.show_grid(&panel);
                 me.redraw(&panel);
-                me.show(&panel);
+                me.show(&panel, true);
             }
         });
         let (me, weak) = (Rc::clone(self), panel.as_weak());
@@ -142,7 +161,7 @@ impl Bench {
             if let Some(panel) = weak.upgrade() {
                 // Shown again either way: a drag in hand may have been put back.
                 me.redraw(&panel);
-                me.show(&panel);
+                me.show(&panel, true);
             }
         });
         let (me, weak) = (Rc::clone(self), panel.as_weak());
@@ -155,7 +174,7 @@ impl Bench {
         let (me, weak) = (Rc::clone(self), panel.as_weak());
         data.on_hear(move || {
             let Some(panel) = weak.upgrade() else { return };
-            if me.tone.get().is_some() || me.making.get() {
+            if me.tone.get().is_some() || me.making.get().is_some() {
                 me.stop(&panel);
             } else {
                 me.play(&panel);
@@ -207,21 +226,27 @@ impl Bench {
         panel.set_curve_said(SharedString::new());
         panel.set_curve_editing(true);
         self.redraw(panel);
-        self.show(panel);
+        self.show(panel, true);
     }
 
     /// The curves were read again: the one open is found among them again (it may have another place), or the
     /// editor closes when it's gone.
     pub(super) fn read_again(&self, panel: &Panel, curves: &[Curve]) {
         let Some((_, was)) = self.open.borrow().clone() else { return };
-        match curves.iter().position(|c| c.id == was.id) {
-            Some(at) => *self.open.borrow_mut() = Some((at, was)),
+        match curves.iter().enumerate().find(|(_, c)| c.id == was.id) {
+            // As it's found now: its name may be new.
+            Some((at, now)) => {
+                panel.global::<CurveEditorData>().set_name(now.name.as_str().into());
+                self.card.borrow_mut().open(&now.id, &now.name, &now.points, now.length_beats);
+                *self.open.borrow_mut() = Some((at, now.clone()));
+                self.show(panel, false);
+            }
             None => {
                 self.stop(panel);
                 self.card.borrow_mut().close();
                 *self.open.borrow_mut() = None;
                 panel.set_curve_editing(false);
-                self.show(panel);
+                self.show(panel, true);
             }
         }
     }
@@ -235,20 +260,25 @@ impl Bench {
         data.set_grid_dotted(dotted);
     }
 
-    /// Shows what lies over the picture as the mouse and the edits have it now, and the part's actions.
-    fn show(&self, panel: &Panel) {
+    /// Shows what lies over the picture as the mouse and the edits have it now; and, when the curve or its highlight
+    /// may have changed (`curve`), the part's actions (working them out tries each on the curve: not on every move
+    /// of the mouse).
+    fn show(&self, panel: &Panel, curve: bool) {
         let data = panel.global::<CurveEditorData>();
         let now = self.card.borrow_mut().showing(cfg!(target_os = "macos"));
         let changed = now.changed;
         mo_app::show_curve_card!(data, now, EditorDot, ClipTile);
         data.set_changed(changed);
+        if !curve {
+            return;
+        }
         let offers = self.card.borrow().part_offers();
         if *self.offers.borrow() != offers {
             let lines: Vec<MenuItem> = offers
                 .iter()
                 .map(|o| MenuItem {
-                    what: o.text.as_str().into(),
-                    key: SharedString::new(),
+                    what: short(o).into(),
+                    key: o.text.as_str().into(),
                     id: o.id.into(),
                     enabled: o.enabled,
                 })
@@ -283,7 +313,7 @@ impl Bench {
         let song = self.player.tempo().filter(|bpm| (curve_hear::BPM_LOW..=curve_hear::BPM_HIGH).contains(bpm));
         let hear = Hear { bpm: song.unwrap_or(hear.bpm), ..hear };
         *self.heard.borrow_mut() = Some((points.clone(), length, hear));
-        self.making.set(true);
+        self.making.set(Some(Instant::now()));
         panel.global::<CurveEditorData>().set_playing(true);
         let in_step = song.map(|bpm| (curve_hear::heard_beats(length), bpm));
         let make = Box::new(move || Ok((MadeLoop::Sound(curve_hear::tone(&points, length, hear)), in_step)));
@@ -291,9 +321,11 @@ impl Bench {
         self.player.play_made("Curve".into(), make, move |how| *lock(&played) = Some(how));
     }
 
-    /// Stops the tone, if it's this editor's.
+    /// Stops the tone, if it's this editor's and may still be playing (or is being made): never another sound that
+    /// has taken its place since.
     fn stop(&self, panel: &Panel) {
-        if self.tone.take().is_some() || self.making.replace(false) {
+        let ours = self.tone.take().is_some_and(|n| self.player.still_playing(n));
+        if self.making.take().is_some() || ours {
             self.player.stop();
         }
         *self.heard.borrow_mut() = None;
@@ -316,14 +348,30 @@ impl Bench {
             data.set_end_x(drawn.end_x);
         }
         if let Some(how) = lock(&self.played).take()
-            && self.making.replace(false)
+            && self.making.take().is_some()
         {
             match how {
-                Played::Playing(_, n) => self.tone.set(Some(n)),
+                Played::Playing(_, n) => {
+                    self.tone.set(Some(n));
+                    data.set_playing(true);
+                }
                 Played::Not(why) => {
                     self.stop(panel);
                     panel.set_curve_said(why.into());
                 }
+            }
+        }
+        // A tone being made: the one before it ends as this one starts, which isn't a stop. One never answered (a
+        // newer sound overtook it) is given up on, with nothing stopped.
+        if let Some(since) = self.making.get() {
+            if since.elapsed() <= TONE_WAIT {
+                return;
+            }
+            self.making.set(None);
+            if self.tone.get().is_none() {
+                *self.heard.borrow_mut() = None;
+                data.set_playing(false);
+                data.set_playhead(-1.0);
             }
         }
         let Some(n) = self.tone.get() else { return };
@@ -343,6 +391,10 @@ impl Bench {
             let in_sight = frame.fits() && beat >= view.start - 1e-9 && beat <= view.start + view.span + 1e-9;
             data.set_playhead(if in_sight { frame.x(beat) as f32 } else { -1.0 });
         }
+        // Nothing is made again while the mouse holds something: the curve changes with every move.
+        if card.in_hand() {
+            return;
+        }
         // Edited, or the metronome turned over, since the tone was made: made again, once nothing is in hand.
         let stale = match (card.to_hear(), self.heard.borrow().as_ref()) {
             (Some((points, length, hear)), Some(heard)) => {
@@ -350,9 +402,8 @@ impl Bench {
             }
             _ => false,
         };
-        let in_hand = card.in_hand();
         drop(card);
-        if stale && !in_hand && !self.making.get() {
+        if stale {
             self.play(panel);
         }
     }

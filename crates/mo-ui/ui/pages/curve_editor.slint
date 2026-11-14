@@ -484,8 +484,6 @@ export component GridStrip inherits HorizontalLayout {
     }
 }
 
-// The editor card. `close` puts the curve away; the page gives the picked curve's own parts (its rename box, its drag
-// strip, its buttons and message) as it has them, since they act on the curve as found in the list.
 // The editor's bench: the ruler, the clip strip, the picture with all that lies over it, and the hint line. All of it
 // is in `CurveEditorData`, so the app's card and the plugin's Curves tab show the same bench. `menus`: a right-click
 // opens the part's menu (not where a window can't open one: the plugin shows the menu's lines as buttons instead).
@@ -733,6 +731,8 @@ export component CurveBench inherits VerticalLayout {
     }
 }
 
+// The editor card. `close` puts the curve away; the page gives the picked curve's own parts (its rename box, its drag
+// strip, its buttons and message) as it has them, since they act on the curve as found in the list.
 export component CurveEditor inherits SidePanel {
     // Renaming: the name plate shows a box instead of the name while this is on.
     in property <bool> renaming;
