@@ -992,6 +992,19 @@ impl Card {
         Ok(())
     }
 
+    /// Swing given in one go (the plugin's "Swing as the song"): every second line of a grid `step` beats apart
+    /// moves by `amount` of a step, in the highlighted part or the whole curve. One step of undo; whether it changed
+    /// anything. Draw the picture again either way: a drag in hand is given up first.
+    pub fn swing_by(&mut self, step: f64, amount: f64) -> bool {
+        let s = self;
+        let was = s.grab;
+        s.hands_off();
+        s.mouse = None;
+        let Some((_, editor)) = s.open.as_mut() else { return false };
+        given_up(editor, was, &mut s.lit_whole);
+        editor.edit(&Edit::Swing { step, amount })
+    }
+
     /// Esc: a drag in hand is put back as it was before it began; else the highlight is dropped. Whether it did
     /// either.
     pub fn escape(&mut self) -> bool {
@@ -1575,6 +1588,21 @@ mod tests {
         let dot = Piece { points: vec![CurvePoint { x: 0.0, y: 0.5, bend: 0.0 }], ..piece() };
         assert!(card.add(dot).is_err());
         assert!(Card::default().add(piece()).is_err());
+    }
+
+    #[test]
+    fn swing_given_in_one_go_is_one_step_of_undo() {
+        let mut card = card();
+        // A straight rise has nothing a swing would move: steps first.
+        assert!(card.act(curve_act::STEPS));
+        let before = card.edited().expect("steps");
+        assert!(card.swing_by(0.25, 1.0 / 3.0));
+        assert_ne!(card.edited().expect("swung").0, before.0);
+        assert!((card.length() - 4.0).abs() < 1e-9, "swing never changes the length");
+        assert!(!card.swing_by(0.25, 0.0), "no swing is no step");
+        assert!(card.step_back(true));
+        assert_eq!(card.edited().expect("steps again").0, before.0);
+        assert!(!Card::default().swing_by(0.25, 0.3));
     }
 
     #[test]

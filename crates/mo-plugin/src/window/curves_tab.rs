@@ -173,7 +173,7 @@ impl CurvesTab {
             let read = Arc::clone(&self.read);
             background("mo-plugin-curves", move || *lock(&read) = Some(curves::read()));
         }
-        self.bench.tick(panel);
+        self.bench.tick(panel, shown);
         let Some(read) = lock(&self.read).take() else { return };
         self.reading.set(false);
         match read {
