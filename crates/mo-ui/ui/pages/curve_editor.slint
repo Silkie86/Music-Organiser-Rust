@@ -4,7 +4,7 @@
 // buttons. The picture's still layers (grid, fill, curve) are one picture drawn off the window's thread
 // (mo_app::curve_picture, mo-ui/src/curve_editor.rs); what moves with the mouse or the sound is laid over it here.
 // Only shared parts from studio.slint.
-import { Theme, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, TempoStepper, CardAction, CardActions, SidePanel, MouseField } from "../studio.slint";
+import { Theme, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, TempoStepper, Tip, CardAction, CardActions, SidePanel, MouseField } from "../studio.slint";
 
 // One of the ruler's marks: where (from the picture's left) and its bar and beat ("1", "1.2"; none when the marks are
 // too close to number each).
@@ -73,6 +73,9 @@ export global CurveEditorData {
     in property <bool> metronome;
     in property <string> speed-words: "120 BPM";
     in property <bool> speed-changed;
+    in property <string> metronome-key;
+    in property <string> faster-key;
+    in property <string> slower-key;
     callback metronome-toggled();
     // The speed a step slower (-1) or faster (1), or back to the usual one (0).
     callback speed-stepped(int);
@@ -576,12 +579,20 @@ export component CurveEditor inherits SidePanel {
             horizontal-stretch: 1;
         }
         // How Hear plays it: the metronome and the speed, at the line's right end.
-        ToggleChip {
+        metronome := ToggleChip {
             text: "Metronome";
             on: CurveEditorData.metronome;
             clicked => { CurveEditorData.metronome-toggled(); }
+            Tip {
+                text: "A click on each beat while the curve is heard";
+                key: CurveEditorData.metronome-key;
+                hovering: metronome.hovered;
+                at-y: metronome.height + Space.xs;
+            }
         }
         TempoStepper {
+            slower-key: CurveEditorData.slower-key;
+            faster-key: CurveEditorData.faster-key;
             bpm-text: CurveEditorData.speed-words;
             changed: CurveEditorData.speed-changed;
             stepped(by) => { CurveEditorData.speed-stepped(by); }

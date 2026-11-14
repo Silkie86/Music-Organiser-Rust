@@ -213,6 +213,44 @@ type Heard = (Vec<CurvePoint>, f64, Hear);
 /// A tone is being made again for the one playing: one at a time, the newest shape after it.
 static MAKING: AtomicBool = AtomicBool::new(false);
 
+/// Clears [`MAKING`] when the thread making a tone is done with it, however it ends.
+struct Made;
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        MAKING.store(false, Ordering::Release);
+    }
+}
+
+/// Counts the times Hear started a tone: one being made again for an earlier start never takes a later one's place.
+static ASKED: AtomicU64 = AtomicU64::new(0);
+
+/// The tone playing: its key, and the length in beats and the way of hearing it was made with. The play line and
+/// the place carried over go by this (not by what's wanted next), and it changes just as a new tone takes over.
+static SOUNDING: std::sync::Mutex<Option<(String, f64, Hear)>> = std::sync::Mutex::new(None);
+
+/// The tone under `key` is about to play: what it was made with.
+pub fn sounding(key: &str, length: f64, hear: Hear) {
+    *SOUNDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key.to_owned(), length, hear));
+}
+
+/// What the tone playing under `key` was made with, when that's known.
+fn sounding_of(key: &str) -> Option<(f64, Hear)> {
+    let now = SOUNDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    now.as_ref().filter(|(k, ..)| k == key).map(|(_, length, hear)| (*length, *hear))
+}
+
+/// Whether two tones would be made from the same thing, number for number (a number that isn't one is the same as
+/// itself here, so a damaged curve isn't made again at every tick).
+fn same_heard(a: &Heard, b: &Heard) -> bool {
+    let bits = |h: &Heard| -> Vec<u64> {
+        let mut out = vec![h.1.to_bits(), h.2.bpm.to_bits(), u64::from(h.2.click)];
+        out.extend(h.0.iter().flat_map(|p| [p.x.to_bits(), p.y.to_bits(), p.bend.to_bits()]));
+        out
+    };
+    bits(a) == bits(b)
+}
+
 /// What the picture's steps on the window's thread are called in the freeze lines.
 const STEPS: canvas::Steps = canvas::Steps {
     set_up: "Curve editor: set up the GPU painter",
@@ -1200,6 +1238,9 @@ pub fn follow_tone(app: &AppWindow, key: String, heard: Option<Heard>) {
             return false;
         }
         s.tone = Some((key, Instant::now(), false));
+        if heard.is_some() {
+            ASKED.fetch_add(1, Ordering::AcqRel);
+        }
         s.heard = heard;
         true
     });
@@ -1221,7 +1262,7 @@ pub fn follow_tone(app: &AppWindow, key: String, heard: Option<Heard>) {
 fn show_play_line(app: &AppWindow) {
     let player = crate::sounds::player();
     let now = player.playing();
-    let mut again: Option<(String, Hear, Heard)> = None;
+    let mut again: Option<(String, Heard)> = None;
     let at = STATE.with(|s| {
         let s = &mut *s.borrow_mut();
         let frame = s.frame();
@@ -1237,28 +1278,37 @@ fn show_play_line(app: &AppWindow) {
         // The curve was edited, or is heard another way, since the tone was made: it's made again and put in the
         // tone's place at the same beat, so what's heard follows the editor as it plays (Solomon, 14 Nov 2026).
         let wanted = s.open.as_ref().map(|(_, e)| (e.shape().curve_points(), e.shape().length(), s.hear));
-        let was = s.heard.as_ref().map_or(s.hear, |h| h.2);
         if let Some(wanted) = wanted
-            && s.heard.as_ref() != Some(&wanted)
+            && !s.heard.as_ref().is_some_and(|h| same_heard(h, &wanted))
             && !MAKING.swap(true, Ordering::AcqRel)
         {
+            // Counted as heard from here on, even if its thread can't start (that's logged): no trying again at
+            // every tick.
             s.heard = Some(wanted.clone());
-            again = Some((key.clone(), was, wanted));
+            again = Some((key.clone(), wanted));
         }
-        // The play line goes by the tone playing: the new one takes over where this one is.
-        let (length, hear) = s.heard.as_ref().map_or((s.length(), s.hear), |h| (h.1, h.2));
-        let hear = if again.is_some() { was } else { hear };
+        // The play line goes by the tone playing, until the new one takes over where this one is.
+        let (length, hear) = sounding_of(key).unwrap_or((s.length(), s.hear));
         let beat = curve_hear::beat_at(player.position().unwrap_or(0.0), hear, length);
         let view = frame.view;
         let in_sight = frame.fits() && beat >= view.start - 1e-9 && beat <= view.start + view.span + 1e-9;
         Some(if in_sight { frame.x(beat) as f32 } else { -1.0 })
     });
-    if let Some((key, was, (points, length, hear))) = again {
+    if let Some((key, (points, length, hear))) = again {
+        let asked = ASKED.load(Ordering::Acquire);
         let made = background::spawn("Curve tone", move || {
+            let _made = Made;
             let tone = curve_hear::tone(&points, length, hear);
-            crate::sounds::player()
-                .swap_looped(std::sync::Arc::new(tone), &key, |at| curve_hear::carried(at, was, hear, length));
-            MAKING.store(false, Ordering::Release);
+            crate::sounds::player().swap_looped(std::sync::Arc::new(tone), &key, |at| {
+                // Hear was stopped and started again meanwhile: that tone is newer than this one.
+                if ASKED.load(Ordering::Acquire) != asked {
+                    return None;
+                }
+                let mut now = SOUNDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let was = now.as_ref().filter(|(k, ..)| *k == key).map_or(hear, |(_, _, was)| *was);
+                *now = Some((key.clone(), length, hear));
+                Some(curve_hear::carried(at, was, hear, length))
+            });
         });
         if let Err(e) = made {
             MAKING.store(false, Ordering::Release);

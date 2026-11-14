@@ -1039,6 +1039,9 @@ fn show_curve_card(app: &AppWindow) {
         let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some(), edited);
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
         editor.set_hear_key(key(curve_act::HEAR));
+        editor.set_metronome_key(key(curve_act::METRONOME));
+        editor.set_faster_key(key(curve_act::FASTER));
+        editor.set_slower_key(key(curve_act::SLOWER));
         editor.set_undo_key(key(curve_act::UNDO));
         editor.set_redo_key(key(curve_act::REDO));
         editor.set_save_key(key(curve_act::SAVE_AS_NEW));
@@ -1471,6 +1474,7 @@ fn hear_curve(app: &AppWindow, sent: Curve) {
     crate::curve_editor::follow_tone(app, key.clone(), Some((points.clone(), length, hear)));
     let started = background::spawn("Curve tone", move || {
         let tone = mo_app::curve_hear::tone(&points, length, hear);
+        crate::curve_editor::sounding(&key, length, hear);
         crate::sounds::player().play_looped(std::sync::Arc::new(tone), key, 0.0);
         curve_message(
             "Playing the curve as a tone's volume, round and round. It follows your edits as it plays; Space stops it."
@@ -2527,13 +2531,9 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             };
             show_in_songs(app, &s.path);
         }
-        // Heard as the editor has it now, edits and all.
+        // Heard as the editor has it now, edits and all (`hear_curve` asks the editor).
         curve_act::HEAR => {
-            let heard = match crate::curve_editor::edited() {
-                Some((points, length_beats)) => Curve { points, length_beats, ..sent },
-                None => sent,
-            };
-            hear_curve(app, heard);
+            hear_curve(app, sent);
         }
         curve_act::REVERSE
         | curve_act::FLIP

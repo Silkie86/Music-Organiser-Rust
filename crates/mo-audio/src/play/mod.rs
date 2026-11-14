@@ -187,13 +187,14 @@ impl Player {
     }
 
     /// Puts `sound` in the place of the loop playing under `key`, going on from where `from` says, given where the
-    /// loop is now (both in seconds). Only while that loop is the one playing: a stop, or another sound started
-    /// meanwhile, isn't undone by it. Whether it took the loop's place.
-    pub fn swap_looped(&self, sound: Arc<AudioData>, key: &str, from: impl FnOnce(f64) -> f64) -> bool {
+    /// loop is now (both in seconds); `from` can say no (`None`), and is asked with nothing able to start or stop
+    /// meanwhile. Only while that loop is the one playing: a stop, or another sound started meanwhile, isn't undone
+    /// by it. Whether it took the loop's place.
+    pub fn swap_looped(&self, sound: Arc<AudioData>, key: &str, from: impl FnOnce(f64) -> Option<f64>) -> bool {
         let mut now = lock(&self.shared.now);
         let Some(playing) = now.as_ref().filter(|n| n.key == key) else { return false };
         let place = lock(&self.shared.place).as_ref().and_then(|p| p.of(playing.id)).unwrap_or(playing.start);
-        let start = from(place);
+        let Some(start) = from(place) else { return false };
         let start = if start.is_finite() { start.max(0.0) } else { 0.0 };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         *now = Some(Now { id, key: key.to_owned(), start });

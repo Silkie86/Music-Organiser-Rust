@@ -1517,11 +1517,6 @@ pub mod curve_act {
     pub const SLOWER: &str = "curves.slower";
 }
 
-/// A curve heard on its own at the usual speed, with no metronome ([`crate::curve_hear::tone`]).
-pub fn curve_tone(c: &Curve) -> mo_audio::AudioData {
-    crate::curve_hear::tone(&c.points, c.length_beats, crate::curve_hear::Hear::default())
-}
-
 /// What the curves list is filtered by.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CurveFilters {
@@ -2606,23 +2601,6 @@ mod tests {
         assert_eq!(curve_line_at(&list[2], 2.0).length, "1 beat · double speed");
         assert_eq!(Rhythm::EighthTriplet.at_speed(0.5), Some(Rhythm::QuarterTriplet), "triplets stay triplets");
         assert_eq!(Rhythm::DottedEighth.at_speed(0.5), None);
-    }
-
-    #[test]
-    fn a_curve_is_heard_as_a_tone_that_loops() {
-        let mut c = curve("Fall", SourceKind::BitwigClip, "A", 1);
-        c.points = vec![CurvePoint { x: 0.0, y: 1.0, bend: 0.0 }, CurvePoint { x: 1.0, y: 0.0, bend: 0.0 }];
-        c.length_beats = 4.0;
-        let tone = curve_tone(&c);
-        assert_eq!((tone.sample_rate, tone.channels.len(), tone.len()), (44_100, 2, 88_200), "a bar at 120 is 2 s");
-        let loudest = |from: usize, to: usize| tone.channels[0][from..to].iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert!(loudest(0, 2_000) > 0.45, "loud at the top");
-        assert!(loudest(80_000, 88_200) < 0.05, "quiet at the bottom");
-        // An unknown length is heard as a bar; a very long one only its first 32 bars.
-        c.length_beats = 0.0;
-        assert_eq!(curve_tone(&c).len(), 88_200);
-        c.length_beats = 1_000.0;
-        assert_eq!(curve_tone(&c).len(), 44_100 * 64);
     }
 
     #[test]
