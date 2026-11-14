@@ -13,7 +13,7 @@ export component PartsGallery inherits Rectangle {
         { what: "Favourite", key: "Ctrl+D", id: "favourite", enabled: true },
         { what: "", key: "", id: "", enabled: true },
         { what: "Show in folder", key: "Ctrl+Shift+E", id: "reveal", enabled: true },
-        { what: "Copy path", key: "Ctrl+Shift+C", id: "copy", enabled: false, quiet: true },
+        { what: "Copy path", key: "Ctrl+Shift+C", id: "copy", enabled: false },
     ];
     // Made-up years for the year strip: a few with room, and thirty squeezed into the same height.
     property <[YearBar]> years-roomy: [
@@ -140,7 +140,7 @@ export component PartsGallery inherits Rectangle {
                         }
                     }
                     // The year strip with room, and squeezed into a short window: thirty years in the same height,
-                    // every third one named and the ends of the years picked, All years still in sight. No taller
+                    // every third one named and the ends of the years picked, All still in sight. No taller
                     // than the menu beside it, so the row keeps its height.
                     VerticalLayout {
                         spacing: Space.sm;
