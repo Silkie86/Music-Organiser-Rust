@@ -12,6 +12,7 @@ use mo_app::background::{self, Newest};
 use mo_app::curve_edit::{Edit, Editor, Grid, Shape, Span, Step};
 use mo_app::curve_hear::{self, Hear};
 use mo_app::curve_hold::{self, Hold, Over, Part};
+use mo_app::curve_paint::{self, Stroke};
 use mo_app::curve_picture::{self, Colours, Frame, View};
 use mo_app::curve_random;
 use mo_app::curve_strip::{self, OnStrip};
@@ -73,7 +74,16 @@ enum Held {
     /// Empty space: a drag from there highlights, a click drops the highlight. With what was highlighted at the
     /// press, for Esc to put back.
     Sweep(Option<Span>),
+    /// A stroke of paint (Ctrl on empty space): steps, or a line by hand. The stroke itself is in the state.
+    Paint,
+    /// A swing mark on the ruler: every second line of a grid this many beats apart, and the beat it was taken at.
+    Swing(f64, f64),
 }
+
+/// How near the mouse must be to a swing mark to take it, in points either side.
+const SWING_REACH: f64 = 8.0;
+/// The least room between two swing marks shown, in points.
+const SWING_APART: f64 = 28.0;
 
 struct State {
     /// The curve on the card (by its id as it's sent) and its editor.
@@ -94,6 +104,12 @@ struct State {
     /// was made from (its points, its length, how it's heard): when the editor's differs, the tone is made again.
     hear: Hear,
     heard: Option<Heard>,
+    /// The stroke of paint in hand; whether the mouse is on a swing mark of the ruler; how far the swing in hand
+    /// has moved its lines, of a step; and the marks as last shown.
+    stroke: Option<Stroke>,
+    on_swing: bool,
+    swing: f64,
+    swing_marks: Vec<f32>,
     /// Draw here and now, on the processor, instead: for the screenshots, which have no event loop to post to.
     here: bool,
     /// Where the mouse is on the picture (none when it isn't), and the keys held.
@@ -150,6 +166,10 @@ impl Default for State {
             tone: None,
             hear: Hear::default(),
             heard: None,
+            stroke: None,
+            on_swing: false,
+            swing: 0.0,
+            swing_marks: Vec::new(),
             here: false,
             mouse: None,
             keys: Keys::default(),
@@ -185,7 +205,29 @@ impl State {
         self.grab = None;
         self.before = None;
         self.ghost = None;
+        self.stroke = None;
+        self.swing = 0.0;
         self.read_out.clear();
+    }
+
+    /// Where the swing marks stand on the ruler, in points from the picture's left: on every second grid line of
+    /// the highlight (or the whole curve), moved along with a swing in hand.
+    fn swing_xs(&self) -> Vec<f32> {
+        let Some((_, editor)) = self.open.as_ref() else { return Vec::new() };
+        let frame = self.frame();
+        let step = match self.grab {
+            Some((Held::Swing(step, _), _, _)) => Some(step),
+            _ => self.grid.beats(),
+        };
+        let Some(step) = step else { return Vec::new() };
+        let span = editor.highlight().unwrap_or(editor.shape().whole());
+        let view = frame.view;
+        curve_paint::swing_marks(step, span.start, span.end, frame, SWING_APART)
+            .into_iter()
+            .map(|beat| beat + self.swing * step)
+            .filter(|beat| *beat >= view.start - 1e-9 && *beat <= view.start + view.span + 1e-9)
+            .map(|beat| frame.x(beat) as f32)
+            .collect()
     }
 
     /// Takes the curve off the card. One with edits (or steps to redo) is kept for when it's picked again.
@@ -307,6 +349,12 @@ pub fn connect(app: &AppWindow) {
         }
     });
     data.set_mac(cfg!(target_os = "macos"));
+    let weak = app.as_weak();
+    data.on_ruler_mouse(move |kind, x, shift| {
+        if let Some(app) = weak.upgrade() {
+            ruler(&app, kind, f64::from(x), Keys { shift, ..Keys::default() });
+        }
+    });
     let weak = app.as_weak();
     data.on_strip(move |kind, x, shift, alt, ctrl| {
         if let Some(app) = weak.upgrade() {
@@ -475,7 +523,7 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
                         editor.set_highlight(Some(hold.span));
                         s.lit_whole = true;
                     }
-                    if !matches!(held, Held::Sweep(_)) {
+                    if !matches!(held, Held::Sweep(_)) && s.before.is_none() {
                         s.before = Some(editor.shape().clone());
                     }
                 }
@@ -501,7 +549,42 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
                         s.read_out = curve_hold::swept_words(span);
                         editor.set_highlight(Some(span));
                     }
+                    Held::Paint => {
+                        if let Some(stroke) = s.stroke.as_mut() {
+                            stroke.add(frame, length, x, y);
+                            s.read_out = stroke.words();
+                            if let Some(edit) = stroke.edit(frame) {
+                                editor.drag(&edit);
+                            }
+                        }
+                    }
+                    Held::Swing(step, taken) => {
+                        s.swing = curve_paint::swing(frame, step, keys, taken, x);
+                        s.read_out = curve_paint::swing_words(s.swing);
+                        editor.drag(&Edit::Swing { step, amount: s.swing });
+                    }
                 }
+                true
+            }
+            // Ctrl on empty space paints: the stroke begins under the press, with no wait for a drag.
+            1 if keys.ctrl
+                && matches!(
+                    curve_hold::over(editor.shape(), editor.highlight(), frame, x, y),
+                    Over::Inside | Over::Empty
+                ) =>
+            {
+                let mut stroke = Stroke::begin(s.grid, keys);
+                stroke.add(frame, editor.shape().length(), x, y);
+                s.before = Some(editor.shape().clone());
+                s.dropped = None;
+                s.read_out = stroke.words();
+                if let Some(edit) = stroke.edit(frame) {
+                    editor.drag(&edit);
+                }
+                s.stroke = Some(stroke);
+                s.lit_whole = false;
+                s.held_dot = None;
+                s.grab = Some((Held::Paint, (x, y), true));
                 true
             }
             1 => {
@@ -524,6 +607,8 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
                 let was = s.grab.take();
                 s.before = None;
                 s.ghost = None;
+                s.stroke = None;
+                s.swing = 0.0;
                 s.read_out.clear();
                 match was {
                     Some((Held::Sweep(lit), _, moved)) => {
@@ -551,7 +636,19 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
                 s.grab = None;
                 s.before = None;
                 s.ghost = None;
+                s.stroke = None;
+                s.swing = 0.0;
                 s.read_out.clear();
+                // Two quick strokes of paint are two strokes: no point is added under them.
+                if keys.ctrl
+                    && matches!(
+                        curve_hold::over(editor.shape(), editor.highlight(), frame, x, y),
+                        Over::Inside | Over::Empty
+                    )
+                {
+                    s.dropped = None;
+                    return false;
+                }
                 // The click it began with dropped the highlight: it's put back.
                 let back = s.dropped.take().filter(|(_, when)| when.elapsed() < DOUBLE_CLICK);
                 if let (Some((lit, _)), None) = (back, editor.highlight()) {
@@ -570,6 +667,8 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
                 let was = s.grab.take();
                 s.before = None;
                 s.ghost = None;
+                s.stroke = None;
+                s.swing = 0.0;
                 s.read_out.clear();
                 s.mouse = None;
                 s.keys = Keys::default();
@@ -589,6 +688,37 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
     if drawn {
         redraw(app);
     }
+    show_touch(app);
+}
+
+/// The mouse on the ruler (`kind` as [`mouse`] has it; 4 when it leaves), `x` points from the picture's left. A press
+/// on a swing mark takes hold of them all: the drag goes on as the picture's drags do.
+fn ruler(app: &AppWindow, kind: i32, x: f64, keys: Keys) {
+    let dragging = STATE.with(|s| matches!(s.borrow().grab, Some((Held::Swing(..), _, _))));
+    if dragging && matches!(kind, 0 | 2 | 5) {
+        mouse(app, kind, x, 0.0, keys);
+        if kind == 0 {
+            return;
+        }
+        // Let go: the marks stand on the grid again, and the mouse may be on none of them now.
+        STATE.with(|s| s.borrow_mut().mouse = None);
+    }
+    STATE.with(|s| {
+        let s = &mut *s.borrow_mut();
+        let near = kind != 4 && s.swing_xs().iter().any(|m| (f64::from(*m) - x).abs() <= SWING_REACH);
+        s.on_swing = near;
+        if kind == 1
+            && near
+            && s.grab.is_none()
+            && let (Some(step), Some((_, editor))) = (s.grid.beats(), s.open.as_ref())
+        {
+            // Taken at the beat the mouse is on, so moving the view along mid-drag doesn't move the swing.
+            let taken = s.frame().beat_at(x);
+            s.before = Some(editor.shape().clone());
+            s.keys = keys;
+            s.grab = Some((Held::Swing(step, taken), (x, 0.0), true));
+        }
+    });
     show_touch(app);
 }
 
@@ -944,7 +1074,7 @@ fn show_touch(app: &AppWindow) {
                 (part, _) => part,
             }),
             (Some(Held::Part(hold)), None) => Over::Part(hold.part),
-            (Some(Held::Sweep(_)), _) => Over::Empty,
+            (Some(Held::Sweep(_) | Held::Paint | Held::Swing(..)), _) => Over::Empty,
             (None, Some((x, y))) => curve_hold::over_in(shape, hl, frame, x, y),
             _ => Over::Empty,
         };
@@ -1027,7 +1157,8 @@ fn show_touch(app: &AppWindow) {
             }
             _ => 0,
         });
-        let hint = curve_hold::hint(over, cfg!(target_os = "macos"));
+        let mac = cfg!(target_os = "macos");
+        let hint = curve_hold::hint(over, mac);
         let on = s.mouse.is_some() || held.is_some();
         data.set_hint_name(if on { hint.name } else { "" }.into());
         data.set_hint_does(
@@ -1035,6 +1166,30 @@ fn show_touch(app: &AppWindow) {
                 .into(),
         );
         data.set_hint_keys(if on { hint.keys } else { "" }.into());
+        // The paint key held over empty space, or a stroke in hand: what it paints. And the swing mark.
+        let painting = held == Some(Held::Paint);
+        let may_paint =
+            held.is_none() && s.mouse.is_some() && s.keys.ctrl && matches!(over, Over::Inside | Over::Empty);
+        if painting || may_paint {
+            let keys = Keys { shift: s.stroke.as_ref().map_or(s.keys.shift, Stroke::by_hand), ..s.keys };
+            let (does, more) = curve_paint::hint(s.grid, keys, painting);
+            data.set_hint_name("Paint".into());
+            data.set_hint_does(does.into());
+            data.set_hint_keys(more.into());
+            data.set_pointer(8);
+        }
+        let swinging = matches!(held, Some(Held::Swing(..)));
+        if swinging || (held.is_none() && s.on_swing) {
+            data.set_hint_name("Swing".into());
+            data.set_hint_does("drag to move every second grid line later or earlier · the curve follows".into());
+            data.set_hint_keys("Shift: freely".into());
+        }
+        data.set_swing_hot(swinging || (held.is_none() && s.on_swing));
+        let marks = s.swing_xs();
+        if marks != s.swing_marks {
+            data.set_swing_marks(ModelRc::new(VecModel::from(marks.clone())));
+            s.swing_marks = marks;
+        }
         // The clip strip: its tiles, and its own hint while the mouse is on it.
         let tiles = curve_strip::tiles(shape, editor.highlight(), frame, &s.name);
         let on_strip = s.on_strip.filter(|_| held.is_none()).map(|x| curve_strip::strip_at(&tiles, x));
@@ -1387,6 +1542,12 @@ pub fn mouse_sample(app: &AppWindow, kind: i32, beat: f64, value: f64, keys: Key
         (frame.x(beat), frame.y(value))
     });
     mouse(app, kind, x, y, keys);
+}
+
+/// The mouse on the ruler at a beat, as if it were there (screenshots): `kind` as the page says it.
+pub fn ruler_sample(app: &AppWindow, kind: i32, beat: f64) {
+    let x = STATE.with(|s| s.borrow().frame().x(beat));
+    ruler(app, kind, x, Keys::default());
 }
 
 /// What's highlighted, in beats: for the screenshots' own checks.

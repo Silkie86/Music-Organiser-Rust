@@ -60,6 +60,12 @@ export global CurveEditorData {
     in property <[RulerMark]> ruler;
     // Where the curve ends, from the picture's left; under 0 when its end isn't in sight.
     in property <length> end-x: -1px;
+    // The swing marks: where they stand on the ruler (on every second grid line), and whether the mouse is on one
+    // or holds them (they move as one, so they light as one). The mouse on the ruler: 0 moved, 1 pressed, 2 let go,
+    // 4 left, 5 the press was taken away; where, and whether Shift is held.
+    in property <[length]> swing-marks;
+    in property <bool> swing-hot;
+    callback ruler-mouse(int, length, bool);
     // The grid: its step (0 is 1/4, 1 is 1/8, 2 is 1/16, 3 is 1/32, -1 is off) and whether it's triplets or dotted.
     in property <int> grid-step: 2;
     in property <bool> grid-triplet;
@@ -317,7 +323,33 @@ component Ruler inherits Rectangle {
         commands: "M 0 0 L 10 0 L 5 7 Z";
         fill: Theme.accent;
     }
-    TouchArea {
+    // The swing marks: a small diamond on every second grid line, at the ruler's foot, clear of the numbers.
+    for x in CurveEditorData.swing-marks: Path {
+        x: x - 4px;
+        y: root.height - 9px;
+        width: 8px;
+        height: 8px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: "M 5 0 L 10 5 L 5 10 L 0 5 Z";
+        fill: CurveEditorData.swing-hot ? Theme.accent : Theme.muted.transparentize(30%);
+    }
+    MouseField {
+        mouse-cursor: CurveEditorData.swing-hot ? MouseCursor.ew-resize : MouseCursor.default;
+        changed inside => {
+            if !self.inside {
+                CurveEditorData.ruler-mouse(4, self.mouse-x, false);
+            }
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.move {
+                CurveEditorData.ruler-mouse(0, self.mouse-x, e.modifiers.shift);
+            } else if e.kind == PointerEventKind.cancel {
+                CurveEditorData.ruler-mouse(5, self.mouse-x, false);
+            } else if e.button == PointerEventButton.left {
+                CurveEditorData.ruler-mouse(e.kind == PointerEventKind.down ? 1 : 2, self.mouse-x, e.modifiers.shift);
+            }
+        }
         scroll-event(e) => {
             CurveEditorData.wheel(self.mouse-x, e.delta-y != 0 ? e.delta-y : e.delta-x, e.modifiers.shift);
             EventResult.accept
@@ -794,6 +826,7 @@ export component CurveEditor inherits SidePanel {
                     : CurveEditorData.pointer == 5 ? MouseCursor.nwse-resize
                     : CurveEditorData.pointer == 6 ? MouseCursor.nesw-resize
                     : CurveEditorData.pointer == 7 ? MouseCursor.copy
+                    : CurveEditorData.pointer == 8 ? MouseCursor.crosshair
                     : MouseCursor.default;
                 function tell(kind: int, shift: bool, alt: bool, ctrl: bool) {
                     CurveEditorData.mouse(kind, self.mouse-x, self.mouse-y, shift, alt, ctrl);
