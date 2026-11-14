@@ -369,6 +369,9 @@ export component StudioButton inherits Rectangle {
     in property <string> text;
     in property <bool> main: false;
     in property <bool> danger: false;
+    // One that only shows or copies where a thing is (Show in folder, Copy path): flat on the panel, with no raised
+    // face, so the buttons that play, send or make something stand out beside it.
+    in property <bool> quiet: false;
     in property <bool> enabled: true;
     // The tooltip and the key from the shortcut list, if it has one.
     in property <string> tip;
@@ -382,9 +385,11 @@ export component StudioButton inherits Rectangle {
     height: Heights.button;
     border-radius: Theme.radius;
     border-width: 1px;
-    border-color: Theme.edge;
+    border-color: root.flat ? Theme.stroke : Theme.edge;
+    property <bool> flat: quiet && !main;
     background: !enabled ? Theme.surface : main
         ? (touch.pressed ? Theme.accent.darker(15%) : @linear-gradient(180deg, Theme.accent.brighter(12%) 0%, Theme.accent.darker(6%) 100%))
+        : flat ? (touch.pressed ? Theme.well : touch.has-hover ? Theme.hover : transparent)
         : (touch.pressed ? Theme.well : @linear-gradient(180deg, (touch.has-hover ? Theme.hover : Theme.surface-raised).brighter(8%) 0%, Theme.surface-raised.darker(6%) 100%));
     animate background { duration: Motion.tap; }
     // The page's one lit button glows a little past its own edge, like a lamp behind a key.
@@ -403,7 +408,7 @@ export component StudioButton inherits Rectangle {
         height: 1px;
         x: parent.border-radius;
         width: parent.width - 2 * parent.border-radius;
-        background: touch.pressed ? transparent : Theme.shine;
+        background: touch.pressed || root.flat ? transparent : Theme.shine;
     }
     label := Text {
         x: (parent.width - self.width - (root.menu ? 14px : 0px)) / 2;
@@ -3069,6 +3074,8 @@ export struct CardAction {
     // things (Remove).
     main: bool,
     danger: bool,
+    // It only shows or copies where the thing is: a flat button (mo-app's `themes::quiet_button` says which).
+    quiet: bool,
 }
 
 // A side card's buttons: everything you can do with what's picked, in sight rather than behind a "more" menu
@@ -3098,6 +3105,7 @@ export component CardActions inherits FlexboxLayout {
         enabled: a.enabled;
         main: a.main;
         danger: a.danger;
+        quiet: a.quiet;
         clicked => { root.chosen(a.id); }
     }
     for a in root.room > 0 ? root.actions : root.none: StudioButton {
@@ -3108,6 +3116,7 @@ export component CardActions inherits FlexboxLayout {
         enabled: a.enabled;
         main: a.main;
         danger: a.danger;
+        quiet: a.quiet;
         clicked => { root.chosen(a.id); }
     }
 }
