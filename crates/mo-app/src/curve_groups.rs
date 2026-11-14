@@ -326,7 +326,7 @@ pub fn value_at(points: &[CurvePoint], x: f64) -> f64 {
 
 /// How far along a line bent by `bend` is at `t` of its width (both 0 to 1). On a line from (0, 0) to (1, 1) the
 /// page's handle is at (0.5 + bend / 2, 0.5 - bend / 2); the curve's x is solved for its step, then its height read.
-fn bent(t: f64, bend: f64) -> f64 {
+pub(crate) fn bent(t: f64, bend: f64) -> f64 {
     let bend = if bend.is_finite() { bend.clamp(-1.0, 1.0) } else { 0.0 };
     if bend.abs() < 0.01 {
         return t;
