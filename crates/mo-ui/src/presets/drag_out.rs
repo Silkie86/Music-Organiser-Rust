@@ -178,10 +178,14 @@ fn carry_of(item: &Item, have: Option<Arc<Templates>>, bitwig_folders: &[PathBuf
     let name = &item.row.name;
     let mut carried = match &item.row.source {
         Source::File { path } => {
-            carried::from_file(Path::new(path), &item.row.plugin, Some(&*templates)).map_err(|e| match e.kind() {
-                ErrorKind::NotFound => format!("{name} isn't on this computer any more, so there's nothing to drag."),
-                _ => format!("{name} couldn't be read to drag it: {e}."),
-            })?
+            carried::from_file(Path::new(path), &item.row.plugin, item.row.kind, Some(&*templates)).map_err(
+                |e| match e.kind() {
+                    ErrorKind::NotFound => {
+                        format!("{name} isn't on this computer any more, so there's nothing to drag.")
+                    }
+                    _ => format!("{name} couldn't be read to drag it: {e}."),
+                },
+            )?
         }
         Source::Song { save, key } => carried::from_save(save, key, Some(&*templates))
             .map_err(|e| format!("{name} couldn't be read from its song again: {e}"))?,

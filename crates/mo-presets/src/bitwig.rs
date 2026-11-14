@@ -4,9 +4,11 @@
 //! A `.bwpreset` is a Bitwig document like a project: the device and the plugin it loads are in its body, and the
 //! plugin's settings sit in the zip at its end as a plain `.fxp`/`.fxb` (VST2) or `.vstpreset` (VST3) file, named by
 //! the device's state field. So a preset Bitwig itself saved for that plugin is used as a template: its body is kept,
-//! the settings file in its zip is swapped for the new one, and the preset's name is changed. A plugin with no
-//! template of its own borrows another plugin's of the same format ([`stand_in_for`]), whose device takes the
-//! sound's plugin name and id, as the converter makes plugin devices from the Bitwig template's.
+//! the settings file in its zip is swapped for the new one under a name of its own ([`fresh_state_name`]), and the
+//! preset's name is changed. A plugin with no template of its own borrows another plugin's of the same format
+//! ([`stand_in_for`]), a synth's for a synth where there is one, whose device takes the sound's plugin name and id,
+//! and what the sound's plugin is (instrument or effect, so Bitwig puts a synth on an instrument track), as the
+//! converter makes plugin devices from the Bitwig template's.
 //!
 //! Unlike the C# app, which swapped names as bytes, the template is decoded, changed field by field and written again
 //! with `mo_formats::bitwig::encode` (the same writer the converter uses), then the new file is decoded again and
@@ -18,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use mo_formats::bitwig::{self, Document, ObjId, Text, Value};
-use mo_formats::paths;
 use mo_formats::presets::PresetBlob;
+use mo_formats::{PluginKind, paths};
 use rayon::prelude::*;
 
 use crate::files::{self, F_DEVICE_NAME, F_DEVICE_PRESET, F_PLUGIN_STATE, FileFormat};
@@ -39,6 +41,9 @@ pub struct Template {
     pub preset_name: String,
     /// The plugin's id as its settings say (a VST2's four letters, a VST3's class id), or "" when they don't.
     pub plugin_id: String,
+    /// What the plugin is (instrument or effect), as the preset says ([`kind_of`]), so a synth's sound borrows a
+    /// synth's template first ([`stand_in_for`]).
+    pub kind: PluginKind,
     /// When the file was last saved, so the newest template for a plugin wins.
     pub modified: Option<SystemTime>,
 }
@@ -99,19 +104,34 @@ pub fn inspect_doc(doc: &Document) -> Option<Template> {
     if state_format(paths::extension(&entry_name)).is_empty() {
         return None;
     }
-    // Only the settings' head, for the plugin's id.
+    // Only the settings' head, for the plugin's id (and what it is, when the preset doesn't say).
     let mut head = Vec::new();
     archive.by_index(index).ok()?.take(64 * 1024).read_to_end(&mut head).ok()?;
-    let plugin_id = files::read_bytes(&head, &entry_name).map(|f| f.plugin_id).unwrap_or_default();
+    let inner = files::read_bytes(&head, &entry_name).ok();
+    let kind = match kind_of(doc, device) {
+        PluginKind::Unknown => inner.as_ref().map_or(PluginKind::Unknown, |f| f.kind),
+        kind => kind,
+    };
     Some(Template {
         path: PathBuf::new(),
         plugin: o.str(F_DEVICE_NAME).to_owned(),
         state_field: field,
         state_file,
         preset_name: o.str(F_DEVICE_PRESET).to_owned(),
-        plugin_id,
+        plugin_id: inner.map(|f| f.plugin_id).unwrap_or_default(),
+        kind,
         modified: None,
     })
+}
+
+/// What a Bitwig preset's plugin device is: as its metadata says (`device_type`), else as the device does (Bitwig's
+/// kind field, else its category), as the preset files' reader takes it ([`files::bwpreset_of`], which then asks the
+/// settings in the zip, as a template's kind does).
+pub fn kind_of(doc: &Document, device: ObjId) -> PluginKind {
+    match files::kind_of_device_type(doc.meta_str("device_type")) {
+        PluginKind::Unknown => bitwig::device_kind(doc.obj(device)),
+        kind => kind,
+    }
 }
 
 /// The one device that loads a plugin and its state field, when there's one and no other device beside it.
@@ -180,18 +200,27 @@ pub fn template_by_id<'a>(plugin_id: &str, format: &str, templates: &'a Template
 }
 
 /// A stand-in template for a sound whose plugin has no template of its own: the newest template of the same format
-/// (VST2 or VST3) for another plugin. [`build_for_other`] gives it the sound's plugin. (Solomon, 5 Nov 2026: Send to
-/// Bitwig never sent Hive or WAVESTATION, as he had saved no Bitwig preset of either.)
+/// (VST2 or VST3) for another plugin, one for a plugin of the same kind first (a synth's for a synth) when the sound's
+/// kind is known. [`build_for_other`] gives it the sound's plugin, and the sound's kind when it's another. (Solomon, 5
+/// Nov 2026: Send to Bitwig never sent Hive or WAVESTATION, as he had saved no Bitwig preset of either; 14 Nov: a
+/// dragged Keyscape preset went onto an audio track.)
 pub fn stand_in_for<'a>(preset: &PresetBlob, templates: &'a Templates) -> Option<&'a Template> {
     let format = state_format(&preset.extension);
     if format.is_empty() {
         return None;
     }
     // The newest, by path when two were saved at the same time, so it's the same every run.
-    templates
-        .values()
-        .filter(|t| t.format() == format)
-        .min_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)))
+    let newest = |of: &dyn Fn(&Template) -> bool| {
+        templates
+            .values()
+            .filter(|t| t.format() == format && of(t))
+            .min_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)))
+    };
+    let same_kind = match preset.kind {
+        PluginKind::Unknown => None,
+        kind => newest(&|t| t.kind == kind),
+    };
+    same_kind.or_else(|| newest(&|_| true))
 }
 
 /// Who a stand-in template's device becomes: the sound's plugin, by its name and its id as its settings say.
@@ -199,13 +228,13 @@ pub fn stand_in_for<'a>(preset: &PresetBlob, templates: &'a Templates) -> Option
 struct Identity {
     name: String,
     id: Value,
-    /// Instrument or effect, where the song says; the stand-in's device is told which (field 0x9d).
-    kind: mo_formats::PluginKind,
+    /// Instrument or effect, where the song or the file says; the stand-in's device and metadata are told which.
+    kind: PluginKind,
 }
 
 /// The plugin the settings are for, as Bitwig's device names it: a VST2's id is its number (from the program's or
 /// bank's head), a VST3's its class id (from the `.vstpreset`'s head). `None` when the settings don't say.
-fn identity(plugin: &str, kind: mo_formats::PluginKind, state: &[u8], extension: &str) -> Option<Identity> {
+fn identity(plugin: &str, kind: PluginKind, state: &[u8], extension: &str) -> Option<Identity> {
     let id = match state_format(extension) {
         "VST2" if state.get(..4) == Some(b"CcnK") => {
             let id = i32::from_be_bytes(state.get(16..20)?.try_into().ok()?);
@@ -329,15 +358,17 @@ fn build_with(
         ));
     }
 
-    // The settings file takes the new ending, and so does the state field when it names the file with its ending.
+    // The settings file takes a name of its own ([`fresh_state_name`]) with the new ending, in the template's folder
+    // in the zip; the state field names it as the template's named its own (with its ending or without).
     let old_name = paths::entry_name(&t.state_file);
-    let new_name = format!("{}{state_extension}", paths::stem(old_name));
+    let new_stem = fresh_state_name();
+    let new_name = format!("{new_stem}{state_extension}");
     let new_file = format!("{}{new_name}", t.state_file.strip_suffix(old_name).unwrap_or_default());
-    let new_field = if paths::extension(&t.state_field).is_empty() { t.state_field.clone() } else { new_name };
+    let new_field = if paths::extension(&t.state_field).is_empty() { new_stem } else { new_name };
     let (device, _) = one_plugin(&doc).ok_or("the template no longer loads one plugin")?;
     doc.obj_mut(device).set(F_PLUGIN_STATE, Value::Str(Text::new(&new_field)));
     if let Some(who) = other {
-        become_plugin(&mut doc, device, who);
+        become_plugin(&mut doc, device, who, t.kind);
     }
     let plugin = other.map_or(t.plugin.as_str(), |w| w.name.as_str());
 
@@ -363,10 +394,25 @@ fn build_with(
     Ok(bytes)
 }
 
+/// A name for the plugin's settings file in a preset made here, new each time, as Bitwig names each one it saves (a
+/// version 4 UUID, "8b7c6b5b-349f-4805-ae01-e3bcafb33be8"). Bitwig opens a preset's settings from its own
+/// plugin-states folder by that name (its error names the file there), so a preset made under its template's name
+/// could open with what Bitwig already kept under it, the template's settings or an earlier drag's, rather than its own
+/// (Solomon, 14 Nov 2026: a dragged VST3 preset failed with "Error loading VST3 preset" on that file, and another came
+/// up at its plugin's default sound).
+pub fn fresh_state_name() -> String {
+    let hex: String = bitwig::encode::fresh_id().iter().map(|b| format!("{b:02x}")).collect();
+    let part = |from: usize, to: usize| hex.get(from..to).unwrap_or_default();
+    format!("{}-{}-{}-{}-{}", part(0, 8), part(8, 12), part(12, 16), part(16, 20), part(20, 32))
+}
+
 // The plugin device's fields a stand-in template's device changes, as the converter's `plugin` does.
 const F_VENDOR: u32 = 0x9b;
-/// Instrument (2) or audio effect (0), as the converter writes it.
+const F_CATEGORY: u32 = 0x9c;
+/// Instrument (2), note effect (1) or audio effect (0), as Bitwig saves it.
 const F_DEVICE_KIND: u32 = 0x9d;
+/// 1 on an instrument plugin, 0 on an effect, as Bitwig saves it (what it stands for isn't known).
+const F_INSTRUMENT_FLAG: u32 = 0x1809;
 const F_PLUGIN_ID: u32 = 0xce4;
 const F_PLUGIN_VERSION: u32 = 0xc5e;
 const F_AUTOMATED: u32 = 0x1318;
@@ -387,21 +433,108 @@ fn put(doc: &mut Document, obj: ObjId, id: u32, value: Value) {
     }
 }
 
-/// A stand-in template's device becomes the sound's plugin: its name and id, and nothing kept that only the
-/// template's plugin had (its maker, version, automated settings, outputs, program name and file), which Bitwig reads
-/// again from the plugin when it loads it.
-fn become_plugin(doc: &mut Document, device: ObjId, who: &Identity) {
+/// What Bitwig says a plugin of this kind is: its device's kind field, the metadata's device type, and a category for
+/// one that was another kind (a stand-in effect's own, "EQ" say, isn't a synth's). `None` for a kind not known.
+fn kind_words(kind: PluginKind) -> Option<(u8, &'static str, &'static str)> {
+    match kind {
+        PluginKind::Instrument => Some((2, "note_to_audio", "Synth")),
+        PluginKind::NoteEffect => Some((1, "note_to_note", "Note FX")),
+        PluginKind::Effect => Some((0, "audio_to_audio", "Audio FX")),
+        PluginKind::Unknown => None,
+    }
+}
+
+/// A metadata text changed to `value`, when the preset has it (none is added).
+fn set_meta(doc: &mut Document, key: &str, value: &str) {
+    if let Some((_, v)) = doc.meta.iter_mut().rev().find(|(k, _)| k.as_str() == key) {
+        *v = Value::Str(Text::new(value));
+    }
+}
+
+/// A plugin id as text, as its device holds it (a VST3's class id, a VST2's number); `None` for none.
+fn id_text(v: &Value) -> Option<String> {
+    let text = match v {
+        Value::Str(t) => t.as_str().to_owned(),
+        Value::U8(n) => n.to_string(),
+        Value::I16(n) => n.to_string(),
+        Value::I32(n) => n.to_string(),
+        Value::I64(n) => n.to_string(),
+        _ => return None,
+    };
+    (!text.is_empty() && text != "0").then_some(text)
+}
+
+/// `text` with the plugin id `old` in it (the whole of it, or a whole word in it, letter case aside) swapped for `new`;
+/// `None` when it isn't there.
+fn swapped_id(text: &str, old: &str, new: &str) -> Option<String> {
+    if old.is_empty() || !old.is_ascii() {
+        return None;
+    }
+    let (lower, old_lower) = (text.to_ascii_lowercase(), old.to_ascii_lowercase());
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    let (mut out, mut from, mut found) = (String::new(), 0, false);
+    while let Some(at) = lower.get(from..).and_then(|l| l.find(&old_lower)).map(|i| i + from) {
+        let end = at + old.len();
+        let alone = !word(text.get(..at)?.chars().next_back()) && !word(text.get(end..)?.chars().next());
+        out.push_str(text.get(from..at)?);
+        out.push_str(if alone { new } else { text.get(at..end)? });
+        found |= alone;
+        from = end;
+    }
+    out.push_str(text.get(from..)?);
+    found.then_some(out)
+}
+
+/// A stand-in template's device becomes the sound's plugin: its name and id, what it is (instrument or effect) where
+/// that's known, in the device and in the preset's metadata (Bitwig's browser and a drop on the track list go by it),
+/// and nothing kept that only the template's plugin had (its maker, version, automated settings, outputs, program name
+/// and file), which Bitwig reads again from the plugin when it loads it. `was` is what the template's plugin is.
+fn become_plugin(doc: &mut Document, device: ObjId, who: &Identity, was: PluginKind) {
+    let old_id = doc.obj(device).get(F_PLUGIN_ID).and_then(id_text);
     put(doc, device, F_DEVICE_NAME, Value::Str(Text::new(&who.name)));
     put(doc, device, F_PLUGIN_ID, who.id.clone());
-    let kind = match who.kind {
-        mo_formats::PluginKind::Instrument => Some(2),
-        mo_formats::PluginKind::Effect => Some(0),
-        _ => None,
-    };
-    if let Some(kind) = kind
-        && doc.obj(device).has(F_DEVICE_KIND)
-    {
-        put(doc, device, F_DEVICE_KIND, Value::U8(kind));
+    if let Some((kind_field, device_type, category)) = kind_words(who.kind) {
+        // As the kinds of value the template's device holds them in (`set`).
+        if doc.obj(device).has(F_DEVICE_KIND) {
+            doc.obj_mut(device).set(F_DEVICE_KIND, Value::U8(kind_field));
+        }
+        if who.kind != PluginKind::NoteEffect && doc.obj(device).has(F_INSTRUMENT_FLAG) {
+            doc.obj_mut(device).set(F_INSTRUMENT_FLAG, Value::U8(u8::from(who.kind == PluginKind::Instrument)));
+        }
+        if who.kind != was {
+            if doc.obj(device).has(F_CATEGORY) {
+                put(doc, device, F_CATEGORY, Value::Str(Text::new(category)));
+            }
+            set_meta(doc, "device_category", category);
+        }
+        if files::kind_of_device_type(doc.meta_str("device_type")) != who.kind {
+            set_meta(doc, "device_type", device_type);
+        }
+    }
+    set_meta(doc, "device_name", &who.name);
+    set_meta(doc, "device_creator", "");
+    // The template's plugin's id where the metadata names the device by it.
+    if let (Some(old), Some(new)) = (old_id, id_text(&who.id)) {
+        for (key, value) in doc.meta.iter_mut() {
+            if !matches!(key.as_str(), "device_id" | "referenced_device_ids") {
+                continue;
+            }
+            match value {
+                Value::Str(t) => {
+                    if let Some(swapped) = swapped_id(t.as_str(), &old, &new) {
+                        *t = Text::new(&swapped);
+                    }
+                }
+                Value::Strings(list) => {
+                    for t in list.iter_mut() {
+                        if let Some(swapped) = swapped_id(t.as_str(), &old, &new) {
+                            *t = Text::new(&swapped);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     if doc.obj(device).has(F_VENDOR) {
         put(doc, device, F_VENDOR, Value::Str(Text::new("")));

@@ -172,17 +172,24 @@ fn write_all(
     Ok(Exported { folder, files, failed, warning: None })
 }
 
-/// A sound's Bitwig preset, made from its plugin's own template (found by `plugin_id`, the id its settings give, when
-/// the caller has one, else by its name), else a stand-in of the same format that becomes its plugin; `None` when
-/// `templates` has neither. Each template's file is read once into `read` (for a whole export).
+/// A sound's Bitwig preset, made from its plugin's own template (found by `plugin_id`, the id its settings give, else by
+/// its name), else a stand-in of the same format that becomes its plugin; `None` when `templates` has neither. The
+/// caller's `plugin_id` is used when it has one (a preset file's, read already), else it's read from the settings (a
+/// song's sound, which Bitwig or FL may name otherwise than Bitwig's preset of it). Each template's file is read once
+/// into `read` (for a whole export).
 pub(crate) fn bitwig_bytes(
     p: &PresetBlob,
     plugin_id: &str,
     templates: &Templates,
     read: &mut HashMap<PathBuf, Result<Vec<u8>, String>>,
 ) -> Option<Result<Vec<u8>, String>> {
-    let own = bitwig::template_by_id(plugin_id, bitwig::state_format(&p.extension), templates)
-        .or_else(|| bitwig::template_for(p, templates));
+    let format = bitwig::state_format(&p.extension);
+    let from_settings = || files::read_bytes(&p.data, &format!("x{}", p.extension)).map(|f| f.plugin_id).ok();
+    let plugin_id = match plugin_id {
+        "" if !format.is_empty() => from_settings().unwrap_or_default(),
+        id => id.to_owned(),
+    };
+    let own = bitwig::template_by_id(&plugin_id, format, templates).or_else(|| bitwig::template_for(p, templates));
     let (template, other) =
         own.map(|t| (t, false)).or_else(|| bitwig::stand_in_for(p, templates).map(|t| (t, true)))?;
     let raw = read

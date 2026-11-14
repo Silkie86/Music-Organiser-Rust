@@ -157,6 +157,28 @@ fn reads_a_bitwig_preset_of_a_plugin() {
     assert_eq!(files::read_bytes(&raw, "Stem.bwpreset").unwrap().plugin_id, "XfsX");
 }
 
+#[test]
+fn a_bitwig_preset_says_what_its_device_is() {
+    // A real one (the recipe's, made by hand in Bitwig 6.1.7 with its own Polysynth: rule 4's exception), whose
+    // metadata says "note_to_audio" for an instrument.
+    let recipe =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../mo-formats/tests/fixtures/recipe/bitwig/MO Recipe Polysynth.bwpreset");
+    let f = files::read(std::path::Path::new(recipe)).unwrap().unwrap();
+    assert_eq!((f.plugin.as_str(), f.kind, f.wraps_plugin), ("Polysynth", PluginKind::Instrument, false));
+    for (device_type, kind) in [
+        ("note_to_audio", PluginKind::Instrument),
+        ("audio_to_audio", PluginKind::Effect),
+        ("note_to_note", PluginKind::NoteEffect),
+    ] {
+        let raw = bwpreset(&[("device_type", device_type)], &[], "Plug", "x", "a.fxb", &fxp::wrap_chunk(&[0], "x", 1));
+        assert_eq!(files::read_bytes(&raw, "x.bwpreset").unwrap().kind, kind, "{device_type}");
+    }
+    // No device type in its metadata: its device's kind field says (0 is an audio effect).
+    let raw = bwpreset(&[], &[], "Plug", "x", "a.fxb", &fxp::wrap_chunk(&[0], "x", 1));
+    let raw = common::with_fields(raw, &[], &[(0x9d, mo_formats::bitwig::Value::U8(0))]);
+    assert_eq!(files::read_bytes(&raw, "x.bwpreset").unwrap().kind, PluginKind::Effect);
+}
+
 fn note(start: i64, length: i64, key: u8) -> NoteEvent {
     NoteEvent { start, length, key, velocity: 40000, muted: false, step: false, attribute: NoteAttribute::NONE }
 }

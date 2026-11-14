@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 
-use super::format::{Document, ObjId, Value, decode};
+use super::format::{Document, ObjId, Object, Value, decode};
 use crate::model::{Confidence, MidiClip, NoteAttribute, NoteEvent, PluginKind, PluginRef, ProjectInfo};
 use crate::paths;
 use crate::plugins;
@@ -44,6 +44,9 @@ const CLS_HARDWARE_IO: u32 = 0x461;
 pub(super) const F_DEVICE_NAME: u32 = 0x9a;
 const F_DEVICE_VENDOR: u32 = 0x9b;
 pub(super) const F_DEVICE_CATEGORY: u32 = 0x9c;
+/// What a device is: 0 an audio effect, 1 a note effect, 2 an instrument (as Bitwig 6.1 saves it, on its own devices and
+/// on plugins alike).
+const F_DEVICE_KIND: u32 = 0x9d;
 pub(super) const F_DEVICE_PRESET: u32 = 0x12de;
 const F_PLUGIN_STATE: u32 = 0xbe5;
 pub(super) const F_TEMPO: u32 = 0x2c8;
@@ -402,6 +405,20 @@ fn collected_names(copy: &str) -> Vec<String> {
     out
 }
 
+/// What a device is (a plugin's or one of Bitwig's own), as Bitwig saved it: its kind field, else its category (an
+/// instrument's, a note effect's or another, which is an effect's); `Unknown` when it has neither.
+pub fn device_kind(device: &Object) -> PluginKind {
+    match device.num(F_DEVICE_KIND) {
+        Some(2.0) => PluginKind::Instrument,
+        Some(1.0) => PluginKind::NoteEffect,
+        Some(0.0) => PluginKind::Effect,
+        _ => match device.str(F_DEVICE_CATEGORY) {
+            "" => PluginKind::Unknown,
+            category => bitwig_kind("", category),
+        },
+    }
+}
+
 pub(super) fn bitwig_kind(name: &str, category: &str) -> PluginKind {
     if INSTRUMENTS.contains(&name) || is_instrument_category(category) {
         PluginKind::Instrument
@@ -622,7 +639,8 @@ fn zip_entries(doc: &Document) -> Option<Zip<'_>> {
 
 /// The plugin states in the project's zip. Bitwig stores them as ordinary preset files (.vstpreset for a VST3, .fxb
 /// or .fxp for a VST2), so they load straight into the plugin. Each is named after its track and its preset (or its
-/// plugin). Read even from a file whose objects didn't all decode, as far as they did.
+/// plugin), and says what its plugin is as its device does ([`device_kind`]). Read even from a file whose objects didn't
+/// all decode, as far as they did.
 pub fn extract_presets(doc: &Document, names: &TrackNames) -> Vec<PresetBlob> {
     let Some(mut zip) = zip_entries(doc) else { return Vec::new() };
     // The device each state belongs to, by its file's name (letter case aside): the first that names it.
@@ -657,7 +675,7 @@ pub fn extract_presets(doc: &Document, names: &TrackNames) -> Vec<PresetBlob> {
                 let track = names.of(doc, owner);
                 let shown =
                     if preset.is_empty() { format!("{track} - {plugin}") } else { format!("{track} - {preset}") };
-                PresetBlob::new(&shown, plugin, ext, data)
+                PresetBlob { kind: device_kind(o), ..PresetBlob::new(&shown, plugin, ext, data) }
             }
             None => PresetBlob::new(stem, "Unknown plugin", ext, data),
         });
@@ -942,6 +960,28 @@ mod tests {
         assert_eq!(version_after_key("application_version_name 6."), Some("6"));
         assert_eq!(version_after_key("application_version_namex 6"), None);
         assert!(is_version("6.1") && !is_version("6") && !is_version("6.") && !is_version("a.1"));
+    }
+
+    #[test]
+    fn a_device_is_what_it_says_it_is() {
+        use crate::bitwig::Field;
+        let device = |fields: &[(u32, Value)]| Object {
+            fields: fields.iter().map(|(id, value)| Field { id: *id, value: value.clone() }).collect(),
+            ..Object::new(CLS_VST3_PLUGIN)
+        };
+        let text = |t: &str| Value::Str(crate::bitwig::Text::new(t));
+        // The kind field wins over the category, which a plugin names itself ("Generator" isn't one Bitwig lists).
+        let synth = device(&[(F_DEVICE_CATEGORY, text("Generator")), (F_DEVICE_KIND, Value::U8(2))]);
+        assert_eq!(device_kind(&synth), PluginKind::Instrument);
+        assert_eq!(device_kind(&device(&[(F_DEVICE_KIND, Value::U8(0))])), PluginKind::Effect);
+        assert_eq!(device_kind(&device(&[(F_DEVICE_KIND, Value::U8(1))])), PluginKind::NoteEffect);
+        // Without it, the category says.
+        assert_eq!(device_kind(&device(&[(F_DEVICE_CATEGORY, text("Synth"))])), PluginKind::Instrument);
+        assert_eq!(device_kind(&device(&[(F_DEVICE_CATEGORY, text("EQ"))])), PluginKind::Effect);
+        assert_eq!(device_kind(&device(&[(F_DEVICE_CATEGORY, text("Note FX"))])), PluginKind::NoteEffect);
+        // Neither, or a kind no Bitwig saves: not known.
+        assert_eq!(device_kind(&device(&[])), PluginKind::Unknown);
+        assert_eq!(device_kind(&device(&[(F_DEVICE_KIND, Value::U8(7))])), PluginKind::Unknown);
     }
 
     #[test]

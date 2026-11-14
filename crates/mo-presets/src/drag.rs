@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use mo_formats::paths;
 use mo_formats::presets::PresetBlob;
+use mo_formats::{PluginKind, paths};
 
 use crate::bitwig::{self, Templates};
 use crate::export;
@@ -49,9 +49,11 @@ pub struct Carried {
 const LARGEST: u64 = 64 << 20;
 
 /// A preset file to drag out (see the top of this file). `plugin` is its plugin's name as the page shows it (a VST2
-/// file gives only the plugin's four letters, which is what the page shows then). Reads the file, so never on the
-/// window's thread. An error when it isn't a file any more.
-pub fn from_file(path: &Path, plugin: &str, templates: Option<&Templates>) -> io::Result<Carried> {
+/// file gives only the plugin's four letters, which is what the page shows then), and `kind` what the page says it is
+/// (the installed plugin's own word, where the library knows it), which the file's own word stands in for when the page
+/// doesn't know: a Bitwig preset made for a synth is an instrument's. Reads the file, so never on the window's thread.
+/// An error when it isn't a file any more.
+pub fn from_file(path: &Path, plugin: &str, kind: PluginKind, templates: Option<&Templates>) -> io::Result<Carried> {
     let meta = std::fs::metadata(path)?;
     if !meta.is_file() {
         return Err(io::Error::new(io::ErrorKind::NotFound, "it isn't a file any more"));
@@ -77,7 +79,7 @@ pub fn from_file(path: &Path, plugin: &str, templates: Option<&Templates>) -> io
         Err(e) => return Ok(as_it_is(Some(format!("it doesn't read as a preset: {e}")))),
     };
     let mut blob = PresetBlob::new(&file.name, if file.plugin.is_empty() { plugin } else { &file.plugin }, ext, raw);
-    blob.kind = file.kind;
+    blob.kind = if kind == PluginKind::Unknown { file.kind } else { kind };
     match made(&blob, &file.plugin_id, templates) {
         None => Ok(as_it_is(Some(no_template(format)))),
         Some(Err(why)) => Ok(as_it_is(Some(why))),

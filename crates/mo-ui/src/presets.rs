@@ -1218,12 +1218,16 @@ fn read_again(app: &AppWindow) {
     read_sounds(app);
 }
 
-/// Reads the library, every song's newest save and the preset files, handing each batch to the window.
+/// Reads the library, every song's newest save and the preset files, handing each batch to the window. What each line's
+/// plugin is (synth or effect) comes from what the library knows of it where the save or file doesn't say, and the
+/// installed plugin's own word wins for a preset file ([`logic::KnownPlugins`], as the test plugin's list has it;
+/// Solomon, 14 Nov: effects still showed under Synths).
 fn read_all(at: &Where) -> Result<(), String> {
     let lib = Library::open_read_only(&at.library).map_err(|e| format!("Couldn't open your library: {e}"))?;
     let saves = lib.saves().map_err(|e| format!("Couldn't read your library: {e}"))?;
     let choices = lib.song_choices().unwrap_or_default();
     let export_root = bitwig::export_left_out(&lib).ok().flatten();
+    let known = logic::KnownPlugins::read(&lib);
     drop(lib);
     let songs = mo_library::songs::group_songs(&saves, &choices, &mo_formats::dates::RealDates::now());
     let newest = logic::newest_saves(&songs, export_root.as_deref());
@@ -1296,7 +1300,11 @@ fn read_all(at: &Where) -> Result<(), String> {
             mo_presets::list::apply_fixes(&mut s.sounds, &fixes);
             let Some(song) = batch.iter().find(|b| b.path == s.path) else { continue };
             songs += usize::from(!s.sounds.is_empty());
-            items.extend(logic::song_items(plib::rows(std::slice::from_ref(&s), &[]), song));
+            let mut rows = plib::rows(std::slice::from_ref(&s), &[]);
+            for row in &mut rows {
+                known.fill(row);
+            }
+            items.extend(logic::song_items(rows, song));
         }
         done += batch.len();
         add(items, songs, 0, Some((done, total)));
@@ -1335,7 +1343,7 @@ fn read_all(at: &Where) -> Result<(), String> {
         ),
     );
     // Each file's year from the time the store looked at already: no second look at every file (X2-4).
-    let items = logic::file_items(&kept.files, &kept.modified);
+    let items = logic::file_items_with(&kept.files, &kept.modified, &known);
     let templates = kept.templates;
     let files = items.len();
     let templates = Arc::new(templates);

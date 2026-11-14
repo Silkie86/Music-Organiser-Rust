@@ -4,6 +4,8 @@
 
 use std::io::Write;
 
+use mo_formats::bitwig::{self, Field, ObjId, Text, Value};
+
 /// Bitwig's object stream, enough for a preset: big-endian, typed fields (as mo-formats' test writer).
 struct Bw(Vec<u8>);
 
@@ -107,4 +109,30 @@ pub fn bwpreset_full(
     out.extend(&b.0);
     out.extend(&zip_bytes);
     out
+}
+
+/// A .bwpreset (`raw`) with its plugin device's fields and its metadata changed or added (`fields`, `meta`), as Bitwig
+/// saves what a plugin is (its kind 0x9d, its category 0x9c, 0x1809, its id 0xce4, the metadata's `device_type`...),
+/// written again with mo-formats' own writer.
+pub fn with_fields(raw: Vec<u8>, meta: &[(&str, Value)], fields: &[(u32, Value)]) -> Vec<u8> {
+    let mut doc = bitwig::decode(raw).unwrap();
+    let device = (0..doc.objects.len() as u32).map(ObjId).find(|&o| !doc.obj(o).str(0xbe5).is_empty()).unwrap();
+    for (id, value) in fields {
+        let o = doc.obj_mut(device);
+        o.fields.retain(|f| f.id != *id);
+        o.fields.push(Field { id: *id, value: value.clone() });
+    }
+    for (key, value) in meta {
+        match doc.meta.iter_mut().find(|(k, _)| k.as_str() == *key) {
+            Some((_, old)) => *old = value.clone(),
+            None => doc.meta.push((Text::new(key), value.clone())),
+        }
+    }
+    let zip = doc.zip().unwrap().to_vec();
+    bitwig::encode(&doc, Some(&zip)).unwrap()
+}
+
+/// A text value, for [`with_fields`].
+pub fn text(t: &str) -> Value {
+    Value::Str(Text::new(t))
 }

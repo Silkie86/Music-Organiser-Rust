@@ -293,6 +293,18 @@ fn xml_attribute(element: &str, name: &str) -> Option<String> {
     }
 }
 
+/// A Bitwig preset's device type (its metadata's `device_type`) as instrument or effect: Bitwig 6.1 says "note_to_audio"
+/// for an instrument (the recipe's Polysynth preset), "audio_to_audio" for an audio effect and "note_to_note" for a note
+/// effect, and its controller scripts' words ("instrument", "audio-effect", "note-effect") are taken too.
+pub(crate) fn kind_of_device_type(device_type: &str) -> PluginKind {
+    match device_type {
+        "note_to_audio" | "instrument" => PluginKind::Instrument,
+        "note_to_note" | "note_effect" | "note-effect" => PluginKind::NoteEffect,
+        "audio_to_audio" | "audio-effect" | "audio_effect" => PluginKind::Effect,
+        _ => PluginKind::Unknown,
+    }
+}
+
 /// A VST3 category ("Instrument|Synth", "Fx|Delay") as instrument or effect.
 fn kind_of_vst3_category(category: &str) -> PluginKind {
     let first = category.split('|').next().unwrap_or("").trim();
@@ -338,12 +350,7 @@ pub fn bwpreset_of(doc: &bitwig::Document, stem: &str) -> PresetFile {
         // Some versions keep the tags as one text, spaces between.
         file.tags = doc.meta_str("tags").split_whitespace().map(str::to_owned).collect();
     }
-    file.kind = match doc.meta_str("device_type") {
-        "instrument" => PluginKind::Instrument,
-        "note_effect" | "note-effect" => PluginKind::NoteEffect,
-        "audio_to_audio" | "audio-effect" | "audio_effect" => PluginKind::Effect,
-        _ => PluginKind::Unknown,
-    };
+    file.kind = kind_of_device_type(doc.meta_str("device_type"));
 
     // The devices that load a plugin, and the one named device to fall back on for the name.
     let mut state_entry = None;
@@ -353,13 +360,19 @@ pub fn bwpreset_of(doc: &bitwig::Document, stem: &str) -> PresetFile {
         if name.is_empty() {
             continue;
         }
-        first_device.get_or_insert((name, o.str(F_DEVICE_PRESET)));
+        first_device.get_or_insert((name, o.str(F_DEVICE_PRESET), o));
         let state = o.str(F_PLUGIN_STATE);
         if !state.is_empty() && state_entry.is_none() {
-            state_entry = Some((name, state.to_owned()));
+            state_entry = Some((name, state.to_owned(), o));
         }
     }
-    if let Some((device, preset)) = first_device {
+    // Where the metadata doesn't say, the device does: the one that loads the plugin, else the first.
+    if file.kind == PluginKind::Unknown
+        && let Some(device) = state_entry.as_ref().map(|(_, _, o)| *o).or(first_device.map(|(_, _, o)| o))
+    {
+        file.kind = bitwig::device_kind(device);
+    }
+    if let Some((device, preset, _)) = first_device {
         if file.plugin.is_empty() {
             file.plugin = device.to_owned();
         }
@@ -367,7 +380,7 @@ pub fn bwpreset_of(doc: &bitwig::Document, stem: &str) -> PresetFile {
             file.name = preset.to_owned();
         }
     }
-    if let Some((device, entry)) = state_entry {
+    if let Some((device, entry, _)) = state_entry {
         file.wraps_plugin = true;
         if file.plugin.is_empty() {
             file.plugin = device.to_owned();
