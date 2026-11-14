@@ -12,13 +12,14 @@ use crate::curve_touch::{Keys, percent};
 /// How far the mouse may stray from a straight run before a drawn line keeps a point there, in points.
 const DRAWN_CLOSE: f64 = 1.5;
 
-/// A stroke in hand: steps on the grid (which square, and its value), or a line drawn freely.
+/// A stroke in hand: steps on the grid (which square, and its value), or a line drawn freely. It keeps beats and
+/// values, not places on the screen, so zooming or moving along mid-stroke leaves what's drawn where it is.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stroke {
     /// The grid's step in beats; none when it's a line by hand.
     step: Option<f64>,
     cells: BTreeMap<i64, f64>,
-    /// The line by hand, in the order of time: where the mouse was, in points on the picture.
+    /// The line by hand, in the order of time: (beat, value).
     line: Vec<(f64, f64)>,
     last: Option<(f64, f64)>,
 }
@@ -35,46 +36,50 @@ impl Stroke {
         self.step.is_none()
     }
 
-    /// The mouse is at `x`, `y` on the picture.
-    pub fn add(&mut self, frame: Frame, x: f64, y: f64) {
-        if !x.is_finite() || !y.is_finite() {
+    /// The mouse is at `x`, `y` on the picture of a curve `length` beats long: past its ends counts as on them.
+    pub fn add(&mut self, frame: Frame, length: f64, x: f64, y: f64) {
+        if !x.is_finite() || !y.is_finite() || !length.is_finite() || length <= 0.0 {
             return;
         }
+        let beat = frame.beat_at(x).clamp(0.0, length);
+        let value = frame.value_at(y).clamp(0.0, 1.0);
         match self.step {
             Some(step) => {
-                let cell = |x: f64| (frame.beat_at(x) / step + 1e-9).floor() as i64;
-                let value = |y: f64| frame.value_at(y).clamp(0.0, 1.0);
-                let (now, v) = (cell(x), value(y));
+                // The last square is the one that ends at the curve's end, even with the mouse right on it.
+                let most = ((length / step) - 1e-9).ceil().max(1.0) as i64 - 1;
+                let cell = |beat: f64| ((beat / step + 1e-9).floor() as i64).clamp(0, most);
+                let now = cell(beat);
                 // The squares the mouse skipped on its way here get the values on the way.
                 match self.last {
-                    Some((lx, ly)) if cell(lx) != now => {
-                        let (from, from_v) = (cell(lx), value(ly));
+                    Some((last_beat, last_value)) if cell(last_beat) != now => {
+                        let from = cell(last_beat);
                         let n = (now - from).abs();
-                        for i in 1..=n.min(4096) {
+                        for i in 1..=n {
                             let k = from + (now - from).signum() * i;
-                            self.cells.insert(k, from_v + (v - from_v) * i as f64 / n as f64);
+                            self.cells.insert(k, last_value + (value - last_value) * i as f64 / n as f64);
                         }
                     }
                     _ => {
-                        self.cells.insert(now, v);
+                        self.cells.insert(now, value);
                     }
                 }
             }
             None => {
                 // Going back over time it has drawn, the new way takes the old one's place.
-                if let Some((lx, _)) = self.last {
-                    let (low, high) = (lx.min(x), lx.max(x));
-                    self.line.retain(|p| p.0 < low || p.0 > high || p.0 == lx);
+                if let Some((last_beat, _)) = self.last {
+                    let (low, high) = (last_beat.min(beat), last_beat.max(beat));
+                    self.line.retain(|p| p.0 < low || p.0 > high || p.0 == last_beat);
                 }
-                self.line.retain(|p| p.0 != x);
-                let at = self.line.partition_point(|p| p.0 < x);
-                self.line.insert(at, (x, y));
+                self.line.retain(|p| p.0 != beat);
+                let at = self.line.partition_point(|p| p.0 < beat);
+                self.line.insert(at, (beat, value));
             }
         }
-        self.last = Some((x, y));
+        self.last = Some((beat, value));
     }
 
-    /// The edit the stroke comes to so far; none before there's anything of it.
+    /// The edit the stroke comes to so far; none before there's anything of it. The picture as it is now says how
+    /// close a drawn line's points may be to a straight run and still be left out.
     pub fn edit(&self, frame: Frame) -> Option<Edit> {
         match self.step {
             Some(step) => {
@@ -83,18 +88,18 @@ impl Stroke {
                 (!cells.is_empty()).then_some(Edit::Paint { cells })
             }
             None => {
-                let kept = thinned(&self.line, DRAWN_CLOSE);
-                let line: Vec<(f64, f64)> =
-                    kept.iter().map(|&(x, y)| (frame.beat_at(x), frame.value_at(y).clamp(0.0, 1.0))).collect();
+                let on_screen: Vec<(f64, f64)> = self.line.iter().map(|&(b, v)| (frame.x(b), frame.y(v))).collect();
+                let keep = thinned(&on_screen, DRAWN_CLOSE);
+                let line: Vec<(f64, f64)> = self.line.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect();
                 (line.len() >= 2).then_some(Edit::Draw { line })
             }
         }
     }
 
     /// The read-out beside the mouse while it paints.
-    pub fn words(&self, frame: Frame) -> String {
-        let Some((_, y)) = self.last else { return String::new() };
-        let value = percent(frame.value_at(y).clamp(0.0, 1.0));
+    pub fn words(&self) -> String {
+        let Some((_, value)) = self.last else { return String::new() };
+        let value = percent(value);
         match self.step {
             Some(_) if self.cells.len() == 1 => format!("1 step · {value}"),
             Some(_) => format!("{} steps · {value}", self.cells.len()),
@@ -103,13 +108,14 @@ impl Stroke {
     }
 }
 
-/// The points of a line that say its shape, in order: those further than `close` from the straight run between
-/// their neighbours kept (Ramer, Douglas and Peucker's way), the ends always.
-fn thinned(line: &[(f64, f64)], close: f64) -> Vec<(f64, f64)> {
-    if line.len() < 3 {
-        return line.to_vec();
-    }
+/// Which points of a line say its shape, in order: those further than `close` from the straight run between their
+/// neighbours (Ramer, Douglas and Peucker's way), the ends always.
+fn thinned(line: &[(f64, f64)], close: f64) -> Vec<bool> {
     let mut keep = vec![false; line.len()];
+    if line.len() < 3 {
+        keep.fill(true);
+        return keep;
+    }
     keep[0] = true;
     keep[line.len() - 1] = true;
     let mut runs = vec![(0usize, line.len() - 1)];
@@ -127,29 +133,31 @@ fn thinned(line: &[(f64, f64)], close: f64) -> Vec<(f64, f64)> {
             runs.push((i, b));
         }
     }
-    line.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
+    keep
 }
 
-/// What the hint line says with the mouse over empty space and the paint key held.
-pub fn hint(grid: Grid, keys: Keys, mac: bool) -> (&'static str, &'static str) {
+/// What the hint line says with the mouse over empty space and the paint key held; `in_hand` while a stroke is
+/// being painted (its kind was settled when it began).
+pub fn hint(grid: Grid, keys: Keys, in_hand: bool) -> (&'static str, &'static str) {
     let by_hand = keys.shift || grid.beats().is_none();
     let does = if by_hand { "drag draws a line by hand" } else { "drag paints steps, one a grid square" };
-    let more = match (by_hand, grid.beats().is_some(), mac) {
-        (false, _, _) => "with Shift: by hand",
-        (true, true, _) => "let go of Shift: steps on the grid",
-        (true, false, _) => "turn the grid on to paint steps",
+    let more = match (in_hand, by_hand, grid.beats().is_some()) {
+        (true, _, _) => "Esc puts it back",
+        (false, false, _) => "with Shift: by hand",
+        (false, true, true) => "let go of Shift: steps on the grid",
+        (false, true, false) => "turn the grid on to paint steps",
     };
     (does, more)
 }
 
-/// A swing mark dragged from `from_x` to `x`: how far every second line of a grid `step` beats apart moves, of a
-/// step (later above 0), never past [`MOST_SWING`]. With Shift it moves freely; else it catches on no swing and on
-/// triplet swing (a third) when it's close.
-pub fn swing(frame: Frame, step: f64, keys: Keys, from_x: f64, x: f64) -> f64 {
-    if !step.is_finite() || step <= 0.0 || !x.is_finite() || !from_x.is_finite() {
+/// A swing mark dragged from the beat `from` to `x` on the picture: how far every second line of a grid `step`
+/// beats apart moves, of a step (later above 0), never past [`MOST_SWING`]. With Shift it moves freely; else it
+/// catches on no swing, on triplet swing (a third) and on a half when it's close.
+pub fn swing(frame: Frame, step: f64, keys: Keys, from: f64, x: f64) -> f64 {
+    if !step.is_finite() || step <= 0.0 || !x.is_finite() || !from.is_finite() {
         return 0.0;
     }
-    let amount = ((frame.beat_at(x) - frame.beat_at(from_x)) / step).clamp(-MOST_SWING, MOST_SWING);
+    let amount = ((frame.beat_at(x) - from) / step).clamp(-MOST_SWING, MOST_SWING);
     if keys.shift {
         return amount;
     }
@@ -169,17 +177,36 @@ pub fn swing_words(amount: f64) -> String {
     }
 }
 
-/// Where the swing marks stand, in beats: on every second line of a grid `step` beats apart, over `span` (the
-/// highlight, or the whole curve), counted from its start. None when there are too many to tell apart.
-pub fn swing_marks(step: f64, start: f64, end: f64, frame: Frame) -> Vec<f64> {
-    if !step.is_finite() || step <= 0.0 || frame.beat_width() * step < 6.0 {
+/// Where the swing marks stand, in beats: on the curve's odd grid lines (a grid `step` beats apart, counted from
+/// the curve's start) inside `start` to `end` (the highlight, or the whole curve), those in sight only. Where they'd
+/// be closer than `apart` points, only every so many are given: they move as one anyway.
+pub fn swing_marks(step: f64, start: f64, end: f64, frame: Frame, apart: f64) -> Vec<f64> {
+    let width = frame.beat_width();
+    if !step.is_finite()
+        || step <= 0.0
+        || !width.is_finite()
+        || width <= 0.0
+        || end.partial_cmp(&start) != Some(std::cmp::Ordering::Greater)
+    {
         return Vec::new();
     }
+    let pair = 2.0 * step;
+    let every = (apart / (pair * width)).ceil().max(1.0);
+    let view = frame.view;
+    let (low, high) = (start.max(view.start), end.min(view.start + view.span));
+    // The mark numbered k stands at (2k + 1) steps; those shown are every so many, counted from the curve's start.
+    let first = (((low - step) / pair / every) - 1e-9).ceil().max(0.0) * every;
     let mut out = Vec::new();
-    let mut at = start + step;
-    while at < end - 1e-9 && out.len() < 512 {
-        out.push(at);
-        at += 2.0 * step;
+    let mut k = first;
+    while out.len() < 4096 {
+        let beat = (2.0 * k + 1.0) * step;
+        if beat >= high - 1e-9 {
+            break;
+        }
+        if beat > low + 1e-9 {
+            out.push(beat);
+        }
+        k += every;
     }
     out
 }
@@ -208,18 +235,21 @@ mod tests {
         let f = frame();
         let mut s = Stroke::begin(grid(Step::Quarter), ctrl());
         assert!(s.edit(f).is_none());
-        s.add(f, f.x(0.5), f.y(0.2));
+        s.add(f, 4.0, f.x(0.5), f.y(0.2));
         // Straight to the fourth beat: the two squares between are filled on the way.
-        s.add(f, f.x(3.5), f.y(0.8));
+        s.add(f, 4.0, f.x(3.5), f.y(0.8));
         let Some(Edit::Paint { cells }) = s.edit(f) else { panic!("steps") };
         assert_eq!(cells.len(), 4);
         for (i, (start, end, value)) in cells.iter().enumerate() {
             assert!((start - i as f64).abs() < 1e-9 && (end - start - 1.0).abs() < 1e-9);
             assert!((value - (0.2 + 0.2 * i as f64)).abs() < 0.01, "{value}");
         }
-        assert_eq!(s.words(f), "4 steps · 80%");
+        assert_eq!(s.words(), "4 steps · 80%");
+        // Past the curve's end counts as its last square: no steps are counted that won't be painted.
+        s.add(f, 4.0, f.x(4.0) + 300.0, f.y(0.8));
+        assert_eq!(s.words(), "4 steps · 80%");
         // Back over a square: its new value.
-        s.add(f, f.x(2.5), f.y(0.1));
+        s.add(f, 4.0, f.x(2.5), f.y(0.1));
         let Some(Edit::Paint { cells }) = s.edit(f) else { panic!("steps") };
         assert!((cells[2].2 - 0.1).abs() < 0.01);
         // The whole stroke is one edit the rules take.
@@ -236,16 +266,20 @@ mod tests {
         assert!(s.by_hand());
         // Up in a straight run, then down: three points say it all.
         for i in 0..=20 {
-            s.add(f, f.x(1.0) + f64::from(i) * 4.0, f.y(0.2) - f64::from(i) * 3.0);
+            s.add(f, 4.0, f.x(1.0) + f64::from(i) * 4.0, f.y(0.2) - f64::from(i) * 3.0);
         }
         for i in 1..=20 {
-            s.add(f, f.x(1.0) + 80.0 + f64::from(i) * 4.0, f.y(0.2) - 60.0 + f64::from(i) * 3.0);
+            s.add(f, 4.0, f.x(1.0) + 80.0 + f64::from(i) * 4.0, f.y(0.2) - 60.0 + f64::from(i) * 3.0);
         }
         let Some(Edit::Draw { line }) = s.edit(f) else { panic!("a line") };
         assert_eq!(line.len(), 3, "{line:?}");
         assert!(line.windows(2).all(|w| w[0].0 < w[1].0));
         // Back over what it drew: the new way takes its place, and time still runs one way.
-        s.add(f, f.x(1.0) + 40.0, f.y(0.9));
+        s.add(f, 4.0, f.x(1.0) + 40.0, f.y(0.9));
+        // The view moved along mid-stroke: what was drawn stays at its own beats.
+        let moved = Frame { view: View { start: 1.0, span: 2.0 }, ..f };
+        let Some(Edit::Draw { line: after }) = s.edit(moved) else { panic!("a line") };
+        assert!((after[0].0 - 1.0).abs() < 1e-6, "{after:?}");
         let Some(Edit::Draw { line }) = s.edit(f) else { panic!("a line") };
         assert!(line.windows(2).all(|w| w[0].0 < w[1].0), "{line:?}");
         assert!(line.iter().any(|p| (p.1 - 0.9).abs() < 0.01));
@@ -258,28 +292,38 @@ mod tests {
         let f = frame();
         let x = |beat: f64| f.x(beat);
         let none = Keys::default();
-        assert!((swing(f, 1.0, none, x(1.0), x(1.34)) - 1.0 / 3.0).abs() < 1e-9);
-        assert!((swing(f, 1.0, Keys { shift: true, ..none }, x(1.0), x(1.34)) - 0.34).abs() < 1e-6);
-        assert!((swing(f, 1.0, none, x(1.0), x(1.2)) - 0.2).abs() < 1e-6);
-        assert!((swing(f, 1.0, none, x(1.0), x(3.0)) - MOST_SWING).abs() < 1e-9);
-        assert!((swing(f, 1.0, none, x(1.0), x(0.5)) + 0.5).abs() < 1e-9);
-        assert_eq!(swing(f, 0.0, none, x(1.0), x(2.0)), 0.0);
+        assert!((swing(f, 1.0, none, 1.0, x(1.34)) - 1.0 / 3.0).abs() < 1e-9);
+        assert!((swing(f, 1.0, Keys { shift: true, ..none }, 1.0, x(1.34)) - 0.34).abs() < 1e-6);
+        assert!((swing(f, 1.0, none, 1.0, x(1.2)) - 0.2).abs() < 1e-6);
+        assert!((swing(f, 1.0, none, 1.0, x(3.0)) - MOST_SWING).abs() < 1e-9);
+        assert!((swing(f, 1.0, none, 1.0, x(0.5)) + 0.5).abs() < 1e-9);
+        assert_eq!(swing(f, 0.0, none, 1.0, x(2.0)), 0.0);
         assert_eq!(swing_words(0.0), "no swing");
         assert_eq!(swing_words(1.0 / 3.0), "swing 67% · triplet");
         assert_eq!(swing_words(0.2), "swing 60%");
         assert_eq!(swing_words(-0.2), "swing 40% · early");
-        assert_eq!(swing_marks(1.0, 0.0, 4.0, f), [1.0, 3.0]);
-        assert!(swing_marks(1.0 / 64.0, 0.0, 4.0, f).is_empty(), "too close to tell apart");
+        assert_eq!(swing_marks(1.0, 0.0, 4.0, f, 28.0), [1.0, 3.0]);
+        // A highlight that starts off the pairs: the marks are still the curve's odd lines.
+        assert_eq!(swing_marks(1.0, 0.5, 3.5, f, 28.0), [1.0, 3.0]);
+        // Too close to tell apart: only every so many, never none.
+        let thin = swing_marks(1.0 / 64.0, 0.0, 4.0, f, 28.0);
+        assert!(!thin.is_empty() && thin.len() < 20, "{}", thin.len());
+        assert!(thin.windows(2).all(|w| (w[1] - w[0]) * f.beat_width() >= 28.0 - 1e-6));
+        // Far along a long curve, zoomed in: the marks in sight are found without counting from its start.
+        let far = Frame { view: View { start: 200.0, span: 2.0 }, ..f };
+        let marks = swing_marks(1.0 / 8.0, 0.0, 256.0, far, 28.0);
+        assert!(!marks.is_empty() && marks.iter().all(|m| *m > 200.0 && *m < 202.0), "{marks:?}");
     }
 
     #[test]
     fn the_hint_says_what_the_paint_key_does() {
         let g = grid(Step::Sixteenth);
-        assert_eq!(hint(g, ctrl(), false).0, "drag paints steps, one a grid square");
-        assert_eq!(hint(g, Keys { ctrl: true, shift: true, alt: false }, false).0, "drag draws a line by hand");
-        assert_eq!(
-            hint(Grid { step: None, triplet: false, dotted: false }, ctrl(), false).1,
-            "turn the grid on to paint steps"
-        );
+        let both = Keys { ctrl: true, shift: true, alt: false };
+        let off = Grid { step: None, triplet: false, dotted: false };
+        assert_eq!(hint(g, ctrl(), false), ("drag paints steps, one a grid square", "with Shift: by hand"));
+        assert_eq!(hint(g, both, false), ("drag draws a line by hand", "let go of Shift: steps on the grid"));
+        assert_eq!(hint(off, ctrl(), false).1, "turn the grid on to paint steps");
+        // A stroke in hand keeps its kind: nothing is said about keys that no longer change it.
+        assert_eq!(hint(g, both, true).1, "Esc puts it back");
     }
 }

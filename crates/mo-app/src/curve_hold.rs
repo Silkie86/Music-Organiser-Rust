@@ -294,9 +294,11 @@ pub fn hint(over: Over, mac: bool) -> Hint {
             does: "drag its bar, sides and corners · Esc drops it",
             keys: "Shift: off the grid",
         },
-        Over::Empty => {
-            Hint { name: "Empty", does: "drag to highlight · double-click adds a point", keys: "Shift: off the grid" }
-        }
+        Over::Empty => Hint {
+            name: "Empty",
+            does: "drag to highlight · double-click adds a point",
+            keys: key("Shift: off the grid · Ctrl: paint steps", "Shift: off the grid · Cmd: paint steps"),
+        },
     }
 }
 

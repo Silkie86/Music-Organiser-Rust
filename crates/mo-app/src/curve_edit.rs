@@ -577,22 +577,38 @@ fn edited(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(Shape,
             with(put(&shape.points, part, &[Point::new(0.0, before, 0.0), Point::new(part.len(), after, 0.0)]))
         }
         Edit::Paint { ref cells } => {
-            let mut points = shape.points.clone();
-            let mut any = false;
-            for &(start, end, value) in cells {
-                if !finite(&[start, end, value]) {
-                    continue;
-                }
-                let span = Span::new(start, end).within(length);
-                if span.is_empty() {
-                    continue;
-                }
-                let v = value.clamp(0.0, 1.0);
-                points = put(&points, span, &[Point::new(0.0, v, 0.0), Point::new(span.len(), v, 0.0)]);
-                any = true;
-            }
-            if !any {
+            // In the order of time, each inside the curve; cells that touch are put in as one run, so a long
+            // stroke walks the curve once.
+            let mut kept: Vec<(Span, f64)> = cells
+                .iter()
+                .filter(|(start, end, value)| finite(&[*start, *end, *value]))
+                .map(|&(start, end, value)| (Span::new(start, end).within(length), value.clamp(0.0, 1.0)))
+                .filter(|(span, _)| !span.is_empty())
+                .collect();
+            if kept.is_empty() {
                 return None;
+            }
+            kept.sort_by(|l, r| l.0.start.total_cmp(&r.0.start));
+            let mut points = shape.points.clone();
+            let mut at = 0;
+            while at < kept.len() {
+                let run_start = kept[at].0.start;
+                let mut run: Vec<Point> = Vec::new();
+                let mut end = run_start;
+                while let Some(&(span, v)) = kept.get(at).filter(|(span, _)| span.start <= end + EPS) {
+                    // A cell over one painted before it takes its place from where it starts.
+                    let from = span.start.max(run_start);
+                    run.retain(|p| p.beat < from - run_start - EPS);
+                    if let Some(last) = run.last().copied() {
+                        run.push(Point::new(from - run_start, last.value, 0.0));
+                    }
+                    run.push(Point::new(from - run_start, v, 0.0));
+                    run.push(Point::new(span.end - run_start, v, 0.0));
+                    end = end.max(span.end);
+                    at += 1;
+                }
+                let whole = Span { start: run_start, end: run.last().map_or(end, |p| run_start + p.beat) };
+                points = put(&points, whole, &run);
             }
             with(points)
         }
@@ -625,7 +641,7 @@ fn edited(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(Shape,
             if amount.abs() < EPS {
                 return None;
             }
-            reshaped(&|part, len| Some(swung(&part, len, step, amount)))
+            reshaped(&|piece, len| Some(swung(&piece, len, part.start, step, amount)))
         }
         Edit::RemoveTime => {
             let gone = highlight?;
@@ -1130,26 +1146,29 @@ fn stepped(part: &[Point], len: f64, step: f64) -> Vec<Point> {
     out
 }
 
-/// The part swung: in each pair of steps the line between them moves by `amount` of a step, the first step
-/// stretched (or squeezed) up to it and the second after it. A last step with no partner stays as it is.
-fn swung(part: &[Point], len: f64, step: f64, amount: f64) -> Vec<Point> {
+/// The part swung. The grid is the curve's own, counted from its start (`from` is where the part starts on it):
+/// each odd line inside the part moves by `amount` of a step, and the curve from the even line before it (or the
+/// part's start) is stretched or squeezed up to it, and after it to the next even line (or the part's end). A line
+/// never passes three quarters of the way to the end of its stretch.
+fn swung(part: &[Point], len: f64, from: f64, step: f64, amount: f64) -> Vec<Point> {
     let mut out = Vec::new();
-    let mut start = 0.0;
     let moved = |piece: Vec<Point>, by: f64, to: f64| -> Vec<Point> {
         stretched(&piece, by).into_iter().map(|p| Point { beat: to + p.beat, ..p }).collect()
     };
-    while start < len - EPS {
-        let end = (start + 2.0 * step).min(len);
-        let mid = start + step;
-        if end - mid < SHORTEST {
+    let pair = 2.0 * step;
+    // Where the first stretch starts, in the part's own time: on the even line at or before the part's start.
+    let mut even = (from / pair + EPS).floor() * pair - from;
+    while even < len - EPS {
+        let (start, end) = (even.max(0.0), (even + pair).min(len));
+        let mid = even + step;
+        if mid - start < SHORTEST || end - mid < SHORTEST {
             out.extend(moved(cut(part, Span { start, end }), 1.0, start));
         } else {
-            // In a pair cut short by the part's end, the line never passes three quarters of what's left.
-            let new_mid = (mid + amount * step).min(mid + (end - mid) * MOST_SWING);
-            out.extend(moved(cut(part, Span { start, end: mid }), (new_mid - start) / step, start));
+            let new_mid = (mid + amount * step).clamp(mid - (mid - start) * MOST_SWING, mid + (end - mid) * MOST_SWING);
+            out.extend(moved(cut(part, Span { start, end: mid }), (new_mid - start) / (mid - start), start));
             out.extend(moved(cut(part, Span { start: mid, end }), (end - new_mid) / (end - mid), new_mid));
         }
-        start = end;
+        even += pair;
     }
     out
 }
@@ -1766,6 +1785,11 @@ mod tests {
         // Past the curve's end, or not a number: nothing is painted there.
         assert!(apply(&ramp(), None, &Edit::Paint { cells: vec![(9.0, 9.5, 0.5), (f64::NAN, 1.0, 0.5)] }).is_none());
         assert!(apply(&ramp(), None, &Edit::Paint { cells: Vec::new() }).is_none());
+        // Cells given out of order, with a gap, and one painted over another: each holds its own value.
+        let cells = vec![(3.0, 3.5, 0.3), (0.0, 1.0, 0.6), (0.5, 1.0, 0.2)];
+        let (s, _) = done(&ramp(), None, Edit::Paint { cells });
+        assert!(near(s.value_at(0.25), 0.6) && near(s.value_at(0.75), 0.2) && near(s.value_at(3.25), 0.3));
+        assert!(near(s.value_at(2.0), 0.5), "the gap between them stays");
     }
 
     #[test]
@@ -1795,6 +1819,11 @@ mod tests {
         assert!(near(early.value_at(0.75), 0.8));
         let (most, _) = done(&steps, None, Edit::Swing { step: 1.0, amount: 5.0 });
         assert!(near(most.value_at(1.7), 0.2) && near(most.value_at(1.8), 0.8));
+        // A highlight that starts off the pairs: the lines that swing are still the curve's odd ones (beat 1 here),
+        // not every second line counted from the highlight's start.
+        let (part, _) = done(&steps, Some(Span::new(0.5, 2.5)), Edit::Swing { step: 1.0, amount: 0.5 });
+        assert!(near(part.value_at(1.25), 0.2) && near(part.value_at(1.75), 0.8), "beat 1 moved to 1.5");
+        assert!(near(part.value_at(2.25), 0.2) && near(part.value_at(3.25), 0.8), "the rest is in time");
         assert!(apply(&steps, None, &Edit::Swing { step: 1.0, amount: 0.0 }).is_none());
         assert!(apply(&steps, None, &Edit::Swing { step: 0.0, amount: 0.3 }).is_none());
     }
