@@ -1272,6 +1272,15 @@ impl Editor {
         true
     }
 
+    /// The whole curve becomes `shape` (Randomise), with `highlight`, as one step of undo. False when it's the same.
+    pub fn put(&mut self, shape: Shape, highlight: Option<Span>) -> bool {
+        self.let_go();
+        self.drag_from = Some(self.now.clone());
+        let highlight = highlight.map(|s| s.within(shape.length)).filter(|s| !s.is_empty());
+        self.now = (shape, highlight);
+        self.let_go()
+    }
+
     /// The drag given up (Esc): the curve is as it was when it began.
     pub fn give_up(&mut self) -> bool {
         match self.drag_from.take() {

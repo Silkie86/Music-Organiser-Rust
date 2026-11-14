@@ -12,6 +12,7 @@ use mo_app::background::Newest;
 use mo_app::curve_edit::{Edit, Editor, Grid, Shape, Span, Step};
 use mo_app::curve_hold::{self, Hold, Over, Part};
 use mo_app::curve_picture::{self, Colours, Frame, View};
+use mo_app::curve_random;
 use mo_app::curve_strip::{self, OnStrip};
 use mo_app::curve_touch::{self, Grab, Keys};
 use mo_app::log;
@@ -649,6 +650,41 @@ pub fn act(app: &AppWindow, id: &str) -> bool {
     // Shown again either way: a drag may have been put back.
     redraw(app);
     show_touch(app);
+    done
+}
+
+/// Randomise: the curve in the editor becomes a roll from `sources`, or with a highlight only that part is rolled
+/// again; one step of undo. False when there's no curve open, or nothing could be rolled.
+pub fn randomise(
+    app: &AppWindow,
+    sources: &[curve_random::Source],
+    settings: curve_random::Settings,
+    seed: u64,
+) -> bool {
+    let done = STATE.with(|s| {
+        let s = &mut *s.borrow_mut();
+        let was = s.grab;
+        s.hands_off();
+        s.mouse = None;
+        let Some((_, editor)) = s.open.as_mut() else { return false };
+        given_up(editor, was, &mut s.lit_whole);
+        let lit = editor.highlight();
+        let Some(rolled) = curve_random::roll(editor.shape(), lit, sources, settings, seed) else { return false };
+        let length = rolled.length();
+        let longer = (length - editor.shape().length()).abs() > 1e-9;
+        if !editor.put(rolled, lit) {
+            return false;
+        }
+        // Another length: the whole of it in sight.
+        if longer {
+            s.view = View::whole(length);
+        }
+        true
+    });
+    if done {
+        redraw(app);
+        show_touch(app);
+    }
     done
 }
 

@@ -4,7 +4,7 @@
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { CurveEditor } from "curve_editor.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -168,6 +168,19 @@ export global PresetsData {
     in property <bool> curve-hidden;
     callback curve-hidden-toggled(bool);
     // "Other speeds too": the rhythms picked show curves at half and double speed as well, sent stretched.
+    // Randomise: its words, whether it can roll, its length (a place in 1, 2, 4, 8 bars), how wild (0 to 1) and
+    // that in a word, and whether its parts have mixed lengths.
+    in property <string> random-says;
+    in property <bool> random-can;
+    in property <int> random-bars;
+    in property <float> random-wild;
+    in property <string> random-wild-name;
+    in property <bool> random-mixed;
+    in property <string> randomise-key;
+    callback random-bars-picked(int);
+    callback random-wild-moved(float);
+    callback random-mixed-toggled(bool);
+    callback randomise();
     in property <bool> curve-other-speeds;
     callback curve-other-speeds-toggled(bool);
     in property <[CurveLineInfo]> curve-lines;
@@ -598,6 +611,17 @@ export component PresetsPage inherits Rectangle {
                 }
             }
             Rectangle { horizontal-stretch: 1; }
+            if PresetsData.section == 1: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Randomise";
+                    enabled: PresetsData.random-can;
+                    tip: "Make a new curve from parts of the curves shown; with a highlight, roll only that part again";
+                    key: PresetsData.randomise-key;
+                    clicked => { PresetsData.randomise(); }
+                }
+            }
             if PresetsData.section == 0: VerticalLayout {
                 alignment: center;
                 StudioButton {
@@ -922,6 +946,64 @@ export component PresetsPage inherits Rectangle {
                     text: "The curves I hid";
                     on: PresetsData.curve-hidden;
                     clicked => { PresetsData.curve-hidden-toggled(!PresetsData.curve-hidden); }
+                }
+                // Randomise's settings, right under the filters that choose what it's made from (as Kits on Sounds).
+                if PresetsData.section == 1: Rectangle {
+                    height: 1px;
+                    background: Theme.edge;
+                }
+                if PresetsData.section == 1: Caps {
+                    text: "RANDOMISE";
+                }
+                if PresetsData.section == 1: Text {
+                    text: PresetsData.random-says;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    wrap: word-wrap;
+                }
+                if PresetsData.section == 1: HorizontalLayout {
+                    spacing: Space.sm;
+                    Text {
+                        text: "Bars";
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                    }
+                    Segmented {
+                        choices: ["1", "2", "4", "8"];
+                        pad: Space.md;
+                        current: PresetsData.random-bars;
+                        picked(i) => { PresetsData.random-bars-picked(i); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if PresetsData.section == 1: HorizontalLayout {
+                    Text {
+                        text: "How wild";
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: PresetsData.random-wild-name;
+                        color: Theme.text;
+                        font-size: Type.meta;
+                        font-weight: 600;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+                if PresetsData.section == 1: StudioSlider {
+                    height: 28px;
+                    tip: "From parts as they are (Spliced) to most parts sped up, reversed, flipped, stuttered or faded (Wild)";
+                    value: PresetsData.random-wild;
+                    moved(v) => { PresetsData.random-wild-moved(v); }
+                }
+                if PresetsData.section == 1: TickLine {
+                    text: "Mixed beat divisions";
+                    on: PresetsData.random-mixed;
+                    clicked => { PresetsData.random-mixed-toggled(!PresetsData.random-mixed); }
                 }
             }
         }

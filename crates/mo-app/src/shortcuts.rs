@@ -145,6 +145,11 @@ pub const CURVES_ACTIONS: &[Action] = &[
     action("curves.keepClip", "Keep the highlighted part as a clip with a name, or forget that clip", "Alt+K"),
     action("curves.cutTime", "Cut the highlighted time out of the curve: what follows moves up", "Shift+Delete"),
     action("curves.highlightAll", "Highlight the whole curve in the editor", "Alt+A"),
+    action(
+        "curves.randomise",
+        "Make a new curve from parts of the curves shown; with a highlight, roll only that part again",
+        "Ctrl+R",
+    ),
 ];
 
 /// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
