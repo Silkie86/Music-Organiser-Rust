@@ -1038,6 +1038,19 @@ fn show_curve_card(app: &AppWindow) {
     });
 }
 
+/// Whether curve `id` is on the editor's card with edits not saved; then it says to save them first.
+pub(crate) fn curves_edits_wait(app: &AppWindow, id: &str) -> bool {
+    if crate::curve_editor::edited_id().as_deref() != Some(id) {
+        return false;
+    }
+    PAGE.with(|p| {
+        p.borrow_mut().curve_message =
+            "Save as new curve first: this would send the curve as it was found, without your edits.".into();
+    });
+    show_curve_card(app);
+    true
+}
+
 /// The editor's curve became edited, or was put back as it was: the card's own buttons follow.
 pub(crate) fn curve_edits_changed(app: &AppWindow) {
     show_curve_card(app);
@@ -2407,6 +2420,11 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
     });
     // `curve` is the curve as it's kept (renamed, hidden); `sent` as it goes out, at the speed it's shown at.
     let Some((curve, sent)) = curve else { return false };
+    // These send the curve as it was found: with edits not saved they'd send the old shape (the keys and the finder
+    // get here too, not only the card's greyed button).
+    if matches!(id, curve_act::TO_BITWIG | curve_act::REVEAL) && curves_edits_wait(app, &curve.id) {
+        return true;
+    }
     match id {
         curve_act::RENAME => {
             let data = app.global::<PresetsData>();
@@ -2441,7 +2459,7 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         curve_act::REDO => return crate::curve_editor::undo(app, false),
         curve_act::SAVE_AS_NEW => {
             let Some((points, length)) = crate::curve_editor::edited() else { return false };
-            save_as_new(logic::edited_name(&sent.name), points, length);
+            save_as_new(sent.id.clone(), logic::edited_name(&sent.name), points, length);
         }
         curve_act::REVEAL => {
             let folder = data_dir.join(curves::FOLDER);
@@ -2493,7 +2511,7 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
 
 /// Keeps the editor's curve as a new curve of its own in `curves.db`, puts it in the list and picks it: the editor
 /// then shows it as saved.
-fn save_as_new(name: String, points: Vec<mo_formats::bitwig::curve::CurvePoint>, length: f64) {
+fn save_as_new(from: String, name: String, points: Vec<mo_formats::bitwig::curve::CurvePoint>, length: f64) {
     let (db, feed) = PAGE.with(|p| {
         let p = p.borrow();
         (p.data_dir.join(curves::FILE_NAME), p.feed.clone())
@@ -2507,7 +2525,14 @@ fn save_as_new(name: String, points: Vec<mo_formats::bitwig::curve::CurvePoint>,
                 let key = logic::CurveKey::of(&c);
                 on_window(move |app| {
                     let id = c.id.clone();
-                    let text = format!("Saved as a new curve, \"{}\". Rename gives it your own name.", c.name);
+                    let known = PAGE.with(|p| p.borrow().curves.iter().any(|o| o.id == c.id));
+                    let text = if known {
+                        format!("That shape was saved before: it's \"{}\" in the list.", c.name)
+                    } else {
+                        format!("Saved as a new curve, \"{}\". Rename gives it your own name.", c.name)
+                    };
+                    // The curve the edits were made on is as it was found again: the edits live in the new one.
+                    crate::curve_editor::forget(app, &from);
                     PAGE.with(|p| {
                         let mut p = p.borrow_mut();
                         match p.curves.iter().position(|o| o.id == c.id) {

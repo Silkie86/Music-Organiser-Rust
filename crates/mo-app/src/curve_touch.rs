@@ -58,10 +58,15 @@ fn apart(a: &Dot, x: f64, y: f64) -> f64 {
 /// corners of its steps and not a bead on every one; and the one nearest the mouse within [`NEAR_DOT`], whatever its
 /// neighbours, so every point can be reached.
 pub fn dots(shape: &Shape, frame: Frame, mouse: Option<(f64, f64)>) -> Vec<Dot> {
+    let near = mouse.and_then(|(x, y)| nearest_dot(shape, frame, x, y));
+    dots_with(shape, frame, near)
+}
+
+/// [`dots`] with the point that shows whatever its neighbours given (`near`): the one under the mouse, or in hand.
+pub fn dots_with(shape: &Shape, frame: Frame, near: Option<usize>) -> Vec<Dot> {
     if !frame.fits() {
         return Vec::new();
     }
-    let near = mouse.and_then(|(x, y)| nearest_dot(shape, frame, x, y));
     let mut shown: Vec<Dot> = Vec::new();
     for d in places(shape, frame) {
         let room = shown.last().is_none_or(|last| apart(last, d.x, d.y) >= DOT_APART);
@@ -72,13 +77,41 @@ pub fn dots(shape: &Shape, frame: Frame, mouse: Option<(f64, f64)>) -> Vec<Dot> 
     shown
 }
 
+/// The point in sight nearest `x`, `y`, and how far it is.
+fn nearest(shape: &Shape, frame: Frame, x: f64, y: f64) -> Option<(f64, usize)> {
+    places(shape, frame).map(|d| (apart(&d, x, y), d.point)).min_by(|a, b| a.0.total_cmp(&b.0))
+}
+
 /// The point whose dot the mouse has: the nearest within [`NEAR_DOT`].
 fn nearest_dot(shape: &Shape, frame: Frame, x: f64, y: f64) -> Option<usize> {
-    places(shape, frame)
-        .map(|d| (apart(&d, x, y), d.point))
-        .filter(|(far, _)| *far <= NEAR_DOT)
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, point)| point)
+    nearest(shape, frame, x, y).filter(|(far, _)| *far <= NEAR_DOT).map(|(_, point)| point)
+}
+
+/// The point a dragged dot is now, in the curve as the drag's `edit` made it from `before`: the one where the edit
+/// put it (the grid, its neighbours and the picture's edges keep a point from following the mouse all the way, and a
+/// point that joined a neighbour has another place in the list).
+pub fn held_point(shape: &Shape, before: &Shape, edit: &Edit) -> Option<usize> {
+    let Edit::MovePoint { point, beat, value } = *edit else { return None };
+    let points = before.points();
+    let low = point.checked_sub(1).and_then(|i| points.get(i)).map_or(0.0, |p| p.beat);
+    let high = points.get(point + 1).map_or(before.length(), |p| p.beat);
+    let (beat, value) = (beat.clamp(low, high.max(low)), value.clamp(0.0, 1.0));
+    shape
+        .points()
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| (p.beat - beat).abs() < 1e-6 && (p.value - value).abs() < 1e-6)
+        .min_by_key(|(i, _)| i.abs_diff(point))
+        .map(|(i, _)| i)
+}
+
+/// The line a held line is now: the one that starts where it started when the drag began (`before`), as a point
+/// that joined a neighbour moves the ones after it up the list.
+pub fn held_line(shape: &Shape, before: &Shape, grab: Grab) -> Option<usize> {
+    let Grab::Line { line, .. } = grab else { return None };
+    let from = before.points().get(line)?.beat;
+    let now = shape.points().iter().rposition(|p| p.beat <= from + 1e-9)?;
+    shape.points().get(now + 1).map(|_| now)
 }
 
 /// The line under the mouse: the one over its beat, when the mouse is within [`NEAR_LINE`] of it up or down. A jump
@@ -128,14 +161,20 @@ pub fn grab(shape: &Shape, frame: Frame, x: f64, y: f64) -> Option<Grab> {
 }
 
 /// The edit a drag makes with the mouse now at `x`, `y`, and the read-out's words for it. The edit is made on the
-/// curve as it was when the drag began (`Editor::drag`). A point goes to the grid unless Shift is held; a line moves
-/// up or down, or with Alt bends: up early, down late.
-pub fn drag(grab: Grab, frame: Frame, grid: Grid, keys: Keys, x: f64, y: f64) -> (Edit, String) {
+/// curve as it was when the drag began (`before`, as `Editor::drag` does it). A point goes to the grid unless Shift
+/// is held; a line moves up or down, or with Alt bends: up early, down late. The read-out says where the point or
+/// line gets to (a point stops at its neighbours, a line at the top and bottom), not where the mouse is.
+pub fn drag(grab: Grab, before: &Shape, frame: Frame, grid: Grid, keys: Keys, x: f64, y: f64) -> (Edit, String) {
+    let points = before.points();
     match grab {
         Grab::Dot { point, off_x, off_y } => {
             let beat = grid.snap(frame.beat_at(x - off_x), keys.shift).max(0.0);
             let value = frame.value_at(y - off_y);
-            (Edit::MovePoint { point, beat, value }, format!("{} · {}", place_words(beat), percent(value)))
+            // Where it lands, as `Edit::MovePoint` keeps it between its neighbours.
+            let low = point.checked_sub(1).and_then(|i| points.get(i)).map_or(0.0, |p| p.beat);
+            let high = points.get(point + 1).map_or(before.length(), |p| p.beat);
+            let lands = beat.clamp(low, high.max(low));
+            (Edit::MovePoint { point, beat, value }, format!("{} · {}", place_words(lands), percent(value)))
         }
         Grab::Line { line, y: from, bend } if keys.alt => {
             // Up is early: the line gets most of the way sooner, which is a bend below 0.
@@ -145,7 +184,12 @@ pub fn drag(grab: Grab, frame: Frame, grid: Grid, keys: Keys, x: f64, y: f64) ->
         }
         Grab::Line { line, y: from, .. } => {
             let by = frame.value_at(y) - frame.value_at(from);
-            let words = format!("{}{}", if by >= 0.0 { "+" } else { "−" }, percent(by.abs()));
+            // How far it goes, as `Edit::MoveLine` stops it at the top and bottom.
+            let moved = match (points.get(line), points.get(line + 1)) {
+                (Some(a), Some(b)) => by.clamp(-a.value.min(b.value), 1.0 - a.value.max(b.value)),
+                _ => by,
+            };
+            let words = format!("{}{}", if moved >= 0.0 { "+" } else { "−" }, percent(moved.abs()));
             (Edit::MoveLine { line, by }, words)
         }
     }
@@ -203,17 +247,18 @@ pub fn hint(under: Under, mac: bool) -> Hint {
 /// Between sixteenths (off the grid) the beat is said to two decimals instead: "1 · beat 3.31".
 pub fn place_words(beat: f64) -> String {
     let beat = if beat.is_finite() { beat.max(0.0) } else { 0.0 };
-    let bar = (beat / BAR).floor();
-    let in_bar = beat - bar * BAR;
-    let whole = in_bar.floor();
-    let sixteenths = (in_bar - whole) * 4.0;
-    let (bar, at) = (bar as u64 + 1, whole as u64 + 1);
-    if (sixteenths - sixteenths.round()).abs() > 1e-6 {
-        return format!("{bar} · beat {:.2}", in_bar + 1.0);
+    // Counted in whole sixteenths first, so a beat a hair under a whole one is that one and not a "fifth sixteenth".
+    let sixteenths = (beat * 4.0).round();
+    if (beat * 4.0 - sixteenths).abs() > 1e-6 {
+        let bar = (beat / BAR).floor();
+        return format!("{} · beat {:.2}", bar as u64 + 1, beat - bar * BAR + 1.0);
     }
-    match sixteenths.round() as u64 {
-        0 => format!("{bar}.{at}"),
-        n => format!("{bar}.{at}.{}", n + 1),
+    let sixteenths = sixteenths as u64;
+    let per_bar = (BAR * 4.0) as u64;
+    let (bar, in_bar) = (sixteenths / per_bar + 1, sixteenths % per_bar);
+    match in_bar % 4 {
+        0 => format!("{bar}.{}", in_bar / 4 + 1),
+        n => format!("{bar}.{}.{}", in_bar / 4 + 1, n + 1),
     }
 }
 
@@ -319,14 +364,23 @@ mod tests {
         let g = grab(&s, f, x + 3.0, y + 3.0).unwrap();
         assert!(matches!(g, Grab::Dot { point: 1, .. }));
         let (to_x, to_y) = at(1.31, 0.6);
-        let (edit, words) = drag(g, f, grid, NO_KEYS, to_x + 3.0, to_y + 3.0);
+        let (edit, words) = drag(g, &s, f, grid, NO_KEYS, to_x + 3.0, to_y + 3.0);
         assert_eq!(words, "1.2.2 · 60%");
         let Edit::MovePoint { point: 1, beat, value } = edit else { panic!("{edit:?}") };
         assert!((beat - 1.25).abs() < 1e-9 && (value - 0.6).abs() < 1e-9);
-        let (edit, words) = drag(g, f, grid, SHIFT, to_x + 3.0, to_y + 3.0);
+        let (edit, words) = drag(g, &s, f, grid, SHIFT, to_x + 3.0, to_y + 3.0);
         let Edit::MovePoint { beat, .. } = edit else { panic!("{edit:?}") };
         assert!((beat - 1.31).abs() < 1e-9);
         assert_eq!(words, "1 · beat 2.31 · 60%");
+        // Past its neighbour it stops there, and the read-out says where it stopped; the held point is still found
+        // though the mouse is far from it.
+        let (far_x, far_y) = at(3.5, 0.6);
+        let (edit, words) = drag(g, &s, f, grid, NO_KEYS, far_x + 3.0, far_y + 3.0);
+        assert_eq!(words, "1.3 · 60%");
+        let moved = crate::curve_edit::apply(&s, None, &edit).unwrap().0;
+        let held = held_point(&moved, &s, &edit).unwrap();
+        assert!((moved.points()[held].beat - 2.0).abs() < 1e-9 && (moved.points()[held].value - 0.6).abs() < 1e-9);
+        assert!(dots_with(&moved, f, Some(held)).iter().any(|d| d.point == held));
         // Nothing is held on empty space.
         let (x, y) = at(3.0, 0.9);
         assert_eq!(grab(&s, f, x, y), None);
@@ -340,17 +394,24 @@ mod tests {
         let g = grab(&s, f, x, y).unwrap();
         assert_eq!(g, Grab::Line { line: 2, y, bend: 0.0 });
         // 40 points up of 200 is a fifth.
-        let (edit, words) = drag(g, f, grid, NO_KEYS, x + 30.0, y - 40.0);
+        let (edit, words) = drag(g, &s, f, grid, NO_KEYS, x + 30.0, y - 40.0);
         let Edit::MoveLine { line: 2, by } = edit else { panic!("{edit:?}") };
         assert!((by - 0.2).abs() < 1e-9);
         assert_eq!(words, "+20%");
-        assert_eq!(drag(g, f, grid, NO_KEYS, x, y + 20.0).1, "−10%");
+        assert_eq!(drag(g, &s, f, grid, NO_KEYS, x, y + 20.0).1, "−10%");
+        // It stops at the bottom (it was at a quarter), and the read-out says how far it went.
+        assert_eq!(drag(g, &s, f, grid, NO_KEYS, x, y + 150.0).1, "−25%");
+        assert_eq!(held_line(&s, &s, g), Some(2));
+        assert_eq!(held_point(&s, &s, &edit), None);
         // Alt: up bends early (below 0), down late; a quarter of the height is half way, and it stops at all the way.
-        let (edit, words) = drag(g, f, grid, ALT, x, y - 50.0);
+        let (edit, words) = drag(g, &s, f, grid, ALT, x, y - 50.0);
         assert_eq!(edit, Edit::Bend { line: 2, bend: -0.5 });
         assert_eq!(words, "bend 50% early");
-        assert_eq!(drag(g, f, grid, ALT, x, y + 400.0), (Edit::Bend { line: 2, bend: 1.0 }, "bend 100% late".into()));
-        assert_eq!(drag(g, f, grid, ALT, x, y).1, "straight");
+        assert_eq!(
+            drag(g, &s, f, grid, ALT, x, y + 400.0),
+            (Edit::Bend { line: 2, bend: 1.0 }, "bend 100% late".into())
+        );
+        assert_eq!(drag(g, &s, f, grid, ALT, x, y).1, "straight");
     }
 
     #[test]
@@ -377,6 +438,8 @@ mod tests {
         assert_eq!(place_words(6.5), "2.3.3");
         assert_eq!(place_words(4.75), "2.1.4");
         assert_eq!(place_words(f64::NAN), "1.1");
+        assert_eq!(place_words(2.999_999_999_999_999_6), "1.4");
+        assert_eq!(place_words(3.999_999_999_999_999_6), "2.1");
         assert_eq!(hint(Under::Dot(3), false).name, "Point");
         assert!(hint(Under::Line(0), false).keys.starts_with("Alt: bend it"));
         assert!(hint(Under::Line(0), true).keys.starts_with("Option: bend it"));

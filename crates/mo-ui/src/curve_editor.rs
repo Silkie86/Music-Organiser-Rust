@@ -85,7 +85,21 @@ struct State {
     before: Option<Shape>,
     /// The read-out's words while dragging.
     read_out: String,
+    /// The point in hand, as the drag has left it in the list.
+    held_dot: Option<usize>,
+    /// The faint old curve's path, and the frame it was made for: made once a drag, not on every move.
+    ghost: Option<(Frame, String)>,
+    /// The dots as they were last put on the picture: the same ones aren't put there again.
+    dots: Vec<EditorDot>,
+    /// The curve on the card as it was opened, before any edit.
+    origin: Option<Shape>,
+    /// Curves with edits not saved that were left for another: each as it was opened, its editor and what was in
+    /// sight, the one left last at the end. Picked again (unchanged where it came from), a curve is as it was left.
+    kept: Vec<(String, Shape, Editor, View)>,
 }
+
+/// How many edited curves are kept while others are looked at; the one left longest ago goes first.
+const KEPT: usize = 8;
 
 impl Default for State {
     fn default() -> State {
@@ -104,6 +118,11 @@ impl Default for State {
             grab: None,
             before: None,
             read_out: String::new(),
+            held_dot: None,
+            ghost: None,
+            dots: Vec::new(),
+            origin: None,
+            kept: Vec::new(),
         }
     }
 }
@@ -115,6 +134,29 @@ impl State {
 
     fn frame(&self) -> Frame {
         Frame { width: self.width, height: self.height, view: self.view.within(self.length()) }
+    }
+
+    /// Nothing is in hand any more.
+    fn hands_off(&mut self) {
+        self.grab = None;
+        self.before = None;
+        self.ghost = None;
+        self.read_out.clear();
+    }
+
+    /// Takes the curve off the card. One with edits (or steps to redo) is kept for when it's picked again.
+    fn put_away(&mut self) {
+        self.hands_off();
+        let Some((id, mut editor)) = self.open.take() else { return };
+        let Some(origin) = self.origin.take() else { return };
+        editor.let_go();
+        if editor.changed() || editor.can_undo() || editor.can_redo() {
+            self.kept.retain(|(kept, ..)| *kept != id);
+            self.kept.push((id, origin, editor, self.view));
+            if self.kept.len() > KEPT {
+                self.kept.remove(0);
+            }
+        }
     }
 }
 
@@ -153,6 +195,8 @@ pub fn connect(app: &AppWindow) {
         });
         if let Some(app) = weak.upgrade() {
             redraw(&app);
+            // The dots sit where the picture's room puts them.
+            show_touch(&app);
         }
     });
     let weak = app.as_weak();
@@ -235,10 +279,9 @@ pub fn open(app: &AppWindow, curve: Option<(&Curve, String)>) {
             let mut s = s.borrow_mut();
             s.shown += 1;
             s.tone = None;
-            s.grab = None;
-            s.before = None;
-            s.read_out.clear();
-            s.open.take().is_some()
+            let had = s.open.is_some();
+            s.put_away();
+            had
         });
         if had {
             data.set_picture(Image::default());
@@ -258,15 +301,27 @@ pub fn open(app: &AppWindow, curve: Option<(&Curve, String)>) {
     }
     STATE.with(|s| {
         let mut s = s.borrow_mut();
-        let mut editor = Editor::new(Shape::from_curve(&curve.points, curve.length_beats));
+        s.put_away();
+        let origin = Shape::from_curve(&curve.points, curve.length_beats);
+        // Left with edits not saved, and still the same curve where it came from: as it was left.
+        let kept =
+            s.kept.iter().position(|(id, from, ..)| *id == curve.id && *from == origin).map(|at| s.kept.remove(at));
+        // (One that has changed where it came from starts afresh: its old edits were made on another shape.)
+        s.kept.retain(|(id, ..)| *id != curve.id);
+        let (mut editor, view) = match kept {
+            Some((_, _, editor, view)) => (editor, view),
+            None => {
+                let editor = Editor::new(origin.clone());
+                let view = View::whole(editor.shape().length());
+                (editor, view)
+            }
+        };
         editor.grid = s.grid;
-        s.view = View::whole(editor.shape().length());
+        s.view = view;
         s.open = Some((curve.id.clone(), editor));
+        s.origin = Some(origin);
         s.shown += 1;
         s.tone = None;
-        s.grab = None;
-        s.before = None;
-        s.read_out.clear();
     });
     data.set_picture(Image::default());
     data.set_ruler(ModelRc::default());
@@ -282,7 +337,8 @@ pub fn open(app: &AppWindow, curve: Option<(&Curve, String)>) {
     redraw(app);
 }
 
-/// The mouse on the picture: `kind` 0 moved, 1 pressed, 2 let go, 3 double-clicked, 4 left. A press on a dot or a
+/// The mouse on the picture: `kind` 0 moved, 1 pressed, 2 let go, 3 double-clicked, 4 left, 5 the press was taken
+/// away (the window lost the mouse: what was being dragged goes back where it was). A press on a dot or a
 /// line takes hold of it, and once the mouse has gone [`DRAG_STARTS`] it's dragged; a double-click adds, removes or
 /// straightens (`mo_app::curve_touch` says which).
 fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
@@ -290,7 +346,7 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
         let s = &mut *s.borrow_mut();
         let frame = s.frame();
         let Some((_, editor)) = s.open.as_mut() else { return false };
-        if kind != 4 {
+        if kind < 4 {
             s.keys = keys;
             s.mouse = Some((x, y));
         }
@@ -304,18 +360,28 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
                     *moved = true;
                     s.before = Some(editor.shape().clone());
                 }
-                let (edit, words) = curve_touch::drag(*grab, frame, s.grid, keys, x, y);
+                let before = s.before.as_ref().unwrap_or_else(|| editor.shape());
+                let (edit, words) = curve_touch::drag(*grab, before, frame, s.grid, keys, x, y);
                 s.read_out = words;
                 editor.drag(&edit);
+                if matches!(grab, Grab::Dot { .. }) {
+                    s.held_dot = s.before.as_ref().and_then(|b| curve_touch::held_point(editor.shape(), b, &edit));
+                }
                 true
             }
             1 => {
                 s.grab = curve_touch::grab(editor.shape(), frame, x, y).map(|g| (g, (x, y), false));
+                s.held_dot = match s.grab {
+                    Some((Grab::Dot { point, .. }, ..)) => Some(point),
+                    _ => None,
+                };
                 false
             }
             2 => {
-                let dragged = s.grab.take().is_some_and(|(_, _, moved)| moved);
+                let dragged = s.grab.is_some_and(|(_, _, moved)| moved);
+                s.grab = None;
                 s.before = None;
+                s.ghost = None;
                 s.read_out.clear();
                 if dragged {
                     editor.let_go();
@@ -325,13 +391,25 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
             3 => {
                 s.grab = None;
                 s.before = None;
+                s.ghost = None;
                 s.read_out.clear();
                 curve_touch::double_click(editor.shape(), frame, s.grid, keys, x, y).is_some_and(|e| editor.edit(&e))
+            }
+            5 => {
+                s.grab = None;
+                s.before = None;
+                s.ghost = None;
+                s.read_out.clear();
+                s.mouse = None;
+                s.keys = Keys::default();
+                editor.give_up()
             }
             _ => {
                 // The mouse left; while something is held the drag goes on outside the picture.
                 if s.grab.is_none() {
                     s.mouse = None;
+                    // No more is heard of the keys from out there: their lamps go out.
+                    s.keys = Keys::default();
                 }
                 false
             }
@@ -347,9 +425,7 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
 fn step_back(app: &AppWindow, back: bool) {
     let done = STATE.with(|s| {
         let s = &mut *s.borrow_mut();
-        s.grab = None;
-        s.before = None;
-        s.read_out.clear();
+        s.hands_off();
         s.open.as_mut().is_some_and(|(_, e)| if back { e.undo() } else { e.redo() })
     });
     if done {
@@ -377,6 +453,35 @@ pub fn edited() -> Option<(Vec<CurvePoint>, f64)> {
     })
 }
 
+/// The id of the curve on the card, when it has edits that aren't saved.
+pub fn edited_id() -> Option<String> {
+    STATE.with(|s| s.borrow().open.as_ref().filter(|(_, e)| e.changed()).map(|(id, _)| id.clone()))
+}
+
+/// A curve's edits were saved as a new curve: the curve they were made on is as it was found again, on the card or
+/// kept for later.
+pub fn forget(app: &AppWindow, id: &str) {
+    let open = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        s.kept.retain(|(kept, ..)| kept != id);
+        let open = s.open.as_ref().is_some_and(|(open, _)| open == id);
+        if open {
+            s.hands_off();
+            let origin = s.origin.clone();
+            if let (Some((_, editor)), Some(origin)) = (s.open.as_mut(), origin) {
+                let grid = editor.grid;
+                *editor = Editor::new(origin);
+                editor.grid = grid;
+            }
+        }
+        open
+    });
+    if open {
+        redraw(app);
+        show_touch(app);
+    }
+}
+
 /// A stretch of the curve as path commands in the picture's points: from `from` to `to` beats (what's in sight of
 /// it), a step every [`PATH_STEP`] points, each at the value `at` gives.
 fn path(frame: Frame, from: f64, to: f64, at: impl Fn(f64) -> f64) -> String {
@@ -401,9 +506,11 @@ fn show_touch(app: &AppWindow) {
     let data = app.global::<CurveEditorData>();
     let was_changed = data.get_changed();
     let changed = STATE.with(|s| {
-        let s = s.borrow();
+        let s = &mut *s.borrow_mut();
         let frame = s.frame();
         let Some((_, editor)) = s.open.as_ref() else {
+            s.dots.clear();
+            s.ghost = None;
             data.set_dots(ModelRc::default());
             data.set_hot_line("".into());
             data.set_ghost("".into());
@@ -414,27 +521,33 @@ fn show_touch(app: &AppWindow) {
         };
         let shape = editor.shape();
         let held = s.grab.map(|(grab, _, _)| grab);
-        // What's lit: the thing held, else the thing under the mouse.
+        // What's lit: the thing held (as the drag has left it: a point that joined a neighbour has another place in
+        // the list), else the thing under the mouse.
         let under = match (held, s.mouse) {
-            // A held point may have joined a neighbour: the dot nearest the mouse is the one in hand.
-            (Some(Grab::Dot { .. }), Some((x, y))) => curve_touch::under(shape, frame, x, y),
-            (Some(Grab::Line { line, .. }), _) => Under::Line(line),
-            (_, Some((x, y))) => curve_touch::under(shape, frame, x, y),
+            (Some(Grab::Dot { .. }), _) => s.held_dot.map_or(Under::Empty, Under::Dot),
+            (Some(grab @ Grab::Line { .. }), _) => {
+                let before = s.before.as_ref().unwrap_or(shape);
+                curve_touch::held_line(shape, before, grab).map_or(Under::Empty, Under::Line)
+            }
+            (None, Some((x, y))) => curve_touch::under(shape, frame, x, y),
             _ => Under::Empty,
         };
-        let dots: Vec<EditorDot> = curve_touch::dots(shape, frame, s.mouse)
+        let on_show = match (held, under) {
+            (Some(_), Under::Dot(point)) => curve_touch::dots_with(shape, frame, Some(point)),
+            (Some(_), _) => curve_touch::dots_with(shape, frame, None),
+            (None, _) => curve_touch::dots(shape, frame, s.mouse),
+        };
+        let dots: Vec<EditorDot> = on_show
             .into_iter()
             .map(|d| {
                 let hot = under == Under::Dot(d.point);
-                EditorDot {
-                    x: d.x as f32,
-                    y: d.y as f32,
-                    hot: hot && held.is_none(),
-                    held: hot && matches!(held, Some(Grab::Dot { .. })),
-                }
+                EditorDot { x: d.x as f32, y: d.y as f32, hot: hot && held.is_none(), held: hot && held.is_some() }
             })
             .collect();
-        data.set_dots(ModelRc::new(VecModel::from(dots)));
+        if dots != s.dots {
+            data.set_dots(ModelRc::new(VecModel::from(dots.clone())));
+            s.dots = dots;
+        }
         let hot_line = match under {
             Under::Line(line) => match (shape.points().get(line), shape.points().get(line + 1)) {
                 (Some(a), Some(b)) => path(frame, a.beat, b.beat, |beat| shape.line_value(line, beat)),
@@ -443,9 +556,18 @@ fn show_touch(app: &AppWindow) {
             _ => String::new(),
         };
         data.set_hot_line(hot_line.into());
-        let ghost =
-            s.before.as_ref().map_or_else(String::new, |old| path(frame, 0.0, old.length(), |b| old.value_at(b)));
-        data.set_ghost(ghost.into());
+        match (&s.before, &s.ghost) {
+            (Some(_), Some((made_for, _))) if *made_for == frame => {}
+            (Some(old), _) => {
+                let ghost = path(frame, 0.0, old.length(), |b| old.value_at(b));
+                data.set_ghost(ghost.as_str().into());
+                s.ghost = Some((frame, ghost));
+            }
+            (None, _) => {
+                data.set_ghost("".into());
+                s.ghost = None;
+            }
+        }
         data.set_picture_width(frame.width as f32);
         data.set_picture_height(frame.height as f32);
         data.set_pointer(match (held, under) {
@@ -523,6 +645,8 @@ fn wheel(app: &AppWindow, x: f64, by: f64, along: bool) {
     if changed {
         redraw(app);
         show_play_line(app);
+        // The dots, the lit line and the faint old curve move with what's in sight.
+        show_touch(app);
     }
 }
 

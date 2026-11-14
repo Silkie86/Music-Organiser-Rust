@@ -200,7 +200,8 @@ pub fn shape_id(points: &[curve::CurvePoint]) -> String {
 /// are) and its length, hashed. The same curve saved twice is one curve; one that only differs from a found curve in
 /// its height or length is still a curve of its own.
 pub fn made_id(points: &[curve::CurvePoint], length_beats: f64) -> String {
-    let round = |v: f64| (v * 1000.0).round() as i64;
+    // To a millionth: two curves the eye can't tell apart are one, and one bent a little is another.
+    let round = |v: f64| (v * 1_000_000.0).round() as i64;
     let mut h = Sha256::new();
     h.update(b"mo-presets made curve 1\0");
     h.update(round(length_beats).to_le_bytes());
@@ -678,7 +679,7 @@ impl CurvesDb {
 
     /// Keeps a curve made in the editor as a new curve of its own, named `name`, made at `now` (seconds since 1970);
     /// returns it as the list has it. The same points and length saved again are the same curve: it keeps its first
-    /// name and date. Refused when it's no curve (fewer than two points, a point out of place, no length).
+    /// name and date, and shows again if it was hidden. Refused when it's no curve (fewer than two points, a point out of place, no length).
     pub fn save_made(
         &self,
         name: &str,
@@ -703,6 +704,8 @@ impl CurvesDb {
              ON CONFLICT(id) DO NOTHING",
             params![id, name, length_beats, points_text(points), now],
         )?;
+        // The same shape saved before and hidden since: saving it again shows it again.
+        self.conn.execute("UPDATE your_curves SET hidden = 0 WHERE id = ?1", [&id])?;
         self.get(&id)?.ok_or_else(|| CurvesError("the curve was kept but can't be read back".into()))
     }
 
@@ -1016,6 +1019,9 @@ mod tests {
         db.scan(&[], &Progress::default()).unwrap();
         let kept = db.get(&made.id).unwrap().unwrap();
         assert_eq!((kept.name.as_str(), kept.hidden), ("Mine", true));
+        // Saved again while hidden, it shows again (under the name you gave it).
+        let shown = db.save_made("Third name", &points, 8.0, 2).unwrap();
+        assert_eq!((shown.name.as_str(), shown.hidden), ("Mine", false));
         assert_eq!(db.list().unwrap().len(), 2, "the found curve went with its file, the made ones stay");
         // No name gets one; what's no curve is refused; the file it's dragged out as is made as for any curve.
         assert_eq!(db.save_made(" ", &[p(0.0, 1.0, 0.0), p(1.0, 0.0, 0.0)], 4.0, 2).unwrap().name, "New curve");

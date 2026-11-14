@@ -76,7 +76,7 @@ export global CurveEditorData {
     in property <string> read-out;
     in property <length> read-x;
     in property <length> read-y;
-    // The mouse on the picture: 0 moved, 1 pressed, 2 let go, 3 double-clicked, 4 left; where; Shift, Alt, Ctrl.
+    // The mouse on the picture: 0 moved, 1 pressed, 2 let go, 3 double-clicked, 4 left, 5 press taken away; where; Shift, Alt, Ctrl.
     callback mouse(int, length, length, bool, bool, bool);
     callback undo();
     callback redo();
@@ -519,7 +519,8 @@ export component CurveEditor inherits SidePanel {
                     if e.kind == PointerEventKind.move {
                         self.tell(0, e.modifiers.shift, e.modifiers.alt, e.modifiers.control || e.modifiers.meta);
                     } else if e.kind == PointerEventKind.cancel {
-                        self.tell(4, false, false, false);
+                        // The press was taken away: what was dragged goes back where it was.
+                        self.tell(5, false, false, false);
                     } else if e.button == PointerEventButton.left {
                         self.tell(e.kind == PointerEventKind.down ? 1 : 2, e.modifiers.shift, e.modifiers.alt,
                             e.modifiers.control || e.modifiers.meta);
