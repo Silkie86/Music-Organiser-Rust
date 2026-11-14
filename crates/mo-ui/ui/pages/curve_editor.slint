@@ -64,7 +64,7 @@ export global CurveEditorData {
     in property <length> end-x: -1px;
     // The swing marks: where they stand on the ruler (on every second grid line), and whether the mouse is on one
     // or holds them (they move as one, so they light as one). The mouse on the ruler: 0 moved, 1 pressed, 2 let go,
-    // 4 left, 5 the press was taken away; where, and whether Shift is held.
+    // 4 left, 5 the press was taken away; where; Shift, Alt, Ctrl (Cmd on a Mac).
     in property <[length]> swing-marks;
     in property <bool> swing-hot;
     callback ruler-mouse(int, length, bool, bool, bool);

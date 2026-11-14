@@ -466,8 +466,9 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         let now = was.with(Role::ALL[role], Key::ALL[key]);
         change(SETTING, &now.to_setting());
         if let Some(app) = weak.upgrade() {
-            show_curve_keys(&app.global::<SettingsData>(), now);
             crate::curve_editor::set_keys(&app, now);
+            // The whole tab: "Every key back to the start" follows this too.
+            show(&app);
         }
     });
     let weak = app.as_weak();
@@ -600,6 +601,10 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         let Some(app) = weak.upgrade() else { return };
         let mut keys = crate::shortcuts();
         keys.reset_all();
+        // The curve editor's keys on the same tab go back too.
+        let start = mo_app::curve_keys::KeyMap::default();
+        change(mo_app::curve_keys::SETTING, &start.to_setting());
+        crate::curve_editor::set_keys(&app, start);
         keys_now(&app, &keys, "All keys are back to the ones they started with.".to_owned());
     });
     let weak = app.as_weak();
@@ -651,13 +656,17 @@ fn apply_helper(on: bool, weak: slint::Weak<AppWindow>) {
 /// The curve editor's keys on the Shortcuts tab: each meaning's line and the key it has.
 fn show_curve_keys(data: &SettingsData, map: mo_app::curve_keys::KeyMap) {
     use mo_app::curve_keys::{Key, Role};
-    let mac = cfg!(target_os = "macos");
-    let lines: Vec<SharedString> = Role::ALL.iter().map(|r| r.words().1.into()).collect();
-    let names: Vec<SharedString> = Key::ALL.iter().map(|k| k.name(mac).into()).collect();
+    use slint::Model;
+    // The lines and the keys' names never change: given once, so the rows aren't made again at each pick.
+    if data.get_curve_key_lines().row_count() == 0 {
+        let mac = cfg!(target_os = "macos");
+        let lines: Vec<SharedString> = Role::ALL.iter().map(|r| r.words().1.into()).collect();
+        let names: Vec<SharedString> = Key::ALL.iter().map(|k| k.name(mac).into()).collect();
+        data.set_curve_key_lines(ModelRc::new(VecModel::from(lines)));
+        data.set_curve_key_names(ModelRc::new(VecModel::from(names)));
+    }
     let keys: Vec<i32> =
         Role::ALL.iter().map(|r| Key::ALL.iter().position(|k| *k == map.key(*r)).map_or(0, |i| i as i32)).collect();
-    data.set_curve_key_lines(ModelRc::new(VecModel::from(lines)));
-    data.set_curve_key_names(ModelRc::new(VecModel::from(names)));
     data.set_curve_keys(ModelRc::new(VecModel::from(keys)));
 }
 
@@ -1568,7 +1577,8 @@ fn show(app: &AppWindow) {
         data.set_key_lines(ModelRc::new(VecModel::from(lines)));
         data.set_listening(p.listening.unwrap_or_default().into());
         data.set_keys_message(p.keys_message.clone().into());
-        data.set_keys_changed(keys.any_changed());
+        let curve_keys = mo_app::curve_keys::KeyMap::from_setting(p.settings.get(mo_app::curve_keys::SETTING));
+        data.set_keys_changed(keys.any_changed() || curve_keys != mo_app::curve_keys::KeyMap::default());
 
         let fl = page::fl_status(p.fl_state, &p.fl_folders);
         let mut bitwig = p.bitwig.clone();

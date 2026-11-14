@@ -295,9 +295,8 @@ impl Bench {
     }
 
     /// Which key does what, as the app's Settings have it now.
-    pub(super) fn set_keys(&self, panel: &Panel, map: mo_app::curve_keys::KeyMap) {
+    pub(super) fn set_keys(&self, map: mo_app::curve_keys::KeyMap) {
         self.card.borrow_mut().set_keys(map);
-        self.show(panel, false);
     }
 
     /// The curves were read again: the one open is found among them again (it may have another place), or the

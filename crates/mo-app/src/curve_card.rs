@@ -538,8 +538,10 @@ impl Card {
 
     /// Which key does what from here on.
     pub fn set_keys(&mut self, map: KeyMap) {
-        self.key_map = map;
-        self.keys = Keys::default();
+        if map != self.key_map {
+            self.key_map = map;
+            self.keys = Keys::default();
+        }
     }
 
     /// The picked points: none once the curve is another than the one they were picked in.
@@ -673,8 +675,14 @@ impl Card {
     /// a stretch of time, and a click there drops the highlight; a double-click adds, removes or straightens
     /// (`curve_touch` and `curve_hold` say which). Whether the picture is to be drawn again.
     pub fn mouse(&mut self, kind: i32, x: f64, y: f64, keys: Keys) -> bool {
+        let keys = self.key_map.roles(keys);
+        self.mouse_meant(kind, x, y, keys)
+    }
+
+    /// [`Card::mouse`] with the keys already as their meanings (free, bend, make): the ruler and the strip hand
+    /// their drags on to it.
+    fn mouse_meant(&mut self, kind: i32, x: f64, y: f64, keys: Keys) -> bool {
         let s = self;
-        let keys = s.key_map.roles(keys);
         let frame = s.frame();
         let Some((_, editor)) = s.open.as_mut() else { return false };
         if kind < mouse::LEFT {
@@ -981,7 +989,7 @@ impl Card {
         let mut drawn = false;
         let dragging = matches!(self.grab, Some((Held::Swing(..), _, _)));
         if dragging && matches!(kind, mouse::MOVED | mouse::LET_GO | mouse::TAKEN_AWAY) {
-            drawn = self.mouse(kind, x, 0.0, keys);
+            drawn = self.mouse_meant(kind, x, 0.0, keys);
             if kind == mouse::MOVED {
                 return drawn;
             }
@@ -1013,7 +1021,7 @@ impl Card {
         let keys = self.key_map.roles(keys);
         // A drag begun here goes on as the bar's. The picture isn't told the mouse is on it for longer than that.
         if self.grab.is_some() && matches!(kind, mouse::MOVED | mouse::LET_GO | mouse::TAKEN_AWAY) {
-            let drawn = self.mouse(kind, x, BAR_Y, keys);
+            let drawn = self.mouse_meant(kind, x, BAR_Y, keys);
             // While it's dragged the read-out follows the mouse; after that it's on the strip, not the picture.
             if kind != mouse::MOVED {
                 self.mouse = None;
@@ -2007,6 +2015,21 @@ mod tests {
         card.mouse(mouse::MOVED, x, y, none);
         let hint = card.showing(false).hint_keys;
         assert!(hint.contains("Alt: paint steps") && hint.contains("Ctrl-drag: pick points"), "{hint}");
+        // A drag begun on the ruler goes by the same keys: Ctrl is free now, so a swing mark held with it moves
+        // freely (0.2 of a step is caught by nothing), and with no key it catches on triplet swing.
+        card.set_keys(KeyMap::default().with(Role::Free, Key::Ctrl));
+        assert!(card.act(curve_act::STEPS));
+        let swung = |card: &mut Card, keys: Keys, by: f64| {
+            let (from, to) = (card.frame().x(0.25), card.frame().x(0.25 + 0.25 * by));
+            card.ruler(mouse::MOVED, from, keys);
+            card.ruler(mouse::PRESSED, from, keys);
+            card.ruler(mouse::MOVED, to, keys);
+            let words = card.showing(false).read_out;
+            card.ruler(mouse::TAKEN_AWAY, to, keys);
+            words
+        };
+        assert_eq!(swung(&mut card, ctrl, 0.32), curve_paint::swing_words(0.32));
+        assert_eq!(swung(&mut card, none, 0.32), curve_paint::swing_words(1.0 / 3.0));
     }
 
     #[test]

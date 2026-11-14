@@ -85,7 +85,7 @@ impl KeyMap {
         let keys: Vec<Key> = value
             .unwrap_or_default()
             .split_whitespace()
-            .filter_map(|w| Key::ALL.into_iter().find(|k| k.word() == w.to_lowercase()))
+            .filter_map(|w| Key::ALL.into_iter().find(|k| k.word().eq_ignore_ascii_case(w)))
             .collect();
         match keys[..] {
             [free, bend, make] if free != bend && bend != make && free != make => KeyMap { free, bend, make },
@@ -133,11 +133,9 @@ impl KeyMap {
     }
 
     /// The editor's words (written with the keys as they come: "Shift: off the grid", "Alt-drag", "Cmd: paint") with
-    /// each key's name changed for the key that has its meaning now.
+    /// each key's name changed for the key that has its meaning now, as a Mac names it when `mac`. Only for the
+    /// editor's hint words, where every key named is one of the three held with the mouse.
     pub fn words(self, text: &str, mac: bool) -> String {
-        if self == KeyMap::default() {
-            return text.to_owned();
-        }
         const NAMES: [(&str, Role); 5] = [
             ("Shift", Role::Free),
             ("Option", Role::Bend),
@@ -217,6 +215,11 @@ mod tests {
         let text = "Shift: off the grid · Ctrl: paint steps · Alt-drag: pick points in a box";
         assert_eq!(m.words(text, false), "Alt: off the grid · Ctrl: paint steps · Shift-drag: pick points in a box");
         assert_eq!(KeyMap::default().words(text, false), text);
+        // A Mac's names for the keys, whatever names the words came with.
+        assert_eq!(
+            KeyMap::default().words("Ctrl-drag copies it · Alt: bend", true),
+            "Cmd-drag copies it · Option: bend"
+        );
         let mac = "Option: bend it · Cmd-click: pick it with others · Shift: finely";
         assert_eq!(m.words(mac, true), "Shift: bend it · Cmd-click: pick it with others · Option: finely");
         // Only whole words that are a key's name.
