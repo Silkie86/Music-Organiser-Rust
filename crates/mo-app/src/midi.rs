@@ -1111,6 +1111,57 @@ pub fn loop_notes(notes: &[NoteEvent], bars: i32) -> (Vec<NoteEvent>, i64) {
     mo_midi::analyser::clip_of(notes, i64::from(bars))
 }
 
+/// The metronome's clicks, General MIDI drums: a high wood block on each bar's first beat, a low one on the others.
+pub const METRONOME_BAR_KEY: u8 = 76;
+pub const METRONOME_BEAT_KEY: u8 = 77;
+
+/// A metronome for a loop `length` ticks long, as drum notes: a click on every beat (4 to a bar), the bar's first
+/// louder. Played with the part, on the SoundFont's drums, so it keeps exact time with it at any speed.
+pub fn metronome_notes(length: i64) -> Vec<NoteEvent> {
+    let beat = mo_midi::PPQ;
+    (0..(length.max(0) + beat - 1) / beat)
+        .map(|at| {
+            let bar = at % 4 == 0;
+            NoteEvent {
+                start: at * beat,
+                length: beat / 4,
+                key: if bar { METRONOME_BAR_KEY } else { METRONOME_BEAT_KEY },
+                velocity: if bar { 65_535 } else { 45_000 },
+                muted: false,
+                step: false,
+                attribute: mo_formats::NoteAttribute::default(),
+            }
+        })
+        .collect()
+}
+
+/// How far one press of the stepper's minus or plus moves the speed, in BPM (as the curve editor's).
+pub const BPM_STEP: f64 = 5.0;
+
+/// The speed a part plays at, `by` steps up or down (the stepper's minus and plus): to the next multiple of
+/// [`BPM_STEP`] that way (92 goes to 95 or 90), kept to what a part can play at ([`usable_tempo`]'s 20 to 400).
+pub fn step_bpm(bpm: f64, by: i32) -> f64 {
+    let steps = bpm / BPM_STEP;
+    let on = if by > 0 { steps.floor() } else { steps.ceil() };
+    ((on + f64::from(by)) * BPM_STEP).clamp(20.0, 400.0)
+}
+
+/// The stepper's words for a speed: "120 BPM", "92.5 BPM".
+pub fn bpm_text(bpm: f64) -> String {
+    let tenths = (bpm * 10.0).round() / 10.0;
+    if tenths.fract() == 0.0 { format!("{tenths:.0} BPM") } else { format!("{tenths:.1} BPM") }
+}
+
+/// Where a loop made again at another speed starts, in seconds, so it goes on from the same beat rather than from
+/// the top: `position` seconds into the loop at `was` BPM is that many beats in, at `now` BPM, round a loop
+/// `seconds` long.
+pub fn resume_seconds(position: f64, was: f64, now: f64, seconds: f64) -> f64 {
+    if !(seconds > 0.0 && was > 0.0 && now > 0.0 && position.is_finite()) {
+        return 0.0;
+    }
+    (position.max(0.0) * was / now).rem_euclid(seconds)
+}
+
 /// The C# app's settings in `library.db` the reading follows: the MIDI library folders (a JSON list), and "1" to
 /// read every save of a song, not only its newest.
 pub const FOLDERS_KEY: &str = "midi_folders";
@@ -1432,6 +1483,32 @@ pub(crate) mod tests {
         assert_eq!(parts.len(), 1, "one line for the loop");
         let g = crate::finder::find(&[parts], "pad loop fsm", None, 4);
         assert_eq!(g.len(), 1, "the other key's file is found by its own name");
+    }
+
+    #[test]
+    fn the_metronome_and_the_speed() {
+        // Two bars and a half: a click a beat, rounded up to the last beat begun, the bars' first beats high.
+        let clicks = metronome_notes(2 * BAR + mo_midi::PPQ / 2);
+        assert_eq!(clicks.len(), 9);
+        let keys: Vec<u8> = clicks.iter().map(|n| n.key).collect();
+        assert_eq!(&keys[..5], &[76, 77, 77, 77, 76]);
+        assert_eq!(clicks[8].key, METRONOME_BAR_KEY);
+        assert!(clicks[0].velocity > clicks[1].velocity);
+        assert!(metronome_notes(0).is_empty());
+        // Steps go to the next 5 BPM, and stay where a part can play.
+        assert_eq!(step_bpm(120.0, 1), 125.0);
+        assert_eq!(step_bpm(120.0, -1), 115.0);
+        assert_eq!(step_bpm(92.0, 1), 95.0);
+        assert_eq!(step_bpm(92.0, -1), 90.0);
+        assert_eq!(step_bpm(400.0, 1), 400.0);
+        assert_eq!(step_bpm(22.0, -1), 20.0);
+        assert_eq!(bpm_text(120.0), "120 BPM");
+        assert_eq!(bpm_text(92.54), "92.5 BPM");
+        // At half the speed a beat lasts twice as long: 1 s in at 120 is 2 s in at 60, round an 8 s loop.
+        assert_eq!(resume_seconds(1.0, 120.0, 60.0, 8.0), 2.0);
+        assert_eq!(resume_seconds(5.0, 120.0, 60.0, 8.0), 2.0);
+        assert_eq!(resume_seconds(f64::NAN, 120.0, 60.0, 8.0), 0.0);
+        assert_eq!(resume_seconds(1.0, 120.0, 120.0, 0.0), 0.0);
     }
 
     #[test]
