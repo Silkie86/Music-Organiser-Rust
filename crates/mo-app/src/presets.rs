@@ -1512,58 +1512,14 @@ pub mod curve_act {
     pub const CUT_TIME: &str = "curves.cutTime";
     pub const HIGHLIGHT_ALL: &str = "curves.highlightAll";
     pub const RANDOMISE: &str = "curves.randomise";
+    pub const METRONOME: &str = "curves.metronome";
+    pub const FASTER: &str = "curves.faster";
+    pub const SLOWER: &str = "curves.slower";
 }
 
-/// The tempo a curve is heard at on its tone (Solomon, 13 Nov: "preview the curve maybe as a volume curve on a
-/// sinewave").
-pub const HEAR_BPM: f64 = 120.0;
-/// The tone's pitch (A below middle C) and loudness at the curve's top (half: -6 dB).
-const TONE_HZ: f64 = 220.0;
-const TONE_LEVEL: f64 = 0.5;
-const TONE_RATE: u32 = 44_100;
-/// The longest stretch heard: 32 bars (a minute at 120); a longer curve is heard from its start.
-pub const TONE_MOST_BEATS: f64 = 128.0;
-/// How fast the tone's volume follows a jump in the curve, in seconds: quick, but with no click.
-const TONE_GLIDE: f64 = 0.002;
-
-/// A curve heard on its own: a sine tone whose volume follows it, as long as the curve is at [`HEAR_BPM`] (a bar
-/// when its length isn't known), made to go round and round with no gap or click where it starts again.
+/// A curve heard on its own at the usual speed, with no metronome ([`crate::curve_hear::tone`]).
 pub fn curve_tone(c: &Curve) -> mo_audio::AudioData {
-    let beats = if c.length_beats.is_finite() && c.length_beats > 0.0 { c.length_beats } else { 4.0 };
-    let heard = beats.min(TONE_MOST_BEATS);
-    let seconds = heard * 60.0 / HEAR_BPM;
-    let frames = ((seconds * f64::from(TONE_RATE)).round() as usize).max(1);
-    // The part of the curve heard (all of it, unless it's longer than the most heard), stretched across, with the
-    // first point past it kept for the line to it; drawn at each sample.
-    let stretch = beats / heard;
-    let mut part: Vec<CurvePoint> = Vec::new();
-    for p in &c.points {
-        part.push(CurvePoint { x: p.x * stretch, ..*p });
-        if p.x * stretch > 1.0 {
-            break;
-        }
-    }
-    let drawn = curve_groups::draw(&part, frames);
-    // A whole number of the tone's waves in the loop, so where it starts again joins up.
-    let waves = (TONE_HZ * seconds).round().max(1.0);
-    let step = std::f64::consts::TAU * waves / frames as f64;
-    let follow = 1.0 - (-1.0 / (TONE_GLIDE * f64::from(TONE_RATE))).exp();
-    let mut level = drawn.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
-    let samples: Vec<f32> = drawn
-        .iter()
-        .take(frames)
-        .enumerate()
-        .map(|(i, v)| {
-            level += (v.clamp(0.0, 1.0) - level) * follow;
-            ((i as f64 * step).sin() * level * TONE_LEVEL) as f32
-        })
-        .collect();
-    mo_audio::AudioData {
-        sample_rate: TONE_RATE,
-        channels: vec![samples.clone(), samples],
-        file_seconds: seconds,
-        ..Default::default()
-    }
+    crate::curve_hear::tone(&c.points, c.length_beats, crate::curve_hear::Hear::default())
 }
 
 /// What the curves list is filtered by.

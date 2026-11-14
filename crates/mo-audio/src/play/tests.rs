@@ -179,6 +179,30 @@ fn a_sound_no_longer_wanted_as_it_starts_leaves_the_one_playing_alone() {
 }
 
 #[test]
+fn a_loop_is_swapped_for_another_where_it_is_and_only_while_its_the_one_playing() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, _ended) = player(&outputs);
+    // Nothing playing: nothing is swapped in.
+    assert!(!player.swap_looped(ramp(), "a", |at| at));
+    assert_eq!(player.playing(), None);
+    player.play_looped(ramp(), "a", 2.0);
+    settle(&player);
+    outputs.pull(100);
+    // Another key: left alone.
+    assert!(!player.swap_looped(ramp(), "b", |at| at));
+    // Its own: the new sound goes on from where `from` says, given where the loop was (2.1 s in).
+    assert!(player.swap_looped(ramp(), "a", |at| at + 5.0));
+    assert_eq!(player.playing().as_deref(), Some("a"));
+    settle(&player);
+    let heard = outputs.pull(100);
+    assert!((heard[50] - 0.715).abs() < 1e-3, "{}", heard[50]);
+    // Stopped: a tone made meanwhile doesn't start it again.
+    player.stop();
+    assert!(!player.swap_looped(ramp(), "a", |at| at));
+    assert_eq!(player.playing(), None);
+}
+
+#[test]
 fn seek_plays_on_from_there() {
     let outputs = FakeOutputs::new(&["Speakers"]);
     let (player, _ended) = player(&outputs);
