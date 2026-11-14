@@ -930,6 +930,9 @@ export component TempoStepper inherits Rectangle {
     in property <string> bpm-text;
     in property <bool> enabled: true;
     in property <bool> changed;
+    // The keys that step it, from the shortcut list, for the tips (none where a page has none).
+    in property <string> slower-key;
+    in property <string> faster-key;
     callback stepped(int);
     callback reset();
     height: 28px;
@@ -957,6 +960,7 @@ export component TempoStepper inherits Rectangle {
         }
         Tip {
             text: "Slower";
+            key: root.slower-key;
             hovering: minus-touch.has-hover && !minus-touch.pressed;
             at-y: root.height + Space.xs;
         }
@@ -1000,6 +1004,7 @@ export component TempoStepper inherits Rectangle {
         }
         Tip {
             text: "Faster";
+            key: root.faster-key;
             hovering: plus-touch.has-hover && !plus-touch.pressed;
             at-y: root.height + Space.xs;
         }

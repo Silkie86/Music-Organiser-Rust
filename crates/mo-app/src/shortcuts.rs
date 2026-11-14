@@ -150,6 +150,9 @@ pub const CURVES_ACTIONS: &[Action] = &[
         "Make a new curve from parts of the curves shown; with a highlight, roll only that part again",
         "Ctrl+R",
     ),
+    action("curves.metronome", "Turn the metronome on or off while a curve is heard", "Alt+M"),
+    action("curves.faster", "Hear the curve 5 BPM faster", "Alt+Up"),
+    action("curves.slower", "Hear the curve 5 BPM slower", "Alt+Down"),
 ];
 
 /// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),

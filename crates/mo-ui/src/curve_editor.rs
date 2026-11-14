@@ -5,18 +5,19 @@
 //! grid or look asks for a new picture, and the newest ask wins (rule 12).
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use mo_app::background::Newest;
+use mo_app::background::{self, Newest};
 use mo_app::curve_edit::{Edit, Editor, Grid, Shape, Span, Step};
+use mo_app::curve_hear::{self, Hear};
 use mo_app::curve_hold::{self, Hold, Over, Part};
 use mo_app::curve_picture::{self, Colours, Frame, View};
 use mo_app::curve_random;
 use mo_app::curve_strip::{self, OnStrip};
 use mo_app::curve_touch::{self, Grab, Keys};
 use mo_app::log;
-use mo_app::presets::{HEAR_BPM, Offer, TONE_MOST_BEATS, curve_act};
+use mo_app::presets::{Offer, curve_act};
 use mo_formats::bitwig::curve::CurvePoint;
 use mo_presets::curves::Curve;
 use slint::{ComponentHandle, Image, ModelRc, VecModel};
@@ -89,6 +90,10 @@ struct State {
     pictures: u64,
     /// The player's key of the tone the play line follows, since when, and whether it's been heard to play yet.
     tone: Option<(String, Instant, bool)>,
+    /// How the tone is heard (its speed, the metronome), kept from curve to curve; and the curve as the tone playing
+    /// was made from (its points, its length, how it's heard): when the editor's differs, the tone is made again.
+    hear: Hear,
+    heard: Option<Heard>,
     /// Draw here and now, on the processor, instead: for the screenshots, which have no event loop to post to.
     here: bool,
     /// Where the mouse is on the picture (none when it isn't), and the keys held.
@@ -143,6 +148,8 @@ impl Default for State {
             shown: 0,
             pictures: 0,
             tone: None,
+            hear: Hear::default(),
+            heard: None,
             here: false,
             mouse: None,
             keys: Keys::default(),
@@ -200,6 +207,50 @@ impl State {
 /// The newest picture the drawing thread has sent the window (as `State::pictures` counts them).
 static SENT: AtomicU64 = AtomicU64::new(0);
 
+/// What a tone is made from: the curve's points, its length in beats, and how it's heard.
+type Heard = (Vec<CurvePoint>, f64, Hear);
+
+/// A tone is being made again for the one playing: one at a time, the newest shape after it.
+static MAKING: AtomicBool = AtomicBool::new(false);
+
+/// Clears [`MAKING`] when the thread making a tone is done with it, however it ends.
+struct Made;
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        MAKING.store(false, Ordering::Release);
+    }
+}
+
+/// Counts the times Hear started a tone: one being made again for an earlier start never takes a later one's place.
+static ASKED: AtomicU64 = AtomicU64::new(0);
+
+/// The tone playing: its key, and the length in beats and the way of hearing it was made with. The play line and
+/// the place carried over go by this (not by what's wanted next), and it changes just as a new tone takes over.
+static SOUNDING: std::sync::Mutex<Option<(String, f64, Hear)>> = std::sync::Mutex::new(None);
+
+/// The tone under `key` is about to play: what it was made with.
+pub fn sounding(key: &str, length: f64, hear: Hear) {
+    *SOUNDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key.to_owned(), length, hear));
+}
+
+/// What the tone playing under `key` was made with, when that's known.
+fn sounding_of(key: &str) -> Option<(f64, Hear)> {
+    let now = SOUNDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    now.as_ref().filter(|(k, ..)| k == key).map(|(_, length, hear)| (*length, *hear))
+}
+
+/// Whether two tones would be made from the same thing, number for number (a number that isn't one is the same as
+/// itself here, so a damaged curve isn't made again at every tick).
+fn same_heard(a: &Heard, b: &Heard) -> bool {
+    let bits = |h: &Heard| -> Vec<u64> {
+        let mut out = vec![h.1.to_bits(), h.2.bpm.to_bits(), u64::from(h.2.click)];
+        out.extend(h.0.iter().flat_map(|p| [p.x.to_bits(), p.y.to_bits(), p.bend.to_bits()]));
+        out
+    };
+    bits(a) == bits(b)
+}
+
 /// What the picture's steps on the window's thread are called in the freeze lines.
 const STEPS: canvas::Steps = canvas::Steps {
     set_up: "Curve editor: set up the GPU painter",
@@ -223,6 +274,19 @@ pub fn connect(app: &AppWindow) {
     }
     let data = app.global::<CurveEditorData>();
     show_grid(app);
+    show_hear(app);
+    let weak = app.as_weak();
+    data.on_metronome_toggled(move || {
+        if let Some(app) = weak.upgrade() {
+            set_hear(&app, None, None);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_speed_stepped(move |by| {
+        if let Some(app) = weak.upgrade() {
+            set_hear(&app, None, Some(by));
+        }
+    });
     let weak = app.as_weak();
     data.on_laid_out(move |width, height| {
         STATE.with(|s| {
@@ -378,7 +442,7 @@ pub fn open(app: &AppWindow, curve: Option<(&Curve, String)>) {
     show_touch(app);
     // Its tone may be playing already (picked again while it goes round): the play line follows it again.
     if crate::sounds::player().playing().as_deref() == Some(tone_key.as_str()) {
-        follow_tone(app, tone_key);
+        follow_tone(app, tone_key, None);
     }
     redraw(app);
 }
@@ -1164,13 +1228,20 @@ fn put_up(app: &AppWindow, shown: u64, number: Option<u64>, drawn: Drawn) {
 
 /// The tone under `key` was asked for (Hear, or Space): the play line follows it from when it starts to when it
 /// stops. The tone is made on a thread of its own first, so it's waited for a while.
-pub fn follow_tone(app: &AppWindow, key: String) {
+///
+/// `heard` is what the tone was made from ([`to_hear`]); none when that isn't known (a tone found playing), and then
+/// it's made again from the editor's curve.
+pub fn follow_tone(app: &AppWindow, key: String, heard: Option<Heard>) {
     let ours = STATE.with(|s| {
         let mut s = s.borrow_mut();
         if s.open.is_none() {
             return false;
         }
         s.tone = Some((key, Instant::now(), false));
+        if heard.is_some() {
+            ASKED.fetch_add(1, Ordering::AcqRel);
+        }
+        s.heard = heard;
         true
     });
     if !ours {
@@ -1191,10 +1262,10 @@ pub fn follow_tone(app: &AppWindow, key: String) {
 fn show_play_line(app: &AppWindow) {
     let player = crate::sounds::player();
     let now = player.playing();
+    let mut again: Option<(String, Heard)> = None;
     let at = STATE.with(|s| {
-        let mut s = s.borrow_mut();
+        let s = &mut *s.borrow_mut();
         let frame = s.frame();
-        let heard = s.length().min(TONE_MOST_BEATS);
         let (key, since, seen) = s.tone.as_mut()?;
         if now.as_deref() != Some(key.as_str()) {
             // Not playing: still being made, or stopped (or another sound took its place).
@@ -1204,11 +1275,46 @@ fn show_play_line(app: &AppWindow) {
             return None;
         }
         *seen = true;
-        let beat = (player.position().unwrap_or(0.0) * HEAR_BPM / 60.0).rem_euclid(heard.max(1e-6));
+        // The curve was edited, or is heard another way, since the tone was made: it's made again and put in the
+        // tone's place at the same beat, so what's heard follows the editor as it plays (Solomon, 14 Nov 2026).
+        let wanted = s.open.as_ref().map(|(_, e)| (e.shape().curve_points(), e.shape().length(), s.hear));
+        if let Some(wanted) = wanted
+            && !s.heard.as_ref().is_some_and(|h| same_heard(h, &wanted))
+            && !MAKING.swap(true, Ordering::AcqRel)
+        {
+            // Counted as heard from here on, even if its thread can't start (that's logged): no trying again at
+            // every tick.
+            s.heard = Some(wanted.clone());
+            again = Some((key.clone(), wanted));
+        }
+        // The play line goes by the tone playing, until the new one takes over where this one is.
+        let (length, hear) = sounding_of(key).unwrap_or((s.length(), s.hear));
+        let beat = curve_hear::beat_at(player.position().unwrap_or(0.0), hear, length);
         let view = frame.view;
         let in_sight = frame.fits() && beat >= view.start - 1e-9 && beat <= view.start + view.span + 1e-9;
         Some(if in_sight { frame.x(beat) as f32 } else { -1.0 })
     });
+    if let Some((key, (points, length, hear))) = again {
+        let asked = ASKED.load(Ordering::Acquire);
+        let made = background::spawn("Curve tone", move || {
+            let _made = Made;
+            let tone = curve_hear::tone(&points, length, hear);
+            crate::sounds::player().swap_looped(std::sync::Arc::new(tone), &key, |at| {
+                // Hear was stopped and started again meanwhile: that tone is newer than this one.
+                if ASKED.load(Ordering::Acquire) != asked {
+                    return None;
+                }
+                let mut now = SOUNDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let was = now.as_ref().filter(|(k, ..)| *k == key).map_or(hear, |(_, _, was)| *was);
+                *now = Some((key.clone(), length, hear));
+                Some(curve_hear::carried(at, was, hear, length))
+            });
+        });
+        if let Err(e) = made {
+            MAKING.store(false, Ordering::Release);
+            log::error("Curves", &format!("Couldn't start making the curve's tone again: {e}"));
+        }
+    }
     let data = app.global::<CurveEditorData>();
     match at {
         Some(x) => {
@@ -1221,6 +1327,40 @@ fn show_play_line(app: &AppWindow) {
             }
         }
     }
+}
+
+/// What Hear plays now: the editor's curve (its points and its length in beats) and how it's heard.
+pub fn to_hear() -> Option<Heard> {
+    STATE.with(|s| {
+        let s = s.borrow();
+        s.open.as_ref().map(|(_, e)| (e.shape().curve_points(), e.shape().length(), s.hear))
+    })
+}
+
+/// The metronome on or off (`None` turns it over), or the speed `by` steps up or down (0 for the usual speed).
+/// While the tone plays it's made again with it, at the same beat.
+pub fn set_hear(app: &AppWindow, click: Option<bool>, speed: Option<i32>) {
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        if speed.is_none() {
+            s.hear.click = click.unwrap_or(!s.hear.click);
+        }
+        match speed {
+            Some(0) => s.hear.bpm = curve_hear::BPM_USUAL,
+            Some(by) => s.hear.bpm = curve_hear::stepped(s.hear.bpm, by),
+            None => {}
+        }
+    });
+    show_hear(app);
+}
+
+/// How the curve is heard, on the card: the metronome's chip and the speed's words.
+fn show_hear(app: &AppWindow) {
+    let hear = STATE.with(|s| s.borrow().hear);
+    let data = app.global::<CurveEditorData>();
+    data.set_metronome(hear.click);
+    data.set_speed_words(curve_hear::speed_words(hear.bpm).into());
+    data.set_speed_changed((hear.speed() - curve_hear::BPM_USUAL).abs() > 1e-9);
 }
 
 fn stop_play_line(app: &AppWindow) {

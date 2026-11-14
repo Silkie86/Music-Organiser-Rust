@@ -1570,6 +1570,17 @@ fn presets_shots(
         return Err("curves-random.png: the roll left nothing to undo".into());
     }
     capture(window);
+    // Hear with the metronome on, four steps slower (100 BPM), the play line part way.
+    mo_ui::curve_editor::set_hear(app, Some(true), None);
+    for _ in 0..4 {
+        mo_ui::curve_editor::set_hear(app, None, Some(-1));
+    }
+    mo_ui::curve_editor::show_playing_sample(app, Some(5.5));
+    shots.push(("curves-hear.png".into(), capture(window)));
+    mo_ui::curve_editor::show_playing_sample(app, None);
+    mo_ui::curve_editor::set_hear(app, Some(false), None);
+    mo_ui::curve_editor::set_hear(app, None, Some(0));
+    capture(window);
     // A curve dragged out onto an automation lane from its line, its shape on the card.
     let still = capture(window);
     data.set_curve_lifted_row(1);
