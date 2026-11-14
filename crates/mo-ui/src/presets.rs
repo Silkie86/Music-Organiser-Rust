@@ -1548,6 +1548,16 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
     }
 }
 
+/// One of the page's actions from its key. The key of Hide (Delete) with points picked in the curve editor takes
+/// those points out: the key means the nearest thing picked. The Hide button and menu line still hide the curve.
+pub fn run_key(app: &AppWindow, id: &str) -> bool {
+    let curves = PAGE.with(|p| p.borrow().section == Section::Curves);
+    if curves && id == curve_act::HIDE && crate::curve_editor::picked() > 0 {
+        return crate::curve_editor::act(app, curve_act::REMOVE_POINTS);
+    }
+    run_action(app, id)
+}
+
 /// The page's own key lists: the Sounds section's or the Curves section's, as is on show.
 pub fn page_actions() -> &'static [mo_app::shortcuts::Action] {
     match PAGE.with(|p| p.borrow().section) {
@@ -2578,10 +2588,6 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             let data = app.global::<PresetsData>();
             data.set_rename_text(curve.name.as_str().into());
             data.set_renaming(true);
-        }
-        // Delete with points picked in the editor takes those out: the key means the nearest thing picked.
-        curve_act::HIDE if crate::curve_editor::picked() > 0 => {
-            return crate::curve_editor::act(app, curve_act::REMOVE_POINTS);
         }
         curve_act::HIDE => {
             let hidden = !curve.hidden;

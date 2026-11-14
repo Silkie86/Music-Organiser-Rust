@@ -405,15 +405,30 @@ fn places(which: &[usize], len: usize) -> Vec<usize> {
 /// How far each of the points at `which` (in order) may go in time: back to and on to the nearest point that isn't
 /// one of them, or the curve's ends.
 fn room(points: &[Point], which: &[usize], length: f64) -> Vec<(f64, f64)> {
-    let free = |i: usize| which.binary_search(&i).is_err();
-    which
-        .iter()
-        .map(|&i| {
-            let low = (0..i).rev().find(|j| free(*j)).and_then(|j| points.get(j)).map_or(0.0, |p| p.beat);
-            let high = (i + 1..points.len()).find(|j| free(*j)).and_then(|j| points.get(j)).map_or(length, |p| p.beat);
-            (low, high.max(low))
-        })
-        .collect()
+    // One pass each way: the nearest point not picked before each place, and after it.
+    let mut picked = vec![false; points.len()];
+    for &i in which {
+        if let Some(p) = picked.get_mut(i) {
+            *p = true;
+        }
+    }
+    let mut lows = vec![0.0; points.len()];
+    let mut low = 0.0;
+    for (i, p) in points.iter().enumerate() {
+        lows[i] = low;
+        if !picked[i] {
+            low = p.beat;
+        }
+    }
+    let mut highs = vec![length; points.len()];
+    let mut high = length;
+    for (i, p) in points.iter().enumerate().rev() {
+        highs[i] = high;
+        if !picked[i] {
+            high = p.beat;
+        }
+    }
+    which.iter().filter(|i| **i < points.len()).map(|&i| (lows[i], highs[i].max(lows[i]))).collect()
 }
 
 /// A [`Edit::MovePoints`] or [`Edit::Quantise`] done to `shape`'s points, before they're tidied: the points, and the
@@ -463,7 +478,18 @@ fn moved_points(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(
             let room = room(&points, &which, shape.length);
             for (&i, (low, high)) in which.iter().zip(&room) {
                 let p = points.get_mut(i)?;
-                p.beat = ((p.beat / step).round() * step).clamp(*low, *high);
+                // Its nearest line, or the nearest one it can reach; with no line between its neighbours it stays.
+                let line = (p.beat / step).round() * step;
+                let line = if line < low - EPS {
+                    (low / step).ceil() * step
+                } else if line > high + EPS {
+                    (high / step).floor() * step
+                } else {
+                    line
+                };
+                if line >= low - EPS && line <= high + EPS {
+                    p.beat = line.clamp(*low, *high);
+                }
             }
             Some((points, which))
         }
@@ -1730,11 +1756,16 @@ mod tests {
         let (q, _) = done(&s, Some(Span::new(0.5, 1.5)), Edit::Quantise { points: vec![], step: 1.0 });
         let beats: Vec<f64> = q.points().iter().map(|p| p.beat).collect();
         assert_eq!(beats, [0.1, 1.0, 1.0, 1.6, 3.1]);
-        // Only the picked one, and it stops at the point before it that isn't picked.
-        let one = Edit::Quantise { points: vec![3], step: 4.0 };
+        // Only the picked one. Its nearest line is past the point before it: it takes the nearest it can reach.
+        let one = Edit::Quantise { points: vec![3], step: 1.0 };
         let (q, _) = done(&s, None, one.clone());
-        assert!(near(q.points()[3].beat, 1.4), "{:?}", q.points());
-        assert!(!landed(&s, None, &one, &q).is_empty());
+        assert!(near(q.points()[3].beat, 2.0), "{:?}", q.points());
+        assert_eq!(landed(&s, None, &one, &q), [(3, 3)]);
+        let back = Edit::Quantise { points: vec![2], step: 1.0 };
+        let (q, _) = done(&s, None, back);
+        assert!(near(q.points()[2].beat, 1.0), "{:?}", q.points());
+        // No line between its neighbours: it stays where it is, on its slope.
+        assert!(apply(&s, None, &Edit::Quantise { points: vec![3], step: 4.0 }).is_none());
         // On the grid already: nothing to do. And no grid at all.
         assert!(apply(&ramp(), None, &Edit::Quantise { points: vec![], step: 0.25 }).is_none());
         assert!(apply(&s, None, &Edit::Quantise { points: vec![], step: 0.0 }).is_none());

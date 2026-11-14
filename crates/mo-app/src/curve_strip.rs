@@ -103,7 +103,9 @@ pub fn part_name(shape: &Shape) -> String {
 /// The right-click menu on the picture and the strip: what can be done to the highlighted part (the whole curve
 /// when nothing is highlighted), each line with its key. `step` is a grid square in beats, for the steps. A line
 /// that would change nothing (a level part flipped, a part that reads the same backwards) is greyed.
-pub fn part_offers(shape: &Shape, highlight: Option<Span>, step: f64, picked: &[usize]) -> Vec<Offer> {
+pub fn part_offers(shape: &Shape, highlight: Option<Span>, grid: Option<f64>, picked: &[usize]) -> Vec<Offer> {
+    // Steps with the grid off are sixteenths; Quantise needs a grid to go by.
+    let step = grid.unwrap_or(0.25);
     let lit = highlight.is_some();
     let clip = clip_of(shape, highlight);
     let offer = |text: &str, id: &'static str, enabled: bool| Offer { text: text.to_owned(), id, enabled };
@@ -114,13 +116,14 @@ pub fn part_offers(shape: &Shape, highlight: Option<Span>, step: f64, picked: &[
         offer(&format!("Flip {of} upside down"), curve_act::FLIP, does(Edit::Flip)),
         offer(&format!("Make {of} into steps"), curve_act::STEPS, does(Edit::Steps { step })),
         offer(
-            &match picked.len() {
-                0 => format!("Quantise: put the points of {of} on the grid"),
-                1 => "Quantise: put the picked point on the grid".to_owned(),
-                n => format!("Quantise: put the {n} picked points on the grid"),
+            &match (grid, picked.len()) {
+                (None, _) => "Quantise: turn the grid on first".to_owned(),
+                (_, 0) => format!("Quantise: put the points of {of} on the grid"),
+                (_, 1) => "Quantise: put the picked point on the grid".to_owned(),
+                (_, n) => format!("Quantise: put the {n} picked points on the grid"),
             },
             curve_act::QUANTISE,
-            does(Edit::Quantise { points: picked.to_vec(), step }),
+            grid.is_some_and(|step| does(Edit::Quantise { points: picked.to_vec(), step })),
         ),
         offer(
             &match picked.len() {
@@ -220,22 +223,24 @@ mod tests {
         let s = with_clips();
         assert_eq!(clip_of(&s, Some(Span::new(0.0, 4.0))), Some(0));
         assert_eq!(clip_of(&s, Some(Span::new(0.0, 3.0))), None);
-        let on_clip = part_offers(&s, Some(Span::new(0.0, 4.0)), 0.25, &[]);
+        let on_clip = part_offers(&s, Some(Span::new(0.0, 4.0)), Some(0.25), &[]);
         assert!(on_clip.iter().any(|o| o.id == curve_act::KEEP_CLIP && o.text.starts_with("Forget")));
-        let on_part = part_offers(&s, Some(Span::new(5.0, 6.0)), 0.25, &[]);
+        let on_part = part_offers(&s, Some(Span::new(5.0, 6.0)), Some(0.25), &[]);
         assert!(on_part.iter().any(|o| o.id == curve_act::KEEP_CLIP && o.text.starts_with("Keep") && o.enabled));
         assert!(on_part.iter().any(|o| o.id == curve_act::CUT_TIME && o.enabled));
         // Beats 5 to 6 of the fall: flipped and reversed it's another shape, and a level part would not be.
         assert!(on_part.iter().any(|o| o.id == curve_act::FLIP && o.enabled));
         let level = [CurvePoint { x: 0.0, y: 0.5, bend: 0.0 }, CurvePoint { x: 1.0, y: 0.5, bend: 0.0 }];
-        let on_flat = part_offers(&Shape::from_curve(&level, 4.0), None, 0.25, &[]);
+        let on_flat = part_offers(&Shape::from_curve(&level, 4.0), None, Some(0.25), &[]);
         assert!(on_flat.iter().any(|o| o.id == curve_act::FLIP && !o.enabled));
         assert!(on_flat.iter().any(|o| o.id == curve_act::REVERSE && !o.enabled));
-        let on_none = part_offers(&s, None, 0.25, &[]);
+        let on_none = part_offers(&s, None, Some(0.25), &[]);
         assert!(on_none.iter().any(|o| o.id == curve_act::KEEP_CLIP && !o.enabled));
         assert!(on_none.iter().any(|o| o.id == curve_act::REVERSE && o.text == "Reverse the whole curve"));
         // The whole curve's time can't be cut out.
-        assert!(part_offers(&s, Some(s.whole()), 0.25, &[]).iter().any(|o| o.id == curve_act::CUT_TIME && !o.enabled));
+        assert!(
+            part_offers(&s, Some(s.whole()), Some(0.25), &[]).iter().any(|o| o.id == curve_act::CUT_TIME && !o.enabled)
+        );
         for o in &on_part {
             assert!(crate::shortcuts::CURVES_ACTIONS.iter().any(|a| a.id == o.id), "{}", o.id);
         }

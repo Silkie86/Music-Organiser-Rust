@@ -348,6 +348,9 @@ pub struct Card {
     picked_of: Vec<Point>,
     picked_from: Vec<usize>,
     band: Option<((f64, f64), (f64, f64))>,
+    /// The points picked before the last click on a point, and when: a double-click on one of several picked
+    /// points begins with a click that picks it alone.
+    clicked: Option<(Vec<usize>, Instant)>,
     /// The curve's name, for the strip's one tile when it has no clips.
     name: String,
     /// Where the mouse is on the clip strip, from the picture's left (none when it isn't there).
@@ -400,6 +403,7 @@ impl Default for Card {
             picked_of: Vec::new(),
             picked_from: Vec::new(),
             band: None,
+            clicked: None,
             name: String::new(),
             on_strip: None,
             tiles: None,
@@ -847,6 +851,8 @@ impl Card {
                     }
                     // A click on a point picks it: alone, or with Ctrl in or out of the picked ones.
                     Some((Held::Touch(Grab::Dot { point, .. }), _, false)) => {
+                        // A double-click begins with such a click: it's done to the points picked before it.
+                        s.clicked = Some((s.picked.clone(), Instant::now()));
                         if !keys.ctrl {
                             s.picked = vec![point];
                         } else if let Some(at) = s.picked.iter().position(|p| *p == point) {
@@ -909,9 +915,13 @@ impl Card {
                     return back.is_some();
                 }
                 // On one of several picked points: they all go.
+                // (As they were before the click this double-click began with, which picked this one alone.)
+                let before = s.clicked.take().filter(|(_, when)| when.elapsed() < DOUBLE_CLICK).map(|(p, _)| p);
+                let all = before.unwrap_or_else(|| s.picked.clone());
                 let edit = match curve_touch::double_click(editor.shape(), frame, s.grid, keys, x, y) {
-                    Some(Edit::RemovePoint(point)) if s.picked.len() > 1 && s.picked.contains(&point) => {
-                        Some(Edit::RemovePoints(std::mem::take(&mut s.picked)))
+                    Some(Edit::RemovePoint(point)) if all.len() > 1 && all.contains(&point) => {
+                        s.picked.clear();
+                        Some(Edit::RemovePoints(all))
                     }
                     edit => edit,
                 };
@@ -930,7 +940,7 @@ impl Card {
                 s.band = None;
                 let given = given_up(editor, was, &mut s.lit_whole);
                 // The curve is as it was at the press, and so is what's picked.
-                if was.is_some() {
+                if matches!(was, Some((Held::Touch(_) | Held::Band, ..))) {
                     s.picked = std::mem::take(&mut s.picked_from);
                     s.picked_of = editor.shape().points().to_vec();
                 }
@@ -1046,11 +1056,10 @@ impl Card {
     /// What the right-click menu offers for the highlighted part (the whole curve with none); empty with no curve
     /// open.
     pub fn part_offers(&self) -> Vec<Offer> {
-        let step = self.grid.beats().unwrap_or(0.25);
-        let picked = self.picked_now();
+        let (grid, picked) = (self.grid.beats(), self.picked_now());
         self.open
             .as_ref()
-            .map_or_else(Vec::new, |(_, e)| curve_strip::part_offers(e.shape(), e.highlight(), step, picked))
+            .map_or_else(Vec::new, |(_, e)| curve_strip::part_offers(e.shape(), e.highlight(), grid, picked))
     }
 
     /// One of the editor's own actions (the right-click menu's, or its key): reverse, flip, steps, keep or forget a
@@ -1068,6 +1077,8 @@ impl Card {
         // The picked points, if the curve is still the one they were picked in.
         let picked = if editor.shape().points() == s.picked_of.as_slice() { s.picked.clone() } else { Vec::new() };
         match id {
+            // With the grid off there's nothing to quantise to.
+            curve_act::QUANTISE if s.grid.beats().is_none() => false,
             curve_act::QUANTISE => {
                 let edit = Edit::Quantise { points: picked.clone(), step };
                 let before = editor.shape().clone();
@@ -1192,12 +1203,16 @@ impl Card {
         let Some((_, editor)) = s.open.as_mut() else { return false };
         let same = |picked_of: &[Point], editor: &Editor| editor.shape().points() == picked_of;
         if given_up(editor, was, &mut s.lit_whole) {
-            // The curve is as it was at the press, and so is what's picked.
-            s.picked = std::mem::take(&mut s.picked_from);
-            s.picked_of = editor.shape().points().to_vec();
+            // The curve is as it was at the press, and so is what's picked (a drag of points or a box changed it;
+            // after any other drag it's as it was by itself).
+            if matches!(was, Some((Held::Touch(_) | Held::Band, ..))) {
+                s.picked = std::mem::take(&mut s.picked_from);
+                s.picked_of = editor.shape().points().to_vec();
+            }
             true
         } else if matches!(was, Some((Held::Band, ..))) {
             s.picked = std::mem::take(&mut s.picked_from);
+            s.picked_of = editor.shape().points().to_vec();
             true
         } else if !s.picked.is_empty() && same(&s.picked_of, editor) {
             s.picked.clear();
@@ -1925,6 +1940,40 @@ mod tests {
         );
         assert!(card.part_offers().iter().any(|o| o.id == curve_act::REMOVE_POINTS && !o.enabled));
         assert!(card.act(curve_act::QUANTISE));
+        // With the grid off there's nothing to quantise to.
+        assert!(card.step_back(true));
+        card.pick_grid(6);
+        assert!(card.part_offers().iter().any(|o| o.id == curve_act::QUANTISE && !o.enabled));
+        assert!(!card.act(curve_act::QUANTISE));
+    }
+
+    #[test]
+    fn a_double_click_on_one_of_the_picked_points_removes_them_all() {
+        let (none, ctrl) = (Keys::default(), Keys { ctrl: true, ..Keys::default() });
+        let mut card = five();
+        click(&mut card, 1.1, 0.5, none);
+        click(&mut card, 2.0, 0.75, ctrl);
+        // As a screen sends a double-click: a click, a press, then the double-click.
+        click(&mut card, 2.0, 0.75, none);
+        let (x, y) = at(&card, 2.0, 0.75);
+        card.mouse(mouse::PRESSED, x, y, none);
+        assert!(card.mouse(mouse::DOUBLE_CLICKED, x, y, none));
+        assert_eq!(card.edited().expect("removed").0.len(), 3);
+        assert_eq!(card.picked(), 0);
+        assert!(card.step_back(true), "one step");
+        assert_eq!(card.edited().map(|e| e.0.len()), None);
+    }
+
+    #[test]
+    fn a_stroke_of_paint_given_up_brings_no_old_pick_back() {
+        let (none, ctrl) = (Keys::default(), Keys { ctrl: true, ..Keys::default() });
+        let mut card = five();
+        click(&mut card, 3.0, 0.25, none);
+        click(&mut card, 0.5, 0.9, none);
+        assert_eq!(card.picked(), 0);
+        press_drag(&mut card, (0.4, 0.9), (0.9, 0.8), ctrl);
+        assert!(card.escape());
+        assert_eq!(card.picked(), 0);
     }
 
     #[test]

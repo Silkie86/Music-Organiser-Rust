@@ -166,7 +166,7 @@ fn key_pressed(weak: &Weak<AppWindow>, feed: &Feed, key: &str, repeat: bool) -> 
     if let Some(app) = weak.upgrade()
         && on_presets_page(app.get_place())
         && let Some(id) = shortcuts.page_action_for(key, presets::page_actions())
-        && (repeat || presets::run_action(&app, id))
+        && (repeat || presets::run_key(&app, id))
     {
         return true;
     }

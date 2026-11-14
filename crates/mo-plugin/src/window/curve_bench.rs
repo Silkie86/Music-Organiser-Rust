@@ -93,8 +93,9 @@ pub(super) struct Bench {
     open: RefCell<Option<(usize, Curve)>>,
     drawer: RefCell<Option<Newest<Ask>>>,
     drawn: Arc<Mutex<Option<Drawn>>>,
-    /// The part's actions as the buttons last showed them.
+    /// The part's actions as the buttons last showed them, and how many points were picked then.
     offers: RefCell<Vec<Offer>>,
+    picked: Cell<usize>,
     player: Arc<Player>,
     /// How asking for the tone went, once that's known; and since when one is asked for and not answered yet.
     played: Arc<Mutex<Option<Played>>>,
@@ -120,6 +121,7 @@ impl Bench {
             drawer: RefCell::new(None),
             drawn: Arc::default(),
             offers: RefCell::default(),
+            picked: Cell::new(0),
             player,
             played: Arc::default(),
             making: Cell::new(None),
@@ -144,11 +146,14 @@ impl Bench {
             let (me, weak) = (Rc::clone(self), panel.as_weak());
             move |told: (i32, f64, f64, Keys)| {
                 let drawn = what(&mut me.card.borrow_mut(), told);
+                // Points picked or let go change what the part's buttons would do, with no change to the curve.
+                let picked = me.card.borrow().picked();
+                let repicked = me.picked.replace(picked) != picked;
                 if let Some(panel) = weak.upgrade() {
                     if drawn {
                         me.redraw(&panel);
                     }
-                    me.show(&panel, drawn);
+                    me.show(&panel, drawn || repicked);
                 }
             }
         };
