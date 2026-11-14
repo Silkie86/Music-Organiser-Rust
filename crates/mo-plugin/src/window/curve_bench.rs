@@ -177,7 +177,7 @@ impl Bench {
             if me.tone.get().is_some() || me.making.get().is_some() {
                 me.stop(&panel);
             } else {
-                me.play(&panel);
+                me.play(&panel, false);
             }
         });
         let (me, weak) = (Rc::clone(self), panel.as_weak());
@@ -307,8 +307,9 @@ impl Bench {
     }
 
     /// Hear: the curve as the volume of a tone, round and round through the track; at the song's speed (and in step
-    /// with it) when the DAW says what that is, else at 120.
-    fn play(&self, panel: &Panel) {
+    /// with it) when the DAW says what that is, else at 120. `again`: made again after an edit, it goes on from where
+    /// the tone playing is, not from its start.
+    fn play(&self, panel: &Panel, again: bool) {
         let Some((points, length, hear)) = self.card.borrow().to_hear() else { return };
         let song = self.player.tempo().filter(|bpm| (curve_hear::BPM_LOW..=curve_hear::BPM_HIGH).contains(bpm));
         let hear = Hear { bpm: song.unwrap_or(hear.bpm), ..hear };
@@ -318,7 +319,12 @@ impl Bench {
         let in_step = song.map(|bpm| (curve_hear::heard_beats(length), bpm));
         let make = Box::new(move || Ok((MadeLoop::Sound(curve_hear::tone(&points, length, hear)), in_step)));
         let played = Arc::clone(&self.played);
-        self.player.play_made("Curve".into(), make, move |how| *lock(&played) = Some(how));
+        let told = move |how| *lock(&played) = Some(how);
+        if again {
+            self.player.swap_made("Curve".into(), make, told);
+        } else {
+            self.player.play_made("Curve".into(), make, told);
+        }
     }
 
     /// Stops the tone, if it's this editor's and may still be playing (or is being made): never another sound that
@@ -404,7 +410,7 @@ impl Bench {
         };
         drop(card);
         if stale {
-            self.play(panel);
+            self.play(panel, true);
         }
     }
 }
