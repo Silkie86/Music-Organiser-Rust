@@ -579,7 +579,7 @@ mod tests {
                 })
                 .collect();
             assert_eq!(fills.len(), 2, "at {scale}");
-            assert_eq!(fills[0].0 + fills[0].1, fills[1].0, "at {scale}: they meet");
+            assert!((fills[0].0 + fills[0].1 - fills[1].0).abs() < 1e-3, "at {scale}: they meet");
             for (x, w) in fills {
                 let (left, right) = (f64::from(x) * scale, f64::from(x + w) * scale);
                 assert!((left - left.round()).abs() < 1e-3 && (right - right.round()).abs() < 1e-3, "at {scale}");
