@@ -10,6 +10,7 @@
 //! On Windows and Mac the window's thread is the DAW's main thread, so nothing slow ever runs on it: reading the
 //! library, searching it and reading a sound all run on background threads at low priority.
 
+mod curve_bench;
 mod curves_tab;
 mod midi_tab;
 mod presets_tab;
@@ -622,12 +623,12 @@ impl Shown {
             pointer: Cell::new(LogicalPosition::default()),
             lines,
             slots,
+            curves: curves_tab::CurvesTab::new(Arc::clone(&instance.player)),
             instance,
             asked: Rc::new(RefCell::new(Asked { seed: seed(), ..Asked::default() })),
             column: Rc::new(Column::default()),
             midi: midi_tab::MidiTab::new(),
             presets: presets_tab::PresetsTab::new(),
-            curves: curves_tab::CurvesTab::new(),
             carried: Cell::new(None),
             recorded: Rc::default(),
             chords_seen: Cell::new(u64::MAX),
@@ -1819,7 +1820,10 @@ impl Shown {
                     Carried::Sound(row) => self.panel.set_carried(i32::try_from(row).unwrap_or(-1)),
                     Carried::Part(at) => self.panel.set_midi_carried(self.midi.row_of(at)),
                     Carried::Preset(at) => self.panel.set_preset_carried(self.presets.row_of(at)),
-                    Carried::Curve(at) => self.panel.set_curve_carried(self.curves.row_of(at)),
+                    Carried::Curve(at) => {
+                        self.panel.set_curve_carried(self.curves.row_of(at));
+                        self.panel.set_curve_edit_lifted(self.panel.get_curve_editing());
+                    }
                     Carried::Recording => self.panel.set_recorded_carried(true),
                 }
                 let (slots, started) = (Arc::clone(&self.slots), Instant::now());
@@ -1847,6 +1851,7 @@ impl Shown {
         self.panel.set_midi_carried(-1);
         self.panel.set_preset_carried(-1);
         self.panel.set_curve_carried(-1);
+        self.panel.set_curve_edit_lifted(false);
         self.panel.set_recorded_carried(false);
         // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't left
         // pressed.

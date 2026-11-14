@@ -2,6 +2,7 @@
 //! app's list is, and a curve dragged out as a Bitwig curve file. The curves are read the first time the tab is shown
 //! (and again each time it's shown after that, so a curve the app found since is there), on a background thread.
 
+use super::curve_bench::Bench;
 use super::{Carried, Choices, Slots};
 use crate::curves::{self, Curves, Read};
 use crate::threads::{background, lock};
@@ -94,6 +95,8 @@ impl Shown {
 
 pub(super) struct CurvesTab {
     shown: Rc<Shown>,
+    /// The editor a clicked curve opens in.
+    bench: Rc<Bench>,
     read: Arc<Mutex<Option<Read>>>,
     /// Asked for and not yet answered: not asked again meanwhile.
     reading: Cell<bool>,
@@ -101,8 +104,14 @@ pub(super) struct CurvesTab {
 }
 
 impl CurvesTab {
-    pub(super) fn new() -> CurvesTab {
-        CurvesTab { shown: Rc::default(), read: Arc::default(), reading: Cell::new(false), was_shown: Cell::new(false) }
+    pub(super) fn new(player: Arc<crate::audition::Player>) -> CurvesTab {
+        CurvesTab {
+            shown: Rc::default(),
+            bench: Bench::new(player),
+            read: Arc::default(),
+            reading: Cell::new(false),
+            was_shown: Cell::new(false),
+        }
     }
 
     /// The tab's list and what its search, filter and lines do. A dragged curve's file is written on a background
@@ -126,6 +135,15 @@ impl CurvesTab {
         panel.on_curve_clear(move || clear(SharedString::new()));
         let hidden = change(|f, t| f.hidden = t == "on");
         panel.on_curve_hidden_toggled(move |on| hidden(if on { "on" } else { "" }.into()));
+        self.bench.fill_in(panel, window_slots);
+        let (shown, bench, weak) = (Rc::clone(&self.shown), Rc::clone(&self.bench), panel.as_weak());
+        panel.on_curve_open(move |row| {
+            let Some(row) = usize::try_from(row).ok() else { return };
+            let (Some(curves), Some(at)) = (shown.lines.curves.borrow().clone(), shown.lines.at(row)) else { return };
+            if let (Some(curve), Some(panel)) = (curves.curves.get(at), weak.upgrade()) {
+                bench.open(&panel, at, curve);
+            }
+        });
         let shown = Rc::clone(&self.shown);
         let slots = Arc::clone(window_slots);
         let weak = panel.as_weak();
@@ -155,14 +173,17 @@ impl CurvesTab {
             let read = Arc::clone(&self.read);
             background("mo-plugin-curves", move || *lock(&read) = Some(curves::read()));
         }
+        self.bench.tick(panel);
         let Some(read) = lock(&self.read).take() else { return };
         self.reading.set(false);
         match read {
             Read::Ready(curves) => {
+                self.bench.read_again(panel, &curves.curves);
                 *self.shown.lines.curves.borrow_mut() = Some(Arc::new(curves));
                 self.shown.show(panel);
             }
             Read::Not(why) => {
+                self.bench.read_again(panel, &[]);
                 *self.shown.lines.curves.borrow_mut() = None;
                 self.shown.show(panel);
                 panel.set_curve_status(why.into());

@@ -178,6 +178,89 @@ pub struct Showing {
     pub changed: bool,
 }
 
+/// Copies what a card shows (`$now`: a [`Showing`]) onto a screen's `CurveEditorData` (`$data`): the app's and the
+/// plugin's are two Slint types with the same properties, so this is written once for both. `$dot` and `$tile` are
+/// the screen's own `EditorDot` and `ClipTile`. Whether there's something to save (`changed`) is left to the
+/// screen: its other buttons follow that.
+#[macro_export]
+macro_rules! show_curve_card {
+    ($data:expr, $now:expr, $dot:ident, $tile:ident) => {{
+        if !$now.open {
+            $data.set_clips(::slint::ModelRc::default());
+            $data.set_dots(::slint::ModelRc::default());
+            $data.set_swing_marks(::slint::ModelRc::default());
+            $data.set_hl_shown(false);
+            $data.set_hot_line("".into());
+            $data.set_ghost("".into());
+            $data.set_read_out("".into());
+            $data.set_can_undo(false);
+            $data.set_can_redo(false);
+        } else {
+            if let Some(dots) = $now.dots {
+                let dots: Vec<$dot> =
+                    dots.into_iter().map(|d| $dot { x: d.x, y: d.y, hot: d.hot, held: d.held }).collect();
+                $data.set_dots(::slint::ModelRc::new(::slint::VecModel::from(dots)));
+            }
+            // The highlight's frame and its handles, or the pills round the whole curve.
+            match $now.frame {
+                Some(b) => {
+                    $data.set_hl_shown(true);
+                    $data.set_hl_whole(b.whole);
+                    $data.set_hl_left(b.left as f32);
+                    $data.set_hl_right(b.right as f32);
+                    $data.set_hl_top(b.top as f32);
+                    $data.set_hl_bottom(b.bottom as f32);
+                }
+                None => $data.set_hl_shown(false),
+            }
+            $data.set_hl_hot($now.handle);
+            $data.set_hl_near($now.near);
+            $data.set_hot_line($now.hot_line.into());
+            if let Some(ghost) = $now.ghost {
+                $data.set_ghost(ghost.into());
+            }
+            $data.set_picture_width($now.width);
+            $data.set_picture_height($now.height);
+            $data.set_pointer($now.pointer);
+            $data.set_hint_name($now.hint_name.into());
+            $data.set_hint_does($now.hint_does.into());
+            $data.set_hint_keys($now.hint_keys.into());
+            $data.set_swing_hot($now.swing_hot);
+            if let Some(marks) = $now.swing_marks {
+                $data.set_swing_marks(::slint::ModelRc::new(::slint::VecModel::from(marks)));
+            }
+            if let Some(tiles) = $now.tiles {
+                let tiles: Vec<$tile> = tiles
+                    .into_iter()
+                    .map(|t| $tile {
+                        x: t.x,
+                        width: t.width,
+                        name: t.name.into(),
+                        words: t.words.into(),
+                        pinned: t.pinned,
+                        picked: t.picked,
+                        lighter: t.lighter,
+                        hot: t.hot,
+                        pin_hot: t.pin_hot,
+                        can_pin: t.can_pin,
+                    })
+                    .collect();
+                $data.set_clips(::slint::ModelRc::new(::slint::VecModel::from(tiles)));
+            }
+            $data.set_shift($now.keys.shift);
+            $data.set_alt($now.keys.alt);
+            $data.set_ctrl($now.keys.ctrl);
+            $data.set_read_out($now.read_out.into());
+            if let Some((x, y)) = $now.mouse {
+                $data.set_read_x(x);
+                $data.set_read_y(y);
+            }
+            $data.set_can_undo($now.can_undo);
+            $data.set_can_redo($now.can_redo);
+        }
+    }};
+}
+
 /// A picture of the curve to work out: of which curve and which picture (both are counted), the shape as it is now,
 /// what's highlighted, the grid, and the room and what's in sight.
 #[derive(Clone, Debug)]
@@ -386,6 +469,11 @@ impl Card {
     /// What's highlighted, in beats.
     pub fn highlight(&self) -> Option<Span> {
         self.open.as_ref().and_then(|(_, e)| e.highlight())
+    }
+
+    /// Whether the mouse holds something (a press not let go yet).
+    pub fn in_hand(&self) -> bool {
+        self.grab.is_some()
     }
 
     /// The picture has this much room now, in points.
