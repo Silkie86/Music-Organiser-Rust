@@ -118,6 +118,14 @@ light that means something. It should feel like a rack unit on a desk, not a web
   the time headings step aside; Sounds: its List view's Sound, Type and Key, and an "Order" drop-down stays in
   the top row beside the search, since tiles have no headings and Shuffled, Most liked and Newest have no column).
 
+- Light spills (the frontend-design pass of 14 Nov 2026, step 1): what's on doesn't only change colour, its light
+  falls on what's beside it, so "on" reads from across the room and the app looks like gear, not a dark web page.
+  `Theme.spill` is the accent, faint, and always fades to nothing: along a picked list line from its accent bar, up
+  the face of a picked view (`Segmented`) and behind a picked tab's name (`TabBar`) from their lit strips, and as a
+  thin glow round the page's one lit button. On the rail the picked place's line is washed in the place's own colour
+  (`Theme.spill-of`). Panels catch the light too: a side card has a top-lit edge like a button's, and a sunken
+  screen (`Well`) a lit lip along its bottom. None of it moves, so it costs no frames, and nothing unlit gets any.
+
 ## Next steps
 
 - Left out on purpose: a focus ring on every button (the app is driven by its shortcut list, and focusable buttons

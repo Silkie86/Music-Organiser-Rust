@@ -44,6 +44,12 @@ export global Theme {
     out property <color> well: light ? surface.darker(4%) : background.darker(20%);
     out property <color> shine: light ? #ffffff80 : #ffffff12;
     out property <length> radius: square ? 1px : 4px;
+    // Light spilling from something that's on (docs/look.md, "light means on"): the accent, faint, fading to nothing
+    // over the face beside it. `spill-of` does the same for another lit colour (a place's, on the rail).
+    out property <color> spill: spill-of(accent);
+    public pure function spill-of(lit: color) -> color {
+        lit.transparentize(light ? 88% : 82%)
+    }
 
     // How things went, the same in every theme: missing or failed, a warning, all good.
     out property <color> missing: #F0616D;
@@ -381,6 +387,16 @@ export component StudioButton inherits Rectangle {
         ? (touch.pressed ? Theme.accent.darker(15%) : @linear-gradient(180deg, Theme.accent.brighter(12%) 0%, Theme.accent.darker(6%) 100%))
         : (touch.pressed ? Theme.well : @linear-gradient(180deg, (touch.has-hover ? Theme.hover : Theme.surface-raised).brighter(8%) 0%, Theme.surface-raised.darker(6%) 100%));
     animate background { duration: Motion.tap; }
+    // The page's one lit button glows a little past its own edge, like a lamp behind a key.
+    if root.main && root.enabled: Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: parent.border-radius + 2px;
+        border-width: 2px;
+        border-color: Theme.spill;
+    }
     // The top-lit edge.
     Rectangle {
         y: 1px;
@@ -453,6 +469,14 @@ export component RailItem inherits Rectangle {
     border-radius: Theme.radius;
     background: selected ? Theme.surface-raised : touch.pressed ? Theme.well : touch.has-hover ? Theme.hover : transparent;
     animate background { duration: Motion.tap; }
+    // The picked place's light spills over its line, in the place's colour.
+    Rectangle {
+        visible: root.selected;
+        x: 0;
+        width: parent.width * 0.7;
+        border-radius: parent.border-radius;
+        background: @linear-gradient(90deg, Theme.spill-of(root.tint) 0%, root.tint.transparentize(100%) 100%);
+    }
     // The light on the picked place, in its colour.
     Rectangle {
         x: 0;
@@ -503,6 +527,14 @@ export component Well inherits Rectangle {
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.edge;
+    // The lip a sunken screen catches the light on, along its bottom edge.
+    Rectangle {
+        x: parent.border-radius;
+        y: parent.height - 1px;
+        width: parent.width - 2 * parent.border-radius;
+        height: 1px;
+        background: Theme.shine;
+    }
 }
 
 // A small × button, for putting a card away or taking a line off a list.
@@ -1729,6 +1761,13 @@ export component ListLine inherits Rectangle {
     // No easing here: lists reuse their lines as they scroll, and an eased line would trail the scroll.
     background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
     opacity: root.lifted ? 0.4 : 1;
+    // The picked line's light spills a little way along it.
+    Rectangle {
+        visible: root.selected;
+        x: 0;
+        width: min(parent.width, 220px);
+        background: @linear-gradient(90deg, Theme.spill 0%, Theme.accent.transparentize(100%) 100%);
+    }
     // The accent bar on the picked line.
     Rectangle {
         x: 0;
@@ -2100,6 +2139,16 @@ export component TabBar inherits Rectangle {
                 clicked => { root.current = i; }
             }
         }
+    }
+    // The underline's light spills up behind the picked tab's name.
+    Rectangle {
+        y: root.lit-y + root.tab-height - 2px - self.height;
+        height: 16px;
+        x: root.lit-x + 8px;
+        width: max(0px, root.lit-width - 16px);
+        visible: root.current >= 0 && root.current < root.tabs.length;
+        background: @linear-gradient(0deg, Theme.spill 0%, Theme.accent.transparentize(100%) 100%);
+        animate x, y, width { duration: root.ready ? Motion.move : 0ms; easing: ease-out; }
     }
     Rectangle {
         y: root.lit-y + root.tab-height - 2px;
@@ -2832,6 +2881,12 @@ export component Segmented inherits Rectangle {
         // button on a desk with its light on. One accent strip says "on" without turning the row into a block of colour.
         background: @linear-gradient(180deg, Theme.hover.brighter(Theme.light ? 0% : 30%) 0%, Theme.hover.brighter(Theme.light ? 0% : 12%) 100%);
         animate x, width { duration: root.ready ? Motion.move : 0ms; easing: ease-out; }
+        // The strip's light spills up the key's face.
+        Rectangle {
+            y: parent.height * 0.35;
+            height: parent.height * 0.65;
+            background: @linear-gradient(0deg, Theme.spill 0%, Theme.accent.transparentize(100%) 100%);
+        }
         Rectangle {
             x: Space.sm;
             y: parent.height - 3px;
@@ -3150,6 +3205,14 @@ export component SidePanel inherits Rectangle {
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.edge;
+    // The top-lit edge of a raised panel, as on a button.
+    Rectangle {
+        x: parent.border-radius;
+        y: 1px;
+        width: parent.width - 2 * parent.border-radius;
+        height: 1px;
+        background: Theme.shine;
+    }
     // Scrolls when what it holds is taller than the panel; fills it otherwise, so a stretch at the end works. Never
     // wider than the panel: something too wide inside (a long path once) made the whole card slide right and lose its
     // right side (Solomon's F12 note, 2026-11-02 03:28), so it's cut at the edge instead, and the parts wrap.
