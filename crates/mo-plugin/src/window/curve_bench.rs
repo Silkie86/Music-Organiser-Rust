@@ -15,7 +15,9 @@ use mo_app::curve_picture::{self, Colours};
 use mo_app::curve_touch::Keys;
 use mo_app::presets::Offer;
 use mo_app::shapes::{self, Colour};
-use mo_dawlink::bitwig::Watch;
+use mo_dawlink::bitwig::watch::State;
+use mo_dawlink::bitwig::{Groove, Watch};
+use mo_formats::bitwig::curve::CurvePoint;
 use mo_presets::curves::Curve;
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
@@ -25,6 +27,9 @@ use std::time::{Duration, Instant};
 
 /// How long an answer about a tone asked for is waited for: one that a newer sound overtook is never answered.
 const TONE_WAIT: Duration = Duration::from_secs(5);
+
+/// How long the watch on Bitwig is kept once the editor is out of sight.
+const WATCH_KEPT: Duration = Duration::from_secs(90);
 
 /// A part action's short name on its button (the menu's own words are its tip).
 fn short(offer: &Offer) -> &'static str {
@@ -77,6 +82,9 @@ fn colour(c: slint::Color) -> Colour {
     Colour { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() }
 }
 
+/// A curve as edited: its points and its length in beats.
+type Edited = (Vec<CurvePoint>, f64);
+
 pub(super) struct Bench {
     card: RefCell<Card>,
     /// The curve open in the editor: its place in the list as read, and the curve as found.
@@ -92,11 +100,14 @@ pub(super) struct Bench {
     /// The tone playing, as the player numbers it, and what it was made from.
     tone: Cell<Option<u64>>,
     heard: RefCell<Option<Heard>>,
-    /// The song as Bitwig shows it, watched only while the editor is in sight (for "Swing as the song"); how many
-    /// changes of it the button has taken in; and the swing it would give.
+    /// The song as Bitwig shows it, watched only while the editor is in sight (for "Swing as the song"); what of it
+    /// the button last went by; since when the editor is out of sight; and the swing the button would give.
     watch: RefCell<Option<Watch>>,
-    watched: Cell<Option<u64>>,
+    seen: RefCell<Option<(State, bool, Option<Groove>)>>,
+    unwatched: Cell<Option<Instant>>,
     groove: Cell<Option<Swing>>,
+    /// The swing the button last gave, and the curve as that left it.
+    swung: RefCell<Option<(Swing, Edited)>>,
 }
 
 impl Bench {
@@ -113,8 +124,10 @@ impl Bench {
             tone: Cell::new(None),
             heard: RefCell::new(None),
             watch: RefCell::new(None),
-            watched: Cell::new(None),
+            seen: RefCell::new(None),
+            unwatched: Cell::new(None),
             groove: Cell::new(None),
+            swung: RefCell::new(None),
         })
     }
 
@@ -198,16 +211,30 @@ impl Bench {
                 panel.set_curve_said(panel.get_curve_groove_says());
                 return;
             };
-            let done = me.card.borrow_mut().swing_by(swing.step, swing.amount);
-            {
-                me.redraw(&panel);
-                me.show(&panel, true);
-                panel.set_curve_said(if done {
-                    SharedString::new()
-                } else {
-                    "That swing changes nothing here: the curve has no points on the lines it moves.".into()
-                });
+            // The curve as this button last left it: the song's swing takes that swing's place, not a second swing
+            // on top of it.
+            let now = me.card.borrow().edited();
+            let ours = me.swung.borrow().as_ref().filter(|(_, left)| now.as_ref() == Some(left)).map(|(s, _)| *s);
+            if ours == Some(swing) {
+                panel.set_curve_said("The curve has the song's swing already.".into());
+                return;
             }
+            let mut card = me.card.borrow_mut();
+            if ours.is_some() {
+                card.step_back(true);
+            }
+            let done = card.swing_by(swing.step, swing.amount);
+            *me.swung.borrow_mut() = if done { card.edited().map(|left| (swing, left)) } else { None };
+            drop(card);
+            me.redraw(&panel);
+            me.show(&panel, true);
+            panel.set_curve_said(if done {
+                SharedString::new()
+            } else {
+                "That swing changes nothing here: the curve is flat, or the part is shorter than two of the swing's \
+                 steps."
+                    .into()
+            });
         });
         let (me, weak) = (Rc::clone(self), panel.as_weak());
         panel.on_curve_back(move || {
@@ -372,21 +399,30 @@ impl Bench {
     }
 
     /// Watches the song in Bitwig while the editor is in sight (`wanted`), for the swing "Swing as the song" would
-    /// give: the button follows the song's Groove as it changes. Out of sight, nothing is watched.
+    /// give: the button follows the song's Groove as it changes. Out of sight for [`WATCH_KEPT`], nothing is watched
+    /// (kept that long, so going from curve to curve isn't a new connection to Bitwig each time).
     fn watch_song(&self, panel: &Panel, wanted: bool) {
         let mut watch = self.watch.borrow_mut();
         if !wanted {
-            if watch.take().is_some() {
-                self.watched.set(None);
+            let since = self.unwatched.get().unwrap_or_else(Instant::now);
+            self.unwatched.set(Some(since));
+            if watch.is_some() && since.elapsed() > WATCH_KEPT {
+                *watch = None;
+                *self.seen.borrow_mut() = None;
+                self.groove.set(None);
+                panel.set_curve_groove_says(SharedString::new());
             }
             return;
         }
-        let watch = watch.get_or_insert_with(|| Watch::start(mo_dawlink::bitwig::PORT));
-        let version = watch.version();
-        if self.watched.replace(Some(version)) == Some(version) {
+        self.unwatched.set(None);
+        let live = watch.get_or_insert_with(|| Watch::start(mo_dawlink::bitwig::PORT)).now();
+        // Only what the button goes by: the feed has news many times a second while the song plays.
+        let seen = (live.state.clone(), live.sections.iter().any(|s| s == "groove"), live.groove);
+        if self.seen.borrow().as_ref() == Some(&seen) {
             return;
         }
-        let (swing, says) = match curve_groove::of(&watch.now()) {
+        *self.seen.borrow_mut() = Some(seen);
+        let (swing, says) = match curve_groove::of(&live) {
             Ok((swing, says)) => (Some(swing), says),
             Err(why) => (None, why),
         };
@@ -397,7 +433,7 @@ impl Bench {
     /// Takes in a picture worked out, and moves the play line. A curve edited while its tone plays has the tone made
     /// again once the mouse lets go (Solomon, 14 Nov 2026: what's heard follows the edits).
     pub(super) fn tick(&self, panel: &Panel, in_sight: bool) {
-        self.watch_song(panel, in_sight && panel.get_curve_editing());
+        self.watch_song(panel, in_sight && panel.get_curve_editing() && panel.get_in_bitwig());
         let data = panel.global::<CurveEditorData>();
         if let Some(drawn) = lock(&self.drawn).take()
             && drawn.shown == self.card.borrow().shown()

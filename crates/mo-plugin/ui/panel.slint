@@ -1570,7 +1570,7 @@ export component Panel inherits Window {
                 Rectangle {
                     horizontal-stretch: 1;
                 }
-                StudioButton {
+                if root.in-bitwig: StudioButton {
                     horizontal-stretch: 0;
                     text: "Swing as the song";
                     tip: root.curve-groove-says;

@@ -5,7 +5,6 @@
 //! How Bitwig's shuffle amount maps to how far a note moves is a guess, not measured in a Bitwig: its 100 % is taken
 //! as triplet swing (every second note a third of a step late), and less in a straight line down to none.
 
-use crate::curve_edit::MOST_SWING;
 use crate::curve_paint::swing_words;
 use mo_dawlink::bitwig::watch::State;
 use mo_dawlink::bitwig::{GROOVE_NEEDS, Groove, GrooveRate, Live};
@@ -25,7 +24,7 @@ pub fn amount(shuffle: f64) -> f64 {
     if !shuffle.is_finite() {
         return 0.0;
     }
-    (shuffle.clamp(0.0, 1.0) / 3.0).min(MOST_SWING)
+    shuffle.clamp(0.0, 1.0) / 3.0
 }
 
 /// The swing of a Groove: none while it's off or its shuffle is at nothing.
@@ -34,8 +33,7 @@ pub fn swing(groove: Groove) -> Option<Swing> {
         GrooveRate::Eighth => 0.5,
         GrooveRate::Sixteenth => 0.25,
     };
-    let amount = amount(groove.shuffle);
-    (groove.on && groove.shuffle >= LEAST && amount > 0.0).then_some(Swing { step, amount })
+    (groove.on && groove.shuffle >= LEAST).then_some(Swing { step, amount: amount(groove.shuffle) })
 }
 
 /// The song's swing as Bitwig shows it now, with words for the button's tip; or why there's none to give, in words
@@ -62,7 +60,11 @@ pub fn of(live: &Live) -> Result<(Swing, String), String> {
         ));
     }
     let Some(groove) = live.groove else {
-        return Err("Bitwig's Groove is at a shuffle rate the app doesn't know: it knows 1/8 and 1/16.".into());
+        return Err(
+            "Bitwig hasn't said its Groove yet, or its shuffle rate is one the app doesn't know: it knows 1/8 \
+                    and 1/16."
+                .into(),
+        );
     };
     let rate = match groove.rate {
         GrooveRate::Eighth => "1/8",
@@ -103,8 +105,8 @@ mod tests {
         let (s, says) = of(&live(Some(half))).expect("on, with shuffle");
         assert!((s.step - 0.5).abs() < 1e-12 && (s.amount - 1.0 / 6.0).abs() < 1e-12);
         assert!(says.contains("1/8") && says.contains("swing 58%"), "{says}");
-        // Never past what the editor allows, whatever comes.
-        assert!(amount(7.0) <= MOST_SWING && amount(f64::NAN) == 0.0 && amount(-1.0) == 0.0);
+        // Whatever comes: never past triplet swing, never early.
+        assert!((amount(7.0) - 1.0 / 3.0).abs() < 1e-12 && amount(f64::NAN) == 0.0 && amount(-1.0) == 0.0);
     }
 
     #[test]
