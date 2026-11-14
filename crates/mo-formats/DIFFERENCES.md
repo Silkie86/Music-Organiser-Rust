@@ -53,7 +53,7 @@ below); these are the places the Rust reader was written to differ, for files th
 
 | What | C# | Rust | Judged |
 |---|---|---|---|
-| What a plugin preset taken out of a project is (instrument, note effect or audio effect; Solomon, 14 Nov 2026: effects were listed under Synths) | Unknown, so the Presets page lists it under Synths and Effects alike. | As its plugin's device says (Bitwig's kind field 0x9d, else its category). | Better |
+| What a plugin preset taken out of a project is (instrument, note effect or audio effect; Solomon, 14 Nov 2026: effects were listed under Synths) | Unknown, so the Presets page lists it under Synths and Effects alike. | As its plugin's device says: Bitwig 6.1's kind field (0x9d), else its category where that says plainly (an instrument's, "Note FX" or an effect's); still unknown for a category of the plugin's own. | Better |
 | A group of tracks listed inside itself (a damaged file) | Walks round it for ever, until the app runs out of stack and closes. | Lists each track once. | Better |
 | A plugin state in the project's zip that won't come out whole | No presets at all from the project. | That one preset is left out; the rest are taken out. | Better |
 | A folder beside the project that can't be opened (in `samples`, say) | The whole project fails to read. | That folder is skipped. | Better |

@@ -26,8 +26,8 @@ pub enum Type {
     Effects,
 }
 
-/// The maker and type choices. A preset whose kind isn't known (a Bitwig plugin's, as the project doesn't say) passes
-/// the type choice, as in the C# app's `PresetFilter`.
+/// The maker and type choices. A preset whose kind isn't known (a Studio One song's plugin, or an older Bitwig song's
+/// whose device doesn't say plainly) passes the type choice, as in the C# app's `PresetFilter`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Choice {
     pub maker: Maker,

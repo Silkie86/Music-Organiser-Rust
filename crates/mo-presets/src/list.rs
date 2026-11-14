@@ -305,8 +305,8 @@ pub fn from_bitwig_parts(presets: Vec<PresetBlob>, clips: &[MidiClip], limits: &
                     guess(&Part { notes, ppq, shift, names: &names }, limits)
                 })
                 .clone();
-            // Only an instrument can be unused; the Bitwig reader doesn't say which presets are instruments yet, so an
-            // effect on an audio track isn't taken for an unused synth.
+            // Only an instrument can be unused, as its device says (the Bitwig reader's `device_kind`): an effect on an
+            // audio track, or a plugin the song doesn't say is a synth, isn't taken for an unused synth.
             let plays_nothing = blob.kind == mo_formats::PluginKind::Instrument && notes.iter().all(|n| n.muted);
             SongPreset::new(blob, track_name, plays_nothing, g, &[notes])
         })

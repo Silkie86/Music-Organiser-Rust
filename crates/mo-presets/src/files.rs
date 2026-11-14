@@ -293,9 +293,10 @@ fn xml_attribute(element: &str, name: &str) -> Option<String> {
     }
 }
 
-/// A Bitwig preset's device type (its metadata's `device_type`) as instrument or effect: Bitwig 6.1 says "note_to_audio"
-/// for an instrument (the recipe's Polysynth preset), "audio_to_audio" for an audio effect and "note_to_note" for a note
-/// effect, and its controller scripts' words ("instrument", "audio-effect", "note-effect") are taken too.
+/// A Bitwig preset's device type (its metadata's `device_type`) as instrument or effect: Bitwig 6.1 says
+/// "note_to_audio" for an instrument (the recipe's Polysynth preset), "audio_to_audio" for an audio effect and
+/// "note_to_note" for a note effect, and its controller scripts' words ("instrument", "audio-effect", "note-effect")
+/// are taken too.
 pub(crate) fn kind_of_device_type(device_type: &str) -> PluginKind {
     match device_type {
         "note_to_audio" | "instrument" => PluginKind::Instrument,
@@ -350,7 +351,6 @@ pub fn bwpreset_of(doc: &bitwig::Document, stem: &str) -> PresetFile {
         // Some versions keep the tags as one text, spaces between.
         file.tags = doc.meta_str("tags").split_whitespace().map(str::to_owned).collect();
     }
-    file.kind = kind_of_device_type(doc.meta_str("device_type"));
 
     // The devices that load a plugin, and the one named device to fall back on for the name.
     let mut state_entry = None;
@@ -366,12 +366,8 @@ pub fn bwpreset_of(doc: &bitwig::Document, stem: &str) -> PresetFile {
             state_entry = Some((name, state.to_owned(), o));
         }
     }
-    // Where the metadata doesn't say, the device does: the one that loads the plugin, else the first.
-    if file.kind == PluginKind::Unknown
-        && let Some(device) = state_entry.as_ref().map(|(_, _, o)| *o).or(first_device.map(|(_, _, o)| o))
-    {
-        file.kind = bitwig::device_kind(device);
-    }
+    // What it is, as the device that loads the plugin says, else the first.
+    let device = state_entry.as_ref().map(|(_, _, o)| *o).or(first_device.map(|(_, _, o)| o));
     if let Some((device, preset, _)) = first_device {
         if file.plugin.is_empty() {
             file.plugin = device.to_owned();
@@ -380,22 +376,46 @@ pub fn bwpreset_of(doc: &bitwig::Document, stem: &str) -> PresetFile {
             file.name = preset.to_owned();
         }
     }
+    let mut settings = PluginKind::Unknown;
     if let Some((device, entry, _)) = state_entry {
         file.wraps_plugin = true;
         if file.plugin.is_empty() {
             file.plugin = device.to_owned();
         }
-        if let Some((state, entry_name)) = zip_entry(doc.zip(), &entry) {
-            let inner = read_bytes(&state, &entry_name).ok();
-            if let Some(inner) = inner {
-                file.plugin_id = inner.plugin_id;
-                if file.kind == PluginKind::Unknown {
-                    file.kind = inner.kind;
-                }
-            }
+        if let Some((state, entry_name)) = zip_entry(doc.zip(), &entry)
+            && let Ok(inner) = read_bytes(&state, &entry_name)
+        {
+            file.plugin_id = inner.plugin_id;
+            settings = inner.kind;
         }
     }
+    file.kind = bwpreset_kind(doc, device, settings);
     file
+}
+
+/// What a Bitwig preset's plugin is, the surest word first: its metadata's device type ([`kind_of_device_type`]), the
+/// device's kind field (Bitwig 6.1: [`bitwig::saved_kind`]), what the plugin's own settings in the zip say
+/// (`settings`: a VST3's category), then the device's category where that says plainly ([`bitwig::category_kind`]).
+/// `Unknown` when none of them says. A preset file's kind and a template's are both read by it, so a template's is the
+/// same whether it was read just now or kept from before.
+pub(crate) fn bwpreset_kind(
+    doc: &bitwig::Document,
+    device: Option<&bitwig::Object>,
+    settings: PluginKind,
+) -> PluginKind {
+    let saved = device.map_or(PluginKind::Unknown, bitwig::saved_kind);
+    let category = device.map_or(PluginKind::Unknown, bitwig::category_kind);
+    [kind_of_device_type(doc.meta_str("device_type")), saved, settings, category]
+        .into_iter()
+        .find(|k| *k != PluginKind::Unknown)
+        .unwrap_or(PluginKind::Unknown)
+}
+
+/// The plugin's id that a plugin's settings (a VST2 `.fxp`/`.fxb`, a VST3 `.vstpreset`) give, read from their head
+/// only, where it is; "" when they don't say.
+pub(crate) fn plugin_id_of(settings: &[u8], extension: &str) -> String {
+    let head = settings.get(..usize::try_from(STATE_HEAD).unwrap_or(usize::MAX)).unwrap_or(settings);
+    read_bytes(head, &format!("x{extension}")).map(|f| f.plugin_id).unwrap_or_default()
 }
 
 /// The most of a plugin state in a Bitwig preset that's read for its header.

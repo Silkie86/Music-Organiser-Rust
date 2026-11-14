@@ -79,7 +79,7 @@ pub fn from_file(path: &Path, plugin: &str, kind: PluginKind, templates: Option<
         Err(e) => return Ok(as_it_is(Some(format!("it doesn't read as a preset: {e}")))),
     };
     let mut blob = PresetBlob::new(&file.name, if file.plugin.is_empty() { plugin } else { &file.plugin }, ext, raw);
-    blob.kind = if kind == PluginKind::Unknown { file.kind } else { kind };
+    blob.kind = export::kind_for(kind, file.kind);
     match made(&blob, &file.plugin_id, templates) {
         None => Ok(as_it_is(Some(no_template(format)))),
         Some(Err(why)) => Ok(as_it_is(Some(why))),
@@ -92,11 +92,12 @@ pub fn from_file(path: &Path, plugin: &str, kind: PluginKind, templates: Option<
 }
 
 /// A song's sound to drag out (see the top of this file), by its save and its key there ([`crate::list::place_keys`]):
-/// read from the save again, as an export reads it, and named as an export names it. Reads the save, so never on the
-/// window's thread. An error when the save can't be read, the sound isn't in it any more, or its settings don't read
-/// back as a preset.
-pub fn from_save(save: &str, key: &str, templates: Option<&Templates>) -> io::Result<Carried> {
-    let (blob, name) = export::sound_in_save(save, key)?;
+/// read from the save again, as an export reads it, and named as an export names it. `kind` is what the page says it is
+/// (what the library knows of its plugin fills in what the save doesn't say), so a synth's goes as an instrument's
+/// Bitwig preset. Reads the save, so never on the window's thread. An error when the save can't be read, the sound
+/// isn't in it any more, or its settings don't read back as a preset.
+pub fn from_save(save: &str, key: &str, kind: PluginKind, templates: Option<&Templates>) -> io::Result<Carried> {
+    let (blob, name) = export::sound_in_save(save, key, kind)?;
     Ok(from_sound(blob, name, templates))
 }
 

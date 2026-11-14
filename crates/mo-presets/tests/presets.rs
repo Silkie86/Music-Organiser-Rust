@@ -175,8 +175,20 @@ fn a_bitwig_preset_says_what_its_device_is() {
     }
     // No device type in its metadata: its device's kind field says (0 is an audio effect).
     let raw = bwpreset(&[], &[], "Plug", "x", "a.fxb", &fxp::wrap_chunk(&[0], "x", 1));
-    let raw = common::with_fields(raw, &[], &[(0x9d, mo_formats::bitwig::Value::U8(0))]);
-    assert_eq!(files::read_bytes(&raw, "x.bwpreset").unwrap().kind, PluginKind::Effect);
+    let field = common::with_fields(raw.clone(), &[], &[(0x9d, mo_formats::bitwig::Value::U8(0))]);
+    assert_eq!(files::read_bytes(&field, "x.bwpreset").unwrap().kind, PluginKind::Effect);
+    // An older save, with neither: the plugin's own settings say before the device's category does, and only a
+    // category that says plainly counts (one of the plugin's own isn't taken for an effect's).
+    let info = r#"<MetaInfo><Attr id="PlugInCategory" value="Instrument|Synth" type="string"/></MetaInfo>"#;
+    let synth = bwpreset(&[], &[], "Plug", "x", "a.vstpreset", &vstpreset_with_info(CLASS, info));
+    let synth = common::with_fields(synth, &[], &[(0x9c, common::text("Dynamics"))]);
+    assert_eq!(files::read_bytes(&synth, "x.bwpreset").unwrap().kind, PluginKind::Instrument);
+    for (category, kind) in
+        [("Reverb", PluginKind::Effect), ("Synth", PluginKind::Instrument), ("Keys", PluginKind::Unknown)]
+    {
+        let raw = common::with_fields(raw.clone(), &[], &[(0x9c, common::text(category))]);
+        assert_eq!(files::read_bytes(&raw, "x.bwpreset").unwrap().kind, kind, "{category}");
+    }
 }
 
 fn note(start: i64, length: i64, key: u8) -> NoteEvent {

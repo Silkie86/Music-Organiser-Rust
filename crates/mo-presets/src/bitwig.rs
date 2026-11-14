@@ -41,8 +41,8 @@ pub struct Template {
     pub preset_name: String,
     /// The plugin's id as its settings say (a VST2's four letters, a VST3's class id), or "" when they don't.
     pub plugin_id: String,
-    /// What the plugin is (instrument or effect), as the preset says ([`kind_of`]), so a synth's sound borrows a
-    /// synth's template first ([`stand_in_for`]).
+    /// What the plugin is (instrument or effect), as the preset says ([`files::bwpreset_kind`], as for any Bitwig
+    /// preset file), so a synth's sound borrows a synth's template first ([`stand_in_for`]).
     pub kind: PluginKind,
     /// When the file was last saved, so the newest template for a plugin wins.
     pub modified: Option<SystemTime>,
@@ -108,10 +108,7 @@ pub fn inspect_doc(doc: &Document) -> Option<Template> {
     let mut head = Vec::new();
     archive.by_index(index).ok()?.take(64 * 1024).read_to_end(&mut head).ok()?;
     let inner = files::read_bytes(&head, &entry_name).ok();
-    let kind = match kind_of(doc, device) {
-        PluginKind::Unknown => inner.as_ref().map_or(PluginKind::Unknown, |f| f.kind),
-        kind => kind,
-    };
+    let settings = inner.as_ref().map_or(PluginKind::Unknown, |f| f.kind);
     Some(Template {
         path: PathBuf::new(),
         plugin: o.str(F_DEVICE_NAME).to_owned(),
@@ -119,19 +116,9 @@ pub fn inspect_doc(doc: &Document) -> Option<Template> {
         state_file,
         preset_name: o.str(F_DEVICE_PRESET).to_owned(),
         plugin_id: inner.map(|f| f.plugin_id).unwrap_or_default(),
-        kind,
+        kind: files::bwpreset_kind(doc, Some(o), settings),
         modified: None,
     })
-}
-
-/// What a Bitwig preset's plugin device is: as its metadata says (`device_type`), else as the device does (Bitwig's
-/// kind field, else its category), as the preset files' reader takes it ([`files::bwpreset_of`], which then asks the
-/// settings in the zip, as a template's kind does).
-pub fn kind_of(doc: &Document, device: ObjId) -> PluginKind {
-    match files::kind_of_device_type(doc.meta_str("device_type")) {
-        PluginKind::Unknown => bitwig::device_kind(doc.obj(device)),
-        kind => kind,
-    }
 }
 
 /// The one device that loads a plugin and its state field, when there's one and no other device beside it.
@@ -349,7 +336,7 @@ fn build_with(
     if state_format(state_extension) != t.format() {
         return Err(format!("the template is for {}, not {state_extension}", t.format()));
     }
-    let new_id = files::read_bytes(state, &format!("x{state_extension}")).map(|f| f.plugin_id).unwrap_or_default();
+    let new_id = files::plugin_id_of(state, state_extension);
     // To the letter, as [`template_by_id`] matches them: a VST2's "abcd" and "ABCD" are two plugins.
     if other.is_none() && !t.plugin_id.is_empty() && !new_id.is_empty() && t.plugin_id != new_id {
         return Err(format!(
@@ -411,7 +398,8 @@ const F_VENDOR: u32 = 0x9b;
 const F_CATEGORY: u32 = 0x9c;
 /// Instrument (2), note effect (1) or audio effect (0), as Bitwig saves it.
 const F_DEVICE_KIND: u32 = 0x9d;
-/// 1 on an instrument plugin, 0 on an effect, as Bitwig saves it (what it stands for isn't known).
+/// 1 on an instrument plugin, 0 on an effect, as Bitwig saves them (Solomon's template's Serum 2 and its effects; the
+/// C# Serum swap set 1 for Serum 2). What it stands for isn't known, so a note effect's is left as the template has it.
 const F_INSTRUMENT_FLAG: u32 = 0x1809;
 const F_PLUGIN_ID: u32 = 0xce4;
 const F_PLUGIN_VERSION: u32 = 0xc5e;

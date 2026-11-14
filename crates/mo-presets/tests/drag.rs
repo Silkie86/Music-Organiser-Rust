@@ -185,13 +185,13 @@ fn a_songs_sound_is_read_from_its_save_again() {
     let save = concat!(env!("CARGO_MANIFEST_DIR"), "/../mo-formats/tests/fixtures/recipe/fl/MO Recipe 08 sampler.flp");
     let sounds = mo_presets::library::read_save(save, &mo_presets::Thresholds::default()).unwrap().sounds;
     let key = mo_presets::list::place_keys(&sounds).into_iter().next().expect("the recipe has a sound");
-    let c = drag::from_save(save, &key, None).unwrap();
+    let c = drag::from_save(save, &key, PluginKind::Unknown, None).unwrap();
     let (name, bytes) = made(&c);
     // Its settings as an export writes them, though the page's list let them go once it was read.
     assert!(name.ends_with(&*sounds[0].blob.extension), "{name}");
     assert!(!bytes.is_empty());
     assert!(!c.bitwig);
-    let gone = drag::from_save(save, "no such sound", None).unwrap_err();
+    let gone = drag::from_save(save, "no such sound", PluginKind::Unknown, None).unwrap_err();
     assert!(gone.to_string().contains("isn't in the save"), "{gone}");
 }
 

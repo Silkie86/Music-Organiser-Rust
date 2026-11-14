@@ -23,6 +23,9 @@ pub const DAW: &str = "Bitwig Studio";
 /// counted once. 3 is what the Rust reader finds differently (DIFFERENCES.md): damaged files read further, and a
 /// plugin state too big to be real left out.
 /// 4 warns when the plugin settings stored at the end of the file are missing or damaged.
+///
+/// What a plugin preset taken out of a project is ([`device_kind`], 14 Nov 2026) didn't raise it: only the presets list
+/// keeps that, and `mo_presets::sound_store::VERSION` went up for it, so the songs' MIDI and curves aren't read again.
 pub const VERSION: u32 = 4;
 
 /// Said when the plugin settings stored at the end of a project are missing or can't be opened.
@@ -44,8 +47,8 @@ const CLS_HARDWARE_IO: u32 = 0x461;
 pub(super) const F_DEVICE_NAME: u32 = 0x9a;
 const F_DEVICE_VENDOR: u32 = 0x9b;
 pub(super) const F_DEVICE_CATEGORY: u32 = 0x9c;
-/// What a device is: 0 an audio effect, 1 a note effect, 2 an instrument (as Bitwig 6.1 saves it, on its own devices and
-/// on plugins alike).
+/// What a device is: 0 an audio effect, 1 a note effect, 2 an instrument (as Bitwig 6.1 saves it, on its own devices
+/// and on plugins alike).
 const F_DEVICE_KIND: u32 = 0x9d;
 pub(super) const F_DEVICE_PRESET: u32 = 0x12de;
 const F_PLUGIN_STATE: u32 = 0xbe5;
@@ -168,6 +171,32 @@ const NOTE_EFFECTS: &[&str] = &[
 /// Device categories that make a plugin an instrument (letter case aside).
 const INSTRUMENT_CATEGORIES: &[&str] =
     &["Synth", "Instrument", "Drum Kit", "Drum", "Drums", "Sampler", "Organ", "Piano", "Hardware"];
+
+/// Device categories that plainly make a plugin an audio effect (letter case aside): Bitwig's "Audio FX" and its
+/// effects' own ("EQ", "Delay"), and the effect categories a VST3 plugin gives itself ("Fx|Reverb" and the like).
+const EFFECT_CATEGORIES: &[&str] = &[
+    "Audio FX",
+    "FX",
+    "Effect",
+    "Analyzer",
+    "Analysis",
+    "Delay",
+    "Distortion",
+    "Dynamics",
+    "EQ",
+    "Filter",
+    "Mastering",
+    "Mixing",
+    "Modulation",
+    "Pitch Shift",
+    "Restoration",
+    "Reverb",
+    "Spatial",
+    "Spectral",
+    "Surround",
+    "Tools",
+    "Utility",
+];
 
 pub(super) fn is_instrument_category(category: &str) -> bool {
     INSTRUMENT_CATEGORIES.iter().any(|c| c.eq_ignore_ascii_case(category))
@@ -405,17 +434,42 @@ fn collected_names(copy: &str) -> Vec<String> {
     out
 }
 
-/// What a device is (a plugin's or one of Bitwig's own), as Bitwig saved it: its kind field, else its category (an
-/// instrument's, a note effect's or another, which is an effect's); `Unknown` when it has neither.
+/// What a device is (a plugin's or one of Bitwig's own), as Bitwig saved it: its kind field ([`saved_kind`]), else
+/// its category where that says plainly ([`category_kind`]); `Unknown` when neither does.
 pub fn device_kind(device: &Object) -> PluginKind {
+    match saved_kind(device) {
+        PluginKind::Unknown => category_kind(device),
+        kind => kind,
+    }
+}
+
+/// What a device's kind field says it is (Bitwig 6.1 saves one on its own devices and on plugins alike); `Unknown`
+/// when it has none (an older save) or one no Bitwig saves.
+pub fn saved_kind(device: &Object) -> PluginKind {
     match device.num(F_DEVICE_KIND) {
         Some(2.0) => PluginKind::Instrument,
         Some(1.0) => PluginKind::NoteEffect,
         Some(0.0) => PluginKind::Effect,
-        _ => match device.str(F_DEVICE_CATEGORY) {
-            "" => PluginKind::Unknown,
-            category => bitwig_kind("", category),
-        },
+        _ => PluginKind::Unknown,
+    }
+}
+
+/// What a device's category says it is, only where it says so plainly: an instrument's, "Note FX", or an effect's
+/// ([`EFFECT_CATEGORIES`]). `Unknown` for any other (a category a plugin names itself), rather than a guess: the
+/// project's plugin list ([`bitwig_kind`]) calls any other an effect, which would file a synth with a category of its
+/// own under the effects.
+pub fn category_kind(device: &Object) -> PluginKind {
+    let category = device.str(F_DEVICE_CATEGORY).trim();
+    if category.is_empty() {
+        PluginKind::Unknown
+    } else if is_instrument_category(category) {
+        PluginKind::Instrument
+    } else if category.eq_ignore_ascii_case("Note FX") {
+        PluginKind::NoteEffect
+    } else if EFFECT_CATEGORIES.iter().any(|c| c.eq_ignore_ascii_case(category)) {
+        PluginKind::Effect
+    } else {
+        PluginKind::Unknown
     }
 }
 
@@ -639,8 +693,8 @@ fn zip_entries(doc: &Document) -> Option<Zip<'_>> {
 
 /// The plugin states in the project's zip. Bitwig stores them as ordinary preset files (.vstpreset for a VST3, .fxb
 /// or .fxp for a VST2), so they load straight into the plugin. Each is named after its track and its preset (or its
-/// plugin), and says what its plugin is as its device does ([`device_kind`]). Read even from a file whose objects didn't
-/// all decode, as far as they did.
+/// plugin), and says what its plugin is as its device does ([`device_kind`]). Read even from a file whose objects
+/// didn't all decode, as far as they did.
 pub fn extract_presets(doc: &Document, names: &TrackNames) -> Vec<PresetBlob> {
     let Some(mut zip) = zip_entries(doc) else { return Vec::new() };
     // The device each state belongs to, by its file's name (letter case aside): the first that names it.
@@ -972,13 +1026,25 @@ mod tests {
         let text = |t: &str| Value::Str(crate::bitwig::Text::new(t));
         // The kind field wins over the category, which a plugin names itself ("Generator" isn't one Bitwig lists).
         let synth = device(&[(F_DEVICE_CATEGORY, text("Generator")), (F_DEVICE_KIND, Value::U8(2))]);
-        assert_eq!(device_kind(&synth), PluginKind::Instrument);
+        assert_eq!((device_kind(&synth), saved_kind(&synth)), (PluginKind::Instrument, PluginKind::Instrument));
         assert_eq!(device_kind(&device(&[(F_DEVICE_KIND, Value::U8(0))])), PluginKind::Effect);
         assert_eq!(device_kind(&device(&[(F_DEVICE_KIND, Value::U8(1))])), PluginKind::NoteEffect);
-        // Without it, the category says.
-        assert_eq!(device_kind(&device(&[(F_DEVICE_CATEGORY, text("Synth"))])), PluginKind::Instrument);
-        assert_eq!(device_kind(&device(&[(F_DEVICE_CATEGORY, text("EQ"))])), PluginKind::Effect);
-        assert_eq!(device_kind(&device(&[(F_DEVICE_CATEGORY, text("Note FX"))])), PluginKind::NoteEffect);
+        // Without it, the category says, where it says plainly.
+        for (category, kind) in [
+            ("Synth", PluginKind::Instrument),
+            ("sampler", PluginKind::Instrument),
+            ("EQ", PluginKind::Effect),
+            ("Audio FX", PluginKind::Effect),
+            ("Reverb", PluginKind::Effect),
+            ("Note FX", PluginKind::NoteEffect),
+            // A category of the plugin's own isn't taken for an effect's (the project's plugin list does).
+            ("Generator", PluginKind::Unknown),
+            ("Keys", PluginKind::Unknown),
+        ] {
+            let d = device(&[(F_DEVICE_CATEGORY, text(category))]);
+            assert_eq!((device_kind(&d), category_kind(&d), saved_kind(&d)), (kind, kind, PluginKind::Unknown));
+        }
+        assert_eq!(bitwig_kind("", "Keys"), PluginKind::Effect);
         // Neither, or a kind no Bitwig saves: not known.
         assert_eq!(device_kind(&device(&[])), PluginKind::Unknown);
         assert_eq!(device_kind(&device(&[(F_DEVICE_KIND, Value::U8(7))])), PluginKind::Unknown);

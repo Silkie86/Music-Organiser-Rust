@@ -3,11 +3,13 @@
 // Test files may unwrap: a test that stops there has failed, which is what it should do.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+use mo_formats::PluginKind;
 use mo_formats::presets::{PresetBlob, fxp};
 use mo_presets::export;
-use mo_presets::filter::Choice;
+use mo_presets::filter::{Choice, Type};
 
 fn folder(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-presets-export").join(name);
@@ -89,7 +91,15 @@ fn a_save_that_cant_be_read_exports_nothing() {
     let save = root.join("Damaged.flp");
     std::fs::write(&save, b"FLhd not really").unwrap();
     assert!(
-        export::export_from_save(save.to_str().unwrap(), Choice::default(), None, &root.join("out"), None).is_err()
+        export::export_from_save(
+            save.to_str().unwrap(),
+            Choice::default(),
+            None,
+            &HashMap::new(),
+            &root.join("out"),
+            None
+        )
+        .is_err()
     );
     assert!(!root.join("out").exists());
 }
@@ -164,9 +174,30 @@ fn an_auditions_bitwig_preset_writes_only_its_own_file() {
     let templates = mo_presets::bitwig::Templates::default();
     let damaged = root.join("Damaged.flp");
     std::fs::write(&damaged, b"FLhd not really").unwrap();
-    assert!(export::bitwig_preset_from_save(damaged.to_str().unwrap(), "x", &templates, &to).is_err());
+    let unknown = PluginKind::Unknown;
+    assert!(export::bitwig_preset_from_save(damaged.to_str().unwrap(), "x", unknown, &templates, &to).is_err());
     let save = concat!(env!("CARGO_MANIFEST_DIR"), "/../mo-formats/tests/fixtures/recipe/fl/MO Recipe 08 sampler.flp");
-    let gone = export::bitwig_preset_from_save(save, "no such sound", &templates, &to).unwrap_err();
+    let gone = export::bitwig_preset_from_save(save, "no such sound", unknown, &templates, &to).unwrap_err();
     assert!(gone.to_string().contains("isn't in the save"), "{gone}");
     assert_eq!(names(&root), ["Damaged.flp"]);
+}
+
+#[test]
+fn what_the_page_says_a_sound_is_goes_with_its_export() {
+    // The page puts in what the library knows of a sound's plugin (the installed plugin's own word) where its save
+    // doesn't say, so a Bitwig preset made of it is a synth's or an effect's as the page lists it. Here the page's
+    // word is put over the save's, to see that it's the one used: FL Keys taken for an effect.
+    let root = folder("kinds");
+    let save = concat!(env!("CARGO_MANIFEST_DIR"), "/../mo-formats/tests/fixtures/recipe/fl/MO Recipe 08 sampler.flp");
+    let sounds = mo_presets::library::read_save(save, &mo_presets::Thresholds::default()).unwrap().sounds;
+    let keys = mo_presets::list::place_keys(&sounds);
+    let kinds: Vec<(&str, PluginKind)> = sounds.iter().map(|s| (s.blob.plugin.as_str(), s.blob.kind)).collect();
+    assert_eq!(kinds, [("FL Keys", PluginKind::Instrument), ("Fruity Reeverb 2", PluginKind::Effect)]);
+    let effects = Choice { kind: Type::Effects, ..Choice::default() };
+    let saved = export::export_from_save(save, effects, None, &HashMap::new(), &root, None).unwrap().files;
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    let page = HashMap::from([(keys[0].clone(), PluginKind::Effect)]);
+    let as_page = export::export_from_save(save, effects, None, &page, &root, None).unwrap().files;
+    assert_eq!(as_page.len(), 2, "{as_page:?}");
+    assert!(as_page.contains(&saved[0]));
 }

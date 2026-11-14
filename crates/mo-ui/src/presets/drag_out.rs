@@ -187,7 +187,7 @@ fn carry_of(item: &Item, have: Option<Arc<Templates>>, bitwig_folders: &[PathBuf
                 },
             )?
         }
-        Source::Song { save, key } => carried::from_save(save, key, Some(&*templates))
+        Source::Song { save, key } => carried::from_save(save, key, item.row.kind, Some(&*templates))
             .map_err(|e| format!("{name} couldn't be read from its song again: {e}"))?,
     };
     if let Some(why) = carried.why_not.as_mut() {

@@ -1614,6 +1614,7 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
                 &save,
                 Choice::default(),
                 Some(std::slice::from_ref(&key)),
+                &HashMap::from([(key.clone(), item.row.kind)]),
                 &root,
                 Some(&templates),
             )
@@ -1724,18 +1725,27 @@ fn export_shown(app: &AppWindow) -> bool {
             Err(why) => return export_stopped(job, why),
         };
         // The lines are let go of straight after, so lines read during the export join the list.
-        let (plan, without, templates) = {
+        let (plan, without, templates, kinds) = {
             let (plan, _) = logic::export_plan(&items, &shown);
             let songs: Vec<&Item> = shown.iter().filter_map(|&i| items.get(i)).filter(|i| !i.is_file()).collect();
             let templates = templates_now(templates, &bitwig_folders, |t| without_template(&songs, t).is_empty());
-            (plan, without_template(&songs, &templates), templates)
+            // What each sound is as the page says, by save and key, for its Bitwig preset.
+            let mut kinds: HashMap<String, HashMap<String, mo_formats::PluginKind>> = HashMap::new();
+            for i in &songs {
+                if let Source::Song { save, key } = &i.row.source {
+                    kinds.entry(save.clone()).or_default().insert(key.clone(), i.row.kind);
+                }
+            }
+            (plan, without_template(&songs, &templates), templates, kinds)
         };
         drop((items, shown));
+        let none = HashMap::new();
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         let total = plan.len();
         for (n, (save, keys)) in plan.iter().enumerate() {
             match background::on_pool(|| {
-                export::export_from_save(save, Choice::default(), Some(keys), &root, Some(&templates))
+                let kinds = kinds.get(save).unwrap_or(&none);
+                export::export_from_save(save, Choice::default(), Some(keys), kinds, &root, Some(&templates))
             }) {
                 Ok(e) => done.push(e),
                 Err(e) => failed.push(format!("{}: {e}", mo_formats::paths::stem(save))),
@@ -2017,7 +2027,7 @@ fn audition_preset_of(
 ) -> Result<(PathBuf, String), Option<String>> {
     let to = std::env::temp_dir().join(mo_app::midi::play_preset_name());
     let templates = templates_now(templates, bitwig_folders, |t| without_template(&[item], t).is_empty());
-    let made = background::on_pool(|| export::bitwig_preset_from_save(save, key, &templates, &to));
+    let made = background::on_pool(|| export::bitwig_preset_from_save(save, key, item.row.kind, &templates, &to));
     match made {
         Ok(Some(name)) => Ok((to, name)),
         Ok(None) => Err(Some(no_bitwig_preset(item))),

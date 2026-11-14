@@ -355,7 +355,7 @@ fn load_from(conn: &Connection) -> rusqlite::Result<HashMap<String, (i64, i64, E
                 state_file: r.get::<_, Option<String>>(16)?.unwrap_or_default(),
                 preset_name: r.get::<_, Option<String>>(17)?.unwrap_or_default(),
                 plugin_id: r.get::<_, Option<String>>(18)?.unwrap_or_default(),
-                // The file's own kind: a template's is read by the same rules (`bitwig::kind_of`, then its settings).
+                // The file's own kind: a template's is read by the same rule (`files::bwpreset_kind`).
                 kind: kind_of(r.get(8)?),
                 modified: Some(time_of(modified)),
             }),
