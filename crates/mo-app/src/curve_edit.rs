@@ -63,8 +63,9 @@ impl Span {
 
     /// Too short to hold anything.
     pub fn is_empty(self) -> bool {
-        // Written this way round so a span with an edge that's not a number is empty too.
-        !(self.len() >= SHORTEST - EPS)
+        // A span with an edge that's not a number is empty too.
+        let len = self.len();
+        len.is_nan() || len < SHORTEST - EPS
     }
 
     fn same(self, other: Span) -> bool {
