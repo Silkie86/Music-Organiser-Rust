@@ -296,6 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("7-highlight-menu", 1440, 900, s_menu),
         ("8-ctrl-paint", 1440, 900, s_paint),
         ("9-nothing-picked", 1440, 900, s_empty),
+        ("10-found-in", 1440, 900, s_found),
         ("wide-4-ctrl-stutter", 3440, 1369, s_stutter),
         ("wide-6-randomised", 3440, 1369, s_random),
     ];
@@ -561,7 +562,18 @@ fn s_paint(m: &Mock, w: u32) {
     m.set_hint(hint(&[("", "one step per grid square"), ("Shift", "freehand")]));
 }
 
+/// Not edited: the picked curve's own buttons work, and "In 2 songs" is open.
+fn s_found(m: &Mock, w: u32) {
+    m.set_state_words("".into());
+    let pts = pump_into_gate(0.7);
+    m.set_points(model(dots(&pts, picture_width(w), None, None)));
+    m.set_found_open(true);
+    m.set_hint_title("In 2 songs".into());
+    m.set_hint(hint(&[("", "pick one to show it on Songs")]));
+}
+
 fn s_empty(m: &Mock, _w: u32) {
+    m.set_facts("".into());
     m.set_name("".into());
     m.set_state_words("".into());
     m.set_curve("".into());

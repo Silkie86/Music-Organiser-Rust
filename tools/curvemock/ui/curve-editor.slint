@@ -867,6 +867,11 @@ export component Mock inherits Window {
     in property <bool> mac;
     // Solomon's wide screen: the hint line has room for what every key means.
     in property <bool> wide;
+    // The picked curve's facts and where it was found, as found in the list.
+    in property <string> facts: "1 bar · 9 points ·";
+    in property <string> found: "In 2 songs";
+    // The found-in menu, open.
+    in property <bool> found-open;
     // The list and its filters.
     in property <FilterView> shape;
     in property <FilterView> rhythm;
@@ -1156,6 +1161,38 @@ export component Mock inherits Window {
                                 enabled: false;
                             }
                         }
+                        // The picked curve's facts on one line under its name, as found (not as edited): its length,
+                        // points and where it was found; "In 2 songs" opens the list of them.
+                        if root.facts != "": HorizontalLayout {
+                            height: 20px;
+                            spacing: Space.sm;
+                            Text {
+                                text: root.facts;
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.found;
+                                color: Theme.text;
+                                font-size: Type.meta;
+                                font-weight: 500;
+                                vertical-alignment: center;
+                            }
+                            Path {
+                                y: 7px;
+                                width: 8px;
+                                height: 6px;
+                                viewbox-width: 8;
+                                viewbox-height: 6;
+                                commands: "M 1 1 L 4 4.5 L 7 1";
+                                stroke: Theme.muted;
+                                stroke-width: 1.5px;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
                         Ruler {
                             inset: root.inset-x;
                             marks: root.ruler;
@@ -1284,6 +1321,45 @@ export component Mock inherits Window {
                                 enabled: root.state-words != "";
                             }
                         }
+                        // The picked curve's own buttons, as on every card: into the DAW first, then the curve's
+                        // name and place, then show. On a narrow card the show buttons fold into More.
+                        if root.facts != "": HorizontalLayout {
+                            spacing: Space.sm;
+                            height: 32px;
+                            StudioButton {
+                                horizontal-stretch: 0;
+                                text: "Save to Bitwig's curves";
+                                enabled: root.state-words == "";
+                            }
+                            StudioButton {
+                                horizontal-stretch: 0;
+                                text: "Rename";
+                            }
+                            StudioButton {
+                                horizontal-stretch: 0;
+                                text: "Hide";
+                            }
+                            if root.wide: StudioButton {
+                                horizontal-stretch: 0;
+                                text: "Show curve file";
+                            }
+                            if root.wide: StudioButton {
+                                horizontal-stretch: 0;
+                                text: "Show in Songs";
+                            }
+                            if root.wide: StudioButton {
+                                horizontal-stretch: 0;
+                                text: "Show the song's file";
+                            }
+                            if !root.wide: StudioButton {
+                                horizontal-stretch: 0;
+                                text: "Show";
+                                menu: true;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
                     }
                     // The right-click menu on a highlight, when shown.
                     if root.menu-open: Rectangle {
@@ -1337,6 +1413,68 @@ export component Mock inherits Window {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+    // "In 2 songs" opened: each song and where in it, a click shows it on Songs.
+    if root.found-open: Rectangle {
+        x: 900px;
+        y: 136px;
+        width: 330px;
+        height: found-lines.preferred-height;
+        border-radius: Theme.radius;
+        background: Theme.surface-raised;
+        border-width: 1px;
+        border-color: Theme.edge;
+        drop-shadow-blur: 16px;
+        drop-shadow-color: Theme.shadow;
+        found-lines := VerticalLayout {
+            padding: Space.xs;
+            for m in [
+                { t: "Night Drive", k: "FL knob moves · Serum · Cutoff · bar 17" },
+                { t: "Didums_70", k: "Bitwig clip · Filter · bar 33" },
+                { t: "", k: "" },
+                { t: "Show the song's file", k: "Ctrl+Shift+E" },
+            ]: Rectangle {
+                height: m.t == "" ? 9px : m.k == "" || m.t == "Show the song's file" ? 32px : 46px;
+                if m.t == "": Rectangle {
+                    y: 4px;
+                    height: 1px;
+                    background: Theme.edge;
+                }
+                if m.t != "" && m.t != "Show the song's file": VerticalLayout {
+                    padding-left: Space.md;
+                    padding-right: Space.md;
+                    alignment: center;
+                    Text {
+                        text: m.t;
+                        color: Theme.text;
+                        font-size: Type.body;
+                    }
+                    Text {
+                        text: m.k;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                    }
+                }
+                if m.t == "Show the song's file": HorizontalLayout {
+                    padding-left: Space.md;
+                    padding-right: Space.md;
+                    Text {
+                        text: m.t;
+                        color: Theme.text;
+                        font-size: Type.body;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: m.k;
+                        color: Theme.faint;
+                        font-family: Theme.number-font;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
                     }
                 }
             }
