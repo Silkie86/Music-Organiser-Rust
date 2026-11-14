@@ -217,16 +217,18 @@ impl Step {
     }
 }
 
-/// The grid edits land on: a step (none is "Off"), as triplets or not.
+/// The grid edits land on: a step (none is "Off"), straight, as triplets (two thirds of the step) or dotted (one and
+/// a half of it; Solomon, 14 Nov 2026). Triplet wins if both are set: the screen sets one at most.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grid {
     pub step: Option<Step>,
     pub triplet: bool,
+    pub dotted: bool,
 }
 
 impl Default for Grid {
     fn default() -> Grid {
-        Grid { step: Some(Step::Sixteenth), triplet: false }
+        Grid { step: Some(Step::Sixteenth), triplet: false, dotted: false }
     }
 }
 
@@ -234,7 +236,13 @@ impl Grid {
     /// The beats between two grid lines; none when the grid is off.
     pub fn beats(self) -> Option<f64> {
         let step = self.step?.beats();
-        Some(if self.triplet { step * 2.0 / 3.0 } else { step })
+        Some(if self.triplet {
+            step * 2.0 / 3.0
+        } else if self.dotted {
+            step * 1.5
+        } else {
+            step
+        })
     }
 
     /// `beat` on its nearest grid line; as it is when `free` (Shift held) or the grid is off.
@@ -1777,9 +1785,12 @@ mod tests {
         assert!(near(g.snap(1.1, false), 1.0));
         assert!(near(g.snap(1.13, false), 1.25));
         assert!(near(g.snap(1.13, true), 1.13));
-        let t = Grid { step: Some(Step::Eighth), triplet: true };
+        let t = Grid { step: Some(Step::Eighth), triplet: true, dotted: false };
         assert!(near(t.snap(0.3, false), 1.0 / 3.0));
-        assert!(near(Grid { step: None, triplet: false }.snap(1.13, false), 1.13));
+        assert!(near(Grid { step: None, triplet: false, dotted: false }.snap(1.13, false), 1.13));
+        // A dotted 1/8 is three quarters of a beat.
+        let d = Grid { step: Some(Step::Eighth), triplet: false, dotted: true };
+        assert!(near(d.snap(1.4, false), 1.5) && near(d.snap(1.0, false), 0.75));
     }
 
     #[test]
