@@ -22,6 +22,13 @@ pub fn size_from_setting(value: Option<&str>) -> u32 {
     value.and_then(|v| v.trim().parse().ok()).filter(|n| SIZES.contains(n)).unwrap_or(100)
 }
 
+/// Whether a side card's button is a quiet one, from its words: one that only shows where a thing is or copies it
+/// ("Show in folder", "Show in Songs", "Copy path"). A quiet button is drawn flat, so the buttons that play, send or
+/// make something stand out beside it (docs/look.md). By its words, so every page agrees without a list of ids.
+pub fn quiet_button(words: &str) -> bool {
+    words.starts_with("Show ") || words.starts_with("Copy ")
+}
+
 /// The font a [`FONTS`] name stands for, or `None` for the theme's own (and for anything unknown).
 pub fn font_named(name: &str) -> Option<ThemeFont> {
     match name {
@@ -281,6 +288,16 @@ pub fn is_light(rgb: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buttons_that_show_or_copy_are_quiet_and_the_rest_are_not() {
+        for words in ["Show in folder", "Show in Songs", "Copy path", "Show the song's file", "Copy the song's path"] {
+            assert!(quiet_button(words), "{words}");
+        }
+        for words in ["Send to Bitwig", "Play in Bitwig", "Export", "Rename", "Hide", "Showcase", "Uninstall..."] {
+            assert!(!quiet_button(words), "{words}");
+        }
+    }
 
     #[test]
     fn graphite_is_the_default() {

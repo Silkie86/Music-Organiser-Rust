@@ -443,12 +443,14 @@ component SongPanel inherits Rectangle {
                 }
                 StudioButton {
                     text: "Show in folder";
+                    quiet: true;
                     tip: SongsData.reveal-key.what;
                     key: SongsData.reveal-key.key;
                     clicked => { SongsData.reveal(); }
                 }
                 StudioButton {
                     text: "Copy path";
+                    quiet: true;
                     tip: SongsData.copy-key.what;
                     key: SongsData.copy-key.key;
                     clicked => { SongsData.copy-path(); }

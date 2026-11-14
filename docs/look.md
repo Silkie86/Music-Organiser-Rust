@@ -125,6 +125,11 @@ light that means something. It should feel like a rack unit on a desk, not a web
   thin glow round the page's one lit button. On the rail the picked place's line is washed in the place's own colour
   (`Theme.spill-of`). Panels catch the light too: a side card has a top-lit edge like a button's, and a sunken
   screen (`Well`) a lit lip along its bottom. None of it moves, so it costs no frames, and nothing unlit gets any.
+- Quiet buttons (the frontend-design pass, step 2): a side card had up to eight buttons that all looked the same.
+  Now there are three steps of weight: the one lit button, the raised ones that play, send or make something, and
+  flat ones (`StudioButton.quiet`: no raised face, a thin outline) for those that only show or copy where a thing is.
+  `mo_app::themes::quiet_button` says which from the button's words ("Show ...", "Copy ..."), so every page agrees.
+  Same sizes and places as before.
 
 ## Next steps
 
