@@ -19,6 +19,7 @@ import com.bitwig.extension.controller.api.DeviceBank;
 import com.bitwig.extension.controller.api.DirectParameterValueDisplayObserver;
 import com.bitwig.extension.controller.api.DrumPad;
 import com.bitwig.extension.controller.api.DrumPadBank;
+import com.bitwig.extension.controller.api.Groove;
 import com.bitwig.extension.controller.api.HardwareButton;
 import com.bitwig.extension.controller.api.HardwareSurface;
 import com.bitwig.extension.controller.api.InsertionPoint;
@@ -354,6 +355,8 @@ final class Link {
     private int[][] meters;
     /** The arranger's first cue markers (null when Bitwig wouldn't give them). */
     private CueMarker[] markers;
+    /** The song's Groove (extension 3.27): on or off, the shuffle amount and its rate (null when Bitwig wouldn't give it). */
+    private Parameter[] groove;
     /** The apps watching, each with what it has been told. */
     private final Map<Client, Watch> watching = new LinkedHashMap<>();
     /** Whether the link is looking at Bitwig for them now, and how many looks it has made. */
@@ -817,6 +820,19 @@ final class Link {
             }
             markers = made;
         }, () -> watchMarkers().size() + " cue markers in the arranger (the link follows the first " + Watch.MARKERS + ").");
+
+        // Extension 3.27: the song's Groove, for the app's curve editor to take its swing from.
+        feature("watch: groove", () -> {
+            Groove g = host.createGroove();
+            Parameter[] made = {g.getEnabled(), g.getShuffleAmount(), g.getShuffleRate()};
+            for (Parameter p : made) {
+                p.markInterested();
+                p.displayedValue().markInterested();
+            }
+            groove = made;
+        }, () -> "Groove is " + str(groove[0].displayedValue().get()) + " (" + groove[0].get() + "), shuffle "
+                 + str(groove[1].displayedValue().get()) + " (" + groove[1].get() + ") at " + str(groove[2].displayedValue().get())
+                 + " (" + groove[2].get() + ").");
 
         // The routes that run Bitwig's commands other than straight away (see ROUTES): the loopback's MIDI ports, and two
         // buttons for each command of ROUTED Bitwig has, which notes on channel 16 coming back through the loopback press.
@@ -2510,6 +2526,7 @@ final class Link {
         if (markers != null) list.add("markers");
         if (watchNotes) list.add(Watch.NOTES);
         if (meters != null) list.add("levels");
+        if (groove != null) list.add("groove");
         return list;
     }
 
@@ -2566,6 +2583,13 @@ final class Link {
             if (sections.contains("selected")) watchSection(m, "selected", this::watchSelected);
             if (sections.contains("markers")) watchSection(m, "markers", this::watchMarkers);
             if (sections.contains("levels")) watchSection(m, "levels", this::watchLevels);
+            if (sections.contains("groove")) watchSection(m, "groove", () -> {
+                Map<String, Object> g = new LinkedHashMap<>();
+                g.put("on", groove[0].get() >= 0.5);
+                g.put("shuffle", Watch.amount(groove[1].get()));
+                g.put("rate", Watch.grooveRate(str(groove[2].displayedValue().get())));
+                return g;
+            });
         }
         if (sections.contains(Watch.NOTES)) watchSection(m, Watch.NOTES, this::watchPlaying);
         return m;
