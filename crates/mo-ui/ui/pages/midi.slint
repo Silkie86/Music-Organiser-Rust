@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -222,6 +222,14 @@ export global MidiData {
     // Play in Bitwig plays it with that song's bars going round there: the song is a Bitwig project with bars to loop.
     in property <bool> bitwig-with-song;
     in property <string> sound-line;
+    // Play loop's speed and metronome: the speed it plays at ("120 BPM"), whether that's yours rather than the part's
+    // own tempo, and whether a click plays with it. A change is heard at once, from the same beat.
+    in property <string> bpm-text;
+    in property <bool> bpm-changed;
+    in property <bool> metronome;
+    callback bpm-stepped(int);
+    callback bpm-reset();
+    callback metronome-toggled();
     in property <string> play-note;
     in property <string> play-key;
     // No SoundFont to play with yet: what to do, and a button to choose one.
@@ -630,6 +638,22 @@ component PartPanel inherits SidePanel {
             tip: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop the part in FL Studio" : "Play the part round and round through the channel selected in FL Studio";
             key: MidiData.fl-key;
             clicked => { MidiData.daw-play("fl"); }
+        }
+    }
+    // How Play loop plays: with a click, and how fast. Changed while it plays, it goes on from the same beat.
+    HorizontalLayout {
+        alignment: start;
+        spacing: Space.sm;
+        ToggleChip {
+            text: "Metronome";
+            on: MidiData.metronome;
+            clicked => { MidiData.metronome-toggled(); }
+        }
+        TempoStepper {
+            bpm-text: MidiData.bpm-text;
+            changed: MidiData.bpm-changed;
+            stepped(by) => { MidiData.bpm-stepped(by); }
+            reset => { MidiData.bpm-reset(); }
         }
     }
     // The sound it plays with, and at what tempo: a line of its own below the buttons.
