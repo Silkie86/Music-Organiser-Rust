@@ -1519,7 +1519,17 @@ mod tests {
         assert_eq!(prune_logs(&logs, None, later), Tidied::default());
         assert!(logs.join(name(0)).exists());
         drop(writing);
-        assert_eq!(prune_logs(&logs, None, later).removed, 1);
+        // A test beside this one that starts a program holds a copy of the lock for a moment (from the fork until the
+        // program starts, which closes it): seen once on CI, so the log is given a little while to come free.
+        let mut removed = 0;
+        for _ in 0..40 {
+            removed = prune_logs(&logs, None, later).removed;
+            if removed > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(removed, 1);
         assert!(!logs.join(name(0)).exists());
         let _ = fs::remove_dir_all(&dir);
     }
