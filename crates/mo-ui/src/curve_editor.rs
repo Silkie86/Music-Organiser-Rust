@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use mo_app::background::Newest;
 use mo_app::curve_edit::{Editor, Grid, Shape, Span, Step};
+use mo_app::curve_hold::{self, Hold, Over, Part};
 use mo_app::curve_picture::{self, Colours, Frame, View};
-use mo_app::curve_touch::{self, Grab, Keys, Under};
+use mo_app::curve_touch::{self, Grab, Keys};
 use mo_app::log;
 use mo_app::presets::{HEAR_BPM, TONE_MOST_BEATS};
 use mo_formats::bitwig::curve::CurvePoint;
@@ -59,6 +60,17 @@ struct Drawn {
     end_x: f32,
 }
 
+/// What a press took hold of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Held {
+    /// A point or a line.
+    Touch(Grab),
+    /// A handle of the highlight.
+    Part(Hold),
+    /// Empty space: a drag from there highlights, a click drops the highlight.
+    Sweep,
+}
+
 struct State {
     /// The curve on the card (by its id as it's sent) and its editor.
     open: Option<(String, Editor)>,
@@ -80,7 +92,7 @@ struct State {
     mouse: Option<(f64, f64)>,
     keys: Keys,
     /// What a press took hold of, where the press was, and whether it has become a drag.
-    grab: Option<(Grab, (f64, f64), bool)>,
+    grab: Option<(Held, (f64, f64), bool)>,
     /// The curve as it was when the drag began: shown faint behind the new one.
     before: Option<Shape>,
     /// The read-out's words while dragging.
@@ -338,9 +350,10 @@ pub fn open(app: &AppWindow, curve: Option<(&Curve, String)>) {
 }
 
 /// The mouse on the picture: `kind` 0 moved, 1 pressed, 2 let go, 3 double-clicked, 4 left, 5 the press was taken
-/// away (the window lost the mouse: what was being dragged goes back where it was). A press on a dot or a
-/// line takes hold of it, and once the mouse has gone [`DRAG_STARTS`] it's dragged; a double-click adds, removes or
-/// straightens (`mo_app::curve_touch` says which).
+/// away (the window lost the mouse: what was being dragged goes back where it was). A press on a dot, a line or a
+/// handle of the highlight takes hold of it, and once the mouse has gone [`DRAG_STARTS`] it's dragged; a drag from
+/// empty space highlights a stretch of time, and a click there drops the highlight; a double-click adds, removes or
+/// straightens (`mo_app::curve_touch` and `mo_app::curve_hold` say which).
 fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
     let drawn = STATE.with(|s| {
         let s = &mut *s.borrow_mut();
@@ -352,47 +365,89 @@ fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
         }
         match kind {
             0 => {
-                let Some((grab, from, moved)) = s.grab.as_mut() else { return false };
+                let Some((held, from, moved)) = s.grab.as_mut() else { return false };
                 if !*moved && (from.0 - x).hypot(from.1 - y) < DRAG_STARTS {
                     return false;
                 }
                 if !*moved {
                     *moved = true;
-                    s.before = Some(editor.shape().clone());
+                    // A handle round the whole curve: the whole curve is what's highlighted from here on.
+                    if let (Held::Part(hold), None) = (&*held, editor.highlight()) {
+                        editor.set_highlight(Some(hold.span));
+                    }
+                    if !matches!(held, Held::Sweep) {
+                        s.before = Some(editor.shape().clone());
+                    }
                 }
-                let before = s.before.as_ref().unwrap_or_else(|| editor.shape());
-                let (edit, words) = curve_touch::drag(*grab, before, frame, s.grid, keys, x, y);
-                s.read_out = words;
-                editor.drag(&edit);
-                if matches!(grab, Grab::Dot { .. }) {
-                    s.held_dot = s.before.as_ref().and_then(|b| curve_touch::held_point(editor.shape(), b, &edit));
+                let length = s.before.as_ref().map_or_else(|| editor.shape().length(), Shape::length);
+                match *held {
+                    Held::Touch(grab) => {
+                        let before = s.before.as_ref().unwrap_or_else(|| editor.shape());
+                        let (edit, words) = curve_touch::drag(grab, before, frame, s.grid, keys, x, y);
+                        s.read_out = words;
+                        editor.drag(&edit);
+                        if matches!(grab, Grab::Dot { .. }) {
+                            s.held_dot =
+                                s.before.as_ref().and_then(|b| curve_touch::held_point(editor.shape(), b, &edit));
+                        }
+                    }
+                    Held::Part(hold) => {
+                        let (edit, words) = curve_hold::drag(hold, length, frame, s.grid, keys, x, y);
+                        s.read_out = words;
+                        editor.drag(&edit);
+                    }
+                    Held::Sweep => {
+                        let span = curve_hold::swept(frame, s.grid, keys, length, from.0, x);
+                        s.read_out = curve_hold::swept_words(span);
+                        editor.set_highlight(Some(span));
+                    }
                 }
                 true
             }
             1 => {
-                s.grab = curve_touch::grab(editor.shape(), frame, x, y).map(|g| (g, (x, y), false));
-                s.held_dot = match s.grab {
-                    Some((Grab::Dot { point, .. }, ..)) => Some(point),
+                let held = match curve_hold::over(editor.shape(), editor.highlight(), frame, x, y) {
+                    Over::Part(part) => {
+                        Some(Held::Part(curve_hold::hold(editor.shape(), editor.highlight(), part, x, y)))
+                    }
+                    Over::Dot(_) | Over::Line(_) => curve_touch::grab(editor.shape(), frame, x, y).map(Held::Touch),
+                    Over::Inside | Over::Empty => Some(Held::Sweep),
+                };
+                s.grab = held.map(|h| (h, (x, y), false));
+                s.held_dot = match held {
+                    Some(Held::Touch(Grab::Dot { point, .. })) => Some(point),
                     _ => None,
                 };
                 false
             }
             2 => {
-                let dragged = s.grab.is_some_and(|(_, _, moved)| moved);
-                s.grab = None;
+                let was = s.grab.take();
                 s.before = None;
                 s.ghost = None;
                 s.read_out.clear();
-                if dragged {
-                    editor.let_go();
+                match was {
+                    Some((Held::Sweep, _, moved)) => {
+                        // A click on empty space drops the highlight; a drag has left its own.
+                        if !moved {
+                            editor.set_highlight(None);
+                        }
+                        true
+                    }
+                    Some((_, _, true)) => {
+                        editor.let_go();
+                        true
+                    }
+                    _ => false,
                 }
-                dragged
             }
             3 => {
                 s.grab = None;
                 s.before = None;
                 s.ghost = None;
                 s.read_out.clear();
+                // A handle is nothing to double-click: no point is added under it.
+                if matches!(curve_hold::over(editor.shape(), editor.highlight(), frame, x, y), Over::Part(_)) {
+                    return false;
+                }
                 curve_touch::double_click(editor.shape(), frame, s.grid, keys, x, y).is_some_and(|e| editor.edit(&e))
             }
             5 => {
@@ -432,6 +487,31 @@ fn step_back(app: &AppWindow, back: bool) {
         redraw(app);
     }
     show_touch(app);
+}
+
+/// Esc: a drag in hand is put back as it was before it began; else the highlight is dropped. Whether it did either.
+pub fn escape(app: &AppWindow) -> bool {
+    let done = STATE.with(|s| {
+        let s = &mut *s.borrow_mut();
+        let dragging = s.grab.is_some_and(|(_, _, moved)| moved);
+        let swept = matches!(s.grab, Some((Held::Sweep, _, true)));
+        s.hands_off();
+        let Some((_, editor)) = s.open.as_mut() else { return false };
+        if dragging && !swept {
+            editor.give_up();
+            true
+        } else if editor.highlight().is_some() {
+            editor.set_highlight(None);
+            true
+        } else {
+            false
+        }
+    });
+    if done {
+        redraw(app);
+        show_touch(app);
+    }
+    done
 }
 
 /// Undo or Redo from the page's keys; whether there was a step to take.
@@ -512,6 +592,7 @@ fn show_touch(app: &AppWindow) {
             s.dots.clear();
             s.ghost = None;
             data.set_dots(ModelRc::default());
+            data.set_hl_shown(false);
             data.set_hot_line("".into());
             data.set_ghost("".into());
             data.set_read_out("".into());
@@ -520,27 +601,30 @@ fn show_touch(app: &AppWindow) {
             return false;
         };
         let shape = editor.shape();
-        let held = s.grab.map(|(grab, _, _)| grab);
+        let held = s.grab.map(|(held, _, _)| held);
+        let highlight = editor.highlight();
         // What's lit: the thing held (as the drag has left it: a point that joined a neighbour has another place in
         // the list), else the thing under the mouse.
-        let under = match (held, s.mouse) {
-            (Some(Grab::Dot { .. }), _) => s.held_dot.map_or(Under::Empty, Under::Dot),
-            (Some(grab @ Grab::Line { .. }), _) => {
+        let over = match (held, s.mouse) {
+            (Some(Held::Touch(Grab::Dot { .. })), _) => s.held_dot.map_or(Over::Empty, Over::Dot),
+            (Some(Held::Touch(grab @ Grab::Line { .. })), _) => {
                 let before = s.before.as_ref().unwrap_or(shape);
-                curve_touch::held_line(shape, before, grab).map_or(Under::Empty, Under::Line)
+                curve_touch::held_line(shape, before, grab).map_or(Over::Empty, Over::Line)
             }
-            (None, Some((x, y))) => curve_touch::under(shape, frame, x, y),
-            _ => Under::Empty,
+            (Some(Held::Part(hold)), _) => Over::Part(hold.part),
+            (Some(Held::Sweep), _) => Over::Empty,
+            (None, Some((x, y))) => curve_hold::over(shape, highlight, frame, x, y),
+            _ => Over::Empty,
         };
-        let on_show = match (held, under) {
-            (Some(_), Under::Dot(point)) => curve_touch::dots_with(shape, frame, Some(point)),
+        let on_show = match (held, over) {
+            (Some(_), Over::Dot(point)) => curve_touch::dots_with(shape, frame, Some(point)),
             (Some(_), _) => curve_touch::dots_with(shape, frame, None),
             (None, _) => curve_touch::dots(shape, frame, s.mouse),
         };
         let dots: Vec<EditorDot> = on_show
             .into_iter()
             .map(|d| {
-                let hot = under == Under::Dot(d.point);
+                let hot = over == Over::Dot(d.point);
                 EditorDot { x: d.x as f32, y: d.y as f32, hot: hot && held.is_none(), held: hot && held.is_some() }
             })
             .collect();
@@ -548,8 +632,33 @@ fn show_touch(app: &AppWindow) {
             data.set_dots(ModelRc::new(VecModel::from(dots.clone())));
             s.dots = dots;
         }
-        let hot_line = match under {
-            Under::Line(line) => match (shape.points().get(line), shape.points().get(line + 1)) {
+        // The highlight's frame and its handles, or the pills round the whole curve.
+        match curve_hold::frame_of(shape, highlight, frame) {
+            Some(b) => {
+                data.set_hl_shown(true);
+                data.set_hl_whole(b.whole);
+                data.set_hl_left(b.left as f32);
+                data.set_hl_right(b.right as f32);
+                data.set_hl_top(b.top as f32);
+                data.set_hl_bottom(b.bottom as f32);
+            }
+            None => data.set_hl_shown(false),
+        }
+        data.set_hl_hot(match over {
+            Over::Part(Part::Bar) => 1,
+            Over::Part(Part::Left) => 2,
+            Over::Part(Part::Right) => 3,
+            Over::Part(Part::Top) => 4,
+            Over::Part(Part::Bottom) => 5,
+            Over::Part(Part::Corner { left: true, top: true }) => 6,
+            Over::Part(Part::Corner { left: false, top: true }) => 7,
+            Over::Part(Part::Corner { left: true, top: false }) => 8,
+            Over::Part(Part::Corner { left: false, top: false }) => 9,
+            _ => 0,
+        });
+        data.set_hl_near(s.mouse.is_some() || held.is_some());
+        let hot_line = match over {
+            Over::Line(line) => match (shape.points().get(line), shape.points().get(line + 1)) {
                 (Some(a), Some(b)) => path(frame, a.beat, b.beat, |beat| shape.line_value(line, beat)),
                 _ => String::new(),
             },
@@ -570,17 +679,30 @@ fn show_touch(app: &AppWindow) {
         }
         data.set_picture_width(frame.width as f32);
         data.set_picture_height(frame.height as f32);
-        data.set_pointer(match (held, under) {
-            (Some(Grab::Dot { .. }), _) => 2,
-            (Some(Grab::Line { .. }), _) | (None, Under::Line(_)) => 3,
-            (None, Under::Dot(_)) => 1,
+        data.set_pointer(match (held, over) {
+            (Some(Held::Touch(Grab::Dot { .. })), _) => 2,
+            (_, Over::Part(Part::Bar)) if s.keys.ctrl => 7,
+            (Some(_), Over::Part(Part::Bar)) => 2,
+            (None, Over::Part(Part::Bar)) | (None, Over::Dot(_)) => 1,
+            (_, Over::Part(Part::Left | Part::Right)) => 4,
+            (_, Over::Part(Part::Top | Part::Bottom)) | (_, Over::Line(_)) => 3,
+            (_, Over::Part(Part::Corner { left, top })) => {
+                if left == top {
+                    5
+                } else {
+                    6
+                }
+            }
             _ => 0,
         });
-        let hint = curve_touch::hint(under, cfg!(target_os = "macos"));
-        let over = s.mouse.is_some() || held.is_some();
-        data.set_hint_name(if over { hint.name } else { "" }.into());
-        data.set_hint_does(if over { hint.does } else { "Point at the curve: drag its points and lines" }.into());
-        data.set_hint_keys(if over { hint.keys } else { "" }.into());
+        let hint = curve_hold::hint(over, cfg!(target_os = "macos"));
+        let on = s.mouse.is_some() || held.is_some();
+        data.set_hint_name(if on { hint.name } else { "" }.into());
+        data.set_hint_does(
+            if on { hint.does } else { "Point at the curve: drag its points and lines, or empty space to highlight" }
+                .into(),
+        );
+        data.set_hint_keys(if on { hint.keys } else { "" }.into());
         data.set_shift(s.keys.shift);
         data.set_alt(s.keys.alt);
         data.set_ctrl(s.keys.ctrl);
@@ -827,6 +949,11 @@ pub fn mouse_sample(app: &AppWindow, kind: i32, beat: f64, value: f64, keys: Key
         (frame.x(beat), frame.y(value))
     });
     mouse(app, kind, x, y, keys);
+}
+
+/// What's highlighted, in beats: for the screenshots' own checks.
+pub fn highlight_sample() -> Option<(f64, f64)> {
+    STATE.with(|s| s.borrow().open.as_ref().and_then(|(_, e)| e.highlight()).map(|h| (h.start, h.end)))
 }
 
 /// A graphics card was handed over (the window opened, or the card was reset): the painter is set up on it, away from
