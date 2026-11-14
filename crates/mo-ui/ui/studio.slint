@@ -1766,6 +1766,7 @@ export component ListLine inherits Rectangle {
         visible: root.selected;
         x: 0;
         width: min(parent.width, 220px);
+        border-radius: parent.border-radius;
         background: @linear-gradient(90deg, Theme.spill 0%, Theme.accent.transparentize(100%) 100%);
     }
     // The accent bar on the picked line.
