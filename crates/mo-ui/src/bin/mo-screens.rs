@@ -1561,6 +1561,15 @@ fn presets_shots(
     mo_ui::curve_editor::mouse_sample(app, 2, 14.0, 0.9, keys);
     mo_ui::curve_editor::mouse_sample(app, 4, 14.0, 0.9, keys);
     capture(window);
+    // Randomise: a new curve from parts of the curves shown, each part a clip named after the curve it came from.
+    if !mo_ui::presets::randomise_with(app, 7) {
+        return Err("curves-random.png: nothing was rolled".into());
+    }
+    shots.push(("curves-random.png".into(), capture(window)));
+    if !mo_ui::curve_editor::undo(app, true) {
+        return Err("curves-random.png: the roll left nothing to undo".into());
+    }
+    capture(window);
     // A curve dragged out onto an automation lane from its line, its shape on the card.
     let still = capture(window);
     data.set_curve_lifted_row(1);

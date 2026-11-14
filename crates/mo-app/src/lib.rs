@@ -16,6 +16,7 @@ pub mod curve_edit;
 pub mod curve_groups;
 pub mod curve_hold;
 pub mod curve_picture;
+pub mod curve_random;
 pub mod curve_strip;
 pub mod curve_touch;
 pub mod data_move;

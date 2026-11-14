@@ -111,6 +111,8 @@ struct Page {
     /// The speed each shown curve is at, beside `curve_shown`: 1, or half or double with "Other speeds too".
     curve_speeds: Vec<f64>,
     curve_filters: CurveFilters,
+    /// Randomise's settings: how long, how wild, mixed lengths.
+    random: mo_app::curve_random::Settings,
     /// The Found in filter as its chips show it now.
     curve_found_in: mo_app::filters::Filter,
     /// The shape, rhythm and feel filters as their chips show them now.
@@ -511,6 +513,34 @@ fn wire(app: &AppWindow) {
             change_curves(&app, |f| f.hidden = on);
         }
     });
+    data.on_random_bars_picked(|at| {
+        let bars = usize::try_from(at).ok().and_then(|i| mo_app::curve_random::BARS.get(i).copied());
+        if let Some(bars) = bars {
+            PAGE.with(|p| p.borrow_mut().random.bars = bars);
+            on_window(show_all);
+        }
+    });
+    // Only its own word follows the slider: the page isn't shown again on every step of a drag.
+    let weak = app.as_weak();
+    data.on_random_wild_moved(move |wild| {
+        let wild = f64::from(wild).clamp(0.0, 1.0);
+        PAGE.with(|p| p.borrow_mut().random.wild = wild);
+        if let Some(app) = weak.upgrade() {
+            let data = app.global::<PresetsData>();
+            data.set_random_wild(wild as f32);
+            data.set_random_wild_name(mo_app::curve_random::wild_name(wild).into());
+        }
+    });
+    data.on_random_mixed_toggled(|on| {
+        PAGE.with(|p| p.borrow_mut().random.mixed = on);
+        on_window(show_all);
+    });
+    let weak = app.as_weak();
+    data.on_randomise(move || {
+        if let Some(app) = weak.upgrade() {
+            run_curve_action(&app, curve_act::RANDOMISE);
+        }
+    });
     let weak = app.as_weak();
     data.on_curve_other_speeds_toggled(move |on| {
         if let Some(app) = weak.upgrade() {
@@ -859,6 +889,13 @@ fn show_everything(app: &AppWindow) {
         // The curves.
         data.set_curve_hidden(p.curve_filters.hidden);
         data.set_curve_other_speeds(p.curve_filters.other_speeds);
+        show_random_can(&data, &p);
+        let bars = mo_app::curve_random::BARS.iter().position(|b| *b == p.random.bars).unwrap_or(1);
+        data.set_random_bars(bars as i32);
+        data.set_random_wild(p.random.wild as f32);
+        data.set_random_wild_name(mo_app::curve_random::wild_name(p.random.wild).into());
+        data.set_random_mixed(p.random.mixed);
+        data.set_randomise_key(p.shortcuts.key_of(curve_act::RANDOMISE).into());
         data.set_curves_shown(p.curve_shown.len() as i32);
         let (title, text) = logic::curves_empty(
             p.curves.len(),
@@ -1130,8 +1167,20 @@ fn pick_curve(app: &AppWindow, id: Option<String>) {
         data.set_curve_show_row(row as i32);
         data.set_curve_show_ask(data.get_curve_show_ask() + 1);
     }
+    PAGE.with(|p| show_random_can(&data, &p.borrow()));
     show_curve_card(app);
     CURVE_LINES.with(|m| m.notify.reset());
+}
+
+/// Randomise's words and whether it can roll: two curves shown, and one open to roll into.
+fn show_random_can(data: &PresetsData, p: &Page) {
+    let open = p.curve_picked.is_some();
+    data.set_random_says(if p.curve_shown.len() >= 2 && !open {
+        "Pick a curve first: the roll lands in its editor, and Undo brings it back.".into()
+    } else {
+        mo_app::curve_random::says(p.curve_shown.len()).into()
+    });
+    data.set_random_can(p.curve_shown.len() >= 2 && open);
 }
 
 fn step_curve(app: &AppWindow, by: i32) {
@@ -2489,6 +2538,7 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         | curve_act::KEEP_CLIP
         | curve_act::CUT_TIME
         | curve_act::HIGHLIGHT_ALL => return crate::curve_editor::act(app, id),
+        curve_act::RANDOMISE => return randomise(app),
         curve_act::UNDO => return crate::curve_editor::undo(app, true),
         curve_act::REDO => return crate::curve_editor::undo(app, false),
         curve_act::SAVE_AS_NEW => {
@@ -2541,6 +2591,47 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         }
     }
     true
+}
+
+/// The most curves a roll cuts from: with more shown, this many of them, picked afresh each roll.
+const ROLL_FROM: usize = 64;
+
+/// Randomise: rolls a curve from the curves shown in the list into the editor (with a highlight, only that part).
+fn randomise(app: &AppWindow) -> bool {
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
+    randomise_with(app, seed)
+}
+
+/// A roll with a seed of its own: the same seed rolls the same curve (the screenshots use one).
+pub fn randomise_with(app: &AppWindow, seed: u64) -> bool {
+    let (sources, settings, shown) = PAGE.with(|p| {
+        let p = p.borrow();
+        let shown = p.curve_shown.len();
+        // Spread through the list from a place of the roll's own, so a long list is cut from end to end.
+        let take = shown.min(ROLL_FROM);
+        let first = (seed % shown.max(1) as u64) as usize;
+        let sources: Vec<mo_app::curve_random::Source> = (0..take)
+            .filter_map(|i| row_curve_as_sent(&p, (first + i * shown / take.max(1)) % shown.max(1)))
+            .filter(|c| c.points.len() >= 2)
+            .map(|c| mo_app::curve_random::Source {
+                id: c.id,
+                name: c.name,
+                points: c.points,
+                length_beats: c.length_beats,
+            })
+            .collect();
+        (sources, p.random, shown)
+    });
+    let rolled = crate::curve_editor::randomise(app, &sources, settings, seed);
+    // What happened, or why nothing did: a click never goes by with no word.
+    let words = if rolled {
+        mo_app::curve_random::rolled_words(sources.len(), shown)
+    } else {
+        mo_app::curve_random::NOTHING_ROLLED.to_owned()
+    };
+    PAGE.with(|p| p.borrow_mut().curve_message = words);
+    show_curve_card(app);
+    rolled
 }
 
 /// Keeps the editor's curve as a new curve of its own in `curves.db`, puts it in the list and picks it: the editor

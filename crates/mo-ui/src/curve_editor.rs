@@ -12,6 +12,7 @@ use mo_app::background::Newest;
 use mo_app::curve_edit::{Edit, Editor, Grid, Shape, Span, Step};
 use mo_app::curve_hold::{self, Hold, Over, Part};
 use mo_app::curve_picture::{self, Colours, Frame, View};
+use mo_app::curve_random;
 use mo_app::curve_strip::{self, OnStrip};
 use mo_app::curve_touch::{self, Grab, Keys};
 use mo_app::log;
@@ -652,6 +653,40 @@ pub fn act(app: &AppWindow, id: &str) -> bool {
     done
 }
 
+/// Randomise: the curve in the editor becomes a roll from `sources`, or with a highlight only that part is rolled
+/// again; one step of undo. False when there's no curve open, or nothing could be rolled.
+pub fn randomise(
+    app: &AppWindow,
+    sources: &[curve_random::Source],
+    settings: curve_random::Settings,
+    seed: u64,
+) -> bool {
+    let done = STATE.with(|s| {
+        let s = &mut *s.borrow_mut();
+        let was = s.grab;
+        s.hands_off();
+        s.mouse = None;
+        let Some((_, editor)) = s.open.as_mut() else { return false };
+        given_up(editor, was, &mut s.lit_whole);
+        let lit = editor.highlight();
+        let Some(rolled) = curve_random::roll(editor.shape(), lit, sources, settings, seed) else { return false };
+        let length = rolled.length();
+        let another = (length - editor.shape().length()).abs() > 1e-9;
+        if !editor.put(rolled, lit) {
+            return false;
+        }
+        // Another length: the whole of it in sight.
+        if another {
+            s.view = View::whole(length);
+        }
+        true
+    });
+    // Drawn again either way: a drag in hand was given up above, even when nothing could be rolled.
+    redraw(app);
+    show_touch(app);
+    done
+}
+
 /// A drag in hand is given up (Esc, or the press was taken away): the curve and its highlight are as they were
 /// before it. Whether there was a drag to give up.
 fn given_up(editor: &mut Editor, was: Option<(Held, (f64, f64), bool)>, lit_whole: &mut bool) -> bool {
@@ -677,7 +712,15 @@ fn step_back(app: &AppWindow, back: bool) {
     let done = STATE.with(|s| {
         let s = &mut *s.borrow_mut();
         s.hands_off();
-        s.open.as_mut().is_some_and(|(_, e)| if back { e.undo() } else { e.redo() })
+        let Some((_, e)) = s.open.as_mut() else { return false };
+        let was = e.shape().length();
+        let done = if back { e.undo() } else { e.redo() };
+        // A step that changes the curve's length (a roll, the end mark): the whole of it in sight again.
+        let length = e.shape().length();
+        if done && (length - was).abs() > 1e-9 {
+            s.view = View::whole(length);
+        }
+        done
     });
     if done {
         redraw(app);
