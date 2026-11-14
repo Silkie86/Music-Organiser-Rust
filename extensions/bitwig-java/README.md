@@ -269,8 +269,9 @@ whether the link's own MIDI has come back, from the message it sends itself as B
 the app connects.
 
 New in 3.27: the watch feed has the song's Groove, as a section `groove`: `on`, `shuffle` (the shuffle amount, 0 to
-1) and `rate` (`"1/8"` or `"1/16"`). The app's curve editor takes its swing from it ("Swing: from the project"). The
-self-check's "watch: groove" says what Bitwig shows for each of the three.
+1) and `rate` (as Bitwig shows it: `"1/8"` or `"1/16"`). It's there for the curve editor's "Swing: from the
+project", which comes in a later change. The self-check's "watch: groove" says what Bitwig shows for each of the
+three.
 
 New in 3.26: the reports follow the app's data folder when Settings moved it (see [Reports](#reports)). Before,
 they stayed in the first folder on the system drive.

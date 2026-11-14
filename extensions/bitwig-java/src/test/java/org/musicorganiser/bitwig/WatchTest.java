@@ -172,12 +172,12 @@ class WatchTest {
     }
 
     @Test
-    @DisplayName("reads the Groove's rate from Bitwig's words, or else from the knob")
+    @DisplayName("gives the Groove's rate as Bitwig shows it, and never guesses one")
     void readsTheGrooveRate() {
-        assertEquals("1/16", Watch.grooveRate("1/16", 0));
-        assertEquals("1/8", Watch.grooveRate("1/8", 1));
-        assertEquals("1/8", Watch.grooveRate("", 0));
-        assertEquals("1/16", Watch.grooveRate("?", 1));
+        assertEquals("1/16", Watch.grooveRate(" 1/16 "));
+        assertEquals("1/8", Watch.grooveRate("1/8"));
+        assertEquals("", Watch.grooveRate(""));
+        assertEquals("1/32", Watch.grooveRate("1/32"));
         assertEquals(0.0, Watch.amount(Double.NaN));
         assertEquals(1.0, Watch.amount(1.2));
     }

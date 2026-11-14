@@ -2587,7 +2587,7 @@ final class Link {
                 Map<String, Object> g = new LinkedHashMap<>();
                 g.put("on", groove[0].get() >= 0.5);
                 g.put("shuffle", Watch.amount(groove[1].get()));
-                g.put("rate", Watch.grooveRate(str(groove[2].displayedValue().get()), groove[2].get()));
+                g.put("rate", Watch.grooveRate(str(groove[2].displayedValue().get())));
                 return g;
             });
         }

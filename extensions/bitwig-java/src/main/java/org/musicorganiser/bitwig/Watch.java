@@ -69,7 +69,6 @@ final class Watch {
         return Math.round(loudest * 1000.0 / LEVEL_RANGE) / 1000.0;
     }
 
-    /** A beat position to the thousandth of a beat, so a position that hasn't moved reads the same each look. */
     /** A knob's place from 0 to 1 to three decimals, so a knob that barely moves sends nothing. */
     static double amount(double value) {
         if (!(value > 0)) return 0;
@@ -77,15 +76,14 @@ final class Watch {
     }
 
     /**
-     * The Groove's shuffle rate, "1/8" or "1/16": from the words Bitwig shows for it, and when they name neither, from
-     * the knob's place (the 1/8 comes first).
+     * The Groove's shuffle rate as Bitwig shows it, "1/8" or "1/16", without the spaces around it. Any other words go
+     * as they are: the app then knows it can't tell the rate, instead of the link guessing one.
      */
-    static String grooveRate(String shown, double value) {
-        if (shown.contains("16")) return "1/16";
-        if (shown.contains("8")) return "1/8";
-        return value >= 0.5 ? "1/16" : "1/8";
+    static String grooveRate(String shown) {
+        return shown.trim();
     }
 
+    /** A beat position to the thousandth of a beat, so a position that hasn't moved reads the same each look. */
     static double beats(double at) {
         return Math.round(at * 1000.0) / 1000.0;
     }
