@@ -3,7 +3,7 @@
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -195,13 +195,9 @@ export global SettingsData {
 }
 
 // A card on a tab: its title, a line on what it's for, and its parts.
-component SettingsCard inherits Rectangle {
+component SettingsCard inherits Panel {
     in property <string> title;
     in property <string> intro;
-    background: Theme.surface;
-    border-radius: Theme.radius;
-    border-width: 1px;
-    border-color: Theme.stroke;
     VerticalLayout {
         padding: Space.lg;
         spacing: Space.md;
@@ -764,11 +760,7 @@ component ShortcutsTab inherits VerticalLayout {
             clicked => { SettingsData.reset-keys(); }
         }
     }
-    Rectangle {
-        background: Theme.surface;
-        border-radius: Theme.radius;
-        border-width: 1px;
-        border-color: Theme.stroke;
+    Panel {
         VerticalLayout {
             padding: Space.lg;
             spacing: Space.xs;

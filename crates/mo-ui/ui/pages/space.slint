@@ -5,7 +5,7 @@
 // (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
 // them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, EmptyState, HowItWorks, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, Panel, PageHeader, ListLine, SidePanel, PanelDivider, EmptyState, HowItWorks, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
 
 // One drive across the top.
 export struct DriveCard {
@@ -95,15 +95,12 @@ export global SpaceData {
 }
 
 // A drive: its name and room, a bar of how full it is, what of yours it holds, and why it needs room when it does.
-component DriveView inherits Rectangle {
+component DriveView inherits Panel {
     in property <DriveCard> drive;
     // How full it is in the colours every theme shares (all good, a warning, missing), never the accent: some
     // themes' accent is a red.
     property <color> tint: drive.fill == 2 ? Theme.missing : drive.fill == 1 ? Theme.warning : Theme.ok;
     width: 300px;
-    background: Theme.surface;
-    border-radius: Theme.radius;
-    border-width: 1px;
     border-color: drive.fill > 0 ? self.tint.transparentize(50%) : Theme.stroke;
     // At the top when a taller card beside it makes this one taller too.
     VerticalLayout {
