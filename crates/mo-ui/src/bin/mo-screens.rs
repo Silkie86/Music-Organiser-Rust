@@ -1515,6 +1515,21 @@ fn presets_shots(
     shots.push(("curves-hear.png".into(), capture(window)));
     mo_ui::curve_editor::show_playing_sample(app, None);
     capture(window);
+    // The mouse on a point: it grows, and the hint line says what it does.
+    let keys = mo_app::curve_touch::Keys::default();
+    mo_ui::curve_editor::mouse_sample(app, 0, 12.0, 0.95, keys);
+    shots.push(("curves-point.png".into(), capture(window)));
+    // The point dragged: the old shape stays faint behind, the read-out says where it is, Undo lights.
+    mo_ui::curve_editor::mouse_sample(app, 1, 12.0, 0.95, keys);
+    mo_ui::curve_editor::mouse_sample(app, 0, 9.0, 0.7, keys);
+    shots.push(("curves-point-drag.png".into(), capture(window)));
+    mo_ui::curve_editor::mouse_sample(app, 2, 9.0, 0.7, keys);
+    mo_ui::curve_editor::mouse_sample(app, 4, 9.0, 0.7, keys);
+    shots.push(("curves-edited.png".into(), capture(window)));
+    if !mo_ui::curve_editor::undo(app, true) {
+        return Err("curves-edited.png: the dragged point left nothing to undo".into());
+    }
+    capture(window);
     // A curve dragged out onto an automation lane from its line, its shape on the card.
     let still = capture(window);
     data.set_curve_lifted_row(1);

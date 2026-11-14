@@ -1343,6 +1343,12 @@ export component HoverSense inherits Rectangle {
     @children
 }
 
+// A place the mouse works on directly (the curve editor's picture): a touch area that also says whether the mouse is
+// in it (`inside`), so the page can put away what it showed under the mouse when it leaves.
+export component MouseField inherits TouchArea {
+    out property <bool> inside: self.has-hover;
+}
+
 // A slider with two handles, for a span of numbers (the Sounds page's Tempo, in the filter column): what's let
 // through lies between them, both ends in. A handle at its end sets no limit there, so with both at their ends nothing
 // is lit (the accent means "on"). `bars` stand over the track, one for each equal part of it: how much there is at

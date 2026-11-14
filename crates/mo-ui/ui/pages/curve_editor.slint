@@ -4,7 +4,7 @@
 // buttons. The picture's still layers (grid, fill, curve) are one picture drawn off the window's thread
 // (mo_app::curve_picture, mo-ui/src/curve_editor.rs); what moves with the mouse or the sound is laid over it here.
 // Only shared parts from studio.slint.
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, CardAction, CardActions, SidePanel } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, CardAction, CardActions, SidePanel, MouseField } from "../studio.slint";
 
 // One of the ruler's marks: where (from the picture's left) and its bar and beat ("1", "1.2"; none when the marks are
 // too close to number each).
@@ -12,6 +12,14 @@ export struct RulerMark {
     x: length,
     text: string,
     bar: bool,
+}
+
+// A point's dot on the picture: where its middle is, and whether the mouse is on it or holds it.
+export struct EditorDot {
+    x: length,
+    y: length,
+    hot: bool,
+    held: bool,
 }
 
 export global CurveEditorData {
@@ -47,10 +55,150 @@ export global CurveEditorData {
     callback wheel(length, length, bool);
     // A grid chip: 0 to 3 a step, 4 Triplet (on or off), 5 Dotted (on or off), 6 Off.
     callback grid-picked(int);
+    // The points' dots on show, the line under the mouse and the curve as it was when a drag began (both as path
+    // commands in the picture's own points; "" for none), and the picture's size they're drawn in.
+    in property <[EditorDot]> dots;
+    in property <string> hot-line;
+    in property <string> ghost;
+    in property <length> picture-width;
+    in property <length> picture-height;
+    // The pointer over the picture: 0 arrow, 1 open hand, 2 closed hand, 3 up and down.
+    in property <int> pointer;
+    // The hint line: what's under the mouse, what it does, what the keys change; and the keys held.
+    in property <string> hint-name;
+    in property <string> hint-does;
+    in property <string> hint-keys;
+    in property <bool> shift;
+    in property <bool> alt;
+    in property <bool> ctrl;
+    in property <bool> mac;
+    // The read-out by the mouse while dragging ("" for none), and where the mouse is.
+    in property <string> read-out;
+    in property <length> read-x;
+    in property <length> read-y;
+    // The mouse on the picture: 0 moved, 1 pressed, 2 let go, 3 double-clicked, 4 left, 5 press taken away; where; Shift, Alt, Ctrl.
+    callback mouse(int, length, length, bool, bool, bool);
     callback undo();
     callback redo();
     callback hear();
     callback save-as-new();
+}
+
+// A key's cap, as on the hint line: lit while it's held.
+component KeyCap inherits Rectangle {
+    in property <string> text;
+    in property <bool> lit;
+    width: label.preferred-width + 12px;
+    height: 20px;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: root.lit ? Theme.accent : Theme.edge;
+    background: root.lit ? Theme.accent.transparentize(78%) : Theme.well;
+    label := Text {
+        text: root.text;
+        color: root.lit ? Theme.text : Theme.muted;
+        font-family: Theme.number-font;
+        font-size: Type.tiny;
+        font-weight: 500;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
+// One of the three keys at the hint line's right, always on show with what it means: they teach the editor's three
+// rules, and light while held. On a narrow hint line only the held key says what it means.
+component KeyLamp inherits HorizontalLayout {
+    in property <string> key;
+    in property <string> means;
+    in property <bool> lit;
+    in property <bool> compact;
+    spacing: Space.xs;
+    alignment: start;
+    VerticalLayout {
+        alignment: center;
+        KeyCap {
+            text: root.key;
+            lit: root.lit;
+        }
+    }
+    if !root.compact || root.lit: Text {
+        text: root.means;
+        color: root.lit ? Theme.text : Theme.faint;
+        font-size: Type.meta;
+        font-weight: root.lit ? 600 : 400;
+        vertical-alignment: center;
+    }
+}
+
+// The hint line under the picture: what's under the mouse, what a drag or a double-click does there, and what the
+// keys change. A phrase that doesn't fit is cut at the lamps, never laid over them.
+component HintLine inherits Rectangle {
+    height: 34px;
+    border-radius: Theme.radius;
+    background: Theme.surface-raised;
+    border-width: 1px;
+    border-color: Theme.edge;
+    HorizontalLayout {
+        padding-left: Space.md;
+        padding-right: Space.md;
+        spacing: Space.sm;
+        Text {
+            text: CurveEditorData.hint-name;
+            color: Theme.text;
+            font-size: Type.body;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        Text {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            text: CurveEditorData.hint-does + (CurveEditorData.hint-keys != "" ? "  ·  " + CurveEditorData.hint-keys : "");
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        KeyLamp {
+            key: "Shift";
+            means: "free";
+            lit: CurveEditorData.shift;
+            compact: root.width < 900px;
+        }
+        KeyLamp {
+            key: CurveEditorData.mac ? "Option" : "Alt";
+            means: "bend";
+            lit: CurveEditorData.alt;
+            compact: root.width < 900px;
+        }
+        KeyLamp {
+            key: CurveEditorData.mac ? "Cmd" : "Ctrl";
+            means: "make";
+            lit: CurveEditorData.ctrl;
+            compact: root.width < 900px;
+        }
+    }
+}
+
+// The small label by the mouse while dragging: what the drag is doing, in numbers.
+component ReadOut inherits Rectangle {
+    in property <string> text;
+    width: label.preferred-width + 16px;
+    height: 24px;
+    border-radius: Theme.radius;
+    background: Theme.surface-raised;
+    border-width: 1px;
+    border-color: Theme.accent.transparentize(40%);
+    drop-shadow-blur: 8px;
+    drop-shadow-color: Theme.shadow;
+    label := Text {
+        text: root.text;
+        color: Theme.text;
+        font-family: Theme.number-font;
+        font-size: Type.small;
+        font-weight: 500;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
 }
 
 // The ruler: a mark at each beat with its place, the end mark, and the play marker while Hear plays. It keeps the
@@ -182,8 +330,8 @@ export component CurveEditor inherits SidePanel {
             overflow: elide;
             min-width: 0px;
         }
-        if !root.renaming && CurveEditorData.state-words != "": Text {
-            text: CurveEditorData.state-words;
+        if !root.renaming && (CurveEditorData.changed || CurveEditorData.state-words != ""): Text {
+            text: CurveEditorData.changed ? "edited, not saved" : CurveEditorData.state-words;
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
@@ -315,13 +463,87 @@ export component CurveEditor inherits SidePanel {
                 height: parent.height;
                 background: Theme.accent;
             }
-            TouchArea {
+            // The curve as it was when the drag began, faint behind the new one.
+            if CurveEditorData.ghost != "": Path {
+                x: 0;
+                y: 0;
+                width: CurveEditorData.picture-width;
+                height: CurveEditorData.picture-height;
+                viewbox-width: CurveEditorData.picture-width / 1px;
+                viewbox-height: CurveEditorData.picture-height / 1px;
+                commands: CurveEditorData.ghost;
+                stroke: Theme.text.transparentize(72%);
+                stroke-width: 1.5px;
+                fill: transparent;
+            }
+            // The line under the mouse, lit.
+            if CurveEditorData.hot-line != "": Path {
+                x: 0;
+                y: 0;
+                width: CurveEditorData.picture-width;
+                height: CurveEditorData.picture-height;
+                viewbox-width: CurveEditorData.picture-width / 1px;
+                viewbox-height: CurveEditorData.picture-height / 1px;
+                commands: CurveEditorData.hot-line;
+                stroke: Theme.accent;
+                stroke-width: 3.5px;
+                fill: transparent;
+            }
+            // The points: small and plain, a size up with an accent ring under the mouse, filled while held.
+            for d in CurveEditorData.dots: Rectangle {
+                property <length> across: d.hot || d.held ? 11px : 6px;
+                x: d.x - self.width / 2;
+                y: d.y - self.height / 2;
+                width: self.across + (d.hot || d.held ? 0px : 3px);
+                height: self.width;
+                border-radius: self.width / 2;
+                background: d.held ? Theme.accent : d.hot ? Theme.well : Theme.text;
+                border-width: d.held ? 0px : d.hot ? 2px : 1.5px;
+                border-color: d.hot ? Theme.accent : Theme.well;
+            }
+            touch := MouseField {
+                // The mouse left: what showed under it is put away.
+                changed inside => {
+                    if !self.inside {
+                        self.tell(4, false, false, false);
+                    }
+                }
+                mouse-cursor: CurveEditorData.pointer == 1 ? MouseCursor.grab
+                    : CurveEditorData.pointer == 2 ? MouseCursor.grabbing
+                    : CurveEditorData.pointer == 3 ? MouseCursor.ns-resize
+                    : MouseCursor.default;
+                function tell(kind: int, shift: bool, alt: bool, ctrl: bool) {
+                    CurveEditorData.mouse(kind, self.mouse-x, self.mouse-y, shift, alt, ctrl);
+                }
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.move {
+                        self.tell(0, e.modifiers.shift, e.modifiers.alt, e.modifiers.control || e.modifiers.meta);
+                    } else if e.kind == PointerEventKind.cancel {
+                        // The press was taken away: what was dragged goes back where it was.
+                        self.tell(5, false, false, false);
+                    } else if e.button == PointerEventButton.left {
+                        self.tell(e.kind == PointerEventKind.down ? 1 : 2, e.modifiers.shift, e.modifiers.alt,
+                            e.modifiers.control || e.modifiers.meta);
+                    }
+                }
+                double-clicked => {
+                    self.tell(3, CurveEditorData.shift, CurveEditorData.alt, CurveEditorData.ctrl);
+                }
                 scroll-event(e) => {
                     CurveEditorData.wheel(self.mouse-x, e.delta-y != 0 ? e.delta-y : e.delta-x, e.modifiers.shift);
                     EventResult.accept
                 }
             }
+            // What the drag is doing, by the mouse; flipped to stay inside the picture.
+            if CurveEditorData.read-out != "": ReadOut {
+                text: CurveEditorData.read-out;
+                x: CurveEditorData.read-x + 14px + self.width > parent.width
+                    ? CurveEditorData.read-x - 14px - self.width
+                    : CurveEditorData.read-x + 14px;
+                y: max(2px, CurveEditorData.read-y - 10px - self.height);
+            }
         }
+        HintLine { }
     }
     // Where to take the curve from to drag it onto an automation lane: its file in the app's Curves folder.
     DragHandle {

@@ -231,6 +231,10 @@ fn look_again(have: Arc<Templates>, bitwig_folders: Vec<PathBuf>) -> Option<Arc<
 /// Drags `curve` out of the app as its curve file (made in the app's Curves folder on the drag's own thread), onto an
 /// automation lane in Bitwig, picked up at `spot`.
 fn carry_curve(app: &AppWindow, curve: Curve, spot: Spot) {
+    // Dragged out it's the curve as it was found: edits not saved would be left behind.
+    if super::curves_edits_wait(app, &curve.id) {
+        return;
+    }
     let folder = PAGE.with(|p| p.borrow().data_dir.join(curves::FOLDER));
     let under_way = drag::start(
         app,
