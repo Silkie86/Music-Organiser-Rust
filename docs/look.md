@@ -139,6 +139,14 @@ light that means something. It should feel like a rack unit on a desk, not a web
   Songs' song card, the Sounds cards and every `SidePanel` are one; before, each page drew its own, some with a grey
   outline and some with a dark one. A card that says something with its outline (a drive nearly full, the Swept
   card with the keys) sets `border-color`. A new card on a page starts from `Panel`, never from a plain rectangle.
+- The year strip is a little meter (the frontend-design pass, step 5): `YearRange` stands in its own sunken channel
+  (`framed`, off on Songs where it already stands in the sunken list), each year a slot filled by how much of the
+  list is in it, with the year's name over it. The years picked are lit as a picked line of a list is (the accent
+  down the left edge and over the line), and All is a line of the strip, lit while no year is picked. No underlines,
+  no link.
+- Space's drives fill their rows (step 5): every drive card on a row is as wide as the others and the rows are as
+  even as they can be (four drives: 2 and 2, never 3 and 1). How many go on a row is counted for the room the page
+  has while a card is open, so opening one never moves the lines.
 
 ## Next steps
 
