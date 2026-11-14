@@ -54,7 +54,8 @@ impl View {
             return self.within(length);
         }
         let at = if self.span > 0.0 { (around - self.start) / self.span } else { 0.5 };
-        let span = (self.span / by).clamp(CLOSEST.min(View::whole(length).span), View::whole(length).span);
+        // The new span first, as `within` allows it, so the beat stays put even at the closest and widest zoom.
+        let span = View { start: 0.0, span: self.span / by }.within(length).span;
         View { start: around - at * span, span }.within(length)
     }
 
@@ -140,7 +141,17 @@ pub struct Colours {
 
 /// `c` showing `part` of what it shows.
 fn faint(c: Colour, part: f64) -> Colour {
-    Colour { a: (f64::from(c.a) * part.clamp(0.0, 1.0)).round() as u8, ..c }
+    c.showing(part)
+}
+
+/// How many beats apart the picture's bar lines are: every bar, or every second, fourth... where they'd be closer
+/// than [`TIGHT`] points.
+fn bar_lines(frame: Frame) -> f64 {
+    let mut bars = BAR;
+    while bars * frame.beat_width() < TIGHT && bars < 4096.0 {
+        bars *= 2.0;
+    }
+    bars
 }
 
 /// The multiples of `step` beats in sight, from the first at or after the view's start, with how many steps from the
@@ -158,11 +169,15 @@ fn marks(frame: Frame, step: f64, length: f64) -> Vec<(u64, f64)> {
 /// the clips' seams, the highlight's band, the fill under the curve and the curve, the highlighted part in the accent.
 /// `scale` is pixels to a point: the fill is drawn a pixel column at a time.
 pub fn picture(shape: &Shape, highlight: Option<Span>, grid: Grid, frame: Frame, scale: f64, c: &Colours) -> Scene {
-    let mut scene = Scene::new(frame.width, frame.height, c.well);
     if !frame.fits() {
-        return scene;
+        // No room (or no size yet): an empty picture of a size a painter can make.
+        let size = |v: f64| if v.is_finite() && v >= 1.0 { v } else { 1.0 };
+        return Scene::new(size(frame.width), size(frame.height), c.well);
     }
     let length = shape.length();
+    // Only the curve's own time is ever in sight, whatever the page asked for.
+    let frame = Frame { view: frame.view.within(length), ..frame };
+    let mut scene = Scene::new(frame.width, frame.height, c.well);
     let (left, right) = (frame.x(frame.view.start), frame.x((frame.view.start + frame.view.span).min(length)));
     let (top, bottom) = (frame.y(1.0), frame.y(0.0));
     // 1. Value guides.
@@ -187,39 +202,51 @@ pub fn picture(shape: &Shape, highlight: Option<Span>, grid: Grid, frame: Frame,
         }
     }
     // Bars, wider apart when zoomed far out.
-    let mut bars = BAR;
-    while bars * frame.beat_width() < TIGHT && bars < 1024.0 {
-        bars *= 2.0;
-    }
-    for (_, beat) in marks(frame, bars, length) {
+    for (_, beat) in marks(frame, bar_lines(frame), length) {
         upright(&mut scene, beat, c.stroke);
         // A shade brighter than the beats' lines.
         upright(&mut scene, beat, faint(c.text, 0.12));
     }
     // 3. The clips' seams, where one clip ends and the next begins.
     let in_sight = |beat: f64| beat > frame.view.start + 1e-9 && beat < frame.view.start + frame.view.span - 1e-9;
-    for clip in shape.clips() {
-        for beat in [clip.span.start, clip.span.end] {
-            if in_sight(beat) && beat > 1e-9 && beat < length - 1e-9 {
-                scene.rect((frame.x(beat) - 0.5, 0.0, 1.0, frame.height), faint(c.muted, 0.45));
-            }
+    let mut seams: Vec<f64> = shape.clips().iter().flat_map(|clip| [clip.span.start, clip.span.end]).collect();
+    seams.sort_by(f64::total_cmp);
+    // Two clips that touch share one seam.
+    seams.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    for beat in seams {
+        if in_sight(beat) && beat > 1e-9 && beat < length - 1e-9 {
+            scene.rect((frame.x(beat) - 0.5, 0.0, 1.0, frame.height), faint(c.muted, 0.45));
         }
     }
     // 4. The highlight's band: its time, the picture's full height.
-    let lit = highlight;
+    let lit = highlight.filter(|h| h.start.is_finite() && h.end.is_finite());
     if let Some(h) = lit {
         let (from, to) = (frame.x(h.start).clamp(left, right), frame.x(h.end).clamp(left, right));
         scene.rect((from, 0.0, to - from, frame.height), faint(c.accent, 0.07));
     }
-    // 5. The fill under the curve, a pixel column at a time.
-    let column = 1.0 / crate::shapes::usable_scale(scale);
-    let columns = ((right - left) / column).ceil().clamp(0.0, 16_384.0) as usize;
+    // 5. The fill under the curve, a pixel column at a time: each column on whole pixels, so no two overlap or leave
+    // a gap, and next-door columns of one height as one shape (a gate's steps are a handful).
+    let scale = crate::shapes::usable_scale(scale);
+    let (first, last) = ((left * scale).round() as i64, (right * scale).round() as i64);
     let mut values = Columns::new(shape);
-    for i in 0..columns {
-        let x = left + i as f64 * column;
-        let wide = column.min(right - x);
-        let y = frame.y(values.at(frame.beat_at(x + wide / 2.0)));
-        scene.rect((x, y, wide, bottom - y), faint(c.text, 0.07));
+    let mut run: Option<(i64, f64)> = None;
+    for px in first..=last.min(first + 32_768) {
+        let y = if px < last {
+            let middle = (px as f64 + 0.5) / scale;
+            Some(frame.y(values.at(frame.beat_at(middle))))
+        } else {
+            None
+        };
+        match (run, y) {
+            (Some((_, was)), Some(y)) if (was - y).abs() < 1e-6 => {}
+            _ => {
+                if let Some((from, was)) = run {
+                    let (x0, x1) = (from as f64 / scale, px as f64 / scale);
+                    scene.rect((x0, was, x1 - x0, bottom - was), faint(c.text, 0.07));
+                }
+                run = y.map(|y| (px, y));
+            }
+        }
     }
     // 6. The curve: each line cut where it leaves what's in sight and where the highlight starts and ends.
     let points = shape.points();
@@ -317,11 +344,13 @@ pub fn ruler(length: f64, frame: Frame) -> Vec<Tick> {
     if !frame.fits() {
         return Vec::new();
     }
+    let frame = Frame { view: frame.view.within(length), ..frame };
     let per_bar = BAR as u64;
     let name_beats = frame.beat_width() >= NUMBERED;
-    // How many bars apart the numbered ones are, so their numbers have about 40 points each.
+    // How many bars apart the numbered ones are, so their numbers have at least 44 points each (as the
+    // arrangement's ruler gives its own).
     let mut every = 1u64;
-    while every as f64 * BAR * frame.beat_width() < 40.0 && every < 1024 {
+    while every as f64 * BAR * frame.beat_width() < 44.0 && every < 4096 {
         every *= 2;
     }
     let mut ticks: Vec<Tick> = marks(frame, 1.0, length)
@@ -338,10 +367,17 @@ pub fn ruler(length: f64, frame: Frame) -> Vec<Tick> {
         })
         .collect();
     if ticks.is_empty() {
-        // Beats too close to mark: the bars alone.
-        ticks = marks(frame, BAR * every as f64, length)
+        // Beats too close to mark: a mark over each bar line the picture draws.
+        let step = bar_lines(frame);
+        let bars_apart = (step / BAR) as u64;
+        ticks = marks(frame, step, length)
             .into_iter()
-            .map(|(i, beat)| Tick { x: frame.x(beat), label: format!("{}", i * every + 1), bar: true })
+            .map(|(i, beat)| {
+                let bar = i * bars_apart;
+                let label =
+                    if bar.is_multiple_of(every.max(bars_apart)) { format!("{}", bar + 1) } else { String::new() };
+                Tick { x: frame.x(beat), label, bar: true }
+            })
             .collect();
     }
     ticks
@@ -526,9 +562,29 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(fill.len(), 1200);
+        // (But for the few at the peak that share a height and are one shape.)
+        assert!((1190..=1200).contains(&fill.len()), "{}", fill.len());
         let tallest = fill.iter().map(|f| f.1).fold(0.0, f32::max);
-        assert!((tallest - 200.0).abs() < 0.5, "{tallest}");
+        assert!((tallest - 200.0).abs() < 1.0, "{tallest}");
+        // A gate's two levels are two shapes (its low level has no height to fill), whatever the scale; and at a
+        // scale that isn't whole, every column still starts and ends on a whole pixel.
+        let gate = Shape::new(vec![pt(0.0, 0.5), pt(2.0, 0.5), pt(2.0, 1.0), pt(4.0, 1.0)], 4.0);
+        for scale in [1.0, 1.25, 1.75, 2.0] {
+            let fills: Vec<(f32, f32)> = picture(&gate, None, Grid::default(), f, scale, &c)
+                .shapes
+                .iter()
+                .filter_map(|s| match *s {
+                    Drawn::Rect { x, w, fill, .. } if fill == faint(c.text, 0.07) => Some((x, w)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(fills.len(), 2, "at {scale}");
+            assert_eq!(fills[0].0 + fills[0].1, fills[1].0, "at {scale}: they meet");
+            for (x, w) in fills {
+                let (left, right) = (f64::from(x) * scale, f64::from(x + w) * scale);
+                assert!((left - left.round()).abs() < 1e-3 && (right - right.round()).abs() < 1e-3, "at {scale}");
+            }
+        }
     }
 
     #[test]
@@ -545,6 +601,36 @@ mod tests {
             })
             .collect();
         assert_eq!(seams, [f.x(1.0) as f32, f.x(2.0) as f32]);
+        // Two clips that touch share one seam.
+        let (s, _) = apply(&s, Some(Span::new(2.0, 3.0)), &Edit::Remember { name: "next".into() }).unwrap();
+        let seams = picture(&s, None, Grid::default(), f, 1.0, &colours())
+            .shapes
+            .iter()
+            .filter(|s| matches!(**s, Drawn::Rect { h: 236.0, .. }))
+            .count();
+        assert_eq!(seams, 3);
+    }
+
+    #[test]
+    fn a_view_or_size_that_cant_be_is_drawn_safely() {
+        let c = colours();
+        // The curve got shorter under a view of its old end, with a highlight on.
+        let past = Frame { view: View { start: 6.0, span: 2.0 }, ..frame(4.0) };
+        let scene = picture(&triangle(), Some(Span::new(1.0, 2.0)), Grid::default(), past, 1.0, &c);
+        assert_eq!(lines(&scene).len(), 1, "what's shown is the curve's last two beats");
+        // A view from before the curve's start shows the curve from its start.
+        let before = Frame { view: View { start: -1.0, span: 4.0 }, ..frame(4.0) };
+        assert_eq!(
+            picture(&triangle(), None, Grid::default(), before, 1.0, &c),
+            picture(&triangle(), None, Grid::default(), frame(4.0), 1.0, &c)
+        );
+        // No size yet: an empty picture a painter can still make.
+        let none = Frame { width: f64::NAN, ..frame(4.0) };
+        let scene = picture(&triangle(), None, Grid::default(), none, 1.0, &c);
+        assert!(scene.shapes.is_empty());
+        assert_eq!(scene.pixel_size(1.0), (1, 236));
+        let broken = Some(Span { start: f64::NAN, end: 2.0 });
+        assert_eq!(lines(&picture(&triangle(), broken, Grid::default(), frame(4.0), 1.0, &c)).len(), 2);
     }
 
     #[test]
@@ -561,11 +647,15 @@ mod tests {
         assert_eq!(far.len(), 65);
         assert_eq!(far[0], "1");
         assert_eq!(far[1], "");
-        assert_eq!(far[4], "", "bars 37 points apart: every second one is numbered");
+        assert_eq!(far[4], "", "bars 37.5 points apart: every second one is numbered");
         assert_eq!(far[8], "3");
-        // 64 bars, 9.4 points each: the beats are too close to mark at all, and every eighth bar is numbered.
+        // 64 bars, 9.4 points each: the beats are too close to mark at all. Each bar line the picture draws has its
+        // mark, and every eighth is numbered.
         let farther = labels(256.0, 628.0);
-        assert_eq!(&farther[..3], ["1", "9", "17"]);
+        assert_eq!(farther.len(), 65);
+        assert_eq!(farther[0], "1");
+        assert!(farther[1..8].iter().all(String::is_empty));
+        assert_eq!(farther[8], "9");
         // Zoomed in to the second bar.
         let near = ruler(8.0, Frame { width: 628.0, height: 236.0, view: View { start: 4.0, span: 2.0 } });
         assert_eq!(near.iter().map(|t| t.label.as_str()).collect::<Vec<_>>(), ["2", "2.2", "2.3"]);
