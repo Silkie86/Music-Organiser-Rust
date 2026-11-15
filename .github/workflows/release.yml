@@ -1,0 +1,147 @@
+name: Release
+
+# A release starts from a version tag on main, like v1.0.0 (docs/installer.md). GitHub builds the Bitwig extension and
+# the app (dist profile), makes the setup .exe, tries it (installer/check.ps1), and puts a DRAFT release on the
+# Releases page with the setup and its SHA-256. Nothing is public until Solomon publishes the draft.
+# The tag must match the workspace version in Cargo.toml (v1.0.0 for 1.0.0), so the app's version and the setup agree.
+
+on:
+  push:
+    tags: ["v*"]
+  # A try-out from any branch (Actions, Release, Run workflow): everything but the release itself; the setup is kept
+  # as a download.
+  workflow_dispatch:
+
+# Read-only everywhere; only the job that drafts the release may write.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Before anything is built: a tag must be on main and match the app's version, so a release is always code that went
+  # through review and CI, and the app and its setup say the same version.
+  tag:
+    name: Tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The tag is on main and matches the app's version
+        if: github.event_name == 'push'
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_REF_NAME is not a commit on main"; exit 1; }
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "the tag $GITHUB_REF_NAME doesn't match Cargo.toml's version $version: raise the version first"; exit 1; }
+
+  bitwig-extension:
+    name: Bitwig extension
+    needs: tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: extensions/bitwig-java/pom.xml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build and test
+        working-directory: extensions/bitwig-java
+        run: mvn -B package
+      # Whatever the extension is called (its name is the DAW links', not this workflow's).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bitwig-extension
+          path: extensions/bitwig-java/target/*.bwextension
+          if-no-files-found: error
+
+  setup:
+    name: Setup
+    needs: bitwig-extension
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      # The dist build's own cache, saved by tag runs, so a release rebuilds only what changed.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dist
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Build the app (dist)
+        # --locked: exactly the libraries Cargo.lock names, the ones CI tested.
+        run: cargo build --locked --profile dist -p mo-ui --bin music-organiser
+      - uses: actions/download-artifact@v4
+        with:
+          name: bitwig-extension
+          path: bitwig
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Build the setup
+        shell: pwsh
+        run: |
+          $ext = Get-ChildItem bitwig -Filter *.bwextension | Select-Object -First 1
+          if (-not $ext) { throw 'no Bitwig extension came from the first job' }
+          $setup = installer\build.ps1 -Exe target\dist\music-organiser.exe -BitwigExtension $ext.FullName -Out dist
+          "SETUP=$setup" >> $env:GITHUB_ENV
+      - name: Try the setup
+        shell: pwsh
+        run: installer\check.ps1 -Setup $env:SETUP
+      - uses: actions/upload-artifact@v4
+        with:
+          name: setup
+          path: dist/*.exe
+
+  # The only job that writes: it puts the tried setup on a draft release.
+  release:
+    name: Draft release
+    needs: setup
+    if: github.event_name == 'push'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: setup
+          path: dist
+      - name: Draft the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $env:SETUP = (Get-ChildItem dist -Filter *.exe | Select-Object -First 1).FullName
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:SETUP).Hash.ToLower()
+          $file = Split-Path -Leaf $env:SETUP
+          "$hash  $file" | Set-Content -Encoding ascii -NoNewline "$env:SETUP.sha256"
+          $notes = "Download **$file** and run it. Windows may say ""Windows protected your PC"" until the setup is " +
+            "signed: click More info, then Run anyway.`n`nSHA-256: ``$hash``"
+          # Run again (a re-run, say): the draft that's there gets the new files, never a second draft.
+          gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME $env:SETUP "$env:SETUP.sha256" --clobber
+          } else {
+            # A version with a dash (0.9.0-beta.1) is a test release, marked so on the page.
+            $more = @()
+            if ($env:GITHUB_REF_NAME -like '*-*') { $more += '--prerelease' }
+            gh release create $env:GITHUB_REF_NAME $env:SETUP "$env:SETUP.sha256" --draft --verify-tag `
+              --title "$env:GITHUB_REF_NAME" --notes $notes @more
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'the release could not be made' }

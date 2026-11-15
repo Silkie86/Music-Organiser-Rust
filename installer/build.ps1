@@ -70,7 +70,8 @@ if (Test-Path -LiteralPath $pdb) { $defines += "/DPdbFile=$pdb" }
 if ($BitwigExtension) {
     $defines += "/DBitwigExtension=$((Resolve-Path -LiteralPath $BitwigExtension).Path)"
 }
-& $iscc /Q @defines (Join-Path $PSScriptRoot 'setup.iss')
+# Inno Setup's own words go to the screen, so this script's only output is the setup's path.
+& $iscc /Q @defines (Join-Path $PSScriptRoot 'setup.iss') | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup stopped with $LASTEXITCODE" }
 $setup = Join-Path $outDir "$outName.exe"
 if (-not (Test-Path -LiteralPath $setup)) { throw "no $setup was made" }

@@ -4,7 +4,8 @@
 # details) and the installer all follow. The version is the workspace's, in Cargo.toml.
 #
 # What does NOT follow, on purpose: the data folder (MusicOrganiser, so a rename never loses anyone's data), the
-# .exe's file name, and the names the DAWs know the app's links by (mo-dawlink keeps those).
+# .exe's file name, and the IDs the DAWs know the app's links by (the Bitwig controller and CLAP plugin IDs, which
+# saved songs point at). The names the DAWs show do follow, by hand, in mo-dawlink and the extensions (#634).
 
 # What people see: the title bar, About, the Start menu, Windows' Apps list.
 name = "DAWmate"
