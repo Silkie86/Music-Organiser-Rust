@@ -256,9 +256,13 @@ fn main() -> Result<(), slint::PlatformError> {
     // The sweep's and the frames' last few seconds, before the log closes.
     mo_app::sweep_timing::finish();
     mo_app::frame_timing::finish();
-    // Last of all, once everything is written: the setup "Restart to update" asked for (it waits for this to end).
-    mo_ui::update::run_if_asked();
+    // The setup "Restart to update" asked for: started only once everything is written and the log has closed, as it
+    // closes whatever is left of the app.
+    let setup = mo_ui::update::asked();
     session.close();
+    if let Some(setup) = setup {
+        mo_ui::update::run(&setup);
+    }
     ran
 }
 

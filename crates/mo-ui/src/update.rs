@@ -1,6 +1,6 @@
 //! The window's side of updates (`mo_app::update`): the daily look a while after start, the fetch as a job card, the
 //! rail's "Restart to update" line, and Settings › General's switch. The setup itself runs once the app has closed
-//! and written everything as it always does ([`run_if_asked`], the very end of main).
+//! and written everything as it always does ([`asked`] and [`run`], the very end of main).
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -45,6 +45,11 @@ pub fn connect(app: &AppWindow, feed: Feed, live: bool) {
         );
         if let Some(app) = weak.upgrade() {
             app.global::<SettingsData>().set_update_check(on);
+            // Turned off: the rail stops offering what was fetched.
+            if !on {
+                app.set_update_ready("".into());
+                app.set_update_setup("".into());
+            }
         }
     });
     let weak = app.as_weak();
@@ -97,7 +102,8 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// A setup already fetched is offered without asking GitHub; otherwise GitHub is asked once a day.
+/// Once a day GitHub is asked, and a newer setup fetched; between looks (or offline), a setup fetched on an earlier
+/// day and checked again is offered.
 fn look_if_due(app: &AppWindow, feed: &Feed) {
     let wanted = update::wanted(crate::settings::value(CHECK_KEY).as_deref());
     let due = update::due(crate::settings::value(CHECKED_KEY).as_deref(), now_secs());
@@ -112,27 +118,27 @@ fn look_if_due(app: &AppWindow, feed: &Feed) {
     let folder = mo_app::paths::data_dir().join(update::FOLDER);
     let current = env!("CARGO_PKG_VERSION").to_owned();
     let feed = feed.clone();
-    let weak = app.as_weak();
+    let answer = Answer { found: None, window: app.as_weak() };
     let started = mo_app::background::spawn("Update look", move || {
-        mo_app::background::lower_priority();
+        // Tells the window when it's dropped, so a panic in here still frees the next look.
+        let mut answer = answer;
         update::clear_old(&folder, &current);
-        if let Some((version, setup)) = update::ready_in(&folder, &current) {
-            log::info("Update", &format!("{version} was fetched before and is ready: {}", setup.display()));
-            return Some((version, setup));
-        }
         if !due {
-            return None;
+            answer.found = update::ready_in(&folder, &current);
+            return;
         }
         let offer = match update::look(update::GITHUB_API, &current) {
             Ok(Some(offer)) => offer,
+            // Nothing newer listed: a setup fetched earlier and since taken off the Releases page isn't offered.
             Ok(None) => {
                 log::info("Update", &format!("No newer version than {current}"));
-                return None;
+                return;
             }
-            // Offline, or GitHub not answering: tried again tomorrow, nothing shown.
+            // Offline, or GitHub not answering: a setup fetched before still is, and GitHub is asked again tomorrow.
             Err(e) => {
                 log::info("Update", &format!("Couldn't ask GitHub for new versions: {e}"));
-                return None;
+                answer.found = update::ready_in(&folder, &current);
+                return;
             }
         };
         let job = feed.start(&format!("Getting {} {}", mo_app::product::NAME, offer.version), "Fetching the setup");
@@ -140,35 +146,59 @@ fn look_if_due(app: &AppWindow, feed: &Feed) {
             Ok(setup) => {
                 log::info("Update", &format!("{} is ready: {}", offer.version, setup.display()));
                 job.done_as(&format!("{} {} is ready", mo_app::product::NAME, offer.version), "Restart to update");
-                Some((offer.version, setup))
+                answer.found = Some((offer.version, setup));
             }
             Err(e) => {
                 log::warning("Update", &format!("Couldn't fetch {}: {e}", offer.version));
                 job.failed(&e);
-                None
             }
         }
     });
-    let Ok(handle) = started else {
+    if started.is_err() {
         BUSY.with(|b| *b.borrow_mut() = false);
-        return;
-    };
-    // Waits for the answer away from the window, then tells the window.
-    let _ = std::thread::Builder::new().name("Update answer".into()).spawn(move || {
-        let found = handle.join().ok().flatten();
+    }
+}
+
+/// What a look found, given to the window when the look ends, however it ends.
+struct Answer {
+    found: Option<(String, PathBuf)>,
+    window: slint::Weak<AppWindow>,
+}
+
+impl Drop for Answer {
+    fn drop(&mut self) {
+        let found = self.found.take();
+        let window = self.window.clone();
         let _ = slint::invoke_from_event_loop(move || {
             BUSY.with(|b| *b.borrow_mut() = false);
-            let (Some((version, setup)), Some(app)) = (found, weak.upgrade()) else { return };
+            let (Some((version, setup)), Some(app)) = (found, window.upgrade()) else { return };
+            // Turned off while it looked: nothing offered.
+            if !update::wanted(crate::settings::value(CHECK_KEY).as_deref()) {
+                return;
+            }
             app.set_update_ready(version.into());
             app.set_update_setup(setup.display().to_string().into());
         });
-    });
+    }
 }
 
-/// After the window has closed and everything is written: runs the setup the rail's "Restart to update" asked for.
-pub fn run_if_asked() {
-    let Some(setup) = RUN_AT_EXIT.lock().ok().and_then(|mut s| s.take()) else { return };
-    if let Err(e) = update::run_setup(&setup) {
-        log::last(log::Level::Error, "Update", &format!("Couldn't start the setup {}: {e}", setup.display()));
+/// Once the window has closed and everything is written, before the log closes: whether "Restart to update" was
+/// clicked, and its setup is there to run (logged when it isn't).
+pub fn asked() -> Option<PathBuf> {
+    let setup = RUN_AT_EXIT.lock().ok().and_then(|mut s| s.take())?;
+    if setup.is_file() {
+        log::info("Update", &format!("The setup {} starts once the log is closed", setup.display()));
+        Some(setup)
+    } else {
+        log::last(log::Level::Error, "Update", &format!("The setup {} isn't there any more", setup.display()));
+        None
+    }
+}
+
+/// Last of all, after the log has closed: starts the setup [`asked`] gave. It closes what's left of the app and puts
+/// the new version in, so nothing may still be writing. Where it can't start, the next start looks again.
+pub fn run(setup: &std::path::Path) {
+    if let Err(e) = update::run_setup(setup) {
+        eprintln!("Couldn't start the setup {}: {e}", setup.display());
     }
 }
