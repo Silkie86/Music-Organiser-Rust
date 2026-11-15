@@ -14,7 +14,9 @@
 //! the loop does.
 //!
 //! No more than [`MOST_SLOTS`] are kept of anything: a part longer than 32 bars of 4/4 is looked at by its first 32
-//! alone, and the close look hears the rest.
+//! alone, and the close look hears the rest. Chords with more slots to a whole turn than that (longer ones, or ones
+//! that end inside a slot and take many turns to end on a slot's line) are never played round where the kept slots
+//! end, since they don't come round there: a tune is tried over them as far as they're kept.
 //!
 //! How much it may leave out was measured (`theorybench pairs --quick`; `docs/harmony/together-experiments.md` has
 //! the numbers): for a tune over chords, keeping the best 2 parts in 100 keeps 99 in 100 of the close look's best
@@ -45,10 +47,15 @@ pub const SLOTS_VERSION: u32 = 1;
 /// plays two loops round for.
 pub const MOST_SLOTS: usize = 2 * MOST_BARS_ROUND as usize;
 
-/// How many slots a loop `length` ticks long is kept for: until it ends on a slot's line, going round again when
-/// once through ends inside a slot. [`MOST_SLOTS`] at the most.
+/// How many slots a whole turn of a loop `length` ticks long is: until it ends on a slot's line, going round again
+/// when once through ends inside a slot.
+fn turn_slots(length: i64, slot: i64) -> usize {
+    usize::try_from(length / gcd(length, slot)).unwrap_or(usize::MAX)
+}
+
+/// How many slots a loop `length` ticks long is kept for: a whole turn ([`turn_slots`]), [`MOST_SLOTS`] at the most.
 fn slots_round(length: i64, slot: i64) -> usize {
-    usize::try_from(length / gcd(length, slot)).unwrap_or(MOST_SLOTS).min(MOST_SLOTS)
+    turn_slots(length, slot).min(MOST_SLOTS)
 }
 
 /// A part's slots, each `slot` ticks long, from the bar its first note is in to the bar its last note ends in, as
@@ -90,6 +97,10 @@ pub struct Outline {
     worth: Vec<Option<[f64; 12]>>,
     /// How many of the slots are once through the chords.
     once: usize,
+    /// How many slots a whole turn of the chords is: until they end on a slot's line. As many as are kept, or more
+    /// when that's past [`MOST_SLOTS`]: what's kept is then the start of a turn and nothing is known of the rest, so
+    /// the kept slots are never played round ([`Outline::sits`]).
+    turn: usize,
     /// The most slots a tune and the chords are played round for: past it, once through the longer. As many as the
     /// close look's [`MOST_BARS_ROUND`] bars of the chords' own.
     most: usize,
@@ -120,7 +131,8 @@ impl Backing {
         let worths = how.worths();
         let worth_of = |place: usize| worths.get(place).copied().unwrap_or(0.0);
         let (slot, half, length) = (slot.max(1), self.half(), self.length.max(1));
-        let count = slots_round(length, slot);
+        let turn = turn_slots(length, slot);
+        let count = turn.min(MOST_SLOTS);
         let mut worth = Vec::with_capacity(count);
         for k in 0..count as i64 {
             let to = (k + 1).saturating_mul(slot);
@@ -163,6 +175,7 @@ impl Backing {
         Outline {
             worth,
             once: slots_in(length.saturating_add(slot - 1)).min(count),
+            turn,
             most: slots_in(MOST_BARS_ROUND.saturating_mul(self.grid.bar())).max(1),
             scale: self.scale,
             alike: worth_of(ALIKE),
@@ -207,7 +220,9 @@ impl Outline {
                 Some(out)
             })
             .collect();
-        Outline { worth, once: slots.len(), most: MOST_SLOTS, scale, alike: worth_of(ALIKE) }
+        // The slots given are the turn: whoever gives them says what goes round (of a long chord part, the bars its
+        // close look reads and plays round).
+        Outline { worth, once: slots.len(), turn: slots.len(), most: MOST_SLOTS, scale, alike: worth_of(ALIKE) }
     }
 
     /// How a tune is likely to sit over the chords, from its slots alone, moved up by each of 0 to 11 semitones:
@@ -221,9 +236,13 @@ impl Outline {
             return None;
         }
         // Until they meet again, or once through the longer when that's past the most two loops are played round.
-        let shared = usize::try_from(gcd(mine as i64, theirs as i64)).unwrap_or(1).max(1);
-        let together = mine / shared * theirs;
+        // The chords come round after a whole turn of theirs, which is more than is kept of long ones.
+        let turn = i64::try_from(self.turn).unwrap_or(i64::MAX);
+        let shared = usize::try_from(gcd(mine as i64, turn)).unwrap_or(1).max(1);
+        let together = (mine / shared).saturating_mul(self.turn);
         let round = if together <= self.most { together } else { mine.max(self.once) };
+        // And no further than the chords are kept: they don't come round where the kept slots end.
+        let round = if self.turn > theirs { round.min(theirs) } else { round };
         let mut sums = [0.0f64; 12];
         let mut tune_time = PerPitch([0.0f64; 12]);
         let (mut heard, mut all) = (0.0f64, 0.0f64);
@@ -418,6 +437,67 @@ mod tests {
         // And a tune of 16 slots meets them after exactly 48: played all the way round.
         let (first, close) = both_looks(&a_note_a_slot(&keys[..16]), &backing);
         assert_same(&first, &close);
+    }
+
+    /// The 14 November 2026 review's MI-9. In bars of 12 quarter notes (12/4, or 12/8 as an FL save gives it) a
+    /// bar is six slots, and eleven bars of chords are 66: two more than are kept. What's kept isn't a whole turn
+    /// of the chords, so it can't go round: a one-bar tune was tried against the first 64 slots three times over,
+    /// the second and third time from the wrong place in the bar.
+    #[test]
+    fn chords_cut_short_are_looked_at_once_through_and_never_round() {
+        let grid = Grid { ticks_per_beat: BEAT as u32, beats_per_bar: 12, bar_line: 0 };
+        let bar = grid.bar();
+        // A major for the first half of each bar and G major for the second, in the same voicing.
+        let chords: Vec<Note> = (0..11i64)
+            .flat_map(|at| {
+                let a = [45u8, 57, 61, 64].map(|k| note(at * bar, bar / 2, k));
+                let g = [43u8, 55, 59, 62].map(|k| note(at * bar + bar / 2, bar / 2, k));
+                a.into_iter().chain(g)
+            })
+            .collect();
+        let parts = [Part { role: Role::Harmony, notes: &chords }];
+        let backing = Backing::read(&mut ChordReader::new(), &parts, grid, Span::Loop).unwrap();
+        let outline = backing.outline(SLOT, &Sitting::SHIPPED);
+        assert_eq!((outline.worth.len(), outline.turn), (MOST_SLOTS, 66));
+        // A tune of one bar: each chord's root for as long as the chord sounds.
+        let (first, close) = both_looks(&a_note_a_slot(&[69, 69, 69, 67, 67, 67]), &backing);
+        // The close look plays the tune through the chords' eleven bars, a root on its chord all the way. The first
+        // look hears the first 64 slots of the same, so it says the same but for the two slots it never sees.
+        for up in 0..12 {
+            assert!((first.moved(up) - close.moved(up)).abs() < 0.02, "{up}: first {first:?}\nclose {close:?}");
+        }
+        assert_eq!(first.best().0, close.best().0);
+        // Chords that fit in what's kept still go round under a shorter tune, as they did: four bars are 8 slots.
+        let whole = self::backing(&self::chords(0)).outline(SLOT, &Sitting::SHIPPED);
+        assert_eq!((whole.worth.len(), whole.turn), (8, 8));
+    }
+
+    /// The same for chords that are short enough but end inside a slot, and take more turns to end on a slot's
+    /// line than are kept. Nine bars of nine quarter notes are 40 slots and a half, and a whole turn is 81: the 64
+    /// kept are once through and the start of a second turn. A tune of four slots meets them again far past what
+    /// two loops are played round for, so both looks play the chords once through; the kept slots were played to
+    /// their end, the chords' first bars counted twice.
+    #[test]
+    fn chords_that_end_inside_a_slot_too_often_to_keep_are_played_once_through() {
+        let grid = Grid { ticks_per_beat: BEAT as u32, beats_per_bar: 9, bar_line: 0 };
+        let bar = grid.bar();
+        // A major for four bars, then A flat major for five: the tune's A is the first's root and rubs on the rest.
+        let chords: Vec<Note> = (0..9i64)
+            .flat_map(|at| {
+                let keys: [u8; 4] = if at < 4 { [45, 57, 61, 64] } else { [44, 56, 60, 63] };
+                keys.map(|k| note(at * bar, bar, k))
+            })
+            .collect();
+        let parts = [Part { role: Role::Harmony, notes: &chords }];
+        let backing = Backing::read(&mut ChordReader::new(), &parts, grid, Span::Loop).unwrap();
+        let outline = backing.outline(SLOT, &Sitting::SHIPPED);
+        assert_eq!((outline.worth.len(), outline.once, outline.turn), (MOST_SLOTS, 41, 81));
+        let (first, close) = both_looks(&a_note_a_slot(&[69, 69, 69, 69]), &backing);
+        // The first look hears half a slot more than the close look (the slot the chords end in), no more.
+        for up in 0..12 {
+            assert!((first.moved(up) - close.moved(up)).abs() < 0.03, "{up}: first {first:?}\nclose {close:?}");
+        }
+        assert_eq!(first.best().0, close.best().0);
     }
 
     #[test]

@@ -185,7 +185,11 @@ many of the close look's best ten are still there when the first look keeps only
   two beats (12 bytes a slot, 24 a bar, about 200 a part). A slot is two quarter notes whatever the time signature, so
   a song in 6/8 is looked at in the same stretches of time as the library's parts, which are all read as 4/4; a loop
   that ends inside a slot (a bar of 6/8 is a slot and a half) is kept going round until it ends on a slot's line. No
-  more than 64 slots are kept of a part: one longer than 32 bars is looked at by its first 32. For the song's chords,
+  more than 64 slots are kept of a part: one longer than 32 bars is looked at by its first 32. Chords with more than
+  64 slots to a whole turn (longer than that, or ending inside a slot too often to end on a slot's line by then) are
+  never played round where the kept slots end, since they don't come round there (the 14 November 2026 review's
+  MI-9: a 12/4 song's 11 bars were tried three times over, twice from the wrong place in the bar). For the song's
+  chords,
   `Backing::outline` works out what each pitch class is worth in each slot by the close look's own numbers, so a tune
   made of whole slots gets exactly the close look's answer (`first_look::tests`), and real tunes land near it: keeping
   2 parts in 100 loses 1 of the close look's best hundred.
