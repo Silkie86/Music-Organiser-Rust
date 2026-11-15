@@ -2112,6 +2112,8 @@ final class Link {
             }
             if (now < 0) throw new LinkError("The track went before its clip could be launched.");
             m.put("launched", true);
+            // A launch starts a stopped Bitwig a moment later: a Stop asked for meanwhile waits for it (see afterStart).
+            launchAsked = clock.millis();
             if (!looping) {
                 // In step with the song (extension 3.17): a swapped clip carries on from where Bitwig is, not from its own
                 // start, so it stays with the parts that didn't change.
@@ -2199,6 +2201,47 @@ final class Link {
      * playing (or START_WAIT has passed), so a deleteclip that comes meanwhile waits for the start it's to stop (see
      * deleteClip). Looked at outside the changes' line: the launch's change has answered.
      */
+    /**
+     * When the link last launched a clip (which starts a stopped Bitwig a moment later), or -1 once Bitwig was seen
+     * playing after it (extension 3.28).
+     */
+    private long launchAsked = -1;
+
+    /** Whether a launch the link asked for less than START_WAIT ago may still be about to start Bitwig. */
+    private boolean startPending() {
+        if (launchAsked < 0) return false;
+        if (transport.isPlaying().get() || clock.millis() - launchAsked >= START_WAIT) {
+            launchAsked = -1;
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Runs `work`, which may press Stop (`transport` in the request): straight away, unless Bitwig is stopped and a launch
+     * the link asked for a moment ago hasn't shown yet. Then it waits for that start first (START_WAIT at most), so the
+     * Stop stops it, instead of landing on a stopped Bitwig with the start coming after it (extension 3.28).
+     */
+    private void afterStart(Map<String, Object> request, Runnable work, Finish finish) {
+        if (flag(request, "transport", false) && transport != null && startPending()) {
+            waitFor(() -> !startPending(), START_WAIT, seen -> work.run(), finish);
+            return;
+        }
+        work.run();
+    }
+
+    /**
+     * Presses Stop for a change that asked for it (`transport`), only while Bitwig plays: Stop on a Bitwig that's stopped
+     * already (you stopped it, or what the app started never did) moves your play start to the beginning (extension
+     * 3.28; before, only a part with its song's bars was kept from it). Says whether it pressed Stop.
+     */
+    private boolean stopIfPlaying(Map<String, Object> request) {
+        if (!flag(request, "transport", false) || transport == null || !transport.isPlaying().get()) return false;
+        transport.stop();
+        launchAsked = -1;
+        return true;
+    }
+
     private void watchStart(SongLoop loop) {
         long start = clock.millis();
         loop.starting = true;
@@ -2373,7 +2416,8 @@ final class Link {
             }, finish);
             return;
         }
-        takeClipOut(request, (String) id, index, loop, finish);
+        // Any other part launched a moment ago waits the same way (extension 3.28).
+        afterStart(request, () -> takeClipOut(request, (String) id, index, loop, finish), finish);
     }
 
     /** deleteClip's work, on the clip in slot `index` of the track with ID `id`; `loop` when the song's bars go round for it. */
@@ -2387,10 +2431,9 @@ final class Link {
             // As stoptracks does: the track plays its arranger clips again, not the empty launcher.
             trackItems[t].returnToArrangement();
         }
-        // A part that played with its song's bars: Stop while Bitwig is stopped already (you stopped it) would move your
-        // play start to the beginning, so Bitwig is only stopped while it plays.
-        boolean stopping = flag(request, "transport", false) && transport != null && (loop == null || transport.isPlaying().get());
-        if (stopping) transport.stop();
+        // Stop while Bitwig is stopped already (you stopped it) would move your play start to the beginning, so Bitwig is
+        // only stopped while it plays (any part from extension 3.28; before, only one with its song's bars).
+        boolean stopping = stopIfPlaying(request);
         Map<String, Object> m = new LinkedHashMap<>();
         if (t < 0 || noted == null || !trackSlots[t][index].hasContent().get()
             || !noted.equals(str(trackSlots[t][index].name().get()))) {
@@ -2419,18 +2462,23 @@ final class Link {
     private void deleteTrack(Map<String, Object> request, Finish finish) {
         Object id = field(request, "trackId");
         if (!(id instanceof String) || ((String) id).isEmpty()) throw new LinkError("Say which track, by its ID.");
+        afterStart(request, () -> takeTrackOut(request, (String) id, finish), finish);
+    }
+
+    /** deleteTrack's work, on the track with ID `id`. */
+    private void takeTrackOut(Map<String, Object> request, String id, Finish finish) {
         String noted = auditionTracks.remove(id);
         // Its clips go with it, or stay yours with a track you kept: either way they're not the app's to take out now.
         auditionClips.keySet().removeIf(k -> k.startsWith(id + "#"));
         // Nor do a song's bars stay looped for a part that went with its track.
         if (songLoop != null && songLoop.clip.startsWith(id + "#")) loopLeft();
-        int t = indexOf((String) id);
+        int t = indexOf(id);
         if (t >= 0) {
             trackItems[t].stop();
             // As stoptracks does: a track you keep plays its arranger clips again, not the empty launcher.
             trackItems[t].returnToArrangement();
         }
-        if (flag(request, "transport", false) && transport != null) transport.stop();
+        stopIfPlaying(request);
         Map<String, Object> m = new LinkedHashMap<>();
         if (t < 0 || noted == null || !noted.equals(str(trackItems[t].name().get()))) {
             m.put("deleted", false);
@@ -2438,7 +2486,7 @@ final class Link {
             return;
         }
         trackItems[t].deleteObject();
-        waitFor(() -> indexOf((String) id) < 0, CHANGE_WAIT, gone -> {
+        waitFor(() -> indexOf(id) < 0, CHANGE_WAIT, gone -> {
             m.put("deleted", gone);
             finish.ok(m);
         }, finish);
@@ -2452,19 +2500,23 @@ final class Link {
     private void stopTracks(Map<String, Object> request, Finish finish) {
         Object given = field(request, "trackIds");
         if (!(given instanceof List)) throw new LinkError("Say which tracks to stop, by their IDs.");
-        List<Object> stopped = new ArrayList<>();
         for (Object id : (List<?>) given) {
             if (!(id instanceof String)) throw new LinkError("A track's ID is text.");
-            int t = indexOf((String) id);
-            if (t < 0) continue;
-            trackItems[t].stop();
-            trackItems[t].returnToArrangement();
-            stopped.add(id);
         }
-        if (flag(request, "transport", false) && transport != null) transport.stop();
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("stopped", stopped);
-        finish.ok(m);
+        afterStart(request, () -> {
+            List<Object> stopped = new ArrayList<>();
+            for (Object id : (List<?>) given) {
+                int t = indexOf((String) id);
+                if (t < 0) continue;
+                trackItems[t].stop();
+                trackItems[t].returnToArrangement();
+                stopped.add(id);
+            }
+            stopIfPlaying(request);
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("stopped", stopped);
+            finish.ok(m);
+        }, finish);
     }
 
     /**

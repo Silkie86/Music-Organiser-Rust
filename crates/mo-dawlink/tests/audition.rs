@@ -411,6 +411,10 @@ fn a_preset_bitwig_doesnt_load_leaves_no_track() {
     let world = bitwig.world();
     assert_eq!(world.tracks.len(), before);
     assert!(world.requests.iter().all(|r| r["cmd"] != "clip"));
+    // Nothing started Bitwig, so the take-out doesn't ask it to stop: Stop on a stopped Bitwig moves the play start
+    // back to bar 1 (the review's BW-2).
+    let out = world.requests.iter().find(|r| r["cmd"] == "deletetrack").expect("the track was taken out");
+    assert_eq!(out["transport"], json!(false));
 }
 
 #[test]

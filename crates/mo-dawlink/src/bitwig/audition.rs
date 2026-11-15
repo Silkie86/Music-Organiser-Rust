@@ -334,10 +334,13 @@ impl Bitwig {
         };
         made(&auditioning);
         // Whatever goes wrong from here, the track comes out again, so a failed audition leaves nothing behind (and
-        // Bitwig stops if its clip launched after all and started it). When the link can't take it out (the
+        // Bitwig stops if its clip launched after all and started it: `launched`. Before the clip is asked for,
+        // nothing started Bitwig, and Stop on a stopped Bitwig would move the play start to bar 1; the review's BW-2). When the link can't take it out (the
         // connection went, say), the words say there may be a track left; one no longer wanted comes back then, so
         // it can still be stopped (the review's D-fp3).
-        let undo = |link: &mut Link, why: Error| match link.delete_audition_track(&track_id, !was_playing) {
+        let undo = |link: &mut Link, why: Error, launched: bool| match link
+            .delete_audition_track(&track_id, launched && !was_playing)
+        {
             Ok(_) => Err(why),
             Err(_) if why == Error::Cancelled => Ok(auditioning.clone()),
             Err(_) => {
@@ -348,18 +351,19 @@ impl Bitwig {
             Ok(inserted) if inserted.added => {}
             Ok(_) => {
                 let why = Error::Bitwig(format!("Bitwig didn't load {}.", file_name(&preset)));
-                return undo(&mut link, why);
+                return undo(&mut link, why, false);
             }
-            Err(e) => return undo(&mut link, e),
+            Err(e) => return undo(&mut link, e, false),
         }
         if !wanted() {
-            return undo(&mut link, Error::Cancelled);
+            return undo(&mut link, Error::Cancelled, false);
         }
         if let Err(e) = link.add_audition_clip(&track_id, &part, None) {
-            return undo(&mut link, e);
+            // The clip may have been launched before whatever went wrong.
+            return undo(&mut link, e, true);
         }
         if !wanted() {
-            return undo(&mut link, Error::Cancelled);
+            return undo(&mut link, Error::Cancelled, true);
         }
         Ok(auditioning)
     }
