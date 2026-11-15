@@ -227,12 +227,65 @@ fn notes_above_midis_top_key_are_left_out_with_a_warning() {
 }
 
 #[test]
-fn fl_25_writes_event_172_with_three_bytes() {
-    // Read as four bytes, the 172 swallows the title's id and garbles everything after it.
+fn fl_25_writes_event_172_before_an_extended_events_number() {
+    // Read as four bytes, the 172 swallows the last byte of the number and garbles everything after it.
     let info = read(&fl_studio_25_nothing_saved());
     assert_eq!(info.tempo, Some(98.0));
     assert_eq!(info.tracks, ["Cell"]);
     assert_eq!(info.details["Notes"], "1");
+    // It is one event: 172, the number 0xC0000101, a length and the text of who wrote the file.
+    let bytes = fl_studio_25_nothing_saved();
+    let flp = events::load(&bytes).unwrap();
+    let extended: Vec<_> = flp.events.iter().filter_map(|e| e.extended()).collect();
+    assert_eq!(extended.len(), 1);
+    assert_eq!((extended[0].0, flp.text(extended[0].1)), (0xC000_0101, "FL Studio 25.2.5.5319".to_owned()));
+    assert!(flp.events.iter().all(|e| e.id != 192), "its text isn't an old-style channel name");
+}
+
+/// FL 26 is said to write extended events inside channels too (other readers' notes: 0x100 with a one-byte value,
+/// 0xC0000102 with text). Read as "three bytes, then the next event", the first looked like the channel's light
+/// switched off and the second like an old-style channel name.
+#[test]
+fn an_extended_event_inside_a_channel_is_not_the_channels_light_or_name() {
+    let project = |extended: &[&[u8]]| {
+        let mut flp = Flp::new().ascii(199, "26.1.5.5618").dword(156, 120_000).word(64, 0).byte(21, 0).byte(0, 1);
+        for e in extended {
+            flp = flp.raw(e);
+        }
+        flp.text(203, "Kick").word(65, 1).data(224, &note(0, 0, 96, 60, 100)).build()
+    };
+    let text: Vec<u8> = "1,2\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let named = [&[172, 2, 1, 0, 0xC0, text.len() as u8][..], &text].concat();
+    let bytes =
+        project(&[&[172, 0, 1, 0, 0, 0], &named, &[172, 0, 2, 0, 0x40, 7, 0], &[172, 0, 3, 0, 0x80, 1, 2, 3, 4]]);
+    let flp = events::load(&bytes).unwrap();
+    assert!(flp.warning.is_none());
+    let extended: Vec<_> = flp.events.iter().filter_map(|e| e.extended()).collect();
+    assert_eq!(
+        extended,
+        [(0x100, &[0][..]), (0xC000_0102, &text[..]), (0x4000_0200, &[7, 0][..]), (0x8000_0300, &[1, 2, 3, 4][..])]
+    );
+    // The channel is on and has its own name; the song reads the same with and without them.
+    let info = read(&bytes);
+    assert_eq!(info.tracks, ["Kick"]);
+    let song = fl::song::read_song(&flp);
+    assert!(song.channels.iter().all(|c| c.enabled));
+    let plain = project(&[]);
+    assert_eq!(format!("{:?}", fl::song::read_song(&events::load(&plain).unwrap())), format!("{song:?}"));
+
+    // Before FL 25 event 172 is an ordinary four-byte event; from FL 25, one that isn't an extended event's number
+    // (255 or below, or a kind FL doesn't have) is read as three bytes, as before.
+    let old = Flp::new().ascii(199, "24.1.1.4285").dword(172, 0x100).dword(156, 90_000).build();
+    assert_eq!(read(&old).tempo, Some(90.0));
+    for odd in [[172, 1, 0, 0], [172, 0, 1, 0x10]] {
+        let bytes = Flp::new().ascii(199, "25.2.5.5319").raw(&odd).raw(&[0x50, 0, 0]).dword(156, 90_000).build();
+        assert_eq!(read(&bytes).tempo, Some(90.0), "{odd:?}");
+    }
+    // One cut off part-way reads up to there, with the warning (rule 9).
+    let cut = Flp::new().ascii(199, "26.1.5.5618").dword(156, 90_000).raw(&[172, 2, 1, 0, 0xC0, 40, 1, 2]).build();
+    let flp = events::load(&cut).unwrap();
+    assert!(flp.cut_short);
+    assert_eq!(read(&cut).tempo, Some(90.0));
 }
 
 #[test]

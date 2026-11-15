@@ -29,8 +29,12 @@ pub const EV_DOT_SHIFT: u8 = 92;
 pub const EV_MIXER_SLOT: u8 = 98;
 /// Tempo × 1000.
 pub const EV_TEMPO: u8 = 156;
-/// A four-byte id, but FL 25 and later write it with three bytes (meaning unknown).
-pub const EV_3_BYTES: u8 = 172;
+/// Not an event of its own: from FL 25 it says the next four bytes are the real event's number (an "extended" id,
+/// above 255), and that number's top four bits say how long its value is, the way a plain id's range does. The whole
+/// thing is kept as one event 172; [`Event::extended`] splits it. Solomon's 21 FL 25 saves that have one all carry
+/// 0xC0000101 (the text "FL Studio 25.2.5…", who wrote the file) before the first channel. FL 26 is said to write
+/// more of them, one inside each channel (from other readers' notes, not yet seen in a save of his).
+pub const EV_EXTENDED: u8 = 172;
 pub const EV_CHANNEL_NAME_OLD: u8 = 192;
 pub const EV_PATTERN_NAME: u8 = 193;
 pub const EV_TITLE: u8 = 194;
@@ -75,6 +79,18 @@ pub struct Event<'a> {
 }
 
 impl Event<'_> {
+    /// An extended event's own number and value (see [`EV_EXTENDED`]); `None` for every other event, and for an
+    /// event 172 that isn't one.
+    pub fn extended(&self) -> Option<(u32, &[u8])> {
+        let id = u32::from_le_bytes(bytes_at(&self.data, 0).filter(|_| self.id == EV_EXTENDED)?);
+        let value = self.data.get(4..)?;
+        match extended_size(id)? {
+            Some(size) => (value.len() == size).then_some((id, value)),
+            // Past the length, which ends at the first byte without its top bit.
+            None => Some((id, value.get(value.iter().position(|b| b & 0x80 == 0)? + 1..)?)),
+        }
+    }
+
     /// The value of a one-, two-, three- or four-byte event (ids below 192).
     pub fn int(&self) -> u32 {
         match *self.data {
@@ -166,6 +182,38 @@ pub(crate) fn f32_at(d: &[u8], at: usize) -> f32 {
     f32::from_le_bytes(zero_filled(d, at))
 }
 
+/// How long an extended event's value is, from its number's top four bits: one, two or four bytes, or `Some(None)`
+/// for a length followed by that many bytes. `None` when the four bytes after an event 172 can't be an extended
+/// event's number: every one FL writes is above 255 and has one of those four kinds.
+fn extended_size(id: u32) -> Option<Option<usize>> {
+    if id & 0x0FFF_FFFF < 0x100 {
+        return None;
+    }
+    match id >> 28 {
+        0x0 => Some(Some(1)),
+        0x4 => Some(Some(2)),
+        0x8 => Some(Some(4)),
+        0xC => Some(None),
+        _ => None,
+    }
+}
+
+/// The length that starts a text or data event's value at `pos` (seven bits a byte, lowest first, at most five
+/// bytes) and where the value starts; `None` when it doesn't end by then or by `end`: junk from a damaged file.
+fn length_at(raw: &[u8], mut pos: usize, end: usize) -> Option<(usize, usize)> {
+    let mut n = 0usize;
+    let mut shift = 0;
+    while let Some(&b) = raw.get(pos).filter(|_| shift < 35 && pos < end) {
+        pos += 1;
+        n |= ((b & 0x7F) as usize) << shift;
+        if b & 0x80 == 0 {
+            return Some((n, pos));
+        }
+        shift += 7;
+    }
+    None
+}
+
 /// The number before the first dot of a version, or 0.
 fn major_of(version: &str) -> u32 {
     version.trim_end_matches('\0').split('.').next().and_then(|v| v.parse().ok()).unwrap_or(0)
@@ -243,26 +291,20 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
         let size = match id {
             0..64 => Some(1),
             64..128 => Some(2),
-            // FL 25 and 26 write event 172 with three bytes, not the four its id says. Reading four swallows the next
-            // event and garbles what follows (the tempo, title and first pattern).
-            EV_3_BYTES if major >= 25 => Some(3),
+            // From FL 25, event 172 says the next four bytes are the real event's number, and its value follows as
+            // that number's kind says. All of it is one event here, so nothing after it reads as an event of its own
+            // (the value of 0x100 would look like "channel on", the text of 0xC0000101 like an old channel name).
+            // One that isn't an extended number is read as three bytes, as FL 25's were before this was known.
+            EV_EXTENDED if major >= 25 => match bytes_at(raw, pos).map(u32::from_le_bytes).and_then(extended_size) {
+                Some(Some(size)) => Some(4 + size),
+                Some(None) => length_at(raw, pos + 4, end).map(|(n, value)| n.saturating_add(value - pos)),
+                None => Some(3),
+            },
             128..192 => Some(4),
-            _ => {
-                // At most five bytes of seven bits each; a size that doesn't end by then is junk from a damaged file.
-                let mut size = None;
-                let mut n = 0usize;
-                let mut shift = 0;
-                while let Some(&b) = raw.get(pos).filter(|_| shift < 35 && pos < end) {
-                    pos += 1;
-                    n |= ((b & 0x7F) as usize) << shift;
-                    if b & 0x80 == 0 {
-                        size = Some(n);
-                        break;
-                    }
-                    shift += 7;
-                }
-                size
-            }
+            _ => length_at(raw, pos, end).map(|(n, value)| {
+                pos = value;
+                n
+            }),
         };
         // A file cut short or damaged: keep what's been read.
         let Some(data) = size.filter(|&s| s <= end - pos).and_then(|s| raw.get(pos..pos + s)) else {
