@@ -1080,11 +1080,18 @@ fn read_all(
     };
     let mut index = send_index(prints, &send);
     // How your songs use samples, with the file of each project counted (for the card's Used in list), read once:
-    // counted again for the sounds read again after an update.
+    // counted again for the sounds read again after an update. The list with them counted in is the one on show from
+    // then on, so sounds read again once the count was let go (the hourly look mending the library) keep them (the
+    // whole-app review of 14 Nov, SO-4).
     let uses = lib.and_then(|lib| uses_in(&lib, now, settings.rules));
-    if let Some((uses, projects)) = &uses {
-        send(Step::Used(Arc::new(with_usage(&list, usage_of(&list, uses), projects, &settings.weights))));
-    }
+    let list = match &uses {
+        Some((uses, projects)) => {
+            let counted = Arc::new(with_usage(&list, usage_of(&list, uses), projects, &settings.weights));
+            send(Step::Used(counted.clone()));
+            counted
+        }
+        None => list,
+    };
     // A copy of the format before, read as it is: laid out anew now that the page has all it needs from it (one that's
     // behind is made afresh below instead). The page works as usual meanwhile: it holds nothing of it.
     if first.formerly && !first.behind && remade.is_none() {
@@ -1898,6 +1905,9 @@ pub fn index_known(app: &AppWindow, index: Arc<SoundIndex>) {
         }
         (p.picked, first)
     });
+    if !first {
+        galaxy::show_trail(app);
+    }
     if let Some(at) = picked {
         find_alike(app, at);
     }
@@ -2092,6 +2102,8 @@ fn brought_up_to_date(app: &AppWindow, r: Refreshed) {
         let after = take_refreshed(&mut p, library, moved.as_deref().map(Vec::as_slice), retyped);
         (after, p.list.clone())
     });
+    // The Swept card as the trail is now: gone with the stars when they're laid out again.
+    galaxy::show_trail(app);
     crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(list)));
     refresh(app);
     show_rediscover_chips(app);
@@ -2351,6 +2363,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
     });
+    galaxy::show_trail(app);
     let list = PAGE.with(|p| p.borrow().list.clone());
     crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(list)));
     refresh(app);
@@ -2451,8 +2464,22 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.on_search_edited(move |text| change(&weak, |f| f.search = text.to_string()));
     let weak = app.as_weak();
     data.on_toggle_choice(move |chip, choice| change(&weak, |f| f.pick(&chip, &choice)));
+    // The Tempo slider says where its handles are on the press and on every move while it's held, mostly the same 5
+    // BPM step again: the list is asked for again only when the tempo picked changed, not for a pass over every sound
+    // (and every star packed again) each time (the whole-app review of 14 Nov, SO-7).
     let weak = app.as_weak();
-    data.on_tempo_picked(move |low, high| change(&weak, |f| f.set_tempo(low, high)));
+    data.on_tempo_picked(move |low, high| {
+        let Some(app) = weak.upgrade() else { return };
+        let changed = PAGE.with(|p| {
+            let filters = &mut p.borrow_mut().filters;
+            let was = filters.tempo;
+            filters.set_tempo(low, high);
+            filters.tempo != was
+        });
+        if changed {
+            refresh(&app);
+        }
+    });
     data.set_tempo_low_end(list::TEMPO_LOW);
     data.set_tempo_high_end(list::TEMPO_HIGH);
     data.set_tempo_step(list::TEMPO_STEP);
@@ -4830,6 +4857,42 @@ mod tests {
         let said = one_start(&sounds_db, &library_db, &Feed::default());
         let first = said.first().cloned().unwrap_or_default();
         assert!(first.starts_with("couldn't read: The sound library") && first.contains("is damaged"), "{said:?}");
+    }
+
+    /// The list with your songs' use counted in is the one the page goes on from: sounds read again after the count
+    /// was let go (the scans loop lets it go after its first pass; then the hourly look mends a damaged library, or a
+    /// later scan can't open the song library) keep the counts of the list on show (the whole-app review of 14 Nov,
+    /// SO-4). Before, that was the list from before they were counted, and the Used chips and column went blank.
+    #[test]
+    fn sounds_read_again_after_the_use_count_was_let_go_keep_it() {
+        let sounds_db = sound_library("uses-kept");
+        let library_db = song_library("uses-kept-songs.db", &[]);
+        one_start(&sounds_db, &library_db, &Feed::default());
+        let Some(mut on_show) = read_all(&sounds_db, &library_db, Some(Feed::default()), None, None, |_| {}) else {
+            panic!("no sounds read")
+        };
+        // The kick is in both of the song library's songs.
+        let kick_used = |list: &SoundList| {
+            let at = list.sounds().iter().position(|s| s.path.ends_with("kick.wav"));
+            at.and_then(|at| list.used_in(at))
+        };
+        assert_eq!(kick_used(&on_show.list), Some(2));
+        // As the scans loop does once its first pass is done.
+        on_show.recount |= on_show.uses.take().is_some();
+        let now = Local::now().naive_local();
+        let Ok((sounds, db)) = SoundsDb::open_read_only(&on_show.source).and_then(|db| Ok((db.all(now)?, db))) else {
+            panic!("couldn't read the sounds again")
+        };
+        let steps = std::sync::Mutex::new(Vec::new());
+        let send = |step: Step| {
+            if let Ok(mut steps) = steps.lock() {
+                steps.push(said(step));
+            }
+        };
+        take_again(sounds, Ok(db), PrintsAgain::CameWith, &mut on_show, None, &send);
+        let got = steps.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
+        assert_eq!(got, ["again: the same sounds, 5 sounds, 0 plays, used: true"]);
+        assert_eq!(kick_used(&on_show.list), Some(2));
     }
 
     #[test]

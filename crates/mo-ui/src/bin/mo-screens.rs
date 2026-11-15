@@ -830,7 +830,191 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tag_box_checks(&app, &window)?;
     stopping_by_click(&app, &window)?;
     keys_come_back_checks(&app, &window)?;
+    short_swept_card(&app, &window, &out)?;
+    swept_card_checks(&app, &window)?;
     Ok(())
+}
+
+/// A sweep across the galaxy, from its top left down to the right, slow enough that each star passed gets its turn to
+/// play: the trail through the swept stars, and the Swept card.
+fn sweep(data: &mo_ui::SoundsData<'_>) {
+    data.invoke_galaxy_down(40.0, 120.0, false);
+    for step in 1..=60 {
+        data.invoke_galaxy_move(40.0 + step as f32 * 12.0, 120.0 + step as f32 * 6.0);
+        if step % 3 == 0 {
+            std::thread::sleep(Duration::from_millis(95));
+        }
+    }
+    data.invoke_galaxy_up(false);
+}
+
+/// The galaxy's Swept card (the whole-app review of 14 Nov): the wheel over it stays with it, so the map under it
+/// doesn't zoom (SO-8); a double-click on a swept star counts as a play (SO-6); and its lines go with the trail when
+/// the stars are laid out again, so none goes on carrying its place in the old list (SO-5). Last, as it lays the map
+/// out again.
+fn swept_card_checks(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let data = app.global::<mo_ui::SoundsData>();
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    start_on(app, Place::Sounds);
+    data.invoke_pick_view(2);
+    // As on the galaxy's pictures: a sound's card open beside the map, and the whole map on show (the mini-map's
+    // picture flew in), so the sweep passes the same stars and the card is where the wheel turns.
+    pick_sound(app, 3);
+    data.invoke_galaxy_reset();
+    for _ in 0..60 {
+        std::thread::sleep(Duration::from_millis(16));
+        capture(window);
+    }
+    data.invoke_galaxy_swept_clear();
+    sweep(&data);
+    capture(window);
+    if data.get_galaxy_swept().row_count() == 0 {
+        return Err("swept card: the sweep across the galaxy left no Swept card".into());
+    }
+    // The wheel turned up over the card (a positive turn), then time for a zoom to fly in: the map left of the card
+    // stays as it was. Up, as down would show nothing: the whole map can't go further out.
+    let before = capture(window);
+    let (x, y) = SWEPT_CARD_WHEEL;
+    scroll(window, x, y, PAGE_DOWN);
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(16));
+        capture(window);
+    }
+    let after = capture(window);
+    hover(window, -1.0, -1.0);
+    if changed_within(&before, &after, GALAXY_LEFT) {
+        return Err(format!(
+            "swept card: the wheel at {x}, {y} over the Swept card zoomed the map; is the card still there?"
+        ));
+    }
+    // A double-click on the star swept last: it's picked and played, a play you meant, so History lists it first (SO-6).
+    let Some(star) = data.get_galaxy_trail_dots().row_data(0) else {
+        return Err("swept card: the sweep left no trail on the map".into());
+    };
+    data.invoke_galaxy_move(star.x, star.y);
+    data.invoke_galaxy_down(star.x, star.y, false);
+    data.invoke_galaxy_double();
+    data.invoke_galaxy_up(false);
+    capture(window);
+    let played = data.get_picked().name.to_string();
+    data.invoke_pick_view(3);
+    let first = data.get_lines().row_data(0).map(|line| line.name.to_string());
+    data.invoke_pick_view(2);
+    capture(window);
+    if first.as_deref() != Some(played.as_str()) {
+        return Err(format!(
+            "swept card: {played:?}, double-clicked on the map, isn't first in History ({first:?} is)"
+        ));
+    }
+    // New fingerprints: the stars are to be laid out again, and the trail goes with them, card and all, at once. With
+    // another view on show, so the map isn't laid out again on the spot: here that happens on this thread at once,
+    // hiding a card left as it was; in the app it takes seconds on the pool, and the galaxy came back to the old lines.
+    data.invoke_pick_view(1);
+    mo_ui::sounds::index_known(app, std::sync::Arc::new(sample_fingerprints()));
+    let left = data.get_galaxy_swept().row_count();
+    data.invoke_pick_view(2);
+    capture(window);
+    if left > 0 {
+        return Err(format!(
+            "swept card: {left} lines stayed on the Swept card once the stars were to be laid out again"
+        ));
+    }
+    mo_ui::sounds::stop_on_escape(app);
+    Ok(())
+}
+
+/// The galaxy's Swept card in a short window, with more lines than it has room for: they give way between its top and
+/// its Clear line, which both stay in sight, and the line Back and Next are on stays in sight among them, down to the
+/// oldest (the whole-app review of 14 Nov, SO-8: the card now stops above the mini-map and below the map's settings,
+/// and cut off its end, Clear and all). Saved as sounds-galaxy-swept-short.png.
+fn short_swept_card(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = app.global::<mo_ui::SoundsData>();
+    window.set_size(PhysicalSize::new(WIDTH, SHORT));
+    start_on(app, Place::Sounds);
+    data.invoke_pick_view(2);
+    pick_sound(app, 3);
+    data.invoke_galaxy_reset();
+    for _ in 0..60 {
+        std::thread::sleep(Duration::from_millis(16));
+        capture(window);
+    }
+    data.invoke_galaxy_swept_clear();
+    // Across the whole map and back, a row at a time, for a long trail.
+    for row in 0..SHORT_SWEEP_ROWS {
+        let y = 25.0 + row as f32 * 50.0;
+        let (from, to) = if row % 2 == 0 { (10.0, 530.0) } else { (530.0, 10.0) };
+        sweep_along(&data, (from, y), (to, y));
+    }
+    capture(window);
+    let lines = data.get_galaxy_swept().row_count();
+    // Down the card to its oldest line, as Down does.
+    for _ in 1..lines {
+        data.invoke_galaxy_swept_step(1);
+    }
+    let pixels = capture_sized(window, (WIDTH, SHORT), Duration::from_millis(400));
+    let path = out.join("sounds-galaxy-swept-short.png");
+    image::save_buffer(&path, &pixels, WIDTH, SHORT, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
+    let oldest = i32::try_from(lines).unwrap_or(0) - 1;
+    let was_at = data.get_galaxy_swept_at();
+    // The line Back and Next are on shows lowest on the card, so the one above it is the line swept after it.
+    let (x, y) = SHORT_SWEPT_ABOVE;
+    click(window, x, y);
+    capture(window);
+    let clicked = data.get_galaxy_swept_at();
+    let (clear_x, clear_y) = SHORT_SWEPT_CLEAR;
+    click(window, clear_x, clear_y);
+    capture(window);
+    let left = data.get_galaxy_swept().row_count();
+    mo_ui::sounds::stop_on_escape(app);
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    capture(window);
+    if lines < SHORT_SWEPT_LINES {
+        return Err(format!("short swept card: the sweeps left {lines} lines, too few to fill the card").into());
+    }
+    if was_at != oldest {
+        return Err(format!("short swept card: Down to the oldest line left Back and Next on line {was_at}").into());
+    }
+    if clicked != oldest - 1 {
+        return Err(format!(
+            "short swept card: the click at {x}, {y} went to line {clicked}, not to line {}, just above the one Back \
+             and Next were on: was that out of sight?",
+            oldest - 1
+        )
+        .into());
+    }
+    if left > 0 {
+        return Err(format!(
+            "short swept card: Clear at {clear_x}, {clear_y} left {left} lines: is it cut off the card's foot?"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// A sweep across the galaxy from `from` to `to` (on the map, in points), as [`sweep`]'s.
+fn sweep_along(data: &mo_ui::SoundsData<'_>, from: (f32, f32), to: (f32, f32)) {
+    let (dx, dy) = ((to.0 - from.0) / 60.0, (to.1 - from.1) / 60.0);
+    data.invoke_galaxy_down(from.0, from.1, false);
+    for step in 1..=60 {
+        data.invoke_galaxy_move(from.0 + step as f32 * dx, from.1 + step as f32 * dy);
+        if step % 3 == 0 {
+            std::thread::sleep(Duration::from_millis(95));
+        }
+    }
+    data.invoke_galaxy_up(false);
+}
+
+/// Whether any pixel differs between two pictures of the window inside a box (x, y, width, height, in pixels).
+fn changed_within(a: &[u8], b: &[u8], (x, y, width, height): (u32, u32, u32, u32)) -> bool {
+    (y..y + height).any(|row| {
+        let at = ((row * WIDTH + x) * 3) as usize..((row * WIDTH + x + width) * 3) as usize;
+        a.get(at.clone()) != b.get(at)
+    })
 }
 
 /// The filter column shows as many types as it has room for as tick lines, and only the rest in More types (Solomon,
@@ -2253,15 +2437,7 @@ fn sounds_shots(
     data.invoke_galaxy_light_by("Liked".into());
     capture(window);
     // A sweep across the map: the trail through the swept stars and the Swept card.
-    data.invoke_galaxy_down(40.0, 120.0, false);
-    for step in 1..=60 {
-        data.invoke_galaxy_move(40.0 + step as f32 * 12.0, 120.0 + step as f32 * 6.0);
-        // Slow enough that each star passed gets its turn to play.
-        if step % 3 == 0 {
-            std::thread::sleep(Duration::from_millis(95));
-        }
-    }
-    data.invoke_galaxy_up(false);
+    sweep(&data);
     capture(window);
     shots.push(("sounds-galaxy-swept.png".into(), capture(window)));
     // The arrow keys on the map: Right goes to the nearest star that way, and it's picked.
@@ -2290,8 +2466,14 @@ fn sounds_shots(
     ])));
     capture(window);
     shots.push(("sounds-galaxy-names.png".into(), capture(window)));
-    // Flown in: the mini-map shows the whole map with a box round the part on show.
+    // Flown in: the mini-map shows the whole map with a box round the part on show. From the whole map again: going
+    // down the Swept card moved the map to its sound, and the zoom would have flown into an empty corner.
     data.set_galaxy_labels(slint::ModelRc::new(slint::VecModel::from(Vec::<mo_ui::GalaxyLabel>::new())));
+    data.invoke_galaxy_reset();
+    for _ in 0..60 {
+        std::thread::sleep(Duration::from_millis(16));
+        capture(window);
+    }
     data.invoke_galaxy_move(300.0, 300.0);
     data.invoke_galaxy_wheel(8.0);
     for _ in 0..60 {
@@ -3541,6 +3723,7 @@ fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::Scann
 const REMOVE_OLDER_BUTTON: (f32, f32) = (1150.0, 822.0);
 /// The Presets page's Plugin menu: the first thing in its filter column.
 const PLUGIN_CHIP: (f32, f32) = (288.0, 152.0);
+/// A page's turn of the wheel: `-PAGE_DOWN` turns a page down, `PAGE_DOWN` up ([`scroll`]).
 const PAGE_DOWN: f32 = 300.0;
 
 /// Where the wheel turns the song panel down in the narrowest window, and by how much: on its status line, which
@@ -3553,8 +3736,20 @@ const SPACE_OLD_LINE: (f32, f32) = (400.0, 493.0);
 const SPACE_EMPTY: (f32, f32) = (1000.0, 60.0);
 /// Where the wheel turns a page's card (Space's, or Sounds') down to its end, and by more than enough: on its parts.
 const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
-/// The second line on the galaxy's Swept card, after the sweep.
-const SWEPT_LINE: (f32, f32) = (760.0, 387.0);
+/// The second line on the galaxy's Swept card, after the sweep and an arrow key.
+const SWEPT_LINE: (f32, f32) = (760.0, 301.0);
+/// On the galaxy's Swept card, after the sweep: on its first line, where the wheel turns.
+const SWEPT_CARD_WHEEL: (f32, f32) = (800.0, 260.0);
+/// The galaxy left of the Swept card, in pixels (x, y, width, height): its stars move when the map zooms.
+const GALAXY_LEFT: (u32, u32, u32, u32) = (470, 300, 200, 540);
+/// The Swept card in the short window, too short for its lines, gone down to its oldest: the line just above that one,
+/// and Clear.
+const SHORT_SWEPT_ABOVE: (f32, f32) = (760.0, 469.0);
+const SHORT_SWEPT_CLEAR: (f32, f32) = (903.0, 551.0);
+/// How many times the sweeps go across the map in the short window, and the fewest lines on the Swept card that fill
+/// it there (nine are more than it has room for).
+const SHORT_SWEEP_ROWS: usize = 9;
+const SHORT_SWEPT_LINES: usize = 10;
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 194.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
