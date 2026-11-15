@@ -317,6 +317,18 @@ more); a file that ends on the line leaves nothing to guess.
   round by its own bars of 4/4 in both looks, as a clip dropped into the song keeps its own length (before the
   search, the close look re-barred it to the song's bars, which the first look couldn't follow). Whether a part
   from a 4/4 pack is wanted in a waltz at all isn't measured: no measure set has such songs.
+- **A song in 6/8** (2026-11-15, the 14 November review's MI-13). A song's grid takes the signature's own beat now
+  (`Song::grid`: an eighth in 6/8, six to the bar), where it took three quarter notes. Measured on the three
+  POP909-CL songs with six beats to the bar (092, 102 and 254; most of their chords change on beat 1 or 4), the
+  chord reader on the accompaniment (`theorybench chords --engine rust --part accompaniment --folds 1,2,3,4`), each
+  read with six beats to the bar and again as three beats twice as long: the root is right 84.4% of the time
+  against 82.0%, sevenths 77.7% against 74.4%, MIREX 87.1% against 83.9%, where the chords change 89.0 against
+  87.4, the chord named whole 72.1% against 67.8%. Three songs is few (the likely ranges are 18 to 62 points wide),
+  but all ten of mir_eval's scores and the chords named whole move the same way. One thing goes the other way: the
+  kind of bass (root position, an inversion or a slash) is right 89.3% of the time against 90.2%, as more
+  inversions are read in root position. Not measured: how the order of the parts found moves (`theorybench pairs`
+  only takes songs in four). A Bitwig save gives only how long a bar is, so a Bitwig song in 6/8 still arrives as
+  3/4.
 
 - **How long a loop from the library is.** A part's length isn't saved with it, so a found part goes round by the
   bars its notes take: a four-bar loop that rests in its last bar is heard as three bars (and is a three-bar clip
