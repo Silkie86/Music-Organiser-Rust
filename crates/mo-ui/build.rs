@@ -50,7 +50,8 @@ fn product_slint(name: &str, logo: &Path) -> String {
 }
 
 /// The logo, name, description and version in the .exe. Only when building on Windows (where the resource compiler
-/// is); a build for Windows from elsewhere goes without, and says so.
+/// is); a build for Windows from elsewhere, or one where the resource compiler can't be found, goes without and says
+/// so: a missing icon is never worth a failed build.
 fn windows_details(product: &std::collections::HashMap<String, String>, ico: &Path) {
     #[cfg(windows)]
     {
@@ -63,7 +64,9 @@ fn windows_details(product: &std::collections::HashMap<String, String>, ico: &Pa
             .set("Comments", &product["description"])
             .set("ProductVersion", &version)
             .set("FileVersion", &version);
-        res.compile().expect("the .exe's logo and details should build");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=the .exe has no logo or details: {e}");
+        }
     }
     #[cfg(not(windows))]
     {

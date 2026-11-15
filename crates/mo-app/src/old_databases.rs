@@ -443,11 +443,12 @@ fn note_in_read_me(archive: &Path, name: &str, how: &str, from: &Path) {
     let Ok(mut file) = File::options().create(true).append(true).open(&path) else { return };
     let mut text = String::new();
     if new {
-        text.push_str(
-            "Music Organiser put the old app's databases here once its own had worked without them for a week.\r\n\
+        text.push_str(concat!(
+            crate::product::name_literal!(),
+            " put the old app's databases here once its own had worked without them for a week.\r\n\
              It doesn't open them any more, and it never deletes them: they're yours to keep or remove.\r\n\
              Each is whole only with the -wal and -shm files of the same name beside it.\r\n\r\n",
-        );
+        ));
     }
     let when = chrono::Local::now().format("%Y-%m-%d %H:%M");
     text.push_str(&format!("{when}  {name}: {how} from {}\r\n", from.display()));
@@ -626,7 +627,10 @@ mod tests {
         assert_eq!(names(&archive_folder), [READ_ME, "library.db", "library.db-shm", "library.db-wal"]);
         assert_eq!(fs::read(archive_folder.join("library.db-wal")).unwrap(), b"newest");
         let read_me = fs::read_to_string(archive_folder.join(READ_ME)).unwrap();
-        assert!(read_me.starts_with("Music Organiser put the old app's databases here"), "{read_me}");
+        assert!(
+            read_me.starts_with(&format!("{} put the old app's databases here", crate::product::NAME)),
+            "{read_me}"
+        );
         assert!(read_me.contains(&format!("library.db: moved here from {}", data.display())), "{read_me}");
         assert!(holds(&data, "library.db") && holds(&data, "library.db-wal") && !holds(&data, "midi.db"));
         assert!(!holds(&data, "library.db.bak") && !holds(&data, "songs.db"));
@@ -635,7 +639,7 @@ mod tests {
         let done = archive(&data, &[], READY, &mut quiet);
         assert_eq!(done.moved, [("midi.db", 4)]);
         let read_me = fs::read_to_string(archive_folder.join(READ_ME)).unwrap();
-        assert_eq!(read_me.matches("Music Organiser put").count(), 1, "{read_me}");
+        assert_eq!(read_me.matches(&format!("{} put", crate::product::NAME)).count(), 1, "{read_me}");
         assert_eq!(read_me.matches("moved here").count(), 2, "{read_me}");
         assert_eq!(names(&data), [FOLDER, "songs.db"]);
         let line = card_line(&done, &data, &[]).unwrap();

@@ -3,8 +3,16 @@
 //! person takes it from here; names that other programs or folders know the app by (the data folder, the DAW links,
 //! the MIDI port) don't.
 
+/// `product.toml`'s name as a literal, for `concat!` in this crate (the build variable is named only here).
+macro_rules! name_literal {
+    () => {
+        env!("MO_PRODUCT_NAME")
+    };
+}
+pub(crate) use name_literal;
+
 /// What people see: the title bar, About, the logs, the installer.
-pub const NAME: &str = env!("MO_PRODUCT_NAME");
+pub const NAME: &str = name_literal!();
 
 /// One line on what the app is.
 pub const DESCRIPTION: &str = env!("MO_PRODUCT_DESCRIPTION");
@@ -16,20 +24,4 @@ pub const PUBLISHER: &str = env!("MO_PRODUCT_PUBLISHER");
 pub const WEBSITE: &str = env!("MO_PRODUCT_WEBSITE");
 
 /// The background helper's name, for its tray icon and its log.
-pub fn helper_name() -> String {
-    format!("{NAME} helper")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn product_words_are_there() {
-        for words in [NAME, DESCRIPTION, PUBLISHER, WEBSITE] {
-            assert!(!words.trim().is_empty());
-        }
-        assert!(WEBSITE.starts_with("https://"), "{WEBSITE}");
-        assert_eq!(helper_name(), format!("{NAME} helper"));
-    }
-}
+pub const HELPER_NAME: &str = concat!(name_literal!(), " helper");

@@ -256,7 +256,7 @@ pub fn start(folder: &Path, header: &str) -> &'static SessionLog {
 /// Starts the background helper's log in the usual folder: named [`HELPER_PREFIX`]…, so it's kept apart from the
 /// app's.
 pub fn start_helper() -> &'static SessionLog {
-    let header = crate::version::log_header_of(&crate::product::helper_name(), Local::now());
+    let header = crate::version::log_header_of(crate::product::HELPER_NAME, Local::now());
     CURRENT.get_or_init(|| SessionLog::named(&crate::paths::logs_dir(), HELPER_PREFIX, Local::now(), &header))
 }
 

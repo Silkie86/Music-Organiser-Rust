@@ -819,7 +819,7 @@ pub const DAWS_NOTE: &str = "The scripts that let the app talk to Bitwig and FL 
     for letting the app make changes), on Bitwig's its extension (close Bitwig first on Windows).";
 
 pub const SLINT_CREDIT: &str =
-    concat!(env!("MO_PRODUCT_NAME"), "'s screens are made with Slint, under its royalty-free licence.");
+    concat!(crate::product::name_literal!(), "'s screens are made with Slint, under its royalty-free licence.");
 
 #[cfg(test)]
 mod tests {
