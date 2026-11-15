@@ -112,6 +112,10 @@ export component AppWindow inherits Window {
     callback dismiss-card(int);
     // Settings' "Try an activity card", until real jobs exist.
     callback try-job();
+    // A newer version fetched and checked (mo-ui update.rs): its version, and the setup that puts it in.
+    in property <string> update-ready;
+    in property <string> update-setup;
+    callback restart-to-update();
 
     // The key sheet (F1 or ?).
     // The key sheet's lines: the page's own keys, then the ones that work everywhere.
@@ -305,6 +309,29 @@ export component AppWindow inherits Window {
                                 text: "and " + root.more-jobs + " more";
                                 color: Theme.faint;
                                 font-size: Type.small;
+                            }
+                        }
+                    }
+                    // A new version ready to put in: one click closes the app, updates it and opens it again.
+                    if root.update-ready != "": VerticalLayout {
+                        vertical-stretch: 0;
+                        spacing: Space.xs;
+                        padding-top: Space.md;
+                        padding-left: Space.md;
+                        padding-right: Space.sm;
+                        Caps { text: "NEW VERSION"; }
+                        Text {
+                            text: Product.name + " " + root.update-ready + " is ready";
+                            color: Theme.text;
+                            font-size: Type.meta;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            StudioButton {
+                                text: "Restart to update";
+                                tip: "Closes the app (everything is kept), puts the new version in and opens it again";
+                                clicked => { root.restart-to-update(); }
                             }
                         }
                     }

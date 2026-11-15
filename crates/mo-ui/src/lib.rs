@@ -36,6 +36,7 @@ pub mod sounds;
 pub mod space;
 pub mod startup;
 mod stuck;
+pub mod update;
 pub mod watchdog;
 mod waves;
 

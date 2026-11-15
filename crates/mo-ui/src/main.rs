@@ -172,6 +172,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::startup::step("Space page");
     // The rail's "In your DAWs": what Bitwig has open, asked on a thread of its own.
     mo_ui::daws::connect(&app);
+    // A while after start, once a day: whether a newer version is out (an installed copy only; Settings turns it off).
+    mo_ui::update::connect(&app, feed.clone(), true);
     // Maximised under full screen, so F11 out of full screen leaves the window filling the screen beside the taskbar.
     app.window().set_maximized(true);
     if full_screen {
@@ -254,7 +256,13 @@ fn main() -> Result<(), slint::PlatformError> {
     // The sweep's and the frames' last few seconds, before the log closes.
     mo_app::sweep_timing::finish();
     mo_app::frame_timing::finish();
+    // The setup "Restart to update" asked for: started only once everything is written and the log has closed, as it
+    // closes whatever is left of the app.
+    let setup = mo_ui::update::asked();
     session.close();
+    if let Some(setup) = setup {
+        mo_ui::update::run(&setup);
+    }
     ran
 }
 

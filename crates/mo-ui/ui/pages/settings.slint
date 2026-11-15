@@ -110,6 +110,9 @@ export global SettingsData {
     in property <bool> output-busy;
     // Whether a Galaxy sweep holds the pointer to the star that's playing.
     in property <bool> sweep-hold;
+    // Updates (mo_ui::update): the once-a-day look for a new version, and the line under its switch.
+    in property <bool> update-check;
+    in property <string> update-note;
     // The MIDI page's smallest part: the choices, and which is picked.
     in property <[string]> smallest-parts;
     in property <int> smallest-index;
@@ -208,6 +211,7 @@ export global SettingsData {
     callback output-picked(string);
     callback refresh-outputs();
     callback toggle-sweep-hold();
+    callback toggle-update-check();
     // The curve editor's keys: what each meaning covers (free, bend, make), the keys' names, the key each meaning
     // has (a place in the names), and a key picked for a meaning.
     in property <[string]> curve-key-lines;
@@ -545,6 +549,24 @@ component GeneralTab inherits VerticalLayout {
                 on: SettingsData.sweep-hold;
                 clicked => { SettingsData.toggle-sweep-hold(); }
             }
+        }
+    }
+    SettingsCard {
+        title: "Updates";
+        intro: "New versions come from the app's Releases page on GitHub.";
+        HorizontalLayout {
+            alignment: start;
+            ToggleChip {
+                text: "Look for new versions once a day";
+                on: SettingsData.update-check;
+                clicked => { SettingsData.toggle-update-check(); }
+            }
+        }
+        Text {
+            text: SettingsData.update-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
         }
     }
     SettingsCard {
