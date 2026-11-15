@@ -100,7 +100,7 @@ export component AppWindow inherits Window {
     callback key(string, bool, bool, bool, bool, bool) -> bool;
 
     // What the app is doing: running and just-finished jobs as lines in the rail (and how many more than fit there),
-    // and the ones that failed as cards, bottom right.
+    // and the ones that failed or that stay until closed as cards, bottom right.
     in property <[CardInfo]> jobs;
     in property <int> more-jobs;
     in property <[CardInfo]> cards;
