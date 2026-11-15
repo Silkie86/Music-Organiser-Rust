@@ -1104,6 +1104,17 @@ export component MenuLine inherits Rectangle {
     }
 }
 
+// The small arrow after words that open a menu, 8 by 6, in the words' colour (`stroke`). Drawn: the app's fonts have
+// no "▾", which showed as an empty box (Solomon's note of 15 Nov 2026, the year strip's "Changed").
+export component MenuArrow inherits Path {
+    width: 8px;
+    height: 6px;
+    viewbox-width: 8;
+    viewbox-height: 6;
+    commands: "M 1 1 L 4 4.5 L 7 1";
+    stroke-width: 1.5px;
+}
+
 // The card a menu's lines sit on, inside a PopupWindow: raised, with a shadow.
 export component MenuCard inherits Rectangle {
     background: Theme.surface-raised;
@@ -2495,17 +2506,25 @@ export component YearRange inherits Rectangle {
         padding: Space.xs;
         spacing: Space.xs;
         alignment: start;
+        // The date's name, and under it the arrow that says it opens a menu (`MenuArrow`), on a line of its own:
+        // "Changed" or "First used" fills the strip's width.
         if root.by-choices.length > 0: Rectangle {
-            height: by-name.preferred-height;
+            height: by-name.preferred-height + 2px + by-arrow.height;
             by-name := Text {
                 // The strip's whole width, its padding too: a date's name is short, but the strip is narrow.
                 x: -Space.xs;
+                y: 0;
                 width: parent.width + 2 * Space.xs;
-                text: root.by + " ▾";
+                text: root.by;
                 color: by-touch.has-hover ? Theme.text : Theme.muted;
                 font-size: Type.caps;
                 horizontal-alignment: center;
                 wrap: word-wrap;
+            }
+            by-arrow := MenuArrow {
+                x: (parent.width - self.width) / 2;
+                y: by-name.preferred-height + 2px;
+                stroke: by-name.color;
             }
             by-touch := TouchArea {
                 mouse-cursor: pointer;

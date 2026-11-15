@@ -121,6 +121,8 @@ struct Page {
     /// the picked sound: that lost where the tiles were kept. A turn later, the picked sound is brought into view only
     /// if the count is a new one (the window or the card changed width while the tiles were away).
     columns_before: Option<usize>,
+    /// What the last resize that changed `columns` kept in sight ([`TilesHeld`]).
+    tiles_held: Option<TilesHeld>,
     /// The picked sound, as its place in `list`.
     picked: Option<usize>,
     /// A sound Ctrl+K jumped to that the filters hid: picked once the list without them arrives.
@@ -231,6 +233,7 @@ impl Default for Page {
             columns: 4,
             made_tiles: None,
             columns_before: None,
+            tiles_held: None,
             picked: None,
             to_pick: None,
             autoplay: false,
@@ -2714,19 +2717,36 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         });
     });
     let weak = app.as_weak();
-    data.on_columns_changed(move |n| {
+    // The window's width changed how many tiles fit in a row: the rows are made again, and the tiles turn so the ones
+    // you were looking at stay in sight. It used to bring the picked sound into view instead, from wherever you had
+    // turned to, and with none picked the same turn showed other tiles (Solomon's note of 15 Nov 2026: "strange
+    // behaviour when i scroll fast and resize").
+    data.on_columns_changed(move |n, turned, seen, row| {
         let Some(app) = weak.upgrade() else { return };
+        let data = app.global::<SoundsData>();
         let n = n.max(1) as usize;
-        let (changed, laying_out) = PAGE.with(|p| {
+        // A turn asked for that the tiles haven't made yet: they're still where they were, under rows made again.
+        let waiting = data.get_tiles_place_ask() != data.get_tiles_place_done();
+        let (changed, held) = PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            (std::mem::replace(&mut p.columns, n) != n, p.columns_before.is_some())
-        });
-        if changed {
-            TILE_ROWS.with(|m| m.notify.reset());
-            grid::changed();
-            if !laying_out {
-                bring_picked_into_view(&app);
+            let was = std::mem::replace(&mut p.columns, n);
+            // Tiles being made again come back where they were kept instead (`on_list_made`).
+            if was == n || p.columns_before.is_some() {
+                return (was != n, None);
             }
+            let picked = p.picked.and_then(|at| p.row_of(at));
+            let held = hold_in_sight(p.tiles_held, turned, seen, row, (was, n), picked, waiting);
+            p.tiles_held = held.or(p.tiles_held);
+            (true, held)
+        });
+        if !changed {
+            return;
+        }
+        TILE_ROWS.with(|m| m.notify.reset());
+        grid::changed();
+        if let Some(held) = held {
+            data.set_tiles_place_y(-held.turned);
+            data.set_tiles_place_ask(data.get_tiles_place_ask().wrapping_add(1));
         }
     });
     let weak = app.as_weak();
@@ -3741,6 +3761,66 @@ fn pick(app: &AppWindow, at: usize) {
     bring_picked_into_view(app);
 }
 
+/// What the tiles keep in sight while the window's width changes how many fit in a row: one tile, at the same height
+/// in the room ([`hold_in_sight`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TilesHeld {
+    /// The tile, as its place among the tiles.
+    tile: usize,
+    /// How far its row's top was down from the room's when it was first held, in points: less than nothing when the
+    /// row was cut off.
+    down: f32,
+    /// How far down that turns the tiles (`-content-y`), with the new count a row (the picked sound's row shown whole).
+    turned: f32,
+    /// The picked sound's place among the tiles then.
+    picked: Option<usize>,
+}
+
+/// The tile to keep in sight when a row's count of tiles changes, and how far its row's top is down from the room's:
+/// the picked sound's tile if any of its row is in sight, else the first tile in sight. `turned` is how far down the
+/// tiles are turned (`-content-y`), `seen` how tall the room they're in is and `row` a row's height, in points, with
+/// `columns` tiles a row; `picked` is the picked sound's place among the tiles. None while the rows aren't laid out.
+fn tile_in_sight(turned: f32, seen: f32, row: f32, columns: usize, picked: Option<usize>) -> Option<(usize, f32)> {
+    if !(row > 0.0 && turned.is_finite() && seen.is_finite()) {
+        return None;
+    }
+    let (columns, turned) = (columns.max(1), turned.max(0.0));
+    let first = (turned / row).floor() as usize;
+    // Past the last row with any of it in sight.
+    let past = (((turned + seen.max(0.0)) / row).ceil() as usize).max(first + 1);
+    let tile = picked.filter(|t| (first..past).contains(&(t / columns))).unwrap_or(first * columns);
+    Some((tile, (tile / columns) as f32 * row - turned))
+}
+
+/// What the tiles keep in sight as a row's count of tiles goes from `was` to `now` (the arguments as for
+/// [`tile_in_sight`]). The tile `held` by the resize before is held again while the tiles are still at the turn it
+/// gave them, or haven't made that turn yet (`waiting`), and the same sound is picked: a new first tile in sight each
+/// time would creep up a row or so, and a window dragged narrower and wider again wouldn't come back to the same
+/// tiles. The picked sound's row shows whole, as far as the room lets it: a narrower window can make the room shorter
+/// (the page's top takes more lines), and its row mustn't slip out of sight at the foot. None while the rows aren't
+/// laid out.
+fn hold_in_sight(
+    held: Option<TilesHeld>,
+    turned: f32,
+    seen: f32,
+    row: f32,
+    (was, now): (usize, usize),
+    picked: Option<usize>,
+    waiting: bool,
+) -> Option<TilesHeld> {
+    if row.is_nan() || row <= 0.0 || !seen.is_finite() {
+        return None;
+    }
+    let (tile, down) = held
+        .filter(|h| h.picked == picked && (waiting || (turned - h.turned).abs() < 0.5))
+        .map(|h| (h.tile, h.down))
+        .or_else(|| tile_in_sight(turned, seen, row, was, picked))?;
+    // `down` stays as it was, so a taller room again puts the picked one back where it was.
+    let shown = if picked == Some(tile) { down.clamp(0.0, (seen - row).max(0.0)) } else { down };
+    let turned = ((tile / now.max(1)) as f32 * row - shown).max(0.0);
+    Some(TilesHeld { tile, down, turned, picked })
+}
+
 /// Scrolls the list so the picked sound shows, when it's out of sight.
 fn bring_picked_into_view(app: &AppWindow) {
     let data = app.global::<SoundsData>();
@@ -4340,6 +4420,49 @@ mod tests {
         assert_eq!(click_does(4, Some(3), Some(3), true, false), Click::Pick { play: true });
         assert_eq!(click_does(4, None, None, true, false), Click::Pick { play: true });
         assert_eq!(click_does(4, None, Some(4), false, false), Click::Pick { play: false });
+    }
+
+    #[test]
+    fn the_tiles_you_were_looking_at_stay_in_sight_when_a_row_holds_more_or_fewer() {
+        // Rows 120 points tall, turned 30 points into row 100, five rows' room: from 4 to a row to 3.
+        let (row, seen, turned) = (120.0, 600.0, 100.0 * 120.0 + 30.0);
+        let hold =
+            |held, turned, counts, picked, waiting| hold_in_sight(held, turned, seen, row, counts, picked, waiting);
+        let turn = |held: Option<TilesHeld>| held.map(|h| h.turned);
+        // None picked: the first tile in sight (400) stays at the top, its row cut off as far. It's in row 133 now.
+        let narrow = hold(None, turned, (4, 3), None, false);
+        assert_eq!(narrow, Some(TilesHeld { tile: 400, down: -30.0, turned: 133.0 * 120.0 + 30.0, picked: None }));
+        // The picked one in sight (row 102, 210 points down) stays as far down: 410 is in row 136 now.
+        assert_eq!(turn(hold(None, turned, (4, 3), Some(410), false)), Some(136.0 * 120.0 - 210.0));
+        // A row only partly in sight counts, and shows whole after: row 105 showed its top 30 points, row 100 its
+        // foot.
+        assert_eq!(turn(hold(None, turned, (4, 3), Some(420), false)), Some(140.0 * 120.0 - 480.0));
+        assert_eq!(turn(hold(None, turned, (4, 3), Some(400), false)), Some(133.0 * 120.0));
+        // A shorter room (the page's top on more lines in a narrower window): the picked one still shows whole, at
+        // the room's foot. A taller room again puts it back as far down as it was.
+        let short = hold_in_sight(None, turned, 300.0, row, (4, 3), Some(410), false);
+        assert_eq!(turn(short), Some(136.0 * 120.0 - 180.0));
+        assert_eq!(turn(hold(short, 136.0 * 120.0 - 180.0, (3, 4), Some(410), false)), Some(turned));
+        // The picked one out of sight, above or below: the first in sight goes by, as with none picked.
+        for picked in [5, 424, 4000] {
+            assert_eq!(turn(hold(None, turned, (4, 3), Some(picked), false)), Some(133.0 * 120.0 + 30.0));
+        }
+        // Back to 4 a row: the same tile, so the same turn as at first. The first tile in sight now (399, at the
+        // start of row 133) would be in row 99, a row up.
+        assert_eq!(turn(hold(narrow, 133.0 * 120.0 + 30.0, (3, 4), None, false)), Some(turned));
+        assert_eq!(turn(hold(None, 133.0 * 120.0 + 30.0, (3, 4), None, false)), Some(99.0 * 120.0 + 30.0));
+        // On to 2 a row before the tiles have made the turn to 3 a row: still 400, in row 200.
+        assert_eq!(turn(hold(narrow, turned, (3, 2), None, true)), Some(200.0 * 120.0 + 30.0));
+        // Turned since, or another sound picked: what's in sight now goes by (401's row, cut off at the top, shows
+        // whole).
+        assert_eq!(turn(hold(narrow, 133.0 * 120.0, (3, 4), None, false)), Some(99.0 * 120.0));
+        assert_eq!(turn(hold(narrow, 133.0 * 120.0 + 30.0, (3, 4), Some(401), false)), Some(100.0 * 120.0));
+        // At the top it stays there; the picked one near the top doesn't go above it.
+        assert_eq!(turn(hold(None, 0.0, (4, 3), None, false)), Some(0.0));
+        assert_eq!(turn(hold(None, 0.0, (3, 6), Some(5), false)), Some(0.0));
+        // A room or rows not laid out yet: no turn.
+        assert_eq!(hold_in_sight(narrow, 50.0, seen, 0.0, (4, 3), None, true), None);
+        assert_eq!(hold(None, f32::NAN, (4, 3), None, false), None);
     }
 
     #[test]
