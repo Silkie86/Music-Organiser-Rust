@@ -402,6 +402,17 @@ impl Bitwig {
     /// and the part's clip stay in the project as yours. It takes the audition, so nothing can stop it (and take the
     /// track out) after. It goes in `_turn`.
     pub fn keep_audition(&self, auditioning: Auditioning, _turn: &Turn<'_>) -> Result<(), Error> {
+        self.keep_audition_now(&auditioning)
+    }
+
+    /// [`Bitwig::keep_audition`] as the app closes, without waiting its turn: a Keep still waiting behind a long job
+    /// would be lost with the app, and the kept part would play on (the 14 Nov review's MI-16). The extension makes
+    /// it even once the app has gone (3.21).
+    pub fn keep_audition_as_app_closes(&self, auditioning: &Auditioning) -> Result<(), Error> {
+        self.keep_audition_now(auditioning)
+    }
+
+    fn keep_audition_now(&self, auditioning: &Auditioning) -> Result<(), Error> {
         let mut link = self.connect()?;
         check_version(link.hello(), AUDITION_NEEDS)?;
         link.set_only_in(auditioning.project.clone());
