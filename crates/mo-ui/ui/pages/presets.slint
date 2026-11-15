@@ -4,7 +4,7 @@
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { CurveEditor } from "curve_editor.slint";
-import { Theme, AppKeys, Type, Space, Well, Panel, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, Panel, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -257,37 +257,41 @@ component PresetLineView inherits ListLine {
             preferred-width: 0px;
             min-width: 0px;
             alignment: center;
-            Text {
+            CutText {
+                over: root.resting;
+                mouse: root.mouse;
                 text: root.line.name;
                 color: Theme.text;
                 font-size: Type.body;
-                overflow: elide;
             }
-            Text {
+            CutText {
+                over: root.resting;
+                mouse: root.mouse;
                 text: root.line.under;
                 color: Theme.muted;
                 font-size: Type.meta;
-                overflow: elide;
             }
         }
-        Text {
+        CutText {
             width: 96px;
+            over: root.resting;
+            mouse: root.mouse;
             text: root.line.part;
             color: root.line.part == "" ? Theme.faint : Theme.sound-type(root.line.colour);
             font-size: Type.meta;
             font-weight: root.line.fixed ? 700 : 500;
             vertical-alignment: center;
-            overflow: elide;
         }
-        Text {
+        CutText {
             horizontal-stretch: 2;
             preferred-width: 0px;
             min-width: 0px;
+            over: root.resting;
+            mouse: root.mouse;
             text: root.line.from;
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
-            overflow: elide;
         }
         if !root.tight: Text {
             width: 56px;
@@ -410,28 +414,31 @@ component CurveLineView inherits ListLine {
             preferred-width: 0px;
             min-width: 0px;
             alignment: center;
-            Text {
+            CutText {
+                over: root.resting;
+                mouse: root.mouse;
                 text: root.line.name;
                 color: root.line.hidden ? Theme.muted : Theme.text;
                 font-size: Type.body;
-                overflow: elide;
             }
-            Text {
+            CutText {
+                over: root.resting;
+                mouse: root.mouse;
                 text: root.line.under;
                 color: Theme.muted;
                 font-size: Type.meta;
-                overflow: elide;
             }
         }
         // The list is a narrow column beside the editor: where a curve was found is on its card, and the name gets
         // the room.
-        if root.line.hidden: Text {
+        if root.line.hidden: CutText {
             horizontal-stretch: 0;
+            over: root.resting;
+            mouse: root.mouse;
             text: "Hidden";
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
-            overflow: elide;
         }
         Text {
             width: 52px;
@@ -661,13 +668,13 @@ export component PresetsPage inherits Rectangle {
                 padding-right: Space.md;
                 spacing: Space.sm;
                 alignment: stretch;
-                Text {
+                CutText {
                     horizontal-stretch: 1;
+                    own-mouse: true;
                     text: PresetsData.hearing;
                     color: Theme.text;
                     font-size: Type.meta;
                     vertical-alignment: center;
-                    overflow: elide;
                 }
                 VerticalLayout {
                     alignment: center;

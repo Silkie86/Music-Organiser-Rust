@@ -2,7 +2,7 @@
 // on a background thread, and the graphics card draws them into a picture (mo-ui's arrangement.rs and canvas.rs; the
 // processor where there's no card); the words are laid on top here, in the app's own fonts, each clipped to its strip:
 // track names on the left, the ruler along the top, clip names on the timeline.
-import { Theme, Type, Space, ToggleChip, PointerPad, HoverNote } from "../studio.slint";
+import { Theme, CutText, Type, Space, ToggleChip, PointerPad, HoverNote } from "../studio.slint";
 
 // How a label on the picture looks.
 export enum ArrKind {
@@ -111,13 +111,13 @@ export component ArrangementPreview inherits VerticalLayout {
             on: i == ArrangementData.view;
             clicked => { ArrangementData.pick-view(i); }
         }
-        Text {
+        CutText {
             horizontal-stretch: 1;
+            own-mouse: true;
             text: ArrangementData.summary;
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
-            overflow: elide;
         }
     }
     for n in ArrangementData.notes: Text {

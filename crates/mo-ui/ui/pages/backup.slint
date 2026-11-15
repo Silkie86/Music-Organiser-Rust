@@ -4,7 +4,7 @@
 // (mo_app::backup), mo-ui/src/backup.rs fills it.
 import { ListView } from "std-widgets.slint";
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, StudioButton, ActionKey, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Panel, Groove, ProgressLine, EmptyState, NoticeStrip, ListLine } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, ActionKey, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Panel, Groove, ProgressLine, EmptyState, NoticeStrip, ListLine, CutText } from "../studio.slint";
 
 export struct BackupFolderLine {
     path: string,
@@ -125,12 +125,12 @@ export component BackupPage inherits Rectangle {
                         Caps { text: "BACKUP DRIVE"; }
                         HorizontalLayout {
                             spacing: Space.md;
-                            Text {
+                            CutText {
+                                own-mouse: true;
                                 text: BackupData.drive != "" ? BackupData.drive : "No drive picked yet";
                                 color: BackupData.drive != "" ? Theme.text : Theme.muted;
                                 font-size: Type.row-title;
                                 font-weight: 600;
-                                overflow: elide;
                             }
                         }
                         if BackupData.drive != "": ProgressLine {
@@ -191,7 +191,7 @@ export component BackupPage inherits Rectangle {
                 if BackupData.gone-open && BackupData.gone.length > 0: ListView {
                     // Up to six lines show; the rest scroll. A click on a line shows that file on the backup.
                     height: min(BackupData.gone.length, 6) * 48px;
-                    for g[i] in BackupData.gone: ListLine {
+                    for g[i] in BackupData.gone: gone-file := ListLine {
                         height: 48px;
                         tip: "Show it on the backup";
                         clicked => { BackupData.gone-show(i); }
@@ -205,17 +205,19 @@ export component BackupPage inherits Rectangle {
                                 alignment: center;
                                 spacing: Space.xs;
                                 horizontal-stretch: 1;
-                                Text {
+                                CutText {
+                                    over: gone-file.resting;
+                                    mouse: gone-file.mouse;
                                     text: g.was;
                                     color: Theme.text;
                                     font-size: Type.body;
-                                    overflow: elide;
                                 }
-                                Text {
+                                CutText {
+                                    over: gone-file.resting;
+                                    mouse: gone-file.mouse;
                                     text: g.note;
                                     color: Theme.muted;
                                     font-size: Type.meta;
-                                    overflow: elide;
                                 }
                             }
                             Text {
@@ -279,12 +281,12 @@ export component BackupPage inherits Rectangle {
                         HorizontalLayout {
                             spacing: Space.md;
                             Caps { text: "FOLDERS"; vertical-alignment: center; }
-                            Text {
+                            CutText {
+                                own-mouse: true;
                                 text: "All backed up together. Whole: everything goes. Slimmed: How much decides.";
                                 color: Theme.muted;
                                 font-size: Type.meta;
                                 horizontal-stretch: 1;
-                                overflow: elide;
                             }
                         }
                         Panel {
@@ -368,17 +370,17 @@ export component BackupPage inherits Rectangle {
                                 spacing: Space.md;
                                 VerticalLayout {
                                     horizontal-stretch: 1;
-                                    Text {
+                                    CutText {
+                                        own-mouse: true;
                                         text: o.why;
                                         color: Theme.text;
                                         font-size: Type.body;
-                                        overflow: elide;
                                     }
-                                    Text {
+                                    CutText {
+                                        own-mouse: true;
                                         text: o.note;
                                         color: Theme.muted;
                                         font-size: Type.meta;
-                                        overflow: elide;
                                     }
                                 }
                                 Text {

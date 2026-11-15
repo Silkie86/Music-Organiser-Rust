@@ -5,7 +5,7 @@
 // (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
 // them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, Caps, Well, Panel, PageHeader, ListLine, SidePanel, PanelDivider, EmptyState, HowItWorks, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, Panel, PageHeader, ListLine, CutText, SidePanel, PanelDivider, EmptyState, HowItWorks, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
 
 // One drive across the top.
 export struct DriveCard {
@@ -108,12 +108,12 @@ component DriveView inherits Panel {
         alignment: start;
         HorizontalLayout {
             spacing: Space.md;
-            Text {
+            CutText {
+                own-mouse: true;
                 text: root.drive.name;
                 color: Theme.text;
                 font-size: Type.row-title;
                 font-weight: 600;
-                overflow: elide;
                 horizontal-stretch: 1;
             }
             Text {
@@ -164,17 +164,19 @@ component RoomLineView inherits ListLine {
             alignment: center;
             spacing: Space.xs;
             horizontal-stretch: 1;
-            Text {
+            CutText {
+                over: root.resting;
+                mouse: root.mouse;
                 text: root.line.title;
                 color: Theme.text;
                 font-size: Type.body;
-                overflow: elide;
             }
-            Text {
+            CutText {
+                over: root.resting;
+                mouse: root.mouse;
                 text: root.line.why;
                 color: Theme.muted;
                 font-size: Type.meta;
-                overflow: elide;
             }
         }
         // How much of all the room to free is this line's (the UX review of 10 Nov, C4).

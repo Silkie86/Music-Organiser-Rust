@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, Tip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, Tip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -364,21 +364,23 @@ component MidiLineView inherits ListLine {
             spacing: Space.xs;
             HorizontalLayout {
                 spacing: Space.sm;
-                Text {
+                CutText {
+                    over: root.resting;
+                    mouse: root.mouse;
                     text: root.line.title;
                     color: Theme.text;
                     font-size: Type.body;
                     font-weight: 600;
-                    overflow: elide;
                     horizontal-stretch: 1;
                     preferred-width: 0px;
                     min-width: 0px;
                 }
-                Text {
+                CutText {
+                    over: root.resting;
+                    mouse: root.mouse;
                     text: root.line.from;
                     color: Theme.muted;
                     font-size: Type.meta;
-                    overflow: elide;
                     horizontal-stretch: 1;
                     preferred-width: 0px;
                     min-width: 0px;
@@ -387,11 +389,12 @@ component MidiLineView inherits ListLine {
             }
             HorizontalLayout {
                 spacing: Space.sm;
-                Text {
+                CutText {
+                    over: root.resting;
+                    mouse: root.mouse;
                     text: root.line.details;
                     color: Theme.muted;
                     font-size: Type.meta;
-                    overflow: elide;
                     horizontal-stretch: 1;
                     preferred-width: 0px;
                     min-width: 0px;
@@ -422,14 +425,15 @@ component MidiLineView inherits ListLine {
             vertical-alignment: center;
             horizontal-alignment: right;
         }
-        Text {
+        CutText {
             width: root.tight ? 48px : 96px;
+            over: root.resting;
+            mouse: root.mouse;
             text: root.line.key;
             color: Theme.text;
             font-family: Theme.number-font;
             font-size: Type.meta;
             vertical-alignment: center;
-            overflow: elide;
         }
         Text {
             width: 96px;
@@ -552,11 +556,11 @@ component PartPanel inherits SidePanel {
             font-size: Type.meta;
             font-weight: 600;
         }
-        Text {
+        CutText {
+            own-mouse: true;
             text: MidiData.picked.kind-why;
             color: Theme.muted;
             font-size: Type.meta;
-            overflow: elide;
             horizontal-stretch: 1;
             min-width: 0px;
         }
@@ -810,11 +814,11 @@ component PartPanel inherits SidePanel {
     if MidiData.picked.others.length > 0: VerticalLayout {
         spacing: Space.xs;
         Caps { text: "THE SAME NOTES ARE IN"; }
-        for o in MidiData.picked.others: Text {
+        for o in MidiData.picked.others: CutText {
+            own-mouse: true;
             text: o;
             color: Theme.muted;
             font-size: Type.meta;
-            overflow: elide;
             min-width: 0px;
         }
         if MidiData.picked.others-more != "": Text {
@@ -849,12 +853,12 @@ component ListSays inherits HorizontalLayout {
             clicked => { MidiData.clear-target(); }
         }
     }
-    Text {
+    CutText {
+        own-mouse: true;
         text: MidiData.result;
         color: Theme.muted;
         font-size: Type.meta;
         vertical-alignment: center;
-        overflow: elide;
         horizontal-stretch: 1;
         min-width: 0px;
     }

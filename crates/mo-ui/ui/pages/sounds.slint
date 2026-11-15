@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, CutText, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -601,30 +601,32 @@ component SoundTileView inherits Rectangle {
             y: Space.md + (root.line-height - self.height) / 2;
             tint: Theme.sound-type(root.tile.colour);
         }
-        Text {
+        CutText {
             x: Space.md + 8px + Space.sm;
             y: Space.md;
             width: root.width - 2 * Space.md - 8px - Space.sm - (root.tile.favourite ? Space.sm + 11px : 0);
             height: root.name-height;
+            over: line.resting;
+            mouse: line.mouse;
             text: root.tile.name;
             color: Theme.text;
             font-size: Type.body;
             font-weight: 600;
-            overflow: elide;
         }
         if root.tile.favourite: Heart {
             x: root.width - Space.md - self.width;
             y: Space.md + (root.line-height - self.height) / 2;
         }
-        Text {
+        CutText {
             x: Space.md;
             y: Space.md + root.line-height + Space.xs;
             width: root.width - 2 * Space.md;
             height: root.facts-height;
+            over: line.resting;
+            mouse: line.mouse;
             text: root.tile.facts;
             color: Theme.muted;
             font-size: Type.meta;
-            overflow: elide;
         }
         if root.itself: Waveform {
             x: Space.md;
@@ -644,18 +646,22 @@ component SoundTileView inherits Rectangle {
 // nothing and stretches, so every line splits the room the same way.
 component SoundName inherits HorizontalLayout {
     in property <SoundLine> line;
+    // The mouse on the line, and where it is, for the whole name when it's cut short (`CutText`).
+    in property <bool> over;
+    in property <Point> mouse;
     preferred-width: 0px;
     min-width: 0px;
     spacing: Space.sm;
-    Text {
+    CutText {
         horizontal-stretch: 1;
         preferred-width: 0px;
         min-width: 0px;
+        over: root.over;
+        mouse: root.mouse;
         text: root.line.name;
         color: root.line.playing ? Theme.accent : Theme.text;
         font-size: Type.body;
         vertical-alignment: center;
-        overflow: elide;
     }
     if root.line.favourite: VerticalLayout {
         alignment: center;
@@ -711,14 +717,17 @@ component SoundLineView inherits ListLine {
         SoundName {
             horizontal-stretch: 2;
             line: root.line;
+            over: root.resting;
+            mouse: root.mouse;
         }
-        Text {
+        CutText {
             width: 110px;
+            over: root.resting;
+            mouse: root.mouse;
             text: root.line.sound-type;
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
-            overflow: elide;
         }
         Text {
             width: 52px;
@@ -755,15 +764,16 @@ component SoundLineView inherits ListLine {
             vertical-alignment: center;
             horizontal-alignment: right;
         }
-        Text {
+        CutText {
             horizontal-stretch: root.rediscover ? 3 : 1;
             preferred-width: 0px;
             min-width: 0px;
+            over: root.resting;
+            mouse: root.mouse;
             text: root.rediscover ? root.line.reason : root.line.folder;
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
-            overflow: elide;
         }
     }
     if root.narrow: VerticalLayout {
@@ -782,6 +792,8 @@ component SoundLineView inherits ListLine {
             SoundName {
                 horizontal-stretch: 1;
                 line: root.line;
+                over: root.resting;
+                mouse: root.mouse;
             }
             Text {
                 width: 56px;
@@ -797,14 +809,15 @@ component SoundLineView inherits ListLine {
         HorizontalLayout {
             spacing: Space.md;
             Rectangle { width: 8px; }
-            Text {
+            CutText {
                 horizontal-stretch: 1;
                 preferred-width: 0px;
                 min-width: 0px;
+                over: root.resting;
+                mouse: root.mouse;
                 text: root.facts;
                 color: Theme.muted;
                 font-size: Type.meta;
-                overflow: elide;
             }
         }
     }
@@ -906,14 +919,15 @@ component PadLineView inherits ListLine {
         padding-left: Space.md;
         padding-right: Space.md;
         spacing: Space.md;
-        if !root.narrow: Text {
+        if !root.narrow: CutText {
             width: 120px;
+            over: root.resting;
+            mouse: root.mouse;
             text: root.pad.name;
             color: Theme.text;
             font-size: Type.body;
             font-weight: 600;
             vertical-alignment: center;
-            overflow: elide;
         }
         VerticalLayout {
             alignment: center;
@@ -927,28 +941,31 @@ component PadLineView inherits ListLine {
             HorizontalLayout {
                 spacing: Space.sm;
                 // Never wider than the names' column in a wide list, so a long name can't squeeze the sound out.
-                if root.narrow: Text {
+                if root.narrow: CutText {
                     max-width: 120px;
+                    over: root.resting;
+                    mouse: root.mouse;
                     text: root.pad.name;
                     color: Theme.text;
                     font-size: Type.body;
                     font-weight: 600;
-                    overflow: elide;
                 }
-                Text {
+                CutText {
                     horizontal-stretch: 1;
                     min-width: 0px;
+                    over: root.resting;
+                    mouse: root.mouse;
                     text: root.pad.sound;
                     color: root.pad.playing ? Theme.accent : root.pad.filled ? Theme.text : Theme.muted;
                     font-size: Type.body;
-                    overflow: elide;
                 }
             }
-            Text {
+            CutText {
+                over: root.resting;
+                mouse: root.mouse;
                 text: root.pad.detail;
                 color: Theme.muted;
                 font-size: Type.meta;
-                overflow: elide;
             }
         }
         VerticalLayout {
@@ -992,7 +1009,7 @@ component FoldersCard inherits Panel {
         }
         ListView {
             vertical-stretch: 1;
-            for f in SoundsData.folders: ListLine {
+            for f in SoundsData.folders: folder-line := ListLine {
                 height: 44px;
                 tip: f.folder;
                 clicked => { SoundsData.pick-folder(f.folder); }
@@ -1007,11 +1024,12 @@ component FoldersCard inherits Panel {
                         font-size: Type.meta;
                         overflow: elide;
                     }
-                    Text {
+                    CutText {
+                        over: folder-line.resting;
+                        mouse: folder-line.mouse;
                         text: f.used;
                         color: Theme.muted;
                         font-size: Type.meta;
-                        overflow: elide;
                     }
                 }
             }
@@ -1127,12 +1145,12 @@ component BitwigCard inherits Panel {
             min-height: 80px;
             row-height: 22px;
             rows: SoundsData.bitwig-missing.length;
-            for line in SoundsData.bitwig-missing: Text {
+            for line in SoundsData.bitwig-missing: CutText {
                 height: 22px;
+                own-mouse: true;
                 text: line;
                 color: Theme.muted;
                 font-size: Type.meta;
-                overflow: elide;
                 vertical-alignment: center;
             }
         }
@@ -1379,7 +1397,7 @@ component SoundPanel inherits SidePanel {
         }
         if SoundsData.card-list == 0: VerticalLayout {
             spacing: Space.xs;
-            for a in SoundsData.alike: ListLine {
+            for a in SoundsData.alike: alike-line := ListLine {
                 height: 28px;
                 draggable: true;
                 lifted: a.place == SoundsData.lifted-alike;
@@ -1398,15 +1416,16 @@ component SoundPanel inherits SidePanel {
                         alignment: center;
                         Dot { tint: Theme.sound-type(a.colour); }
                     }
-                    Text {
+                    CutText {
                         horizontal-stretch: 1;
                         preferred-width: 0px;
                         min-width: 0px;
+                        over: alike-line.resting;
+                        mouse: alike-line.mouse;
                         text: a.name;
                         color: Theme.text;
                         font-size: Type.meta;
                         vertical-alignment: center;
-                        overflow: elide;
                     }
                     Text {
                         text: a.sound-type;
@@ -1435,7 +1454,7 @@ component SoundPanel inherits SidePanel {
         }
         if SoundsData.card-list == 1: VerticalLayout {
             spacing: Space.xs;
-            for u in SoundsData.picked.projects: ListLine {
+            for u in SoundsData.picked.projects: song-line := ListLine {
                 height: 28px;
                 tip: "Open it on the Songs page";
                 clicked => { SoundsData.open-project(u.id); }
@@ -1449,15 +1468,16 @@ component SoundPanel inherits SidePanel {
                         alignment: center;
                         Dot { tint: Theme.daw(u.daw); }
                     }
-                    Text {
+                    CutText {
                         horizontal-stretch: 1;
                         preferred-width: 0px;
                         min-width: 0px;
+                        over: song-line.resting;
+                        mouse: song-line.mouse;
                         text: u.name;
                         color: Theme.text;
                         font-size: Type.meta;
                         vertical-alignment: center;
-                        overflow: elide;
                     }
                     Text {
                         text: u.saved;
@@ -2013,7 +2033,7 @@ export component SoundsPage inherits Rectangle {
                                             width: parent.width;
                                             height: self.preferred-height;
                                             spacing: Space.xs;
-                                            for line[i] in SoundsData.galaxy-swept: ListLine {
+                                            for line[i] in SoundsData.galaxy-swept: swept-line := ListLine {
                                                 height: 30px;
                                                 selected: line.current;
                                                 tip: line.kind;
@@ -2036,12 +2056,13 @@ export component SoundsPage inherits Rectangle {
                                                         alignment: center;
                                                         Dot { tint: Theme.sound-type(line.colour); }
                                                     }
-                                                    Text {
+                                                    CutText {
+                                                        over: swept-line.resting;
+                                                        mouse: swept-line.mouse;
                                                         text: line.name;
                                                         color: line.current ? Theme.text : Theme.muted;
                                                         font-size: Type.meta;
                                                         vertical-alignment: center;
-                                                        overflow: elide;
                                                         horizontal-stretch: 1;
                                                     }
                                                 }
