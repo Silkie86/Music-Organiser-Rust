@@ -1630,8 +1630,10 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
         act::COPY_PATH => crate::files::copy_path(&feed, item.path()),
         act::EXPORT if enabled(id) => export_one(app, item, false),
         act::TO_BITWIG if enabled(id) => {
-            if item.is_file() {
+            if item.is_file() && item.row.extension.eq_ignore_ascii_case(".bwpreset") {
                 send_file(item.path().to_owned());
+            } else if item.is_file() {
+                send_made_from_file(item);
             } else {
                 export_one(app, item, true);
             }
@@ -1771,7 +1773,7 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
                 let mut went = true;
                 if send {
                     (text, went) = match &bwpreset {
-                        Some(p) => match send_to_bitwig(p) {
+                        Some(p) => match send_to_bitwig(p, &stem_of(p)) {
                             Ok(words) => (words, true),
                             Err(words) => (words, false),
                         },
@@ -1927,7 +1929,8 @@ fn send_file(path: String) {
     });
     on_window(show_all);
     let started = background::spawn("Send to Bitwig", move || {
-        let text = match send_to_bitwig(Path::new(&path)) {
+        let name = Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let text = match send_to_bitwig(Path::new(&path), &name) {
             Ok(words) => words,
             Err(words) => {
                 crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
@@ -1941,12 +1944,59 @@ fn send_file(path: String) {
     }
 }
 
+/// A plugin's own preset file (.fxp, .fxb, .vstpreset) sent into Bitwig as a Bitwig preset made from it, in Temp
+/// under a name the sweep knows, removed once Bitwig has it (PR-3, rule 28). The file itself is only read.
+fn send_made_from_file(item: Item) {
+    let (_, templates, bitwig_folders, feed) = export_setup();
+    PAGE.with(|p| p.borrow_mut().exporting = true);
+    on_window(show_all);
+    let started = background::spawn("Send to Bitwig", move || {
+        let text = match made_from_file(&item, templates, &bitwig_folders) {
+            Ok((made, name)) => {
+                let sent = send_to_bitwig(&made.0, &name);
+                drop(made);
+                sent.unwrap_or_else(|words| {
+                    crate::files::reveal(&feed, item.path(), mo_app::shell::folder_of(item.path()));
+                    words
+                })
+            }
+            Err(words) => words,
+        };
+        set_exporting(false, Some(text));
+    });
+    if let Err(e) = started {
+        log::error("Presets", &format!("Couldn't start sending to Bitwig: {e}"));
+        PAGE.with(|p| p.borrow_mut().exporting = false);
+    }
+}
+
+/// A Bitwig preset made from a plugin's own preset file, in Temp (removed when the [`Gone`] goes), and its name (the
+/// file's). An error says why none could be made. Reads the file, so never on the window's thread.
+fn made_from_file(
+    item: &Item,
+    templates: Option<Arc<Templates>>,
+    bitwig_folders: &[PathBuf],
+) -> Result<(Gone, String), String> {
+    let path = PathBuf::from(item.path());
+    let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| item.row.name.clone());
+    let to = Gone(std::env::temp_dir().join(mo_app::midi::play_preset_name()));
+    let templates = templates_now(templates, bitwig_folders, |t| without_template(&[item], t).is_empty());
+    let made = background::on_pool(|| {
+        export::bitwig_preset_from_file(&path, &item.row.plugin, item.row.kind, &templates, &to.0)
+    });
+    match made {
+        Ok(Some(())) => Ok((to, name)),
+        Ok(None) => Err(no_bitwig_preset(item)),
+        Err(e) => Err(format!("No Bitwig preset could be made of {name}: {e}.")),
+    }
+}
+
 /// Sends a Bitwig preset into the project open in Bitwig, through the Bitwig link (`mo-dawlink`): a new track named
 /// after the preset, with the preset loaded on it, as if it were dropped there. Waits for Bitwig, so only ever on a
 /// thread away from the window. `Ok` says what happened in Bitwig; `Err` says why it didn't go, and the caller shows
 /// the file in its folder instead, to drag onto a track.
-fn send_to_bitwig(preset: &Path) -> Result<String, String> {
-    let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+fn send_to_bitwig(preset: &Path, name: &str) -> Result<String, String> {
+    let name = name.to_owned();
     // The link's own send: it waits its turn behind sounds and kits sent from the Sounds page, checks the file is
     // still there, and keeps the change to the project open as it began.
     match mo_dawlink::bitwig::send_preset(preset, &name) {
@@ -2116,19 +2166,23 @@ fn audition(
     }
     // A song's sound gets its Bitwig preset made in Temp, under a name the sweep knows, and it goes once Bitwig has
     // loaded it: never in the export folder, among the presets you exported (the 6 Nov review's D-fp5, rule 28).
-    let (preset, name, made) = match &item.row.source {
+    // The preset made for it (`_made`) goes however this ends.
+    let (preset, name, _made) = match &item.row.source {
+        // A plugin's own preset file is made a Bitwig preset in Temp first, as Send to Bitwig makes it (PR-3).
+        Source::File { .. } if logic::can_be_bitwig(&item.row.extension) => {
+            let (made, name) = made_from_file(item, templates, bitwig_folders).map_err(Some)?;
+            (made.0.clone(), Some(name), Some(made))
+        }
         Source::File { .. } => {
             let preset = PathBuf::from(item.path());
             let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned());
-            (preset, name, false)
+            (preset, name, None)
         }
         Source::Song { save, key } => {
             let (preset, name) = audition_preset_of(item, save, key, templates, bitwig_folders)?;
-            (preset, Some(name), true)
+            (preset.clone(), Some(name), Some(Gone(preset)))
         }
     };
-    // The preset made for it goes however this ends.
-    let _made = made.then(|| Gone(preset.clone()));
     let name = name.unwrap_or_else(|| item.row.name.clone());
     let clip = mo_app::preset_audition::clip(&name, item.role());
     let bytes = mo_formats::midi::write::write_clip(&clip)
@@ -2144,6 +2198,10 @@ fn audition(
         mo_dawlink::bitwig::Bitwig::default().audition_preset_telling(&preset, &part, &name, turn, wanted, &made);
     let _ = std::fs::remove_file(&part);
     heard.map_err(|e| (e != mo_dawlink::bitwig::Error::Cancelled).then(|| e.to_string()))
+}
+
+fn stem_of(p: &Path) -> String {
+    p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// A file the app made in Temp, removed when this goes.
