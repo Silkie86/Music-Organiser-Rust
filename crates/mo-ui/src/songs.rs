@@ -1089,6 +1089,7 @@ fn line(songs: &Songs, entry: &Entry, now: NaiveDateTime) -> SongLine {
                 date: r.short_date(now).into(),
                 date_tip: r.date_tip().into(),
                 missing: r.missing_text().into(),
+                missing_words: r.missing_words().into(),
                 rating: r.rating,
                 favourite: r.favourite,
                 // The first status ("Idea") is every song's to begin with, so it isn't shown.

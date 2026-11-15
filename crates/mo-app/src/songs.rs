@@ -163,18 +163,40 @@ impl SongRow {
 
     /// What's missing: "2 plugins, 1 sample, file moved", or "" when nothing is.
     pub fn missing_text(&self) -> String {
-        let l = &self.song.latest;
-        let mut parts = Vec::new();
-        if l.missing_plugins > 0 {
-            parts.push(plural(l.missing_plugins as usize, "plugin"));
-        }
-        if l.missing_samples > 0 {
-            parts.push(plural(l.missing_samples as usize, "sample"));
-        }
-        if l.file_missing {
+        let mut parts = self.missing_counts();
+        if self.song.latest.file_missing {
             parts.push("file moved".to_owned());
         }
         parts.join(", ")
+    }
+
+    /// What's missing, saying so, for a line among the song's details: "2 plugins, 1 sample missing, file moved", or
+    /// "" when nothing is. The list beside the song's panel puts it after the details line (Solomon, 15 Nov 2026: "should
+    /// be able to see if a song has something missing without seeing its card"), where "1 sample" alone would read as
+    /// how many it has.
+    pub fn missing_words(&self) -> String {
+        let counts = self.missing_counts();
+        let mut parts = Vec::new();
+        if !counts.is_empty() {
+            parts.push(format!("{} missing", counts.join(", ")));
+        }
+        if self.song.latest.file_missing {
+            parts.push("file moved".to_owned());
+        }
+        parts.join(", ")
+    }
+
+    /// "2 plugins", "1 sample": the plugins and samples its newest save can't find.
+    fn missing_counts(&self) -> Vec<String> {
+        let l = &self.song.latest;
+        let mut counts = Vec::new();
+        if l.missing_plugins > 0 {
+            counts.push(plural(l.missing_plugins as usize, "plugin"));
+        }
+        if l.missing_samples > 0 {
+            counts.push(plural(l.missing_samples as usize, "sample"));
+        }
+        counts
     }
 
     pub fn has_missing(&self) -> bool {
@@ -1148,6 +1170,19 @@ mod tests {
         let r = &s.rows[0];
         assert_eq!(r.details_line(), "FL Studio · 140 BPM · G minor · 2 saves");
         assert_eq!(r.missing_text(), "1 plugin, 3 samples");
+        // After the details (the list beside the song's panel), it says they're missing: "3 samples" alone would read
+        // as how many it has.
+        assert_eq!(r.missing_words(), "1 plugin, 3 samples missing");
+        let said = |plugins: u32, samples: u32, file_missing: bool| {
+            let mut one = save("Didums", day(2024, 8, 3));
+            (one.missing_plugins, one.missing_samples, one.file_missing) = (plugins, samples, file_missing);
+            let listed = songs(&[one]);
+            (listed.rows[0].missing_text(), listed.rows[0].missing_words())
+        };
+        assert_eq!(said(0, 1, true), ("1 sample, file moved".to_owned(), "1 sample missing, file moved".to_owned()));
+        assert_eq!(said(2, 0, false), ("2 plugins".to_owned(), "2 plugins missing".to_owned()));
+        assert_eq!(said(0, 0, true), ("file moved".to_owned(), "file moved".to_owned()));
+        assert_eq!(said(0, 0, false), (String::new(), String::new()));
         assert_eq!(r.short_date(day(2024, 12, 1)), "3 Aug");
         assert_eq!(r.short_date(day(2026, 1, 1)), "3 Aug 2024");
         assert_eq!(r.date_tip(), "Last saved 3 Aug 2024. First made 10 Jan 2019.");
