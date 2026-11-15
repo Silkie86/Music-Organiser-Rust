@@ -595,28 +595,6 @@ export component CloseButton inherits Rectangle {
     }
 }
 
-// A rounded chip that does something when clicked, like "2 running" under the activity cards.
-export component Chip inherits Rectangle {
-    in property <string> text;
-    callback clicked;
-    width: label.preferred-width + 24px;
-    height: 28px;
-    border-radius: 14px;
-    background: touch.has-hover ? Theme.hover : Theme.surface-raised;
-    border-width: 1px;
-    border-color: Theme.edge;
-    animate background { duration: Motion.tap; }
-    label := Text {
-        text: root.text;
-        color: Theme.text;
-        font-size: Type.meta;
-        font-weight: 500;
-    }
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
-
 // A tick box with its words beside it. Clicking either ticks or unticks it.
 export component TickBox inherits Rectangle {
     in property <string> text;

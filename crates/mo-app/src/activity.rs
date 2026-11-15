@@ -1,5 +1,6 @@
-//! Activity cards: every job reports through here, and the window shows one card per job, bottom right: started,
-//! progress, finished or failed (spec 3.1, kept). A running card can be put away; "N running" brings them back.
+//! Activity: every job reports through here: started, progress, finished or failed (spec 3.1, kept). The window shows
+//! the running and just-finished jobs as lines in the rail, under WORKING ON, and a job that failed, or one done that
+//! stays until it's read ([`Feed::told`]), as a card bottom right, to close with its × ([`Card::to_close`]).
 //!
 //! Jobs run on any thread. They hold a [`Job`] and report through it; the feed keeps the cards and calls the window
 //! back when something changed, at most every 250 ms for progress (rule 12: no progress flood). Each start and end
@@ -36,8 +37,6 @@ pub struct Card {
     /// 0 to 1, or `None` while it can't say how far it is.
     pub progress: Option<f32>,
     pub state: State,
-    /// Put away by its × while it runs.
-    pub put_away: bool,
     pub started: Instant,
     pub ended: Option<Instant>,
 }
@@ -103,7 +102,6 @@ impl Feed {
             detail: detail.to_owned(),
             progress: None,
             state: State::Running,
-            put_away: false,
             started: Instant::now(),
             ended: None,
         });
@@ -136,26 +134,20 @@ impl Feed {
             detail: detail.to_owned(),
             progress: None,
             state,
-            put_away: false,
             started: Instant::now(),
             ended: None,
         });
         self.changed();
     }
 
-    /// The cards to show now, oldest first: put-away ones and finished ones past their time are left out.
+    /// The cards to show now, oldest first: finished ones past their time are left out.
     pub fn visible(&self, now: Instant) -> Vec<Card> {
-        self.lock().cards.iter().filter(|c| !c.put_away && !c.gone_by(now)).cloned().collect()
+        self.lock().cards.iter().filter(|c| !c.gone_by(now)).cloned().collect()
     }
 
-    /// How many jobs are running, put away or not.
+    /// How many jobs are running.
     pub fn running(&self) -> usize {
         self.lock().cards.iter().filter(|c| c.state == State::Running).count()
-    }
-
-    /// How many running jobs are put away (for the "N running" chip).
-    pub fn put_away(&self) -> usize {
-        self.lock().cards.iter().filter(|c| c.state == State::Running && c.put_away).count()
     }
 
     /// The running jobs' titles, for the freeze watchdog. Never waits on the window.
@@ -163,25 +155,15 @@ impl Feed {
         self.lock().cards.iter().filter(|c| c.state == State::Running).map(|c| c.title.clone()).collect()
     }
 
-    /// The × on a card: a running one is put away, a finished one goes.
+    /// The × on a card: it goes. Only one that's finished has a × ([`Card::to_close`]); a job running is a line in
+    /// the rail, which has none, so it stays (the whole-app review of 14 Nov, AP-10: the "N running" chip that
+    /// brought put-away cards back went with #444).
     pub fn dismiss(&self, id: u64) {
         {
             let mut inner = self.lock();
-            if let Some(i) = inner.cards.iter().position(|c| c.id == id) {
-                if inner.cards[i].state == State::Running {
-                    inner.cards[i].put_away = true;
-                } else {
-                    inner.cards.remove(i);
-                }
+            if let Some(i) = inner.cards.iter().position(|c| c.id == id && c.state != State::Running) {
+                inner.cards.remove(i);
             }
-        }
-        self.changed();
-    }
-
-    /// "N running": brings the put-away cards back.
-    pub fn bring_back(&self) {
-        for c in self.lock().cards.iter_mut() {
-            c.put_away = false;
         }
         self.changed();
     }
@@ -304,7 +286,6 @@ impl Job {
         let card = self.feed.update(self.id, |c| {
             c.state = state;
             c.ended = Some(Instant::now());
-            c.put_away = false;
             c.progress = (state == State::Done).then_some(1.0);
             if !detail.is_empty() {
                 c.detail = detail.to_owned();
@@ -370,16 +351,14 @@ mod tests {
     }
 
     #[test]
-    fn put_away_and_bring_back() {
+    fn a_running_job_stays_and_a_failure_shows() {
         let feed = Feed::default();
         let job = feed.start("Analysing sounds", "");
+        // A running job has no × (review AP-10): it stays, so a failure is never hidden.
         feed.dismiss(job.id);
-        assert!(feed.visible(Instant::now()).is_empty());
-        assert_eq!(feed.put_away(), 1);
-        feed.bring_back();
         assert_eq!(feed.visible(Instant::now()).len(), 1);
+        assert_eq!(feed.running(), 1);
         job.failed("The folder went away");
-        // Ending brings a put-away card back, so a failure is never hidden.
         assert_eq!(feed.visible(Instant::now())[0].state, State::Failed);
         // And it stays longer than a card that's done, so there's time to read why.
         assert_eq!(feed.visible(Instant::now() + DONE_STAYS).len(), 1);

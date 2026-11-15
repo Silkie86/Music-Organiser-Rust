@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
 use mo_app::log;
+use mo_app::plugins::folder_fixes;
 use mo_app::plugins::measure::{self, Roots, due};
 use mo_library::Library;
 use slint::ComponentHandle;
@@ -52,12 +53,14 @@ pub(super) fn line(measured: Option<NaiveDateTime>) -> String {
     }
 }
 
-/// Measures when the last measure is due ([`due`]), looking at most once an hour: the oldest measure is read from the
-/// library first, on the thread. Quick on the window's thread.
+/// Measures when the last measure is due ([`due`]), looking at most once an hour, or at once when a read asked for a
+/// measure (a folder you added that the last measure hasn't got: [`folder_fixes::measure_asked`]; one that didn't keep
+/// what it found leaves it owed, for the hourly look): the oldest measure is read from the library first, on the
+/// thread. Quick on the window's thread.
 pub fn when_due(app: &AppWindow) {
     let look = {
         let mut looked = LOOKED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let look = looked.is_none_or(|at| at.elapsed() >= LOOK_EVERY);
+        let look = looked.is_none_or(|at| at.elapsed() >= LOOK_EVERY) || folder_fixes::measure_asked();
         if look {
             *looked = Some(Instant::now());
         }
@@ -86,7 +89,8 @@ fn start(app: &AppWindow, whatever: bool) {
     let spawned = mo_app::background::spawn("Plugins measure", move || {
         let own = mo_library::songs_db::own_since(&library).is_some();
         NOT_OWN.store(!own, Ordering::Relaxed);
-        let kept = if !own || (!whatever && !is_due(&library)) {
+        let asked = folder_fixes::take_measure_asked();
+        let kept = if !own || (!whatever && !asked && !is_due(&library)) {
             false
         } else {
             let card = feed.start("Measuring your plugins", "Looking through your plugin folders");
@@ -103,6 +107,11 @@ fn start(app: &AppWindow, whatever: bool) {
             }
             found.is_ok()
         };
+        // Kept: it measured every folder you added that was there, so a read's ask is answered, this measure's or
+        // one made while it ran. Not kept (it failed, stopped or couldn't run): still owed, tried at the hourly look.
+        if kept {
+            folder_fixes::measure_answered();
+        }
         RUNNING.store(false, Ordering::Relaxed);
         back(&weak, move |app| {
             shown(app);

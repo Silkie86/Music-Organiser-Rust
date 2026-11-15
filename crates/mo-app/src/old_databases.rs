@@ -459,13 +459,16 @@ fn note_in_read_me(archive: &Path, name: &str, how: &str, from: &Path) {
 /// folder `data`, and those left in the folders the data was moved out of. Not in a run that uses the old copy of
 /// its data (the folder a move went to is away: [`crate::paths::problem`]): that folder is the one the old databases
 /// are copied *from*, and nothing in it is changed. The caller leaves it out too in a run that reads `library.db`.
-pub fn archive_later(data: PathBuf, feed: Feed) {
+/// `then` is called on that thread once something was put away (Settings says what the old folders still hold).
+pub fn archive_later(data: PathBuf, feed: Feed, then: impl FnOnce() + Send + 'static) {
     if crate::paths::problem().is_some() {
         return;
     }
     let started = crate::background::spawn("Old databases", move || {
         std::thread::sleep(WAIT);
-        archive_now(&data, &old_folders(&data), &crate::paths::first_dir(), &feed);
+        if archive_now(&data, &old_folders(&data), &crate::paths::first_dir(), &feed).any() {
+            then();
+        }
     });
     if let Err(e) = started {
         log::warning("Old databases", &format!("Couldn't start putting the old app's databases away: {e}"));

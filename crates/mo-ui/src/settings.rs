@@ -82,6 +82,12 @@ struct Page {
     data_message: String,
     /// The folder a finished copy waits to switch to at the next start (read once, then kept here).
     data_pending: Option<PathBuf>,
+    /// What the folder the data was moved out of still holds for the app to put away, as last looked when the page
+    /// showed or the old databases were put away, away from the window's thread ([`look_left_behind`]): not at every
+    /// redraw (the whole-app review of 14 Nov, AP-18). `None` until the first look is in.
+    data_left: Option<Vec<&'static str>>,
+    /// Which look at it is the newest, so an older one that took longer (a drive waking up) never shows over it.
+    data_left_asked: u64,
     feed: Feed,
 }
 
@@ -232,6 +238,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             data_moving: None,
             data_message: String::new(),
             data_pending: mo_app::data_move::pending(),
+            data_left: None,
+            data_left_asked: 0,
             feed: setup.feed,
         })
     });
@@ -902,6 +910,7 @@ pub fn shown(app: &AppWindow) {
     if !live {
         return;
     }
+    look_left_behind(app);
     list_outputs(app);
     // Bitwig is only asked while its tab is on show.
     let on_daws =
@@ -910,6 +919,40 @@ pub fn shown(app: &AppWindow) {
         check_daws(app);
     }
     read_folders_later(app, library, asked);
+}
+
+/// Looks away from the window at what the folder the data was moved out of still holds for the app to put away (it
+/// may have put some away since the last look), and shows the data folder's note again when that changed. The newest
+/// look wins. Called when the page shows, and once the old databases are put away.
+pub fn look_left_behind(app: &AppWindow) {
+    let Some(from) = mo_app::paths::moved_from() else { return };
+    let Some(asked) = PAGE.with(|p| {
+        p.borrow_mut().as_mut().map(|p| {
+            p.data_left_asked += 1;
+            p.data_left_asked
+        })
+    }) else {
+        return;
+    };
+    let weak = app.as_weak();
+    let started = background::spawn("Settings data folder", move || {
+        let left = mo_app::data_move::left_to_put_away(&mo_app::paths::data_dir(), Some(&from));
+        let _ = slint::invoke_from_event_loop(move || {
+            let changed = PAGE.with(|p| match p.borrow_mut().as_mut() {
+                Some(p) if p.data_left_asked == asked && p.data_left.as_ref() != Some(&left) => {
+                    p.data_left = Some(left);
+                    true
+                }
+                _ => false,
+            });
+            if changed && let Some(app) = weak.upgrade() {
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start looking in the folder the data was moved out of: {e}"));
+    }
 }
 
 /// Reads the folders away from the window, and shows them if no newer read was asked for since.
@@ -1696,10 +1739,10 @@ fn show(app: &AppWindow) {
         let problems: Vec<String> =
             [mo_app::paths::problem(), mo_app::data_move::start_problem()].into_iter().flatten().collect();
         let mut note = mo_app::data_move::status_note(
-            &mo_app::paths::data_dir(),
             pending.as_deref(),
             mo_app::paths::moved_from().as_deref(),
             &problems,
+            p.data_left.as_deref(),
         );
         if !p.data_message.is_empty() {
             note = if note.is_empty() { p.data_message.clone() } else { format!("{}\n{note}", p.data_message) };

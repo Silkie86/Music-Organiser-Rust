@@ -8,7 +8,8 @@ use std::sync::atomic::AtomicBool;
 
 use mo_app::space::app_databases;
 use mo_space::app_files::{
-    CACHES, DAMAGED_SOUND_LAB, KEPT_SOUND_LAB, NEW_SONG_LIBRARY, OLD_DATABASES, SOUND_LAB_BACKUP, measure,
+    CACHES, CURVES_LIBRARY, DAMAGED_SOUND_LAB, KEPT_SOUND_LAB, NEW_SONG_LIBRARY, OLD_DATABASES, PART_FIXES,
+    SOUND_LAB_BACKUP, measure,
 };
 
 /// The card's parts for the data folder `data` while the app reads the song library `library` there, with their sizes.
@@ -117,6 +118,41 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             (KEPT_SOUND_LAB, 15),
             ("Everything else", 12),
             ("MIDI parts", 12),
+        ]
+    );
+    let _ = fs::remove_dir_all(&data);
+}
+
+/// The test plugin's recordings and Chord check's takes, the curve files made to drag, and the Presets page's own
+/// databases are parts of their own, each by its folder's or file's own name: before, they were all "Everything else:
+/// Your Bitwig template and the rest", so an evening's recordings filling the drive read as the template (the
+/// whole-app review of 14 Nov, AP-14).
+#[test]
+fn recordings_takes_curves_and_the_presets_pages_databases_are_parts_of_their_own() {
+    let data = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-app-space-app-files-yours");
+    let _ = fs::remove_dir_all(&data);
+    let write = |path: PathBuf, bytes: usize| {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, vec![0u8; bytes]).unwrap();
+    };
+    write(data.join("songs.db"), 1);
+    write(data.join(mo_app::data_move::RECORDINGS_FOLDER).join("Recording 2026-11-14 21-00-00.wav"), 90);
+    write(data.join(mo_app::chord_check::FOLDER).join("take 2026-11-13 07-12-03-250.json"), 70);
+    write(data.join(mo_presets::curves::FOLDER).join("Rise.bwcurve"), 30);
+    write(data.join(mo_presets::fixes::FILE_NAME), 50);
+    write(data.join(mo_presets::curves::FILE_NAME), 40);
+    write(data.join(format!("{}-wal", mo_presets::curves::FILE_NAME)), 4);
+    write(data.join("Bitwig template").join("Music Organiser template.bwproject"), 7);
+    assert_eq!(
+        parts(&data, "songs.db"),
+        [
+            ("Recordings", 90),
+            ("Chord check takes", 70),
+            (PART_FIXES, 50),
+            (CURVES_LIBRARY, 44),
+            ("Curve files", 30),
+            ("Everything else", 7),
+            ("Your library", 1),
         ]
     );
     let _ = fs::remove_dir_all(&data);

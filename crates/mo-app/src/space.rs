@@ -349,9 +349,10 @@ const CACHE_FILES: [&str; 8] = [
 /// What the App files card measures in the app's data folder `data`, as parts (each file counts once, in the first
 /// part that names it): the song library the app reads (`library`: its own `songs.db` once it's made, or `library.db`
 /// till then), the sound library and the MIDI index, then `songs.db` while it isn't read yet, the old app's databases
-/// it doesn't read any more, the sound library's backup copy and a damaged one set aside (or kept), and the caches. The rest
-/// goes by what's at the top of the folder ([`app_files::part_of`]): before, the backup copy and the caches were "Your
-/// Bitwig template and the rest" (the whole-app review of 10 Nov, T-4).
+/// it doesn't read any more, the sound library's backup copy and a damaged one set aside (or kept), the Presets page's
+/// own databases, and the caches. The rest goes by what's at the top of the folder ([`app_files::part_of`]): before,
+/// the backup copy and the caches were "Your Bitwig template and the rest" (the whole-app review of 10 Nov, T-4), and
+/// so were the Presets page's databases (the whole-app review of 14 Nov, AP-14).
 pub fn app_databases(data: &Path, library: PathBuf) -> Vec<AppDatabase> {
     let midi = mo_midi::store::MidiStore::path_beside(&library);
     let own_sounds = mo_sounds::compact::copy_of(&data.join("sounds.db"));
@@ -364,6 +365,10 @@ pub fn app_databases(data: &Path, library: PathBuf) -> Vec<AppDatabase> {
         mo_sounds::compact::backup::backup_of(&own_sounds),
         mo_sounds::compact::backup::damaged_of(&own_sounds),
         mo_sounds::compact::backup::kept_of(&own_sounds),
+    ));
+    databases.extend(app_files::presets_and_curves(
+        data.join(mo_presets::fixes::FILE_NAME),
+        data.join(mo_presets::curves::FILE_NAME),
     ));
     databases.extend(app_files::caches(CACHE_FILES.iter().map(|name| data.join(name))));
     databases

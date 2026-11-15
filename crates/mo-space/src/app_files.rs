@@ -118,6 +118,28 @@ pub fn sound_lab_copies(backup: PathBuf, damaged: PathBuf, kept: PathBuf) -> Vec
     ]
 }
 
+/// What the parts with the Presets page's own databases are called ([`presets_and_curves`]).
+pub const PART_FIXES: &str = "Your part fixes";
+pub const CURVES_LIBRARY: &str = "Curves library";
+
+/// The Presets page's own databases, each a part of its own: your fixes to its guess of the part a sound plays
+/// (`fixes`, `presets.db`) and the curves library (`curves`, `curves.db`). Before, they were "Everything else: Your
+/// Bitwig template and the rest" (the whole-app review of 14 Nov, AP-14).
+pub fn presets_and_curves(fixes: PathBuf, curves: PathBuf) -> Vec<AppDatabase> {
+    vec![
+        AppDatabase {
+            name: PART_FIXES,
+            what: "The parts you set by hand where the Presets page guessed wrong",
+            path: fixes,
+        },
+        AppDatabase {
+            name: CURVES_LIBRARY,
+            what: "The curves found in your songs and plugins, with the names you gave them and the ones you hid",
+            path: curves,
+        },
+    ]
+}
+
 /// The app's caches at `paths`, as one part: the fingerprints and lists it keeps so pages open quickly, which it makes
 /// again if they go.
 pub fn caches(paths: impl IntoIterator<Item = PathBuf>) -> Vec<AppDatabase> {
@@ -221,6 +243,13 @@ pub fn part_of(name: &str, folder: bool) -> (&'static str, &'static str) {
         "notes" => ("Notes for Claude", "What you wrote with F12, with its pictures"),
         "reports" | "probe" => ("Test reports", "Live tests, self-checks and MO Probe"),
         OLD_DATABASES_FOLDER => (OLD_DATABASES, OLD_DATABASES_WHAT),
+        // The test plugin's takes and Chord check's, and the curve files made to drag: before, they were "Everything
+        // else", so an evening's recordings filling the drive read as your Bitwig template (the whole-app review of 14
+        // Nov, AP-14). The names are the folders' own (mo-app's `data_move::RECORDINGS_FOLDER` and
+        // `chord_check::FOLDER`, mo-presets' `curves::FOLDER`), which mo-app's tests hold to these.
+        "recordings" => ("Recordings", "What the plugin's Record took: yours, the app never removes them"),
+        "chord check" => ("Chord check takes", "What you played into Chord check and the chords you named: yours"),
+        "curves" => ("Curve files", "Curves made into files to drag onto a Bitwig automation lane"),
         _ => ("Everything else", "Your Bitwig template and the rest"),
     }
 }
@@ -269,5 +298,9 @@ mod tests {
         assert_eq!(part_of("Models", true).0, "Search models");
         assert_eq!(part_of("logs", false).0, "Everything else");
         assert_eq!(part_of("playground-quick", true).0, "Playground ideas");
+        assert_eq!(part_of("Recordings", true).0, "Recordings");
+        assert_eq!(part_of("Chord check", true).0, "Chord check takes");
+        assert_eq!(part_of("Curves", true).0, "Curve files");
+        assert_eq!(part_of("Recordings", false).0, "Everything else");
     }
 }

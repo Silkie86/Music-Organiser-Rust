@@ -927,9 +927,23 @@ pub fn size_text(bytes: u64) -> String {
     mo_space::size_text(bytes)
 }
 
-/// The line Settings shows under the data folder: a move waiting for the next start, where the data came from, or
-/// why a move's folder isn't in use. `data` is the data folder in use.
-pub fn status_note(data: &Path, pending: Option<&Path>, moved_from: Option<&Path>, problems: &[String]) -> String {
+/// What the folder the data was moved out of (`moved_from`) still holds for the app to put away, with `data` the data
+/// folder in use ([`still_waited`]), for [`status_note`]. It looks at the disk, a few files in both folders and the
+/// archive, so Settings works it out away from the window's thread when it shows, not at every redraw: a click waited
+/// on a drive gone to sleep (the whole-app review of 14 Nov, AP-18).
+pub fn left_to_put_away(data: &Path, moved_from: Option<&Path>) -> Vec<&'static str> {
+    moved_from.map(|from| still_waited(from, data)).unwrap_or_default()
+}
+
+/// The line Settings shows under the data folder: a move waiting for the next start, where the data came from (with
+/// what the app still has to put away there, `left`: [`left_to_put_away`], `None` while that's still being looked
+/// at), or why a move's folder isn't in use. Only words: it reads nothing from the disk.
+pub fn status_note(
+    pending: Option<&Path>,
+    moved_from: Option<&Path>,
+    problems: &[String],
+    left: Option<&[&str]>,
+) -> String {
     let mut lines: Vec<String> = problems.to_vec();
     if let Some(to) = pending {
         lines.push(format!(
@@ -946,9 +960,11 @@ pub fn status_note(data: &Path, pending: Option<&Path>, moved_from: Option<&Path
                 paths::POINTER_FILE
             ));
         }
-        let left = still_waited(from, data);
-        if !left.is_empty() {
-            line.push_str(&format!(" Keep {} there until the app has archived it.", left.join(", ")));
+        match left {
+            Some([]) => {}
+            Some(left) => line.push_str(&format!(" Keep {} there until the app has archived it.", left.join(", "))),
+            // Never nothing while it isn't known: the folder may still hold what the app needs.
+            None => line.push_str(" The app is looking at what it still needs there."),
         }
         lines.push(line);
     }
@@ -1085,7 +1101,11 @@ mod tests {
         // The rest of the old folder removed before then (the note said it could go): sounds.db is still asked for.
         fs::remove_file(s.first.join(mo_sounds::compact::FILE_NAME)).unwrap();
         assert!(!renew_moved_out_note(&s.to, &s.to, &s.first));
-        assert!(status_note(&s.to, None, Some(&s.first), &[]).contains("Keep sounds.db, sounds.db-wal there"));
+        let note_now = || status_note(None, Some(&s.first), &[], Some(&left_to_put_away(&s.to, Some(&s.first))));
+        assert!(note_now().contains("Keep sounds.db, sounds.db-wal there"), "{}", note_now());
+        // While Settings' look at the folder isn't in yet, the note doesn't leave it out (the review of PR 6's code).
+        let looking = status_note(None, Some(&s.first), &[], None);
+        assert!(looking.contains("The app is looking at what it still needs there."), "{looking}");
         // The app puts the old databases away: library.db from the new folder, sounds.db copied from the old one.
         let done = crate::old_databases::archive(&s.to, std::slice::from_ref(&s.first), &|_| Ok(()), &mut |_| {});
         assert_eq!(done.moved.len(), 1, "{done:?}");
@@ -1096,7 +1116,7 @@ mod tests {
         assert!(note().contains("The rest can go once you're happy the app works from the new folder."));
         assert!(note().contains(&s.to.display().to_string()));
         assert!(!renew_moved_out_note(&s.to, &s.to, &s.first), "written once");
-        assert!(!status_note(&s.to, None, Some(&s.first), &[]).contains("sounds.db"));
+        assert!(!note_now().contains("sounds.db"), "{}", note_now());
         // A note you removed isn't written again, and a folder the data never moved into has none to write.
         fs::remove_file(&note_file).unwrap();
         assert!(!renew_moved_out_note(&s.to, &s.to, &s.first) && !note_file.exists());
