@@ -183,6 +183,15 @@ impl Hold {
         }
         let fine = if was_fine { FINE } else { 1.0 };
         let reached = self.reached + (frame.value_at(y) - frame.value_at(self.y)) * fine;
+        // No further than the handle itself got: the mouse may have gone on past where it stops.
+        let tall = if self.high - self.low < 1e-6 { 1.0 } else { self.high - self.low };
+        let reached = match self.part {
+            Part::Top => reached.clamp(-self.high, 1.0 - self.high),
+            Part::Bottom => reached.clamp(-self.low, 1.0 - self.low),
+            Part::Corner { top: true, .. } => reached.clamp(-tall, 0.0),
+            Part::Corner { top: false, .. } => reached.clamp(0.0, tall),
+            Part::Bar | Part::Left | Part::Right => reached,
+        };
         Hold { reached, y, ..self }
     }
 }

@@ -1034,18 +1034,23 @@ const FOUND_LINE: &str = "found:";
 fn show_curve_card(app: &AppWindow) {
     let data = app.global::<PresetsData>();
     let editor = app.global::<CurveEditorData>();
+    // The editor takes the curve before the page's list is held for the rest: nothing it does on the way can ask
+    // for that list while it's held (as the 14 Nov review's CV-1 did, and closed the app).
+    let sent = PAGE.with(|p| {
+        let p = p.borrow();
+        p.curve_picked.as_deref().filter(|id| p.curves.iter().any(|c| c.id == *id)).and(picked_curve_as_sent(&p))
+    });
+    crate::curve_editor::open(app, sent.as_ref().map(|sent| (sent, curve_tone_key(sent))));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let picked = p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id));
-        let Some((c, sent)) = picked.zip(picked_curve_as_sent(&p)) else {
+        let Some((c, sent)) = picked.zip(sent) else {
             data.set_curve_panel_shown(false);
             p.curve_found.clear();
             p.curve_found_of = None;
-            crate::curve_editor::open(app, None);
             return;
         };
         data.set_curve_panel_shown(true);
-        crate::curve_editor::open(app, Some((&sent, curve_tone_key(&sent))));
         editor.set_state_words(if c.hidden { "hidden" } else { "" }.into());
         let (facts, found) = logic::curve_facts_line(&sent);
         editor.set_facts(facts.into());

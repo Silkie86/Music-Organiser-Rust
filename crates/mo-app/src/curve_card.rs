@@ -141,6 +141,15 @@ pub mod pointer {
     pub const PAINT: i32 = 8;
 }
 
+/// How far from where a stroke of paint ended, in points, a quick press still paints on rather than taking hold of
+/// a point: the step just painted, with its corners (two reaches of a dot).
+const PAINTS_ON: f64 = 24.0;
+
+/// Whether a stroke of paint was let go a moment ago, close to `x`, `y`.
+fn just_painted(painted: Option<(Instant, (f64, f64))>, x: f64, y: f64) -> bool {
+    painted.is_some_and(|(when, at)| when.elapsed() < DOUBLE_CLICK && (at.0 - x).hypot(at.1 - y) < PAINTS_ON)
+}
+
 /// What "Swing as the song" did ([`Card::swing_as_song`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SongSwing {
@@ -152,12 +161,13 @@ pub enum SongSwing {
     Nothing,
 }
 
-/// The swing "Swing as the song" last gave: to which curve, the curve and its highlight before it, the curve as it
-/// left it, and the swing.
+/// The swing "Swing as the song" last gave: to which curve, the curve before it, the parts it was pressed for (none
+/// is the whole curve), the curve as it left it, and the swing.
 #[derive(Clone, Debug)]
 struct Swung {
     curve: String,
-    before: (Shape, Option<Span>),
+    before: Shape,
+    parts: Vec<Option<Span>>,
     left: Shape,
     step: f64,
     amount: f64,
@@ -383,9 +393,9 @@ pub struct Card {
     /// The points picked before the last click on a point, and when: a double-click on one of several picked
     /// points begins with a click that picks it alone.
     clicked: Option<(Vec<usize>, Instant)>,
-    /// When a stroke of paint was last let go: a quick press with the make key after it paints on, even right on
-    /// that stroke's own corners, and the double-click the screen makes of the two does nothing.
-    painted: Option<Instant>,
+    /// When and where a stroke of paint was last let go: a quick press with the make key close by paints on, even
+    /// right on that stroke's own corners, and the double-click the screen makes of the two does nothing.
+    painted: Option<(Instant, (f64, f64))>,
     /// The swing "Swing as the song" last gave.
     swung: Option<Swung>,
     /// The curve's name, for the strip's one tile when it has no clips.
@@ -845,7 +855,7 @@ impl Card {
                 if keys.ctrl
                     && match curve_hold::over(editor.shape(), editor.highlight(), frame, x, y) {
                         Over::Inside | Over::Empty => true,
-                        Over::Dot(_) | Over::Line(_) => s.painted.is_some_and(|when| when.elapsed() < DOUBLE_CLICK),
+                        Over::Dot(_) | Over::Line(_) => just_painted(s.painted, x, y),
                         Over::Part(_) => false,
                     } =>
             {
@@ -906,7 +916,7 @@ impl Card {
             }
             mouse::LET_GO => {
                 let was = s.grab.take();
-                s.painted = matches!(was, Some((Held::Paint, ..))).then(Instant::now);
+                s.painted = matches!(was, Some((Held::Paint, ..))).then(|| (Instant::now(), (x, y)));
                 s.before = None;
                 s.ghost = None;
                 s.stroke = None;
@@ -974,7 +984,7 @@ impl Card {
                 s.swing = 0.0;
                 s.read_out.clear();
                 // Two quick strokes of paint are two strokes: nothing is added or removed under them.
-                if keys.ctrl && s.painted.is_some_and(|when| when.elapsed() < DOUBLE_CLICK) {
+                if keys.ctrl && just_painted(s.painted, x, y) {
                     s.dropped = None;
                     s.clicked = None;
                     return false;
@@ -1117,6 +1127,8 @@ impl Card {
             }
             // Two quick clicks on a pin pin and unpin: nothing more.
             (mouse::DOUBLE_CLICKED, OnStrip::Pin(_)) => false,
+            // A quick click and then a drag of a clip is a drag: letting go ends it.
+            (mouse::DOUBLE_CLICKED, _) if matches!(s.grab, Some((_, _, true))) => false,
             (mouse::DOUBLE_CLICKED, _) => {
                 // The highlight is kept as a clip, unless it's one already.
                 let lit = editor.highlight();
@@ -1262,23 +1274,13 @@ impl Card {
         Ok(())
     }
 
-    /// Swing given in one go (the plugin's "Swing as the song"): every second line of a grid `step` beats apart
-    /// moves by `amount` of a step, in the highlighted part or the whole curve. One step of undo; whether it changed
-    /// anything. Draw the picture again either way: a drag in hand is given up first.
-    pub fn swing_by(&mut self, step: f64, amount: f64) -> bool {
-        let s = self;
-        let was = s.grab;
-        s.hands_off();
-        s.mouse = None;
-        let Some((_, editor)) = s.open.as_mut() else { return false };
-        given_up(editor, was, &mut s.lit_whole);
-        editor.edit(&Edit::Swing { step, amount })
-    }
-
-    /// "Swing as the song" (the plugin's button): the song's swing, as [`Card::swing_by`] gives it. While the
-    /// curve's points are still as this button's last swing left them, the new swing takes that swing's place: it's
-    /// given to the curve as it was before the old one (in the same part), never on top of it, and clips kept since
-    /// stay. One step of undo. Draw the picture again whatever it says.
+    /// "Swing as the song" (the plugin's button): every second line of a grid `step` beats apart moves by `amount`
+    /// of a step, in the highlighted part or the whole curve. One step of undo. Draw the picture again whatever it
+    /// says: a drag in hand is given up first.
+    ///
+    /// While the curve's points are still as this button's last swing left them, the song's swing takes that
+    /// swing's place, never on top of it: the curve as it was before is swung again, in each part the button was
+    /// pressed for (and the one highlighted now), and clips kept since stay.
     pub fn swing_as_song(&mut self, step: f64, amount: f64) -> SongSwing {
         let s = self;
         let was = s.grab;
@@ -1287,35 +1289,50 @@ impl Card {
         let Some((id, editor)) = s.open.as_mut() else { return SongSwing::Nothing };
         given_up(editor, was, &mut s.lit_whole);
         let edit = Edit::Swing { step, amount };
+        let lit = editor.highlight();
         let ours = s.swung.take().filter(|w| {
             w.curve == *id
                 && w.left.points() == editor.shape().points()
                 && (w.left.length() - editor.shape().length()).abs() < 1e-9
         });
-        if let Some(w) = ours {
-            if (w.step - step).abs() < 1e-9 && (w.amount - amount).abs() < 1e-9 {
-                s.swung = Some(w);
-                return SongSwing::Already;
-            }
-            let (before, lit) = &w.before;
-            let Some((swung, _)) = curve_edit::apply(before, *lit, &edit) else {
-                s.swung = Some(w);
+        let Some(w) = ours else {
+            let before = editor.shape().clone();
+            if !editor.edit(&edit) {
                 return SongSwing::Nothing;
-            };
-            let swung = swung.with_clips_of(editor.shape());
-            let highlight = editor.highlight();
-            if !editor.put(swung, highlight) {
-                s.swung = Some(w);
-                return SongSwing::Already;
             }
-            s.swung = Some(Swung { left: editor.shape().clone(), step, amount, ..w });
+            let left = editor.shape().clone();
+            s.swung = Some(Swung { curve: id.clone(), before, parts: vec![lit], left, step, amount });
             return SongSwing::Done;
+        };
+        // The part highlighted now has the button's swing already when it's inside a part it was pressed for.
+        let inside = |part: &Option<Span>| match (part, lit) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(p), Some(l)) => p.start <= l.start + 1e-9 && l.end <= p.end + 1e-9,
+        };
+        let covered = w.parts.iter().any(inside);
+        if covered && (w.step - step).abs() < 1e-9 && (w.amount - amount).abs() < 1e-9 {
+            s.swung = Some(w);
+            return SongSwing::Already;
         }
-        let before = (editor.shape().clone(), editor.highlight());
-        if !editor.edit(&edit) {
-            return SongSwing::Nothing;
+        let parts = match (covered, lit) {
+            (true, _) => w.parts.clone(),
+            (false, None) => vec![None],
+            (false, Some(_)) => w.parts.iter().copied().chain([lit]).collect(),
+        };
+        let mut swung = w.before.clone();
+        let mut any = false;
+        for part in &parts {
+            if let Some((next, _)) = curve_edit::apply(&swung, *part, &edit) {
+                swung = next;
+                any = true;
+            }
         }
-        s.swung = Some(Swung { curve: id.clone(), before, left: editor.shape().clone(), step, amount });
+        if !any || !editor.put(swung.with_clips_of(editor.shape()), lit) {
+            s.swung = Some(w);
+            return if any { SongSwing::Already } else { SongSwing::Nothing };
+        }
+        s.swung = Some(Swung { parts, left: editor.shape().clone(), step, amount, ..w });
         SongSwing::Done
     }
 
@@ -1362,8 +1379,11 @@ impl Card {
         s.lit_whole = false;
         let Some((_, e)) = s.open.as_mut() else { return false };
         let was = e.shape().length();
-        // A drag in hand is a step of its own: Undo takes back that, not it and the step before it as well.
-        e.let_go();
+        // A drag in hand is a step of its own: Undo takes back that, not it and the step before it as well. (Redo
+        // gives the drag up, as ever: keeping it would throw the steps to redo away.)
+        if back {
+            e.let_go();
+        }
         let done = if back { e.undo() } else { e.redo() };
         // A step that changes the curve's length (a roll, the end mark): the whole of it in sight again.
         let length = e.shape().length();
@@ -2174,6 +2194,11 @@ mod tests {
         press_drag(&mut card, (2.0, 0.75), (2.0, 0.25), none);
         assert!(card.step_back(true));
         assert_eq!(card.edited().expect("the first move stays"), first);
+        // Redo in the middle of a drag gives the drag up and redoes: the step to redo isn't thrown away.
+        assert!(card.step_back(true));
+        press_drag(&mut card, (2.0, 0.75), (2.0, 0.25), none);
+        assert!(card.step_back(false));
+        assert_eq!(card.edited().expect("redone"), first);
     }
 
     #[test]
@@ -2378,6 +2403,22 @@ mod tests {
         assert_eq!(card.swing_as_song(0.25, 0.2), SongSwing::Done);
         assert_eq!(card.edited().expect("swung"), once, "the new swing alone, not on top of the old one");
         assert_eq!(card.open.as_ref().expect("open").1.shape().clips().len(), 1);
+        // Another part highlighted: it's swung as well, and the first keeps its swing.
+        let mut parts = open();
+        press_drag(&mut parts, (1.1, 0.5), (1.9, 0.5), Keys::default());
+        let (x, y) = at(&parts, 1.9, 0.5);
+        parts.mouse(mouse::LET_GO, x, y, Keys::default());
+        assert_eq!(parts.swing_as_song(0.25, 0.2), SongSwing::Done);
+        let first = parts.edited().expect("swung");
+        assert_eq!(parts.swing_as_song(0.25, 0.2), SongSwing::Already);
+        press_drag(&mut parts, (2.6, 0.5), (3.6, 0.5), Keys::default());
+        let (x, y) = at(&parts, 3.6, 0.5);
+        parts.mouse(mouse::LET_GO, x, y, Keys::default());
+        assert_eq!(parts.swing_as_song(0.25, 0.2), SongSwing::Done);
+        let both = parts.edited().expect("swung");
+        assert_ne!(both, first);
+        let early = |e: &(Vec<CurvePoint>, f64)| e.0.iter().filter(|p| p.x < 0.55).copied().collect::<Vec<_>>();
+        assert_eq!(early(&both), early(&first), "the first part is as it was swung");
         // After an edit of the points, the swing is no longer the button's to replace: the next goes on top.
         assert!(card.escape());
         press_drag(&mut card, (4.0, 1.0), (4.0, 0.5), Keys::default());
@@ -2395,13 +2436,13 @@ mod tests {
         // A straight rise has nothing a swing would move: steps first.
         assert!(card.act(curve_act::STEPS));
         let before = card.edited().expect("steps");
-        assert!(card.swing_by(0.25, 1.0 / 3.0));
+        assert_eq!(card.swing_as_song(0.25, 1.0 / 3.0), SongSwing::Done);
         assert_ne!(card.edited().expect("swung").0, before.0);
         assert!((card.length() - 4.0).abs() < 1e-9, "swing never changes the length");
-        assert!(!card.swing_by(0.25, 0.0), "no swing is no step");
         assert!(card.step_back(true));
         assert_eq!(card.edited().expect("steps again").0, before.0);
-        assert!(!Card::default().swing_by(0.25, 0.3));
+        assert_eq!(card.swing_as_song(0.25, 0.0), SongSwing::Nothing, "no swing is no step");
+        assert_eq!(Card::default().swing_as_song(0.25, 0.3), SongSwing::Nothing);
     }
 
     #[test]

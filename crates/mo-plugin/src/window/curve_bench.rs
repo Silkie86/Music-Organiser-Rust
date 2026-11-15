@@ -17,7 +17,6 @@ use mo_app::presets::Offer;
 use mo_app::shapes::{self, Colour};
 use mo_dawlink::bitwig::watch::State;
 use mo_dawlink::bitwig::{Groove, Watch};
-use mo_formats::bitwig::curve::CurvePoint;
 use mo_presets::curves::Curve;
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
@@ -139,6 +138,7 @@ impl Bench {
         let then = |what: fn(&mut Card, (i32, f64, f64, Keys)) -> bool| {
             let (me, weak) = (Rc::clone(self), panel.as_weak());
             move |told: (i32, f64, f64, Keys)| {
+                let held = me.card.borrow().in_hand();
                 let drawn = what(&mut me.card.borrow_mut(), told);
                 // Points picked or let go change what the part's buttons would do, with no change to the curve.
                 let picked = me.card.borrow().picked();
@@ -147,8 +147,10 @@ impl Bench {
                     if drawn {
                         me.redraw(&panel);
                     }
-                    // The part buttons wait for a drag to end: they can't be pressed while it's in hand.
-                    me.show(&panel, (drawn && !me.card.borrow().in_hand()) || repicked);
+                    // The part buttons wait for what's in hand to be let go (they can't be pressed till then), and
+                    // follow it then: a click on a clip changed the highlight at its press.
+                    let in_hand = me.card.borrow().in_hand();
+                    me.show(&panel, (!in_hand && (drawn || held)) || repicked);
                 }
             }
         };
