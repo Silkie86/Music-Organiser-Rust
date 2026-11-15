@@ -264,9 +264,30 @@ fn menu(window: HWND) {
     }
 }
 
-/// Starts the full app: this same program, without the helper's flag, at normal priority (it would take on the
-/// helper's below-normal otherwise).
+/// Opens the full app. One that's open already is asked to show its window (the 14 Nov review's DF-1: a second copy
+/// would write over the first one's settings); only when none is, it's started: this same program, without the
+/// helper's flag, at normal priority (it would take on the helper's below-normal otherwise). A copy that's closing is
+/// left to the new one to wait for. Off the icon's thread, since asking can take a moment.
 fn open_app() {
+    let asking = std::thread::Builder::new().name("Helper: open the app".into()).spawn(|| {
+        use mo_app::one_copy;
+        if one_copy::taken(one_copy::PORT)
+            && let Some(open) = one_copy::hello(one_copy::PORT)
+            && !open.closing
+        {
+            crate::one_copy::let_come_to_front(open.pid);
+            if one_copy::ask_to_show(one_copy::PORT) {
+                return;
+            }
+        }
+        start_app();
+    });
+    if asking.is_err() {
+        start_app();
+    }
+}
+
+fn start_app() {
     use std::os::windows::process::CommandExt;
     const NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
     let opened = std::env::current_exe()

@@ -44,6 +44,7 @@ pub mod midi;
 pub mod midi_fits;
 pub mod note;
 pub mod old_databases;
+pub mod one_copy;
 pub mod paths;
 pub mod piano_roll;
 pub mod places;
