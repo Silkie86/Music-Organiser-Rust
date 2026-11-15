@@ -10,7 +10,8 @@
 //!
 //! The port is the proof that a copy is open. A copy that starts ([`claim`]) and finds it taken asks who has it:
 //!
-//! - the same build: it asks that copy to show its window, and stops ([`Claim::Shown`]);
+//! - the same build: it asks that copy to show its window, and stops ([`Claim::Shown`]). When that copy is closing
+//!   already (its window is gone, it's writing its last settings), it's waited for instead;
 //! - another build: it asks that copy to close, waits for it, and carries on in its place. The copy just started is
 //!   the one that's wanted: the launcher starts each new build that way, and a plain "one copy only" would leave
 //!   Solomon on the old build while the launcher says the new one is open.
@@ -18,12 +19,15 @@
 //! When the port's holder doesn't answer as the app, or the other build doesn't close in time, the copy opens anyway
 //! and says so in its log ([`Claim::Unguarded`]): never opening would be worse than what the guard is for.
 //!
+//! The port is one for the whole computer, not one for each Windows user: with two people signed in at once, the
+//! second one's start would reach the first one's app. Solomon's PC has one user.
+//!
 //! As with the helper, a web page in a browser can send the port lines: a connection ends at its first line that
 //! isn't a request (an HTTP request's first line never is), and only a few are answered at once.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -35,8 +39,9 @@ use crate::log;
 
 /// The open app's port, on this computer only (the Bitwig extension's is 19791, the helper's 19792).
 pub const PORT: u16 = 19793;
-/// How long a copy of another build gets to close (it writes its settings and stops its work first).
-pub const CLOSE_WAIT: Duration = Duration::from_secs(20);
+/// How long a closing copy gets to end: it writes its settings and stops its work first, and waits up to a minute for
+/// a plugin move to stop.
+pub const CLOSE_WAIT: Duration = Duration::from_secs(80);
 /// The longest request line read: anything longer isn't a request.
 const MOST_LINE: u64 = 64 * 1024;
 /// The most connections answered at once; more are closed at once.
@@ -52,6 +57,9 @@ pub struct Hello {
     /// The program it runs from (the launcher puts each build in a folder of its own). Empty when it can't be told.
     #[serde(default)]
     pub exe: String,
+    /// Whether it's closing: its window is gone (or going), and the port is let go once its last files are written.
+    #[serde(default)]
+    pub closing: bool,
 }
 
 /// What another copy, or the helper's icon, asks of the open app.
@@ -69,6 +77,7 @@ type Handler = Box<dyn Fn(Asked) + Send + Sync>;
 /// settings are written, so a copy waiting for it never reads them half-way.
 pub struct OneCopy {
     hello: Hello,
+    closing: AtomicBool,
     port: u16,
     connections: AtomicUsize,
     /// What the window does when asked, once there is a window; what was asked before then waits.
@@ -87,15 +96,18 @@ pub enum Claim {
 
 /// Takes the port for this copy of the app (build `version`, run from `exe`), or finds out who has it: see the
 /// module's words. Call it before the window and before anything is read from the data folder. It can wait up to
-/// `close_wait` for a copy of another build to close.
-pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration) -> Claim {
+/// `close_wait` for a closing copy to end. `before_show` is called with the open copy's process id before it's asked
+/// to show its window (Windows only lets a window come to the front when the program in front allows it).
+pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration, before_show: impl Fn(u32)) -> Claim {
     let until = Instant::now() + close_wait;
-    let mut closed = None;
+    // The build of a copy that's being waited for, once there is one.
+    let mut closing: Option<String> = None;
+    let mut asked_to_close = false;
     loop {
         match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
             Ok(listener) => {
                 return match OneCopy::start(listener, version, exe) {
-                    Ok(held) => Claim::Ours { held, closed },
+                    Ok(held) => Claim::Ours { held, closed: closing.filter(|_| asked_to_close) },
                     Err(e) => Claim::Unguarded(format!("couldn't answer on port {port}: {e}")),
                 };
             }
@@ -104,40 +116,60 @@ pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration) -> Claim
             }
             Err(_) => {}
         }
-        match (hello(port), &closed) {
-            (Some(other), None) if other.app == version && same_program(&other.exe, exe) => {
-                return if ask_to_show(port) {
-                    Claim::Shown
-                } else {
-                    Claim::Unguarded("the copy that's open didn't answer when asked to show its window".into())
-                };
-            }
-            (Some(other), None) => {
-                // Asked once; from then on only waited for.
-                if ask(port, &json!({ "ask": "close" })).is_err() {
-                    return Claim::Unguarded(format!("the copy from another build ({}) didn't answer", other.app));
+        // Once a copy is closing, only the port is watched: asking it more would only keep it busy.
+        if closing.is_none() {
+            match hello(port) {
+                // Closing by itself (its window was just closed): waited for, whatever its build.
+                Some(other) if other.closing => closing = Some(other.app),
+                Some(other) if other.app == version && same_program(&other.exe, exe) => {
+                    before_show(other.pid);
+                    match ask(port, &json!({ "ask": "show" })) {
+                        Ok(answer) if answer.get("showing").and_then(Value::as_bool) == Some(true) => {
+                            return Claim::Shown;
+                        }
+                        // It began to close between the two asks.
+                        Ok(answer) if answer.get("closing").and_then(Value::as_bool) == Some(true) => {
+                            closing = Some(other.app);
+                        }
+                        _ => {
+                            return Claim::Unguarded(
+                                "the copy that's open didn't answer when asked to show its window".into(),
+                            );
+                        }
+                    }
                 }
-                closed = Some(other.app);
-            }
-            // Closing: it may still answer, or have stopped answering with the port not yet let go.
-            (_, Some(_)) => {}
-            // Just let go between the two looks: the next try takes it. Otherwise it isn't the app's.
-            (None, None) => {
-                if let Ok(listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
-                    return match OneCopy::start(listener, version, exe) {
-                        Ok(held) => Claim::Ours { held, closed },
-                        Err(e) => Claim::Unguarded(format!("couldn't answer on port {port}: {e}")),
-                    };
+                Some(other) => {
+                    if ask(port, &json!({ "ask": "close" })).is_err() {
+                        return Claim::Unguarded(format!("the copy from another build ({}) didn't answer", other.app));
+                    }
+                    asked_to_close = true;
+                    closing = Some(other.app);
                 }
-                return Claim::Unguarded(format!("port {port} is taken by something that doesn't answer as the app"));
+                // Just let go between the two looks: the next try takes it. Otherwise it isn't the app's.
+                None => {
+                    if let Ok(listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+                        return match OneCopy::start(listener, version, exe) {
+                            Ok(held) => Claim::Ours { held, closed: None },
+                            Err(e) => Claim::Unguarded(format!("couldn't answer on port {port}: {e}")),
+                        };
+                    }
+                    return Claim::Unguarded(format!(
+                        "port {port} is taken by something that doesn't answer as the app"
+                    ));
+                }
             }
         }
         if Instant::now() >= until {
-            let other = closed.unwrap_or_default();
-            return Claim::Unguarded(format!("the copy from another build ({other}) didn't close in time"));
+            let other = closing.unwrap_or_default();
+            return Claim::Unguarded(format!("the copy that was closing ({other}) didn't end in time"));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Whether something has `port`: told at once, without asking it anything.
+pub fn taken(port: u16) -> bool {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err()
 }
 
 /// Which app answers on `port`, if one does.
@@ -161,14 +193,28 @@ impl OneCopy {
     fn start(listener: TcpListener, version: &str, exe: &str) -> io::Result<Arc<OneCopy>> {
         let port = listener.local_addr()?.port();
         let held = Arc::new(OneCopy {
-            hello: Hello { app: version.to_owned(), pid: std::process::id(), exe: exe.to_owned() },
+            hello: Hello { app: version.to_owned(), pid: std::process::id(), exe: exe.to_owned(), closing: false },
+            closing: AtomicBool::new(false),
             port,
             connections: AtomicUsize::new(0),
             handler: Mutex::new((None, Vec::new())),
         });
         let serving = Arc::clone(&held);
-        crate::background::spawn("One copy: requests", move || serving.serve(listener))?;
+        // At the window's priority, not the background's: a copy that starts takes an answer that doesn't come in
+        // time as "not the app", and a busy computer mustn't make it so.
+        std::thread::Builder::new().name("One copy: requests".into()).spawn(move || serving.serve(listener))?;
         Ok(held)
+    }
+
+    /// The app is closing from now on: its window is gone or going. It no longer says it will show, and a copy that
+    /// starts waits for it to end instead. The port itself is let go when the process ends, once the last settings
+    /// are written, whatever becomes of this value.
+    pub fn closing(&self) {
+        self.closing.store(true, Ordering::Relaxed);
+    }
+
+    fn hello(&self) -> Hello {
+        Hello { closing: self.closing.load(Ordering::Relaxed), ..self.hello.clone() }
     }
 
     /// The port it answers on.
@@ -203,7 +249,7 @@ impl OneCopy {
                 continue;
             }
             let held = Arc::clone(&self);
-            let answering = crate::background::spawn("One copy: one connection", move || {
+            let answering = std::thread::Builder::new().name("One copy: one connection".into()).spawn(move || {
                 held.answer(stream);
                 held.connections.fetch_sub(1, Ordering::Relaxed);
             });
@@ -235,14 +281,18 @@ impl OneCopy {
                 return;
             };
             let answer = match request.get("ask").and_then(Value::as_str) {
-                Some("hello") => serde_json::to_value(&self.hello).unwrap_or(Value::Null),
+                Some("hello") => serde_json::to_value(self.hello()).unwrap_or(Value::Null),
+                Some("show") if self.closing.load(Ordering::Relaxed) => json!({ "showing": false, "closing": true }),
                 Some("show") => {
                     self.asked(Asked::Show);
                     json!({ "showing": true })
                 }
                 Some("close") => {
-                    log::info("One copy", "Asked to close by a copy from another build");
-                    self.asked(Asked::Close);
+                    // Once is enough: a second ask finds it closing.
+                    if !self.closing.swap(true, Ordering::Relaxed) {
+                        log::info("One copy", "Asked to close by a copy from another build");
+                        self.asked(Asked::Close);
+                    }
                     json!({ "closing": true })
                 }
                 Some(other) => json!({ "error": format!("the app doesn't know \"{other}\"") }),
@@ -270,7 +320,9 @@ mod tests {
 
     /// The first copy, with what it's asked sent on.
     fn open(port: u16, version: &str, exe: &str) -> (Arc<OneCopy>, mpsc::Receiver<Asked>) {
-        let Claim::Ours { held, closed: None } = claim(port, version, exe, SOON) else { panic!("the port was free") };
+        let Claim::Ours { held, closed: None } = claim(port, version, exe, SOON, |_| {}) else {
+            panic!("the port was free")
+        };
         let (tell, told) = mpsc::channel();
         let tell = Mutex::new(tell);
         held.on_asked(move |asked| {
@@ -285,9 +337,11 @@ mod tests {
         let port = free_port();
         let (held, told) = open(port, "1.0 (abc)", "C:\\builds\\abc\\mo.exe");
         assert_eq!(hello(port).unwrap(), held.hello);
+        let pid = Mutex::new(0);
         // The same program, as Windows may write it, counts as the same there.
         let exe = if cfg!(windows) { "\\\\?\\c:\\Builds\\abc\\MO.exe" } else { "C:\\builds\\abc\\mo.exe" };
-        assert!(matches!(claim(port, "1.0 (abc)", exe, SOON), Claim::Shown));
+        assert!(matches!(claim(port, "1.0 (abc)", exe, SOON, |p| *pid.lock().unwrap() = p), Claim::Shown));
+        assert_eq!(*pid.lock().unwrap(), std::process::id(), "the open copy may come to the front");
         assert_eq!(told.recv_timeout(SOON), Ok(Asked::Show));
         // The helper's icon asks the same way.
         assert!(ask_to_show(port));
@@ -315,10 +369,13 @@ mod tests {
             (asked, listener)
         });
         // The stand-in for the old process can't end, so its port stays taken: the new copy says so, having asked.
-        let claimed = claim(port, "1.1 (new)", "C:\\builds\\new\\mo.exe", Duration::from_millis(800));
+        let claimed = claim(port, "1.1 (new)", "C:\\builds\\new\\mo.exe", Duration::from_millis(800), |_| {});
         let (asked, _listener) = closing.join().unwrap();
         assert_eq!(asked, Ok(Asked::Close));
         assert!(matches!(&claimed, Claim::Unguarded(why) if why.contains("1.0 (old)") && why.contains("in time")));
+        // Asked to close once, and from then on it says so.
+        assert!(hello(port).unwrap().closing);
+        assert!(!ask_to_show(port));
     }
 
     #[test]
@@ -348,7 +405,7 @@ mod tests {
             }
             asks
         });
-        let claimed = claim(port, "1.1 (new)", "/builds/new/mo", SOON);
+        let claimed = claim(port, "1.1 (new)", "/builds/new/mo", SOON, |_| {});
         assert_eq!(old.join().unwrap(), ["hello", "close"]);
         let Claim::Ours { held, closed } = claimed else { panic!("the port was let go") };
         assert_eq!(closed.as_deref(), Some("1.0 (old)"));
@@ -356,11 +413,33 @@ mod tests {
         drop(held);
     }
 
+    /// The window was closed and the app is writing its last files, port still held, when it's started again: the
+    /// new copy waits for the old one to end instead of asking a window that's gone to show, and then opens.
+    #[test]
+    fn a_copy_started_while_the_same_build_is_closing_waits_for_it() {
+        let _one = crate::helper::one_at_a_time();
+        let port = free_port();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+        let old = OneCopy::start(listener.try_clone().unwrap(), "1.0", "").unwrap();
+        let (tell, told) = mpsc::channel();
+        let tell = Mutex::new(tell);
+        old.on_asked(move |asked| {
+            let _ = tell.lock().unwrap().send(asked);
+        });
+        old.closing();
+        let claimed = claim(port, "1.0", "", Duration::from_millis(500), |_| panic!("nothing is asked to show"));
+        assert!(matches!(&claimed, Claim::Unguarded(why) if why.contains("didn't end in time")));
+        assert!(told.try_recv().is_err(), "it's only waited for");
+        drop(listener);
+    }
+
     #[test]
     fn what_was_asked_before_the_window_was_there_is_done_once_it_is() {
         let _one = crate::helper::one_at_a_time();
         let port = free_port();
-        let Claim::Ours { held, .. } = claim(port, "1.0", "", SOON) else { panic!("the port was free") };
+        assert!(!taken(port));
+        let Claim::Ours { held, .. } = claim(port, "1.0", "", SOON, |_| {}) else { panic!("the port was free") };
+        assert!(taken(port));
         assert!(ask_to_show(port));
         let (tell, told) = mpsc::channel();
         let tell = Mutex::new(tell);
@@ -378,7 +457,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         assert!(hello(port).is_none());
         assert!(!ask_to_show(port));
-        let claimed = claim(port, "1.0", "", SOON);
+        let claimed = claim(port, "1.0", "", SOON, |_| {});
         assert!(matches!(&claimed, Claim::Unguarded(why) if why.contains("doesn't answer as the app")));
     }
 

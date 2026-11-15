@@ -10,13 +10,26 @@ use slint::ComponentHandle;
 /// Takes the app's place as the open copy: see [`mo_app::one_copy::claim`]. Before the window and the settings.
 pub fn claim() -> Claim {
     let exe = std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default();
-    one_copy::claim(PORT, &mo_app::version::version(), &exe, CLOSE_WAIT)
+    one_copy::claim(PORT, &mo_app::version::version(), &exe, CLOSE_WAIT, let_come_to_front)
+}
+
+/// Lets the process `pid` put its window in front, on Windows: only the program in front (this one, just started by
+/// a click) can pass that on.
+#[allow(unsafe_code)]
+pub fn let_come_to_front(pid: u32) {
+    #[cfg(windows)]
+    {
+        // SAFETY: a plain call with a process id; one that's gone is refused, not a fault.
+        let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(pid) };
+    }
+    #[cfg(not(windows))]
+    let _ = pid;
 }
 
 /// A line for the session log on how the claim went, once the log has started.
 pub fn log_claim(claim: &Claim) {
     match claim {
-        Claim::Ours { closed: None, .. } => {}
+        Claim::Ours { closed: None, .. } => log::info("One copy", "This is the open copy"),
         Claim::Ours { closed: Some(other), .. } => {
             log::info("One copy", &format!("A copy from another build ({other}) was open: it closed for this one"));
         }
@@ -40,7 +53,7 @@ pub fn connect(app: &crate::AppWindow, held: &Arc<OneCopy>) {
                 }
             }
             Asked::Close => {
-                log::info("One copy", "Closing for a copy from another build");
+                log::last(log::Level::Info, "One copy", "Closing for a copy from another build");
                 let _ = slint::quit_event_loop();
             }
         });

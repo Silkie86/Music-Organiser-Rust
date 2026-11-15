@@ -23,15 +23,16 @@ fn main() -> Result<(), slint::PlatformError> {
         mo_ui::helper::run();
         return Ok(());
     }
+    mo_ui::startup::begin();
+    // Before the log starts, so a crash while it starts still gets its crash file.
+    log_crashes();
     // One copy at a time (DF-1): a copy of this build that's open already is asked to show its window, and this one
     // stops; a copy of another build is asked to close, and waited for. Before anything of the data folder is opened.
     let one_copy = mo_ui::one_copy::claim();
     if matches!(one_copy, mo_app::one_copy::Claim::Shown) {
         return Ok(());
     }
-    mo_ui::startup::begin();
-    // Before the log starts, so a crash while it starts still gets its crash file.
-    log_crashes();
+    mo_ui::startup::step("one copy");
     // The graphics card takes a while to wake up: it's looked for while the log and the settings start.
     mo_ui::gpu::look_ahead();
     // The data folder was moved to a drive that isn't there now: ask what to do before anything opens the old copy
@@ -117,14 +118,9 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     };
     mo_ui::startup::step("window");
-    // Held until the app ends, so the port is let go only once the last settings are written.
-    let _one_copy = match &one_copy {
-        mo_app::one_copy::Claim::Ours { held, .. } => {
-            mo_ui::one_copy::connect(&app, held);
-            Some(std::sync::Arc::clone(held))
-        }
-        _ => None,
-    };
+    if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
+        mo_ui::one_copy::connect(&app, held);
+    }
     mo_ui::gpu::connect(&app);
     // The window's moves, resizes and hiding, for the freeze lines.
     mo_ui::watchdog::watch_window(&app);
@@ -202,6 +198,11 @@ fn main() -> Result<(), slint::PlatformError> {
         log::warning("Freeze", "Couldn't start the freeze watchdog");
     }
     let ran = app.run();
+    // The window is gone: a copy started from now on waits for this one to end (the port is let go with the process,
+    // once everything below is written) instead of asking it to show.
+    if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
+        held.closing();
+    }
     if let Err(e) = &ran {
         // A line of how the run ends: it shows even once the log is full.
         log::last(log::Level::Error, "App", &format!("The window stopped with an error: {e}"));
