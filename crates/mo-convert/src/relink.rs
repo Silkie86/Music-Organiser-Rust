@@ -25,7 +25,7 @@
 //! every copy. The original still uses its copies; it's kept as it is, so Solomon can go back to it while the copies
 //! are still there.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
@@ -93,6 +93,11 @@ struct Listed {
     library_name: String,
     /// What's searched for in a file's bytes (made small in ASCII) to tell whether it still names the copy.
     needles: Vec<Vec<u8>>,
+    /// The original's own path in the same forms: a needle found inside it names the original, not the copy
+    /// ("samples/Snare.wav" is in "F:/Samples/Snare.wav").
+    original: Vec<Vec<u8>>,
+    /// A copy of a Library multisample (in `multi-samples`), not of a single sample.
+    multisample: bool,
 }
 
 /// How a text in the project leads to a file, compared as Windows compares names (case aside, either slash).
@@ -153,7 +158,7 @@ fn listed(project_dir: &Path, relinks: &[Relink]) -> Result<Vec<Listed>, String>
                 ));
             };
             if !r.library.is_absolute() || !r.library.is_file() {
-                return Err(format!("{full} isn't a Library file on disk, so nothing was written"));
+                return Err(format!("{full} isn't on disk, so nothing was written"));
             }
             let library_name = file_name(&full).to_owned();
             let name = key(&shown);
@@ -166,6 +171,8 @@ fn listed(project_dir: &Path, relinks: &[Relink]) -> Result<Vec<Listed>, String>
             };
             Ok(Listed {
                 needles: needles(&forms),
+                original: needles(&[full.replace('\\', "/"), full.replace('/', "\\")]),
+                multisample: inside == COPY_FOLDERS[0],
                 tail: format!("{}/{name}", key(inside)),
                 shown,
                 bare,
@@ -262,6 +269,9 @@ fn relink_listed(
     // folder (a path there is read from the project's folder, so the Library's would be missing), its file reference
     // and the files it was found at before all the Library file.
     let mut held: Vec<(ObjId, Vec<usize>)> = Vec::new();
+    // Sample files left as they are: the general pass below leaves their own texts alone too (their file references,
+    // being paths, still lead to a copy only by its place in this project).
+    let mut others: HashSet<ObjId> = HashSet::new();
     for i in 0..doc.objects.len() {
         let id = ObjId(i as u32);
         if doc.obj(id).class != SAMPLE_FILE {
@@ -274,9 +284,14 @@ fn relink_listed(
             && !inside.as_str().is_empty()
             && copy_of(inside.as_str(), &folder, listed).is_none()
         {
+            others.insert(id);
             continue;
         }
-        let texts = [F_IN_PROJECT, F_NAME].into_iter().filter_map(|f| match o.get(f) {
+        // One Bitwig keeps outside the project (an empty place inside it) is that file wherever its name: only its own
+        // path can make it a copy (a pack's "Clap-2.wav" isn't this project's copy "Clap-2.wav").
+        let outside = matches!(o.get(F_IN_PROJECT), Some(Value::Str(t)) if t.as_str().is_empty());
+        let fields: &[u32] = if outside { &[] } else { &[F_IN_PROJECT, F_NAME] };
+        let texts = fields.iter().filter_map(|&f| match o.get(f) {
             Some(Value::Str(t)) => Some(t.as_str()),
             _ => None,
         });
@@ -284,7 +299,12 @@ fn relink_listed(
             Some(Value::Str(t)) => Some(t.as_str()),
             _ => None,
         });
-        let Some(c) = texts.chain(paths).find_map(|t| copy_of(t, &folder, listed)) else { continue };
+        let Some(c) = texts.chain(paths).find_map(|t| copy_of(t, &folder, listed)) else {
+            if outside {
+                others.insert(id);
+            }
+            continue;
+        };
         let l = &listed[c];
         let o = doc.obj_mut(id);
         if o.has(F_IN_PROJECT) {
@@ -299,6 +319,9 @@ fn relink_listed(
     }
     // Any other text that names a copy (a layout not known here), and which copies each object held.
     for (i, o) in doc.objects.iter_mut().enumerate() {
+        if others.contains(&ObjId(i as u32)) {
+            continue;
+        }
         let mut here = Vec::new();
         for field in &mut o.fields {
             for t in texts_mut(&mut field.value) {
@@ -353,7 +376,8 @@ fn relink_listed(
             add(at);
         }
     }
-    for l in listed {
+    // Only a multisample's: a single sample's original may be in any folder called Library (a Mac's own, say).
+    for l in listed.iter().filter(|l| l.multisample) {
         let at = Path::new(&l.full)
             .ancestors()
             .find(|a| a.file_name().is_some_and(|n| key(&n.to_string_lossy()) == "LIBRARY"));
@@ -573,7 +597,7 @@ fn named_in(raw: &[u8], listed: &[Listed]) -> Vec<bool> {
     let mut look = |bytes: &[u8]| {
         let lower = bytes.to_ascii_lowercase();
         for (c, copy) in listed.iter().enumerate() {
-            named[c] = named[c] || copy.needles.iter().any(|n| memmem::find(&lower, n).is_some());
+            named[c] = named[c] || names_copy(&lower, copy);
         }
     };
     if !bitwig::is_bitwig(raw) {
@@ -597,6 +621,24 @@ fn named_in(raw: &[u8], listed: &[Listed]) -> Vec<bool> {
         return vec![true; listed.len()];
     }
     named
+}
+
+/// Whether bytes (made small in ASCII) name a copy: one of its needles found somewhere that isn't inside its
+/// original's own path.
+fn names_copy(lower: &[u8], copy: &Listed) -> bool {
+    let mut original: Vec<(usize, usize)> = Vec::new();
+    let mut looked = false;
+    copy.needles.iter().any(|n| {
+        memmem::find_iter(lower, n).any(|at| {
+            if !looked {
+                looked = true;
+                for o in &copy.original {
+                    original.extend(memmem::find_iter(lower, o).map(|from| (from, from + o.len())));
+                }
+            }
+            !original.iter().any(|&(from, to)| from <= at && at + n.len() <= to)
+        })
+    })
 }
 
 /// Whether two files hold the same bytes, read a piece at a time.
@@ -658,10 +700,27 @@ fn fix(project: &Path, relinks: &[Relink], libraries: &[PathBuf], look_around: b
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
     };
+    // One whose original is gone now (a drive unplugged, say) is left alone; the others are still fixed.
+    let mut left = Vec::new();
+    let relinks: Vec<Relink> = relinks
+        .iter()
+        .filter(|r| {
+            let there = !r.library.is_absolute() || r.library.is_file();
+            if !there {
+                let shown = r.copy.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                left.push(format!("{shown}: {} isn't there now, so it's left alone", r.library.display()));
+            }
+            there
+        })
+        .cloned()
+        .collect();
+    if relinks.is_empty() {
+        return Err(format!("nothing was written: {}", left.join("; ")));
+    }
+    let relinks = relinks.as_slice();
     let listed = listed(&dir, relinks)?;
     // A copy that's no longer the same as its Library file (edited in Bitwig since) is left alone.
     let same: Vec<bool> = relinks.par_iter().map(|r| same_file(&r.copy, &r.library)).collect();
-    let mut left = Vec::new();
     let mut keep = Vec::new();
     let mut kept_relinks = Vec::new();
     for ((r, l), same) in relinks.iter().zip(listed).zip(same) {

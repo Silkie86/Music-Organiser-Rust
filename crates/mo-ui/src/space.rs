@@ -1695,25 +1695,18 @@ fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &
     // The Sounds library finds the originals of the single sample copies in each project's samples folder.
     let sounds = mo_app::sound_library::shared(&mo_app::sound_library::database_in(&data));
     let named = |name: &str| sounds.named(name).to_vec();
+    // An empty Sounds library (not read yet, or none) has no originals to give: the samples folders aren't walked.
+    let named: Option<&mo_space::bitwig::Named<'_>> = (!sounds.is_empty()).then_some(&named);
     let found = background::on_bulk_pool(|| {
-        space_bitwig::look(
-            &roots,
-            &studios,
-            &ask.libraries,
-            index,
-            Some(&prints),
-            Some(&named),
-            &ask.stop,
-            |done, of| {
-                if of > 0 {
-                    job.progress(done as f32 / of as f32, Some(&space_bitwig::progress_words(done, of)));
-                }
-                if done == 0 || done == of || told.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
-                    told = Some(Instant::now());
-                    arrive(weak, Step::BitwigLooking(ask.id, (done, of)));
-                }
-            },
-        )
+        space_bitwig::look(&roots, &studios, &ask.libraries, index, Some(&prints), named, &ask.stop, |done, of| {
+            if of > 0 {
+                job.progress(done as f32 / of as f32, Some(&space_bitwig::progress_words(done, of)));
+            }
+            if done == 0 || done == of || told.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
+                told = Some(Instant::now());
+                arrive(weak, Step::BitwigLooking(ask.id, (done, of)));
+            }
+        })
     });
     match found {
         Ok(copies) => {

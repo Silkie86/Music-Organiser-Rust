@@ -62,7 +62,8 @@ pub const REMOVING_FIXED: &str = if cfg!(windows) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
     pub folder: PathBuf,
-    /// The copies in its `multi-samples` folder that are the same as a Library file, in the order of their paths.
+    /// The copies in its `multi-samples` and `samples` folders that are the same as a Library multisample or a sound the
+    /// Sounds library knows, in the order of their paths.
     pub copies: Vec<LibraryCopy>,
     /// Its saves: yours beside the project newest first, then Bitwig's auto-backups below it
     /// (`mo_space::bitwig::saves_in`).
@@ -188,7 +189,9 @@ fn look_through(
     progress(0, folders.len());
     let library = if folders.is_empty() { Vec::new() } else { library_folders(&folders, studios, extra) };
     let mut found = Copies { library, folders: folders.len(), projects: Vec::new() };
-    if found.library.is_empty() {
+    // Without a Library there's nothing to compare the multisamples with; the samples are still compared with the
+    // Sounds library's.
+    if found.library.is_empty() && named.is_none() {
         return Ok(found);
     }
     let index = match index {
@@ -219,11 +222,19 @@ fn look_through(
             }
         }
         let mut copies = index.copies_in(folder, stop)?;
-        if let Some(named) = named {
-            copies.extend(bitwig::sample_copies_in(index, folder, named, stop)?);
-        }
+        let samples = match named {
+            Some(named) => bitwig::sample_copies_in(index, folder, named, stop)?,
+            None => Vec::new(),
+        };
+        let has_samples = !samples.is_empty();
+        copies.extend(samples);
+        copies.sort_by(|a, b| a.in_project.cmp(&b.in_project));
         if !copies.is_empty() {
-            let saves = bitwig::saves_in(folder, stop)?;
+            let mut saves = bitwig::saves_in(folder, stop)?;
+            if has_samples {
+                // A Fix from before it pointed samples at their originals left them all in use.
+                bitwig::fixed_before_samples(&mut saves);
+            }
             found.projects.push(Project { folder: folder.clone(), copies, saves });
         }
         progress(n + 1, folders.len());
@@ -308,7 +319,7 @@ pub fn none_note(found: Option<&Copies>) -> &'static str {
             "Bitwig's Library folder wasn't found (the Library folder in Bitwig Studio), so its copies in your projects \
              can't be compared with it. "
         }
-        Some(c) if c.projects.is_empty() => "No Bitwig project has copies of your Library's multisamples. ",
+        Some(c) if c.projects.is_empty() => "No Bitwig project has copies of your multisamples or samples. ",
         _ => "",
     }
 }
@@ -766,7 +777,7 @@ mod tests {
         assert_eq!(none_note(None), "");
         assert_eq!(none_note(Some(&sample())), "");
         let none = Copies { library: sample().library, folders: 3, projects: Vec::new() };
-        assert_eq!(none_note(Some(&none)), "No Bitwig project has copies of your Library's multisamples. ");
+        assert_eq!(none_note(Some(&none)), "No Bitwig project has copies of your multisamples or samples. ");
         assert!(none_note(Some(&Copies::default())).starts_with("No Bitwig project"));
         let no_library = Copies { library: Vec::new(), folders: 3, projects: Vec::new() };
         assert!(none_note(Some(&no_library)).starts_with("Bitwig's Library folder wasn't found"));
