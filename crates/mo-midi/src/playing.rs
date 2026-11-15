@@ -17,7 +17,7 @@ use std::ops::Range;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
-use mo_formats::arrangement::{Arrangement, MOST_BEATS};
+use mo_formats::arrangement::{Arrangement, MOST_BEATS, TimeSignature};
 use mo_formats::dates::RealDates;
 use mo_formats::{NoteAttribute, NoteEvent, bitwig, case, fl, paths, studio_one};
 use mo_harmony::Grid;
@@ -79,8 +79,8 @@ pub struct Song {
     /// scenes, Studio One's tracks).
     pub view: &'static str,
     pub tempo: f64,
-    /// Beats in a bar. A song that changes its time signature on the way is read by the one it starts with.
-    pub beats_per_bar: u32,
+    /// The time signature. A song that changes it on the way is read by the one it starts with.
+    pub signature: TimeSignature,
     /// The instruments that play notes, in the project's order.
     pub parts: Vec<Playing>,
     pub markers: Vec<Marker>,
@@ -96,7 +96,9 @@ impl Song {
 
     /// The song's beats and bars, for `mo-harmony`.
     pub fn grid(&self) -> Grid {
-        Grid { ticks_per_beat: PPQ as u32, beats_per_bar: self.beats_per_bar.max(1), bar_line: 0 }
+        // The beat is the signature's own, an eighth in 6/8, as `mo-harmony` asks.
+        let beat = (PPQ * 4 / i64::from(self.signature.bottom())).max(1);
+        Grid { ticks_per_beat: beat as u32, beats_per_bar: self.signature.top(), bar_line: 0 }
     }
 
     /// How many bars the song's notes run.
@@ -266,9 +268,8 @@ fn clip_bars(start: i64, length: i64, bar: i64) -> Range<i64> {
 /// An FL Studio project's song: a part for each channel that's switched on and plays notes.
 fn of_fl(flp: &fl::events::Flp<'_>) -> Song {
     let song = fl::song::read_song_with(flp, false);
-    let (beats_per_bar, markers) = fl::arrangement::bars_and_markers(flp);
-    let beats_per_bar = beats_per_bar.max(1);
-    let bar = PPQ * i64::from(beats_per_bar);
+    let (signature, markers) = fl::arrangement::bars_and_markers(flp);
+    let bar = signature.bar_ticks(PPQ);
     // A damaged header can say 0 ticks a beat: FL's default stands in, as in the arrangement's layouts.
     let per_beat = if song.ppq > 0 { f64::from(song.ppq) } else { 96.0 };
     let ticks = |at: i64| ticks_of(at as f64 / per_beat);
@@ -307,7 +308,7 @@ fn of_fl(flp: &fl::events::Flp<'_>) -> Song {
     Song {
         view: FL_VIEW,
         tempo: if song.tempo > 0.0 { song.tempo } else { 120.0 },
-        beats_per_bar,
+        signature,
         parts: finish(gathered, bar),
         markers: markers
             .iter()
@@ -324,8 +325,8 @@ fn of_fl(flp: &fl::events::Flp<'_>) -> Song {
 /// For an FL Studio project use [`read`]: it reads the song itself, and knows which channels play a sample, not a
 /// plugin.
 pub fn of(arrangement: &Arrangement) -> Song {
-    let beats_per_bar = arrangement.beats_per_bar.max(1);
-    let bar = PPQ * i64::from(beats_per_bar);
+    let signature = arrangement.signature;
+    let bar = signature.bar_ticks(PPQ);
     // FL Studio's lane-a-channel layout: the clips on a lane are patterns, which other channels play in too.
     let patterns = arrangement.view == fl::arrangement::BITWIG_VIEW;
     // (the lane it's on, or none for an instrument named by its clips; its name) -> its place in `parts`.
@@ -407,7 +408,7 @@ pub fn of(arrangement: &Arrangement) -> Song {
     Song {
         view: arrangement.view,
         tempo: arrangement.tempo,
-        beats_per_bar,
+        signature,
         parts: finish(parts, bar),
         markers,
         warnings: arrangement.notes.clone(),
@@ -509,7 +510,14 @@ mod tests {
     }
 
     fn arrangement(lanes: Vec<PreviewLane>) -> Arrangement {
-        Arrangement { view: "Test", tempo: 128.0, beats_per_bar: 4, lanes, markers: Vec::new(), notes: Vec::new() }
+        Arrangement {
+            view: "Test",
+            tempo: 128.0,
+            signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
+            lanes,
+            markers: Vec::new(),
+            notes: Vec::new(),
+        }
     }
 
     /// A bar of a chord: three notes held for the bar.
@@ -705,7 +713,7 @@ mod tests {
     #[test]
     fn three_beats_a_bar_and_markers() {
         let mut waltz = arrangement(vec![lane("Keys", vec![clip("w", 3.0, 6.0, chord([60, 64, 67]))])]);
-        waltz.beats_per_bar = 3;
+        waltz.signature = TimeSignature::quarters(3).unwrap();
         waltz.markers = vec![PreviewMarker { beat: 6.0, name: "Verse".into() }];
         waltz.notes = vec!["Something was left out.".into()];
         let song = of(&waltz);
@@ -715,6 +723,23 @@ mod tests {
         assert_eq!(song.markers, [Marker { bar: 2, name: "Verse".into() }]);
         assert_eq!(song.warnings, ["Something was left out."]);
         assert_eq!(song.grid().bar(), 3 * PPQ);
+    }
+
+    #[test]
+    fn six_eight_is_six_eighth_notes_to_the_bar() {
+        // A chord on the bar's second dotted quarter (beat 1.5), in a song three quarter notes to the bar.
+        let mut jig = arrangement(vec![lane("Keys", vec![clip("j", 0.0, 6.0, chord([60, 64, 67]))])]);
+        jig.signature = TimeSignature::new(6, 8).unwrap();
+        jig.markers = vec![PreviewMarker { beat: 3.0, name: "Turn".into() }];
+        let song = of(&jig);
+        assert_eq!((song.bar(), song.bars()), (3 * PPQ, 2));
+        assert_eq!(song.markers, [Marker { bar: 1, name: "Turn".into() }]);
+        // The chord reader's beat is the signature's own: an eighth note, six to the bar.
+        let grid = song.grid();
+        assert_eq!((grid.ticks_per_beat, grid.beats_per_bar, grid.bar()), (PPQ as u32 / 2, 6, 3 * PPQ));
+        // 7/8 is three and a half quarter notes, not four.
+        jig.signature = TimeSignature::new(7, 8).unwrap();
+        assert_eq!(of(&jig).bar(), 7 * PPQ / 2);
     }
 
     #[test]
@@ -797,9 +822,9 @@ mod tests {
         // on beat 5 (bar 2 too).
         let verse = [Marker { bar: 1, name: "Verse".into() }];
         let fl = read(&recipe("fl", "MO Recipe 16 time signature and marker.flp")).unwrap();
-        assert_eq!((fl.beats_per_bar, fl.markers.as_slice()), (3, verse.as_slice()));
+        assert_eq!((fl.signature.beats(), fl.markers.as_slice()), (3.0, verse.as_slice()));
         let bitwig = read(&recipe("bitwig", "MO Recipe 16 time signature and marker.bwproject")).unwrap();
-        assert_eq!((bitwig.beats_per_bar, bitwig.markers.as_slice()), (3, verse.as_slice()));
+        assert_eq!((bitwig.signature.beats(), bitwig.markers.as_slice()), (3.0, verse.as_slice()));
     }
 
     #[test]

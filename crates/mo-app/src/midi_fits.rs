@@ -1184,7 +1184,7 @@ mod tests {
         playing::of(&Arrangement {
             view: "Test",
             tempo: 120.0,
-            beats_per_bar: 4,
+            signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
             lanes,
             markers: Vec::new(),
             notes: Vec::new(),

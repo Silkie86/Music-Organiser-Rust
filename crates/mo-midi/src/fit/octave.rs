@@ -421,7 +421,14 @@ mod tests {
     }
 
     fn song(parts: Vec<crate::playing::Playing>) -> Song {
-        Song { view: "", tempo: 120.0, beats_per_bar: 4, parts, markers: Vec::new(), warnings: Vec::new() }
+        Song {
+            view: "",
+            tempo: 120.0,
+            signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
+            parts,
+            markers: Vec::new(),
+            warnings: Vec::new(),
+        }
     }
 
     #[test]

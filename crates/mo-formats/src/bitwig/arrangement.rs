@@ -15,7 +15,7 @@ use super::reader::{
 use crate::PluginKind;
 use crate::arrangement::{
     Arrangement, AudioPart, LaneKind, MOST_BEATS, MOST_NOTES, NoteBudget, PreviewClip, PreviewLane, PreviewMarker,
-    PreviewNote, PreviewPoint, Stretch, TOO_MANY_NOTES,
+    PreviewNote, PreviewPoint, Stretch, TOO_MANY_NOTES, TimeSignature,
 };
 use crate::velocity;
 
@@ -141,12 +141,15 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
         .unwrap_or(120.0);
 
     let transport = field_obj(doc, root, F_TRANSPORT);
-    let beats_per_bar = transport
+    // The packed number's top byte is the bar's length in sixteenth notes (16 in 4/4, 12 in 3/4): the bar comes out
+    // the right length whatever the signature, but which notes it counts in isn't known (6/8 reads as 3/4).
+    let signature = transport
         .and_then(|t| field_obj(doc, t, F_TIME_SIGNATURE))
         .and_then(|s| doc.obj(s).num(F_SIGNATURE))
-        .map(|packed| (packed as i64 as u32 >> 24) as f64 / 4.0)
-        .filter(|beats| (0.5..=64.0).contains(beats))
-        .map_or(4, |beats| beats.round_ties_even().max(1.0) as u32);
+        .map(|packed| packed as i64 as u32 >> 24)
+        .filter(|sixteenths| (2..=256).contains(sixteenths))
+        .and_then(TimeSignature::of_sixteenths)
+        .unwrap_or_default();
     let mut markers: Vec<PreviewMarker> = transport
         .and_then(|t| field_obj(doc, t, F_CUE_MARKERS))
         .map(|list| doc.field_list(list, F_ITEMS))
@@ -235,7 +238,7 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
     }
 
     // The scenes view has a note budget of its own, so a busy arranger can't leave it empty.
-    let scenes = scenes(doc, root, tempo, beats_per_bar, &lanes, &launcher);
+    let scenes = scenes(doc, root, tempo, signature, &lanes, &launcher);
     let mut notes = Vec::new();
     if budget.ran_out {
         notes.push(TOO_MANY_NOTES.to_owned());
@@ -252,7 +255,7 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
     }
     shown.extend(mix_curves);
     let lanes = shown;
-    let mut arranger = Arrangement { view: VIEW, tempo, beats_per_bar, lanes, markers, notes };
+    let mut arranger = Arrangement { view: VIEW, tempo, signature, lanes, markers, notes };
     match scenes {
         None => {
             if timeline_empty && arranger.lanes.iter().any(|l| l.kind != LaneKind::Automation) {
@@ -280,7 +283,7 @@ fn scenes(
     doc: &Document,
     root: ObjId,
     tempo: f64,
-    beats_per_bar: u32,
+    signature: TimeSignature,
     lanes: &[PreviewLane],
     launcher: &[Vec<Option<ObjId>>],
 ) -> Option<Arrangement> {
@@ -348,7 +351,7 @@ fn scenes(
     if budget.ran_out {
         notes.push(TOO_MANY_NOTES.to_owned());
     }
-    Some(Arrangement { view: SCENES_VIEW, tempo, beats_per_bar, lanes: placed, markers, notes })
+    Some(Arrangement { view: SCENES_VIEW, tempo, signature, lanes: placed, markers, notes })
 }
 
 /// How many more automation points the preview holds.
@@ -935,7 +938,8 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f
             muted,
             audio: parts,
             fade_in: fade(F_FADE_IN),
-            fade_out: fade(F_FADE_OUT),
+            // Together the two can't be longer than the clip, as in the other readers.
+            fade_out: fade(F_FADE_OUT).min((length - fade(F_FADE_IN)).max(0.0)),
             ..PreviewClip::default()
         });
     }

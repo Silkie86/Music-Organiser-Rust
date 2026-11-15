@@ -1876,7 +1876,7 @@ fn made_song(cat: &Catalogue, notes: &HashMap<String, Vec<NoteEvent>>, save: &st
     mo_midi::playing::of(&Arrangement {
         view: if bitwig { mo_formats::bitwig::arrangement::VIEW } else { "Made up" },
         tempo: 92.0,
-        beats_per_bar: 4,
+        signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
         lanes,
         markers: Vec::new(),
         notes: Vec::new(),

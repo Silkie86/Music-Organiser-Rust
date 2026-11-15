@@ -70,7 +70,7 @@ impl Measured {
     pub fn of(arrangement: &Arrangement) -> Measured {
         // Never past the readers' longest song (mo_formats::arrangement::MOST_BEATS), so the bar numbers can count it.
         let length = arrangement.length();
-        let song_beats = (arrangement.beats_per_bar.max(1) as f64).max(length * 1.02);
+        let song_beats = arrangement.signature.beats().max(length * 1.02);
         let content_height = arrangement.lanes.iter().map(lane_height).sum();
         let keys = arrangement
             .lanes
@@ -667,8 +667,10 @@ impl View {
         }
         let a = &self.arrangement;
         let beat = self.beat(px).max(0.0);
-        let bpb = a.beats_per_bar.max(1) as f64;
-        let mut text = format!("Bar {}.{}", ((beat / bpb) as u64).saturating_add(1), (beat % bpb) as u64 + 1);
+        let bpb = a.signature.beats();
+        // The beat in the bar counts the signature's own beats: eighths in 6/8.
+        let in_bar = (beat % bpb) * f64::from(a.signature.bottom()) / 4.0;
+        let mut text = format!("Bar {}.{}", ((beat / bpb) as u64).saturating_add(1), in_bar as u64 + 1);
         if py >= ruler {
             let scale = self.lane_scale();
             let mut y = ruler - self.top;
@@ -689,7 +691,7 @@ impl View {
 
     /// How many bars apart the ruler's numbers are, so they're at least 44 points apart.
     fn bar_step(&self) -> u64 {
-        let bar = self.zoom() * self.arrangement.beats_per_bar.max(1) as f64;
+        let bar = self.zoom() * self.arrangement.signature.beats();
         let mut step = 1;
         while (step as f64) * bar < 44.0 && step < 1 << 40 {
             step *= 2;
@@ -699,7 +701,7 @@ impl View {
 
     /// Each bar with a number on the ruler, with where it is.
     fn bars(&self, step: u64) -> Vec<(u64, f64)> {
-        let bpb = self.arrangement.beats_per_bar.max(1) as f64;
+        let bpb = self.arrangement.signature.beats();
         let zoom = self.zoom();
         if !(zoom > 0.0 && zoom.is_finite()) {
             return Vec::new();
@@ -1292,7 +1294,7 @@ mod tests {
         Arrangement {
             view: "FL Studio playlist",
             tempo: 140.0,
-            beats_per_bar: 4,
+            signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
             lanes: vec![keys, vox, cutoff],
             markers: vec![PreviewMarker { beat: 16.0, name: "Drop".into() }],
             notes: Vec::new(),

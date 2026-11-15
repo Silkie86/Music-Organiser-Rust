@@ -33,7 +33,7 @@ use roxmltree::Node;
 use super::{Song, attr, elements, id, num, parse, unescape, url_to_path, velocity_of};
 use crate::arrangement::{
     Arrangement, AudioPart, LaneKind, NoteBudget, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, PreviewPoint,
-    Stretch, TOO_MANY_NOTES,
+    Stretch, TOO_MANY_NOTES, TimeSignature,
 };
 use crate::paths;
 
@@ -304,11 +304,15 @@ impl Song<'_> {
             _ => 120.0,
         };
         let spb = seconds_per_beat.unwrap_or(60.0 / tempo);
-        let beats_per_bar = elements(song).find(|e| e.tag_name().name() == "TimeSignatureMapSegment").map_or(4, |s| {
-            let numerator = num(attr(s, "numerator")).unwrap_or(4.0);
-            let denominator = num(attr(s, "denominator")).unwrap_or(4.0);
-            (numerator * 4.0 / denominator).round_ties_even().max(1.0).min(u32::MAX as f64) as u32
-        });
+        // A number a damaged song gets wrong (a denominator of 0, half a beat) leaves the song in 4/4.
+        let whole = |text: &str| match text {
+            "" => Some(4),
+            text => num(text).filter(|n| n.fract() == 0.0 && (1.0..=64.0).contains(n)).map(|n| n as u32),
+        };
+        let signature = elements(song)
+            .find(|e| e.tag_name().name() == "TimeSignatureMapSegment")
+            .and_then(|s| TimeSignature::new(whole(attr(s, "numerator"))?, whole(attr(s, "denominator"))?))
+            .unwrap_or_default();
 
         let pool = self.pool();
         let channels = self.channels();
@@ -641,7 +645,7 @@ impl Song<'_> {
         if too_many_part_events {
             notes.push(TOO_MANY_PART_EVENTS.to_owned());
         }
-        Arrangement { view: VIEW, tempo, beats_per_bar, lanes, markers, notes }
+        Arrangement { view: VIEW, tempo, signature, lanes, markers, notes }
     }
 
     /// What each clip id in the media pool points at (ids by lower case: Studio One's don't care about letter case).

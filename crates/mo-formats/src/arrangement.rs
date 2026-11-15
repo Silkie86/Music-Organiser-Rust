@@ -174,13 +174,77 @@ pub struct PreviewMarker {
     pub name: String,
 }
 
+/// A time signature: `top` beats in a bar, each a `1/bottom` note (6/8 is `top` 6, `bottom` 8). Tempo and clip
+/// positions count quarter notes whatever it says, so a bar is `top × 4 ÷ bottom` of those: 3 in 6/8, 3.5 in 7/8.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimeSignature {
+    top: u32,
+    bottom: u32,
+}
+
+impl Default for TimeSignature {
+    fn default() -> Self {
+        TimeSignature::FOUR_FOUR
+    }
+}
+
+impl TimeSignature {
+    pub const FOUR_FOUR: TimeSignature = TimeSignature { top: 4, bottom: 4 };
+
+    /// None unless `top` is 1 to 64 and `bottom` is 1, 2, 4, 8, 16 or 32: what a damaged save says doesn't count.
+    pub const fn new(top: u32, bottom: u32) -> Option<TimeSignature> {
+        if top >= 1 && top <= 64 && bottom <= 32 && bottom.is_power_of_two() {
+            Some(TimeSignature { top, bottom })
+        } else {
+            None
+        }
+    }
+
+    /// `top` quarter notes in a bar: 3/4, 4/4.
+    pub const fn quarters(top: u32) -> Option<TimeSignature> {
+        TimeSignature::new(top, 4)
+    }
+
+    /// From a bar's length in sixteenth notes, for a save that says only that: 14 is 7/8, 12 is 3/4 (6/8 is as long
+    /// and reads as 3/4 too), 16 is 4/4.
+    pub fn of_sixteenths(sixteenths: u32) -> Option<TimeSignature> {
+        match sixteenths {
+            0 => None,
+            n if n % 4 == 0 => TimeSignature::new(n / 4, 4),
+            n if n % 2 == 0 => TimeSignature::new(n / 2, 8),
+            n => TimeSignature::new(n, 16),
+        }
+    }
+
+    pub const fn top(self) -> u32 {
+        self.top
+    }
+
+    pub const fn bottom(self) -> u32 {
+        self.bottom
+    }
+
+    /// Quarter notes in a bar.
+    pub fn beats(self) -> f64 {
+        f64::from(self.top) * 4.0 / f64::from(self.bottom)
+    }
+
+    /// Ticks in a bar at `ppq` ticks a quarter note, at least 1 (whole when `ppq` × 4 divides by `bottom`, as 96
+    /// does).
+    pub const fn bar_ticks(self, ppq: i64) -> i64 {
+        let bar = ppq.saturating_mul(4).saturating_mul(self.top as i64) / self.bottom as i64;
+        if bar > 0 { bar } else { 1 }
+    }
+}
+
 /// A project's arrangement. `view` names the layout ("FL Studio playlist", "As it opens in Bitwig") when a project
 /// can be shown more than one way.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Arrangement {
     pub view: &'static str,
     pub tempo: f64,
-    pub beats_per_bar: u32,
+    /// The time signature the song starts in.
+    pub signature: TimeSignature,
     pub lanes: Vec<PreviewLane>,
     pub markers: Vec<PreviewMarker>,
     /// Things the preview couldn't show, in plain words.
@@ -195,7 +259,7 @@ impl Arrangement {
     }
 
     pub fn bars(&self) -> f64 {
-        if self.beats_per_bar > 0 { self.length() / self.beats_per_bar as f64 } else { 0.0 }
+        self.length() / self.signature.beats()
     }
 
     pub fn clip_count(&self) -> usize {
@@ -284,9 +348,33 @@ pub(crate) fn unreadable(view: &'static str, what: &str) -> Arrangement {
     Arrangement {
         view,
         tempo: 120.0,
-        beats_per_bar: 4,
+        signature: TimeSignature::FOUR_FOUR,
         lanes: Vec::new(),
         markers: Vec::new(),
         notes: vec![format!("{what} couldn't be read in enough detail to draw.")],
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::TimeSignature;
+
+    #[test]
+    fn a_time_signature_counts_its_bar_in_quarter_notes() {
+        let of = |top, bottom| TimeSignature::new(top, bottom).unwrap();
+        assert_eq!(TimeSignature::default(), of(4, 4));
+        assert_eq!((of(6, 8).beats(), of(7, 8).beats(), of(2, 2).beats(), of(12, 8).beats()), (3.0, 3.5, 4.0, 6.0));
+        // Ticks in a bar are whole at 96 a quarter note, down to thirty-seconds.
+        assert_eq!((of(6, 8).bar_ticks(96), of(7, 8).bar_ticks(96), of(5, 32).bar_ticks(96)), (288, 336, 60));
+        assert_eq!(of(1, 32).bar_ticks(0), 1);
+        for (top, bottom) in [(0, 4), (65, 4), (4, 0), (4, 3), (4, 64), (u32::MAX, u32::MAX)] {
+            assert_eq!(TimeSignature::new(top, bottom), None, "{top}/{bottom}");
+        }
+        assert_eq!(TimeSignature::of_sixteenths(16), Some(of(4, 4)));
+        assert_eq!(TimeSignature::of_sixteenths(12), Some(of(3, 4)));
+        assert_eq!(TimeSignature::of_sixteenths(14), Some(of(7, 8)));
+        assert_eq!(TimeSignature::of_sixteenths(7), Some(of(7, 16)));
+        assert_eq!(TimeSignature::of_sixteenths(0), None);
+        assert_eq!(TimeSignature::of_sixteenths(255), None);
     }
 }
