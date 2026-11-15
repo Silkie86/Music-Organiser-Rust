@@ -318,6 +318,35 @@ fn your_say_noted_without_waiting_is_kept_in_order_with_the_plays() {
 }
 
 #[test]
+fn many_changes_under_one_number_are_kept_in_one_write() {
+    // Review SO-9: a read held off by the writer finds a number's changes all kept, or none of them.
+    use mo_app::sound_notes::Noter;
+    use mo_sounds::compact::yours::{Change, Yours};
+    let dir = folder("all-yours");
+    let kick = dir.join("Samples").join("Kick 01.wav");
+    tone(&kick, 0.3, 60.0);
+    let db = own_library(&dir, &[&kick]);
+    let copy = compact::copy_of(&db);
+    let noter = Noter::start(db.clone());
+    let yours: Vec<Yours> = (0..2000).map(|i| Yours { id: 1, change: Change::Tag(format!("t{i}")) }).collect();
+    let number = noter.note_all_yours(yours).unwrap();
+    let c = Connection::open(&copy).unwrap();
+    let tags =
+        || c.query_row("SELECT COUNT(*) FROM sound_tags WHERE sound_id = 1", [], |r| r.get::<_, i64>(0)).unwrap();
+    loop {
+        let held = noter.hold();
+        let count = tags();
+        if held.holds().has(number) {
+            // Beside the tag it had.
+            assert_eq!(count, 2001);
+            break;
+        }
+        assert!(count <= 1, "{count} tags in before the number was");
+    }
+    noter.finish();
+}
+
+#[test]
 fn your_say_that_couldnt_be_kept_is_tried_again_and_shows_till_then() {
     use mo_app::sound_notes::Noter;
     use mo_sounds::compact::yours::Change;
