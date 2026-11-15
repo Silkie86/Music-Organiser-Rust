@@ -33,7 +33,7 @@ use roxmltree::Node;
 use super::{Song, attr, elements, id, num, parse, unescape, url_to_path, velocity_of};
 use crate::arrangement::{
     Arrangement, AudioPart, LaneKind, NoteBudget, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, PreviewPoint,
-    Stretch, TOO_MANY_NOTES, TimeSignature,
+    Stretch, TOO_MANY_NOTES, TimeSignature, fades_within,
 };
 use crate::paths;
 
@@ -403,8 +403,11 @@ impl Song<'_> {
                             name.to_owned()
                         };
                         // The fades are in seconds; together they can't be longer than the clip.
-                        let fade_in = map.span(start, event.fade_in, true).min(length.max(0.0));
-                        let fade_out = map.span_before(start + length, event.fade_out).min((length - fade_in).max(0.0));
+                        let (fade_in, fade_out) = fades_within(
+                            map.span(start, event.fade_in, true),
+                            map.span_before(start + length, event.fade_out),
+                            length,
+                        );
                         clips.push(PreviewClip {
                             name,
                             start,

@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::events::{
-    EV_CHANNEL_NAME_OLD, EV_CHANNEL_NEW, EV_CHANNEL_TYPE, EV_PATTERN_NAME, EV_PATTERN_NEW, EV_PATTERN_NOTES,
-    EV_PLAYLIST, EV_PLUGIN_NAME, Event, Flp, byte_at, u32_at,
+    EV_CHANNEL_NAME_OLD, EV_CHANNEL_TYPE, EV_PATTERN_NAME, EV_PATTERN_NEW, EV_PATTERN_NOTES, EV_PLAYLIST,
+    EV_PLUGIN_NAME, Event, Flp, byte_at, u32_at,
 };
 use super::notes;
 use super::song::{
@@ -16,7 +16,7 @@ use super::song::{
 use super::{Rack, channels as known_channels};
 use crate::arrangement::{
     Arrangement, AudioPart, LaneKind, NoteBudget, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, PreviewPoint,
-    Stretch, TOO_MANY_NOTES, TimeSignature,
+    Stretch, TOO_MANY_NOTES, TimeSignature, fades_within,
 };
 use crate::fl::automation::{FlPoint, cut_curve};
 use crate::paths::file_name;
@@ -67,7 +67,7 @@ pub fn read(flp: &Flp<'_>) -> Vec<Arrangement> {
 /// The song's time signature, and its first arrangement's markers in beats, as [`read`]'s playlist view gives them:
 /// for a reader that needs no more of the playlist (one pass over the events, no notes read).
 pub fn bars_and_markers(flp: &Flp<'_>) -> (TimeSignature, Vec<PreviewMarker>) {
-    let mut timeline = Timeline::new();
+    let mut timeline = Timeline::new(flp);
     for e in &flp.events {
         timeline.step(flp, e);
     }
@@ -82,8 +82,9 @@ struct Timeline {
     mode: Option<u32>,
     markers: Vec<(i64, String)>,
     arrangements: u32,
-    /// In a pattern's events: its markers are the Piano roll's, not the song's.
-    in_pattern: bool,
+    /// The save has arrangements (FL 20 onwards): a marker before the first is a pattern's Piano roll marker, not
+    /// the song's. An older save has no such markers, and all of its are the song's.
+    has_arrangements: bool,
     /// The song's last marker changes the time signature: where it stands, and its numbers as they are read.
     change: Option<(i64, Option<u32>, Option<u32>)>,
     /// The time signature a marker at the very start of the song sets.
@@ -91,14 +92,14 @@ struct Timeline {
 }
 
 impl Timeline {
-    fn new() -> Timeline {
+    fn new(flp: &Flp<'_>) -> Timeline {
         Timeline {
             top: None,
             bottom: None,
             mode: None,
             markers: Vec::new(),
             arrangements: 0,
-            in_pattern: false,
+            has_arrangements: flp.events.iter().any(|e| e.id == EV_ARRANGEMENT_NEW),
             change: None,
             start: None,
         }
@@ -115,7 +116,8 @@ impl Timeline {
         if let Some(start) = self.start {
             return start;
         }
-        let top = self.top.unwrap_or(4);
+        // Without a top number that can be one, nothing else said counts: 4/4.
+        let Some(top) = self.top.filter(|top| (1..=32).contains(top)) else { return TimeSignature::FOUR_FOUR };
         let as_written = match (self.mode, self.bottom) {
             (Some(1), Some(bottom @ (2 | 4 | 8 | 16))) => TimeSignature::new(top, bottom),
             _ => None,
@@ -128,26 +130,29 @@ impl Timeline {
         self.arrangements <= 1
     }
 
+    /// Where the song's own markers are: in the first arrangement, or anywhere in a save from before FL had them.
+    /// In Solomon's FL 20 to 25 saves every marker before the first arrangement comes straight after a pattern's
+    /// event 65 (scales mostly), and every one of the song's after its playlist.
+    fn songs_markers(&self) -> bool {
+        if self.has_arrangements { self.arrangements == 1 } else { true }
+    }
+
     fn step(&mut self, flp: &Flp<'_>, e: &Event<'_>) {
-        let first = self.first();
         match e.id {
-            EV_TIME_SIG_NUMERATOR if self.top.is_none() && (1..=32).contains(&e.int()) => self.top = Some(e.int()),
+            EV_TIME_SIG_NUMERATOR if self.top.is_none() => self.top = Some(e.int()),
             EV_TIME_SIG_DENOMINATOR if self.bottom.is_none() => self.bottom = Some(e.int()),
             EV_TIME_SIG_MODE if self.mode.is_none() => self.mode = Some(e.int()),
-            EV_PATTERN_NEW => (self.in_pattern, self.change) = (true, None),
-            EV_CHANNEL_NEW | EV_PLAYLIST => self.in_pattern = false,
             EV_ARRANGEMENT_NEW => {
                 self.arrangements += 1;
-                (self.in_pattern, self.change) = (false, None);
+                self.change = None;
             }
-            // A pattern's markers come straight after its event 65, before the channels and the playlist.
-            EV_TIME_MARKER if first && !self.in_pattern => {
+            EV_TIME_MARKER if self.songs_markers() => {
                 let at = (e.int() & 0x00FF_FFFF) as i64;
                 self.markers.push((at, String::new()));
                 self.change = (e.int() >> 24 == MARKER_SIGNATURE).then_some((at, None, None));
             }
-            EV_MARKER_NUMERATOR | EV_MARKER_DENOMINATOR if first => self.signature_marker(e),
-            EV_MARKER_NAME if first && !self.in_pattern => {
+            EV_MARKER_NUMERATOR | EV_MARKER_DENOMINATOR if self.songs_markers() => self.signature_marker(e),
+            EV_MARKER_NAME if self.songs_markers() => {
                 // The name comes after the marker's numbers; an empty one leaves the name they gave it.
                 let name = flp.text(&e.data);
                 if let Some(m) = self.markers.last_mut().filter(|m| !name.is_empty() || m.1.is_empty()) {
@@ -227,8 +232,7 @@ struct Placement {
 
 /// A clip's fades in beats, from seconds: together they can't be longer than the clip.
 fn fades((fade_in, fade_out): (f64, f64), length: f64, tempo: f64) -> (f64, f64) {
-    let fade_in = (fade_in * tempo / 60.0).clamp(0.0, length.max(0.0));
-    (fade_in, (fade_out * tempo / 60.0).clamp(0.0, (length - fade_in).max(0.0)))
+    fades_within(fade_in * tempo / 60.0, fade_out * tempo / 60.0, length)
 }
 
 /// The playlist as FL Studio shows it (its first arrangement).
@@ -246,7 +250,7 @@ struct Playlist {
 
 fn read_playlist(flp: &Flp<'_>) -> Playlist {
     let known = known_channels(flp);
-    let mut timeline = Timeline::new();
+    let mut timeline = Timeline::new(flp);
     let mut channel_colours = HashMap::new();
     let mut channel_names = HashMap::new();
     let mut automation_channels = HashSet::new();

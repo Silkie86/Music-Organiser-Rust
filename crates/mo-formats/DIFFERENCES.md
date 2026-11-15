@@ -66,6 +66,7 @@ below); these are the places the Rust reader was written to differ, for files th
 | A project whose header says it stores plugin settings, but they're missing or cut short (a save interrupted at the end) | Read as whole, with no plugin states and no warning. | The same, with a warning that the plugin settings can't be read (VERSION 4). | Better |
 | A note's velocity as a MIDI 1.0 value (0 to 127) | Bitwig's 0-to-1 velocity rounded straight to 0 to 127. | Kept at MIDI 2.0's 16 bits, then rounded to 0 to 127 when a MIDI 1.0 value is wanted. About 3 in 10,000 velocities come out 1 apart (rounding twice); Bitwig's own whole-step velocities are the same. | Better (rule 22) |
 | The arrangement preview of a project (worked out from the recipe saves, 10 Nov 2026) | Every track drawn as playing, always 4 beats to the bar, no cue markers, no automation. | A deactivated or muted track is marked, the time signature and the cue markers are read, and each automation curve is a lane under its track (the tempo's first; the effect tracks' and the master's last). A track in a muted or deactivated group is muted with it. | Better |
+| The time signature (whole-app review FX-2, 15 Nov 2026) | The bar's length in 16ths rounded to whole beats (14 gets 4). | Kept as it is: 14 is 3.5 beats (7/8). The save says only the bar's length, so 6/8 reads as 3/4; a recipe save in 6/8 would settle it. A clip's two fades are capped together to the clip's length, as in the other readers. | Better |
 
 ## Studio One
 
@@ -90,6 +91,7 @@ tests don't have.
 | A track with layers (takes): no Events list of its own, each layer's under `Layers` | Shown empty ("Nothing is on this song's timeline yet" for a mix made on such tracks). | The active layer's events. | Better |
 | An audio part (AudioPartEvent; its events are the media pool's AudioPartClip) | Left out. | A clip with each of its events' audio, cut to what the part shows. | Better |
 | An audio event's stretch mode, transpose and tune, gain and fades; a disabled track; the bus a track is sent to; automation curves (`Envelopes/*.envelopex`, older `*.envelope`, the tempo's in song.xml) | Not read. | Read (10 Nov 2026). The gain is taken as a plain multiple (0.631 is -4 dB): Solomon's songs hold 3.2 and 6.5, too much for any other reading, but it hasn't been checked against the number Studio One shows. | Better |
+| The time signature (whole-app review FX-2, 15 Nov 2026) | The bar rounded to whole beats (7/8 gets 4); a denominator of 0 gives a bar of four billion beats. | Both numbers kept: 7/8 is 3.5 beats, and 6/8 is six eighth notes for the chord reader. Numbers that can't be a time signature (a 0, a fraction, over 64) leave the song in 4/4. | Better |
 
 ## MIDI files
 

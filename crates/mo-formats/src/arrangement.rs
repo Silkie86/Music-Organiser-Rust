@@ -191,9 +191,10 @@ impl Default for TimeSignature {
 impl TimeSignature {
     pub const FOUR_FOUR: TimeSignature = TimeSignature { top: 4, bottom: 4 };
 
-    /// None unless `top` is 1 to 64 and `bottom` is 1, 2, 4, 8, 16 or 32: what a damaged save says doesn't count.
+    /// None unless `top` is 1 to 255 and `bottom` is 1, 2, 4, 8, 16 or 32 (what a MIDI file can say too): what a
+    /// damaged save says doesn't count.
     pub const fn new(top: u32, bottom: u32) -> Option<TimeSignature> {
-        if top >= 1 && top <= 64 && bottom <= 32 && bottom.is_power_of_two() {
+        if top >= 1 && top <= 255 && bottom <= 32 && bottom.is_power_of_two() {
             Some(TimeSignature { top, bottom })
         } else {
             None
@@ -235,6 +236,22 @@ impl TimeSignature {
         let bar = ppq.saturating_mul(4).saturating_mul(self.top as i64) / self.bottom as i64;
         if bar > 0 { bar } else { 1 }
     }
+}
+
+impl From<TimeSignature> for crate::midi::write::TimeSignature {
+    /// The same signature, for a MIDI file: every one a project can have fits.
+    fn from(t: TimeSignature) -> Self {
+        crate::midi::write::TimeSignature { numerator: t.top as u8, denominator: t.bottom as u8 }
+    }
+}
+
+/// A clip's two fades, in beats, no longer together than the clip: the fade in gives way last. A number that isn't
+/// one (or is below 0) is no fade.
+pub(crate) fn fades_within(fade_in: f64, fade_out: f64, length: f64) -> (f64, f64) {
+    let room = if length > 0.0 { length } else { 0.0 };
+    let whole = |fade: f64| if fade > 0.0 { fade } else { 0.0 };
+    let fade_in = whole(fade_in).min(room);
+    (fade_in, whole(fade_out).min(room - fade_in))
 }
 
 /// A project's arrangement. `view` names the layout ("FL Studio playlist", "As it opens in Bitwig") when a project
@@ -367,7 +384,7 @@ mod signature_tests {
         // Ticks in a bar are whole at 96 a quarter note, down to thirty-seconds.
         assert_eq!((of(6, 8).bar_ticks(96), of(7, 8).bar_ticks(96), of(5, 32).bar_ticks(96)), (288, 336, 60));
         assert_eq!(of(1, 32).bar_ticks(0), 1);
-        for (top, bottom) in [(0, 4), (65, 4), (4, 0), (4, 3), (4, 64), (u32::MAX, u32::MAX)] {
+        for (top, bottom) in [(0, 4), (256, 4), (4, 0), (4, 3), (4, 64), (u32::MAX, u32::MAX)] {
             assert_eq!(TimeSignature::new(top, bottom), None, "{top}/{bottom}");
         }
         assert_eq!(TimeSignature::of_sixteenths(16), Some(of(4, 4)));
@@ -375,6 +392,21 @@ mod signature_tests {
         assert_eq!(TimeSignature::of_sixteenths(14), Some(of(7, 8)));
         assert_eq!(TimeSignature::of_sixteenths(7), Some(of(7, 16)));
         assert_eq!(TimeSignature::of_sixteenths(0), None);
-        assert_eq!(TimeSignature::of_sixteenths(255), None);
+        // A bar far longer than any real one keeps its length.
+        assert_eq!(TimeSignature::of_sixteenths(255).map(TimeSignature::beats), Some(63.75));
+        assert_eq!(TimeSignature::of_sixteenths(130).map(TimeSignature::beats), Some(32.5));
+        let midi: crate::midi::write::TimeSignature = of(12, 8).into();
+        assert_eq!((midi.numerator, midi.denominator), (12, 8));
+    }
+
+    #[test]
+    fn two_fades_are_never_longer_together_than_their_clip() {
+        use super::fades_within;
+        assert_eq!(fades_within(1.0, 2.0, 4.0), (1.0, 2.0));
+        assert_eq!(fades_within(3.0, 2.0, 4.0), (3.0, 1.0));
+        assert_eq!(fades_within(9.0, 2.0, 4.0), (4.0, 0.0));
+        assert_eq!(fades_within(-1.0, f64::NAN, 4.0), (0.0, 0.0));
+        assert_eq!(fades_within(1.0, 1.0, -4.0), (0.0, 0.0));
+        assert_eq!(fades_within(1.0, f64::INFINITY, f64::NAN), (0.0, 0.0));
     }
 }

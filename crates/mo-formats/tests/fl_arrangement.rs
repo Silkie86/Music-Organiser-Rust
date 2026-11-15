@@ -288,6 +288,9 @@ fn the_time_signature_keeps_both_its_numbers() {
     assert_eq!(read(&[(35, 1)]), (4, 4, 4.0));
     // The first of each is the song's: a later one is a pattern's own.
     assert_eq!(read(&[(17, 6), (18, 8), (35, 1), (17, 4), (18, 4)]), (6, 8, 3.0));
+    // A first top number that can't be one doesn't let a pattern's stand in, and a bottom number alone says nothing.
+    assert_eq!(read(&[(17, 0), (18, 8), (35, 1), (17, 3)]), (4, 4, 4.0));
+    assert_eq!(read(&[(18, 8), (35, 1)]), (4, 4, 4.0));
 }
 
 #[test]
@@ -339,4 +342,19 @@ fn a_patterns_own_markers_stay_off_the_songs_ruler_and_a_marker_keeps_its_place_
     let (signature, markers) = arrangement::bars_and_markers(&events::load(&bytes).expect("an FL project"));
     assert_eq!((signature.top(), signature.bottom(), signature.beats()), (12, 8, 6.0));
     assert_eq!(markers, [PreviewMarker { beat: 0.0, name: "Shuffle".into() }]);
+}
+
+#[test]
+fn a_save_from_before_arrangements_keeps_every_marker_as_the_songs() {
+    // FL 12 and older: no event 99, and a marker can follow a pattern's events with no playlist in between.
+    let bytes = Flp::new()
+        .ascii(199, "12.5.1.165")
+        .word(64, 0)
+        .text(203, "Bass")
+        .word(65, 1)
+        .dword(148, 4 << 24 | 192)
+        .text(205, "Drop")
+        .build();
+    let (_, markers) = arrangement::bars_and_markers(&events::load(&bytes).expect("an FL project"));
+    assert_eq!(markers, [PreviewMarker { beat: 2.0, name: "Drop".into() }]);
 }

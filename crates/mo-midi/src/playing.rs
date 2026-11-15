@@ -91,7 +91,7 @@ pub struct Song {
 impl Song {
     /// Ticks in one of the song's bars.
     pub fn bar(&self) -> i64 {
-        self.grid().bar()
+        self.signature.bar_ticks(PPQ)
     }
 
     /// The song's beats and bars, for `mo-harmony`.

@@ -15,7 +15,7 @@ use super::reader::{
 use crate::PluginKind;
 use crate::arrangement::{
     Arrangement, AudioPart, LaneKind, MOST_BEATS, MOST_NOTES, NoteBudget, PreviewClip, PreviewLane, PreviewMarker,
-    PreviewNote, PreviewPoint, Stretch, TOO_MANY_NOTES, TimeSignature,
+    PreviewNote, PreviewPoint, Stretch, TOO_MANY_NOTES, TimeSignature, fades_within,
 };
 use crate::velocity;
 
@@ -930,16 +930,16 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f
         } else {
             name.to_owned()
         };
-        let fade = |field: u32| c.num(field).filter(|f| f.is_finite() && *f > 0.0).unwrap_or(0.0).min(length);
+        let fade = |field: u32| c.num(field).filter(|f| f.is_finite()).unwrap_or(0.0);
+        let (fade_in, fade_out) = fades_within(fade(F_FADE_IN), fade(F_FADE_OUT), length);
         return Some(PreviewClip {
             name,
             start,
             length,
             muted,
             audio: parts,
-            fade_in: fade(F_FADE_IN),
-            // Together the two can't be longer than the clip, as in the other readers.
-            fade_out: fade(F_FADE_OUT).min((length - fade(F_FADE_IN)).max(0.0)),
+            fade_in,
+            fade_out,
             ..PreviewClip::default()
         });
     }
