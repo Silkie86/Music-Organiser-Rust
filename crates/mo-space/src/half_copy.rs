@@ -437,7 +437,7 @@ fn remove_half(folder: &Path, stop: &AtomicBool) -> Result<(), NotRemoved> {
 }
 
 /// Whether two paths name one place: the same as written, or where they really are.
-fn same_place(a: &str, b: &str) -> bool {
+pub(crate) fn same_place(a: &str, b: &str) -> bool {
     key(a) == key(b) || matches!((real_path(a), real_path(b)), (Some(x), Some(y)) if key(&x) == key(&y))
 }
 

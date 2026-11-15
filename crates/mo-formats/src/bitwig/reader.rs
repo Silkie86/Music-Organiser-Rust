@@ -777,7 +777,7 @@ fn files_under(dir: &Path) -> Vec<String> {
 // ---- When the file can't be decoded: a text scan ----------------------------------------------------------------
 
 /// The folders Bitwig keeps a project's own files in, next to the .bwproject.
-const PROJECT_FOLDERS: [&str; 6] = ["samples", "recordings", "bounce", "audio", "multi-samples", "wavetables"];
+pub const PROJECT_FOLDERS: [&str; 6] = ["samples", "recordings", "bounce", "audio", "multi-samples", "wavetables"];
 
 fn text_scan(
     raw: &[u8],

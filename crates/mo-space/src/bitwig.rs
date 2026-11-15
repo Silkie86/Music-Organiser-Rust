@@ -29,13 +29,24 @@ use crate::{key, real_path, really, text};
 /// The folder in a Bitwig project (or template) its multisample copies are kept in.
 pub const PROJECT_FOLDER: &str = "multi-samples";
 
+/// The folder in a Bitwig project its single sample copies are kept in (a WAV it copied in from a sample pack, or from
+/// another project's copy), named as the multisamples are ("ukg_snr_blaze-2-2-3.wav").
+pub const SAMPLES_FOLDER: &str = "samples";
+
+/// Whether a folder's name is one a Bitwig project keeps its own files in (mo-formats' list: samples, recordings,
+/// bounces, multisamples and more) or its auto-backups. A sound in one of these (beside a Bitwig project) is the
+/// project's, never the original of a copy.
+fn own_folder(name: &str) -> bool {
+    mo_formats::bitwig::reader::PROJECT_FOLDERS.iter().chain(&["auto-backups"]).any(|o| name.eq_ignore_ascii_case(o))
+}
+
 /// A project's copy that's the same as a Library file. It was the same byte for byte when looked at: whatever acts on
 /// it (the converter, then the Recycle Bin) compares the two again first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryCopy {
-    /// The copy in the project's `multi-samples` folder.
+    /// The copy in the project's `multi-samples` folder, or a single sample in its `samples` folder.
     pub in_project: String,
-    /// The Library file it's the same as, byte for byte.
+    /// The Library file (or for a single sample, the original sound) it's the same as, byte for byte.
     pub library_file: String,
     /// Its size: the room it takes in the project.
     pub bytes: u64,
@@ -176,11 +187,135 @@ impl LibraryIndex {
     }
 }
 
-/// The project folders under `roots` that hold a Bitwig project and a `multi-samples` folder, each once, in the order
-/// of their paths: the folders [`LibraryIndex::copies_in`] looks in. A root moved to another drive with a link in its
-/// place is read where it really is, and its folders keep the paths you know, as for the Library. A folder reached two
-/// ways (roots inside each other, spelled in another case, or one through a link) is listed once, so its copies count
-/// once. Folders in an "… (old copy)" folder that a move left behind are left out: that goes as a whole. Call it off
+/// The Sounds library's sounds of a file name (its paths), as [`sample_copies_in`] asks for them.
+pub type Named<'a> = dyn Fn(&str) -> Vec<String> + Sync + 'a;
+
+/// The single sample copies in a project's `samples` folder: each file that's the same, byte for byte, as a sound the
+/// Sounds library knows outside any Bitwig project (`named` gives the library's sounds of a name), with its own name or
+/// that name with Bitwig's "-2" endings taken off ("ukg_snr_blaze-2-2-3.wav" is a copy of "ukg_snr_blaze.wav").
+/// Solomon chose this on 15 Nov 2026: each sampler keeps its own sound, played from the original, and the copies can
+/// then go. A file whose name matches no sound, or whose sound differs, is the project's own (a recording, say) and
+/// isn't listed. Only sounds of the same size are read, with the same prints as the multisamples.
+pub fn sample_copies_in(
+    index: &LibraryIndex,
+    project: &Path,
+    named: &Named<'_>,
+    stop: &AtomicBool,
+) -> Result<Vec<LibraryCopy>, Stopped> {
+    let folder = project.join(SAMPLES_FOLDER);
+    if is_link(&folder) || !folder.is_dir() {
+        return Ok(Vec::new());
+    }
+    // Only the folder's own files: Bitwig puts its copies there, never in a folder below.
+    let found: Vec<(PathBuf, u64)> = fs::read_dir(&folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| {
+                    let meta =
+                        e.metadata().ok().filter(|m| m.is_file() && !e.file_type().is_ok_and(|t| t.is_symlink()))?;
+                    Some((e.path(), meta.len()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if stop.load(Ordering::Relaxed) {
+        return Err(Stopped);
+    }
+    // Each copy's possible originals: the library's sounds of each of its names, of its size, outside any project.
+    // Whether a folder is a project's own is asked once per folder.
+    let own: std::sync::Mutex<HashMap<PathBuf, bool>> = std::sync::Mutex::default();
+    let outside = |sound: &Path| {
+        let Some(at) = sound.parent() else { return false };
+        if let Some(known) = own.lock().ok().and_then(|o| o.get(at).copied()) {
+            return !known;
+        }
+        let real = real_path(&text(at)).map(PathBuf::from);
+        let inside = in_old_copy(at)
+            || in_bitwig_project(at)
+            || real.as_deref().is_some_and(|r| in_old_copy(r) || in_bitwig_project(r));
+        if let Ok(mut o) = own.lock() {
+            o.insert(at.to_path_buf(), inside);
+        }
+        !inside
+    };
+    let extension = |p: &Path| p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let maybe: Vec<(&PathBuf, u64, Vec<PathBuf>)> = found
+        .par_iter()
+        .filter_map(|(path, bytes)| {
+            let ext = extension(path);
+            let mut same_size: Vec<PathBuf> = Vec::new();
+            for name in names(path) {
+                for sound in named(&format!("{name}{ext}")) {
+                    let sound = PathBuf::from(sound);
+                    let size = fs::symlink_metadata(&sound).ok().filter(|m| m.is_file()).map(|m| m.len());
+                    if size == Some(*bytes)
+                        && !same_size.contains(&sound)
+                        && !crate::half_copy::same_place(&text(&sound), &text(path))
+                        && outside(&sound)
+                    {
+                        same_size.push(sound);
+                    }
+                }
+            }
+            (!same_size.is_empty()).then_some((path, *bytes, same_size))
+        })
+        .collect();
+    // Each original read once, its ends then (where those match) the whole of it, as for the multisamples.
+    let mut wanted: Vec<&PathBuf> = maybe.iter().flat_map(|(_, _, same)| same.iter()).collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let ends: HashMap<&PathBuf, [u8; 32]> =
+        wanted.into_par_iter().filter_map(|s| index.prints.ends(s, stop).map(|print| (s, print))).collect();
+    let maybe: Vec<(&PathBuf, u64, Vec<&PathBuf>)> = maybe
+        .par_iter()
+        .filter_map(|(path, bytes, same_size)| {
+            let own_ends = index.prints.ends(path, stop)?;
+            let same: Vec<&PathBuf> = same_size.iter().filter(|s| ends.get(s) == Some(&own_ends)).collect();
+            (!same.is_empty()).then_some((*path, *bytes, same))
+        })
+        .collect();
+    let mut wanted: Vec<&PathBuf> = maybe.iter().flat_map(|(_, _, same)| same.iter().copied()).collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let wholes: HashMap<&PathBuf, [u8; 32]> =
+        wanted.into_par_iter().filter_map(|s| index.prints.whole(s, stop).map(|print| (s, print))).collect();
+    let copies: Vec<Option<LibraryCopy>> = maybe
+        .par_iter()
+        .map(|(path, bytes, same)| {
+            let print = index.prints.whole(path, stop)?;
+            let same: Vec<&PathBuf> = same.iter().copied().filter(|s| wholes.get(s) == Some(&print)).collect();
+            let original = best(path, &same)?;
+            Some(LibraryCopy { in_project: text(path), library_file: text(original), bytes: *bytes })
+        })
+        .collect();
+    if stop.load(Ordering::Relaxed) {
+        return Err(Stopped);
+    }
+    let mut copies: Vec<LibraryCopy> = copies.into_iter().flatten().collect();
+    copies.sort_by(|a, b| a.in_project.cmp(&b.in_project));
+    Ok(copies)
+}
+
+/// Whether a folder is, or is in, one of a Bitwig project's own folders ([`own_folder`]) beside a Bitwig project (its
+/// `.bitwig-project` marker, or a save).
+fn in_bitwig_project(path: &Path) -> bool {
+    path.ancestors().any(|folder| {
+        let own = folder.file_name().is_some_and(|n| own_folder(&n.to_string_lossy()));
+        own && folder.parent().is_some_and(|project| {
+            project.join(".bitwig-project").exists()
+                || fs::read_dir(project).is_ok_and(|entries| {
+                    entries.flatten().any(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("bwproject")))
+                })
+        })
+    })
+}
+
+/// The project folders under `roots` that hold a Bitwig project and a `multi-samples` or `samples` folder, each once,
+/// in the order of their paths: the folders [`LibraryIndex::copies_in`] and [`sample_copies_in`] look in. A root
+/// moved to another drive with a link in its place is read where it really is, and its folders keep the paths you
+/// know, as for the Library. A folder reached two ways (roots inside each other, spelled in another case, or one
+/// through a link) is listed once, so its copies count once. Folders in an "… (old copy)" folder that a move left behind are left out: that goes as a whole. Call it off
 /// the window's thread.
 pub fn project_folders(roots: &[PathBuf], stop: &AtomicBool) -> Result<Vec<PathBuf>, Stopped> {
     let mut found = Vec::new();
@@ -189,7 +324,10 @@ pub fn project_folders(roots: &[PathBuf], stop: &AtomicBool) -> Result<Vec<PathB
         found.extend(walk(&real, false, stop, |path, meta| {
             let project = meta.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bwproject"));
             let folder = path.parent()?;
-            if !project || in_a_project(folder) || !folder.join(PROJECT_FOLDER).is_dir() {
+            if !project || in_a_project(folder) {
+                return None;
+            }
+            if !folder.join(PROJECT_FOLDER).is_dir() && !folder.join(SAMPLES_FOLDER).is_dir() {
                 return None;
             }
             let inside = folder.strip_prefix(&real).ok()?;
@@ -248,6 +386,23 @@ impl Save {
 /// opened neon rmx 40's from 10 Nov), so its save is offered to be fixed again, as one saved again since is.
 pub fn fix_writes_library_files() -> SystemTime {
     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_370_717)
+}
+
+/// When Fix began pointing a project's single sample copies at their originals ([`sample_copies_in`], 15 Nov 2026). A
+/// "(fixed)" project written before then left every sample copy in use.
+pub fn fix_relinks_samples() -> SystemTime {
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_752_643)
+}
+
+/// Marks the "(fixed)" projects written before [`fix_relinks_samples`] as out of date, for a project with single sample
+/// copies: Fix can now point those at their originals too. One whose time can't be read counts as out of date.
+pub fn fixed_before_samples(saves: &mut [Save]) {
+    for save in saves {
+        if let Some((fixed, current)) = &mut save.fixed {
+            let at = fs::metadata(&*fixed).and_then(|m| m.modified()).ok();
+            *current = *current && at.is_some_and(|at| at >= fix_relinks_samples());
+        }
+    }
 }
 
 /// The Bitwig projects in a project folder and the folders below it, for a fix: your saves beside the project, newest

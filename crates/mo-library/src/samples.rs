@@ -445,6 +445,12 @@ impl SoundLibrary {
         self.by_name.entry(case::key(file_name(&path))).or_default().push(path);
     }
 
+    /// Every sound called `name` (in any letter case), in the order they joined the library. Nothing is read from the
+    /// disk: whether each is still there is the caller's to check.
+    pub fn named(&self, name: &str) -> &[String] {
+        self.by_name.get(&case::key(name)).map_or(&[], Vec::as_slice)
+    }
+
     /// How many sounds it knows.
     pub fn len(&self) -> usize {
         self.by_name.values().map(Vec::len).sum()

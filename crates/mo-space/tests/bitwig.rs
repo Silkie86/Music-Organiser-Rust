@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use mo_space::bitwig::{
     FixedProject, LibraryCopy, LibraryIndex, fixed_projects, project_folders, remove_copies, remove_fixed_projects,
-    saves_in,
+    sample_copies_in, saves_in,
 };
 use mo_space::clean::{Bin, Problem, Removed, What, undo};
 use mo_space::key;
@@ -170,6 +170,42 @@ fn the_next_look_lists_the_library_again_and_reads_again_only_what_changed() {
     write(&library, "Kicks Again.multisample", &[2u8; 256]);
     assert!(index.list_again(std::slice::from_ref(&library), &AtomicBool::new(true)).is_err());
     assert_eq!(index.copies_in(&dir.join("Song"), &stop).unwrap().len(), 1);
+}
+
+#[test]
+fn a_sample_copy_points_at_its_original_never_at_another_projects_copy() {
+    let dir = fixtures("mo-space-bitwig-sample-copies");
+    let snare = [5u8; 3000];
+    write(&dir, "Library/Pads.multisample", b"pads");
+    write(&dir, "Pack/ukg_snr_blaze.wav", &snare);
+    // The same sound in another project's samples folder: that's a copy too, never the original.
+    write(&dir, "Projects/Garage/Garage.bwproject", b"project");
+    write(&dir, "Projects/Garage/samples/ukg_snr_blaze-2.wav", &snare);
+    let project = dir.join("Projects/707");
+    write(&project, "707.bwproject", b"project");
+    write(&project, "samples/ukg_snr_blaze-2-2-3.wav", &snare);
+    // In a folder below samples (Bitwig keeps only the top level): left alone.
+    write(&project, "samples/old/ukg_snr_blaze-2.wav", &snare);
+    let sounds = [
+        dir.join("Pack/ukg_snr_blaze.wav"),
+        dir.join("Projects/Garage/samples/ukg_snr_blaze-2.wav"),
+        project.join("samples/ukg_snr_blaze-2-2-3.wav"),
+    ];
+    let named = |name: &str| -> Vec<String> {
+        sounds.iter().filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy() == name)).map(|p| s(p)).collect()
+    };
+    let stop = AtomicBool::new(false);
+    let index = LibraryIndex::new(&[dir.join("Library")], &stop).unwrap();
+    let copies = sample_copies_in(&index, &project, &named, &stop).unwrap();
+    assert_eq!(
+        copies.iter().map(keyed).collect::<Vec<_>>(),
+        vec![(
+            key(&s(&project.join("samples/ukg_snr_blaze-2-2-3.wav"))),
+            key(&s(&dir.join("Pack/ukg_snr_blaze.wav"))),
+            3000
+        )]
+    );
+    assert!(sample_copies_in(&index, &project, &named, &AtomicBool::new(true)).is_err());
 }
 
 #[test]

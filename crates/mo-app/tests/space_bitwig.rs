@@ -82,7 +82,7 @@ fn the_copies_in_each_project_are_found_and_listed_biggest_first() {
     // Settings names the Bitwig Studio folder: its Library comes first, before the one in Documents.
     let studios = [studio.clone(), documents.join("Bitwig Studio")];
     let found =
-        look(&roots, &studios, &[], &mut index, Some(&store), &stop, |done, of| heard.push((done, of))).unwrap();
+        look(&roots, &studios, &[], &mut index, Some(&store), None, &stop, |done, of| heard.push((done, of))).unwrap();
     assert_eq!(heard, [(0, 4), (1, 4), (2, 4), (3, 4), (4, 4)]);
     assert_eq!(found.folders, 4);
     assert_eq!(
@@ -116,14 +116,14 @@ fn the_copies_in_each_project_are_found_and_listed_biggest_first() {
 
     // After a restart (a new index) the fingerprints kept in the store give the same copies.
     let restarted =
-        look(&roots, &[documents.join("Bitwig Studio")], &[], &mut None, Some(&store), &stop, |_, _| {}).unwrap();
+        look(&roots, &[documents.join("Bitwig Studio")], &[], &mut None, Some(&store), None, &stop, |_, _| {}).unwrap();
     assert_eq!(summary(&restarted), summary(&found));
 
     // The next look keeps the Library it read: a multisample added since is found, and one taken out isn't.
     write(&studio, "Library/Multisamples/Own.multisample", &own);
     fs::remove_file(studio.join("Library/Multisamples/Pads.multisample")).unwrap();
-    let again =
-        look(&roots, &[documents.join("Bitwig Studio")], &[], &mut index, Some(&store), &stop, |_, _| {}).unwrap();
+    let again = look(&roots, &[documents.join("Bitwig Studio")], &[], &mut index, Some(&store), None, &stop, |_, _| {})
+        .unwrap();
     let names: Vec<(String, usize)> = again.projects.iter().map(|p| (p.name(), p.copies.len())).collect();
     assert_eq!(
         names,
@@ -137,7 +137,7 @@ fn without_projects_or_a_library_nothing_is_read() {
     let stop = AtomicBool::new(false);
     // No project keeps copies of multisamples.
     write(&dir, "Projects/Sketch/Sketch.bwproject", b"project");
-    let found = look(&[dir.join("Projects")], &[], &[], &mut None, None, &stop, |_, _| {}).unwrap();
+    let found = look(&[dir.join("Projects")], &[], &[], &mut None, None, None, &stop, |_, _| {}).unwrap();
     assert_eq!(found, Copies::default());
     // Copies, but no Bitwig Studio folder above them and none in Documents: there's no Library to compare them with.
     write(&dir, "Projects/Song/Song.bwproject", b"project");
@@ -149,12 +149,49 @@ fn without_projects_or_a_library_nothing_is_read() {
         &[],
         &mut index,
         None,
+        None,
         &stop,
         |_, _| {},
     )
     .unwrap();
     assert_eq!((found.folders, found.library.len(), found.projects.len()), (1, 0, 0));
     assert!(index.is_none(), "no Library was read");
+}
+
+#[test]
+fn single_sample_copies_are_found_through_the_sounds_library() {
+    let dir = fixtures("mo-app-space-bitwig-samples");
+    let studio = dir.join("K/Bitwig Studio");
+    write(&studio, "Library/Multisamples/Pads.multisample", &[2u8; 8192]);
+    let (snare, other) = ([5u8; 3000], [6u8; 3000]);
+    // The originals, in a sample pack, as the Sounds library knows them.
+    write(&dir, "F/Samples/ukg_snr_blaze.wav", &snare);
+    write(&dir, "F/Samples/ukg_snr_bingo.wav", &other);
+    let projects = studio.join("Projects");
+    write(&projects, "707/707.bwproject", b"project");
+    write(&projects, "707/samples/ukg_snr_blaze-2-2-3.wav", &snare);
+    // Named like a sound, but not the same bytes: the project's own.
+    write(&projects, "707/samples/ukg_snr_bingo-2.wav", &[7u8; 3000]);
+    // A recording of the project's own, named like no sound.
+    write(&projects, "707/samples/vocal take.wav", &other);
+    let sounds = [dir.join("F/Samples/ukg_snr_blaze.wav"), dir.join("F/Samples/ukg_snr_bingo.wav")];
+    let named = |name: &str| -> Vec<String> {
+        sounds
+            .iter()
+            .filter(|s| s.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)))
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
+    };
+    let stop = AtomicBool::new(false);
+    let found =
+        look(std::slice::from_ref(&projects), &[], &[], &mut None, None, Some(&named), &stop, |_, _| {}).unwrap();
+    assert_eq!(
+        summary(&found),
+        vec![("707".to_string(), 3000, vec![("ukg_snr_blaze-2-2-3.wav".to_string(), "ukg_snr_blaze.wav".to_string())])]
+    );
+    // Without the Sounds library, the samples folder isn't looked through.
+    let found = look(&[projects], &[], &[], &mut None, None, None, &stop, |_, _| {}).unwrap();
+    assert!(found.projects.is_empty());
 }
 
 #[test]
@@ -166,8 +203,8 @@ fn a_stop_stops_it_and_the_next_look_starts_again() {
     write(&studio, "Projects/Song/multi-samples/Kicks-2.multisample", b"kicks");
     let roots = [studio.join("Projects")];
     let mut index = None;
-    assert!(look(&roots, &[], &[], &mut index, None, &AtomicBool::new(true), |_, _| {}).is_err());
-    let found = look(&roots, &[], &[], &mut index, None, &AtomicBool::new(false), |_, _| {}).unwrap();
+    assert!(look(&roots, &[], &[], &mut index, None, None, &AtomicBool::new(true), |_, _| {}).is_err());
+    let found = look(&roots, &[], &[], &mut index, None, None, &AtomicBool::new(false), |_, _| {}).unwrap();
     assert_eq!(found.count(), 1);
 }
 
@@ -207,7 +244,7 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
     let roots = [studio.join("Projects")];
     let stop = AtomicBool::new(false);
     let mut index = None;
-    let found = look(&roots, &[], &[], &mut index, None, &stop, |_, _| {}).unwrap();
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
     let saves: Vec<String> = found.projects[0].saves.iter().map(|s| name(&s.path)).collect();
     assert_eq!(saves, ["Song v2.bwproject", "Song v1.bwproject"]);
 
@@ -227,7 +264,7 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
 
     // The next look sees it fixed on disk, which counts from then on, so nothing is ticked; the older save can be
     // ticked and fixed too.
-    let again = look(&roots, &[], &[], &mut index, None, &stop, |_, _| {}).unwrap();
+    let again = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
     fixes.looked();
     assert!(fixes.fixing.is_empty());
     let newest = &again.projects[0].saves[0];
@@ -256,7 +293,7 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
     let other = studio.join("Projects/Other");
     write(&other, "multi-samples/Kicks-3.multisample", kicks);
     project(&other.join("Other.bwproject"), "Snare.multisample", 30);
-    let found = look(&roots, &[], &[], &mut index, None, &stop, |_, _| {}).unwrap();
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
     let other = found.projects.iter().find(|p| p.name() == "Other").unwrap();
     let job = mo_app::space_bitwig::ToFix {
         save: other.saves[0].path.clone(),

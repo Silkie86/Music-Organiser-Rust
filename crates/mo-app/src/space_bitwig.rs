@@ -36,8 +36,8 @@ pub const BITWIG_COPIES: &str = "bitwig-copies";
 /// The activity card's headline while a look is on, in words that say what it's for (Solomon, 4 Nov 2026: "what
 /// does looking for bitwig copies mean?"), and its line until it can say how far it is.
 pub const LOOKING: &str = "Finding Bitwig's copies of your Library sounds";
-pub const LOOKING_WHY: &str = "Bitwig copies a Library multisample into each project that uses it. The Space page \
-    shows the room those copies take.";
+pub const LOOKING_WHY: &str = "Bitwig copies a Library multisample or a sample into each project that uses it. The \
+    Space page shows the room those copies take.";
 
 /// The activity card's headline and line when a look stops because a newer one took its place.
 pub const LOOK_STOPPED: (&str, &str) = ("Stopped finding Bitwig's copies", "A newer look took its place.");
@@ -64,7 +64,8 @@ pub const REMOVING_FIXED: &str = if cfg!(windows) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
     pub folder: PathBuf,
-    /// The copies in its `multi-samples` folder that are the same as a Library file, in the order of their paths.
+    /// The copies in its `multi-samples` and `samples` folders that are the same as a Library multisample or a sound the
+    /// Sounds library knows, in the order of their paths.
     pub copies: Vec<LibraryCopy>,
     /// Its saves: yours beside the project newest first, then Bitwig's auto-backups below it
     /// (`mo_space::bitwig::saves_in`).
@@ -136,19 +137,23 @@ const KEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 /// copies. `index` is the last look's Library, kept so a file already read isn't read again while it's unchanged
 /// (rule 12); the first look makes it, taking in the fingerprints kept in `prints` (the store in the app's data
 /// folder, `mo_space::prints::FILE_NAME`) so a restart doesn't read them again either. What was read is written there
-/// as it goes and at the end, also when stopped. `progress` hears how many project folders have been looked through, of how many.
-/// Reads the disks, so call it off the window's thread, inside the low-priority pool (rule 21).
+/// as it goes and at the end, also when stopped. `named` gives the Sounds library's sounds of a name, when it could be
+/// read: each project's `samples` folder is then looked through too, for single sample copies of those sounds
+/// (`mo_space::bitwig::sample_copies_in`). `progress` hears how many project folders have been looked through, of how
+/// many. Reads the disks, so call it off the window's thread, inside the low-priority pool (rule 21).
+#[allow(clippy::too_many_arguments)]
 pub fn look(
     roots: &[PathBuf],
     studios: &[PathBuf],
     extra: &[PathBuf],
     index: &mut Option<LibraryIndex>,
     prints: Option<&Path>,
+    named: Option<&bitwig::Named<'_>>,
     stop: &AtomicBool,
     progress: impl FnMut(usize, usize),
 ) -> Result<Copies, Stopped> {
     let started = std::time::Instant::now();
-    let found = look_through(roots, studios, extra, index, prints, stop, progress);
+    let found = look_through(roots, studios, extra, index, prints, named, stop, progress);
     if let Some(index) = index.as_ref() {
         // A look that stopped forgets nothing; a whole one forgets the files it didn't ask about. One that found no
         // Library, or with a project folder away (a drive asleep or unplugged), isn't whole: what's there is kept for
@@ -171,12 +176,14 @@ pub fn look(
     found
 }
 
+#[allow(clippy::too_many_arguments)]
 fn look_through(
     roots: &[PathBuf],
     studios: &[PathBuf],
     extra: &[PathBuf],
     index: &mut Option<LibraryIndex>,
     prints: Option<&Path>,
+    named: Option<&bitwig::Named<'_>>,
     stop: &AtomicBool,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<Copies, Stopped> {
@@ -184,7 +191,9 @@ fn look_through(
     progress(0, folders.len());
     let library = if folders.is_empty() { Vec::new() } else { library_folders(&folders, studios, extra) };
     let mut found = Copies { library, folders: folders.len(), projects: Vec::new() };
-    if found.library.is_empty() {
+    // Without a Library there's nothing to compare the multisamples with; the samples are still compared with the
+    // Sounds library's.
+    if found.library.is_empty() && named.is_none() {
         return Ok(found);
     }
     let index = match index {
@@ -214,9 +223,20 @@ fn look_through(
                 crate::log::warning("Space", &format!("Couldn't keep the Bitwig copies' fingerprints so far: {e}"));
             }
         }
-        let copies = index.copies_in(folder, stop)?;
+        let mut copies = index.copies_in(folder, stop)?;
+        let samples = match named {
+            Some(named) => bitwig::sample_copies_in(index, folder, named, stop)?,
+            None => Vec::new(),
+        };
+        let has_samples = !samples.is_empty();
+        copies.extend(samples);
+        copies.sort_by(|a, b| a.in_project.cmp(&b.in_project));
         if !copies.is_empty() {
-            let saves = bitwig::saves_in(folder, stop)?;
+            let mut saves = bitwig::saves_in(folder, stop)?;
+            if has_samples {
+                // A Fix from before it pointed samples at their originals left them all in use.
+                bitwig::fixed_before_samples(&mut saves);
+            }
             found.projects.push(Project { folder: folder.clone(), copies, saves });
         }
         progress(n + 1, folders.len());
@@ -279,12 +299,12 @@ pub fn progress_words(done: usize, of: usize) -> String {
 /// The Bitwig copies line under Biggest wins first, with the room the copies take (what the wins are sorted by), once
 /// a look has found copies; or, while the first look is on (`looking`), how far it is. None when there are none.
 pub fn line(found: Option<&Copies>, looking: Option<(usize, usize)>) -> Option<(u64, Line)> {
-    let line = |why: String, size: String| Line { id: BITWIG_COPIES, title: "Bitwig multisample copies", why, size };
+    let line = |why: String, size: String| Line { id: BITWIG_COPIES, title: "Bitwig sound copies", why, size };
     match (found, looking) {
         (Some(c), _) if !c.projects.is_empty() => Some((
             c.bytes(),
             line(
-                format!("Copies of your Library's multisamples in {}", plural(c.projects.len(), "project")),
+                format!("Copies of your multisamples and samples in {}", plural(c.projects.len(), "project")),
                 size_text(c.bytes()),
             ),
         )),
@@ -301,7 +321,7 @@ pub fn none_note(found: Option<&Copies>) -> &'static str {
             "Bitwig's Library folder wasn't found (the Library folder in Bitwig Studio), so its copies in your projects \
              can't be compared with it. "
         }
-        Some(c) if c.projects.is_empty() => "No Bitwig project has copies of your Library's multisamples. ",
+        Some(c) if c.projects.is_empty() => "No Bitwig project has copies of your multisamples or samples. ",
         _ => "",
     }
 }
@@ -605,7 +625,7 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
     }
     Card {
         kind: "BITWIG COPIES",
-        title: "Bitwig multisample copies",
+        title: "Bitwig sound copies",
         big: found.map_or_else(|| "Measuring…".to_owned(), |c| size_text(c.bytes())),
         big_note: match (found, looking) {
             (Some(c), _) => format!("{} in {}", copies_words(c.count()), plural(c.projects.len(), "project")),
@@ -613,8 +633,9 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
             (None, None) => String::new(),
         },
         lead: format!(
-            "Byte for byte the same as the multisamples in {}. Bitwig copies a multisample into each project that \
-             uses it, under a new name each time, so one sound can sit in many projects.",
+            "Byte for byte the same as the multisamples in {}, or as a sample your Sounds library knows. Bitwig \
+             copies a multisample or a sample into each project that uses it, under a new name each time, so one \
+             sound can sit in many projects.",
             library_words(found.map(|c| c.library.as_slice()).unwrap_or_default())
         ),
         ticks: true,
@@ -800,7 +821,7 @@ mod tests {
         assert_eq!((bytes, line.id), (found.bytes(), BITWIG_COPIES));
         assert_eq!(
             (line.why.as_str(), line.size.as_str()),
-            ("Copies of your Library's multisamples in 2 projects", "272 MB")
+            ("Copies of your multisamples and samples in 2 projects", "272 MB")
         );
         // Looking again keeps what was found on show.
         assert_eq!(super::line(Some(&found), Some((1, 3))).unwrap().1.size, "272 MB");
@@ -822,7 +843,7 @@ mod tests {
         assert_eq!(none_note(None), "");
         assert_eq!(none_note(Some(&sample())), "");
         let none = Copies { library: sample().library, folders: 3, projects: Vec::new() };
-        assert_eq!(none_note(Some(&none)), "No Bitwig project has copies of your Library's multisamples. ");
+        assert_eq!(none_note(Some(&none)), "No Bitwig project has copies of your multisamples or samples. ");
         assert!(none_note(Some(&Copies::default())).starts_with("No Bitwig project"));
         let no_library = Copies { library: Vec::new(), folders: 3, projects: Vec::new() };
         assert!(none_note(Some(&no_library)).starts_with("Bitwig's Library folder wasn't found"));
@@ -832,7 +853,11 @@ mod tests {
     fn the_card_lists_each_projects_copies() {
         let card = card(Some(&sample()), None, &Fixes::default());
         assert_eq!((card.big.as_str(), card.big_note.as_str()), ("272 MB", "3 copies in 2 projects"));
-        assert!(card.lead.starts_with(r"Byte for byte the same as the multisamples in K:\Bitwig Studio\Library. "));
+        assert!(
+            card.lead.starts_with(
+                r"Byte for byte the same as the multisamples in K:\Bitwig Studio\Library, or as a sample "
+            )
+        );
         let garage = &card.parts[0];
         assert_eq!(
             (garage.name.as_str(), garage.what.as_str(), garage.size.as_str()),

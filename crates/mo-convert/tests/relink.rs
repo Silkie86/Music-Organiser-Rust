@@ -191,9 +191,9 @@ fn bad_lists_and_unused_copies_write_nothing() {
     assert!(err(&[relink(&dir, "Other-2.multisample", &library)]).contains("uses none"));
     // Somewhere else, or a Library file that isn't there.
     let elsewhere = Relink { copy: dir.join("Kicks 1 Select-3.multisample"), library: library.clone() };
-    assert!(err(&[elsewhere]).contains("isn't in this project's multi-samples folder"));
+    assert!(err(&[elsewhere]).contains("isn't in this project's multi-samples or samples folder"));
     let missing = dir.join("Library").join("Gone.multisample");
-    assert!(err(&[relink(&dir, "Kicks 1 Select-3.multisample", &missing)]).contains("isn't a Library file"));
+    assert!(err(&[relink(&dir, "Kicks 1 Select-3.multisample", &missing)]).contains("isn't there now"));
     assert!(!dir.join("Song (fixed).bwproject").exists());
 }
 
@@ -271,7 +271,7 @@ fn a_copy_is_asked_about_again_before_the_bin() {
     // The Library file gone: the copy stays.
     std::fs::write(&fixed.file, b"").unwrap();
     std::fs::remove_file(&relink.library).unwrap();
-    assert!(still_named(&project, &relink).unwrap().contains("isn't a Library file"));
+    assert!(still_named(&project, &relink).unwrap().contains("isn't on disk"));
 }
 
 /// A file reference (0x2a) to a path.
@@ -455,4 +455,106 @@ fn a_copy_becomes_a_library_file_as_bitwig_writes_one_and_moved_files_are_found(
     assert_eq!(fixed.found.len(), 2, "{:?}", fixed.found);
     let used = back.meta.iter().find(|(k, _)| k.as_str() == "used_files").map(|(_, v)| v.clone());
     assert_eq!(used, Some(Value::Strings(vec![Text::new("samples/Kick.wav")])));
+}
+
+/// A single sample Bitwig copied into the project's `samples` folder (Solomon's Selector Grid snares, 15 Nov 2026:
+/// "ukg_snr_blazecombo-2-2-3.wav", copied from another project's copy) is pointed at the sample it was copied from,
+/// written as Bitwig writes a sample outside the project: no path inside it, its file reference the original.
+#[test]
+fn a_sample_copy_in_the_samples_folder_points_at_its_original() {
+    let root = folder("relink sample copy");
+    let dir = root.join("Projects").join("707 house");
+    let copy = "ukg_snr_blaze-2-2-3.wav";
+    std::fs::create_dir_all(dir.join("samples")).unwrap();
+    std::fs::write(dir.join("samples").join(copy), b"RIFF snare").unwrap();
+    let pack = root.join("Samples").join("snares and claps");
+    std::fs::create_dir_all(&pack).unwrap();
+    let original = pack.join("ukg_snr_blaze.wav");
+    std::fs::write(&original, b"RIFF snare").unwrap();
+    let full = original.to_string_lossy().into_owned();
+
+    let mut doc = bitwig::decode(fixtures::bitwig_template(fixtures::Template::default())).unwrap();
+    sample_file(
+        &mut doc,
+        copy,
+        &format!("samples/{copy}"),
+        r"I:\Bitwig Studio\Projects\Garage Project\samples\ukg_snr_blaze-2-2.wav",
+        &[&format!(r"I:\Bitwig Studio\Projects\707 house\samples\{copy}")],
+        10,
+    );
+    for (k, v) in &mut doc.meta {
+        if k.as_str() == "used_files" {
+            *v = Value::Strings(vec![Text::new(&format!("samples/{copy}")), Text::new("bounce/Kick-bounce-1.wav")]);
+        }
+    }
+    let zip = doc.zip().map(<[u8]>::to_vec);
+    let project = dir.join("707 house.bwproject");
+    std::fs::write(&project, bitwig::encode(&doc, zip.as_deref()).unwrap()).unwrap();
+
+    let relinks = [Relink { copy: dir.join("samples").join(copy), library: original.clone() }];
+    let fixed = mo_convert::relink::fix_bitwig_project_in(&project, &relinks, &[]).unwrap();
+    assert_eq!(fixed.changed, relinks, "{:?}", fixed.left);
+    let back = bitwig::decode(std::fs::read(&fixed.file).unwrap()).unwrap();
+    assert_eq!(back.body_error, None);
+    assert_eq!(
+        sample_file_texts(&back, 0),
+        ("ukg_snr_blaze.wav".to_owned(), String::new(), full.clone(), vec![full.clone()])
+    );
+    let used = back.meta.iter().find(|(k, _)| k.as_str() == "used_files").map(|(_, v)| v.clone());
+    assert_eq!(used, Some(Value::Strings(vec![Text::new("bounce/Kick-bounce-1.wav")])));
+    assert!(!texts(&fixed.file).iter().any(|t| t.contains(copy)), "nothing names the copy any more");
+
+    // A copy anywhere else in the project (its bounce folder, say) is never one Fix points elsewhere.
+    let bounce = dir.join("bounce");
+    std::fs::create_dir_all(&bounce).unwrap();
+    std::fs::write(bounce.join(copy), b"RIFF snare").unwrap();
+    let err = mo_convert::relink::fix_bitwig_project_in(
+        &project,
+        &[Relink { copy: bounce.join(copy), library: original }],
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.contains("isn't in this project's multi-samples or samples folder"), "{err}");
+}
+
+#[test]
+fn a_same_named_sample_copy_is_told_from_its_original_in_a_samples_folder() {
+    let root = folder("relink same-named sample");
+    let dir = root.join("Projects").join("Night");
+    std::fs::create_dir_all(dir.join("samples")).unwrap();
+    // Bitwig keeps a sample's own name the first time it copies it in.
+    std::fs::write(dir.join("samples").join("Snare.wav"), b"RIFF snare").unwrap();
+    std::fs::write(dir.join("samples").join("Clap-2.wav"), b"RIFF clap").unwrap();
+    // The originals sit in a folder called Samples: "samples/Snare.wav" is in the original's own path.
+    let pack = root.join("Samples");
+    std::fs::create_dir_all(&pack).unwrap();
+    let snare = pack.join("Snare.wav");
+    std::fs::write(&snare, b"RIFF snare").unwrap();
+    // A pack sample the project uses as it is, named like the copy "Clap-2.wav": never the copy.
+    let pack_clap = pack.join("Clap-2.wav").to_string_lossy().into_owned();
+    std::fs::write(&pack_clap, b"RIFF other clap").unwrap();
+
+    let mut doc = bitwig::decode(fixtures::bitwig_template(fixtures::Template::default())).unwrap();
+    sample_file(&mut doc, "Snare.wav", "samples/Snare.wav", r"I:\Old\Night\samples\Snare.wav", &[], 10);
+    sample_file(&mut doc, "Clap-2.wav", "", &pack_clap, &[], 15);
+    let zip = doc.zip().map(<[u8]>::to_vec);
+    let project = dir.join("Night.bwproject");
+    std::fs::write(&project, bitwig::encode(&doc, zip.as_deref()).unwrap()).unwrap();
+
+    let relinks = [
+        Relink { copy: dir.join("samples").join("Snare.wav"), library: snare.clone() },
+        // Its original's drive can't be read now: that one is left alone, the rest is still fixed.
+        Relink { copy: dir.join("samples").join("Clap-2.wav"), library: root.join("Gone").join("Clap.wav") },
+    ];
+    let fixed = mo_convert::relink::fix_bitwig_project_in(&project, &relinks, &[]).unwrap();
+    assert_eq!(fixed.changed, relinks[..1], "{:?}", fixed.left);
+    assert!(
+        fixed.left.iter().any(|l| l.starts_with("Clap-2.wav: ") && l.contains("isn't there now")),
+        "{:?}",
+        fixed.left
+    );
+    let back = bitwig::decode(std::fs::read(&fixed.file).unwrap()).unwrap();
+    let full = snare.to_string_lossy().into_owned();
+    assert_eq!(sample_file_texts(&back, 0), ("Snare.wav".to_owned(), String::new(), full, Vec::new()));
+    assert_eq!(sample_file_texts(&back, 1).2, pack_clap, "the pack's own sample is left as it is");
 }
