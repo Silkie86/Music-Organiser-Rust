@@ -3590,6 +3590,7 @@ fn stop_playing(app: &AppWindow) {
     let data = app.global::<MidiData>();
     data.set_playing(false);
     data.set_play_note("".into());
+    data.set_loop_note("".into());
 }
 
 /// Another page is about to play (a sound on the Sounds page): the loop playing stops, and one still being made
@@ -3684,6 +3685,12 @@ fn play_from(app: &AppWindow, at: usize, resume: bool) {
     crate::curve_editor::call_off_tone();
     data.set_playing(true);
     data.set_play_note("".into());
+    // A loop made again while it plays keeps its own note (that only its first bars play) until the new one starts
+    // and says its own: it's true of what's heard till then, and the line doesn't come and go at each step of the
+    // speed.
+    if !resume {
+        data.set_loop_note("".into());
+    }
     if HERE.with(|h| *h.borrow()) {
         // The screenshots show it playing, with no sound card to play through.
         return;
@@ -3697,7 +3704,7 @@ fn play_from(app: &AppWindow, at: usize, resume: bool) {
                 let id = ask.id;
                 let made = make_loop(&ask, &mut open);
                 let problem = match made {
-                    Ok((sound, tempo)) => {
+                    Ok((sound, tempo, note)) => {
                         let seconds = sound.seconds();
                         // Only if it's still the newest ask as it starts: a Stop or another part meanwhile wins. Made
                         // again, it goes on from where the loop playing is as this one goes in (MI-1: the old one
@@ -3715,6 +3722,17 @@ fn play_from(app: &AppWindow, at: usize, resume: bool) {
                                 Ok(from)
                             },
                         );
+                        // What the card says of this loop (that only its first bars play, or nothing), if it's
+                        // still the newest ask: a line of its own (`loop-note`), shown on its part's card while it
+                        // plays, so it never wipes or is taken for what else is said under Play.
+                        let weak = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(app) = weak.upgrade()
+                                && PLAY_ASKED.load(std::sync::atomic::Ordering::SeqCst) == id
+                            {
+                                app.global::<MidiData>().set_loop_note(note.into());
+                            }
+                        });
                         return;
                     }
                     Err(e) => e,
@@ -3728,6 +3746,7 @@ fn play_from(app: &AppWindow, at: usize, resume: bool) {
                         let data = app.global::<MidiData>();
                         data.set_playing(false);
                         data.set_play_note(problem.into());
+                        data.set_loop_note("".into());
                         PAGE.with(|p| p.borrow_mut().looping = None);
                     }
                 });
@@ -3804,9 +3823,11 @@ fn forget_song_loop() {
 /// The part's loop: its notes read, the SoundFont read (once), and the two made into sound. With the song
 /// ([`PlayAsk::with`]): at the song's tempo, over the song's parts in the bars it fits ([`with_song`]). If the song's
 /// parts can't be made into sound, the part still plays, alone (the log says why).
-/// The part as a loop to play, and the BPM it was made at: its own tempo (or the song's), unless you picked a speed;
-/// with the metronome's clicks when that's on.
-fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<(mo_audio::AudioData, f64), String> {
+/// The part as a loop to play, the BPM it was made at (its own tempo, or the song's, unless you picked a speed), and
+/// what the card says of it under Play: nothing, or that only its first bars play, when all of it would be longer
+/// than a loop can be at that speed ([`page::loop_held`]). With the metronome's clicks when that's on: in the part's
+/// bars of 4/4 alone, in the song's bars with the song.
+fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<Made, String> {
     let notes = ask.part.notes(open)?;
     let (heard, length) = page::loop_notes(&notes, ask.part.bars);
     if heard.is_empty() {
@@ -3833,31 +3854,58 @@ fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<(
         (None, Some(speed)) => speed,
         (None, None) => tempo_of(&ask.part.from, &ask.source, &ask.library).bpm(),
     };
-    let notes = gm_notes(&heard);
-    let part = gm_part(&notes, length, tempo, &ask.sound);
-    let alone = if ask.metronome {
-        let clicks = gm_notes(&page::metronome_notes(length));
-        let click = mo_audio::gm::Part { notes: &clicks, ppq: mo_midi::PPQ, length, tempo, program: 0, drums: true };
-        mo_audio::gm::render_together(&font, &[part, click])?
-    } else {
-        mo_audio::gm::render_loop(&font, &part)?
+    let most = mo_audio::gm::longest_ticks(mo_midi::PPQ, tempo);
+    // The part alone: no longer than can be made into sound, by whole bars of its own (MI-11: it was cut at two
+    // minutes wherever that fell), with the metronome's clicks in those bars when it's on.
+    let alone = || -> Result<Made, String> {
+        let (held, held_length) = page::loop_held(heard.clone(), length, most);
+        let notes = gm_notes(&held);
+        let part = gm_part(&notes, held_length, tempo, &ask.sound);
+        let sound = if ask.metronome {
+            let clicks = gm_notes(&page::metronome_notes(held_length, mo_midi::BAR));
+            mo_audio::gm::render_together(&font, &[part, click_part(&clicks, held_length, tempo)])?
+        } else {
+            mo_audio::gm::render_loop(&font, &part)?
+        };
+        Ok((sound, tempo, page::held_note(&heard, held_length, length)))
     };
-    // Nothing of the song to play (the page never asks for that): alone, with nothing to say about it.
+    // Nothing of the song to play (the page never asks for that): alone, with nothing to say about the song.
     let Some(with) = with.as_ref().filter(|with| with.length > 0 && !with.voices.is_empty()) else {
-        return Ok((alone, tempo));
+        return alone();
     };
-    match with_song(&font, &ask.font, with, &alone, length, tempo) {
-        Ok(both) => Ok((both, tempo)),
+    // With the song, the song's bars say where the two go round ([`SongBars::round`]) and they're what the metronome
+    // clicks (MI-12), so neither is made into the part's own loop.
+    let notes = gm_notes(&heard);
+    let part = mo_audio::gm::render_loop(&font, &gm_part(&notes, length, tempo, &ask.sound))?;
+    match with_song(&font, &ask.font, with, &part, length, tempo, ask.metronome) {
+        Ok((both, round)) => Ok((both, tempo, page::held_note(&heard, round, length))),
         Err(e) => {
             log::warning("MIDI", &format!("A part plays without the song's parts, which couldn't be played: {e}"));
-            Ok((alone, tempo))
+            // Alone, then: the loop in hand when that's the same thing, else made as it plays alone (and the one in
+            // hand after all, should that fail now).
+            if !ask.metronome && length <= most {
+                return Ok((part, tempo, String::new()));
+            }
+            Ok(alone().unwrap_or((part, tempo, String::new())))
         }
     }
 }
 
+/// What [`make_loop`] gives: the loop, the BPM it was made at, and the card's note on it ("" for none).
+type Made = (mo_audio::AudioData, f64, String);
+
+/// The metronome's clicks as a loop of `length` ticks at `tempo`, on the SoundFont's drums.
+fn click_part(clicks: &[mo_audio::gm::Note], length: i64, tempo: f64) -> mo_audio::gm::Part<'_> {
+    mo_audio::gm::Part { notes: clicks, ppq: mo_midi::PPQ, length, tempo, program: 0, drums: true }
+}
+
 /// A part's loop (`alone`, `length` ticks long, made at the song's `tempo`) with the song's parts under it: each
 /// goes round from its own bar lines until both are back at their starts ([`SongBars::round`], held to what can be
-/// made into sound), the song's a little under the part ([`song_gain`]).
+/// made into sound), the song's a little under the part ([`song_gain`]). With the `metronome`, its clicks go by the
+/// song's bars, three beats to a waltz's: one bar of them, going round under both from the song's first bar line
+/// (the 14 November 2026 review's MI-12: they were made into the part's loop, a loud click every four beats), and
+/// wherever the song's loop is cut and starts again, so are they. Gives the loop and how long it is, in ticks: a
+/// part longer than that is cut there.
 fn with_song(
     font: &mo_audio::gm::Font,
     font_path: &Path,
@@ -3865,15 +3913,28 @@ fn with_song(
     alone: &mo_audio::AudioData,
     length: i64,
     tempo: f64,
-) -> Result<mo_audio::AudioData, String> {
+    metronome: bool,
+) -> Result<(mo_audio::AudioData, i64), String> {
     use mo_audio::gm::{Layer, level};
     let song = song_loop(font, font_path, with)?;
-    let layers = [
+    // If the clicks can't be made, the part and the song still play, without them.
+    let clicks = metronome
+        .then(|| {
+            let clicks = gm_notes(&page::metronome_notes(with.bar, with.bar));
+            mo_audio::gm::render_loop(font, &click_part(&clicks, with.bar, tempo))
+                .inspect_err(|e| log::warning("MIDI", &format!("The metronome couldn't click the song's bars: {e}")))
+                .ok()
+        })
+        .flatten();
+    let mut layers = vec![
         Layer { sound: alone, length, gain: 1.0 },
         Layer { sound: &song, length: with.length, gain: song_gain(level(alone), level(&song)) },
     ];
+    if let Some(clicks) = &clicks {
+        layers.push(Layer { sound: clicks, length: with.bar, gain: 1.0 });
+    }
     let round = with.round(length, mo_audio::gm::longest_ticks(mo_midi::PPQ, tempo));
-    mo_audio::gm::layered(&layers, round, mo_midi::PPQ, tempo)
+    Ok((mo_audio::gm::layered(&layers, round, mo_midi::PPQ, tempo)?, round))
 }
 
 /// A part's notes as the SoundFont's player takes them.
@@ -5266,7 +5327,8 @@ mod tests {
             resume: false,
         };
         let started = Instant::now();
-        let (together, tempo) = make_loop(&ask(Some(Arc::clone(&with))), &mut None).unwrap();
+        let (together, tempo, note) = make_loop(&ask(Some(Arc::clone(&with))), &mut None).unwrap();
+        assert_eq!(note, "", "all of it plays");
         assert_eq!(tempo, 100.0, "the song's");
         let first = started.elapsed();
         // A bar at 100 beats a minute is 105,840 frames.
@@ -5275,7 +5337,7 @@ mod tests {
         let kept = SONG_LOOP.lock().unwrap().kept.clone().unwrap();
         assert!(kept.0 == font_path && Arc::ptr_eq(&kept.1, &with) && kept.2.len() == 6 * 105_840);
         let started = Instant::now();
-        let (again, _) = make_loop(&ask(Some(Arc::new((*with).clone()))), &mut None).unwrap();
+        let (again, ..) = make_loop(&ask(Some(Arc::new((*with).clone()))), &mut None).unwrap();
         println!("first {first:?}, with the song's loop kept {:?}", started.elapsed());
         assert!(
             Arc::ptr_eq(&SONG_LOOP.lock().unwrap().kept.as_ref().unwrap().2, &kept.2),
@@ -5285,11 +5347,11 @@ mod tests {
         // Your speed goes for the song's parts too: twice as fast, half as long. The metronome clicks with the part
         // alone, at its length.
         let fast = PlayAsk { speed: Some(200.0), ..ask(Some(Arc::clone(&with))) };
-        let (quick, tempo) = make_loop(&fast, &mut None).unwrap();
+        let (quick, tempo, _) = make_loop(&fast, &mut None).unwrap();
         assert_eq!((tempo, quick.len()), (200.0, 6 * 105_840));
         let clicking = PlayAsk { metronome: true, ..ask(None) };
-        let (clicked, _) = make_loop(&clicking, &mut None).unwrap();
-        let (plain, _) = make_loop(&ask(None), &mut None).unwrap();
+        let (clicked, ..) = make_loop(&clicking, &mut None).unwrap();
+        let (plain, ..) = make_loop(&ask(None), &mut None).unwrap();
         assert_eq!(clicked.len(), plain.len());
         assert_ne!(clicked.channels, plain.channels, "the clicks are heard");
 
@@ -5316,12 +5378,55 @@ mod tests {
         }
         assert!(loudest > 0.05, "there's sound in it: {loudest}");
         assert!(loudest <= 1.0 && furthest < 1e-5, "added up as they are: off by {furthest}, peak {loudest}");
+        // The metronome with the song clicks the song's bars (MI-12). Over a waltz that's a loud click every three
+        // beats: one bar of clicks going round under the part and the song, not four-beat bars made into the part.
+        let three = 3 * mo_midi::PPQ;
+        let waltz = Arc::new(SongBars { bar: three, length: 8 * three, ..(*with).clone() });
+        let (unclicked, ..) = make_loop(&ask(Some(Arc::clone(&waltz))), &mut None).unwrap();
+        let clicking = PlayAsk { metronome: true, ..ask(Some(Arc::clone(&waltz))) };
+        let (clicked, ..) = make_loop(&clicking, &mut None).unwrap();
+        // The part's 16 beats and the song's 24 meet again after 48: twelve bars of four.
+        assert_eq!((unclicked.len(), clicked.len()), (12 * 105_840, 12 * 105_840));
+        let clicks = gm_notes(&page::metronome_notes(three, three));
+        let one_bar = mo_audio::gm::render_loop(&font, &click_part(&clicks, three, 100.0)).unwrap();
+        assert_eq!(one_bar.len(), 3 * 105_840 / 4);
+        let (mut loudest, mut furthest) = (0.0f32, 0.0f32);
+        for i in (0..clicked.len()).step_by(89) {
+            let want = unclicked.channels[0][i] + one_bar.channels[0][i % one_bar.len()];
+            loudest = loudest.max(want.abs());
+            furthest = furthest.max((clicked.channels[0][i] - want).abs());
+        }
+        assert!(loudest <= 1.0 && furthest < 1e-5, "the song's bars clicked: off by {furthest}, peak {loudest}");
+        // A loop too long for its speed keeps its first whole bars, and the card says so (MI-11): 16 bars at 25
+        // beats a minute would be over two minutes, which is 12 bars and a half. A bar is then 423,360 frames.
+        let long = |speed: f64| PlayAsk {
+            part: PartOut { bars: 16, ..part_out(&s, e, 0) },
+            speed: Some(speed),
+            metronome: true,
+            ..ask(None)
+        };
+        let (slow, tempo, note) = make_loop(&long(25.0), &mut None).unwrap();
+        assert_eq!((tempo, slow.len()), (25.0, 12 * 423_360));
+        assert!(note.starts_with("Only the first 12 of its 16 bars play at this speed"), "{note}");
+        let (whole, _, note) = make_loop(&long(100.0), &mut None).unwrap();
+        assert_eq!((whole.len(), note.as_str()), (16 * 105_840, ""));
+        // With the song the song's bars say where it goes round, as they did: the six bars twice, 115.2 seconds.
+        let both = PlayAsk { with: Some(Arc::clone(&with)), ..long(25.0) };
+        let (slow, tempo, note) = make_loop(&both, &mut None).unwrap();
+        assert_eq!((tempo, slow.len()), (25.0, 12 * 423_360));
+        assert!(note.starts_with("Only the first 12 of its 16 bars play at this speed"), "{note}");
+        // Over a waltz it's a bar line of the song's too: at 20 beats a minute two minutes are 40 beats, so 13 bars
+        // of three play (39 beats, 132,300 frames each), not the part's own ten bars of four.
+        let waltzing = PlayAsk { with: Some(Arc::clone(&waltz)), ..long(20.0) };
+        let (slow, _, note) = make_loop(&waltzing, &mut None).unwrap();
+        assert_eq!(slow.len(), 39 * 132_300);
+        assert!(note.starts_with("Only about the first 9 of its 16 bars play at this speed"), "{note}");
         // The song's parts can't be made into sound (there are none): the part still plays, alone at the song's
         // tempo.
         let no_song = Arc::new(SongBars { voices: Vec::new(), ..(*with).clone() });
         assert_eq!(make_loop(&ask(Some(no_song)), &mut None).unwrap().0.channels, part.channels);
         // Alone, it plays at its own tempo and for its own four bars.
-        let (alone, _) = make_loop(&ask(None), &mut None).unwrap();
+        let (alone, ..) = make_loop(&ask(None), &mut None).unwrap();
         assert!(alone.len() != four || tempo_of(&ask(None).part.from, &e.phrase.source, Path::new("")).bpm() == 100.0);
         // The song's loop is let go once nothing plays with a song.
         forget_song_loop();
