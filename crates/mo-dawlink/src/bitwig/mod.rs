@@ -1,7 +1,7 @@
 //! The Bitwig link: the app talks to the Music Organiser extension (or the script it took over from) running inside
 //! Bitwig Studio, over a connection on this computer, and Send to Bitwig puts things into the project open there.
 //!
-//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.28; the C# app's copy is frozen):
+//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.29; the C# app's copy is frozen):
 //! Bitwig only runs Java extensions. Settings > DAWs installs it. Changing anything needs "Let the app make changes"
 //! on in Bitwig (Settings > Controllers > Music Organiser); reading never does.
 //!
@@ -17,7 +17,7 @@
 //! - [`Bitwig::audition_preset`] then [`Bitwig::stop_audition`] or [`Bitwig::keep_audition`]: a preset on a track of
 //!   its own playing a part (extension 3.20).
 //! - [`Bitwig::swap_into_sampler`]: a sound in the place of the Sampler selected in Bitwig, its settings set back
-//!   (extension 3.25).
+//!   (extension 3.29).
 //! - [`Bitwig::put_in_song`]: a MIDI part into the arranger at a song's bars, on the selected track (Bitwig records
 //!   it in from the clip launcher); [`Bitwig::stop_putting`] stops a recording under way.
 //! - [`Bitwig::send_part_for_song`]: [`send_part`] for a part found for a song, with Bitwig's play start moved to
@@ -48,7 +48,8 @@ pub use device::{DRUM_MACHINE_KEY, DRUM_MACHINE_NAME, DeviceId, drum_machine};
 pub use error::{Error, LOOPBACK_PORT};
 pub use link::{
     CHANGE_TIMEOUT, CONNECT_TIMEOUT, Device, DeviceParam, Hello, Inserted, LINK_VERSION, Link, Metre, NewTrack,
-    PLAY_START_NEEDS, PORT, PadContents, PadsFilled, Recorded, SelectedDevice, SelectedTrack, TIMEOUT, TakenOut,
+    PLAY_START_NEEDS, PORT, PadContents, PadsFilled, Recorded, Replaced, SelectedDevice, SelectedTrack, TIMEOUT,
+    TakenOut,
 };
 pub use put::{PUT_NEEDS, PutIn, Seen};
 pub use sampler::{SWAP_NEEDS, Swapped};

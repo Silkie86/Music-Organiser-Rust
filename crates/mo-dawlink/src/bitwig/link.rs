@@ -279,8 +279,25 @@ pub struct Device {
 pub struct SelectedDevice {
     /// The selected track's name.
     pub track: String,
+    /// The selected track's ID (extension 3.29; "" before, or when Bitwig hasn't said it).
+    pub track_id: String,
+    /// The device's place in its chain, from 0 (extension 3.29; none before).
+    pub position: Option<usize>,
+    /// The sample in it, as Bitwig names it (extension 3.29; "" before, or for a device without one).
+    pub sample: String,
     pub device: Device,
     pub params: Vec<DeviceParam>,
+}
+
+/// Whether Bitwig showed a file going in the selected device's place ([`Link::replace_selected_with_file`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Replaced {
+    /// The selected device shows another sample than before.
+    Yes,
+    /// It never did: Bitwig ignored the file, and nothing changed.
+    No,
+    /// The file is the sample that was there already, so nothing shows whether it went in again.
+    CantTell,
 }
 
 /// One of a device's parameters, as Bitwig shows it.
@@ -678,6 +695,9 @@ impl Link {
         let params = answer.get("params").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
         Ok(Some(SelectedDevice {
             track: text(&answer, "track"),
+            track_id: text(&answer, "trackId"),
+            position: answer.get("position").and_then(Value::as_u64).map(|p| p as usize),
+            sample: text(&answer, "sample"),
             device: device_of(device),
             params: params
                 .iter()
@@ -698,12 +718,27 @@ impl Link {
         self.change(ask("set", [("param", id.into()), ("value", value.into())])).map(|_| ())
     }
 
-    /// Puts a file in the selected device's place, as if dropped on it: a sample makes a Sampler with it instead of
-    /// the device (`insert` at `replace`, extension 3.25). Bitwig quietly ignores a file it can't use: read the
-    /// selected device again to see what it made.
-    pub fn replace_selected_with_file(&mut self, path: &str) -> Result<(), Error> {
-        let fields = [("kind", "file".into()), ("path", path.into()), ("at", "replace".into())];
-        self.change(ask("insert", fields)).map(|_| ())
+    /// Puts a file in the place of `expect`, the device selected when it was read, as if dropped on it: a sample makes
+    /// a Sampler with it instead of the device (`insert` at `replace`, with `expect` from extension 3.29). The change
+    /// waits its turn in Bitwig: when another device is selected by then, the extension refuses it and nothing changes.
+    /// The answer says whether Bitwig showed the file going in ([`Replaced`]); it quietly ignores a file it can't use.
+    pub fn replace_selected_with_file(&mut self, path: &str, expect: &SelectedDevice) -> Result<Replaced, Error> {
+        let mut wanted = Map::new();
+        if !expect.track_id.is_empty() {
+            wanted.insert("trackId".into(), expect.track_id.as_str().into());
+        }
+        if let Some(position) = expect.position {
+            wanted.insert("position".into(), position.into());
+        }
+        wanted.insert("name".into(), expect.device.name.as_str().into());
+        let fields =
+            [("kind", "file".into()), ("path", path.into()), ("at", "replace".into()), ("expect", wanted.into())];
+        let answer = self.change(ask("insert", fields))?;
+        Ok(match answer.get("replaced") {
+            Some(Value::Bool(true)) => Replaced::Yes,
+            Some(Value::Bool(false)) => Replaced::No,
+            _ => Replaced::CantTell,
+        })
     }
 
     /// Adds one of Bitwig's own devices to the end of a track's chain, by its ID.

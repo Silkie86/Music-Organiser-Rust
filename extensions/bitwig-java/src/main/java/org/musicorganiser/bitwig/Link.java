@@ -281,6 +281,8 @@ final class Link {
     private PinnableCursorDevice cursorDevice;
     /** What takes the selected device's place (extension 3.25): a sample put there makes a Sampler in its stead. */
     private InsertionPoint cursorReplace;
+    /** Whether Bitwig tells the selected device's sample (extension 3.29), which shows a file put in its place went in. */
+    private boolean cursorSample;
     private DirectParameterValueDisplayObserver displayObserver;
     /** The selected device's drum pads, when it's a Drum Machine. */
     private DrumPadBank drumPads;
@@ -527,6 +529,13 @@ final class Link {
         }, () -> cursorDevice.exists().get()
                  ? "Device \"" + str(cursorDevice.name().get()) + "\" is selected, with " + params.ids.size() + " parameters."
                  : "No device is selected.");
+
+        // Extension 3.29: the sample in the selected device, on its own so a Bitwig without it keeps the cursor device.
+        feature("cursor device's sample", () -> {
+            cursorDevice.sampleName().markInterested();
+            cursorSample = true;
+        }, () -> !cursorDevice.exists().get() ? "No device is selected."
+                 : "The selected device's sample is \"" + str(cursorDevice.sampleName().get()) + "\".");
 
         // A Drum Machine's pads, when the selected device is one: pad n plays MIDI note n.
         feature("drum pads", () -> {
@@ -1341,6 +1350,13 @@ final class Link {
         return m;
     }
 
+    /** The selected track's ID, or "" when Bitwig hasn't said it or the track is past those the link follows. */
+    private String selectedTrackId() {
+        for (int t = 0; t < MAX_TRACKS; t++)
+            if (trackItems[t] != null && trackItems[t].exists().get() && trackSelected[t] != null && trackSelected[t].get()) return idOf(t);
+        return "";
+    }
+
     private static Map<String, Object> describeDevice(int index, Device device) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("index", index);
@@ -1456,6 +1472,13 @@ final class Link {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("track", str(cursorTrack.name().get()));
         m.put("device", exists ? describeDevice(-1, cursorDevice) : null);
+        // Extension 3.29: which device it is (its track's ID and its place in the chain) and the sample in it, so the
+        // app can tell a Sampler from the one a file was put in the place of.
+        if (exists) {
+            m.put("trackId", selectedTrackId());
+            m.put("position", cursorDevice.position().get());
+            if (cursorSample) m.put("sample", str(cursorDevice.sampleName().get()));
+        }
         m.put("params", list);
         m.put("drumPads", exists && cursorDevice.hasDrumPads().get());
         if (remoteControls != null) {
@@ -1871,8 +1894,14 @@ final class Link {
      * device by its ID, or a file (a preset, or a sample, which Bitwig loads into a Sampler). It goes at the end
      * of the selected track's chain, or of `track`'s (at its start with `at: "start"`). With a track, the answer
      * waits to say whether Bitwig added a device, since it quietly ignores what it can't use. With `at: "replace"`
-     * (extension 3.25) it takes the selected device's place instead (no track: the selected device is the one); the
-     * app reads the selected device again to see what Bitwig made of it.
+     * (extension 3.25) it takes the selected device's place instead (no track: the selected device is the one).
+     *
+     * From extension 3.29 a replace can say which device it means (`expect`: `trackId`, `position`, `name`, each
+     * optional): a change waits its turn behind others, and by then you may have selected something else, which is then
+     * left alone. And a file put in a device's place waits to see it go in: `replaced` is true once the selected device
+     * shows another sample than before, false when it never does (Bitwig quietly ignores a file it can't use), and null
+     * when the file is the sample that was there already (nothing to tell them apart by). With it come `device`,
+     * `trackId`, `position` and `sample`, as `device` gives them.
      */
     private void insert(Map<String, Object> request, Finish finish) {
         // The track by its place, or (extension 3.21) by the ID Bitwig keeps it under, which holds however tracks move.
@@ -1888,6 +1917,7 @@ final class Link {
         if (replace) {
             if (!absent(t)) throw new LinkError("Replace takes the selected device's place: give no track.");
             if (cursorReplace == null || !cursorDevice.exists().get()) throw new LinkError("No device is selected in Bitwig.");
+            checkExpected(field(request, "expect"));
             point = cursorReplace;
         } else if (absent(t)) {
             if (start) throw new LinkError("Say which track's chain to insert at the start of.");
@@ -1900,6 +1930,10 @@ final class Link {
             point = start ? trackStarts[track] : trackEnds[track];
         }
         Object kind = field(request, "kind");
+        // What a file put in the selected device's place is told apart from (extension 3.29).
+        boolean confirm = replace && "file".equals(kind) && cursorSample;
+        String sampleBefore = confirm ? str(cursorDevice.sampleName().get()) : "";
+        String trackBefore = confirm ? selectedTrackId() : "";
         switch (kind instanceof String ? (String) kind : "\u0000") {
             case "vst3":
                 point.insertVST3Device(given(field(request, "plugin"), "plugin ID"));
@@ -1918,6 +1952,10 @@ final class Link {
                 break;
             default:
                 throw new LinkError("Can't insert a \"" + Json.js(kind) + "\": use vst3, clap, vst2, bitwig or file.");
+        }
+        if (confirm) {
+            replaced(given(field(request, "path"), "file"), sampleBefore, trackBefore, finish);
+            return;
         }
         if (chain == null) {
             // Bitwig quietly does nothing for an ID it doesn't know; the app checks the device list afterwards.
@@ -1946,6 +1984,67 @@ final class Link {
                        finish.ok(m);
                    }, finish);
         }, finish);
+    }
+
+    /**
+     * Refuses a replace when the selected device isn't the one the app meant (`expect`, extension 3.29): the change
+     * waited its turn, and something else was selected meanwhile.
+     */
+    private void checkExpected(Object expect) {
+        if (absent(expect)) return;
+        Map<String, Object> wanted = asMap(expect);
+        if (wanted == null) throw new LinkError("The device to expect is a trackId, a position and a name, not " + Json.js(expect) + ".");
+        Object track = field(wanted, "trackId");
+        Object position = field(wanted, "position");
+        Object name = field(wanted, "name");
+        boolean same = (absent(track) || track.equals(selectedTrackId()))
+                       && (absent(position) || position instanceof Number && ((Number) position).intValue() == cursorDevice.position().get())
+                       && (absent(name) || name.equals(str(cursorDevice.name().get())));
+        if (!same)
+            throw new LinkError("Another device is selected in Bitwig now than when this was asked for: nothing was replaced. "
+                                + "Select the device again and ask again.");
+    }
+
+    /**
+     * Answers a file put in the selected device's place (extension 3.29) once Bitwig shows it there: the selected device,
+     * still on the same track, with a sample that isn't the one before. See insert for the answer.
+     */
+    private void replaced(String path, String sampleBefore, String trackBefore, Finish finish) {
+        String file = path.substring(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
+        String stem = file.contains(".") ? file.substring(0, file.lastIndexOf('.')) : file;
+        // The sample that was there already, put in again: its name can't show the swap.
+        boolean again = !sampleBefore.isEmpty() && (sampleBefore.equalsIgnoreCase(file) || sampleBefore.equalsIgnoreCase(stem));
+        Then describe = changed -> {
+            if (!changed && !again) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("replaced", false);
+                finish.ok(m);
+                return;
+            }
+            settle(() -> {
+                Map<String, Object> seen = new LinkedHashMap<>();
+                boolean exists = cursorDevice.exists().get();
+                seen.put("device", exists ? describeDevice(-1, cursorDevice) : null);
+                seen.put("trackId", selectedTrackId());
+                seen.put("position", exists ? cursorDevice.position().get() : null);
+                seen.put("sample", exists ? str(cursorDevice.sampleName().get()) : null);
+                return seen;
+            }, seen -> {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("replaced", changed ? Boolean.TRUE : null);
+                m.putAll(seen);
+                finish.ok(m);
+            }, finish);
+        };
+        if (again) {
+            describe.run(false);
+            return;
+        }
+        waitFor(() -> {
+            if (!cursorDevice.exists().get() || !selectedTrackId().equals(trackBefore)) return false;
+            String now = str(cursorDevice.sampleName().get());
+            return !now.isEmpty() && !now.equals(sampleBefore);
+        }, CHANGE_WAIT, describe, finish);
     }
 
     /**
