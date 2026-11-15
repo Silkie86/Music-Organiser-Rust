@@ -159,6 +159,9 @@ struct Page {
     card_move: i32,
     loop_move: i32,
     daw_move: i32,
+    /// The song's bars the part in Bitwig was started with ([`BitwigSong::given`]), so [`fit_follows`] starts it
+    /// again when they change (MI-3); none for a part alone, or in FL.
+    daw_song: Option<BitwigGiven>,
     /// What the picked part's card says and offers about its fit now ([`show_card_fit`]).
     card_fit: CardFit,
     /// While a part is being put in its song in Bitwig ([`put_in_song`]; one at a time): set to have it stopped
@@ -194,6 +197,17 @@ struct BitwigSong {
     /// The song's name, and the parts and bars the part was fitted to, for the card's words.
     name: String,
     with: Arc<SongBars>,
+}
+
+/// What of a [`BitwigSong`] Bitwig and the card's Bitwig line are given: the arranger's loop (or why there's none)
+/// and the song's bars. Not the song's notes: Bitwig plays its own arrangement, so an edit to them (a save while it
+/// plays, a parts chip that keeps the bars) has it play on as it is.
+type BitwigGiven = (Result<mo_dawlink::bitwig::SongLoop, String>, std::ops::Range<i64>);
+
+impl BitwigSong {
+    fn given(&self) -> BitwigGiven {
+        (self.bars.clone(), self.with.bars.clone())
+    }
 }
 
 /// How the picked part is moved to fit a song: what its card says, and how it's shown, played, dragged and sent.
@@ -440,6 +454,15 @@ impl Page {
     /// What Play in Bitwig plays the part at `at` with while "Play with the song" is on: the bars of the song it was
     /// fitted to, for Bitwig's arranger to go round ([`midi_fits::bitwig_loop`]), or why Bitwig has no such bars.
     /// None when the part plays alone in the app too ([`Page::heard_with`]): nothing is said of the song then.
+    /// Whether the part at `at` playing in a DAW is to start again the new way: when its move changed (to `now`), or
+    /// in Bitwig when the song's bars going round with it did (MI-3: the bars slider, Play with the song on or off,
+    /// another song).
+    fn daw_follows(&self, at: usize, now: i32, bitwig: bool) -> bool {
+        let there = self.in_daw.is_some() && self.in_daw == self.cat.entry(at).map(|e| e.phrase.id);
+        let song = || self.bitwig_song(at).map(|song| song.given());
+        there && (now != self.daw_move || (bitwig && song() != self.daw_song))
+    }
+
     fn bitwig_song(&self, at: usize) -> Option<BitwigSong> {
         self.in_bitwig(at, self.heard_with(at)?)
     }
@@ -2103,7 +2126,8 @@ fn fit_follows(app: &AppWindow) {
             show_sound(&data, &mut p);
         }
         let looping = p.looping == Some(at) && (now != p.loop_move || !same_bars(&with, &p.loop_with));
-        let in_daw = p.in_daw.is_some() && p.in_daw == p.cat.entry(at).map(|e| e.phrase.id) && now != p.daw_move;
+        let bitwig = data.get_daw_playing() == Daw::Bitwig.id() || data.get_daw_starting() == Daw::Bitwig.id();
+        let in_daw = p.daw_follows(at, now, bitwig);
         show_card_fit(&data, &mut p);
         Some((at, ask, (looping, in_daw)))
     }) else {
@@ -4162,6 +4186,7 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
         let mut p = p.borrow_mut();
         p.in_daw = Some(phrase_id);
         p.daw_move = part.semitones;
+        p.daw_song = song.as_ref().map(BitwigSong::given);
     });
     show_picked_plays(app);
     data.set_daw_starting(daw.id().into());
@@ -4923,6 +4948,31 @@ mod tests {
         assert_eq!((p.bitwig_song(drums), p.bitwig_song(7)), (None, None));
         p.with_song = false;
         assert_eq!(p.bitwig_song(4), None);
+
+        // The part playing in Bitwig with the song starts again when the song's bars do, as its move (MI-3): the bars
+        // slider, the chip off, or other bars of the song; not for the same bars with other notes in them, nor in FL.
+        p.with_song = true;
+        listed(&mut p, &glass, &arranger);
+        p.in_daw = p.cat.entry(4).map(|e| e.phrase.id);
+        p.daw_song = p.bitwig_song(4).map(|song| song.given());
+        p.daw_move = 0;
+        assert!(!p.daw_follows(4, 0, true));
+        assert!(p.daw_follows(4, 2, false), "its move");
+        let mut voices = arranger.voices.clone();
+        voices[0].notes[0].velocity = 50_000;
+        let edited = Arc::new(SongBars { voices, ..(*arranger).clone() });
+        listed(&mut p, &glass, &edited);
+        assert!(!p.daw_follows(4, 0, true), "the same bars, edited");
+        let later = Arc::new(SongBars { bars: 12..16, ..(*arranger).clone() });
+        listed(&mut p, &glass, &later);
+        assert!(p.daw_follows(4, 0, true), "other bars");
+        assert!(!p.daw_follows(4, 0, false), "in FL");
+        listed(&mut p, &glass, &arranger);
+        p.with_song = false;
+        assert!(p.daw_follows(4, 0, true), "the chip off");
+        assert!(!p.daw_follows(2, 0, true), "another part");
+        p.with_song = false;
+        p.in_daw = None;
 
         // What the card says, against the stand-in Bitwig (which has "Night Drive" open, not "Glass").
         let bitwig = FakeBitwig::start().unwrap();
