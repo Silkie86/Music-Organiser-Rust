@@ -7,7 +7,7 @@ members = ["crates/*", "tools/formatlab", "tools/miditwin", "tools/theorybench",
 exclude = ["tools/galaxycheck", "fuzz", "vendor/femtovg"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.9.0-beta.1"
 edition = "2024"
 repository = "https://github.com/Silkie86/Music-Organiser-Rust"
 publish = false
