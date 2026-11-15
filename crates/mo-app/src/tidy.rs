@@ -20,6 +20,11 @@
 //! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
 //! - `Chord check\`: a take the test plugin was still saving (`take <time>.json.mo-part`), an hour old. Never the takes,
 //!   which are yours.
+//! - `Recordings\`: a Record take the test plugin was still saving (`Recording <time>.wav.part`), an hour old.
+//!   Never the takes, which are yours.
+//! - `Trimmed sounds\` in the export folder: a trimmed copy Trim silence was still making
+//!   (`<copy>.<number>.wav` or `.wav.part`, [`crate::trim_copy::is_half_made`]), an hour old. Never the copies: DAW
+//!   projects use them.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
 //! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old;
 //!   and the Play in Bitwig files (`MO Play <n>-<n>.mid`, and `.bwpreset` for an audition, removed once Bitwig has
@@ -60,7 +65,7 @@
 //! first: they may hold the newest words, and the next draft written the same way clears one left behind), the words
 //! of a save that failed (`unsaved.txt`) or the lock (`writing.lock`) (rule 17).
 //!
-//! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports, F12 notes under 3 months
+//! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports (only the half-made files named above go from the export folder), F12 notes under 3 months
 //! old and the drafts (rule 17), Playground ideas, settings, the databases (library.db, sounds.db and midi.db are the
 //! C# app's too, and opened read-only), the C# app's own logs and reports, the launcher's folders (`run-latest-rust\`
 //! and its build folders, which it keeps in bounds itself), and everything else in those folders.
@@ -224,7 +229,7 @@ pub struct Places {
     /// says nothing about where an earlier run wrote).
     pub beside_first: Option<PathBuf>,
     /// The export folder (the one set, else the one in Documents), whose "MIDI browser" folder Send to Bitwig writes
-    /// parts to; none when it can't be told.
+    /// parts to and whose "Trimmed sounds" folder Trim silence writes copies to; none when it can't be told.
     pub exports: Option<PathBuf>,
     /// The sample folders, whose "From Bitwig" folder Favourites from Bitwig saves samples into
     /// ([`crate::bitwig_favourites::save_missing`]).
@@ -335,6 +340,15 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     // A part Send to Bitwig was still writing when the app stopped (its own name, given only while it's written).
     if let Some(sent) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER])) {
         done.add(remove_older(&sent, crate::midi::is_half_sent, WRITING, now, false));
+    }
+    // A trimmed copy Trim silence was still making when the app or the plugin stopped (its own name, given only
+    // while it's written). Never the copies: DAW projects use them (DF-5).
+    if let Some(trimmed) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::trim_copy::FOLDER])) {
+        done.add(remove_older(&trimmed, crate::trim_copy::is_half_made, WRITING, now, false));
+    }
+    // A Record take the plugin was still saving when the DAW stopped (DF-5). Never the takes.
+    if let Some(takes) = real_folder(&places.data, &[RECORDINGS]) {
+        done.add(remove_older(&takes, is_half_recorded, WRITING, now, false));
     }
     if let Some(notes) = real_folder(&places.data, &[crate::note::FOLDER]) {
         done.add(old_notes_to_bin(&notes, &places.data.join(NOTES_DONE_FILE), NOTES_KEPT_FOR, now, bin));
@@ -946,6 +960,25 @@ fn is_cut_short(name: &str) -> bool {
 /// its whole name: never anything else of the other apps' there.
 fn is_move_part(name: &str) -> bool {
     WRITTEN_WHOLE_BESIDE_FIRST.iter().any(|f| is_whole_part_of(name, f))
+}
+
+/// The plugin's Record folder in the data folder: the one name the data folder move carries too.
+pub const RECORDINGS: &str = crate::data_move::RECORDINGS_FOLDER;
+
+/// How a Record take's name gives its time, after "Recording " (mo-plugin `record` uses it): "2026-11-15 21-02-44".
+pub const TAKE_TIME: &str = "%Y-%m-%d %H-%M-%S";
+
+/// A take `write_wav` was still writing: "Recording 2026-11-15 21-02-44.wav.part", or with " (2)" after the time.
+fn is_half_recorded(name: &str) -> bool {
+    let Some(rest) = name.strip_suffix(".wav.part").and_then(|n| n.strip_prefix("Recording ")) else { return false };
+    // A second take in the same second is " (2)", then " (3)" and on (mo_audio::record::save): never " (1)" or " (02)".
+    let (when, n) = match rest.split_once(" (") {
+        Some((when, n)) => {
+            (when, n.strip_suffix(')').filter(|n| !n.starts_with('0') && n.parse::<u32>().is_ok_and(|n| n >= 2)))
+        }
+        None => (rest, Some("")),
+    };
+    n.is_some() && chrono::NaiveDateTime::parse_from_str(when, TAKE_TIME).is_ok()
 }
 
 /// The saves-list copy of library.db ([`mo_library::list_copy`]), or the journal SQLite may leave beside it.
@@ -1647,6 +1680,45 @@ mod tests {
         assert!(!part.exists());
         assert!(kept.iter().all(|file| file.exists()));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn half_made_trimmed_copies_and_takes_go_and_nothing_else_there() {
+        let dir = test_folder("trimmed-takes");
+        let exports = dir.join("Music Organiser Exports");
+        let places = Places { exports: Some(exports.clone()), ..test_places(&dir) };
+        let bin = TestBin(dir.join("bin"));
+        let trimmed = exports.join(crate::trim_copy::FOLDER);
+        let takes = places.data.join(RECORDINGS);
+        fs::create_dir_all(&trimmed).unwrap();
+        fs::create_dir_all(&takes).unwrap();
+        let copy = mo_sounds::trimmed::copy_name("D:\\Samples\\Kick.wav", -60);
+        let stem = copy.strip_suffix(".wav").unwrap().to_owned();
+        let gone = [
+            trimmed.join(format!("{stem}.4242.wav")),
+            trimmed.join(format!("{stem}.4242.wav.part")),
+            takes.join("Recording 2026-11-15 21-02-44.wav.part"),
+            takes.join("Recording 2026-11-15 21-02-44 (2).wav.part"),
+        ];
+        let kept = [
+            trimmed.join(&copy),
+            trimmed.join("Kick.wav"),
+            takes.join("Recording 2026-11-15 21-02-44.wav"),
+            takes.join("Recording of mine.wav.part"),
+            takes.join("Recording 2026-11-15 21-02-44 (1).wav.part"),
+            takes.join("Recording 2026-11-15 21-02-44 (02).wav.part"),
+        ];
+        for f in gone.iter().chain(&kept) {
+            fs::write(f, b"x").unwrap();
+        }
+        // Long after they were written.
+        sweep(&places, SystemTime::now() + WRITING + Duration::from_secs(60), &bin);
+        for f in &gone {
+            assert!(!f.exists(), "{} should go", f.display());
+        }
+        for f in &kept {
+            assert!(f.exists(), "{} should stay", f.display());
+        }
     }
 
     #[test]

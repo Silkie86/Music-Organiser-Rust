@@ -940,15 +940,20 @@ impl MidiStore {
     }
 
     /// Sets of notes whose key is to be read again (an older key finder read it, or the kind it was heard as has
-    /// changed), up to `limit`: each with the kind the newest part holding it gives it now, whether it's a cut piece,
-    /// and its notes.
-    pub fn stale_keys(&self, limit: usize) -> Result<Vec<StaleKey>, MidiError> {
+    /// changed) after the set of notes `after` (an id; 0 for the first), in id order, up to `limit`: each with the
+    /// kind the newest part holding it gives it now, whether it's a cut piece, and its notes. The caller goes on
+    /// from the last one given, so each is given once however its reading goes.
+    pub fn stale_keys(&self, after: i64, limit: usize) -> Result<Vec<StaleKey>, MidiError> {
+        // The keys in their own order from `after` on (the `+` keeps SQLite off the version index, which would
+        // have it sort every key still to read for each batch; `CROSS JOIN` keeps `keys` the table it walks): a
+        // few thousand small rows a millisecond, and no more of them than it takes to find `limit`.
         let mut st = self.conn.prepare_cached(
             "SELECT k.notes, k.cut, d.data,
                     (SELECT p.role FROM parts p WHERE p.notes = k.notes ORDER BY p.id DESC LIMIT 1)
-             FROM keys k JOIN note_data d ON d.notes = k.notes WHERE k.version < ?1 LIMIT ?2",
+             FROM keys k CROSS JOIN note_data d ON d.notes = k.notes
+             WHERE k.notes > ?3 AND +k.version < ?1 ORDER BY k.notes LIMIT ?2",
         )?;
-        let rows = st.query_map(params![keys::VERSION, limit as i64], |r| {
+        let rows = st.query_map(params![keys::VERSION, limit as i64, after], |r| {
             Ok(StaleKey {
                 notes_id: r.get(0)?,
                 cut: r.get(1)?,

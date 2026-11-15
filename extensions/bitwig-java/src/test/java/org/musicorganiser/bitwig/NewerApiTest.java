@@ -856,12 +856,70 @@ class NewerApiTest {
             app.waitFor(obj("id", 1, "cmd", "newtrack", "name", "Warm Pad", "audition", true)).get("result"));
         String id = (String) made.get("id");
         assertEquals(before + 1, bitwig.state.tracks.size());
+        // Its clip starts Bitwig, which the take-out then stops.
+        app.waitFor(obj("id", 2, "cmd", "clip", "trackId", id, "path", "C:\\MIDI\\MO Play 1.mid", "launch", true, "audition", true));
         assertJson(obj("deleted", true),
-                   app.waitFor(obj("id", 2, "cmd", "deletetrack", "trackId", id, "transport", true)).get("result"));
+                   app.waitFor(obj("id", 3, "cmd", "deletetrack", "trackId", id, "transport", true)).get("result"));
         assertEquals(before, bitwig.state.tracks.size());
         assertTrue(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
+        bitwig.clock.advance(500);
+        assertFalse(bitwig.calls.contains(List.of("stopWhileStopped")), String.valueOf(bitwig.calls));
+        assertFalse(bitwig.playingNow);
         // Only once: a second ask finds nothing of the app's there.
-        assertJson(obj("deleted", false), app.waitFor(obj("id", 3, "cmd", "deletetrack", "trackId", id)).get("result"));
+        assertJson(obj("deleted", false), app.waitFor(obj("id", 4, "cmd", "deletetrack", "trackId", id)).get("result"));
+    }
+
+    @Test
+    @DisplayName("doesn't press Stop on a Bitwig that never started, which would move your play start to the beginning (extension 3.28)")
+    void neverStopsABitwigThatIsStopped() {
+        Model m = LinkTest.song();
+        m.newTrackIds = true;
+        m.scenes = 2;
+        m.playStart = 128;
+        m.tracks.get(1).id("bass-id").slots("old.mid");
+        start(m);
+        bitwig.allowChanges(true);
+        // An audition track whose preset never loaded: no clip was launched, so nothing started Bitwig.
+        String id = (String) SelfCheckTest.map(
+            app.waitFor(obj("id", 1, "cmd", "newtrack", "name", "Warm Pad", "audition", true)).get("result")).get("id");
+        assertJson(obj("deleted", true),
+                   app.waitFor(obj("id", 2, "cmd", "deletetrack", "trackId", id, "transport", true)).get("result"));
+        // A part you stopped yourself before the app's Stop, Keep or next Play.
+        app.waitFor(obj("id", 3, "cmd", "clip", "trackId", "bass-id", "path", "C:\\MIDI\\MO Play 1.mid", "launch", true,
+                        "audition", true));
+        bitwig.clock.advance(1000);
+        assertTrue(bitwig.playingNow);
+        bitwig.pressStop();
+        bitwig.clock.advance(4000);
+        assertJson(obj("stopped", list("bass-id")),
+                   app.waitFor(obj("id", 4, "cmd", "stoptracks", "trackIds", list("bass-id"), "transport", true)).get("result"));
+        assertJson(obj("deleted", true),
+                   app.waitFor(obj("id", 5, "cmd", "deleteclip", "trackId", "bass-id", "slot", 1, "stop", true, "transport", true))
+                      .get("result"));
+        assertFalse(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
+        assertFalse(bitwig.calls.contains(List.of("stopWhileStopped")), String.valueOf(bitwig.calls));
+        assertEquals(128.0, bitwig.playStartAt);
+    }
+
+    @Test
+    @DisplayName("waits for a plain part taken out straight after its launch to start Bitwig, and stops it then (extension 3.28)")
+    void stopsAPlainPartTakenOutAsItStarts() {
+        Model m = LinkTest.song();
+        m.scenes = 2;
+        m.playStart = 128;
+        m.startDelay = 400;
+        m.tracks.get(1).id("bass-id").slots("old.mid");
+        start(m);
+        bitwig.allowChanges(true);
+        app.send(obj("id", 1, "cmd", "clip", "trackId", "bass-id", "path", "C:\\MIDI\\MO Play 1.mid", "launch", true, "audition", true));
+        app.send(obj("id", 2, "cmd", "deleteclip", "trackId", "bass-id", "slot", 1, "stop", true, "transport", true));
+        bitwig.clock.advance(10000);
+        List<Map<String, Object>> replies = app.take();
+        assertJson(obj("deleted", true), replies.get(1).get("result"));
+        assertTrue(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
+        assertFalse(bitwig.calls.contains(List.of("stopWhileStopped")), String.valueOf(bitwig.calls));
+        assertFalse(bitwig.playingNow);
+        assertEquals(128.0, bitwig.playStartAt);
     }
 
     @Test

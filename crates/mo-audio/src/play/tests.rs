@@ -205,6 +205,37 @@ fn a_loop_is_swapped_for_another_where_it_is_and_only_while_its_the_one_playing(
 }
 
 #[test]
+fn a_loop_made_again_goes_on_from_where_the_old_one_is_as_it_goes_in() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, _ended) = player(&outputs);
+    // Nothing playing: `from` is told so.
+    assert!(player.play_looped_from(ramp(), "a", |playing| if playing.is_none() { Ok(2.0) } else { Err(()) }).is_ok());
+    settle(&player);
+    outputs.pull(100);
+    // The new one is made while the old one plays on (another 0.1 s): it goes on from where the old one is then.
+    outputs.pull(100);
+    let mut seen = None;
+    assert!(
+        player
+            .play_looped_from(ramp(), "b", |playing| {
+                seen = playing.map(|(key, at)| (key.to_owned(), at));
+                Ok::<_, ()>(playing.map_or(0.0, |(_, at)| at + 5.0))
+            })
+            .is_ok()
+    );
+    let (key, at) = seen.unwrap();
+    assert_eq!(key, "a");
+    assert!((at - 2.2).abs() < 1e-3, "{at}");
+    assert_eq!(player.playing().as_deref(), Some("b"));
+    settle(&player);
+    let heard = outputs.pull(100);
+    assert!((heard[50] - 0.725).abs() < 1e-3, "{}", heard[50]);
+    // Said no: nothing changes.
+    assert_eq!(player.play_looped_from(ramp(), "c", |_| Err(())), Err(()));
+    assert_eq!(player.playing().as_deref(), Some("b"));
+}
+
+#[test]
 fn seek_plays_on_from_there() {
     let outputs = FakeOutputs::new(&["Speakers"]);
     let (player, _ended) = player(&outputs);

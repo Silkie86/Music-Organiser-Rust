@@ -34,6 +34,10 @@ pub const PLAY_NEEDS: &str = "3.19";
 /// The extension version Audition (a preset on a track of its own, playing a part) needs.
 pub const AUDITION_NEEDS: &str = "3.20";
 
+/// From this version the extension presses Stop for a take-out only while Bitwig plays. An older one pressed it on a
+/// stopped Bitwig too, which moves the play start back to the beginning (the 14 Nov review's BW-2).
+pub(crate) const STOP_GUARD_FROM: &str = "3.28";
+
 /// The extension version Play on the selected track needs to play with the song's bars going round ([`SongLoop`]).
 pub const WITH_SONG_NEEDS: &str = "3.22";
 
@@ -332,14 +336,24 @@ impl Bitwig {
             started_bitwig: !was_playing,
             project: link.only_in().map(str::to_owned),
         };
-        made(&auditioning);
+        // Until its clip is asked for, the audition hasn't started Bitwig: an extension before STOP_GUARD_FROM would
+        // press Stop on a stopped Bitwig if this one were stopped now (the app closing while the preset loads). A
+        // newer one only stops a Bitwig that plays, so it can be asked to either way.
+        let guarded = link.hello().at_least(STOP_GUARD_FROM);
+        let not_started = Auditioning { started_bitwig: guarded && !was_playing, ..auditioning.clone() };
+        made(&not_started);
         // Whatever goes wrong from here, the track comes out again, so a failed audition leaves nothing behind (and
-        // Bitwig stops if its clip launched after all and started it). When the link can't take it out (the
+        // Bitwig stops if its clip launched after all and started it: `launched`). Before the clip is asked for,
+        // nothing started Bitwig, and Stop on a stopped Bitwig would move the play start to bar 1 (the review's
+        // BW-2). When the link can't take it out (the
         // connection went, say), the words say there may be a track left; one no longer wanted comes back then, so
         // it can still be stopped (the review's D-fp3).
-        let undo = |link: &mut Link, why: Error| match link.delete_audition_track(&track_id, !was_playing) {
+        let undo = |link: &mut Link, why: Error, launched: bool| match link
+            .delete_audition_track(&track_id, launched && !was_playing)
+        {
             Ok(_) => Err(why),
-            Err(_) if why == Error::Cancelled => Ok(auditioning.clone()),
+            Err(_) if why == Error::Cancelled && launched => Ok(auditioning.clone()),
+            Err(_) if why == Error::Cancelled => Ok(not_started.clone()),
             Err(_) => {
                 Err(Error::Bitwig(format!("{}. There may be a track named {name} left in Bitwig.", sentence(&why))))
             }
@@ -348,18 +362,19 @@ impl Bitwig {
             Ok(inserted) if inserted.added => {}
             Ok(_) => {
                 let why = Error::Bitwig(format!("Bitwig didn't load {}.", file_name(&preset)));
-                return undo(&mut link, why);
+                return undo(&mut link, why, false);
             }
-            Err(e) => return undo(&mut link, e),
+            Err(e) => return undo(&mut link, e, false),
         }
         if !wanted() {
-            return undo(&mut link, Error::Cancelled);
+            return undo(&mut link, Error::Cancelled, false);
         }
         if let Err(e) = link.add_audition_clip(&track_id, &part, None) {
-            return undo(&mut link, e);
+            // The clip may have been launched before whatever went wrong.
+            return undo(&mut link, e, true);
         }
         if !wanted() {
-            return undo(&mut link, Error::Cancelled);
+            return undo(&mut link, Error::Cancelled, true);
         }
         Ok(auditioning)
     }

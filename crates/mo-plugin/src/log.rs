@@ -7,8 +7,9 @@
 //! starts).
 //!
 //! Lines are written by a background thread at low priority, so nothing waits on the disk to write one. The thread
-//! ends once it has written what's waiting (the next line starts another): the plugin keeps no thread of its own
-//! going in the DAW, which may take the plugin out of memory at any time. Never called on the DAW's audio thread.
+//! ends once it has written what's waiting (the next line starts another), so it keeps nothing going. The plugin's file
+//! stays loaded until the DAW quits, once its first copy is made (`threads::pin_the_file`), so a thread still
+//! finishing never wakes into code that's gone. Never called on the DAW's audio thread.
 //! Until [`start`] is called (in tests, always) a line goes nowhere.
 
 use crate::threads::lock;

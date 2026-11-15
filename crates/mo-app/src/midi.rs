@@ -1152,6 +1152,22 @@ pub fn bpm_text(bpm: f64) -> String {
     if tenths.fract() == 0.0 { format!("{tenths:.0} BPM") } else { format!("{tenths:.1} BPM") }
 }
 
+/// The card's words for a speed you set on it: "100 BPM, your speed (its own is 92)", or with the song "100 BPM,
+/// your speed (the song's is 128)"; `own` none when it isn't known yet.
+pub fn your_speed_words(speed: f64, own: Option<f64>, song: bool) -> String {
+    let speed = bpm_text(speed);
+    match own {
+        Some(own) if song => format!("{speed}, your speed (the song's is {})", bpm_text(own)),
+        Some(own) => format!("{speed}, your speed (its own is {})", bpm_text(own)),
+        None => format!("{speed}, your speed"),
+    }
+}
+
+/// The card's sound line for a part playing alone at a speed you set (`own`: its own tempo, once read).
+pub fn sound_line_at_speed(sound: &mo_midi::gm::GmSound, speed: f64, own: Option<f64>) -> String {
+    format!("{} · {}", sound_line(sound, None), your_speed_words(speed, own, false))
+}
+
 /// Where a loop made again at another speed starts, in seconds, so it goes on from the same beat rather than from
 /// the top: `position` seconds into the loop at `was` BPM is that many beats in, at `now` BPM, round a loop
 /// `seconds` long.
@@ -1213,9 +1229,17 @@ pub fn read_done_text(s: &mo_midi::indexer::Summary) -> (String, String) {
     if s.stopped {
         return ("Stopped reading MIDI".to_owned(), "It carries on from there next time".to_owned());
     }
+    // Notes kept in the index that tripped the key finder, or what's made from them for a search: a bug, said here
+    // so it gets heard of. The reading went on without them, and they keep what they had. (A reading that was
+    // stopped doesn't say: the next one asks for them again and does.)
+    let tripped = match s.tripped {
+        0 => String::new(),
+        1 => "; 1 part's notes couldn't be worked on (the log says why)".to_owned(),
+        n => format!("; {} parts' notes couldn't be worked on (the log says why)", thousands(n)),
+    };
     if s.read == 0 {
         let rekeyed = if s.rekeyed > 0 { format!("; {} keys read again", thousands(s.rekeyed)) } else { String::new() };
-        return ("MIDI up to date".to_owned(), format!("Nothing new to read{rekeyed}"));
+        return ("MIDI up to date".to_owned(), format!("Nothing new to read{rekeyed}{tripped}"));
     }
     let files = if s.read == 1 { "1 file".to_owned() } else { format!("{} files", thousands(s.read)) };
     let parts = if s.parts == 1 { "1 part".to_owned() } else { format!("{} parts", thousands(s.parts)) };
@@ -1223,6 +1247,7 @@ pub fn read_done_text(s: &mo_midi::indexer::Summary) -> (String, String) {
     if s.failed > 0 {
         detail.push_str(&format!("; {} couldn't be read", thousands(s.failed)));
     }
+    detail.push_str(&tripped);
     ("MIDI read".to_owned(), detail)
 }
 
@@ -1483,6 +1508,18 @@ pub(crate) mod tests {
         assert_eq!(parts.len(), 1, "one line for the loop");
         let g = crate::finder::find(&[parts], "pad loop fsm", None, 4);
         assert_eq!(g.len(), 1, "the other key's file is found by its own name");
+    }
+
+    #[test]
+    fn a_speed_you_set_is_what_the_card_says() {
+        assert_eq!(your_speed_words(100.0, Some(92.0), false), "100 BPM, your speed (its own is 92 BPM)");
+        assert_eq!(your_speed_words(100.0, Some(127.96), true), "100 BPM, your speed (the song's is 128 BPM)");
+        assert_eq!(your_speed_words(92.5, None, false), "92.5 BPM, your speed");
+        let sound = mo_midi::gm::sound_for(mo_midi::Role::Melody, false, None, &[], None);
+        assert_eq!(
+            sound_line_at_speed(&sound, 100.0, Some(92.0)),
+            "Saw Lead · for its kind of part · 100 BPM, your speed (its own is 92 BPM)"
+        );
     }
 
     #[test]
@@ -1776,6 +1813,15 @@ pub(crate) mod tests {
         assert_eq!(read_done_text(&Default::default()).0, "MIDI up to date");
         let s = mo_midi::indexer::Summary { read: 3, parts: 1, ..Default::default() };
         assert_eq!(read_done_text(&s).1, "3 files, 1 part");
+        // Notes that tripped a reader were passed over, and it says so: after a reading, and when there was nothing
+        // new to read.
+        let s = mo_midi::indexer::Summary { read: 3, parts: 1, tripped: 1, ..Default::default() };
+        assert_eq!(read_done_text(&s).1, "3 files, 1 part; 1 part's notes couldn't be worked on (the log says why)");
+        let s = mo_midi::indexer::Summary { rekeyed: 4_000, tripped: 1_200, ..Default::default() };
+        assert_eq!(
+            read_done_text(&s).1,
+            "Nothing new to read; 4,000 keys read again; 1,200 parts' notes couldn't be worked on (the log says why)"
+        );
         // Files, then the files' last call, then keys.
         let mut p = ReadProgress::default();
         assert_eq!(p.text(5, 10, "L:\\x\\a.mid"), "Reading MIDI: 5 of 10 · a.mid");

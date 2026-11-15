@@ -541,6 +541,8 @@ impl Heard {
 pub struct Checker {
     /// Counts the DAW's starts of the track's audio: an older reading thread ends.
     run: AtomicU64,
+    /// The reading thread's sleep between looks, cut short when it's told to end.
+    nap: crate::threads::Nap,
     /// Thru: the notes played in go on out of the note output, for an instrument after the plugin.
     pub thru: AtomicBool,
     /// The newest for the panel, and its number (counted up each time): kept, so a panel opened later shows it too.
@@ -549,7 +551,13 @@ pub struct Checker {
     takes: Mutex<(u64, Vec<Ended>)>,
     /// Held while a take is saved: saves go one at a time, so an older label never lands over a newer one.
     saving: Mutex<()>,
+    /// This copy of the plugin's own end to its takes' names ("4120-1": the DAW's process and the copy in it), so
+    /// two copies following one keyboard never give a take the same name and save over each other's (RC-11).
+    copy: String,
 }
+
+/// Counts the copies of Chord check made in this process, for [`Checker::copy`].
+static COPIES: AtomicU64 = AtomicU64::new(0);
 
 /// A take's line in the panel's list.
 #[derive(Clone, Debug, PartialEq)]
@@ -563,10 +571,12 @@ impl Default for Checker {
     fn default() -> Checker {
         Checker {
             run: AtomicU64::new(0),
+            nap: crate::threads::Nap::default(),
             thru: AtomicBool::new(true),
             heard: Mutex::new((0, Heard::default())),
             takes: Mutex::new((0, Vec::new())),
             saving: Mutex::new(()),
+            copy: format!("{}-{}", std::process::id(), COPIES.fetch_add(1, Ordering::Relaxed) + 1),
         }
     }
 }
@@ -577,6 +587,7 @@ impl Checker {
     pub fn start(self: &Arc<Self>) -> Catch {
         let (to, from) = rtrb::RingBuffer::new(RING);
         let run = self.run.fetch_add(1, Ordering::AcqRel) + 1;
+        self.nap.wake();
         let me = Arc::clone(self);
         background("mo-plugin-chords", move || me.read_on(run, from));
         Catch { to, own: 0.0, passed: [0; 128], checker: Arc::clone(self) }
@@ -585,6 +596,7 @@ impl Checker {
     /// The DAW stopped the track's audio: the reading thread ends.
     pub fn stop(&self) {
         self.run.fetch_add(1, Ordering::AcqRel);
+        self.nap.wake();
     }
 
     /// A take that's over, in the list by when it started (newest first). Past [`crate::takes::KEPT`] the oldest
@@ -592,8 +604,10 @@ impl Checker {
     pub fn add_take(&self, mut ended: Ended) {
         let mut takes = lock(&self.takes);
         let list = &mut takes.1;
-        // Two takes started in the same millisecond (a song going back as a key goes down): each its own name.
-        let base = ended.id.clone();
+        // Two takes started in the same millisecond (a song going back as a key goes down): each its own name; and
+        // this copy's own end, for another copy's take started then too.
+        let base = format!("{}-{}", ended.id, self.copy);
+        ended.id.clone_from(&base);
         let mut n = 2;
         while list.iter().any(|t| t.id == ended.id) {
             ended.id = format!("{base}-{n}");
@@ -693,7 +707,7 @@ impl Checker {
         loop {
             let running = self.run.load(Ordering::Acquire) == run;
             if running {
-                std::thread::sleep(READ_EVERY);
+                self.nap.sleep(READ_EVERY);
             }
             came.clear();
             while let Ok(c) = from.pop() {
@@ -733,6 +747,9 @@ pub struct Steps {
     read_in: i64,
     /// The takes that ended, with the beat each ended on, for [`crate::takes::Ended`].
     pub finished: Vec<(Take, f64)>,
+    /// Whether the sustain pedal is down, kept with no take under way too: a take started with it down holds its
+    /// keys on from the first (RC-2).
+    pedal: bool,
 }
 
 impl Steps {
@@ -741,6 +758,11 @@ impl Steps {
     /// when it changed. What the panel should show, when that changed.
     pub fn step(&mut self, came: &[Came], reader: &mut ChordReader) -> Option<Heard> {
         for c in came {
+            match c {
+                Came::Pedal { down, .. } => self.pedal = *down,
+                Came::AllOff { .. } => self.pedal = false,
+                _ => {}
+            }
             match c {
                 Came::Now(now) => {
                     let went_back = self.now.is_some_and(|was| was.song && now.song && now.beat < was.beat - BACK);
@@ -762,6 +784,7 @@ impl Steps {
                     let now =
                         self.now.map_or(Now { beat: *beat, song: false, bar: None }, |n| Now { beat: *beat, ..n });
                     let mut take = Take::start(&now);
+                    take.pedal = self.pedal;
                     take.add(c);
                     self.take = Some(take);
                     self.changed = true;
@@ -880,6 +903,25 @@ mod tests {
     }
 
     #[test]
+    fn a_pedal_pressed_before_the_take_holds_its_keys() {
+        // RC-2: the pedal goes down with no take under way, then a key is pressed and let go: it still sounds.
+        let mut steps = Steps::default();
+        let mut reader = ChordReader::new();
+        let pedal = |down, beat| Came::Pedal { down, beat };
+        steps.step(&[free(0.0), pedal(true, 0.0), press(60, 1.0), lift(60, 1.5), free(2.0)], &mut reader);
+        let take = steps.take.as_ref().unwrap();
+        assert_eq!(take.sounding_keys(), [60], "held on by the pedal pressed first");
+        // Still held two bars after the key went up: the take isn't over while the chord rings.
+        steps.step(&[free(12.0)], &mut reader);
+        assert!(steps.take.is_some());
+        steps.step(&[pedal(false, 12.0), free(12.5)], &mut reader);
+        assert_eq!(steps.take.as_ref().unwrap().notes[0].length, 11 * PPQ);
+        // Let go before the next take: that one isn't held.
+        steps.step(&[free(30.0), press(62, 30.0), lift(62, 30.5), free(31.0)], &mut reader);
+        assert!(steps.take.as_ref().is_some_and(|t| !t.sounds()));
+    }
+
+    #[test]
     fn a_take_ends_after_two_bars_with_nothing_sounding() {
         let mut take = Take::start(&Now { beat: 0.0, song: false, bar: None });
         take.add(&press(60, 0.0));
@@ -990,6 +1032,11 @@ mod tests {
         let (_, lines) = checker.takes(u64::MAX).unwrap();
         assert_eq!(lines.len(), 2);
         assert_ne!(lines[0].id, lines[1].id, "the same start: each its own name");
+        let other = Checker::default();
+        other.add_take(ended.clone());
+        let theirs = other.takes(u64::MAX).unwrap().1[0].id.clone();
+        assert!(!lines.iter().any(|t| t.id == theirs), "another copy's take started then too has its own name");
+        assert!(mo_app::chord_check::is_half_written(&format!("{}.mo-part", mo_app::chord_check::file_name(&theirs))));
         // The oldest is labelled and not saved: past the most kept, a newer one goes instead.
         let oldest = lines[1].id.clone();
         assert!(checker.label(&oldest, 0, Label::Right));
