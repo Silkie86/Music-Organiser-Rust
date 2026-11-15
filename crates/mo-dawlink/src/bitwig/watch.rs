@@ -52,7 +52,7 @@ pub enum State {
     /// busy Bitwig (opening a project, say) greets late, one that's closing lets go, and another program may have
     /// the port.
     NoAnswer,
-    /// The link answered, but it's older than [`WATCH_NEEDS`]: what answered, in words ("the Music Organiser
+    /// The link answered, but it's older than [`WATCH_NEEDS`]: what answered, in words ("the DAWmate
     /// extension 3.23"). Installing the extension again (Settings > DAWs) brings the feed.
     TooOld(String),
     /// The link refused to watch, in its words.

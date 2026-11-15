@@ -1,4 +1,4 @@
-// A stand-in for the parts of Bitwig's controller API the Music Organiser script uses, so the script
+// A stand-in for the parts of Bitwig's controller API the DAWmate script uses, so the script
 // can be run and checked without Bitwig. Like Bitwig, reading a value that init() didn't mark as
 // interested fails, and changes the script asks for happen a little later (on the stand-in's clock),
 // reaching the script bit by bit, as Bitwig's do.

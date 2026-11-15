@@ -345,7 +345,8 @@ class RoutesTest {
                      + "working), and the routes through MIDI need them. Bitwig 6.1.3 has only saved for the link once they were set. "
                      + Link.LOOPBACK_SETUP,
                      SelfCheckTest.detail(result, "command routes"));
-        assertMatches("set both MIDI in and MIDI out to \"Music Organiser Bitwig\" \\(the loopMIDI port\\), never \"Music Organiser\"",
+        assertMatches("set both MIDI in and MIDI out to \"DAWmate Bitwig\" \\(the loopMIDI port; \"Music Organiser Bitwig\", its first name, "
+                      + "works too\\), never \"DAWmate\" or \"Music Organiser\"",
                       Link.LOOPBACK_SETUP);
         assertEquals(10, bitwig.buttons.size());
         assertEquals(List.of(60.0, 20.0), List.of(bitwig.surfaceSize[0], bitwig.surfaceSize[1]));

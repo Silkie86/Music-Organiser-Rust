@@ -49,9 +49,7 @@ pub fn of(live: &Live) -> Result<(Swing, String), String> {
         }
         State::Refused(why) => return Err(format!("Bitwig wouldn't say the song's swing: {why}")),
         _ => {
-            return Err(
-                "Waiting for Bitwig's Music Organiser extension to answer: the song's swing comes through it.".into()
-            );
+            return Err("Waiting for Bitwig's DAWmate extension to answer: the song's swing comes through it.".into());
         }
     }
     if !live.sections.iter().any(|s| s == "groove") {
@@ -119,7 +117,7 @@ mod tests {
         // An older extension's feed has no Groove in it.
         let old = Live { state: State::Watching, sections: vec!["transport".into()], ..Live::default() };
         assert!(of(&old).unwrap_err().contains(GROOVE_NEEDS));
-        let older = Live { state: State::TooOld("the Music Organiser extension 3.20".into()), ..Live::default() };
+        let older = Live { state: State::TooOld("the DAWmate extension 3.20".into()), ..Live::default() };
         let why = of(&older).unwrap_err();
         assert!(why.contains("3.20") && why.contains(GROOVE_NEEDS), "{why}");
         assert!(of(&Live::default()).unwrap_err().contains("Waiting for Bitwig"));

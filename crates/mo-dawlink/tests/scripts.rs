@@ -61,7 +61,7 @@ fn a_folder_that_cant_take_it_doesnt_stop_the_others() {
     let root = fixture("blocked");
     // A file where the folder should be.
     fs::write(root.join("A"), "not a folder").unwrap();
-    let folders = vec![root.join("A").join("Music Organiser"), root.join("B")];
+    let folders = vec![root.join("A").join("DAWmate"), root.join("B")];
     let done = install_fl(&folders);
     assert_eq!(done.went, [root.join("B")]);
     assert_eq!(done.failed.len(), 1);
@@ -128,4 +128,77 @@ fn installs_the_extension_and_takes_out_the_old_script() {
     assert_eq!(bitwig_state(&source, &folders), ScriptState::Installed);
     extension(&source, "3.19");
     assert_eq!(bitwig_state(&source, &folders), ScriptState::Outdated);
+}
+
+#[test]
+fn the_fl_script_from_before_the_rename_comes_out_keeping_its_setting() {
+    let root = fixture("fl-renamed");
+    user_data(&root);
+    let folders = fl_script_folders(std::slice::from_ref(&root));
+    let hardware = root.join("Settings").join("Hardware");
+    assert_eq!(folders, [hardware.join(FL_FOLDER)]);
+    // Only the old copy is there, in the old folder, with changes on, and a file of the user's beside it.
+    let first = hardware.join(FIRST_FL_FOLDER);
+    fs::create_dir_all(&first).unwrap();
+    fs::write(first.join(FIRST_FL_SCRIPT_NAME), "# old\nLET_THE_APP_MAKE_CHANGES = True\n").unwrap();
+    fs::write(first.join("notes.txt"), "mine").unwrap();
+    assert_eq!(fl_state(&folders), ScriptState::Outdated);
+    let done = install_fl(&folders);
+    assert_eq!((done.went.as_slice(), done.failed.as_slice()), (folders.as_slice(), &[][..]));
+    assert_eq!(done.removed, [first.join(FIRST_FL_SCRIPT_NAME)]);
+    let new = fs::read_to_string(folders[0].join(FL_SCRIPT_NAME)).unwrap();
+    assert!(new.lines().any(|l| l == "LET_THE_APP_MAKE_CHANGES = True"), "the old copy's setting came over");
+    // Only the old script went: the user's file, and so its folder, stay.
+    assert!(!first.join(FIRST_FL_SCRIPT_NAME).exists() && first.join("notes.txt").exists());
+    assert_eq!(fl_state(&folders), ScriptState::Installed);
+
+    // With nothing else in it, the old folder goes too.
+    fs::remove_file(first.join("notes.txt")).unwrap();
+    fs::write(first.join(FIRST_FL_SCRIPT_NAME), "# old\n").unwrap();
+    assert_eq!(fl_state(&folders), ScriptState::Outdated);
+    let done = install_fl(&folders);
+    assert_eq!(done.removed.len(), 1);
+    assert!(!first.exists() && folders[0].join(FL_SCRIPT_NAME).exists());
+}
+
+#[test]
+fn a_folder_that_cant_take_the_new_script_keeps_its_old_one() {
+    let root = fixture("fl-renamed-blocked");
+    user_data(&root);
+    let hardware = root.join("Settings").join("Hardware");
+    let first = hardware.join(FIRST_FL_FOLDER);
+    fs::create_dir_all(&first).unwrap();
+    fs::write(first.join(FIRST_FL_SCRIPT_NAME), "# old\n").unwrap();
+    // A file where the new folder should be.
+    fs::write(hardware.join(FL_FOLDER), "not a folder").unwrap();
+    let done = install_fl(&fl_script_folders(std::slice::from_ref(&root)));
+    assert!(done.went.is_empty() && done.removed.is_empty() && done.failed.len() == 1);
+    assert!(first.join(FIRST_FL_SCRIPT_NAME).exists(), "the link it has keeps working");
+}
+
+#[test]
+fn the_bitwig_extension_from_before_the_rename_comes_out() {
+    let root = fixture("bitwig-renamed");
+    let user = root.join("Bitwig Studio");
+    let extensions = user.join("Extensions");
+    fs::create_dir_all(&extensions).unwrap();
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    // Bitwig has the old file (same ID), and was seen loading it.
+    extension(&extensions.join(FIRST_BITWIG_EXTENSION_NAME), "3.30");
+    let seen = extensions.join(FIRST_BITWIG_EXTENSION_NAME).display().to_string();
+    let folders = bitwig_extension_folders(std::slice::from_ref(&user), Some(&seen));
+    assert_eq!(folders, std::slice::from_ref(&extensions));
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Outdated);
+    let done = install_bitwig(&source, &folders, std::slice::from_ref(&user));
+    assert!(done.installed.failed.is_empty());
+    assert_eq!(done.removed, [extensions.join(FIRST_BITWIG_EXTENSION_NAME)]);
+    let names: Vec<_> = fs::read_dir(&extensions).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, [BITWIG_EXTENSION_NAME], "one copy, so Bitwig lists the controller once");
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Installed);
+    // A folder Bitwig was seen loading the old file from, outside the user folders, is updated too.
+    let elsewhere = root.join("Elsewhere").join("Extensions");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let seen = elsewhere.join(FIRST_BITWIG_EXTENSION_NAME).display().to_string();
+    assert_eq!(bitwig_extension_folders(std::slice::from_ref(&user), Some(&seen)), [extensions, elsewhere]);
 }

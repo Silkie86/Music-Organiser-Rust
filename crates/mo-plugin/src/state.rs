@@ -9,7 +9,8 @@
 
 use crate::knobs::Knob;
 
-/// The first line of every state the plugin writes.
+/// The first line of every state the plugin writes. It keeps the app's first name: songs saved with the plugin
+/// have it, and a state without it isn't read.
 const NAMED: &str = "Music Organiser plugin state";
 /// The most of a state that's read: far more than it ever writes.
 pub const MOST: u64 = 64 * 1024;

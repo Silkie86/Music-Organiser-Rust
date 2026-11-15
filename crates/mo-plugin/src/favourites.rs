@@ -105,7 +105,7 @@ pub fn sounds_db(vendor: Option<&CStr>) -> Option<PathBuf> {
 
 /// How the DAW names the favourites' provider.
 pub fn descriptor() -> ProviderDescriptor {
-    ProviderDescriptor::new(PROVIDER_ID, "Music Organiser favourites").with_vendor("Music Organiser")
+    ProviderDescriptor::new(PROVIDER_ID, "DAWmate favourites").with_vendor("DAWmate")
 }
 
 /// The favourites' provider, made when the DAW asks for it.

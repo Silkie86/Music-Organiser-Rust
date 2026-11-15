@@ -221,7 +221,7 @@ jobs:
           python-version: "3.12"
       - name: FL Studio link parses as FL Studio's Python 3.9 and passes its tests
         run: |
-          python -c "import ast, sys; ast.parse(open(sys.argv[1], encoding='utf-8').read(), feature_version=(3, 9))" extensions/fl-studio/device_MusicOrganiser.py
+          python -c "import ast, sys; ast.parse(open(sys.argv[1], encoding='utf-8').read(), feature_version=(3, 9))" extensions/fl-studio/device_DAWmate.py
           python -m unittest discover -s extensions/fl-studio/test -v
       - uses: actions/setup-node@v4
         with:
@@ -237,12 +237,12 @@ jobs:
           # grep finds nothing (1) is the pass; a missing file (2) fails too.
           set +e
           LC_ALL=C grep -nP '[^\x00-\x7F]' tools/formatlab/daw/bitwig/*.js extensions/bitwig/MusicOrganiser.control.js \
-            extensions/bitwig-java/src/main/java/org/musicorganiser/bitwig/*.java extensions/fl-studio/device_MusicOrganiser.py
+            extensions/bitwig-java/src/main/java/org/musicorganiser/bitwig/*.java extensions/fl-studio/device_DAWmate.py
           test $? -eq 1
 
   # The Bitwig extension (Java), moved here from the C# repo: built and tested with Maven, which gets Bitwig's API from
   # Bitwig's own repository (maven.bitwig.com; nothing of Bitwig's is kept here). Each run keeps
-  # MusicOrganiser.bwextension as a download. Cheap enough to always run.
+  # DAWmate.bwextension as a download. Cheap enough to always run.
   bitwig-extension:
     name: Bitwig extension
     runs-on: ubuntu-latest
@@ -263,6 +263,6 @@ jobs:
         run: mvn -B package
       - uses: actions/upload-artifact@v4
         with:
-          name: music-organiser-bitwig-extension
-          path: extensions/bitwig-java/target/MusicOrganiser.bwextension
+          name: dawmate-bitwig-extension
+          path: extensions/bitwig-java/target/DAWmate.bwextension
           if-no-files-found: error

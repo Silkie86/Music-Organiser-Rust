@@ -1,15 +1,16 @@
 <#
-  Builds the Music Organiser test plugin (crates/mo-plugin) and puts it where DAWs look for CLAP plugins, so Bitwig
-  lists "Music Organiser (test)" among its instruments.
+  Builds the DAWmate test plugin (crates/mo-plugin) and puts it where DAWs look for CLAP plugins, so Bitwig lists
+  "DAWmate (test)" among its instruments.
 
   It builds the version the launcher (Run latest) last brought down: pick the plugin's pull request in Run latest
   first, then double-click this. It uses the launcher's own copy of the code and its build folder, so it takes no
   extra room beyond the plugin's own build.
 
-  The plugin goes to C:\Program Files\Common Files\CLAP\Music Organiser (test).clap, the usual CLAP folder that
+  The plugin goes to C:\Program Files\Common Files\CLAP\DAWmate (test).clap, the usual CLAP folder that
   Bitwig scans. Writing there needs an administrator, so Windows asks once (a "Do you want to allow..." box) just
   for the copy; the build itself runs as you. An older copy in %LOCALAPPDATA%\Programs\Common\CLAP (where the first
-  version of this script put it) is removed, so Bitwig doesn't list it twice. Bitwig must be closed while it's
+  version of this script put it) is removed, so Bitwig doesn't list it twice, and so is "Music Organiser (test).clap"
+  in the CLAP folder (the plugin's file before the app was called DAWmate: the same plugin, so the same ID). Bitwig must be closed while it's
   replaced (Windows won't replace a file a program has open). In Bitwig: Settings, Locations, Plug-ins, then rescan
   if it doesn't show.
 
@@ -32,7 +33,9 @@ $Launcher = Join-Path (Join-Path $DataRoot 'MusicOrganiser') 'run-latest-rust'
 $CommonFiles = $env:CommonProgramW6432
 if (-not $CommonFiles) { $CommonFiles = $env:CommonProgramFiles }
 $ClapDir = Join-Path $CommonFiles 'CLAP'
-$Plugin = Join-Path $ClapDir 'Music Organiser (test).clap'
+$Plugin = Join-Path $ClapDir 'DAWmate (test).clap'
+# The same plugin under the app's first name: taken out with the copy, as Bitwig would list the one ID twice.
+$FirstPlugin = Join-Path $ClapDir 'Music Organiser (test).clap'
 $OldPlugin = [IO.Path]::Combine($DataRoot, 'Programs', 'Common', 'CLAP', 'Music Organiser (test).clap')
 
 # Runs a few lines of PowerShell as administrator (Windows asks first) and says whether they worked.
@@ -56,13 +59,20 @@ function RemoveOld {
 
 if ($Remove) {
     RemoveOld
+    $hadFirst = Test-Path -LiteralPath $FirstPlugin
+    if ($hadFirst) {
+        if (-not ((AsAdmin "Remove-Item -LiteralPath $(Quoted $FirstPlugin)") -and -not (Test-Path -LiteralPath $FirstPlugin))) {
+            Say "Couldn't remove $FirstPlugin : is Bitwig open? Close it and try again." 'Red'; exit 1
+        }
+        Say "Removed $FirstPlugin" 'Green'
+    }
     if (Test-Path -LiteralPath $Plugin) {
         if ((AsAdmin "Remove-Item -LiteralPath $(Quoted $Plugin)") -and -not (Test-Path -LiteralPath $Plugin)) {
             Say "Removed $Plugin" 'Green'
         }
         else { Say "Couldn't remove $Plugin : is Bitwig open? Close it and try again." 'Red'; exit 1 }
     }
-    else { Say 'The test plugin isn''t installed.' }
+    elseif (-not $hadFirst) { Say 'The test plugin isn''t installed.' }
     exit 0
 }
 
@@ -96,6 +106,7 @@ $Built = [IO.Path]::Combine($TargetDir, 'release', 'mo_plugin.dll')
 if (-not (Test-Path -LiteralPath $Built)) { Say "The build made no $Built." 'Red'; exit 1 }
 Say "Copying it to $ClapDir. Windows asks for an administrator for this step..." 'Cyan'
 $copy = "[void][IO.Directory]::CreateDirectory($(Quoted $ClapDir))`nCopy-Item -LiteralPath $(Quoted $Built) -Destination $(Quoted $Plugin) -Force"
+$copy += "`nif (Test-Path -LiteralPath $(Quoted $FirstPlugin)) { Remove-Item -LiteralPath $(Quoted $FirstPlugin) }"
 $worked = AsAdmin $copy
 # Checked by its contents, so an old copy left in place (Bitwig had it open) is never taken for the new one.
 $same = (Test-Path -LiteralPath $Plugin) -and
@@ -104,6 +115,10 @@ if (-not $worked -or -not $same) {
     Say "Couldn't put the plugin in $ClapDir : is Bitwig open? Close it and double-click this again." 'Red'
     exit 1
 }
+if (Test-Path -LiteralPath $FirstPlugin) {
+    Say "The new plugin is in, but the older copy $FirstPlugin is still there: is Bitwig open? Close it and double-click this again." 'Red'
+    exit 1
+}
 RemoveOld
 Say "Installed: $Plugin" 'Green'
-Say 'Open Bitwig, add the instrument "Music Organiser (test)" to a track, and open its window.' 'Green'
+Say 'Open Bitwig, add the instrument "DAWmate (test)" to a track, and open its window. A song that had "Music Organiser (test)" in it opens it as DAWmate (test).' 'Green'

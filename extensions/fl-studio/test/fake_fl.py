@@ -1,5 +1,5 @@
 """
-A stand-in for the parts of FL Studio's scripting modules the Music Organiser script uses, so the script can
+A stand-in for the parts of FL Studio's scripting modules the DAWmate script uses, so the script can
 be run and checked without FL Studio. Like FL Studio's own functions, these take their arguments by position,
 and the useGlobalIndex flag only exists from the scripting version that added it.
 """
@@ -8,7 +8,7 @@ import shutil
 import sys
 import types
 
-SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "device_MusicOrganiser.py")
+SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "device_DAWmate.py")
 VST_COUNT = 4240
 REC_TEMPO = 0x10000 + 5
 FROM_MIDI_MAX = 1 << 30
@@ -224,7 +224,7 @@ def compile_script(studio, path=SCRIPT):
     with open(path, encoding="utf-8") as f:
         source = f.read()
     sys.modules.update(studio.modules())
-    script = types.ModuleType("device_MusicOrganiser")
+    script = types.ModuleType("device_DAWmate")
     exec(compile(source, path, "exec"), script.__dict__)
     return script
 

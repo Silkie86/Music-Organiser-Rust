@@ -62,7 +62,7 @@ pub enum WithSong {
     Looping,
     /// Bitwig has another project open (its name; "" when Bitwig didn't say which): the part alone.
     OtherProject(String),
-    /// What answers in Bitwig is older than [`WITH_SONG_NEEDS`] (its words: "the Music Organiser extension 3.21"):
+    /// What answers in Bitwig is older than [`WITH_SONG_NEEDS`] (its words: "the DAWmate extension 3.21"):
     /// the part alone.
     OldExtension(String),
     /// This Bitwig didn't let the extension reach the arranger's loop or the play start ([`Hello::song_loop`]): the

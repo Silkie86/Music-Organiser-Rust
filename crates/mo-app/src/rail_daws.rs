@@ -63,7 +63,7 @@ pub fn bitwig_rail(checked: &Result<Hello, Error>) -> RailDaw {
             "Linked, not working fully",
             false,
             format!(
-                "Part of the Music Organiser extension didn't start in Bitwig, so the app can't see what's open there \
+                "Part of the DAWmate extension didn't start in Bitwig, so the app can't see what's open there \
                  or send anything to it. Restarting Bitwig may help. {} {MORE}",
                 said(hello.error.as_deref().unwrap_or_default())
             ),
@@ -71,7 +71,7 @@ pub fn bitwig_rail(checked: &Result<Hello, Error>) -> RailDaw {
         Err(Error::NotRunning) => line(
             "Not linked",
             false,
-            "Bitwig isn't answering: it's closed, or the Music Organiser controller isn't on in it. Settings \u{203a} \
+            "Bitwig isn't answering: it's closed, or the DAWmate controller isn't on in it. Settings \u{203a} \
              DAWs says how to link it."
                 .to_owned(),
         ),
@@ -87,7 +87,7 @@ pub fn bitwig_rail(checked: &Result<Hello, Error>) -> RailDaw {
             "Not answering",
             false,
             format!(
-                "Something took the app's call on port {port} but didn't answer as the Music Organiser extension does: \
+                "Something took the app's call on port {port} but didn't answer as the DAWmate extension does: \
                  Bitwig may be busy (opening a big project, say), or another program uses the port. {AGAIN} {MORE}"
             ),
         ),
@@ -257,7 +257,7 @@ mod tests {
         assert!(!broken.tip.contains("didn't send"), "{}", broken.tip);
         let off = bitwig_rail(&Err(Error::NotRunning));
         assert_eq!((off.text.as_str(), off.linked), ("Not linked", false));
-        assert!(off.tip.contains("closed, or the Music Organiser controller isn't on"), "{}", off.tip);
+        assert!(off.tip.contains("closed, or the DAWmate controller isn't on"), "{}", off.tip);
         assert_eq!(bitwig_rail(&Err(Error::Closed)).text, "Not linked");
         // Busy: the rail asks again by itself, so it doesn't say to try again.
         for busy in [Error::TimedOut, Error::NotTheLink { port: 19791 }] {

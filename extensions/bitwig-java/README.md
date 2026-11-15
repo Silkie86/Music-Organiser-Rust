@@ -1,8 +1,8 @@
-# Music Organiser extension for Bitwig Studio
+# DAWmate extension for Bitwig Studio
 
-The Bitwig link as a Java controller extension (`MusicOrganiser.bwextension`), for Bitwig Studio 6.1 and later
+The Bitwig link as a Java controller extension (`DAWmate.bwextension`), for Bitwig Studio 6.1 and later
 (controller API 23). It replaces the JavaScript controller script in `../bitwig`, which stays in the repository
-for now as the fallback. Both are the same controller to Bitwig (same vendor, model and ID), so a Music Organiser
+for now as the fallback. Both are the same controller to Bitwig (same vendor, model and ID), so a DAWmate
 controller already added in Bitwig stays added, with its *Let the app make changes* setting. Install one or the
 other, not both.
 
@@ -19,21 +19,21 @@ cd extensions/bitwig-java
 ./mvnw package          # mvnw.cmd package on Windows; or mvn package with Maven installed
 ```
 
-That runs the tests and makes `target/MusicOrganiser.bwextension`. Maven gets Bitwig's API from Bitwig's own
+That runs the tests and makes `target/DAWmate.bwextension`. Maven gets Bitwig's API from Bitwig's own
 repository (`com.bitwig:extension-api:23` from maven.bitwig.com); it's only needed to build, since Bitwig has it
 when the extension runs, so nothing of Bitwig's goes in the extension or the repository. CI builds it too
-(the `bitwig-extension` job) and keeps the file as a download called `music-organiser-bitwig-extension`.
+(the `bitwig-extension` job) and keeps the file as a download called `dawmate-bitwig-extension`.
 
 ## Installing
 
 The app does it: building the app also builds the extension when a JDK is installed (on Windows,
 `winget install Microsoft.OpenJDK.21`; see `MusicOrganiser.BitwigExtension.targets`), and then **Install** in
 Settings → DAW links → Bitwig Studio puts the extension in place of the script. By hand: copy
-`MusicOrganiser.bwextension` into `Extensions` in Bitwig's user folder (normally
+`DAWmate.bwextension` into `Extensions` in Bitwig's user folder (normally
 `Documents\Bitwig Studio\Extensions`; on Linux `~/Bitwig Studio/Extensions`), and take
 `Controller Scripts\Music Organiser` out of that folder if the JavaScript script is there. Bitwig picks the
 extension up by itself (restart Bitwig if it doesn't). If the controller isn't added yet: Settings → Controllers → Add controller →
-Music Organiser → DAW link.
+DAWmate → DAW link.
 
 ### The MIDI loopback (3.7)
 
@@ -41,9 +41,9 @@ The extension has one MIDI in and one MIDI out, only for its loopback: it sends 
 Bitwig hands it back on the in as if a device had sent it. Bitwig 6.1.3 ignored Save run straight away by the
 link without these ports, and once they were set it saved from its flush (which 3.8 makes the default route) both
 times, and straight away once in two. To set it up: in loopMIDI, add a
-port called **Music Organiser Bitwig**, then in Bitwig, Settings → Controllers → Music Organiser, set both MIDI
+port called **DAWmate Bitwig**, then in Bitwig, Settings → Controllers → DAWmate, set both MIDI
 in and MIDI out to it. Bitwig can fill them in by itself when it finds the port (the extension offers it for
-auto-detection). Never use **Music Organiser**, the FL Studio link's port: FL Studio must never get what the
+auto-detection). Never use **DAWmate** (or **Music Organiser**), the FL Studio link's port: FL Studio must never get what the
 Bitwig link sends itself. The self-check and `hello`'s `loopback` say whether the loopback works. Bitwig 6.1.3
 starts the extension, and the link answers, with its MIDI in and out unassigned, but it has only saved for the link
 once they were set (the flush was never tried without them), so set them after installing 3.7 or later, whichever
@@ -268,6 +268,13 @@ press never runs the command, except a late `button` press, whose command Bitwig
 hears of it. `hello` says `loopback`:
 whether the link's own MIDI has come back, from the message it sends itself as Bitwig starts it and each time
 the app connects.
+
+New in 3.31: the app is called DAWmate (15 Nov 2026), so the extension is too: Bitwig lists it as DAWmate > DAW
+link, and the file is `DAWmate.bwextension`. Its ID is the same, so Bitwig treats it as the same controller. Two
+things keep their first names so nothing set up before is lost: the category of the "Let the app make changes"
+setting ("Music Organiser"), so Bitwig keeps its value, and the loopback port, which may be called "Music Organiser
+Bitwig" as well as "DAWmate Bitwig" (Bitwig is offered both). Installing it from the app takes out the old
+`MusicOrganiser.bwextension`, so Bitwig doesn't load the same controller twice.
 
 New in 3.30: two small things. The reports follow the app's data folder when Settings moves it while Bitwig is open:
 the folder is looked up again each time the app or a plugin connects, not only when Bitwig starts (before, they went

@@ -3846,7 +3846,7 @@ fn settings_shots(
         )),
     );
     // Exports go into a folder chosen on another drive (an invented one).
-    let exports = r"I:\Music Organiser Exports";
+    let exports = r"I:\DAWmate Exports";
     mo_ui::settings::show_exports(
         app,
         &mo_app::settings::exports_card(Some(exports), &Ok(PathBuf::from(exports)), true),
@@ -3887,7 +3887,7 @@ fn settings_shots(
     mo_ui::settings::show_fl(
         app,
         mo_dawlink::scripts::ScriptState::Outdated,
-        vec![std::path::PathBuf::from(r"I:\Fl Studio Data\FL Studio\Settings\Hardware\Music Organiser")],
+        vec![std::path::PathBuf::from(r"I:\Fl Studio Data\FL Studio\Settings\Hardware\DAWmate")],
     );
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));

@@ -54,7 +54,7 @@ fn says_when_the_extension_is_too_old_and_never_asks_it() {
     let bitwig = FakeBitwig::with(world).unwrap();
     let watch = Watch::start(bitwig.port());
     let live = until(&watch, |l| l.state != State::Connecting);
-    assert_eq!(live.state, State::TooOld("the Music Organiser extension 3.23".into()));
+    assert_eq!(live.state, State::TooOld("the DAWmate extension 3.23".into()));
     assert!(!bitwig.world().commands().contains(&"watch".to_owned()));
 }
 

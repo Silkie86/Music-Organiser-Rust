@@ -154,7 +154,7 @@ fn wont_send_through_an_old_script_or_with_changes_off() {
     assert_eq!(
         Error::ChangesOff.to_string(),
         "Bitwig isn't letting the app make changes. Turn on \"Let the app make changes\" in Bitwig (Settings > \
-         Controllers > Music Organiser), then send it again."
+         Controllers > DAWmate), then send it again."
     );
     // Changes turned off after the greeting: the link says so in its words, and the app can't tell how far it got.
     let bitwig = with(|w| {
@@ -669,7 +669,7 @@ fn the_play_start_stays_in_another_project_and_with_an_older_extension() {
     });
     let sent = bitwig.bitwig().send_part_for_song(&file, "Older", &bars_9_to_12()).unwrap();
     assert!(sent.went_in(), "{sent:?}");
-    assert_eq!(sent.mark, Mark::OldExtension("the Music Organiser extension 3.22".into()));
+    assert_eq!(sent.mark, Mark::OldExtension("the DAWmate extension 3.22".into()));
     assert_eq!(bitwig.world().commands(), ["newtrack", "clip"]);
 }
 

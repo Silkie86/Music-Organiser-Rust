@@ -1,6 +1,6 @@
 [package]
 name = "mo-dawlink"
-description = "The app's links to the DAWs: the Music Organiser extension in Bitwig Studio, and Send to Bitwig."
+description = "The app's links to the DAWs: the DAWmate extension in Bitwig Studio, and Send to Bitwig."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -12,7 +12,7 @@ workspace = true
 # The stand-in Bitwig (`bitwig::fake`), for the tests of the crates that use this one: tests never reach a real DAW
 # (rule 11). This crate's own tests always have it.
 fake-bitwig = []
-# Notes out of the "Music Organiser" MIDI port for FL Studio (`fl::open_port`), through midir. The app turns it on;
+# Notes out of the "DAWmate" MIDI port for FL Studio (`fl::open_port`), through midir. The app turns it on;
 # crates that only test the player leave it off, so they don't need the system's MIDI libraries (ALSA's on Linux).
 midi-port = ["dep:midir"]
 

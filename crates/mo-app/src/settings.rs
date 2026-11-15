@@ -411,10 +411,11 @@ pub fn exports_card(setting: Option<&str>, checked: &Result<PathBuf, String>, th
             folder: folder.display().to_string(),
             note: match (chosen, there) {
                 (true, _) => String::new(),
-                (false, true) => "The app's own choice: Music Organiser Exports in your Documents folder.".to_owned(),
-                (false, false) => "The app's own choice: Music Organiser Exports in your Documents folder, made the \
-                                   first time something is exported."
-                    .to_owned(),
+                (false, true) => format!("The app's own choice: {} in your Documents folder.", name_of(folder)),
+                (false, false) => format!(
+                    "The app's own choice: {} in your Documents folder, made the first time something is exported.",
+                    name_of(folder)
+                ),
             },
             chosen,
             there,
@@ -424,13 +425,21 @@ pub fn exports_card(setting: Option<&str>, checked: &Result<PathBuf, String>, th
     }
 }
 
+/// A folder's own name, to say where in Documents exports go ("DAWmate Exports").
+/// Either slash counts, so a Windows path reads the same on every system.
+fn name_of(folder: &Path) -> String {
+    let whole = folder.display().to_string();
+    let trimmed = whole.trim_end_matches(['\\', '/']);
+    trimmed.rsplit(['\\', '/']).next().filter(|n| !n.is_empty()).unwrap_or(trimmed).to_owned()
+}
+
 /// What choosing the export folder (`Some`) or going back to Documents (`None`) did, in words: none when it changed
 /// nothing.
 pub fn export_change_note(folder: Option<&str>, done: Result<bool, String>) -> Option<String> {
     match done {
         Ok(true) => Some(match folder {
             Some(folder) => format!("Exports now go into {folder}."),
-            None => "Exports go into Music Organiser Exports in your Documents folder again.".to_owned(),
+            None => "Exports go into the app's own folder in your Documents folder again.".to_owned(),
         }),
         Ok(false) => None,
         Err(e) => Some(format!("The export folder wasn't changed: {e}")),
@@ -598,8 +607,8 @@ pub fn bitwig_status(checked: &Result<mo_dawlink::bitwig::Hello, mo_dawlink::bit
             if hello.changes {
                 "Allowed".to_owned()
             } else {
-                "Off: turn on \u{201c}Let the app make changes\u{201d} in Bitwig (Settings > Controllers > Music \
-                 Organiser) to send sounds and kits"
+                "Off: turn on \u{201c}Let the app make changes\u{201d} in Bitwig (Settings > Controllers > DAWmate) \
+                 to send sounds and kits"
                     .to_owned()
             },
         ));
@@ -631,7 +640,7 @@ pub fn bitwig_status(checked: &Result<mo_dawlink::bitwig::Hello, mo_dawlink::bit
     DawStatus { daw: "Bitwig Studio", state, ok, facts }
 }
 
-/// FL Studio's row: whether the Music Organiser script is installed (none while it's being looked at), and where it
+/// FL Studio's row: whether the DAWmate script is installed (none while it's being looked at), and where it
 /// goes. Talking to FL Studio through it comes later in phase 5.
 pub fn fl_status(state: Option<ScriptState>, folders: &[PathBuf]) -> DawStatus {
     let fact = |what, value: String| Fact { what, value, button: None };
@@ -784,12 +793,15 @@ pub fn bitwig_installed_note(done: &BitwigInstalled) -> String {
         );
     }
     if !done.removed.is_empty() {
-        out.push_str(" Took out the older script it replaces.");
+        out.push_str(" Took out the older copy it replaces.");
     }
     for (folder, why) in &done.installed.failed {
         out.push_str(&format!(" Couldn't put it in {}: {why}", folder.display()));
     }
-    if !done.installed.failed.is_empty() {
+    for (file, why) in &done.installed.left {
+        out.push_str(&format!(" Couldn't take out the older copy {}: {why}", file.display()));
+    }
+    if !done.installed.failed.is_empty() || !done.installed.left.is_empty() {
         out.push_str(" If Bitwig is open, close it, then press Install again.");
     }
     out.trim_start().to_owned()
@@ -804,11 +816,23 @@ pub fn installed_note(done: &Installed) -> String {
             done.went.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(" and ")
         );
     }
+    if !done.removed.is_empty() {
+        out.push_str(
+            " Took out the copy from before the app was called DAWmate: in FL Studio's MIDI settings, pick \
+                      DAWmate as the controller type of the port it was on.",
+        );
+    }
     for (folder, why) in &done.failed {
         if !out.is_empty() {
             out.push(' ');
         }
         out.push_str(&format!("Couldn't put it in {}: {why}", folder.display()));
+    }
+    for (file, why) in &done.left {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("Couldn't take out the older copy {}: {why}", file.display()));
     }
     out
 }
@@ -994,7 +1018,7 @@ mod tests {
             values,
             [
                 "Bitwig Studio 6.1.5",
-                "The Music Organiser extension 3.18",
+                "The DAWmate extension 3.18",
                 "Night drive \u{b7} unsaved changes",
                 "Allowed",
                 "Working"
@@ -1010,7 +1034,7 @@ mod tests {
 
     #[test]
     fn the_exports_card_says_where_exports_go_and_what_an_export_would_say() {
-        let documents = PathBuf::from(r"C:\Users\Solomon\Documents\Music Organiser Exports");
+        let documents = PathBuf::from(r"C:\Users\Solomon\Documents\DAWmate Exports");
         // Nothing chosen: the app's own, in Documents, made when it's first needed.
         let card = exports_card(None, &Ok(documents.clone()), false);
         assert_eq!(card.folder, documents.display().to_string());
@@ -1018,6 +1042,10 @@ mod tests {
         assert!(!card.chosen && !card.there);
         // "" is none too (the C# app's "none"), and once it's there it's only the app's own.
         let card = exports_card(Some(" "), &Ok(documents.clone()), true);
+        assert_eq!(card.note, "The app's own choice: DAWmate Exports in your Documents folder.");
+        // Someone who exported before the rename keeps their folder, and is told its name.
+        let first = PathBuf::from(r"C:\Users\Solomon\Documents\Music Organiser Exports");
+        let card = exports_card(None, &Ok(first), true);
         assert_eq!(card.note, "The app's own choice: Music Organiser Exports in your Documents folder.");
         assert!(!card.chosen && card.there);
         // One chosen and there: just the folder.
@@ -1099,17 +1127,24 @@ mod tests {
 
     #[test]
     fn fl_row_says_whether_the_script_is_in() {
-        let folder = PathBuf::from(r"I:\FL Studio\Settings\Hardware\Music Organiser");
+        let folder = PathBuf::from(r"I:\FL Studio\Settings\Hardware\DAWmate");
         assert_eq!(fl_status(None, &[]).state, "Looking\u{2026}");
         assert_eq!(fl_status(Some(ScriptState::NotInstalled), &[]).state, "No FL Studio folder found");
         let row = fl_status(Some(ScriptState::Installed), std::slice::from_ref(&folder));
         assert_eq!((row.state.as_str(), row.ok), ("Script installed", true));
         assert_eq!(row.facts[0].value, folder.display().to_string());
         assert_eq!(fl_status(Some(ScriptState::Outdated), std::slice::from_ref(&folder)).state, "Script out of date");
-        let done = Installed { went: vec![folder.clone()], failed: vec![(PathBuf::from("K:"), "not there".into())] };
+        let done = Installed {
+            went: vec![folder.clone()],
+            failed: vec![(PathBuf::from("K:"), "not there".into())],
+            ..Installed::default()
+        };
         let note = installed_note(&done);
         assert!(note.starts_with("Installed the FL Studio script in"), "{note}");
         assert!(note.ends_with("Couldn't put it in K:: not there"), "{note}");
+        // Taking out the copy from before the rename says what to pick in FL Studio.
+        let done = Installed { went: vec![folder.clone()], removed: vec![folder.clone()], ..Installed::default() };
+        assert!(installed_note(&done).contains("pick DAWmate as the controller type"), "{}", installed_note(&done));
     }
 
     #[test]
@@ -1129,7 +1164,7 @@ mod tests {
         assert_eq!(facts[0].value, "Another copy is installed; the app has 3.18");
         assert_eq!(facts[1].value, folder.display().to_string());
         let done = BitwigInstalled {
-            installed: Installed { went: vec![], failed: vec![(folder.clone(), "in use".into())] },
+            installed: Installed { failed: vec![(folder.clone(), "in use".into())], ..Installed::default() },
             removed: vec![],
         };
         assert!(bitwig_installed_note(&done).ends_with("If Bitwig is open, close it, then press Install again."));

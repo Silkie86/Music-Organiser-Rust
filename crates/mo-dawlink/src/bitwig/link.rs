@@ -1,4 +1,4 @@
-//! The connection to the Music Organiser link in Bitwig (the C# app's `BitwigLink`).
+//! The connection to the DAWmate link in Bitwig (the C# app's `BitwigLink`).
 //!
 //! The link (the Java extension, or the JavaScript script it took over from) listens on port 19791 on this computer.
 //! Each message is JSON with a 4-byte big-endian length in front, which is how Bitwig's remote connections frame them;
@@ -209,12 +209,12 @@ impl Hello {
         }
     }
 
-    /// What answers in Bitwig, in words: "the Music Organiser extension 3.18", or "the Music Organiser script".
+    /// What answers in Bitwig, in words: "the DAWmate extension 3.18", or "the DAWmate script".
     pub fn answering(&self) -> String {
         if self.runtime == "java" {
-            format!("the Music Organiser extension {}", self.extension).trim_end().to_owned()
+            format!("the DAWmate extension {}", self.extension).trim_end().to_owned()
         } else {
-            "the Music Organiser script".to_owned()
+            "the DAWmate script".to_owned()
         }
     }
 
@@ -381,7 +381,7 @@ pub struct PadContents {
     pub sample: String,
 }
 
-/// A connection to the Music Organiser link in Bitwig. Dropping it closes the connection; a change still waiting in
+/// A connection to the DAWmate link in Bitwig. Dropping it closes the connection; a change still waiting in
 /// Bitwig behind others is then left out (extension 3.18), while one Bitwig has started goes on to the end. An answer
 /// that doesn't come in time closes it too: on Windows, a read that ran out of time leaves a connection in a state it
 /// mustn't be used in (it can lose what comes next), so a link that gave up waiting connects again.
@@ -434,7 +434,7 @@ impl Link {
             timeout: TIMEOUT,
             change_timeout: CHANGE_TIMEOUT,
         };
-        // The link greets every connection, which also shows it's the Music Organiser link listening.
+        // The link greets every connection, which also shows it's the DAWmate link listening.
         let deadline = Instant::now() + timeout;
         loop {
             match link.next_message(deadline) {
@@ -1199,13 +1199,13 @@ mod tests {
         }));
         assert_eq!((hello.link, hello.project.as_str(), hello.changes, hello.only_in), (3, "Night Drive", true, true));
         assert_eq!(hello.loopback, Some(false));
-        assert_eq!(hello.answering(), "the Music Organiser extension 3.18");
+        assert_eq!(hello.answering(), "the DAWmate extension 3.18");
         assert_eq!(hello.can_send(), Ok(()));
 
         // The script says less; a greeting with nulls reads as nothing.
         let script = Hello::from_json(&json!({ "link": 2, "product": null, "project": "X", "changes": false }));
         assert_eq!((script.product.as_str(), script.loopback), ("", None));
-        assert_eq!(script.answering(), "the Music Organiser script");
+        assert_eq!(script.answering(), "the DAWmate script");
         assert_eq!(script.can_send(), Err(Error::ChangesOff));
         assert_eq!(Hello::from_json(&json!({ "link": 1, "changes": true })).can_send(), Err(Error::OldLink));
 

@@ -695,12 +695,12 @@ function Build-App {
 
 function Add-BitwigExtension([string]$Folder) {
     # The Bitwig extension (extensions\bitwig-java, Java) is built with its Maven Wrapper when a JDK is installed, and
-    # copied beside the app as extensions\MusicOrganiser.bwextension, where Settings > DAWs installs it from. It's only
+    # copied beside the app as extensions\DAWmate.bwextension, where Settings > DAWs installs it from. It's only
     # built again when its code changed, and without its tests (CI runs them). Without a JDK, or if the build fails,
     # the app still runs: the DAWs tab says the app has no copy to install.
     $code = [IO.Path]::Combine($Repo, 'extensions', 'bitwig-java')
     if (-not [IO.File]::Exists((Join-Path $code 'pom.xml'))) { return }
-    $built = [IO.Path]::Combine($code, 'target', 'MusicOrganiser.bwextension')
+    $built = [IO.Path]::Combine($code, 'target', 'DAWmate.bwextension')
     if (-not $env:JAVA_HOME -and -not (Get-Command java -ErrorAction SilentlyContinue)) {
         Say 'No JDK, so the Bitwig extension is not built (winget install Microsoft.OpenJDK.21 to have it).' 'Yellow'
         return
@@ -721,7 +721,7 @@ function Add-BitwigExtension([string]$Folder) {
     }
     try {
         $null = [IO.Directory]::CreateDirectory((Join-Path $Folder 'extensions'))
-        Copy-Item -Force -LiteralPath $built -Destination ([IO.Path]::Combine($Folder, 'extensions', 'MusicOrganiser.bwextension')) -ErrorAction Stop
+        Copy-Item -Force -LiteralPath $built -Destination ([IO.Path]::Combine($Folder, 'extensions', 'DAWmate.bwextension')) -ErrorAction Stop
     }
     catch { Say "Couldn't copy the Bitwig extension beside the app ($($_.Exception.Message))." 'Yellow' }
 }

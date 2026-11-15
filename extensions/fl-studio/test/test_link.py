@@ -101,8 +101,9 @@ class ScriptFile(unittest.TestCase):
     def test_starts_with_the_name_fl_studio_lists(self):
         with open(SCRIPT, encoding="utf-8") as f:
             lines = f.read().splitlines()
-        self.assertEqual(lines[0], "# name=Music Organiser")
-        self.assertIn("# supportedDevices=Music Organiser", lines[:5])
+        self.assertEqual(lines[0], "# name=DAWmate")
+        # The port it was first made for still gets it, so a set-up from before the rename goes on working.
+        self.assertIn("# supportedDevices=DAWmate,Music Organiser", lines[:5])
         self.assertTrue(os.path.basename(SCRIPT).startswith("device_"))
 
     def test_changes_are_off_as_shipped(self):
@@ -130,7 +131,7 @@ class LinkTests(unittest.TestCase):
     def test_says_where_fl_studio_loaded_it_from_without_file(self):
         link = self.link()
         self.assertEqual(link.result({"cmd": "hello"})["script"], os.path.abspath(link.installed))
-        self.assertIn("Music Organiser link 2 is on", link.printed.getvalue())
+        self.assertIn("DAWmate link 2 is on", link.printed.getvalue())
         self.assertNotIn("no MIDI output", link.printed.getvalue())
 
     def test_says_hello(self):
@@ -316,7 +317,7 @@ class LinkTests(unittest.TestCase):
         for i in range(2):
             link.send({"id": 20 + i, "cmd": "hello", "sent": link.clock.now})
         self.assertEqual(link.take(), [])
-        self.assertEqual(link.printed.getvalue().count("give the Music Organiser output the same Port number"), 1)
+        self.assertEqual(link.printed.getvalue().count("give the DAWmate output the same Port number"), 1)
         studio.output = True
         self.assertTrue(link.result({"cmd": "hello"})["link"])
 

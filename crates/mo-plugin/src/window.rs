@@ -75,8 +75,7 @@ pub fn open(
     instance: Arc<Instance>,
 ) -> Result<baseview::Window, String> {
     crate::threads::note_crashes();
-    let settings =
-        WindowSettings::new().with_title("Music Organiser").with_size(size).with_parent(parent).with_resizable(true);
+    let settings = WindowSettings::new().with_title("DAWmate").with_size(size).with_parent(parent).with_resizable(true);
     let window = baseview::Window::create(settings, move |context| {
         // Made inside Windows' own window code, which a panic can't pass through: one here only fails the opening
         // (the 14 Nov review's PL-2).

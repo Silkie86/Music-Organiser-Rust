@@ -1,6 +1,6 @@
-// Music Organiser link for Bitwig Studio.
+// DAWmate link for Bitwig Studio.
 //
-// Lets the Music Organiser app see what's in the open Bitwig project: its tracks and devices, the
+// Lets the DAWmate app see what's in the open Bitwig project: its tracks and devices, the
 // selected device's parameters (with the IDs Bitwig saves them under) and Bitwig's actions. With
 // "Let the app make changes" turned on in this controller's settings, the app can also add tracks,
 // set a parameter, insert a plugin, device, preset or sample, put a MIDI file in a clip slot, fill a
@@ -8,7 +8,7 @@
 // or a kit into Bitwig, and how it learns Bitwig's file format: change one thing, save, and compare.
 //
 // Installing: Settings in the app copies this file into Bitwig's Controller Scripts folder. Then in
-// Bitwig: Settings > Controllers > Add controller > Music Organiser > DAW link.
+// Bitwig: Settings > Controllers > Add controller > DAWmate > DAW link.
 //
 // The app connects to port 19791 on this computer and sends JSON requests, one per message; each
 // message has a 4-byte big-endian length in front (Bitwig's remote connections work that way).
@@ -18,7 +18,7 @@
 // @ts-check
 
 loadAPI(18);
-host.defineController("Music Organiser", "DAW link", "2.0", "ed35e3c7-c544-49ed-936d-c236b0c9b73b", "Music Organiser");
+host.defineController("DAWmate", "DAW link", "2.0", "ed35e3c7-c544-49ed-936d-c236b0c9b73b", "DAWmate");
 host.defineMidiPorts(0, 0);
 
 var PORT = 19791;
@@ -45,7 +45,7 @@ var PORT_CHECK_DELAY = 1000;
 var SAMPLER = "468bc14b-b2e7-45a1-9666-e83117fe404e";
 var NOTE_TRANSPOSE = "0815cd9e-3a31-4429-a268-dabd952a3b68";
 var CHANGES_OFF = "Changes are turned off. To let the app change things, turn on \"Let the app make changes\" " +
-                  "in Bitwig: Settings > Controllers > Music Organiser.";
+                  "in Bitwig: Settings > Controllers > DAWmate.";
 
 /** @type {API.Application} */ var app;
 /** @type {API.Project} */ var project;
@@ -118,7 +118,7 @@ function init() {
     transport.getPosition().markInterested();
 
     // The track and device selected in Bitwig.
-    cursorTrack = host.createCursorTrack("MO_LINK", "Music Organiser", 0, 0, true);
+    cursorTrack = host.createCursorTrack("MO_LINK", "DAWmate", 0, 0, true);
     cursorTrack.exists().markInterested();
     cursorTrack.name().markInterested();
     cursorDevice = cursorTrack.createCursorDevice();
@@ -219,13 +219,14 @@ function init() {
     popupBrowser = host.createPopupBrowser();
     popupBrowser.exists().markInterested();
 
+    // The category keeps the name the app had when the setting was first saved, so Bitwig keeps its value.
     changesSetting = host.getPreferences().getBooleanSetting("Let the app make changes", "Music Organiser", false);
     changesSetting.markInterested();
 
-    socket = host.createRemoteConnection("Music Organiser", PORT);
+    socket = host.createRemoteConnection("DAWmate", PORT);
     socket.setClientConnectCallback(connected);
     port = socket.getPort();
-    println("Music Organiser: waiting for the app on port " + (port > 0 ? port : PORT) + ".");
+    println("DAWmate: waiting for the app on port " + (port > 0 ? port : PORT) + ".");
     warnIfPortTaken();
     // If Bitwig didn't say which port, ask again once it's had a moment (the extension's self-check does the same).
     host.scheduleTask(knownPort, PORT_CHECK_DELAY);
@@ -248,8 +249,8 @@ function knownPort() {
 function warnIfPortTaken() {
     if (port <= 0 || port === PORT || portWarned) return;
     portWarned = true;
-    host.showPopupNotification("Music Organiser: port " + PORT + " is taken, so the app can't connect. " +
-                               "If Music Organiser is listed twice in Bitwig's Settings > Controllers, remove one; " +
+    host.showPopupNotification("DAWmate: port " + PORT + " is taken, so the app can't connect. " +
+                               "If DAWmate is listed twice in Bitwig's Settings > Controllers, remove one; " +
                                "otherwise close what's using the port. Then restart Bitwig.");
 }
 
@@ -491,7 +492,7 @@ function send(client, message) {
     } catch (e) {
         client.open = false;
         remove(clients, client);
-        errorln("Music Organiser: lost the connection to the app (" + e + ").");
+        errorln("DAWmate: lost the connection to the app (" + e + ").");
     }
 }
 

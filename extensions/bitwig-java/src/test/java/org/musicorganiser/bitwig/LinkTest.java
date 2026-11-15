@@ -91,7 +91,7 @@ class LinkTest {
         MusicOrganiserExtensionDefinition definition = (MusicOrganiserExtensionDefinition) found.get(0);
 
         // The script's identity (MusicOrganiser.control.js's defineController), so Bitwig keeps the controller it has.
-        assertEquals(List.of("Music Organiser", "DAW link", "Music Organiser", "Music Organiser", MusicOrganiserExtensionDefinition.VERSION),
+        assertEquals(List.of("DAWmate", "DAW link", "DAWmate", "DAWmate", MusicOrganiserExtensionDefinition.VERSION),
                      List.of(definition.getHardwareVendor(), definition.getHardwareModel(), definition.getName(), definition.getAuthor(),
                              definition.getVersion()));
         assertEquals(UUID.fromString("ed35e3c7-c544-49ed-936d-c236b0c9b73b"), definition.getId());
@@ -102,9 +102,12 @@ class LinkTest {
         for (PlatformType platform : PlatformType.values()) {
             AutoDetectionMidiPortNamesList ports = new AutoDetectionMidiPortNamesList();
             definition.listAutoDetectionMidiPortNames(ports, platform);
-            assertEquals(1, ports.getCount());
-            assertEquals(List.of("Music Organiser Bitwig"), List.of(ports.getPortNamesAt(0).getInputNames()));
-            assertEquals(List.of("Music Organiser Bitwig"), List.of(ports.getPortNamesAt(0).getOutputNames()));
+            // The port by its name now, then by its first one (before the app was called DAWmate).
+            assertEquals(2, ports.getCount());
+            assertEquals(List.of("DAWmate Bitwig"), List.of(ports.getPortNamesAt(0).getInputNames()));
+            assertEquals(List.of("DAWmate Bitwig"), List.of(ports.getPortNamesAt(0).getOutputNames()));
+            assertEquals(List.of("Music Organiser Bitwig"), List.of(ports.getPortNamesAt(1).getInputNames()));
+            assertEquals(List.of("Music Organiser Bitwig"), List.of(ports.getPortNamesAt(1).getOutputNames()));
         }
 
         // Making it touches nothing in Bitwig until Bitwig starts it.
@@ -185,7 +188,7 @@ class LinkTest {
         assertMatches("port 19791 is taken", bitwig.popups.get(0));
         // Most often by the link itself, loaded twice.
         assertMatches("listed twice in Bitwig's Settings > Controllers, remove one", bitwig.popups.get(0));
-        assertEquals(List.of("Music Organiser: waiting for the app on port 50123."), bitwig.printed);
+        assertEquals(List.of("DAWmate: waiting for the app on port 50123."), bitwig.printed);
     }
 
     @Test
@@ -197,7 +200,7 @@ class LinkTest {
         FakeBitwig bitwig = start(m);
         bitwig.clock.advance(2000);
         assertEquals(List.of(), bitwig.popups);
-        assertEquals(List.of("Music Organiser: waiting for the app on port 19791."), bitwig.printed);
+        assertEquals(List.of("DAWmate: waiting for the app on port 19791."), bitwig.printed);
         App app = bitwig.connect();
         assertEquals(19791, ((Number) at(app.take().get(0), "result", "port")).intValue());
         assertEquals(List.of(), bitwig.popups);
@@ -545,7 +548,7 @@ class LinkTest {
         app.send(obj("id", 2, "cmd", "hello"));
         assertEquals(List.of(), app.take());
         assertEquals(1, bitwig.errors.size(), "says so once");
-        assertMatches("^Music Organiser: lost the connection to the app \\(", bitwig.errors.get(0));
+        assertMatches("^DAWmate: lost the connection to the app \\(", bitwig.errors.get(0));
         assertEquals(true, other.ask(obj("id", 3, "cmd", "hello")).get("ok"), "the other connection carries on");
         assertJson(1, at(other.ask(obj("id", 4, "cmd", "selftest")), "result", "connections"));
     }

@@ -5,13 +5,17 @@
 use std::fmt;
 
 /// The MIDI port the extension (3.7 and later) has its MIDI in and out set to, for its loopback (made in loopMIDI on
-/// Windows). Never FL Studio's port, "Music Organiser".
-pub const LOOPBACK_PORT: &str = "Music Organiser Bitwig";
+/// Windows). Never FL Studio's port, "DAWmate" (or "Music Organiser").
+pub const LOOPBACK_PORT: &str = "DAWmate Bitwig";
+
+/// The loopback port's name before the app was called DAWmate (15 Nov 2026), which works as well: the extension
+/// offers Bitwig both.
+pub const FIRST_LOOPBACK_PORT: &str = "Music Organiser Bitwig";
 
 /// Why the app couldn't do what it asked Bitwig to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// Nothing answered on the link's port: Bitwig isn't open, or the Music Organiser controller isn't added there.
+    /// Nothing answered on the link's port: Bitwig isn't open, or the DAWmate controller isn't added there.
     NotRunning,
     /// Something answered on the port, but it didn't greet the app the way the link does.
     NotTheLink { port: u16 },
@@ -63,28 +67,29 @@ impl fmt::Display for Error {
             // it stops a controller whose device goes away, so a missing loopback port may be why.
             Error::NotRunning => write!(
                 f,
-                "Bitwig isn't answering. Check that Bitwig Studio is open, with the Music Organiser controller added \
-                 (Settings > Controllers > Add controller > Music Organiser > DAW link). If that controller's MIDI in \
-                 and out are set to \u{201c}{LOOPBACK_PORT}\u{201d}, check that the port is there (on Windows, that \
-                 loopMIDI is running): Bitwig may not start a controller whose port is missing."
+                "Bitwig isn't answering. Check that Bitwig Studio is open, with the DAWmate controller added \
+                 (Settings > Controllers > Add controller > DAWmate > DAW link). If that controller's MIDI in \
+                 and out are set to \u{201c}{LOOPBACK_PORT}\u{201d} (or \u{201c}{FIRST_LOOPBACK_PORT}\u{201d}), check \
+                 that the port is there (on Windows, that loopMIDI is running): Bitwig may not start a controller \
+                 whose port is missing."
             ),
             // The link greets from Bitwig's controller thread, which may be slow to come to it while Bitwig is busy.
             Error::NotTheLink { port } => write!(
                 f,
-                "Something answered on port {port}, but not the Music Organiser extension in Bitwig. If Bitwig is busy \
+                "Something answered on port {port}, but not the DAWmate extension in Bitwig. If Bitwig is busy \
                  (opening a project, say), try again in a moment."
             ),
             Error::OldLink => f.write_str(
-                "Bitwig has an older copy of the Music Organiser extension. Install it again from Settings > DAWs \
+                "Bitwig has an older copy of the DAWmate extension. Install it again from Settings > DAWs \
                  (Install on Bitwig's row; Bitwig picks up the new one by itself), then try again.",
             ),
             Error::ChangesOff => f.write_str(
                 "Bitwig isn't letting the app make changes. Turn on \"Let the app make changes\" in Bitwig (Settings \
-                 > Controllers > Music Organiser), then send it again.",
+                 > Controllers > DAWmate), then send it again.",
             ),
             Error::NotStarted(why) => write!(
                 f,
-                "Part of the Music Organiser extension didn't start in Bitwig, so the app didn't send anything. \
+                "Part of the DAWmate extension didn't start in Bitwig, so the app didn't send anything. \
                  Restarting Bitwig may help. Bitwig said: {why}"
             ),
             Error::Bitwig(words) => f.write_str(words),
@@ -107,12 +112,12 @@ impl fmt::Display for Error {
             Error::NoPads => f.write_str("Roll a kit first."),
             Error::OldExtension { has, needs } if has.is_empty() => write!(
                 f,
-                "This needs the Music Organiser extension {needs} in Bitwig, and Bitwig has the older script. Install \
+                "This needs the DAWmate extension {needs} in Bitwig, and Bitwig has the older script. Install \
                  the extension from Settings > DAWs (close Bitwig first on Windows), then try again."
             ),
             Error::OldExtension { has, needs } => write!(
                 f,
-                "This needs the Music Organiser extension {needs} in Bitwig, and Bitwig has {has}. Install it again \
+                "This needs the DAWmate extension {needs} in Bitwig, and Bitwig has {has}. Install it again \
                  from Settings > DAWs (close Bitwig first on Windows), then try again."
             ),
             Error::NoTrackSelected => {

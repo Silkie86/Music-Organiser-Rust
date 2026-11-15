@@ -1,4 +1,4 @@
-//! The Music Organiser test plugin: the first step of the CLAP plugin plan (2026-11-07). It proves the parts every
+//! The DAWmate test plugin: the first step of the CLAP plugin plan (2026-11-07). It proves the parts every
 //! later step stands on, inside a real DAW:
 //!
 //! - the app's own Slint panel opens in the plugin window the DAW lends ([`window`]);
@@ -7,7 +7,8 @@
 //! - it lists every CLAP extension the DAW has ([`check`]), to settle which of the plan's extensions Bitwig 6.1
 //!   offers.
 //!
-//! It shows in the DAW as the instrument "Music Organiser (test)". The notes played into it are read for their chords
+//! It shows in the DAW as the instrument "DAWmate (test)" (its ID is still the one it had as "Music Organiser (test)",
+//! so songs that have it go on loading it). The notes played into it are read for their chords
 //! ([`chordcheck`]) and passed on out with Thru on. It never writes any of the app's files.
 //!
 //! A DAW calls a plugin from several threads: the main thread (opening the window, starting and stopping the audio)
@@ -128,8 +129,8 @@ impl Plugin for MoPlugin {
 impl DefaultPluginFactory for MoPlugin {
     fn get_descriptor() -> PluginDescriptor {
         use clack_plugin::plugin::features::{INSTRUMENT, SAMPLER, STEREO};
-        PluginDescriptor::new("com.silkie86.music-organiser.test", "Music Organiser (test)")
-            .with_vendor("Music Organiser")
+        PluginDescriptor::new("com.silkie86.music-organiser.test", "DAWmate (test)")
+            .with_vendor("DAWmate")
             .with_version(env!("CARGO_PKG_VERSION"))
             .with_description("Browse and play your sounds inside the DAW (test version)")
             .with_features([INSTRUMENT, SAMPLER, STEREO])
@@ -143,11 +144,7 @@ impl DefaultPluginFactory for MoPlugin {
         // graphics card looked for in it.
         let real = info.vendor().map(|v| v.to_bytes()) != Some(TESTS_VENDOR.as_bytes());
         if real {
-            log::start(&format!(
-                "Music Organiser test plugin {} in {}",
-                env!("CARGO_PKG_VERSION"),
-                check::host_line(&info)
-            ));
+            log::start(&format!("DAWmate test plugin {} in {}", env!("CARGO_PKG_VERSION"), check::host_line(&info)));
             // It keeps one data folder for as long as the DAW runs and saves takes there: the app's start mustn't
             // move the data folder from under it (DF-3).
             mo_app::data_move::hold_open_lock();
@@ -193,7 +190,7 @@ impl DefaultPluginFactory for MoPlugin {
 }
 
 /// Who the tests' stand-in DAW says made it (`tests/host.rs`): the plugin keeps no log in it.
-pub const TESTS_VENDOR: &str = "Music Organiser tests";
+pub const TESTS_VENDOR: &str = "DAWmate tests";
 
 pub struct Shared {
     pub instance: Arc<Instance>,
@@ -696,7 +693,7 @@ impl PluginGuiImpl for MainThread<'_> {
             }
             Err(why) => {
                 log::line("Window", &format!("Couldn't open: {why}"));
-                self.say(LogSeverity::Error, &format!("Music Organiser: {why}"));
+                self.say(LogSeverity::Error, &format!("DAWmate: {why}"));
                 Err(PluginError::Message("Couldn't open the plugin's window"))
             }
         }

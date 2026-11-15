@@ -102,7 +102,7 @@ pub fn listed(file: &PresetFile) -> Option<Listed> {
 
 /// How the DAW names the preset files' provider.
 pub fn descriptor() -> ProviderDescriptor {
-    ProviderDescriptor::new(PROVIDER_ID, "Music Organiser preset files").with_vendor("Music Organiser")
+    ProviderDescriptor::new(PROVIDER_ID, "DAWmate preset files").with_vendor("DAWmate")
 }
 
 /// The preset files' provider, made when the DAW asks for it. It tells the DAW where to look: the app's preset
@@ -121,7 +121,7 @@ pub fn provider<'a>(indexer: IndexerInfo<'a>, descriptor: &'a ProviderDescriptor
             let (Ok(path), Ok(name)) = (
                 CString::new(folder.to_string_lossy().as_bytes()),
                 CString::new(format!(
-                    "Music Organiser: {}",
+                    "DAWmate: {}",
                     folder.file_name().map_or_else(|| folder.to_string_lossy(), |n| n.to_string_lossy())
                 )),
             ) else {

@@ -689,7 +689,7 @@ component FoldersTab inherits VerticalLayout {
             }
             if SettingsData.export-chosen: StudioButton {
                 text: "Use Documents";
-                tip: "Exports go back into Music Organiser Exports in your Documents folder. What was exported stays where it is.";
+                tip: "Exports go back into the app's own folder in your Documents folder. What was exported stays where it is.";
                 enabled: !SettingsData.folders-busy;
                 clicked => { SettingsData.documents-exports(); }
             }

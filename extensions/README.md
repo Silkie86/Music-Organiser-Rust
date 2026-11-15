@@ -4,9 +4,9 @@ Small programs that run inside the DAWs. They are ported from the C# app's `exte
 
 | Folder | Runs in | What it does |
 |---|---|---|
-| `bitwig-java` | Bitwig Studio 6.1 and later, as the Java controller extension "Music Organiser" (`MusicOrganiser.bwextension`) | The Bitwig link: what Bitwig shows for the open project, and Send to Bitwig. Moved here from the C# repo (Solomon, 2026-11-03); the C# repo's copy gets no more changes. Built by CI (the `Bitwig extension` job); see its README. |
+| `bitwig-java` | Bitwig Studio 6.1 and later, as the Java controller extension "DAWmate" (`DAWmate.bwextension`) | The Bitwig link: what Bitwig shows for the open project, and Send to Bitwig. Moved here from the C# repo (Solomon, 2026-11-03); the C# repo's copy gets no more changes. Built by CI (the `Bitwig extension` job); see its README. |
 | `bitwig` | Bitwig Studio, as the JavaScript controller script | The older form of the Bitwig link, kept as the extension's fallback; the extension's ParityTest checks both answer alike. |
-| `fl-studio` | FL Studio, as the MIDI controller script "Music Organiser" | The FL link (SysEx on the Music Organiser MIDI port), plus a one-off measurement: with `MEASURE_IN_LIVE_TEST = True` and the project "MO Live Test automation" open, it sets insert 1's fader to 0.00 ... 1.00 and reads the dB FL shows, sets the tempo to automation values 0.00 ... 1.00 and reads the BPM, puts both back, writes the readings in the first inserts' names, several to a name ("v0.80 0.0dB; v0.81 ...", "t0.50 266.0bpm; ...") and saves. FL Studio 2025 doesn't tell scripts the project's file name, so the project is known by its Project info title (F11), which must be exactly "MO Live Test automation", so Format Lab reads them from the .flp (FL scripts can't write files). |
+| `fl-studio` | FL Studio, as the MIDI controller script "DAWmate" | The FL link (SysEx on the DAWmate MIDI port), plus a one-off measurement: with `MEASURE_IN_LIVE_TEST = True` and the project "MO Live Test automation" open, it sets insert 1's fader to 0.00 ... 1.00 and reads the dB FL shows, sets the tempo to automation values 0.00 ... 1.00 and reads the BPM, puts both back, writes the readings in the first inserts' names, several to a name ("v0.80 0.0dB; v0.81 ...", "t0.50 266.0bpm; ...") and saves. FL Studio 2025 doesn't tell scripts the project's file name, so the project is known by its Project info title (F11), which must be exactly "MO Live Test automation", so Format Lab reads them from the .flp (FL scripts can't write files). |
 
 The Bitwig test driver for Format Lab is in `tools/formatlab/daw/bitwig`.
 
@@ -18,7 +18,7 @@ never reach a real DAW or MIDI port (rule 11).
 Two builds of the same link, which talk to the app the same way:
 
 - **`bitwig-java`**: a Java controller extension against Bitwig's controller API 23 (Bitwig 6.1 and later), built
-  with Maven into `MusicOrganiser.bwextension`, which goes in `Extensions` in Bitwig's user folder. It's a port
+  with Maven into `DAWmate.bwextension`, which goes in `Extensions` in Bitwig's user folder. It's a port
   of the script, function by function, and adds what only an extension can do: Bitwig's newer API (link version
   3 below), reports it writes to files, with a self-check of every part of the API it uses, and (from 3.7) a MIDI
   loopback to run Bitwig's commands as a hardware controller would (see [its README](bitwig-java/README.md) and
@@ -118,11 +118,12 @@ none (and so the app's own commands take it):
 | `buttonCode` | When a press of one of the link's own hardware buttons comes back through the loopback: the link sends a note on MIDI channel 16 (from note 110, one for each command), Bitwig presses the button, and the link runs the command. |
 | `button` | The same with another of the link's buttons (from note 100), which Bitwig runs the command for itself, as for a controller's button; the link only hears of the press. |
 
-The last three need the loopback. In loopMIDI, add a port called **Music Organiser Bitwig**, then in Bitwig,
-Settings > Controllers > Music Organiser, set both MIDI in and MIDI out to it. Never set them to **Music
-Organiser**: that's the FL Studio link's port, and FL Studio must never get the notes and messages the Bitwig link
+The last three need the loopback. In loopMIDI, add a port called **DAWmate Bitwig** (one made before the rename, **Music Organiser Bitwig**, works
+too), then in Bitwig,
+Settings > Controllers > DAWmate, set both MIDI in and MIDI out to it. Never set them to **DAWmate**
+(or **Music Organiser**, its first name): that's the FL Studio link's port, and FL Studio must never get the notes and messages the Bitwig link
 sends itself. The extension asks Bitwig for one MIDI in and one MIDI out, only for the loopback, and offers the
-Music Organiser Bitwig port for both, so Bitwig can fill them in when it finds the port (auto-detection).
+DAWmate Bitwig port for both, so Bitwig can fill them in when it finds the port (auto-detection).
 Bitwig 6.1.3 starts the extension with them unassigned, and the link answers. In the live runs without them
 (extensions 3.3 and 3.6, which have no ports, so only `direct`) Save did nothing; with them set (3.7 and 3.8) Save
 worked from the flush both times and straight away once in two. Nobody has tried the flush without them, so set

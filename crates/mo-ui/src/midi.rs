@@ -2945,8 +2945,8 @@ fn send_to_bitwig(at: usize) {
     }
 }
 
-/// Where parts sent to Bitwig are written: "MIDI browser" in the export folder (the one set, else "Music Organiser
-/// Exports" in Documents), or why not ([`mo_app::bitwig_convert::export_folder_in`]).
+/// Where parts sent to Bitwig are written: "MIDI browser" in the export folder (the one set, else the
+/// app's own in Documents), or why not ([`mo_app::bitwig_convert::export_folder_in`]).
 fn export_dir(library: &Path) -> Result<PathBuf, String> {
     Ok(mo_app::bitwig_convert::export_folder_in(library)?.join(page::EXPORT_SUBFOLDER))
 }
@@ -4437,7 +4437,7 @@ fn watch_fl(app: &AppWindow) {
             }
             if gone && let Some(app) = weak.upgrade() {
                 stop_daw(&app);
-                app.global::<MidiData>().set_daw_note("It stopped: the Music Organiser MIDI port went away.".into());
+                app.global::<MidiData>().set_daw_note("It stopped: the DAWmate MIDI port went away.".into());
                 FL_WATCH.with(slint::Timer::stop);
             }
         });
