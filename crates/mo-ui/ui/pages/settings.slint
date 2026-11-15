@@ -3,7 +3,7 @@
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow, WordBox } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -41,6 +41,18 @@ export struct KeyLineInfo {
     key: string,
     changed: bool,
     starts: string,
+}
+
+// A line of the beta checklist (Developer): an area's heading (only `area` set) or a step, its mark (0 Works,
+// 1 Problem, 2 Skip, -1 none), the note and when it was marked.
+export struct BetaLineInfo {
+    area: string,
+    id: string,
+    what: string,
+    expect: string,
+    mark: int,
+    note: string,
+    said: string,
 }
 
 // A DAW's row on the DAWs tab: how its link stands, and the facts under that.
@@ -160,6 +172,12 @@ export global SettingsData {
 
     // Developer.
     in property <[SettingsFact]> facts;
+    // The beta checklist: its lines, how far through it is, whether only the steps to try show, and what went wrong
+    // keeping the marks, if anything.
+    in property <[BetaLineInfo]> beta-lines;
+    in property <string> beta-progress;
+    in property <bool> beta-to-try;
+    in property <string> beta-message;
 
     // Shortcuts: every action with its key; the one listening for a new key (its id), or empty; what the last change
     // did; and whether any key isn't the one it started with.
@@ -198,6 +216,12 @@ export global SettingsData {
     // Developer: a fact's button (open its folder, show the log in its folder), by the fact's number; try an activity card.
     callback open-fact(int);
     callback try-job();
+    // A step's mark picked (0 Works, 1 Problem, 2 Skip; the mark it has takes it off), with the words in its note box;
+    // its note changed; Only to try switched; the checklist's file shown in its folder.
+    callback beta-mark(string, int, string);
+    callback beta-note(string, string);
+    callback beta-toggle-to-try();
+    callback beta-show-file();
 }
 
 // A card on a tab: its title, a line on what it's for, and its parts.
@@ -914,9 +938,99 @@ component DawsTab inherits VerticalLayout {
     }
 }
 
+// One step of the beta checklist: what to do, what you should see, its three marks and a note box. Enter in the box
+// keeps the note; a mark keeps what's in the box with it.
+component BetaStep inherits VerticalLayout {
+    in property <BetaLineInfo> line;
+    spacing: Space.xs;
+    padding-top: Space.xs;
+    padding-bottom: Space.xs;
+    Text {
+        text: root.line.what;
+        color: Theme.text;
+        font-size: Type.meta;
+        font-weight: 500;
+        wrap: word-wrap;
+    }
+    Text {
+        text: "You should see: " + root.line.expect;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: Space.sm;
+        ToggleChip {
+            text: "Works";
+            on: root.line.mark == 0;
+            clicked => { SettingsData.beta-mark(root.line.id, 0, note.text); }
+        }
+        ToggleChip {
+            text: "Problem";
+            on: root.line.mark == 1;
+            clicked => { SettingsData.beta-mark(root.line.id, 1, note.text); }
+        }
+        ToggleChip {
+            text: "Skip";
+            on: root.line.mark == 2;
+            clicked => { SettingsData.beta-mark(root.line.id, 2, note.text); }
+        }
+        note := WordBox {
+            horizontal-stretch: 1;
+            min-width: 120px;
+            hint: root.line.mark == 1 ? "What went wrong? (Enter keeps it)" : "A note, if any (Enter keeps it)";
+            text: root.line.note;
+            accepted(t) => { SettingsData.beta-note(root.line.id, t); }
+        }
+    }
+    if root.line.said != "": Text {
+        text: root.line.said;
+        color: Theme.faint;
+        font-size: Type.meta;
+    }
+}
+
 component DeveloperTab inherits VerticalLayout {
     spacing: Space.lg;
     alignment: start;
+    SettingsCard {
+        title: "Beta checklist";
+        intro: "Try each step with your own songs, sounds and DAWs, and mark how it went. Your marks and notes are kept in the data folder, where Claude reads them; a Problem keeps the log's last lines with it, so Claude can see why.";
+        HorizontalLayout {
+            spacing: Space.md;
+            Text {
+                horizontal-stretch: 1;
+                text: SettingsData.beta-progress;
+                color: Theme.text;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+            ToggleChip {
+                text: "Only to try";
+                on: SettingsData.beta-to-try;
+                clicked => { SettingsData.beta-toggle-to-try(); }
+            }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Show the file";
+                clicked => { SettingsData.beta-show-file(); }
+            }
+        }
+        if SettingsData.beta-message != "": Text {
+            text: SettingsData.beta-message;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        for l in SettingsData.beta-lines: VerticalLayout {
+            if l.id == "": Caps {
+                text: l.area;
+            }
+            if l.id != "": BetaStep {
+                line: l;
+            }
+        }
+    }
     SettingsCard {
         title: "This build";
         intro: "Which app is running, and where it keeps its files. Claude reads the logs from these folders.";
@@ -938,7 +1052,7 @@ component DeveloperTab inherits VerticalLayout {
     }
     SettingsCard {
         title: "Coming here";
-        intro: "The self-check (the app checking itself with your real library) and the live tests with Bitwig.";
+        intro: "The self-check: the app checking itself with your real library, and ticking the checklist's automatic steps.";
     }
 }
 

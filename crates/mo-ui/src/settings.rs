@@ -196,6 +196,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         apply_helper(true, app.as_weak());
     }
     crate::midi::smallest_part(None, smallest_part(&setup.settings));
+    crate::beta::connect(app, &setup.folder, setup.live, setup.feed.clone());
     PAGE.with(|p| {
         *p.borrow_mut() = Some(Page {
             outputs: page::outputs(&[], setup.settings.get(SOUND_OUTPUT_KEY), cfg!(windows)),
