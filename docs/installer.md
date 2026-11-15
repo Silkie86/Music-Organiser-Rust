@@ -35,7 +35,7 @@ built.
    `git push origin v0.9.0-beta.1`.
 3. The Release workflow builds the Bitwig extension and the app (`dist` profile, about 25 minutes). It then makes the
    setup, tries it with `installer/check.ps1`, and puts a **draft** release on the Releases page. The draft has the
-   setup and its SHA-256. A tag that doesn't match the version stops the workflow straight away.
+   setup and its SHA-256. A tag that isn't on `main`, or doesn't match the version, stops the workflow before anything is built.
 4. Read the draft over and publish it. Nobody sees it until then.
 
 To try the workflow without releasing anything: Actions, Release, Run workflow. It does everything except the release,
