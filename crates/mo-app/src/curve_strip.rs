@@ -3,7 +3,7 @@
 //! and the highlight's right-click menu. A clip is a remembered highlight: a part of the curve with a name. A curve
 //! with no clips shows one tile with its own name across its whole length, so the strip is always there.
 
-use crate::curve_edit::{Edit, Shape, Span, apply};
+use crate::curve_edit::{self, Edit, Shape, Span, apply};
 use crate::curve_hold::length_words;
 use crate::curve_picture::Frame;
 use crate::presets::{Offer, curve_act};
@@ -111,10 +111,15 @@ pub fn part_offers(shape: &Shape, highlight: Option<Span>, grid: Option<f64>, pi
     let offer = |text: &str, id: &'static str, enabled: bool| Offer { text: text.to_owned(), id, enabled };
     let does = |edit: Edit| apply(shape, highlight, &edit).is_some();
     let of = if lit { "this part" } else { "the whole curve" };
+    // A nudge goes by the grid, or just a little with the grid off.
+    let nudge = grid.unwrap_or(curve_edit::SLIGHTLY);
+    let by = if grid.is_some() { "a grid square" } else { "a little" };
     vec![
         offer(&format!("Reverse {of}"), curve_act::REVERSE, does(Edit::Reverse)),
         offer(&format!("Flip {of} upside down"), curve_act::FLIP, does(Edit::Flip)),
         offer(&format!("Make {of} into steps"), curve_act::STEPS, does(Edit::Steps { step })),
+        offer(&format!("Move {of} {by} earlier"), curve_act::NUDGE_LEFT, does(Edit::Nudge { by: -nudge })),
+        offer(&format!("Move {of} {by} later"), curve_act::NUDGE_RIGHT, does(Edit::Nudge { by: nudge })),
         offer(
             &match (grid, picked.len()) {
                 (None, _) => "Quantise: turn the grid on first".to_owned(),

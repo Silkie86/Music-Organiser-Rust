@@ -1523,6 +1523,8 @@ pub mod curve_act {
     pub const KEEP_CLIP: &str = "curves.keepClip";
     pub const CUT_TIME: &str = "curves.cutTime";
     pub const HIGHLIGHT_ALL: &str = "curves.highlightAll";
+    pub const NUDGE_LEFT: &str = "curves.nudgeLeft";
+    pub const NUDGE_RIGHT: &str = "curves.nudgeRight";
     pub const QUANTISE: &str = "curves.quantise";
     pub const REMOVE_POINTS: &str = "curves.removePoints";
     pub const RANDOMISE: &str = "curves.randomise";

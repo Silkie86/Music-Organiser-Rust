@@ -153,6 +153,16 @@ pub const CURVES_ACTIONS: &[Action] = &[
     action("curves.cutTime", "Cut the highlighted time out of the curve: what follows moves up", "Shift+Delete"),
     action("curves.highlightAll", "Highlight the whole curve in the editor", "Alt+A"),
     action(
+        "curves.nudgeLeft",
+        "Move the curve a grid square earlier (a little with the grid off); with a highlight, only that part",
+        "Shift+Alt+Left",
+    ),
+    action(
+        "curves.nudgeRight",
+        "Move the curve a grid square later (a little with the grid off); with a highlight, only that part",
+        "Shift+Alt+Right",
+    ),
+    action(
         "curves.quantise",
         "Quantise: put the picked points on the grid (with none picked, the highlighted part's, or all)",
         "Alt+Q",

@@ -37,6 +37,9 @@ fn short(offer: &Offer) -> &'static str {
         act::REVERSE => "Reverse",
         act::FLIP => "Flip",
         act::STEPS => "Steps",
+        // Arrows, not words: the row must fit the panel.
+        act::NUDGE_LEFT => "\u{2190}",
+        act::NUDGE_RIGHT => "\u{2192}",
         act::QUANTISE => "Quantise",
         act::REMOVE_POINTS => "Remove points",
         act::KEEP_CLIP if offer.text.starts_with("Forget") => "Forget clip",

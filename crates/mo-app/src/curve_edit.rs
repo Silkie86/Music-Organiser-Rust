@@ -27,6 +27,8 @@ pub const MAX_BEATS: f64 = 256.0;
 const LONGEST: f64 = 100_000.0;
 /// The shortest highlight, clip or curve, in beats (a 1/256 note).
 pub const SHORTEST: f64 = 1.0 / 64.0;
+/// How far a nudge moves the curve with the grid off, in beats: a 128th note, just enough to see.
+pub const SLIGHTLY: f64 = 1.0 / 32.0;
 /// How many steps back Undo goes.
 pub const UNDO_STEPS: usize = 200;
 /// The furthest a swung line moves, of a step: three quarters of the way to the next line.
@@ -365,6 +367,12 @@ pub enum Edit {
         step: f64,
         amount: f64,
     },
+    /// Nudge: the highlighted part moves `by` beats (later above 0), as far as the curve's ends, and leaves a hold
+    /// behind. With nothing highlighted the whole curve moves, and what goes off one end comes back in at the
+    /// other: a curve goes round and round, so nothing of it is lost.
+    Nudge {
+        by: f64,
+    },
     /// The highlight's time is taken out: what follows moves up and the curve gets shorter.
     RemoveTime,
 
@@ -628,6 +636,15 @@ fn edited(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(Shape,
             let points = put(&base, there, &part);
             let clips = clips_moved(&shape.clips, from, there, copy);
             Some((Shape { points, clips, length }, Some(there)))
+        }
+        Edit::Nudge { by } => {
+            if !by.is_finite() {
+                return None;
+            }
+            match highlight.filter(|h| !h.same(shape.whole())) {
+                Some(from) => edited(shape, Some(from), &Edit::Move { to: from.start + by, copy: false }),
+                None => Some((turned(shape, by)?, highlight)),
+            }
         }
         Edit::Speed { start, end } => {
             let from = highlight?;
@@ -953,7 +970,9 @@ fn tidy(points: Vec<Point>, length: f64) -> Vec<Point> {
 
 /// The value at `beat`: at a jump, the value from it on. Before the first point its value, after the last its value.
 fn value_at(points: &[Point], beat: f64) -> f64 {
-    let Some(i) = points.iter().rposition(|p| p.beat <= beat + EPS) else {
+    // The last point at or before the beat: found by halving (the points are in order), not by walking them all,
+    // as this is asked once a step by edits that go through a long curve.
+    let Some(i) = points.partition_point(|p| p.beat <= beat + EPS).checked_sub(1) else {
         return points.first().map_or(0.0, |p| p.value);
     };
     on_line(points, i, beat)
@@ -1034,31 +1053,8 @@ fn split_at(points: &mut Vec<Point>, beat: f64) {
 
 /// As [`split_at`], with how close a bent line drawn again must stay to itself.
 fn split_at_close(points: &mut Vec<Point>, beat: f64, close: f64) {
-    if points.iter().any(|p| same(p.beat, beat)) {
-        return;
-    }
-    let i = points.partition_point(|p| p.beat < beat);
-    let (before, after) = (i.checked_sub(1).and_then(|j| points.get(j)).copied(), points.get(i).copied());
-    match (before, after) {
-        (Some(a), Some(b)) => {
-            let line = |x: f64| a.value + (b.value - a.value) * bent((x - a.beat) / (b.beat - a.beat), a.bend);
-            let here = (beat, line(beat));
-            let mut drawn = Vec::new();
-            if a.bend.abs() < 0.01 {
-                drawn.push(Point { bend: 0.0, ..a });
-                drawn.push(Point::new(here.0, here.1, 0.0));
-            } else {
-                traced(&line, (a.beat, a.value), here, close, 0, &mut drawn);
-                traced(&line, here, (b.beat, b.value), close, 0, &mut drawn);
-            }
-            points.splice(i - 1..i, drawn);
-        }
-        (None, Some(b)) => points.insert(0, Point::new(beat, b.value, 0.0)),
-        (Some(a), None) => {
-            points[i - 1].bend = 0.0;
-            points.push(Point::new(beat, a.value, 0.0));
-        }
-        (None, None) => points.push(Point::new(beat, 0.0, 0.0)),
+    if !points.iter().any(|p| same(p.beat, beat)) {
+        *points = split_all(points, &[beat], close);
     }
 }
 
@@ -1070,20 +1066,103 @@ fn cut(points: &[Point], span: Span) -> Vec<Point> {
 
 /// As [`cut`], with how close a bent line cut at an edge must stay to itself.
 fn cut_close(points: &[Point], span: Span, close: f64) -> Vec<Point> {
-    let mut all = points.to_vec();
-    split_at_close(&mut all, span.start, close);
-    split_at_close(&mut all, span.end, close);
-    let first = all.iter().rposition(|p| same(p.beat, span.start)).unwrap_or(0);
-    let last = all.iter().position(|p| same(p.beat, span.end)).unwrap_or(all.len().saturating_sub(1));
-    let mut out: Vec<Point> = all
-        .get(first..=last.max(first))
-        .unwrap_or_default()
+    cut_all_close(points, &[span], close).pop().unwrap_or_default()
+}
+
+/// The parts of the curve in `spans` (in order, none reaching back into the one before), each as [`cut`] gives it.
+/// The curve is gone through once for all of them: cutting them one by one goes through it once for each, which on
+/// a long curve swung on a fine grid held the window for seconds (Solomon's note of 15 Nov 2026).
+fn cut_all(points: &[Point], spans: &[Span]) -> Vec<Vec<Point>> {
+    cut_all_close(points, spans, CLOSE)
+}
+
+/// As [`cut_all`], with how close a bent line cut at an edge must stay to itself.
+fn cut_all_close(points: &[Point], spans: &[Span], close: f64) -> Vec<Vec<Point>> {
+    let beats: Vec<f64> = spans.iter().flat_map(|s| [s.start, s.end]).collect();
+    let all = split_all(points, &beats, close);
+    spans
         .iter()
-        .map(|p| Point { beat: (p.beat - span.start).clamp(0.0, span.len()), ..*p })
-        .collect();
-    if let Some(p) = out.last_mut() {
-        p.bend = 0.0;
+        .map(|span| {
+            // The last point at the span's start and the first at its end (a jump on either edge stays outside).
+            let first = all.partition_point(|p| p.beat < span.start + EPS).saturating_sub(1);
+            let last = all.partition_point(|p| p.beat <= span.end - EPS).min(all.len().saturating_sub(1));
+            let mut out: Vec<Point> = all
+                .get(first..=last.max(first))
+                .unwrap_or_default()
+                .iter()
+                .map(|p| Point { beat: (p.beat - span.start).clamp(0.0, span.len()), ..*p })
+                .collect();
+            if let Some(p) = out.last_mut() {
+                p.bend = 0.0;
+            }
+            out
+        })
+        .collect()
+}
+
+/// The points with one at each of `beats` (which never go back), going through the points once. A straight line a
+/// beat is on is cut in two there; a bent one is drawn again as bent lines (a few, where it's bent hard) that stay
+/// within `close` of it. Every piece of a bent line cut more than once is drawn from the line itself, never from a
+/// piece drawn before, so many cuts in one line stray no further than one.
+fn split_all(points: &[Point], beats: &[f64], close: f64) -> Vec<Point> {
+    let mut out: Vec<Point> = Vec::with_capacity(points.len() + beats.len());
+    let mut rest = points.iter().copied().peekable();
+    // The bent line being cut: its two ends, and how far along it has been drawn (a beat and its value).
+    let mut cutting: Option<(Point, Point, (f64, f64))> = None;
+    let line = |a: Point, b: Point| {
+        move |x: f64| a.value + (b.value - a.value) * bent((x - a.beat) / (b.beat - a.beat), a.bend)
+    };
+    for &beat in beats {
+        if let Some((a, b, from)) = cutting {
+            if same(from.0, beat) {
+                continue;
+            }
+            if beat < b.beat && !same(b.beat, beat) {
+                let f = line(a, b);
+                let here = (beat, f(beat));
+                traced(&f, from, here, close, 0, &mut out);
+                cutting = Some((a, b, here));
+                continue;
+            }
+            // Past this line: the rest of it is drawn to its end.
+            traced(&line(a, b), from, (b.beat, b.value), close, 0, &mut out);
+            cutting = None;
+        }
+        while let Some(p) = rest.next_if(|p| p.beat < beat && !same(p.beat, beat)) {
+            out.push(p);
+        }
+        let (before, after) = (out.last().copied(), rest.peek().copied());
+        if after.is_some_and(|p| same(p.beat, beat)) || before.is_some_and(|p| same(p.beat, beat)) {
+            continue;
+        }
+        match (before, after) {
+            (Some(a), Some(b)) => {
+                let f = line(a, b);
+                let here = (beat, f(beat));
+                out.pop();
+                if a.bend.abs() < 0.01 {
+                    out.push(Point { bend: 0.0, ..a });
+                    out.push(Point::new(here.0, here.1, 0.0));
+                } else {
+                    traced(&f, (a.beat, a.value), here, close, 0, &mut out);
+                    // From the beat on it's still to come: a later beat may fall in it.
+                    cutting = Some((a, b, here));
+                }
+            }
+            (None, Some(b)) => out.push(Point::new(beat, b.value, 0.0)),
+            (Some(a), None) => {
+                if let Some(last) = out.last_mut() {
+                    last.bend = 0.0;
+                }
+                out.push(Point::new(beat, a.value, 0.0));
+            }
+            (None, None) => out.push(Point::new(beat, 0.0, 0.0)),
+        }
     }
+    if let Some((a, b, from)) = cutting {
+        traced(&line(a, b), from, (b.beat, b.value), close, 0, &mut out);
+    }
+    out.extend(rest);
     out
 }
 
@@ -1325,24 +1404,27 @@ fn stepped(part: &[Point], len: f64, step: f64) -> Vec<Point> {
 /// part's start) is stretched or squeezed up to it, and after it to the next even line (or the part's end). A line
 /// never passes three quarters of the way to the end of its stretch.
 fn swung(part: &[Point], len: f64, from: f64, step: f64, amount: f64) -> Vec<Point> {
-    let mut out = Vec::new();
-    let moved = |piece: Vec<Point>, by: f64, to: f64| -> Vec<Point> {
-        stretched(&piece, by).into_iter().map(|p| Point { beat: to + p.beat, ..p }).collect()
-    };
     let pair = 2.0 * step;
+    // Each stretch of the part, how much longer or shorter it gets, and where it goes.
+    let mut stretches: Vec<(Span, f64, f64)> = Vec::new();
     // Where the first stretch starts, in the part's own time: on the even line at or before the part's start.
     let mut even = (from / pair + EPS).floor() * pair - from;
     while even < len - EPS {
         let (start, end) = (even.max(0.0), (even + pair).min(len));
         let mid = even + step;
         if mid - start < SHORTEST || end - mid < SHORTEST {
-            out.extend(moved(cut(part, Span { start, end }), 1.0, start));
+            stretches.push((Span { start, end }, 1.0, start));
         } else {
             let new_mid = (mid + amount * step).clamp(mid - (mid - start) * MOST_SWING, mid + (end - mid) * MOST_SWING);
-            out.extend(moved(cut(part, Span { start, end: mid }), (new_mid - start) / (mid - start), start));
-            out.extend(moved(cut(part, Span { start: mid, end }), (end - new_mid) / (end - mid), new_mid));
+            stretches.push((Span { start, end: mid }, (new_mid - start) / (mid - start), start));
+            stretches.push((Span { start: mid, end }, (end - new_mid) / (end - mid), new_mid));
         }
         even += pair;
+    }
+    let spans: Vec<Span> = stretches.iter().map(|(span, ..)| *span).collect();
+    let mut out = Vec::new();
+    for (piece, (_, by, to)) in cut_all(part, &spans).into_iter().zip(stretches) {
+        out.extend(piece.into_iter().map(|p| Point { beat: to + p.beat * by, ..p }));
     }
     out
 }
@@ -1418,6 +1500,54 @@ fn inserted(shape: &Shape, at: f64, piece: &Piece) -> Option<(Shape, Option<Span
     Some((Shape { points, clips: in_order(clips), length }, Some(there)))
 }
 
+/// The whole curve `by` beats later (earlier below 0): what goes off one end comes back in at the other. Its clips
+/// go with it; one that would lie over the end keeps its longer side (a clip is one stretch of time; Undo gives the
+/// rest back). A bent line the curve's end now falls in is drawn again as a few, as every cut of one is.
+fn turned(shape: &Shape, by: f64) -> Option<Shape> {
+    let length = shape.length;
+    let by = by.rem_euclid(length);
+    if !by.is_finite() || by < EPS || length - by < EPS {
+        return None;
+    }
+    let parts =
+        cut_all(&shape.points, &[Span { start: 0.0, end: length - by }, Span { start: length - by, end: length }]);
+    let [start, end] = parts.as_slice() else { return None };
+    let mut points = end.clone();
+    let mut start: Vec<Point> = start.iter().map(|p| Point { beat: p.beat + by, ..*p }).collect();
+    // Where the curve's old end meets its old start: on a straight line that runs on through, the two ends' points
+    // say nothing and go, so a nudge there and back leaves the curve as it was.
+    if let ([.., before, a], [b, after, ..]) = (points.as_slice(), start.as_slice()) {
+        let through = before.value + (after.value - before.value) * (a.beat - before.beat) / (after.beat - before.beat);
+        let straight = before.bend == 0.0 && b.bend == 0.0 && after.beat - before.beat > EPS;
+        if straight && same(a.value, b.value) && same(a.value, through) {
+            points.pop();
+            start.remove(0);
+        }
+    }
+    points.extend(start);
+    let clips = shape
+        .clips
+        .iter()
+        .filter_map(|c| {
+            // One that names the whole curve still does.
+            if c.span.same(shape.whole()) {
+                return Some(c.clone());
+            }
+            let start = (c.span.start + by).rem_euclid(length);
+            let end = start + c.span.len();
+            let span = if end <= length + EPS {
+                Span { start, end: end.min(length) }
+            } else if length - start >= end - length {
+                Span { start, end: length }
+            } else {
+                Span { start: 0.0, end: end - length }
+            };
+            (!span.is_empty()).then(|| Clip { span, ..c.clone() })
+        })
+        .collect();
+    Some(Shape { points, clips: in_order(clips), length })
+}
+
 fn clip_of(piece: &Piece, span: Span) -> Clip {
     Clip { span, source: piece.source.clone(), name: piece.name.clone(), pinned: false }
 }
@@ -1478,6 +1608,8 @@ pub struct Editor {
     drag_from: Option<State>,
     /// How many edits away from the curve as it was opened or last saved (None: it can't be got back to).
     from_saved: Option<i64>,
+    /// How many new edits have been made (steps of Undo and Redo aren't counted).
+    made: u64,
 }
 
 impl Editor {
@@ -1489,7 +1621,13 @@ impl Editor {
             redo: Vec::new(),
             drag_from: None,
             from_saved: Some(0),
+            made: 0,
         }
+    }
+
+    /// How many new edits have been made to the curve; Undo and Redo don't count.
+    pub fn made(&self) -> u64 {
+        self.made
     }
 
     pub fn shape(&self) -> &Shape {
@@ -1555,6 +1693,7 @@ impl Editor {
             self.from_saved = None;
         }
         self.redo.clear();
+        self.made += 1;
         self.from_saved = self.from_saved.map(|n| n + 1);
         true
     }
@@ -2083,6 +2222,34 @@ mod tests {
     }
 
     #[test]
+    fn a_nudge_turns_the_whole_curve_round_and_moves_a_highlight_as_far_as_the_end() {
+        // A ramp over four beats, a beat later: its last beat comes in at the start.
+        let (later, lit) = done(&ramp(), None, Edit::Nudge { by: 1.0 });
+        assert_eq!(lit, None);
+        assert!(near(later.length(), ramp().length()));
+        for beat in [0.25, 0.75, 1.5, 2.5, 3.5] {
+            let from = (beat - 1.0_f64).rem_euclid(ramp().length());
+            assert!(near(later.value_at(beat), ramp().value_at(from)), "at {beat}");
+        }
+        // And back again gives the curve it was; so does going all the way round.
+        let (back, _) = done(&later, None, Edit::Nudge { by: -1.0 });
+        same_picture(&back, &ramp(), 1e-6);
+        assert!(apply(&ramp(), None, &Edit::Nudge { by: ramp().length() }).is_none());
+        assert!(apply(&ramp(), None, &Edit::Nudge { by: f64::NAN }).is_none());
+        // A highlighted part moves like a drag of its bar, and stops at the end.
+        let part = Span::new(1.0, 2.0);
+        let (moved, lit) = done(&ramp(), Some(part), Edit::Nudge { by: 0.5 });
+        assert_eq!(lit, Some(Span::new(1.5, 2.5)));
+        assert_eq!(Some((moved, lit)), apply(&ramp(), Some(part), &Edit::Move { to: 1.5, copy: false }));
+        let at_end = Span::new(3.0, 4.0);
+        assert!(apply(&ramp(), Some(at_end), &Edit::Nudge { by: 0.5 }).is_none());
+        // A clip goes round with the curve; one over the end keeps its longer side.
+        let (clipped, _) = done(&ramp(), Some(Span::new(2.0, 3.5)), Edit::Remember { name: "a".into() });
+        let (round, _) = done(&clipped, None, Edit::Nudge { by: 1.0 });
+        assert!(round.clips()[0].span.same(Span::new(3.0, 4.0)));
+    }
+
+    #[test]
     fn remove_time_closes_the_gap() {
         let mut s = triangle();
         s.clips = vec![
@@ -2506,6 +2673,41 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn cutting_many_parts_in_one_go_gives_what_cutting_each_gives() {
+        // Straight lines, with a jump: the very same points.
+        let s =
+            Shape::new(vec![pt(0.0, 0.0), pt(1.0, 0.5), pt(2.0, 0.8), pt(2.0, 0.1), pt(3.3, 0.2), pt(4.0, 1.0)], 4.0);
+        let spans: Vec<Span> = (0..16).map(|i| Span::new(f64::from(i) * 0.25, f64::from(i + 1) * 0.25)).collect();
+        let each: Vec<Vec<Point>> = spans.iter().map(|span| cut(&s.points, *span)).collect();
+        assert_eq!(cut_all(&s.points, &spans), each);
+        // Bent lines are drawn again where they're cut: the same curve, to within what a cut may stray.
+        let bent = Shape::new(
+            vec![Point::new(0.0, 0.0, 0.9), Point::new(1.7, 1.0, -0.6), Point::new(3.1, 0.2, 0.4), pt(4.0, 0.7)],
+            4.0,
+        );
+        let all = cut_all(&bent.points, &spans);
+        for (span, piece) in spans.iter().zip(&all) {
+            assert!(near(piece[0].beat, 0.0) && near(piece.last().unwrap().beat, span.len()), "{span:?}");
+            for k in 0..=8 {
+                let at = span.len() * f64::from(k) / 8.0;
+                let (was, now) = (value_at(&bent.points, span.start + at), value_at(piece, at));
+                assert!((was - now).abs() < 3.0 * CLOSE, "{span:?} at {at}: {was} {now}");
+            }
+        }
+        // One hard-bent line cut at every 32nd of 16 beats: each piece is drawn from the line itself, so the
+        // hundreds of cuts stray no further from it than one does.
+        let bent = Shape::new(vec![Point::new(0.0, 0.0, 0.9), pt(16.0, 1.0)], 16.0);
+        let spans: Vec<Span> = (0..512).map(|i| Span::new(f64::from(i) / 32.0, f64::from(i + 1) / 32.0)).collect();
+        for (span, piece) in spans.iter().zip(cut_all(bent.points(), &spans)) {
+            let piece = Shape::new(piece, span.len());
+            for at in [0.0, 0.3, 0.7, 1.0] {
+                let (was, now) = (bent.value_at(span.start + span.len() * at), piece.value_at(span.len() * at));
+                assert!((was - now).abs() < 2.0 * CLOSE, "{span:?} at {at}: {was} {now}");
             }
         }
     }

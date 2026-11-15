@@ -1176,10 +1176,18 @@ fn step(app: &AppWindow, by: i32) {
 }
 
 fn pick_curve(app: &AppWindow, id: Option<String>) {
+    pick_curve_saying(app, id, String::new());
+}
+
+/// [`pick_curve`], with what the card says of it (nothing: it says what it said, or nothing for another curve).
+fn pick_curve_saying(app: &AppWindow, id: Option<String>, says: String) {
     let row = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         if p.curve_picked != id {
             p.curve_message.clear();
+        }
+        if !says.is_empty() {
+            p.curve_message = says;
         }
         p.curve_picked = id.clone();
         let id = id?;
@@ -1218,6 +1226,21 @@ pub fn add_curve(app: &AppWindow, row: usize) -> bool {
 
 /// How the card's words begin after a curve was added: Undo and Redo take those words away again.
 const ADDED: &str = "Added ";
+
+/// Undo (`back`) or Redo with no step left in the curve on the card: the page picks curve `id`, the one worked on
+/// before (or the one Undo came back from), and says so. False when that curve is no longer among the curves.
+pub(crate) fn curve_gone_back(app: &AppWindow, id: &str, back: bool) -> bool {
+    let name = PAGE.with(|p| p.borrow().curves.iter().find(|c| c.id == id).map(|c| c.name.clone()));
+    let Some(name) = name else { return false };
+    // ("Back to", not "as you left it": one that has changed where it came from since comes back afresh.)
+    let says = if back {
+        format!("Back to {name}. Redo goes to the curve you came from again.")
+    } else {
+        format!("Forward to {name} again. Undo goes back.")
+    };
+    pick_curve_saying(app, Some(id.to_owned()), says);
+    true
+}
 
 /// Undo or Redo took a step in the editor: the card no longer says a curve was added.
 pub(crate) fn curve_stepped(app: &AppWindow) {
@@ -2724,6 +2747,8 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         | curve_act::KEEP_CLIP
         | curve_act::CUT_TIME
         | curve_act::HIGHLIGHT_ALL
+        | curve_act::NUDGE_LEFT
+        | curve_act::NUDGE_RIGHT
         | curve_act::QUANTISE
         | curve_act::REMOVE_POINTS => return crate::curve_editor::act(app, id),
         curve_act::RANDOMISE => return randomise(app),
