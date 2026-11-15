@@ -1,4 +1,5 @@
-//! Reading `library.db`, the C# app's database, without ever changing it.
+//! Reading a song library without ever changing it: the app's own `songs.db` ([`crate::songs_db`]), or `library.db`,
+//! the C# app's database, which `songs.db` was made from.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;

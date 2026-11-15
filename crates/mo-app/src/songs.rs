@@ -56,9 +56,7 @@ impl SongRow {
         let saved = song.saves().map(|s| s.modified).filter(|m| real.local(*m)).max();
         let made = songs::first_made(song.saves(), real);
         let runs = songs::runs(song.saves(), gap_months, real);
-        let mut earlier: Vec<&mo_library::Save> = song.older.iter().collect();
-        // Newest first, and a save with no real date after the rest, as the fields a new save takes over (live.rs).
-        earlier.sort_by_key(|s| std::cmp::Reverse((real.local(s.modified), s.modified)));
+        let earlier = earlier_saves(&song, real);
         let latest = &song.latest;
         let pick = |own: &str, of: fn(&mo_library::Save) -> &str| -> String {
             if !own.trim().is_empty() {
@@ -85,11 +83,7 @@ impl SongRow {
             favourite: latest.favourite || earlier.iter().any(|s| s.favourite),
             musical_key: pick(&latest.musical_key, |s| &s.musical_key),
             notes: pick(&latest.notes, |s| &s.notes),
-            tags: if latest.tags.is_empty() {
-                earlier.iter().find(|s| !s.tags.is_empty()).map_or_else(Vec::new, |s| s.tags.clone())
-            } else {
-                latest.tags.clone()
-            },
+            tags: tags_of(latest, &earlier),
             find: String::new(),
             song,
         };
@@ -200,6 +194,30 @@ impl SongRow {
         self.find.contains(&word.key)
             || case::eq_ignore_case(self.key(), &word.text)
             || word.year.is_some_and(|y| [self.saved, self.made].into_iter().flatten().any(|d| d.year() == y))
+    }
+}
+
+/// The older saves a song's fields come from while its newest save hasn't got them: newest first, and a save with no
+/// real date after the rest, as the fields a new save takes over (live.rs).
+fn earlier_saves<'a>(song: &'a Song, real: &RealDates) -> Vec<&'a Save> {
+    let mut earlier: Vec<&Save> = song.older.iter().collect();
+    earlier.sort_by_key(|s| std::cmp::Reverse((real.local(s.modified), s.modified)));
+    earlier
+}
+
+/// The tags a song shows: its newest save's, or while that has none, the newest older save's that has some. The row
+/// shows them ([`SongRow::new`]), and a tag put on goes to every save with them ([`crate::live::Live::give`], review
+/// SG-1), or the newest save would hold the new tag alone and hide the rest.
+pub(crate) fn shown_tags(song: &Song, real: &RealDates) -> Vec<String> {
+    tags_of(&song.latest, &earlier_saves(song, real))
+}
+
+/// [`shown_tags`], with the older saves already in order ([`earlier_saves`]).
+fn tags_of(latest: &Save, earlier: &[&Save]) -> Vec<String> {
+    if latest.tags.is_empty() {
+        earlier.iter().find(|s| !s.tags.is_empty()).map_or_else(Vec::new, |s| s.tags.clone())
+    } else {
+        latest.tags.clone()
     }
 }
 

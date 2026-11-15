@@ -18,6 +18,7 @@ use mo_formats::arrangement::{Arrangement, AudioPart, LaneKind, PreviewClip, Pre
 use mo_library::samples::{SampleLocator, TreeRead, is_daw_content};
 use mo_library::songs::thousands;
 
+use crate::plugins::folder_fixes::drive_there;
 use crate::shapes::{Colour, Scene};
 use crate::themes::Look;
 
@@ -129,18 +130,28 @@ impl Peaks {
     }
 }
 
-/// Why an arrangement couldn't be read, for the page: a file that's gone or can't be opened in plain words, anything
-/// else as the reader says it, without the system's error number.
-fn couldnt_read(why: &str) -> String {
-    if why.contains("(os error 2)") || why.contains("(os error 3)") {
-        return "Couldn't read the arrangement: the save isn't where it was. It may have been moved or deleted."
-            .to_owned();
+/// Why the arrangement of the save at `project` couldn't be read (`e`, from reading its file), for the page: a save
+/// that isn't there says whether its drive is plugged in, one the app may not open says so, anything else as the system
+/// says it, without its error number. Told by the kind of error, which means the same on every system (the whole-app
+/// review of 14 Nov, SG-7: by its number, a drive that isn't plugged in read as a save moved or deleted, and on a Mac
+/// a disk that couldn't be read as one the app isn't allowed to open).
+fn couldnt_read(project: &Path, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound if !drive_there(project) => {
+            "Couldn't read the arrangement: the save's drive isn't plugged in.".to_owned()
+        }
+        std::io::ErrorKind::NotFound => {
+            "Couldn't read the arrangement: the save isn't where it was. It may have been moved or deleted.".to_owned()
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            "Couldn't read the arrangement: the app isn't allowed to open the save.".to_owned()
+        }
+        _ => {
+            let why = e.to_string();
+            let plain = why.split(" (os error").next().unwrap_or(&why).trim_end_matches('.');
+            format!("Couldn't read the arrangement: {plain}.")
+        }
     }
-    if why.contains("(os error 5)") || why.contains("(os error 13)") {
-        return "Couldn't read the arrangement: the app isn't allowed to open the save.".to_owned();
-    }
-    let plain = why.split(" (os error").next().unwrap_or(why).trim_end_matches('.');
-    format!("Couldn't read the arrangement: {plain}.")
 }
 
 /// Reads a project's arrangement views. Its audio files are looked for after, by [`find_samples`] (until then
@@ -155,9 +166,8 @@ pub fn read(project: &Path) -> Result<Preview, String> {
         .map_err(|e| {
             // What happened and what to do, in a line; the system's own words go to the log (the UX review of
             // 10 Nov, C6: "No such file or directory (os error 2)" was on the page).
-            let why = e.to_string();
-            crate::log::warning("Arrangement", &format!("Couldn't read {}: {why}", project.display()));
-            couldnt_read(&why)
+            crate::log::warning("Arrangement", &format!("Couldn't read {}: {e}", project.display()));
+            couldnt_read(project, &e)
         })?
         .into_iter()
         .map(Arc::new)
@@ -1210,11 +1220,40 @@ mod tests {
 
     #[test]
     fn a_failed_read_is_said_in_plain_words() {
-        let gone = couldnt_read("No such file or directory (os error 2)");
+        use std::io::{Error, ErrorKind};
+        let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("no such save.flp");
+        let gone = couldnt_read(&here, &Error::from(ErrorKind::NotFound));
         assert!(gone.contains("isn't where it was") && !gone.contains("os error"), "{gone}");
-        assert!(couldnt_read("Access is denied. (os error 5)").contains("isn't allowed"));
-        assert_eq!(couldnt_read("not a Bitwig project"), "Couldn't read the arrangement: not a Bitwig project.");
-        assert_eq!(couldnt_read("disk trouble (os error 23)"), "Couldn't read the arrangement: disk trouble.");
+        // On a drive that isn't plugged in: said so, not moved or deleted (the whole-app review of 14 Nov, SG-7). A
+        // Mac's drives are in /Volumes, Linux's in /media/<you>, /run/media/<you> or /mnt.
+        let away: &[&str] = if cfg!(windows) {
+            &[r"Q:\No Such Drive\Songs\Night Drive.flp"]
+        } else {
+            &[
+                "/Volumes/No Such Drive/Songs/Night Drive.flp",
+                "/media/you/No Such Drive/Songs/Night Drive.flp",
+                "/run/media/you/No Such Drive/Night Drive.flp",
+                "/mnt/no-such-drive/Night Drive.flp",
+            ]
+        };
+        for away in away {
+            assert_eq!(
+                couldnt_read(Path::new(away), &Error::from(ErrorKind::NotFound)),
+                "Couldn't read the arrangement: the save's drive isn't plugged in.",
+                "{away}"
+            );
+        }
+        // A path naming no drive (the library never keeps one) is on this one: so moved or deleted.
+        let near = couldnt_read(Path::new("Night Drive.flp"), &Error::from(ErrorKind::NotFound));
+        assert!(near.contains("isn't where it was"), "{near}");
+        assert!(couldnt_read(&here, &Error::from(ErrorKind::PermissionDenied)).contains("isn't allowed"));
+        // By its kind, not its number: what isn't a missing file or a refusal is said as the system says it.
+        let failing = Error::other("Input/output error (os error 5)");
+        assert_eq!(couldnt_read(&here, &failing), "Couldn't read the arrangement: Input/output error.");
+        assert_eq!(couldnt_read(&here, &Error::other("disk trouble")), "Couldn't read the arrangement: disk trouble.");
+        // A real read of a save that isn't there.
+        let said = read(&here).err().unwrap_or_default();
+        assert!(said.contains("isn't where it was"), "{said}");
     }
 
     #[test]

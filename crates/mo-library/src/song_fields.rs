@@ -166,9 +166,15 @@ pub struct Kept {
 /// isn't the app's own changes nothing; a library busy with another write for longer than the wait gives
 /// [`LibraryError::Busy`], and trying again in a moment can work.
 pub fn set(songs_db: &Path, saves: &[SaveRow], change: &Change) -> Result<Kept, LibraryError> {
+    set_all(songs_db, saves, std::slice::from_ref(change))
+}
+
+/// [`set`] for several changes, made in order in the one transaction: every one of them for every save, or nothing.
+/// A tag put on with the tags the song shows, so its newest save holds them all (review SG-1).
+pub fn set_all(songs_db: &Path, saves: &[SaveRow], changes: &[Change]) -> Result<Kept, LibraryError> {
     let write_error = |why: String| LibraryError::Write { path: songs_db.to_owned(), why };
     let sql = |e| write_failed(songs_db, e);
-    let change = change.checked().map_err(write_error)?;
+    let changes: Vec<Change> = changes.iter().map(Change::checked).collect::<Result<_, _>>().map_err(write_error)?;
     let mut conn = open_to_write(songs_db)?;
     let tx = begin_own(&mut conn, songs_db)?;
     let mut kept = Kept::default();
@@ -182,59 +188,71 @@ pub fn set(songs_db: &Path, saves: &[SaveRow], change: &Change) -> Result<Kept, 
             if there { kept.saves.push(save.id) } else { kept.unknown.push(save.id) }
         }
     }
-    let column = |column: &str, value: &dyn rusqlite::ToSql| -> rusqlite::Result<()> {
-        let mut st = tx.prepare_cached(&format!("UPDATE projects SET {column} = ?2 WHERE id = ?1"))?;
+    for change in &changes {
+        make(&tx, &kept.saves, change).map_err(sql)?;
+        // Read back: every save asked for has the change, before any of it is kept.
         for id in &kept.saves {
-            st.execute(params![id, value])?;
-        }
-        Ok(())
-    };
-    match &change {
-        Change::Status(status) => column("status", status).map_err(sql)?,
-        Change::Rating(stars) => column("rating", stars).map_err(sql)?,
-        Change::Favourite(heart) => column("favourite", heart).map_err(sql)?,
-        Change::Key(key) => column("musical_key", key).map_err(sql)?,
-        Change::Notes(notes) => column("notes", notes).map_err(sql)?,
-        Change::AddTag(tag) => {
-            for id in &kept.saves {
-                // One of another letter case (an older library's) is the same tag: it isn't put on twice.
-                if tags_like(&tx, *id, tag).map_err(sql)?.is_empty() {
-                    tx.execute("INSERT INTO tags (project_id, tag) VALUES (?1, ?2)", params![id, tag]).map_err(sql)?;
-                }
+            if !made(&tx, *id, change).map_err(sql)? {
+                return Err(write_error(format!("what was written didn't read back the same (save {id})")));
             }
-        }
-        Change::RemoveTag(tag) => {
-            for id in &kept.saves {
-                for spelt in tags_like(&tx, *id, tag).map_err(sql)? {
-                    tx.execute("DELETE FROM tags WHERE project_id = ?1 AND tag = ?2", params![id, spelt])
-                        .map_err(sql)?;
-                }
-            }
-        }
-    }
-    // Read back: every save asked for has the change, before any of it is kept.
-    let text = |column: &str, id: i64| -> rusqlite::Result<Option<String>> {
-        tx.query_row(&format!("SELECT {column} FROM projects WHERE id = ?1"), [id], |r| r.get(0))
-    };
-    let number = |column: &str, id: i64| -> rusqlite::Result<Option<i64>> {
-        tx.query_row(&format!("SELECT {column} FROM projects WHERE id = ?1"), [id], |r| r.get(0))
-    };
-    for id in &kept.saves {
-        let right = match &change {
-            Change::Status(status) => text("status", *id).map_err(sql)?.as_deref() == Some(status.as_str()),
-            Change::Rating(stars) => number("rating", *id).map_err(sql)? == Some(i64::from(*stars)),
-            Change::Favourite(heart) => number("favourite", *id).map_err(sql)? == Some(i64::from(*heart)),
-            Change::Key(key) => text("musical_key", *id).map_err(sql)?.as_deref() == Some(key.as_str()),
-            Change::Notes(notes) => text("notes", *id).map_err(sql)?.as_deref() == Some(notes.as_str()),
-            Change::AddTag(tag) => !tags_like(&tx, *id, tag).map_err(sql)?.is_empty(),
-            Change::RemoveTag(tag) => tags_like(&tx, *id, tag).map_err(sql)?.is_empty(),
-        };
-        if !right {
-            return Err(write_error(format!("what was written didn't read back the same (save {id})")));
         }
     }
     tx.commit().map_err(sql)?;
     Ok(kept)
+}
+
+/// Makes `change` (checked) to the saves `ids`, in `tx`.
+fn make(tx: &rusqlite::Transaction<'_>, ids: &[i64], change: &Change) -> rusqlite::Result<()> {
+    let column = |column: &str, value: &dyn rusqlite::ToSql| -> rusqlite::Result<()> {
+        let mut st = tx.prepare_cached(&format!("UPDATE projects SET {column} = ?2 WHERE id = ?1"))?;
+        for id in ids {
+            st.execute(params![id, value])?;
+        }
+        Ok(())
+    };
+    match change {
+        Change::Status(status) => column("status", status),
+        Change::Rating(stars) => column("rating", stars),
+        Change::Favourite(heart) => column("favourite", heart),
+        Change::Key(key) => column("musical_key", key),
+        Change::Notes(notes) => column("notes", notes),
+        Change::AddTag(tag) => {
+            for id in ids {
+                // One of another letter case (an older library's) is the same tag: it isn't put on twice.
+                if tags_like(tx, *id, tag)?.is_empty() {
+                    tx.execute("INSERT INTO tags (project_id, tag) VALUES (?1, ?2)", params![id, tag])?;
+                }
+            }
+            Ok(())
+        }
+        Change::RemoveTag(tag) => {
+            for id in ids {
+                for spelt in tags_like(tx, *id, tag)? {
+                    tx.execute("DELETE FROM tags WHERE project_id = ?1 AND tag = ?2", params![id, spelt])?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Whether the save `id` reads back with `change` made ([`make`]), in `tx`.
+fn made(tx: &rusqlite::Transaction<'_>, id: i64, change: &Change) -> rusqlite::Result<bool> {
+    let text = |column: &str| -> rusqlite::Result<Option<String>> {
+        tx.query_row(&format!("SELECT {column} FROM projects WHERE id = ?1"), [id], |r| r.get(0))
+    };
+    let number = |column: &str| -> rusqlite::Result<Option<i64>> {
+        tx.query_row(&format!("SELECT {column} FROM projects WHERE id = ?1"), [id], |r| r.get(0))
+    };
+    Ok(match change {
+        Change::Status(status) => text("status")?.as_deref() == Some(status.as_str()),
+        Change::Rating(stars) => number("rating")? == Some(i64::from(*stars)),
+        Change::Favourite(heart) => number("favourite")? == Some(i64::from(*heart)),
+        Change::Key(key) => text("musical_key")?.as_deref() == Some(key.as_str()),
+        Change::Notes(notes) => text("notes")?.as_deref() == Some(notes.as_str()),
+        Change::AddTag(tag) => !tags_like(tx, id, tag)?.is_empty(),
+        Change::RemoveTag(tag) => tags_like(tx, id, tag)?.is_empty(),
+    })
 }
 
 /// The tags the save `id` has that are `tag` ([`same_tag`]), as they're spelt. A save has a handful of tags, so

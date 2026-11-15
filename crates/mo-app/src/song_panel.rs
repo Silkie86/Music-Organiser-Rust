@@ -1,7 +1,8 @@
 //! The song panel beside the Songs list: what it says about the picked song. The facts come from the list's row;
 //! the plugins, samples, tracks and details come from the library's record of the song's newest save, read on a
-//! background thread when the song is picked (rule 12). As the C# app's panel, less what needs writing: the song's own
-//! fields (status, rating, notes, tags) can't be changed here yet.
+//! background thread when the song is picked (rule 12). As the C# app's panel. Its status, stars, heart and tags are
+//! the song's: given on the card, they're kept on every save of it in songs.db (rule 14, [`crate::live::Live::give`]
+//! through `mo_library::song_fields::set_all`). Its key and notes can't be changed here yet.
 
 use mo_formats::dates::RealDates;
 use mo_formats::paths::file_name;
