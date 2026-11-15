@@ -4,7 +4,7 @@
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { CurveEditor } from "curve_editor.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, Panel, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -651,9 +651,8 @@ export component PresetsPage inherits Rectangle {
         }
         // The audition playing in Bitwig, whatever line is picked and whichever section is on show, with its
         // Stop and Keep (the 6 Nov review's D-4 and X3-1).
-        if PresetsData.hearing != "": Rectangle {
+        if PresetsData.hearing != "": Panel {
             height: 48px;
-            background: Theme.surface-raised;
             HorizontalLayout {
                 padding-left: Space.md;
                 padding-right: Space.md;

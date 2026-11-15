@@ -962,8 +962,8 @@ fn is_move_part(name: &str) -> bool {
     WRITTEN_WHOLE_BESIDE_FIRST.iter().any(|f| is_whole_part_of(name, f))
 }
 
-/// The plugin's Record folder in the data folder (mo-plugin `record::folder` uses it).
-pub const RECORDINGS: &str = "Recordings";
+/// The plugin's Record folder in the data folder: the one name the data folder move carries too.
+pub const RECORDINGS: &str = crate::data_move::RECORDINGS_FOLDER;
 
 /// How a Record take's name gives its time, after "Recording " (mo-plugin `record` uses it): "2026-11-15 21-02-44".
 pub const TAKE_TIME: &str = "%Y-%m-%d %H-%M-%S";
