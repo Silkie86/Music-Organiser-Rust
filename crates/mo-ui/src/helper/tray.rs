@@ -161,7 +161,7 @@ fn refresh_now(again: bool) {
             Some(mo_dawlink::bitwig::watch::State::Watching) => GREEN,
             Some(_) => GREY,
         };
-        let words = format!("Music Organiser helper: {}", helper::bitwig_words(state.as_ref()));
+        let words = format!("{}: {}", mo_app::product::helper_name(), helper::bitwig_words(state.as_ref()));
         let now = (colour, words);
         if !again && tray.shown.as_ref() == Some(&now) {
             return None;
@@ -201,7 +201,8 @@ fn icon_data(tray: &Tray) -> NOTIFYICONDATAW {
     if let Some(icon) = tray.icon {
         data.hIcon = icon;
     }
-    let words = tray.shown.as_ref().map_or("Music Organiser helper", |(_, w)| w.as_str());
+    let name = mo_app::product::helper_name();
+    let words = tray.shown.as_ref().map_or(name.as_str(), |(_, w)| w.as_str());
     // The last place stays 0, the end of the words.
     let room = data.szTip.len() - 1;
     for (slot, unit) in data.szTip.iter_mut().take(room).zip(words.encode_utf16()) {

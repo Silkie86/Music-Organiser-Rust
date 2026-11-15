@@ -818,7 +818,8 @@ pub const DAWS_NOTE: &str = "The scripts that let the app talk to Bitwig and FL 
     reads. Install puts the app's own copy in the DAW's folders: on FL Studio's row its script (keeping your setting \
     for letting the app make changes), on Bitwig's its extension (close Bitwig first on Windows).";
 
-pub const SLINT_CREDIT: &str = "Music Organiser's screens are made with Slint, under its royalty-free licence.";
+pub const SLINT_CREDIT: &str =
+    concat!(env!("MO_PRODUCT_NAME"), "'s screens are made with Slint, under its royalty-free licence.");
 
 #[cfg(test)]
 mod tests {

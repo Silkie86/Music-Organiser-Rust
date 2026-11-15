@@ -92,5 +92,9 @@ femtovg = { version = "0.27", default-features = false, features = ["wgpu"] }
 [build-dependencies]
 slint-build.workspace = true
 
+# The logo, name and version inside the .exe (build.rs). Only for a build on Windows, where the resource compiler is.
+[target.'cfg(windows)'.build-dependencies]
+winresource = { version = "0.1", default-features = false }
+
 [lints]
 workspace = true
