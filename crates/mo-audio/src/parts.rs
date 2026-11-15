@@ -6,8 +6,8 @@ use std::panic::AssertUnwindSafe;
 
 use crate::AudioError;
 
-/// What a part goes to ([`crate::read_parts`]'s `each`): its sample rate and its samples, a channel each; it says whether
-/// to go on.
+/// What a part goes to ([`crate::read_parts`]'s `each`): its sample rate and its samples, a channel each; it says
+/// whether to go on.
 pub(crate) type Each<'a> = dyn FnMut(u32, &[Vec<f32>]) -> bool + 'a;
 
 /// How going through a file's sound ended.
@@ -30,7 +30,8 @@ pub(crate) fn give(each: &mut Each, rate: u32, part: &[Vec<f32>]) -> Result<bool
     })
 }
 
-/// A file's sound, as its decoder gives it a stretch at a time, cut into parts of the same length for `each` ([`give`]).
+/// A file's sound, as its decoder gives it a stretch at a time, cut into parts of the same length for `each`
+/// ([`give`]).
 pub(crate) struct Parts {
     rate: u32,
     /// Frames in a part: one at the least, and never more than one read may hold.

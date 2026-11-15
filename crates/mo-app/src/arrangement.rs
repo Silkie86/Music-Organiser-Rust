@@ -108,12 +108,13 @@ pub struct Peaks {
 /// Each slice of a waveform: 5 ms, so even a clip zoomed far in looks smooth, and a minute is 12,000 numbers.
 const PEAK_STEP: f64 = 0.005;
 
-/// How many of a waveform's values each coarser one stands for (a third of a second): a pixel of an hour-long file
-/// zoomed out looks at a few hundred numbers instead of thousands, as the whole of each file is read now.
+/// How many of a waveform's values each coarser one stands for (a third of a second), as the whole of each file is
+/// read now: a pixel that stands for a long stretch of a file (an hour-long one, zoomed out) looks at one number for
+/// each third of a second instead of 64, and at most 63 either side one by one.
 const COARSE: usize = 64;
 
-/// How much of a file [`Peaks::read`] holds at a time: half a minute (10 MB of a stereo 44.1 kHz file), however long the
-/// file is.
+/// How much of a file [`Peaks::read`] holds at a time: half a minute (10 MB of a stereo 44.1 kHz file), however long
+/// the file is.
 const PART_SECONDS: f64 = 30.0;
 
 /// What reads the waveforms ([`Peaks::read`]), for the store kept between runs (`peaks_store::PeakStore::open`): when

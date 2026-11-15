@@ -351,7 +351,7 @@ fn ogg_stream(f: &mut File, format: u16, start_byte: u64, length: u64) -> Result
 }
 
 /// The Ogg Vorbis stream of a WAV file that keeps its audio that way (FL Studio's own sounds), or none for any other
-/// WAV, or an AIFF. Anything wrong with the file is left for [`read_from`] to say.
+/// WAV, or an AIFF. A file that can't be read gives the error [`read_from`] would.
 fn ogg_in_wav(path: &Path) -> Result<Option<Vec<u8>>, AudioError> {
     let mut f = File::open(path)?;
     let len = f.metadata()?.len();
