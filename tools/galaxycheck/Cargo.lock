@@ -2888,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "mo-app"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "chrono",
  "fs4",
@@ -2919,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "mo-audio"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "mo-catch",
  "rtrb",
@@ -2929,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "mo-backup"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "chrono",
  "crc32fast",
@@ -2943,11 +2943,11 @@ dependencies = [
 
 [[package]]
 name = "mo-catch"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 
 [[package]]
 name = "mo-convert"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "md-5",
  "memchr",
@@ -2959,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "mo-dawlink"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "mo-formats",
  "serde_json",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "mo-formats"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "chrono",
  "flate2",
@@ -2983,11 +2983,11 @@ dependencies = [
 
 [[package]]
 name = "mo-harmony"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 
 [[package]]
 name = "mo-library"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "chrono",
  "flate2",
@@ -3006,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "mo-midi"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "fs4",
  "mo-catch",
@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "mo-presets"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "flate2",
  "mo-catch",
@@ -3034,7 +3034,7 @@ dependencies = [
 
 [[package]]
 name = "mo-sounds"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "chrono",
  "fs4",
@@ -3053,7 +3053,7 @@ dependencies = [
 
 [[package]]
 name = "mo-space"
-version = "0.1.0"
+version = "0.9.0-beta.1"
 dependencies = [
  "chrono",
  "fs4",

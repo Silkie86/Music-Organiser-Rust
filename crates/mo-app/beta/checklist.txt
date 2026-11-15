@@ -11,6 +11,10 @@ start.release | Start the app from the launcher's Release shortcut, then close i
 start.full-screen | Start the app, press F11, close it and start it again; then F11 back to full screen | It opens in full screen; after F11 it opens as you left it
 start.close-clean | Use the app for a while, then close it (Alt+F4, or F11 out of full screen and the window's X) | It closes at once; no new crash-....log in the logs folder
 
+== Install
+install.setup | From the Releases page on GitHub, download the DAWmate setup and run it (Windows may ask: More info, then Run anyway). Keep your data folder where it is | No administrator question; DAWmate is in the Start menu and opens with your songs and sounds as before
+install.update | Once a newer test version is out, leave the app open a day (or start it the next day) | The rail says a new version is ready; Restart to update closes the app and opens the new version, with everything kept
+
 == Songs
 songs.list | Open the Songs page, search for a song, pick a few chips | The list fills at once and the search and chips narrow it
 songs.open-each-daw | Open one FL song, one Bitwig song and one Studio One song from the Songs card | Each opens in its own DAW
