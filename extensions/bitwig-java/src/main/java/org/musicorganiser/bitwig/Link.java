@@ -110,6 +110,14 @@ import java.util.stream.Collectors;
  */
 final class Link {
     static final int PORT = 19791;
+    /**
+     * Where to look when Bitwig didn't let the link use a part of its API, at the end of the error the app shows as it
+     * is (extension 3.30). Before, these said "A selftest says why", which the app has no button for; the self-check
+     * the extension writes each time Bitwig starts says the same, and is there to read.
+     */
+    static final String SELF_CHECK_SAYS = " The self-check Bitwig wrote as it started says why: the newest"
+                                          + " self-check file in the app's data folder, under reports, then bitwig.";
+
     /** The protocol's version: 3 adds the newer API's fields and the clicked, recorder and selftest commands. */
     static final int LINK_VERSION = 3;
     /** Tracks the project listing covers (a flat list: tracks inside groups, effect tracks and the master). */
@@ -983,6 +991,17 @@ final class Link {
         Client client = new Client(connection);
         clients.add(client);
         knownPort();
+        // The app may have moved its data folder since Bitwig started (it switches at its own start, with Bitwig
+        // often left open): the reports follow it from the next connection on. The new folder is tidied and gets a
+        // self-check of its own, which the errors point at (SELF_CHECK_SAYS).
+        if (reports.refresh()) {
+            reports.tidy();
+            try {
+                selfTest("moved");
+            } catch (RuntimeException | LinkageError e) {
+                host.errorln("Music Organiser: the self-check failed (" + e + ").");
+            }
+        }
         connection.setDisconnectCallback(() -> {
             client.open = false;
             clients.remove(client);
@@ -1303,7 +1322,7 @@ final class Link {
             m.put("extension", MusicOrganiserExtensionDefinition.VERSION);
             if (!loadedFrom.isEmpty()) m.put("loadedFrom", loadedFrom);
             m.put("loopback", loopback);
-            m.put("error", failure(e) + " Ask for a selftest to see what's wrong.");
+            m.put("error", failure(e) + SELF_CHECK_SAYS);
             return m;
         }
     }
@@ -1620,7 +1639,7 @@ final class Link {
         String route = (String) via;
         if (needsLoopback(route) && buttons == null)
             throw new LinkError("This Bitwig didn't let the link set up its MIDI ports and buttons, so it can't run a command via "
-                                + route + ". A selftest says why.");
+                                + route + "." + SELF_CHECK_SAYS);
         return route;
     }
 
@@ -1794,7 +1813,7 @@ final class Link {
     /** The parameter last clicked in Bitwig (link version 3), with what Bitwig says of it. */
     private void clicked(Ask ask, Map<String, Object> request) {
         if (lastClicked == null)
-            throw new LinkError("This Bitwig didn't let the link follow the last clicked parameter. A selftest says why.");
+            throw new LinkError("This Bitwig didn't let the link follow the last clicked parameter." + SELF_CHECK_SAYS);
         Parameter p = clickedParameter;
         Map<String, Object> m = new LinkedHashMap<>();
         boolean exists = p.exists().get();
@@ -1853,7 +1872,7 @@ final class Link {
      * `key` and `velocity`, 0 to 127), by start, then key.
      */
     private void notes(Ask ask, Map<String, Object> request) {
-        if (noteClips == null) throw new LinkError("This Bitwig didn't let the link read its clips' notes. A selftest says why.");
+        if (noteClips == null) throw new LinkError("This Bitwig didn't let the link read its clips' notes." + SELF_CHECK_SAYS);
         List<Object> clips = new ArrayList<>();
         for (NoteClip c : noteClips) {
             if (!c.clip.exists().get()) continue;
@@ -2262,7 +2281,7 @@ final class Link {
         double length = beats(field(bars, "length"), "The loop's length", true);
         if (!flag(request, "launch", false) || !flag(request, "audition", false))
             throw new LinkError("Only a part the app plays and takes out again (launch and audition) can loop the song's bars.");
-        if (!loops || !followed) throw new LinkError("This Bitwig didn't let the link set the arranger's loop. A selftest says why.");
+        if (!loops || !followed) throw new LinkError("This Bitwig didn't let the link set the arranger's loop." + SELF_CHECK_SAYS);
         return new double[] {start, length};
     }
 
@@ -2473,7 +2492,7 @@ final class Link {
      * back to where it was found when that part comes out. A mark asked for meanwhile is where it goes back to instead.
      */
     private void markPlayStart(Map<String, Object> request, Finish finish) {
-        if (!followed) throw new LinkError("This Bitwig didn't let the link reach the play start. A selftest says why.");
+        if (!followed) throw new LinkError("This Bitwig didn't let the link reach the play start." + SELF_CHECK_SAYS);
         double at = beats(field(request, "at"), "at", false);
         double was = transport.playStartPosition().get();
         if (!same(was, at)) transport.playStartPosition().set(at);
@@ -2637,7 +2656,7 @@ final class Link {
      * and `timeSignature` (extension 3.16), for the Playground's Follow Bitwig, which asks many times a second.
      */
     private void transportNow(Ask ask, Map<String, Object> request) {
-        if (!followed) throw new LinkError("This Bitwig didn't let the link follow where it's playing. A selftest says why.");
+        if (!followed) throw new LinkError("This Bitwig didn't let the link follow where it's playing." + SELF_CHECK_SAYS);
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("playing", transport.isPlaying().get());
         m.put("position", transport.playPosition().get());
@@ -3063,7 +3082,7 @@ final class Link {
      */
     private void useRecorder(Map<String, Object> request, Finish finish) {
         if (recorder == null)
-            throw new LinkError("This Bitwig didn't let the link use its master recorder. A selftest says why.");
+            throw new LinkError("This Bitwig didn't let the link use its master recorder." + SELF_CHECK_SAYS);
         Object what = field(request, "do");
         String action = absent(what) ? "status" : what instanceof String ? (String) what : "";
         switch (action) {
@@ -3136,7 +3155,7 @@ final class Link {
      */
     private void arrange(Map<String, Object> request, Finish asked) {
         String route = route(request);
-        if (arranger == null) throw new LinkError("This Bitwig didn't let the link reach its arranger. A selftest says why.");
+        if (arranger == null) throw new LinkError("This Bitwig didn't let the link reach its arranger." + SELF_CHECK_SAYS);
         Object c = field(request, "checks");
         if (!absent(c) && !(c instanceof Boolean)) throw new LinkError("checks is true or false, not " + Json.js(c) + ".");
         boolean checks = Boolean.TRUE.equals(c);
@@ -3683,8 +3702,8 @@ final class Link {
      * own, in front: then the change stops, saying Bitwig has that open.
      */
     private void fileTrack(Map<String, Object> request, Finish finish) {
-        if (trackAfter == null) throw new LinkError("This Bitwig didn't let the link insert files between tracks. A selftest says why.");
-        if (arranger == null) throw new LinkError("This Bitwig didn't let the link reach its arranger. A selftest says why.");
+        if (trackAfter == null) throw new LinkError("This Bitwig didn't let the link insert files between tracks." + SELF_CHECK_SAYS);
+        if (arranger == null) throw new LinkError("This Bitwig didn't let the link reach its arranger." + SELF_CHECK_SAYS);
         int t = requestedTrack(request);
         String targetId = idOf(t);
         String path = given(field(request, "path"), "file");
@@ -3808,8 +3827,8 @@ final class Link {
      * `aborted`, `abandoned` or `failed`. The rest says what the link saw (see Recording.answer).
      */
     private void record(Map<String, Object> request, Finish finish) {
-        if (master == null) throw new LinkError("This Bitwig didn't let the link record into its arranger. A selftest says why.");
-        if (!trackIds) throw new LinkError("This Bitwig doesn't tell the link tracks' IDs, which the record job finds its track by. A selftest says why.");
+        if (master == null) throw new LinkError("This Bitwig didn't let the link record into its arranger." + SELF_CHECK_SAYS);
+        if (!trackIds) throw new LinkError("This Bitwig doesn't tell the link tracks' IDs, which the record job finds its track by." + SELF_CHECK_SAYS);
         Object id = field(request, "trackId");
         if (!(id instanceof String) || ((String) id).isEmpty()) throw new LinkError("Say which track to record by its ID (trackId).");
         Object s = field(request, "slot");
@@ -4676,7 +4695,7 @@ final class Link {
      */
     private void probe(Map<String, Object> request, Finish finish) {
         String route = route(request);
-        if (arranger == null) throw new LinkError("This Bitwig didn't let the link reach its arranger. A selftest says why.");
+        if (arranger == null) throw new LinkError("This Bitwig didn't let the link reach its arranger." + SELF_CHECK_SAYS);
         Object g = field(request, "gap");
         if (!absent(g) && !(g instanceof Double && (Double) g >= 0 && (Double) g <= 10000))
             throw new LinkError("The gap is from 0 to 10000 ms, not " + Json.js(g) + ".");
@@ -4853,7 +4872,7 @@ final class Link {
         Object id = field(request, "trackId");
         if (absent(id)) return checkTrack(field(request, "track"));
         if (!(id instanceof String) || ((String) id).isEmpty()) throw new LinkError("A track's ID is text.");
-        if (!trackIds) throw new LinkError("This Bitwig doesn't tell the link tracks' IDs, so it can't find one by its ID. A selftest says why.");
+        if (!trackIds) throw new LinkError("This Bitwig doesn't tell the link tracks' IDs, so it can't find one by its ID." + SELF_CHECK_SAYS);
         int t = indexOf((String) id);
         if (t < 0) throw new LinkError("There's no track with ID " + id + " in the project listing.");
         return t;

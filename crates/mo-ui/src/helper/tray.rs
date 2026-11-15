@@ -112,9 +112,36 @@ fn show(helper: &Arc<Helper>) -> windows::core::Result<()> {
     Ok(())
 }
 
+thread_local! {
+    /// Whether a refresh is under way on this thread, and whether another was asked for meanwhile (and whether that
+    /// one was to put the icon in afresh).
+    static REFRESHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REFRESH_AGAIN: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 /// Puts the icon's colour and words right; `again` puts the icon in afresh (at the start, and when Explorer came
 /// back).
+///
+/// Telling Windows waits for Explorer, and while it waits Windows hands this window the messages other programs send
+/// (the review's BW-11). So nothing of the tray is borrowed during the call, and a refresh asked for from inside one
+/// (Explorer came back just then) waits its turn: it would otherwise swap the icon the call under way still shows.
 fn refresh(again: bool) {
+    if REFRESHING.replace(true) {
+        REFRESH_AGAIN.set(Some(again || REFRESH_AGAIN.get() == Some(true)));
+        return;
+    }
+    let mut again = again;
+    loop {
+        refresh_now(again);
+        match REFRESH_AGAIN.take() {
+            Some(next) => again = next,
+            None => break,
+        }
+    }
+    REFRESHING.set(false);
+}
+
+fn refresh_now(again: bool) {
     let ending = TRAY.with(|t| t.borrow().as_ref().filter(|t| t.helper.quitting()).map(|t| t.window));
     if let Some(window) = ending {
         // Outside the borrow: destroying the window calls window_proc (WM_DESTROY) straight away, which borrows too.
@@ -124,9 +151,10 @@ fn refresh(again: bool) {
         }
         return;
     }
-    TRAY.with(|t| {
+    // What to tell Windows is made inside the borrow and told outside it.
+    let told = TRAY.with(|t| {
         let mut t = t.borrow_mut();
-        let Some(tray) = t.as_mut() else { return };
+        let tray = t.as_mut()?;
         let state = tray.helper.bitwig();
         let colour = match &state {
             None => AMBER,
@@ -136,29 +164,29 @@ fn refresh(again: bool) {
         let words = format!("Music Organiser helper: {}", helper::bitwig_words(state.as_ref()));
         let now = (colour, words);
         if !again && tray.shown.as_ref() == Some(&now) {
-            return;
+            return None;
         }
         let changed_colour = tray.shown.as_ref().is_none_or(|(c, _)| *c != colour);
+        let mut old = None;
         if changed_colour || tray.icon.is_none() {
-            let old = tray.icon.take();
+            old = tray.icon.take();
             tray.icon = make_icon(colour);
-            if let Some(old) = old {
-                // SAFETY: an icon this module made and no longer shows once the next call below replaces it.
-                unsafe {
-                    let _ = DestroyIcon(old);
-                }
-            }
         }
         tray.shown = Some(now);
-        let data = icon_data(tray);
-        // SAFETY: `data` is filled in for this window's icon 1.
-        unsafe {
-            // Adding fails when it's already there (Explorer kept it): it's changed instead.
-            if !again || !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
-                let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
-            }
-        }
+        Some((icon_data(tray), old))
     });
+    let Some((data, old)) = told else { return };
+    // SAFETY: `data` is filled in for this window's icon 1, with the icon the tray keeps; the icon it showed before
+    // is only let go once Windows has the new one.
+    unsafe {
+        // Adding fails when it's already there (Explorer kept it): it's changed instead.
+        if !again || !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+        }
+        if let Some(old) = old {
+            let _ = DestroyIcon(old);
+        }
+    }
 }
 
 fn icon_data(tray: &Tray) -> NOTIFYICONDATAW {
@@ -183,7 +211,12 @@ fn icon_data(tray: &Tray) -> NOTIFYICONDATAW {
 }
 
 extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let taskbar_back = TRAY.with(|t| t.borrow().as_ref().map(|t| t.taskbar_back));
+    // A message that comes while the tray is being changed is Windows' own to answer: never a panic, which can't
+    // leave this function and would end the helper.
+    let Ok(taskbar_back) = TRAY.with(|t| t.try_borrow().map(|t| t.as_ref().map(|t| t.taskbar_back))) else {
+        // SAFETY: the default answer to a message for this thread's own window.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    };
     match message {
         ICON_MESSAGE => {
             match (lparam.0 & 0xffff) as u32 {
@@ -198,22 +231,18 @@ extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lpara
             LRESULT(0)
         }
         WM_DESTROY => {
-            TRAY.with(|t| {
-                if let Some(tray) = t.borrow().as_ref() {
-                    let data = icon_data(tray);
-                    // SAFETY: removes this window's own icon and timer.
-                    unsafe {
-                        let _ = Shell_NotifyIconW(NIM_DELETE, &data);
-                        let _ = KillTimer(Some(window), TIMER);
-                    }
-                    if let Some(icon) = tray.icon {
-                        // SAFETY: the icon is gone from the tray now.
-                        unsafe {
-                            let _ = DestroyIcon(icon);
-                        }
+            // Taken out of the borrow first: taking the icon away waits for Explorer too.
+            let going = TRAY.with(|t| t.borrow_mut().as_mut().map(|tray| (icon_data(tray), tray.icon.take())));
+            if let Some((data, icon)) = going {
+                // SAFETY: removes this window's own icon and timer; the icon is gone from the tray by then.
+                unsafe {
+                    let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+                    let _ = KillTimer(Some(window), TIMER);
+                    if let Some(icon) = icon {
+                        let _ = DestroyIcon(icon);
                     }
                 }
-            });
+            }
             // SAFETY: ends this thread's message loop.
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
@@ -290,8 +319,16 @@ fn open_app() {
 fn start_app() {
     use std::os::windows::process::CommandExt;
     const NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
-    let opened = std::env::current_exe()
-        .and_then(|exe| std::process::Command::new(exe).creation_flags(NORMAL_PRIORITY_CLASS).spawn());
+    // A debug build is a console program, and the helper has no console to hand on: without this Windows would give
+    // the app a black window of its own, and closing that ends the app on the spot (the review's BW-9).
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let opened = std::env::current_exe().and_then(|exe| {
+        std::process::Command::new(exe)
+            .creation_flags(NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW)
+            // The launcher watches the copy it started, not this one.
+            .env_remove("MO_WATCH")
+            .spawn()
+    });
     if let Err(e) = opened {
         log::warning("Helper", &format!("Couldn't open Music Organiser: {e}"));
     }

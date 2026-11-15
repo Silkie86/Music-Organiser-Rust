@@ -327,7 +327,7 @@ class NewerApiTest {
         m.broken.add("createLauncherCursorClip");
         start(m);
         assertEquals(true, app.ask(obj("id", 1, "cmd", "project")).get("ok"));
-        assertEquals("This Bitwig didn't let the link read its clips' notes. A selftest says why.", error(app.ask(obj("id", 2, "cmd", "notes"))));
+        assertEquals("This Bitwig didn't let the link read its clips' notes." + Link.SELF_CHECK_SAYS, error(app.ask(obj("id", 2, "cmd", "notes"))));
         Map<String, Object> result = SelfCheckTest.map(app.ask(obj("id", 3, "cmd", "selftest")).get("result"));
         assertEquals(List.of("clip notes"), listAt(result, "checks").stream().filter(c -> !(Boolean) at(c, "ok")).map(c -> at(c, "name"))
                                                                     .collect(Collectors.toList()));
@@ -702,7 +702,7 @@ class NewerApiTest {
         start(m);
         bitwig.allowChanges(true);
         assertEquals(false, at(app.ask(obj("id", 1, "cmd", "hello")), "result", "songLoop"));
-        assertEquals("This Bitwig didn't let the link set the arranger's loop. A selftest says why.",
+        assertEquals("This Bitwig didn't let the link set the arranger's loop." + Link.SELF_CHECK_SAYS,
                      error(app.waitFor(partWithBars(2, "MO Play 1.mid"))));
         // The part alone still plays there.
         assertJson(obj("slot", 0, "launched", true),
@@ -838,7 +838,7 @@ class NewerApiTest {
         m.broken.add("playStartPosition");
         start(m);
         bitwig.allowChanges(true);
-        assertEquals("This Bitwig didn't let the link reach the play start. A selftest says why.",
+        assertEquals("This Bitwig didn't let the link reach the play start." + Link.SELF_CHECK_SAYS,
                      error(app.waitFor(obj("id", 1, "cmd", "playstart", "at", 32))));
     }
 

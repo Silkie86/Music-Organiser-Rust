@@ -5339,8 +5339,8 @@ mod tests {
         assert_eq!(
             card.detail,
             format!(
-                "{} Bitwig's play start is at bar 9 now, where it fits Night drive: drag the clip down to it in the \
-                 arranger.",
+                "Bitwig's play start is at bar 9 now, where it fits Night drive: drag the clip down to it in the \
+                 arranger. {}",
                 mo_dawlink::bitwig::PART_IN
             )
         );

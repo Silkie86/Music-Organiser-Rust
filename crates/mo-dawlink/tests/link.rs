@@ -5,7 +5,7 @@
 use std::net::TcpListener;
 use std::time::Duration;
 
-use mo_dawlink::bitwig::fake::{CHANGES_OFF, FakeBitwig, OnConnect, World};
+use mo_dawlink::bitwig::fake::{CHANGES_OFF, FakeBitwig, OnConnect, SELF_CHECK_SAYS, World};
 use mo_dawlink::bitwig::{DeviceId, Error, Inserted, Link, Pad};
 use serde_json::{Value, json};
 
@@ -31,7 +31,7 @@ fn greets_and_says_what_bitwig_has_open() {
     assert_eq!((hello.link, hello.product.as_str(), hello.version.as_str()), (3, "Bitwig Studio", "6.1.5"));
     assert_eq!((hello.project.as_str(), hello.modified, hello.engine), ("Night Drive", false, true));
     assert_eq!((hello.changes, hello.only_in, hello.loopback), (true, true, Some(true)));
-    assert_eq!(hello.answering(), "the Music Organiser extension 3.29");
+    assert_eq!(hello.answering(), "the Music Organiser extension 3.30");
     assert_eq!(hello.can_send(), Ok(()));
 
     // Asking again sees what changed in Bitwig meanwhile.
@@ -276,10 +276,7 @@ fn an_old_script_or_changes_off_take_nothing() {
 #[test]
 fn a_link_that_didnt_start_says_why() {
     let bitwig = with(|w| {
-        w.hello.insert(
-            "error".into(),
-            json!("The Bitwig extension failed: no transport. Ask for a selftest to see what's wrong."),
-        );
+        w.hello.insert("error".into(), json!(format!("The Bitwig extension failed: no transport.{SELF_CHECK_SAYS}")));
     });
     let link = connect(&bitwig);
     assert_eq!(link.hello().project, "");
@@ -287,8 +284,10 @@ fn a_link_that_didnt_start_says_why() {
     assert!(matches!(err, Error::NotStarted(_)));
     assert_eq!(
         err.to_string(),
-        "Part of the Music Organiser extension didn't start in Bitwig, so the app didn't send anything. Restarting \
-         Bitwig may help. Bitwig said: The Bitwig extension failed: no transport. Ask for a selftest to see what's wrong."
+        format!(
+            "Part of the Music Organiser extension didn't start in Bitwig, so the app didn't send anything. \
+             Restarting Bitwig may help. Bitwig said: The Bitwig extension failed: no transport.{SELF_CHECK_SAYS}"
+        )
     );
 }
 

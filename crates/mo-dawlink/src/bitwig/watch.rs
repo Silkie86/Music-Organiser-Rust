@@ -48,6 +48,10 @@ pub enum State {
     Connecting,
     /// Nothing answered on the link's port: Bitwig isn't running, or the extension isn't added in it.
     NoBitwig,
+    /// Something has the link's port but didn't greet as the link in time, or the connection broke as it began: a
+    /// busy Bitwig (opening a project, say) greets late, one that's closing lets go, and another program may have
+    /// the port.
+    NoAnswer,
     /// The link answered, but it's older than [`WATCH_NEEDS`]: what answered, in words ("the Music Organiser
     /// extension 3.23"). Installing the extension again (Settings > DAWs) brings the feed.
     TooOld(String),
@@ -266,14 +270,18 @@ fn run(port: u16, shared: &Shared) {
 fn watch_once(port: u16, shared: &Shared) {
     let mut link = match Link::connect(port, CONNECT_TIMEOUT) {
         Ok(link) => link,
+        Err(super::Error::NotRunning) => {
+            settle_on(shared, State::NoBitwig);
+            return;
+        }
+        // Not "Bitwig isn't open": something has the port (the review's BW-4).
         Err(_) => {
-            publish(shared, |live| *live = fresh(live, State::NoBitwig));
+            settle_on(shared, State::NoAnswer);
             return;
         }
     };
     if !link.hello().at_least(WATCH_NEEDS) {
-        let answering = link.hello().answering();
-        publish(shared, |live| *live = fresh(live, State::TooOld(answering)));
+        settle_on(shared, State::TooOld(link.hello().answering()));
         return;
     }
     // Kept before asking, so a drop from now on closes the connection; checked after, as the drop may have come first.
@@ -286,8 +294,7 @@ fn watch_once(port: u16, shared: &Shared) {
     let answer = match link.start_watch() {
         Ok(answer) => answer,
         Err(error) => {
-            let words = error.to_string();
-            publish(shared, |live| *live = fresh(live, State::Refused(words)));
+            settle_on(shared, State::Refused(error.to_string()));
             return;
         }
     };
@@ -313,17 +320,32 @@ fn watch_once(port: u16, shared: &Shared) {
     }
 }
 
+/// The picture when a try didn't reach the feed: nothing in it but `state`. A try that ends as the one before did
+/// changes nothing, so a reader going by [`Watch::version`] isn't woken every few seconds for the same news.
+fn settle_on(shared: &Shared, state: State) {
+    if lock(&shared.live).state != state {
+        publish(shared, |live| *live = fresh(live, state));
+    }
+}
+
 /// A picture with nothing in it but `state`, keeping the count of events (see [`Live::events`]).
 fn fresh(live: &Live, state: State) -> Live {
     Live { state, events: live.events, ..Live::default() }
 }
 
 /// Changes the picture (a copy of it: readers holding the old one keep it) and says it changed.
+///
+/// The lock is held only to take the picture and to put the new one in, never while it's copied and changed: this
+/// thread runs at the lowest priority, and a reader at the window's ([`Watch::now`]) would wait for as long as Windows
+/// kept it off a core with the lock held (the review's BW-12). Only this thread writes, so nothing is lost between.
 fn publish(shared: &Shared, change: impl FnOnce(&mut Live)) {
-    let mut live = lock(&shared.live);
-    let mut next = Live::clone(&live);
+    let was = Arc::clone(&lock(&shared.live));
+    let mut next = Live::clone(&was);
     change(&mut next);
-    *live = Arc::new(next);
+    let next = Arc::new(next);
+    let old = std::mem::replace(&mut *lock(&shared.live), next);
+    // Let go of outside the lock too: the last holder frees the track list.
+    drop((old, was));
     shared.version.fetch_add(1, Ordering::AcqRel);
 }
 

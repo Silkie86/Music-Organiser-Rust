@@ -280,6 +280,15 @@ impl Job {
         self.end(State::Done, detail);
     }
 
+    /// Done, but with something to read and act on that a line gone in a few seconds would lose: the card stays
+    /// until its × takes it away, as [`Feed::told`]'s does, and isn't a failure.
+    pub fn done_to_read(mut self, title: &str, detail: &str) {
+        self.retitle(title);
+        self.end(State::Done, detail);
+        self.feed.update(self.id, |c| c.ended = None);
+        self.feed.changed();
+    }
+
     /// Failed, with a headline that says what came of it.
     pub fn failed_as(mut self, title: &str, why: &str) {
         self.retitle(title);
@@ -447,8 +456,12 @@ mod tests {
         feed.start("Backing up", "").failed("The drive is full");
         feed.told("Put the old app's databases away", "In Old databases");
         feed.notice("Using the old copy of your data", "The drive is missing");
+        feed.start("Sending Keys", "").done_to_read("Keys is in Bitwig, but its bar isn't marked", "Why");
+        let cards = feed.visible(Instant::now() + FAILED_STAYS);
+        let kept = cards.iter().find(|c| c.title.starts_with("Keys")).unwrap();
+        assert_eq!((kept.state, kept.to_close()), (State::Done, true), "done, and it stays to be read");
         let close: Vec<bool> = feed.visible(Instant::now()).iter().map(Card::to_close).collect();
-        assert_eq!(close, [false, false, true, true, true]);
+        assert_eq!(close, [false, false, true, true, true, true]);
         drop(running);
     }
 }

@@ -1,5 +1,5 @@
 //! A stand-in for the Music Organiser link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
-//! on a free port on this computer, greets each connection as extension 3.29 does, and answers `hello`, `newtrack`,
+//! on a free port on this computer, greets each connection as extension 3.30 does, and answers `hello`, `newtrack`,
 //! `insert`, `pads`, `clip`, `selectedtrack`, `transport`, `watch`, `stoptracks`, `deleteclip` and `deletetrack` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
 //! whichever connection it came on, as the extension makes changes one at a time.
@@ -312,14 +312,14 @@ pub struct FakeSongLoop {
 }
 
 impl Default for World {
-    /// "Night Drive" open, changes allowed, extension 3.29 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
+    /// "Night Drive" open, changes allowed, extension 3.30 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
     /// Drums (a group), Kick (audio, with EQ+), Bass (an instrument: Serum, then a Compressor, selected) and the
     /// Master (with a Peak Limiter). The arranger's loop is off, over the first 4 bars, and Play starts at the start.
     /// 120 BPM in 4/4, with nothing recorded into the arranger.
     fn default() -> World {
         let hello = json!({
             "link": 3, "product": "Bitwig Studio", "version": "6.1.5", "api": 23, "platform": "WINDOWS",
-            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.29", "loopback": true,
+            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.30", "loopback": true,
             "songLoop": true, "watch": WATCH_SECTIONS,
         });
         let mut serum = FakeDevice::new("Serum", "instrument");
@@ -385,6 +385,11 @@ impl Default for World {
         world
     }
 }
+
+/// How the extension's errors about a part of Bitwig it couldn't use end from 3.30 (`Link.SELF_CHECK_SAYS` in the
+/// Java, which this copies).
+pub const SELF_CHECK_SAYS: &str = " The self-check Bitwig wrote as it started says why: the newest self-check file \
+                                   in the app's data folder, under reports, then bitwig.";
 
 /// A selection that moves when a request comes ([`World::select_on`]), before the request is answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1184,7 +1189,7 @@ impl World {
         };
         // As the greeting says (`songLoop`): a Bitwig that didn't let the link reach its loop refuses the bars.
         if self.greeting().get("songLoop").and_then(Value::as_bool) == Some(false) {
-            return Err("This Bitwig didn't let the link set the arranger's loop. A selftest says why.".into());
+            return Err(format!("This Bitwig didn't let the link set the arranger's loop.{SELF_CHECK_SAYS}"));
         }
         Ok(Some(bars))
     }
