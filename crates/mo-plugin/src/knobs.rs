@@ -161,6 +161,16 @@ impl Knobs {
         }
     }
 
+    /// `knob` (Volume or a switch) as the project kept it, on the DAW's main thread as the project opens: it acts at
+    /// once, and an open panel shows it. Not told to the DAW (that would be recorded as a turn of the knob): the DAW
+    /// reads the knobs again instead. A list knob is never set here, as it would pick a line and play it.
+    pub fn restore(&self, knob: Knob, value: f64, player: &Player) {
+        if knob.list().is_some() || knob == Knob::Like {
+            return;
+        }
+        self.turn(knob, value, player, None);
+    }
+
     /// The knobs the DAW has turned since the panel last asked, for the panel to act on.
     pub fn turned(&self) -> Vec<Knob> {
         let bits = self.turned.swap(0, Ordering::AcqRel);
