@@ -60,7 +60,7 @@ try {
     Run-Setup @()
     Check (Test-Path -LiteralPath (Join-Path $app 'music-organiser.exe')) 'the app is in'
     $menu = Join-Path ([Environment]::GetFolderPath('Programs')) "$name.lnk"
-    Check (Test-Path -LiteralPath $menu) "a Start menu shortcut called $name'
+    Check (Test-Path -LiteralPath $menu) "a Start menu shortcut called $name"
     $apps = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
         Where-Object { $_.PSChildName -like '{*}_is1' -and (Get-ItemProperty $_.PSPath).InstallLocation -like "$app*" }
     Check ($null -ne $apps) 'in the Apps list, for this user only'
