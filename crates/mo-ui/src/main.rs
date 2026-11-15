@@ -215,6 +215,9 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::midi::write_picks_waiting();
     // A settings change still waiting to be written goes now.
     mo_ui::settings::finish_up();
+    // So does a status, stars, heart or tag given on a song's card while the Songs page was busy: waited for up to 10
+    // seconds, only while some are waiting.
+    mo_ui::songs::finish_up();
     // A Remove still sending things to the Recycle Bin stops, and keeps what went for Put back.
     mo_ui::space::finish_up();
     // A backup still running stops tidily, and its settings and songs list waiting to be written go now.

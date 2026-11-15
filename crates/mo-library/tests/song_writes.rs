@@ -403,6 +403,28 @@ fn what_you_give_a_song_is_kept_for_every_save_of_it_and_reads_back() {
 }
 
 #[test]
+fn several_changes_are_kept_together_or_not_at_all() {
+    let songs = library("fields-together");
+    song_writes::write(&songs, &put(read(2, TWO), None)).unwrap();
+    let both = rows(&[(1, ONE), (2, TWO)]);
+    let tags = |list: &[&str]| list.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>();
+    // The tags a song shows, from one of its saves, given to every save with a new one, in one go (review SG-1).
+    let shown_and_new = [Change::AddTag("Dark".into()), Change::AddTag("live".into())];
+    let kept = song_fields::set_all(&songs, &both, &shown_and_new).unwrap();
+    assert_eq!(kept, Kept { saves: vec![1, 2], unknown: vec![] });
+    assert_eq!(yours(&songs, 1).3, tags(&["dark", "live"]));
+    assert_eq!(yours(&songs, 2).3, tags(&["dark", "digitakt", "live"]));
+    // One of them that can't be kept: none of them is.
+    let refused = [Change::AddTag("vocal".into()), Change::Rating(9)];
+    assert!(song_fields::set_all(&songs, &both, &refused).is_err());
+    assert_eq!((yours(&songs, 2).1, yours(&songs, 2).3), (0, tags(&["dark", "digitakt", "live"])));
+    // Made in order: a tag put on and then taken off is off.
+    let undone = [Change::AddTag("vocal".into()), Change::RemoveTag("Vocal".into())];
+    song_fields::set_all(&songs, &both, &undone).unwrap();
+    assert_eq!(yours(&songs, 1).3, tags(&["dark", "live"]));
+}
+
+#[test]
 fn a_save_read_again_cant_undo_what_you_gave_it() {
     let songs = library("fields-read-again");
     for change in [

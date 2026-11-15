@@ -4,9 +4,11 @@
 //! save's plugins, samples and details follow from a background thread that only reads the last song picked.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
@@ -387,22 +389,29 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
     };
     let mut catch_up_at = Some(Instant::now() + CATCH_UP_AFTER);
     let mut keep_again_at: Option<Instant> = None;
+    // What came while the thread was busy, still to do ([`next`]).
+    let mut waiting: VecDeque<Told> = VecDeque::new();
     loop {
         let now = Instant::now();
         let due = |at: Option<Instant>| at.map_or(RETRY_AFTER, |at| at.saturating_duration_since(now));
         // A save that couldn't be read (still being written, or locked) is tried again after a quiet moment.
         let wait = due(catch_up_at).min(due(keep_again_at)).min(RETRY_AFTER);
-        // What you gave a song on its card: kept, and the list made again with it. If it can't be kept the list is
+        // What you gave songs on their cards: kept, and the list made again with it. If it can't be kept the list is
         // made again all the same, so the card goes back to what the library has, and a card says why.
-        let mut given: Option<Result<(), String>> = None;
-        let changes = match rx.recv_timeout(wait) {
+        let mut gave = Gave::default();
+        let changes = match next(&rx, &mut waiting, wait) {
             Ok(Told::Changed(changes)) => Some(changes),
-            Ok(Told::Give(save_ids, change)) => {
-                given = Some(live.give(&save_ids, &change).map(|_| ()).map_err(|e| e.to_string()));
+            Ok(Told::Give(given)) => {
+                gave.keep(live, given);
                 None
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => live.retries(),
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            // The app is closing, and what you gave songs before it is kept: the rest is let go.
+            Ok(Told::Finish(done)) => {
+                let _ = done.send(());
+                break;
+            }
+            Err(RecvTimeoutError::Timeout) => live.retries(),
+            Err(RecvTimeoutError::Disconnected) => break,
         };
         let mut updated = Updated::default();
         if let Some(changes) = &changes {
@@ -421,9 +430,12 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                 );
             }
         }
+        // What you gave songs meanwhile is kept before the catch-up or a keep can make it wait (review SG-11). Once
+        // the app is closing nothing more is read.
+        let closing = gave.take_waiting(live, &rx, &mut waiting);
         // Looked at after every batch too, so a folder that keeps changing (a DAW saving every few seconds) can't put
         // it off.
-        if catch_up_at.is_some_and(|at| Instant::now() >= at) {
+        if !closing && catch_up_at.is_some_and(|at| Instant::now() >= at) {
             catch_up_at = None;
             let began = Instant::now();
             let caught = live.catch_up();
@@ -440,9 +452,17 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
             );
             updated = updated.and(caught);
         }
-        // Kept in songs.db with each change, or a while after it couldn't be kept.
+        let closing = gave.take_waiting(live, &rx, &mut waiting);
+        // Kept in songs.db with each change, or a while after it couldn't be kept. As the app closes, only when you gave
+        // a song something just now: a save it went to that the library hadn't taken yet (just read) has it here only
+        // till it's kept.
         let mut renumbered = false;
-        if !updated.is_empty() || live.note_to_keep() || keep_again_at.is_some_and(|at| Instant::now() >= at) {
+        let keep_now = if closing {
+            gave.any
+        } else {
+            !updated.is_empty() || live.note_to_keep() || keep_again_at.is_some_and(|at| Instant::now() >= at)
+        };
+        if keep_now {
             keep_again_at = match live.keep() {
                 Some(Ok(kept)) => {
                     let w = &kept.written;
@@ -457,6 +477,13 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                     renumbered = !w.ids.is_empty();
                     None
                 }
+                Some(Err(e)) if closing => {
+                    log::warning(
+                        "Songs",
+                        &format!("{e}, as the app closed: saves not kept yet are read again next time"),
+                    );
+                    None
+                }
                 Some(Err(e)) => {
                     log::warning("Songs", &format!("{e}; it's kept with the next change, or in a minute"));
                     Some(Instant::now() + KEEP_AGAIN_AFTER)
@@ -464,7 +491,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                 None => None,
             };
         }
-        if updated.is_empty() && !renumbered && given.is_none() {
+        if closing || (updated.is_empty() && !renumbered && !gave.any) {
             continue;
         }
         // Made again when a save's id changed too, so the page picks it by the id the library has.
@@ -476,11 +503,10 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
             show_again(&app, songs, years);
             crate::finder::add_source(&app, "songs", found);
             crate::midi::songs_offered(&app, offered);
-            if let Some(Err(why)) = given {
-                log::warning("Songs", &format!("Couldn't keep what the song was given: {why}"));
+            for why in &gave.not_kept {
                 FEED.with(|f| {
                     if let Some(feed) = f.borrow().as_ref() {
-                        feed.start(NOT_KEPT, "").failed(&why);
+                        feed.start(NOT_KEPT, "").failed(why);
                     }
                 });
             }
@@ -497,15 +523,102 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
     }
 }
 
-/// What the page's thread is told: the project folders changed, or you gave a song something on its card (its saves'
-/// ids and what).
+/// What the page's thread is told: the project folders changed, you gave a song something on its card, or the app is
+/// closing (it says back once what you gave songs is kept).
 enum Told {
     Changed(Changes),
-    Give(Vec<i64>, Change),
+    Give(Given),
+    Finish(mpsc::Sender<()>),
 }
 
-/// How the window's thread tells the page's thread ([`watch`]); None until the list is up.
+/// A song given something on its card ([`Live::give`]): the song as the list showed it (its key, and the ids of its
+/// saves and copies), and what.
+struct Given {
+    song: String,
+    save_ids: Vec<i64>,
+    change: Change,
+}
+
+/// What the page's thread does next ([`watch`]): what you gave songs on their cards first, then the app closing, then
+/// the rest in the order it came. It waits up to `wait` for something when nothing's waiting.
+fn next(rx: &Receiver<Told>, waiting: &mut VecDeque<Told>, wait: Duration) -> Result<Told, RecvTimeoutError> {
+    waiting.extend(rx.try_iter());
+    let first = waiting
+        .iter()
+        .position(|t| matches!(t, Told::Give(_)))
+        .or_else(|| waiting.iter().position(|t| matches!(t, Told::Finish(_))))
+        .unwrap_or(0);
+    match waiting.remove(first) {
+        Some(told) => Ok(told),
+        None => rx.recv_timeout(wait),
+    }
+}
+
+/// What you gave songs on their cards in one pass of [`watch`]: whether you gave any, and why each that couldn't be
+/// kept wasn't.
+#[derive(Default)]
+struct Gave {
+    any: bool,
+    not_kept: Vec<String>,
+}
+
+impl Gave {
+    /// Keeps `given` ([`Live::give`]). Why it can't be kept goes in the log now and on a card with the list.
+    fn keep(&mut self, live: &mut Live, given: Given) {
+        self.any = true;
+        if let Err(e) = live.give(&given.song, &given.save_ids, &given.change) {
+            log::warning("Songs", &format!("Couldn't keep what the song was given: {e}"));
+            self.not_kept.push(e.to_string());
+        }
+        let _ = GIVES_WAITING.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    }
+
+    /// Keeps what you've given songs since the pass began, ahead of the rest that came meanwhile ([`next`] takes that
+    /// in turn). Whether the app is closing.
+    fn take_waiting(&mut self, live: &mut Live, rx: &Receiver<Told>, waiting: &mut VecDeque<Told>) -> bool {
+        waiting.extend(rx.try_iter());
+        while let Some(at) = waiting.iter().position(|t| matches!(t, Told::Give(_))) {
+            if let Some(Told::Give(given)) = waiting.remove(at) {
+                self.keep(live, given);
+            }
+        }
+        waiting.iter().any(|t| matches!(t, Told::Finish(_)))
+    }
+}
+
+/// How the window's thread tells the page's thread ([`watch`]); None until the list is up, and once the app closes.
 static TELL: Mutex<Option<mpsc::Sender<Told>>> = Mutex::new(None);
+
+/// How many songs given something on their cards the page's thread hasn't kept yet, waited for as the app closes.
+static GIVES_WAITING: AtomicUsize = AtomicUsize::new(0);
+
+/// How long the app waits as it closes for what you gave songs on their cards to be kept: the page's thread may be part
+/// way through reading your project folders.
+const CLOSE_WAIT: Duration = Duration::from_secs(10);
+
+/// As the app closes: the page's thread is told to stop once what you gave songs on their cards and it hasn't kept yet
+/// is kept, waited for [`CLOSE_WAIT`] at most (review SG-11). What still isn't kept is said in the log.
+pub fn finish_up() {
+    let tell = TELL.lock().unwrap_or_else(PoisonError::into_inner).take();
+    let (done, finished) = mpsc::channel();
+    let told = tell.is_some_and(|t| t.send(Told::Finish(done)).is_ok());
+    if told && GIVES_WAITING.load(Ordering::SeqCst) > 0 {
+        let _ = finished.recv_timeout(CLOSE_WAIT);
+    }
+    let left = GIVES_WAITING.load(Ordering::SeqCst);
+    if left > 0 {
+        log::warning("Songs", &not_kept_line(left));
+    }
+}
+
+/// The log's words for `left` changes given on song cards that the app closed before it kept.
+fn not_kept_line(left: usize) -> String {
+    let (changes, were) = if left == 1 { ("change", "was") } else { ("changes", "were") };
+    format!(
+        "The app closed before {left} {changes} given on song cards {were} kept in songs.db (the Songs page was busy \
+         reading your project folders): those songs show as they were at the next start"
+    )
+}
 
 /// The card's title when what you gave a song couldn't be kept.
 const NOT_KEPT: &str = "Couldn't keep that for the song";
@@ -561,19 +674,20 @@ fn give(app: &AppWindow, what: &str, value: &str) {
         };
         let save_ids: Vec<i64> = row.song.saves().chain(&row.song.copies).map(|s| s.id).collect();
         show_given(row, &change);
-        Some(Ok((save_ids, change)))
+        Some(Ok(Given { song: row.song.key.clone(), save_ids, change }))
     });
-    let (save_ids, change) = match asked {
-        Some(Ok(asked)) => asked,
+    let given = match asked {
+        Some(Ok(given)) => given,
         Some(Err(why)) => return failed(&why),
         None => return,
     };
     // The line in the list and the card show it now; the filters' counts follow when the list is made again.
     LINES.with(|l| l.notify.reset());
     fill_panel(app);
-    let told =
-        TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|t| t.send(Told::Give(save_ids, change)));
+    GIVES_WAITING.fetch_add(1, Ordering::SeqCst);
+    let told = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|t| t.send(Told::Give(given)));
     if !matches!(told, Some(Ok(()))) {
+        let _ = GIVES_WAITING.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
         failed("the song list isn't being kept up to date just now; it shows again as it was when the app next starts");
     }
 }
@@ -1467,6 +1581,34 @@ mod tests {
         // Six stars, or a tag with no name, is refused before anything shows.
         assert!(Change::Rating(6).checked().is_err());
         assert!(Change::AddTag("  ".to_owned()).checked().is_err());
+    }
+
+    /// Review SG-11: what you gave songs on their cards goes before the app closing, and that before folders to read,
+    /// whatever order they came in; a give that came while the thread was busy never waits behind a read.
+    #[test]
+    fn what_you_give_songs_goes_first_then_the_app_closing_then_folders_read() {
+        let (tx, rx) = mpsc::channel();
+        let card =
+            |song: &str| Told::Give(Given { song: song.to_owned(), save_ids: vec![1], change: Change::Rating(1) });
+        let (done, _finished) = mpsc::channel();
+        tx.send(Told::Changed(Changes::default())).unwrap();
+        tx.send(card("a")).unwrap();
+        tx.send(Told::Finish(done)).unwrap();
+        tx.send(card("b")).unwrap();
+        let mut waiting = VecDeque::new();
+        let mut order = Vec::new();
+        while let Ok(told) = next(&rx, &mut waiting, Duration::ZERO) {
+            order.push(match told {
+                Told::Give(given) => given.song,
+                Told::Finish(_) => "closing".to_owned(),
+                Told::Changed(_) => "folders".to_owned(),
+            });
+        }
+        assert_eq!(order, ["a", "b", "closing", "folders"]);
+        assert!(waiting.is_empty());
+        // What the log says of changes the app closed before it kept.
+        assert!(not_kept_line(1).starts_with("The app closed before 1 change given on song cards was kept"));
+        assert!(not_kept_line(2).contains("2 changes given on song cards were kept"));
     }
 
     #[test]

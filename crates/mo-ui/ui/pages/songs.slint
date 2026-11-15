@@ -321,23 +321,6 @@ component SongPanel inherits Panel {
                 font-size: Type.meta;
                 overflow: elide;
             }
-            // Which save the buttons act on, when one is picked on the Saves tab; a click goes back to the newest.
-            if SongsData.picked-save != "": HorizontalLayout {
-                spacing: Space.sm;
-                alignment: start;
-                Text {
-                    text: "The buttons act on the picked save: " + SongsData.picked-save-name;
-                    color: Theme.accent;
-                    font-size: Type.meta;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-                LinkText {
-                    text: "Back to the newest";
-                    font-size: Type.meta;
-                    clicked => { SongsData.pick-save("", ""); }
-                }
-            }
             // Its status, stars, key and tags, and its buttons below: each row wraps in a narrow panel, so nothing runs past
             // its edge.
             FlexboxLayout {
@@ -406,6 +389,25 @@ component SongPanel inherits Panel {
                         SongsData.give("add-tag", text);
                         self.text = "";
                     }
+                }
+            }
+            // Which save the buttons below act on, when one is picked on the Saves tab; a click goes back to the newest.
+            // Right above them, below the status, stars, heart and tags, which are the whole song's: above those, it
+            // read as if they changed the picked save alone (the whole-app review of 14 Nov, SG-3).
+            if SongsData.picked-save != "": HorizontalLayout {
+                spacing: Space.sm;
+                alignment: start;
+                Text {
+                    text: "The buttons below act on the picked save: " + SongsData.picked-save-name;
+                    color: Theme.accent;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                LinkText {
+                    text: "Back to the newest";
+                    font-size: Type.meta;
+                    clicked => { SongsData.pick-save("", ""); }
                 }
             }
             FlexboxLayout {

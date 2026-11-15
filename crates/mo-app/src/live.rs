@@ -31,7 +31,7 @@ use rayon::prelude::*;
 
 use crate::background::{on_bulk_pool, on_pool};
 use crate::shell;
-use crate::songs::{ASK_DOUBTS, DOUBTS_ACROSS_FOLDERS, RUN_GAP, Songs, run_gap};
+use crate::songs::{ASK_DOUBTS, DOUBTS_ACROSS_FOLDERS, RUN_GAP, Songs, run_gap, shown_tags};
 
 /// The details of the saves read here, by their ids, shared with the song panel's reader.
 pub type LiveDetails = Arc<Mutex<HashMap<i64, SaveDetail>>>;
@@ -286,10 +286,15 @@ impl Live {
         &self.roots
     }
 
-    /// Gives every save in `save_ids` (all the saves of one song, rule 14) `change`: kept in the library
-    /// ([`mo_library::song_fields::set`]: all of them or none) and then made to the saves held here, so the list shows
-    /// what's kept. Call it on the thread that owns this list, as [`Live::update`] and [`Live::keep`] are: then no
-    /// save can be read, or kept, between the two. It waits for another write to the library, up to five seconds.
+    /// Gives the song `key` `change`, as you gave it on its card (rule 14: every save of it gets it, its copies in other
+    /// folders too): kept in the library ([`mo_library::song_fields::set_all`]: all of it or none) and then made to the
+    /// saves held here, so the list shows what's kept. Call it on the thread that owns this list, as [`Live::update`]
+    /// and [`Live::keep`] are: then no save can be read, or kept, between the two. It waits for another write to the
+    /// library, up to five seconds.
+    ///
+    /// The song's saves are those held here now (review SG-8): a save read since the card was shown is the song's too,
+    /// and one the library numbered anew is found by its new id. `save_ids`, the saves the card was shown with, are
+    /// given it only when no song has that key now. A tag put on goes with the tags the card showed (review SG-1).
     ///
     /// A save the library hasn't taken yet (just read, or refused) is changed here only, and is kept with the change
     /// when the library takes it. While the list isn't kept in a library of the app's own ([`Live::writes`]) the change
@@ -297,18 +302,43 @@ impl Live {
     ///
     /// If the library can't keep it nothing is changed, here or there. Whether anything held here is different for
     /// it: then [`Live::songs`] gives the list anew.
-    pub fn give(&mut self, save_ids: &[i64], change: &Change) -> Result<bool, LibraryError> {
+    pub fn give(&mut self, key: &str, save_ids: &[i64], change: &Change) -> Result<bool, LibraryError> {
+        let (save_ids, changes) = self.given_to(key, save_ids, change);
         if let Some(songs_db) = &self.writes {
             // By id and the path the library keeps each under: an id alone may be another save's there by now.
             let rows: Vec<SaveRow> = save_ids
                 .iter()
                 .filter_map(|id| self.kept_as.get(id).map(|path| SaveRow { id: *id, path: path.clone() }))
                 .collect();
-            song_fields::set(songs_db, &rows, change)?;
-        } else if let Err(why) = change.checked() {
+            song_fields::set_all(songs_db, &rows, &changes)?;
+        } else if let Some(why) = changes.iter().find_map(|c| c.checked().err()) {
             return Err(LibraryError::Write { path: PathBuf::new(), why });
         }
-        Ok(self.gave(save_ids, change))
+        let mut differs = false;
+        for change in &changes {
+            differs |= self.gave(&save_ids, change);
+        }
+        Ok(differs)
+    }
+
+    /// The saves a change given to the song `key` goes to ([`Live::give`]), and the changes it makes: the song's
+    /// saves and copies as they group now, else `save_ids`. A tag put on comes after the tags the song shows: while its
+    /// newest save has none it shows an older save's, and the newest holding the new tag alone would hide them.
+    fn given_to(&self, key: &str, save_ids: &[i64], change: &Change) -> (Vec<i64>, Vec<Change>) {
+        let real = RealDates::now();
+        let grouped = songs::group_songs(&self.saves, &self.choices, &real);
+        let Some(song) = grouped.iter().find(|s| s.key == key) else {
+            return (save_ids.to_vec(), vec![change.clone()]);
+        };
+        let ids: Vec<i64> = song.saves().chain(&song.copies).map(|s| s.id).collect();
+        let mut changes = Vec::new();
+        if matches!(change, Change::AddTag(_)) {
+            // One an older library holds that couldn't be put on now (too long, say) stays on the save it's on.
+            let shown = shown_tags(song, &real).into_iter().map(Change::AddTag);
+            changes.extend(shown.filter(|c| c.checked().is_ok()));
+        }
+        changes.push(change.clone());
+        (ids, changes)
     }
 
     /// Makes `change` to the saves held here, the panel's copies of them too ([`Live::give`]).
@@ -1032,8 +1062,38 @@ mod tests {
         // A save that isn't held here (hidden, or gone from the list) is no trouble.
         assert!(!live.gave(&[77], &Change::Favourite(true)));
         // With no library of the app's own to keep it in, a change is made here only; one that can't be kept, nowhere.
-        assert!(live.give(&[3], &Change::Rating(2)).unwrap());
-        assert!(live.give(&[3], &Change::Rating(9)).is_err());
+        let day = live.songs().rows.into_iter().find(|r| r.song.latest.id == 3).unwrap().song.key;
+        assert!(live.give(&day, &[3], &Change::Rating(2)).unwrap());
+        assert!(live.give(&day, &[3], &Change::Rating(9)).is_err());
+        assert_eq!(live.saves[2].rating, 2);
+    }
+
+    #[test]
+    fn what_you_give_a_song_goes_to_its_saves_as_they_are_now_with_the_tags_it_shows() {
+        let mut eleven = save(1, "C:\\Music\\Night", "Night_11");
+        eleven.tags = vec!["dark".into(), "vocal".into()];
+        let mut live = live(vec![save(2, "C:\\Music\\Night", "Night_12"), eleven, save(3, "C:\\Music\\Day", "Day_1")]);
+        let night = live.songs().rows.into_iter().find(|r| r.song.latest.id == 2).unwrap().song.key;
+        let card = |live: &Live| live.songs().rows.into_iter().find(|r| r.song.key == night).unwrap();
+        // The newest save has no tags, so the card shows the older save's.
+        assert_eq!(card(&live).tags, ["dark", "vocal"]);
+        // A tag put on keeps them on the card, the new one after them (review SG-1); the same tag again changes nothing.
+        assert!(live.give(&night, &[2, 1], &Change::AddTag("Mix".into())).unwrap());
+        assert_eq!(card(&live).tags, ["dark", "vocal", "mix"]);
+        assert!(!live.give(&night, &[2, 1], &Change::AddTag("DARK".into())).unwrap());
+        assert!(live.saves.iter().all(|s| s.id == 3 || s.tags == ["dark", "vocal", "mix"]));
+        // A save read since the card was shown (Night_13, with the song's status as it was), and one the library
+        // numbered anew, get what's given too: the song's saves are those held now (review SG-8).
+        live.saves.push(save(4, "C:\\Music\\Night", "Night_13"));
+        live.saves[0].id = 22;
+        assert!(live.give(&night, &[2, 1], &Change::Status("Finished".into())).unwrap());
+        assert_eq!(card(&live).status, "Finished");
+        let night_saves: Vec<(i64, &str)> =
+            live.saves.iter().filter(|s| s.id != 3).map(|s| (s.id, s.status.as_str())).collect();
+        assert_eq!(night_saves, [(22, "Finished"), (1, "Finished"), (4, "Finished")]);
+        // Another song is left alone; a song no longer found by its key gets it on the saves the card named.
+        assert_eq!(live.saves[2].status, mo_library::STATUSES[0]);
+        assert!(live.give("a song that's gone", &[3], &Change::Rating(2)).unwrap());
         assert_eq!(live.saves[2].rating, 2);
     }
 
@@ -1192,11 +1252,12 @@ mod tests {
         live.catch_up();
         let ids: Vec<i64> = live.saves.iter().map(|s| s.id).collect();
         assert_eq!(ids.len(), 2);
+        let night = live.songs().rows.remove(0).song.key;
         // Given to both: kept for the one the library has, held for the other, which is kept with it when it's taken.
-        assert!(live.give(&ids, &Change::Status("Mixing".into())).unwrap());
-        assert!(live.give(&ids, &Change::Rating(4)).unwrap());
-        assert!(live.give(&ids, &Change::AddTag("Dark".into())).unwrap());
-        assert!(!live.give(&ids, &Change::Rating(4)).unwrap(), "the same again changes nothing");
+        assert!(live.give(&night, &ids, &Change::Status("Mixing".into())).unwrap());
+        assert!(live.give(&night, &ids, &Change::Rating(4)).unwrap());
+        assert!(live.give(&night, &ids, &Change::AddTag("Dark".into())).unwrap());
+        assert!(!live.give(&night, &ids, &Change::Rating(4)).unwrap(), "the same again changes nothing");
         let kept = |songs: &std::path::Path| -> Vec<(String, i32, Vec<String>)> {
             let mut saves = Library::open_read_only(songs).unwrap().saves().unwrap();
             saves.sort_by_key(|s| s.id);
@@ -1207,12 +1268,12 @@ mod tests {
         live.keep().unwrap().unwrap();
         assert_eq!(kept(&songs), [given.clone(), given.clone()]);
         // One that can't be kept changes nothing, here or in the library.
-        assert!(live.give(&ids, &Change::Rating(9)).is_err());
+        assert!(live.give(&night, &ids, &Change::Rating(9)).is_err());
         assert!(live.saves.iter().all(|s| s.rating == 4));
         // The library busy with another write: said so, and nothing changed here either.
         let holder = rusqlite::Connection::open(&songs).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
-        assert!(live.give(&ids, &Change::Favourite(true)).unwrap_err().is_busy());
+        assert!(live.give(&night, &ids, &Change::Favourite(true)).unwrap_err().is_busy());
         holder.execute_batch("ROLLBACK;").unwrap();
         drop(holder);
         assert!(live.saves.iter().all(|s| !s.favourite));
