@@ -1,5 +1,5 @@
 //! A stand-in for the Music Organiser link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
-//! on a free port on this computer, greets each connection as extension 3.28 does, and answers `hello`, `newtrack`,
+//! on a free port on this computer, greets each connection as extension 3.29 does, and answers `hello`, `newtrack`,
 //! `insert`, `pads`, `clip`, `selectedtrack`, `transport`, `watch`, `stoptracks`, `deleteclip` and `deletetrack` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
 //! whichever connection it came on, as the extension makes changes one at a time.
@@ -186,6 +186,13 @@ pub struct World {
     /// Brings another project to the front part way through the next request with this command, as if someone
     /// brought their own to the front just after the change began: (command, the project).
     pub switch_during: Option<(String, String)>,
+    /// Whether this Bitwig doesn't tell the selected device's sample (`device` answers without `sample`).
+    pub no_sample_names: bool,
+    /// Whether Bitwig shows no sign of a sample going in when it has the name of the one before: `replaced` is null.
+    pub quiet_same_name: bool,
+    /// Selects another device when a request with a command comes, as if someone clicked elsewhere in Bitwig while
+    /// the change waited its turn.
+    pub select_on: Option<SelectOn>,
     /// Brings this project to the front once the next kit's samples are on their pads, before they're named: the link
     /// stops there, with the samples in.
     pub switch_while_filling: Option<String>,
@@ -305,14 +312,14 @@ pub struct FakeSongLoop {
 }
 
 impl Default for World {
-    /// "Night Drive" open, changes allowed, extension 3.28 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
+    /// "Night Drive" open, changes allowed, extension 3.29 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
     /// Drums (a group), Kick (audio, with EQ+), Bass (an instrument: Serum, then a Compressor, selected) and the
     /// Master (with a Peak Limiter). The arranger's loop is off, over the first 4 bars, and Play starts at the start.
     /// 120 BPM in 4/4, with nothing recorded into the arranger.
     fn default() -> World {
         let hello = json!({
             "link": 3, "product": "Bitwig Studio", "version": "6.1.5", "api": 23, "platform": "WINDOWS",
-            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.28", "loopback": true,
+            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.29", "loopback": true,
             "songLoop": true, "watch": WATCH_SECTIONS,
         });
         let mut serum = FakeDevice::new("Serum", "instrument");
@@ -346,6 +353,9 @@ impl Default for World {
             hang_up_on: Vec::new(),
             late: Vec::new(),
             switch_during: None,
+            select_on: None,
+            no_sample_names: false,
+            quiet_same_name: false,
             switch_while_filling: None,
             unnamed_devices: false,
             slow_pads: false,
@@ -374,6 +384,17 @@ impl Default for World {
         }
         world
     }
+}
+
+/// A selection that moves when a request comes ([`World::select_on`]), before the request is answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectOn {
+    /// The request's command ("insert").
+    pub command: String,
+    /// How many requests with that command pass first.
+    pub after: usize,
+    /// The device selected from then on: its track's place in the listing, and its place in the chain.
+    pub device: (usize, usize),
 }
 
 /// A track in the project listing.
@@ -529,6 +550,16 @@ impl World {
             _ => return Err(format!("Unknown command: {}", js(cmd))),
         };
         self.check_allowed(map, changes)?;
+        if let Some(select) = self.select_on.as_mut()
+            && cmd.and_then(Value::as_str) == Some(select.command.as_str())
+        {
+            if select.after > 0 {
+                select.after -= 1;
+            } else if let Some(select) = self.select_on.take() {
+                self.selected_device = Some(select.device);
+                self.selected_track = Some(select.device.0);
+            }
+        }
         match cmd.and_then(Value::as_str) {
             Some("hello") => match self.hello.get("error").and_then(Value::as_str) {
                 Some(error) => Err(error.to_owned()),
@@ -1166,6 +1197,9 @@ impl World {
             Some((index, device)) => json!({
                 "track": track.map(|t| t.name.as_str()).unwrap_or_default(),
                 "device": device.described(index),
+                "trackId": track.map(|t| t.id.as_str()).unwrap_or_default(),
+                "position": index,
+                "sample": if self.no_sample_names { Value::Null } else { file_name(&device.sample).into() },
                 "params": device.params.iter().map(|p| json!({
                     "id": p.id, "name": p.name, "value": p.value.map(|v| f64::from(v) / 1e6), "display": "",
                 })).collect::<Vec<_>>(),
@@ -1184,8 +1218,14 @@ impl World {
         let value = request.get("value").and_then(Value::as_f64).filter(|v| (0.0..=1.0).contains(v));
         let fixed = self.fixed_params.contains(&id);
         let (t, d) = self.selected_device.ok_or("No device is selected in Bitwig.")?;
+        let track_id = self.tracks.get(t).map(|t| t.id.clone()).unwrap_or_default();
         let device =
             self.tracks.get_mut(t).and_then(|t| t.devices.get_mut(d)).ok_or("No device is selected in Bitwig.")?;
+        if !expected(request, &track_id, d, device) {
+            return Err("Another device is selected in Bitwig now than when this was asked for: this setting wasn't \
+                        set. Select the device again and ask again."
+                .into());
+        }
         let param = device
             .params
             .iter_mut()
@@ -1277,7 +1317,8 @@ impl World {
     }
 
     /// A file in the selected device's place (extension 3.25): a sample makes a Sampler with [`World::new_sampler`]'s
-    /// parameters instead of it; what Bitwig can't load leaves the device as it was.
+    /// parameters instead of it; what Bitwig can't load leaves the device as it was. As extension 3.29 does, it
+    /// refuses when the selected device isn't the one to `expect`, and answers whether the sample went in.
     fn replace_selected(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
         if request.get("track").or(request.get("trackId")).is_some_and(|t| !t.is_null()) {
             return Err("Replace takes the selected device's place: give no track.".into());
@@ -1294,13 +1335,32 @@ impl World {
             params: self.new_sampler.clone(),
             ..FakeDevice::sampler(&path)
         };
+        let track_id = self.tracks.get(t).map(|t| t.id.clone()).unwrap_or_default();
         let device =
             self.tracks.get_mut(t).and_then(|t| t.devices.get_mut(d)).ok_or("No device is selected in Bitwig.")?;
-        if loads {
-            *device = sampler;
-            self.modified = true;
+        if !expected(request, &track_id, d, device) {
+            return Err(
+                "Another device is selected in Bitwig now than when this was asked for: nothing was replaced. \
+                        Select the device again and ask again."
+                    .into(),
+            );
         }
-        Ok(json!({}))
+        if !loads {
+            return Ok(json!({ "replaced": false }));
+        }
+        // A sample of the name that was there: its name can't show the swap.
+        let again = file_name(&device.sample).eq_ignore_ascii_case(file_name(&path));
+        *device = sampler;
+        let shown = device.described(d);
+        let fresh: Vec<&str> = device.params.iter().map(|p| p.id.as_str()).collect();
+        self.modified = true;
+        if again && self.quiet_same_name {
+            return Ok(json!({ "replaced": null }));
+        }
+        Ok(json!({
+            "replaced": true, "device": shown, "trackId": track_id, "position": d, "sample": file_name(&path),
+            "fresh": fresh,
+        }))
     }
 
     fn fill_pads(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
@@ -1616,6 +1676,15 @@ fn write_message(stream: &mut TcpStream, message: &Value, lengths: bool) -> io::
     }
     frame.extend_from_slice(&body);
     stream.write_all(&frame)
+}
+
+/// Whether the selected device is the one a request means (`expect`, extension 3.29), each part of it optional.
+fn expected(request: &Map<String, Value>, track_id: &str, position: usize, device: &FakeDevice) -> bool {
+    let Some(expect) = request.get("expect").filter(|e| !e.is_null()) else { return true };
+    expect.get("trackId").is_none_or(|id| id.as_str() == Some(track_id))
+        && expect.get("position").is_none_or(|p| p.as_u64() == Some(position as u64))
+        && expect.get("name").is_none_or(|n| n.as_str() == Some(device.name.as_str()))
+        && expect.get("sample").is_none_or(|s| s.as_str() == Some(file_name(&device.sample)))
 }
 
 /// The name Bitwig gives a sample dropped on a pad, or a Sampler it loads: the file's name without its ending, whichever
