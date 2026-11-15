@@ -75,7 +75,7 @@ pub enum Asked {
 
 type Handler = Box<dyn Fn(Asked) + Send + Sync>;
 
-/// The open app's hold on the port, kept until the app ends: the port is let go with the process, once its last
+/// The open app's hold on the port, kept until the app ends: the port is let go at the very end ([`OneCopy::let_go`]), once its last
 /// settings are written, so a copy waiting for it never reads them half-way.
 pub struct OneCopy {
     hello: Hello,
@@ -151,12 +151,17 @@ pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration, before_s
                     closing = Some(other.app);
                 }
                 // Just let go between the two looks: the next try takes it. Otherwise it isn't the app's.
+                // A copy at its very last step drops what it's asked and lets go a moment later, so the port gets
+                // a few more tries.
                 None => {
-                    if let Ok(listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
-                        return match OneCopy::start(listener, version, exe) {
-                            Ok(held) => Claim::Ours { held, closed: None },
-                            Err(e) => Claim::Unguarded(format!("couldn't answer on port {port}: {e}")),
-                        };
+                    for wait in [0, 50, 100, 150, 200] {
+                        std::thread::sleep(Duration::from_millis(wait));
+                        if let Ok(listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+                            return match OneCopy::start(listener, version, exe) {
+                                Ok(held) => Claim::Ours { held, closed: None },
+                                Err(e) => Claim::Unguarded(format!("couldn't answer on port {port}: {e}")),
+                            };
+                        }
                     }
                     return Claim::Unguarded(format!(
                         "port {port} is taken by something that doesn't answer as the app"
@@ -214,8 +219,8 @@ impl OneCopy {
     }
 
     /// The app is closing from now on: its window is gone or going. It no longer says it will show, and a copy that
-    /// starts waits for it to end instead. The port itself is let go when the process ends, once the last settings
-    /// are written, whatever becomes of this value.
+    /// starts waits for it to end instead. The port itself is let go at the very end ([`OneCopy::let_go`]), once the last
+    /// settings are written, or with the process if that's never reached.
     pub fn closing(&self) {
         self.closing.store(true, Ordering::Relaxed);
     }
@@ -228,11 +233,14 @@ impl OneCopy {
     pub fn let_go(&self) -> bool {
         self.closing();
         self.going.store(true, Ordering::Release);
+        // One connection wakes the thread waiting for one, so it sees it's time to stop; then it's only waited for.
+        // (Not one after another: one sent after the port is free could reach the next copy.)
+        if !self.gone.load(Ordering::Acquire) {
+            let _ = TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, self.port).into(), LET_GO_WAIT);
+        }
         let until = Instant::now() + LET_GO_WAIT;
         while !self.gone.load(Ordering::Acquire) && Instant::now() < until {
-            // Wakes the thread waiting for a connection, so it sees it's time to stop.
-            let _ = TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, self.port).into(), LET_GO_WAIT);
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(2));
         }
         self.gone.load(Ordering::Acquire)
     }

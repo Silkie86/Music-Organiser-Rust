@@ -9,7 +9,8 @@
 //! marked step that takes longer than [`STALL`] gets its own `[Slow]` line with its time.
 //!
 //! A freeze outside every marked step says more, so the next one can be pinned down: where the window's thread was
-//! (looked at once it has been stuck for [`LOOK_AT_THREAD`], and again at [`STILL_STUCK`], see [`crate::stuck`]), how
+//! (looked at once it has been stuck for [`LOOK_AT_THREAD`], and again at [`LOOK_AGAIN`] and [`STILL_STUCK`], see
+//! [`crate::stuck`]), how
 //! many pages of memory the app had to find while it was stuck (page faults, less those of the looks themselves), and
 //! the window's last move, resize, minimising or hiding before it, with how long before.
 //!
@@ -283,7 +284,7 @@ fn busy_with() -> String {
 }
 
 /// Starts watching. Call it from inside the event loop (for example with `slint::invoke_from_event_loop` before
-/// `run`), so the time the window takes to open isn't counted as a freeze. Stops by itself when the window closes.
+/// `run`), so the time the window takes to open isn't counted as a freeze. Stops when the window is asked to close ([`stop`]).
 pub fn start(feed: Feed) {
     let _ = WINDOW.set(std::thread::current().id());
     crate::stuck::remember_this_thread();
@@ -356,7 +357,9 @@ fn watch(feed: &Feed) {
                 own_faults += log_thread(waited);
                 log::current().inspect(|l| l.flush());
             }
-            if waited >= LOOK_AGAIN && !looked_again && !paused_since(pauses) {
+            // (Not in the same turn as the first look: a watchdog that was itself held up for a second would look
+            // twice at one moment.)
+            else if waited >= LOOK_AGAIN && !looked_again && !paused_since(pauses) {
                 looked_again = true;
                 own_faults += log_thread(waited);
                 log::current().inspect(|l| l.flush());
