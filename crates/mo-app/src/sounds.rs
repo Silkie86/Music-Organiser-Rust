@@ -1906,6 +1906,47 @@ pub fn salvaged_line(salvaged: &mo_sounds::compact::Salvaged, unused: Option<&st
     )
 }
 
+/// What the card says when the app's own sound library was found damaged with nothing to mend it from: no backup copy
+/// to put it back from (`unused`: why not, as [`Synced::backup_unused`] says it), and no `sounds.db` to make it again
+/// from. What could still be read of it was kept in a new one ([`Synced::kept_alone`]): how much, how the rest comes
+/// back, and how long the damaged one is kept: a week, or for good (`for_good`, [`Synced::kept_for_good`]: parts of it
+/// couldn't be read, and they're nowhere else).
+pub fn kept_alone_line(salvaged: &mo_sounds::compact::Salvaged, unused: Option<&str>, for_good: bool) -> String {
+    let kept = match (salvaged.kept, salvaged.unread) {
+        (0, unread) => format!(
+            "{}, so it starts empty: a scan of your sample folders finds your sounds again",
+            if unread == 0 { "There was nothing in it to keep" } else { "None of it could still be read" }
+        ),
+        (_, 0) => "It kept all of it: your sounds, favourites, tags and plays".to_owned(),
+        _ => "It kept all of it that could still be read: a scan of your sample folders finds the rest of your sounds"
+            .to_owned(),
+    };
+    let unused = unused.unwrap_or("there's no backup copy");
+    let name = |path: std::path::PathBuf| path.display().to_string();
+    let file = std::path::Path::new(mo_sounds::compact::FILE_NAME);
+    let damaged = if for_good {
+        format!(
+            "The damaged one is kept beside it, as {}: the app never removes it, as what couldn't be read of it is \
+             nowhere else",
+            name(mo_sounds::compact::backup::kept_of(file))
+        )
+    } else {
+        format!(
+            "The damaged one is kept beside it for a week, as {}",
+            name(mo_sounds::compact::backup::damaged_of(file))
+        )
+    };
+    format!(
+        "It was damaged, {unused}, and there's no sounds.db to make it again from, so a new one was made. {kept}. \
+         {damaged}."
+    )
+}
+
+/// The card's title for [`kept_alone_line`]: what was done, as far as anything of it could be kept.
+pub fn kept_alone_title(salvaged: &mo_sounds::compact::Salvaged) -> &'static str {
+    if salvaged.kept > 0 { "Kept what could be read of your sound library" } else { "Made your sound library again" }
+}
+
 /// Why the app's own copy of the sound library couldn't be made or brought up to date, for a card: what went wrong,
 /// without the copy's whole path.
 pub fn copy_failed_line(e: &SoundsError) -> String {
@@ -2843,6 +2884,42 @@ mod tests {
         assert!(salvaged(12, 3).contains("with all of it that could still be read (the rest is as sounds.db has it)."));
         assert!(salvaged(0, 1).contains("none of it could still be read, so it's as sounds.db has it."));
         assert!(salvaged(0, 0).contains("nothing in it differed from sounds.db."));
+        // Nothing to mend it from: what could still be read of it kept in a new one (the whole-app review of 14 Nov,
+        // SO-3).
+        let alone = |kept, unread| {
+            let salvaged = mo_sounds::compact::Salvaged { kept, unread };
+            kept_alone_line(&salvaged, None, unread > 0)
+        };
+        assert_eq!(
+            alone(12, 0),
+            "It was damaged, there's no backup copy, and there's no sounds.db to make it again from, so a new one was \
+             made. It kept all of it: your sounds, favourites, tags and plays. The damaged one is kept beside it for a \
+             week, as sounds-rust.db.damaged."
+        );
+        assert!(
+            kept_alone_line(&unusable, Some("the backup copy can't be used: it's damaged"), false)
+                .starts_with("It was damaged, the backup copy can't be used: it's damaged, and there's no sounds.db")
+        );
+        // Parts of it couldn't be read: the damaged one is kept for good, as they're nowhere else (found by this fix's
+        // code review).
+        assert_eq!(
+            alone(12, 3),
+            "It was damaged, there's no backup copy, and there's no sounds.db to make it again from, so a new one was \
+             made. It kept all of it that could still be read: a scan of your sample folders finds the rest of your \
+             sounds. The damaged one is kept beside it, as sounds-rust.db.damaged-kept: the app never removes it, as \
+             what couldn't be read of it is nowhere else."
+        );
+        assert!(alone(0, 1).contains(". None of it could still be read, so it starts empty: a scan of your sample"));
+        assert!(alone(0, 1).ends_with("the app never removes it, as what couldn't be read of it is nowhere else."));
+        assert!(alone(0, 0).contains(". There was nothing in it to keep, so it starts empty: a scan of your sample"));
+        assert!(
+            alone(0, 0).ends_with("again. The damaged one is kept beside it for a week, as sounds-rust.db.damaged.")
+        );
+        // The card's title says something was kept only when something was.
+        let title = |kept, unread| kept_alone_title(&mo_sounds::compact::Salvaged { kept, unread });
+        assert_eq!(title(12, 3), "Kept what could be read of your sound library");
+        assert_eq!(title(0, 1), "Made your sound library again");
+        assert_eq!(title(0, 0), "Made your sound library again");
         let full = SoundsError::Copy {
             path: "C:\\Users\\Solomon\\AppData\\Local\\MusicOrganiser\\sounds-rust.db".into(),
             why: "only 3.1 GB is free on its disk".into(),

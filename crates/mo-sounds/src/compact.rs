@@ -239,6 +239,12 @@ pub struct Synced {
     /// Made again so, what could still be read of the damaged library, set aside, was kept in the new one
     /// ([`Salvaged`]).
     pub salvaged: Option<Salvaged>,
+    /// Found damaged with nothing to mend it from (no whole backup copy, and no `sounds.db`), it's a new library of
+    /// the app's own holding only what could still be read of the damaged one ([`mend_reading`]).
+    pub kept_alone: bool,
+    /// Kept so with parts of it that couldn't be read, the damaged one was set aside for good
+    /// ([`backup::kept_of`]), not for a week: those parts are nowhere else.
+    pub kept_for_good: bool,
 }
 
 impl Synced {
@@ -350,9 +356,11 @@ pub fn read_for_page(
         _ => (false, true),
     };
     // The app's own library is never left for `sounds.db` when it can't be read just now: only when it's damaged
-    // (mended from its backup copy, or made again from `sounds.db` while that's still there). One so damaged nothing
-    // can be read from it (its first page, or its list of tables) is the app's own if it has a backup copy.
-    let mut damaged = matches!(looked, Ok(Found::Unreadable)) && backup::backup_of(&copy).exists();
+    // (mended from its backup copy, or made again from `sounds.db` while that's still there, or else kept as far as it
+    // can still be read). One so damaged nothing can be read from it (its first page or its list of tables spoilt, or
+    // where the disk can't read them) is mended too, backup copy or not: it's set aside for the new one, not removed
+    // (the whole-app review of 14 Nov, SO-2 and SO-3).
+    let mut damaged = matches!(looked, Ok(Found::Unreadable));
     match (!damaged).then(|| SoundsDb::open_read_only(&copy)) {
         Some(Ok(db)) if db.is_copy() => {
             first(&db);
@@ -441,15 +449,7 @@ pub fn make_empty(sounds_db: &Path, copy: &Path) -> Result<bool, SoundsError> {
     remove_database(&part).map_err(|e| failed(format!("a half-made copy couldn't be removed ({e})")))?;
     let _part = Part(part.clone());
     let made = (|| -> Result<(), Failed> {
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = open_for_writing(&part, flags)?;
-        conn.pragma_update(None, "page_size", PAGE_SIZE)?;
-        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
-        tx.execute_batch(SCHEMA)?;
-        tx.execute_batch(INDEXES)?;
-        set_info(&tx, "format", FORMAT)?;
-        set_info(&tx, OWN_SINCE, unix_now())?;
-        tx.commit()?;
+        let conn = new_own_library(&part)?;
         // Read and written as every library of the app's own is: in WAL mode, so readers never wait for a writer.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.close().map_err(|(_, e)| e)?;
@@ -470,6 +470,21 @@ pub fn make_empty(sounds_db: &Path, copy: &Path) -> Result<bool, SoundsError> {
     };
     named.map_err(|e| failed(format!("it couldn't be given its name ({e})")))?;
     Ok(true)
+}
+
+/// A new, empty library of the app's own at `part`, of this version's format, open: its tables, its indexes and its
+/// notes ([`make_empty`], [`keep_what_can_be_read`]).
+fn new_own_library(part: &Path) -> Result<Connection, Failed> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = open_for_writing(part, flags)?;
+    conn.pragma_update(None, "page_size", PAGE_SIZE)?;
+    let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+    tx.execute_batch(SCHEMA)?;
+    tx.execute_batch(INDEXES)?;
+    set_info(&tx, "format", FORMAT)?;
+    set_info(&tx, OWN_SINCE, unix_now())?;
+    tx.commit()?;
+    Ok(conn)
 }
 
 /// Notes that the copy at `copy`, up to date with `sounds_db` (or the only library left, with `sounds_db` gone), is
@@ -912,9 +927,10 @@ pub fn sync_reading(
 /// backup), else made again from `sounds_db` while that's there, reading it on the same pass as [`sync_reading`] does
 /// (a copy that was the app's own stays so, from the same time). Made again so, the app's own library (or one so
 /// damaged it can't be told) is set aside first, never removed, and what can still be read of it is kept in the new
-/// one ([`Salvaged`]); if it can't be made again, it's put back, to be mended the next time. With neither, an error
-/// that names the copy as damaged ([`SoundsError::Damaged`]). The copy must not be open meanwhile (Windows won't move
-/// an open file).
+/// one ([`Salvaged`]); if it can't be made again, it's put back, to be mended the next time. With neither, what can
+/// still be read of it is kept in a new library of the app's own ([`Synced::kept_alone`]); an error that names the
+/// copy as damaged ([`SoundsError::Damaged`]) when even that can't be done. The copy must not be open meanwhile
+/// (Windows won't move an open file).
 pub fn mend_reading(
     sounds_db: &Path,
     copy: &Path,
@@ -940,11 +956,40 @@ pub fn mend_reading(
         }
         Err(backup::NotRestored::NoBackup(why)) => why,
     };
+    // Nothing to make it again from either: what can still be read of it is kept in a new library of the app's own,
+    // and the damaged one is set aside (the whole-app review of 14 Nov, SO-3). Before, it was left as it was, and each
+    // start said it couldn't be mended. Only one of this version's format, or one so damaged it can't be told: one of
+    // the format before holds nothing a new one could keep ([`salvage`]), so it's left as it is, as one a newer version
+    // made is, and one that can't be looked at just now.
     if library_gone(sounds_db) {
-        return Err(SoundsError::Damaged {
+        let damaged = |why: String| SoundsError::Damaged {
             path: copy.to_owned(),
-            why: format!("{unused}, and there's no sounds.db to make it again from"),
-        });
+            why: format!("{unused}, and there's no sounds.db to make it again from{why}"),
+        };
+        match look_at(copy, WAIT) {
+            Ok(Found::Copy { format: FORMAT, .. } | Found::Unreadable) => {}
+            Ok(Found::Copy { format, .. }) if format > FORMAT => {
+                return Err(damaged(format!(
+                    "; a newer version of the app made it (format {format}), so it's left as it is"
+                )));
+            }
+            Err(why) => return Err(damaged(format!("; it couldn't be looked at just now ({why})"))),
+            Ok(_) => return Err(damaged(String::new())),
+        }
+        let looked = SoundsDb::stamp(copy);
+        let kept = keep_what_can_be_read(copy, &looked).map_err(|why| damaged(format!(", and {why}")))?;
+        let everything = SoundsDb::open_read_only(copy)?.everything(now)?;
+        let sounds = everything.sounds.len();
+        let synced = Synced {
+            made: true,
+            sounds,
+            salvaged: Some(kept.salvaged),
+            backup_unused: Some(unused),
+            kept_alone: true,
+            kept_for_good: kept.for_good,
+            ..Default::default()
+        };
+        return Ok((everything, Ok(synced)));
     }
     let damaged = |why: String| SoundsError::Damaged {
         path: copy.to_owned(),
@@ -986,6 +1031,65 @@ pub fn mend_reading(
         everything = SoundsDb::open_read_only(copy)?.everything(now)?;
     }
     Ok((everything, made.map(|synced| Synced { backup_unused: Some(unused), ..synced })))
+}
+
+/// What [`keep_what_can_be_read`] kept of a damaged library.
+struct KeptAlone {
+    /// What could still be read of it.
+    salvaged: Salvaged,
+    /// It was set aside for good ([`backup::kept_of`]), not for a week ([`backup::damaged_of`]).
+    for_good: bool,
+}
+
+/// Keeps what can still be read of the damaged library at `copy` when there's nothing to mend it from: no whole backup
+/// copy, and no `sounds.db` to make it again from ([`mend_reading`]: the whole-app review of 14 Nov, SO-3). A new,
+/// empty library of the app's own is made beside it, what can be read of the damaged one is put in it
+/// ([`salvage`]), and it takes the damaged one's name as a backup copy put back does ([`backup::restore`]). The damaged
+/// one is set aside: for a week when all of it could be read ([`backup::damaged_of`]), else for good
+/// ([`backup::kept_of`]): what couldn't be read of it is nowhere else. Only while it's as it was found (`looked`, its
+/// [`SoundsDb::stamp`] then): another copy of the app may have mended it meanwhile. Nor while one kept for good before
+/// is there: that's never replaced. Why not, when it couldn't be: the damaged one is then where it was.
+fn keep_what_can_be_read(copy: &Path, looked: &str) -> Result<KeptAlone, String> {
+    let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+    if SoundsDb::stamp(copy) != looked {
+        return Err("it changed as it was looked at (another copy of the app may have mended it), so it's looked at \
+                    again the next time the app starts"
+            .into());
+    }
+    // Not worth the work while something else holds it: it couldn't be set aside at the end.
+    if backup::held_elsewhere(copy) {
+        return Err("something else has it open, so it's left as it is till the next time the app starts".into());
+    }
+    if let Some(there) = backup::database_there(&backup::kept_of(copy)) {
+        return Err(format!(
+            "a damaged one kept before is still there, as {}: put that somewhere safe, and it's tried again the next \
+             time the app starts",
+            there.display()
+        ));
+    }
+    let dir = dir_of(copy);
+    // The new one holds no more than the damaged one did.
+    let size: u64 = ["", "-wal"].iter().filter_map(|end| fs::metadata(side(copy, end)).ok()).map(|m| m.len()).sum();
+    if let Ok(free) = fs4::available_space(dir) {
+        room_for(free, size, "keeping what can still be read of it")?;
+    }
+    let part = part_of(copy);
+    remove_database(&part).map_err(|e| format!("a half-made copy couldn't be removed ({e})"))?;
+    let _part = Part(part.clone());
+    let made = (|| -> Result<Salvaged, Failed> {
+        let conn = new_own_library(&part)?;
+        // A file being made needs no journal, as [`make`]'s doesn't: if this stops half way, the file is thrown away.
+        conn.pragma_update(None, "journal_mode", "OFF")?;
+        conn.pragma_update(None, "synchronous", "OFF")?;
+        let salvaged = salvage::salvage(&conn, copy, dir, true)?;
+        backup::finish_part(conn, &part).map_err(Failed::new)?;
+        Ok(salvaged)
+    })();
+    let salvaged = made.map_err(|f| format!("what can still be read of it couldn't be kept ({})", f.why))?;
+    let for_good = salvaged.unread > 0;
+    let aside = if for_good { backup::kept_of(copy) } else { backup::damaged_of(copy) };
+    backup::swap_in(&part, copy, &aside, "the new library")?;
+    Ok(KeptAlone { salvaged, for_good })
 }
 
 /// The app's own library, found damaged with no backup copy to put it back from, set aside to be made again
@@ -1031,6 +1135,21 @@ struct Job<'a> {
 /// to make.
 fn run(sounds_db: &Path, copy: &Path, job: Job<'_>, read: &mut Option<Everything>) -> Result<Synced, SoundsError> {
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+    // One so damaged nothing can be read from it, met by a pass that isn't mending it, is mended all the same: set
+    // aside, and what can still be read of it kept, never removed for the new one (the whole-app review of 14 Nov,
+    // SO-2). Not with a backup copy: it's mended from that ([`mend_reading`]), and the pass leaves it be. Nor without
+    // `sounds.db`: the pass stops before it touches the copy. Never `sounds.db` itself, by any name.
+    let unreadable = Mend { from: backup::damaged_of(copy), own: None };
+    let job = match job.mend {
+        None if !library_gone(sounds_db)
+            && !same_file(sounds_db, copy)
+            && !backup::backup_of(copy).exists()
+            && matches!(look_at(copy, WAIT), Ok(Found::Unreadable)) =>
+        {
+            Job { mend: Some(&unreadable), ..job }
+        }
+        _ => job,
+    };
     // The app's own library found damaged is set aside under the same lock as it's made again, so nothing writes into
     // its place meanwhile (review finding S-1). [`SoundsError::Damaged`] when it can't be: nothing else gives that.
     if job.mend.is_some() {
@@ -1108,6 +1227,11 @@ fn run_locked(
         // that ([`mend_reading`]), never made again from `sounds.db` unasked.
         Found::Unreadable if !afresh && backup::backup_of(copy).exists() => {
             Err(failed("it's damaged, and it's mended from its backup copy, not made again from sounds.db".into()))
+        }
+        // Without one, [`run`] set it aside before this pass: found so only now (it couldn't be looked at a moment
+        // ago), it's left as it is for the next, never removed.
+        Found::Unreadable if mend.is_none() => {
+            Err(failed("it's damaged, and it's set aside to be mended first, never removed".into()))
         }
         // Behind `sounds.db`, older, or (`afresh`) made again: nothing follows each save any more, so it's made anew.
         // One this version reads is kept until the new one is whole: made from a `sounds.db` found damaged on the way,
@@ -1192,7 +1316,7 @@ fn make(old: &SoundsDb, copy: &Path, keep: bool, pass: Pass<'_>) -> Result<Synce
         conn.execute_batch(SCHEMA)?;
         let mut synced = fill(old, &conn, pass)?;
         if let Some(damaged) = salvage_from {
-            synced.salvaged = Some(salvage::salvage(&conn, damaged, dir)?);
+            synced.salvaged = Some(salvage::salvage(&conn, damaged, dir, false)?);
             // With the sounds the app's scan added, and without those it forgot.
             let sounds: i64 = conn.query_row("SELECT COUNT(*) FROM sounds", [], |r| r.get(0))?;
             synced.sounds = usize::try_from(sounds).unwrap_or_default();
@@ -1560,7 +1684,8 @@ enum Found {
         stamp: Option<String>,
         own: Option<i64>,
     },
-    /// Something nothing can be read from: a file that isn't a database, a damaged one, or an empty one. Made again.
+    /// Something nothing can be read from: a file that isn't a database, a damaged one (or one the disk can't read
+    /// where it's looked at), or an empty one. Mended, or made again.
     Unreadable,
     /// A database of something else, which is never thrown away.
     Foreign,
@@ -1603,11 +1728,10 @@ fn look_at(copy: &Path, wait: Duration) -> Result<Found, String> {
         Ok(Found::Copy { format, stamp, own })
     })();
     match found {
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if matches!(e.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt) =>
-        {
-            Ok(Found::Unreadable)
-        }
+        // Damaged where it's looked at, as SQLite tells it ([`SoundsError::damaged`]): also a part the disk can't read
+        // (a bad sector), which reading it again won't mend (the whole-app review of 14 Nov, SO-2: before, it was an
+        // error each time, and it was never mended, even from a whole backup copy).
+        Err(e) if crate::db::is_damage(&e) => Ok(Found::Unreadable),
         found => found.map_err(|e| e.to_string()),
     }
 }

@@ -17,7 +17,9 @@
 //!   ([`super::grow::CHANGES`]), and one behind by any of those is made again at once.
 //! - **Mending** ([`restore`]): the backup is checked again (`quick_check`), copied beside the library, and given its
 //!   name. The damaged library is set aside as `sounds-rust.db.damaged` (only one: the one before goes), so nothing is
-//!   thrown away at once; it goes a week after it was set aside.
+//!   thrown away at once; it goes a week after it was set aside. One that had nothing to mend it from, with parts that
+//!   couldn't be read, is kept for good instead, as `sounds-rust.db.damaged-kept` ([`kept_of`]): those parts are
+//!   nowhere else.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,6 +42,9 @@ const BACKUP_END: &str = ".backup";
 /// A damaged library is set aside under its name and this: `sounds-rust.db.damaged`.
 const DAMAGED_END: &str = ".damaged";
 
+/// A damaged library kept for good is set aside under its name and this: `sounds-rust.db.damaged-kept` ([`kept_of`]).
+const KEPT_END: &str = ".damaged-kept";
+
 /// A week: a damaged library set aside goes once it's been there this long, and a backup copy that hasn't been looked
 /// at for this long is checked again.
 const A_WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -59,6 +64,13 @@ pub fn backup_of(copy: &Path) -> PathBuf {
 /// Where the library at `copy` is set aside when it's found damaged and mended.
 pub fn damaged_of(copy: &Path) -> PathBuf {
     side(copy, DAMAGED_END)
+}
+
+/// Where the library at `copy` is set aside for good when it's found damaged with nothing to mend it from (no backup
+/// copy, and no `sounds.db`) and parts of it couldn't be read: they're nowhere else, so it's never removed, nor
+/// replaced by one set aside after it (the whole-app review of 14 Nov: [`super::mend_reading`]).
+pub fn kept_of(copy: &Path) -> PathBuf {
+    side(copy, KEPT_END)
 }
 
 /// What [`back_up`] did.
@@ -342,42 +354,68 @@ pub(crate) fn restore(copy: &Path) -> Result<(SystemTime, Salvaged), NotRestored
         conn.execute("DELETE FROM copy_info WHERE key IN (?1, ?2)", [BACKED_UP_FROM, BACKED_UP_AT])
             .map_err(|e| e.to_string())?;
         // What the app wrote since the backup was made, where it can still be read (review finding S-3).
-        let salvaged = super::salvage::salvage(&conn, copy, dir_of(copy)).map_err(|f| f.why)?;
-        // Read and written as the library is: in WAL mode, so the page's readers never wait for a writer.
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(|e| e.to_string())?;
-        conn.close().map_err(|(_, e)| e.to_string())?;
-        if ["-wal", "-shm", "-journal"].iter().any(|end| side(&part, end).exists()) {
-            return Err("its log was left beside it".into());
-        }
-        fs::OpenOptions::new().write(true).open(&part).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+        let salvaged = super::salvage::salvage(&conn, copy, dir_of(copy), false).map_err(|f| f.why)?;
+        finish_part(conn, &part)?;
         Ok(salvaged)
     })();
     let salvaged = put.map_err(|why| NotNow(format!("it couldn't be copied from its backup copy ({why})")))?;
+    swap_in(&part, copy, &damaged_of(copy), "the copy of its backup").map_err(NotNow)?;
+    Ok((made, salvaged))
+}
+
+/// Readies the new library made at `part`, open on `conn`, to take the library's name ([`swap_in`]): read and written
+/// in WAL mode as the library is, so the page's readers never wait for a writer; closed, with no log left beside it
+/// (it would be read into the library as if it were its own); and on the disk, so a library with its name is whole even
+/// after a power cut.
+pub(super) fn finish_part(conn: Connection, part: &Path) -> Result<(), String> {
+    conn.pragma_update(None, "journal_mode", "WAL").map_err(|e| e.to_string())?;
+    conn.close().map_err(|(_, e)| e.to_string())?;
+    if ["-wal", "-shm", "-journal"].iter().any(|end| side(part, end).exists()) {
+        return Err("its log was left beside it".into());
+    }
+    fs::OpenOptions::new().write(true).open(part).and_then(|f| f.sync_all()).map_err(|e| e.to_string())
+}
+
+/// Puts the new library made at `part` ([`finish_part`]) in the place of the damaged one at `copy`, which is set aside
+/// as `aside` first ([`set_aside_as`]), and put back when the new one can't be given its name. Why not, when it wasn't
+/// (`what` names the new one there).
+pub(super) fn swap_in(part: &Path, copy: &Path, aside: &Path, what: &str) -> Result<(), String> {
     // No reader in this app opens the library while it's swapped.
     let _readers_wait = LAYING_OUT.lock().unwrap_or_else(PoisonError::into_inner);
-    set_aside(copy).map_err(NotNow)?;
-    if let Err(e) = fs::rename(&part, copy) {
-        let undone = match put_back(copy) {
+    set_aside_as(copy, aside)?;
+    if let Err(e) = fs::rename(part, copy) {
+        let undone = match put_back_from(copy, aside) {
             Ok(()) => String::new(),
-            Err(e) => format!("; the damaged one is left as {} ({e})", damaged_of(copy).display()),
+            Err(e) => format!("; the damaged one is left as {} ({e})", aside.display()),
         };
-        return Err(NotNow(format!("the copy of its backup couldn't be given its name ({e}){undone}")));
+        return Err(format!("{what} couldn't be given its name ({e}){undone}"));
     }
-    Ok((made, salvaged))
+    Ok(())
 }
 
 /// Sets the damaged library at `copy` aside ([`damaged_of`]), with its log, so the two can still be opened together;
 /// the one set aside before goes. Not when something else has it open: then nothing is moved. A log left beside the
 /// copy put in its place would be read into it as if it were its own, so nothing is put there unless it has gone.
 pub(super) fn set_aside(copy: &Path) -> Result<(), String> {
+    set_aside_as(copy, &damaged_of(copy))
+}
+
+/// [`set_aside`], as `aside`. One kept for good there ([`kept_of`]) is never replaced: then nothing is moved.
+pub(super) fn set_aside_as(copy: &Path, aside: &Path) -> Result<(), String> {
     let held = || "the damaged library couldn't be set aside: something else has it open".to_owned();
     let busy =
         |e: std::io::Error| format!("the damaged library couldn't be set aside ({e}): something else may have it open");
     if held_elsewhere(copy) {
         return Err(held());
     }
-    let damaged = damaged_of(copy);
-    remove_database(&damaged).map_err(busy)?;
+    let damaged = aside;
+    if damaged == kept_of(copy) {
+        if let Some(there) = database_there(damaged) {
+            return Err(format!("{} is there, kept for good, so it isn't replaced", there.display()));
+        }
+    } else {
+        remove_database(damaged).map_err(busy)?;
+    }
     // Windows won't remove the shared-memory file of a library something has open: then nothing is moved.
     for end in ["-shm", "-journal"] {
         match fs::remove_file(side(copy, end)) {
@@ -386,35 +424,44 @@ pub(super) fn set_aside(copy: &Path) -> Result<(), String> {
         }
     }
     // The library first, then its log: if the log can't follow, the library is put back, so the two stay together.
-    match fs::rename(copy, &damaged) {
+    match fs::rename(copy, damaged) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(busy(e)),
         _ => {}
     }
-    match fs::rename(side(copy, "-wal"), side(&damaged, "-wal")) {
+    match fs::rename(side(copy, "-wal"), side(damaged, "-wal")) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            let _ = fs::rename(&damaged, copy);
+            let _ = fs::rename(damaged, copy);
             return Err(busy(e));
         }
         _ => {}
     }
     if ["", "-wal", "-shm", "-journal"].iter().any(|end| side(copy, end).exists()) {
-        let _ = put_back(copy);
+        let _ = put_back_from(copy, damaged);
         return Err(held());
     }
-    // It goes a week from now: a file keeps the time it was last written when it's moved.
-    let _ = fs::File::options().write(true).open(&damaged).and_then(|f| f.set_modified(SystemTime::now()));
+    // One set aside for a week goes a week from now: a file keeps the time it was last written when it's moved.
+    let _ = fs::File::options().write(true).open(damaged).and_then(|f| f.set_modified(SystemTime::now()));
     Ok(())
+}
+
+/// The first of the files of a database at `path` that's there (the database, or a part SQLite keeps beside it).
+pub(super) fn database_there(path: &Path) -> Option<PathBuf> {
+    ["", "-wal", "-shm", "-journal"].iter().map(|end| side(path, end)).find(|p| !matches!(p.try_exists(), Ok(false)))
 }
 
 /// Undoes [`set_aside`]: the damaged library at `copy` given its name again, then its log (never a log without its
 /// library, which would be read into another put there).
 pub(super) fn put_back(copy: &Path) -> std::io::Result<()> {
-    let damaged = damaged_of(copy);
+    put_back_from(copy, &damaged_of(copy))
+}
+
+/// [`put_back`], from where [`set_aside_as`] set it aside: `aside`.
+pub(super) fn put_back_from(copy: &Path, aside: &Path) -> std::io::Result<()> {
     if copy.exists() {
         return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "something else is there in its place"));
     }
-    fs::rename(&damaged, copy)?;
-    match fs::rename(side(&damaged, "-wal"), side(copy, "-wal")) {
+    fs::rename(aside, copy)?;
+    match fs::rename(side(aside, "-wal"), side(copy, "-wal")) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -425,16 +472,19 @@ pub(super) fn put_back(copy: &Path) -> std::io::Result<()> {
 /// closed here, they're gone unless something else holds it. Windows won't move or remove a file that's open anyway;
 /// elsewhere one can be, so this is how it's told there. A library so damaged SQLite can't open it at all counts as
 /// held by nothing (its files are as they are).
-fn held_elsewhere(copy: &Path) -> bool {
+pub(super) fn held_elsewhere(copy: &Path) -> bool {
     let Ok(conn) =
         Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
     else {
         return false;
     };
-    // Read, so SQLite opens it and its log: one that's never read is closed without touching them. Busy is held.
+    // Read, so SQLite opens it and its log: one that's never read is closed without touching them. Busy is held. An
+    // empty file (nothing in it, not even its list of tables) counts as held by nothing too: SQLite keeps no log for
+    // it, so a shared-memory file a reader left beside the library before stays there, held or not.
     match conn.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0)) {
         Err(e) if is_damage(&e) => return false,
         Err(_) => return true,
+        Ok(0) => return false,
         Ok(_) => {}
     }
     if conn.close().is_err() {
