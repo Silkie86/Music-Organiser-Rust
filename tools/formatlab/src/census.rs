@@ -238,9 +238,12 @@ impl Census {
         let mut mine: HashMap<u32, Tally> = HashMap::new();
         // Only what's in the file, not the events the reader adds (an old FL's step sequencer dots read as notes).
         for e in flp.events.iter().filter(|e| e.offset.is_some()) {
-            let t = mine.entry(u32::from(e.id)).or_insert_with(|| Tally { projects: 1, ..Tally::default() });
+            // An extended event (172) counts under its own number, with its value's length.
+            let (id, len) =
+                e.extended().map_or((u32::from(e.id), e.data.len()), |(number, value)| (number, value.len()));
+            let t = mine.entry(id).or_insert_with(|| Tally { projects: 1, ..Tally::default() });
             t.times += 1;
-            *t.shapes.entry(e.data.len()).or_default() += 1;
+            *t.shapes.entry(len).or_default() += 1;
         }
         for (id, mut t) in mine {
             t.versions.insert(version.clone());

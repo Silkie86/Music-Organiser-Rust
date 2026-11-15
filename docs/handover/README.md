@@ -377,7 +377,8 @@ project plays. Notes: `memory/space-backend.md`, `memory/bitwig-multisample-reli
 
 **Readers** (`mo-formats`): "Not yet" items in `crates/mo-formats/DIFFERENCES.md` need Solomon's saves. Still to
 do: fuzzing (a reader may error but never panic or hang), the format registry test (spec 11.2), Bitwig note
-expressions. FL event 172 size in FL 26 is open (see `memory/external-format-references.md`).
+expressions. FL event 172 is settled for FL 25 (it starts an extended event, 15 Nov 2026); the ones FL 26 is said to write
+inside channels still need an FL 26 save of Solomon's (see `memory/external-format-references.md`).
 
 ## Waiting on Solomon (don't block on these; carry on with something else)
 

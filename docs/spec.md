@@ -343,7 +343,10 @@ the same files, and every difference is listed and judged (section 11's "twin te
 ### 4.1 FL Studio `.flp` (read, repair, relink)
 
 - `FLhd` header then `FLdt` + length, then events: id < 64 byte, < 128 word, < 192 dword, ≥ 192 variable length.
-- **Rule:** event 172 is written with 3 bytes when the FL version (event 199) is 25 or later.
+- **Rule:** when the FL version (event 199) is 25 or later, event 172 starts an extended event: the next four
+  bytes are the real event's number, whose top four bits give its value's size (0xC a length then bytes, the only
+  kind seen in Solomon's saves; 0 one byte, 4 two, 8 four are from other readers' notes). It was first read as "3 bytes", which only worked for the one in the header (0xC0000101, the
+  text of who wrote the file) because that number's last byte looks like a text event.
 - Some FL 4 to 7 saves have junk after `FLhd`; read on with a warning. A file with no `FLhd` is "empty or damaged",
   not an error.
 - Notes (224): 24 bytes FL 9+, 20 bytes FL 4 to 8 (the version decides). Length 0 = step. Muted flag byte 19 bit 0x20.
@@ -741,7 +744,8 @@ These are the first 22, as the rebuild began. The rules in force, with the later
 6. Never add a column to `plugins`; schema changes only add.
 7. Bump a reader's version when what it finds changes.
 8. Bitwig: define objects at first use; no class-1 reference in a single-object field; decode must end at the zip.
-9. FL: 3-byte event 172 from FL 25; note size by FL version; read damaged saves on with a warning.
+9. FL: event 172 from FL 25 starts an extended event (the next four bytes are its number; it was first read as a
+   3-byte event); note size by FL version; read damaged saves on with a warning.
 10. Live tests only touch a project called "MO Live Test…" with changes allowed.
 11. DAW scripts stay plain ASCII; tests never reach a real DAW, folder or MIDI port.
 12. No lag: shared slots, low priority, no UI waits, newest wins, virtualised lists, read big files once.

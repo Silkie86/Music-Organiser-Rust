@@ -207,7 +207,8 @@ pub fn channel_params(time: i32, cents: i32, multiplier: i32, mode: i32) -> Vec<
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
-/// Like the C# tests' FL 25 header: version, build, and the 3-byte event 172.
+/// Like the C# tests' FL 25 header: version, build, and event 172 before the number (0xC0000101) of the text that
+/// says who wrote the file.
 fn fl_25() -> Flp {
     Flp::new()
         .ascii(199, "25.2.5.5319")

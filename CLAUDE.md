@@ -33,7 +33,8 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 6. Never add a column to `plugins`; schema changes only add.
 7. Bump a reader's version when what it finds changes.
 8. Bitwig: define objects at first use; no class-1 reference in a single-object field; decode must end at the zip.
-9. FL: 3-byte event 172 from FL 25; note size by FL version; read damaged saves on with a warning.
+9. FL: event 172 from FL 25 starts an extended event (the next four bytes are its number; it was first read as a
+   3-byte event); note size by FL version; read damaged saves on with a warning.
 10. Live tests only touch a project called "MO Live Test…" with changes allowed.
 11. DAW scripts stay plain ASCII; tests never reach a real DAW, folder or MIDI port.
 12. No lag: shared slots, low priority, no UI waits, newest wins, virtualised lists, read big files once.

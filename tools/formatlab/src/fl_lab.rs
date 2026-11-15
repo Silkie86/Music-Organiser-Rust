@@ -53,6 +53,24 @@ pub fn read(raw: &[u8], name: &str) -> Result<LabFile, String> {
         let path = format!("{scope} › {label}");
         let data: &[u8] = &e.data;
 
+        // An extended event (172) is named by its own number, and its value shown as what it is.
+        if let Some((number, value)) = e.extended() {
+            let name = reg.event(number).map(|entry| format!(" {}", entry.name)).unwrap_or_default();
+            let label = format!("{} {number:#X}{name}{again}", e.id);
+            let key = format!("{scope}/{}:{number:X}{}", e.id, again.replace(' ', ""));
+            let path = format!("{scope} › {label}");
+            let item = if number >> 28 == 0xC && looks_like_text(value) {
+                let text = flp.text(value);
+                Item::new(key, path, 1, label, lab::quote(&text), Data::Text(text))
+            } else if number >> 28 == 0xC {
+                Item::new(key, path, 1, label, lab::bytes(value), Data::Bytes(value.to_vec()))
+            } else {
+                let v = value.iter().rev().fold(0i64, |v, &b| v << 8 | i64::from(b));
+                Item::new(key, path, 1, label, v.to_string(), Data::Int(v))
+            };
+            items.push(item);
+            continue;
+        }
         // Ids below 192 are numbers.
         if e.id < 192 {
             let v = e.int();
