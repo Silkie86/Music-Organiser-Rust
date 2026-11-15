@@ -125,6 +125,14 @@ pub struct Marked {
 pub struct Marks {
     #[serde(default)]
     pub steps: BTreeMap<String, Marked>,
+    /// When the self-check last ran, in seconds since 1970 (0 for never), so it runs once a day.
+    #[serde(default)]
+    pub self_checked: u64,
+}
+
+/// Whether a step is one the self-check marks ([`crate::self_check`]), not Solomon.
+pub fn is_self_check(id: &str) -> bool {
+    id.starts_with("auto.")
 }
 
 /// What the app knows when a step is marked.
@@ -236,6 +244,8 @@ pub struct Line {
     pub expect: &'static str,
     pub mark: Option<Mark>,
     pub note: String,
+    /// Marked by the self-check, not by hand.
+    pub auto: bool,
     /// "Problem on 0.1.0 (abc), 2026-11-15 18:04", or empty.
     pub said: String,
 }
@@ -258,6 +268,7 @@ pub fn lines(steps: &[Step], marks: &Marks, to_try: bool) -> Vec<Line> {
                 expect: "",
                 mark: None,
                 note: String::new(),
+                auto: false,
                 said: String::new(),
             });
             last = Some(s.area);
@@ -269,6 +280,7 @@ pub fn lines(steps: &[Step], marks: &Marks, to_try: bool) -> Vec<Line> {
             expect: s.expect,
             mark: m.map(|m| m.mark),
             note: m.map(|m| m.note.clone()).unwrap_or_default(),
+            auto: is_self_check(s.id),
             said: m.map(|m| format!("{} on {}, {}", m.mark.name(), m.version, m.when)).unwrap_or_default(),
         });
     }

@@ -52,6 +52,8 @@ export struct BetaLineInfo {
     expect: string,
     mark: int,
     note: string,
+    // Marked by the self-check: its mark and what it found show, with no chips to press.
+    auto: bool,
     said: string,
 }
 
@@ -178,6 +180,7 @@ export global SettingsData {
     in property <string> beta-progress;
     in property <bool> beta-to-try;
     in property <string> beta-message;
+    in property <bool> beta-checking;
 
     // Shortcuts: every action with its key; the one listening for a new key (its id), or empty; what the last change
     // did; and whether any key isn't the one it started with.
@@ -222,6 +225,8 @@ export global SettingsData {
     callback beta-note(string, string);
     callback beta-toggle-to-try();
     callback beta-show-file();
+    // Run the self-check now.
+    callback beta-self-check();
 }
 
 // A card on a tab: its title, a line on what it's for, and its parts.
@@ -963,7 +968,13 @@ component BetaStep inherits VerticalLayout {
         font-size: Type.meta;
         wrap: word-wrap;
     }
-    HorizontalLayout {
+    if root.line.auto: Text {
+        text: root.line.mark == 0 ? "Fine: " + root.line.note : root.line.mark == 1 ? "Problem: " + root.line.note : "Not checked yet";
+        color: root.line.mark == 1 ? Theme.text : Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    if !root.line.auto: HorizontalLayout {
         spacing: Space.sm;
         ToggleChip {
             text: "Works";
@@ -1000,7 +1011,7 @@ component DeveloperTab inherits VerticalLayout {
     alignment: start;
     SettingsCard {
         title: "Beta checklist";
-        intro: "Try each step with your own songs, sounds and DAWs, and mark how it went. Your marks and notes are kept in the data folder, where Claude reads them; a Problem keeps the log's last lines with it, so Claude can see why.";
+        intro: "Try each step with your own songs, sounds and DAWs, and mark how it went. Your marks and notes are kept in the data folder, where Claude reads them; a Problem keeps the log's last lines with it, so Claude can see why. The Self-check steps at the end the app marks by itself, once a day.";
         HorizontalLayout {
             spacing: Space.md;
             Text {
@@ -1014,6 +1025,11 @@ component DeveloperTab inherits VerticalLayout {
                 text: "Only to try";
                 on: SettingsData.beta-to-try;
                 clicked => { SettingsData.beta-toggle-to-try(); }
+            }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: SettingsData.beta-checking ? "Checking…" : "Run the self-check";
+                clicked => { SettingsData.beta-self-check(); }
             }
             StudioButton {
                 horizontal-stretch: 0;

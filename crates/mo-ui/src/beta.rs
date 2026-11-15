@@ -11,6 +11,7 @@ use mo_app::activity::Feed;
 use mo_app::background::Newest;
 use mo_app::beta::{self, Mark, Marks, Moment, Step};
 use mo_app::log;
+use mo_app::self_check;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::{AppWindow, BetaLineInfo, SettingsData};
@@ -28,6 +29,8 @@ struct Checklist {
     /// Notes typed on a step not yet marked, kept until it is (and while the lines are drawn again).
     waiting: HashMap<&'static str, String>,
     to_try: bool,
+    /// The self-check is running.
+    checking: bool,
     message: String,
     model: Rc<VecModel<BetaLineInfo>>,
     feed: Feed,
@@ -132,6 +135,7 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
             unsaved: false,
             waiting: HashMap::new(),
             to_try: false,
+            checking: false,
             message,
             model,
             feed,
@@ -159,6 +163,23 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
         });
         redraw(&app, true);
     });
+    let weak = app.as_weak();
+    data.on_beta_self_check(move || {
+        let Some(app) = weak.upgrade() else { return };
+        self_check(&app, "asked for");
+    });
+    // Once a day by itself, a while after the start (at low priority, out of the start's way).
+    let due = LIST.with(|l| {
+        l.borrow().as_ref().is_some_and(|l| l.writable && now_secs().saturating_sub(l.marks.self_checked) >= DAILY)
+    });
+    if due {
+        let weak = app.as_weak();
+        slint::Timer::single_shot(SELF_CHECK_AFTER, move || {
+            if let Some(app) = weak.upgrade() {
+                self_check(&app, "daily");
+            }
+        });
+    }
     data.on_beta_show_file(move || {
         let found = LIST.with(|l| l.borrow().as_ref().map(|l| (l.folder.clone(), l.feed.clone())));
         let Some((folder, feed)) = found else { return };
@@ -166,6 +187,97 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
         let file = folder.join(beta::FILE);
         crate::files::reveal(&feed, &file.display().to_string(), &folder.display().to_string());
     });
+}
+
+/// How long after the start the daily self-check runs.
+const SELF_CHECK_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
+/// The self-check runs by itself when it last ran at least this long ago (seconds): a little under a day, so it runs
+/// at each day's first start.
+const DAILY: u64 = 20 * 3600;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Runs the self-check off the window's thread, at low priority, then marks its steps.
+fn self_check(app: &AppWindow, why: &'static str) {
+    let go = LIST.with(|l| {
+        let mut l = l.borrow_mut();
+        let l = l.as_mut()?;
+        if l.checking {
+            return None;
+        }
+        l.checking = true;
+        Some(())
+    });
+    if go.is_none() {
+        return;
+    }
+    redraw(app, false);
+    let data = mo_app::paths::data_dir();
+    let logs = mo_app::paths::logs_dir();
+    let weak = app.as_weak();
+    log::info("Beta", &format!("Self-check started ({why})"));
+    let started = mo_app::background::spawn("Self-check", move || {
+        let now = std::time::SystemTime::now();
+        let found = match self_check::read_logs(&logs, self_check::since(now)) {
+            Ok(facts) => {
+                for u in &facts.unread {
+                    log::warning("Beta", &format!("Self-check couldn't read {u}"));
+                }
+                Ok(self_check::findings(&facts, &data, cfg!(windows)))
+            }
+            Err(e) => Err(format!("Couldn't read the logs folder {}: {e}", logs.display())),
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                self_checked(&app, found);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Beta", &format!("Couldn't start the self-check: {e}"));
+        LIST.with(|l| {
+            if let Some(l) = l.borrow_mut().as_mut() {
+                l.checking = false;
+                l.message = format!("The self-check couldn't start: {e}");
+            }
+        });
+        redraw(app, false);
+    }
+}
+
+/// The self-check's findings: each marks its step (a Problem keeps the lines that show it), and the file is saved.
+fn self_checked(app: &AppWindow, found: Result<Vec<self_check::Found>, String>) {
+    let job = LIST.with(|l| {
+        let mut l = l.borrow_mut();
+        let l = l.as_mut()?;
+        l.checking = false;
+        let found = match found {
+            Ok(f) => f,
+            Err(e) => {
+                log::warning("Beta", &format!("Self-check: {e}"));
+                l.message = format!("The self-check couldn't run: {e}");
+                return None;
+            }
+        };
+        let version = mo_app::version::version();
+        let log_file = log::current().and_then(|c| c.path());
+        let when = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+        let problems = found.iter().filter(|f| f.mark == Mark::Problem).count();
+        for f in found {
+            let Some(step) = l.steps.iter().find(|s| s.id == f.id).cloned() else { continue };
+            beta_log(f.mark == Mark::Problem, &beta::log_line(&step, Some(f.mark), &format!("Self-check: {}", f.note)));
+            let moment = Moment { when: when.clone(), version: &version, recent: f.lines, log_file };
+            l.marks.set(&step, Some(f.mark), &f.note, moment);
+        }
+        log::info("Beta", &format!("Self-check done: {problems} problems"));
+        l.marks.self_checked = now_secs();
+        l.unsaved |= l.writable;
+        l.writable.then(|| (l.folder.clone(), l.marks.to_json()))
+    });
+    save(job);
+    redraw(app, false);
 }
 
 /// A mark picked: the one it has takes it off.
@@ -294,6 +406,7 @@ fn redraw(app: &AppWindow, whole: bool) {
                 } else {
                     line.note.into()
                 },
+                auto: line.auto,
                 said: line.said.into(),
             })
             .collect();
@@ -315,6 +428,7 @@ fn redraw(app: &AppWindow, whole: bool) {
         let data = app.global::<SettingsData>();
         data.set_beta_progress(beta::progress(&l.steps, &l.marks).into());
         data.set_beta_to_try(l.to_try);
+        data.set_beta_checking(l.checking);
         data.set_beta_message(l.message.clone().into());
     });
 }

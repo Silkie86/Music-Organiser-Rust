@@ -2,8 +2,8 @@
 #   name | what to do | what you should see
 # under an "== Area" heading. A step's name is how its mark is kept in beta-checklist.json: never change or reuse one
 # (reword the step instead; a step that's gone keeps its old mark in the file). A thread that builds something that
-# needs trying in real use adds a step here. Steps marked (auto) in their words are the ones the self-check will tick
-# by itself once it's built; until then, try them by hand. Live tests with a DAW only use a project called
+# needs trying in real use adds a step here. The Self-check steps (auto.*) are marked by the app itself, from what
+# mo_app::self_check finds. Live tests with a DAW only use a project called
 # "MO Live Test..." (rule 10).
 
 == Start
@@ -100,4 +100,11 @@ plugin.unload | In FL, remove the plugin from a channel, then close the project 
 
 == Files
 files.real-check | Run "Real files check.cmd" from the tools folder (auto) | It ends with no panics; Claude reads the summary
-files.logs | After a few days of use, leave the logs folder as it is (auto) | Claude reads it: freezes, slow starts and crashes
+
+== Self-check
+# Marked by the app itself (mo_app::self_check), once a day and from Run the self-check; never by hand.
+auto.crashes | The app looks for crash logs from the last 7 days | None
+auto.freezes | The app looks for freezes of a second or more in its logs | None
+auto.errors | The app looks for error lines in its logs | None
+auto.start | The app reads how long each start took to the window | Usually 5 s or less
+auto.data-folder | The app looks at where its data folder is | Not on C:

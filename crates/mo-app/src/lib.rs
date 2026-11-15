@@ -53,6 +53,7 @@ pub mod plugins;
 pub mod preset_audition;
 pub mod presets;
 pub mod rail_daws;
+pub mod self_check;
 pub mod settings;
 pub mod shapes;
 pub mod shell;
