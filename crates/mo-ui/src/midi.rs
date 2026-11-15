@@ -5307,12 +5307,25 @@ mod tests {
         assert_eq!(card.state, mo_app::activity::State::Failed);
 
         // Stopped while it still waits its turn: nothing is asked of Bitwig, and the card says nothing was recorded.
-        let requests = bitwig.world().requests.len();
+        // A stop the first put's clock sent may reach the stand-in late (on a slow computer its answer timed out, and
+        // the stand-in takes it in after): waited for, and not counted as the second put's.
+        let count = || bitwig.world().requests.len();
+        let settled = Instant::now();
+        let mut requests = count();
+        while settled.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(300));
+            let now = count();
+            if now == requests {
+                break;
+            }
+            requests = now;
+        }
         let feed = Feed::default();
         let job = feed.start("Putting", "");
         let ticket = mo_dawlink::bitwig::ticket();
         assert!(!put_part(job, &bitwig.bitwig(), &part, Ok(dir.as_path()), &song, ticket, &stop));
-        assert_eq!(bitwig.world().requests.len(), requests);
+        let after: Vec<String> = bitwig.world().commands().into_iter().skip(requests).collect();
+        assert!(after.iter().all(|cmd| cmd == "recordabort"), "the second put asked Bitwig for {after:?}");
         assert_eq!(files_in(&dir), Vec::<String>::new());
         let cards = feed.visible(Instant::now());
         let card = cards.iter().find(|c| c.title == midi_fits::PUT_STOPPED).unwrap();
