@@ -3120,6 +3120,10 @@ fn put_part(
         Ok(written) => written,
         Err(why) => return failed(job, midi_fits::PUT_FAILED, why),
     };
+    // Noted, so the next start removes it if the app closes or crashes before it goes (MI-6, rule 28).
+    let note = page::note_put(&mo_app::paths::data_dir(), &file)
+        .inspect_err(|e| log::warning("MIDI", &format!("Couldn't note the part's file for the start-up sweep: {e}")))
+        .ok();
     let place = midi_fits::put_place(fitted, &song.with, ticks);
     job.progress(0.0, Some(&midi_fits::recording_line(&place)));
     let turn = ticket.wait();
@@ -3163,6 +3167,9 @@ fn put_part(
     drop(turn);
     // Bitwig has the notes, or took nothing: the file was new, under a name this gave it, and goes again.
     let _ = std::fs::remove_file(&file);
+    if let Some(note) = &note {
+        page::forget_put(note);
+    }
     // Whether a recording under way was told to stop: what it ends with is the stop's doing then.
     let heard = clock.ok().and_then(|clock| clock.join().ok()).unwrap_or(false);
     // The clock has ended, so the card is this thread's alone again; were it not, it fails by itself as it goes.

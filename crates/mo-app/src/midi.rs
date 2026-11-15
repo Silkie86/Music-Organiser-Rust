@@ -1356,6 +1356,54 @@ pub fn is_half_sent(name: &str) -> bool {
     !before.is_empty() && digits(app) && digits(write)
 }
 
+/// The folder in the data folder where Put in the song notes which MIDI file it wrote, while Bitwig records it
+/// (the 14 Nov review's MI-6): a part's file has its own name ("Lead · Pattern 3.mid") beside the parts you sent on
+/// purpose, so when the app closes or crashes before it goes, only this note says it was the app's to remove.
+pub const PUTS_FOLDER: &str = "midi-puts";
+
+/// Notes in `data`'s [`PUTS_FOLDER`] that Put in the song wrote `file` (just written, not yet changed): its size and
+/// when it was last changed, then its whole path, in a note of its own named `put-<process>-<count>.txt`. Gives
+/// back the note, for [`forget_put`] once the file has gone.
+pub fn note_put(data: &std::path::Path, file: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let meta = std::fs::symlink_metadata(file)?;
+    let changed = put_time(&meta).ok_or_else(|| std::io::Error::other("the file has no time it was changed"))?;
+    let path = file.to_str().ok_or_else(|| std::io::Error::other("the file's path isn't plain text"))?;
+    let folder = data.join(PUTS_FOLDER);
+    std::fs::create_dir_all(&folder)?;
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let note = folder.join(format!("put-{}-{n}.txt", std::process::id()));
+    std::fs::write(&note, format!("{}\n{changed}\n{path}", meta.len()))?;
+    Ok(note)
+}
+
+/// Takes away a note [`note_put`] made, once its file has gone.
+pub fn forget_put(note: &std::path::Path) {
+    let _ = std::fs::remove_file(note);
+}
+
+/// When a file was last changed, in nanoseconds from 1970, as [`note_put`] writes it.
+pub fn put_time(meta: &std::fs::Metadata) -> Option<u128> {
+    Some(meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos())
+}
+
+/// A note [`note_put`] made, by its whole name, and the process that made it.
+pub fn put_note_process(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("put-")?.strip_suffix(".txt")?;
+    let (process, count) = rest.split_once('-')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(process) && digits(count)).then(|| process.parse().ok()).flatten()
+}
+
+/// What a note [`note_put`] made says: the file's size, when it was changed, and its path.
+pub fn read_put_note(text: &str) -> Option<(u64, u128, std::path::PathBuf)> {
+    let mut lines = text.splitn(3, '\n');
+    let size = lines.next()?.parse().ok()?;
+    let changed = lines.next()?.parse().ok()?;
+    let path = lines.next().filter(|p| !p.is_empty())?;
+    Some((size, changed, std::path::PathBuf::from(path)))
+}
+
 /// Writes a part's MIDI file into `dir` under `name` (made safe for a file name) as a new file: never over another.
 /// "Keys · Pattern 3.mid", or "Keys · Pattern 3 (2).mid" when that's taken. Written beside it first and only then
 /// given its name, so Bitwig never sees half a file.
