@@ -68,7 +68,8 @@ enum Note {
 
 struct Writer {
     /// Where notes go to be written, each with its number.
-    to: Sender<(u64, Note)>,
+    /// Each number's notes as one message, so the writer always takes a number whole (review SO-9).
+    to: Sender<(u64, Vec<Note>)>,
     /// Closes as the writer ends.
     ended: Receiver<()>,
     thread: JoinHandle<()>,
@@ -127,6 +128,7 @@ impl Noter {
     /// Gives the writer `notes`, under the next number (starting it at the first note, so a page that's never used
     /// starts no thread).
     fn send(&self, notes: impl Iterator<Item = Note>) -> Option<u64> {
+        let notes: Vec<Note> = notes.collect();
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.writer.is_none() && !state.no_writer {
             state.writer = self.writer_thread();
@@ -135,10 +137,10 @@ impl Noter {
         state.noted += 1;
         let number = state.noted;
         let to = &state.writer.as_ref()?.to;
-        for note in notes {
-            // The writer went (it can't, short of a crash it logged): nothing more to keep.
-            to.send((number, note)).ok()?;
-        }
+        // All of them in one message: a write never takes part of a number, so a read held off until it's in
+        // ([`Noter::hold`]) never finds only some of its changes kept (review SO-9). The writer went (it can't, short
+        // of a crash it logged): nothing more to keep.
+        to.send((number, notes)).ok()?;
         Some(number)
     }
 
@@ -173,7 +175,7 @@ impl Noter {
     /// Starts the writer: each time something's noted, it keeps all that's been noted meanwhile, in one write of
     /// what's done with sounds and one of your own say about them (in the order noted).
     fn writer_thread(&self) -> Option<Writer> {
-        let (to, from) = mpsc::channel::<(u64, Note)>();
+        let (to, from) = mpsc::channel::<(u64, Vec<Note>)>();
         let (ending, ended) = mpsc::channel::<()>();
         let sounds_db = self.sounds_db.clone();
         let written = self.written.clone();
@@ -204,7 +206,9 @@ impl Noter {
                 }
                 let last = notes.iter().map(|n| n.0).max().unwrap_or_default();
                 let mut did = Vec::new();
-                for (number, note) in notes {
+                for (number, note) in
+                    notes.into_iter().flat_map(|(number, all)| all.into_iter().map(move |n| (number, n)))
+                {
                     match note {
                         Note::Did(d) => did.push(d),
                         Note::Yours(y) => waiting.push((number, y, 0)),
