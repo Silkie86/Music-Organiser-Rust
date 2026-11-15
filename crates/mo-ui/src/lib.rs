@@ -559,7 +559,9 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
         "app.help" | "app.helpF1" => app.set_sheet_open(!app.get_sheet_open()),
         "app.fullScreen" => {
             let w = app.window();
-            w.set_fullscreen(!w.is_fullscreen());
+            let on = !w.is_fullscreen();
+            w.set_fullscreen(on);
+            settings::full_screen_changed(on);
         }
         // Where everything the app removes goes first, from any page.
         "app.recycleBin" => files::open_recycle_bin(feed),

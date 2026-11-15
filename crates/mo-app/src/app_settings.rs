@@ -36,6 +36,9 @@ pub const LAST_PAGE_KEY: &str = "last_page";
 pub const PACE_KEY: &str = "performance";
 /// The output sounds play through, by name; empty for the computer's default. The C# app's name.
 pub const SOUND_OUTPUT_KEY: &str = "sound_output";
+/// Whether the window opens in full screen: "0" after F11 took it out of full screen, so it opens as it was left; on
+/// otherwise (Solomon's F12 note of 15 Nov: "app should default open full screen"). This app's own.
+pub const FULL_SCREEN_KEY: &str = "full_screen";
 /// The Settings tab last shown, by its name. The C# app's name (its tabs had other names; an unknown one opens General).
 pub const TAB_KEY: &str = "settings_tab";
 
@@ -257,6 +260,11 @@ pub fn write_checked(path: &Path, text: &str) -> io::Result<()> {
     written
 }
 
+/// Whether the window opens in full screen: yes unless F11 last took it out (see [`FULL_SCREEN_KEY`]).
+pub fn opens_full_screen(settings: &AppSettings) -> bool {
+    settings.get(FULL_SCREEN_KEY) != Some("0")
+}
+
 /// The place the app opens on, from the settings.
 pub fn start_place(settings: &AppSettings) -> places::Place {
     places::Place::start_place(settings.get(START_PAGE_KEY), settings.get(LAST_PAGE_KEY))
@@ -265,6 +273,16 @@ pub fn start_place(settings: &AppSettings) -> places::Place {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_opens_full_screen_until_f11_takes_it_out() {
+        let mut settings = AppSettings::default();
+        assert!(opens_full_screen(&settings));
+        settings.set(FULL_SCREEN_KEY, "0");
+        assert!(!opens_full_screen(&settings));
+        settings.set(FULL_SCREEN_KEY, "1");
+        assert!(opens_full_screen(&settings));
+    }
 
     #[test]
     fn a_folder_list_keeps_each_folder_once_in_its_order() {

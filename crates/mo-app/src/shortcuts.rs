@@ -59,7 +59,7 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.escape", "Step back: stop, then clear the search, then close the card", "Esc"),
     action("app.rescan", "Look for new and changed projects", "F5"),
     action("app.fullRescan", "Rescan everything: re-read every project, even unchanged ones", ""),
-    action("app.fullScreen", "Full screen on or off", "F11"),
+    action("app.fullScreen", "Full screen on or off (the app opens the way you leave it)", "F11"),
     action(
         "app.recycleBin",
         if cfg!(windows) {
