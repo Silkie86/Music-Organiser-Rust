@@ -161,7 +161,7 @@ fn refresh_now(again: bool) {
             Some(mo_dawlink::bitwig::watch::State::Watching) => GREEN,
             Some(_) => GREY,
         };
-        let words = format!("Music Organiser helper: {}", helper::bitwig_words(state.as_ref()));
+        let words = format!("{}: {}", mo_app::product::HELPER_NAME, helper::bitwig_words(state.as_ref()));
         let now = (colour, words);
         if !again && tray.shown.as_ref() == Some(&now) {
             return None;
@@ -201,7 +201,7 @@ fn icon_data(tray: &Tray) -> NOTIFYICONDATAW {
     if let Some(icon) = tray.icon {
         data.hIcon = icon;
     }
-    let words = tray.shown.as_ref().map_or("Music Organiser helper", |(_, w)| w.as_str());
+    let words = tray.shown.as_ref().map_or(mo_app::product::HELPER_NAME, |(_, w)| w.as_str());
     // The last place stays 0, the end of the words.
     let room = data.szTip.len() - 1;
     for (slot, unit) in data.szTip.iter_mut().take(room).zip(words.encode_utf16()) {
@@ -264,7 +264,8 @@ fn menu(window: HWND) {
         let Ok(menu) = CreatePopupMenu() else { return };
         let pause_flags = if helper.paused() { MF_STRING | MF_CHECKED } else { MF_STRING };
         // Windows' own menu by the clock, not one of the app's: its keys are the underlined letters (O, P, Q).
-        let _ = AppendMenuW(menu, MF_STRING, OPEN, w!("&Open Music Organiser"));
+        let open = windows::core::HSTRING::from(format!("&Open {}", mo_app::product::NAME));
+        let _ = AppendMenuW(menu, MF_STRING, OPEN, &open);
         let _ = AppendMenuW(menu, pause_flags, PAUSE, w!("&Pause watching Bitwig"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, QUIT, w!("&Quit the helper"));
@@ -330,7 +331,7 @@ fn start_app() {
             .spawn()
     });
     if let Err(e) = opened {
-        log::warning("Helper", &format!("Couldn't open Music Organiser: {e}"));
+        log::warning("Helper", &format!("Couldn't open {}: {e}", mo_app::product::NAME));
     }
 }
 

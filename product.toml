@@ -1,0 +1,28 @@
+# The app's name, logo and the words around them, in one place. The name is DAWmate (Solomon, 2026-11-15; "Music
+# Organiser" was the working title). The logo is "Dm, in the well" (Solomon, 2026-11-15): assets/logo/logo.svg is the
+# drawing, logo.png and logo.ico are made from it. Change either here: the app (title bar, About, logs, Windows' file
+# details) and the installer all follow. The version is the workspace's, in Cargo.toml.
+#
+# What does NOT follow, on purpose: the data folder (MusicOrganiser, so a rename never loses anyone's data), the
+# .exe's file name, and the names the DAWs know the app's links by (mo-dawlink keeps those).
+
+# What people see: the title bar, About, the Start menu, Windows' Apps list.
+name = "DAWmate"
+
+# One line on what it is, for Windows' file details and the installer.
+description = "Songs, sounds and MIDI for FL Studio and Bitwig, in one place"
+
+# Who makes it, for Windows' file details and the installer.
+publisher = "Silkie86"
+
+# The app's page, for the installer and the update check.
+website = "https://github.com/Silkie86/Music-Organiser-Rust"
+
+# The logo: a square PNG for the window, and an .ico (16 to 256 pixels) for the .exe and the installer. Paths are from
+# this file's folder.
+logo_png = "assets/logo/logo.png"
+logo_ico = "assets/logo/logo.ico"
+
+# Windows knows the installed app by this. It never changes, even when the name does, so a renamed version installs
+# over the old one instead of beside it.
+installer_id = "2230BF8D-69E9-444B-A9D0-3F6CD3246506"

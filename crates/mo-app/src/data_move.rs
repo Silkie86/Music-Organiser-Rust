@@ -832,8 +832,9 @@ fn moved_out_note(from: &Path, first: &Path, to: &Path, data: &Path, when: &str)
         keep.push(format!("{}: not copied, kept here until the app has archived them", left.join(", ")));
     }
     let mut note = format!(
-        "Music Organiser copied its data from this folder to\r\n\r\n    {}\r\n\r\non {when} and uses that folder now. \
+        "{} copied its data from this folder to\r\n\r\n    {}\r\n\r\non {when} and uses that folder now. \
          Nothing here was changed or removed.\r\n",
+        crate::product::NAME,
         to.display()
     );
     if !keep.is_empty() {

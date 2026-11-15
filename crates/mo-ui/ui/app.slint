@@ -1,6 +1,8 @@
 // The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Presets, MIDI,
 // Plugins and Space, with Settings at the bottom.
 import { Theme, Type, Space, Motion, Icons, RailItem, RailDawLine, RailJobLine, DawLine, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton, JumpField, AppKeys, Dot, Tip } from "studio.slint";
+// The app's name and logo, from product.toml (mo-ui's build.rs makes it).
+import { Product } from "@product";
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook } from "pages/sounds.slint";
@@ -60,7 +62,8 @@ export struct PlaceInfo {
 }
 
 export component AppWindow inherits Window {
-    title: "Music Organiser";
+    title: Product.name;
+    icon: Product.logo;
     preferred-width: 1440px;
     preferred-height: 900px;
     min-width: 900px;
@@ -225,7 +228,7 @@ export component AppWindow inherits Window {
                             x: 38px;
                             height: parent.height;
                             vertical-alignment: center;
-                            text: "Music Organiser";
+                            text: Product.name;
                             font-family: Theme.title-font;
                             font-size: Type.row-title;
                             font-weight: 700;

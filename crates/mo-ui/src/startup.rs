@@ -81,7 +81,7 @@ pub enum Missing {
 pub fn data_folder_missing(problem: &str) -> Missing {
     let answer = rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Warning)
-        .set_title("Music Organiser: data folder not found")
+        .set_title(format!("{}: data folder not found", mo_app::product::NAME))
         .set_description(format!(
             "{problem}.\n\nYes: look again (plug the drive in first).\nNo: open on the old copy. It is from before the \
              move, and changes made now stay in it, not in the moved folder.\nCancel: close the app."

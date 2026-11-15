@@ -7,10 +7,10 @@ pub fn version() -> String {
 
 /// The session log's first lines, like the C# app's.
 pub fn log_header(start: chrono::DateTime<chrono::Local>) -> String {
-    log_header_of("Music Organiser", start)
+    log_header_of(crate::product::NAME, start)
 }
 
-/// [`log_header`] for a run of `what` ("Music Organiser", or "Music Organiser helper").
+/// [`log_header`] for a run of `what` (the app's name, or its helper's: [`crate::product`]).
 pub fn log_header_of(what: &str, start: chrono::DateTime<chrono::Local>) -> String {
     let build = if cfg!(debug_assertions) { "Debug" } else { "Release" };
     let watched = if std::env::var_os("MO_WATCH").is_some() {

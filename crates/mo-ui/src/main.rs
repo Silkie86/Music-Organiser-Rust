@@ -358,7 +358,7 @@ fn on_crash(
     let current = std::thread::current();
     let thread = current.name().unwrap_or("unnamed");
     let place = place_of(info);
-    let text = format!("Music Organiser {} crashed on thread {thread}\n{info}\n", mo_app::version::version());
+    let text = format!("{} {} crashed on thread {thread}\n{info}\n", mo_app::product::NAME, mo_app::version::version());
     log::crash(&place, &text, fatal);
     // Out to disk now. The log's own writer can't wait for itself to write the crash out.
     let on_disk = || {

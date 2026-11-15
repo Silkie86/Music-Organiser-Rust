@@ -2,6 +2,7 @@
 // "Made with Slint" credit in General's About part (Slint's royalty-free licence, decided 2026-10-30). Only shared
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
+import { Product } from "@product";
 import { Fit } from "../list.slint";
 import { Theme, AppKeys, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow, WordBox } from "../studio.slint";
 
@@ -479,7 +480,7 @@ component GeneralTab inherits VerticalLayout {
     // All the start pages show at once, in a row of their own: there's room, so nothing hides in a menu.
     SettingsCard {
         title: "When the app opens";
-        intro: "The page you land on each time you start Music Organiser.";
+        intro: "The page you land on each time you start \{Product.name}.";
         ChoiceRow {
             label: "START ON";
             Segmented {
@@ -609,7 +610,7 @@ component GeneralTab inherits VerticalLayout {
                 alignment: center;
                 spacing: Space.xs;
                 Text {
-                    text: "Music Organiser";
+                    text: Product.name;
                     color: Theme.text;
                     font-size: Type.row-title;
                     font-weight: 600;
