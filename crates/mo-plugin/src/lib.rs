@@ -135,6 +135,7 @@ impl DefaultPluginFactory for MoPlugin {
 
     fn new_shared(host: HostSharedHandle<'_>) -> Result<Shared, PluginError> {
         let info = host.info();
+        threads::pin_the_file();
         threads::note_crashes();
         // The tests' stand-in DAW gets no log: tests never write to the real logs folder (rule 11). Nor is the
         // graphics card looked for in it.

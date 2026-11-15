@@ -541,6 +541,8 @@ impl Heard {
 pub struct Checker {
     /// Counts the DAW's starts of the track's audio: an older reading thread ends.
     run: AtomicU64,
+    /// The reading thread's sleep between looks, cut short when it's told to end.
+    nap: crate::threads::Nap,
     /// Thru: the notes played in go on out of the note output, for an instrument after the plugin.
     pub thru: AtomicBool,
     /// The newest for the panel, and its number (counted up each time): kept, so a panel opened later shows it too.
@@ -563,6 +565,7 @@ impl Default for Checker {
     fn default() -> Checker {
         Checker {
             run: AtomicU64::new(0),
+            nap: crate::threads::Nap::default(),
             thru: AtomicBool::new(true),
             heard: Mutex::new((0, Heard::default())),
             takes: Mutex::new((0, Vec::new())),
@@ -577,6 +580,7 @@ impl Checker {
     pub fn start(self: &Arc<Self>) -> Catch {
         let (to, from) = rtrb::RingBuffer::new(RING);
         let run = self.run.fetch_add(1, Ordering::AcqRel) + 1;
+        self.nap.wake();
         let me = Arc::clone(self);
         background("mo-plugin-chords", move || me.read_on(run, from));
         Catch { to, own: 0.0, passed: [0; 128], checker: Arc::clone(self) }
@@ -585,6 +589,7 @@ impl Checker {
     /// The DAW stopped the track's audio: the reading thread ends.
     pub fn stop(&self) {
         self.run.fetch_add(1, Ordering::AcqRel);
+        self.nap.wake();
     }
 
     /// A take that's over, in the list by when it started (newest first). Past [`crate::takes::KEPT`] the oldest
@@ -693,7 +698,7 @@ impl Checker {
         loop {
             let running = self.run.load(Ordering::Acquire) == run;
             if running {
-                std::thread::sleep(READ_EVERY);
+                self.nap.sleep(READ_EVERY);
             }
             came.clear();
             while let Ok(c) = from.pop() {
