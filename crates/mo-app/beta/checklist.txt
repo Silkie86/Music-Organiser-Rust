@@ -8,8 +8,8 @@
 
 == Start
 start.release | Start the app from the launcher's Release shortcut, then close it and start it again | It opens in a few seconds both times; Settings > Developer says Build: Release
-start.no-old-dbs | Start the app with the old library.db, sounds.db and midi.db gone | No error card; the Songs, Sounds and MIDI pages all fill
-start.close-clean | Use the app for a while, then close it with the window's X | It closes at once; no new crash-....log in the logs folder
+start.full-screen | Start the app, press F11, close it and start it again; then F11 back to full screen | It opens in full screen; after F11 it opens as you left it
+start.close-clean | Use the app for a while, then close it (Alt+F4, or F11 out of full screen and the window's X) | It closes at once; no new crash-....log in the logs folder
 
 == Songs
 songs.list | Open the Songs page, search for a song, pick a few chips | The list fills at once and the search and chips narrow it

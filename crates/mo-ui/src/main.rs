@@ -108,6 +108,7 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::startup::step("graphics card");
     let look = mo_ui::settings::look_of(&settings);
     let start = mo_app::app_settings::start_place(&settings);
+    let full_screen = mo_app::app_settings::opens_full_screen(&settings);
     let app = match mo_ui::new_app(&look, shortcuts.clone(), start, feed.clone()) {
         Ok(app) => app,
         Err(e) => {
@@ -169,7 +170,11 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::startup::step("Space page");
     // The rail's "In your DAWs": what Bitwig has open, asked on a thread of its own.
     mo_ui::daws::connect(&app);
+    // Maximised under full screen, so F11 out of full screen leaves the window filling the screen beside the taskbar.
     app.window().set_maximized(true);
+    if full_screen {
+        app.window().set_fullscreen(true);
+    }
     // A little after start, a card if the app's drive or the temp folder's is almost full.
     mo_app::drive_room::watch(data.clone(), feed.clone());
     // A little after start, the MIDI files older drags left in Temp (rule 28).

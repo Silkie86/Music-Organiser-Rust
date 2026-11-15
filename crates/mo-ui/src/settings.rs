@@ -681,6 +681,11 @@ pub fn sweep_hold(settings: &AppSettings) -> bool {
     settings.get(SWEEP_HOLD_KEY) == Some("1")
 }
 
+/// F11 turned full screen on or off: the window opens that way next time.
+pub fn full_screen_changed(on: bool) {
+    change(app_settings::FULL_SCREEN_KEY, if on { "1" } else { "0" });
+}
+
 /// Changes a setting and writes the file in the background, when it changed.
 fn change(key: &str, value: &str) {
     let save = PAGE.with(|p| {
