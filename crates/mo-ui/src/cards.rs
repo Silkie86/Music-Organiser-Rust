@@ -60,11 +60,14 @@ pub fn connect(app: &AppWindow, feed: &Feed) {
 const RAIL_JOBS: usize = 4;
 
 /// Puts the feed's jobs on screen now: the running and just-finished ones as lines in the rail, the ones that failed
-/// as cards (the UX review of 10 Nov, A3). Call on the window's thread. When the same jobs are on screen, only their
+/// as cards (the UX review of 10 Nov, A3), and so the ones done that stay until closed (review finding AP-8: the
+/// rail's lines have no ×). Call on the window's thread. When the same jobs are on screen, only their
 /// rows change, so the lines aren't rebuilt and their meters glide.
 pub fn refresh(app: &AppWindow, feed: &Feed) {
-    let (cards, mut jobs): (Vec<CardInfo>, Vec<CardInfo>) =
-        feed.visible(Instant::now()).iter().map(card_info).partition(|c| c.state == 2);
+    let visible = feed.visible(Instant::now());
+    let (cards, jobs): (Vec<&Card>, Vec<&Card>) = visible.iter().partition(|c| c.to_close());
+    let cards: Vec<CardInfo> = cards.into_iter().map(card_info).collect();
+    let mut jobs: Vec<CardInfo> = jobs.into_iter().map(card_info).collect();
     // The newest are at the end: they are the ones kept when there are too many for the rail.
     let more = jobs.len().saturating_sub(RAIL_JOBS);
     jobs.drain(..more);

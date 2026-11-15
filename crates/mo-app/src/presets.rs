@@ -1342,8 +1342,9 @@ pub enum Hearing {
 pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
     let ext = i.row.extension.to_lowercase();
     let file = i.is_file();
-    // A Bitwig preset file, or a sound a Bitwig preset can be made from (which waits for an export to finish).
-    let bitwig = if file { ext == ".bwpreset" } else { can_be_bitwig(&ext) };
+    // A Bitwig preset file, or a sound or plugin preset file a Bitwig preset can be made from (a song's waits for an
+    // export to finish). A .fxp, .fxb or .vstpreset file goes as a Bitwig preset made from it, as a drag does (PR-3).
+    let bitwig = (file && ext == ".bwpreset") || can_be_bitwig(&ext);
     // Every card's order (the UX review of 10 Nov, B2): hearing it first (the lit button), then into the DAW, then
     // showing and copying.
     let mut out = Vec::new();
@@ -2427,6 +2428,9 @@ mod tests {
         assert!(!ids(&fl_own).contains(&act::TO_BITWIG), "an FL plugin's own state can't go into Bitwig");
         assert!(!ids(&fl_own).contains(&act::AUDITION), "nor be auditioned there");
         assert_eq!(ids(&all[3]), [act::AUDITION, act::TO_BITWIG, act::REVEAL, act::COPY_PATH]);
+        // A plugin's own preset file goes into Bitwig too, as a Bitwig preset made from it (PR-3).
+        let fxp = Item::new(PresetRow { extension: ".fxp".into(), ..file("Lead", "/p/Lead.fxp") }, String::new(), None);
+        assert_eq!(ids(&fxp), [act::AUDITION, act::TO_BITWIG, act::REVEAL, act::COPY_PATH]);
         // While a preset file is auditioned: Stop in Bitwig, then Keep in Bitwig once it plays, even mid-export.
         let texts = |h| offers(&all[3], true, h).into_iter().filter(|o| o.enabled).map(|o| o.text).collect::<Vec<_>>();
         assert_eq!(texts(Hearing::Starting), ["Stop in Bitwig", "Show in folder", "Copy path"]);

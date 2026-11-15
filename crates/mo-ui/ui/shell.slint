@@ -98,7 +98,8 @@ component ActivityCard inherits Rectangle {
     }
 }
 
-// The cards, bottom right, newest at the bottom: only the jobs that failed (the rest are lines in the rail).
+// The cards, bottom right, newest at the bottom: the jobs that failed and the ones done that stay until their × (the
+// rest are lines in the rail, which have no ×).
 export component ActivityCards inherits VerticalLayout {
     in property <[CardInfo]> cards;
     callback dismiss(int);

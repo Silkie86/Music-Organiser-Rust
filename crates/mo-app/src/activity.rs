@@ -43,6 +43,12 @@ pub struct Card {
 }
 
 impl Card {
+    /// Whether it's a card to read and close with its ×, shown where the × is: one that failed, or one done that
+    /// never goes by itself ([`Feed::told`]). The rest are jobs running or just done, which go by themselves.
+    pub fn to_close(&self) -> bool {
+        self.state == State::Failed || (self.state == State::Done && self.ended.is_none())
+    }
+
     /// Whether it finished long enough ago to go: [`DONE_STAYS`] after it was done, [`FAILED_STAYS`] after it failed.
     fn gone_by(&self, now: Instant) -> bool {
         let stays = if self.state == State::Failed { FAILED_STAYS } else { DONE_STAYS };
@@ -430,5 +436,19 @@ mod tests {
         assert_eq!(feed.running(), 0);
         feed.dismiss(feed.visible(later)[0].id);
         assert!(feed.visible(later).is_empty());
+    }
+
+    // Review finding AP-8: a told card was shown as a line in the rail, which has no ×, so it stayed all session.
+    #[test]
+    fn only_what_stays_or_failed_is_a_card_to_close() {
+        let feed = Feed::default();
+        let running = feed.start("Reading songs", "");
+        feed.start("Reading sounds", "").done("All read");
+        feed.start("Backing up", "").failed("The drive is full");
+        feed.told("Put the old app's databases away", "In Old databases");
+        feed.notice("Using the old copy of your data", "The drive is missing");
+        let close: Vec<bool> = feed.visible(Instant::now()).iter().map(Card::to_close).collect();
+        assert_eq!(close, [false, false, true, true, true]);
+        drop(running);
     }
 }

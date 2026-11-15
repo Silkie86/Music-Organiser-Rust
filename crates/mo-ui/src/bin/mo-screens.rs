@@ -122,6 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.global::<mo_ui::MidiData>().set_playing(true);
     shots.push(("midi-playing.png".into(), capture(&window)));
     app.global::<mo_ui::MidiData>().set_playing(false);
+    midi_right_click_while_playing(&app)?;
     // Playing through the track selected in Bitwig.
     mo_ui::midi::run_action(&app, "midi.playBitwig");
     app.global::<mo_ui::MidiData>().set_daw_note("Playing through \u{201c}Bass\u{201d} in Bitwig.".into());
@@ -828,6 +829,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     types_fill_the_column(&app, &window)?;
     tag_box_checks(&app, &window)?;
     stopping_by_click(&app, &window)?;
+    keys_come_back_checks(&app, &window)?;
     Ok(())
 }
 
@@ -1081,6 +1083,187 @@ fn stopping_by_click(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> 
     hover(window, -1.0, -1.0);
     capture(window);
     Ok(())
+}
+
+/// The keys come back when the part that had them goes, as they do on Sounds since the 10 Nov review's U-1 (the
+/// whole-app review of 14 Nov): the Songs card closing by Esc in its empty tag box, given the keys by Ctrl+T (SG-5,
+/// AP-1); the sound card giving its place to Favourites from Bitwig with the keys in its tag box (AP-4); a
+/// filter-column slider pressed, then hidden with its view (AP-2); and Settings › Shortcuts: Ctrl+F finds its search
+/// (AP-7), a key's button clicked after typing there hears the next key, the words staying (AP-3), Esc takes the
+/// words off (AP-7), another tab after typing there leaves the keys with the window (AP-1), and a line listening
+/// stops as another tab shows (AP-6). F1 must open the key sheet each time. Every part runs, and all that went wrong
+/// is said at once. Last, as it adds tags.
+fn keys_come_back_checks(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let wrong: Vec<String> = [
+        songs_card_keys(app, window),
+        sound_card_gives_way(app, window),
+        slider_keys(app, window),
+        shortcuts_keys(app, window),
+    ]
+    .into_iter()
+    .filter_map(Result::err)
+    .collect();
+    if wrong.is_empty() { Ok(()) } else { Err(format!("keys: {}", wrong.join("; "))) }
+}
+
+/// Whether F1 opens the key sheet now, or what went wrong `after` what.
+fn keys_work(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, after: &str) -> Result<(), String> {
+    if f1_works(app, window) { Ok(()) } else { Err(format!("{after}, F1 did nothing: no part had the keys")) }
+}
+
+/// Songs: Ctrl+T, a tag typed and Enter, then Esc in the empty box closes the card.
+fn songs_card_keys(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    use slint::platform::Key;
+    let songs = app.global::<mo_ui::SongsData>();
+    let song_tagged = |tag: &str| {
+        let tags = songs.get_song_tags();
+        (0..tags.row_count()).any(|i| tags.row_data(i).is_some_and(|t| t.text == tag))
+    };
+    start_on_songs(app);
+    songs.set_search("".into());
+    songs.invoke_search_edited("".into());
+    mo_ui::songs::show_picked(app, 1, sample_detail(), Tab::Overview);
+    capture(window);
+    press(app, "t", true);
+    capture(window);
+    type_in(app, window, "dusty");
+    if !song_tagged("dusty") {
+        return Err("Ctrl+T then typing on Songs added no tag: the card's tag box didn't get the keys".into());
+    }
+    press(app, Key::Escape, false);
+    capture(window);
+    if mo_ui::songs::has_pick() {
+        return Err("Esc in the song card's empty tag box didn't close the card".into());
+    }
+    keys_work(app, window, "once Esc closed the song's card from its tag box")
+}
+
+/// Sounds: Favourites from Bitwig takes the sound card's place while its tag box has the keys.
+fn sound_card_gives_way(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let sounds = app.global::<mo_ui::SoundsData>();
+    start_on(app, Place::Sounds);
+    sounds.invoke_pick_view(0);
+    pick_sound(app, 0);
+    // With Autoplay on the pick plays: stopped, so a check after it has its Esc for itself.
+    mo_ui::sounds::stop_on_escape(app);
+    capture(window);
+    press(app, "t", true);
+    capture(window);
+    type_in(app, window, "murky");
+    if !picked_has_tag(app, "murky") {
+        return Err("Ctrl+T then typing on Sounds added no tag: its box didn't get the keys".into());
+    }
+    sounds.invoke_bitwig_toggle();
+    capture(window);
+    let worked = keys_work(app, window, "once Favourites from Bitwig took the sound card's place, keys in its tag box");
+    sounds.invoke_bitwig_toggle();
+    capture(window);
+    worked
+}
+
+/// Rediscover's How far afield pressed, then Tiles: the slider goes with its view. No filter picked, so the column
+/// holds what it held in the shots.
+fn slider_keys(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let sounds = app.global::<mo_ui::SoundsData>();
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    start_on(app, Place::Sounds);
+    sounds.invoke_clear();
+    sounds.invoke_pick_view(4);
+    capture(window);
+    capture(window);
+    let before = sounds.get_re_adventure();
+    let (x, y) = AFIELD_SLIDER;
+    click(window, x, y);
+    capture(window);
+    let moved = (sounds.get_re_adventure() - before).abs() >= 0.05;
+    sounds.invoke_pick_view(0);
+    capture(window);
+    if !moved {
+        return Err(format!("the press at {x}, {y} moved no slider on Rediscover; has the filter column moved?"));
+    }
+    keys_work(app, window, "once Rediscover's How far afield was pressed and Tiles took its view's place")
+}
+
+/// Settings › Shortcuts: Ctrl+F, words typed, then a key's button clicked: the next key is the action's, and the words
+/// stay; Esc takes them off; words typed, then the General tab; a line listening, then the General tab. Play's key
+/// goes back to its own, and the search is left empty.
+fn shortcuts_keys(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    use mo_app::settings::Tab as SettingsTab;
+    use slint::platform::Key;
+    let settings = app.global::<mo_ui::SettingsData>();
+    let tab = |tab: SettingsTab| {
+        settings.invoke_tab_picked(tab.index() as i32);
+        capture(window);
+    };
+    let typed = |words: &str| {
+        for c in words.chars() {
+            press(app, c.to_string(), false);
+        }
+        capture(window);
+    };
+    let searched = || settings.get_keys_search().to_string();
+    // Esc's first step stops what plays: nothing does here.
+    mo_ui::sounds::stop_on_escape(app);
+    let empty_search = || {
+        settings.set_keys_search("".into());
+        settings.invoke_keys_search_edited("".into());
+        capture(window);
+    };
+    let mut wrong = Vec::new();
+    start_on(app, Place::Settings);
+    tab(SettingsTab::Shortcuts);
+    empty_search();
+    press(app, "f", true);
+    typed("play");
+    // Only with the keys in the search box (Ctrl+F) can the steps that need them there run; the rest run anyway.
+    let found = searched() == "play";
+    if !found {
+        wrong.push(format!("Ctrl+F then typing on Settings › Shortcuts searched {:?}", searched()));
+        settings.set_keys_search("play".into());
+        settings.invoke_keys_search_edited("play".into());
+        capture(window);
+    }
+    if found {
+        settings.invoke_listen("app.play".into());
+        capture(window);
+        press(app, "p", false);
+        capture(window);
+        let given = mo_ui::shortcuts().key_of("app.play").to_owned();
+        let words = searched();
+        settings.invoke_default_key("app.play".into());
+        capture(window);
+        if given != "P" || words != "play" {
+            wrong.push(format!(
+                "P after typing in Shortcuts' search and clicking Play's key gave it {given:?}, the search saying \
+                 {words:?}"
+            ));
+        }
+    }
+    press(app, Key::Escape, false);
+    capture(window);
+    if !searched().is_empty() {
+        wrong.push(format!("Esc on Shortcuts left its search's words {:?}", searched()));
+        empty_search();
+    }
+    // Words typed in the search, then the General tab: the box goes with its tab.
+    if found {
+        press(app, "f", true);
+        typed("x");
+        tab(SettingsTab::General);
+        let worked = keys_work(app, window, "once Settings' General tab took Shortcuts' place, keys in its search box");
+        wrong.extend(worked.err());
+    }
+    // A line listening, then the General tab: it listens no more.
+    tab(SettingsTab::Shortcuts);
+    empty_search();
+    settings.invoke_listen("app.play".into());
+    capture(window);
+    tab(SettingsTab::General);
+    if mo_ui::settings::listening() {
+        wrong.push("Shortcuts went on listening for a key once Settings' General tab showed".into());
+        press(app, Key::Escape, false);
+    }
+    if wrong.is_empty() { Ok(()) } else { Err(wrong.join("; ")) }
 }
 
 /// Every place once more in a window as wide as Solomon's screen (3440 x 1369, the size of his F12 notes' pictures),
@@ -3566,6 +3749,54 @@ fn card_down(window: &MinimalSoftwareWindow, top: &[u8], name: &str) -> Result<V
     Ok(down)
 }
 
+/// A right click on another MIDI line while a part plays (the review of 14 Nov, MI-2): that pick for its menu starts
+/// and stops nothing, in the loop or in Bitwig; its card offers to play it, and the menu's play lines play it rather
+/// than stopping what plays. (The line's right press sets the flag and picks, as on every list: done here by hand.)
+fn midi_right_click_while_playing(app: &mo_ui::AppWindow) -> Result<(), Box<dyn std::error::Error>> {
+    let midi = app.global::<mo_ui::MidiData>();
+    let keys = app.global::<mo_ui::AppKeys>();
+    let menu_pick = |row| {
+        keys.set_picking_for_menu(true);
+        mo_ui::midi::pick_row(app, row);
+        keys.set_picking_for_menu(false);
+    };
+    mo_ui::midi::soundfont_here(app, true);
+    mo_ui::midi::pick_row(app, 0);
+    mo_ui::midi::run_action(app, "app.play");
+    let first = midi.get_picked().title;
+    menu_pick(1);
+    if !midi.get_playing() || midi.get_loop_picked() || midi.get_picked().title == first {
+        return Err(
+            "midi right click: a right click on the second line as the first played stopped or switched it".into()
+        );
+    }
+    mo_ui::midi::run_action(app, "app.play");
+    if !midi.get_playing() || !midi.get_loop_picked() {
+        return Err("midi right click: the menu's Play or stop the loop didn't play the line right-clicked".into());
+    }
+    mo_ui::midi::run_action(app, "app.play");
+    if midi.get_playing() {
+        return Err("midi right click: Play or stop the loop didn't stop the part it plays".into());
+    }
+    // The same in Bitwig.
+    mo_ui::midi::run_action(app, "midi.playBitwig");
+    menu_pick(0);
+    if midi.get_daw_playing() != "bitwig" || midi.get_daw_picked() {
+        return Err("midi right click: a right click on another line stopped or switched the part in Bitwig".into());
+    }
+    mo_ui::midi::run_action(app, "midi.playBitwig");
+    if midi.get_daw_playing() != "bitwig" || !midi.get_daw_picked() {
+        return Err("midi right click: the menu's Play in Bitwig didn't play the line right-clicked".into());
+    }
+    mo_ui::midi::run_action(app, "midi.playBitwig");
+    if midi.get_daw_playing() != "" {
+        return Err("midi right click: Play in Bitwig, or stop didn't stop the part in Bitwig".into());
+    }
+    mo_ui::midi::soundfont_here(app, false);
+    mo_ui::midi::pick_row(app, 0);
+    Ok(())
+}
+
 /// A right click at a point in the window.
 fn right_click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     let position = slint::LogicalPosition::new(x, y);
@@ -3584,6 +3815,9 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
 
 /// Settings, Shortcuts: where the fourth line's "No key" button shows once the mouse is on the line.
 const KEY_LINE_NO_KEY: (f32, f32) = (1218.0, 421.0);
+
+/// Rediscover's How far afield slider in the filter column, near its track's right end (it rests nearer its left).
+const AFIELD_SLIDER: (f32, f32) = (385.0, 634.0);
 
 /// The Sounds page's Tempo slider with no filter picked: its track's height in the window, where its higher handle
 /// rests, and where 150 BPM is along it.

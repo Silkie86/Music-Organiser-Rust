@@ -3,7 +3,7 @@
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow, WordBox } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow, WordBox } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -763,6 +763,10 @@ component KeyLineRow inherits HoverSense {
 }
 
 component ShortcutsTab inherits VerticalLayout {
+    // Ctrl+F (app.search, which goes on to this tab only while it's on show): the keys go to the search box, its
+    // words picked, as on every page with a search (the whole-app review of 14 Nov, AP-7).
+    property <int> search-asked: AppKeys.search;
+    changed search-asked => { search-box.focus-all(); }
     spacing: Space.lg;
     alignment: start;
     HowItWorks { text: SettingsData.keys-note; }
@@ -790,7 +794,8 @@ component ShortcutsTab inherits VerticalLayout {
     }
     HorizontalLayout {
         spacing: Space.md;
-        SearchBox {
+        // Esc goes on to the window's keys, whose step back on this tab takes its words off (app.escape).
+        search-box := SearchBox {
             horizontal-stretch: 0;
             width: 320px;
             hint: "Search actions and keys";
