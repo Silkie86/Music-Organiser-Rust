@@ -159,6 +159,12 @@ fn a_copy_another_project_in_the_folder_uses_is_kept() {
         "{:?}",
         fixed.left
     );
+    // The app's Fix doesn't read the other saves (FX-3): the copy is only no longer named in the fixed project, and
+    // the bin step asks again, which keeps it.
+    std::fs::remove_file(&fixed.file).unwrap();
+    let quick = mo_convert::relink::fix_bitwig_project_in(&project, &relinks, &[]).unwrap();
+    assert_eq!(quick.changed, relinks, "{:?}", quick.left);
+    assert!(still_named(&project, &relinks[0]).is_some());
 }
 
 #[test]

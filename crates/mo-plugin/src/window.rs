@@ -136,6 +136,8 @@ struct Slots {
     found: Mutex<Option<(u64, Vec<usize>, SoundCounts)>>,
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
+    /// Works the list out, one asking at a time ([`crate::threads::OneAtATime`]).
+    lister: crate::threads::OneAtATime,
     /// This panel has shown the list with the sounds like your favourites in (or said they couldn't be found), once
     /// they were known: the library is shared by every panel, so each looks for itself ([`Window::tick`]).
     like_shown: AtomicBool,
@@ -824,8 +826,13 @@ impl Shown {
             let weak = panel.as_weak();
             Rc::new(move |change: &dyn Fn(&mut Asked, Option<&Library>)| {
                 let library = lines.library.borrow().clone();
+                let before = asked.borrow().clone();
                 change(&mut asked.borrow_mut(), library.as_deref());
                 let asked = asked.borrow().clone();
+                // A Tempo drag says the same step again on each mouse move: nothing changed, nothing to work out.
+                if asked == before {
+                    return;
+                }
                 if let Some(panel) = weak.upgrade() {
                     column.show(&panel, library.as_deref(), &asked);
                 }
@@ -2077,15 +2084,20 @@ fn like_wanted(library: &Arc<Library>, asked: &Asked, slots: &Slots) {
 /// number, and only the newest asking's answer is shown.
 fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
     let number = slots.searches.fetch_add(1, Ordering::AcqRel) + 1;
-    background("mo-plugin-view", move || {
-        // Newer words were typed while this one waited for its thread: theirs is on its way.
+    let theirs = Arc::clone(&slots);
+    slots.lister.ask(move || {
+        let slots = theirs;
+        // Newer words were typed while this one waited: theirs is on its way.
         if slots.searches.load(Ordering::Acquire) != number {
             return;
         }
         let started = Instant::now();
         let (shown, counts) = library.view(&asked);
         crate::log::took_if_slow("List", &format!("Worked out a list of {} sounds", shown.len()), started);
-        *lock(&slots.found) = Some((number, shown, counts));
+        let mut found = lock(&slots.found);
+        if found.as_ref().is_none_or(|(n, ..)| *n < number) {
+            *found = Some((number, shown, counts));
+        }
     });
 }
 

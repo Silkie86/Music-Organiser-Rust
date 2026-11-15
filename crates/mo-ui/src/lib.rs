@@ -318,6 +318,13 @@ fn show_places(app: &AppWindow, shortcuts: &Shortcuts) {
             icon: icon(app, *p),
         })
         .collect();
+    // The screens find a place's icon by its number (`Icons.place`, for the empty pages): it must be the one the
+    // rail shows, so a new place can't shift the ones after it (the 14 Nov review's AP-9). mo-screens runs this.
+    #[cfg(debug_assertions)]
+    for (i, p) in Place::ALL.iter().enumerate() {
+        let by_number = app.global::<Icons>().invoke_place(i as i32);
+        assert!(by_number == icon(app, *p), "Icons.place({i}) in studio.slint isn't {}'s icon", p.name());
+    }
     let settings = Place::Settings.index();
     app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));

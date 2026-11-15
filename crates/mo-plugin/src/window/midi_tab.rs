@@ -25,6 +25,8 @@ struct PartSlots {
     found: Mutex<Option<(u64, Vec<usize>, ChoiceCounts)>>,
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
+    /// Works the list out, one asking at a time ([`crate::threads::OneAtATime`]).
+    lister: crate::threads::OneAtATime,
     /// The piano roll drawn for the part picked, with its asking's number (none: it couldn't be).
     roll: Mutex<Option<(u64, Option<midi::RollPixels>)>>,
     /// Counts piano rolls asked for: only the newest is shown.
@@ -398,14 +400,19 @@ fn colours(panel: &Panel) -> mo_app::piano_roll::Colours {
 /// number, and only the newest asking's answer is shown.
 fn view(parts: Arc<Parts>, asked: Asked, slots: Arc<PartSlots>) {
     let number = slots.searches.fetch_add(1, Ordering::AcqRel) + 1;
-    background("mo-plugin-midi-view", move || {
+    let theirs = Arc::clone(&slots);
+    slots.lister.ask(move || {
+        let slots = theirs;
         if slots.searches.load(Ordering::Acquire) != number {
             return;
         }
         let started = Instant::now();
         let (shown, counts) = parts.view(&asked);
         crate::log::took_if_slow("MIDI", &format!("Worked out a list of {} parts", shown.len()), started);
-        *lock(&slots.found) = Some((number, shown, counts));
+        let mut found = lock(&slots.found);
+        if found.as_ref().is_none_or(|(n, ..)| *n < number) {
+            *found = Some((number, shown, counts));
+        }
     });
 }
 

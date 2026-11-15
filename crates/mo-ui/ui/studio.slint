@@ -2335,16 +2335,18 @@ export global Icons {
     out property <string> backup: "M 2 10 L 14 10 L 14 14.5 L 2 14.5 Z M 8 8 L 8 1.5 M 5 4.5 L 8 1.5 L 11 4.5";
     // Settings: a cog.
     out property <string> settings: "M 10.5 8 A 2.5 2.5 0 1 1 5.5 8 A 2.5 2.5 0 1 1 10.5 8 M 8 1 L 8 3.5 M 8 12.5 L 8 15 M 1 8 L 3.5 8 M 12.5 8 L 15 8 M 3 3 L 4.8 4.8 M 11.2 11.2 L 13 13 M 13 3 L 11.2 4.8 M 4.8 11.2 L 3 13";
-    // A place's icon from its place in rail order (mo-app's `Place::ALL`), "" for none.
+    // A place's icon from its place in rail order (mo-app's `Place::ALL`), "" for none. A new place goes in here at
+    // its number, and the ones after it move up: the rail's own icons (by name, in lib.rs) are checked against this.
     public pure function place(i: int) -> string {
         if (i == 0) { return songs; }
         if (i == 1) { return sounds; }
         if (i == 2) { return presets; }
-        if (i == 3) { return midi; }
-        if (i == 4) { return plugins; }
-        if (i == 5) { return space; }
-        if (i == 6) { return backup; }
-        if (i == 7) { return settings; }
+        if (i == 3) { return curves; }
+        if (i == 4) { return midi; }
+        if (i == 5) { return plugins; }
+        if (i == 6) { return space; }
+        if (i == 7) { return backup; }
+        if (i == 8) { return settings; }
         return "";
     }
 }
@@ -2380,7 +2382,7 @@ export component MapName inherits Rectangle {
 
 // The whole of a map in miniature with a box round the part on show, like the galaxy's mini-map: a click or a drag
 // on it goes there. The box is in parts of the picture (0 to 1).
-export component MapInset inherits Rectangle {
+export component MapInset inherits Panel {
     in property <image> picture;
     in property <string> title;
     in property <float> box-x;
@@ -2391,10 +2393,6 @@ export component MapInset inherits Rectangle {
     callback go(float, float);
     width: column.preferred-width;
     height: column.preferred-height;
-    background: Theme.surface;
-    border-radius: Theme.radius;
-    border-width: 1px;
-    border-color: Theme.edge;
     clip: true;
     column := VerticalLayout {
         padding: Space.sm;
