@@ -170,11 +170,20 @@ export global TipState {
     in-out property <length> x;
     in-out property <length> y;
     in-out property <length> above-y;
+    // Where the control it's for is, its top left in the window, and whether that's a list line's own tip: a line's
+    // own tip gives way to a tip put up from inside the line (`Tip.yields-width`).
+    in-out property <length> from-x;
+    in-out property <length> from-y;
+    in-out property <bool> from-line;
     in-out property <bool> shown;
+    // How many times it has been put away by `hide`: a line's tip that gave way to another stays away after one too.
+    in-out property <int> hides;
 
-    // Puts the tooltip away: a key was pressed, which can change the page under a resting mouse.
+    // Puts the tooltip away: a key was pressed, which can change the page under a resting mouse. It stays away until
+    // the mouse rests on something else.
     public function hide() {
         shown = false;
+        hides += 1;
     }
 }
 
@@ -211,6 +220,13 @@ export component Tip {
     in property <length> at-x;
     in property <length> at-y;
     in property <length> above-y: -Space.xs;
+    // Words that change while you look at them (a job's progress, say): the tip on show takes the new ones instead of
+    // going away until the mouse has rested again.
+    in property <bool> live;
+    // A whole list line's tip (ListLine's), with the line's size: it gives way to a tip put up from inside the line
+    // (words on it cut short, a small button's), waits while that one shows and shows once it has gone.
+    in property <length> yields-width;
+    in property <length> yields-height;
     x: 0;
     y: 0;
     width: 0;
@@ -220,10 +236,25 @@ export component Tip {
     // The words it put up: once its own words change, they're how it knows the tip on show is still its own.
     property <string> put-text;
     property <string> put-key;
+    // `TipState.hides` when the mouse came to rest on it.
+    property <int> rest-hides;
+    // Another tip is on show from inside the line it gives way to, or was until a key put it away while the mouse
+    // rested here (the line's own tip doesn't come up in its place then).
+    property <bool> held: root.yields-width > 0
+        && (TipState.shown || (TipState.hides != root.rest-hides && !TipState.from-line))
+        && TipState.from-x >= root.absolute-position.x && TipState.from-x < root.absolute-position.x + root.yields-width
+        && TipState.from-y >= root.absolute-position.y && TipState.from-y < root.absolute-position.y + root.yields-height;
+    // Its words were on show and another tip took their place (not a key putting the tip away: that hides it).
+    property <bool> displaced: root.mine && TipState.shown
+        && (TipState.text != root.put-text || TipState.key != root.put-key);
     Timer {
         interval: 600ms;
-        running: root.wanted && !root.mine;
+        running: root.wanted && !root.mine && !root.held;
         triggered => {
+            // The other came up in the same moment.
+            if (root.held) {
+                return;
+            }
             root.mine = true;
             root.put-text = root.text;
             root.put-key = root.key;
@@ -232,17 +263,33 @@ export component Tip {
             TipState.x = root.absolute-position.x + root.at-x;
             TipState.y = root.absolute-position.y + root.at-y;
             TipState.above-y = root.absolute-position.y + root.above-y;
+            TipState.from-x = root.absolute-position.x;
+            TipState.from-y = root.absolute-position.y;
+            TipState.from-line = root.yields-width > 0;
             TipState.shown = true;
         }
     }
     changed wanted => {
-        if (!root.wanted) {
+        if (root.wanted) {
+            root.rest-hides = TipState.hides;
+        } else {
             root.put-away();
+        }
+    }
+    // A line's tip that gave way shows again once the other has gone (`held`).
+    changed displaced => {
+        if (root.displaced && root.yields-width > 0) {
+            root.mine = false;
         }
     }
     // A list line reused for another song while its tip shows: the old words would stay, so put them away.
     changed text => {
-        root.put-away();
+        if (root.live && root.mine && TipState.shown && TipState.text == root.put-text && TipState.key == root.put-key) {
+            root.put-text = root.text;
+            TipState.text = root.text;
+        } else {
+            root.put-away();
+        }
     }
     changed key => {
         root.put-away();
@@ -260,6 +307,18 @@ export component Tip {
 
 // Draws the tooltip on show. Goes last in the window, so it's over everything; kept inside the window's edges.
 export component TipLayer {
+    // The key beside the words, with the room between them, so the words leave it room in the window.
+    property <length> key-room: TipState.key == "" ? 0px : key-words.preferred-width + 2 * Space.xs + Space.sm;
+    key-words := Text {
+        x: 0px;
+        y: 0px;
+        width: 0px;
+        height: 0px;
+        visible: false;
+        text: TipState.key;
+        font-family: Theme.number-font;
+        font-size: Type.meta;
+    }
     if TipState.shown: Rectangle {
         x: max(0px, min(TipState.x, root.width - self.width - Space.xs));
         y: TipState.y + self.height > root.height ? max(0px, TipState.above-y - self.height) : TipState.y;
@@ -277,11 +336,15 @@ export component TipLayer {
             padding-top: Space.xs;
             padding-bottom: Space.xs;
             spacing: Space.sm;
+            // A long one (a whole path, say) goes on over more lines instead of past the window's edge. Its width is
+            // set, so its height counts every line.
             if TipState.text != "": Text {
+                width: max(0px, min(self.preferred-width, 560px, root.width - 2 * Space.sm - 2 * Space.xs - root.key-room));
                 text: TipState.text;
                 color: Theme.text;
                 font-size: Type.meta;
                 vertical-alignment: center;
+                wrap: word-wrap;
             }
             if TipState.key != "": Rectangle {
                 border-radius: Theme.radius;
@@ -301,6 +364,62 @@ export component TipLayer {
                 }
             }
         }
+    }
+}
+
+// Words cut short with "…" when there isn't room for them, that show whole in a tooltip while the mouse rests on them
+// (Solomon's note of 15 Nov 2026: "when message exceeds limits of chip hovering should read the whole message").
+// Words on a list line take the mouse from the line, `over: line.resting; mouse: line.mouse;` (`ListLine`): a mouse
+// area of their own would take the line's clicks. Words with nothing to click under them, a page's summary say, sense
+// it themselves (`own-mouse`). On a line with a tooltip of its own, the whole words show instead of the line's while
+// the mouse is on them (the line's `Tip` gives way).
+export component CutText inherits Text {
+    // Whether the mouse rests on what holds the words (on it, not pressed), and where it is in the window.
+    in property <bool> over;
+    in property <Point> mouse;
+    in property <bool> own-mouse;
+    // The mouse anywhere on what holds the words counts, not only on the words themselves (a filter line).
+    in property <bool> anywhere;
+    // Words that change while you look (as `Tip.live`).
+    in property <bool> live;
+    // Whether the words are cut short now.
+    out property <bool> cut: whole.preferred-width > root.width;
+    overflow: elide;
+    // The words' whole width, measured apart: a page may give the words themselves no width of their own
+    // (`preferred-width: 0px`, so every line splits its room alike). No room of its own, so it's measured only when
+    // asked, not each time the window is drawn. Put at a place of its own: a child without one counts in its
+    // parent's size, and these words would never give way.
+    whole := Text {
+        x: 0px;
+        y: 0px;
+        width: 0px;
+        height: 0px;
+        visible: false;
+        text: root.text;
+        font-family: root.font-family;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        font-italic: root.font-italic;
+        letter-spacing: root.letter-spacing;
+    }
+    sense := TouchArea {
+        enabled: root.own-mouse;
+    }
+    // Whether the mouse is on the words themselves. A property of its own, read only once the mouse is on what holds
+    // them: written into `hovering`, Slint reads each place it names more than once before anything else, so every
+    // line's words would work out where they are in the window as they're made and each time the list turns.
+    property <bool> on-words: root.mouse.x >= root.absolute-position.x
+        && root.mouse.x < root.absolute-position.x + root.width && root.mouse.y >= root.absolute-position.y
+        && root.mouse.y < root.absolute-position.y + root.height;
+    // The mouse first: the words are measured whole only once it's on them.
+    Tip {
+        text: root.text;
+        live: root.live;
+        hovering: (root.own-mouse ? sense.has-hover && !sense.pressed : root.over && (root.anywhere || root.on-words))
+            && root.cut;
+        // Its words under these, lined up with them.
+        at-x: -Space.sm;
+        at-y: root.height + Space.xs;
     }
 }
 
@@ -1446,14 +1565,18 @@ export component TickLine inherits Rectangle {
                 }
             }
         }
-        Text {
+        // The whole words in a tooltip while they're cut short ("Hide duplicates · chec…"), the mouse anywhere on
+        // the line, as they change (Solomon's note of 15 Nov 2026).
+        CutText {
+            over: touch.has-hover && !touch.pressed;
+            anywhere: true;
+            live: true;
             text: root.text;
             color: root.on ? Theme.text : root.dim ? Theme.faint.transparentize(40%) : Theme.muted;
             font-size: Type.meta;
             font-weight: root.on ? 600 : 400;
             vertical-alignment: center;
             horizontal-stretch: 1;
-            overflow: elide;
         }
         if root.count != "": Text {
             text: root.count;
@@ -1473,6 +1596,13 @@ export component TickLine inherits Rectangle {
 // one counts the mouse on that button with a HoverSense round the button too.
 export component HoverSense inherits Rectangle {
     out property <bool> hovered: sense.has-hover;
+    // The mouse on it and not pressed, and where it is in the window: words in it that are cut short (`CutText`) show
+    // whole while it rests on them.
+    out property <bool> resting: sense.has-hover && !sense.pressed;
+    out property <Point> mouse: {
+        x: sense.absolute-position.x + sense.mouse-x,
+        y: sense.absolute-position.y + sense.mouse-y,
+    };
     sense := TouchArea { }
     @children
 }
@@ -1481,6 +1611,13 @@ export component HoverSense inherits Rectangle {
 // in it (`inside`), so the page can put away what it showed under the mouse when it leaves.
 export component MouseField inherits TouchArea {
     out property <bool> inside: self.has-hover;
+    // The mouse in it and not pressed, and where it is in the window: words under it that are cut short (`CutText`)
+    // show whole while it rests on them.
+    out property <bool> resting: self.has-hover && !self.pressed;
+    out property <Point> mouse: {
+        x: self.absolute-position.x + self.mouse-x,
+        y: self.absolute-position.y + self.mouse-y,
+    };
 }
 
 // A slider with two handles, for a span of numbers (the Sounds page's Tempo, in the filter column): what's let
@@ -1755,6 +1892,13 @@ export component ListLine inherits Rectangle {
     callback right-clicked(length, length);
     // Whether the mouse is over it (it's shaded then).
     out property <bool> hovered: touch.has-hover;
+    // The mouse on it and not pressed, and where it is in the window: words on the line that are cut short (`CutText`)
+    // show whole while it rests on them.
+    out property <bool> resting: touch.has-hover && !touch.pressed;
+    out property <Point> mouse: {
+        x: touch.absolute-position.x + touch.mouse-x,
+        y: touch.absolute-position.y + touch.mouse-y,
+    };
     // Where across the line the mouse was last pressed: a line with parts that mean something by where they're
     // clicked (a waveform that plays from that spot) reads it in `clicked`.
     out property <length> pressed-x: touch.pressed-x;
@@ -1850,6 +1994,8 @@ export component ListLine inherits Rectangle {
     }
     Tip {
         text: root.tip;
+        yields-width: root.width;
+        yields-height: root.height;
         hovering: touch.has-hover && !touch.pressed && touch.mouse-x >= root.tip-from && touch.mouse-y >= root.tip-below;
         at-x: touch.mouse-x;
         at-y: touch.mouse-y + Space.xl;
@@ -2832,6 +2978,8 @@ export component RailJobLine inherits Rectangle {
     touch := TouchArea { }
     Tip {
         text: root.detail != "" ? root.title + ": " + root.detail : root.title;
+        // How far it is changes while you look.
+        live: true;
         hovering: touch.has-hover;
         at-x: root.width + Space.xs;
         at-y: Space.xs;
@@ -2900,13 +3048,13 @@ export component PageHeader inherits VerticalLayout {
             color: Theme.text;
             vertical-alignment: center;
         }
-        Text {
+        CutText {
+            own-mouse: true;
             text: root.summary;
             color: Theme.muted;
             font-size: Type.body;
             vertical-alignment: center;
             horizontal-stretch: 0;
-            overflow: elide;
         }
         // The page's own job, beside what the page holds: on the title's row, so it takes no row of its own and the
         // page doesn't jump when a job starts or ends (the frontend-design pass, step 3: the row kept empty for it
@@ -3058,15 +3206,15 @@ export component NoticeStrip inherits Rectangle {
         spacing: Space.sm;
         HorizontalLayout {
             spacing: Space.sm;
-            Text {
+            // A long line is cut short with dots, not run under Show, and shows whole under the mouse.
+            CutText {
+                own-mouse: true;
                 text: root.text;
                 color: root.quiet ? Theme.muted : Theme.warning;
                 font-size: Type.body;
                 font-weight: 500;
-                // A long line is cut short with dots, not run under Show.
                 horizontal-stretch: 1;
                 min-width: 0px;
-                overflow: elide;
             }
             LinkText {
                 text: root.open ? "Hide" : "Show";

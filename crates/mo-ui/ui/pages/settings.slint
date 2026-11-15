@@ -4,7 +4,7 @@
 import { AboutSlint } from "std-widgets.slint";
 import { Product } from "@product";
 import { Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow, WordBox } from "../studio.slint";
+import { Theme, CutText, AppKeys, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow, WordBox } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -376,12 +376,12 @@ component AccentDot inherits VerticalLayout {
             }
         }
     }
-    Text {
+    CutText {
+        own-mouse: true;
         text: root.info.name;
         color: root.info.picked ? Theme.text : Theme.muted;
         font-size: Type.small;
         horizontal-alignment: center;
-        overflow: elide;
     }
 }
 
@@ -738,14 +738,15 @@ component KeyLineRow inherits HoverSense {
     HorizontalLayout {
         padding-left: Space.sm;
         spacing: Space.sm;
-        Text {
+        CutText {
             horizontal-stretch: 1;
             min-width: 0px;
+            over: root.resting;
+            mouse: root.mouse;
             text: root.line.what;
             color: Theme.text;
             font-size: Type.body;
             vertical-alignment: center;
-            overflow: elide;
         }
         default := HoverSense {
             horizontal-stretch: 0;
@@ -1121,14 +1122,14 @@ export component SettingsPage inherits Rectangle {
                 current <=> SettingsData.tab;
                 changed current => { SettingsData.tab-picked(self.current); }
             }
-            Text {
+            CutText {
                 horizontal-stretch: 1;
+                own-mouse: true;
                 text: SettingsData.kept-note;
                 color: Theme.faint;
                 font-size: Type.meta;
                 horizontal-alignment: right;
                 vertical-alignment: center;
-                overflow: elide;
             }
         }
         Flickable {

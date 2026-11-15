@@ -1,6 +1,6 @@
 // Ctrl+K: one box, from anywhere, that jumps to a song, a sound, a page or an action. What it finds and every word on
 // it come from mo-app's `finder`; this only shows them and passes keys and clicks back.
-import { Theme, Type, Space, Caps, Groove, ListLine, Segmented, StudioButton, Icons } from "studio.slint";
+import { Theme, Type, Space, Caps, Groove, ListLine, CutText, Segmented, StudioButton, Icons } from "studio.slint";
 
 // One line of the list: a group's heading, a thing found, a "12 more songs" line or a quiet note.
 export struct FinderLine {
@@ -211,7 +211,7 @@ export component Finder inherits Rectangle {
                                 vertical-alignment: center;
                             }
                         }
-                        if line.kind == "hit": ListLine {
+                        if line.kind == "hit": hit-line := ListLine {
                             selected: FinderData.selected == i;
                             clicked => { FinderData.chosen(i, false); }
                             HorizontalLayout {
@@ -235,18 +235,20 @@ export component Finder inherits Rectangle {
                                 VerticalLayout {
                                     horizontal-stretch: 1;
                                     alignment: center;
-                                    Text {
+                                    CutText {
+                                        over: hit-line.resting;
+                                        mouse: hit-line.mouse;
                                         text: line.title;
                                         color: Theme.text;
                                         font-size: Type.body;
                                         font-weight: 500;
-                                        overflow: elide;
                                     }
-                                    if line.detail != "": Text {
+                                    if line.detail != "": CutText {
+                                        over: hit-line.resting;
+                                        mouse: hit-line.mouse;
                                         text: line.detail;
                                         color: Theme.muted;
                                         font-size: Type.meta;
-                                        overflow: elide;
                                     }
                                 }
                                 if line.plays: StudioButton {

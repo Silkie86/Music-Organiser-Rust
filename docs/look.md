@@ -147,6 +147,13 @@ light that means something. It should feel like a rack unit on a desk, not a web
 - Space's drives fill their rows (step 5): every drive card on a row is as wide as the others and the rows are as
   even as they can be (four drives: 2 and 2, never 3 and 1). How many go on a row is counted for the room the page
   has while a card is open, so opening one never moves the lines.
+- Nothing cut short stays a mystery (Solomon's note of 15 Nov 2026: "when message exceeds limits of chip hovering
+  should read the whole message"): words cut short with "…" show whole in a tooltip while the mouse rests on them,
+  on every page. A new line of words that can be cut is a `CutText` (`studio.slint`), not a `Text` with `overflow:
+  elide`; on a list line it takes the mouse from the line (`over: line.resting; mouse: line.mouse;`), anywhere else
+  it senses it itself (`own-mouse`). A filter's `TickLine` shows its words the same way, the mouse anywhere on the
+  line, and follows words that change ("Hide duplicates · checking 40%"). A line's own tooltip gives way to one put
+  up from inside the line. A tooltip too long for one line goes on over more lines (560 px at most).
 
 ## Next steps
 

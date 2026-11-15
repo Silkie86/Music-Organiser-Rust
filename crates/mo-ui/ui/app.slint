@@ -139,6 +139,9 @@ export component AppWindow inherits Window {
     // goes with it, and then nothing has the keys, so no key would work until a click.
     changed place => {
         Theme.here = root.place;
+        // A tooltip put up from the page that went (a click on its line opened another page) would stay over the new
+        // one.
+        TipState.hide();
         if (!root.note-open) {
             keys.focus();
         }
@@ -148,6 +151,8 @@ export component AppWindow inherits Window {
     // Keys go back to the window once the Ctrl+K finder closes.
     property <bool> finder-open: FinderData.open;
     changed finder-open => {
+        // A tooltip put up from inside it (a hit cut short, then clicked) would stay over the page.
+        TipState.hide();
         if (!self.finder-open) {
             keys.focus();
         }

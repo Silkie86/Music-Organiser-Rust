@@ -764,20 +764,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // tip has it all), one that can't say how far it is yet and one done; and the one that failed, as a card.
     let going = feed.start(mo_app::space_bitwig::LOOKING, "");
     going.progress(0.4, Some("148 of 371 projects"));
-    let _starting = feed.start("Analysing sounds", "Getting ready");
+    let starting = feed.start("Analysing sounds", "Getting ready");
     feed.start("Finding missing samples", "").done("All 31 found");
     feed.start("Copying Bitwig template", "").failed("The template folder isn't there any more");
     mo_ui::cards::refresh(&app, &feed);
     shots.push(("cards.png".into(), capture(&window)));
-    app.set_cards(Default::default());
-    app.set_jobs(Default::default());
+    // Gone from the feed itself, not only from the window: the rail's timer reads the feed again once the done one's
+    // time is up, and would put them back in whichever shot comes a few seconds later.
+    going.done("");
+    starting.done("");
+    for card in feed.visible(std::time::Instant::now()) {
+        feed.dismiss(card.id);
+    }
+    mo_ui::cards::refresh(&app, &feed);
 
-    // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
+    // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button, a song's date, and a song's
+    // details cut short beside the panel, which show whole (Solomon's note of 15 Nov 2026).
     show_song_panel(&app, 0, Tab::Overview);
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
         ("tip-date.png", 740.0, 228.0),
+        ("tip-cut.png", 560.0, 248.0),
     ] {
         hover(&window, x, y);
         // Before the tip's wait is over, then after: if nothing came up, the mouse missed what it was meant to rest on.

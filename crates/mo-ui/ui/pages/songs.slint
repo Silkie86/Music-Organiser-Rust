@@ -2,7 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, AppKeys, Type, Space, PageHeader, Well, Panel, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel, StarsPick, HeartToggle, TagChip, WordBox, MenuChip } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, PageHeader, Well, Panel, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel, StarsPick, HeartToggle, TagChip, WordBox, MenuChip } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -292,37 +292,37 @@ component SongPanel inherits Panel {
                     font-weight: 600;
                     vertical-alignment: center;
                 }
-                Text {
+                CutText {
+                    own-mouse: true;
                     text: SongsData.song.facts;
                     color: Theme.muted;
                     font-size: Type.meta;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
-                    overflow: elide;
                 }
                 CloseButton {
                     clicked => { SongsData.close-panel(); }
                 }
             }
-            Text {
+            CutText {
+                own-mouse: true;
                 text: SongsData.song.name;
                 color: Theme.text;
                 font-family: Theme.title-font;
                 font-size: Type.panel-title;
                 font-weight: 600;
-                overflow: elide;
             }
-            if SongsData.song.saves != "": Text {
+            if SongsData.song.saves != "": CutText {
+                own-mouse: true;
                 text: SongsData.song.saves;
                 color: Theme.muted;
                 font-size: Type.meta;
-                overflow: elide;
             }
-            if SongsData.song.backed != "": Text {
+            if SongsData.song.backed != "": CutText {
+                own-mouse: true;
                 text: SongsData.song.backed;
                 color: Theme.muted;
                 font-size: Type.meta;
-                overflow: elide;
             }
             // Its status, stars, key and tags, and its buttons below: each row wraps in a narrow panel, so nothing runs past
             // its edge.
@@ -400,12 +400,12 @@ component SongPanel inherits Panel {
             if SongsData.picked-save != "": HorizontalLayout {
                 spacing: Space.sm;
                 alignment: start;
-                Text {
+                CutText {
+                    own-mouse: true;
                     text: "The buttons below act on the picked save: " + SongsData.picked-save-name;
                     color: Theme.accent;
                     font-size: Type.meta;
                     vertical-alignment: center;
-                    overflow: elide;
                 }
                 LinkText {
                     text: "Back to the newest";
@@ -616,17 +616,17 @@ component SongPanel inherits Panel {
                                     font-weight: 600;
                                     vertical-alignment: center;
                                 }
-                                Text {
+                                CutText {
+                                    own-mouse: true;
                                     text: line.details;
                                     color: Theme.muted;
                                     font-size: Type.meta;
                                     vertical-alignment: center;
-                                    overflow: elide;
                                 }
                             }
                             // Click a save to pick it for the song's buttons, double-click to open it, right-click for
                             // the same in a menu. Nothing is hidden (Solomon, 4 Nov 2026): the buttons are the card's.
-                            if line.run == "": ListLine {
+                            if line.run == "": save-line := ListLine {
                               // A click picks the save: the song's own buttons above (Open, Show in folder, Copy path)
                               // then act on it, and so do their keys. No buttons on the line itself, as everywhere else
                               // (the UX review of 10 Nov, B10).
@@ -649,13 +649,14 @@ component SongPanel inherits Panel {
                                     font-size: Type.meta;
                                     vertical-alignment: center;
                                 }
-                                Text {
+                                CutText {
+                                    over: save-line.resting;
+                                    mouse: save-line.mouse;
                                     text: line.name;
                                     color: line.newest ? Theme.text : Theme.muted;
                                     font-weight: line.newest ? 600 : 400;
                                     font-size: Type.body;
                                     vertical-alignment: center;
-                                    overflow: elide;
                                     horizontal-stretch: 1;
                                 }
                                 if line.missing: Text {
@@ -671,12 +672,13 @@ component SongPanel inherits Panel {
                                 padding-right: Space.sm;
                                 alignment: center;
                                 spacing: Space.xs;
-                                Text {
+                                CutText {
+                                    over: save-line.resting;
+                                    mouse: save-line.mouse;
                                     text: line.name;
                                     color: line.newest ? Theme.text : Theme.muted;
                                     font-weight: line.newest ? 600 : 400;
                                     font-size: Type.body;
-                                    overflow: elide;
                                 }
                                 HorizontalLayout {
                                     spacing: Space.sm;
@@ -686,13 +688,14 @@ component SongPanel inherits Panel {
                                         font-family: Theme.number-font;
                                         font-size: Type.meta;
                                     }
-                                    if line.missing: Text {
+                                    if line.missing: CutText {
                                         horizontal-stretch: 1;
                                         min-width: 0px;
+                                        over: save-line.resting;
+                                        mouse: save-line.mouse;
                                         text: "File moved";
                                         color: Theme.missing;
                                         font-size: Type.meta;
-                                        overflow: elide;
                                     }
                                 }
                               }
@@ -717,24 +720,24 @@ component SongPanel inherits Panel {
                                 alignment: center;
                                 spacing: Space.xs;
                                 horizontal-stretch: 1;
-                                Text {
+                                CutText {
+                                    own-mouse: true;
                                     text: p.name;
                                     color: Theme.text;
                                     font-size: Type.body;
-                                    overflow: elide;
                                 }
                                 // In a narrow panel what's wrong comes first on this line, so the name above keeps
                                 // the whole width.
                                 HorizontalLayout {
                                     spacing: Space.sm;
                                     if root.narrow && !p.installed: PluginTrouble { }
-                                    Text {
+                                    CutText {
                                         horizontal-stretch: 1;
                                         min-width: 0px;
+                                        own-mouse: true;
                                         text: p.about;
                                         color: Theme.muted;
                                         font-size: Type.meta;
-                                        overflow: elide;
                                     }
                                 }
                             }
@@ -759,23 +762,23 @@ component SongPanel inherits Panel {
                                 alignment: center;
                                 spacing: Space.xs;
                                 horizontal-stretch: 1;
-                                Text {
+                                CutText {
+                                    own-mouse: true;
                                     text: sm.name;
                                     color: Theme.text;
                                     font-size: Type.body;
-                                    overflow: elide;
                                 }
                                 // As on Plugins: in a narrow panel what's wrong comes first on this line.
                                 HorizontalLayout {
                                     spacing: Space.sm;
                                     if root.narrow && (sm.missing || sm.unplayed): SampleTrouble { sample: sm; }
-                                    Text {
+                                    CutText {
                                         horizontal-stretch: 1;
                                         min-width: 0px;
+                                        own-mouse: true;
                                         text: sm.folder;
                                         color: Theme.muted;
                                         font-size: Type.meta;
-                                        overflow: elide;
                                     }
                                 }
                             }
@@ -974,7 +977,7 @@ export component SongsPage inherits Rectangle {
                                                 y: parent.height - self.height - Space.sm;
                                                 text: line.heading;
                                             }
-                                            if line.heading == "": ListLine {
+                                            if line.heading == "": song-line := ListLine {
                                                 x: Space.xs;
                                                 width: parent.width - 2 * Space.xs;
                                                 selected: line.row == SongsData.selected;
@@ -1015,12 +1018,13 @@ export component SongsPage inherits Rectangle {
                                                         HorizontalLayout {
                                                             spacing: Space.sm;
                                                             alignment: start;
-                                                            Text {
+                                                            CutText {
+                                                                over: song-line.resting;
+                                                                mouse: song-line.mouse;
                                                                 text: line.name;
                                                                 color: Theme.text;
                                                                 font-size: Type.row-title;
                                                                 font-weight: 500;
-                                                                overflow: elide;
                                                             }
                                                             if line.favourite: Heart { y: (parent.height - self.height) / 2; }
                                                             // Its status as a small tag beside the name (the UX review of 10 Nov,
@@ -1047,21 +1051,23 @@ export component SongsPage inherits Rectangle {
                                                         HorizontalLayout {
                                                             alignment: start;
                                                             spacing: Space.xs;
-                                                            Text {
+                                                            CutText {
+                                                                over: song-line.resting;
+                                                                mouse: song-line.mouse;
                                                                 text: line.details
                                                                     + (line.missing-words != "" && !list-well.wide && line.details != "" ? " ·" : "");
                                                                 color: Theme.muted;
                                                                 font-size: Type.meta;
-                                                                overflow: elide;
                                                                 // A text's stretch is 0 unless it's given one: both
                                                                 // would give way alike.
                                                                 horizontal-stretch: 1;
                                                             }
-                                                            if line.missing-words != "" && !list-well.wide: Text {
+                                                            if line.missing-words != "" && !list-well.wide: CutText {
+                                                                over: song-line.resting;
+                                                                mouse: song-line.mouse;
                                                                 text: line.missing-words;
                                                                 color: Theme.missing;
                                                                 font-size: Type.meta;
-                                                                overflow: elide;
                                                                 horizontal-stretch: 0;
                                                             }
                                                         }
@@ -1070,12 +1076,13 @@ export component SongsPage inherits Rectangle {
                                                         alignment: center;
                                                         spacing: Space.xs;
                                                         width: 150px;
-                                                        Text {
+                                                        CutText {
+                                                            over: song-line.resting;
+                                                            mouse: song-line.mouse;
                                                             text: line.missing;
                                                             color: Theme.missing;
                                                             font-size: Type.meta;
                                                             horizontal-alignment: right;
-                                                            overflow: elide;
                                                         }
                                                         if line.status != "": Text {
                                                             text: line.status;

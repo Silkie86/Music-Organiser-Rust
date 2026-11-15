@@ -4,7 +4,7 @@
 // buttons. The picture's still layers (grid, fill, curve) are one picture drawn off the window's thread
 // (mo_app::curve_picture, mo-ui/src/curve_editor.rs); what moves with the mouse or the sound is laid over it here.
 // Only shared parts from studio.slint.
-import { Theme, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, TempoStepper, FilterName, Tip, CardAction, CardActions, SidePanel, MouseField, MenuArrow } from "../studio.slint";
+import { Theme, CutText, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, TempoStepper, FilterName, Tip, CardAction, CardActions, SidePanel, MouseField, MenuArrow } from "../studio.slint";
 
 // One of the ruler's marks: where (from the picture's left) and its bar and beat ("1", "1.2"; none when the marks are
 // too close to number each).
@@ -243,14 +243,14 @@ component HintLine inherits Rectangle {
             font-weight: 600;
             vertical-alignment: center;
         }
-        Text {
+        CutText {
             horizontal-stretch: 1;
             min-width: 0px;
+            own-mouse: true;
             text: CurveEditorData.hint-does + (CurveEditorData.hint-keys != "" ? "  ·  " + CurveEditorData.hint-keys : "");
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
-            overflow: elide;
         }
         KeyLamp {
             key: CurveEditorData.key-free;
@@ -391,10 +391,11 @@ component ClipStrip inherits Rectangle {
             padding-left: Space.sm;
             padding-right: t.can-pin ? Space.xl : Space.xs;
             spacing: Space.sm;
-            Text {
+            CutText {
                 horizontal-stretch: 1;
+                over: touch.resting;
+                mouse: touch.mouse;
                 text: t.name;
-                overflow: elide;
                 color: Theme.text;
                 font-size: Type.meta;
                 font-weight: 500;
@@ -770,14 +771,14 @@ export component CurveEditor inherits SidePanel {
     HorizontalLayout {
         height: 32px;
         spacing: Space.sm;
-        if !root.renaming: Text {
+        if !root.renaming: CutText {
+            own-mouse: true;
             text: CurveEditorData.name;
             color: Theme.text;
             font-family: Theme.title-font;
             font-size: Type.heading;
             font-weight: 600;
             vertical-alignment: center;
-            overflow: elide;
             min-width: 0px;
         }
         if !root.renaming && (CurveEditorData.changed || CurveEditorData.state-words != ""): Text {
