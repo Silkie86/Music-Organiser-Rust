@@ -13,9 +13,10 @@
 //! A DAW calls a plugin from several threads: the main thread (opening the window, starting and stopping the audio)
 //! and the audio thread ([`Processor`]). What they share lives in [`Instance`].
 
-// The CLAP plugin wrapper (clack) catches a panic in any call from the DAW and tells the DAW the call failed, so a bug
-// here never takes the DAW down with it; background threads catch theirs too. Each is written to the plugin's crash
-// note ([`threads`]).
+// The CLAP plugin wrapper (clack) catches a panic in any call the DAW makes and tells the DAW the call failed; the
+// window's own events (drawing, the mouse, keys, its timer) come through Windows' window code instead, so the window
+// catches its own (`window.rs`); background threads catch theirs too. Each is written to the plugin's crash note
+// ([`threads`]).
 
 pub mod audition;
 pub mod check;
@@ -146,6 +147,8 @@ impl DefaultPluginFactory for MoPlugin {
                 env!("CARGO_PKG_VERSION"),
                 check::host_line(&info)
             ));
+            // A take cut off last time (the DAW closed or crashed as it was saved) is saved now.
+            threads::background("mo-plugin-mend", record::mend_cut_off_takes);
         }
         let offered = check::ask(&info);
         let yes = offered.iter().filter(|o| o.offered).count();
@@ -194,6 +197,13 @@ pub struct Shared {
 }
 
 impl PluginShared<'_> for Shared {}
+
+impl Drop for Shared {
+    /// The plugin is going: a take under way is saved before the DAW can end (the 14 Nov review's RC-1).
+    fn drop(&mut self) {
+        self.instance.recorder.finish_before_going(std::time::Duration::from_secs(5));
+    }
+}
 
 pub struct MainThread<'a> {
     host: HostMainThreadHandle<'a>,

@@ -78,9 +78,19 @@ pub fn open(
     let settings =
         WindowSettings::new().with_title("Music Organiser").with_size(size).with_parent(parent).with_resizable(true);
     let window = baseview::Window::create(settings, move |context| {
-        let shown = Shown::new(context.clone(), Arc::clone(&instance))
-            .map_err(|why| HandlerError::from(std::io::Error::other(why)))?;
-        Ok(Window { context, instance, shown: RefCell::new(Some(shown)) })
+        // Made inside Windows' own window code, which a panic can't pass through: one here only fails the opening
+        // (the 14 Nov review's PL-2).
+        let made =
+            mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| Shown::new(context.clone(), Arc::clone(&instance))))
+                .unwrap_or_else(|_| Err("The panel stopped with an error as it opened".into()));
+        let shown = made.map_err(|why| HandlerError::from(std::io::Error::other(why)))?;
+        // The window's one timer, made after the panel so a panel that couldn't be made leaves none behind. It stays
+        // through a move to the card: baseview can't stop a timer, so one made with each panel would go on ticking
+        // beside the next, and the panel's work would run twice a tick (the 14 Nov review's PW-2).
+        let timer = context.create_timer(TICK).map_err(|e| {
+            HandlerError::from(std::io::Error::other(format!("Couldn't start the window's timer: {e}")))
+        })?;
+        Ok(Window { context, instance, shown: RefCell::new(Some(shown)), broken: Cell::new(false), _timer: timer })
     })
     .map_err(|e| format!("Couldn't open the plugin's window: {e}"))?;
     window.show().map_err(|e| format!("Couldn't show the plugin's window: {e}"))?;
@@ -487,9 +497,45 @@ struct Window {
     context: WindowContext,
     instance: Arc<Instance>,
     shown: RefCell<Option<Shown>>,
+    /// The panel's code panicked: the window stays empty, and nothing more is passed on to it.
+    broken: Cell<bool>,
+    /// The window's timer, for whichever panel is open: Slint's timers and animations, and what background threads
+    /// found.
+    _timer: TimerHandle,
 }
 
 impl Window {
+    /// Runs `work`, catching a panic in it: the DAW calls the window through Windows' own window code, which a panic
+    /// can't pass through without closing the whole DAW (the 14 Nov review's PL-2). After one, the panel is let go
+    /// (once nothing is in the middle of it) and the window stays empty: the DAW and the song carry on.
+    fn guarded<T>(&self, fallback: T, work: impl FnOnce() -> T) -> T {
+        if self.broken.get() {
+            self.let_go();
+            return fallback;
+        }
+        match mo_catch::catch_crash(std::panic::AssertUnwindSafe(work)) {
+            Ok(done) => done,
+            Err(_) => {
+                self.broken.set(true);
+                crate::log::line(
+                    "Window",
+                    "The panel stopped with an error (see the crash note): close and open it again",
+                );
+                self.let_go();
+                fallback
+            }
+        }
+    }
+
+    /// Lets a panel that panicked go, once nothing holds it (a drag out holds it while its own timer runs).
+    fn let_go(&self) {
+        if let Ok(mut shown) = self.shown.try_borrow_mut()
+            && let Some(old) = shown.take()
+        {
+            let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| drop(old)));
+        }
+    }
+
     /// Makes the panel again, drawn on the card, once the card is found. What was picked in the panel's first
     /// moments starts again; the sound library is read once all the same (`library::read`).
     fn move_to_the_card(&self) {
@@ -510,22 +556,26 @@ impl Window {
 
 impl WindowHandler for Window {
     fn draw(&self) -> Result<(), HandlerError> {
-        self.shown.borrow().as_ref().map_or(Ok(()), WindowHandler::draw)
+        self.guarded(Ok(()), || self.shown.borrow().as_ref().map_or(Ok(()), WindowHandler::draw))
     }
 
     fn resized(&self, new_size: WindowSize) -> Result<(), HandlerError> {
-        self.shown.borrow().as_ref().map_or(Ok(()), |shown| shown.resized(new_size))
+        self.guarded(Ok(()), || self.shown.borrow().as_ref().map_or(Ok(()), |shown| shown.resized(new_size)))
     }
 
     fn on_timer(&self, timer: &TimerHandle) {
-        self.move_to_the_card();
-        if let Some(shown) = self.shown.borrow().as_ref() {
-            shown.on_timer(timer);
-        }
+        self.guarded((), || {
+            self.move_to_the_card();
+            if let Some(shown) = self.shown.borrow().as_ref() {
+                shown.on_timer(timer);
+            }
+        });
     }
 
     fn on_event(&self, event: Event) -> EventStatus {
-        self.shown.borrow().as_ref().map_or(EventStatus::Ignored, |shown| shown.on_event(event))
+        self.guarded(EventStatus::Ignored, || {
+            self.shown.borrow().as_ref().map_or(EventStatus::Ignored, |shown| shown.on_event(event))
+        })
     }
 }
 
@@ -593,7 +643,6 @@ struct Shown {
     sky_asked: Cell<bool>,
     /// When the timer last ran: a glide of the Galaxy goes on by the time since.
     ticked: Cell<Instant>,
-    _timer: TimerHandle,
 }
 
 impl Shown {
@@ -606,8 +655,6 @@ impl Shown {
         // Taken back whether or not the panel was made, so no later window gets this one.
         NEXT.with(|next| next.borrow_mut().take());
         let panel = panel.map_err(|e| format!("Couldn't make the panel: {e}"))?;
-
-        let timer = context.create_timer(TICK).map_err(|e| format!("Couldn't start the window's timer: {e}"))?;
 
         let lines = Rc::new(Lines {
             library: RefCell::new(None),
@@ -651,7 +698,6 @@ impl Shown {
             painter_failed: Cell::new(false),
             sky_asked: Cell::new(false),
             ticked: Cell::new(Instant::now()),
-            _timer: timer,
         };
         shown.fill_in();
         // What the knobs were turned to while no panel was open isn't acted on now (a sound would play as it opens);

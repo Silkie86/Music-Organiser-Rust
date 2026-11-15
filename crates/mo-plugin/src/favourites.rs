@@ -174,8 +174,14 @@ pub fn play(player: &Arc<Player>, sounds_db: PathBuf, id: i64) {
         let started = std::time::Instant::now();
         match read_some(&sounds_db, Some(&[id])).map(|mut found| found.pop()) {
             Ok(Some(sound)) => {
-                crate::log::took("Presets", &format!("The DAW loaded favourite {id}: playing it"), started);
-                player.play(sound.path.clone().into(), 0.0, library::own_tempo(&sound), |_| {});
+                // Said once it's handed over, or why it couldn't be (the 14 Nov review's PL-3).
+                player.play(sound.path.clone().into(), 0.0, library::own_tempo(&sound), move |played| {
+                    let how = match played {
+                        crate::audition::Played::Playing(..) => "playing it".to_owned(),
+                        crate::audition::Played::Not(why) => format!("not played: {why}"),
+                    };
+                    crate::log::took("Presets", &format!("The DAW loaded favourite {id}: {how}"), started);
+                });
             }
             Ok(None) => {
                 crate::log::took("Presets", &format!("The DAW loaded sound {id}: not in the library now"), started)

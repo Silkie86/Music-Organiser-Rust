@@ -123,6 +123,11 @@ pub fn note_crashes() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         std::panic::set_hook(Box::new(|info| {
+            // Rust's own follow-up when a panic reaches code it can't pass through: the note already says what
+            // broke and where, so it's kept, not replaced (the 14 Nov review's PL-2).
+            if mo_app::log::cannot_unwind(info) {
+                return;
+            }
             let thread = std::thread::current().name().unwrap_or("a thread with no name").to_owned();
             let at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
             let backtrace = std::backtrace::Backtrace::force_capture();

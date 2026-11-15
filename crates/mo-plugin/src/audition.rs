@@ -1046,6 +1046,9 @@ impl Player {
 
     /// Hands `voice` to the audio thread to play, in place of what plays from its place when `swap`.
     fn hand_over_as(&self, mut voice: Box<Voice>, name: String, swap: bool) -> Played {
+        // The sounds the audio thread is done with are freed here first: with the panel shut nothing else frees them,
+        // and the audio thread takes a new pick only with room to hand one back (the 14 Nov review's PL-3).
+        self.tidy();
         // With In time off, it isn't held for the next beat.
         voice.fresh = self.in_time();
         voice.timed = voice.fresh;
@@ -1489,6 +1492,26 @@ mod tests {
         playing.fill(&mut l, &mut r);
         assert_eq!(l, vec![0.0; 5]);
         assert!(!player.still_playing(n));
+    }
+
+    #[test]
+    fn picks_keep_playing_with_the_panel_shut() {
+        // Favourites picked in the DAW's browser with no panel to tidy: each pick frees what the audio thread is
+        // done with first, so the 20th plays as the 1st did.
+        let player = Arc::new(Player::default());
+        let mut playing = player.start(4);
+        let (mut l, mut r) = (vec![0.0; 1], vec![0.0; 1]);
+        for n in 0..20u8 {
+            let value = f32::from(n) / 100.0;
+            let Played::Playing(_, number) =
+                player.hand_over(Box::new(Voice::new(&[vec![value; 4]], 4, 4)), "x".into())
+            else {
+                panic!("pick {n} not handed over")
+            };
+            playing.fill(&mut l, &mut r);
+            assert!(player.still_playing(number), "pick {n}");
+            assert_eq!(l, vec![value * LEVEL], "pick {n}");
+        }
     }
 
     #[test]

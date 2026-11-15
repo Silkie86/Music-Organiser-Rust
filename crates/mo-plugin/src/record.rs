@@ -97,6 +97,26 @@ impl Recorder {
         self.stop.store(true, Ordering::Release);
     }
 
+    /// As the plugin goes (the DAW closes, or the plugin is taken off the track): ends a take under way and waits
+    /// for it to be saved, at most `longest`, so the DAW doesn't end before the file is written (the 14 Nov review's
+    /// RC-1). Whether it was.
+    pub fn finish_before_going(&self, longest: Duration) -> bool {
+        if !self.recording() {
+            return true;
+        }
+        self.stop();
+        crate::log::line("Record", "The plugin is going: the take under way is saved first");
+        let until = std::time::Instant::now() + longest;
+        while self.recording() {
+            if std::time::Instant::now() >= until {
+                crate::log::line("Record", "The take wasn't saved in time: it's mended the next time the plugin loads");
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
     /// The take itself, on its own thread: what became of it.
     fn take(&self, card: Option<String>, trim_db: Option<i32>) -> Said {
         let (input, mut take, from) = match &card {
@@ -180,6 +200,14 @@ pub fn folder() -> PathBuf {
     mo_app::paths::data_dir().join("Recordings")
 }
 
+/// Saves the takes whose saving was cut off when the DAW closed or crashed ([`record::mend_parts`]), and logs what
+/// became of each. A part left alone for a minute isn't being written. Writes to the disk: off the DAW's threads.
+pub fn mend_cut_off_takes() {
+    for said in record::mend_parts(&folder(), Duration::from_secs(60)) {
+        crate::log::line("Record", &said);
+    }
+}
+
 /// The sound card inputs to record from, by name. Asks the system: off the panel's thread.
 pub fn inputs() -> Vec<String> {
     record::card::inputs()
@@ -188,6 +216,28 @@ pub fn inputs() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_take_under_way_is_ended_and_waited_for_as_the_plugin_goes() {
+        let recorder = Arc::new(Recorder::default());
+        assert!(recorder.finish_before_going(Duration::ZERO), "nothing under way");
+        // A take thread that saves once it's told to stop.
+        recorder.busy.store(true, Ordering::Release);
+        let me = Arc::clone(&recorder);
+        let take = std::thread::spawn(move || {
+            while !me.stop.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            me.busy.store(false, Ordering::Release);
+        });
+        assert!(recorder.finish_before_going(Duration::from_secs(10)));
+        assert!(!recorder.recording());
+        take.join().unwrap();
+        // One that never ends isn't waited for past the limit.
+        recorder.busy.store(true, Ordering::Release);
+        assert!(!recorder.finish_before_going(Duration::from_millis(30)));
+    }
 
     #[test]
     fn the_audio_thread_takes_the_feed_only_while_recording() {

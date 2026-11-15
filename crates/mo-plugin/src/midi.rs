@@ -79,17 +79,21 @@ pub fn read() -> Read {
     let data = mo_app::paths::data_dir();
     let store = MidiStore::path_beside(&data.join("library.db"));
     let files = [store.clone()];
-    if let Some(parts) = KEPT.get(&files) {
+    // The smallest part is the app's setting, not in the index: a kept list cut at another size is read again (the
+    // 14 Nov review's PW-3, as D2 found it). Only the settings file is read for it: quick.
+    let smallest = smallest_part(&data);
+    let kept = || KEPT.get(&files).filter(|parts| parts.smallest == smallest);
+    if let Some(parts) = kept() {
         return Read::Ready(parts);
     }
     static READING: Mutex<()> = Mutex::new(());
     let _reading = lock(&READING);
-    if let Some(parts) = KEPT.get(&files) {
+    if let Some(parts) = kept() {
         return Read::Ready(parts);
     }
     let started = std::time::Instant::now();
     let stamp = crate::kept::Stamp::of(&files);
-    let read = read_from(&store, smallest_part(&data));
+    let read = read_from(&store, smallest);
     match &read {
         Read::Ready(parts) => {
             KEPT.keep(stamp, parts);
