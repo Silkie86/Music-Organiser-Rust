@@ -25,8 +25,9 @@ pub fn size_from_setting(value: Option<&str>) -> u32 {
 /// Whether a side card's button is a quiet one, from its words: one that only shows where a thing is or copies it
 /// ("Show in folder", "Show in Songs", "Copy path"). A quiet button is drawn flat, so the buttons that play, send or
 /// make something stand out beside it (docs/look.md). By its words, so every page agrees without a list of ids.
+/// "Show again" is not one: it brings a hidden thing back, which changes it as Hide does.
 pub fn quiet_button(words: &str) -> bool {
-    words.starts_with("Show ") || words.starts_with("Copy ")
+    (words.starts_with("Show ") && words != "Show again") || words.starts_with("Copy ")
 }
 
 /// The font a [`FONTS`] name stands for, or `None` for the theme's own (and for anything unknown).
@@ -294,7 +295,9 @@ mod tests {
         for words in ["Show in folder", "Show in Songs", "Copy path", "Show the song's file", "Copy the song's path"] {
             assert!(quiet_button(words), "{words}");
         }
-        for words in ["Send to Bitwig", "Play in Bitwig", "Export", "Rename", "Hide", "Showcase", "Uninstall..."] {
+        for words in
+            ["Send to Bitwig", "Play in Bitwig", "Export", "Rename", "Hide", "Show again", "Showcase", "Uninstall..."]
+        {
             assert!(!quiet_button(words), "{words}");
         }
     }
