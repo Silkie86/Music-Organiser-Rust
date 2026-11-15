@@ -36,22 +36,33 @@ type Job = Box<dyn FnOnce() + Send>;
 /// takes the place of the one waiting, so after a burst (a Tempo drag, fast typing, the Like knob moved by the DAW)
 /// only the newest runs next, and no pile of passes builds up on the pool (the 14 Nov review's PW-1). The thread is
 /// made at the first asking and ends when this goes (the window closes).
-#[derive(Default)]
 pub struct OneAtATime {
+    name: &'static str,
     worker: Mutex<Option<mo_app::background::Newest<Job>>>,
 }
 
+impl Default for OneAtATime {
+    fn default() -> OneAtATime {
+        OneAtATime::named("mo-plugin-list")
+    }
+}
+
 impl OneAtATime {
+    /// One whose thread is called `name`.
+    pub const fn named(name: &'static str) -> OneAtATime {
+        OneAtATime { name, worker: Mutex::new(None) }
+    }
+
     /// Hands `job` to the thread, in place of any job still waiting. If the thread can't be made, it runs on a
     /// thread of its own, as before.
     pub fn ask(&self, job: impl FnOnce() + Send + 'static) {
         let mut worker = lock(&self.worker);
         if worker.is_none() {
-            *worker = mo_app::background::Newest::start("mo-plugin-list", |job: Job| job()).ok();
+            *worker = mo_app::background::Newest::start(self.name, |job: Job| job()).ok();
         }
         match worker.as_ref() {
             Some(worker) => worker.ask(Box::new(job)),
-            None => background("mo-plugin-list", job),
+            None => background(self.name, job),
         }
     }
 }
