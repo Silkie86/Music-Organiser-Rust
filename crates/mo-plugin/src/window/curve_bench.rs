@@ -8,7 +8,7 @@ use crate::audition::{MadeLoop, Played, Player};
 use crate::threads::{background, lock};
 use crate::{ClipTile, CurveEditorData, EditorDot, MenuItem, Panel, RulerMark, Theme};
 use mo_app::background::Newest;
-use mo_app::curve_card::{self, Card, Heard};
+use mo_app::curve_card::{self, Card, Heard, SongSwing};
 use mo_app::curve_groove::{self, Swing};
 use mo_app::curve_hear::{self, Hear};
 use mo_app::curve_picture::{self, Colours};
@@ -17,7 +17,6 @@ use mo_app::presets::Offer;
 use mo_app::shapes::{self, Colour};
 use mo_dawlink::bitwig::watch::State;
 use mo_dawlink::bitwig::{Groove, Watch};
-use mo_formats::bitwig::curve::CurvePoint;
 use mo_presets::curves::Curve;
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
@@ -84,9 +83,6 @@ fn colour(c: slint::Color) -> Colour {
     Colour { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() }
 }
 
-/// A curve as edited: its points and its length in beats.
-type Edited = (Vec<CurvePoint>, f64);
-
 pub(super) struct Bench {
     card: RefCell<Card>,
     /// The curve open in the editor: its place in the list as read, and the curve as found.
@@ -109,8 +105,6 @@ pub(super) struct Bench {
     seen: RefCell<Option<(State, bool, Option<Groove>)>>,
     unwatched: Cell<Option<Instant>>,
     groove: Cell<Option<Swing>>,
-    /// The swing the button last gave, and the curve as that left it.
-    swung: RefCell<Option<(Swing, Edited)>>,
 }
 
 impl Bench {
@@ -131,7 +125,6 @@ impl Bench {
             seen: RefCell::new(None),
             unwatched: Cell::new(None),
             groove: Cell::new(None),
-            swung: RefCell::new(None),
         })
     }
 
@@ -145,6 +138,7 @@ impl Bench {
         let then = |what: fn(&mut Card, (i32, f64, f64, Keys)) -> bool| {
             let (me, weak) = (Rc::clone(self), panel.as_weak());
             move |told: (i32, f64, f64, Keys)| {
+                let held = me.card.borrow().in_hand();
                 let drawn = what(&mut me.card.borrow_mut(), told);
                 // Points picked or let go change what the part's buttons would do, with no change to the curve.
                 let picked = me.card.borrow().picked();
@@ -153,7 +147,10 @@ impl Bench {
                     if drawn {
                         me.redraw(&panel);
                     }
-                    me.show(&panel, drawn || repicked);
+                    // The part buttons wait for what's in hand to be let go (they can't be pressed till then), and
+                    // follow it then: a click on a clip changed the highlight at its press.
+                    let in_hand = me.card.borrow().in_hand();
+                    me.show(&panel, (!in_hand && (drawn || held)) || repicked);
                 }
             }
         };
@@ -220,29 +217,17 @@ impl Bench {
                 panel.set_curve_said(panel.get_curve_groove_says());
                 return;
             };
-            // The curve as this button last left it: the song's swing takes that swing's place, not a second swing
-            // on top of it.
-            let now = me.card.borrow().edited();
-            let ours = me.swung.borrow().as_ref().filter(|(_, left)| now.as_ref() == Some(left)).map(|(s, _)| *s);
-            if ours == Some(swing) {
-                panel.set_curve_said("The curve has the song's swing already.".into());
-                return;
-            }
-            let mut card = me.card.borrow_mut();
-            if ours.is_some() {
-                card.step_back(true);
-            }
-            let done = card.swing_by(swing.step, swing.amount);
-            *me.swung.borrow_mut() = if done { card.edited().map(|left| (swing, left)) } else { None };
-            drop(card);
+            // The song's swing takes the place of the swing this button last gave, never on top of it (the card
+            // knows which that was).
+            let done = me.card.borrow_mut().swing_as_song(swing.step, swing.amount);
             me.redraw(&panel);
             me.show(&panel, true);
-            panel.set_curve_said(if done {
-                SharedString::new()
-            } else {
-                "That swing changes nothing here: the curve is flat, or the part is shorter than two of the swing's \
-                 steps."
-                    .into()
+            panel.set_curve_said(match done {
+                SongSwing::Done => SharedString::new(),
+                SongSwing::Already => "The curve has the song's swing already.".into(),
+                SongSwing::Nothing => "That swing changes nothing here: the curve is flat, or the part is shorter \
+                                       than two of the swing's steps."
+                    .into(),
             });
         });
         let (me, weak) = (Rc::clone(self), panel.as_weak());

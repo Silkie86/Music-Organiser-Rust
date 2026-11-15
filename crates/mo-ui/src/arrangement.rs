@@ -896,7 +896,7 @@ pub fn sample_preview() -> Preview {
     let playlist = Arrangement {
         view: "FL Studio playlist",
         tempo: 128.0,
-        beats_per_bar: 4,
+        signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
         lanes: vec![drums, kick, hats, bass, keys, vox, cutoff],
         markers: vec![
             PreviewMarker { beat: 0.0, name: "Intro".into() },

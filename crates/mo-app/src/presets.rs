@@ -418,7 +418,9 @@ impl KnownPlugins {
     /// knows best), and fills in a song's that its save doesn't say; your songs' fill in what's left unknown. A file
     /// named only by its plugin's id gets the plugin's name.
     pub fn fill(&self, row: &mut PresetRow) {
-        let by_id = self.by_id.get(&id_key(&row.plugin));
+        // Only a preset file can be named by its plugin's id: a song's plugin is always named (PR-5).
+        let is_file = matches!(row.source, Source::File { .. });
+        let by_id = if is_file { self.by_id.get(&id_key(&row.plugin)) } else { None };
         if let Some((name, _)) = by_id
             && !name.is_empty()
         {
@@ -426,7 +428,6 @@ impl KnownPlugins {
         }
         let key = mo_formats::plugins::name_key(&row.plugin);
         let scanned = by_id.map(|(_, k)| *k).or_else(|| self.scanned.get(&key).copied());
-        let is_file = matches!(row.source, Source::File { .. });
         match scanned {
             Some(kind) if is_file || row.kind == PluginKind::Unknown => row.kind = kind,
             _ if row.kind == PluginKind::Unknown => {
@@ -437,9 +438,11 @@ impl KnownPlugins {
     }
 }
 
-/// A plugin id to match by: small letters, no dashes or braces (a VST3 id is written both ways).
+/// A plugin id to match by: a VST3's class id (32 hex digits) in small letters with no dashes or braces, as it's
+/// written both ways; a VST2's four letters as they are, as "abcd" and "ABCD" are two plugins (PR-5).
 fn id_key(id: &str) -> String {
-    id.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase()
+    let bare: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if bare.len() == 32 && bare.chars().all(|c| c.is_ascii_hexdigit()) { bare.to_ascii_lowercase() } else { bare }
 }
 
 /// The scanner's word for what a plugin is.
@@ -1339,8 +1342,9 @@ pub enum Hearing {
 pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
     let ext = i.row.extension.to_lowercase();
     let file = i.is_file();
-    // A Bitwig preset file, or a sound a Bitwig preset can be made from (which waits for an export to finish).
-    let bitwig = if file { ext == ".bwpreset" } else { can_be_bitwig(&ext) };
+    // A Bitwig preset file, or a sound or plugin preset file a Bitwig preset can be made from (a song's waits for an
+    // export to finish). A .fxp, .fxb or .vstpreset file goes as a Bitwig preset made from it, as a drag does (PR-3).
+    let bitwig = (file && ext == ".bwpreset") || can_be_bitwig(&ext);
     // Every card's order (the UX review of 10 Nov, B2): hearing it first (the lit button), then into the DAW, then
     // showing and copying.
     let mut out = Vec::new();
@@ -1376,6 +1380,14 @@ pub fn audition_id(i: &Item) -> String {
     match &i.row.source {
         Source::Song { save, key } => format!("{save}\0{key}"),
         Source::File { .. } => i.path().to_owned(),
+    }
+}
+
+/// Whether `id` is the line's [`audition_id`], worked out without making it (Ctrl+K looks through every line, PR-1).
+pub fn has_audition_id(i: &Item, id: &str) -> bool {
+    match &i.row.source {
+        Source::Song { save, key } => id.split_once('\0').is_some_and(|(s, k)| s == save && k == key),
+        Source::File { .. } => !id.contains('\0') && i.path() == id,
     }
 }
 
@@ -1585,6 +1597,14 @@ impl CurveFilters {
 
     pub fn any(&self) -> bool {
         !self.kinds.is_empty() || !self.shapes.is_empty() || !self.rhythms.is_empty() || !self.feels.is_empty()
+    }
+
+    /// "Clear filters": nothing is picked in Found in, Shape, Rhythm and Feel. The search and the ticks stay.
+    pub fn clear(&mut self) {
+        self.kinds.clear();
+        self.shapes.clear();
+        self.rhythms.clear();
+        self.feels.clear();
     }
 
     /// Picks or unpicks a way curves are found, by its words: more than one can be picked.
@@ -2031,7 +2051,13 @@ pub fn curves_summary(total: usize, shown: usize, hidden: usize) -> String {
 }
 
 /// The curves list's words when it shows nothing.
-pub fn curves_empty(total: usize, shown: usize, reading: bool, failed: Option<&str>) -> (String, String) {
+pub fn curves_empty(
+    total: usize,
+    shown: usize,
+    reading: bool,
+    failed: Option<&str>,
+    filtered: bool,
+) -> (String, String) {
     if let Some(why) = failed {
         return ("Couldn't read the curves".into(), why.to_owned());
     }
@@ -2049,6 +2075,9 @@ pub fn curves_empty(total: usize, shown: usize, reading: bool, failed: Option<&s
                     .into(),
             )
         };
+    }
+    if filtered {
+        return ("No curves match".into(), "Try fewer filters or other words, or show the hidden ones.".into());
     }
     ("No curves match".into(), "Try other words, or show the hidden ones.".into())
 }
@@ -2133,6 +2162,14 @@ mod tests {
         let mut fxp = PresetRow { kind: PluginKind::Unknown, plugin: "XfsX".into(), ..file("Wobble", "/p/Wobble.fxp") };
         known.fill(&mut fxp);
         assert_eq!((fxp.plugin.as_str(), fxp.kind), ("Serum", PluginKind::Instrument));
+        // A VST2 id is matched to the letter, and a song's plugin isn't looked up by id at all (PR-5).
+        let mut lower = PresetRow { kind: PluginKind::Unknown, plugin: "xfsx".into(), ..file("W", "/p/W.fxp") };
+        known.fill(&mut lower);
+        assert_eq!(lower.plugin, "xfsx");
+        let mut named = PresetRow { kind: PluginKind::Effect, ..row("Q", "XfsX", None, "/s/A.flp") };
+        known.fill(&mut named);
+        assert_eq!(named.plugin, "XfsX");
+        assert_eq!(id_key("{01234567-89AB-CDEF-0123-456789ABCDEF}"), id_key("0123456789abcdef0123456789abcdef"));
         // The installed plugin's own file wins over what a preset file says.
         let mut room = PresetRow { plugin: "bx_roomMS".into(), ..file("Hall", "/p/Hall.vstpreset") };
         known.fill(&mut room);
@@ -2391,6 +2428,9 @@ mod tests {
         assert!(!ids(&fl_own).contains(&act::TO_BITWIG), "an FL plugin's own state can't go into Bitwig");
         assert!(!ids(&fl_own).contains(&act::AUDITION), "nor be auditioned there");
         assert_eq!(ids(&all[3]), [act::AUDITION, act::TO_BITWIG, act::REVEAL, act::COPY_PATH]);
+        // A plugin's own preset file goes into Bitwig too, as a Bitwig preset made from it (PR-3).
+        let fxp = Item::new(PresetRow { extension: ".fxp".into(), ..file("Lead", "/p/Lead.fxp") }, String::new(), None);
+        assert_eq!(ids(&fxp), [act::AUDITION, act::TO_BITWIG, act::REVEAL, act::COPY_PATH]);
         // While a preset file is auditioned: Stop in Bitwig, then Keep in Bitwig once it plays, even mid-export.
         let texts = |h| offers(&all[3], true, h).into_iter().filter(|o| o.enabled).map(|o| o.text).collect::<Vec<_>>();
         assert_eq!(texts(Hearing::Starting), ["Stop in Bitwig", "Show in folder", "Copy path"]);
@@ -2398,6 +2438,11 @@ mod tests {
         // A sound in a song waits for an export to finish, as Send to Bitwig does.
         assert!(!offers(&all[0], true, Hearing::Off).iter().any(|o| o.id == act::AUDITION && o.enabled));
         assert_ne!(audition_id(&all[0]), audition_id(&all[3]));
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                assert_eq!(has_audition_id(a, &audition_id(b)), audition_id(a) == audition_id(b), "{i} {j}");
+            }
+        }
         assert_eq!(part_of("presets.part.bass"), Some(Role::Bass));
         assert_eq!(part_of("presets.export"), None);
         let mut fixed = all[0].clone();

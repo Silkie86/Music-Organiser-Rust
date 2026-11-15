@@ -209,7 +209,7 @@ fn an_index_of_the_older_layout_is_copied_into_this_one_with_every_row_kept() {
     drop(page);
     // The indexer goes on writing it: the notes with no key read are read.
     let store = MidiStore::open(&path).unwrap();
-    let stale = store.stale_keys(10).unwrap();
+    let stale = store.stale_keys(0, 10).unwrap();
     assert_eq!(stale.len(), 1);
     assert_eq!((stale[0].notes_id, stale[0].notes.clone()), (2, notes(36, 3)));
     drop(store);

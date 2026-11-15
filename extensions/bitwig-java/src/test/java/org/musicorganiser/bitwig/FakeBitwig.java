@@ -1112,6 +1112,7 @@ final class FakeBitwig {
         if (selected != null) {
             cursorTrack.present.v = true;
             cursorTrack.title.v = selected.name;
+            cursorTrack.channelId.v = selected.id == null ? "" : selected.id;
         }
         DeviceSpec device = cursorSpec;
         if (device != ALONE) {

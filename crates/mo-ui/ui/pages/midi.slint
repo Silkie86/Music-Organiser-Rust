@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, Tip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -231,6 +231,8 @@ export global MidiData {
     callback bpm-reset();
     callback metronome-toggled();
     in property <string> play-note;
+    // What the loop playing says of itself (only its first bars play at this speed): shown on its own part's card.
+    in property <string> loop-note;
     in property <string> play-key;
     // No SoundFont to play with yet: what to do, and a button to choose one.
     in property <bool> soundfont-missing;
@@ -242,9 +244,17 @@ export global MidiData {
     // in FL Studio: which one plays ("" none, "bitwig", "fl"), which is starting, how it went, and their keys.
     in property <string> daw-playing;
     in property <string> daw-starting;
+    // Whether the part picked is the one the loop plays, and the one in the DAW: a line right-clicked for its menu is
+    // picked with the others playing on (MI-2), and its card offers to play it rather than to stop them.
+    in property <bool> loop-picked: true;
+    in property <bool> daw-picked: true;
     in property <string> daw-note;
     in property <string> bitwig-key;
     in property <string> fl-key;
+    // The keys of Play loop's metronome and speed (the same as the curve card's: one shortcut list, MI-14).
+    in property <string> metronome-key;
+    in property <string> faster-key;
+    in property <string> slower-key;
     callback daw-play(string);
     // Dragging a part out into a DAW as a MIDI clip (mo-ui's drag.rs): a line of the list by its row, or the picked
     // part by its card's handle; then `drag-let-go` if the button comes up before the drag has got going. The part is
@@ -616,17 +626,17 @@ component PartPanel inherits SidePanel {
             main: true;
             width: max(self.min-width, buttons.cell);
             enabled: !MidiData.soundfont-missing || MidiData.playing;
-            text: MidiData.playing ? "Stop" : MidiData.play-with-song ? "Play with the song" : "Play loop";
-            tip: MidiData.playing ? "Stop the loop"
-                : MidiData.play-with-song ? "Play the part round and round with the parts of your song it fits, at the song's tempo"
+            text: MidiData.playing && MidiData.loop-picked ? "Stop" : MidiData.play-with-song ? "Play with the song" : "Play loop";
+            tip: MidiData.playing && MidiData.loop-picked ? "Stop the loop"
+                : MidiData.play-with-song ? "Play the part round and round with the parts of your song it fits, at the song's tempo, or the speed you set"
                 : "Play the part round and round with a General MIDI sound matched to it";
             key: MidiData.play-key;
             clicked => { MidiData.play-toggled(); }
         }
         StudioButton {
             width: max(self.min-width, buttons.cell);
-            text: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop in Bitwig" : "Play in Bitwig";
-            tip: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop the part and take its clip out of Bitwig"
+            text: (MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig") && MidiData.daw-picked ? "Stop in Bitwig" : "Play in Bitwig";
+            tip: (MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig") && MidiData.daw-picked ? "Stop the part and take its clip out of Bitwig"
                 : MidiData.bitwig-with-song ? "Play the part through what's on the track selected in Bitwig, with the bars of your song it fits going round there (when Bitwig has that song open)"
                 : "Play the part round and round through what's on the track selected in Bitwig";
             key: MidiData.bitwig-key;
@@ -634,8 +644,8 @@ component PartPanel inherits SidePanel {
         }
         StudioButton {
             width: max(self.min-width, buttons.cell);
-            text: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop in FL Studio" : "Play in FL Studio";
-            tip: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop the part in FL Studio" : "Play the part round and round through the channel selected in FL Studio";
+            text: (MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl") && MidiData.daw-picked ? "Stop in FL Studio" : "Play in FL Studio";
+            tip: (MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl") && MidiData.daw-picked ? "Stop the part in FL Studio" : "Play the part round and round through the channel selected in FL Studio";
             key: MidiData.fl-key;
             clicked => { MidiData.daw-play("fl"); }
         }
@@ -644,12 +654,20 @@ component PartPanel inherits SidePanel {
     HorizontalLayout {
         alignment: start;
         spacing: Space.sm;
-        ToggleChip {
+        metronome := ToggleChip {
             text: "Metronome";
             on: MidiData.metronome;
             clicked => { MidiData.metronome-toggled(); }
+            Tip {
+                text: "A click on each beat while the loop plays";
+                key: MidiData.metronome-key;
+                hovering: metronome.hovered;
+                at-y: metronome.height + Space.xs;
+            }
         }
         TempoStepper {
+            slower-key: MidiData.slower-key;
+            faster-key: MidiData.faster-key;
             bpm-text: MidiData.bpm-text;
             changed: MidiData.bpm-changed;
             stepped(by) => { MidiData.bpm-stepped(by); }
@@ -673,6 +691,13 @@ component PartPanel inherits SidePanel {
     }
     if MidiData.play-note != "": Text {
         text: MidiData.play-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    if MidiData.loop-note != "" && MidiData.playing && MidiData.loop-picked: Text {
+        text: MidiData.loop-note;
         color: Theme.muted;
         font-size: Type.meta;
         wrap: word-wrap;

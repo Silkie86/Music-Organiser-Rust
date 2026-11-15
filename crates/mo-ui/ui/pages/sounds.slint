@@ -1472,9 +1472,11 @@ export component SoundsPage inherits Rectangle {
     changed search-asked => { search-box.focus-all(); }
     // The card's tag box had the keys (Ctrl+T, or a click in it) as the card closed: the box went with the card, and
     // then nothing had the keys, so no key worked until a click (the whole-app review of 10 Nov, U-1). They come back
-    // to the list. Only then: a card closed by a read meanwhile leaves them where they are (in the search, say).
+    // to the list. Only then: a card closed by a read meanwhile leaves them where they are (in the search, say). The
+    // card is made from this one line, so it goes whenever this says so: Favourites from Bitwig takes its place too
+    // (the whole-app review of 14 Nov, AP-4).
     property <bool> card-keys;
-    property <bool> card-shown: SoundsData.panel-shown;
+    property <bool> card-shown: SoundsData.panel-shown && !SoundsData.bitwig-shown;
     changed card-shown => {
         if (!self.card-shown && self.card-keys) {
             self.card-keys = false;
@@ -2105,7 +2107,8 @@ export component SoundsPage inherits Rectangle {
                     width: area.card-width;
                     height: parent.height;
                 }
-                if SoundsData.panel-shown && !SoundsData.bitwig-shown: SoundPanel {
+                // While `card-shown` says so, which gives the keys back as it goes.
+                if root.card-shown: SoundPanel {
                     x: area.list-width + divider.width;
                     width: area.card-width;
                     height: parent.height;

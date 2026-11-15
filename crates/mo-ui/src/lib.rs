@@ -11,6 +11,7 @@ pub use screens::*;
 
 pub mod arrangement;
 pub mod backup;
+pub mod beta;
 mod canvas;
 pub mod cards;
 pub mod curve_editor;
@@ -24,6 +25,7 @@ pub mod helper;
 mod in_flight;
 pub mod midi;
 pub mod note;
+pub mod one_copy;
 mod piano_roll;
 pub mod plugins;
 pub mod presets;
@@ -318,6 +320,13 @@ fn show_places(app: &AppWindow, shortcuts: &Shortcuts) {
             icon: icon(app, *p),
         })
         .collect();
+    // The screens find a place's icon by its number (`Icons.place`, for the empty pages): it must be the one the
+    // rail shows, so a new place can't shift the ones after it (the 14 Nov review's AP-9). mo-screens runs this.
+    #[cfg(debug_assertions)]
+    for (i, p) in Place::ALL.iter().enumerate() {
+        let by_number = app.global::<Icons>().invoke_place(i as i32);
+        assert!(by_number == icon(app, *p), "Icons.place({i}) in studio.slint isn't {}'s icon", p.name());
+    }
     let settings = Place::Settings.index();
     app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));
@@ -333,6 +342,8 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     data.set_open_own_key(action("projects.openOwn"));
     data.set_reveal_key(action("projects.reveal"));
     data.set_copy_key(action("projects.copyPath"));
+    data.set_favourite_key(action("projects.favourite"));
+    data.set_tag_key(action("projects.tag"));
     let backup = app.global::<BackupData>();
     backup.set_run_key(action("backup.now"));
     backup.set_stop_key(action("backup.stop"));
@@ -523,8 +534,14 @@ fn coming(place: Place) -> &'static str {
 /// The places with a list, which Home takes back to its top.
 const LISTED: [Place; 6] = [Place::Songs, Place::Sounds, Place::Presets, Place::Curves, Place::Midi, Place::Plugins];
 
-/// The places with a search box, which Ctrl+F puts the keys in.
+/// The places with a search box, which Ctrl+F puts the keys in. Settings has one on its Shortcuts tab only
+/// ([`settings::on_shortcuts`]).
 const SEARCHED: [Place; 6] = [Place::Songs, Place::Sounds, Place::Presets, Place::Curves, Place::Midi, Place::Plugins];
+
+/// Whether the page on show has its search box in sight, for Ctrl+F.
+fn searched_here() -> bool {
+    place().is_some_and(|p| SEARCHED.contains(&p) || (p == Place::Settings && settings::on_shortcuts()))
+}
 
 /// Runs an app-wide action (`held`: its key is repeating). Returns whether it did anything, so an unused key can go on
 /// to the page.
@@ -558,10 +575,7 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
         // count change; a page without a search box lets the key go on. Not while Ctrl+K or the F12 note is open, as
         // the keys would go to a box under it; the key sheet closes first, so the search is in sight.
         "app.search" => {
-            if app.global::<FinderData>().get_open()
-                || app.get_note_open()
-                || !place().is_some_and(|p| SEARCHED.contains(&p))
-            {
+            if app.global::<FinderData>().get_open() || app.get_note_open() || !searched_here() {
                 return false;
             }
             app.set_sheet_open(false);
@@ -581,6 +595,7 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
                 Some(Place::Midi) => midi::escape(&app),
                 Some(Place::Plugins) => plugins::escape(&app),
                 Some(Place::Space) => space::escape(&app),
+                Some(Place::Settings) => settings::escape(&app),
                 _ => false,
             };
         }
@@ -611,13 +626,14 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
 }
 
 /// Esc's first step on every page: whatever plays stops, whichever page started it (a sound on Sounds, the MIDI page's
-/// loop or a part playing in a DAW go on after their page goes; an audition in Bitwig stops as its page goes). Each
-/// one, as two can play at once. Whether anything was playing.
+/// loop, a curve's tone or a part playing in a DAW go on after their page goes; an audition in Bitwig stops as its
+/// page goes). Each one, as two can play at once. Whether anything was playing.
 fn stop_what_plays(app: &AppWindow) -> bool {
     let sound = sounds::stop_on_escape(app);
     let midi = midi::stop_on_escape(app);
     let audition = presets::stop_on_escape(app);
-    sound || midi || audition
+    let tone = curve_editor::stop_tone(app);
+    sound || midi || audition || tone
 }
 
 /// Moves the pick of the list on show one line up (`by` -1) or down (1), as its Up and Down keys do (on Sounds' Tiles, a

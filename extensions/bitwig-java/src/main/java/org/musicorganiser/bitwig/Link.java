@@ -281,6 +281,8 @@ final class Link {
     private PinnableCursorDevice cursorDevice;
     /** What takes the selected device's place (extension 3.25): a sample put there makes a Sampler in its stead. */
     private InsertionPoint cursorReplace;
+    /** Whether Bitwig tells the selected device's sample (extension 3.29), which shows a file put in its place went in. */
+    private boolean cursorSample;
     private DirectParameterValueDisplayObserver displayObserver;
     /** The selected device's drum pads, when it's a Drum Machine. */
     private DrumPadBank drumPads;
@@ -520,6 +522,7 @@ final class Link {
             cursorDevice.addDirectParameterNormalizedValueObserver((id, value) -> {
                 params.values.put(String.valueOf(id), value);
                 params.told.merge(String.valueOf(id), 1, Integer::sum);
+                params.toldAt.put(String.valueOf(id), ++params.tellings);
             });
             displayObserver = cursorDevice.addDirectParameterValueDisplayObserver(64, (id, text) -> {
                 params.displays.put(String.valueOf(id), str(text));
@@ -527,6 +530,13 @@ final class Link {
         }, () -> cursorDevice.exists().get()
                  ? "Device \"" + str(cursorDevice.name().get()) + "\" is selected, with " + params.ids.size() + " parameters."
                  : "No device is selected.");
+
+        // Extension 3.29: the sample in the selected device, on its own so a Bitwig without it keeps the cursor device.
+        feature("cursor device's sample", () -> {
+            cursorDevice.sampleName().markInterested();
+            cursorSample = true;
+        }, () -> !cursorDevice.exists().get() ? "No device is selected."
+                 : "The selected device's sample is \"" + str(cursorDevice.sampleName().get()) + "\".");
 
         // A Drum Machine's pads, when the selected device is one: pad n plays MIDI note n.
         feature("drum pads", () -> {
@@ -617,6 +627,7 @@ final class Link {
         // Newer API, as additions: the app works without them.
         feature("track IDs", () -> {
             for (int t = 0; t < MAX_TRACKS; t++) trackItems[t].channelId().markInterested();
+            cursorTrack.channelId().markInterested();
             trackIds = true;
         }, () -> {
             if (!trackItems[0].exists().get()) return "No tracks to show an ID for.";
@@ -956,11 +967,13 @@ final class Link {
         List<String> list = new ArrayList<>(array.length);
         for (Object id : array) list.add(String.valueOf(id));
         params.ids = list;
+        params.listedAt = ++params.tellings;
         Set<String> kept = new HashSet<>(list);
         params.names.keySet().retainAll(kept);
         params.values.keySet().retainAll(kept);
         params.displays.keySet().retainAll(kept);
         params.told.keySet().retainAll(kept);
+        params.toldAt.keySet().retainAll(kept);
         params.answered.keySet().retainAll(kept);
     }
 
@@ -1341,6 +1354,11 @@ final class Link {
         return m;
     }
 
+    /** The ID of the track the selected device is on (the cursor track), or "" when Bitwig doesn't say it. */
+    private String selectedTrackId() {
+        return trackIds ? str(cursorTrack.channelId().get()) : "";
+    }
+
     private static Map<String, Object> describeDevice(int index, Device device) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("index", index);
@@ -1456,6 +1474,13 @@ final class Link {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("track", str(cursorTrack.name().get()));
         m.put("device", exists ? describeDevice(-1, cursorDevice) : null);
+        // Extension 3.29: which device it is (its track's ID and its place in the chain) and the sample in it, so the
+        // app can tell a Sampler from the one a file was put in the place of.
+        if (exists) {
+            m.put("trackId", selectedTrackId());
+            m.put("position", cursorDevice.position().get());
+            if (cursorSample) m.put("sample", str(cursorDevice.sampleName().get()));
+        }
         m.put("params", list);
         m.put("drumPads", exists && cursorDevice.hasDrumPads().get());
         if (remoteControls != null) {
@@ -1538,9 +1563,14 @@ final class Link {
         reply(ask, Map.of(), null);
     }
 
-    /** Sets one of the selected device's parameters, by its ID, to a value from 0 to 1. */
+    /**
+     * Sets one of the selected device's parameters, by its ID, to a value from 0 to 1. With `expect` (extension 3.29, as
+     * insert's) it's refused when the selected device isn't the one the app means.
+     */
     private void setParameter(Ask ask, Map<String, Object> request) {
         if (!cursorDevice.exists().get()) throw new LinkError("No device is selected in Bitwig.");
+        // Extension 3.29: the device the app means, when it says; a setting never lands on another one.
+        checkExpected(field(request, "expect"), "this setting wasn't set");
         Object param = field(request, "param");
         if (!(param instanceof String) || !params.ids.contains(param))
             throw new LinkError("The selected device has no parameter " + Json.js(param) + ".");
@@ -1871,8 +1901,11 @@ final class Link {
      * device by its ID, or a file (a preset, or a sample, which Bitwig loads into a Sampler). It goes at the end
      * of the selected track's chain, or of `track`'s (at its start with `at: "start"`). With a track, the answer
      * waits to say whether Bitwig added a device, since it quietly ignores what it can't use. With `at: "replace"`
-     * (extension 3.25) it takes the selected device's place instead (no track: the selected device is the one); the
-     * app reads the selected device again to see what Bitwig made of it.
+     * (extension 3.25) it takes the selected device's place instead (no track: the selected device is the one).
+     *
+     * From extension 3.29 a replace can say which device it means (`expect`: `trackId`, `position`, `name`, `sample`, each
+     * optional): a change waits its turn behind others, and by then you may have selected something else, which is then
+     * left alone. And a sample put in a device's place waits to see it go in, and answers `replaced`: see replaced.
      */
     private void insert(Map<String, Object> request, Finish finish) {
         // The track by its place, or (extension 3.21) by the ID Bitwig keeps it under, which holds however tracks move.
@@ -1888,6 +1921,7 @@ final class Link {
         if (replace) {
             if (!absent(t)) throw new LinkError("Replace takes the selected device's place: give no track.");
             if (cursorReplace == null || !cursorDevice.exists().get()) throw new LinkError("No device is selected in Bitwig.");
+            checkExpected(field(request, "expect"), "nothing was replaced");
             point = cursorReplace;
         } else if (absent(t)) {
             if (start) throw new LinkError("Say which track's chain to insert at the start of.");
@@ -1900,6 +1934,13 @@ final class Link {
             point = start ? trackStarts[track] : trackEnds[track];
         }
         Object kind = field(request, "kind");
+        // What a sample put in the selected device's place is told apart from (extension 3.29). A preset isn't waited
+        // for: it shows no sample.
+        boolean confirm = replace && "file".equals(kind) && cursorSample
+                          && !str(field(request, "path")).toLowerCase(Locale.ROOT).endsWith(".bwpreset");
+        String sampleBefore = confirm ? str(cursorDevice.sampleName().get()) : "";
+        String trackBefore = confirm ? selectedTrackId() : "";
+        long toldBefore = params.tellings;
         switch (kind instanceof String ? (String) kind : "\u0000") {
             case "vst3":
                 point.insertVST3Device(given(field(request, "plugin"), "plugin ID"));
@@ -1918,6 +1959,10 @@ final class Link {
                 break;
             default:
                 throw new LinkError("Can't insert a \"" + Json.js(kind) + "\": use vst3, clap, vst2, bitwig or file.");
+        }
+        if (confirm) {
+            replaced(given(field(request, "path"), "file"), sampleBefore, trackBefore, toldBefore, finish);
+            return;
         }
         if (chain == null) {
             // Bitwig quietly does nothing for an ID it doesn't know; the app checks the device list afterwards.
@@ -1945,6 +1990,75 @@ final class Link {
                        m.put("device", device);
                        finish.ok(m);
                    }, finish);
+        }, finish);
+    }
+
+    /**
+     * Refuses a change when the selected device isn't the one the app meant (`expect`, extension 3.29: its track's ID,
+     * its place in the chain, its name and its sample, each optional): the change waited its turn, and something else was
+     * selected meanwhile. `undone` says what didn't happen. The sample tells apart what the first three can't: the
+     * Samplers on a Drum Machine's pads are all first in their chain on the same track.
+     */
+    private void checkExpected(Object expect, String undone) {
+        if (absent(expect)) return;
+        Map<String, Object> wanted = asMap(expect);
+        if (wanted == null)
+            throw new LinkError("The device to expect is a trackId, a position, a name and a sample, not " + Json.js(expect) + ".");
+        Object track = field(wanted, "trackId");
+        Object position = field(wanted, "position");
+        Object name = field(wanted, "name");
+        Object sample = field(wanted, "sample");
+        boolean same = (absent(track) || track.equals(selectedTrackId()))
+                       && (absent(position) || position instanceof Number && ((Number) position).intValue() == cursorDevice.position().get())
+                       && (absent(name) || name.equals(str(cursorDevice.name().get())))
+                       && (absent(sample) || !cursorSample || sample.equals(str(cursorDevice.sampleName().get())));
+        if (!same)
+            throw new LinkError("Another device is selected in Bitwig now than when this was asked for: " + undone + ". "
+                                + "Select the device again and ask again.");
+    }
+
+    /**
+     * Answers a sample put in the selected device's place (extension 3.29) once Bitwig shows it there: the selected
+     * device, still on the same track, with a sample that isn't the one before. A sample of the same name as the one
+     * before can't show that way: for it, Bitwig telling the device's list of parameters again is the sign. `replaced`
+     * is true when the sign came, and with it `device`, `trackId`, `position`, `sample` and `fresh` (the IDs of the
+     * parameters whose values Bitwig has told since the file was put in: only those are the new device's for sure).
+     * When it never came within CHANGE_WAIT: false when the device is as it was (Bitwig ignored the file), and null
+     * when that can't be told: another device or track is selected by now (`moved`: true), or the name is the same.
+     */
+    private void replaced(String path, String sampleBefore, String trackBefore, long toldBefore, Finish finish) {
+        String file = path.substring(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
+        String stem = file.contains(".") ? file.substring(0, file.lastIndexOf('.')) : file;
+        boolean again = !sampleBefore.isEmpty() && (sampleBefore.equalsIgnoreCase(file) || sampleBefore.equalsIgnoreCase(stem));
+        BooleanSupplier there = () -> cursorDevice.exists().get() && selectedTrackId().equals(trackBefore);
+        waitFor(() -> {
+            if (!there.getAsBoolean()) return false;
+            String now = str(cursorDevice.sampleName().get());
+            return again ? params.listedAt > toldBefore : !now.isEmpty() && !now.equals(sampleBefore);
+        }, CHANGE_WAIT, shown -> {
+            if (!shown) {
+                boolean moved = !there.getAsBoolean();
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("replaced", moved || again ? null : Boolean.FALSE);
+                if (moved) m.put("moved", true);
+                finish.ok(m);
+                return;
+            }
+            // Until Bitwig has stopped telling the new device's values.
+            settle(() -> {
+                Map<String, Object> seen = new LinkedHashMap<>();
+                boolean exists = cursorDevice.exists().get();
+                seen.put("replaced", true);
+                seen.put("device", exists ? describeDevice(-1, cursorDevice) : null);
+                seen.put("trackId", selectedTrackId());
+                seen.put("position", exists ? cursorDevice.position().get() : null);
+                seen.put("sample", exists ? str(cursorDevice.sampleName().get()) : null);
+                List<String> fresh = new ArrayList<>();
+                for (String id : params.ids)
+                    if (params.toldAt.getOrDefault(id, 0L) > toldBefore) fresh.add(id);
+                seen.put("fresh", fresh);
+                return seen;
+            }, finish::ok, finish);
         }, finish);
     }
 
@@ -2116,6 +2230,7 @@ final class Link {
                 // In step with the song (extension 3.17): a swapped clip carries on from where Bitwig is, not from its own
                 // start, so it stays with the parts that didn't change.
                 trackSlots[now][index].launchWithOptions("default", "synced");
+                watchStart();
                 finish.ok(m);
                 return;
             }
@@ -2126,7 +2241,7 @@ final class Link {
             loop.clip = idOf(now) + "#" + index;
             trackSlots[now][index].launchWithOptions("none", "from_start");
             m.put("looping", true);
-            watchStart(loop);
+            watchStart();
             finish.ok(m);
         }, finish);
     }
@@ -2189,34 +2304,84 @@ final class Link {
         // None of them is this part's until it's launched (see putClip): a failure before then puts the loop back.
         songLoop.clip = "";
         songLoop.settings = settings;
-        songLoop.starting = false;
         for (Setting s : settings)
             if (!same(s.read().get(), s.wanted())) s.write().accept(s.wanted());
     }
 
     /**
-     * A part with its song's bars was just launched, which starts Bitwig a moment later: `starting` until Bitwig is seen
-     * playing (or START_WAIT has passed), so a deleteclip that comes meanwhile waits for the start it's to stop (see
-     * deleteClip). Looked at outside the changes' line: the launch's change has answered.
+     * When the link last launched a clip without Bitwig being seen playing since, else -1: a launch starts a stopped
+     * Bitwig a moment later, and a Stop asked for meanwhile waits for that start (see afterStart). Any part from
+     * extension 3.28; before, only one with its song's bars.
      */
-    private void watchStart(SongLoop loop) {
-        long start = clock.millis();
-        loop.starting = true;
+    private long launchAsked = -1;
+    /** When the link last pressed Stop for a take-out, else -1 (see stopIfPlaying). */
+    private long stopAsked = -1;
+
+    /**
+     * A clip was just launched: the start it causes counts as on its way until Bitwig is seen playing or START_WAIT has
+     * passed. Looked at outside the changes' line (the launch's change has answered), so a Bitwig you stop yourself a
+     * moment after it started isn't waited for.
+     */
+    private void watchStart() {
+        long asked = clock.millis();
+        launchAsked = asked;
+        stopAsked = -1;
         Runnable look = new Runnable() {
             @Override
             public void run() {
-                if (songLoop != loop || !loop.starting) return;
+                if (launchAsked != asked) return;
                 boolean playing;
                 try {
                     playing = transport.isPlaying().get();
                 } catch (RuntimeException | LinkageError e) {
                     playing = true;
                 }
-                if (playing || clock.millis() - start >= START_WAIT) loop.starting = false;
+                if (playing || clock.millis() - asked >= START_WAIT) launchAsked = -1;
                 else host.scheduleTask(this, 50);
             }
         };
         host.scheduleTask(look, 50);
+    }
+
+    /** Whether a launch the link asked for a moment ago may still be about to start Bitwig. */
+    private boolean startPending() {
+        if (launchAsked < 0) return false;
+        if (transport.isPlaying().get() || clock.millis() - launchAsked >= START_WAIT) {
+            launchAsked = -1;
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Runs `work`, which may press Stop (`transport` in the request): straight away, unless Bitwig is stopped and a launch
+     * the link asked for a moment ago hasn't shown yet. Stop now would find Bitwig stopped (which moves your play start
+     * to the beginning), and the start would come after it: so `work` waits for the start it's to stop, START_WAIT at
+     * most. A start that never shows is never told to stop.
+     */
+    private void afterStart(Map<String, Object> request, Runnable work, Finish finish) {
+        if (flag(request, "transport", false) && transport != null && startPending()) {
+            waitFor(() -> !startPending(), START_WAIT, seen -> work.run(), finish);
+            return;
+        }
+        work.run();
+    }
+
+    /**
+     * Presses Stop for a change that asked for it (`transport`), only while Bitwig plays: Stop on a Bitwig that's stopped
+     * already (you stopped it, or what the app started never did) moves your play start to the beginning. Bitwig still
+     * shows playing for a moment after a Stop, so a second take-out within RESTOP of the link's own Stop doesn't press
+     * it again. Says whether Bitwig is being stopped.
+     */
+    private boolean stopIfPlaying(Map<String, Object> request) {
+        if (!flag(request, "transport", false) || transport == null || !transport.isPlaying().get()) return false;
+        long now = clock.millis();
+        if (stopAsked < 0 || now - stopAsked >= RESTOP) {
+            transport.stop();
+            stopAsked = now;
+        }
+        launchAsked = -1;
+        return true;
     }
 
     /** The loop's settings that don't show the song's bars yet. */
@@ -2363,17 +2528,8 @@ final class Link {
         int index = index(s);
         String key = id + "#" + index;
         SongLoop loop = songLoop != null && key.equals(songLoop.clip) ? songLoop : null;
-        // A part launched with its song's bars a moment ago may not have started Bitwig yet. Stop now would find Bitwig
-        // stopped (which moves your play start to the beginning), and the start would come after it: so the take-out
-        // waits for the start it's to stop, a moment at most (see watchStart).
-        if (loop != null && loop.starting && flag(request, "transport", false) && transport != null && !transport.isPlaying().get()) {
-            waitFor(() -> !loop.starting || transport.isPlaying().get(), START_WAIT, seen -> {
-                loop.starting = false;
-                takeClipOut(request, (String) id, index, loop, finish);
-            }, finish);
-            return;
-        }
-        takeClipOut(request, (String) id, index, loop, finish);
+        // A part launched a moment ago may not have started Bitwig yet: the take-out waits for the start it's to stop.
+        afterStart(request, () -> takeClipOut(request, (String) id, index, loop, finish), finish);
     }
 
     /** deleteClip's work, on the clip in slot `index` of the track with ID `id`; `loop` when the song's bars go round for it. */
@@ -2387,10 +2543,9 @@ final class Link {
             // As stoptracks does: the track plays its arranger clips again, not the empty launcher.
             trackItems[t].returnToArrangement();
         }
-        // A part that played with its song's bars: Stop while Bitwig is stopped already (you stopped it) would move your
-        // play start to the beginning, so Bitwig is only stopped while it plays.
-        boolean stopping = flag(request, "transport", false) && transport != null && (loop == null || transport.isPlaying().get());
-        if (stopping) transport.stop();
+        // Stop while Bitwig is stopped already (you stopped it) would move your play start to the beginning, so Bitwig is
+        // only stopped while it plays (any part from extension 3.28; before, only one with its song's bars).
+        boolean stopping = stopIfPlaying(request);
         Map<String, Object> m = new LinkedHashMap<>();
         if (t < 0 || noted == null || !trackSlots[t][index].hasContent().get()
             || !noted.equals(str(trackSlots[t][index].name().get()))) {
@@ -2417,30 +2572,35 @@ final class Link {
      * renamed (so it's yours now), or is already gone.
      */
     private void deleteTrack(Map<String, Object> request, Finish finish) {
-        Object id = field(request, "trackId");
-        if (!(id instanceof String) || ((String) id).isEmpty()) throw new LinkError("Say which track, by its ID.");
+        Object given = field(request, "trackId");
+        if (!(given instanceof String) || ((String) given).isEmpty()) throw new LinkError("Say which track, by its ID.");
+        String id = (String) given;
         String noted = auditionTracks.remove(id);
         // Its clips go with it, or stay yours with a track you kept: either way they're not the app's to take out now.
         auditionClips.keySet().removeIf(k -> k.startsWith(id + "#"));
         // Nor do a song's bars stay looped for a part that went with its track.
         if (songLoop != null && songLoop.clip.startsWith(id + "#")) loopLeft();
-        int t = indexOf((String) id);
+        int t = indexOf(id);
         if (t >= 0) {
             trackItems[t].stop();
             // As stoptracks does: a track you keep plays its arranger clips again, not the empty launcher.
             trackItems[t].returnToArrangement();
         }
-        if (flag(request, "transport", false) && transport != null) transport.stop();
-        Map<String, Object> m = new LinkedHashMap<>();
-        if (t < 0 || noted == null || !noted.equals(str(trackItems[t].name().get()))) {
-            m.put("deleted", false);
-            finish.ok(m);
-            return;
-        }
-        trackItems[t].deleteObject();
-        waitFor(() -> indexOf((String) id) < 0, CHANGE_WAIT, gone -> {
-            m.put("deleted", gone);
-            finish.ok(m);
+        // The track is stopped at once; only Bitwig's own Stop, and the take-out after it, wait for a start on its way.
+        afterStart(request, () -> {
+            stopIfPlaying(request);
+            Map<String, Object> m = new LinkedHashMap<>();
+            int now = indexOf(id);
+            if (now < 0 || noted == null || !noted.equals(str(trackItems[now].name().get()))) {
+                m.put("deleted", false);
+                finish.ok(m);
+                return;
+            }
+            trackItems[now].deleteObject();
+            waitFor(() -> indexOf(id) < 0, CHANGE_WAIT, gone -> {
+                m.put("deleted", gone);
+                finish.ok(m);
+            }, finish);
         }, finish);
     }
 
@@ -2452,19 +2612,24 @@ final class Link {
     private void stopTracks(Map<String, Object> request, Finish finish) {
         Object given = field(request, "trackIds");
         if (!(given instanceof List)) throw new LinkError("Say which tracks to stop, by their IDs.");
-        List<Object> stopped = new ArrayList<>();
         for (Object id : (List<?>) given) {
             if (!(id instanceof String)) throw new LinkError("A track's ID is text.");
+        }
+        List<Object> stopped = new ArrayList<>();
+        for (Object id : (List<?>) given) {
             int t = indexOf((String) id);
             if (t < 0) continue;
             trackItems[t].stop();
             trackItems[t].returnToArrangement();
             stopped.add(id);
         }
-        if (flag(request, "transport", false) && transport != null) transport.stop();
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("stopped", stopped);
-        finish.ok(m);
+        // The tracks are stopped at once; only Bitwig's own Stop waits for a start on its way.
+        afterStart(request, () -> {
+            stopIfPlaying(request);
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("stopped", stopped);
+            finish.ok(m);
+        }, finish);
     }
 
     /**
@@ -4931,8 +5096,6 @@ final class Link {
         List<Setting> settings = List.of();
         /** The clip the bars go round for: the newest launched with them. "" from the loop being set until its launch. */
         String clip = "";
-        /** Whether the clip was just launched and Bitwig hasn't been seen playing yet (see watchStart). */
-        boolean starting;
 
         SongLoop(String project) {
             this.project = project;
@@ -4974,6 +5137,11 @@ final class Link {
         final Map<String, String> displays = new HashMap<>();
         /** How many times Bitwig has told each parameter's value. */
         final Map<String, Integer> told = new HashMap<>();
+        /** Counts everything Bitwig tells of the selected device's parameters: each value, and each list of IDs. */
+        long tellings;
+        /** The count at which each parameter's value was last told, and the list of IDs. */
+        final Map<String, Long> toldAt = new HashMap<>();
+        long listedAt;
         /** What the last answer gave of each parameter (see `staleValue`). */
         final Map<String, Answered> answered = new HashMap<>();
     }

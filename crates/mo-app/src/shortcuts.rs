@@ -75,14 +75,17 @@ pub const APP_ACTIONS: &[Action] = &[
 ];
 
 /// The Songs page's own actions. The ids are the C# app's Projects page's, so a key changed in either app carries
-/// across; `projects.openOwn` is new here, so the song line's menu and the panel's "Open in FL Studio" have a key too
-/// (rule 15).
+/// across. New here: `projects.openOwn`, so the song line's menu and the panel's "Open in FL Studio" have a key too
+/// (rule 15), and `projects.favourite` and `projects.tag` for the card's heart and tag box, with Sounds' keys (the
+/// whole-app review of 14 Nov, SG-5).
 pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.open", "Open the picked song (FL Studio songs go to Bitwig)", "Ctrl+O"),
     action("projects.openOwn", "Open the picked song in the DAW it was made in", "Ctrl+Shift+O"),
     action("projects.openInBitwig", "Open the picked song in Bitwig (FL Studio songs are converted)", "Ctrl+B"),
     action("projects.reveal", "Show the picked song's file in its folder", "Ctrl+Shift+E"),
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
+    action("projects.favourite", "Make the picked song a favourite, or not", "Ctrl+D"),
+    action("projects.tag", "Type a tag for the picked song", "Ctrl+T"),
 ];
 
 /// The Sounds page's own actions, with the C# Sound Lab's ids and keys. Esc stops the sound playing as it does on every
@@ -169,7 +172,7 @@ pub const CURVES_ACTIONS: &[Action] = &[
 /// the playground and Save as join as those parts are built. Esc goes back to the whole list as one of its steps back
 /// (`app.escape`). F5 reads the MIDI again on this page, as it measures again on Space. Put in the song writes into
 /// your project (over what's in those bars on the track), so it has no key until you give it one. The octave keys are
-/// Alt with the arrows here: the C# app's Shift+Alt+= and Shift+Alt+- can't be told on every keyboard (a window here
+/// Shift+Alt with the arrows here (Alt with them is the speed, as on the curve card): the C# app's Shift+Alt+= and Shift+Alt+- can't be told on every keyboard (a window here
 /// hears the character a key types, and with Shift down that's another on each layout).
 pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.moreLike", "Parts shaped like the picked one", "Ctrl+L"),
@@ -183,11 +186,20 @@ pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.playBitwig", "Play the picked part through the track selected in Bitwig, or stop it", "Ctrl+Shift+B"),
     action("midi.playFl", "Play the picked part through the channel selected in FL Studio, or stop it", "Ctrl+Shift+F"),
     action("midi.within", "The longer phrases the picked part is in", ""),
-    action("midi.octaveUp", "Move the picked part up an octave where it's fitted to a song; remembered", "Alt+Up"),
+    // The metronome and speed have the curve card's keys (the same idea, the same key: MI-14), so the octave moved
+    // to Shift+Alt.
+    action("midi.metronome", "Turn the metronome on or off while a part loops", "Alt+M"),
+    action("midi.faster", "Play the loop 5 BPM faster", "Alt+Up"),
+    action("midi.slower", "Play the loop 5 BPM slower", "Alt+Down"),
+    action(
+        "midi.octaveUp",
+        "Move the picked part up an octave where it's fitted to a song; remembered",
+        "Shift+Alt+Up",
+    ),
     action(
         "midi.octaveDown",
         "Move the picked part down an octave where it's fitted to a song; remembered",
-        "Alt+Down",
+        "Shift+Alt+Down",
     ),
     action("midi.octaveApp", "Let the app pick the picked part's octave again", ""),
     action("midi.showInSongs", "Show the song the picked part is from on the Songs page", "Ctrl+O"),
@@ -644,6 +656,11 @@ mod tests {
         assert_eq!(s.page_action_for("Ctrl+O", SONGS_ACTIONS), Some("projects.open"));
         assert_eq!(s.page_action_for("ctrl+shift+e", SONGS_ACTIONS), Some("projects.reveal"));
         assert_eq!(s.page_action_for("Ctrl+Shift+O", SONGS_ACTIONS), Some("projects.openOwn"));
+        // The card's heart and tag box, with the keys their Sounds twins have.
+        assert_eq!(s.page_action_for("Ctrl+D", SONGS_ACTIONS), Some("projects.favourite"));
+        assert_eq!(s.page_action_for("Ctrl+T", SONGS_ACTIONS), Some("projects.tag"));
+        assert_eq!(s.key_of("projects.favourite"), s.key_of("sounds.favourite"));
+        assert_eq!(s.key_of("projects.tag"), s.key_of("sounds.tag"));
         assert_eq!(s.page_action_for("Ctrl+O", &[]), None);
         assert_eq!(s.key_of("projects.copyPath"), "Ctrl+Shift+C");
         // A key changed in the C# app's Projects page carries across.
@@ -834,11 +851,13 @@ mod tests {
             assert!(keys.set("app.search", arrow).contains("kept for moving through the lists"), "{arrow}");
         }
         // With a key held, an arrow is a key of its own (as Ctrl+Up, which steps even while you type a search, and
-        // Alt+Up, the MIDI page's octave up).
-        assert_eq!(keys.set("app.search", "Shift+Alt+Up"), "");
-        assert_eq!(keys.key_of("app.search"), "Shift+Alt+Up");
-        assert_eq!(keys.page_action_for("Alt+Up", MIDI_ACTIONS), Some("midi.octaveUp"));
-        assert_eq!(keys.page_action_for("Alt+Down", MIDI_ACTIONS), Some("midi.octaveDown"));
+        // Alt+Up, faster on the MIDI page and the curve card).
+        assert_eq!(keys.page_action_for("Alt+Up", MIDI_ACTIONS), Some("midi.faster"));
+        assert_eq!(keys.page_action_for("Alt+Down", MIDI_ACTIONS), Some("midi.slower"));
+        assert_eq!(keys.page_action_for("Shift+Alt+Up", MIDI_ACTIONS), Some("midi.octaveUp"));
+        assert_eq!(keys.page_action_for("Shift+Alt+Down", MIDI_ACTIONS), Some("midi.octaveDown"));
+        assert_eq!(keys.set("app.search", "Ctrl+Alt+Up"), "");
+        assert_eq!(keys.key_of("app.search"), "Ctrl+Alt+Up");
         // Held down, an octave key steps once: a held key would fly to the last octave.
         assert!(!repeats("midi.octaveUp") && !repeats("midi.octaveDown") && !repeats("midi.octaveApp"));
         // Each page with a list says what its arrows do on the key sheet; the pages without one say nothing.

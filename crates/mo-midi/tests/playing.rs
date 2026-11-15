@@ -53,7 +53,7 @@ fn each_channel_plays_where_its_patterns_are_placed() {
     assert_eq!(lead.clips, [ClipPlace { name: "Intro".into(), bars: 2..3 }]);
     assert_eq!(bass.notes.iter().map(|n| (n.start, n.key)).collect::<Vec<_>>(), [(0, 41)]);
     assert_eq!((bass.plugin.as_str(), bass.role, bass.bars.clone()), ("3x Osc", Role::Bass, 0..1));
-    assert_eq!((song.tempo, song.beats_per_bar, song.bars()), (128.0, 4, 3));
+    assert_eq!((song.tempo, song.signature.beats(), song.bars()), (128.0, 4.0, 3));
 
     // With nothing in the playlist FL plays the patterns in pattern mode: here they come one after another.
     let song = playing::from_bytes(Path::new("song.flp"), &fl_studio_project()).unwrap();

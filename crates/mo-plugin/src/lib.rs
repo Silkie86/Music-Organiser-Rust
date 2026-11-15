@@ -148,6 +148,9 @@ impl DefaultPluginFactory for MoPlugin {
                 env!("CARGO_PKG_VERSION"),
                 check::host_line(&info)
             ));
+            // It keeps one data folder for as long as the DAW runs and saves takes there: the app's start mustn't
+            // move the data folder from under it (DF-3).
+            mo_app::data_move::hold_open_lock();
             // A take cut off last time (the DAW closed or crashed as it was saved) is saved now.
             threads::background("mo-plugin-mend", record::mend_cut_off_takes);
         }

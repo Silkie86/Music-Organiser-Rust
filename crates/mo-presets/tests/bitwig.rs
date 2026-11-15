@@ -311,6 +311,19 @@ fn export_uses_a_stand_in_when_the_plugin_has_no_template() {
 }
 
 #[test]
+fn a_same_named_plugin_with_another_id_gets_a_stand_in() {
+    // Two plugins called Serum, a Bitwig preset saved of one only (PR-4): the other's sound still gets one.
+    let dir = folder("same-name");
+    let t = send::inspect(&saved_in_bitwig(&dir, "Init", "Serum", "Init", "a.fxb")).unwrap();
+    assert_ne!(t.plugin_id, "BBBB");
+    let templates = one(t);
+    let other = PresetBlob::new("Lead", "Serum", ".fxp", fxp::wrap_chunk(&[7], "Lead", i32::from_be_bytes(*b"BBBB")));
+    let out = dir.join("out");
+    let e = export::export(&[other], "/songs/Song.flp", &out, Some(&templates)).unwrap();
+    assert!(e.files.iter().any(|f| f.ends_with(".bwpreset")), "{:?} {:?}", e.files, e.failed);
+}
+
+#[test]
 fn a_plugins_own_preset_file_becomes_a_bitwig_preset_to_drag() {
     // Solomon, 13 Nov: Bitwig takes only its own presets dropped on a track.
     let dir = folder("from-file");

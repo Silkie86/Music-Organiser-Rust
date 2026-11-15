@@ -307,7 +307,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
 fn finder_opens() {
     crate::finder::on_open(Kind::Preset, |app, hit, _| {
         // Found by what it is, not where it was: a read again puts the lines in another order (M-1).
-        let at = PAGE.with(|p| p.borrow().items.iter().position(|i| logic::audition_id(i) == hit.id));
+        let at = PAGE.with(|p| p.borrow().items.iter().position(|i| logic::has_audition_id(i, &hit.id)));
         let Some(at) = at else { return false };
         crate::go_to(app, Place::Presets.index() as i32);
         show_preset(app, at);
@@ -433,6 +433,12 @@ fn wire(app: &AppWindow) {
     data.on_clear(move || {
         if let Some(app) = weak.upgrade() {
             change(&app, |f| *f = f.cleared());
+        }
+    });
+    let weak = app.as_weak();
+    data.on_curve_clear(move || {
+        if let Some(app) = weak.upgrade() {
+            change_curves(&app, mo_app::presets::CurveFilters::clear);
         }
     });
     let weak = app.as_weak();
@@ -908,7 +914,9 @@ fn show_everything(app: &AppWindow) {
             p.curve_shown.len(),
             p.curves_reading.is_some() || !p.curves_started,
             p.curves_failed.as_deref(),
+            p.curve_filters.any(),
         );
+        data.set_curve_any_filter(p.curve_filters.any());
         data.set_curve_empty_title(title.into());
         data.set_curve_empty_text(text.into());
     });
@@ -1026,18 +1034,23 @@ const FOUND_LINE: &str = "found:";
 fn show_curve_card(app: &AppWindow) {
     let data = app.global::<PresetsData>();
     let editor = app.global::<CurveEditorData>();
+    // The editor takes the curve before the page's list is held for the rest: nothing it does on the way can ask
+    // for that list while it's held (as the 14 Nov review's CV-1 did, and closed the app).
+    let sent = PAGE.with(|p| {
+        let p = p.borrow();
+        p.curve_picked.as_deref().filter(|id| p.curves.iter().any(|c| c.id == *id)).and(picked_curve_as_sent(&p))
+    });
+    crate::curve_editor::open(app, sent.as_ref().map(|sent| (sent, curve_tone_key(sent))));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let picked = p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id));
-        let Some((c, sent)) = picked.zip(picked_curve_as_sent(&p)) else {
+        let Some((c, sent)) = picked.zip(sent) else {
             data.set_curve_panel_shown(false);
             p.curve_found.clear();
             p.curve_found_of = None;
-            crate::curve_editor::open(app, None);
             return;
         };
         data.set_curve_panel_shown(true);
-        crate::curve_editor::open(app, Some((&sent, curve_tone_key(&sent))));
         editor.set_state_words(if c.hidden { "hidden" } else { "" }.into());
         let (facts, found) = logic::curve_facts_line(&sent);
         editor.set_facts(facts.into());
@@ -1503,12 +1516,9 @@ pub fn toggle_play(app: &AppWindow) -> bool {
     }
 }
 
-/// The player's key for a curve heard on its tone: this, then the curve's id.
-const CURVE_TONE_KEY: &str = "curve-tone:";
-
 /// The player's key for `sent` heard on its tone.
 fn curve_tone_key(sent: &Curve) -> String {
-    format!("{CURVE_TONE_KEY}{}", sent.id)
+    format!("{}{}", crate::curve_editor::TONE_KEY, sent.id)
 }
 
 /// Hears `sent` (the picked curve, at the speed it's shown at) as the volume of a tone, going round; or stops it when
@@ -1516,24 +1526,42 @@ fn curve_tone_key(sent: &Curve) -> String {
 fn hear_curve(app: &AppWindow, sent: Curve) {
     let player = crate::sounds::player();
     let key = curve_tone_key(&sent);
-    if player.playing().as_deref() == Some(key.as_str()) {
-        player.stop();
+    // Playing, or still being made: Hear again stops it.
+    if player.playing().as_deref() == Some(key.as_str()) || crate::curve_editor::tone_starting(&key) {
+        crate::curve_editor::stop_tone(app);
         curve_message(String::new());
         return;
     }
     crate::sounds::stop_for_another(app);
+    crate::midi::stop_for_another(app);
+    // The key that stops it, as the shortcut list has it now.
+    let stops = PAGE.with(|p| {
+        let p = p.borrow();
+        let play = p.shortcuts.key_of("app.play");
+        if play.is_empty() { p.shortcuts.key_of(curve_act::HEAR).to_owned() } else { play.to_owned() }
+    });
     // As the editor has it (its speed and metronome too); the editor makes it again as the curve is edited.
     let (points, length, hear) = crate::curve_editor::to_hear()
         .unwrap_or_else(|| (sent.points.clone(), sent.length_beats, mo_app::curve_hear::Hear::default()));
     crate::curve_editor::follow_tone(app, key.clone(), Some((points.clone(), length, hear)));
+    let asked = crate::curve_editor::tone_asked(&key);
     let started = background::spawn("Curve tone", move || {
         let tone = mo_app::curve_hear::tone(&points, length, hear);
-        crate::curve_editor::sounding(&key, length, hear);
-        crate::sounds::player().play_looped(std::sync::Arc::new(tone), key, 0.0);
-        curve_message(
-            "Playing the curve as a tone's volume, round and round. It follows your edits as it plays; Space stops it."
-                .to_owned(),
-        );
+        // Only if it's still wanted as it starts: a stop, a newer Hear or another sound came while it was made.
+        let played = crate::sounds::player().play_looped_if(std::sync::Arc::new(tone), key.clone(), 0.0, || {
+            if crate::curve_editor::tone_wanted(asked) {
+                crate::curve_editor::sounding(&key, length, hear);
+                Ok(())
+            } else {
+                Err(())
+            }
+        });
+        if played.is_ok() {
+            let stops = if stops.is_empty() { String::new() } else { format!("; {stops} stops it") };
+            curve_message(format!(
+                "Playing the curve as a tone's volume, round and round. It follows your edits as it plays{stops}."
+            ));
+        }
     });
     if let Err(e) = started {
         log::error("Curves", &format!("Couldn't start making the curve's tone: {e}"));
@@ -1602,8 +1630,10 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
         act::COPY_PATH => crate::files::copy_path(&feed, item.path()),
         act::EXPORT if enabled(id) => export_one(app, item, false),
         act::TO_BITWIG if enabled(id) => {
-            if item.is_file() {
+            if item.is_file() && item.row.extension.eq_ignore_ascii_case(".bwpreset") {
                 send_file(item.path().to_owned());
+            } else if item.is_file() {
+                send_made_from_file(item);
             } else {
                 export_one(app, item, true);
             }
@@ -1743,7 +1773,7 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
                 let mut went = true;
                 if send {
                     (text, went) = match &bwpreset {
-                        Some(p) => match send_to_bitwig(p) {
+                        Some(p) => match send_to_bitwig(p, &stem_of(p)) {
                             Ok(words) => (words, true),
                             Err(words) => (words, false),
                         },
@@ -1899,7 +1929,8 @@ fn send_file(path: String) {
     });
     on_window(show_all);
     let started = background::spawn("Send to Bitwig", move || {
-        let text = match send_to_bitwig(Path::new(&path)) {
+        let name = Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let text = match send_to_bitwig(Path::new(&path), &name) {
             Ok(words) => words,
             Err(words) => {
                 crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
@@ -1913,12 +1944,59 @@ fn send_file(path: String) {
     }
 }
 
+/// A plugin's own preset file (.fxp, .fxb, .vstpreset) sent into Bitwig as a Bitwig preset made from it, in Temp
+/// under a name the sweep knows, removed once Bitwig has it (PR-3, rule 28). The file itself is only read.
+fn send_made_from_file(item: Item) {
+    let (_, templates, bitwig_folders, feed) = export_setup();
+    PAGE.with(|p| p.borrow_mut().exporting = true);
+    on_window(show_all);
+    let started = background::spawn("Send to Bitwig", move || {
+        let text = match made_from_file(&item, templates, &bitwig_folders) {
+            Ok((made, name)) => {
+                let sent = send_to_bitwig(&made.0, &name);
+                drop(made);
+                sent.unwrap_or_else(|words| {
+                    crate::files::reveal(&feed, item.path(), mo_app::shell::folder_of(item.path()));
+                    words
+                })
+            }
+            Err(words) => words,
+        };
+        set_exporting(false, Some(text));
+    });
+    if let Err(e) = started {
+        log::error("Presets", &format!("Couldn't start sending to Bitwig: {e}"));
+        PAGE.with(|p| p.borrow_mut().exporting = false);
+    }
+}
+
+/// A Bitwig preset made from a plugin's own preset file, in Temp (removed when the [`Gone`] goes), and its name (the
+/// file's). An error says why none could be made. Reads the file, so never on the window's thread.
+fn made_from_file(
+    item: &Item,
+    templates: Option<Arc<Templates>>,
+    bitwig_folders: &[PathBuf],
+) -> Result<(Gone, String), String> {
+    let path = PathBuf::from(item.path());
+    let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| item.row.name.clone());
+    let to = Gone(std::env::temp_dir().join(mo_app::midi::play_preset_name()));
+    let templates = templates_now(templates, bitwig_folders, |t| without_template(&[item], t).is_empty());
+    let made = background::on_pool(|| {
+        export::bitwig_preset_from_file(&path, &item.row.plugin, item.row.kind, &templates, &to.0)
+    });
+    match made {
+        Ok(Some(())) => Ok((to, name)),
+        Ok(None) => Err(no_bitwig_preset(item)),
+        Err(e) => Err(format!("No Bitwig preset could be made of {name}: {e}.")),
+    }
+}
+
 /// Sends a Bitwig preset into the project open in Bitwig, through the Bitwig link (`mo-dawlink`): a new track named
 /// after the preset, with the preset loaded on it, as if it were dropped there. Waits for Bitwig, so only ever on a
 /// thread away from the window. `Ok` says what happened in Bitwig; `Err` says why it didn't go, and the caller shows
 /// the file in its folder instead, to drag onto a track.
-fn send_to_bitwig(preset: &Path) -> Result<String, String> {
-    let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+fn send_to_bitwig(preset: &Path, name: &str) -> Result<String, String> {
+    let name = name.to_owned();
     // The link's own send: it waits its turn behind sounds and kits sent from the Sounds page, checks the file is
     // still there, and keeps the change to the project open as it began.
     match mo_dawlink::bitwig::send_preset(preset, &name) {
@@ -2088,19 +2166,23 @@ fn audition(
     }
     // A song's sound gets its Bitwig preset made in Temp, under a name the sweep knows, and it goes once Bitwig has
     // loaded it: never in the export folder, among the presets you exported (the 6 Nov review's D-fp5, rule 28).
-    let (preset, name, made) = match &item.row.source {
+    // The preset made for it (`_made`) goes however this ends.
+    let (preset, name, _made) = match &item.row.source {
+        // A plugin's own preset file is made a Bitwig preset in Temp first, as Send to Bitwig makes it (PR-3).
+        Source::File { .. } if logic::can_be_bitwig(&item.row.extension) => {
+            let (made, name) = made_from_file(item, templates, bitwig_folders).map_err(Some)?;
+            (made.0.clone(), Some(name), Some(made))
+        }
         Source::File { .. } => {
             let preset = PathBuf::from(item.path());
             let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned());
-            (preset, name, false)
+            (preset, name, None)
         }
         Source::Song { save, key } => {
             let (preset, name) = audition_preset_of(item, save, key, templates, bitwig_folders)?;
-            (preset, Some(name), true)
+            (preset.clone(), Some(name), Some(Gone(preset)))
         }
     };
-    // The preset made for it goes however this ends.
-    let _made = made.then(|| Gone(preset.clone()));
     let name = name.unwrap_or_else(|| item.row.name.clone());
     let clip = mo_app::preset_audition::clip(&name, item.role());
     let bytes = mo_formats::midi::write::write_clip(&clip)
@@ -2116,6 +2198,10 @@ fn audition(
         mo_dawlink::bitwig::Bitwig::default().audition_preset_telling(&preset, &part, &name, turn, wanted, &made);
     let _ = std::fs::remove_file(&part);
     heard.map_err(|e| (e != mo_dawlink::bitwig::Error::Cancelled).then(|| e.to_string()))
+}
+
+fn stem_of(p: &Path) -> String {
+    p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// A file the app made in Temp, removed when this goes.
@@ -2205,6 +2291,10 @@ static PUT_BACK: crate::in_flight::PutBack<mo_dawlink::bitwig::Auditioning> = cr
 /// Auditions only a thread on its way knows of (a start's track while its preset loads, one a stop took out of the
 /// slot and is waiting its turn to stop), for [`finish_up`] to stop as the app closes (the 10 Nov review's D-2).
 static HELD: crate::in_flight::Held<mo_dawlink::bitwig::Auditioning> = crate::in_flight::Held::new();
+
+/// Auditions kept (Keep) whose stop is still waiting its turn, for [`finish_up`] to stop as the app closes while the
+/// track stays (the 14 Nov review's MI-16). Not in [`HELD`]: those have their track taken out.
+static KEEPING: crate::in_flight::Held<mo_dawlink::bitwig::Auditioning> = crate::in_flight::Held::new();
 
 /// An audition that couldn't be stopped: back in its place, unless another plays by now (then it's let go), and a start
 /// in Bitwig still on its way behind it (from this page or the MIDI page) is called off, so one thing plays there at a
@@ -2379,9 +2469,14 @@ fn keep_audition(app: &AppWindow) {
     let words = format!("Kept: {track} stays in Bitwig, on its own track with the part.");
     let ticket = mo_dawlink::bitwig::ticket();
     let on_its_way = crate::in_flight::Start::begin();
+    // Held while it waits its turn, so the app closing behind a long job still stops it (MI-16).
+    let held = KEEPING.hold(auditioning);
     let started = background::spawn("Keep audition", move || {
         let _on_its_way = on_its_way;
-        let kept = mo_dawlink::bitwig::Bitwig::default().keep_audition(auditioning, &ticket.wait());
+        let turn = ticket.wait();
+        // Not there when the app took it as it closed, and stopped it there.
+        let Some(auditioning) = KEEPING.release(held) else { return };
+        let kept = mo_dawlink::bitwig::Bitwig::default().keep_audition(auditioning, &turn);
         if let Err(e) = kept {
             log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped as it was kept: {e}"));
             message_later(format!("{track} stays in Bitwig, but it couldn't be stopped there: {e}"));
@@ -2420,7 +2515,13 @@ pub fn after_crash() {
     let to = crate::in_flight::closing_link(Duration::from_millis(500));
     for auditioning in slot.take().into_iter().chain(HELD.try_take_all()) {
         if to.stop_audition_as_app_closes(&auditioning).is_err() {
-            break;
+            return;
+        }
+    }
+    // Kept ones still waiting their turn: stopped, their tracks staying (MI-16).
+    for auditioning in KEEPING.try_take_all() {
+        if to.keep_audition_as_app_closes(&auditioning).is_err() {
+            return;
         }
     }
 }
@@ -2438,10 +2539,18 @@ pub fn finish_up() {
         first.or_else(|| slot.take()).into_iter().chain(HELD.take_all()).collect()
     };
     let to = crate::in_flight::closing_link(Duration::from_secs(3));
-    for auditioning in all {
+    // Kept ones still waiting their turn (MI-16): stopped with their tracks staying.
+    let kept = KEEPING.take_all();
+    let stops = all.into_iter().map(|a| (a, false)).chain(kept.into_iter().map(|a| (a, true)));
+    for (auditioning, keep) in stops {
         // Without waiting its turn: what would go first is closing too, and the extension still makes the stop once
         // the app has gone (3.21).
-        if let Err(e) = to.stop_audition_as_app_closes(&auditioning) {
+        let stopped = if keep {
+            to.keep_audition_as_app_closes(&auditioning)
+        } else {
+            to.stop_audition_as_app_closes(&auditioning).map(|_| ())
+        };
+        if let Err(e) = stopped {
             log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped as the app closed: {e}"));
             // Bitwig gone or not answering: the rest would only make the app slower to close.
             if e.bitwig_gone() || e == mo_dawlink::bitwig::Error::TimedOut {
@@ -2727,7 +2836,8 @@ fn save_as_new(from: String, name: String, points: Vec<mo_formats::bitwig::curve
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
     let started = background::spawn("Curve save", move || {
-        match CurvesDb::open(&db).and_then(|db| db.save_made(&name, &points, length, now)) {
+        let saved = CurvesDb::open(&db).and_then(|db| db.save_made(&name, &points, length, now));
+        match saved {
             Ok(c) => {
                 let key = logic::CurveKey::of(&c);
                 on_window(move |app| {
@@ -2739,7 +2849,7 @@ fn save_as_new(from: String, name: String, points: Vec<mo_formats::bitwig::curve
                         format!("Saved as a new curve, \"{}\". Rename gives it your own name.", c.name)
                     };
                     // The curve the edits were made on is as it was found again: the edits live in the new one.
-                    crate::curve_editor::forget(app, &from);
+                    crate::curve_editor::forget(app, &from, &(points, length));
                     PAGE.with(|p| {
                         let mut p = p.borrow_mut();
                         match p.curves.iter().position(|o| o.id == c.id) {

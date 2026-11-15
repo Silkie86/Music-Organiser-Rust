@@ -115,9 +115,9 @@ pub struct Own {
 impl Own {
     /// The own parts of the song whose saves are at `saves`: every save's path, as the song library groups them
     /// (`mo_library::Song::saves` and its `copies`; that grouping knows the saves you joined or split by hand, which
-    /// a file's name alone doesn't). Two passes over the catalogue, the second on rayon's threads; keep it for as
-    /// long as the catalogue and the song's saves stay.
-    pub fn of<'a>(cat: &Catalogue, saves: impl IntoIterator<Item = &'a str>) -> Own {
+    /// a file's name alone doesn't). Two passes over the catalogue, the second on `pool`'s threads ([`places`]);
+    /// keep it for as long as the catalogue and the song's saves stay.
+    pub fn of<'a>(cat: &Catalogue, saves: impl IntoIterator<Item = &'a str>, pool: &rayon::ThreadPool) -> Own {
         let saves: HashSet<String> = saves.into_iter().map(case::to_lower).collect();
         if saves.is_empty() {
             return Own::default();
@@ -144,17 +144,12 @@ impl Own {
         let other_keys = if loops.is_empty() {
             HashSet::new()
         } else {
-            cat.entries
-                .par_iter()
-                .enumerate()
-                .filter(|(at, e)| {
-                    !in_song.contains(at)
-                        && loop_shape(e)
-                            .filter(|shape| shapes.contains(shape))
-                            .is_some_and(|shape| files(e).any(|file| loops.contains(&(folder_key(&file.path), shape))))
-                })
-                .map(|(at, _)| at)
-                .collect()
+            places(cat, pool, |at, e| {
+                !in_song.contains(&at)
+                    && loop_shape(e)
+                        .filter(|shape| shapes.contains(shape))
+                        .is_some_and(|shape| files(e).any(|file| loops.contains(&(folder_key(&file.path), shape))))
+            })
         };
         Own { in_song, other_keys }
     }
@@ -201,17 +196,27 @@ pub struct Tried<'a> {
 
 /// The parts of `cat` to try against a song: every part `keep` lets through (the page's filters: a part the page
 /// hides shouldn't come up), without the song's `own`. Every copy of a loop in other keys is among them, so that the
-/// search can give the copy that needs moving least. One pass on rayon's threads.
-pub fn tried<'a>(cat: &'a Catalogue, own: &Own, keep: impl Fn(&Entry) -> bool + Sync) -> Tried<'a> {
-    let places = cat
-        .entries
-        .par_iter()
-        .enumerate()
-        // The cheap test first.
-        .filter(|(at, e)| !own.has(*at) && keep(e))
-        .map(|(at, _)| at)
-        .collect();
+/// search can give the copy that needs moving least. One pass on `pool`'s threads ([`places`]).
+pub fn tried<'a>(
+    cat: &'a Catalogue,
+    own: &Own,
+    keep: impl Fn(&Entry) -> bool + Sync,
+    pool: &rayon::ThreadPool,
+) -> Tried<'a> {
+    // The cheap test first.
+    let places = places(cat, pool, |at, e| !own.has(at) && keep(e));
     Tried { cat, places }
+}
+
+/// The places in [`Catalogue::entries`] of the parts `keep` lets through, in one pass over the catalogue on `pool`'s
+/// threads. Always a pool that's handed in, never rayon's own: its threads run at normal priority, one for each
+/// core, and stay until the app closes, where the app's pools run low beside the audio and the DAW (rule 21). A
+/// search makes this pass for every letter typed.
+fn places<C>(cat: &Catalogue, pool: &rayon::ThreadPool, keep: impl Fn(usize, &Entry) -> bool + Sync) -> C
+where
+    C: FromParallelIterator<usize> + Send,
+{
+    pool.install(|| cat.entries.par_iter().enumerate().filter(|(at, e)| keep(*at, e)).map(|(at, _)| at).collect())
 }
 
 impl Tried<'_> {
@@ -262,6 +267,11 @@ mod tests {
     use crate::{PPQ, analyser, playing};
     use mo_formats::arrangement::Arrangement;
 
+    /// A pool of two threads, as the app hands in its low-priority one.
+    fn pool() -> rayon::ThreadPool {
+        rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap()
+    }
+
     /// A made-up index: the catalogue of its parts, their slots and their notes.
     #[derive(Default)]
     struct Index {
@@ -292,9 +302,8 @@ mod tests {
 
         /// A search of `tried`, with the hashes found in order and each one's best move.
         fn search(&self, tried: &Tried, target: &Target, most: usize) -> (Search, Vec<(String, i32)>) {
-            let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
             let mut notes = |_: i64, hash: &str| self.notes.get(hash).cloned();
-            let search = tried.search(target, &self.book, &mut notes, most, &pool, &AtomicBool::new(false));
+            let search = tried.search(target, &self.book, &mut notes, most, &pool(), &AtomicBool::new(false));
             let found =
                 search.found.iter().map(|f| (tried.cat.entries[f.at].phrase.hash.clone(), f.sits.best().0)).collect();
             (search, found)
@@ -302,7 +311,14 @@ mod tests {
     }
 
     fn arrangement(lanes: Vec<mo_formats::arrangement::PreviewLane>) -> Arrangement {
-        Arrangement { view: "Test", tempo: 120.0, beats_per_bar: 4, lanes, markers: Vec::new(), notes: Vec::new() }
+        Arrangement {
+            view: "Test",
+            tempo: 120.0,
+            signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
+            lanes,
+            markers: Vec::new(),
+            notes: Vec::new(),
+        }
     }
 
     fn up(notes: &[NoteEvent], semitones: u8) -> Vec<NoteEvent> {
@@ -423,8 +439,9 @@ mod tests {
     fn the_songs_own_parts_are_every_saves_and_its_loops_in_other_keys() {
         let index = library();
         let cat = index.catalogue();
+        let pool = pool();
         // The saves as the library lists them, whatever the letters' case.
-        let own = Own::of(&cat, [SAVES[0], &SAVES[1].to_uppercase(), SAVES[2]]);
+        let own = Own::of(&cat, [SAVES[0], &SAVES[1].to_uppercase(), SAVES[2]], &pool);
         let has = |hash: &str| own.has(cat.find(hash).unwrap());
         // Its parts from every save, the one joined by hand too.
         assert!(has("song chords") && has("song lead") && has("song hats") && has("old lead") && has("joined riff"));
@@ -442,15 +459,15 @@ mod tests {
         assert!(!has("pack tune") && !has("pack tune in Eb") && !has("other song's tune") && !has("wandering 0"));
 
         // Without the save joined by hand, its riff isn't the song's.
-        let two = Own::of(&cat, [SAVES[0], SAVES[1]]);
+        let two = Own::of(&cat, [SAVES[0], SAVES[1]], &pool);
         assert!(!two.has(cat.find("joined riff").unwrap()) && two.len() == 5);
         // Another song's own parts are its own; the pack's tune isn't one of its loops (it has no file there).
-        let other = Own::of(&cat, [r"C:\Projects\Other\Other_3.flp"]);
+        let other = Own::of(&cat, [r"C:\Projects\Other\Other_3.flp"], &pool);
         assert_eq!(other.len(), 1);
         assert!(!other.has(cat.find("pack tune").unwrap()));
         // A song the library has nothing of, or one with no saves, leaves nothing out.
-        assert!(Own::of(&cat, [r"C:\Projects\New\New_1.flp"]).is_empty());
-        assert_eq!(Own::of(&cat, []), Own::default());
+        assert!(Own::of(&cat, [r"C:\Projects\New\New_1.flp"], &pool).is_empty());
+        assert_eq!(Own::of(&cat, [], &pool), Own::default());
     }
 
     #[test]
@@ -459,9 +476,10 @@ mod tests {
         let cat = index.catalogue();
         let song = song();
         let target = Pick::usual(&song, Wants::Tune).unwrap().target(&song).unwrap();
-        let own = Own::of(&cat, SAVES);
+        let pool = pool();
+        let own = Own::of(&cat, SAVES, &pool);
 
-        let tried = tried(&cat, &own, |_| true);
+        let tried = tried(&cat, &own, |_| true, &pool);
         // 21 sets of notes, less the song's six and its three loops in other keys.
         assert_eq!((cat.entries.len(), tried.len()), (21, 12));
         let (search, found) = index.search(&tried, &target, 20);
@@ -484,14 +502,14 @@ mod tests {
 
         // What the page's filters hide isn't tried: without the files only the other projects' two are left. The
         // other song's tune is found with nothing moved, the sketch's riff moved back down.
-        let from_projects = super::tried(&cat, &own, |e| e.is_project());
+        let from_projects = super::tried(&cat, &own, |e| e.is_project(), &pool);
         assert_eq!(from_projects.len(), 2);
         let (_, mut found) = index.search(&from_projects, &target, 3);
         found.sort();
         assert_eq!(found, [("other song's tune".to_owned(), 0), ("sketch riff".to_owned(), -3)]);
 
         // Without the song's own parts left out they'd be found, and first.
-        let nothing_left_out = super::tried(&cat, &Own::default(), |_| true);
+        let nothing_left_out = super::tried(&cat, &Own::default(), |_| true, &pool);
         assert_eq!(nothing_left_out.len(), 21);
         let (_, found) = index.search(&nothing_left_out, &target, 1);
         assert!(found[0].0.starts_with("song"), "{found:?}");
@@ -503,10 +521,33 @@ mod tests {
         let cat = index.catalogue();
         let song = song();
         let target = Pick::usual(&song, Wants::Tune).unwrap().target(&song).unwrap();
-        let none = tried(&cat, &Own::default(), |_| false);
+        let none = tried(&cat, &Own::default(), |_| false, &pool());
         assert!(none.is_empty());
         let (search, found) = index.search(&none, &target, 10);
         assert!(found.is_empty());
         assert_eq!((search.looked, search.close), (0, 0));
+    }
+
+    /// Rule 21 (the 14 November review's MI-8): the passes over the catalogue that every search makes run on the pool
+    /// handed in (the app's low-priority one), not on rayon's own threads at normal priority.
+    #[test]
+    fn the_catalogue_is_gone_over_on_the_pool_handed_in() {
+        let index = library();
+        let cat = index.catalogue();
+        let low = rayon::ThreadPoolBuilder::new().num_threads(2).thread_name(|n| format!("low {n}")).build().unwrap();
+        let on = std::sync::Mutex::new(HashSet::new());
+        let seen = |_: &Entry| {
+            on.lock().unwrap().insert(std::thread::current().name().unwrap_or("no name").to_owned());
+            true
+        };
+        // From a thread that's in no pool, as the search's own thread is.
+        let all = tried(&cat, &Own::default(), seen, &low);
+        assert_eq!(all.len(), cat.entries.len());
+        let on = on.into_inner().unwrap();
+        assert!(!on.is_empty() && on.iter().all(|name| name.starts_with("low ")), "{on:?}");
+        // The song's loops in other keys are found by the same pass ([`places`]), and come out the same whatever
+        // the pool.
+        assert_eq!(Own::of(&cat, SAVES, &low), Own::of(&cat, SAVES, &pool()));
+        assert!(!Own::of(&cat, SAVES, &low).other_keys.is_empty());
     }
 }

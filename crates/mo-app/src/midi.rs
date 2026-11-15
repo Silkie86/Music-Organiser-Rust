@@ -1115,24 +1115,80 @@ pub fn loop_notes(notes: &[NoteEvent], bars: i32) -> (Vec<NoteEvent>, i64) {
 pub const METRONOME_BAR_KEY: u8 = 76;
 pub const METRONOME_BEAT_KEY: u8 = 77;
 
-/// A metronome for a loop `length` ticks long, as drum notes: a click on every beat (4 to a bar), the bar's first
-/// louder. Played with the part, on the SoundFont's drums, so it keeps exact time with it at any speed.
-pub fn metronome_notes(length: i64) -> Vec<NoteEvent> {
-    let beat = mo_midi::PPQ;
-    (0..(length.max(0) + beat - 1) / beat)
-        .map(|at| {
-            let bar = at % 4 == 0;
-            NoteEvent {
-                start: at * beat,
-                length: beat / 4,
-                key: if bar { METRONOME_BAR_KEY } else { METRONOME_BEAT_KEY },
-                velocity: if bar { 65_535 } else { 45_000 },
-                muted: false,
-                step: false,
-                attribute: mo_formats::NoteAttribute::default(),
-            }
+/// A metronome for a loop `length` ticks long, as drum notes: a click on every beat from each bar line, the bar's
+/// first louder. `bar` is a bar's ticks: [`mo_midi::BAR`] for a part alone (the index counts every part in bars of
+/// 4/4), the song's own for a part playing with a song, so a waltz clicks in three (the 14 November 2026 review's
+/// MI-12: the loud click came every four beats whatever the song's bars). Played on the SoundFont's drums at the
+/// part's tempo, so it keeps exact time with it at any speed.
+pub fn metronome_notes(length: i64, bar: i64) -> Vec<NoteEvent> {
+    let (beat, bar) = (mo_midi::PPQ, bar.max(1));
+    let click = |start: i64, first: bool| NoteEvent {
+        start,
+        length: beat / 4,
+        key: if first { METRONOME_BAR_KEY } else { METRONOME_BEAT_KEY },
+        velocity: if first { 65_535 } else { 45_000 },
+        muted: false,
+        step: false,
+        attribute: mo_formats::NoteAttribute::default(),
+    };
+    (0i64..)
+        .map(|n| n.saturating_mul(bar))
+        .take_while(|line| *line < length)
+        .flat_map(|line| {
+            let end = line.saturating_add(bar).min(length);
+            (0i64..).map(move |n| line + n * beat).take_while(move |at| *at < end).map(move |at| (at, at == line))
         })
+        .map(|(at, first)| click(at, first))
         .collect()
+}
+
+/// A loop held to what can be made into sound: `most` ticks (`mo_audio::gm::longest_ticks`: two minutes, which a
+/// long part is over at a slow speed). A longer one keeps as many whole bars of 4/4 as fit, one at the least, so it
+/// goes round on a bar line and the beat never jumps (the 14 November 2026 review's MI-11: it was cut at two minutes
+/// wherever that fell, half way through bar 13 of 16 at 25 BPM): the notes that start in those bars, none held past
+/// their end, and how long it then is. What the card says of it is [`held_note`].
+pub fn loop_held(notes: Vec<NoteEvent>, length: i64, most: i64) -> (Vec<NoteEvent>, i64) {
+    let bar = mo_midi::BAR;
+    let held = (most / bar).max(1).saturating_mul(bar);
+    if length <= most || held >= length {
+        return (notes, length);
+    }
+    let notes = notes
+        .into_iter()
+        .filter(|n| n.start < held)
+        .map(|n| NoteEvent { length: n.length.min(held - n.start), ..n })
+        .collect();
+    (notes, held)
+}
+
+/// What the card says under Play while only the first `plays` ticks of a loop `length` ticks long play, the rest
+/// being more than a loop can be at this speed ([`loop_held`]; with a song, where the song's bars say it goes
+/// round); nothing when all of it plays. `heard`: the loop's notes, since a part that starts late can have none in
+/// what plays. Bars are the part's own, of 4/4, as its card counts them; with a song in other bars what plays can
+/// end inside one, and is then said as "about".
+pub fn held_note(heard: &[NoteEvent], plays: i64, length: i64) -> String {
+    if plays >= length {
+        return String::new();
+    }
+    let bar = mo_midi::BAR;
+    let (whole, of) = (plays / bar, length.saturating_add(bar - 1) / bar);
+    let about = if plays % bar == 0 { "" } else { "about " };
+    let why = "at this speed: a loop can be two minutes long at the most.";
+    if !heard.iter().any(|n| n.start < plays) {
+        let first = match whole {
+            0 => "the start of the first bar".to_owned(),
+            1 => format!("{about}the first bar"),
+            n => format!("{about}the first {n} bars"),
+        };
+        return format!(
+            "Nothing is heard: none of its notes start in {first} of its {of}, which is all that plays {why}"
+        );
+    }
+    match whole {
+        0 => format!("Only the start of the first of its {of} bars plays {why}"),
+        1 => format!("Only {about}the first of its {of} bars plays {why}"),
+        n => format!("Only {about}the first {n} of its {of} bars play {why}"),
+    }
 }
 
 /// How far one press of the stepper's minus or plus moves the speed, in BPM (as the curve editor's).
@@ -1150,6 +1206,22 @@ pub fn step_bpm(bpm: f64, by: i32) -> f64 {
 pub fn bpm_text(bpm: f64) -> String {
     let tenths = (bpm * 10.0).round() / 10.0;
     if tenths.fract() == 0.0 { format!("{tenths:.0} BPM") } else { format!("{tenths:.1} BPM") }
+}
+
+/// The card's words for a speed you set on it: "100 BPM, your speed (its own is 92)", or with the song "100 BPM,
+/// your speed (the song's is 128)"; `own` none when it isn't known yet.
+pub fn your_speed_words(speed: f64, own: Option<f64>, song: bool) -> String {
+    let speed = bpm_text(speed);
+    match own {
+        Some(own) if song => format!("{speed}, your speed (the song's is {})", bpm_text(own)),
+        Some(own) => format!("{speed}, your speed (its own is {})", bpm_text(own)),
+        None => format!("{speed}, your speed"),
+    }
+}
+
+/// The card's sound line for a part playing alone at a speed you set (`own`: its own tempo, once read).
+pub fn sound_line_at_speed(sound: &mo_midi::gm::GmSound, speed: f64, own: Option<f64>) -> String {
+    format!("{} · {}", sound_line(sound, None), your_speed_words(speed, own, false))
 }
 
 /// Where a loop made again at another speed starts, in seconds, so it goes on from the same beat rather than from
@@ -1213,9 +1285,17 @@ pub fn read_done_text(s: &mo_midi::indexer::Summary) -> (String, String) {
     if s.stopped {
         return ("Stopped reading MIDI".to_owned(), "It carries on from there next time".to_owned());
     }
+    // Notes kept in the index that tripped the key finder, or what's made from them for a search: a bug, said here
+    // so it gets heard of. The reading went on without them, and they keep what they had. (A reading that was
+    // stopped doesn't say: the next one asks for them again and does.)
+    let tripped = match s.tripped {
+        0 => String::new(),
+        1 => "; 1 part's notes couldn't be worked on (the log says why)".to_owned(),
+        n => format!("; {} parts' notes couldn't be worked on (the log says why)", thousands(n)),
+    };
     if s.read == 0 {
         let rekeyed = if s.rekeyed > 0 { format!("; {} keys read again", thousands(s.rekeyed)) } else { String::new() };
-        return ("MIDI up to date".to_owned(), format!("Nothing new to read{rekeyed}"));
+        return ("MIDI up to date".to_owned(), format!("Nothing new to read{rekeyed}{tripped}"));
     }
     let files = if s.read == 1 { "1 file".to_owned() } else { format!("{} files", thousands(s.read)) };
     let parts = if s.parts == 1 { "1 part".to_owned() } else { format!("{} parts", thousands(s.parts)) };
@@ -1223,6 +1303,7 @@ pub fn read_done_text(s: &mo_midi::indexer::Summary) -> (String, String) {
     if s.failed > 0 {
         detail.push_str(&format!("; {} couldn't be read", thousands(s.failed)));
     }
+    detail.push_str(&tripped);
     ("MIDI read".to_owned(), detail)
 }
 
@@ -1329,6 +1410,54 @@ pub fn is_half_sent(name: &str) -> bool {
     let Some((app, write)) = tail.split_once('-') else { return false };
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     !before.is_empty() && digits(app) && digits(write)
+}
+
+/// The folder in the data folder where Put in the song notes which MIDI file it wrote, while Bitwig records it
+/// (the 14 Nov review's MI-6): a part's file has its own name ("Lead · Pattern 3.mid") beside the parts you sent on
+/// purpose, so when the app closes or crashes before it goes, only this note says it was the app's to remove.
+pub const PUTS_FOLDER: &str = "midi-puts";
+
+/// Notes in `data`'s [`PUTS_FOLDER`] that Put in the song wrote `file` (just written, not yet changed): its size and
+/// when it was last changed, then its whole path, in a note of its own named `put-<process>-<count>.txt`. Gives
+/// back the note, for [`forget_put`] once the file has gone.
+pub fn note_put(data: &std::path::Path, file: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let meta = std::fs::symlink_metadata(file)?;
+    let changed = put_time(&meta).ok_or_else(|| std::io::Error::other("the file has no time it was changed"))?;
+    let path = file.to_str().ok_or_else(|| std::io::Error::other("the file's path isn't plain text"))?;
+    let folder = data.join(PUTS_FOLDER);
+    std::fs::create_dir_all(&folder)?;
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let note = folder.join(format!("put-{}-{n}.txt", std::process::id()));
+    std::fs::write(&note, format!("{}\n{changed}\n{path}", meta.len()))?;
+    Ok(note)
+}
+
+/// Takes away a note [`note_put`] made, once its file has gone.
+pub fn forget_put(note: &std::path::Path) {
+    let _ = std::fs::remove_file(note);
+}
+
+/// When a file was last changed, in nanoseconds from 1970, as [`note_put`] writes it.
+pub fn put_time(meta: &std::fs::Metadata) -> Option<u128> {
+    Some(meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos())
+}
+
+/// A note [`note_put`] made, by its whole name, and the process that made it.
+pub fn put_note_process(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("put-")?.strip_suffix(".txt")?;
+    let (process, count) = rest.split_once('-')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(process) && digits(count)).then(|| process.parse().ok()).flatten()
+}
+
+/// What a note [`note_put`] made says: the file's size, when it was changed, and its path.
+pub fn read_put_note(text: &str) -> Option<(u64, u128, std::path::PathBuf)> {
+    let mut lines = text.splitn(3, '\n');
+    let size = lines.next()?.parse().ok()?;
+    let changed = lines.next()?.parse().ok()?;
+    let path = lines.next().filter(|p| !p.is_empty())?;
+    Some((size, changed, std::path::PathBuf::from(path)))
 }
 
 /// Writes a part's MIDI file into `dir` under `name` (made safe for a file name) as a new file: never over another.
@@ -1486,15 +1615,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_speed_you_set_is_what_the_card_says() {
+        assert_eq!(your_speed_words(100.0, Some(92.0), false), "100 BPM, your speed (its own is 92 BPM)");
+        assert_eq!(your_speed_words(100.0, Some(127.96), true), "100 BPM, your speed (the song's is 128 BPM)");
+        assert_eq!(your_speed_words(92.5, None, false), "92.5 BPM, your speed");
+        let sound = mo_midi::gm::sound_for(mo_midi::Role::Melody, false, None, &[], None);
+        assert_eq!(
+            sound_line_at_speed(&sound, 100.0, Some(92.0)),
+            "Saw Lead · for its kind of part · 100 BPM, your speed (its own is 92 BPM)"
+        );
+    }
+
+    #[test]
     fn the_metronome_and_the_speed() {
         // Two bars and a half: a click a beat, rounded up to the last beat begun, the bars' first beats high.
-        let clicks = metronome_notes(2 * BAR + mo_midi::PPQ / 2);
+        let clicks = metronome_notes(2 * BAR + mo_midi::PPQ / 2, BAR);
         assert_eq!(clicks.len(), 9);
         let keys: Vec<u8> = clicks.iter().map(|n| n.key).collect();
         assert_eq!(&keys[..5], &[76, 77, 77, 77, 76]);
         assert_eq!(clicks[8].key, METRONOME_BAR_KEY);
         assert!(clicks[0].velocity > clicks[1].velocity);
-        assert!(metronome_notes(0).is_empty());
+        assert!(metronome_notes(0, BAR).is_empty());
+        // With a song in 3/4 the loud click is on each of the song's bar lines (MI-12), a click a beat as before.
+        let waltz = metronome_notes(2 * 3 * mo_midi::PPQ, 3 * mo_midi::PPQ);
+        let starts: Vec<i64> = waltz.iter().map(|n| n.start / mo_midi::PPQ).collect();
+        assert_eq!(starts, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(waltz.iter().map(|n| n.key).collect::<Vec<_>>(), [76, 77, 77, 76, 77, 77]);
+        // A bar of three and a half beats (7/8): the last beat is cut short by the next bar's loud click.
+        let seven = metronome_notes(2 * 336, 336);
+        assert_eq!(seven.iter().map(|n| (n.start, n.key)).collect::<Vec<_>>()[3..5], [(288, 77), (336, 76)]);
         // Steps go to the next 5 BPM, and stay where a part can play.
         assert_eq!(step_bpm(120.0, 1), 125.0);
         assert_eq!(step_bpm(120.0, -1), 115.0);
@@ -1509,6 +1658,56 @@ pub(crate) mod tests {
         assert_eq!(resume_seconds(5.0, 120.0, 60.0, 8.0), 2.0);
         assert_eq!(resume_seconds(f64::NAN, 120.0, 60.0, 8.0), 0.0);
         assert_eq!(resume_seconds(1.0, 120.0, 120.0, 0.0), 0.0);
+    }
+
+    /// The 14 November 2026 review's MI-11: a 16-bar part at 25 BPM is over the two minutes a loop can be (12 bars
+    /// and a half), and was cut there, half way through bar 13.
+    #[test]
+    fn a_loop_too_long_for_its_speed_keeps_its_first_whole_bars() {
+        let note = |start: i64, length: i64| NoteEvent {
+            start,
+            length,
+            key: 60,
+            velocity: 40_000,
+            muted: false,
+            step: false,
+            attribute: mo_formats::NoteAttribute::default(),
+        };
+        // A note in each bar, the one in bar 12 held into bar 14.
+        let notes: Vec<NoteEvent> =
+            (0..16).map(|b| note(b * BAR, if b == 11 { 2 * BAR + 10 } else { BAR / 2 })).collect();
+        let most = 12 * BAR + BAR / 2;
+        let (held, length) = loop_held(notes.clone(), 16 * BAR, most);
+        assert_eq!((held.len(), length), (12, 12 * BAR));
+        assert_eq!(held[11].start + held[11].length, 12 * BAR, "no note is held past where it goes round");
+        let why = "at this speed: a loop can be two minutes long at the most.";
+        assert_eq!(held_note(&notes, length, 16 * BAR), format!("Only the first 12 of its 16 bars play {why}"));
+        // One that fits is left as it is, to the tick, whole bars or not, with nothing to say; and a bar is the
+        // least there is.
+        assert_eq!(loop_held(notes.clone(), 12 * BAR + BAR / 2, most), (notes.clone(), 12 * BAR + BAR / 2));
+        assert_eq!(loop_held(notes.clone(), 16 * BAR, 16 * BAR), (notes.clone(), 16 * BAR));
+        assert_eq!(held_note(&notes, 16 * BAR, 16 * BAR), "");
+        let (one, length) = loop_held(notes.clone(), 16 * BAR, 10);
+        assert_eq!((one.len(), length), (1, BAR));
+        assert_eq!(held_note(&notes, BAR, 3 * BAR), format!("Only the first of its 3 bars plays {why}"));
+        // With a song in other bars, what plays can end inside one of the part's: ten bars and a half here.
+        assert_eq!(
+            held_note(&notes, 10 * BAR + BAR / 2, 16 * BAR),
+            format!("Only about the first 10 of its 16 bars play {why}")
+        );
+        assert_eq!(
+            held_note(&notes, BAR / 2, 16 * BAR),
+            format!("Only the start of the first of its 16 bars plays {why}")
+        );
+        // A part that comes in late has nothing in what plays: said, where it would only be silence.
+        let late: Vec<NoteEvent> = notes[12..].to_vec();
+        assert_eq!(
+            held_note(&late, 12 * BAR, 16 * BAR),
+            format!(
+                "Nothing is heard: none of its notes start in the first 12 bars of its 16, which is all that plays {why}"
+            )
+        );
+        assert_eq!(held_note(&late, 13 * BAR, 16 * BAR), format!("Only the first 13 of its 16 bars play {why}"));
     }
 
     #[test]
@@ -1776,6 +1975,15 @@ pub(crate) mod tests {
         assert_eq!(read_done_text(&Default::default()).0, "MIDI up to date");
         let s = mo_midi::indexer::Summary { read: 3, parts: 1, ..Default::default() };
         assert_eq!(read_done_text(&s).1, "3 files, 1 part");
+        // Notes that tripped a reader were passed over, and it says so: after a reading, and when there was nothing
+        // new to read.
+        let s = mo_midi::indexer::Summary { read: 3, parts: 1, tripped: 1, ..Default::default() };
+        assert_eq!(read_done_text(&s).1, "3 files, 1 part; 1 part's notes couldn't be worked on (the log says why)");
+        let s = mo_midi::indexer::Summary { rekeyed: 4_000, tripped: 1_200, ..Default::default() };
+        assert_eq!(
+            read_done_text(&s).1,
+            "Nothing new to read; 4,000 keys read again; 1,200 parts' notes couldn't be worked on (the log says why)"
+        );
         // Files, then the files' last call, then keys.
         let mut p = ReadProgress::default();
         assert_eq!(p.text(5, 10, "L:\\x\\a.mid"), "Reading MIDI: 5 of 10 · a.mid");

@@ -26,7 +26,7 @@ pub const FILE: &str = "rust-settings.json";
 /// Every file in the data folder written through [`write_checked`] (as `<name>.mo-part` first): the app's settings and
 /// the Space page's list of what it put in the Recycle Bin. A new caller adds its file's name here, so the start-up
 /// sweep clears what a crash leaves of it (`crate::tidy::is_cut_short`).
-pub const WRITTEN_CHECKED: [&str; 2] = [FILE, crate::binned::FILE];
+pub const WRITTEN_CHECKED: [&str; 3] = [FILE, crate::binned::FILE, crate::beta::FILE];
 
 /// Which page the app opens on: a page's name, or [`places::LAST_PAGE_CHOICE`]. The C# app's name.
 pub const START_PAGE_KEY: &str = "start_page";

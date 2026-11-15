@@ -31,7 +31,7 @@ fn a_song_in_pattern_mode_shows_no_playlist_but_opens_in_bitwig_one_pattern_afte
     assert_eq!((playlist.view, bitwig.view), (arrangement::PLAYLIST_VIEW, arrangement::BITWIG_VIEW));
     assert!(playlist.lanes.is_empty());
     assert_eq!(playlist.notes.len(), 1, "says why the playlist is empty");
-    assert_eq!((bitwig.tempo, bitwig.beats_per_bar), (128.0, 4));
+    assert_eq!((bitwig.tempo, bitwig.signature.beats()), (128.0, 4.0));
     assert_eq!(
         lanes(&bitwig),
         [
@@ -141,12 +141,15 @@ fn markers_colours_and_the_time_signature() {
         .text(205, "Drop")
         .build();
     let [playlist, bitwig] = read(&bytes);
-    assert_eq!((playlist.tempo, playlist.beats_per_bar), (90.0, 3));
+    assert_eq!((playlist.tempo, playlist.signature.beats()), (90.0, 3.0));
     assert_eq!(playlist.markers, [PreviewMarker { beat: 3.0, name: "Drop".into() }]);
     // The same two facts alone, for a reader that needs no more of the playlist.
     let flp = events::load(&bytes).expect("an FL project");
-    assert_eq!(arrangement::bars_and_markers(&flp), (3, playlist.markers.clone()));
-    assert_eq!(arrangement::bars_and_markers(&events::load(&fl_studio_project()).expect("an FL project")), (4, vec![]));
+    assert_eq!(arrangement::bars_and_markers(&flp), (playlist.signature, playlist.markers.clone()));
+    assert_eq!(
+        arrangement::bars_and_markers(&events::load(&fl_studio_project()).expect("an FL project")),
+        (Default::default(), vec![])
+    );
     assert_eq!(lanes(&playlist), [("Bass line", LaneKind::Instrument, "Riff")]);
     // FL saves colours blue first; they come out red first. The pattern's colour is the clip's.
     assert_eq!(playlist.lanes[0].clips[0].colour, Some(0x00_00FF));
@@ -256,4 +259,102 @@ fn a_channel_switched_off_in_the_channel_rack_is_muted_in_both_views() {
         }
     }
     assert!(hat > 0, "the Hat's notes are still in the picture");
+}
+
+#[test]
+fn the_time_signature_keeps_both_its_numbers() {
+    // FL 20 onwards says "Set as time signature" in event 35; event 18 is then the bottom number.
+    let read = |events: &[(u8, u8)]| {
+        let mut b = Flp::new().ascii(199, "25.2.5.5319");
+        for &(id, value) in events {
+            b = b.byte(id, value);
+        }
+        let bytes = b.build();
+        let (signature, _) = arrangement::bars_and_markers(&events::load(&bytes).expect("an FL project"));
+        (signature.top(), signature.bottom(), signature.beats())
+    };
+    // Tempo counts quarter notes whatever the signature, so a 6/8 bar is 3 of them.
+    assert_eq!(read(&[(17, 6), (18, 8), (35, 1)]), (6, 8, 3.0));
+    assert_eq!(read(&[(17, 12), (18, 8), (35, 1)]), (12, 8, 6.0));
+    assert_eq!(read(&[(17, 2), (18, 2), (35, 1)]), (2, 2, 4.0));
+    assert_eq!(read(&[(17, 7), (18, 8), (35, 1)]), (7, 8, 3.5));
+    assert_eq!(read(&[(17, 3), (18, 4), (35, 1)]), (3, 4, 3.0));
+    // Before FL 20 (no event 35), or in time division mode, event 18 is the steps in a beat: quarter notes.
+    assert_eq!(read(&[(17, 6), (18, 4)]), (6, 4, 6.0));
+    assert_eq!(read(&[(17, 4), (18, 6)]), (4, 4, 4.0));
+    assert_eq!(read(&[(17, 6), (18, 8), (35, 0)]), (6, 4, 6.0));
+    // A bottom number no time signature has, or none at all: quarter notes again, and 4/4 with nothing said.
+    assert_eq!(read(&[(17, 6), (18, 5), (35, 1)]), (6, 4, 6.0));
+    assert_eq!(read(&[(35, 1)]), (4, 4, 4.0));
+    // The first of each is the song's: a later one is a pattern's own.
+    assert_eq!(read(&[(17, 6), (18, 8), (35, 1), (17, 4), (18, 4)]), (6, 8, 3.0));
+    // A first top number that can't be one doesn't let a pattern's stand in, and a bottom number alone says nothing.
+    assert_eq!(read(&[(17, 0), (18, 8), (35, 1), (17, 3)]), (4, 4, 4.0));
+    assert_eq!(read(&[(18, 8), (35, 1)]), (4, 4, 4.0));
+}
+
+#[test]
+fn a_patterns_own_markers_stay_off_the_songs_ruler_and_a_marker_keeps_its_place_whatever_its_kind() {
+    let kind = |kind: u32, ticks: u32| kind << 24 | ticks;
+    let bytes = Flp::new()
+        .ascii(199, "25.2.5.5319")
+        .byte(17, 4)
+        .byte(18, 4)
+        .byte(35, 1)
+        // A pattern with a Piano roll marker (a scale, kind 11) and its own time signature: neither is the song's.
+        .word(65, 1)
+        .dword(148, kind(11, 96))
+        .byte(33, 3)
+        .byte(34, 4)
+        .text(205, "C Major")
+        .byte(17, 3)
+        .word(64, 0)
+        .text(203, "Bass")
+        .word(99, 0)
+        // The song's: a loop marker (kind 4) on beat 3, and a time signature change that FL named itself.
+        .dword(148, kind(4, 192))
+        .text(205, "Loop")
+        .dword(148, kind(8, 384))
+        .byte(33, 6)
+        .byte(34, 8)
+        .text(205, "")
+        .build();
+    let (signature, markers) = arrangement::bars_and_markers(&events::load(&bytes).expect("an FL project"));
+    assert_eq!(
+        markers,
+        [PreviewMarker { beat: 2.0, name: "Loop".into() }, PreviewMarker { beat: 4.0, name: "6/8".into() }]
+    );
+    // A change further on isn't followed: the song is read by the signature it starts with.
+    assert_eq!((signature.top(), signature.bottom()), (4, 4));
+
+    // A time signature marker at the very start of the playlist says the song's over the project's own.
+    let bytes = Flp::new()
+        .ascii(199, "25.2.5.5319")
+        .byte(17, 4)
+        .byte(18, 4)
+        .byte(35, 1)
+        .word(99, 0)
+        .dword(148, kind(8, 0))
+        .byte(33, 12)
+        .byte(34, 8)
+        .text(205, "Shuffle")
+        .build();
+    let (signature, markers) = arrangement::bars_and_markers(&events::load(&bytes).expect("an FL project"));
+    assert_eq!((signature.top(), signature.bottom(), signature.beats()), (12, 8, 6.0));
+    assert_eq!(markers, [PreviewMarker { beat: 0.0, name: "Shuffle".into() }]);
+}
+
+#[test]
+fn a_save_from_before_arrangements_keeps_every_marker_as_the_songs() {
+    // FL 12 and older: no event 99, and a marker can follow a pattern's events with no playlist in between.
+    let bytes = Flp::new()
+        .ascii(199, "12.5.1.165")
+        .word(64, 0)
+        .text(203, "Bass")
+        .word(65, 1)
+        .dword(148, 4 << 24 | 192)
+        .text(205, "Drop")
+        .build();
+    let (_, markers) = arrangement::bars_and_markers(&events::load(&bytes).expect("an FL project"));
+    assert_eq!(markers, [PreviewMarker { beat: 2.0, name: "Drop".into() }]);
 }

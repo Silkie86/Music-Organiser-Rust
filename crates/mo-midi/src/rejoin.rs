@@ -27,6 +27,11 @@ use crate::member::PhraseMember;
 use crate::roles::Role;
 use crate::{BAR, PPQ};
 
+/// What joining makes of the same song: raised when that changes, so that FL songs (the only ones joined) are read
+/// again once, and nothing else is ([`crate::extract::project_version`]; rule 7). 2: a hand-over too long to join is
+/// no way on (its first stretch was listed again, as "joined" with one piece, and its second could start no phrase).
+pub const VERSION: u32 = 2;
+
 /// How many times two stretches must come back together, the same way, to be one phrase.
 pub const MIN_REPEATS: usize = 2;
 /// The score a pair of stretches needs to be joined ([`score`]).
@@ -339,6 +344,12 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
             next.entry(i).or_insert(j);
         }
     }
+    // A hand-over whose two stretches are more than is joined is no way on: the first stops there (alone it's one
+    // channel's stretch, a part already where its patterns are read, and no phrase joined from several), and the
+    // second is free to start a phrase with what it hands to. So every chain below is two pieces or more. The first
+    // doesn't take its next strongest way on instead: its strongest is where the tune goes, and a tune that goes on
+    // for longer than a phrase isn't joined to something else beside it (a pad that came in at the same bar).
+    next.retain(|i, j| all.get(*i).zip(all.get(*j)).is_some_and(|(a, b)| b.to - a.from <= MAX_JOINED_BARS));
     let taken: std::collections::HashSet<usize> = next.values().copied().collect();
     let starts_a_chain = |i: &usize| !taken.contains(i);
     let mut heads: Vec<usize> = next.keys().copied().filter(starts_a_chain).collect();
@@ -622,5 +633,39 @@ mod tests {
             ..channel(name, "", notes)
         };
         assert!(join(&voices(&[shots("01", a), shots("01 #3", b)])).is_empty());
+    }
+
+    /// The 14 November 2026 review's MI-10: a lead's 12 bars answered by 8 on another synth, three times over. The
+    /// hand-over is as strong as any, but the two together are 20 bars, more than is joined. So nothing is: the
+    /// first lead's 12 bars alone were listed as a "joined" phrase of one piece.
+    #[test]
+    fn a_hand_over_too_long_to_join_joins_nothing() {
+        // Lead A's 12 bars, Lead B's answer, and a third lead's 8 bars after it where asked, three times over.
+        let section = |answer_bars: i64, third: bool| {
+            let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
+            for cycle in 0..3 {
+                a.extend(tune(cycle * 32, 12, 60));
+                b.extend(tune(cycle * 32 + 12, answer_bars, 62));
+                if third {
+                    c.extend(tune(cycle * 32 + 12 + answer_bars, 8, 64));
+                }
+            }
+            let (a, b) = (channel("Lead A", "Sytrus", a), channel("Lead B", "Harmor", b));
+            join(&voices(&[a, b, channel("Lead C", "3x Osc", c)]))
+        };
+        let names = |joined: &[Joined]| joined.iter().map(|j| j.name.clone()).collect::<Vec<_>>();
+        let shape = |j: &Joined| (j.members.len(), j.repeats, analyser::bars_of(&j.notes));
+        assert_eq!(names(&section(8, false)), [""; 0]);
+        // With an answer of 4 bars the two are 16 bars, and join as they did: both pieces, three times.
+        let joined = section(4, false);
+        assert_eq!(names(&joined), ["Lead A + Lead B"]);
+        assert_eq!(shape(&joined[0]), (2, 3, 16));
+        // The answer too long to join to Lead A still starts a phrase with the lead that takes over from it: being
+        // handed to by a lead it can't join doesn't use it up.
+        let joined = section(8, true);
+        assert_eq!(names(&joined), ["Lead B + Lead C"]);
+        assert_eq!((shape(&joined[0]), joined[0].first_bar), ((2, 3, 16), 12));
+        // A joined phrase is always two pieces or more, in every song these tests make.
+        assert!(join(&voices(&song())).iter().all(|j| j.members.len() >= 2));
     }
 }

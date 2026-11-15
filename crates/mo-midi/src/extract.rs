@@ -31,16 +31,23 @@ pub const FILE_VERSION: u32 = VERSION * 10_000 + midi::smf::VERSION * 100 + midi
 /// as empty rather than failed.
 pub const MIN_MIDI_BYTES: u64 = 22;
 
-/// What a project was read with: the analysis and its DAW's reader, so a better reader reads its MIDI again too.
+/// What a project was read with: the analysis and its DAW's reader, so a better reader reads its MIDI again too. An
+/// FL song's also how its phrases are joined back ([`crate::rejoin::VERSION`]), so a change to the joining reads
+/// FL songs again and no other file.
 pub fn project_version(path: &str) -> Option<u32> {
-    let reader = match case::to_lower(paths::extension(paths::file_name(path))).as_str() {
-        ".flp" => fl::VERSION,
-        ".bwproject" => bitwig::reader::VERSION,
-        ".song" => studio_one::VERSION,
+    let (reader, joins) = match case::to_lower(paths::extension(paths::file_name(path))).as_str() {
+        ".flp" => (fl::VERSION, crate::rejoin::VERSION),
+        ".bwproject" => (bitwig::reader::VERSION, 0),
+        ".song" => (studio_one::VERSION, 0),
         _ => return None,
     };
-    Some(VERSION * 100 + reader)
+    Some(joins * 1_000_000 + VERSION * 100 + reader)
 }
+
+// Each of the three keeps to its own digits (a reader's the last two, the analysis's the four before them, the
+// joins' the millions), so two different sets can never give the same number, and a change to any reads again.
+const _: () = assert!(fl::VERSION < 100 && bitwig::reader::VERSION < 100 && studio_one::VERSION < 100);
+const _: () = assert!(VERSION < 10_000 && crate::rejoin::VERSION < 4_000);
 
 /// One part found in a file, ready to save.
 #[derive(Clone, Debug, PartialEq)]
@@ -411,7 +418,12 @@ mod tests {
 
     #[test]
     fn versions() {
-        assert_eq!(project_version("a.FLP"), Some(1100 + fl::VERSION));
+        // An FL song's has how its phrases are joined back in front; another DAW's hasn't, so raising the joins'
+        // version reads FL songs again and nothing else.
+        let joins = crate::rejoin::VERSION * 1_000_000;
+        assert_eq!(project_version("a.FLP"), Some(joins + VERSION * 100 + fl::VERSION));
+        assert_eq!(project_version("a.bwproject"), Some(VERSION * 100 + bitwig::reader::VERSION));
+        assert_eq!(project_version("a.song"), Some(VERSION * 100 + studio_one::VERSION));
         assert_eq!(project_version("a.mid"), None);
     }
 }

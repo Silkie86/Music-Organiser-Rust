@@ -4,7 +4,7 @@
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { CurveEditor } from "curve_editor.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, Panel, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -95,6 +95,9 @@ export global PresetsData {
     callback toggle(string, string);
     callback clear-chip(string);
     callback clear();
+    // The Curves section's own: a filter is picked there, and "Clear filters".
+    in property <bool> curve-any-filter;
+    callback curve-clear();
     // The column the sounds list goes by, as its heading says it ("" for the list as it was found), and whether
     // that order is turned round; a click on a heading (its words) picks, turns round, then lets go.
     in property <string> order-column;
@@ -651,9 +654,8 @@ export component PresetsPage inherits Rectangle {
         }
         // The audition playing in Bitwig, whatever line is picked and whichever section is on show, with its
         // Stop and Keep (the 6 Nov review's D-4 and X3-1).
-        if PresetsData.hearing != "": Rectangle {
+        if PresetsData.hearing != "": Panel {
             height: 48px;
-            background: Theme.surface-raised;
             HorizontalLayout {
                 padding-left: Space.md;
                 padding-right: Space.md;
@@ -780,6 +782,8 @@ export component PresetsPage inherits Rectangle {
                         if PresetsData.section == 1 && PresetsData.curve-empty-title != "": EmptyState {
                             title: PresetsData.curve-empty-title;
                             text: PresetsData.curve-empty-text;
+                            action: PresetsData.curve-any-filter && PresetsData.curves-shown == 0 ? "Clear the filters" : "";
+                            act => { PresetsData.curve-clear(); }
                         }
                         if PresetsData.section == 1 && PresetsData.curve-empty-title == "": ListBox {
                             turned: curve-list.content-y;
@@ -876,7 +880,7 @@ export component PresetsPage inherits Rectangle {
             column := FilterColumn {
                 page-width: split.width;
                 height: split.height;
-                active: PresetsData.section == 0 && PresetsData.any-filter;
+                active: PresetsData.section == 0 ? PresetsData.any-filter : PresetsData.curve-any-filter;
                 if PresetsData.section == 0: FilterList {
                     name: "PLUGIN";
                     filter: PresetsData.plugin-filter;
@@ -960,6 +964,13 @@ export component PresetsPage inherits Rectangle {
                     text: "The curves I hid";
                     on: PresetsData.curve-hidden;
                     clicked => { PresetsData.curve-hidden-toggled(!PresetsData.curve-hidden); }
+                }
+                if PresetsData.section == 1 && PresetsData.curve-any-filter: HorizontalLayout {
+                    alignment: start;
+                    StudioButton {
+                        text: "Clear filters";
+                        clicked => { PresetsData.curve-clear(); }
+                    }
                 }
                 // Randomise's settings, right under the filters that choose what it's made from (as Kits on Sounds).
                 if PresetsData.section == 1: Rectangle {

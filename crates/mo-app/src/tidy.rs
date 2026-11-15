@@ -20,6 +20,15 @@
 //! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
 //! - `Chord check\`: a take the test plugin was still saving (`take <time>.json.mo-part`), an hour old. Never the takes,
 //!   which are yours.
+//! - `Recordings\`: a Record take the test plugin was still saving (`Recording <time>.wav.part`), an hour old.
+//!   Never the takes, which are yours.
+//! - `MIDI browser\` in the export folder: a part Put in the song wrote for Bitwig to record, left when the app closed
+//!   or crashed while Bitwig recorded it. Its name is the part's own, so it goes only when `midi-puts\` in the data
+//!   folder has a note from that run naming its whole path, its size and when it was changed, and the file is still
+//!   just so (a part you sent since under that name stays); the note goes either way ([`crate::midi::note_put`]).
+//! - `Trimmed sounds\` in the export folder: a trimmed copy Trim silence was still making
+//!   (`<copy>.<number>.wav` or `.wav.part`, [`crate::trim_copy::is_half_made`]), an hour old. Never the copies: DAW
+//!   projects use them.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
 //! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old;
 //!   and the Play in Bitwig files (`MO Play <n>-<n>.mid`, and `.bwpreset` for an audition, removed once Bitwig has
@@ -60,7 +69,7 @@
 //! first: they may hold the newest words, and the next draft written the same way clears one left behind), the words
 //! of a save that failed (`unsaved.txt`) or the lock (`writing.lock`) (rule 17).
 //!
-//! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports, F12 notes under 3 months
+//! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports (only the half-made files named above go from the export folder), F12 notes under 3 months
 //! old and the drafts (rule 17), Playground ideas, settings, the databases (library.db, sounds.db and midi.db are the
 //! C# app's too, and opened read-only), the C# app's own logs and reports, the launcher's folders (`run-latest-rust\`
 //! and its build folders, which it keeps in bounds itself), and everything else in those folders.
@@ -224,7 +233,7 @@ pub struct Places {
     /// says nothing about where an earlier run wrote).
     pub beside_first: Option<PathBuf>,
     /// The export folder (the one set, else the one in Documents), whose "MIDI browser" folder Send to Bitwig writes
-    /// parts to; none when it can't be told.
+    /// parts to and whose "Trimmed sounds" folder Trim silence writes copies to; none when it can't be told.
     pub exports: Option<PathBuf>,
     /// The sample folders, whose "From Bitwig" folder Favourites from Bitwig saves samples into
     /// ([`crate::bitwig_favourites::save_missing`]).
@@ -335,6 +344,20 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     // A part Send to Bitwig was still writing when the app stopped (its own name, given only while it's written).
     if let Some(sent) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER])) {
         done.add(remove_older(&sent, crate::midi::is_half_sent, WRITING, now, false));
+    }
+    // A part Put in the song left in MIDI browser when the app closed or crashed while Bitwig recorded it (MI-6).
+    if let Some(notes) = real_folder(&places.data, &[crate::midi::PUTS_FOLDER]) {
+        let sent = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER]));
+        done.add(clear_puts(&notes, sent.as_deref(), std::process::id()));
+    }
+    // A trimmed copy Trim silence was still making when the app or the plugin stopped (its own name, given only
+    // while it's written). Never the copies: DAW projects use them (DF-5).
+    if let Some(trimmed) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::trim_copy::FOLDER])) {
+        done.add(remove_older(&trimmed, crate::trim_copy::is_half_made, WRITING, now, false));
+    }
+    // A Record take the plugin was still saving when the DAW stopped (DF-5). Never the takes.
+    if let Some(takes) = real_folder(&places.data, &[RECORDINGS]) {
+        done.add(remove_older(&takes, is_half_recorded, WRITING, now, false));
     }
     if let Some(notes) = real_folder(&places.data, &[crate::note::FOLDER]) {
         done.add(old_notes_to_bin(&notes, &places.data.join(NOTES_DONE_FILE), NOTES_KEPT_FOR, now, bin));
@@ -894,6 +917,36 @@ fn own_files(folder: &Path, is_kind: impl Fn(&str) -> bool) -> Vec<(PathBuf, Met
         .collect()
 }
 
+/// Put in the song's files an earlier run left (MI-6): each note in `notes` from another process than `this` names a
+/// file; that goes only when it's right in `sent` (the export folder's MIDI browser, not through a link), a plain
+/// file, with the size and changed time the note gives. Then the note goes, so a file that's changed since (you
+/// sent a part under that name) is never looked at again.
+fn clear_puts(notes: &Path, sent: Option<&Path>, this: u32) -> Tidied {
+    let mut done = Tidied::default();
+    let earlier = |name: &str| crate::midi::put_note_process(name).is_some_and(|p| p != this);
+    for (note, _) in own_files(notes, earlier) {
+        let Ok(text) = fs::read_to_string(&note) else {
+            done.failed += 1;
+            continue;
+        };
+        if let (Some((size, changed, file)), Some(sent)) = (crate::midi::read_put_note(&text), sent)
+            && file.parent() == Some(sent)
+            && let Ok(meta) = fs::symlink_metadata(&file)
+            && meta.is_file()
+            && meta.len() == size
+            && crate::midi::put_time(&meta) == Some(changed)
+        {
+            done.remove(&file, size, false);
+        }
+        match fs::remove_file(&note) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(_) => done.failed += 1,
+        }
+    }
+    done
+}
+
 /// The folders right inside `folder`, never a link or a junction.
 fn real_subfolders(folder: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(folder) else { return Vec::new() };
@@ -948,6 +1001,25 @@ fn is_move_part(name: &str) -> bool {
     WRITTEN_WHOLE_BESIDE_FIRST.iter().any(|f| is_whole_part_of(name, f))
 }
 
+/// The plugin's Record folder in the data folder: the one name the data folder move carries too.
+pub const RECORDINGS: &str = crate::data_move::RECORDINGS_FOLDER;
+
+/// How a Record take's name gives its time, after "Recording " (mo-plugin `record` uses it): "2026-11-15 21-02-44".
+pub const TAKE_TIME: &str = "%Y-%m-%d %H-%M-%S";
+
+/// A take `write_wav` was still writing: "Recording 2026-11-15 21-02-44.wav.part", or with " (2)" after the time.
+fn is_half_recorded(name: &str) -> bool {
+    let Some(rest) = name.strip_suffix(".wav.part").and_then(|n| n.strip_prefix("Recording ")) else { return false };
+    // A second take in the same second is " (2)", then " (3)" and on (mo_audio::record::save): never " (1)" or " (02)".
+    let (when, n) = match rest.split_once(" (") {
+        Some((when, n)) => {
+            (when, n.strip_suffix(')').filter(|n| !n.starts_with('0') && n.parse::<u32>().is_ok_and(|n| n >= 2)))
+        }
+        None => (rest, Some("")),
+    };
+    n.is_some() && chrono::NaiveDateTime::parse_from_str(when, TAKE_TIME).is_ok()
+}
+
 /// The saves-list copy of library.db ([`mo_library::list_copy`]), or the journal SQLite may leave beside it.
 fn is_list_copy(name: &str) -> bool {
     name.strip_prefix(mo_library::list_copy::FILE_NAME).is_some_and(|end| ["", "-journal"].contains(&end))
@@ -988,6 +1060,54 @@ mod tests {
             exports: None,
             sample_folders: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_part_put_in_the_song_goes_only_when_its_note_says_so_and_it_is_as_it_was() {
+        let dir = test_folder("puts");
+        let data = dir.join("data");
+        let sent = dir.join("exports").join(crate::midi::EXPORT_SUBFOLDER);
+        let left = sent.join("Lead · Pattern 3.mid");
+        let changed = sent.join("Keys · Pattern 1.mid");
+        let elsewhere = dir.join("Bass · Pattern 2.mid");
+        let yours = sent.join("Pad · Pattern 4.mid");
+        for file in [&left, &changed, &elsewhere, &yours] {
+            fresh(file);
+        }
+        for file in [&left, &changed, &elsewhere] {
+            crate::midi::note_put(&data, file).unwrap();
+        }
+        // Sent again since under that name: another size, so it's yours now.
+        fs::write(&changed, b"a part you sent").unwrap();
+        let notes = data.join(crate::midi::PUTS_FOLDER);
+        // This run's own notes are left alone: its puts may still be recording.
+        let done = clear_puts(&notes, Some(&sent), std::process::id());
+        assert_eq!((done.removed, names(&notes).len()), (0, 3));
+        // An earlier run's: only the file as it was, right in MIDI browser, goes; every note goes.
+        let done = clear_puts(&notes, Some(&sent), std::process::id().wrapping_add(1));
+        assert_eq!((done.removed, done.failed), (1, 0));
+        assert!(!left.exists() && changed.exists() && elsewhere.exists() && yours.exists());
+        assert!(names(&notes).is_empty());
+        // Through the sweep, with no export folder known: the file stays, and the note isn't there to try again.
+        crate::midi::note_put(&data, &yours).unwrap();
+        let note = names(&notes).pop().unwrap();
+        fs::rename(notes.join(&note), notes.join("put-1-0.txt")).unwrap();
+        let mut places = test_places(&dir);
+        places.exports = None;
+        sweep(&places, SystemTime::now(), &TestBin(dir.join("bin")));
+        assert!(yours.exists() && names(&notes).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_put_note_is_known_by_its_whole_name() {
+        assert_eq!(crate::midi::put_note_process("put-123-4.txt"), Some(123));
+        for name in ["put-123.txt", "put--4.txt", "put-1-2.txt.bak", "Put-1-2.txt", "put-a-2.txt"] {
+            assert_eq!(crate::midi::put_note_process(name), None, "{name}");
+        }
+        let read = crate::midi::read_put_note("12\n345\nC:\\Exports\\MIDI browser\\Lead.mid");
+        assert_eq!(read, Some((12, 345, PathBuf::from("C:\\Exports\\MIDI browser\\Lead.mid"))));
+        assert_eq!(crate::midi::read_put_note("12\n345\n"), None);
     }
 
     /// A folder for one test, made by the test and removed after: never a real data or temp folder (rule 11).
@@ -1647,6 +1767,45 @@ mod tests {
         assert!(!part.exists());
         assert!(kept.iter().all(|file| file.exists()));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn half_made_trimmed_copies_and_takes_go_and_nothing_else_there() {
+        let dir = test_folder("trimmed-takes");
+        let exports = dir.join("Music Organiser Exports");
+        let places = Places { exports: Some(exports.clone()), ..test_places(&dir) };
+        let bin = TestBin(dir.join("bin"));
+        let trimmed = exports.join(crate::trim_copy::FOLDER);
+        let takes = places.data.join(RECORDINGS);
+        fs::create_dir_all(&trimmed).unwrap();
+        fs::create_dir_all(&takes).unwrap();
+        let copy = mo_sounds::trimmed::copy_name("D:\\Samples\\Kick.wav", -60);
+        let stem = copy.strip_suffix(".wav").unwrap().to_owned();
+        let gone = [
+            trimmed.join(format!("{stem}.4242.wav")),
+            trimmed.join(format!("{stem}.4242.wav.part")),
+            takes.join("Recording 2026-11-15 21-02-44.wav.part"),
+            takes.join("Recording 2026-11-15 21-02-44 (2).wav.part"),
+        ];
+        let kept = [
+            trimmed.join(&copy),
+            trimmed.join("Kick.wav"),
+            takes.join("Recording 2026-11-15 21-02-44.wav"),
+            takes.join("Recording of mine.wav.part"),
+            takes.join("Recording 2026-11-15 21-02-44 (1).wav.part"),
+            takes.join("Recording 2026-11-15 21-02-44 (02).wav.part"),
+        ];
+        for f in gone.iter().chain(&kept) {
+            fs::write(f, b"x").unwrap();
+        }
+        // Long after they were written.
+        sweep(&places, SystemTime::now() + WRITING + Duration::from_secs(60), &bin);
+        for f in &gone {
+            assert!(!f.exists(), "{} should go", f.display());
+        }
+        for f in &kept {
+            assert!(f.exists(), "{} should stay", f.display());
+        }
     }
 
     #[test]

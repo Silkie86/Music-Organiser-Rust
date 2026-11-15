@@ -233,7 +233,9 @@ pub fn of(points: &[CurvePoint], length_beats: f64, loops: bool) -> Groups {
     let parts = (length_beats / PART_BEATS).floor() as usize;
     let mut rhythms: Vec<Rhythm> = Vec::new();
     let mut shapes: Vec<Shape> = Vec::new();
-    if parts >= 2 {
+    // (Not for a curve so long that a half bar is less than one place of the drawing: nothing could be found in
+    // one, and a damaged length, 1e15 beats, would have this go round for days.)
+    if parts >= 2 && parts <= n {
         let per = n as f64 / (length_beats / PART_BEATS);
         for k in 0..parts {
             let (from, to) = ((k as f64 * per).round() as usize, (((k + 1) as f64 * per).round() as usize).min(n));
@@ -584,6 +586,15 @@ mod tests {
 
     fn p(x: f64, y: f64, bend: f64) -> CurvePoint {
         CurvePoint { x, y, bend }
+    }
+
+    #[test]
+    fn an_absurdly_long_curve_is_sorted_at_once() {
+        let began = std::time::Instant::now();
+        for length in [1e9, 1e15, 1e300] {
+            let _ = of(&[p(0.0, 0.0, 0.0), p(0.5, 1.0, 0.0), p(1.0, 0.2, 0.0)], length, false);
+        }
+        assert!(began.elapsed() < std::time::Duration::from_secs(5));
     }
 
     fn g(shape: Shape, rhythm: Rhythm, feel: Feel) -> Groups {

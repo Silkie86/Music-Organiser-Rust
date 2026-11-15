@@ -245,6 +245,11 @@ the next PR step by step). Solomon wants the highest effort here.
     over them after the list turns to chords. How long they play: `SongBars::round`, until both loops start
     together again or once through the longer past 32 bars (`mo_harmony::round_of`, the matcher's rule), held to
     the two minutes of sound there can be by whole turns or whole bars, so a slow song never jumps the beat.
+    A part alone is held the same way (2026-11-15, `page::loop_held`: at 20 to 30 BPM a 16-bar part is over two
+    minutes): its first whole bars play, and the card says so under Play (`page::held_note`). The metronome
+    clicks the part's bars of 4/4 alone and the song's bars with the song (`page::metronome_notes` takes the
+    bar's ticks; with the song it's one bar of clicks, a layer of its own in `with_song`), so a waltz clicks in
+    three.
     The sound is the part's loop as it's dropped (from its first bar line, at the song's tempo) and the song's
     loop under it, each going round from its own bar lines (`mo_audio::gm::layered`: a turn a frame longer than
     its sound goes on with the loop's start, a loop cut where the whole goes round fades, and nothing is ever

@@ -658,8 +658,11 @@ export component TickBox inherits Rectangle {
     }
 }
 
-// A slider from 0 to 1 between two words ("Safe" … "Adventurous"): drag or click the track, or use the arrow keys.
-// `moved` follows the knob; `released` says where it was let go, for work that should only run then.
+// A slider from 0 to 1 between two words ("Safe" … "Adventurous"): drag or click the track. `moved` follows the knob;
+// `released` says where it was let go, for work that should only run then. It takes no keys, as the Tempo slider
+// (RangeSlider) doesn't: the keys stay where they were. Keys of its own went with it when the part holding it went
+// (Favourites unticked, another view, the filter column folded), and then nothing had them, so no key worked until a
+// click (the whole-app review of 14 Nov, AP-2).
 export component StudioSlider inherits HorizontalLayout {
     in property <string> low;
     in property <string> high;
@@ -699,12 +702,12 @@ export component StudioSlider inherits HorizontalLayout {
             width: 14px;
             height: 14px;
             border-radius: 7px;
-            background: keys.has-focus ? Theme.accent : Theme.text;
+            // Lit while it's held.
+            background: touch.pressed ? Theme.accent : Theme.text;
         }
         touch := TouchArea {
             pointer-event(e) => {
                 if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
-                    keys.focus();
                     root.value = clamp(self.mouse-x / self.width, 0, 1);
                     root.moved(root.value);
                 } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
@@ -714,17 +717,6 @@ export component StudioSlider inherits HorizontalLayout {
             moved => {
                 root.value = clamp(self.mouse-x / self.width, 0, 1);
                 root.moved(root.value);
-            }
-        }
-        keys := FocusScope {
-            key-pressed(e) => {
-                if e.text == Key.LeftArrow || e.text == Key.RightArrow {
-                    root.value = clamp(root.value + (e.text == Key.LeftArrow ? -0.1 : 0.1), 0, 1);
-                    root.moved(root.value);
-                    root.released(root.value);
-                    return accept;
-                }
-                reject
             }
         }
         Tip {
@@ -988,6 +980,8 @@ export component TempoStepper inherits Rectangle {
     // The keys that step it, from the shortcut list, for the tips (none where a page has none).
     in property <string> slower-key;
     in property <string> faster-key;
+    // What a click on a changed tempo does, for its tip.
+    in property <string> reset-tip: "Back to its own tempo";
     callback stepped(int);
     callback reset();
     height: 28px;
@@ -1036,7 +1030,7 @@ export component TempoStepper inherits Rectangle {
             clicked => { root.reset(); }
         }
         Tip {
-            text: root.changed ? "Back to its own tempo" : "The tempo it plays at";
+            text: root.changed ? root.reset-tip : "The tempo it plays at";
             hovering: value-touch.has-hover && !value-touch.pressed;
             at-y: root.height + Space.xs;
         }
@@ -1307,7 +1301,7 @@ export component PicksChip inherits MenuChipFace {
 }
 
 // The name at the start of a filter's strip: a sunken cap, so the chips after it read as its choices.
-component FilterName inherits Rectangle {
+export component FilterName inherits Rectangle {
     in property <string> text;
     width: label.preferred-width + 22px;
     height: 28px;
@@ -2343,16 +2337,18 @@ export global Icons {
     out property <string> backup: "M 2 10 L 14 10 L 14 14.5 L 2 14.5 Z M 8 8 L 8 1.5 M 5 4.5 L 8 1.5 L 11 4.5";
     // Settings: a cog.
     out property <string> settings: "M 10.5 8 A 2.5 2.5 0 1 1 5.5 8 A 2.5 2.5 0 1 1 10.5 8 M 8 1 L 8 3.5 M 8 12.5 L 8 15 M 1 8 L 3.5 8 M 12.5 8 L 15 8 M 3 3 L 4.8 4.8 M 11.2 11.2 L 13 13 M 13 3 L 11.2 4.8 M 4.8 11.2 L 3 13";
-    // A place's icon from its place in rail order (mo-app's `Place::ALL`), "" for none.
+    // A place's icon from its place in rail order (mo-app's `Place::ALL`), "" for none. A new place goes in here at
+    // its number, and the ones after it move up: the rail's own icons (by name, in lib.rs) are checked against this.
     public pure function place(i: int) -> string {
         if (i == 0) { return songs; }
         if (i == 1) { return sounds; }
         if (i == 2) { return presets; }
-        if (i == 3) { return midi; }
-        if (i == 4) { return plugins; }
-        if (i == 5) { return space; }
-        if (i == 6) { return backup; }
-        if (i == 7) { return settings; }
+        if (i == 3) { return curves; }
+        if (i == 4) { return midi; }
+        if (i == 5) { return plugins; }
+        if (i == 6) { return space; }
+        if (i == 7) { return backup; }
+        if (i == 8) { return settings; }
         return "";
     }
 }
@@ -2388,7 +2384,7 @@ export component MapName inherits Rectangle {
 
 // The whole of a map in miniature with a box round the part on show, like the galaxy's mini-map: a click or a drag
 // on it goes there. The box is in parts of the picture (0 to 1).
-export component MapInset inherits Rectangle {
+export component MapInset inherits Panel {
     in property <image> picture;
     in property <string> title;
     in property <float> box-x;
@@ -2399,10 +2395,6 @@ export component MapInset inherits Rectangle {
     callback go(float, float);
     width: column.preferred-width;
     height: column.preferred-height;
-    background: Theme.surface;
-    border-radius: Theme.radius;
-    border-width: 1px;
-    border-color: Theme.edge;
     clip: true;
     column := VerticalLayout {
         padding: Space.sm;

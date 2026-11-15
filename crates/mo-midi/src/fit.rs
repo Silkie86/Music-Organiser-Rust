@@ -767,7 +767,7 @@ mod tests {
         playing::of(&Arrangement {
             view: "Test",
             tempo: 120.0,
-            beats_per_bar: 4,
+            signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
             lanes: vec![keys, lane("Sub", 8, &bass()), lane("Lead", 12, &tune(0)), lane("FPC", 8, &bass())],
             markers: Vec::new(),
             notes: Vec::new(),
@@ -842,7 +842,7 @@ mod tests {
         let song = playing::of(&Arrangement {
             view: "Test",
             tempo: 120.0,
-            beats_per_bar: 4,
+            signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
             lanes: vec![keys],
             markers: Vec::new(),
             notes: Vec::new(),
@@ -863,7 +863,7 @@ mod tests {
             playing::of(&Arrangement {
                 view: "Test",
                 tempo: 120.0,
-                beats_per_bar: 4,
+                signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
                 lanes,
                 markers: Vec::new(),
                 notes: Vec::new(),
