@@ -75,9 +75,9 @@ pub const APP_ACTIONS: &[Action] = &[
 ];
 
 /// The Songs page's own actions. The ids are the C# app's Projects page's, so a key changed in either app carries
-/// across; `projects.openOwn` is new here, so the song line's menu and the panel's "Open in FL Studio" have a key too
-/// (rule 15), and so are the card's heart and tag box's, with the same keys as on Sounds (the whole-app review of 14
-/// Nov, SG-5).
+/// across. New here: `projects.openOwn`, so the song line's menu and the panel's "Open in FL Studio" have a key too
+/// (rule 15), and `projects.favourite` and `projects.tag` for the card's heart and tag box, with Sounds' keys (the
+/// whole-app review of 14 Nov, SG-5).
 pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.open", "Open the picked song (FL Studio songs go to Bitwig)", "Ctrl+O"),
     action("projects.openOwn", "Open the picked song in the DAW it was made in", "Ctrl+Shift+O"),
@@ -647,6 +647,11 @@ mod tests {
         assert_eq!(s.page_action_for("Ctrl+O", SONGS_ACTIONS), Some("projects.open"));
         assert_eq!(s.page_action_for("ctrl+shift+e", SONGS_ACTIONS), Some("projects.reveal"));
         assert_eq!(s.page_action_for("Ctrl+Shift+O", SONGS_ACTIONS), Some("projects.openOwn"));
+        // The card's heart and tag box, with the keys their Sounds twins have.
+        assert_eq!(s.page_action_for("Ctrl+D", SONGS_ACTIONS), Some("projects.favourite"));
+        assert_eq!(s.page_action_for("Ctrl+T", SONGS_ACTIONS), Some("projects.tag"));
+        assert_eq!(s.key_of("projects.favourite"), s.key_of("sounds.favourite"));
+        assert_eq!(s.key_of("projects.tag"), s.key_of("sounds.tag"));
         assert_eq!(s.page_action_for("Ctrl+O", &[]), None);
         assert_eq!(s.key_of("projects.copyPath"), "Ctrl+Shift+C");
         // A key changed in the C# app's Projects page carries across.

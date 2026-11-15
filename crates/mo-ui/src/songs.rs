@@ -1215,8 +1215,9 @@ fn save_menu(daw: &str) -> Vec<MenuItem> {
 }
 
 /// The lines of a song's right-click menu: the panel's buttons, each with its key from `keys` (rule 15; review X3-24).
-/// Open, as Ctrl+O does (an FL Studio song goes to Bitwig), an FL Studio song also in FL Studio itself, then Show in
-/// folder and Copy path. Each line's id is its action's, so choosing it runs what its key does ([`run_action`]).
+/// Open, as Ctrl+O does (an FL Studio song goes to Bitwig), an FL Studio song also in FL Studio itself, then the
+/// card's heart and tag box (Favourite, or not; Add a tag…), then Show in folder and Copy path. Each line's id is its
+/// action's, so choosing it runs what its key does ([`run_action`]).
 fn song_menu(daw: &str, keys: &Shortcuts) -> Vec<MenuItem> {
     let item = |what: String, id: &str| MenuItem {
         what: what.into(),
@@ -1229,6 +1230,9 @@ fn song_menu(daw: &str, keys: &Shortcuts) -> Vec<MenuItem> {
     } else {
         vec![item(format!("Open in {daw}"), "projects.open")]
     };
+    // The card's heart and tag box, as the Sounds menu has them: Add a tag gives the box the keys.
+    items.push(item("Favourite, or not".into(), "projects.favourite"));
+    items.push(item("Add a tag…".into(), "projects.tag"));
     items.push(MenuItem { enabled: true, ..MenuItem::default() });
     items.push(item("Show in folder".into(), "projects.reveal"));
     items.push(item("Copy path".into(), "projects.copyPath"));
@@ -1488,6 +1492,8 @@ mod tests {
             [
                 line("Open in Bitwig", "Ctrl+O", "projects.open"),
                 line("Open in FL Studio", "Ctrl+Shift+O", "projects.openOwn"),
+                line("Favourite, or not", "Ctrl+D", "projects.favourite"),
+                line("Add a tag…", "Ctrl+T", "projects.tag"),
                 line("", "", ""),
                 line("Show in folder", "Ctrl+Shift+E", "projects.reveal"),
                 line("Copy path", "Ctrl+Shift+C", "projects.copyPath"),
@@ -1495,14 +1501,14 @@ mod tests {
         );
         let bitwig: Vec<_> = lines(BITWIG_STUDIO, &keys);
         assert_eq!(bitwig[0], line("Open in Bitwig Studio", "Ctrl+O", "projects.open"));
-        assert_eq!(bitwig.len(), 4);
+        assert_eq!(bitwig.len(), 6);
         // Every line runs a Songs action, so its key and its line do the same thing.
         for (_, _, id) in fl.iter().filter(|(_, _, id)| !id.is_empty()) {
             assert!(mo_app::shortcuts::SONGS_ACTIONS.iter().any(|a| a.id == id), "{id}");
         }
         // A key changed in Settings shows on its line.
         let changed = Shortcuts::from_setting(Some(r#"{"projects.reveal":"Ctrl+R"}"#));
-        assert_eq!(lines(BITWIG_STUDIO, &changed)[2], line("Show in folder", "Ctrl+R", "projects.reveal"));
+        assert_eq!(lines(BITWIG_STUDIO, &changed)[4], line("Show in folder", "Ctrl+R", "projects.reveal"));
     }
 
     #[test]

@@ -1208,29 +1208,35 @@ fn shortcuts_keys(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Res
         settings.invoke_keys_search_edited("".into());
         capture(window);
     };
+    let mut wrong = Vec::new();
     start_on(app, Place::Settings);
     tab(SettingsTab::Shortcuts);
     empty_search();
     press(app, "f", true);
     typed("play");
-    if searched() != "play" {
-        let found = searched();
-        empty_search();
-        return Err(format!("Ctrl+F then typing on Settings › Shortcuts searched {found:?}"));
+    // Only with the keys in the search box (Ctrl+F) can the steps that need them there run; the rest run anyway.
+    let found = searched() == "play";
+    if !found {
+        wrong.push(format!("Ctrl+F then typing on Settings › Shortcuts searched {:?}", searched()));
+        settings.set_keys_search("play".into());
+        settings.invoke_keys_search_edited("play".into());
+        capture(window);
     }
-    settings.invoke_listen("app.play".into());
-    capture(window);
-    press(app, "p", false);
-    capture(window);
-    let given = mo_ui::shortcuts().key_of("app.play").to_owned();
-    let words = searched();
-    settings.invoke_default_key("app.play".into());
-    capture(window);
-    let mut wrong = Vec::new();
-    if given != "P" || words != "play" {
-        wrong.push(format!(
-            "P after typing in Shortcuts' search and clicking Play's key gave it {given:?}, the search saying {words:?}"
-        ));
+    if found {
+        settings.invoke_listen("app.play".into());
+        capture(window);
+        press(app, "p", false);
+        capture(window);
+        let given = mo_ui::shortcuts().key_of("app.play").to_owned();
+        let words = searched();
+        settings.invoke_default_key("app.play".into());
+        capture(window);
+        if given != "P" || words != "play" {
+            wrong.push(format!(
+                "P after typing in Shortcuts' search and clicking Play's key gave it {given:?}, the search saying \
+                 {words:?}"
+            ));
+        }
     }
     press(app, Key::Escape, false);
     capture(window);
@@ -1239,11 +1245,12 @@ fn shortcuts_keys(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Res
         empty_search();
     }
     // Words typed in the search, then the General tab: the box goes with its tab.
-    press(app, "f", true);
-    typed("x");
-    tab(SettingsTab::General);
-    if let Err(e) = keys_work(app, window, "once Settings' General tab took Shortcuts' place, keys in its search box") {
-        wrong.push(e);
+    if found {
+        press(app, "f", true);
+        typed("x");
+        tab(SettingsTab::General);
+        let worked = keys_work(app, window, "once Settings' General tab took Shortcuts' place, keys in its search box");
+        wrong.extend(worked.err());
     }
     // A line listening, then the General tab: it listens no more.
     tab(SettingsTab::Shortcuts);

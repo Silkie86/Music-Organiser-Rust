@@ -801,20 +801,13 @@ pub fn on_shortcuts() -> bool {
 /// every page's search clears first (the whole-app review of 14 Nov, AP-7). Says whether it did (when not, the key
 /// goes on).
 pub fn escape(app: &AppWindow) -> bool {
-    let cleared = PAGE.with(|p| {
-        let mut p = p.borrow_mut();
-        let Some(p) = p.as_mut() else { return false };
-        if Tab::from_setting(p.settings.get(TAB_KEY)) != Tab::Shortcuts || p.keys_search.is_empty() {
-            return false;
-        }
-        p.keys_search.clear();
-        true
-    });
-    if cleared {
-        app.global::<SettingsData>().set_keys_search(SharedString::new());
-        show(app);
+    let data = app.global::<SettingsData>();
+    if !on_shortcuts() || data.get_keys_search().is_empty() {
+        return false;
     }
-    cleared
+    data.set_keys_search(SharedString::new());
+    data.invoke_keys_search_edited(SharedString::new());
+    true
 }
 
 /// Remembers the page on show, for "Last page I used": only while that's the start page, so other clicks on the rail
