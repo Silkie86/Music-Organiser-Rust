@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, Tip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -249,6 +249,10 @@ export global MidiData {
     in property <string> daw-note;
     in property <string> bitwig-key;
     in property <string> fl-key;
+    // The keys of Play loop's metronome and speed (the same as the curve card's: one shortcut list, MI-14).
+    in property <string> metronome-key;
+    in property <string> faster-key;
+    in property <string> slower-key;
     callback daw-play(string);
     // Dragging a part out into a DAW as a MIDI clip (mo-ui's drag.rs): a line of the list by its row, or the picked
     // part by its card's handle; then `drag-let-go` if the button comes up before the drag has got going. The part is
@@ -648,12 +652,20 @@ component PartPanel inherits SidePanel {
     HorizontalLayout {
         alignment: start;
         spacing: Space.sm;
-        ToggleChip {
+        metronome := ToggleChip {
             text: "Metronome";
             on: MidiData.metronome;
             clicked => { MidiData.metronome-toggled(); }
+            Tip {
+                text: "A click on each beat while the loop plays";
+                key: MidiData.metronome-key;
+                hovering: metronome.hovered;
+                at-y: metronome.height + Space.xs;
+            }
         }
         TempoStepper {
+            slower-key: MidiData.slower-key;
+            faster-key: MidiData.faster-key;
             bpm-text: MidiData.bpm-text;
             changed: MidiData.bpm-changed;
             stepped(by) => { MidiData.bpm-stepped(by); }
