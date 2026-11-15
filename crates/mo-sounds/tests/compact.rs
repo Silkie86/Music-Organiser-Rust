@@ -1298,7 +1298,8 @@ fn a_copy_left_without_sounds_db_becomes_the_apps_own_as_it_is() {
 }
 
 /// A copy that's up to date becomes the app's own on the page's first read, once; made again because it's damaged, it
-/// keeps the time it became so. Without `sounds.db` to make it again from, the damage is said, not hidden.
+/// keeps the time it became so. Without `sounds.db` to make it again from, or a backup copy, what can still be read of
+/// it is kept in a new one, still the app's own since the same time (the whole-app review of 14 Nov, SO-3).
 #[test]
 fn an_up_to_date_copy_becomes_the_apps_own_and_stays_so_when_made_again() {
     let dir = folder("adopt");
@@ -1323,12 +1324,18 @@ fn an_up_to_date_copy_becomes_the_apps_own_and_stays_so_when_made_again() {
     assert!(made.made && !made.adopted, "{made:?}");
     assert_eq!(compact::own_since(&copy), Some(since));
     same_everything(&everything, &read_for_page(&old));
-    // Damaged again, with sounds.db gone: the page says why it can't read its sounds.
+    // Damaged again, with sounds.db gone and no backup copy: what can still be read of it is kept in a new one (before,
+    // the page could only say why it couldn't read its sounds).
     damage(&copy, "sounds");
     for end in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{end}", old.display()));
     }
-    assert!(compact::read_for_page(&old, now(), |_| {}).is_err());
+    let Ok(PageRead::Library { made, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
+        panic!("what can still be read of it kept");
+    };
+    let made = made.unwrap();
+    assert!(made.made && made.kept_alone && !made.adopted, "{made:?}");
+    assert_eq!(compact::own_since(&copy), Some(since));
 }
 
 /// A library with CLAP fingerprints of every kind `sounds.db` holds: of the most common length, of another (an older
@@ -1795,6 +1802,225 @@ fn a_library_nothing_can_be_read_from_is_mended_from_its_backup_copy() {
     assert!(backup::damaged_of(&copy).exists());
 }
 
+/// Writes over the first page of the library at `db` (its header and its list of tables): nothing can be read from it.
+fn spoil_first_page(db: &Path) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::File::options().write(true).open(db).unwrap();
+    f.seek(SeekFrom::Start(0)).unwrap();
+    f.write_all(&[0xEE; 100]).unwrap();
+}
+
+/// A library so damaged nothing can be read from it (its first page), with no backup copy, is set aside as it was and
+/// made again from sounds.db, on the page's read and on any pass over sounds.db: never removed for the new one (the
+/// whole-app review of 14 Nov, SO-2). With sounds.db gone too, a new library of the app's own is made in its place,
+/// rather than the page naming sounds.db as the library it can't open (SO-3).
+#[test]
+fn a_library_nothing_can_be_read_from_without_a_backup_copy_is_set_aside_never_removed() {
+    let dir = folder("unreadable-no-backup");
+    let old = library(&dir, 90);
+    let copy = compact::copy_of(&old);
+    let damaged = backup::damaged_of(&copy);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    assert!(!backup::backup_of(&copy).exists());
+    spoil_first_page(&copy);
+    let unreadable = std::fs::read(&copy).unwrap();
+    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now(), |_| {}) else {
+        panic!("made again from sounds.db");
+    };
+    let made = made.unwrap();
+    assert!(made.made && !made.kept_alone && made.from_backup.is_none(), "{made:?}");
+    assert_eq!(made.salvaged, Some(compact::Salvaged { kept: 0, unread: 1 }), "{made:?}");
+    assert!(std::fs::read(&damaged).unwrap() == unreadable, "set aside as it was");
+    same_everything(&everything, &read_for_page(&old));
+    same_answers(&old, &copy);
+    assert!(compact::own_since(&copy).is_some());
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    // A pass over sounds.db that meets it so: set aside all the same.
+    spoil_first_page(&copy);
+    let unreadable = std::fs::read(&copy).unwrap();
+    let synced = compact::sync(&old, &copy).unwrap();
+    assert!(synced.made, "{synced:?}");
+    assert_eq!(synced.salvaged, Some(compact::Salvaged { kept: 0, unread: 1 }), "{synced:?}");
+    assert!(std::fs::read(&damaged).unwrap() == unreadable, "set aside as it was");
+    same_answers(&old, &copy);
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    // With sounds.db gone: a new, empty library of the app's own, and the page reads the new one from then on. The
+    // damaged one is kept beside it for good, as it was: none of it could be read, and nothing else holds it (found
+    // by this fix's code review). The one set aside before stays as it was.
+    remove_db(&old);
+    spoil_first_page(&copy);
+    let unreadable = std::fs::read(&copy).unwrap();
+    let set_aside = std::fs::read(&damaged).unwrap();
+    let kept = backup::kept_of(&copy);
+    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now(), |_| {}) else {
+        panic!("a new one made");
+    };
+    let made = made.unwrap();
+    assert!(made.made && made.kept_alone && made.kept_for_good && made.from_backup.is_none(), "{made:?}");
+    assert_eq!(made.backup_unused.as_deref(), Some("there's no backup copy"));
+    assert_eq!(made.salvaged, Some(compact::Salvaged { kept: 0, unread: 1 }), "{made:?}");
+    assert!(everything.sounds.is_empty());
+    assert!(std::fs::read(&kept).unwrap() == unreadable, "kept as it was");
+    assert!(std::fs::read(&damaged).unwrap() == set_aside, "the one set aside before is as it was");
+    assert_eq!(format_of(&copy), 2);
+    assert!(compact::own_since(&copy).is_some());
+    assert_eq!(pragma(&copy, "journal_mode"), "wal");
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    let Ok(PageRead::Copy { sounds, .. }) = compact::read_for_page(&old, now(), |_| {}) else { panic!("read") };
+    assert!(sounds.is_empty());
+    // A week on, with a backup copy made since: the one set aside for a week goes, the one kept for good stays.
+    let week_ago = SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+    for path in [&damaged, &kept] {
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(week_ago).unwrap();
+    }
+    assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
+    assert!(!damaged.exists());
+    assert!(std::fs::read(&kept).unwrap() == unreadable, "kept for good");
+    // Damaged again with nothing to mend it from, while that's there: left as it is, never put in its place.
+    remove_db(&backup::backup_of(&copy));
+    spoil_first_page(&copy);
+    let spoilt = std::fs::read(&copy).unwrap();
+    let Err(e) = compact::read_for_page(&old, now(), |_| {}) else { panic!("left as it is") };
+    assert!(matches!(&e, SoundsError::Damaged { path, .. } if *path == copy), "{e}");
+    assert!(e.to_string().contains("a damaged one kept before is still there, as"), "{e}");
+    assert!(std::fs::read(&copy).unwrap() == spoilt);
+    assert!(std::fs::read(&kept).unwrap() == unreadable);
+    assert!(!damaged.exists());
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+}
+
+/// The app's own library found damaged with nothing to mend it from (no backup copy, and sounds.db gone) keeps
+/// everything that can still be read of it in a new library of its own, and the damaged one is set aside, never
+/// removed (the whole-app review of 14 Nov, SO-3): before, it was left damaged, and the page said so at every start.
+/// One of the format before, or one a newer version made, is left as it is.
+#[test]
+fn a_damaged_library_with_nothing_to_mend_it_from_keeps_what_can_still_be_read_of_it() {
+    let dir = folder("salvage-alone");
+    let old = library(&dir, 300);
+    let copy = compact::copy_of(&old);
+    let kept = backup::kept_of(&copy);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    let since = compact::own_since(&copy).unwrap();
+    let id: i64 = Connection::open(&copy).unwrap().query_row("SELECT MIN(id) FROM sounds", [], |r| r.get(0)).unwrap();
+    let stars = changed(&copy, id);
+    // A sound the app's scan added: CLAP never heard it, and the note that says so is kept.
+    let kick = "D:\\Samples\\New Pack\\Kick 01.wav";
+    let listened = Listened { path: kick.to_owned(), size: 1000, mtime: unix(2026, 11, 9), analysed: Ok(heard(0.5)) };
+    grow::keep(&old, &[listened]).unwrap();
+    let kick_id = id_of(&copy, kick).unwrap();
+    assert_eq!(grow::new_since(&copy), Some(kick_id));
+    remove_db(&old);
+    assert!(!backup::backup_of(&copy).exists());
+    let kept_tables = ["sounds", "sound_waves", "sound_clap", "sound_tags", "sound_events", "sound_maps", "settings"];
+    // Rows left behind by a sound that's gone ([`library`] has a few) belong to nothing: a library made afresh from
+    // what can still be read keeps none of them.
+    let of_a_sound = |rows: Vec<String>| -> Vec<String> {
+        rows.into_iter().filter(|row| !row.split(" | ").any(|value| value == "Integer(999999)")).collect()
+    };
+    let before: Vec<Vec<String>> = kept_tables.iter().map(|t| of_a_sound(table(&copy, t))).collect();
+    let info = "SELECT key, value FROM copy_info ORDER BY key";
+    let info_before = rows(&copy, info);
+    // A bad sector where the fingerprints are.
+    damage(&copy, "sound_features");
+    let (everything, made) = compact::mend_reading(&old, &copy, now()).unwrap();
+    let made = made.unwrap();
+    assert!(made.made && made.kept_alone && made.kept_for_good && made.from_backup.is_none(), "{made:?}");
+    assert_eq!(made.backup_unused.as_deref(), Some("there's no backup copy"));
+    let salvaged = made.salvaged.unwrap();
+    assert_eq!(salvaged.unread, 1, "{salvaged:?}");
+    assert!(salvaged.kept >= 300, "{salvaged:?}");
+    // All but the fingerprints as they were, every row of a sound to the last bit, the notes too; the page's read with
+    // them.
+    for (name, rows) in kept_tables.iter().zip(&before) {
+        assert_eq!(&table(&copy, name), rows, "{name}");
+    }
+    assert_eq!(table(&copy, "sound_features"), Vec::<String>::new());
+    assert_eq!(rows(&copy, info), info_before);
+    assert_eq!(grow::new_since(&copy), Some(kick_id));
+    assert_eq!(compact::own_since(&copy), Some(since));
+    assert_eq!(rating_of(&copy, id), stars);
+    assert_eq!(made.sounds, everything.sounds.len());
+    assert!(everything.sounds.iter().any(|s| s.id == kick_id));
+    same_everything(&everything, &SoundsDb::open_read_only(&copy).unwrap().everything(now()).unwrap());
+    assert_eq!(pragma(&copy, "journal_mode"), "wal");
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    // The fingerprints couldn't be read, and they're nowhere else: the damaged one is kept for good.
+    assert_ne!(pragma(&kept, "quick_check"), "ok");
+    assert!(!backup::damaged_of(&copy).exists());
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    // The page reads the new one as the app's own from then on.
+    let Ok(PageRead::Copy { sounds, .. }) = compact::read_for_page(&old, now(), |_| {}) else { panic!("read") };
+    assert_eq!(sounds.len(), everything.sounds.len());
+    // One a newer version made is left as it is: this version can't read what it holds.
+    Connection::open(&copy).unwrap().execute("UPDATE copy_info SET value = 3 WHERE key = 'format'", []).unwrap();
+    damage(&copy, "sound_waves");
+    let newer = std::fs::read(&copy).unwrap();
+    let Err(e) = compact::mend_reading(&old, &copy, now()) else { panic!("left as it is") };
+    assert!(e.to_string().contains("a newer version of the app made it"), "{e}");
+    assert!(std::fs::read(&copy).unwrap() == newer);
+    // One of the format before holds nothing a new one could keep: left as it is too, never set aside to go.
+    Connection::open(&copy).unwrap().execute("UPDATE copy_info SET value = 1 WHERE key = 'format'", []).unwrap();
+    let formerly = std::fs::read(&copy).unwrap();
+    let set_aside = std::fs::read(&kept).unwrap();
+    let Err(e) = compact::mend_reading(&old, &copy, now()) else { panic!("left as it is") };
+    assert!(matches!(&e, SoundsError::Damaged { path, .. } if *path == copy), "{e}");
+    assert!(e.to_string().contains("there's no sounds.db to make it again from"), "{e}");
+    assert!(std::fs::read(&copy).unwrap() == formerly);
+    assert!(std::fs::read(&kept).unwrap() == set_aside);
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+}
+
+/// A damaged library with nothing to mend it from that something else has open (another copy of the app) is left as it
+/// is, before anything is read from it: it couldn't be set aside at the end (found by this fix's code review).
+#[test]
+fn a_damaged_library_something_else_has_open_is_left_as_it_is() {
+    let dir = folder("salvage-alone-held");
+    let old = library(&dir, 60);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    remove_db(&old);
+    damage(&copy, "sound_features");
+    let holder = Connection::open(&copy).unwrap();
+    holder.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0)).unwrap();
+    let spoilt = std::fs::read(&copy).unwrap();
+    let Err(e) = compact::mend_reading(&old, &copy, now()) else { panic!("left as it is") };
+    assert!(matches!(&e, SoundsError::Damaged { path, .. } if *path == copy), "{e}");
+    assert!(e.to_string().contains("something else has it open, so it's left as it is till the next time"), "{e}");
+    assert!(std::fs::read(&copy).unwrap() == spoilt);
+    assert!(!backup::damaged_of(&copy).exists() && !backup::kept_of(&copy).exists());
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    drop(holder);
+}
+
+/// Damaged where nothing is lost (an index: a new library makes its own), with nothing to mend it from: all of it is
+/// kept, and the damaged one is set aside for a week only, as when it's mended from its backup copy.
+#[test]
+fn a_damaged_library_that_can_all_still_be_read_is_set_aside_for_a_week() {
+    let dir = folder("salvage-alone-all");
+    let old = library(&dir, 120);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    remove_db(&old);
+    let before = table(&copy, "sounds");
+    damage(&copy, "sounds_path");
+    let spoilt = std::fs::read(&copy).unwrap();
+    let (everything, made) = compact::mend_reading(&old, &copy, now()).unwrap();
+    let made = made.unwrap();
+    assert!(made.made && made.kept_alone && !made.kept_for_good, "{made:?}");
+    assert_eq!(made.salvaged.map(|s| s.unread), Some(0), "{made:?}");
+    assert_eq!(table(&copy, "sounds"), before);
+    assert_eq!(everything.sounds.len(), before.len());
+    assert!(std::fs::read(backup::damaged_of(&copy)).unwrap() == spoilt, "set aside as it was");
+    assert!(!backup::kept_of(&copy).exists());
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+}
+
 /// A damaged library its backup copy can't be put back into just now (something else has it open) is left as it is,
 /// for the next time: never made again from sounds.db meanwhile.
 #[test]
@@ -1861,14 +2087,25 @@ fn a_damaged_library_is_mended_from_its_backup_copy() {
     let (again, made) = compact::mend_reading(&old, &copy, now()).unwrap();
     assert!(made.unwrap().from_backup.is_some());
     same_everything(&again, &kept);
-    // No backup copy, and no sounds.db: the library itself is named, as damaged.
+    // No backup copy, and no sounds.db: what can still be read of it is kept in a new one (here, with its list of
+    // sounds spoilt, none of its sounds), and the damaged one is kept for good as it was, as what couldn't be read of
+    // it is nowhere else (the whole-app review of 14 Nov, SO-3). Before, it was left damaged, and the page said so at
+    // every start.
     damage(&copy, "sounds");
     remove_db(&backup);
-    let Err(e) = compact::read_for_page(&old, now(), |_| {}) else { panic!("nothing to mend it from") };
-    assert!(matches!(&e, SoundsError::Damaged { path, .. } if *path == copy), "{e}");
-    assert!(e.damaged());
-    let said = e.to_string();
-    assert!(said.contains(compact::FILE_NAME) && said.contains("there's no backup copy"), "{said}");
+    let spoilt = std::fs::read(&copy).unwrap();
+    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now(), |_| {}) else {
+        panic!("what can still be read of it kept");
+    };
+    let made = made.unwrap();
+    assert!(made.made && made.kept_alone && made.kept_for_good && made.from_backup.is_none(), "{made:?}");
+    assert_eq!(made.backup_unused.as_deref(), Some("there's no backup copy"));
+    assert!(made.salvaged.is_some_and(|s| s.unread >= 1), "{made:?}");
+    assert!(everything.sounds.is_empty());
+    assert!(std::fs::read(backup::kept_of(&copy)).unwrap() == spoilt, "kept as it was");
+    assert_eq!(compact::own_since(&copy), Some(since));
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    assert_eq!(half_made(&dir), Vec::<String>::new());
 }
 
 /// Every row of `table` in the database at `db`, by row number.

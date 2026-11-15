@@ -2656,7 +2656,7 @@ fn sample_app_files() -> Vec<mo_space::app_files::AppFilesPart> {
     const MB: u64 = 1 << 20;
     let part = |(name, what): (&'static str, &'static str), bytes: u64| AppFilesPart { name, what, bytes };
     let named = |db: &AppDatabase| (db.name, db.what);
-    let backup = sound_lab_copies(PathBuf::new(), PathBuf::new());
+    let backup = sound_lab_copies(PathBuf::new(), PathBuf::new(), PathBuf::new());
     let cache = caches([PathBuf::new()]);
     vec![
         AppFilesPart { name: "Your library", what: "Projects, plugins, samples, tags and ratings", bytes: 6250 * MB },

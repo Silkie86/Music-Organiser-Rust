@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use mo_app::space::app_databases;
-use mo_space::app_files::{CACHES, DAMAGED_SOUND_LAB, NEW_SONG_LIBRARY, OLD_DATABASES, SOUND_LAB_BACKUP, measure};
+use mo_space::app_files::{
+    CACHES, DAMAGED_SOUND_LAB, KEPT_SOUND_LAB, NEW_SONG_LIBRARY, OLD_DATABASES, SOUND_LAB_BACKUP, measure,
+};
 
 /// The card's parts for the data folder `data` while the app reads the song library `library` there, with their sizes.
 fn parts(data: &Path, library: &str) -> Vec<(&'static str, u64)> {
@@ -34,10 +36,13 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
     write("library.db", 100);
     write("sounds.db", 50);
     write("midi.db", 30);
-    // The sound library's backup copy, and a damaged one set aside with SQLite's log beside it.
+    // The sound library's backup copy, and a damaged one set aside with SQLite's log beside it, and one kept for good
+    // (parts of it couldn't be read: the whole-app review of 14 Nov, SO-3).
     write("sounds-rust.db.backup", 55);
     write("sounds-rust.db.damaged", 20);
     write("sounds-rust.db.damaged-wal", 5);
+    write("sounds-rust.db.damaged-kept", 14);
+    write("sounds-rust.db.damaged-kept-wal", 1);
     // Each cache, one with SQLite's log beside it.
     let caches = [
         "sound-copies.db",
@@ -67,6 +72,7 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             ("Your library", 40),
             (DAMAGED_SOUND_LAB, 25),
             (CACHES, 19),
+            (KEPT_SOUND_LAB, 15),
             ("Everything else", 10),
             ("MIDI parts", 8),
         ]
@@ -82,6 +88,7 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             (NEW_SONG_LIBRARY, 40),
             (DAMAGED_SOUND_LAB, 25),
             (CACHES, 19),
+            (KEPT_SOUND_LAB, 15),
             ("Everything else", 10),
             ("MIDI parts", 8),
         ]
@@ -107,6 +114,7 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             (NEW_SONG_LIBRARY, 61),
             (DAMAGED_SOUND_LAB, 25),
             (CACHES, 21),
+            (KEPT_SOUND_LAB, 15),
             ("Everything else", 12),
             ("MIDI parts", 12),
         ]

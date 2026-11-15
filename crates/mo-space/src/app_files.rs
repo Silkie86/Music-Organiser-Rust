@@ -87,13 +87,17 @@ pub const SOUND_LAB_BACKUP: &str = "Sound Lab backup";
 /// What the part with the damaged sound library set aside is called ([`sound_lab_copies`]).
 pub const DAMAGED_SOUND_LAB: &str = "Damaged Sound Lab";
 
+/// What the part with a damaged sound library kept for good is called ([`sound_lab_copies`]).
+pub const KEPT_SOUND_LAB: &str = "Damaged Sound Lab, kept";
+
 /// What the part with the app's caches is called ([`caches`]).
 pub const CACHES: &str = "Caches";
 
-/// The sound library's checked backup copy (`backup`) and the damaged library set aside when it was mended from it
-/// (`damaged`), each a part of its own. The backup is about the library's size, and counted in "Everything else" it
-/// read as your Bitwig template (the whole-app review of 10 Nov, T-4).
-pub fn sound_lab_copies(backup: PathBuf, damaged: PathBuf) -> Vec<AppDatabase> {
+/// The sound library's checked backup copy (`backup`), the damaged library set aside when it was mended from it
+/// (`damaged`), and one kept for good (`kept`: damaged with nothing to mend it from, and parts of it unread), each a
+/// part of its own. The backup is about the library's size, and counted in "Everything else" it read as your Bitwig
+/// template (the whole-app review of 10 Nov, T-4).
+pub fn sound_lab_copies(backup: PathBuf, damaged: PathBuf, kept: PathBuf) -> Vec<AppDatabase> {
     vec![
         AppDatabase {
             name: SOUND_LAB_BACKUP,
@@ -104,6 +108,12 @@ pub fn sound_lab_copies(backup: PathBuf, damaged: PathBuf) -> Vec<AppDatabase> {
             name: DAMAGED_SOUND_LAB,
             what: "Set aside when Sound Lab was mended from its backup; it goes after a week",
             path: damaged,
+        },
+        AppDatabase {
+            name: KEPT_SOUND_LAB,
+            what: "Kept when Sound Lab was damaged with nothing to mend it from: parts of it couldn't be read, so the \
+                   app never removes it",
+            path: kept,
         },
     ]
 }

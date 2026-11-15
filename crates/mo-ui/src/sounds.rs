@@ -1788,6 +1788,17 @@ fn say_made(
                 cards.start("Mended your sound library from its backup copy", "").done(&line);
             }
         }
+        // Nothing to mend it from: what could still be read of it kept in a new one (the whole-app review of 14 Nov,
+        // SO-3).
+        Ok(synced) if synced.made && synced.kept_alone => {
+            let unused = synced.backup_unused.as_deref();
+            let salvaged = synced.salvaged.unwrap_or_default();
+            let line = list::kept_alone_line(&salvaged, unused, synced.kept_for_good);
+            log::warning("Sounds", &format!("The app's own sound library was damaged: {line} ({synced:?})"));
+            if let Some(cards) = cards {
+                cards.start(list::kept_alone_title(&salvaged), "").done(&line);
+            }
+        }
         // Made again from sounds.db with what could still be read of it (review finding S-1).
         Ok(synced) if synced.made && synced.salvaged.is_some() => {
             let unused = synced.backup_unused.as_deref();
@@ -4847,16 +4858,34 @@ mod tests {
             shown.iter().any(|c| c.starts_with("Mended your sound library from its backup copy: It was damaged")),
             "{shown:?}"
         );
-        // No backup copy any more, and the fingerprints damaged: what waits for them is told why (review finding B-1).
+        // No backup copy any more, and the fingerprints damaged, with no sounds.db to make it again from: what can still
+        // be read of it is kept in a new library, its sounds without the fingerprints, and a card says so (the whole-app
+        // review of 14 Nov, SO-3). Before, what waited for them was only told why (review finding B-1), at every start.
         let _ = std::fs::remove_file(compact::backup::backup_of(&copy));
         damage_first_page(&copy, "sound_features");
-        let said = one_start(&sounds_db, &library_db, &Feed::default());
-        assert!(said.iter().any(|s| s.starts_with("no fingerprints: The sound library")), "{said:?}");
-        // Its list damaged too: the page says the library itself couldn't be read.
+        let cards = Feed::default();
+        let said = one_start(&sounds_db, &library_db, &cards);
+        assert_eq!(
+            said,
+            [
+                "35 sounds from sounds-rust.db, 0 plays",
+                "0 fingerprints",
+                "used: true",
+                "again: the same sounds, 35 sounds, 0 plays, used: true",
+            ]
+        );
+        let shown = cards_said(&cards);
+        assert!(
+            shown.iter().any(|c| c.starts_with("Kept what could be read of your sound library: It was damaged")),
+            "{shown:?}"
+        );
+        assert!(compact::backup::kept_of(&copy).exists(), "the damaged one is kept for good");
+        // Its list damaged too, while that one is still there: the page says the library itself couldn't be read.
         damage_first_page(&copy, "sounds");
         let said = one_start(&sounds_db, &library_db, &Feed::default());
         let first = said.first().cloned().unwrap_or_default();
         assert!(first.starts_with("couldn't read: The sound library") && first.contains("is damaged"), "{said:?}");
+        assert!(first.contains("a damaged one kept before is still there"), "{said:?}");
     }
 
     /// The list with your songs' use counted in is the one the page goes on from: sounds read again after the count

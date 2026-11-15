@@ -45,12 +45,12 @@ pub struct Salvaged {
 /// be read.
 const STRETCH: i64 = 256;
 
-/// Puts into the new library open at `ours` (made from `sounds.db`, or put back from its backup copy, and not yet
-/// given its name) what can be read of the damaged one at `damaged`. The disk is watched for room in `dir`. Damage met
-/// in it leaves that part out; anything else (the disk full, the file gone) stops it, and the new library with it.
-/// `ours` checks no foreign keys from then on (the tables copied whole say a row goes with its sound, and putting one
-/// sound's row in would take its tags and plays with it).
-pub(super) fn salvage(ours: &Connection, damaged: &Path, dir: &Path) -> Result<Salvaged, Failed> {
+/// Puts into the new library open at `ours` (made from `sounds.db`, or put back from its backup copy, or `fresh`: made
+/// empty, with nothing to mend it from; and not yet given its name) what can be read of the damaged one at `damaged`.
+/// The disk is watched for room in `dir`. Damage met in it leaves that part out; anything else (the disk full, the file
+/// gone) stops it, and the new library with it. `ours` checks no foreign keys from then on (the tables copied whole say
+/// a row goes with its sound, and putting one sound's row in would take its tags and plays with it).
+pub(super) fn salvage(ours: &Connection, damaged: &Path, dir: &Path, fresh: bool) -> Result<Salvaged, Failed> {
     // A long read, beside the app's other reads of the library (the waveforms on show go in between).
     let _turn = crate::turns::long_turn();
     // Into a library of this version's format only: a backup copy of the format before is put back as it is, and
@@ -92,7 +92,7 @@ pub(super) fn salvage(ours: &Connection, damaged: &Path, dir: &Path) -> Result<S
     }
     pass.orphans_out()?;
     pass.counts_into()?;
-    numbers_noted(ours, highest_before)?;
+    numbers_noted(ours, highest_before, fresh)?;
     ours.execute_batch("COMMIT")?;
     Ok(pass.out)
 }
@@ -140,14 +140,15 @@ fn highest_sound(conn: &Connection) -> rusqlite::Result<Option<i64>> {
 /// The numbers the app gave its sounds, noted again as the new library has them now: the highest given
 /// ([`LAST_ID`]) at least its highest sound, and (when the damaged library's note of it couldn't be read) the first
 /// number the app gave a sound of its own scan ([`NEW_SINCE`]), for one kept above `before`, the highest the new
-/// library had.
-fn numbers_noted(ours: &Connection, before: Option<i64>) -> rusqlite::Result<()> {
+/// library had. Not in a `fresh` one: with no sounds of its own, every sound kept would count as the scan's, and CLAP
+/// would seem to have heard none (only the damaged library's note says which are the scan's).
+fn numbers_noted(ours: &Connection, before: Option<i64>, fresh: bool) -> rusqlite::Result<()> {
     let Some(highest) = highest_sound(ours)? else { return Ok(()) };
     let noted = super::info_value(ours, LAST_ID)?;
     if noted.is_none_or(|noted| noted < highest) {
         ours.execute("INSERT OR REPLACE INTO main.copy_info (key, value) VALUES (?1, ?2)", params![LAST_ID, highest])?;
     }
-    if super::info_value(ours, NEW_SINCE)?.is_none() {
+    if !fresh && super::info_value(ours, NEW_SINCE)?.is_none() {
         let first: Option<i64> =
             ours.query_row("SELECT MIN(id) FROM main.sounds WHERE id > ?1", [before.unwrap_or(0)], |r| r.get(0))?;
         if let Some(first) = first {
