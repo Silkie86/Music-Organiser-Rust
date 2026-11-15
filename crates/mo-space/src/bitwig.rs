@@ -231,7 +231,8 @@ pub struct Save {
     /// In a folder below the project's own (Bitwig's auto-backups).
     pub below: bool,
     /// Its newest "(fixed)" project, beside it ("<name> (fixed).bwproject", or "(fixed 2)" and on), and whether that's
-    /// as new as the save or newer. An older one was written before the save was saved again.
+    /// as new as the save or newer. An older one was written before the save was saved again, or by an older Fix
+    /// ([`fix_writes_library_files`]).
     pub fixed: Option<(PathBuf, bool)>,
 }
 
@@ -240,6 +241,13 @@ impl Save {
     pub fn is_fixed(&self) -> bool {
         matches!(self.fixed, Some((_, true)))
     }
+}
+
+/// When Fix began writing a copy's sample file the way Bitwig writes a Library file (#462, merged 11 Nov 2026 04:18
+/// UTC). A "(fixed)" project written before then has its multisamples missing in Bitwig (Solomon, 15 Nov 2026: he
+/// opened neon rmx 40's from 10 Nov), so its save is offered to be fixed again, as one saved again since is.
+pub fn fix_writes_library_files() -> SystemTime {
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_370_717)
 }
 
 /// The Bitwig projects in a project folder and the folders below it, for a fix: your saves beside the project, newest
@@ -269,7 +277,9 @@ pub fn saves_in(folder: &Path, stop: &AtomicBool) -> Result<Vec<Save>, Stopped> 
                 .filter(|(f, _)| fixed_from(&stem(f)).is_some_and(|from| from.eq_ignore_ascii_case(&name)))
                 .min_by(|a, b| newest_first(a, b));
             let below = path.parent() != Some(folder);
-            Save { fixed: twin.map(|(f, at)| (f.clone(), *at >= modified)), path, modified, below }
+            let current =
+                |at: &Option<SystemTime>| *at >= modified && at.is_some_and(|at| at >= fix_writes_library_files());
+            Save { fixed: twin.map(|(f, at)| (f.clone(), current(at))), path, modified, below }
         })
         .collect();
     // Your own saves first; each group stays newest first.
