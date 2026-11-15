@@ -521,7 +521,7 @@ fn state_words(project: &Project, save: &Save, state: &State<'_>, newest: bool) 
             (format!("Not fixed: {why}"), true)
         }
         State::Outdated(f) => {
-            (format!("Saved again since \"{}\" was written: fix it again for this save.", file(f)), false)
+            (format!("\"{}\" is older than this save or than the newest Fix: fix it again.", file(f)), false)
         }
         State::Open if newest => {
             let others = project.others().count();
@@ -822,7 +822,7 @@ mod tests {
         assert!(card.parts[1].under && card.parts[1].tick == Some((vec![p.saves[1].path.clone()], false)));
         assert_eq!(
             card.parts[1].status,
-            "Saved again since \"GARAGE v1 (fixed).bwproject\" was written: fix it again for this save."
+            "\"GARAGE v1 (fixed).bwproject\" is older than this save or than the newest Fix: fix it again."
         );
         assert!(card.parts[2].under);
         assert_eq!((card.parts[2].tick.clone(), card.parts[2].status.as_str()), (None, BACKUP));
@@ -896,7 +896,7 @@ mod tests {
         assert_eq!((line.tick, line.open), (Some((vec![newest.clone()], true)), None));
         assert_eq!(
             line.status,
-            "Saved again since \"GARAGE FOR BW 1 (fixed 2).bwproject\" was written: fix it again for this save."
+            "\"GARAGE FOR BW 1 (fixed 2).bwproject\" is older than this save or than the newest Fix: fix it again."
         );
 
         // One that failed says why, and loses its tick: pressing Fix again wouldn't help until something changes. It
