@@ -67,7 +67,9 @@ pub struct Relink {
 #[derive(Debug)]
 pub struct Fixed {
     pub file: PathBuf,
-    /// The copies nothing uses any more but the original project: only these may be offered for the Recycle Bin.
+    /// The copies nothing uses any more but the original project: only these may be offered for the Recycle Bin. From
+    /// [`fix_bitwig_project_in`], the ones the fixed project no longer names (the other files aren't read): ask
+    /// [`still_named`] before any goes.
     pub changed: Vec<Relink>,
     /// Listed copies that are still needed, or that this project doesn't use, said plainly.
     pub left: Vec<String>,
@@ -624,14 +626,23 @@ fn fixed_names(project: &Path) -> impl Iterator<Item = PathBuf> + '_ {
 }
 
 /// Writes the fixed project beside `project` (copy, check, then rename, never over a file that's there), and says
-/// which copies nothing uses any more but the original.
+/// which copies nothing uses any more but the original: every other Bitwig file in the project's folder and below it
+/// is read to see (a folder that can't be listed keeps them all).
 pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, String> {
-    fix_bitwig_project_in(project, relinks, &[])
+    fix(project, relinks, &[], true)
 }
 
-/// [`fix_bitwig_project`], with Bitwig's Library folders as you have them (your Bitwig Studio folder's in Settings
-/// first): a file whose folder moved is looked for in these first, then in the Library the copies' files are in.
+/// Writes the fixed project as [`fix_bitwig_project`] does, with Bitwig's Library folders as you have them (your
+/// Bitwig Studio folder's in Settings first): a file whose folder moved is looked for in these first, then in the
+/// Library the copies' files are in. It doesn't read the other Bitwig files in the folder (the whole-app review of
+/// 14 Nov, FX-3: the app's Fix never used the answer, and reading every other save and auto-backup made each Fix
+/// slow), so [`Fixed::changed`] only says which copies the fixed project no longer names. Before a copy goes to the
+/// Recycle Bin, [`still_named`] asks again of every Bitwig file there.
 pub fn fix_bitwig_project_in(project: &Path, relinks: &[Relink], libraries: &[PathBuf]) -> Result<Fixed, String> {
+    fix(project, relinks, libraries, false)
+}
+
+fn fix(project: &Path, relinks: &[Relink], libraries: &[PathBuf], look_around: bool) -> Result<Fixed, String> {
     let dir = match project.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
@@ -677,8 +688,18 @@ pub fn fix_bitwig_project_in(project: &Path, relinks: &[Relink], libraries: &[Pa
     if !changed.contains(&true) {
         return Err(format!("every copy is still needed, so nothing was written: {}", left.join("; ")));
     }
-    // Other Bitwig files in the folder and below it may use the same copies.
-    let others = other_bitwig_files(project, &dir)?;
+    // Other Bitwig files in the folder and below it may use the same copies. One folder that can't be listed keeps
+    // them all, as a file that can't be read does; the fixed project is still written.
+    let others = if look_around { other_bitwig_files(project, &dir) } else { Ok(Vec::new()) };
+    let others = others.unwrap_or_else(|why| {
+        for (c, l) in listed.iter().enumerate() {
+            if changed[c] {
+                changed[c] = false;
+                left.push(format!("{}: {why}, so it's kept", l.shown));
+            }
+        }
+        Vec::new()
+    });
     let used: Vec<(String, Vec<bool>)> = others
         .par_iter()
         .map(|p| {
