@@ -2166,6 +2166,8 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
         let _doing = crate::watchdog::doing("Space: a look arrived");
         // A Plugins page clean-up put back from here: that page hears once this one is done with its own state.
         let mut plugins_put_back = None;
+        // A look at the plugins came in: it may have found a folder you added that the last measure hasn't got.
+        let mut plugins_read = false;
         let changed = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             match step {
@@ -2229,6 +2231,7 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Wins
                 }
                 Step::Plugins(id, looked) if id == p.plugins_look.asked => {
+                    plugins_read = true;
                     match *looked {
                         PluginsLooked::Found(found, stamp, fixes) => {
                             let now = found.now;
@@ -2342,6 +2345,11 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
         });
         if let Some((kind, when, all, list)) = plugins_put_back {
             plugins_page::put_back_elsewhere(&kind, when, all, list.as_deref());
+        }
+        // Then the plugins are measured again now, as after the Plugins page's read: the read doesn't walk the folder
+        // itself (the whole-app review of 14 Nov, AP-12), and the measure due was asked for before this look.
+        if plugins_read && mo_app::plugins::folder_fixes::measure_asked() {
+            plugins_page::measure_when_due(&app);
         }
         // Off show the page draws nothing, as what arrives can take tens of milliseconds to draw and some comes
         // several times a second (rule 12): it's drawn once when it comes back ([`shown`]). The looks a step asks

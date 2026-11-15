@@ -145,8 +145,9 @@ fn card_info(c: &Card) -> CardInfo {
     }
 }
 
-/// Settings' "Try an activity card": a pretend job of about four seconds that changes nothing, so the cards can be
-/// seen before any real job exists. It can't say how far it is for its first second, like a real scan starting up.
+/// Settings' "Try an activity card": a pretend job of about four seconds that changes nothing, so a job's line in the
+/// rail can be seen before any real job exists. It can't say how far it is for its first second, like a real scan
+/// starting up.
 fn try_job(feed: &Feed) {
     let job = feed.start("Trying an activity card", "Getting ready");
     let spawned = mo_app::background::spawn("Pretend job", move || {

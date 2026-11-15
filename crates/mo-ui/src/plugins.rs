@@ -627,6 +627,10 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>, in_bin: Vec<String>)
                 clean::load_binned(app);
                 // And your plugins measured again, when the last measure is a day old (review X1-2).
                 measuring::when_due(app);
+            } else if mo_app::plugins::folder_fixes::measure_asked() {
+                // Or when this read found a folder you added that the last measure hasn't got: measured with the rest,
+                // not walked inside the read (the whole-app review of 14 Nov, AP-12).
+                measuring::when_due(app);
             }
             // And the plugin files Space's clean-ups sent to the Recycle Bin, as Space leaves them out: as Space has
             // them now, once it has looked in the bin.

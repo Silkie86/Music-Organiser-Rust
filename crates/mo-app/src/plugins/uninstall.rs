@@ -176,13 +176,12 @@ impl Ask {
                 }
                 s
             }
-            Plan::Files(_) if cfg!(windows) => {
-                "Windows has no uninstaller for it that's still there. Its plugin files \
-                                                can go to the {BIN} instead (Windows may ask for administrator \
-                                                rights):"
-                    .to_owned()
-            }
-            Plan::Files(_) => "Its plugin files can go to the Bin:".to_owned(),
+            // Each with format!, so the bin is named (review AP-13: a plain string showed "{BIN}" as it's written).
+            Plan::Files(_) if cfg!(windows) => format!(
+                "Windows has no uninstaller for it that's still there. Its plugin files can go to the {BIN} instead \
+                 (Windows may ask for administrator rights):"
+            ),
+            Plan::Files(_) => format!("Its plugin files can go to the {BIN}:"),
             Plan::Waves => plugin_files::WAVES.to_owned(),
             Plan::Nothing if cfg!(windows) => format!(
                 "Windows has no uninstaller for {} and the last measure found none of its plugin files, so \
@@ -359,6 +358,39 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         stop.store(true, Ordering::Relaxed);
         assert_eq!(after_run(&Ran::Finished, &watched, WAIT, POLL, &stop), Waited::Stopped);
+    }
+
+    /// Review AP-13: the card's first words name the bin, whatever the plan; nothing in braces is left in them.
+    #[test]
+    fn the_card_s_words_name_the_bin() {
+        let ask = Ask {
+            row_key: ("arcade".into(), String::new()),
+            name: "Arcade".into(),
+            vendor: "Output".into(),
+            songs: 0,
+            songs_now: 0,
+            stands_in: None,
+            space: PluginSpace {
+                key: "arcade".into(),
+                name: "Arcade".into(),
+                vendor: "Output".into(),
+                folders: Vec::new(),
+            },
+            installed: Vec::new(),
+            names: HashMap::new(),
+        };
+        let u = Uninstaller { name: "Arcade".into(), publisher: "Output".into(), command: "x".into(), bytes: 2048 };
+        let plans = [
+            Plan::Run { found: vec![u], must_pick: true, files: Vec::new() },
+            Plan::Files(Vec::new()),
+            Plan::Waves,
+            Plan::Nothing,
+        ];
+        for plan in &plans {
+            let intro = ask.intro(plan);
+            assert!(!intro.contains('{') && !intro.contains('}'), "{plan:?}: {intro}");
+        }
+        assert!(ask.intro(&Plan::Files(Vec::new())).contains(BIN));
     }
 
     #[test]

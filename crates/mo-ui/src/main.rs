@@ -184,7 +184,16 @@ fn main() -> Result<(), slint::PlatformError> {
     // Later still, the old app's databases put away, once the app's own have worked without them for a week: never
     // in a run whose pages read library.db.
     if songs_db.is_songs_db() {
-        mo_app::old_databases::archive_later(data.clone(), feed.clone());
+        // Settings then looks again at what the folder the data came from still holds for the app (the whole-app
+        // review of 14 Nov, AP-18: it looks only when it shows, not at every redraw).
+        let settings = app.as_weak();
+        mo_app::old_databases::archive_later(data.clone(), feed.clone(), move || {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = settings.upgrade() {
+                    mo_ui::settings::look_left_behind(&app);
+                }
+            });
+        });
     }
     // A little after start too, songs.db made from library.db, for the next start.
     if songs_db.make_wanted() {

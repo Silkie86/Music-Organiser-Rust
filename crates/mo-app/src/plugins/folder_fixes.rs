@@ -39,10 +39,13 @@ impl FolderFix {
 /// Your say on each stored plugin's folders, as the library keeps it (`plugin_space_not:<key>` and
 /// `plugin_space_added:<key>`), as fixes to apply over the stored measure ([`Plugins::apply_folder_fixes`]): a folder
 /// ruled out, one the measure has as added that's no longer on your list (taken off), and one on your list the measure
-/// hasn't got (added since), measured here. One the measure left out as it is, holds or is inside a project, sample or
-/// MIDI folder of yours stays out, as the measure has it (rule 2, review P-4). A list that can't be read is an error,
-/// never no say: a ruled-out folder read as the plugin's could be ticked in Clean up. Reads the disk for an added
-/// folder: call it away from the window.
+/// hasn't got, added this run (with the size it had then). One added in an earlier run that the last measure hasn't got
+/// (added since, or its drive wasn't plugged in then) shows once the plugins are measured again, which it asks for
+/// ([`measure_asked`]): it isn't walked here, inside the read, which kept the Plugins page empty for minutes on a big
+/// library and Space's look waiting (the whole-app review of 14 Nov, AP-12). One the measure left out as it is, holds
+/// or is inside a project, sample or MIDI folder of yours stays out, as the measure has it (rule 2, review P-4). A list
+/// that can't be read is an error, never no say: a ruled-out folder read as the plugin's could be ticked in Clean up.
+/// Looks at the disk for an added folder: call it away from the window.
 pub fn saved(lib: &mo_library::Library, spaces: &[StoredSpace]) -> Result<Vec<FolderFix>, mo_library::LibraryError> {
     let mut fixes = Vec::new();
     let mut protected: Option<Vec<String>> = None;
@@ -71,7 +74,7 @@ pub fn saved(lib: &mo_library::Library, spaces: &[StoredSpace]) -> Result<Vec<Fo
             if yours.has(path) {
                 continue;
             }
-            let Some(measured) = measured_once(path) else { continue };
+            let Some(measured) = known(path) else { continue };
             let inside: Vec<(String, u64)> = spaces
                 .iter()
                 .flat_map(|o| &o.folders)
@@ -86,26 +89,62 @@ pub fn saved(lib: &mo_library::Library, spaces: &[StoredSpace]) -> Result<Vec<Fo
     Ok(fixes)
 }
 
-/// The sizes of the folders you added, measured once a run (the page reads the library again often; the folder rarely
-/// changes while the app runs), by path key. Adding a folder puts its fresh measure here ([`remember_measure`]).
+/// The sizes of the folders you added this run, measured as you added them ([`remember_measure`]), by path key: the
+/// reads show them until the plugins are measured again with them.
 static SIZES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Measured>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// A folder you added, measured once a run, or `None` when it isn't a real folder there now. The lock is held while it
-/// measures, so the Plugins page and Space reading at once measure it once, not twice.
-fn measured_once(path: &str) -> Option<Measured> {
+/// The folders you added that asked for a measure this run ([`known`]), by path key: each asks once, so a measure
+/// that still leaves one out isn't asked for again and again.
+static ASKED_BY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether a read asked for a measure of the plugins: a folder you added that the last measure hasn't got is a real
+/// folder now ([`known`]). [`NOT_ASKED`], [`ASKED`] or [`OWED`].
+static MEASURE_ASKED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(NOT_ASKED);
+const NOT_ASKED: u8 = 0;
+/// Asked, and no measure has tried yet: one starts as soon as the app looks ([`measure_asked`]).
+const ASKED: u8 = 1;
+/// A measure tried and didn't keep what it found (or couldn't run): still owed, but the next try waits for the hourly
+/// look, so a measure that fails isn't started again at every read.
+const OWED: u8 = 2;
+
+/// A folder you added, as measured when you added it this run, or `None`. A real folder there now that wasn't
+/// measured this run asks for a measure of the plugins ([`measure_asked`]), once a run.
+fn known(path: &str) -> Option<Measured> {
     let key = mo_space::key(path);
-    let mut sizes = SIZES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(m) = sizes.get(&key) {
+    if let Some(m) = SIZES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
         return Some(*m);
     }
     let p = std::path::Path::new(path);
-    if !p.is_dir() || mo_space::size::is_link(p) {
-        return None;
+    if p.is_dir() && !mo_space::size::is_link(p) {
+        let mut asked = ASKED_BY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !asked.contains(&key) {
+            asked.push(key);
+            MEASURE_ASKED.store(ASKED, std::sync::atomic::Ordering::Relaxed);
+        }
     }
-    let m = mo_space::size::measure(p, &std::sync::atomic::AtomicBool::new(false)).ok()?;
-    sizes.insert(key, m);
-    Some(m)
+    None
+}
+
+/// Whether a read found a folder you added that the last measure hasn't got, a real folder now ([`saved`]), and no
+/// measure has tried since: the plugins are to be measured now, whenever the last measure was.
+pub fn measure_asked() -> bool {
+    MEASURE_ASKED.load(std::sync::atomic::Ordering::Relaxed) == ASKED
+}
+
+/// For a measure starting: whether one is asked for, or still owed after one that didn't keep what it found
+/// ([`measure_asked`]). It stays owed until a measure keeps what it found ([`measure_answered`]), but isn't asked for
+/// at once again.
+pub fn take_measure_asked() -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (Ok(was) | Err(was)) = MEASURE_ASKED.try_update(Relaxed, Relaxed, |s| (s == ASKED).then_some(OWED));
+    was != NOT_ASKED
+}
+
+/// A measure kept what it found: it measured every folder you added that was there then, so what a read asked for is
+/// answered.
+pub fn measure_answered() {
+    MEASURE_ASKED.store(NOT_ASKED, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Keeps a folder's fresh measure (taken when you add it) for [`saved`], over one taken before.
@@ -466,7 +505,9 @@ mod tests {
     }
 
     /// Review E2-1: your say on a plugin's folders is read back from the library after a restart: a folder ruled out,
-    /// one taken off your list (stored as added), and one added since the measure (measured, less what's inside it).
+    /// one taken off your list (stored as added), and one added since the measure. That one isn't walked inside the
+    /// read (the whole-app review of 14 Nov, AP-12): it asks for a measure of the plugins, once, and shows with what
+    /// was measured as you added it this run, less what's inside it.
     #[test]
     fn your_say_on_folders_is_read_back_after_a_restart() {
         let d = std::env::temp_dir().join(format!("mo-app-folder-fixes-saved-{}", std::process::id()));
@@ -484,6 +525,19 @@ mod tests {
             stored("arcade", vec![stored_folder("C:\\Guess", 5, false), stored_folder("C:\\Old", 5, true)]),
             stored("other", vec![stored_folder(&kit_s, 40, false)]),
         ];
+        let removed = saved(&lib, &spaces).unwrap();
+        assert_eq!(removed.len(), 2, "the folder added since isn't measured here: {removed:?}");
+        assert!(measure_asked(), "it asks for a measure, at once");
+        // A measure that starts takes it, and it's owed until one keeps what it found, but not asked at once again: a
+        // measure that fails isn't started at every read.
+        assert!(take_measure_asked());
+        assert!(!measure_asked() && take_measure_asked(), "owed");
+        measure_answered();
+        assert!(!take_measure_asked(), "answered");
+        assert_eq!(saved(&lib, &spaces).unwrap(), removed);
+        assert!(!measure_asked() && !take_measure_asked(), "once a run");
+        // As adding it does.
+        remember_measure(&new_s, mo_space::size::measure(&new, &std::sync::atomic::AtomicBool::new(false)).unwrap());
         let fixes = saved(&lib, &spaces).unwrap();
         assert_eq!(fixes.len(), 3, "{fixes:?}");
         assert!(fixes.contains(&FolderFix::Removed { key: "arcade".into(), path: "C:\\Guess".into(), measured: None }));
