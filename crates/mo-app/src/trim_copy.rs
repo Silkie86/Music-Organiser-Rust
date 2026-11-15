@@ -36,8 +36,8 @@ const REMEMBERED: usize = 4_096;
 /// thread.
 pub fn to_drag(original: &Path, db: Option<i32>, is_loop: bool) -> (PathBuf, Option<String>) {
     let Some(db) = db.filter(|_| !is_loop) else { return (original.to_path_buf(), None) };
-    let folder = match crate::bitwig_convert::export_folder_in(&crate::paths::data_dir().join("library.db")) {
-        Ok(exports) => exports.join(FOLDER),
+    let folder = match folder_in(&crate::paths::data_dir()) {
+        Ok(folder) => folder,
         Err(why) => return (original.to_path_buf(), Some(format!("Dragged the whole file, untrimmed: {why}"))),
     };
     match for_drag(original, db, &folder) {
@@ -46,6 +46,29 @@ pub fn to_drag(original: &Path, db: Option<i32>, is_loop: bool) -> (PathBuf, Opt
             (original.to_path_buf(), why.map(|why| format!("Dragged the whole file, untrimmed: {why}")))
         }
     }
+}
+
+/// Where trimmed copies go for the data folder `data`: [`FOLDER`] in the export folder set in Settings, read from the
+/// app's own song library (songs.db once it's the app's own, library.db before), as every other export reads it
+/// (DF-2, 14 Nov review: it read library.db, which the archive step takes away). Opens the library: off the window's
+/// thread.
+pub fn folder_in(data: &Path) -> Result<PathBuf, String> {
+    let library = mo_library::songs_db::to_read(data);
+    crate::bitwig_convert::export_folder_in(&library).map(|exports| exports.join(FOLDER))
+}
+
+/// How far ahead of now an original's date may be and still be believed (a clock a little out, another time zone).
+const AHEAD: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Whether `name` is a copy whose making was cut short, in [`FOLDER`]: written under this program's own name first
+/// (`<copy>.<pid>.wav`, and `write_wav`'s `<copy>.<pid>.wav.part` beside it) and renamed after (DF-5, for the
+/// start-up sweep). Never a copy itself.
+pub fn is_half_made(name: &str) -> bool {
+    let Some(rest) = name.strip_suffix(".wav.part").or_else(|| name.strip_suffix(".wav")) else { return false };
+    let Some((copy, pid)) = rest.rsplit_once('.') else { return false };
+    !pid.is_empty()
+        && pid.bytes().all(|b| b.is_ascii_digit())
+        && mo_sounds::trimmed::mark_in(&format!("{copy}.wav")).is_some()
 }
 
 /// What [`for_drag`] gives.
@@ -73,9 +96,12 @@ pub fn for_drag(original: &Path, db: i32, folder: &Path) -> Made {
     let path = original.to_string_lossy();
     let copy = folder.join(mo_sounds::trimmed::copy_name(&path, db));
     let changed = meta.modified().ok();
-    // Made before, and the original hasn't changed since.
+    // Made before, and the original hasn't changed since. An original dated ahead of now (a pack's files can say 2107)
+    // can't be told by its date: its copy stands, rather than being made again at every drag (DF-6).
+    let ahead = changed.is_some_and(|o| o > SystemTime::now() + AHEAD);
     let fresh = |copy: &Path| {
-        std::fs::metadata(copy).is_ok_and(|c| c.is_file() && c.modified().ok().zip(changed).is_none_or(|(c, o)| c >= o))
+        std::fs::metadata(copy)
+            .is_ok_and(|c| c.is_file() && (ahead || c.modified().ok().zip(changed).is_none_or(|(c, o)| c >= o)))
     };
     if fresh(&copy) {
         return Made::Copy(copy);
@@ -205,6 +231,54 @@ mod tests {
         assert!(!copies.exists(), "no folder made for nothing");
         assert!(matches!(for_drag(&dir.join("Gone.wav"), -60, &copies), Made::AsItIs(Some(_))));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copies_go_to_the_export_folder_the_song_library_sets() {
+        let dir = folder("library");
+        let exports = dir.join("Exports on I");
+        std::fs::create_dir_all(&exports).unwrap();
+        // Only songs.db, as on his PC since library.db was put away: its export folder is the one used.
+        let c = rusqlite::Connection::open(dir.join(mo_library::songs_db::FILE_NAME)).unwrap();
+        c.execute_batch(
+            "CREATE TABLE projects (id INTEGER PRIMARY KEY); CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![crate::bitwig_convert::EXPORT_FOLDER_KEY, exports.to_string_lossy()],
+        )
+        .unwrap();
+        drop(c);
+        assert_eq!(folder_in(&dir), Ok(exports.join(FOLDER)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_original_dated_ahead_keeps_its_copy() {
+        let dir = folder("ahead");
+        let original = dir.join("Ahead.wav");
+        quiet_loud_quiet(&original);
+        let copies = dir.join(FOLDER);
+        let Made::Copy(copy) = for_drag(&original, -60, &copies) else { panic!("no copy") };
+        let later = SystemTime::now() + std::time::Duration::from_secs(80 * 365 * 24 * 60 * 60);
+        std::fs::File::options().write(true).open(&original).unwrap().set_modified(later).unwrap();
+        // Marked, so a copy made again would show.
+        std::fs::write(&copy, b"kept").unwrap();
+        assert_eq!(for_drag(&original, -60, &copies), Made::Copy(copy.clone()));
+        assert_eq!(std::fs::read(&copy).unwrap(), b"kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn half_made_copies_are_told_from_copies() {
+        let copy = mo_sounds::trimmed::copy_name("D:\\Samples\\Kick.wav", -60);
+        let stem = copy.strip_suffix(".wav").unwrap();
+        assert!(is_half_made(&format!("{stem}.4242.wav")));
+        assert!(is_half_made(&format!("{stem}.4242.wav.part")));
+        assert!(!is_half_made(&copy), "never a copy");
+        assert!(!is_half_made("Kick.4242.wav"), "never a file of the user's");
+        assert!(!is_half_made(&format!("{stem}.x42.wav")));
     }
 
     #[test]

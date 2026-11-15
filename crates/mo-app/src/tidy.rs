@@ -336,6 +336,15 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     if let Some(sent) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER])) {
         done.add(remove_older(&sent, crate::midi::is_half_sent, WRITING, now, false));
     }
+    // A trimmed copy Trim silence was still making when the app or the plugin stopped (its own name, given only
+    // while it's written). Never the copies: DAW projects use them (DF-5).
+    if let Some(trimmed) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::trim_copy::FOLDER])) {
+        done.add(remove_older(&trimmed, crate::trim_copy::is_half_made, WRITING, now, false));
+    }
+    // A Record take the plugin was still saving when the DAW stopped (DF-5). Never the takes.
+    if let Some(takes) = real_folder(&places.data, &[RECORDINGS]) {
+        done.add(remove_older(&takes, is_half_recorded, WRITING, now, false));
+    }
     if let Some(notes) = real_folder(&places.data, &[crate::note::FOLDER]) {
         done.add(old_notes_to_bin(&notes, &places.data.join(NOTES_DONE_FILE), NOTES_KEPT_FOR, now, bin));
     }
@@ -946,6 +955,21 @@ fn is_cut_short(name: &str) -> bool {
 /// its whole name: never anything else of the other apps' there.
 fn is_move_part(name: &str) -> bool {
     WRITTEN_WHOLE_BESIDE_FIRST.iter().any(|f| is_whole_part_of(name, f))
+}
+
+/// The plugin's Record folder in the data folder (mo-plugin `record::folder`).
+pub const RECORDINGS: &str = "Recordings";
+
+/// A take `write_wav` was still writing: "Recording 2026-11-15 21-02-44.wav.part", or with " (2)" after the time.
+fn is_half_recorded(name: &str) -> bool {
+    let Some(rest) = name.strip_suffix(".wav.part").and_then(|n| n.strip_prefix("Recording ")) else { return false };
+    let (when, n) = match rest.split_once(" (") {
+        Some((when, n)) => {
+            (when, n.strip_suffix(')').filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
+        }
+        None => (rest, Some("")),
+    };
+    n.is_some() && chrono::NaiveDateTime::parse_from_str(when, "%Y-%m-%d %H-%M-%S").is_ok()
 }
 
 /// The saves-list copy of library.db ([`mo_library::list_copy`]), or the journal SQLite may leave beside it.
@@ -1647,6 +1671,43 @@ mod tests {
         assert!(!part.exists());
         assert!(kept.iter().all(|file| file.exists()));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn half_made_trimmed_copies_and_takes_go_and_nothing_else_there() {
+        let dir = test_folder("trimmed-takes");
+        let exports = dir.join("Music Organiser Exports");
+        let places = Places { exports: Some(exports.clone()), ..test_places(&dir) };
+        let bin = TestBin(dir.join("bin"));
+        let trimmed = exports.join(crate::trim_copy::FOLDER);
+        let takes = places.data.join(RECORDINGS);
+        fs::create_dir_all(&trimmed).unwrap();
+        fs::create_dir_all(&takes).unwrap();
+        let copy = mo_sounds::trimmed::copy_name("D:\\Samples\\Kick.wav", -60);
+        let stem = copy.strip_suffix(".wav").unwrap().to_owned();
+        let gone = [
+            trimmed.join(format!("{stem}.4242.wav")),
+            trimmed.join(format!("{stem}.4242.wav.part")),
+            takes.join("Recording 2026-11-15 21-02-44.wav.part"),
+            takes.join("Recording 2026-11-15 21-02-44 (2).wav.part"),
+        ];
+        let kept = [
+            trimmed.join(&copy),
+            trimmed.join("Kick.wav"),
+            takes.join("Recording 2026-11-15 21-02-44.wav"),
+            takes.join("Recording of mine.wav.part"),
+        ];
+        for f in gone.iter().chain(&kept) {
+            fs::write(f, b"x").unwrap();
+        }
+        // Long after they were written.
+        sweep(&places, SystemTime::now() + WRITING + Duration::from_secs(60), &bin);
+        for f in &gone {
+            assert!(!f.exists(), "{} should go", f.display());
+        }
+        for f in &kept {
+            assert!(f.exists(), "{} should stay", f.display());
+        }
     }
 
     #[test]
