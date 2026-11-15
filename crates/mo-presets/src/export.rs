@@ -188,7 +188,12 @@ pub(crate) fn bitwig_bytes(
         "" if !format.is_empty() => files::plugin_id_of(&p.data, &p.extension),
         id => id.to_owned(),
     };
-    let own = bitwig::template_by_id(&plugin_id, format, templates).or_else(|| bitwig::template_for(p, templates));
+    // One found by name is the plugin's own only when it's for this plugin's id too: one for another plugin of the
+    // same name (another build, another maker's) can't be built from as it is, so a stand-in is used instead (PR-4).
+    let own = bitwig::template_by_id(&plugin_id, format, templates).or_else(|| {
+        bitwig::template_for(p, templates)
+            .filter(|t| plugin_id.is_empty() || t.plugin_id.is_empty() || t.plugin_id == plugin_id)
+    });
     let (template, other) =
         own.map(|t| (t, false)).or_else(|| bitwig::stand_in_for(p, templates).map(|t| (t, true)))?;
     let raw = read

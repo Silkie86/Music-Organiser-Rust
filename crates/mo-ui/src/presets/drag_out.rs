@@ -11,7 +11,7 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use mo_app::drag_out::{self, Payload};
@@ -23,7 +23,9 @@ use mo_presets::drag::{self as carried, Carried, File};
 use mo_presets::library::Source;
 use slint::ComponentHandle;
 
-use super::{PAGE, export_setup, picked_curve_as_sent, row_curve_as_sent, templates_now, without_template};
+use super::{
+    PAGE, export_setup, picked_curve_as_sent, row_curve_as_sent, set_message, templates_now, without_template,
+};
 use crate::drag::{self, Drag, Outcome};
 use crate::{AppWindow, PresetsData};
 
@@ -123,19 +125,21 @@ pub fn curve_card_at_row(row: usize) -> Option<Payload> {
 fn carry_preset(app: &AppWindow, at: usize, spot: Spot) {
     let Some((item, tint)) = item(app, at) else { return };
     let (_, templates, bitwig_folders, _) = export_setup();
+    // Why it went out as its plugin's own preset, for the page to say once the drag is over (PR-2).
+    let why_not: Arc<Mutex<Option<String>>> = Arc::default();
+    let said = Arc::clone(&why_not);
     let under_way = drag::start(
         app,
         Drag {
             make: Box::new(move || {
                 let carried = carry_of(&item, templates, &bitwig_folders)?;
                 if let Some(why) = &carried.why_not {
-                    log::info(
-                        "Presets",
-                        &format!(
-                            "{} went out as its plugin's own preset, not as a Bitwig preset: {why}",
-                            item.row.name
-                        ),
+                    let text = format!(
+                        "{} went out as its plugin's own preset, not as a Bitwig preset: {why}.",
+                        item.row.name
                     );
+                    log::info("Presets", &text);
+                    *said.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
                 }
                 drag_out::preset(carried, &item.row.name, &item.row.plugin, tint)
                     .write(&std::env::temp_dir())
@@ -145,6 +149,9 @@ fn carry_preset(app: &AppWindow, at: usize, spot: Spot) {
                 lift(app, spot, false);
                 if outcome == Outcome::Landed {
                     drag::glow(app, move |app, on| glow(app, spot, on));
+                }
+                if let Some(why) = why_not.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+                    set_message(app, &why);
                 }
             }),
         },

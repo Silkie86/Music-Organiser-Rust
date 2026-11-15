@@ -418,7 +418,9 @@ impl KnownPlugins {
     /// knows best), and fills in a song's that its save doesn't say; your songs' fill in what's left unknown. A file
     /// named only by its plugin's id gets the plugin's name.
     pub fn fill(&self, row: &mut PresetRow) {
-        let by_id = self.by_id.get(&id_key(&row.plugin));
+        // Only a preset file can be named by its plugin's id: a song's plugin is always named (PR-5).
+        let is_file = matches!(row.source, Source::File { .. });
+        let by_id = if is_file { self.by_id.get(&id_key(&row.plugin)) } else { None };
         if let Some((name, _)) = by_id
             && !name.is_empty()
         {
@@ -426,7 +428,6 @@ impl KnownPlugins {
         }
         let key = mo_formats::plugins::name_key(&row.plugin);
         let scanned = by_id.map(|(_, k)| *k).or_else(|| self.scanned.get(&key).copied());
-        let is_file = matches!(row.source, Source::File { .. });
         match scanned {
             Some(kind) if is_file || row.kind == PluginKind::Unknown => row.kind = kind,
             _ if row.kind == PluginKind::Unknown => {
@@ -437,9 +438,11 @@ impl KnownPlugins {
     }
 }
 
-/// A plugin id to match by: small letters, no dashes or braces (a VST3 id is written both ways).
+/// A plugin id to match by: a VST3's class id (32 hex digits) in small letters with no dashes or braces, as it's
+/// written both ways; a VST2's four letters as they are, as "abcd" and "ABCD" are two plugins (PR-5).
 fn id_key(id: &str) -> String {
-    id.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase()
+    let bare: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if bare.len() == 32 && bare.chars().all(|c| c.is_ascii_hexdigit()) { bare.to_ascii_lowercase() } else { bare }
 }
 
 /// The scanner's word for what a plugin is.
@@ -1379,6 +1382,14 @@ pub fn audition_id(i: &Item) -> String {
     }
 }
 
+/// Whether `id` is the line's [`audition_id`], worked out without making it (Ctrl+K looks through every line, PR-1).
+pub fn has_audition_id(i: &Item, id: &str) -> bool {
+    match &i.row.source {
+        Source::Song { save, key } => id.split_once('\0').is_some_and(|(s, k)| s == save && k == key),
+        Source::File { .. } => !id.contains('\0') && i.path() == id,
+    }
+}
+
 /// Whether a sound's settings can go into a Bitwig preset: a VST2 or VST3 plugin's (not an FL plugin's own state).
 pub fn can_be_bitwig(extension: &str) -> bool {
     !mo_presets::bitwig::state_format(extension).is_empty()
@@ -2133,6 +2144,14 @@ mod tests {
         let mut fxp = PresetRow { kind: PluginKind::Unknown, plugin: "XfsX".into(), ..file("Wobble", "/p/Wobble.fxp") };
         known.fill(&mut fxp);
         assert_eq!((fxp.plugin.as_str(), fxp.kind), ("Serum", PluginKind::Instrument));
+        // A VST2 id is matched to the letter, and a song's plugin isn't looked up by id at all (PR-5).
+        let mut lower = PresetRow { kind: PluginKind::Unknown, plugin: "xfsx".into(), ..file("W", "/p/W.fxp") };
+        known.fill(&mut lower);
+        assert_eq!(lower.plugin, "xfsx");
+        let mut named = PresetRow { kind: PluginKind::Effect, ..row("Q", "XfsX", None, "/s/A.flp") };
+        known.fill(&mut named);
+        assert_eq!(named.plugin, "XfsX");
+        assert_eq!(id_key("{01234567-89AB-CDEF-0123-456789ABCDEF}"), id_key("0123456789abcdef0123456789abcdef"));
         // The installed plugin's own file wins over what a preset file says.
         let mut room = PresetRow { plugin: "bx_roomMS".into(), ..file("Hall", "/p/Hall.vstpreset") };
         known.fill(&mut room);
@@ -2398,6 +2417,11 @@ mod tests {
         // A sound in a song waits for an export to finish, as Send to Bitwig does.
         assert!(!offers(&all[0], true, Hearing::Off).iter().any(|o| o.id == act::AUDITION && o.enabled));
         assert_ne!(audition_id(&all[0]), audition_id(&all[3]));
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                assert_eq!(has_audition_id(a, &audition_id(b)), audition_id(a) == audition_id(b), "{i} {j}");
+            }
+        }
         assert_eq!(part_of("presets.part.bass"), Some(Role::Bass));
         assert_eq!(part_of("presets.export"), None);
         let mut fixed = all[0].clone();
