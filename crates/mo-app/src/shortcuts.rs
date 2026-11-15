@@ -229,9 +229,11 @@ pub const SPACE_ACTIONS: &[Action] = &[
     action(
         "space.removeFixed",
         if cfg!(windows) {
-            "Send every \"(fixed)\" Bitwig project Fix wrote to the Recycle Bin, so the saves can be fixed again"
+            "Send every \"(fixed)\" Bitwig project Fix wrote to the Recycle Bin, so the saves can be fixed again (not \
+             one you've saved in since)"
         } else {
-            "Send every \"(fixed)\" Bitwig project Fix wrote to the Trash, so the saves can be fixed again"
+            "Send every \"(fixed)\" Bitwig project Fix wrote to the Trash, so the saves can be fixed again (not one \
+             you've saved in since)"
         },
         "",
     ),

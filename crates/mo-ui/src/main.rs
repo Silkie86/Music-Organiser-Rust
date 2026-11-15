@@ -85,6 +85,9 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.
     mo_app::tidy::start(library.clone());
+    // The note of what Space's Fix writes begins now if it hasn't, so a "(fixed)" project you save in from now on stays
+    // out of the Recycle Bin (the whole-app review of 14 Nov, FX-5).
+    mo_app::space_fix_note::begin_soon();
     if !songs_db.is_songs_db() {
         // The saves list is read from a small copy of the app's own while library.db hasn't changed (it's slow to
         // read out of library.db itself; songs.db needs no copy).

@@ -349,8 +349,8 @@ fn a_library_folder_inside_the_project_never_counts() {
     }
 }
 
-/// While Solomon tests Fix: every "(fixed)" project Fix wrote goes to the bin in one go, and only those; Put back
-/// brings them back.
+/// While Solomon tests Fix: every "(fixed)" project Fix wrote goes to the bin in one go, and only those (each still as
+/// Fix left it, which the app's note answers: here, all are); Put back brings them back.
 #[test]
 fn the_fixed_projects_fix_wrote_go_to_the_bin_and_come_back() {
     let dir = fixtures("mo-space-bitwig-fixed-projects");
@@ -380,7 +380,7 @@ fn the_fixed_projects_fix_wrote_go_to_the_bin_and_come_back() {
     sent.push(garage.join("Gone (fixed).bwproject"));
     fs::remove_file(&fixed[0]).unwrap();
     let bin = FolderBin::new(&dir);
-    let done = remove_fixed_projects(&sent, &bin, &stop);
+    let done = remove_fixed_projects(&sent, &|_, _| Ok(()), &bin, &stop);
     let gone: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
     assert_eq!(gone, [s(&fixed[1]), s(&fixed[2])]);
     assert!(done.removed.iter().all(|r| r.what == What::FixedProject));
@@ -396,6 +396,35 @@ fn the_fixed_projects_fix_wrote_go_to_the_bin_and_come_back() {
     assert!(bin.find(&mut removed).is_empty());
     assert!(undo(&mo_space::clean::Done { removed, ..done }, &bin).is_empty());
     assert!(fixed[1].is_file() && fixed[2].is_file(), "Put back brings them back");
+}
+
+/// One you've saved in since Fix wrote it is yours (rule 3): it stays where it is, with why, as the app's note of what
+/// Fix wrote says (the whole-app review of 14 Nov, FX-5). The note is asked once for each, with the file's own size.
+#[test]
+fn a_fixed_project_saved_in_since_fix_wrote_it_stays() {
+    let dir = fixtures("mo-space-bitwig-fixed-saved-in");
+    let garage = dir.join("Projects/Garage");
+    write(&garage, "Garage 2.bwproject", b"BtWg");
+    write(&garage, "Garage 2 (fixed).bwproject", b"BtWg fixed");
+    write(&garage, "Garage 2 (fixed 2).bwproject", b"BtWg fixed, then saved in");
+    let as_left = garage.join("Garage 2 (fixed).bwproject");
+    let saved_in = garage.join("Garage 2 (fixed 2).bwproject");
+    let asked = RefCell::new(Vec::new());
+    let as_fix_left = |path: &Path, meta: &fs::Metadata| {
+        asked.borrow_mut().push((s(path), meta.len()));
+        if path == saved_in { Err("Saved in since.".to_owned()) } else { Ok(()) }
+    };
+    let stop = AtomicBool::new(false);
+    let found = fixed_projects(std::slice::from_ref(&garage), &stop).unwrap();
+    assert_eq!(found, [saved_in.clone(), as_left.clone()]);
+    let bin = FolderBin::new(&dir);
+    let done = remove_fixed_projects(&found, &as_fix_left, &bin, &stop);
+    let gone: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(gone, [s(&as_left)]);
+    assert_eq!(done.bytes(), 10);
+    assert_eq!(done.problems, [Problem { path: s(&saved_in), why: "Saved in since.".to_owned() }]);
+    assert!(saved_in.is_file() && !as_left.exists());
+    assert_eq!(*asked.borrow(), [(s(&saved_in), 25), (s(&as_left), 10)]);
 }
 
 /// A folder standing in for the Recycle Bin.

@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 use mo_app::space_bitwig::{Copies, Fixes, Fixing, fix, look};
+use mo_app::space_fix_note;
 use mo_formats::bitwig::{self, Field, Object, Slot, Text, Value};
 use mo_space::key;
 
@@ -198,6 +199,8 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
     let kicks = b"<multisample kicks/>";
     write(&studio, "Library/Multisamples/Kicks.multisample", kicks);
     let song = studio.join("Projects/Song");
+    // The app's note of what Fix wrote, here rather than in the data folder.
+    let note = dir.join(space_fix_note::FILE_NAME);
     write(&song, "multi-samples/Kicks-2.multisample", kicks);
     project(&song.join("Song v1.bwproject"), "Kicks-2.multisample", 10);
     project(&song.join("Song v2.bwproject"), "Kicks-2.multisample", 20);
@@ -213,7 +216,7 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
     let jobs = fixes.to_fix(&found);
     assert_eq!(jobs.iter().map(|j| name(&j.save)).collect::<Vec<_>>(), ["Song v2.bwproject"]);
     fixes.start(&jobs);
-    let Fixing::Written(fixed) = fix(&jobs[0]) else { panic!("the newest save should be fixed") };
+    let Fixing::Written(fixed) = fix(&jobs[0], &note) else { panic!("the newest save should be fixed") };
     assert_eq!(fixed, song.join("Song v2 (fixed).bwproject"));
     let back = bitwig::decode(fs::read(&fixed).unwrap()).unwrap();
     assert_eq!(back.body_error, None);
@@ -233,7 +236,21 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
     fixes.ticks.insert(song.join("Song v1.bwproject"), true);
     let jobs = fixes.to_fix(&again);
     assert_eq!(jobs.iter().map(|j| name(&j.save)).collect::<Vec<_>>(), ["Song v1.bwproject"]);
-    assert_eq!(fix(&jobs[0]), Fixing::Written(song.join("Song v1 (fixed).bwproject")));
+    assert_eq!(fix(&jobs[0], &note), Fixing::Written(song.join("Song v1 (fixed).bwproject")));
+
+    // Each is on the app's note as Fix left it, so the button that sends every fixed project to the Recycle Bin may
+    // send it; one you've saved in since stays (the whole-app review of 14 Nov, FX-5).
+    let v1 = song.join("Song v1 (fixed).bwproject");
+    let check = space_fix_note::Check::new(&note);
+    for file in [&fixed, &v1] {
+        assert_eq!(check.as_fix_left(file, &fs::metadata(file).unwrap()), Ok(()), "{}", file.display());
+    }
+    fs::write(&v1, b"saved in Bitwig").unwrap();
+    let later = SystemTime::now() + Duration::from_secs(60);
+    fs::File::options().write(true).open(&v1).unwrap().set_modified(later).unwrap();
+    let changed = space_fix_note::Stays::Changed;
+    assert_eq!(check.as_fix_left(&v1, &fs::metadata(&v1).unwrap()), Err(changed.why().to_owned()));
+    assert_eq!(check.stayed().get(&key(&v1.to_string_lossy())), Some(&changed));
 
     // A save that names none of the copies isn't fixed, and says why.
     let other = studio.join("Projects/Other");
@@ -246,7 +263,7 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
         copies: other.copies.clone(),
         libraries: Vec::new(),
     };
-    let Fixing::Failed(why) = fix(&job) else { panic!("a save that uses none of the copies isn't fixed") };
+    let Fixing::Failed(why) = fix(&job, &note) else { panic!("a save that uses none of the copies isn't fixed") };
     assert!(why.contains("nothing was written"), "{why}");
 }
 

@@ -8,7 +8,7 @@
 //! [`saves_in`] lists a project folder's saves, each with its "(fixed)" project when it has one. [`remove_copies`]
 //! sends the copies a "(fixed)" project no longer uses to the Recycle Bin, once you've opened it. [`fixed_projects`]
 //! and [`remove_fixed_projects`] send the "(fixed)" projects themselves there, so the saves can be fixed again (while
-//! Solomon tests Fix, 11 Nov 2026).
+//! Solomon tests Fix, 11 Nov 2026), but only those still as Fix left them (Solomon, 15 Nov).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -387,9 +387,9 @@ pub fn fixed_projects(folders: &[PathBuf], stop: &AtomicBool) -> Result<Vec<Path
     Ok(out)
 }
 
-/// Whether a file is a "(fixed)" project Fix wrote, as far as can be told: a plain file (not a link) named as Fix
-/// names them, with the save it was written from beside it. Err says why not, in plain words.
-fn written_by_fix(path: &Path) -> Result<u64, String> {
+/// Whether a file is a "(fixed)" project Fix wrote, as far as its name and place can tell: a plain file (not a link)
+/// named as Fix names them, with the save it was written from beside it. Its metadata, or why not in plain words.
+fn written_by_fix(path: &Path) -> Result<fs::Metadata, String> {
     let stays = |why: &str| Err(why.to_owned());
     let project = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bwproject"));
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -408,14 +408,27 @@ fn written_by_fix(path: &Path) -> Result<u64, String> {
     if !fs::metadata(&save).is_ok_and(|m| m.is_file()) {
         return stays("The save it was written from isn't beside it, so it may not be Fix's: it stays.");
     }
+    Ok(meta)
+}
+
+/// Whether a "(fixed)" project is still as Fix left it, given the file and its metadata: the app's own note of what
+/// Fix wrote answers ([`remove_fixed_projects`]). Err says why it stays, in plain words.
+pub type AsFixLeft<'a> = &'a dyn Fn(&Path, &fs::Metadata) -> Result<(), String>;
+
+/// Whether a file may go with the "(fixed)" projects: Fix wrote it ([`written_by_fix`]) and it's still as Fix left it
+/// (`as_fix_left`). Its size, or why it stays.
+fn may_go(path: &Path, as_fix_left: AsFixLeft<'_>) -> Result<u64, String> {
+    let meta = written_by_fix(path)?;
+    as_fix_left(path, &meta)?;
     Ok(meta.len())
 }
 
-/// Sends "(fixed)" projects Fix wrote to the Recycle Bin, so their saves can be fixed again. Each is checked again
-/// just before it goes ([`fixed_projects`]: named as Fix names them, its save beside it); the save, its copies and
-/// everything else in the folder stay. Put back brings them back. One you've worked on in Bitwig since goes too: it's
-/// in the Recycle Bin, not gone.
-pub fn remove_fixed_projects(files: &[PathBuf], bin: &dyn Bin, stop: &AtomicBool) -> Done {
+/// Sends "(fixed)" projects Fix wrote to the Recycle Bin, so their saves can be fixed again: each one still as Fix left
+/// it (`as_fix_left`). One you've saved in Bitwig since is yours (rule 3), so it stays, with why (the whole-app review
+/// of 14 Nov, FX-5: Solomon chose this on 15 Nov; before, it went too). Each is checked again just before it goes
+/// ([`fixed_projects`]: named as Fix names them, its save beside it, and still as Fix left it); the save, its copies
+/// and everything else in the folder stay. Put back brings them back.
+pub fn remove_fixed_projects(files: &[PathBuf], as_fix_left: AsFixLeft<'_>, bin: &dyn Bin, stop: &AtomicBool) -> Done {
     let mut done = Done::default();
     let mut sending = Sending::new(bin, stop);
     for file in files {
@@ -423,7 +436,7 @@ pub fn remove_fixed_projects(files: &[PathBuf], bin: &dyn Bin, stop: &AtomicBool
             done.problems.push(Problem { path: text(file), why: STOPPED.to_owned() });
             continue;
         }
-        let bytes = match written_by_fix(file) {
+        let bytes = match may_go(file, as_fix_left) {
             Ok(bytes) => bytes,
             Err(why) => {
                 done.problems.push(Problem { path: text(file), why });
@@ -431,7 +444,7 @@ pub fn remove_fixed_projects(files: &[PathBuf], bin: &dyn Bin, stop: &AtomicBool
             }
         };
         let real = real_path(&text(file)).unwrap_or_else(|| text(file));
-        let again = move || written_by_fix(file).map(|_| ());
+        let again = move || may_go(file, as_fix_left).map(|_| ());
         sending.send(&text(file), real, bytes, What::FixedProject, &mut done, again);
     }
     sending.finish(&mut done);
