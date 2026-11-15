@@ -7,6 +7,7 @@
 //! It only reads: this app's session logs (`rust-session-….log`) and crash logs (`crash-….log`) in the logs folder
 //! from the last [`DAYS`] days, a line at a time, at low priority, never on the window's thread.
 
+use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
@@ -32,84 +33,125 @@ pub struct LogFacts {
     pub crash_files: Vec<String>,
     /// Each freeze: how long (ms) and its line.
     pub freezes: Vec<(u64, String)>,
-    /// Each run's time to the first frame, in seconds.
-    pub starts: Vec<f64>,
-    /// Error lines (with the log's name in front), and how many in all.
-    pub errors: Vec<String>,
+    /// Each run's time to the first frame, in seconds, and its line.
+    pub starts: Vec<(f64, String)>,
+    /// The newest error lines (with the log's name in front), and how many in all. Crash and freeze lines aren't
+    /// counted: they have steps of their own.
+    pub errors: VecDeque<String>,
     pub error_count: usize,
     /// Logs that couldn't be read.
     pub unread: Vec<String>,
 }
 
-/// Reads the logs in `dir` changed since `since`. The log of this run (`skip`, if any) is read too: it's the newest.
+/// Reads the logs in `dir` from `since` on, this run's too: by each line's own time (a log's name has the day it
+/// started, its lines the time of day), so a run that started before `since` counts only its later lines.
 pub fn read_logs(dir: &Path, since: SystemTime) -> io::Result<LogFacts> {
+    let from = chrono::DateTime::<chrono::Local>::from(since).naive_local();
     let mut facts = LogFacts::default();
     let mut names: Vec<(String, SystemTime)> = Vec::new();
     for entry in fs::read_dir(dir)? {
         let Ok(entry) = entry else { continue };
-        let Ok(meta) = entry.metadata() else { continue };
-        // Never through a link, and only plain files (rule 28's care, though this only reads).
-        if !meta.is_file() || entry.file_type().map(|t| t.is_symlink()).unwrap_or(true) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Only the names the app gives its logs, and only plain files, never through a link (rule 28's care, though
+        // this only reads).
+        if !crate::log::is_session_log(&name) && !crate::log::is_crash_log(&name) {
             continue;
         }
-        let changed = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let changed = entry.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
         if changed < since {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
         names.push((name, changed));
     }
     names.sort_by_key(|(_, t)| *t);
     for (name, _) in names {
         if crate::log::is_crash_log(&name) {
             facts.crash_files.push(name);
-        } else if crate::log::is_session_log(&name) {
+        } else {
             facts.runs += 1;
             match File::open(dir.join(&name)) {
-                Ok(f) => read_one(&name, BufReader::new(f), &mut facts),
+                Ok(f) => read_one(&name, BufReader::new(f), from, &mut facts),
                 Err(e) => facts.unread.push(format!("{name}: {e}")),
             }
         }
     }
+    let skip = facts.crash_files.len().saturating_sub(KEPT);
+    facts.crash_files.drain(..skip);
     Ok(facts)
 }
 
-fn read_one(name: &str, lines: impl BufRead, facts: &mut LogFacts) {
+/// When a session log started, from its name (`rust-session-2026-11-15_10-00-00.log`).
+fn started(name: &str) -> Option<chrono::NaiveDateTime> {
+    let stamp = name.strip_prefix(crate::log::PREFIX)?.get(..19)?;
+    chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d_%H-%M-%S").ok()
+}
+
+/// Reads one session log's lines from `from` on (all of them when its name has no time).
+fn read_one(name: &str, lines: impl BufRead, from: chrono::NaiveDateTime, facts: &mut LogFacts) {
+    let mut day = started(name);
+    let mut last_time: Option<chrono::NaiveTime> = None;
+    // A "still stuck" freeze waits for its "was stuck" line, which says how long it really was: only when none follows
+    // (the app was closed while stuck) does it count by itself.
+    let mut stuck: Option<(u64, String)> = None;
     for line in lines.split(b'\n') {
         let Ok(line) = line else { break };
         let line = String::from_utf8_lossy(&line);
         let line = line.trim_end();
-        let Some((level, area, message)) = split_line(line) else { continue };
+        let Some((time, level, area, message)) = split_line(line) else { continue };
+        // The day moves on when the time of day goes back past midnight.
+        if let (Some(d), Some(t)) = (day.as_mut(), chrono::NaiveTime::parse_from_str(time, "%H:%M:%S%.3f").ok()) {
+            if last_time.is_some_and(|l| t < l) {
+                *d += chrono::Duration::days(1);
+            }
+            last_time = Some(t);
+            if d.date().and_time(t) < from {
+                continue;
+            }
+        }
+        let kept = || format!("{name}: {line}");
         match area {
             "Start" => {
                 if let Some(secs) = start_secs(message) {
-                    facts.starts.push(secs);
+                    facts.starts.push((secs, kept()));
                 }
             }
             "Freeze" => {
-                if let Some(ms) = freeze_ms(message) {
-                    facts.freezes.push((ms, format!("{name}: {line}")));
+                if message.starts_with("The window is still stuck") {
+                    if let Some(ms) = freeze_ms(message) {
+                        stuck = Some((ms, kept()));
+                    }
+                } else if let Some(ms) = freeze_ms(message) {
+                    stuck = None;
+                    facts.freezes.push((ms, kept()));
                 }
             }
             _ => {}
         }
-        if level == "Error" {
+        // Crashes and freezes have their own steps.
+        if level == "Error" && area != "Crash" && area != "Freeze" {
             facts.error_count += 1;
-            if facts.errors.len() < KEPT {
-                facts.errors.push(format!("{name}: {line}"));
+            facts.errors.push_back(kept());
+            if facts.errors.len() > KEPT {
+                facts.errors.pop_front();
             }
         }
     }
+    if let Some(s) = stuck {
+        facts.freezes.push(s);
+    }
 }
 
-/// A log line's level, area and message: `12:00:00.000 Warning [Area] message`.
-fn split_line(line: &str) -> Option<(&str, &str, &str)> {
-    let (_, rest) = line.split_once(' ')?;
+/// A log line's time, level, area and message: `12:00:00.000 Warning [Area] message`.
+fn split_line(line: &str) -> Option<(&str, &str, &str, &str)> {
+    let (time, rest) = line.split_once(' ')?;
     let rest = rest.trim_start();
     let (level, rest) = rest.split_once(' ')?;
     let rest = rest.trim_start().strip_prefix('[')?;
     let (area, message) = rest.split_once("] ")?;
-    Some((level, area, message))
+    Some((time, level, area, message))
 }
 
 /// "Window drawn 2.31 s after the app started: …" → 2.31.
@@ -153,7 +195,7 @@ pub fn findings(facts: &LogFacts, data: &Path, windows: bool) -> Vec<Found> {
                 "auto.crashes",
                 Mark::Problem,
                 format!("{} crash logs in {days} ({runs} runs)", facts.crash_files.len()),
-                facts.crash_files.iter().take(KEPT).cloned().collect(),
+                facts.crash_files.clone(),
             )
         });
     }
@@ -185,12 +227,12 @@ pub fn findings(facts: &LogFacts, data: &Path, windows: bool) -> Vec<Found> {
                 "auto.errors",
                 Mark::Problem,
                 format!("{} error lines in {runs} runs in {days}", facts.error_count),
-                facts.errors.clone(),
+                facts.errors.iter().cloned().collect(),
             )
         });
     }
     if !facts.starts.is_empty() {
-        let mut s = facts.starts.clone();
+        let mut s: Vec<f64> = facts.starts.iter().map(|(secs, _)| *secs).collect();
         s.sort_by(f64::total_cmp);
         let middle = s[s.len() / 2];
         let slowest = s[s.len() - 1];
@@ -198,12 +240,19 @@ pub fn findings(facts: &LogFacts, data: &Path, windows: bool) -> Vec<Found> {
             "{} starts: usually {middle:.1} s to the window, the slowest {slowest:.1} s (a Problem from {SLOW_START_SECS:.0} s)",
             s.len()
         );
-        out.push(found(
-            "auto.start",
-            if middle <= SLOW_START_SECS { Mark::Works } else { Mark::Problem },
-            note,
-            Vec::new(),
-        ));
+        let slow: Vec<String> = facts
+            .starts
+            .iter()
+            .rev()
+            .filter(|(secs, _)| *secs > SLOW_START_SECS)
+            .take(KEPT)
+            .map(|(_, l)| l.clone())
+            .collect();
+        out.push(if middle <= SLOW_START_SECS {
+            found("auto.start", Mark::Works, note, Vec::new())
+        } else {
+            found("auto.start", Mark::Problem, note, slow)
+        });
     }
     let on_c = windows && data.to_string_lossy().get(..2).is_some_and(|d| d.eq_ignore_ascii_case("c:"));
     out.push(if on_c {
@@ -211,7 +260,7 @@ pub fn findings(facts: &LogFacts, data: &Path, windows: bool) -> Vec<Found> {
             "auto.data-folder",
             Mark::Problem,
             format!("The data folder is on C: ({}), the full drive", data.display()),
-            Vec::new(),
+            vec![format!("Data folder: {}", data.display())],
         )
     } else {
         found("auto.data-folder", Mark::Works, format!("The data folder is {}", data.display()), Vec::new())
@@ -235,22 +284,30 @@ mod tests {
 10:02:00.000 Warning [Freeze] The window was stuck for 300 ms (page Songs; no jobs running; busy)
 10:03:00.000 Error   [Settings] Couldn't save rust-settings.json: denied
 10:04:00.000 Error   [Freeze] The window is still stuck after 3.0 s (page MIDI; no jobs running; busy)
+10:04:02.000 Warning [Freeze] The window was stuck for 4100 ms (page MIDI; no jobs running; busy)
+10:05:00.000 Error   [Crash] something broke
+10:06:00.000 Error   [Freeze] The window is still stuck after 3.0 s (page Songs; no jobs running; busy)
 ";
+
+    fn long_ago() -> chrono::NaiveDateTime {
+        chrono::NaiveDate::from_ymd_opt(2000, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0)).expect("a date")
+    }
 
     #[test]
     fn reads_a_log() {
         let mut facts = LogFacts::default();
-        read_one("rust-session-1.log", LOG.as_bytes(), &mut facts);
-        assert_eq!(facts.starts, [2.31]);
-        assert_eq!(facts.freezes.iter().map(|f| f.0).collect::<Vec<_>>(), [1520, 300, 3000]);
-        assert_eq!(facts.error_count, 2);
+        read_one("rust-session-1.log", LOG.as_bytes(), long_ago(), &mut facts);
+        assert_eq!(facts.starts.iter().map(|s| s.0).collect::<Vec<_>>(), [2.31]);
+        // The 3 s "still stuck" counts as the 4100 ms it was; the last one, with no end, by itself.
+        assert_eq!(facts.freezes.iter().map(|f| f.0).collect::<Vec<_>>(), [1520, 300, 4100, 3000]);
+        assert_eq!(facts.error_count, 1, "crash and freeze lines have their own steps");
         assert!(facts.errors[0].starts_with("rust-session-1.log: 10:03"));
     }
 
     #[test]
     fn findings_mark_each_step() {
         let mut facts = LogFacts { runs: 2, ..LogFacts::default() };
-        read_one("a.log", LOG.as_bytes(), &mut facts);
+        read_one("a.log", LOG.as_bytes(), long_ago(), &mut facts);
         let f = findings(&facts, Path::new("I:\\MusicOrganiser"), true);
         let by = |id: &str| f.iter().find(|x| x.id == id).map(|x| x.mark);
         assert_eq!(by("auto.crashes"), Some(Mark::Works));
@@ -259,8 +316,8 @@ mod tests {
         assert_eq!(by("auto.start"), Some(Mark::Works));
         assert_eq!(by("auto.data-folder"), Some(Mark::Works));
         let freezes = f.iter().find(|x| x.id == "auto.freezes").expect("there");
-        assert_eq!(freezes.lines.len(), 2);
-        assert!(freezes.note.contains("3000 ms"), "{}", freezes.note);
+        assert_eq!(freezes.lines.len(), 3);
+        assert!(freezes.note.contains("4100 ms"), "{}", freezes.note);
         let c = findings(&LogFacts::default(), Path::new("C:\\Users\\x\\AppData\\Local\\MusicOrganiser"), true);
         assert_eq!(c.len(), 1, "nothing to go on but the folder");
         assert_eq!(c[0].mark, Mark::Problem);
@@ -270,11 +327,30 @@ mod tests {
 
     #[test]
     fn every_finding_is_a_step_of_the_list() {
-        let facts = LogFacts { runs: 1, starts: vec![1.0], ..LogFacts::default() };
+        let facts = LogFacts { runs: 1, starts: vec![(1.0, String::new())], ..LogFacts::default() };
         let steps = crate::beta::steps();
         for f in findings(&facts, Path::new("/d"), false) {
             assert!(steps.iter().any(|s| s.id == f.id), "{} isn't on the checklist", f.id);
         }
+    }
+
+    #[test]
+    fn lines_before_the_window_are_left_out() {
+        let name = "rust-session-2026-11-01_23-59-00.log";
+        let text = "23:59:30.000 Error   [A] old\n00:00:30.000 Error   [A] new, the next day\n";
+        let from = chrono::NaiveDate::from_ymd_opt(2026, 11, 2).and_then(|d| d.and_hms_opt(0, 0, 0)).expect("a date");
+        let mut facts = LogFacts::default();
+        read_one(name, text.as_bytes(), from, &mut facts);
+        assert_eq!(facts.error_count, 1);
+        assert!(facts.errors[0].contains("new"));
+    }
+
+    #[test]
+    fn a_slow_start_keeps_its_lines() {
+        let facts = LogFacts { runs: 1, starts: vec![(7.0, "slow".into())], ..LogFacts::default() };
+        let f = findings(&facts, Path::new("/d"), false);
+        let start = f.iter().find(|x| x.id == "auto.start").expect("there");
+        assert_eq!((start.mark, start.lines.clone()), (Mark::Problem, vec!["slow".to_owned()]));
     }
 
     #[test]

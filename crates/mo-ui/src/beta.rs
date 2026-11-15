@@ -39,6 +39,8 @@ struct Checklist {
 thread_local! {
     static LIST: RefCell<Option<Checklist>> = const { RefCell::new(None) };
     static WRITER: RefCell<Option<Newest<(PathBuf, String)>>> = const { RefCell::new(None) };
+    /// Looks each hour whether the daily self-check is due.
+    static DAILY_TIMER: slint::Timer = slint::Timer::default();
 }
 
 /// One save at a time: the writer thread and the last save as the app closes ([`finish_up`]) both write through the
@@ -166,18 +168,23 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
     let weak = app.as_weak();
     data.on_beta_self_check(move || {
         let Some(app) = weak.upgrade() else { return };
-        self_check(&app, "asked for");
+        run_self_check(&app, "asked for");
     });
-    // Once a day by itself, a while after the start (at low priority, out of the start's way).
-    let due = LIST.with(|l| {
-        l.borrow().as_ref().is_some_and(|l| l.writable && now_secs().saturating_sub(l.marks.self_checked) >= DAILY)
-    });
-    if due {
+    // Once a day by itself: a while after the start (out of its way), then each hour it looks whether a day has
+    // gone by, for an app left open for days.
+    if live {
         let weak = app.as_weak();
         slint::Timer::single_shot(SELF_CHECK_AFTER, move || {
-            if let Some(app) = weak.upgrade() {
-                self_check(&app, "daily");
-            }
+            let Some(app) = weak.upgrade() else { return };
+            self_check_if_due(&app);
+            let weak = app.as_weak();
+            DAILY_TIMER.with(|t| {
+                t.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(3600), move || {
+                    if let Some(app) = weak.upgrade() {
+                        self_check_if_due(&app);
+                    }
+                })
+            });
         });
     }
     data.on_beta_show_file(move || {
@@ -199,8 +206,18 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// Runs the self-check when it last ran a day ago or more (and marks can be kept).
+fn self_check_if_due(app: &AppWindow) {
+    let due = LIST.with(|l| {
+        l.borrow().as_ref().is_some_and(|l| l.writable && now_secs().saturating_sub(l.marks.self_checked) >= DAILY)
+    });
+    if due {
+        run_self_check(app, "daily");
+    }
+}
+
 /// Runs the self-check off the window's thread, at low priority, then marks its steps.
-fn self_check(app: &AppWindow, why: &'static str) {
+fn run_self_check(app: &AppWindow, why: &'static str) {
     let go = LIST.with(|l| {
         let mut l = l.borrow_mut();
         let l = l.as_mut()?;

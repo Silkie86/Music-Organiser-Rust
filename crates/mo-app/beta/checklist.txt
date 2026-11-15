@@ -99,7 +99,7 @@ plugin.chord-check | Play chords into the Chord check tab and label a few takes 
 plugin.unload | In FL, remove the plugin from a channel, then close the project | FL doesn't crash
 
 == Files
-files.real-check | Run "Real files check.cmd" from the tools folder (auto) | It ends with no panics; Claude reads the summary
+files.real-check | Run "Real files check.cmd" from the tools folder | It ends with no panics; Claude reads the summary
 
 == Self-check
 # Marked by the app itself (mo_app::self_check), once a day and from Run the self-check; never by hand.
