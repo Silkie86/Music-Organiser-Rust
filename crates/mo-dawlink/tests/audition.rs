@@ -411,6 +411,40 @@ fn a_preset_bitwig_doesnt_load_leaves_no_track() {
     let world = bitwig.world();
     assert_eq!(world.tracks.len(), before);
     assert!(world.requests.iter().all(|r| r["cmd"] != "clip"));
+    // Nothing started Bitwig, so the take-out doesn't ask it to stop: Stop on a stopped Bitwig moves the play start
+    // back to bar 1 (the review's BW-2).
+    let out = world.requests.iter().find(|r| r["cmd"] == "deletetrack").expect("the track was taken out");
+    assert_eq!(out["transport"], json!(false));
+}
+
+/// The review's BW-2, by what it did: with an extension before 3.28 (which pressed Stop whenever it was asked), a
+/// preset that doesn't load, and an audition replaced while its preset loads, leave the play start where it was.
+#[test]
+fn an_audition_that_never_played_leaves_the_play_start_with_an_older_extension() {
+    let old = |w: &mut World| {
+        w.hello.insert("extension".into(), json!("3.27"));
+        w.transport.play_start = 128.0;
+        w.unloadable = vec!["Broken.bwpreset".into()];
+    };
+    let bitwig = with(old);
+    bitwig.bitwig().audition_preset(preset("Broken"), part("MO Play 31"), "Broken", &turn(), &|| true).unwrap_err();
+    assert_eq!(bitwig.world().transport.play_start, 128.0);
+
+    // Replaced by a newer press once its track is in: wanted at first, then not.
+    let bitwig = with(|w| {
+        old(w);
+        w.unloadable.clear();
+    });
+    let asked = std::cell::Cell::new(0);
+    let wanted = || {
+        asked.set(asked.get() + 1);
+        asked.get() == 1
+    };
+    let gone = bitwig.bitwig().audition_preset(preset("Slow"), part("MO Play 32"), "Slow", &turn(), &wanted);
+    assert_eq!(gone.unwrap_err(), Error::Cancelled);
+    let world = bitwig.world();
+    assert!(world.requests.iter().all(|r| r["cmd"] != "clip"));
+    assert_eq!(world.transport.play_start, 128.0);
 }
 
 #[test]
