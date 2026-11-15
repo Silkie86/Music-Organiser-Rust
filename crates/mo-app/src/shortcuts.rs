@@ -76,13 +76,16 @@ pub const APP_ACTIONS: &[Action] = &[
 
 /// The Songs page's own actions. The ids are the C# app's Projects page's, so a key changed in either app carries
 /// across; `projects.openOwn` is new here, so the song line's menu and the panel's "Open in FL Studio" have a key too
-/// (rule 15).
+/// (rule 15), and so are the card's heart and tag box's, with the same keys as on Sounds (the whole-app review of 14
+/// Nov, SG-5).
 pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.open", "Open the picked song (FL Studio songs go to Bitwig)", "Ctrl+O"),
     action("projects.openOwn", "Open the picked song in the DAW it was made in", "Ctrl+Shift+O"),
     action("projects.openInBitwig", "Open the picked song in Bitwig (FL Studio songs are converted)", "Ctrl+B"),
     action("projects.reveal", "Show the picked song's file in its folder", "Ctrl+Shift+E"),
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
+    action("projects.favourite", "Make the picked song a favourite, or not", "Ctrl+D"),
+    action("projects.tag", "Type a tag for the picked song", "Ctrl+T"),
 ];
 
 /// The Sounds page's own actions, with the C# Sound Lab's ids and keys. Esc stops the sound playing as it does on every

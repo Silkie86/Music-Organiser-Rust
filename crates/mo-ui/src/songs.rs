@@ -282,12 +282,6 @@ pub fn connect(app: &AppWindow, ahead: Ahead, feed: Feed) {
     });
     data.set_statuses(strings(STATUSES.iter().copied()));
     let weak = app.as_weak();
-    data.on_give(move |what, value| {
-        if let Some(app) = weak.upgrade() {
-            give(&app, &what, &value);
-        }
-    });
-    let weak = app.as_weak();
     data.on_close_panel(move || {
         if let Some(app) = weak.upgrade() {
             pick(&app, None);
@@ -677,10 +671,17 @@ fn wire_filters(app: &AppWindow) {
     data.on_years_cleared(move || change(&weak, |f| f.years = None));
 }
 
-/// The list's keys and its lines' right-click menu: Up and Down, Esc, and the menu (review X3-8, X3-24). For the
-/// screenshots too.
+/// The list's keys and its lines' right-click menu: Up and Down, Esc, and the menu (review X3-8, X3-24), and the
+/// card's status, stars, heart and tags. For the screenshots too: there, with nothing to keep it in, a change only
+/// shows.
 fn wire_list(app: &AppWindow) {
     let data = app.global::<SongsData>();
+    let weak = app.as_weak();
+    data.on_give(move |what, value| {
+        if let Some(app) = weak.upgrade() {
+            give(&app, &what, &value);
+        }
+    });
     let weak = app.as_weak();
     data.on_pick_save(move |path, name| {
         let Some(app) = weak.upgrade() else { return };
@@ -1164,6 +1165,9 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         }
         "projects.reveal" => data.invoke_reveal(),
         "projects.copyPath" => data.invoke_copy_path(),
+        "projects.favourite" => give(app, "favourite", ""),
+        // The card's tag box takes the keys.
+        "projects.tag" => data.set_tag_asked(data.get_tag_asked().wrapping_add(1)),
         _ => return false,
     }
     true

@@ -180,6 +180,11 @@ export global SongsData {
     in property <ActionKey> open-own-key;
     in property <ActionKey> reveal-key;
     in property <ActionKey> copy-key;
+    // The card's heart's and tag box's keys (Ctrl+D and Ctrl+T, as on Sounds); Ctrl+T bumps `tag-asked`, and the tag
+    // box takes the keys.
+    in property <ActionKey> favourite-key;
+    in property <ActionKey> tag-key;
+    in property <int> tag-asked;
     // Opens the picked song's newest save: FL Studio songs go to Bitwig, the rest to their own DAW.
     callback open();
     // Opens the picked song's newest save in its own DAW (FL Studio's "Open in FL Studio").
@@ -241,8 +246,11 @@ component TabRoom inherits VerticalLayout {
     changed preferred-height => { self.wants = self.preferred-height; }
 }
 
-// The picked song: what it is, its counts and its tabs. Read-only until the Rust app's database is trusted.
+// The picked song: what it is, its counts and its tabs. Its status, stars, heart and tags are the song's, on all its
+// saves (rule 14), and are kept in songs.db.
 component SongPanel inherits Panel {
+    // Whether the tag box has the keys: when the card closes with them, the page gives them back to its list.
+    in-out property <bool> tag-keys;
     // How tall the tab on show wants to be, which it says itself (see TabRoom).
     property <length> tab-height;
     // Too narrow for a list line's name to share its line with a date or what's wrong (about 250 px in the narrowest
@@ -252,6 +260,9 @@ component SongPanel inherits Panel {
     // so the new song opens at its name, as it opens on Overview. A new tab keeps the place, as the tabs are in sight.
     property <int> song-row: SongsData.selected;
     changed song-row => { flick.content-y = 0; }
+    // Ctrl+T (projects.tag): the keys go to the tag box, with anything typed in it picked.
+    property <int> tag-asked: SongsData.tag-asked;
+    changed tag-asked => { tag-box.focus-all(); }
 
     // Scrolls when what it holds is taller than the panel, as the other pages' panels do: in a narrow window its
     // rows wrap, and the tab below keeps the room it needs. Otherwise it fills the panel, and the tab's well takes
@@ -351,6 +362,7 @@ component SongPanel inherits Panel {
                 HeartToggle {
                     on: SongsData.song.favourite;
                     tip: SongsData.song.favourite ? "A favourite: click to make it not one" : "Make it a favourite";
+                    key: SongsData.favourite-key.key;
                     clicked => { SongsData.give("favourite", ""); }
                 }
                 if SongsData.song.key != "": HorizontalLayout {
@@ -379,10 +391,17 @@ component SongPanel inherits Panel {
                     clicked => { SongsData.toggle-choice("tag", t.text); }
                     removed => { SongsData.give("remove-tag", t.text); }
                 }
-                WordBox {
+                tag-box := WordBox {
                     width: 160px;
                     hint: "Add a tag";
                     tip: "Type a tag and press Enter: it's kept for the song, on all its saves";
+                    key: SongsData.tag-key.key;
+                    // Not while another app's window is in front: the box gets them back with the window.
+                    changed has-keys => {
+                        if (self.has-keys || AppKeys.window-active) {
+                            root.tag-keys = self.has-keys;
+                        }
+                    }
                     accepted(text) => {
                         SongsData.give("add-tag", text);
                         self.text = "";
@@ -807,6 +826,18 @@ export component SongsPage inherits Rectangle {
     // Ctrl+F (app.search): the keys go to the search box, its words picked so typing replaces them (review X3-22).
     property <int> search-asked: AppKeys.search;
     changed search-asked => { search-box.focus-all(); }
+    // The card's tag box had the keys (Ctrl+T, or a click in it) as the card closed (Esc in the empty box, its ×, or a
+    // read): the box went with the card, and then nothing had the keys, so no key worked until a click (the whole-app
+    // review of 14 Nov, AP-1, as Sounds had it on 10 Nov, U-1). They come back to the list. Only then: a card closed
+    // by a read meanwhile leaves them where they are (in the search, say). The card is made from this one line.
+    property <bool> card-keys;
+    property <bool> card-shown: SongsData.selected >= 0;
+    changed card-shown => {
+        if (!self.card-shown && self.card-keys) {
+            self.card-keys = false;
+            keys.focus();
+        }
+    }
 
     VerticalLayout {
         // In a window wider than the list and the song's panel at their widest, the page stops there (the UX review
@@ -1074,13 +1105,14 @@ export component SongsPage inherits Rectangle {
                         }
                     }
                 }
-                if SongsData.selected >= 0: SongPanel {
+                if root.card-shown: SongPanel {
                     x: keys.width + 16px;
                     y: 0;
                     height: parent.height;
                     width: parent.width - self.x;
+                    tag-keys <=> root.card-keys;
                 }
-                if SongsData.selected < 0: SidePanel {
+                if !root.card-shown: SidePanel {
                     x: keys.width + 16px;
                     y: 0;
                     height: parent.height;

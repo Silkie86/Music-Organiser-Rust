@@ -143,6 +143,24 @@ export component AppWindow inherits Window {
             keys.focus();
         }
     }
+    // The same as Settings' tab changes: a tab goes as another shows, and the Shortcuts search box with it, keys and
+    // all; then nothing had the keys (the whole-app review of 14 Nov, AP-1). That box is the page's only text box.
+    property <int> settings-tab: SettingsData.tab;
+    changed settings-tab => {
+        if (!root.note-open) {
+            keys.focus();
+        }
+    }
+    // Settings › Shortcuts listening for a key: the keys come to the window, where every key reaches the one listening.
+    // Left in the tab's search box (the search typed first, then the key's button clicked), the box took the letters,
+    // Space, Home and the rest for itself, and the search lost the line listening from sight (AP-3). The action's id
+    // is watched, so another line listening after a click back in the box takes the keys back too.
+    property <string> listening-for: SettingsData.listening;
+    changed listening-for => {
+        if (self.listening-for != "" && !root.note-open) {
+            keys.focus();
+        }
+    }
     keys := FocusScope {
         // Tab moves between the note's parts and never lands on this invisible scope, where typing would vanish.
         focus-on-tab-navigation: false;
