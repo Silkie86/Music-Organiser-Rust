@@ -110,6 +110,13 @@ export global Motion {
     out property <duration> settle: 260ms;
 }
 
+// Where the bar of a job that can't say how far it is stands on its way across and back, 0 to 1. Moved from Rust
+// (cards.rs) a few times a second, and only while such a job shows: a bar that glided with every frame had the whole
+// window drawn 50 times a second for as long as a job ran (Solomon's log of 15 Nov 2026).
+export global Busy {
+    in property <float> sweep;
+}
+
 // Text sizes (the agreed scale, nearer the C# app at 125%). Pages use these, never a size of their own.
 export global Type {
     // A page's name, top left.
@@ -2818,7 +2825,7 @@ export component RailJobLine inherits Rectangle {
             background: Theme.well;
             clip: true;
             Rectangle {
-                x: (parent.width - self.width) * (0.5 + 0.5 * sin(animation-tick() / 900ms * 180deg));
+                x: (parent.width - self.width) * Busy.sweep;
                 width: parent.width * 0.3;
                 border-radius: 1px;
                 background: Theme.accent;
