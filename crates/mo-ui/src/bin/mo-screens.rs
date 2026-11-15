@@ -108,6 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The Space page, from made-up drives: it only reads the real ones when it's shown in the app.
     mo_ui::space::connect(&app, out.join("no library.db"), feed.clone());
     mo_ui::space::show_sample(&app, sample_space(), "");
+    // Settings › General's Updates switch, with nothing looked up.
+    mo_ui::update::connect(&app, feed.clone(), false);
 
     let mut shots = Vec::new();
     for place in Place::ALL {

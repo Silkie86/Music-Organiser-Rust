@@ -13,6 +13,7 @@ built.
 | `installer/check.ps1` | Tries a setup on a CI machine: new PC, picked data folder, PC with data, update, uninstall. |
 | `.github/workflows/release.yml` | A version tag makes a draft release with the setup (below). |
 | `crates/mo-app/src/install_choice.rs` | The app's side of the data folder page. |
+| `crates/mo-app/src/update.rs`, `crates/mo-ui/src/update.rs` | Updates from inside the app (below). |
 
 ## Decisions
 
@@ -26,6 +27,16 @@ built.
   Bitwig extension beside it (`extensions\`), and it sets the helper's startup line too. Uninstall removes that line
   only when it points at the copy being removed.
 - The CLAP plugin joins in 1.1.
+
+## Updates
+
+Only a copy the setup put in (its `unins000.exe` is beside it) updates itself; the launcher's builds never do. Three
+minutes after start, then once a day, it asks GitHub's Releases page (through Windows' own `curl.exe`) whether a newer
+version is out. That is all it sends online, and Settings › General › Updates turns it off. A newer setup is fetched into
+the data folder's `updates` folder, checked against the `.sha256` beside it on the release, and the rail then offers
+"Restart to update": the app closes as it always does, and the setup runs silently and opens the new version
+(`/UPDATED=1`). A test version (with a dash) is offered only to a copy that is a test version too. Old setups are
+removed at the next look.
 
 ## Making a release
 
