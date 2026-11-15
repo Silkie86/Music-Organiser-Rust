@@ -392,8 +392,14 @@ pub fn undo(app: &AppWindow, back: bool) -> bool {
         step_back(app, back);
         return true;
     }
-    let Some(to) = card(|c| c.back_to(back).map(str::to_owned)) else { return false };
-    crate::presets::curve_gone_back(app, &to, back, || card(|c| c.go(back)))
+    let Some(to) = card(|c| c.go(back)) else { return false };
+    if crate::presets::curve_gone_back(app, &to, back) {
+        return true;
+    }
+    // That curve is gone from the list: the way to it is closed, and the button says so.
+    card(|c| c.no_way(back));
+    show_touch(app);
+    false
 }
 
 /// The curve as it's been edited, when it has been: its points and its length in beats.

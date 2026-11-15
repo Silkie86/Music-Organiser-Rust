@@ -357,6 +357,9 @@ pub struct PlayLine {
     pub over: bool,
 }
 
+/// Undo or Redo asked for again within this long is a key held down, not a new press.
+const KEY_HELD: Duration = Duration::from_millis(600);
+
 /// The curve editor's card.
 pub struct Card {
     /// The curve on the card (by its id as it's sent) and its editor.
@@ -442,8 +445,10 @@ pub struct Card {
     /// it. The curve Undo went back from: Redo with nothing to redo goes to it again. And the way the screen is
     /// going right now (back, or forward again), till the curve it goes to is opened.
     left: Option<String>,
-    ahead: Option<String>,
+    ahead: Option<(String, u64)>,
     going: Option<(String, bool)>,
+    /// When Undo or Redo was last asked for: a key held down doesn't run on from one curve into another.
+    asked: Option<Instant>,
     /// The curve that was last taken off the card.
     gone_from: Option<String>,
 }
@@ -493,6 +498,7 @@ impl Default for Card {
             left: None,
             ahead: None,
             going: None,
+            asked: None,
             gone_from: None,
         }
     }
@@ -684,15 +690,45 @@ impl Card {
         if !self.goes_back || self.open.is_none() {
             return None;
         }
-        let to = if back { &self.left } else { &self.ahead }.as_deref()?;
-        // Back only to one that's still kept as it was left: a curve that comes back afresh is no step back.
-        (!back || self.kept.iter().any(|(kept, ..)| kept == to)).then_some(to)
+        if back {
+            // Back only to one that's still kept as it was left: a curve that comes back afresh is no step back.
+            let to = self.left.as_deref()?;
+            self.kept.iter().any(|(kept, ..)| kept == to).then_some(to)
+        } else {
+            // Forward only while nothing new has been done here since Undo came back: a new edit leaves nothing
+            // to redo.
+            let (to, made) = self.ahead.as_ref()?;
+            let (_, editor) = self.open.as_ref()?;
+            (editor.made() == *made && !editor.dragging()).then_some(to.as_str())
+        }
     }
 
-    /// The screen is about to pick the curve [`Card::back_to`] gave: opened next, it's a step back (or forward
-    /// again), not a curve picked anew.
-    pub fn go(&mut self, back: bool) {
-        self.going = self.back_to(back).map(|to| (to.to_owned(), back));
+    /// Undo (`back`) or Redo was asked for with no step of its own left in the curve on the card: the curve the
+    /// screen is to pick ([`Card::back_to`]). Opened next, it's a step back (or forward again), not a curve picked
+    /// anew. None when Undo or Redo was asked for only a moment ago: a key held down stops at the curve's last step,
+    /// and goes on to the other curve when it's pressed again.
+    pub fn go(&mut self, back: bool) -> Option<String> {
+        self.go_at(back, Instant::now())
+    }
+
+    fn go_at(&mut self, back: bool, now: Instant) -> Option<String> {
+        let held = self.asked.replace(now).is_some_and(|last| now.saturating_duration_since(last) < KEY_HELD);
+        if held {
+            return None;
+        }
+        let to = self.back_to(back)?.to_owned();
+        self.going = Some((to.clone(), back));
+        Some(to)
+    }
+
+    /// The curve [`Card::go`] led to isn't there to be picked any more: that way is closed.
+    pub fn no_way(&mut self, back: bool) {
+        self.going = None;
+        if back {
+            self.left = None;
+        } else {
+            self.ahead = None;
+        }
     }
 
     /// Whether the curve on the card has a step of its own to undo (`back`) or redo. A drag in hand is one to undo.
@@ -724,14 +760,14 @@ impl Card {
         // Redo: the other way leads to where it came from.
         let from = self.gone_from.take();
         let was_kept = |id: &String| self.kept.iter().any(|(kept, ..)| kept == id);
+        let mut ahead = None;
         match self.going.take().filter(|(to, _)| to == id) {
-            Some((_, true)) => (self.left, self.ahead) = (None, from),
-            Some((_, false)) => (self.left, self.ahead) = (from.filter(was_kept), None),
+            Some((_, true)) => (self.left, ahead) = (None, from),
+            Some((_, false)) => self.left = from.filter(was_kept),
             None => {
                 if let Some(from) = from.filter(was_kept) {
                     self.left = Some(from);
                 }
-                self.ahead = None;
             }
         }
         if self.left.as_deref() == Some(id) {
@@ -750,6 +786,7 @@ impl Card {
             }
         };
         editor.grid = self.grid;
+        self.ahead = ahead.map(|to| (to, editor.made()));
         self.view = view;
         self.open = Some((id.to_owned(), editor));
         self.origin = Some(origin);
@@ -1465,6 +1502,7 @@ impl Card {
         let s = self;
         s.hands_off();
         s.lit_whole = false;
+        s.asked = Some(Instant::now());
         let Some((_, e)) = s.open.as_mut() else { return false };
         let was = e.shape().length();
         // A drag in hand is a step of its own: Undo takes back that, not it and the step before it as well. (Redo
@@ -2293,15 +2331,27 @@ mod tests {
         assert_eq!(card.back_to(true), None);
         assert!(card.escape());
         assert_eq!(card.back_to(true), Some("a"));
-        card.go(true);
+        // A key held down (Undo asked for a moment ago) stops here; pressed again, it goes back.
+        let now = Instant::now();
+        card.asked = Some(now);
+        assert_eq!(card.go_at(true, now + KEY_HELD / 2), None);
+        assert_eq!(card.go_at(true, now + KEY_HELD * 2).as_deref(), Some("a"));
         assert!(card.open("a", "Rise", &rise(), 4.0));
         assert_eq!(card.edited().as_ref(), Some(&edited), "as it was left, edits and all");
         assert!(card.can_step(true), "and its own steps are there to undo");
         // Redo, once this curve has nothing to redo, goes forward to the other again; Undo there comes back.
         assert_eq!(card.back_to(false), Some("b"));
-        card.go(false);
+        assert_eq!(card.go_at(false, now + KEY_HELD * 4).as_deref(), Some("b"));
         assert!(card.open("b", "Fall", &other, 4.0));
         assert_eq!((card.back_to(true), card.back_to(false)), (Some("a"), None));
+        // Back again, and a new edit there: nothing is left to redo, so Redo leads nowhere.
+        assert_eq!(card.go_at(true, now + KEY_HELD * 6).as_deref(), Some("a"));
+        assert!(card.open("a", "Rise", &rise(), 4.0));
+        assert_eq!(card.back_to(false), Some("b"));
+        assert!(card.act(curve_act::FLIP));
+        assert_eq!(card.back_to(false), None);
+        assert!(!card.showing(false).can_redo);
+        assert!(card.open("b", "Fall", &other, 4.0));
         // A curve left with no edits is no step back; the way to the one before it stays.
         assert!(card.open("c", "Third", &other, 2.0));
         assert_eq!(card.back_to(true), Some("a"));

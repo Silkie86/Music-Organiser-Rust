@@ -1176,10 +1176,18 @@ fn step(app: &AppWindow, by: i32) {
 }
 
 fn pick_curve(app: &AppWindow, id: Option<String>) {
+    pick_curve_saying(app, id, String::new());
+}
+
+/// [`pick_curve`], with what the card says of it (nothing: it says what it said, or nothing for another curve).
+fn pick_curve_saying(app: &AppWindow, id: Option<String>, says: String) {
     let row = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         if p.curve_picked != id {
             p.curve_message.clear();
+        }
+        if !says.is_empty() {
+            p.curve_message = says;
         }
         p.curve_picked = id.clone();
         let id = id?;
@@ -1220,21 +1228,17 @@ pub fn add_curve(app: &AppWindow, row: usize) -> bool {
 const ADDED: &str = "Added ";
 
 /// Undo (`back`) or Redo with no step left in the curve on the card: the page picks curve `id`, the one worked on
-/// before (or the one Undo came back from), and says so. `go` tells the card it's a step back, not a curve picked
-/// anew. False when that curve is no longer among the curves.
-pub(crate) fn curve_gone_back(app: &AppWindow, id: &str, back: bool, go: impl FnOnce()) -> bool {
+/// before (or the one Undo came back from), and says so. False when that curve is no longer among the curves.
+pub(crate) fn curve_gone_back(app: &AppWindow, id: &str, back: bool) -> bool {
     let name = PAGE.with(|p| p.borrow().curves.iter().find(|c| c.id == id).map(|c| c.name.clone()));
     let Some(name) = name else { return false };
-    go();
-    pick_curve(app, Some(id.to_owned()));
-    PAGE.with(|p| {
-        p.borrow_mut().curve_message = if back {
-            format!("Back to {name}, as you left it. Redo goes to the curve you came from again.")
-        } else {
-            format!("Forward to {name} again. Undo goes back.")
-        };
-    });
-    show_curve_card(app);
+    // ("Back to", not "as you left it": one that has changed where it came from since comes back afresh.)
+    let says = if back {
+        format!("Back to {name}. Redo goes to the curve you came from again.")
+    } else {
+        format!("Forward to {name} again. Undo goes back.")
+    };
+    pick_curve_saying(app, Some(id.to_owned()), says);
     true
 }
 
