@@ -2,8 +2,8 @@
 //!
 //! [`Watch::start`] opens a connection of its own to the link, on a thread of its own, and asks it to `watch`. The link
 //! then sends what changes in Bitwig as it changes: the notes each track plays (looked at every 50 ms), and the
-//! project, the transport, the tracks with their devices, the selection, the cue markers and each track's level
-//! (every 100 ms). While nothing changes only an empty event comes, every 5 s, and a feed silent for [`SILENT`] counts
+//! project, the transport, the tracks with their devices, the selection, the cue markers, each track's level
+//! and, from extension [`GROOVE_NEEDS`], the song's Groove (every 100 ms). While nothing changes only an empty event comes, every 5 s, and a feed silent for [`SILENT`] counts
 //! as Bitwig gone. Each event is merged into one picture, a [`Live`], which [`Watch::now`] hands out as it stands: the
 //! newest always wins, and reading it never waits for Bitwig (rule 12).
 //!
@@ -25,6 +25,9 @@ use super::link::{CONNECT_TIMEOUT, Link};
 
 /// The extension version from which the link sends the watch feed.
 pub const WATCH_NEEDS: &str = "3.24";
+/// The first version of the extension whose watch feed has the song's Groove: for telling the user why
+/// [`Live::groove`] is empty (the feed itself says what it gives, in [`Live::sections`]).
+pub const GROOVE_NEEDS: &str = "3.27";
 
 /// How long the watch waits before trying Bitwig again, after it wasn't there or the connection ended.
 pub const RETRY: Duration = Duration::from_secs(2);
@@ -58,8 +61,8 @@ pub enum State {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Live {
     pub state: State,
-    /// Which sections this Bitwig gives ("project", "tracks", "selected", "transport", "markers", "notes", "levels"):
-    /// a section missing here stays empty.
+    /// Which sections this Bitwig gives ("project", "tracks", "selected", "transport", "markers", "notes", "levels",
+    /// and from extension 3.27 "groove"): a section missing here stays empty.
     pub sections: Vec<String>,
     /// The project open, by the name Bitwig shows, and whether it has unsaved changes.
     pub project: String,
@@ -77,6 +80,10 @@ pub struct Live {
     pub notes: Vec<Playing>,
     /// The tracks that show a level now: (place in the list, level from 0 to 1, the louder of left and right).
     pub levels: Vec<(usize, f32)>,
+    /// The song's Groove (extension 3.27); none until the link says, never from an older extension or a Bitwig
+    /// that doesn't give it ("groove" is then missing from `sections`), and none while Bitwig shows a shuffle rate
+    /// the app doesn't know.
+    pub groove: Option<Groove>,
     /// How many events have come in since the watch started, over every connection: a reader that kept the number
     /// it saw last knows whether anything changed ([`Watch::version`] says the same without taking the picture).
     pub events: u64,
@@ -93,6 +100,25 @@ pub struct Transport {
     pub tempo: f64,
     /// "4/4".
     pub time_signature: String,
+}
+
+/// The song's Groove as the feed gives it: Bitwig's swing for the whole song.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Groove {
+    /// Whether the Groove is on: off, the song plays straight whatever the shuffle says.
+    pub on: bool,
+    /// Bitwig's shuffle amount, from 0 (straight) to 1 (its 100 %).
+    pub shuffle: f64,
+    /// Which notes the shuffle moves.
+    pub rate: GrooveRate,
+}
+
+/// The notes a Groove's shuffle moves: every second eighth note, or every second sixteenth.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GrooveRate {
+    Eighth,
+    #[default]
+    Sixteenth,
 }
 
 /// A track as the feed gives it.
@@ -327,6 +353,16 @@ pub(super) fn merge(live: &mut Live, result: &Value) {
             device: s.get("device").and_then(device),
         };
     }
+    if let Some(g) = result.get("groove") {
+        // A rate that's neither isn't guessed at: the app then has no Groove to go by, rather than an old one.
+        let rate = match g.get("rate").and_then(Value::as_str) {
+            Some("1/8") => Some(GrooveRate::Eighth),
+            Some("1/16") => Some(GrooveRate::Sixteenth),
+            _ => None,
+        };
+        live.groove =
+            rate.map(|rate| Groove { on: flag(g, "on"), shuffle: number(g, "shuffle").clamp(0.0, 1.0), rate });
+    }
     if let Some(list) = result.get("markers").and_then(Value::as_array) {
         live.markers = list
             .iter()
@@ -461,8 +497,14 @@ mod tests {
                            {"name": "no place, left out"}],
                 "selected": {"track": 1, "id": "bass", "name": "Bass", "device": null},
                 "markers": [{"name": "Chorus", "at": 32, "color": "#ff0000"}],
+                "groove": {"on": true, "shuffle": 0.62, "rate": "1/8"},
             }),
         );
+        assert_eq!(live.groove, Some(Groove { on: true, shuffle: 0.62, rate: GrooveRate::Eighth }));
+        merge(&mut live, &json!({"groove": {"on": false, "shuffle": 7, "rate": "1/16"}}));
+        assert_eq!(live.groove, Some(Groove { on: false, shuffle: 1.0, rate: GrooveRate::Sixteenth }));
+        merge(&mut live, &json!({"groove": {"on": true, "shuffle": 0.2, "rate": "1/4"}}));
+        assert_eq!(live.groove, None, "a rate the app doesn't know: no Groove to go by, not the old one");
         assert!(live.modified);
         assert_eq!(live.transport.as_ref().map(|t| (t.playing, t.position, t.tempo)), Some((true, 16.5, 124.0)));
         assert_eq!(live.tracks.len(), 1);

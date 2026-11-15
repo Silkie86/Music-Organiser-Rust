@@ -69,6 +69,20 @@ final class Watch {
         return Math.round(loudest * 1000.0 / LEVEL_RANGE) / 1000.0;
     }
 
+    /** A knob's place from 0 to 1 to three decimals, so a knob that barely moves sends nothing. */
+    static double amount(double value) {
+        if (!(value > 0)) return 0;
+        return Math.min(1, Math.round(value * 1000) / 1000.0);
+    }
+
+    /**
+     * The Groove's shuffle rate as Bitwig shows it, "1/8" or "1/16", without the spaces around it. Any other words go
+     * as they are: the app then knows it can't tell the rate, instead of the link guessing one.
+     */
+    static String grooveRate(String shown) {
+        return shown.trim();
+    }
+
     /** A beat position to the thousandth of a beat, so a position that hasn't moved reads the same each look. */
     static double beats(double at) {
         return Math.round(at * 1000.0) / 1000.0;

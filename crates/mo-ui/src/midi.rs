@@ -2604,6 +2604,7 @@ fn actions(
         enabled,
         main: false,
         danger: false,
+        quiet: mo_app::themes::quiet_button(text),
     };
     // Into your DAW first, by the drag handle above them; then finding more.
     let mut list: Vec<(&str, &str, bool)> = vec![("midi.toBitwig", "Send to Bitwig", true)];

@@ -41,8 +41,8 @@ export component PartsGallery inherits Rectangle {
     // A side card's buttons after its main one (they wrap when the card is narrow).
     property <[CardAction]> card-actions: [
         { text: "To Bitwig", tip: "Put the picked sound into Bitwig", key: "Ctrl+B", id: "bitwig", enabled: true },
-        { text: "Show in folder", tip: "Show the sound's file in Explorer", key: "Ctrl+Shift+E", id: "reveal", enabled: true },
-        { text: "Copy path", tip: "Copy where the sound's file is", key: "Ctrl+Shift+C", id: "copy", enabled: false },
+        { text: "Show in folder", tip: "Show the sound's file in Explorer", key: "Ctrl+Shift+E", id: "reveal", enabled: true, quiet: true },
+        { text: "Copy path", tip: "Copy where the sound's file is", key: "Ctrl+Shift+C", id: "copy", enabled: false, quiet: true },
     ];
     property <length> panel-width: 380px;
     VerticalLayout {
@@ -140,7 +140,7 @@ export component PartsGallery inherits Rectangle {
                         }
                     }
                     // The year strip with room, and squeezed into a short window: thirty years in the same height,
-                    // every third one named and the ends of the years picked, All years still in sight. No taller
+                    // every third one named and the ends of the years picked, All still in sight. No taller
                     // than the menu beside it, so the row keeps its height.
                     VerticalLayout {
                         spacing: Space.sm;

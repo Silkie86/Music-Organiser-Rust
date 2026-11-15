@@ -118,6 +118,36 @@ light that means something. It should feel like a rack unit on a desk, not a web
   the time headings step aside; Sounds: its List view's Sound, Type and Key, and an "Order" drop-down stays in
   the top row beside the search, since tiles have no headings and Shuffled, Most liked and Newest have no column).
 
+- Light spills (the frontend-design pass of 14 Nov 2026, step 1): what's on doesn't only change colour, its light
+  falls on what's beside it, so "on" reads from across the room and the app looks like gear, not a dark web page.
+  `Theme.spill` is the accent, faint, and always fades to nothing: along a picked list line from its accent bar, up
+  the face of a picked view (`Segmented`) and behind a picked tab's name (`TabBar`) from their lit strips, and as a
+  thin glow round the page's one lit button. On the rail the picked place's line is washed in the place's own colour
+  (`Theme.spill-of`). Panels catch the light too: a side card has a top-lit edge like a button's, and a sunken
+  screen (`Well`) a lit lip along its bottom. None of it moves, so it costs no frames, and nothing unlit gets any.
+- Quiet buttons (the frontend-design pass, step 2): a side card had up to eight buttons that all looked the same.
+  Now there are three steps of weight: the one lit button, the raised ones that play, send or make something, and
+  flat ones (`StudioButton.quiet`: no raised face, a thin outline) for those that only show or copy where a thing is.
+  `mo_app::themes::quiet_button` says which from the button's words ("Show ...", "Copy ..."), so every page agrees.
+  Same sizes and places as before.
+- No empty row under a page's title (the frontend-design pass, step 3): the page's own job line ("Listening to new
+  sounds: 458 of 1,204") used to keep a row of its own, empty nearly all the time, so every page but Songs started
+  23 px lower with a gap under its name. It now sits on the title's row after the summary (`PageHeader`), which
+  shortens to make room; nothing jumps when a job starts or ends, and every page starts at the same height as Songs.
+- One raised panel (the frontend-design pass, step 4): every card on a page is a `Panel` (`studio.slint`): the
+  surface colour, the dark edge and a top-lit edge, as a button has. Settings' cards, Backup's, Space's drives,
+  Songs' song card, the Sounds cards and every `SidePanel` are one; before, each page drew its own, some with a grey
+  outline and some with a dark one. A card that says something with its outline (a drive nearly full, the Swept
+  card with the keys) sets `border-color`. A new card on a page starts from `Panel`, never from a plain rectangle.
+- The year strip is a little meter (the frontend-design pass, step 5): `YearRange` stands in its own sunken channel
+  (`framed`, off on Songs where it already stands in the sunken list), each year a slot filled by how much of the
+  list is in it, with the year's name over it. The years picked are lit as a picked line of a list is (the accent
+  down the left edge and over the line), and All is a line of the strip, lit while no year is picked. No underlines,
+  no link.
+- Space's drives fill their rows (step 5): every drive card on a row is as wide as the others and the rows are as
+  even as they can be (four drives: 2 and 2, never 3 and 1). How many go on a row is counted for the room the page
+  has while a card is open, so opening one never moves the lines.
+
 ## Next steps
 
 - Left out on purpose: a focus ring on every button (the app is driven by its shortcut list, and focusable buttons

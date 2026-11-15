@@ -4,7 +4,7 @@
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { CurveEditor } from "curve_editor.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -205,6 +205,9 @@ export global PresetsData {
     // shown) or the card's handle (`curve-drag`); then `drag-let-go`, as for a sound, if the button comes up before the
     // drag has got going. Dimmed while carried, glows once landed; -1 for no line.
     callback curve-drag-row(int);
+    // While a curve is open in the editor (`curve-panel-shown`), each line shows a + that adds its curve to that one,
+    // by its row.
+    callback curve-add(int);
     callback curve-drag();
     in property <int> curve-lifted-row: -1;
     in property <int> curve-landed-row: -1;
@@ -435,6 +438,17 @@ component CurveLineView inherits ListLine {
             font-size: Type.meta;
             vertical-alignment: center;
             horizontal-alignment: right;
+        }
+        // Joining curves: this one goes into the curve in the editor.
+        if PresetsData.curve-panel-shown: VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: center;
+            StudioButton {
+                width: 32px;
+                icon: Icons.add;
+                tip: "Add this curve to the one in the editor: in place of the highlighted part, or at its end";
+                clicked => { PresetsData.curve-add(root.line.row); }
+            }
         }
     }
 }

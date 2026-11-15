@@ -22,6 +22,7 @@ import com.bitwig.extension.controller.api.ClipLauncherSlotBank;
 import com.bitwig.extension.controller.api.ControllerHost;
 import com.bitwig.extension.controller.api.CueMarker;
 import com.bitwig.extension.controller.api.CueMarkerBank;
+import com.bitwig.extension.controller.api.Groove;
 import com.bitwig.extension.controller.api.CursorRemoteControlsPage;
 import com.bitwig.extension.controller.api.CursorTrack;
 import com.bitwig.extension.controller.api.Device;
@@ -1389,6 +1390,10 @@ final class FakeBitwig {
         boolean notesHidden;
         /** The arranger's cue markers (extension 3.24's watch feed), as Bitwig shows them whenever the extension looks. */
         final List<Marker> markers = new ArrayList<>();
+        /** The song's Groove (extension 3.27), as Bitwig shows it whenever the extension looks. */
+        boolean grooveOn;
+        double grooveShuffle = 0.5;
+        String grooveRate = "1/16";
         /** Whether Bitwig's play position stays where it started while it plays (the link then goes by the clock). */
         boolean positionStill;
         /**
@@ -3473,6 +3478,32 @@ final class FakeBitwig {
 
         Stand createArranger() {
             return arranger;
+        }
+
+        /** The song's Groove (extension 3.27): three knobs, each reading the Model whenever the extension looks. */
+        Stand createGroove() {
+            Param on = new Param(Parameter.class, 0, "");
+            on.live = () -> model.grooveOn ? 1.0 : 0.0;
+            on.display.live = () -> model.grooveOn ? "On" : "Off";
+            Param shuffle = new Param(Parameter.class, 0, "");
+            shuffle.live = () -> model.grooveShuffle;
+            shuffle.display.live = () -> Math.round(model.grooveShuffle * 100) + " %";
+            Param rate = new Param(Parameter.class, 0, "");
+            rate.live = () -> "1/16".equals(model.grooveRate) ? 1.0 : 0.0;
+            rate.display.live = () -> model.grooveRate;
+            return new Stand(Groove.class) {
+                Param getEnabled() {
+                    return on;
+                }
+
+                Param getShuffleAmount() {
+                    return shuffle;
+                }
+
+                Param getShuffleRate() {
+                    return rate;
+                }
+            };
         }
 
         Stand createMasterTrack(int scenes) {

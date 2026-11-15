@@ -44,6 +44,12 @@ export global Theme {
     out property <color> well: light ? surface.darker(4%) : background.darker(20%);
     out property <color> shine: light ? #ffffff80 : #ffffff12;
     out property <length> radius: square ? 1px : 4px;
+    // Light spilling from something that's on (docs/look.md, "light means on"): the accent, faint, fading to nothing
+    // over the face beside it. `spill-of` does the same for another lit colour (a place's, on the rail).
+    out property <color> spill: spill-of(accent);
+    public pure function spill-of(lit: color) -> color {
+        lit.transparentize(light ? 88% : 82%)
+    }
 
     // How things went, the same in every theme: missing or failed, a warning, all good.
     out property <color> missing: #F0616D;
@@ -363,6 +369,9 @@ export component StudioButton inherits Rectangle {
     in property <string> text;
     in property <bool> main: false;
     in property <bool> danger: false;
+    // One that only shows or copies where a thing is (Show in folder, Copy path): flat on the panel, with no raised
+    // face, so the buttons that play, send or make something stand out beside it.
+    in property <bool> quiet: false;
     in property <bool> enabled: true;
     // The tooltip and the key from the shortcut list, if it has one.
     in property <string> tip;
@@ -376,18 +385,30 @@ export component StudioButton inherits Rectangle {
     height: Heights.button;
     border-radius: Theme.radius;
     border-width: 1px;
-    border-color: Theme.edge;
+    border-color: root.flat ? Theme.stroke : Theme.edge;
+    property <bool> flat: quiet && !main;
     background: !enabled ? Theme.surface : main
         ? (touch.pressed ? Theme.accent.darker(15%) : @linear-gradient(180deg, Theme.accent.brighter(12%) 0%, Theme.accent.darker(6%) 100%))
+        : flat ? (touch.pressed ? Theme.well : touch.has-hover ? Theme.hover : transparent)
         : (touch.pressed ? Theme.well : @linear-gradient(180deg, (touch.has-hover ? Theme.hover : Theme.surface-raised).brighter(8%) 0%, Theme.surface-raised.darker(6%) 100%));
     animate background { duration: Motion.tap; }
+    // The page's one lit button glows a little past its own edge, like a lamp behind a key.
+    if root.main && root.enabled: Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: parent.border-radius + 2px;
+        border-width: 2px;
+        border-color: Theme.spill;
+    }
     // The top-lit edge.
     Rectangle {
         y: 1px;
         height: 1px;
         x: parent.border-radius;
         width: parent.width - 2 * parent.border-radius;
-        background: touch.pressed ? transparent : Theme.shine;
+        background: touch.pressed || root.flat ? transparent : Theme.shine;
     }
     label := Text {
         x: (parent.width - self.width - (root.menu ? 14px : 0px)) / 2;
@@ -453,6 +474,14 @@ export component RailItem inherits Rectangle {
     border-radius: Theme.radius;
     background: selected ? Theme.surface-raised : touch.pressed ? Theme.well : touch.has-hover ? Theme.hover : transparent;
     animate background { duration: Motion.tap; }
+    // The picked place's light spills over its line, in the place's colour.
+    Rectangle {
+        visible: root.selected;
+        x: 0;
+        width: parent.width * 0.7;
+        border-radius: parent.border-radius;
+        background: @linear-gradient(90deg, Theme.spill-of(root.tint) 0%, root.tint.transparentize(100%) 100%);
+    }
     // The light on the picked place, in its colour.
     Rectangle {
         x: 0;
@@ -497,12 +526,38 @@ export component RailItem inherits Rectangle {
     }
 }
 
+// A raised panel, like a unit's face plate: for a card on a page (a drive, a Settings card, a side card). Its top
+// edge catches the light, as a button's does. Every card on every page is one of these, so they all sit the same
+// way on the page; a card that says something with its outline (a drive that's nearly full, a card with the keys)
+// sets `border-color`.
+export component Panel inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    Rectangle {
+        x: parent.border-radius;
+        y: 1px;
+        width: parent.width - 2 * parent.border-radius;
+        height: 1px;
+        background: Theme.shine;
+    }
+}
+
 // A sunken panel, like a screen set into the hardware: for previews, lists and empty pages.
 export component Well inherits Rectangle {
     background: Theme.well;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.edge;
+    // The lip a sunken screen catches the light on, along its bottom edge.
+    Rectangle {
+        x: parent.border-radius;
+        y: parent.height - 1px;
+        width: parent.width - 2 * parent.border-radius;
+        height: 1px;
+        background: Theme.shine;
+    }
 }
 
 // A small × button, for putting a card away or taking a line off a list.
@@ -930,6 +985,9 @@ export component TempoStepper inherits Rectangle {
     in property <string> bpm-text;
     in property <bool> enabled: true;
     in property <bool> changed;
+    // The keys that step it, from the shortcut list, for the tips (none where a page has none).
+    in property <string> slower-key;
+    in property <string> faster-key;
     callback stepped(int);
     callback reset();
     height: 28px;
@@ -957,6 +1015,7 @@ export component TempoStepper inherits Rectangle {
         }
         Tip {
             text: "Slower";
+            key: root.slower-key;
             hovering: minus-touch.has-hover && !minus-touch.pressed;
             at-y: root.height + Space.xs;
         }
@@ -1000,6 +1059,7 @@ export component TempoStepper inherits Rectangle {
         }
         Tip {
             text: "Faster";
+            key: root.faster-key;
             hovering: plus-touch.has-hover && !plus-touch.pressed;
             at-y: root.height + Space.xs;
         }
@@ -1724,6 +1784,14 @@ export component ListLine inherits Rectangle {
     // No easing here: lists reuse their lines as they scroll, and an eased line would trail the scroll.
     background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
     opacity: root.lifted ? 0.4 : 1;
+    // The picked line's light spills a little way along it.
+    Rectangle {
+        visible: root.selected;
+        x: 0;
+        width: min(parent.width, 220px);
+        border-radius: parent.border-radius;
+        background: @linear-gradient(90deg, Theme.spill 0%, Theme.accent.transparentize(100%) 100%);
+    }
     // The accent bar on the picked line.
     Rectangle {
         x: 0;
@@ -2096,6 +2164,16 @@ export component TabBar inherits Rectangle {
             }
         }
     }
+    // The underline's light spills up behind the picked tab's name.
+    Rectangle {
+        y: root.lit-y + root.tab-height - 2px - self.height;
+        height: 16px;
+        x: root.lit-x + 8px;
+        width: max(0px, root.lit-width - 16px);
+        visible: root.current >= 0 && root.current < root.tabs.length;
+        background: @linear-gradient(0deg, Theme.spill 0%, Theme.accent.transparentize(100%) 100%);
+        animate x, y, width { duration: root.ready ? Motion.move : 0ms; easing: ease-out; }
+    }
     Rectangle {
         y: root.lit-y + root.tab-height - 2px;
         height: 2px;
@@ -2236,6 +2314,8 @@ export component HoverNote inherits Rectangle {
 export global Icons {
     // Six dots in two rows of three: a handle to take hold of and drag.
     out property <string> grip: "M 5.25 4 A 0.75 0.75 0 1 0 6.75 4 A 0.75 0.75 0 1 0 5.25 4 M 9.25 4 A 0.75 0.75 0 1 0 10.75 4 A 0.75 0.75 0 1 0 9.25 4 M 5.25 8 A 0.75 0.75 0 1 0 6.75 8 A 0.75 0.75 0 1 0 5.25 8 M 9.25 8 A 0.75 0.75 0 1 0 10.75 8 A 0.75 0.75 0 1 0 9.25 8 M 5.25 12 A 0.75 0.75 0 1 0 6.75 12 A 0.75 0.75 0 1 0 5.25 12 M 9.25 12 A 0.75 0.75 0 1 0 10.75 12 A 0.75 0.75 0 1 0 9.25 12";
+    // A plus: add this to what's open.
+    out property <string> add: "M 8 3 L 8 13 M 3 8 L 13 8";
     // Three dots: more things to do with what's picked.
     out property <string> more: "M 2.5 8 A 0.75 0.75 0 1 0 4 8 A 0.75 0.75 0 1 0 2.5 8 M 7.25 8 A 0.75 0.75 0 1 0 8.75 8 A 0.75 0.75 0 1 0 7.25 8 M 12 8 A 0.75 0.75 0 1 0 13.5 8 A 0.75 0.75 0 1 0 12 8";
     // A magnifier: search (the page's search box and Ctrl+K).
@@ -2377,15 +2457,20 @@ export struct YearBar {
     share: float,
 }
 
-// A strip of years beside a list, newest at the top, each with a bar for how much of the list is in it. Press on a
-// year and drag over others to show only those years; a click picks just one; a double-click or All years shows
-// every year again. The page says which are picked. In a short window the years' lines get shorter, so every year
-// and All years still fit: the bars go when they'd run into the names, and when the lines are too short for every
-// year's name, only every second (or third...) one is named, plus the one under the mouse and the first and last
-// picked. A page can let you pick which date the years go by (`by-choices`, Sounds): the date's name shows above the
-// years, and a click on it opens the choices, with what the one picked means under them (`by-about`).
-export component YearRange inherits VerticalLayout {
+// A strip of years beside a list, newest at the top, each a little meter line: a slot filled by how much of the list
+// is in that year, the year's name over it. Press on a year and drag over others to show only those years; a click
+// picks just one; a double-click or All shows every year again (All is lit while no year is picked). The years picked
+// are lit as a picked line of a list is: the accent down their left edge and over the line. In a short window the
+// years' lines get shorter, so every year and All still fit: the slots go when they'd run into each other, and when
+// the lines are too short for every year's name, only every second (or third...) one is named, plus the one under
+// the mouse and the first and last picked. A page can let you pick which date the years go by (`by-choices`,
+// Sounds): the date's name shows above the years, and a click on it opens the choices, with what the one picked
+// means under them (`by-about`).
+export component YearRange inherits Rectangle {
     in property <[YearBar]> years;
+    // Its own sunken channel, like a meter set into the unit's face. A page whose strip already stands in a sunken
+    // list (Songs) turns it off.
+    in property <bool> framed: true;
     // Which date the years go by, the choices of it, and what the one picked means (no choices: none shown).
     in property <string> by;
     in property <[string]> by-choices;
@@ -2401,7 +2486,7 @@ export component YearRange inherits VerticalLayout {
     property <length> full-line: 20px;
     // Each year's line: the full line, or what the room leaves each year when that's less.
     property <length> line: min(root.full-line, strip.height / max(1, root.years.length));
-    // A year's bar runs under its name: shorter than this, the two would touch, so the bars are left out.
+    // A year's slot needs this much of a line: shorter, and the slots are left out.
     property <length> bar-room: 14px;
     // A year's name needs this much room for its figures not to touch the next year's.
     property <length> name-room: 10px;
@@ -2421,142 +2506,190 @@ export component YearRange inherits VerticalLayout {
     property <bool> bottom-named: root.lit-bottom > root.lit-top && !root.crowds(root.lit-bottom, root.hovered)
         && !(root.top-named && root.crowds(root.lit-bottom, root.lit-top));
     width: 56px;
-    padding: Space.xs;
-    spacing: Space.xs;
-    alignment: start;
+    background: root.framed ? Theme.well : transparent;
+    border-radius: Theme.radius;
+    border-width: root.framed ? 1px : 0px;
+    border-color: Theme.edge;
     // Whether a name at place `a` would come too close to the one at place `b` (when there is one, -1 when not).
     pure function crowds(a: int, b: int) -> bool {
         return b >= 0 && a != b && abs(a - b) * root.line < root.name-room;
     }
-    if root.by-choices.length > 0: Rectangle {
-        height: by-name.preferred-height;
-        by-name := Text {
-            // The strip's whole width, its padding too: a date's name is short, but the strip is narrow.
-            x: -Space.xs;
-            width: parent.width + 2 * Space.xs;
-            text: root.by + " ▾";
-            color: by-touch.has-hover ? Theme.text : Theme.muted;
-            font-size: Type.caps;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-        }
-        by-touch := TouchArea {
-            mouse-cursor: pointer;
-            clicked => { by-menu.show(); }
-        }
-        by-menu := PopupWindow {
-            // The strip is at the list's right edge: the menu opens leftwards, over the list.
-            x: parent.width - self.width;
-            y: parent.height + 4px;
-            width: 300px;
-            close-policy: close-on-click-outside;
-            MenuCard {
-                Text {
-                    text: "Years by";
-                    color: Theme.faint;
-                    font-size: Type.caps;
-                    horizontal-alignment: left;
-                }
-                for c in root.by-choices: MenuLine {
-                    text: c;
-                    on: root.by == c;
-                    tickable: true;
-                    clicked => {
-                        by-menu.close();
-                        root.by-picked(c);
+    VerticalLayout {
+        padding: Space.xs;
+        spacing: Space.xs;
+        alignment: start;
+        if root.by-choices.length > 0: Rectangle {
+            height: by-name.preferred-height;
+            by-name := Text {
+                // The strip's whole width, its padding too: a date's name is short, but the strip is narrow.
+                x: -Space.xs;
+                width: parent.width + 2 * Space.xs;
+                text: root.by + " ▾";
+                color: by-touch.has-hover ? Theme.text : Theme.muted;
+                font-size: Type.caps;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            by-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { by-menu.show(); }
+            }
+            by-menu := PopupWindow {
+                // The strip is at the list's right edge: the menu opens leftwards, over the list.
+                x: parent.width - self.width;
+                y: parent.height + 4px;
+                width: 300px;
+                close-policy: close-on-click-outside;
+                MenuCard {
+                    Text {
+                        text: "Years by";
+                        color: Theme.faint;
+                        font-size: Type.caps;
+                        horizontal-alignment: left;
+                    }
+                    for c in root.by-choices: MenuLine {
+                        text: c;
+                        on: root.by == c;
+                        tickable: true;
+                        clicked => {
+                            by-menu.close();
+                            root.by-picked(c);
+                        }
+                    }
+                    Text {
+                        text: root.by-about;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        wrap: word-wrap;
                     }
                 }
+            }
+        }
+        strip := Rectangle {
+            // Every year at its full line, but it gives way when the room is short, so All is never pushed off the
+            // bottom.
+            preferred-height: root.years.length * root.full-line;
+            min-height: 0px;
+            for y[i] in root.years: Rectangle {
+                property <bool> lit: root.lit-top >= 0 && i >= root.lit-top && i <= root.lit-bottom;
+                property <bool> under: root.hovered == i;
+                // Named when it's under the mouse or the first or last lit; else when there's room for it (every year,
+                // or every second or third...) and none of those is too close.
+                property <bool> named: self.under
+                    || (i == root.lit-top && root.top-named)
+                    || (i == root.lit-bottom && root.bottom-named)
+                    || (mod(i, root.named-every) == 0
+                        && !root.crowds(i, root.hovered)
+                        && !(root.top-named && root.crowds(i, root.lit-top))
+                        && !(root.bottom-named && root.crowds(i, root.lit-bottom)));
+                y: i * root.line;
+                height: root.line;
+                // Less round on a shorter line, and square once the bars are left out: round corners there would leave
+                // little notches down a picked span's edges.
+                border-radius: root.line >= root.bar-room ? min(Theme.radius, root.line / 5) : 0px;
+                property <bool> barred: root.line >= root.bar-room;
+                // Picked: the accent's light over the whole line (stronger on a short line, which has no bar to light).
+                background: self.lit ? (self.barred ? Theme.spill : Theme.accent.transparentize(Theme.light ? 60% : 55%))
+                    : self.under ? Theme.hover : transparent;
+                // How much of the list is in the year, like one line of a meter laid on its side behind the name: a
+                // faint slot the line's whole width, filled from the left, lit in the accent for the years picked.
+                // Left out on a short line, where the slots would run into each other.
+                if self.barred: Rectangle {
+                    property <bool> lit: parent.lit;
+                    y: 2px;
+                    height: parent.height - 4px;
+                    border-radius: 2px;
+                    background: Theme.stroke.transparentize(Theme.light ? 65% : 60%);
+                    Rectangle {
+                        x: 0;
+                        width: max(2px, parent.width * y.share);
+                        border-radius: 2px;
+                        background: parent.lit ? Theme.accent.transparentize(Theme.light ? 60% : 55%) : Theme.stroke.transparentize(Theme.light ? 20% : 0%);
+                    }
+                }
+                // The light on the years picked, down their left edge, as on a picked line of a list.
+                Rectangle {
+                    x: 0;
+                    width: parent.lit ? 2px : 0px;
+                    background: Theme.accent;
+                }
                 Text {
-                    text: root.by-about;
-                    color: Theme.muted;
-                    font-size: Type.meta;
-                    wrap: word-wrap;
+                    // Never shorter than its figures, centred on the line, so a short line doesn't cut them off.
+                    width: parent.width;
+                    height: max(parent.height, self.preferred-height);
+                    y: (parent.height - self.height) / 2;
+                    text: parent.named ? y.year : "";
+                    color: parent.lit || parent.under ? Theme.text : Theme.muted;
+                    font-family: Theme.number-font;
+                    font-size: Type.caps;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            touch := TouchArea {
+                mouse-cursor: pointer;
+                pointer-event(e) => {
+                    if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                        root.from = clamp(floor(self.mouse-y / root.line), 0, root.years.length - 1);
+                        root.to = root.from;
+                    }
+                    if e.button == PointerEventButton.left && e.kind == PointerEventKind.up && root.from >= 0 {
+                        root.picked(min(root.from, root.to), max(root.from, root.to));
+                        root.from = -1;
+                        root.to = -1;
+                    }
+                    // The window lost the mouse mid-drag: nothing is picked.
+                    if e.kind == PointerEventKind.cancel {
+                        root.from = -1;
+                        root.to = -1;
+                    }
+                }
+                moved => {
+                    if self.pressed && root.from >= 0 {
+                        root.to = clamp(floor(self.mouse-y / root.line), 0, root.years.length - 1);
+                    }
+                }
+                // A release runs this before the button-up above, so the drag is forgotten first: otherwise the up
+                // would pick the one year straight after the strip was cleared.
+                double-clicked => {
+                    root.from = -1;
+                    root.to = -1;
+                    root.cleared();
                 }
             }
         }
-    }
-    strip := Rectangle {
-        // Every year at its full line, but it gives way when the room is short, so All years is never pushed off the
-        // bottom.
-        preferred-height: root.years.length * root.full-line;
-        min-height: 0px;
-        for y[i] in root.years: Rectangle {
-            property <bool> lit: root.lit-top >= 0 && i >= root.lit-top && i <= root.lit-bottom;
-            property <bool> under: root.hovered == i;
-            // Named when it's under the mouse or the first or last lit; else when there's room for it (every year,
-            // or every second or third...) and none of those is too close.
-            property <bool> named: self.under
-                || (i == root.lit-top && root.top-named)
-                || (i == root.lit-bottom && root.bottom-named)
-                || (mod(i, root.named-every) == 0
-                    && !root.crowds(i, root.hovered)
-                    && !(root.top-named && root.crowds(i, root.lit-top))
-                    && !(root.bottom-named && root.crowds(i, root.lit-bottom)));
-            y: i * root.line;
-            height: root.line;
-            // Less round on a shorter line, and square once the bars are left out: round corners there would leave
-            // little notches down a picked span's edges.
-            border-radius: root.line >= root.bar-room ? min(Theme.radius, root.line / 5) : 0px;
-            background: self.lit ? Theme.accent.transparentize(80%) : self.under ? Theme.hover : transparent;
+        // Every year again. It's the one lit while no years are picked: either a span of years is on, or this is.
+        Rectangle {
+            property <bool> on: root.lit-top < 0;
+            height: root.full-line + 4px;
+            border-radius: 2px;
+            background: all-touch.has-hover && !self.on ? Theme.hover : transparent;
             Rectangle {
-                visible: root.line >= root.bar-room;
-                x: Space.xs;
-                y: parent.height - 3px;
-                width: (parent.width - 2 * Space.xs) * y.share;
-                height: 2px;
-                border-radius: 1px;
-                background: parent.lit ? Theme.accent : Theme.stroke;
+                x: 0;
+                width: parent.on ? 2px : 0px;
+                background: Theme.accent;
             }
             Text {
-                // Never shorter than its figures, centred on the line, so a short line doesn't cut them off.
                 width: parent.width;
-                height: max(parent.height, self.preferred-height);
-                y: (parent.height - self.height) / 2;
-                text: parent.named ? y.year : "";
-                color: parent.lit || parent.under ? Theme.text : Theme.faint;
-                font-family: Theme.number-font;
+                height: parent.height;
+                text: "All";
+                color: parent.on ? Theme.text : Theme.muted;
                 font-size: Type.caps;
+                font-weight: parent.on ? 600 : 400;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
-        }
-        touch := TouchArea {
-            mouse-cursor: pointer;
-            pointer-event(e) => {
-                if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
-                    root.from = clamp(floor(self.mouse-y / root.line), 0, root.years.length - 1);
-                    root.to = root.from;
-                }
-                if e.button == PointerEventButton.left && e.kind == PointerEventKind.up && root.from >= 0 {
-                    root.picked(min(root.from, root.to), max(root.from, root.to));
-                    root.from = -1;
-                    root.to = -1;
-                }
-                // The window lost the mouse mid-drag: nothing is picked.
-                if e.kind == PointerEventKind.cancel {
-                    root.from = -1;
-                    root.to = -1;
-                }
+            all-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.cleared(); }
             }
-            moved => {
-                if self.pressed && root.from >= 0 {
-                    root.to = clamp(floor(self.mouse-y / root.line), 0, root.years.length - 1);
-                }
-            }
-            // A release runs this before the button-up above, so the drag is forgotten first: otherwise the up
-            // would pick the one year straight after the strip was cleared.
-            double-clicked => {
-                root.from = -1;
-                root.to = -1;
-                root.cleared();
+            Tip {
+                text: "Show every year again";
+                hovering: all-touch.has-hover && !all-touch.pressed;
+                at-x: -Space.xs;
+                at-y: parent.height + Space.xs;
             }
         }
-    }
-    LinkText {
-        text: "All years";
-        tint: Theme.muted;
-        font-size: Type.meta;
-        clicked => { root.cleared(); }
     }
 }
 
@@ -2776,16 +2909,20 @@ export component PageHeader inherits VerticalLayout {
             color: Theme.muted;
             font-size: Type.body;
             vertical-alignment: center;
-            horizontal-stretch: 1;
+            horizontal-stretch: 0;
             overflow: elide;
         }
-    }
-    // Always there, so the page doesn't jump when a job starts or ends; only seen while one runs. A page that never
-    // runs a job of its own (Songs) leaves `job-line` off and keeps the room.
-    if root.job-line: ProgressLine {
-        visible: root.busy != "";
-        text: root.busy;
-        done: root.done;
+        // The page's own job, beside what the page holds: on the title's row, so it takes no row of its own and the
+        // page doesn't jump when a job starts or ends (the frontend-design pass, step 3: the row kept empty for it
+        // left a gap under every title). The summary shortens to make room. A page that never runs a job of its own
+        // (Songs) leaves `job-line` off.
+        if root.job-line && root.busy != "": ProgressLine {
+            text: root.busy;
+            done: root.done;
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
     }
 }
 
@@ -2825,6 +2962,12 @@ export component Segmented inherits Rectangle {
         // button on a desk with its light on. One accent strip says "on" without turning the row into a block of colour.
         background: @linear-gradient(180deg, Theme.hover.brighter(Theme.light ? 0% : 30%) 0%, Theme.hover.brighter(Theme.light ? 0% : 12%) 100%);
         animate x, width { duration: root.ready ? Motion.move : 0ms; easing: ease-out; }
+        // The strip's light spills up the key's face.
+        Rectangle {
+            y: parent.height * 0.35;
+            height: parent.height * 0.65;
+            background: @linear-gradient(0deg, Theme.spill 0%, Theme.accent.transparentize(100%) 100%);
+        }
         Rectangle {
             x: Space.sm;
             y: parent.height - 3px;
@@ -3006,6 +3149,8 @@ export struct CardAction {
     // things (Remove).
     main: bool,
     danger: bool,
+    // It only shows or copies where the thing is: a flat button (mo-app's `themes::quiet_button` says which).
+    quiet: bool,
 }
 
 // A side card's buttons: everything you can do with what's picked, in sight rather than behind a "more" menu
@@ -3035,6 +3180,7 @@ export component CardActions inherits FlexboxLayout {
         enabled: a.enabled;
         main: a.main;
         danger: a.danger;
+        quiet: a.quiet;
         clicked => { root.chosen(a.id); }
     }
     for a in root.room > 0 ? root.actions : root.none: StudioButton {
@@ -3045,6 +3191,7 @@ export component CardActions inherits FlexboxLayout {
         enabled: a.enabled;
         main: a.main;
         danger: a.danger;
+        quiet: a.quiet;
         clicked => { root.chosen(a.id); }
     }
 }
@@ -3112,7 +3259,7 @@ export component OptionsButton inherits StudioButton {
 }
 
 // The picked thing's panel beside a page's list: a raised card with a × to put it away (Esc does too).
-export component SidePanel inherits Rectangle {
+export component SidePanel inherits Panel {
     callback close;
     // Whether it has something to close: an empty card ("Pick a part") shows no ×.
     in property <bool> closable: true;
@@ -3139,10 +3286,6 @@ export component SidePanel inherits Rectangle {
             flick.content-y = min(0px, flick.content-y + (shown-top - top));
         }
     }
-    background: Theme.surface;
-    border-radius: Theme.radius;
-    border-width: 1px;
-    border-color: Theme.edge;
     // Scrolls when what it holds is taller than the panel; fills it otherwise, so a stretch at the end works. Never
     // wider than the panel: something too wide inside (a long path once) made the whole card slide right and lose its
     // right side (Solomon's F12 note, 2026-11-02 03:28), so it's cut at the edge instead, and the parts wrap.

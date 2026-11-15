@@ -2416,6 +2416,7 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
             enabled: true,
             main: false,
             danger: false,
+            quiet: mo_app::themes::quiet_button(text),
         });
     }
     data.set_menu(ModelRc::new(VecModel::from(menu)));

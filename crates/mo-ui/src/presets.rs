@@ -558,6 +558,12 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_curve_add(move |row| {
+        if let (Some(app), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
+            add_curve(&app, row);
+        }
+    });
+    let weak = app.as_weak();
     data.on_curve_step(move |by| {
         if let Some(app) = weak.upgrade() {
             step_curve(&app, by);
@@ -979,6 +985,7 @@ fn show_card(app: &AppWindow) {
                     enabled: o.enabled,
                     main: o.id == act::AUDITION,
                     danger: false,
+                    quiet: mo_app::themes::quiet_button(o.text.as_str()),
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -1039,6 +1046,9 @@ fn show_curve_card(app: &AppWindow) {
         let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some(), edited);
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
         editor.set_hear_key(key(curve_act::HEAR));
+        editor.set_metronome_key(key(curve_act::METRONOME));
+        editor.set_faster_key(key(curve_act::FASTER));
+        editor.set_slower_key(key(curve_act::SLOWER));
         editor.set_undo_key(key(curve_act::UNDO));
         editor.set_redo_key(key(curve_act::REDO));
         editor.set_save_key(key(curve_act::SAVE_AS_NEW));
@@ -1082,6 +1092,7 @@ fn show_curve_card(app: &AppWindow) {
                     enabled: o.enabled,
                     main: false,
                     danger: false,
+                    quiet: mo_app::themes::quiet_button(o.text.as_str()),
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -1170,6 +1181,44 @@ fn pick_curve(app: &AppWindow, id: Option<String>) {
     PAGE.with(|p| show_random_can(&data, &p.borrow()));
     show_curve_card(app);
     CURVE_LINES.with(|m| m.notify.reset());
+}
+
+/// The + on the shown curve at `row`: it's added to the curve in the editor (as its line shows it: at that speed), in
+/// place of the highlighted part or at its end, and the card says so. Whether it was.
+pub fn add_curve(app: &AppWindow, row: usize) -> bool {
+    let Some(c) = PAGE.with(|p| row_curve_as_sent(&p.borrow(), row)) else { return false };
+    let piece = mo_app::curve_edit::Piece {
+        points: c.points.clone(),
+        length_beats: c.length_beats,
+        source: Some(c.id.clone()),
+        name: c.name.clone(),
+    };
+    let done = crate::curve_editor::add(app, piece);
+    let said = match done {
+        Ok(()) => format!("{ADDED}{}. Undo takes it out again; Save as new curve keeps the joined curve.", c.name),
+        Err(why) => format!("{} wasn't added: {why}.", c.name),
+    };
+    PAGE.with(|p| p.borrow_mut().curve_message = said);
+    show_curve_card(app);
+    done.is_ok()
+}
+
+/// How the card's words begin after a curve was added: Undo and Redo take those words away again.
+const ADDED: &str = "Added ";
+
+/// Undo or Redo took a step in the editor: the card no longer says a curve was added.
+pub(crate) fn curve_stepped(app: &AppWindow) {
+    let said = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let said = p.curve_message.starts_with(ADDED);
+        if said {
+            p.curve_message.clear();
+        }
+        said
+    });
+    if said {
+        show_curve_card(app);
+    }
 }
 
 /// Randomise's words and whether it can roll: two curves shown, and one open to roll into.
@@ -1473,14 +1522,18 @@ fn hear_curve(app: &AppWindow, sent: Curve) {
         return;
     }
     crate::sounds::stop_for_another(app);
-    crate::curve_editor::follow_tone(app, key.clone());
+    // As the editor has it (its speed and metronome too); the editor makes it again as the curve is edited.
+    let (points, length, hear) = crate::curve_editor::to_hear()
+        .unwrap_or_else(|| (sent.points.clone(), sent.length_beats, mo_app::curve_hear::Hear::default()));
+    crate::curve_editor::follow_tone(app, key.clone(), Some((points.clone(), length, hear)));
     let started = background::spawn("Curve tone", move || {
-        let tone = logic::curve_tone(&sent);
+        let tone = mo_app::curve_hear::tone(&points, length, hear);
+        crate::curve_editor::sounding(&key, length, hear);
         crate::sounds::player().play_looped(std::sync::Arc::new(tone), key, 0.0);
-        curve_message(format!(
-            "Playing the curve as a tone's volume, round and round at {} BPM. Space stops it.",
-            logic::HEAR_BPM
-        ));
+        curve_message(
+            "Playing the curve as a tone's volume, round and round. It follows your edits as it plays; Space stops it."
+                .to_owned(),
+        );
     });
     if let Err(e) = started {
         log::error("Curves", &format!("Couldn't start making the curve's tone: {e}"));
@@ -1493,6 +1546,16 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         Section::Sounds => run_sound_action(app, id),
         Section::Curves => run_curve_action(app, id),
     }
+}
+
+/// One of the page's actions from its key. The key of Hide (Delete) with points picked in the curve editor takes
+/// those points out: the key means the nearest thing picked. The Hide button and menu line still hide the curve.
+pub fn run_key(app: &AppWindow, id: &str) -> bool {
+    let curves = PAGE.with(|p| p.borrow().section == Section::Curves);
+    if curves && id == curve_act::HIDE && crate::curve_editor::picked() > 0 {
+        return crate::curve_editor::act(app, curve_act::REMOVE_POINTS);
+    }
+    run_action(app, id)
 }
 
 /// The page's own key lists: the Sounds section's or the Curves section's, as is on show.
@@ -2542,21 +2605,22 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             };
             show_in_songs(app, &s.path);
         }
-        // Heard as the editor has it now, edits and all.
+        // Heard as the editor has it now, edits and all (`hear_curve` asks the editor).
         curve_act::HEAR => {
-            let heard = match crate::curve_editor::edited() {
-                Some((points, length_beats)) => Curve { points, length_beats, ..sent },
-                None => sent,
-            };
-            hear_curve(app, heard);
+            hear_curve(app, sent);
         }
         curve_act::REVERSE
         | curve_act::FLIP
         | curve_act::STEPS
         | curve_act::KEEP_CLIP
         | curve_act::CUT_TIME
-        | curve_act::HIGHLIGHT_ALL => return crate::curve_editor::act(app, id),
+        | curve_act::HIGHLIGHT_ALL
+        | curve_act::QUANTISE
+        | curve_act::REMOVE_POINTS => return crate::curve_editor::act(app, id),
         curve_act::RANDOMISE => return randomise(app),
+        curve_act::METRONOME => crate::curve_editor::set_hear(app, None, None),
+        curve_act::FASTER => crate::curve_editor::set_hear(app, None, Some(1)),
+        curve_act::SLOWER => crate::curve_editor::set_hear(app, None, Some(-1)),
         curve_act::UNDO => return crate::curve_editor::undo(app, true),
         curve_act::REDO => return crate::curve_editor::undo(app, false),
         curve_act::SAVE_AS_NEW => {

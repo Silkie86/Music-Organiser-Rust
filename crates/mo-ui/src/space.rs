@@ -921,6 +921,7 @@ fn actions(buttons: Vec<Button>) -> ModelRc<CardAction> {
     let actions: Vec<CardAction> = buttons
         .into_iter()
         .map(|b| CardAction {
+            quiet: mo_app::themes::quiet_button(&b.text),
             text: b.text.into(),
             tip: what_of(b.id).into(),
             key: keys.key_of(b.id).into(),

@@ -1570,6 +1570,62 @@ fn presets_shots(
         return Err("curves-random.png: the roll left nothing to undo".into());
     }
     capture(window);
+    // Hear with the metronome on, four steps slower (100 BPM), the play line part way.
+    mo_ui::curve_editor::set_hear(app, Some(true), None);
+    for _ in 0..4 {
+        mo_ui::curve_editor::set_hear(app, None, Some(-1));
+    }
+    mo_ui::curve_editor::show_playing_sample(app, Some(5.5));
+    shots.push(("curves-hear.png".into(), capture(window)));
+    mo_ui::curve_editor::show_playing_sample(app, None);
+    mo_ui::curve_editor::set_hear(app, Some(false), None);
+    mo_ui::curve_editor::set_hear(app, None, Some(0));
+    capture(window);
+    // Steps painted with Ctrl held, the stroke still in hand: the old curve faint behind, the read-out by the mouse.
+    let paint = mo_app::curve_touch::Keys { ctrl: true, ..keys };
+    mo_ui::curve_editor::mouse_sample(app, 1, 5.1, 0.7, paint);
+    mo_ui::curve_editor::mouse_sample(app, 0, 6.1, 0.3, paint);
+    mo_ui::curve_editor::mouse_sample(app, 0, 7.1, 0.9, paint);
+    mo_ui::curve_editor::mouse_sample(app, 0, 8.6, 0.5, paint);
+    shots.push(("curves-paint.png".into(), capture(window)));
+    mo_ui::curve_editor::mouse_sample(app, 2, 8.6, 0.5, paint);
+    if !mo_ui::curve_editor::undo(app, true) {
+        return Err("curves-paint.png: the stroke left nothing to undo".into());
+    }
+    mo_ui::curve_editor::mouse_sample(app, 4, 12.0, 0.9, keys);
+    capture(window);
+    // The swing mark dragged a third of a step later (triplet swing), still in hand.
+    mo_ui::curve_editor::ruler_sample(app, 1, 0.25);
+    mo_ui::curve_editor::ruler_sample(app, 0, 0.25 + 0.25 / 3.0);
+    shots.push(("curves-swing.png".into(), capture(window)));
+    mo_ui::curve_editor::ruler_sample(app, 2, 0.25 + 0.25 / 3.0);
+    if !mo_ui::curve_editor::undo(app, true) {
+        return Err("curves-swing.png: the swing left nothing to undo".into());
+    }
+    mo_ui::curve_editor::ruler_sample(app, 4, 0.0);
+    capture(window);
+    // Joining curves: the + on the second line adds its curve at the end of the one in the editor, as a clip.
+    if !mo_ui::presets::add_curve(app, 1) {
+        return Err("curves-joined.png: the second line's curve wasn't added".into());
+    }
+    shots.push(("curves-joined.png".into(), capture(window)));
+    if !mo_ui::curve_editor::undo(app, true) {
+        return Err("curves-joined.png: the join left nothing to undo".into());
+    }
+    capture(window);
+    // Points picked in a box (Alt-drag over empty space), the box still in hand.
+    let pick = mo_app::curve_touch::Keys { alt: true, ..keys };
+    mo_ui::curve_editor::mouse_sample(app, 0, 1.0, 0.97, pick);
+    mo_ui::curve_editor::mouse_sample(app, 1, 1.0, 0.97, pick);
+    mo_ui::curve_editor::mouse_sample(app, 0, 15.0, 0.0, pick);
+    if mo_ui::curve_editor::picked() == 0 {
+        return Err("curves-picked.png: the box picked no points".into());
+    }
+    shots.push(("curves-picked.png".into(), capture(window)));
+    mo_ui::curve_editor::mouse_sample(app, 2, 15.0, 0.0, pick);
+    mo_ui::curve_editor::escape(app);
+    mo_ui::curve_editor::mouse_sample(app, 4, 12.0, 0.9, keys);
+    capture(window);
     // A curve dragged out onto an automation lane from its line, its shape on the card.
     let still = capture(window);
     data.set_curve_lifted_row(1);
@@ -3295,9 +3351,9 @@ fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::Scann
 }
 
 /// The Backup page's Remove older versions button, and how far the page is turned down to show the question it asks.
-const REMOVE_OLDER_BUTTON: (f32, f32) = (1150.0, 845.0);
+const REMOVE_OLDER_BUTTON: (f32, f32) = (1150.0, 822.0);
 /// The Presets page's Plugin menu: the first thing in its filter column.
-const PLUGIN_CHIP: (f32, f32) = (288.0, 175.0);
+const PLUGIN_CHIP: (f32, f32) = (288.0, 152.0);
 const PAGE_DOWN: f32 = 300.0;
 
 /// Where the wheel turns the song panel down in the narrowest window, and by how much: on its status line, which
@@ -3306,34 +3362,34 @@ const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
 const OLDER_BUTTON: (f32, f32) = (1205.0, 341.0);
 /// Space's Old copies after moving folders line, the page at its top, and a place on the page with nothing on it (right
 /// of its name, left of a card).
-const SPACE_OLD_LINE: (f32, f32) = (400.0, 516.0);
+const SPACE_OLD_LINE: (f32, f32) = (400.0, 493.0);
 const SPACE_EMPTY: (f32, f32) = (1000.0, 60.0);
 /// Where the wheel turns a page's card (Space's, or Sounds') down to its end, and by more than enough: on its parts.
 const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 /// The second line on the galaxy's Swept card, after the sweep.
-const SWEPT_LINE: (f32, f32) = (760.0, 410.0);
+const SWEPT_LINE: (f32, f32) = (760.0, 387.0);
 /// The Lock chip on the kit's second pad (Snare).
-const SNARE_LOCK: (f32, f32) = (846.0, 217.0);
+const SNARE_LOCK: (f32, f32) = (846.0, 194.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 /// Inside the first tile of the Sounds grid, and the first line of its List, at their top (x, y, width, height in
 /// pixels): all one colour there, the list shows nothing.
-const FIRST_TILE: (u32, u32, u32, u32) = (250, 320, 200, 70);
-const FIRST_LINE: (u32, u32, u32, u32) = (250, 335, 400, 30);
+const FIRST_TILE: (u32, u32, u32, u32) = (250, 297, 200, 70);
+const FIRST_LINE: (u32, u32, u32, u32) = (250, 312, 400, 30);
 /// A point on a Sounds tile to right-click, and where a right-click menu's lines start under the mouse (its card's
 /// padding) and how tall each is (studio.slint's MenuItems and MenuLine).
-const MENU_TILE: (f32, f32) = (560.0, 301.0);
+const MENU_TILE: (f32, f32) = (560.0, 278.0);
 const MENU_LINES_TOP: f32 = 4.0;
 const MENU_LINE: f32 = 32.0;
 /// With the card open: the waveform of the tile at [`MENU_TILE`], and the waveform on the card.
-const TILE_WAVE: (f32, f32) = (560.0, 345.0);
-const CARD_WAVE: (f32, f32) = (1200.0, 315.0);
+const TILE_WAVE: (f32, f32) = (560.0, 322.0);
+const CARD_WAVE: (f32, f32) = (1200.0, 292.0);
 /// The path on the Sounds card, on its one line (Boom Kick's, cut short at its start).
-const CARD_PATH: (f32, f32) = (1150.0, 249.0);
+const CARD_PATH: (f32, f32) = (1150.0, 226.0);
 /// Below and right of the mouse at [`MENU_TILE`], off its tile (with the card open): a menu opened there covers it.
-const MENU_OVER: (u32, u32, u32, u32) = (700, 400, 120, 80);
+const MENU_OVER: (u32, u32, u32, u32) = (700, 377, 120, 80);
 /// The Sounds card's Add a tag box, the card turned down to its end (with a sound's six tags over it).
-const TAG_BOX: (f32, f32) = (1130.0, 490.0);
+const TAG_BOX: (f32, f32) = (1130.0, 467.0);
 /// The Songs, Presets, MIDI and Plugins lists in the short window: left of the activity cards, which move on their own.
 const SHORT_LIST: (u32, u32, u32, u32) = (230, 200, 760, 400);
 /// The mouse over each of those lists (Songs' is narrow beside its panel; Plugins' starts low), for the wheel.
@@ -3518,11 +3574,11 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
 }
 
 /// Settings, Shortcuts: where the fourth line's "No key" button shows once the mouse is on the line.
-const KEY_LINE_NO_KEY: (f32, f32) = (1218.0, 444.0);
+const KEY_LINE_NO_KEY: (f32, f32) = (1218.0, 421.0);
 
 /// The Sounds page's Tempo slider with no filter picked: its track's height in the window, where its higher handle
 /// rests, and where 150 BPM is along it.
-const TEMPO_TRACK_Y: f32 = 625.0;
+const TEMPO_TRACK_Y: f32 = 602.0;
 const TEMPO_HIGH_END_X: f32 = 419.0;
 const TEMPO_150_X: f32 = 357.0;
 

@@ -26,6 +26,8 @@ pub const MAX_BEATS: f64 = 256.0;
 pub const SHORTEST: f64 = 1.0 / 64.0;
 /// How many steps back Undo goes.
 pub const UNDO_STEPS: usize = 200;
+/// The furthest a swung line moves, of a step: three quarters of the way to the next line.
+pub const MOST_SWING: f64 = 0.75;
 
 /// One point of the curve being edited.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -330,6 +332,23 @@ pub enum Edit {
     },
     /// The part becomes a straight line from the value before it to the value after it.
     Flatten,
+    /// Steps painted (Ctrl-drag over empty space): each stretch of time (its start, its end) is held at its value.
+    /// It needs no highlight and pays none any mind.
+    Paint {
+        cells: Vec<(f64, f64, f64)>,
+    },
+    /// A line drawn by hand (Ctrl+Shift-drag): it takes the curve's place from its first beat to its last. Its
+    /// points are (beat, value), in the order of time.
+    Draw {
+        line: Vec<(f64, f64)>,
+    },
+    /// Swing: every second line of a grid `step` beats apart, counted from the part's start, moves by `amount` of
+    /// a step (later above 0, earlier below; a third is triplet swing), and the curve either side of it is
+    /// stretched or squeezed to follow.
+    Swing {
+        step: f64,
+        amount: f64,
+    },
     /// The highlight's time is taken out: what follows moves up and the curve gets shorter.
     RemoveTime,
 
@@ -356,6 +375,147 @@ pub enum Edit {
     },
     /// The end mark dragged: the curve's length. Shorter cuts it; longer holds its last value.
     SetLength(f64),
+
+    /// Picked points (their places in [`Shape::points`]) move together, by this many beats and this much value.
+    /// They keep their shape: the move stops where the first of them meets a point that isn't picked, an end of the
+    /// curve, the top or the bottom.
+    MovePoints {
+        points: Vec<usize>,
+        beats: f64,
+        value: f64,
+    },
+    /// Picked points go; the curve keeps one point at least.
+    RemovePoints(Vec<usize>),
+    /// Quantise: picked points go to their nearest line of a grid `step` beats apart (never past a point that
+    /// isn't picked). With none picked: every point of the highlighted part, or of the whole curve.
+    Quantise {
+        points: Vec<usize>,
+        step: f64,
+    },
+}
+
+/// `which` as places in a list of `len` points: in order, each once, none past the end.
+fn places(which: &[usize], len: usize) -> Vec<usize> {
+    let mut out: Vec<usize> = which.iter().copied().filter(|i| *i < len).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// How far each of the points at `which` (in order) may go in time: back to and on to the nearest point that isn't
+/// one of them, or the curve's ends.
+fn room(points: &[Point], which: &[usize], length: f64) -> Vec<(f64, f64)> {
+    // One pass each way: the nearest point not picked before each place, and after it.
+    let mut picked = vec![false; points.len()];
+    for &i in which {
+        if let Some(p) = picked.get_mut(i) {
+            *p = true;
+        }
+    }
+    let mut lows = vec![0.0; points.len()];
+    let mut low = 0.0;
+    for (i, p) in points.iter().enumerate() {
+        lows[i] = low;
+        if !picked[i] {
+            low = p.beat;
+        }
+    }
+    let mut highs = vec![length; points.len()];
+    let mut high = length;
+    for (i, p) in points.iter().enumerate().rev() {
+        highs[i] = high;
+        if !picked[i] {
+            high = p.beat;
+        }
+    }
+    which.iter().filter(|i| **i < points.len()).map(|&i| (lows[i], highs[i].max(lows[i]))).collect()
+}
+
+/// A [`Edit::MovePoints`] or [`Edit::Quantise`] done to `shape`'s points, before they're tidied: the points, and the
+/// places of the ones the edit is about. None for another edit, or one that can't be done.
+fn moved_points(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(Vec<Point>, Vec<usize>)> {
+    let mut points = shape.points.clone();
+    match edit {
+        Edit::MovePoints { points: which, beats, value } => {
+            let which = places(which, points.len());
+            if which.is_empty() || !beats.is_finite() || !value.is_finite() {
+                return None;
+            }
+            let room = room(&points, &which, shape.length);
+            let (mut back, mut on, mut down, mut up) =
+                (f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY);
+            for (&i, (low, high)) in which.iter().zip(&room) {
+                let p = points.get(i)?;
+                back = back.max(low - p.beat);
+                on = on.min(high - p.beat);
+                down = down.max(-p.value);
+                up = up.min(1.0 - p.value);
+            }
+            // A point already past a neighbour by a hair leaves no room: then nothing moves that way.
+            let beats = beats.clamp(back.min(0.0), on.max(0.0));
+            let value = value.clamp(down.min(0.0), up.max(0.0));
+            for &i in &which {
+                let p = points.get_mut(i)?;
+                p.beat += beats;
+                p.value = (p.value + value).clamp(0.0, 1.0);
+            }
+            Some((points, which))
+        }
+        Edit::Quantise { points: which, step } => {
+            if !step.is_finite() || *step <= 0.0 {
+                return None;
+            }
+            let part = highlight.unwrap_or(shape.whole());
+            let which = if which.is_empty() {
+                let inside = |p: &Point| p.beat >= part.start - EPS && p.beat <= part.end + EPS;
+                points.iter().enumerate().filter(|(_, p)| inside(p)).map(|(i, _)| i).collect()
+            } else {
+                places(which, points.len())
+            };
+            if which.is_empty() {
+                return None;
+            }
+            let room = room(&points, &which, shape.length);
+            for (&i, (low, high)) in which.iter().zip(&room) {
+                let p = points.get_mut(i)?;
+                // Its nearest line, or the nearest one it can reach; with no line between its neighbours it stays.
+                let line = (p.beat / step).round() * step;
+                let line = if line < low - EPS {
+                    (low / step).ceil() * step
+                } else if line > high + EPS {
+                    (high / step).floor() * step
+                } else {
+                    line
+                };
+                if line >= low - EPS && line <= high + EPS {
+                    p.beat = line.clamp(*low, *high);
+                }
+            }
+            Some((points, which))
+        }
+        _ => None,
+    }
+}
+
+/// Where the points a [`Edit::MovePoints`] or [`Edit::Quantise`] is about are in `after`, the curve that edit made
+/// of `before` (points that met become one, so the places in the list change): each one's place before and its
+/// place now, for keeping them picked. Empty for another edit.
+pub fn landed(before: &Shape, highlight: Option<Span>, edit: &Edit, after: &Shape) -> Vec<(usize, usize)> {
+    let highlight = highlight.map(|h| h.within(before.length)).filter(|h| !h.is_empty());
+    let Some((points, which)) = moved_points(before, highlight, edit) else { return Vec::new() };
+    which
+        .iter()
+        .filter_map(|&i| {
+            let p = points.get(i)?;
+            after
+                .points
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| (q.beat - p.beat).abs() < 1e-6 && (q.value - p.value).abs() < 1e-6)
+                .min_by_key(|(j, _)| j.abs_diff(i))
+                .map(|(j, _)| (i, j))
+        })
+        .collect()
 }
 
 /// `edit` done to `shape` with `highlight`: the new shape and its highlight, or None when it can't be done (no such
@@ -557,6 +717,73 @@ fn edited(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(Shape,
             let (before, after) = (shape.value_before(part.start), shape.value_at(part.end));
             with(put(&shape.points, part, &[Point::new(0.0, before, 0.0), Point::new(part.len(), after, 0.0)]))
         }
+        Edit::Paint { ref cells } => {
+            // In the order of time, each inside the curve; cells that touch are put in as one run, so a long
+            // stroke walks the curve once.
+            let mut kept: Vec<(Span, f64)> = cells
+                .iter()
+                .filter(|(start, end, value)| finite(&[*start, *end, *value]))
+                .map(|&(start, end, value)| (Span::new(start, end).within(length), value.clamp(0.0, 1.0)))
+                .filter(|(span, _)| !span.is_empty())
+                .collect();
+            if kept.is_empty() {
+                return None;
+            }
+            kept.sort_by(|l, r| l.0.start.total_cmp(&r.0.start));
+            let mut points = shape.points.clone();
+            let mut at = 0;
+            while at < kept.len() {
+                let run_start = kept[at].0.start;
+                let mut run: Vec<Point> = Vec::new();
+                let mut end = run_start;
+                while let Some(&(span, v)) = kept.get(at).filter(|(span, _)| span.start <= end + EPS) {
+                    // A cell over one painted before it takes its place from where it starts.
+                    let from = span.start.max(run_start);
+                    run.retain(|p| p.beat < from - run_start - EPS);
+                    if let Some(last) = run.last().copied() {
+                        run.push(Point::new(from - run_start, last.value, 0.0));
+                    }
+                    run.push(Point::new(from - run_start, v, 0.0));
+                    run.push(Point::new(span.end - run_start, v, 0.0));
+                    end = end.max(span.end);
+                    at += 1;
+                }
+                let whole = Span { start: run_start, end: run.last().map_or(end, |p| run_start + p.beat) };
+                points = put(&points, whole, &run);
+            }
+            with(points)
+        }
+        Edit::Draw { ref line } => {
+            // In the order of time, one value a beat (the later one drawn), all inside the curve.
+            let mut drawn: Vec<(f64, f64)> = Vec::with_capacity(line.len());
+            for &(beat, value) in line {
+                if !finite(&[beat, value]) {
+                    continue;
+                }
+                let (beat, value) = (beat.clamp(0.0, length), value.clamp(0.0, 1.0));
+                match drawn.last_mut() {
+                    Some(last) if same(last.0, beat) => last.1 = value,
+                    Some(last) if beat < last.0 => return None,
+                    _ => drawn.push((beat, value)),
+                }
+            }
+            let span = Span { start: drawn.first()?.0, end: drawn.last()?.0 };
+            if span.is_empty() {
+                return None;
+            }
+            let part: Vec<Point> = drawn.iter().map(|&(b, v)| Point::new(b - span.start, v, 0.0)).collect();
+            with(put(&shape.points, span, &part))
+        }
+        Edit::Swing { step, amount } => {
+            if !finite(&[step, amount]) || step < SHORTEST {
+                return None;
+            }
+            let amount = amount.clamp(-MOST_SWING, MOST_SWING);
+            if amount.abs() < EPS {
+                return None;
+            }
+            reshaped(&|piece, len| Some(swung(&piece, len, part.start, step, amount)))
+        }
         Edit::RemoveTime => {
             let gone = highlight?;
             removed(shape, gone).map(|s| (s, None))
@@ -611,6 +838,23 @@ fn edited(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(Shape,
             let mut clips = shape.clips.clone();
             clips.get_mut(clip)?.pinned = pinned;
             Some((Shape { clips, ..shape.clone() }, highlight))
+        }
+        Edit::MovePoints { .. } | Edit::Quantise { .. } => with(moved_points(shape, highlight, edit)?.0),
+        Edit::RemovePoints(ref which) => {
+            let which = places(which, shape.points.len());
+            if which.is_empty() {
+                return None;
+            }
+            // One point at least stays: the first of them, when every point was picked.
+            let keep = (which.len() == shape.points.len()).then_some(0);
+            let points = shape
+                .points
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| which.binary_search(i).is_err() || keep == Some(*i))
+                .map(|(_, p)| *p)
+                .collect();
+            with(points)
         }
         Edit::SetLength(beats) => {
             if !beats.is_finite() {
@@ -1060,6 +1304,33 @@ fn stepped(part: &[Point], len: f64, step: f64) -> Vec<Point> {
     out
 }
 
+/// The part swung. The grid is the curve's own, counted from its start (`from` is where the part starts on it):
+/// each odd line inside the part moves by `amount` of a step, and the curve from the even line before it (or the
+/// part's start) is stretched or squeezed up to it, and after it to the next even line (or the part's end). A line
+/// never passes three quarters of the way to the end of its stretch.
+fn swung(part: &[Point], len: f64, from: f64, step: f64, amount: f64) -> Vec<Point> {
+    let mut out = Vec::new();
+    let moved = |piece: Vec<Point>, by: f64, to: f64| -> Vec<Point> {
+        stretched(&piece, by).into_iter().map(|p| Point { beat: to + p.beat, ..p }).collect()
+    };
+    let pair = 2.0 * step;
+    // Where the first stretch starts, in the part's own time: on the even line at or before the part's start.
+    let mut even = (from / pair + EPS).floor() * pair - from;
+    while even < len - EPS {
+        let (start, end) = (even.max(0.0), (even + pair).min(len));
+        let mid = even + step;
+        if mid - start < SHORTEST || end - mid < SHORTEST {
+            out.extend(moved(cut(part, Span { start, end }), 1.0, start));
+        } else {
+            let new_mid = (mid + amount * step).clamp(mid - (mid - start) * MOST_SWING, mid + (end - mid) * MOST_SWING);
+            out.extend(moved(cut(part, Span { start, end: mid }), (new_mid - start) / (mid - start), start));
+            out.extend(moved(cut(part, Span { start: mid, end }), (end - new_mid) / (end - mid), new_mid));
+        }
+        even += pair;
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Time put in and taken out, and the clips
 // ---------------------------------------------------------------------------------------------------------------
@@ -1436,6 +1707,72 @@ mod tests {
     }
 
     #[test]
+    fn picked_points_move_together_and_stop_at_the_others() {
+        let s = Shape::new(vec![pt(0.0, 0.0), pt(1.0, 0.5), pt(2.0, 0.8), pt(3.0, 0.2), pt(4.0, 1.0)], 4.0);
+        let edit = Edit::MovePoints { points: vec![2, 1, 2], beats: 0.5, value: 0.1 };
+        let (m, _) = done(&s, None, edit.clone());
+        assert!(near(m.points()[1].beat, 1.5) && near(m.points()[1].value, 0.6));
+        assert!(near(m.points()[2].beat, 2.5) && near(m.points()[2].value, 0.9));
+        assert_eq!(landed(&s, None, &edit, &m), [(1, 1), (2, 2)]);
+        // Too far: they stop together, where the first meets the point at 3 and the top, their shape kept.
+        let far = Edit::MovePoints { points: vec![1, 2], beats: 9.0, value: 9.0 };
+        let (m, _) = done(&s, None, far.clone());
+        let at = |b: f64, v: f64| m.points().iter().any(|p| near(p.beat, b) && near(p.value, v));
+        assert!(at(2.0, 0.7) && at(3.0, 1.0), "{:?}", m.points());
+        assert_eq!(landed(&s, None, &far, &m).len(), 2);
+        let (m, _) = done(&s, None, Edit::MovePoints { points: vec![1, 2], beats: -9.0, value: -9.0 });
+        assert!(near(m.points()[0].beat, 0.0) && near(m.points()[0].value, 0.0), "onto the start: it is the start");
+        assert!(m.points().iter().any(|p| near(p.beat, 1.0) && near(p.value, 0.3)));
+        // Every point picked, from end to end and bottom to top: nowhere to go.
+        let every = Edit::MovePoints { points: vec![0, 1, 2, 3, 4], beats: 1.0, value: -0.5 };
+        assert!(apply(&s, None, &every).is_none(), "no room either way");
+        assert!(apply(&s, None, &Edit::MovePoints { points: vec![9], beats: 1.0, value: 0.0 }).is_none());
+        assert!(apply(&s, None, &Edit::MovePoints { points: vec![1], beats: f64::NAN, value: 0.0 }).is_none());
+        assert!(apply(&s, None, &Edit::MovePoints { points: vec![1], beats: 0.0, value: 0.0 }).is_none());
+    }
+
+    #[test]
+    fn picked_points_are_removed_and_one_point_always_stays() {
+        let s = Shape::new(vec![pt(0.0, 0.0), pt(1.0, 0.5), pt(2.0, 0.8), pt(4.0, 1.0)], 4.0);
+        let (r, _) = done(&s, None, Edit::RemovePoints(vec![2, 1, 7]));
+        assert_eq!(r, ramp());
+        let (r, _) = done(&s, None, Edit::RemovePoints(vec![0, 1, 2, 3]));
+        assert_eq!(r.points().len(), 1);
+        assert!(apply(&s, None, &Edit::RemovePoints(vec![])).is_none());
+        assert!(apply(&s, None, &Edit::RemovePoints(vec![9])).is_none());
+    }
+
+    #[test]
+    fn quantise_puts_points_on_the_grid_and_never_past_the_others() {
+        let s = Shape::new(vec![pt(0.1, 0.0), pt(0.9, 0.5), pt(1.4, 0.8), pt(1.6, 0.2), pt(3.1, 1.0)], 4.0);
+        // Nothing picked, nothing highlighted: every point.
+        let all = Edit::Quantise { points: vec![], step: 1.0 };
+        let (q, _) = done(&s, None, all.clone());
+        let beats: Vec<f64> = q.points().iter().map(|p| p.beat).collect();
+        assert_eq!(beats, [0.0, 1.0, 1.0, 2.0, 3.0], "two that meet make a jump");
+        let now: Vec<usize> = landed(&s, None, &all, &q).into_iter().map(|(_, to)| to).collect();
+        assert_eq!(now, [0, 1, 2, 3, 4]);
+        // Only the highlighted part's points.
+        let (q, _) = done(&s, Some(Span::new(0.5, 1.5)), Edit::Quantise { points: vec![], step: 1.0 });
+        let beats: Vec<f64> = q.points().iter().map(|p| p.beat).collect();
+        assert_eq!(beats, [0.1, 1.0, 1.0, 1.6, 3.1]);
+        // Only the picked one. Its nearest line is past the point before it: it takes the nearest it can reach.
+        let one = Edit::Quantise { points: vec![3], step: 1.0 };
+        let (q, _) = done(&s, None, one.clone());
+        assert!(near(q.points()[3].beat, 2.0), "{:?}", q.points());
+        assert_eq!(landed(&s, None, &one, &q), [(3, 3)]);
+        let back = Edit::Quantise { points: vec![2], step: 1.0 };
+        let (q, _) = done(&s, None, back);
+        assert!(near(q.points()[2].beat, 1.0), "{:?}", q.points());
+        // No line between its neighbours: it stays where it is, on its slope.
+        assert!(apply(&s, None, &Edit::Quantise { points: vec![3], step: 4.0 }).is_none());
+        // On the grid already: nothing to do. And no grid at all.
+        assert!(apply(&ramp(), None, &Edit::Quantise { points: vec![], step: 0.25 }).is_none());
+        assert!(apply(&s, None, &Edit::Quantise { points: vec![], step: 0.0 }).is_none());
+        assert!(landed(&s, None, &Edit::Flip, &s).is_empty());
+    }
+
+    #[test]
     fn points_are_added_moved_and_removed() {
         let (s, _) = done(&ramp(), None, Edit::AddPoint { beat: 1.0, value: 0.9 });
         assert_eq!(s.points().len(), 3);
@@ -1661,6 +1998,58 @@ mod tests {
         let (h, _) = done(&s, None, Edit::Smooth { amount: -1.0, short: 0.05 });
         assert_eq!(h.points()[0].bend, 0.0);
         assert!(near(h.points()[2].beat, 2.1), "a ramp longer than short stays");
+    }
+
+    #[test]
+    fn painted_steps_hold_their_values_and_leave_the_rest() {
+        let (s, _) = done(&ramp(), None, Edit::Paint { cells: vec![(1.0, 1.5, 0.9), (1.5, 2.0, 0.1)] });
+        assert!(near(s.value_at(1.25), 0.9) && near(s.value_at(1.75), 0.1));
+        assert!(near(s.value_at(0.5), 0.125) && near(s.value_at(3.0), 0.75), "the rest stays");
+        assert!(near(s.value_before(1.0), 0.25) && near(s.value_at(2.0), 0.5), "jumps at its edges");
+        // Past the curve's end, or not a number: nothing is painted there.
+        assert!(apply(&ramp(), None, &Edit::Paint { cells: vec![(9.0, 9.5, 0.5), (f64::NAN, 1.0, 0.5)] }).is_none());
+        assert!(apply(&ramp(), None, &Edit::Paint { cells: Vec::new() }).is_none());
+        // Cells given out of order, with a gap, and one painted over another: each holds its own value.
+        let cells = vec![(3.0, 3.5, 0.3), (0.0, 1.0, 0.6), (0.5, 1.0, 0.2)];
+        let (s, _) = done(&ramp(), None, Edit::Paint { cells });
+        assert!(near(s.value_at(0.25), 0.6) && near(s.value_at(0.75), 0.2) && near(s.value_at(3.25), 0.3));
+        assert!(near(s.value_at(2.0), 0.5), "the gap between them stays");
+    }
+
+    #[test]
+    fn a_drawn_line_takes_the_curves_place_between_its_ends() {
+        let line = vec![(1.0, 1.0), (2.0, 0.0), (3.0, 1.0)];
+        let (s, _) = done(&ramp(), None, Edit::Draw { line });
+        assert!(near(s.value_at(1.5), 0.5) && near(s.value_at(2.0), 0.0) && near(s.value_at(2.5), 0.5));
+        assert!(near(s.value_at(0.5), 0.125) && near(s.value_at(3.5), 0.875), "the rest stays");
+        // One point, or a line that goes back in time, is no line.
+        assert!(apply(&ramp(), None, &Edit::Draw { line: vec![(1.0, 0.5)] }).is_none());
+        assert!(apply(&ramp(), None, &Edit::Draw { line: vec![(2.0, 0.5), (1.0, 0.5)] }).is_none());
+    }
+
+    #[test]
+    fn swing_moves_every_second_line_and_keeps_the_rest_in_time() {
+        // Steps a beat long at 0.2, 0.8, 0.2, 0.8: the lines at beats 1 and 3 swing.
+        let cells = vec![(0.0, 1.0, 0.2), (1.0, 2.0, 0.8), (2.0, 3.0, 0.2), (3.0, 4.0, 0.8)];
+        let (steps, _) = done(&ramp(), None, Edit::Paint { cells });
+        let (s, _) = done(&steps, None, Edit::Swing { step: 1.0, amount: 0.5 });
+        assert!(near(s.value_at(1.25), 0.2), "the first step lasts to 1.5: {}", s.value_at(1.25));
+        assert!(near(s.value_at(1.75), 0.8));
+        assert!(near(s.value_at(2.25), 0.2), "the line at beat 2 stays");
+        assert!(near(s.value_at(3.25), 0.2) && near(s.value_at(3.75), 0.8));
+        assert!(near(s.length(), 4.0));
+        // Earlier; and never further than three quarters of a step.
+        let (early, _) = done(&steps, None, Edit::Swing { step: 1.0, amount: -0.5 });
+        assert!(near(early.value_at(0.75), 0.8));
+        let (most, _) = done(&steps, None, Edit::Swing { step: 1.0, amount: 5.0 });
+        assert!(near(most.value_at(1.7), 0.2) && near(most.value_at(1.8), 0.8));
+        // A highlight that starts off the pairs: the lines that swing are still the curve's odd ones (beat 1 here),
+        // not every second line counted from the highlight's start.
+        let (part, _) = done(&steps, Some(Span::new(0.5, 2.5)), Edit::Swing { step: 1.0, amount: 0.5 });
+        assert!(near(part.value_at(1.25), 0.2) && near(part.value_at(1.75), 0.8), "beat 1 moved to 1.5");
+        assert!(near(part.value_at(2.25), 0.2) && near(part.value_at(3.25), 0.8), "the rest is in time");
+        assert!(apply(&steps, None, &Edit::Swing { step: 1.0, amount: 0.0 }).is_none());
+        assert!(apply(&steps, None, &Edit::Swing { step: 0.0, amount: 0.3 }).is_none());
     }
 
     #[test]

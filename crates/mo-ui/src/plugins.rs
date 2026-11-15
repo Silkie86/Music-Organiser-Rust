@@ -1039,6 +1039,7 @@ fn fill_actions(app: &AppWindow) {
                 enabled: enabled(a.id),
                 main: false,
                 danger: a.id == "plugins.uninstall",
+                quiet: mo_app::themes::quiet_button(action_words(a.id)),
             })
             .collect()
     };

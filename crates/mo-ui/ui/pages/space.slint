@@ -5,7 +5,7 @@
 // (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
 // them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, EmptyState, HowItWorks, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, Panel, PageHeader, ListLine, SidePanel, PanelDivider, EmptyState, HowItWorks, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
 
 // One drive across the top.
 export struct DriveCard {
@@ -95,15 +95,11 @@ export global SpaceData {
 }
 
 // A drive: its name and room, a bar of how full it is, what of yours it holds, and why it needs room when it does.
-component DriveView inherits Rectangle {
+component DriveView inherits Panel {
     in property <DriveCard> drive;
     // How full it is in the colours every theme shares (all good, a warning, missing), never the accent: some
     // themes' accent is a red.
     property <color> tint: drive.fill == 2 ? Theme.missing : drive.fill == 1 ? Theme.warning : Theme.ok;
-    width: 300px;
-    background: Theme.surface;
-    border-radius: Theme.radius;
-    border-width: 1px;
     border-color: drive.fill > 0 ? self.tint.transparentize(50%) : Theme.stroke;
     // At the top when a taller card beside it makes this one taller too.
     VerticalLayout {
@@ -358,6 +354,8 @@ export component SpacePage inherits Rectangle {
     // stay within one look of each other; the card takes the room that's left.
     property <length> main-width: min(Fit.list-max + 2 * Space.xl, self.card-shown ? max(480px, self.width - SpaceData.panel-width - divider.width) : self.width);
     property <length> card-width: self.width - self.main-width - divider.width - Space.xl;
+    // The page's width while a card is open, whether one is or not.
+    property <length> shut-width: min(Fit.list-max + 2 * Space.xl, max(480px, self.width - SpaceData.panel-width - divider.width));
     Flickable {
         x: 0;
         width: root.main-width;
@@ -376,9 +374,22 @@ export component SpacePage inherits Rectangle {
                 summary: SpaceData.summary;
             }
             // The drives your folders are on; they wrap onto another row when the window is narrow.
-            FlexboxLayout {
+            // Every card in a row is as wide as the others, and a row is filled: as many to a row as fit at 240 px or
+            // more (never one card left over on a row of its own beside three wide ones while they'd all fit).
+            drives := FlexboxLayout {
+                property <length> room: page.width - 2 * Space.xl;
+                // Counted for the room the page has while a card is open, so opening one never changes how many rows
+                // the drives take: the line under the pointer stays there.
+                property <length> least: min(self.room, root.shut-width - 2 * Space.xl);
+                property <int> across: clamp(floor((self.least + Space.md) / (240px + Space.md)), 1, max(1, SpaceData.drives.length));
+                // With more drives than fit on a row, the rows are as even as they can be (five drives: 3 and 2, not
+                // 4 and 1).
+                property <int> rows: ceil(SpaceData.drives.length / self.across);
+                property <int> per-row: ceil(SpaceData.drives.length / max(1, self.rows));
+                property <length> card: (self.room - (self.per-row - 1) * Space.md) / self.per-row - 0.5px;
                 spacing: Space.md;
                 for d in SpaceData.drives: DriveView {
+                    width: drives.card;
                     drive: d;
                 }
             }
