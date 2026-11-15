@@ -58,6 +58,54 @@ pub fn read_from(path: &Path, max_seconds: f64, from_frame: u64) -> Result<Audio
     }
 }
 
+/// A whole sound file from its start, handed to `each` a part of up to `part_seconds` at a time, in order, with its
+/// sample rate: for going through a long file without holding all of its sound (a waveform). `each` says whether to go
+/// on. WAV and AIFF are read a part at a time ([`read_from`]); MP3, FLAC, M4A, OGG, AAC, WMA (on Windows) and a WAV
+/// that keeps Ogg Vorbis are decoded once, from the start, and handed on as they come (that WAV's Ogg stream is held
+/// whole: FL Studio's own sounds, a few megabytes at the most). A damaged stretch part way in ends it, as in [`read`].
+/// The file's whole length in seconds. A panic in `each` is logged as a crash and ends the read with an error.
+pub fn read_parts(
+    path: &Path,
+    part_seconds: f64,
+    each: &mut dyn FnMut(u32, &[Vec<f32>]) -> bool,
+) -> Result<f64, AudioError> {
+    if can_read_from(path) {
+        // A WAV that keeps Ogg Vorbis (FL Studio's own sounds) is decoded once, as an OGG file is: a place part way
+        // into it can only be reached by decoding all before it.
+        if let Some(stream) = ogg_in_wav(path)? {
+            return crate::other::read_ogg_bytes_parts(stream, part_seconds, each);
+        }
+        let mut seconds = part_seconds;
+        let mut at = 0u64;
+        loop {
+            // Each part opens the file again and goes straight to its place. It ends at a part with nothing in it, as
+            // the file's length in frames isn't told (an AIFF's rate is rounded in what it says).
+            let part = read_from(path, seconds, at)?;
+            if part.is_empty() {
+                // A part shorter than a frame reads nothing: then a frame or two a part, as for the other kinds.
+                let frame = 1.0 / f64::from(part.sample_rate.max(1));
+                if seconds < frame && (at as f64) < part.file_seconds * f64::from(part.sample_rate) {
+                    seconds = 2.0 * frame;
+                    continue;
+                }
+                return Ok(part.file_seconds);
+            }
+            if !crate::parts::give(each, part.sample_rate, &part.channels)? {
+                return Ok(part.file_seconds);
+            }
+            at += part.len() as u64;
+        }
+    }
+    if crate::wma::is_wma(path) {
+        return crate::wma::read_wma_parts(path, part_seconds, each);
+    }
+    if crate::other::is_other(path) {
+        return crate::other::read_other_parts(path, part_seconds, each);
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    Err(AudioError::NotSupported(format!("No decoder for .{ext} files")))
+}
+
 /// Whether [`read_from`] gives this WAV or AIFF file's samples exactly as the file holds them, and its sample rate as
 /// it is: so two files that read the same hold the same audio. Not for 32-bit whole-number or 64-bit float samples
 /// (they're read as 32-bit floats, which lose their last bits), nor an AIFF whose rate isn't a whole number (it's
@@ -136,11 +184,76 @@ fn u32_be(b: &[u8], at: usize) -> Option<u32> {
 
 // ---- WAV ----------------------------------------------------------------------------------------------------------
 
+/// What a WAV file's chunks say ([`wav_chunks`]).
+struct WavChunks {
+    format: u16,
+    channels: u16,
+    rate: u32,
+    bits: u16,
+    /// Where the audio starts in the file, and how many bytes of it there are.
+    data: Option<(u64, u64)>,
+    tempo: Option<f64>,
+    root: Option<i32>,
+    is_loop: Option<bool>,
+    /// The `fmt ` chunk's bytes (an ADPCM file's block layout is in them).
+    fmt_bytes: Vec<u8>,
+    /// The `fact` chunk's frame count.
+    fact: Option<u64>,
+}
+
 fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result<AudioData, AudioError> {
+    let WavChunks { format, channels, rate, bits, data, tempo, root, is_loop, fmt_bytes, fact } = wav_chunks(f, len)?;
+    let Some((start_byte, length)) = data.filter(|_| channels > 0 && rate > 0) else {
+        return Err(AudioError::Format("WAV file has no audio data".into()));
+    };
+    if format == adpcm::MS || format == adpcm::IMA {
+        let layout = adpcm::Layout::from_fmt(format, channels, &fmt_bytes)?;
+        // Caught as read_other does, as a backstop: a damaged file gives an error, never a crash (review finding G-1).
+        let read = mo_catch::catch(AssertUnwindSafe(|| {
+            read_adpcm(f, &layout, rate, start_byte, length, fact, max_seconds, from_frame)
+        }))
+        .unwrap_or_else(|_| Err(AudioError::Format("This ADPCM WAV couldn't be decoded (it may be damaged)".into())));
+        return read.map(|mut a| {
+            (a.embedded_tempo, a.embedded_root_note, a.embedded_is_loop) = (tempo, root, is_loop);
+            a
+        });
+    }
+    if OGG_IN_WAV.contains(&format) {
+        return read_ogg_wav(f, format, start_byte, length, max_seconds, from_frame).map(|mut a| {
+            (a.embedded_tempo, a.embedded_root_note, a.embedded_is_loop) = (tempo, root, is_loop);
+            a
+        });
+    }
+    // Rounded up, so a 12-bit or 20-bit file is read with the bytes each sample really takes.
+    let bytes = usize::from(bits).div_ceil(8);
+    if bytes == 0 {
+        return Err(AudioError::NotSupported("Unsupported WAV bit depth".into()));
+    }
+    let float = format == 3;
+    if format != 1 && !float {
+        return Err(AudioError::NotSupported(format!("WAV format {format} isn't PCM")));
+    }
+    // Checked before reading, so a kind of sample this can't decode never reads the file's audio first.
+    let sample = sample_reader(bytes, float, false)?;
+    let channels = usize::from(channels);
+    let frame_bytes = (bytes * channels) as u64;
+    let total = length / frame_bytes;
+    let raw = read_frames(f, len, start_byte, total, from_frame, max_seconds * f64::from(rate), frame_bytes)?;
+    Ok(AudioData {
+        sample_rate: rate,
+        channels: decode(&raw, channels, bytes, sample),
+        file_seconds: total as f64 / f64::from(rate),
+        embedded_tempo: tempo,
+        embedded_root_note: root,
+        embedded_is_loop: is_loop,
+    })
+}
+
+/// Goes through a WAV file's chunks (from just after its "RIFF", size and "WAVE"), for what they say of its audio.
+fn wav_chunks(f: &mut File, len: u64) -> Result<WavChunks, AudioError> {
     let (mut format, mut channels, mut rate, mut bits) = (0u16, 0u16, 0u32, 0u16);
     let mut data: Option<(u64, u64)> = None;
     let (mut tempo, mut root, mut is_loop) = (None, None, None);
-    // The `fmt ` chunk's bytes (an ADPCM file's block layout is in them) and the `fact` chunk's frame count.
     let (mut fmt_bytes, mut fact) = (Vec::new(), None);
 
     let mut pos = 12u64; // RIFF, size, WAVE
@@ -203,50 +316,7 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
         }
         pos = next;
     }
-    let Some((start_byte, length)) = data.filter(|_| channels > 0 && rate > 0) else {
-        return Err(AudioError::Format("WAV file has no audio data".into()));
-    };
-    if format == adpcm::MS || format == adpcm::IMA {
-        let layout = adpcm::Layout::from_fmt(format, channels, &fmt_bytes)?;
-        // Caught as read_other does, as a backstop: a damaged file gives an error, never a crash (review finding G-1).
-        let read = mo_catch::catch(AssertUnwindSafe(|| {
-            read_adpcm(f, &layout, rate, start_byte, length, fact, max_seconds, from_frame)
-        }))
-        .unwrap_or_else(|_| Err(AudioError::Format("This ADPCM WAV couldn't be decoded (it may be damaged)".into())));
-        return read.map(|mut a| {
-            (a.embedded_tempo, a.embedded_root_note, a.embedded_is_loop) = (tempo, root, is_loop);
-            a
-        });
-    }
-    if OGG_IN_WAV.contains(&format) {
-        return read_ogg_wav(f, format, start_byte, length, max_seconds, from_frame).map(|mut a| {
-            (a.embedded_tempo, a.embedded_root_note, a.embedded_is_loop) = (tempo, root, is_loop);
-            a
-        });
-    }
-    // Rounded up, so a 12-bit or 20-bit file is read with the bytes each sample really takes.
-    let bytes = usize::from(bits).div_ceil(8);
-    if bytes == 0 {
-        return Err(AudioError::NotSupported("Unsupported WAV bit depth".into()));
-    }
-    let float = format == 3;
-    if format != 1 && !float {
-        return Err(AudioError::NotSupported(format!("WAV format {format} isn't PCM")));
-    }
-    // Checked before reading, so a kind of sample this can't decode never reads the file's audio first.
-    let sample = sample_reader(bytes, float, false)?;
-    let channels = usize::from(channels);
-    let frame_bytes = (bytes * channels) as u64;
-    let total = length / frame_bytes;
-    let raw = read_frames(f, len, start_byte, total, from_frame, max_seconds * f64::from(rate), frame_bytes)?;
-    Ok(AudioData {
-        sample_rate: rate,
-        channels: decode(&raw, channels, bytes, sample),
-        file_seconds: total as f64 / f64::from(rate),
-        embedded_tempo: tempo,
-        embedded_root_note: root,
-        embedded_is_loop: is_loop,
-    })
+    Ok(WavChunks { format, channels, rate, bits, data, tempo, root, is_loop, fmt_bytes, fact })
 }
 
 /// The WAV formats that hold Ogg Vorbis ("Og", "Pg", "Qg" and their "+" twins "og", "pg", "qg"): FL Studio's own
@@ -263,6 +333,11 @@ fn read_ogg_wav(
     max_seconds: f64,
     from_frame: u64,
 ) -> Result<AudioData, AudioError> {
+    crate::other::read_ogg_bytes(ogg_stream(f, format, start_byte, length)?, max_seconds, from_frame)
+}
+
+/// The Ogg stream a WAV keeps its audio in ([`read_ogg_wav`]): `length` bytes from `start_byte`.
+fn ogg_stream(f: &mut File, format: u16, start_byte: u64, length: u64) -> Result<Vec<u8>, AudioError> {
     f.seek(SeekFrom::Start(start_byte))?;
     let want = length.min(MOST_BYTES);
     let mut stream = Vec::with_capacity(usize::try_from(want).unwrap_or(0));
@@ -272,7 +347,25 @@ fn read_ogg_wav(
             "WAV format {format} (Ogg Vorbis kept without its Ogg stream) isn't decoded"
         )));
     }
-    crate::other::read_ogg_bytes(stream, max_seconds, from_frame)
+    Ok(stream)
+}
+
+/// The Ogg Vorbis stream of a WAV file that keeps its audio that way (FL Studio's own sounds), or none for any other
+/// WAV, or an AIFF. Anything wrong with the file is left for [`read_from`] to say.
+fn ogg_in_wav(path: &Path) -> Result<Option<Vec<u8>>, AudioError> {
+    let mut f = File::open(path)?;
+    let len = f.metadata()?.len();
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() || !matches!(&magic, b"RIFF" | b"RF64") {
+        return Ok(None);
+    }
+    let chunks = wav_chunks(&mut f, len)?;
+    match chunks.data {
+        Some((start_byte, length)) if chunks.channels > 0 && chunks.rate > 0 && OGG_IN_WAV.contains(&chunks.format) => {
+            ogg_stream(&mut f, chunks.format, start_byte, length).map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Up to `max_seconds` of an ADPCM WAV's audio from `from_frame` on: the blocks that hold them are read and decoded,

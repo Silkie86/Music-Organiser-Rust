@@ -2,9 +2,9 @@
 //! own fixtures folder, under fixed names, never a random temp one.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use mo_audio::{AudioError, read, read_from, write_wav};
+use mo_audio::{AudioError, read, read_from, read_parts, write_wav};
 
 fn fixture(name: &str, bytes: &[u8]) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-audio");
@@ -404,5 +404,130 @@ fn adpcm_wavs_decode_as_ffmpeg_decodes_them() {
         let a = read(&tone(name), 60.0).unwrap();
         assert_eq!((a.sample_rate, a.channels.len(), a.len()), (22050, 2, 11025), "{name}");
         assert_eq!(s16_hash(&a), hash, "{name}");
+    }
+}
+
+/// An AIFF's 80-bit sample rate: its exponent, then its 64 bits with the leading one.
+fn extended80(rate: f64) -> [u8; 10] {
+    let exponent = rate.log2().floor() as i32;
+    let mut b = [0u8; 10];
+    b[..2].copy_from_slice(&((exponent + 16383) as u16).to_be_bytes());
+    b[2..].copy_from_slice(&((rate * 2f64.powi(63 - exponent)) as u64).to_be_bytes());
+    b
+}
+
+/// What [`read_parts`] handed on ([`in_parts`]).
+struct InParts {
+    /// Each part's length and sample rate.
+    parts: Vec<(usize, u32)>,
+    /// All the parts put back together, a channel each.
+    all: Vec<Vec<f32>>,
+    /// The whole length it gave.
+    seconds: f64,
+}
+
+/// What [`read_parts`] hands on, `part_seconds` at a time.
+fn in_parts(path: &Path, part_seconds: f64) -> Result<InParts, AudioError> {
+    let (mut parts, mut all) = (Vec::new(), Vec::<Vec<f32>>::new());
+    let seconds = read_parts(path, part_seconds, &mut |rate, channels| {
+        parts.push((channels[0].len(), rate));
+        all.resize(channels.len(), Vec::new());
+        for (a, c) in all.iter_mut().zip(channels) {
+            a.extend_from_slice(c);
+        }
+        true
+    })?;
+    Ok(InParts { parts, all, seconds })
+}
+
+/// The beta F12 note of 15 Nov: a long clip's waveform on the Songs page stopped after the file's first minute, as
+/// only that much was read. A whole file is read a part at a time instead, so all of it is there however long it is,
+/// with never more than a part in memory.
+#[test]
+fn a_whole_file_is_read_a_part_at_a_time() {
+    // A WAV: 2.5 seconds of stereo at 1,000 frames a second, in parts of a second, the last one shorter.
+    let left: Vec<i16> = (0..2500).map(|i| (i * 13 % 2000 - 1000) as i16).collect();
+    let samples: Vec<i16> = left.iter().flat_map(|&l| [l, -l]).collect();
+    let wav = fixture("parts.wav", &riff(&[fmt(1, 2, 1000, 16), chunk(b"data", &pcm16(&samples), false)]));
+    let InParts { parts, all, seconds } = in_parts(&wav, 1.0).unwrap();
+    assert_eq!(parts, [(1000, 1000), (1000, 1000), (500, 1000)]);
+    assert_eq!(all, read(&wav, f64::INFINITY).unwrap().channels);
+    assert_eq!(seconds, 2.5);
+    // A part shorter than a frame: a frame or two a part instead of nothing.
+    let InParts { parts, all, seconds } = in_parts(&wav, 0.0001).unwrap();
+    assert!(parts.len() > 1 && parts.iter().all(|&(n, _)| n <= 2), "{}", parts.len());
+    assert_eq!((all, seconds), (read(&wav, f64::INFINITY).unwrap().channels, 2.5));
+    // An AIFF at an old Mac rate, 11,127.27 a second (said as 11,127): its last two frames are still read.
+    let rate = 11_127.272_727;
+    let frames = 100_000u32;
+    let mut comm = 1u16.to_be_bytes().to_vec();
+    comm.extend_from_slice(&frames.to_be_bytes());
+    comm.extend_from_slice(&16u16.to_be_bytes());
+    comm.extend_from_slice(&extended80(rate));
+    let mut ssnd = vec![0u8; 8];
+    ssnd.extend((0..frames).flat_map(|i| ((i % 2000) as i16 - 1000).to_be_bytes()));
+    let body = [chunk(b"COMM", &comm, true), chunk(b"SSND", &ssnd, true)].concat();
+    let mut aiff = b"FORM".to_vec();
+    aiff.extend_from_slice(&(4 + body.len() as u32).to_be_bytes());
+    aiff.extend_from_slice(b"AIFF");
+    aiff.extend(body);
+    let aiff = fixture("parts-old-mac-rate.aif", &aiff);
+    let InParts { parts, all, seconds } = in_parts(&aiff, 99_998.5 / rate).unwrap();
+    assert_eq!(parts, [(99_998, 11_127), (2, 11_127)]);
+    assert_eq!(all, read(&aiff, f64::INFINITY).unwrap().channels);
+    assert!((seconds - f64::from(frames) / rate).abs() < 1e-9, "{seconds}");
+    // An ADPCM WAV, its parts ending part way through its blocks (9 frames each, 20 in all).
+    let adpcm = fixture("parts-ima-adpcm.wav", &ima_wav(3, 20));
+    let InParts { parts, all, seconds } = in_parts(&adpcm, 7.0 / 8000.0).unwrap();
+    assert_eq!(parts, [(7, 8000), (7, 8000), (6, 8000)]);
+    assert_eq!(all, read(&adpcm, f64::INFINITY).unwrap().channels);
+    assert_eq!(seconds, 20.0 / 8000.0);
+
+    // The kinds decoded from their start, and a WAV holding Ogg Vorbis as FL Studio keeps its own sounds: each
+    // decoded once, a tenth of a second at a time, the same as all at once.
+    let ogg = std::fs::read(tone("tone.ogg")).unwrap();
+    let ogg_wav = fixture("parts-ogg-inside.wav", &riff(&[fmt(0x674F, 2, 22050, 16), chunk(b"data", &ogg, false)]));
+    let mut kinds: Vec<PathBuf> = ["tone.flac", "tone.mp3", "tone.m4a", "tone.ogg", "tone.aac"].map(tone).into();
+    kinds.push(ogg_wav.clone());
+    if cfg!(windows) {
+        kinds.push(tone("tone.wma"));
+    }
+    for path in &kinds {
+        let whole = read(path, f64::INFINITY).unwrap();
+        let InParts { parts, all, seconds } = in_parts(path, 0.1).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert!(parts.len() >= 5 && parts.iter().all(|&(_, rate)| rate == 22050), "{}: {parts:?}", path.display());
+        assert!(parts[..parts.len() - 1].iter().all(|&(n, _)| n == 2205), "{}: {parts:?}", path.display());
+        assert_eq!(all, whole.channels, "{}", path.display());
+        assert_eq!(seconds, whole.file_seconds, "{}", path.display());
+    }
+    assert_eq!(in_parts(&ogg_wav, 0.1).unwrap().all, read(&tone("tone.ogg"), f64::INFINITY).unwrap().channels);
+
+    // Stopped after its first part: no more are handed on, and a WAV still says how long it is.
+    for path in [wav.clone(), tone("tone.mp3"), ogg_wav] {
+        let mut calls = 0;
+        let seconds = read_parts(&path, 0.1, &mut |_, _| {
+            calls += 1;
+            false
+        })
+        .unwrap();
+        assert_eq!(calls, 1, "{}", path.display());
+        if path == wav {
+            assert_eq!(seconds, 2.5);
+        }
+    }
+
+    // A bug in what the parts go to is a crash in the log and an error, never taken for a damaged file.
+    for path in [wav.clone(), tone("tone.mp3")] {
+        let e = read_parts(&path, 0.1, &mut |_, _| panic!("a bug in the caller")).unwrap_err();
+        assert!(e.to_string().contains("tripped"), "{}: {e}", path.display());
+    }
+
+    // What can't be read says why, as `read` does.
+    let nothing = |path: &Path| read_parts(path, 1.0, &mut |_, _| true).unwrap_err();
+    assert!(matches!(nothing(Path::new("does/not/exist.wav")), AudioError::Io(_)));
+    assert!(matches!(nothing(Path::new("does/not/exist.mp3")), AudioError::Io(_)));
+    assert!(nothing(&fixture("parts.xyz", b"not sound")).to_string().contains("No decoder for .xyz files"));
+    if !cfg!(windows) {
+        assert!(nothing(&tone("tone.wma")).to_string().contains("only be played on Windows"));
     }
 }
