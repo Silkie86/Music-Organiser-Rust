@@ -4570,6 +4570,14 @@ fn choose_soundfont(app: &AppWindow) {
         let kept = crate::settings::remember(page::SOUNDFONT_KEY, &path.to_string_lossy());
         SOUNDFONT.with(|s| *s.borrow_mut() = Some(Some(path.clone())));
         data.set_soundfont_missing(false);
+        log::info("MIDI", &format!("Parts play with the SoundFont {}", path.display()));
+        // A loop playing goes on with the new sounds.
+        if data.get_playing()
+            && let Some(at) = PAGE.with(|p| p.borrow().looping)
+        {
+            replay(&app, at);
+        }
+        // After the replay, which clears the note under Play: so a setting that couldn't be kept is said.
         data.set_play_note(
             if kept {
                 ""
@@ -4578,13 +4586,6 @@ fn choose_soundfont(app: &AppWindow) {
             }
             .into(),
         );
-        log::info("MIDI", &format!("Parts play with the SoundFont {}", path.display()));
-        // A loop playing goes on with the new sounds.
-        if data.get_playing()
-            && let Some(at) = PAGE.with(|p| p.borrow().looping)
-        {
-            replay(&app, at);
-        }
     });
     if let Err(e) = asked {
         log::error("MIDI", &format!("Couldn't open the file picker: {e}"));
