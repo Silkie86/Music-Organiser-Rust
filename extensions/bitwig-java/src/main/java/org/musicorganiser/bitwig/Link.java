@@ -522,6 +522,7 @@ final class Link {
             cursorDevice.addDirectParameterNormalizedValueObserver((id, value) -> {
                 params.values.put(String.valueOf(id), value);
                 params.told.merge(String.valueOf(id), 1, Integer::sum);
+                params.toldAt.put(String.valueOf(id), ++params.tellings);
             });
             displayObserver = cursorDevice.addDirectParameterValueDisplayObserver(64, (id, text) -> {
                 params.displays.put(String.valueOf(id), str(text));
@@ -626,6 +627,7 @@ final class Link {
         // Newer API, as additions: the app works without them.
         feature("track IDs", () -> {
             for (int t = 0; t < MAX_TRACKS; t++) trackItems[t].channelId().markInterested();
+            cursorTrack.channelId().markInterested();
             trackIds = true;
         }, () -> {
             if (!trackItems[0].exists().get()) return "No tracks to show an ID for.";
@@ -965,11 +967,13 @@ final class Link {
         List<String> list = new ArrayList<>(array.length);
         for (Object id : array) list.add(String.valueOf(id));
         params.ids = list;
+        params.listedAt = ++params.tellings;
         Set<String> kept = new HashSet<>(list);
         params.names.keySet().retainAll(kept);
         params.values.keySet().retainAll(kept);
         params.displays.keySet().retainAll(kept);
         params.told.keySet().retainAll(kept);
+        params.toldAt.keySet().retainAll(kept);
         params.answered.keySet().retainAll(kept);
     }
 
@@ -1350,11 +1354,9 @@ final class Link {
         return m;
     }
 
-    /** The selected track's ID, or "" when Bitwig hasn't said it or the track is past those the link follows. */
+    /** The ID of the track the selected device is on (the cursor track), or "" when Bitwig doesn't say it. */
     private String selectedTrackId() {
-        for (int t = 0; t < MAX_TRACKS; t++)
-            if (trackItems[t] != null && trackItems[t].exists().get() && trackSelected[t] != null && trackSelected[t].get()) return idOf(t);
-        return "";
+        return trackIds ? str(cursorTrack.channelId().get()) : "";
     }
 
     private static Map<String, Object> describeDevice(int index, Device device) {
@@ -1561,9 +1563,14 @@ final class Link {
         reply(ask, Map.of(), null);
     }
 
-    /** Sets one of the selected device's parameters, by its ID, to a value from 0 to 1. */
+    /**
+     * Sets one of the selected device's parameters, by its ID, to a value from 0 to 1. With `expect` (extension 3.29, as
+     * insert's) it's refused when the selected device isn't the one the app means.
+     */
     private void setParameter(Ask ask, Map<String, Object> request) {
         if (!cursorDevice.exists().get()) throw new LinkError("No device is selected in Bitwig.");
+        // Extension 3.29: the device the app means, when it says; a setting never lands on another one.
+        checkExpected(field(request, "expect"), "this setting wasn't set");
         Object param = field(request, "param");
         if (!(param instanceof String) || !params.ids.contains(param))
             throw new LinkError("The selected device has no parameter " + Json.js(param) + ".");
@@ -1896,12 +1903,9 @@ final class Link {
      * waits to say whether Bitwig added a device, since it quietly ignores what it can't use. With `at: "replace"`
      * (extension 3.25) it takes the selected device's place instead (no track: the selected device is the one).
      *
-     * From extension 3.29 a replace can say which device it means (`expect`: `trackId`, `position`, `name`, each
+     * From extension 3.29 a replace can say which device it means (`expect`: `trackId`, `position`, `name`, `sample`, each
      * optional): a change waits its turn behind others, and by then you may have selected something else, which is then
-     * left alone. And a file put in a device's place waits to see it go in: `replaced` is true once the selected device
-     * shows another sample than before, false when it never does (Bitwig quietly ignores a file it can't use), and null
-     * when the file is the sample that was there already (nothing to tell them apart by). With it come `device`,
-     * `trackId`, `position` and `sample`, as `device` gives them.
+     * left alone. And a sample put in a device's place waits to see it go in, and answers `replaced`: see replaced.
      */
     private void insert(Map<String, Object> request, Finish finish) {
         // The track by its place, or (extension 3.21) by the ID Bitwig keeps it under, which holds however tracks move.
@@ -1917,7 +1921,7 @@ final class Link {
         if (replace) {
             if (!absent(t)) throw new LinkError("Replace takes the selected device's place: give no track.");
             if (cursorReplace == null || !cursorDevice.exists().get()) throw new LinkError("No device is selected in Bitwig.");
-            checkExpected(field(request, "expect"));
+            checkExpected(field(request, "expect"), "nothing was replaced");
             point = cursorReplace;
         } else if (absent(t)) {
             if (start) throw new LinkError("Say which track's chain to insert at the start of.");
@@ -1930,10 +1934,13 @@ final class Link {
             point = start ? trackStarts[track] : trackEnds[track];
         }
         Object kind = field(request, "kind");
-        // What a file put in the selected device's place is told apart from (extension 3.29).
-        boolean confirm = replace && "file".equals(kind) && cursorSample;
+        // What a sample put in the selected device's place is told apart from (extension 3.29). A preset isn't waited
+        // for: it shows no sample.
+        boolean confirm = replace && "file".equals(kind) && cursorSample
+                          && !str(field(request, "path")).toLowerCase(Locale.ROOT).endsWith(".bwpreset");
         String sampleBefore = confirm ? str(cursorDevice.sampleName().get()) : "";
         String trackBefore = confirm ? selectedTrackId() : "";
+        long toldBefore = params.tellings;
         switch (kind instanceof String ? (String) kind : "\u0000") {
             case "vst3":
                 point.insertVST3Device(given(field(request, "plugin"), "plugin ID"));
@@ -1954,7 +1961,7 @@ final class Link {
                 throw new LinkError("Can't insert a \"" + Json.js(kind) + "\": use vst3, clap, vst2, bitwig or file.");
         }
         if (confirm) {
-            replaced(given(field(request, "path"), "file"), sampleBefore, trackBefore, finish);
+            replaced(given(field(request, "path"), "file"), sampleBefore, trackBefore, toldBefore, finish);
             return;
         }
         if (chain == null) {
@@ -1987,64 +1994,72 @@ final class Link {
     }
 
     /**
-     * Refuses a replace when the selected device isn't the one the app meant (`expect`, extension 3.29): the change
-     * waited its turn, and something else was selected meanwhile.
+     * Refuses a change when the selected device isn't the one the app meant (`expect`, extension 3.29: its track's ID,
+     * its place in the chain, its name and its sample, each optional): the change waited its turn, and something else was
+     * selected meanwhile. `undone` says what didn't happen. The sample tells apart what the first three can't: the
+     * Samplers on a Drum Machine's pads are all first in their chain on the same track.
      */
-    private void checkExpected(Object expect) {
+    private void checkExpected(Object expect, String undone) {
         if (absent(expect)) return;
         Map<String, Object> wanted = asMap(expect);
-        if (wanted == null) throw new LinkError("The device to expect is a trackId, a position and a name, not " + Json.js(expect) + ".");
+        if (wanted == null)
+            throw new LinkError("The device to expect is a trackId, a position, a name and a sample, not " + Json.js(expect) + ".");
         Object track = field(wanted, "trackId");
         Object position = field(wanted, "position");
         Object name = field(wanted, "name");
+        Object sample = field(wanted, "sample");
         boolean same = (absent(track) || track.equals(selectedTrackId()))
                        && (absent(position) || position instanceof Number && ((Number) position).intValue() == cursorDevice.position().get())
-                       && (absent(name) || name.equals(str(cursorDevice.name().get())));
+                       && (absent(name) || name.equals(str(cursorDevice.name().get())))
+                       && (absent(sample) || !cursorSample || sample.equals(str(cursorDevice.sampleName().get())));
         if (!same)
-            throw new LinkError("Another device is selected in Bitwig now than when this was asked for: nothing was replaced. "
+            throw new LinkError("Another device is selected in Bitwig now than when this was asked for: " + undone + ". "
                                 + "Select the device again and ask again.");
     }
 
     /**
-     * Answers a file put in the selected device's place (extension 3.29) once Bitwig shows it there: the selected device,
-     * still on the same track, with a sample that isn't the one before. See insert for the answer.
+     * Answers a sample put in the selected device's place (extension 3.29) once Bitwig shows it there: the selected
+     * device, still on the same track, with a sample that isn't the one before. A sample of the same name as the one
+     * before can't show that way: for it, Bitwig telling the device's list of parameters again is the sign. `replaced`
+     * is true when the sign came, and with it `device`, `trackId`, `position`, `sample` and `fresh` (the IDs of the
+     * parameters whose values Bitwig has told since the file was put in: only those are the new device's for sure).
+     * When it never came within CHANGE_WAIT: false when the device is as it was (Bitwig ignored the file), and null
+     * when that can't be told: another device or track is selected by now (`moved`: true), or the name is the same.
      */
-    private void replaced(String path, String sampleBefore, String trackBefore, Finish finish) {
+    private void replaced(String path, String sampleBefore, String trackBefore, long toldBefore, Finish finish) {
         String file = path.substring(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
         String stem = file.contains(".") ? file.substring(0, file.lastIndexOf('.')) : file;
-        // The sample that was there already, put in again: its name can't show the swap.
         boolean again = !sampleBefore.isEmpty() && (sampleBefore.equalsIgnoreCase(file) || sampleBefore.equalsIgnoreCase(stem));
-        Then describe = changed -> {
-            if (!changed && !again) {
+        BooleanSupplier there = () -> cursorDevice.exists().get() && selectedTrackId().equals(trackBefore);
+        waitFor(() -> {
+            if (!there.getAsBoolean()) return false;
+            String now = str(cursorDevice.sampleName().get());
+            return again ? params.listedAt > toldBefore : !now.isEmpty() && !now.equals(sampleBefore);
+        }, CHANGE_WAIT, shown -> {
+            if (!shown) {
+                boolean moved = !there.getAsBoolean();
                 Map<String, Object> m = new LinkedHashMap<>();
-                m.put("replaced", false);
+                m.put("replaced", moved || again ? null : Boolean.FALSE);
+                if (moved) m.put("moved", true);
                 finish.ok(m);
                 return;
             }
+            // Until Bitwig has stopped telling the new device's values.
             settle(() -> {
                 Map<String, Object> seen = new LinkedHashMap<>();
                 boolean exists = cursorDevice.exists().get();
+                seen.put("replaced", true);
                 seen.put("device", exists ? describeDevice(-1, cursorDevice) : null);
                 seen.put("trackId", selectedTrackId());
                 seen.put("position", exists ? cursorDevice.position().get() : null);
                 seen.put("sample", exists ? str(cursorDevice.sampleName().get()) : null);
+                List<String> fresh = new ArrayList<>();
+                for (String id : params.ids)
+                    if (params.toldAt.getOrDefault(id, 0L) > toldBefore) fresh.add(id);
+                seen.put("fresh", fresh);
                 return seen;
-            }, seen -> {
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("replaced", changed ? Boolean.TRUE : null);
-                m.putAll(seen);
-                finish.ok(m);
-            }, finish);
-        };
-        if (again) {
-            describe.run(false);
-            return;
-        }
-        waitFor(() -> {
-            if (!cursorDevice.exists().get() || !selectedTrackId().equals(trackBefore)) return false;
-            String now = str(cursorDevice.sampleName().get());
-            return !now.isEmpty() && !now.equals(sampleBefore);
-        }, CHANGE_WAIT, describe, finish);
+            }, finish::ok, finish);
+        }, finish);
     }
 
     /**
@@ -5122,6 +5137,11 @@ final class Link {
         final Map<String, String> displays = new HashMap<>();
         /** How many times Bitwig has told each parameter's value. */
         final Map<String, Integer> told = new HashMap<>();
+        /** Counts everything Bitwig tells of the selected device's parameters: each value, and each list of IDs. */
+        long tellings;
+        /** The count at which each parameter's value was last told, and the list of IDs. */
+        final Map<String, Long> toldAt = new HashMap<>();
+        long listedAt;
         /** What the last answer gave of each parameter (see `staleValue`). */
         final Map<String, Answered> answered = new HashMap<>();
     }

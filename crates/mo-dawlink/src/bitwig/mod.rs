@@ -48,8 +48,8 @@ pub use device::{DRUM_MACHINE_KEY, DRUM_MACHINE_NAME, DeviceId, drum_machine};
 pub use error::{Error, LOOPBACK_PORT};
 pub use link::{
     CHANGE_TIMEOUT, CONNECT_TIMEOUT, Device, DeviceParam, Hello, Inserted, LINK_VERSION, Link, Metre, NewTrack,
-    PLAY_START_NEEDS, PORT, PadContents, PadsFilled, Recorded, Replaced, SelectedDevice, SelectedTrack, TIMEOUT,
-    TakenOut,
+    PLAY_START_NEEDS, PORT, PadContents, PadsFilled, Recorded, ReplaceAnswer, Replaced, SelectedDevice, SelectedTrack,
+    TIMEOUT, TakenOut,
 };
 pub use put::{PUT_NEEDS, PutIn, Seen};
 pub use sampler::{SWAP_NEEDS, Swapped};

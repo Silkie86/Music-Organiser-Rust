@@ -400,10 +400,14 @@ class LinkTest {
         Object after = app.waitFor(obj("id", 4, "cmd", "device")).get("result");
         assertEquals("Sampler", at(after, "device", "name"));
         assertEquals("Kick.wav", at(after, "sample"));
-        // The sample that's there already, put in again: its name can't show the swap, and the answer says so.
-        Object again = app.waitFor(obj("id", 23, "cmd", "insert", "kind", "file", "path", "C:\\Samples\\Kick.wav", "at", "replace")).get("result");
-        assertNull(at(again, "replaced"));
+        assertTrue(at(done, "fresh") instanceof List, "the parameters told since, as a list");
+        // A sample of the same name as the one there: its name can't show the swap, but Bitwig telling the device's
+        // parameters again does.
+        Object again = app.waitFor(obj("id", 23, "cmd", "insert", "kind", "file", "path", "D:\\Other\\kick.WAV", "at", "replace")).get("result");
+        assertEquals(true, at(again, "replaced"));
         assertEquals("Sampler", at(again, "device", "name"));
+        // A preset isn't waited for: it shows no sample.
+        assertJson(obj(), app.ask(obj("id", 24, "cmd", "insert", "kind", "file", "path", "C:\\Presets\\Lead.bwpreset", "at", "replace")).get("result"));
         assertMatches("give no track", error(app.ask(obj("id", 5, "cmd", "insert", "kind", "file", "path", "a.wav", "at", "replace", "track", 0))));
     }
 
@@ -421,15 +425,19 @@ class LinkTest {
         int calls = bitwig.calls.size();
         for (Object expect : list(obj("trackId", trackId, "position", 0, "name", "EQ+"),
                                   obj("trackId", trackId, "position", 1, "name", "Sampler"),
-                                  obj("trackId", "another track", "position", 1, "name", "EQ+")))
+                                  obj("trackId", "another track", "position", 1, "name", "EQ+"),
+                                  obj("trackId", trackId, "position", 1, "name", "EQ+", "sample", "Snare.wav")))
             assertMatches("Another device is selected in Bitwig now.*nothing was replaced",
                           error(app.waitFor(obj("id", 4, "cmd", "insert", "kind", "file", "path", "C:\\Samples\\Kick.wav", "at", "replace", "expect", expect))));
-        assertMatches("a trackId, a position and a name",
+        assertMatches("a trackId, a position, a name and a sample",
                       error(app.waitFor(obj("id", 5, "cmd", "insert", "kind", "file", "path", "C:\\Samples\\Kick.wav", "at", "replace", "expect", "Sampler"))));
         assertEquals(calls, bitwig.calls.size(), "nothing was put anywhere: " + bitwig.calls);
+        // A setting meant for another device than the selected one isn't set either.
+        assertMatches("Another device is selected in Bitwig now.*this setting wasn't set",
+                      error(app.ask(obj("id", 7, "cmd", "set", "param", "CONTENTS/GAIN", "value", 0.5, "expect", obj("position", 0, "name", "Sampler")))));
         // What's expected is what's selected: it goes in. Each part is optional.
         Object done = app.waitFor(obj("id", 6, "cmd", "insert", "kind", "file", "path", "C:\\Samples\\Kick.wav", "at", "replace",
-                                      "expect", obj("position", 1, "name", "EQ+"))).get("result");
+                                      "expect", obj("position", 1, "name", "EQ+", "sample", ""))).get("result");
         assertEquals(true, at(done, "replaced"));
         assertJson(1, at(done, "position"));
     }

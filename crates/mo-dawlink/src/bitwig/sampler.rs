@@ -14,7 +14,7 @@
 //! and "Let the app make changes" on. Bitwig's undo takes it back.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::audition::{check_version, there};
 use super::link::Replaced;
@@ -28,6 +28,11 @@ pub const SWAP_NEEDS: &str = "3.29";
 const SAME: f64 = 1e-4;
 /// How long Bitwig gets to show the values just set, before they're read back.
 const SHOWN_AFTER: Duration = Duration::from_millis(300);
+/// How often, and for how long, the new Sampler is read again while it shows no parameters yet.
+const LOOK_EVERY: Duration = Duration::from_millis(100);
+const PARAMS_WAIT: Duration = Duration::from_secs(2);
+/// The trouble when the selection is no longer the Sampler the sound went in.
+const MOVED: &str = "another device is selected in Bitwig now.";
 
 /// What came over to the new Sampler ([`Bitwig::swap_into_sampler`]), by the parameters' names.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -44,7 +49,8 @@ pub struct Swapped {
     pub gone: Vec<String>,
     /// The old Sampler's parameters whose value Bitwig didn't tell, so they couldn't be set back.
     pub unread: Vec<String>,
-    /// The sound is the one the Sampler held already, so Bitwig can't show whether it went in again.
+    /// The Sampler held a sound of this name already, and Bitwig showed no other sign of the swap: whether it went in
+    /// can't be told, and every setting was set again in case.
     pub same_sound: bool,
     /// Why the settings weren't (all) set back after the sound went in, when something got in the way.
     pub trouble: Option<String>,
@@ -71,7 +77,10 @@ impl Swapped {
             }
         }
         if self.same_sound {
-            said.push_str(" The Sampler held this sound already, so Bitwig can't show whether it went in again.");
+            said.push_str(
+                " The Sampler held a sound of this name already, and Bitwig showed no sign of another going in: \
+                 look in Bitwig whether it did.",
+            );
         }
         if let Some(trouble) = &self.trouble {
             said.push_str(&format!(
@@ -103,28 +112,60 @@ impl Bitwig {
             }
             None => return Err(Error::Invalid("Select a Sampler in Bitwig to try the sound in.".into())),
         };
-        let replaced = link.replace_selected_with_file(&shown, &before)?;
-        if replaced == Replaced::No {
-            let file = path.as_ref().file_name().unwrap_or(path.as_ref().as_os_str()).to_string_lossy().into_owned();
-            // The extension waited 5 seconds for it. Untried in a real Bitwig, so the words leave room for a late one.
-            return Err(Error::Bitwig(format!(
-                "Bitwig didn't take {file}: nothing changed. (If it shows up in the Sampler later, Bitwig's undo takes \
-                 it back.)"
-            )));
+        // Without the sample's name the extension can't see the swap, and would answer before Bitwig had done it.
+        if before.sample.is_none() {
+            return Err(Error::Invalid(
+                "This Bitwig doesn't tell the link which sample the selected Sampler holds, so a swap couldn't be \
+                 checked: nothing was tried. The link's self-check says why, at \"cursor device's sample\"."
+                    .into(),
+            ));
         }
-        let mut swapped =
-            Swapped { track: before.track.clone(), same_sound: replaced == Replaced::CantTell, ..Swapped::default() };
-        // The selection, read again: only the Sampler in the old one's place gets the old one's settings.
-        let after = match link.selected_device() {
-            Ok(Some(now)) if same_place(&now, &before) => now,
-            Ok(_) => {
-                swapped.trouble = Some("another device is selected in Bitwig now.".into());
+        let answer = link.replace_selected_with_file(&shown, &before)?;
+        let mut swapped = Swapped {
+            track: before.track.clone(),
+            same_sound: answer.replaced == Replaced::CantTell,
+            ..Swapped::default()
+        };
+        // The device the settings are for: the old one's place, with the sample Bitwig shows there now.
+        let mut place = SelectedDevice { params: Vec::new(), ..before.clone() };
+        match answer.replaced {
+            Replaced::No => {
+                let file =
+                    path.as_ref().file_name().unwrap_or(path.as_ref().as_os_str()).to_string_lossy().into_owned();
+                // The extension waited 5 seconds for it. Untried in a real Bitwig, so the words leave room for a
+                // late one.
+                return Err(Error::Bitwig(format!(
+                    "Bitwig didn't take {file}: nothing changed. (If it shows up in the Sampler later, Bitwig's undo \
+                     takes it back.)"
+                )));
+            }
+            Replaced::Moved => {
+                swapped.trouble = Some(MOVED.into());
                 return Ok(swapped);
             }
-            Err(e) => {
-                swapped.trouble = Some(e.to_string());
-                return Ok(swapped);
+            Replaced::Yes => place.sample = Some(answer.sample.clone()),
+            Replaced::CantTell => {}
+        }
+        // The selection, read again: only the Sampler in the old one's place gets the old one's settings. Its
+        // parameters may take a moment to show.
+        let started = Instant::now();
+        let after = loop {
+            match link.selected_device() {
+                Ok(Some(now)) if same_device(&now, &place) => {
+                    if !now.params.is_empty() || started.elapsed() >= PARAMS_WAIT {
+                        break now;
+                    }
+                }
+                Ok(_) => {
+                    swapped.trouble = Some(MOVED.into());
+                    return Ok(swapped);
+                }
+                Err(e) => {
+                    swapped.trouble = Some(e.to_string());
+                    return Ok(swapped);
+                }
             }
+            std::thread::sleep(LOOK_EVERY);
         };
         let mut set: Vec<(&DeviceParam, f64)> = Vec::new();
         for old in &before.params {
@@ -134,12 +175,14 @@ impl Bitwig {
             };
             match after.params.iter().find(|p| p.id == old.id) {
                 None => swapped.gone.push(old.name.clone()),
-                Some(new) if new.value.is_some_and(|v| (v - value).abs() < SAME) => {
+                // Only a value Bitwig told after the swap is the new Sampler's for sure: any other may be the old
+                // one's still, and is set again (which does no harm when it was right).
+                Some(new) if new.value.is_some_and(|v| (v - value).abs() < SAME) && answer.fresh.contains(&old.id) => {
                     swapped.carried.push(old.name.clone())
                 }
                 // After a set that failed, the rest are left: the selection has most likely moved.
                 Some(_) if swapped.trouble.is_some() => swapped.didnt_take.push(old.name.clone()),
-                Some(_) => match link.set_parameter(&old.id, value) {
+                Some(_) => match link.set_parameter_on(&place, &old.id, value) {
                     Ok(()) => set.push((old, value)),
                     Err(e) => {
                         swapped.trouble = Some(e.to_string());
@@ -151,8 +194,11 @@ impl Bitwig {
         if !set.is_empty() {
             std::thread::sleep(SHOWN_AFTER);
             let now = match link.selected_device() {
-                Ok(Some(now)) if same_place(&now, &before) => now.params,
-                Ok(_) => Vec::new(),
+                Ok(Some(now)) if same_device(&now, &place) => now.params,
+                Ok(_) => {
+                    swapped.trouble.get_or_insert(MOVED.into());
+                    Vec::new()
+                }
                 Err(e) => {
                     swapped.trouble.get_or_insert(e.to_string());
                     Vec::new()
@@ -167,11 +213,13 @@ impl Bitwig {
     }
 }
 
-/// Whether `now` is a Sampler in the place `before` was read at: the same track and the same place in its chain.
-fn same_place(now: &SelectedDevice, before: &SelectedDevice) -> bool {
+/// Whether `now` is the Sampler at `place`: on the same track, at the same place in its chain, with the same sample
+/// (which tells apart the Samplers on a Drum Machine's pads, all first in their chain on one track).
+fn same_device(now: &SelectedDevice, place: &SelectedDevice) -> bool {
     now.device.name == "Sampler"
         && !now.device.plugin
-        && now.track_id == before.track_id
-        && now.track == before.track
-        && now.position == before.position
+        && now.track_id == place.track_id
+        && now.track == place.track
+        && now.position == place.position
+        && now.sample == place.sample
 }

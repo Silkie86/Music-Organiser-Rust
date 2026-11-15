@@ -186,6 +186,10 @@ pub struct World {
     /// Brings another project to the front part way through the next request with this command, as if someone
     /// brought their own to the front just after the change began: (command, the project).
     pub switch_during: Option<(String, String)>,
+    /// Whether this Bitwig doesn't tell the selected device's sample (`device` answers without `sample`).
+    pub no_sample_names: bool,
+    /// Whether Bitwig shows no sign of a sample going in when it has the name of the one before: `replaced` is null.
+    pub quiet_same_name: bool,
     /// Selects another device when a request with a command comes, as if someone clicked elsewhere in Bitwig while
     /// the change waited its turn.
     pub select_on: Option<SelectOn>,
@@ -350,6 +354,8 @@ impl Default for World {
             late: Vec::new(),
             switch_during: None,
             select_on: None,
+            no_sample_names: false,
+            quiet_same_name: false,
             switch_while_filling: None,
             unnamed_devices: false,
             slow_pads: false,
@@ -1193,7 +1199,7 @@ impl World {
                 "device": device.described(index),
                 "trackId": track.map(|t| t.id.as_str()).unwrap_or_default(),
                 "position": index,
-                "sample": file_name(&device.sample),
+                "sample": if self.no_sample_names { Value::Null } else { file_name(&device.sample).into() },
                 "params": device.params.iter().map(|p| json!({
                     "id": p.id, "name": p.name, "value": p.value.map(|v| f64::from(v) / 1e6), "display": "",
                 })).collect::<Vec<_>>(),
@@ -1212,8 +1218,14 @@ impl World {
         let value = request.get("value").and_then(Value::as_f64).filter(|v| (0.0..=1.0).contains(v));
         let fixed = self.fixed_params.contains(&id);
         let (t, d) = self.selected_device.ok_or("No device is selected in Bitwig.")?;
+        let track_id = self.tracks.get(t).map(|t| t.id.clone()).unwrap_or_default();
         let device =
             self.tracks.get_mut(t).and_then(|t| t.devices.get_mut(d)).ok_or("No device is selected in Bitwig.")?;
+        if !expected(request, &track_id, d, device) {
+            return Err("Another device is selected in Bitwig now than when this was asked for: this setting wasn't \
+                        set. Select the device again and ask again."
+                .into());
+        }
         let param = device
             .params
             .iter_mut()
@@ -1326,27 +1338,28 @@ impl World {
         let track_id = self.tracks.get(t).map(|t| t.id.clone()).unwrap_or_default();
         let device =
             self.tracks.get_mut(t).and_then(|t| t.devices.get_mut(d)).ok_or("No device is selected in Bitwig.")?;
-        if let Some(expect) = request.get("expect").filter(|e| !e.is_null()) {
-            let same = expect.get("trackId").is_none_or(|id| id.as_str() == Some(track_id.as_str()))
-                && expect.get("position").is_none_or(|p| p.as_u64() == Some(d as u64))
-                && expect.get("name").is_none_or(|n| n.as_str() == Some(device.name.as_str()));
-            if !same {
-                return Err("Another device is selected in Bitwig now than when this was asked for: nothing was \
-                            replaced. Select the device again and ask again."
-                    .into());
-            }
+        if !expected(request, &track_id, d, device) {
+            return Err(
+                "Another device is selected in Bitwig now than when this was asked for: nothing was replaced. \
+                        Select the device again and ask again."
+                    .into(),
+            );
         }
         if !loads {
             return Ok(json!({ "replaced": false }));
         }
-        // The sample that was there already: its name can't show the swap.
+        // A sample of the name that was there: its name can't show the swap.
         let again = file_name(&device.sample).eq_ignore_ascii_case(file_name(&path));
         *device = sampler;
         let shown = device.described(d);
+        let fresh: Vec<&str> = device.params.iter().map(|p| p.id.as_str()).collect();
         self.modified = true;
+        if again && self.quiet_same_name {
+            return Ok(json!({ "replaced": null }));
+        }
         Ok(json!({
-            "replaced": if again { Value::Null } else { true.into() },
-            "device": shown, "trackId": track_id, "position": d, "sample": file_name(&path),
+            "replaced": true, "device": shown, "trackId": track_id, "position": d, "sample": file_name(&path),
+            "fresh": fresh,
         }))
     }
 
@@ -1663,6 +1676,15 @@ fn write_message(stream: &mut TcpStream, message: &Value, lengths: bool) -> io::
     }
     frame.extend_from_slice(&body);
     stream.write_all(&frame)
+}
+
+/// Whether the selected device is the one a request means (`expect`, extension 3.29), each part of it optional.
+fn expected(request: &Map<String, Value>, track_id: &str, position: usize, device: &FakeDevice) -> bool {
+    let Some(expect) = request.get("expect").filter(|e| !e.is_null()) else { return true };
+    expect.get("trackId").is_none_or(|id| id.as_str() == Some(track_id))
+        && expect.get("position").is_none_or(|p| p.as_u64() == Some(position as u64))
+        && expect.get("name").is_none_or(|n| n.as_str() == Some(device.name.as_str()))
+        && expect.get("sample").is_none_or(|s| s.as_str() == Some(file_name(&device.sample)))
 }
 
 /// The name Bitwig gives a sample dropped on a pad, or a Sampler it loads: the file's name without its ending, whichever

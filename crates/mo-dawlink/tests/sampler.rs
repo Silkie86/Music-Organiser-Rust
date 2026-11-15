@@ -121,7 +121,7 @@ fn a_device_selected_while_the_swap_waited_is_left_alone() {
         w.tracks[1].devices = vec![FakeDevice::new("Serum", "instrument")];
         w.select_on = Some(SelectOn { command: "insert".into(), after: 0, device: (1, 0) });
     });
-    let said = bitwig.bitwig().swap_into_sampler(sample("Kick"), &turn()).unwrap_err();
+    let said = bitwig.bitwig().swap_into_sampler(sample("Kick 1"), &turn()).unwrap_err();
     assert!(matches!(&said, Error::Bitwig(why) if why.contains("nothing was replaced")), "{said:?}");
     let world = bitwig.world();
     assert_eq!(world.tracks[1].devices[0].name, "Serum");
@@ -130,7 +130,7 @@ fn a_device_selected_while_the_swap_waited_is_left_alone() {
     let insert = world.requests.iter().find(|r| r["cmd"] == "insert").unwrap();
     assert_eq!(
         insert["expect"],
-        serde_json::json!({ "trackId": world.tracks[2].id, "position": 0, "name": "Sampler" })
+        serde_json::json!({ "trackId": world.tracks[2].id, "position": 0, "name": "Sampler", "sample": "Old.wav" })
     );
     assert_eq!(insert["onlyIn"], "Night Drive");
 }
@@ -144,7 +144,7 @@ fn another_sampler_selected_while_the_swap_waited_is_left_alone() {
         w.tracks[1].devices = vec![other];
         w.select_on = Some(SelectOn { command: "insert".into(), after: 0, device: (1, 0) });
     });
-    let said = bitwig.bitwig().swap_into_sampler(sample("Kick"), &turn()).unwrap_err();
+    let said = bitwig.bitwig().swap_into_sampler(sample("Kick 2"), &turn()).unwrap_err();
     assert!(matches!(&said, Error::Bitwig(why) if why.contains("nothing was replaced")), "{said:?}");
     assert_eq!(bitwig.world().tracks[1].devices[0].sample, "C:\\Samples\\Other.wav");
 }
@@ -153,43 +153,61 @@ fn another_sampler_selected_while_the_swap_waited_is_left_alone() {
 /// old Sampler's settings never land on the other device.
 #[test]
 fn a_selection_that_moves_after_the_swap_is_told_with_the_sound_in() {
-    // Before the settings are compared: nothing is set anywhere.
+    // Another Sampler, with the same settings' IDs: a set would go through on it.
     let other = || {
         let mut other = FakeDevice::sampler("C:\\Samples\\Other.wav");
         other.params = vec![FakeParam::new("CONTENTS/GAIN", "Gain", 0.1)];
         other
     };
+    // Before the settings are compared, and as the first one is set: nothing lands on the other Sampler.
+    for (command, after) in [("device", 1), ("set", 0)] {
+        let bitwig = with_sampler(|w| {
+            w.tracks[1].devices = vec![other()];
+            w.select_on = Some(SelectOn { command: command.into(), after, device: (1, 0) });
+        });
+        let file = sample("Kick 3");
+        let swapped = bitwig.bitwig().swap_into_sampler(&file, &turn()).unwrap();
+        assert!(swapped.trouble.is_some(), "{command}: {swapped:?}");
+        assert!(swapped.set_back.is_empty(), "{command}: {swapped:?}");
+        assert!(swapped.summary().contains("weren't all set back"), "{}", swapped.summary());
+        let world = bitwig.world();
+        assert_eq!(world.tracks[2].devices[0].sample, file.to_string_lossy());
+        assert_eq!(world.tracks[1].devices[0].params[0], FakeParam::new("CONTENTS/GAIN", "Gain", 0.1), "{command}");
+    }
+    // After the settings were set, before they're read back: said too, not as settings Bitwig refused.
     let bitwig = with_sampler(|w| {
         w.tracks[1].devices = vec![other()];
-        w.select_on = Some(SelectOn { command: "device".into(), after: 1, device: (1, 0) });
+        w.select_on = Some(SelectOn { command: "device".into(), after: 2, device: (1, 0) });
     });
-    let file = sample("Kick");
-    let swapped = bitwig.bitwig().swap_into_sampler(&file, &turn()).unwrap();
+    let swapped = bitwig.bitwig().swap_into_sampler(sample("Kick 4"), &turn()).unwrap();
     assert_eq!(swapped.trouble.as_deref(), Some("another device is selected in Bitwig now."));
-    assert!(swapped.summary().contains("weren't all set back"), "{}", swapped.summary());
-    let world = bitwig.world();
-    assert_eq!(world.tracks[2].devices[0].sample, file.to_string_lossy());
-    assert_eq!(world.tracks[1].devices[0].params[0], FakeParam::new("CONTENTS/GAIN", "Gain", 0.1));
-    assert!(!world.requests.iter().any(|r| r["cmd"] == "set"));
-
-    // As the first setting is set: Serum has no such setting, the set fails, and that's told.
-    let bitwig = with_sampler(|w| {
-        w.tracks[1].devices = vec![FakeDevice::new("Serum", "instrument")];
-        w.select_on = Some(SelectOn { command: "set".into(), after: 0, device: (1, 0) });
-    });
-    let swapped = bitwig.bitwig().swap_into_sampler(sample("Kick"), &turn()).unwrap();
-    assert!(swapped.trouble.as_deref().is_some_and(|t| t.contains("no parameter")), "{swapped:?}");
-    assert_eq!(swapped.didnt_take, ["Gain"]);
-    assert!(swapped.set_back.is_empty());
+    assert_eq!(bitwig.world().tracks[2].devices[0].params[0], FakeParam::new("CONTENTS/GAIN", "Gain", 0.8));
 }
 
-/// The sound the Sampler holds already, tried again: Bitwig can't show the swap, and the report says so.
+/// A sound of the name the Sampler holds already, on a Bitwig that shows no sign of the swap: the report says it
+/// can't tell, and every setting is set again instead of counted as come over.
 #[test]
-fn the_same_sound_again_is_said_as_not_knowable() {
-    let file = sample("Same");
-    let path = file.to_string_lossy().into_owned();
-    let bitwig = with_sampler(|w| w.tracks[2].devices[0].sample = path);
+fn a_sound_of_the_same_name_with_no_sign_of_the_swap_is_said_as_not_knowable() {
+    let file = sample("Old");
+    let bitwig = with_sampler(|w| w.quiet_same_name = true);
     let swapped = bitwig.bitwig().swap_into_sampler(&file, &turn()).unwrap();
     assert!(swapped.same_sound);
-    assert!(swapped.summary().contains("held this sound already"), "{}", swapped.summary());
+    assert!(swapped.carried.is_empty(), "{swapped:?}");
+    assert_eq!(swapped.set_back, ["Gain", "Pitch"]);
+    assert!(swapped.summary().contains("showed no sign"), "{}", swapped.summary());
+
+    // With the sign (Bitwig told the Sampler's parameters again), it's a swap like any other.
+    let bitwig = with_sampler(|_| {});
+    let swapped = bitwig.bitwig().swap_into_sampler(&file, &turn()).unwrap();
+    assert!(!swapped.same_sound);
+    assert_eq!(swapped.carried, ["Pitch"]);
+}
+
+/// A Bitwig that doesn't tell the Sampler's sample can't show a swap: nothing is tried.
+#[test]
+fn a_bitwig_that_doesnt_tell_the_sample_is_refused_before_anything_changes() {
+    let bitwig = with_sampler(|w| w.no_sample_names = true);
+    let said = bitwig.bitwig().swap_into_sampler(sample("Kick 5"), &turn()).unwrap_err();
+    assert!(matches!(&said, Error::Invalid(why) if why.contains("nothing was tried")), "{said:?}");
+    assert!(!bitwig.world().requests.iter().any(|r| r["cmd"] == "insert"));
 }
