@@ -323,8 +323,10 @@ more); a file that ends on the line leaves nothing to guess.
   chord reader on the accompaniment (`theorybench chords --engine rust --part accompaniment --folds 1,2,3,4`), each
   read with six beats to the bar and again as three beats twice as long: the root is right 84.4% of the time
   against 82.0%, sevenths 77.7% against 74.4%, MIREX 87.1% against 83.9%, where the chords change 89.0 against
-  87.4, the chord named whole 72.1% against 67.8%. Three songs is few (the likely ranges are 18 to 60 points wide),
-  but every score moves the same way. Not measured: how the order of the parts found moves (`theorybench pairs`
+  87.4, the chord named whole 72.1% against 67.8%. Three songs is few (the likely ranges are 18 to 62 points wide),
+  but all ten of mir_eval's scores and the chords named whole move the same way. One thing goes the other way: the
+  kind of bass (root position, an inversion or a slash) is right 89.3% of the time against 90.2%, as more
+  inversions are read in root position. Not measured: how the order of the parts found moves (`theorybench pairs`
   only takes songs in four). A Bitwig save gives only how long a bar is, so a Bitwig song in 6/8 still arrives as
   3/4.
 
