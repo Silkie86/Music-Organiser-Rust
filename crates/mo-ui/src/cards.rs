@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use mo_app::activity::{Card, Feed, State};
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
-use crate::{AppWindow, CardInfo};
+use crate::{AppWindow, Busy, CardInfo};
 
 /// Ties the window's jobs and cards to `feed`: redraws when it changes, passes the ×s back, and lets finished ones go
 /// when their time is up.
@@ -71,9 +71,47 @@ pub fn refresh(app: &AppWindow, feed: &Feed) {
     // The newest are at the end: they are the ones kept when there are too many for the rail.
     let more = jobs.len().saturating_sub(RAIL_JOBS);
     jobs.drain(..more);
+    let unsure = cards.iter().chain(&jobs).any(|c| c.state == 0 && c.progress < 0.0);
+    sweep(app, unsure);
     show(&app.get_cards(), cards, |m| app.set_cards(m));
     show(&app.get_jobs(), jobs, |m| app.set_jobs(m));
     app.set_more_jobs(more as i32);
+}
+
+/// How often the bar of a job that can't say how far it is moves on. Each move draws the whole window again, so it
+/// steps eight times a second instead of gliding with every frame: in Solomon's log of 15 Nov 2026 the window was
+/// drawn 50 times a second, 11 ms each, on a page where nothing else moved, for as long as the start-up jobs ran.
+const SWEEP_EVERY: Duration = Duration::from_millis(125);
+/// The bar goes across in this long, and back in as long again.
+const SWEEP_ACROSS: Duration = Duration::from_millis(900);
+
+thread_local! {
+    /// Moves the bar on; runs only while a job that can't say how far it is shows.
+    static SWEEP: Timer = Timer::default();
+}
+
+/// Where the bar stands `since` it set off: 0 at the left, 1 at the right, easing at each end.
+fn sweep_at(since: Duration) -> f32 {
+    let turn = since.as_secs_f32() / SWEEP_ACROSS.as_secs_f32() * std::f32::consts::PI;
+    0.5 + 0.5 * turn.sin()
+}
+
+/// Starts the bar moving when a job that can't say how far it is shows (`unsure`), and stops it when none does, so
+/// nothing asks for a frame once the jobs are done.
+fn sweep(app: &AppWindow, unsure: bool) {
+    SWEEP.with(|timer| {
+        if !unsure {
+            timer.stop();
+        } else if !timer.running() {
+            let weak = app.as_weak();
+            let began = Instant::now();
+            timer.start(TimerMode::Repeated, SWEEP_EVERY, move || {
+                if let Some(app) = weak.upgrade() {
+                    app.global::<Busy>().set_sweep(sweep_at(began.elapsed()));
+                }
+            });
+        }
+    });
 }
 
 /// Makes `shown` say `now`, changing only the rows that differ when the same jobs are there.
@@ -122,5 +160,25 @@ fn try_job(feed: &Feed) {
     });
     if let Err(e) = spawned {
         mo_app::log::warning("Job", &format!("Couldn't start the pretend job: {e}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_unsure_bar_goes_across_and_back_in_steps_not_with_every_frame() {
+        // From the middle to the right, back through the middle to the left, and to the middle again.
+        let at = |parts: u32| sweep_at(SWEEP_ACROSS * parts / 2);
+        assert!((at(0) - 0.5).abs() < 1e-3);
+        assert!((at(1) - 1.0).abs() < 1e-3);
+        assert!((at(2) - 0.5).abs() < 1e-3);
+        assert!((at(3) - 0.0).abs() < 1e-3);
+        assert!((at(4) - 0.5).abs() < 1e-3);
+        // Never outside its groove, however long a job runs.
+        assert!((0..10_000).all(|i| (0.0..=1.0).contains(&sweep_at(SWEEP_EVERY * i))));
+        // A few moves a second: enough to see it's working, a fraction of a frame a second each.
+        assert!(SWEEP_EVERY >= Duration::from_millis(100) && SWEEP_EVERY <= Duration::from_millis(250));
     }
 }

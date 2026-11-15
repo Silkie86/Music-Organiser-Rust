@@ -1,5 +1,5 @@
 // The parts of the window shell that sit over every page: activity cards, the key sheet and the F12 note.
-import { Theme, Type, Space, Meter, StudioButton, Well, Caps, Groove, CloseButton, TickBox } from "studio.slint";
+import { Theme, Type, Space, Busy, Meter, StudioButton, Well, Caps, Groove, CloseButton, TickBox } from "studio.slint";
 
 export struct CardInfo {
     id: int,
@@ -89,7 +89,7 @@ component ActivityCard inherits Rectangle {
             background: Theme.well;
             clip: true;
             Rectangle {
-                x: (parent.width - self.width) * (0.5 + 0.5 * sin(animation-tick() / 900ms * 180deg));
+                x: (parent.width - self.width) * Busy.sweep;
                 width: parent.width * 0.3;
                 border-radius: 1px;
                 background: Theme.accent;
