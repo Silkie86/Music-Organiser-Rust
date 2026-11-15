@@ -242,6 +242,10 @@ export global MidiData {
     // in FL Studio: which one plays ("" none, "bitwig", "fl"), which is starting, how it went, and their keys.
     in property <string> daw-playing;
     in property <string> daw-starting;
+    // Whether the part picked is the one the loop plays, and the one in the DAW: a line right-clicked for its menu is
+    // picked with the others playing on (MI-2), and its card offers to play it rather than to stop them.
+    in property <bool> loop-picked: true;
+    in property <bool> daw-picked: true;
     in property <string> daw-note;
     in property <string> bitwig-key;
     in property <string> fl-key;
@@ -616,8 +620,8 @@ component PartPanel inherits SidePanel {
             main: true;
             width: max(self.min-width, buttons.cell);
             enabled: !MidiData.soundfont-missing || MidiData.playing;
-            text: MidiData.playing ? "Stop" : MidiData.play-with-song ? "Play with the song" : "Play loop";
-            tip: MidiData.playing ? "Stop the loop"
+            text: MidiData.playing && MidiData.loop-picked ? "Stop" : MidiData.play-with-song ? "Play with the song" : "Play loop";
+            tip: MidiData.playing && MidiData.loop-picked ? "Stop the loop"
                 : MidiData.play-with-song ? "Play the part round and round with the parts of your song it fits, at the song's tempo, or the speed you set"
                 : "Play the part round and round with a General MIDI sound matched to it";
             key: MidiData.play-key;
@@ -625,8 +629,8 @@ component PartPanel inherits SidePanel {
         }
         StudioButton {
             width: max(self.min-width, buttons.cell);
-            text: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop in Bitwig" : "Play in Bitwig";
-            tip: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop the part and take its clip out of Bitwig"
+            text: (MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig") && MidiData.daw-picked ? "Stop in Bitwig" : "Play in Bitwig";
+            tip: (MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig") && MidiData.daw-picked ? "Stop the part and take its clip out of Bitwig"
                 : MidiData.bitwig-with-song ? "Play the part through what's on the track selected in Bitwig, with the bars of your song it fits going round there (when Bitwig has that song open)"
                 : "Play the part round and round through what's on the track selected in Bitwig";
             key: MidiData.bitwig-key;
@@ -634,8 +638,8 @@ component PartPanel inherits SidePanel {
         }
         StudioButton {
             width: max(self.min-width, buttons.cell);
-            text: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop in FL Studio" : "Play in FL Studio";
-            tip: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop the part in FL Studio" : "Play the part round and round through the channel selected in FL Studio";
+            text: (MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl") && MidiData.daw-picked ? "Stop in FL Studio" : "Play in FL Studio";
+            tip: (MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl") && MidiData.daw-picked ? "Stop the part in FL Studio" : "Play the part round and round through the channel selected in FL Studio";
             key: MidiData.fl-key;
             clicked => { MidiData.daw-play("fl"); }
         }

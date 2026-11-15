@@ -122,6 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.global::<mo_ui::MidiData>().set_playing(true);
     shots.push(("midi-playing.png".into(), capture(&window)));
     app.global::<mo_ui::MidiData>().set_playing(false);
+    midi_right_click_while_playing(&app)?;
     // Playing through the track selected in Bitwig.
     mo_ui::midi::run_action(&app, "midi.playBitwig");
     app.global::<mo_ui::MidiData>().set_daw_note("Playing through \u{201c}Bass\u{201d} in Bitwig.".into());
@@ -3559,6 +3560,54 @@ fn card_down(window: &MinimalSoftwareWindow, top: &[u8], name: &str) -> Result<V
         return Err(format!("{name}: the wheel at {x}, {y} moved nothing; is it still on the card?").into());
     }
     Ok(down)
+}
+
+/// A right click on another MIDI line while a part plays (the review of 14 Nov, MI-2): that pick for its menu starts
+/// and stops nothing, in the loop or in Bitwig; its card offers to play it, and the menu's play lines play it rather
+/// than stopping what plays. (The line's right press sets the flag and picks, as on every list: done here by hand.)
+fn midi_right_click_while_playing(app: &mo_ui::AppWindow) -> Result<(), Box<dyn std::error::Error>> {
+    let midi = app.global::<mo_ui::MidiData>();
+    let keys = app.global::<mo_ui::AppKeys>();
+    let menu_pick = |row| {
+        keys.set_picking_for_menu(true);
+        mo_ui::midi::pick_row(app, row);
+        keys.set_picking_for_menu(false);
+    };
+    mo_ui::midi::soundfont_here(app, true);
+    mo_ui::midi::pick_row(app, 0);
+    mo_ui::midi::run_action(app, "app.play");
+    let first = midi.get_picked().title;
+    menu_pick(1);
+    if !midi.get_playing() || midi.get_loop_picked() || midi.get_picked().title == first {
+        return Err(
+            "midi right click: a right click on the second line as the first played stopped or switched it".into()
+        );
+    }
+    mo_ui::midi::run_action(app, "app.play");
+    if !midi.get_playing() || !midi.get_loop_picked() {
+        return Err("midi right click: the menu's Play or stop the loop didn't play the line right-clicked".into());
+    }
+    mo_ui::midi::run_action(app, "app.play");
+    if midi.get_playing() {
+        return Err("midi right click: Play or stop the loop didn't stop the part it plays".into());
+    }
+    // The same in Bitwig.
+    mo_ui::midi::run_action(app, "midi.playBitwig");
+    menu_pick(0);
+    if midi.get_daw_playing() != "bitwig" || midi.get_daw_picked() {
+        return Err("midi right click: a right click on another line stopped or switched the part in Bitwig".into());
+    }
+    mo_ui::midi::run_action(app, "midi.playBitwig");
+    if midi.get_daw_playing() != "bitwig" || !midi.get_daw_picked() {
+        return Err("midi right click: the menu's Play in Bitwig didn't play the line right-clicked".into());
+    }
+    mo_ui::midi::run_action(app, "midi.playBitwig");
+    if midi.get_daw_playing() != "" {
+        return Err("midi right click: Play in Bitwig, or stop didn't stop the part in Bitwig".into());
+    }
+    mo_ui::midi::soundfont_here(app, false);
+    mo_ui::midi::pick_row(app, 0);
+    Ok(())
 }
 
 /// A right click at a point in the window.

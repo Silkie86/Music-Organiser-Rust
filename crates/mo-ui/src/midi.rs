@@ -2348,6 +2348,15 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     });
     data.set_panel_shown(true);
     show_soundfont(app);
+    // A line right-clicked is picked for its menu only: that pick starts and stops nothing (MI-2, as on Sounds); the
+    // card then offers to play it, and the menu's play lines play it.
+    if app.global::<crate::AppKeys>().get_picking_for_menu() {
+        show_picked_plays(app);
+        if let Some(ask) = ask {
+            ask_notes(app, ask);
+        }
+        return;
+    }
     // While a loop plays, picking another part plays that one instead (newest wins); the same part again (a click on
     // its line, or the list read again) goes on as it is.
     if data.get_playing() && PAGE.with(|p| p.borrow().looping) != Some(at) {
@@ -2364,9 +2373,23 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         stop_daw(app);
         start_daw(app, daw, at);
     }
+    show_picked_plays(app);
     if let Some(ask) = ask {
         ask_notes(app, ask);
     }
+}
+
+/// Whether the part picked is the one the loop plays, and the one in a DAW, for the card's Play words: after a pick
+/// for a menu they can differ (MI-2).
+fn show_picked_plays(app: &AppWindow) {
+    let (looped, in_daw) = PAGE.with(|p| {
+        let p = p.borrow();
+        let phrase = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.id);
+        (p.picked.is_some() && p.looping == p.picked, phrase.is_some() && p.in_daw == phrase)
+    });
+    let data = app.global::<MidiData>();
+    data.set_loop_picked(looped);
+    data.set_daw_picked(in_daw);
 }
 
 /// Reads the picked part's notes for its card, off the window's thread: its roll, its chords, and its key when the
@@ -3141,6 +3164,14 @@ pub fn work_here() {
     crate::piano_roll::draw_here();
 }
 
+/// For the screenshots: a SoundFont to play parts with (nothing is read from it there: no loop is made), or none
+/// found again (`false`), the card following.
+pub fn soundfont_here(app: &AppWindow, found: bool) {
+    let font = found.then(|| PathBuf::from("made-up.sf2"));
+    SOUNDFONT.with(|s| *s.borrow_mut() = Some(font));
+    show_soundfont(app);
+}
+
 /// For the screenshots: picks the line at `row` of the list on show.
 pub fn pick_row(app: &AppWindow, row: usize) {
     select_row(app, row);
@@ -3510,8 +3541,8 @@ fn loop_playing() -> bool {
 pub fn toggle_play(app: &AppWindow) -> bool {
     let playing = app.global::<MidiData>().get_playing();
     let (picked, looping) = PAGE.with(|p| (p.borrow().picked, p.borrow().looping));
-    // Stops the loop of the part picked (or of none); with another part picked (the menu of the line right-clicked),
-    // plays that one instead.
+    // Stops the loop of the part picked (or of none); with another part picked (the line right-clicked for its menu,
+    // which leaves the loop playing), plays that one instead.
     if playing && (picked.is_none() || picked == looping) {
         stop_playing(app);
         return true;
@@ -3644,6 +3675,7 @@ fn play_from(app: &AppWindow, at: usize, resume: bool) {
         p.loop_move = ask.part.semitones;
         p.loop_with = ask.with.clone();
     });
+    show_picked_plays(app);
     // A part playing in a DAW would play over it.
     if app.global::<MidiData>().get_daw_playing() != "" || app.global::<MidiData>().get_daw_starting() != "" {
         stop_daw(app);
@@ -4029,6 +4061,7 @@ fn stop_bitwig_in(
                 data.set_daw_playing(Daw::Bitwig.id().into());
                 // Picking its part again leaves it as it is.
                 PAGE.with(|p| p.borrow_mut().in_daw = part);
+                show_picked_plays(&app);
             }
             if let Some(audition) = audition {
                 crate::presets::called_off(&app, audition);
@@ -4090,8 +4123,14 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
     // What's playing or starting now: pressing its button again stops it (a start still on its way stops what it
     // started as soon as it's in).
     let was = if data.get_daw_starting() != "" { data.get_daw_starting() } else { data.get_daw_playing() };
+    // Another part picked than the one there (a line right-clicked for its menu): that one plays instead (MI-2).
+    let picked_there = PAGE.with(|p| {
+        let p = p.borrow();
+        let phrase = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.id);
+        p.picked.is_none() || p.in_daw == phrase
+    });
     stop_daw(app);
-    if was == daw.id() {
+    if was == daw.id() && picked_there {
         return true;
     }
     let Some(at) = PAGE.with(|p| p.borrow().picked) else {
@@ -4124,6 +4163,7 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
         p.in_daw = Some(phrase_id);
         p.daw_move = part.semitones;
     });
+    show_picked_plays(app);
     data.set_daw_starting(daw.id().into());
     if HERE.with(|h| *h.borrow()) {
         data.set_daw_starting("".into());
