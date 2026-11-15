@@ -97,7 +97,7 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_app::background::set_pace(pace);
     // The Songs list is read from here on, while the graphics card is found and the window is made. (After the pace
     // is set: background work started before it would fix the pool's size without it.)
-    let songs_ahead = mo_ui::songs::read_ahead(library.clone());
+    let songs_ahead = mo_ui::songs::read_ahead(library.clone(), songs_db.is_songs_db());
     mo_ui::startup::step("settings");
     log::info(
         "Settings",

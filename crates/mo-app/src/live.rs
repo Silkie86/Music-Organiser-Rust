@@ -45,6 +45,15 @@ const SAMPLES_FRESH: Duration = Duration::from_secs(60);
 /// How many times a save that couldn't be read (still being written, or locked) is tried again.
 const TRIES: u8 = 3;
 
+/// How long after songs.db refused something for longer than a moment it's tried again (review SG-12): a look again at
+/// which plugins are installed, or the note that the muted samples are mended. Not at every pass of the folder watch.
+const REFUSED_AGAIN_AFTER: Duration = Duration::from_secs(60);
+
+/// How long a folder found away (on a drive that isn't plugged in, a network place that can't be reached, or busy or
+/// denied) isn't looked in again for the saves in it waiting to be read again (review SG-6): a network place that's
+/// gone can take seconds to answer each look.
+const AWAY_AGAIN_AFTER: Duration = Duration::from_secs(60);
+
 /// Everything the Songs list is made from, kept so it can be made again when a save changes.
 pub struct Live {
     saves: Vec<Save>,
@@ -81,6 +90,14 @@ pub struct Live {
     /// How many plugin measures had been kept when the installed plugins were last read
     /// ([`plugin_writes::measures_kept`]).
     measures_seen: u64,
+    /// When a look again at which plugins are installed that failed may be tried again ([`REFUSED_AGAIN_AFTER`]).
+    recheck_after: Option<Instant>,
+    /// When the note that the muted samples are mended, refused, may be tried again ([`REFUSED_AGAIN_AFTER`]).
+    note_after: Option<Instant>,
+    /// Folders found away as saves in them waited to be read again, by key, and when ([`AWAY_AGAIN_AFTER`]).
+    away: HashMap<String, Instant>,
+    /// Whether the log has said that songs.db has some saves under other ids by now ([`Live::give`]): once a run.
+    said_renumbered: bool,
     /// Unchanged saves to read again because a plugin marked installed in them isn't found now
     /// ([`plugin_writes::Rechecked::to_read`], review P-2): their own read says whether it's missing.
     reread: HashSet<i64>,
@@ -254,6 +271,10 @@ impl Live {
             kept_as,
             mend: Mend::NotLooked,
             measures_seen: plugin_writes::measures_kept(),
+            recheck_after: None,
+            note_after: None,
+            away: HashMap::new(),
+            said_renumbered: false,
             reread: HashSet::new(),
             reread_put: HashSet::new(),
         })
@@ -300,25 +321,41 @@ impl Live {
     /// when the library takes it. While the list isn't kept in a library of the app's own ([`Live::writes`]) the change
     /// is made here only, and lasts until the app closes.
     ///
-    /// If the library can't keep it nothing is changed, here or there. Whether anything held here is different for
-    /// it: then [`Live::songs`] gives the list anew.
-    pub fn give(&mut self, key: &str, save_ids: &[i64], change: &Change) -> Result<bool, LibraryError> {
+    /// If the library can't keep it nothing is changed, here or there. What it did ([`ChangeMade`]): whether anything
+    /// held here is different for it, and whether it's held here only.
+    pub fn give(&mut self, key: &str, save_ids: &[i64], change: &Change) -> Result<ChangeMade, LibraryError> {
         let (save_ids, changes) = self.given_to(key, save_ids, change);
-        if let Some(songs_db) = &self.writes {
+        let held_only = if let Some(songs_db) = &self.writes {
             // By id and the path the library keeps each under: an id alone may be another save's there by now.
             let rows: Vec<SaveRow> = save_ids
                 .iter()
                 .filter_map(|id| self.kept_as.get(id).map(|path| SaveRow { id: *id, path: path.clone() }))
                 .collect();
-            song_fields::set_all(songs_db, &rows, &changes)?;
+            let kept = song_fields::set_all(songs_db, &rows, &changes)?;
+            // Saves the library has under other ids by now (another copy of the app kept them anew): changed here only,
+            // and said, once a run (review SG-2). One it hasn't taken yet is kept with the change when it does.
+            if !kept.unknown.is_empty() && !std::mem::replace(&mut self.said_renumbered, true) {
+                crate::log::warning(
+                    "Songs",
+                    &format!(
+                        "{} saves of the song aren't in songs.db as the list has them (another copy of the app may have \
+                         kept them anew): what you gave them is shown until the app closes",
+                        kept.unknown.len()
+                    ),
+                );
+            }
+            !kept.unknown.is_empty()
         } else if let Some(why) = changes.iter().find_map(|c| c.checked().err()) {
             return Err(LibraryError::Write { path: PathBuf::new(), why });
-        }
+        } else {
+            true
+        };
         let mut differs = false;
         for change in &changes {
             differs |= self.gave(&save_ids, change);
         }
-        Ok(differs)
+        // Nothing different is nothing held.
+        Ok(ChangeMade { differs, held_only: held_only && differs })
     }
 
     /// The saves a change given to the song `key` goes to ([`Live::give`]), and the changes it makes: the song's
@@ -375,8 +412,13 @@ impl Live {
     /// [`Live::update`] looks again at which are installed while no project file changes (review G-3).
     pub fn retries(&mut self) -> Option<Changes> {
         let files: Vec<String> = self.retry.keys().cloned().collect();
-        (!files.is_empty() || self.measures_seen != plugin_writes::measures_kept())
+        (!files.is_empty() || (self.measures_seen != plugin_writes::measures_kept() && !self.recheck_waits()))
             .then_some(Changes { files, ..Changes::default() })
+    }
+
+    /// Whether a look again at which plugins are installed failed a moment ago, so it waits a while.
+    fn recheck_waits(&self) -> bool {
+        self.recheck_after.is_some_and(|at| Instant::now() < at)
     }
 
     /// Walks every project folder once, as the C# app's scan did at its start: saves made or changed while the app was
@@ -409,23 +451,31 @@ impl Live {
 
     /// Looks again at whether every save's plugins are installed, when the installed plugins or the rules changed
     /// since the last look ([`plugin_writes::recheck_installed`]), and shows the new counts; says how many saves
-    /// changed. Saves read from now on use the installed plugins as they are now. One that can't be looked at is
-    /// looked at again at the next start.
+    /// changed. Saves read from now on use the installed plugins as they are now. A look that fails is tried again a
+    /// minute later ([`REFUSED_AGAIN_AFTER`]), or at the next start.
     fn recheck_installed(&mut self) -> usize {
         // Taken before the look, so a measure kept meanwhile is looked at next time; only kept once the look worked,
-        // so one that failed is tried again at the next batch.
+        // so one that failed is tried again.
         let measures = plugin_writes::measures_kept();
         let Some(songs_db) = &self.writes else {
             self.measures_seen = measures;
             return 0;
         };
+        if self.recheck_waits() {
+            return 0;
+        }
         let r = match plugin_writes::recheck_installed(songs_db) {
             Ok(r) => {
                 self.measures_seen = measures;
+                self.recheck_after = None;
                 r
             }
             Err(e) => {
-                crate::log::warning("Songs", &format!("{e}; which plugins are installed is looked at again later"));
+                crate::log::warning(
+                    "Songs",
+                    &format!("{e}; which plugins are installed is looked at again in a minute"),
+                );
+                self.recheck_after = Some(Instant::now() + REFUSED_AGAIN_AFTER);
                 return 0;
             }
         };
@@ -515,9 +565,9 @@ impl Live {
     }
 
     /// Whether the note that the muted samples were mended is still to be kept, though nothing else may be
-    /// ([`Live::keep`]).
+    /// ([`Live::keep`]): not for a minute after songs.db refused it (review SG-12).
     pub fn note_to_keep(&self) -> bool {
-        self.mend.to_note()
+        self.mend.to_note() && self.note_after.is_none_or(|at| Instant::now() >= at)
     }
 
     /// Keeps what's been read since the last time in the app's own `songs.db` ([`Live::with_writes`]): `None` when
@@ -528,7 +578,7 @@ impl Live {
     pub fn keep(&mut self) -> Option<Result<Kept, LibraryError>> {
         let songs_db = self.writes.clone()?;
         let mut batch = self.batch();
-        batch.mended = self.mend.to_note();
+        batch.mended = self.note_to_keep();
         batch.owed = if batch.mended { self.mend.owed() } else { Vec::new() };
         let put: Vec<(i64, String)> =
             batch.put.iter().map(|p| (p.detail.save.id, p.detail.save.path.clone())).collect();
@@ -538,7 +588,7 @@ impl Live {
             return None;
         }
         let kept = match song_writes::write(&songs_db, &batch) {
-            Ok(written) => Kept { written, not_kept: Vec::new() },
+            Ok(written) => Kept { written, ..Kept::default() },
             Err(e) if e.is_busy() => return Some(Err(e)),
             Err(_) => match one_by_one(&songs_db, batch) {
                 Ok(kept) => kept,
@@ -584,6 +634,14 @@ impl Live {
         }
         if kept.written.mended {
             self.mend = Mend::Done;
+        } else if let Some(why) = &kept.not_noted {
+            // Not a library busy for a moment: tried again at every pass it might fail at every pass, as long as the
+            // app runs (review SG-12). So in a minute; if the app closes first, they're read again next start.
+            crate::log::warning(
+                "Songs",
+                &format!("Couldn't note in songs.db that the muted samples are mended: {why}; tried again in a minute"),
+            );
+            self.note_after = Some(Instant::now() + REFUSED_AGAIN_AFTER);
         } else if let Mend::Reading { missed, .. } = &mut self.mend
             && !kept.not_kept.is_empty()
         {
@@ -671,11 +729,30 @@ impl Live {
             done.rechecked += self.recheck_installed();
         }
         let mut paths: Vec<String> = changes.files.clone();
-        // Saves naming a plugin that isn't found now are read again, changed or not (review P-2).
+        // Saves naming a plugin that isn't found now are read again, changed or not (review P-2). One in a folder
+        // walked now is the walk's, which holds back one whose folder can't be read. Any other only once its folder
+        // can be looked at (review SG-6): one on a drive that's away, or in a folder busy or denied, isn't marked
+        // missing for it, and is read again when its folder is back. Each folder is looked at once a batch, and one
+        // found away not again for a minute.
         if !self.reread.is_empty() {
-            paths.extend(
-                self.saves.iter().filter(|s| !s.file_missing && self.reread.contains(&s.id)).map(|s| s.path.clone()),
-            );
+            let walked = |path: &str| changes.overflowed.iter().any(|o| scan::is_inside(path, o));
+            let now = Instant::now();
+            self.away.retain(|_, since| now.duration_since(*since) < AWAY_AGAIN_AFTER);
+            let mut folders: HashMap<String, bool> = HashMap::new();
+            for s in &self.saves {
+                if s.file_missing || !self.reread.contains(&s.id) || walked(&s.path) {
+                    continue;
+                }
+                let folder = folder_key(&s.path);
+                if self.away.contains_key(&folder) {
+                    continue;
+                }
+                if *folders.entry(folder.clone()).or_insert_with(|| can_look_in(&s.path)) {
+                    paths.push(s.path.clone());
+                } else {
+                    self.away.insert(folder, now);
+                }
+            }
         }
         // A path that went and may have been a folder: the saves listed inside it are looked at (the ones that went
         // are marked missing below), with no walk.
@@ -935,6 +1012,17 @@ impl Live {
     }
 }
 
+/// What a change given to a song did ([`Live::give`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChangeMade {
+    /// Whether anything held here is different for it: then [`Live::songs`] gives the list anew.
+    pub differs: bool,
+    /// Whether it's held here only, until the app closes, for some or all of the song's saves (review SG-2): the
+    /// list isn't kept in a library of the app's own this time ([`Live::writes`]), or the library has some of the
+    /// saves under other ids by now (another copy of the app kept them anew).
+    pub held_only: bool,
+}
+
 /// What [`Live::keep`] kept.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Kept {
@@ -942,6 +1030,9 @@ pub struct Kept {
     /// Saves the library wouldn't take, by path, with why: the list shows them this time, as read, and they're tried
     /// again when they're next read.
     pub not_kept: Vec<(String, String)>,
+    /// Why the note that the muted samples are mended couldn't be kept, when the library refused it for longer than a
+    /// moment (busy is tried again with the next batch): it's tried again in a minute ([`REFUSED_AGAIN_AFTER`]).
+    pub not_noted: Option<String>,
 }
 
 /// Keeps a batch the library refused as a whole a save at a time, so one it won't take doesn't hold up the rest. Busy
@@ -970,10 +1061,26 @@ fn one_by_one(songs_db: &std::path::Path, batch: Batch) -> Result<Kept, LibraryE
         match song_writes::write(songs_db, &Batch { mended: true, owed, ..Batch::default() }) {
             Ok(w) => kept.written.mended = w.mended,
             Err(e) if e.is_busy() => return Err(e),
-            Err(_) => {}
+            Err(e) => kept.not_noted = Some(e.to_string()),
         }
     }
     Ok(kept)
+}
+
+/// Whether the folder of the file at `path` can be looked at now, to tell whether the file is there: it can be looked
+/// in, or it has gone from a drive that's there. Not while its drive is away (not plugged in, a network place that
+/// can't be reached) or the folder is busy or denied: a file that isn't found then may be back when they are.
+fn can_look_in(path: &str) -> bool {
+    let Some(folder) = std::path::Path::new(path).parent() else { return true };
+    match std::fs::read_dir(folder) {
+        Ok(_) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound && crate::plugins::folder_fixes::drive_there(folder),
+    }
+}
+
+/// The folder of the file at `path`, as a key ([`case::key`]).
+fn folder_key(path: &str) -> String {
+    case::key(&std::path::Path::new(path).parent().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())
 }
 
 /// A save read again keeps what you gave it, and what the library worked out that isn't read here yet (its key
@@ -1034,6 +1141,10 @@ mod tests {
             kept_as: HashMap::new(),
             mend: Mend::NotLooked,
             measures_seen: plugin_writes::measures_kept(),
+            recheck_after: None,
+            note_after: None,
+            away: HashMap::new(),
+            said_renumbered: false,
             reread: HashSet::new(),
             reread_put: HashSet::new(),
         }
@@ -1063,7 +1174,7 @@ mod tests {
         assert!(!live.gave(&[77], &Change::Favourite(true)));
         // With no library of the app's own to keep it in, a change is made here only; one that can't be kept, nowhere.
         let day = live.songs().rows.into_iter().find(|r| r.song.latest.id == 3).unwrap().song.key;
-        assert!(live.give(&day, &[3], &Change::Rating(2)).unwrap());
+        assert_eq!(live.give(&day, &[3], &Change::Rating(2)).unwrap(), ChangeMade { differs: true, held_only: true });
         assert!(live.give(&day, &[3], &Change::Rating(9)).is_err());
         assert_eq!(live.saves[2].rating, 2);
     }
@@ -1078,23 +1189,78 @@ mod tests {
         // The newest save has no tags, so the card shows the older save's.
         assert_eq!(card(&live).tags, ["dark", "vocal"]);
         // A tag put on keeps them on the card, the new one after them (review SG-1); the same tag again changes nothing.
-        assert!(live.give(&night, &[2, 1], &Change::AddTag("Mix".into())).unwrap());
+        assert!(live.give(&night, &[2, 1], &Change::AddTag("Mix".into())).unwrap().differs);
         assert_eq!(card(&live).tags, ["dark", "vocal", "mix"]);
-        assert!(!live.give(&night, &[2, 1], &Change::AddTag("DARK".into())).unwrap());
+        // Nothing different is nothing held, though there's no library of the app's own here (review SG-2).
+        assert_eq!(live.give(&night, &[2, 1], &Change::AddTag("DARK".into())).unwrap(), ChangeMade::default());
         assert!(live.saves.iter().all(|s| s.id == 3 || s.tags == ["dark", "vocal", "mix"]));
         // A save read since the card was shown (Night_13, with the song's status as it was), and one the library
         // numbered anew, get what's given too: the song's saves are those held now (review SG-8).
         live.saves.push(save(4, "C:\\Music\\Night", "Night_13"));
         live.saves[0].id = 22;
-        assert!(live.give(&night, &[2, 1], &Change::Status("Finished".into())).unwrap());
+        assert!(live.give(&night, &[2, 1], &Change::Status("Finished".into())).unwrap().differs);
         assert_eq!(card(&live).status, "Finished");
         let night_saves: Vec<(i64, &str)> =
             live.saves.iter().filter(|s| s.id != 3).map(|s| (s.id, s.status.as_str())).collect();
         assert_eq!(night_saves, [(22, "Finished"), (1, "Finished"), (4, "Finished")]);
         // Another song is left alone; a song no longer found by its key gets it on the saves the card named.
         assert_eq!(live.saves[2].status, mo_library::STATUSES[0]);
-        assert!(live.give("a song that's gone", &[3], &Change::Rating(2)).unwrap());
+        assert!(live.give("a song that's gone", &[3], &Change::Rating(2)).unwrap().differs);
         assert_eq!(live.saves[2].rating, 2);
+    }
+
+    /// Review SG-6: a save named to read again for its plugins, on a drive that's away, stays as it was, walked or not,
+    /// and is read again once its drive is back; its folder isn't looked in again for a minute. One whose folder is
+    /// there and file isn't has gone, and so has one whose folder has gone from a drive that's there.
+    #[test]
+    fn a_save_to_read_again_on_a_drive_thats_away_isnt_marked_missing() {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // A drive that isn't plugged in.
+        let away = if cfg!(windows) {
+            let free = ('D'..='Z').rev().find(|l| !std::path::Path::new(&format!("{l}:\\")).exists()).unwrap();
+            PathBuf::from(format!("{free}:\\Songs"))
+        } else {
+            PathBuf::from("/mnt/no drive plugged in for the test/Songs")
+        };
+        let at = |folder: &std::path::Path, name: &str| folder.join(format!("{name}.flp")).display().to_string();
+        let mut away_save = save(1, "x", "Night_1");
+        away_save.path = at(&away, "Night_1");
+        let mut gone_save = save(2, "x", "Day_1");
+        gone_save.path = at(here, "Day_1 is no file here");
+        let mut folder_gone_save = save(3, "x", "Dusk_1");
+        folder_gone_save.path = at(&here.join("no such folder"), "Dusk_1");
+        let mut live = live(vec![away_save, gone_save, folder_gone_save]);
+        live.roots = vec![away.display().to_string()];
+        live.reread.insert(1);
+        // Walked (the catch-up at the start): the walk holds it back, and it's left to the walk.
+        assert_eq!(live.catch_up().gone, 0);
+        assert!(!live.saves[0].file_missing);
+        assert!(live.away.is_empty(), "its folder isn't looked in twice");
+        // Not walked (a batch from the folder watch): left for later too; the other two have gone.
+        live.reread.extend([2, 3]);
+        assert_eq!(live.update(&Changes::default()).gone, 2);
+        assert!(!live.saves[0].file_missing && live.saves[1].file_missing && live.saves[2].file_missing);
+        assert!(live.reread.contains(&1), "read again once its drive is back");
+        assert!(live.to_mark.contains(&2) && live.to_mark.contains(&3) && !live.to_mark.contains(&1));
+        assert_eq!(
+            live.away.keys().collect::<Vec<_>>(),
+            [&folder_key(&live.saves[0].path)],
+            "not looked in for a minute"
+        );
+        // A folder found away a moment ago isn't looked in again, so a save there that has gone isn't marked yet;
+        // once the minute has passed it's looked in, and the save is marked.
+        let mut dawn = save(4, "x", "Dawn_1");
+        dawn.path = at(here, "Dawn_1 is no file here");
+        let dawn_folder = folder_key(&dawn.path);
+        live.saves.push(dawn);
+        live.reread.insert(4);
+        live.away.insert(dawn_folder.clone(), Instant::now());
+        assert_eq!(live.update(&Changes::default()).gone, 0);
+        assert!(!live.saves[3].file_missing);
+        let a_minute_ago = Instant::now().checked_sub(AWAY_AGAIN_AFTER).expect("the clock has run a minute");
+        live.away.insert(dawn_folder, a_minute_ago);
+        assert_eq!(live.update(&Changes::default()).gone, 1);
+        assert!(live.saves[3].file_missing);
     }
 
     fn save(id: i64, folder: &str, name: &str) -> Save {
@@ -1121,6 +1287,30 @@ mod tests {
         assert!(woke.files.is_empty());
         l.update(&woke);
         assert!(l.retries().is_none());
+    }
+
+    /// Review SG-12: what songs.db refuses (not busy for a moment, which is tried again soon), the note that the
+    /// muted samples are mended or a look again at which plugins are installed, isn't asked again at every pass.
+    #[test]
+    fn what_songs_db_refuses_isnt_asked_again_at_every_pass() {
+        let mut l = live(Vec::new());
+        l.writes = Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("no such songs.db"));
+        // The note alone to keep, refused: tried again in a minute, not at every pass.
+        l.mend = Mend::Reading { ids: HashSet::new(), owed: HashSet::new(), missed: false };
+        assert!(l.note_to_keep());
+        let kept = l.keep().unwrap().unwrap();
+        assert!(kept.not_noted.is_some() && !kept.written.mended, "{kept:?}");
+        assert!(!l.note_to_keep());
+        assert!(l.keep().is_none());
+        l.note_after = Some(Instant::now());
+        assert!(l.note_to_keep(), "and then tried again");
+        // A measure kept and the look again failing: the watch isn't woken for it again until a minute has passed.
+        l.measures_seen = plugin_writes::measures_kept().wrapping_add(1);
+        let woke = l.retries().expect("a measure to look at");
+        l.update(&woke);
+        assert!(l.retries().is_none(), "it waits a minute");
+        l.recheck_after = Some(Instant::now());
+        assert!(l.retries().is_some(), "and then tries again");
     }
 
     #[test]
@@ -1254,10 +1444,11 @@ mod tests {
         assert_eq!(ids.len(), 2);
         let night = live.songs().rows.remove(0).song.key;
         // Given to both: kept for the one the library has, held for the other, which is kept with it when it's taken.
-        assert!(live.give(&night, &ids, &Change::Status("Mixing".into())).unwrap());
-        assert!(live.give(&night, &ids, &Change::Rating(4)).unwrap());
-        assert!(live.give(&night, &ids, &Change::AddTag("Dark".into())).unwrap());
-        assert!(!live.give(&night, &ids, &Change::Rating(4)).unwrap(), "the same again changes nothing");
+        let kept_now = ChangeMade { differs: true, held_only: false };
+        assert_eq!(live.give(&night, &ids, &Change::Status("Mixing".into())).unwrap(), kept_now);
+        assert_eq!(live.give(&night, &ids, &Change::Rating(4)).unwrap(), kept_now);
+        assert_eq!(live.give(&night, &ids, &Change::AddTag("Dark".into())).unwrap(), kept_now);
+        assert!(!live.give(&night, &ids, &Change::Rating(4)).unwrap().differs, "the same again changes nothing");
         let kept = |songs: &std::path::Path| -> Vec<(String, i32, Vec<String>)> {
             let mut saves = Library::open_read_only(songs).unwrap().saves().unwrap();
             saves.sort_by_key(|s| s.id);
@@ -1286,6 +1477,20 @@ mod tests {
         // And the next start reads it all back.
         let next = open();
         assert!(next.saves.iter().all(|s| (s.status.as_str(), s.rating) == ("Mixing", 4) && s.tags == ["dark"]));
+        drop(next);
+        // Another copy of the app kept a save anew, under another id: given here only, and said (review SG-2).
+        let other = rusqlite::Connection::open(&songs).unwrap();
+        let anew = "PRAGMA foreign_keys = OFF; UPDATE projects SET id = id + 100 WHERE path LIKE '%Night_1.flp';";
+        other.execute_batch(anew).unwrap();
+        assert_eq!(other.changes(), 1);
+        let made = live.give(&night, &ids, &Change::Rating(5)).unwrap();
+        assert_eq!(made, ChangeMade { differs: true, held_only: true });
+        let rating = |name: &str| -> i64 {
+            let path = format!("%{name}.flp");
+            other.query_row("SELECT rating FROM projects WHERE path LIKE ?1", [path], |r| r.get(0)).unwrap()
+        };
+        assert_eq!([rating("Night_1"), rating("Night_2"), rating("Night_3")], [4, 5, 5]);
+        drop(other);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

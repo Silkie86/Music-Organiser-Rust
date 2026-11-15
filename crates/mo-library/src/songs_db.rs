@@ -210,9 +210,13 @@ pub enum State {
     /// `library.db`, as before, and no `songs.db` is made: `why`.
     Kept { why: String },
     /// `library.db` this time only: the `songs.db` there couldn't be read as the app started (`why`): another program
-    /// held it longer than [`START_WAIT`]. It may be the app's own library, so the settings writers don't write into
+    /// held it longer than [`START_WAIT`], or holds it without sharing it (on Windows a backup tool or a virus
+    /// checker can, review SG-9). It may be the app's own library, so the settings writers don't write into
     /// `library.db` while it may be ([`may_be_own`]): a change there would be lost at the next start.
     Unread { why: String },
+    /// `library.db`, as before: the `songs.db` there can't be used (`why`), and that's the same at every start: it's
+    /// damaged, it isn't the app's, or the app may not read it. It's left as it is, and a card says so (review SG-9).
+    Unusable { why: String },
     /// `songs.db`, though it couldn't be looked at as the app started (`why`): `library.db` has gone (it's put away
     /// once `songs.db` has worked for a week), so `songs.db` is all there is, and each page says what it finds.
     Only { why: String },
@@ -239,6 +243,9 @@ impl AtStart {
             State::Old { why } => format!("Reading library.db: {why}, so songs.db will be made from it"),
             State::Kept { why } => format!("Reading library.db: {why}"),
             State::Unread { why } => format!("Reading library.db this time: songs.db couldn't be read ({why})"),
+            State::Unusable { why } => {
+                format!("Reading library.db: songs.db can't be used ({why}), so it's left as it is")
+            }
             State::Only { why } => {
                 format!("Reading songs.db, though it couldn't be looked at just now ({why}): there's no library.db")
             }
@@ -248,12 +255,18 @@ impl AtStart {
     /// What a card should say this time, if anything: the app shows its old library, and changes to settings may be
     /// refused ([`may_be_own`]).
     pub fn notice(&self) -> Option<String> {
-        let State::Unread { why } = &self.state else { return None };
-        Some(format!(
-            "Your song library, songs.db, couldn't be read as the app started ({why}), so the Songs page shows the old \
-             library.db this time, and changes to folders and settings may not be taken. Close the app and open it \
-             again."
-        ))
+        match &self.state {
+            State::Unread { why } => Some(format!(
+                "Your song library, songs.db, couldn't be read as the app started ({why}), so the Songs page shows the \
+                 old library.db this time, and changes to folders and settings may not be taken. Close the app and \
+                 open it again."
+            )),
+            State::Unusable { why } => Some(format!(
+                "Your song library, songs.db, can't be used ({why}), so the Songs page shows the old library.db, and \
+                 songs.db is left as it is. If this stays, press F12 to send a note about it."
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -312,9 +325,7 @@ pub fn at_start(dir: &Path, app: &str) -> AtStart {
         // library.db put away (or never there): songs.db is all there is to open.
         Err(Unread { why, .. }) if !old.exists() => AtStart { library: songs, state: State::Only { why } },
         Err(Unread { why, passing: true }) => old_one(State::Unread { why }),
-        Err(Unread { why, .. }) => {
-            old_one(State::Kept { why: format!("songs.db couldn't be read ({why}), so it's left as it is") })
-        }
+        Err(Unread { why, passing: false }) => old_one(State::Unusable { why }),
     }
 }
 
@@ -410,8 +421,8 @@ enum Found {
     Newer(i32),
 }
 
-/// Why `songs.db` couldn't be looked at, and whether it may be another program holding it just then (it's busy or
-/// locked), rather than what it holds or the drive (those are the same at every start).
+/// Why `songs.db` couldn't be looked at, and whether it may read another time (another program holding it just then),
+/// rather than what it holds or the app's rights to it (those are the same at every start).
 struct Unread {
     why: String,
     passing: bool,
@@ -453,13 +464,24 @@ fn look_closely(songs: &Path, wait: Duration) -> Result<Found, Unread> {
         };
         Ok(Ok(Found::Songs { made_from, own }))
     })();
-    let passing = |e: &rusqlite::Error| {
-        matches!(e.sqlite_error_code(), Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked))
-    };
     match found {
         Ok(found) => found.map_err(|why| Unread { why, passing: false }),
-        Err(e) => Err(Unread { passing: passing(&e), why: e.to_string() }),
+        // Busy or locked passes, and so does a file another program holds without sharing it: on Windows that comes
+        // as "unable to open" or an I/O error once SQLite's own tries are up (review SG-9). Anything else is the same
+        // at every start: what the file holds, the app's rights to it, a folder in its place.
+        Err(e) => Err(Unread {
+            passing: matches!(e.sqlite_error_code(), Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked))
+                || held_unshared(songs),
+            why: e.to_string(),
+        }),
     }
+}
+
+/// Whether another program holds the file at `path` without sharing it, just now: on Windows a backup tool or a virus
+/// checker can (the system says it's in use: a sharing or lock violation). Elsewhere files aren't held that way.
+fn held_unshared(path: &Path) -> bool {
+    // ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION.
+    cfg!(windows) && matches!(fs::File::open(path).err().and_then(|e| e.raw_os_error()), Some(32 | 33))
 }
 
 fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {

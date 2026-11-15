@@ -125,6 +125,9 @@ impl Model for Lines {
 pub struct Ahead {
     path: PathBuf,
     details: LiveDetails,
+    /// Whether the library is the app's own songs.db, as the app found at its start
+    /// ([`mo_library::songs_db::AtStart::is_songs_db`]): only then is what's read, and given on cards, kept in it.
+    own: bool,
     /// Tells the reading thread which window the list goes on. None when that thread couldn't be started:
     /// [`connect`] starts it then.
     window: Option<mpsc::Sender<slint::Weak<AppWindow>>>,
@@ -143,25 +146,25 @@ struct Loaded {
 /// Starts reading the library at `path` and making the page's list from it, in the background. Called as soon as the
 /// app knows which library it reads and how many background threads it may use, before the graphics card is found
 /// and the window made, so the list is ready when the window first draws (or soon after) rather than only begun then.
-pub fn read_ahead(path: PathBuf) -> Ahead {
+pub fn read_ahead(path: PathBuf, own: bool) -> Ahead {
     let details = LiveDetails::default();
-    let window = match start(path.clone(), details.clone()) {
+    let window = match start(path.clone(), details.clone(), own) {
         Ok(window) => Some(window),
         Err(e) => {
             log::warning("Songs", &format!("Couldn't start reading the library ahead of the window: {e}"));
             None
         }
     };
-    Ahead { path, details, window }
+    Ahead { path, details, own, window }
 }
 
 /// Starts the page's thread: it reads the library at `path` at once ([`load`]), waits to be told its window, puts
 /// the list there and then keeps it up to date ([`watch`]). A read that fails is logged as it fails, and shown once
 /// there's a window. If it's never told a window (the window couldn't be made), it ends.
-fn start(path: PathBuf, details: LiveDetails) -> std::io::Result<mpsc::Sender<slint::Weak<AppWindow>>> {
+fn start(path: PathBuf, details: LiveDetails, own: bool) -> std::io::Result<mpsc::Sender<slint::Weak<AppWindow>>> {
     let (window, told) = mpsc::channel::<slint::Weak<AppWindow>>();
     background::spawn("Songs", move || {
-        let loaded = load(&path, details);
+        let loaded = load(&path, details, own);
         if let Err(e) = &loaded {
             log::warning("Songs", e);
         }
@@ -195,17 +198,23 @@ fn fit_songs(songs: &Songs) -> Vec<mo_app::midi_fits::SongChoice> {
     mo_app::midi_fits::song_choices(songs.rows.iter().map(|r| &r.song), &songs.real)
 }
 
-/// Reads the library at `path` and makes the page's list from it. Why not, when it can't be read.
-fn load(path: &Path, details: LiveDetails) -> Result<Loaded, String> {
+/// Reads the library at `path` and makes the page's list from it, to be kept in the library if it's the app's own
+/// songs.db (`own`, as the app found at its start). Why not, when it can't be read.
+fn load(path: &Path, details: LiveDetails, own: bool) -> Result<Loaded, String> {
     let began = Instant::now();
     let read = Library::open_read_only(path)
         .and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details))
         // Missing samples are looked for in the Sounds library beside it last (rule 13).
         .map(|live| live.with_sounds(sound_library::database_beside(path)))
-        // What's read is kept in the app's own songs.db; library.db is never written.
-        .map(|live| match mo_library::songs_db::own_since(path) {
-            Some(_) => live.with_writes(path.to_owned()),
-            None => live,
+        // What's read is kept in the app's own songs.db, as the app found at its start: asked again here, a songs.db
+        // held by another write just then left the whole run unable to keep anything (review SG-2). library.db is
+        // never written.
+        .map(|live| {
+            if own && path.file_name().is_some_and(|n| n == mo_library::songs_db::FILE_NAME) {
+                live.with_writes(path.to_owned())
+            } else {
+                live
+            }
         });
     let live = read.map_err(|e| e.to_string())?;
     let read_in = began.elapsed();
@@ -230,7 +239,7 @@ fn load(path: &Path, details: LiveDetails) -> Result<Loaded, String> {
 /// Wires the page's search box and chips, and puts the library `ahead` has been reading on the page once it's read.
 /// Open, Show in folder and Copy path report on `feed`'s cards.
 pub fn connect(app: &AppWindow, ahead: Ahead, feed: Feed) {
-    let Ahead { path, details, window } = ahead;
+    let Ahead { path, details, own, window } = ahead;
     let data = app.global::<SongsData>();
     FEED.with(|f| *f.borrow_mut() = Some(feed));
     PAGE.with(|p| p.borrow_mut().db = path.clone());
@@ -327,7 +336,7 @@ pub fn connect(app: &AppWindow, ahead: Ahead, feed: Feed) {
 
     // The thread that has been reading since the app started is told its window; started only now if it couldn't
     // be then.
-    match window.map_or_else(|| start(path, details), Ok) {
+    match window.map_or_else(|| start(path, details, own), Ok) {
         Ok(window) => {
             let _ = window.send(app.as_weak());
         }
@@ -389,6 +398,8 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
     };
     let mut catch_up_at = Some(Instant::now() + CATCH_UP_AFTER);
     let mut keep_again_at: Option<Instant> = None;
+    // Whether a card said that what you give songs isn't kept this time: once a run is enough.
+    let mut said_held = false;
     // What came while the thread was busy, still to do ([`next`]).
     let mut waiting: VecDeque<Told> = VecDeque::new();
     loop {
@@ -467,10 +478,13 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                 Some(Ok(kept)) => {
                     let w = &kept.written;
                     let noted = if w.mended { ", and that the muted samples are mended" } else { "" };
-                    log::info(
-                        "Songs",
-                        &format!("Kept in songs.db: {} saves read, {} marked missing{noted}", w.put, w.missing),
-                    );
+                    // Nothing kept is no line (review SG-12).
+                    if w.put > 0 || w.missing > 0 || w.mended {
+                        log::info(
+                            "Songs",
+                            &format!("Kept in songs.db: {} saves read, {} marked missing{noted}", w.put, w.missing),
+                        );
+                    }
                     for (path, why) in &kept.not_kept {
                         log::warning("Songs", &format!("Couldn't keep {path} in songs.db: {why}"));
                     }
@@ -494,6 +508,10 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
         if closing || (updated.is_empty() && !renumbered && !gave.any) {
             continue;
         }
+        let say_held = gave.held && !std::mem::replace(&mut said_held, true);
+        if say_held {
+            log::warning("Songs", &format!("{HELD_ONLY}. {HELD_ONLY_WHY}"));
+        }
         // Made again when a save's id changed too, so the page picks it by the id the library has.
         let songs = live.songs();
         let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
@@ -504,11 +522,10 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
             crate::finder::add_source(&app, "songs", found);
             crate::midi::songs_offered(&app, offered);
             for why in &gave.not_kept {
-                FEED.with(|f| {
-                    if let Some(feed) = f.borrow().as_ref() {
-                        feed.start(NOT_KEPT, "").failed(why);
-                    }
-                });
+                failed_card(NOT_KEPT, why);
+            }
+            if say_held {
+                failed_card(HELD_ONLY, HELD_ONLY_WHY);
             }
             if !updated.for_card() {
                 return;
@@ -560,15 +577,20 @@ fn next(rx: &Receiver<Told>, waiting: &mut VecDeque<Told>, wait: Duration) -> Re
 struct Gave {
     any: bool,
     not_kept: Vec<String>,
+    /// Shown, but held here only until the app closes ([`mo_app::live::ChangeMade::held_only`], review SG-2).
+    held: bool,
 }
 
 impl Gave {
     /// Keeps `given` ([`Live::give`]). Why it can't be kept goes in the log now and on a card with the list.
     fn keep(&mut self, live: &mut Live, given: Given) {
         self.any = true;
-        if let Err(e) = live.give(&given.song, &given.save_ids, &given.change) {
-            log::warning("Songs", &format!("Couldn't keep what the song was given: {e}"));
-            self.not_kept.push(e.to_string());
+        match live.give(&given.song, &given.save_ids, &given.change) {
+            Ok(made) => self.held |= made.held_only,
+            Err(e) => {
+                log::warning("Songs", &format!("Couldn't keep what the song was given: {e}"));
+                self.not_kept.push(e.to_string());
+            }
         }
         let _ = GIVES_WAITING.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
     }
@@ -623,6 +645,20 @@ fn not_kept_line(left: usize) -> String {
 /// The card's title when what you gave a song couldn't be kept.
 const NOT_KEPT: &str = "Couldn't keep that for the song";
 
+/// The card's title and words when what you give songs is shown but not kept this time ([`Gave::held`]).
+const HELD_ONLY: &str = "Shown until the app closes";
+const HELD_ONLY_WHY: &str = "The app isn't keeping what you give songs on their cards (status, stars, hearts, tags) \
+                             in its song library this time, so it lasts only until the app closes.";
+
+/// A card that says what couldn't be done (`title`) and why, on the window's thread.
+fn failed_card(title: &str, why: &str) {
+    FEED.with(|f| {
+        if let Some(feed) = f.borrow().as_ref() {
+            feed.start(title, "").failed(why);
+        }
+    });
+}
+
 /// The change a click on the card asks for (`what` and `value` as songs.slint's `give` says them), for a song that
 /// has `favourite` now. None for words the card never sends.
 fn asked_change(what: &str, value: &str, favourite: bool) -> Option<Change> {
@@ -657,13 +693,7 @@ fn show_given(row: &mut SongRow, change: &Change) {
 /// gets it, its copies in other folders too). Shown at once, then kept by the page's thread ([`watch`]), which makes
 /// the list again; a card says so if it can't be kept.
 fn give(app: &AppWindow, what: &str, value: &str) {
-    let failed = |why: &str| {
-        FEED.with(|f| {
-            if let Some(feed) = f.borrow().as_ref() {
-                feed.start(NOT_KEPT, "").failed(why);
-            }
-        });
-    };
+    let failed = |why: &str| failed_card(NOT_KEPT, why);
     let asked = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let at = p.picked?;
@@ -1673,20 +1703,32 @@ mod tests {
             )
             .expect("filled");
         // No window, no event loop: the read needs neither, so it can start before them.
-        let loaded = load(&library, LiveDetails::default()).expect("read");
+        // Even when told it's the app's own, library.db is never written.
+        let loaded = load(&library, LiveDetails::default(), true).expect("read");
         assert_eq!(loaded.songs.saves, 3);
         let names: Vec<&str> = loaded.songs.rows.iter().map(|r| r.song.name.as_str()).collect();
         assert_eq!(names.len(), 2, "the two Night saves are one song: {names:?}");
         assert_eq!(loaded.years.iter().map(|y| y.1).sum::<usize>(), 2, "each song counted in its year");
         assert!(!loaded.live.writes(), "the C# app's library.db is never written");
+        // So a change given on a card is shown, but held only until the app closes, and a card says so (review
+        // SG-2).
+        let (mut live, mut gave) = (loaded.live, Gave::default());
+        gave.keep(&mut live, Given { song: "a song".to_owned(), save_ids: vec![1], change: Change::Rating(3) });
+        assert!(gave.any && gave.held && gave.not_kept.is_empty());
         // A library that can't be read says why, for the page to show; nothing crashes.
-        assert!(load(&dir.join("gone").join("library.db"), LiveDetails::default()).is_err());
+        assert!(load(&dir.join("gone").join("library.db"), LiveDetails::default(), false).is_err());
         // Started with no window and no event loop: the read needs neither. Never told a window (it couldn't be
         // made), its thread ends once the read is done.
-        let ahead = read_ahead(library.clone());
+        let ahead = read_ahead(library.clone(), false);
         assert_eq!(ahead.path, library);
         assert!(ahead.window.is_some(), "started");
         drop(ahead);
+        // A songs.db is kept in only when the app found it its own as it started; the page doesn't ask again (review
+        // SG-2).
+        let songs = dir.join(mo_library::songs_db::FILE_NAME);
+        mo_library::songs_db::make(&library, &songs, &mut |_| {}).expect("made");
+        assert!(load(&songs, LiveDetails::default(), true).expect("read").live.writes());
+        assert!(!load(&songs, LiveDetails::default(), false).expect("read").live.writes());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

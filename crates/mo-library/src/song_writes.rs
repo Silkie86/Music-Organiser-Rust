@@ -86,6 +86,12 @@ const MEND_SINCE: i64 = 30 * 24 * 60 * 60;
 ///
 /// Of `library.db`, only what comes before each save's details is read, and the samples: the details are tens of KB a
 /// save, most of the file (review finding G-2).
+///
+/// A library noted by a build from 6 to 10 Nov 2026 (#367 up to #416) has the note with no owed list, so the wider
+/// choice #416 brought (samples compared, saves on a drive that was away) never runs on it. Left so on purpose (the
+/// whole-app review of 14 Nov, SG-10): without `library.db` there's nothing to compare with, so it would mean reading
+/// again every FL Studio save with no muted sample, nearly all of them; and muted marks only count with the "not
+/// muted in the newest save" setting, which is off unless it's turned on.
 pub fn to_mend(songs_db: &Path) -> Result<Option<Vec<i64>>, LibraryError> {
     let Some(own_since) = crate::songs_db::own_since(songs_db) else {
         return Ok(None);

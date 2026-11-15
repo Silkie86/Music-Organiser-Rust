@@ -509,6 +509,62 @@ fn songs_db_held_as_the_app_starts_is_waited_for_and_settings_never_go_into_libr
     assert!(matches!(changed, folders::Changed::Done(_)), "{changed:?}");
 }
 
+/// Review SG-9: a songs.db that can't be used, the same at every start (a folder at its name, something that isn't a
+/// database, one of the app's own missing a table it always has), is left as it is, and a card says so and what to do.
+/// It isn't one to wait for: settings go where the app reads them, library.db.
+#[test]
+fn a_songs_db_that_cant_be_used_is_left_as_it_is_and_said_on_a_card() {
+    let old = library("unusable");
+    let dir = old.parent().unwrap();
+    let new = songs_beside(&old);
+    // A folder at songs.db's place.
+    std::fs::create_dir(&new).unwrap();
+    let start = songs_db::at_start(dir, APP);
+    assert_eq!(start.library, old);
+    assert!(matches!(&start.state, State::Unusable { .. }), "{start:?}");
+    assert!(start.notice().is_some_and(|n| n.contains("can't be used") && n.contains("F12")), "{start:?}");
+    assert!(start.line().contains("can't be used"), "{}", start.line());
+    assert!(!start.make_wanted() && !songs_db::may_be_own(&new));
+    assert!(folders::add_folder(&old, FolderList::Samples, "F:\\Lost samples", &[]).is_ok());
+    // Something that isn't a database: left as it is.
+    std::fs::remove_dir(&new).unwrap();
+    std::fs::write(&new, vec![b'x'; 8192]).unwrap();
+    let start = songs_db::at_start(dir, APP);
+    assert!(matches!(&start.state, State::Unusable { why } if why.contains("not a database")), "{start:?}");
+    assert!(!songs_db::may_be_own(&new));
+    assert_eq!(std::fs::read(&new).unwrap(), vec![b'x'; 8192], "left as it is");
+    // One of the app's own that lacks a table it always has.
+    std::fs::remove_file(&new).unwrap();
+    make(&old);
+    Connection::open(&new).unwrap().execute_batch("DROP TABLE songs_info;").unwrap();
+    let start = songs_db::at_start(dir, APP);
+    assert!(matches!(&start.state, State::Unusable { why } if why.contains("songs_info")), "{start:?}");
+    assert_eq!(start.library, old);
+}
+
+/// Review SG-9: on Windows, a songs.db another program opened without sharing it (a backup tool, a virus checker)
+/// can't be opened at all, which isn't "busy": it may be the app's own still, so as for one held a moment, a card says
+/// so and settings stay out of library.db.
+#[cfg(windows)]
+#[test]
+fn a_songs_db_held_without_sharing_as_the_app_starts_is_waited_for() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let old = library("unshared");
+    let dir = old.parent().unwrap();
+    make(&old);
+    let new = songs_beside(&old);
+    let holder = std::fs::OpenOptions::new().read(true).share_mode(0).open(&new).unwrap();
+    let start = songs_db::at_start(dir, APP);
+    assert_eq!(start.library, old);
+    assert!(matches!(&start.state, State::Unread { .. }), "{start:?}");
+    assert!(start.notice().is_some_and(|n| n.contains("open it again")), "{start:?}");
+    assert!(songs_db::may_be_own(&new));
+    let refused = folders::add_folder(&old, FolderList::Samples, "F:\\Lost samples", &[]).unwrap_err().to_string();
+    assert!(refused.contains("open it again"), "{refused}");
+    drop(holder);
+    assert!(!songs_db::may_be_own(&new), "made, not the app's own yet");
+}
+
 /// The names of the indexes on `table`, in order.
 fn indexes(songs: &Path, table: &str) -> Vec<String> {
     let c = Connection::open(songs).unwrap();
