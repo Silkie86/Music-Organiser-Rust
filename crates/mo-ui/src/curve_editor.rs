@@ -7,7 +7,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mo_app::background::{self, Newest};
 use mo_app::curve_card::{self, Card, Heard};
@@ -272,6 +272,8 @@ pub fn open(app: &AppWindow, curve: Option<(&Curve, String)>) {
         show_touch_quietly(app);
         return;
     }
+    // For a note of a freeze or slow frames: which curve was on the card.
+    log::info("Curves", &format!("A curve on the card: {}", curve_says()));
     data.set_picture(Image::default());
     data.set_ruler(ModelRc::default());
     data.set_end_x(-1.0);
@@ -286,28 +288,56 @@ pub fn open(app: &AppWindow, curve: Option<(&Curve, String)>) {
     redraw(app);
 }
 
+/// A step of the editor's that holds the window this long is written to the log.
+const SLOW: Duration = Duration::from_millis(50);
+
+/// The curve on the card for the log: how many points, how long, and whether its tone is playing.
+fn curve_says() -> String {
+    let (points, beats) = card(|c| (c.points(), c.length()));
+    let playing = if crate::sounds::player().playing().is_some() { ", a sound playing" } else { "" };
+    format!("{points} points over {beats:.2} beats{playing}")
+}
+
+/// Does `step` (named `what` for the log) and says so in the log when it held the window: with the curve's size,
+/// so a note of a freeze can be traced to what was being done to which curve.
+fn timed<T>(what: &str, step: impl FnOnce() -> T) -> T {
+    let began = Instant::now();
+    let done = step();
+    let took = began.elapsed();
+    if took >= SLOW {
+        log::info("Curves", &format!("{what} took {} ms ({})", took.as_millis(), curve_says()));
+    }
+    done
+}
+
 /// The mouse on the picture (`kind` one of `curve_card::mouse`).
 fn mouse(app: &AppWindow, kind: i32, x: f64, y: f64, keys: Keys) {
-    if card(|c| c.mouse(kind, x, y, keys)) {
-        redraw(app);
-    }
-    show_touch(app);
+    timed("The mouse on the curve", || {
+        if card(|c| c.mouse(kind, x, y, keys)) {
+            redraw(app);
+        }
+        show_touch(app);
+    });
 }
 
 /// The mouse on the ruler, `x` points from the picture's left.
 fn ruler(app: &AppWindow, kind: i32, x: f64, keys: Keys) {
-    if card(|c| c.ruler(kind, x, keys)) {
-        redraw(app);
-    }
-    show_touch(app);
+    timed("The mouse on the curve's ruler", || {
+        if card(|c| c.ruler(kind, x, keys)) {
+            redraw(app);
+        }
+        show_touch(app);
+    });
 }
 
 /// The mouse on the clip strip, `x` points from the picture's left.
 fn strip(app: &AppWindow, kind: i32, x: f64, keys: Keys) {
-    if card(|c| c.strip(kind, x, keys)) {
-        redraw(app);
-    }
-    show_touch(app);
+    timed("The mouse on the curve's clip strip", || {
+        if card(|c| c.strip(kind, x, keys)) {
+            redraw(app);
+        }
+        show_touch(app);
+    });
 }
 
 /// What the right-click menu offers for the highlighted part (the whole curve with none); empty with no curve open.
@@ -329,11 +359,13 @@ pub fn picked() -> usize {
 /// One of the editor's own actions (the right-click menu's, or its key): reverse, flip, steps, quantise, remove the
 /// picked points, keep or forget a clip, cut the time out, highlight all. Whether it did anything.
 pub fn act(app: &AppWindow, id: &str) -> bool {
-    let done = card(|c| c.act(id));
-    // Shown again either way: a drag may have been put back.
-    redraw(app);
-    show_touch(app);
-    done
+    timed(id, || {
+        let done = card(|c| c.act(id));
+        // Shown again either way: a drag may have been put back.
+        redraw(app);
+        show_touch(app);
+        done
+    })
 }
 
 /// Randomise: the curve in the editor becomes a roll from `sources`, or with a highlight only that part is rolled
