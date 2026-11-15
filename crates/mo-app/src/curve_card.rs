@@ -695,9 +695,9 @@ impl Card {
         self.going = self.back_to(back).map(|to| (to.to_owned(), back));
     }
 
-    /// Whether the curve on the card has a step of its own to undo (`back`) or redo.
+    /// Whether the curve on the card has a step of its own to undo (`back`) or redo. A drag in hand is one to undo.
     fn can_step_here(&self, back: bool) -> bool {
-        self.open.as_ref().is_some_and(|(_, e)| if back { e.can_undo() } else { e.can_redo() })
+        self.open.as_ref().is_some_and(|(_, e)| if back { e.can_undo() || e.dragging() } else { e.can_redo() })
     }
 
     /// Takes the curve off the card; whether there was one.
@@ -2287,6 +2287,11 @@ mod tests {
         // Nothing of its own to undo: Undo leads back, and the button is lit.
         assert!(!card.can_step(true));
         assert!(card.showing(false).can_undo);
+        assert_eq!(card.back_to(true), Some("a"));
+        // (A drag in hand is a step of its own: Undo takes that back before it goes anywhere.)
+        press_drag(&mut card, (0.0, 1.0), (0.0, 0.5), none);
+        assert_eq!(card.back_to(true), None);
+        assert!(card.escape());
         assert_eq!(card.back_to(true), Some("a"));
         card.go(true);
         assert!(card.open("a", "Rise", &rise(), 4.0));
