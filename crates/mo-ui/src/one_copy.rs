@@ -54,6 +54,7 @@ pub fn connect(app: &crate::AppWindow, held: &Arc<OneCopy>) {
             }
             Asked::Close => {
                 log::last(log::Level::Info, "One copy", "Closing for a copy from another build");
+                crate::watchdog::stop();
                 let _ = slint::quit_event_loop();
             }
         });

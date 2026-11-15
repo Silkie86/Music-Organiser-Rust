@@ -9,7 +9,8 @@
 //! marked step that takes longer than [`STALL`] gets its own `[Slow]` line with its time.
 //!
 //! A freeze outside every marked step says more, so the next one can be pinned down: where the window's thread was
-//! (looked at once it has been stuck for [`LOOK_AT_THREAD`], and again at [`STILL_STUCK`], see [`crate::stuck`]), how
+//! (looked at once it has been stuck for [`LOOK_AT_THREAD`], and again at [`LOOK_AGAIN`] and [`STILL_STUCK`], see
+//! [`crate::stuck`]), how
 //! many pages of memory the app had to find while it was stuck (page faults, less those of the looks themselves), and
 //! the window's last move, resize, minimising or hiding before it, with how long before.
 //!
@@ -34,6 +35,9 @@ pub const STILL_STUCK: Duration = Duration::from_secs(5);
 /// Solomon's logs, such as 0.4 s opening the MIDI page on 11 Nov, said only "in no marked step".) The look stops the
 /// window's thread only while its stack is copied; the names are worked out on the watchdog's thread.
 pub const LOOK_AT_THREAD: Duration = Duration::from_millis(300);
+/// Still stuck this long, it is looked at once more: one look at 0.3 s couldn't say whether a freeze of two seconds
+/// spent them in the same place (the 2.6 s on Space on 15 Nov 2026 showed a single look, into the graphics code).
+pub const LOOK_AGAIN: Duration = Duration::from_secs(1);
 const KNOCK_EVERY: Duration = Duration::from_millis(200);
 const LOOK_EVERY: Duration = Duration::from_millis(25);
 
@@ -50,6 +54,8 @@ static LAST_WINDOW_EVENT: Mutex<Option<(&'static str, Instant)>> = Mutex::new(No
 /// going on now.
 static PAUSES: AtomicU64 = AtomicU64::new(0);
 static PAUSED: AtomicU64 = AtomicU64::new(0);
+/// Set by [`stop`]: the event loop has ended, the app is closing.
+static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 thread_local! {
     /// For each marked step going on (on this thread), how long the steps inside it took, so each counts only its own
@@ -278,7 +284,7 @@ fn busy_with() -> String {
 }
 
 /// Starts watching. Call it from inside the event loop (for example with `slint::invoke_from_event_loop` before
-/// `run`), so the time the window takes to open isn't counted as a freeze. Stops by itself when the window closes.
+/// `run`), so the time the window takes to open isn't counted as a freeze. Stops when the window is asked to close ([`stop`]).
 pub fn start(feed: Feed) {
     let _ = WINDOW.set(std::thread::current().id());
     crate::stuck::remember_this_thread();
@@ -293,9 +299,19 @@ pub fn start(feed: Feed) {
     }
 }
 
+/// The event loop has ended and the app is closing: the watchdog stops, and a knock still waiting isn't a freeze. The
+/// window's thread goes on to write what's waiting (up to a minute, for a plugin move), and without this each close
+/// that took over five seconds was logged as "still stuck", an error line for nothing wrong.
+pub fn stop() {
+    STOPPED.store(true, Ordering::Release);
+}
+
 fn watch(feed: &Feed) {
     loop {
         std::thread::sleep(KNOCK_EVERY);
+        if STOPPED.load(Ordering::Acquire) {
+            return;
+        }
         // How long the knock waited, in microseconds (at least 1), once it's answered; 0 until then.
         let answered = Arc::new(AtomicU64::new(0));
         let a = answered.clone();
@@ -311,6 +327,7 @@ fn watch(feed: &Feed) {
         }
         let mut said_still_stuck = false;
         let mut looked_at_thread = false;
+        let mut looked_again = false;
         // The page faults of the watchdog's own looks at the window's thread (reading the app's symbols), left out
         // of the freeze's count.
         let mut own_faults = 0;
@@ -325,6 +342,9 @@ fn watch(feed: &Feed) {
             if answered.load(Ordering::Acquire) != 0 {
                 break;
             }
+            if STOPPED.load(Ordering::Acquire) {
+                return;
+            }
             let waited = sent.elapsed();
             if seen.len() < 400 {
                 seen.push(busy_step());
@@ -334,6 +354,13 @@ fn watch(feed: &Feed) {
             }
             if waited >= LOOK_AT_THREAD && !looked_at_thread && !paused_since(pauses) {
                 looked_at_thread = true;
+                own_faults += log_thread(waited);
+                log::current().inspect(|l| l.flush());
+            }
+            // (Not in the same turn as the first look: a watchdog that was itself held up for a second would look
+            // twice at one moment.)
+            else if waited >= LOOK_AGAIN && !looked_again && !paused_since(pauses) {
+                looked_again = true;
                 own_faults += log_thread(waited);
                 log::current().inspect(|l| l.flush());
             }
@@ -464,6 +491,8 @@ mod tests {
         assert!(LOOK_AT_THREAD > STALL);
         assert!(LOOK_AT_THREAD <= STALL + 2 * LOOK_EVERY);
         assert!(LOOK_AT_THREAD < STILL_STUCK);
+        // And once more between the two, so a freeze of a second or two has two looks to compare.
+        assert!(LOOK_AT_THREAD < LOOK_AGAIN && LOOK_AGAIN < STILL_STUCK);
         assert_eq!(
             thread_line(LOOK_AT_THREAD, &["a".to_owned()]),
             "Stuck for 0.3 s, the window's thread was in:\n    a"

@@ -130,6 +130,12 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::gpu::connect(&app);
     // The window's moves, resizes and hiding, for the freeze lines.
     mo_ui::watchdog::watch_window(&app);
+    // Closing isn't a freeze: the watchdog stops as soon as the window is asked to close (Slint takes the window's
+    // graphics apart inside the event loop, which took over a second on 15 Nov 2026 and was logged as one).
+    app.window().on_close_requested(|| {
+        mo_ui::watchdog::stop();
+        slint::CloseRequestResponse::HideWindow
+    });
     // Dragging sounds and clips out to a DAW says here when it can't.
     mo_ui::drag::connect(feed.clone());
     // The Songs page reads the song library (the C# app's library.db, read-only, until songs.db is the app's own), and
@@ -219,8 +225,11 @@ fn main() -> Result<(), slint::PlatformError> {
         log::warning("Freeze", "Couldn't start the freeze watchdog");
     }
     let ran = app.run();
-    // The window is gone: a copy started from now on waits for this one to end (the port is let go with the process,
-    // once everything below is written) instead of asking it to show.
+    // The window's thread answers no more knocks from here: what it does while closing isn't a freeze. (Said already
+    // when the window was asked to close; this is for an end that came another way.)
+    mo_ui::watchdog::stop();
+    // The window is gone: a copy started from now on waits for this one to end (the port is let go at the very
+    // end, once everything below is written) instead of asking it to show.
     if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
         held.closing();
     }
@@ -263,10 +272,47 @@ fn main() -> Result<(), slint::PlatformError> {
     // closes whatever is left of the app.
     let setup = mo_ui::update::asked();
     session.close();
+    // Everything is written. The port goes now, not with the process, so the copy started next (by the launcher, or
+    // by the setup below) is never held up by this one taking its time to end.
+    if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
+        held.let_go();
+    }
     if let Some(setup) = setup {
         mo_ui::update::run(&setup);
     }
+    // Off Windows the usual way out stays: the window is taken apart first, which an exit on the spot there
+    // wouldn't wait for.
+    #[cfg(windows)]
+    {
+        if let Err(e) = &ran {
+            eprintln!("Error: {e}");
+        }
+        end_now(u32::from(ran.is_err()))
+    }
+    #[cfg(not(windows))]
     ran
+}
+
+/// Ends the app on the spot (Windows), once everything is written and the log is closed. Leaving `main` the usual
+/// way has the window's graphics taken apart piece by piece first, and then Windows unloads the graphics card's driver
+/// from the app: on 15 Nov 2026 that kept Solomon's app alive more than ten seconds after "Closed" (the card was busy
+/// with Bitwig), until the launcher forced it shut. Nothing in that work is the app's to keep: Windows takes back the
+/// window, the card's memory and every open file with the process, at once.
+///
+/// What this gives up: a writer the close above stopped waiting for (the log on a drive that's asleep after 5 s, a
+/// backup after 20 s, a plugin move after a minute) used to get the seconds the taking-apart took, by luck. Those
+/// waits are unchanged, and each of those writers already copes with being cut off: leaving `main` ended them too.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn end_now(code: u32) -> ! {
+    use std::io::Write;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: plain calls on this process itself; when the second comes back at all, it failed, and the usual way
+    // out below is taken.
+    unsafe { TerminateProcess(GetCurrentProcess(), code) };
+    std::process::exit(code.cast_signed())
 }
 
 /// Rule 17, crashes always log: a panic anywhere goes into the session log, with where it happened, and is written out
