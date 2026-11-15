@@ -200,6 +200,8 @@ pub fn connect(app: &AppWindow) {
     // The keys as Settings has them (the page tells of a change with `set_keys`).
     let keys = crate::settings::value(mo_app::curve_keys::SETTING);
     card(|c| c.set_keys(mo_app::curve_keys::KeyMap::from_setting(keys.as_deref())));
+    // Another curve can be picked in the list while one is on the card: Undo goes back to the one left.
+    card(|c| c.set_goes_back(true));
     let weak = app.as_weak();
     data.on_strip(move |kind, x, shift, alt, ctrl| {
         if let Some(app) = weak.upgrade() {
@@ -215,13 +217,13 @@ pub fn connect(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_undo(move || {
         if let Some(app) = weak.upgrade() {
-            step_back(&app, true);
+            undo(&app, true);
         }
     });
     let weak = app.as_weak();
     data.on_redo(move || {
         if let Some(app) = weak.upgrade() {
-            step_back(&app, false);
+            undo(&app, false);
         }
     });
     let weak = app.as_weak();
@@ -382,13 +384,16 @@ pub fn escape(app: &AppWindow) -> bool {
     done
 }
 
-/// Undo or Redo from the page's keys; whether there was a step to take.
+/// Undo or Redo, from the card's buttons or the page's keys; whether there was a step to take. With no step of its
+/// own left to take, the curve on the card gives way to the one that was worked on before it was picked (Undo), or
+/// to the one Undo came back from (Redo): the page picks that one, and it comes back as it was left.
 pub fn undo(app: &AppWindow, back: bool) -> bool {
-    let can = card(|c| c.can_step(back));
-    if can {
+    if card(|c| c.can_step(back)) {
         step_back(app, back);
+        return true;
     }
-    can
+    let Some(to) = card(|c| c.back_to(back).map(str::to_owned)) else { return false };
+    crate::presets::curve_gone_back(app, &to, back, || card(|c| c.go(back)))
 }
 
 /// The curve as it's been edited, when it has been: its points and its length in beats.

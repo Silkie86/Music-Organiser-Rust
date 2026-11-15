@@ -1219,6 +1219,25 @@ pub fn add_curve(app: &AppWindow, row: usize) -> bool {
 /// How the card's words begin after a curve was added: Undo and Redo take those words away again.
 const ADDED: &str = "Added ";
 
+/// Undo (`back`) or Redo with no step left in the curve on the card: the page picks curve `id`, the one worked on
+/// before (or the one Undo came back from), and says so. `go` tells the card it's a step back, not a curve picked
+/// anew. False when that curve is no longer among the curves.
+pub(crate) fn curve_gone_back(app: &AppWindow, id: &str, back: bool, go: impl FnOnce()) -> bool {
+    let name = PAGE.with(|p| p.borrow().curves.iter().find(|c| c.id == id).map(|c| c.name.clone()));
+    let Some(name) = name else { return false };
+    go();
+    pick_curve(app, Some(id.to_owned()));
+    PAGE.with(|p| {
+        p.borrow_mut().curve_message = if back {
+            format!("Back to {name}, as you left it. Redo goes to the curve you came from again.")
+        } else {
+            format!("Forward to {name} again. Undo goes back.")
+        };
+    });
+    show_curve_card(app);
+    true
+}
+
 /// Undo or Redo took a step in the editor: the card no longer says a curve was added.
 pub(crate) fn curve_stepped(app: &AppWindow) {
     let said = PAGE.with(|p| {
@@ -2724,6 +2743,8 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         | curve_act::KEEP_CLIP
         | curve_act::CUT_TIME
         | curve_act::HIGHLIGHT_ALL
+        | curve_act::NUDGE_LEFT
+        | curve_act::NUDGE_RIGHT
         | curve_act::QUANTISE
         | curve_act::REMOVE_POINTS => return crate::curve_editor::act(app, id),
         curve_act::RANDOMISE => return randomise(app),

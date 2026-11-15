@@ -37,6 +37,8 @@ fn short(offer: &Offer) -> &'static str {
         act::REVERSE => "Reverse",
         act::FLIP => "Flip",
         act::STEPS => "Steps",
+        act::NUDGE_LEFT => "Earlier",
+        act::NUDGE_RIGHT => "Later",
         act::QUANTISE => "Quantise",
         act::REMOVE_POINTS => "Remove points",
         act::KEEP_CLIP if offer.text.starts_with("Forget") => "Forget clip",

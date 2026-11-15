@@ -245,7 +245,20 @@ macro_rules! show_curve_card {
                     .into_iter()
                     .map(|d| $dot { x: d.x, y: d.y, hot: d.hot, held: d.held, picked: d.picked })
                     .collect();
-                $data.set_dots(::slint::ModelRc::new(::slint::VecModel::from(dots)));
+                // The dots that are as they were stay as they are on the screen: only the one under the mouse or in
+                // hand is drawn anew on a move, not every dot of the curve.
+                let model = $data.get_dots();
+                match ::slint::Model::as_any(&model).downcast_ref::<::slint::VecModel<$dot>>() {
+                    Some(old) if ::slint::Model::row_count(old) == dots.len() => {
+                        for (i, d) in dots.into_iter().enumerate() {
+                            if ::slint::Model::row_data(old, i).as_ref() != Some(&d) {
+                                ::slint::Model::set_row_data(old, i, d);
+                            }
+                        }
+                    }
+                    Some(old) => old.set_vec(dots),
+                    None => $data.set_dots(::slint::ModelRc::new(::slint::VecModel::from(dots))),
+                }
             }
             match $now.band {
                 Some((x, y, width, height)) => {
@@ -422,6 +435,17 @@ pub struct Card {
     /// Curves with edits not saved that were left for another: each as it was opened, its editor and what was in
     /// sight, the one left last at the end. Picked again (unchanged where it came from), a curve is as it was left.
     kept: Vec<(String, Shape, Editor, View)>,
+    /// Whether the screen goes back to a curve left ([`Card::back_to`]): one where another curve can be picked
+    /// while this one is on the card.
+    goes_back: bool,
+    /// The curve with edits that was left last for another (its id): Undo with nothing more to undo goes back to
+    /// it. The curve Undo went back from: Redo with nothing to redo goes to it again. And the way the screen is
+    /// going right now (back, or forward again), till the curve it goes to is opened.
+    left: Option<String>,
+    ahead: Option<String>,
+    going: Option<(String, bool)>,
+    /// The curve that was last taken off the card.
+    gone_from: Option<String>,
 }
 
 impl Default for Card {
@@ -465,6 +489,11 @@ impl Default for Card {
             dots: None,
             origin: None,
             kept: Vec::new(),
+            goes_back: false,
+            left: None,
+            ahead: None,
+            going: None,
+            gone_from: None,
         }
     }
 }
@@ -627,11 +656,48 @@ impl Card {
         editor.let_go();
         if editor.changed() || editor.can_undo() || editor.can_redo() {
             self.kept.retain(|(kept, ..)| *kept != id);
-            self.kept.push((id, origin, editor, self.view));
+            self.kept.push((id.clone(), origin, editor, self.view));
             if self.kept.len() > KEPT {
                 self.kept.remove(0);
             }
         }
+        self.gone_from = Some(id);
+    }
+
+    /// The screen goes back to a curve left for another when Undo has nothing more to undo ([`Card::back_to`]).
+    pub fn set_goes_back(&mut self, on: bool) {
+        self.goes_back = on;
+    }
+
+    /// The curve Undo (`back`) or Redo would go to when the curve on the card has no step of its own to take: the
+    /// one worked on that was left for this one (picked by accident, say), or the one Undo came back from. The
+    /// screen picks it in its list, having said so with [`Card::go`]; it comes back as it was left.
+    pub fn back_to(&self, back: bool) -> Option<&str> {
+        if self.can_step_here(back) {
+            return None;
+        }
+        self.way(back)
+    }
+
+    /// Where Undo (`back`) or Redo leads beyond this curve's own steps.
+    fn way(&self, back: bool) -> Option<&str> {
+        if !self.goes_back || self.open.is_none() {
+            return None;
+        }
+        let to = if back { &self.left } else { &self.ahead }.as_deref()?;
+        // Back only to one that's still kept as it was left: a curve that comes back afresh is no step back.
+        (!back || self.kept.iter().any(|(kept, ..)| kept == to)).then_some(to)
+    }
+
+    /// The screen is about to pick the curve [`Card::back_to`] gave: opened next, it's a step back (or forward
+    /// again), not a curve picked anew.
+    pub fn go(&mut self, back: bool) {
+        self.going = self.back_to(back).map(|to| (to.to_owned(), back));
+    }
+
+    /// Whether the curve on the card has a step of its own to undo (`back`) or redo.
+    fn can_step_here(&self, back: bool) -> bool {
+        self.open.as_ref().is_some_and(|(_, e)| if back { e.can_undo() } else { e.can_redo() })
     }
 
     /// Takes the curve off the card; whether there was one.
@@ -653,6 +719,24 @@ impl Card {
             return false;
         }
         self.put_away();
+        // Where Undo and Redo go once this curve has no step of its own. Picked anew: back to the curve with edits
+        // that was left for it (one left without any keeps the way back to the one before it). Come to by Undo or
+        // Redo: the other way leads to where it came from.
+        let from = self.gone_from.take();
+        let was_kept = |id: &String| self.kept.iter().any(|(kept, ..)| kept == id);
+        match self.going.take().filter(|(to, _)| to == id) {
+            Some((_, true)) => (self.left, self.ahead) = (None, from),
+            Some((_, false)) => (self.left, self.ahead) = (from.filter(was_kept), None),
+            None => {
+                if let Some(from) = from.filter(was_kept) {
+                    self.left = Some(from);
+                }
+                self.ahead = None;
+            }
+        }
+        if self.left.as_deref() == Some(id) {
+            self.left = None;
+        }
         let origin = Shape::from_curve(points, length_beats);
         let kept = self.kept.iter().position(|(k, from, ..)| k == id && *from == origin).map(|at| self.kept.remove(at));
         // (One that has changed where it came from starts afresh: its old edits were made on another shape.)
@@ -1204,6 +1288,10 @@ impl Card {
                 (None, None) => false,
             },
             curve_act::CUT_TIME => editor.edit(&Edit::RemoveTime),
+            curve_act::NUDGE_LEFT | curve_act::NUDGE_RIGHT => {
+                let by = s.grid.beats().unwrap_or(curve_edit::SLIGHTLY);
+                editor.edit(&Edit::Nudge { by: if id == curve_act::NUDGE_LEFT { -by } else { by } })
+            }
             curve_act::HIGHLIGHT_ALL => {
                 let whole = editor.shape().whole();
                 let was = editor.highlight();
@@ -1369,7 +1457,7 @@ impl Card {
 
     /// Whether there's a step to undo (`back`) or to redo.
     pub fn can_step(&self, back: bool) -> bool {
-        self.open.as_ref().is_some_and(|(_, e)| if back { e.can_undo() } else { e.can_redo() })
+        self.can_step_here(back)
     }
 
     /// Undo (`back`) or Redo; whether a step was taken. What was in hand is let go of either way.
@@ -1659,8 +1747,8 @@ impl Card {
                 can_pin: t.clip.is_some() && t.right - t.left >= curve_strip::PIN_FROM,
             })
             .collect();
-        let can_undo = editor.can_undo();
-        let can_redo = editor.can_redo();
+        let can_undo = editor.can_undo() || s.way(true).is_some();
+        let can_redo = editor.can_redo() || s.way(false).is_some();
         let changed = differs(editor, s.origin.as_ref());
         let new_tiles = (s.tiles.as_ref() != Some(&shown)).then(|| shown.clone());
         s.tiles = Some(shown);
@@ -2181,6 +2269,55 @@ mod tests {
         assert_eq!(card.edited().expect("still moved"), moved);
         assert!(card.step_back(true));
         assert!(card.edited().is_none(), "the move was one step");
+    }
+
+    #[test]
+    fn undo_goes_back_to_the_curve_that_was_left_and_redo_forward_again() {
+        let mut card = card();
+        card.set_goes_back(true);
+        let none = Keys::default();
+        // An edit to the first curve, then another curve picked (by accident).
+        press_drag(&mut card, (0.0, 0.0), (0.0, 0.5), none);
+        let (x, y) = at(&card, 0.0, 0.5);
+        card.mouse(mouse::LET_GO, x, y, none);
+        let edited = card.edited().expect("edited");
+        assert_eq!(card.back_to(true), None, "its own step comes first");
+        let other = [CurvePoint { x: 0.0, y: 1.0, bend: 0.0 }, CurvePoint { x: 1.0, y: 0.0, bend: 0.0 }];
+        assert!(card.open("b", "Fall", &other, 4.0));
+        // Nothing of its own to undo: Undo leads back, and the button is lit.
+        assert!(!card.can_step(true));
+        assert!(card.showing(false).can_undo);
+        assert_eq!(card.back_to(true), Some("a"));
+        card.go(true);
+        assert!(card.open("a", "Rise", &rise(), 4.0));
+        assert_eq!(card.edited().as_ref(), Some(&edited), "as it was left, edits and all");
+        assert!(card.can_step(true), "and its own steps are there to undo");
+        // Redo, once this curve has nothing to redo, goes forward to the other again; Undo there comes back.
+        assert_eq!(card.back_to(false), Some("b"));
+        card.go(false);
+        assert!(card.open("b", "Fall", &other, 4.0));
+        assert_eq!((card.back_to(true), card.back_to(false)), (Some("a"), None));
+        // A curve left with no edits is no step back; the way to the one before it stays.
+        assert!(card.open("c", "Third", &other, 2.0));
+        assert_eq!(card.back_to(true), Some("a"));
+        // A screen that doesn't go back (the plugin's) is never told to.
+        card.set_goes_back(false);
+        assert_eq!(card.back_to(true), None);
+        assert!(!card.showing(false).can_undo);
+    }
+
+    #[test]
+    fn nudge_goes_by_the_grid_or_a_little_with_the_grid_off() {
+        let mut card = card();
+        assert!(card.act(curve_act::NUDGE_RIGHT));
+        let (points, _) = card.edited().expect("moved");
+        let step = card.grid().beats().expect("the grid is on");
+        assert!(points.iter().any(|p| (p.x * 4.0 - step).abs() < 1e-9), "the start is a grid square later");
+        assert!(card.act(curve_act::NUDGE_LEFT));
+        assert_eq!(card.edited(), None, "and back where it was");
+        assert!(
+            card.part_offers().iter().any(|o| o.id == curve_act::NUDGE_LEFT && o.enabled && o.text.contains("grid"))
+        );
     }
 
     #[test]
