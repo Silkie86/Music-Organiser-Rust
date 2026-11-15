@@ -306,6 +306,7 @@ fn scenes(
             depth: l.depth,
             muted: l.muted,
             disabled: l.disabled,
+            layer: l.layer,
             clips: Vec::new(),
         })
         .collect();

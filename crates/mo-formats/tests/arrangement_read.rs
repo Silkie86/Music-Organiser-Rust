@@ -1141,7 +1141,7 @@ fn studio_one_stretch_layers_audio_parts_automation_and_channels() {
 fn studio_one_layers_show_under_a_track_that_keeps_its_own_events() {
     let song = r#"<Song xmlns:x="x">
   <List x:id="Tracks">
-    <MediaTrack name="Keys" mediaType="Music" timeFormat="2" color="FF102030" layerCount="3">
+    <MediaTrack name="Keys" mediaType="Music" timeFormat="2" color="FF102030" layerCount="3" activeLayer="0">
       <List x:id="Events"><MusicPart name="Keeper" start="0" length="4"/></List>
       <List x:id="Layers">
         <Attributes id="0"><List x:id="Events"><MusicPart name="Keeper again" start="0" length="4"/></List></Attributes>
@@ -1149,7 +1149,13 @@ fn studio_one_layers_show_under_a_track_that_keeps_its_own_events() {
         <Attributes id="2" layerName="Loose"><List x:id="Events"><MusicPart name="Second try" start="2" length="2"/></List></Attributes>
       </List>
     </MediaTrack>
-    <MediaTrack name="After" mediaType="Music" timeFormat="2"/>
+    <MediaTrack name="After" mediaType="Music" timeFormat="2">
+      <List x:id="Events"><MusicPart name="Mine" start="0" length="4"/></List>
+      <List x:id="Layers">
+        <Attributes id="0"><List x:id="Events"><MusicPart name="Another" start="0" length="4"/></List></Attributes>
+        <Attributes id="1"><List x:id="Events"><AudioPartEvent name="Lost" start="0" length="4" clipID="{NOWHERE}"/></List></Attributes>
+      </List>
+    </MediaTrack>
   </List>
 </Song>"#;
     let a = read("Song.song", &stored_zip(&[("Song/song.xml", song.as_bytes())]));
@@ -1165,10 +1171,31 @@ fn studio_one_layers_show_under_a_track_that_keeps_its_own_events() {
             // The layer that plays (0 when the track doesn't say) is the track, not a lane of its own.
             ("Layer 2", 1, true, vec!["First try"]),
             ("Loose", 1, true, vec!["Second try"]),
-            ("After", 0, false, vec![]),
+            // A track with its own events that doesn't name a playing layer shows every layer, but not one none of
+            // whose events could be read.
+            ("After", 0, false, vec!["Mine"]),
+            ("Layer 1", 1, true, vec!["Another"]),
         ]
     );
     assert!(a.lanes[1..3].iter().all(|l| l.kind == LaneKind::Instrument && l.colour == Some(0x10_2030)));
+    assert_eq!(a.lanes.iter().map(|l| l.layer).collect::<Vec<_>>(), [false, true, true, false, true]);
+    assert!(a.notes.is_empty(), "{:?}", a.notes);
+
+    // More layers on a track than the preview shows: the first 64, and a note.
+    let layers: String = (1..=70)
+        .map(|i| {
+            format!(r#"<Attributes id="{i}"><List x:id="Events"><MusicPart start="0" length="1"/></List></Attributes>"#)
+        })
+        .collect();
+    let song = format!(
+        r#"<Song xmlns:x="x"><List x:id="Tracks"><MediaTrack name="Comp" mediaType="Music" timeFormat="2">
+        <List x:id="Layers">{layers}</List></MediaTrack></List></Song>"#
+    );
+    let a = read("Song.song", &stored_zip(&[("Song/song.xml", song.as_bytes())]));
+    assert_eq!(a.lanes.iter().filter(|l| l.layer).count(), 64);
+    // Only layers have anything in them, so the timeline itself is still empty.
+    assert_eq!(a.notes.len(), 2, "{:?}", a.notes);
+    assert!(a.notes[1].starts_with("This song's layers that aren't playing hold more"), "{:?}", a.notes);
 }
 
 #[test]

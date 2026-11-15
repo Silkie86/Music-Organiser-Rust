@@ -149,6 +149,9 @@ pub struct PreviewLane {
     pub muted: bool,
     /// Switched off altogether, so it takes no computer power (Studio One's Disable Track): it's `muted` too.
     pub disabled: bool,
+    /// A take that isn't the one playing (one of a Studio One track's other layers), shown under its track: it's
+    /// `muted` too, and isn't one of the song's tracks when they're counted.
+    pub layer: bool,
     pub clips: Vec<PreviewClip>,
 }
 
@@ -162,6 +165,7 @@ impl PreviewLane {
             depth: 0,
             muted: false,
             disabled: false,
+            layer: false,
             clips: Vec::new(),
         }
     }
@@ -318,7 +322,12 @@ pub(crate) struct NoteBudget {
 
 impl NoteBudget {
     pub fn new() -> NoteBudget {
-        NoteBudget { left: MOST_NOTES, ran_out: false }
+        NoteBudget::of(MOST_NOTES)
+    }
+
+    /// A budget of its own size, for what is shown beside the song and mustn't use up the song's own.
+    pub fn of(left: usize) -> NoteBudget {
+        NoteBudget { left, ran_out: false }
     }
 
     /// Takes one note from the budget: false when there are none left.

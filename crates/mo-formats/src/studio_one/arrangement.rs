@@ -51,6 +51,9 @@ const TOO_MANY_POINTS: &str =
 const MOST_PART_EVENTS: usize = 2_000_000;
 /// The most other layers (takes) shown under one track: a track made by hand has a handful.
 const MOST_LAYERS: usize = 64;
+/// Said when a song's layers that don't play pass their limits (64 a track, a million notes, 500,000 part events).
+const TOO_MUCH_IN_LAYERS: &str =
+    "This song's layers that aren't playing hold more than the preview does, so some are left out or drawn in part.";
 /// Said when a song reaches [`MOST_PART_EVENTS`].
 const TOO_MANY_PART_EVENTS: &str =
     "This song's audio parts hold more events than the preview looks at (2 million), so the last parts are left out.";
@@ -334,6 +337,10 @@ impl Song<'_> {
         // Each curve file's points, read once however many regions name it.
         let mut curves: HashMap<String, Vec<PreviewPoint>> = HashMap::new();
         let mut too_many_part_events = false;
+        // The same limits for the layers that don't play, a quarter the size.
+        let mut layer_budget = NoteBudget::of(crate::arrangement::MOST_NOTES / 4);
+        let mut layer_part_events_left = MOST_PART_EVENTS / 4;
+        let (mut layer_too_much, mut too_many_layers) = (false, false);
         // The tempo's own curve, when it changes: first, as Studio One's tempo track is.
         let tempo_points: Vec<PreviewPoint> = elements(song)
             .find(|e| e.tag_name().name() == "TempoMap")
@@ -373,33 +380,42 @@ impl Song<'_> {
             let stretch = stretch_of(track);
             // A track with layers (takes) keeps every layer's events under Layers, and plays the active one. Its own
             // Events list is missing, or there and empty.
+            let active = attr(track, "activeLayer");
             let mut event_lists: Vec<Node<'_, '_>> = lists("Events").collect();
-            if !event_lists.iter().any(|l| l.children().any(|c| c.is_element())) {
-                let active = match attr(track, "activeLayer") {
-                    "" => "0",
-                    layer => layer,
-                };
-                event_lists = lists("Layers")
-                    .flat_map(|l| l.children().filter(|a| a.is_element() && id(*a) == active))
-                    .flat_map(|a| a.children().filter(|l| l.is_element() && id(*l) == "Events"))
-                    .collect();
+            let own_events = event_lists.iter().any(|l| l.children().any(|c| c.is_element()));
+            // The layer that is the track itself: the active one (0 when the track doesn't say). A track with events
+            // of its own (no save of Solomon's has one) only leaves a layer out when it names it.
+            let playing = match (active, own_events) {
+                ("", false) => Some("0"),
+                ("", true) => None,
+                (layer, _) => Some(layer),
+            };
+            let (mut playing_layers, mut other_layers) = (Vec::new(), Vec::new());
+            for layer in lists("Layers").flat_map(|l| l.children().filter(Node::is_element)) {
+                let events: Vec<_> = layer.children().filter(|l| l.is_element() && id(*l) == "Events").collect();
+                if playing == Some(id(layer)) {
+                    playing_layers.extend(events);
+                } else if events.iter().any(|l| l.children().any(|c| c.is_element())) {
+                    other_layers.push((layer, events));
+                }
+            }
+            if !own_events {
+                event_lists = playing_layers;
             }
             // The track's other layers (its takes): what Studio One shows under the track when its layers are
-            // opened. They don't play, so each is a muted lane under the track. The one that plays is left out
-            // here, also when the track has an Events list of its own.
-            let playing = match attr(track, "activeLayer") {
-                "" => "0",
-                layer => layer,
-            };
-            let other_layers = lists("Layers")
-                .flat_map(|l| l.children().filter(|a| a.is_element() && id(*a) != playing))
-                .map(|a| (a, a.children().filter(|l| l.is_element() && id(*l) == "Events").collect::<Vec<_>>()))
-                .filter(|(_, events)| events.iter().any(|l| l.children().any(|c| c.is_element())))
-                .take(MOST_LAYERS);
+            // opened. They don't play, so each is a muted lane under the track.
+            too_many_layers |= other_layers.len() > MOST_LAYERS;
+            other_layers.truncate(MOST_LAYERS);
             // What plays first, then each other layer, read the same way.
-            let mut read: Vec<(Option<Node<'_, '_>>, Vec<PreviewClip>)> = Vec::new();
-            let sets = std::iter::once((None, event_lists)).chain(other_layers.map(|(a, events)| (Some(a), events)));
+            let mut lane_clips: Vec<(Option<Node<'_, '_>>, Vec<PreviewClip>)> = Vec::new();
+            let sets = std::iter::once((None, event_lists)).chain(other_layers.into_iter().map(|(a, e)| (Some(a), e)));
             for (layer, event_lists) in sets {
+                // Layers that don't play have limits of their own, so they can't use up what the song's playing
+                // tracks further down need.
+                let (budget, part_events_left, too_many_part_events) = match layer {
+                    None => (&mut budget, &mut part_events_left, &mut too_many_part_events),
+                    Some(_) => (&mut layer_budget, &mut layer_part_events_left, &mut layer_too_much),
+                };
                 let mut clips = Vec::new();
                 for ev in event_lists.into_iter().flat_map(|l| l.children().filter(Node::is_element)) {
                     let name = attr(ev, "name");
@@ -443,10 +459,10 @@ impl Song<'_> {
                             // shows them from `offset` on for its length.
                             let Some(inside) = pool.parts.get(&clip_id.to_lowercase()) else { continue };
                             let Some(left) = part_events_left.checked_sub(inside.events.len()) else {
-                                too_many_part_events = true;
+                                *too_many_part_events = true;
                                 continue;
                             };
-                            part_events_left = left;
+                            *part_events_left = left;
                             // Where the part's own time starts: `offset` before the part does.
                             let origin = start - offset;
                             let inner: Vec<_> = inside
@@ -568,10 +584,10 @@ impl Song<'_> {
                     }
                 }
                 clips.sort_by(|a, b| a.start.total_cmp(&b.start));
-                read.push((layer, clips));
+                lane_clips.push((layer, clips));
             }
-            let mut read = read.into_iter();
-            let clips = read.next().map(|(_, clips)| clips).unwrap_or_default();
+            let mut lane_clips = lane_clips.into_iter();
+            let clips = lane_clips.next().map(|(_, clips)| clips).unwrap_or_default();
             let name = match attr(track, "name") {
                 "" if kind == LaneKind::Audio => "Audio",
                 "" if kind == LaneKind::Automation => "Automation",
@@ -641,8 +657,9 @@ impl Song<'_> {
                 }
             }
             // Its other layers, under its curves.
-            for (layer, clips) in read {
-                let Some(layer) = layer else { continue };
+            for (layer, clips) in lane_clips {
+                // A layer none of whose events could be read has no lane.
+                let Some(layer) = layer.filter(|_| !clips.is_empty()) else { continue };
                 // Studio One counts its layers from 1 where the song counts from 0.
                 let layer_name = match (attr(layer, "layerName"), id(layer).parse::<u32>()) {
                     ("", Ok(number)) => format!("Layer {}", number.saturating_add(1)),
@@ -654,6 +671,7 @@ impl Song<'_> {
                 lane.colour = colour(attr(layer, "color")).or(colour(attr(track, "color")));
                 lane.depth = depth + 1;
                 lane.muted = true;
+                lane.layer = true;
                 lane.clips = clips;
                 lanes.push(lane);
             }
@@ -676,7 +694,7 @@ impl Song<'_> {
         markers.sort_by(|a, b| a.beat.total_cmp(&b.beat));
 
         let mut notes = Vec::new();
-        if lanes.iter().filter(|l| l.kind != LaneKind::Automation).all(|l| l.clips.is_empty()) {
+        if lanes.iter().filter(|l| l.kind != LaneKind::Automation && !l.layer).all(|l| l.clips.is_empty()) {
             notes.push("Nothing is on this song's timeline yet.".to_owned());
         }
         if budget.ran_out {
@@ -687,6 +705,9 @@ impl Song<'_> {
         }
         if too_many_part_events {
             notes.push(TOO_MANY_PART_EVENTS.to_owned());
+        }
+        if layer_budget.ran_out || layer_too_much || too_many_layers {
+            notes.push(TOO_MUCH_IN_LAYERS.to_owned());
         }
         Arrangement { view: VIEW, tempo, signature, lanes, markers, notes }
     }
