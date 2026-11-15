@@ -24,7 +24,7 @@
 use crate::serum::{Shape, closed_with};
 
 /// Goes up by one whenever what's read from the same files changes (rule 7).
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The biggest file read: a preset is a few KB (the biggest seen is 28 KB).
 const MOST_BYTES: usize = 4 << 20;
@@ -200,9 +200,9 @@ fn line(a: &Node, to: (f64, f64), picture: Option<&[f32]>) -> Line {
     }
 }
 
-/// The app's bend for a line whose middle is `middle` of the way up (it draws a bend `b` through `0.5 - b / 4`).
+/// The app's bend for a line whose middle is `middle` of the way up: the one whose curve is as high half way across.
 fn from_middle(middle: f64) -> f64 {
-    if middle.is_finite() { ((0.5 - middle) * 4.0).clamp(-1.0, 1.0) } else { 0.0 }
+    crate::bitwig::curve::bend_through(middle)
 }
 
 /// The app's bend for a bent line's `curve`: through the same middle, `a / (1 + a)`.
@@ -304,18 +304,17 @@ mod tests {
         let rise = r#"<MultipointEnvelopeData><node x="0.0" value="0.0" curve="0.6446" shape="0"/>
             <node x="0.5" value="1.0" curve="0.5" shape="0"/></MultipointEnvelopeData>"#;
         let s = read("3.DMLFO", rise.as_bytes()).remove(0);
-        assert_eq!(values(&s), [(0.0, 0.0, -1.0), (0.5, 1.0, 0.0), (1.0, 0.0, 0.0)]);
+        assert_eq!(values(&s), [(0.0, 0.0, -0.614), (0.5, 1.0, 0.0), (1.0, 0.0, 0.0)]);
     }
 
     #[test]
     fn a_bent_lines_curve_becomes_the_apps_bend_through_the_same_middle() {
         assert_eq!(bend(0.5), 0.0);
-        // Default.preset's duck, curve 0.2962: its picture is 0.14 up half way, later than the app's fullest bend
-        // (0.25 up half way), so it's that.
-        assert_eq!(bend(0.2962), 1.0);
+        // Default.preset's duck, curve 0.2962: its picture is 0.14 up half way (the app's fullest bend is 0.09 up).
+        assert!((bend(0.2962) - 0.843).abs() < 0.01, "{}", bend(0.2962));
         // Keep The Transient, curve 0.4215: 0.34 up half way in its picture (late); Boing's 0.5325, 0.57 (early).
-        assert!((0.55..0.75).contains(&bend(0.4215)), "{}", bend(0.4215));
-        assert!((-0.35..-0.2).contains(&bend(0.5325)), "{}", bend(0.5325));
+        assert!((bend(0.4215) - 0.337).abs() < 0.01, "{}", bend(0.4215));
+        assert!((bend(0.5325) + 0.140).abs() < 0.01, "{}", bend(0.5325));
         assert_eq!((bend(0.0), bend(1.0)), (1.0, -1.0));
     }
 

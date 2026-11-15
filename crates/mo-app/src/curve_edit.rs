@@ -20,8 +20,11 @@ use crate::curve_groups::bent;
 
 /// Two beats this close are the same beat.
 const EPS: f64 = 1e-9;
-/// The longest curve the editor makes, in beats.
+/// The longest curve the editor makes, in beats. (One found longer in a song opens at its own length, and isn't
+/// made longer still.)
 pub const MAX_BEATS: f64 = 256.0;
+/// The longest curve there is, in beats: past this a length is a damaged number.
+const LONGEST: f64 = 100_000.0;
 /// The shortest highlight, clip or curve, in beats (a 1/256 note).
 pub const SHORTEST: f64 = 1.0 / 64.0;
 /// How many steps back Undo goes.
@@ -121,14 +124,15 @@ pub struct Shape {
 impl Shape {
     /// A curve of `points` over `length` beats, tidied: in order, inside the curve, values 0 to 1.
     pub fn new(points: Vec<Point>, length: f64) -> Shape {
-        let length = if length.is_finite() { length.clamp(SHORTEST, MAX_BEATS) } else { 4.0 };
+        let length = if length.is_finite() { length.clamp(SHORTEST, LONGEST) } else { 4.0 };
         Shape { points: tidy(points, length), length, clips: Vec::new() }
     }
 
     /// A curve from the list, to edit: its points (0 to 1 across) over its length.
     pub fn from_curve(points: &[CurvePoint], length_beats: f64) -> Shape {
         let length = if length_beats.is_finite() && length_beats > 0.0 { length_beats } else { 4.0 };
-        let length = length.clamp(SHORTEST, MAX_BEATS);
+        // Its own length, however long: squeezed into the editor's longest it would play too fast, and be saved so.
+        let length = length.clamp(SHORTEST, LONGEST);
         Shape::new(points.iter().map(|p| Point::new(p.x * length, p.y, p.bend)).collect(), length)
     }
 
@@ -149,6 +153,18 @@ impl Shape {
     /// The clips, in time order; none overlaps another.
     pub fn clips(&self) -> &[Clip] {
         &self.clips
+    }
+
+    /// This curve with another's clips (those that fit in its length).
+    pub fn with_clips_of(mut self, other: &Shape) -> Shape {
+        let length = self.length;
+        self.clips = other
+            .clips
+            .iter()
+            .map(|c| Clip { span: c.span.within(length), ..c.clone() })
+            .filter(|c| !c.span.is_empty())
+            .collect();
+        self
     }
 
     /// The curve's points from its very start to its very end: where its first point comes later or its last one
@@ -860,7 +876,7 @@ fn edited(shape: &Shape, highlight: Option<Span>, edit: &Edit) -> Option<(Shape,
             if !beats.is_finite() {
                 return None;
             }
-            let new = beats.clamp(SHORTEST, MAX_BEATS);
+            let new = beats.clamp(SHORTEST, MAX_BEATS.max(shape.length));
             let points =
                 if new < length { cut(&shape.points, Span { start: 0.0, end: new }) } else { shape.points.clone() };
             let clips = shape
@@ -1663,6 +1679,13 @@ mod tests {
         let values: Vec<f64> = s.points().iter().map(|p| p.value).collect();
         assert_eq!(values, [0.0, 0.1, 0.3, 1.0]);
         assert_eq!(Shape::new(Vec::new(), 4.0).points().len(), 1);
+        // A curve found longer than the editor makes them opens at its own length, not squeezed.
+        let long = [CurvePoint { x: 0.0, y: 0.0, bend: 0.0 }, CurvePoint { x: 1.0, y: 1.0, bend: 0.0 }];
+        let s = Shape::from_curve(&long, 512.0);
+        assert!(near(s.length(), 512.0) && near(s.points()[1].beat, 512.0));
+        // It isn't made longer still, and it can be made shorter.
+        assert!(apply(&s, None, &Edit::SetLength(9999.0)).is_none_or(|(after, _)| near(after.length(), 512.0)));
+        assert!(near(apply(&s, None, &Edit::SetLength(128.0)).expect("cut").0.length(), 128.0));
     }
 
     #[test]

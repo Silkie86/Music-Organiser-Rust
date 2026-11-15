@@ -141,6 +141,28 @@ pub mod pointer {
     pub const PAINT: i32 = 8;
 }
 
+/// What "Swing as the song" did ([`Card::swing_as_song`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SongSwing {
+    /// The curve has the song's swing now.
+    Done,
+    /// It had it already.
+    Already,
+    /// That swing changes nothing here (a flat curve, a part too short), or no curve is open.
+    Nothing,
+}
+
+/// The swing "Swing as the song" last gave: to which curve, the curve and its highlight before it, the curve as it
+/// left it, and the swing.
+#[derive(Clone, Debug)]
+struct Swung {
+    curve: String,
+    before: (Shape, Option<Span>),
+    left: Shape,
+    step: f64,
+    amount: f64,
+}
+
 /// Everything that lies over the picture as the mouse and the edits have it now. What is costly to put on a screen
 /// (the lists, the faint old curve) is only given when it has changed since the last time it was asked for.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -364,6 +386,8 @@ pub struct Card {
     /// When a stroke of paint was last let go: a quick press with the make key after it paints on, even right on
     /// that stroke's own corners, and the double-click the screen makes of the two does nothing.
     painted: Option<Instant>,
+    /// The swing "Swing as the song" last gave.
+    swung: Option<Swung>,
     /// The curve's name, for the strip's one tile when it has no clips.
     name: String,
     /// Where the mouse is on the clip strip, from the picture's left (none when it isn't there).
@@ -420,6 +444,7 @@ impl Default for Card {
             band: None,
             clicked: None,
             painted: None,
+            swung: None,
             name: String::new(),
             on_strip: None,
             tiles: None,
@@ -1250,6 +1275,50 @@ impl Card {
         editor.edit(&Edit::Swing { step, amount })
     }
 
+    /// "Swing as the song" (the plugin's button): the song's swing, as [`Card::swing_by`] gives it. While the
+    /// curve's points are still as this button's last swing left them, the new swing takes that swing's place: it's
+    /// given to the curve as it was before the old one (in the same part), never on top of it, and clips kept since
+    /// stay. One step of undo. Draw the picture again whatever it says.
+    pub fn swing_as_song(&mut self, step: f64, amount: f64) -> SongSwing {
+        let s = self;
+        let was = s.grab;
+        s.hands_off();
+        s.mouse = None;
+        let Some((id, editor)) = s.open.as_mut() else { return SongSwing::Nothing };
+        given_up(editor, was, &mut s.lit_whole);
+        let edit = Edit::Swing { step, amount };
+        let ours = s.swung.take().filter(|w| {
+            w.curve == *id
+                && w.left.points() == editor.shape().points()
+                && (w.left.length() - editor.shape().length()).abs() < 1e-9
+        });
+        if let Some(w) = ours {
+            if (w.step - step).abs() < 1e-9 && (w.amount - amount).abs() < 1e-9 {
+                s.swung = Some(w);
+                return SongSwing::Already;
+            }
+            let (before, lit) = &w.before;
+            let Some((swung, _)) = curve_edit::apply(before, *lit, &edit) else {
+                s.swung = Some(w);
+                return SongSwing::Nothing;
+            };
+            let swung = swung.with_clips_of(editor.shape());
+            let highlight = editor.highlight();
+            if !editor.put(swung, highlight) {
+                s.swung = Some(w);
+                return SongSwing::Already;
+            }
+            s.swung = Some(Swung { left: editor.shape().clone(), step, amount, ..w });
+            return SongSwing::Done;
+        }
+        let before = (editor.shape().clone(), editor.highlight());
+        if !editor.edit(&edit) {
+            return SongSwing::Nothing;
+        }
+        s.swung = Some(Swung { curve: id.clone(), before, left: editor.shape().clone(), step, amount });
+        SongSwing::Done
+    }
+
     /// Esc: a drag in hand is put back as it was before it began; else the picked points are let go; else the
     /// highlight is dropped. Whether it did any of them.
     pub fn escape(&mut self) -> bool {
@@ -1315,11 +1384,13 @@ impl Card {
         self.open.as_ref().filter(|(_, e)| differs(e, self.origin.as_ref())).map(|(id, _)| id.clone())
     }
 
-    /// A curve's edits were saved as a new curve: the curve they were made on is as it was found again, on the card
-    /// or kept for later. Whether it's the one on the card (to be drawn again).
-    pub fn forget(&mut self, id: &str) -> bool {
+    /// A curve's edits were saved as a new curve (`saved`: its points and length as they were saved): the curve
+    /// they were made on is as it was found again, on the card or kept for later. Whether it's the one on the card
+    /// (to be drawn again). Edited further while the save was on its way, it stays as it is, with its undo steps:
+    /// those edits are in neither curve yet.
+    pub fn forget(&mut self, id: &str, saved: &(Vec<CurvePoint>, f64)) -> bool {
         self.kept.retain(|(kept, ..)| kept != id);
-        let open = self.open.as_ref().is_some_and(|(open, _)| open == id);
+        let open = self.open.as_ref().is_some_and(|(open, _)| open == id) && self.edited().as_ref() == Some(saved);
         if open {
             self.hands_off();
             self.lit_whole = false;
@@ -1639,6 +1710,12 @@ impl Card {
         true
     }
 
+    /// The tone was stopped: the play line follows nothing, and no tone is made again.
+    pub fn unfollow(&mut self) {
+        self.tone = None;
+        self.heard = None;
+    }
+
     /// Where the play line is now. `playing` is the key of what the player plays, `position` how far into it in
     /// seconds, `sounding` what the tone playing under a key was made with (its length in beats, how it's heard),
     /// when that's known; `may_make` is asked once, when the tone should be made again, whether one may be (one at
@@ -1821,10 +1898,14 @@ mod tests {
         assert!(card.open("b", "Other", &rise(), 8.0));
         assert!(card.edited().is_none());
         assert!(card.open("a", "Rise", &rise(), 4.0));
-        assert_eq!(card.edited(), Some(flipped));
+        assert_eq!(card.edited(), Some(flipped.clone()));
         assert!(!card.open("a", "Renamed", &rise(), 4.0), "the same curve again only takes its name");
         // Saved as a new curve: the one it was made on is as it was found.
-        assert!(card.forget("a"));
+        // (Not while it has been edited on since the save began: those edits are in neither curve.)
+        assert!(card.act(curve_act::REVERSE));
+        assert!(!card.forget("a", &flipped));
+        assert!(card.step_back(true));
+        assert!(card.forget("a", &flipped));
         assert!(card.edited().is_none() && !card.can_step(true));
         // One that has changed where it came from starts afresh.
         assert!(card.act(curve_act::FLIP));
@@ -2266,6 +2347,46 @@ mod tests {
         press_drag(&mut card, (0.4, 0.9), (0.9, 0.8), ctrl);
         assert!(card.escape());
         assert_eq!(card.picked(), 0);
+    }
+
+    #[test]
+    fn the_songs_swing_takes_its_last_swings_place_and_keeps_clips_made_since() {
+        let p = |x: f64, y: f64| CurvePoint { x: x / 4.0, y, bend: 0.0 };
+        // A gate on the 1/16 grid, a bar long.
+        let gate: Vec<CurvePoint> = (0..16)
+            .flat_map(|i| [p(f64::from(i) * 0.25, f64::from(i % 2)), p(f64::from(i + 1) * 0.25, f64::from(i % 2))])
+            .collect();
+        let open = || {
+            let mut card = Card::default();
+            card.laid_out(400.0, 200.0);
+            assert!(card.open("g", "Gate", &gate, 4.0));
+            card
+        };
+        let mut once = open();
+        assert_eq!(once.swing_as_song(0.25, 0.2), SongSwing::Done);
+        let once = once.edited().expect("swung");
+
+        let mut card = open();
+        assert_eq!(card.swing_as_song(0.25, 0.5), SongSwing::Done);
+        assert_eq!(card.swing_as_song(0.25, 0.5), SongSwing::Already);
+        // A clip kept in between is a step of its own, and it stays.
+        press_drag(&mut card, (1.1, 0.5), (2.1, 0.5), Keys::default());
+        let (x, y) = at(&card, 2.1, 0.5);
+        card.mouse(mouse::LET_GO, x, y, Keys::default());
+        assert!(card.act(curve_act::KEEP_CLIP));
+        assert_eq!(card.open.as_ref().expect("open").1.shape().clips().len(), 1);
+        assert_eq!(card.swing_as_song(0.25, 0.2), SongSwing::Done);
+        assert_eq!(card.edited().expect("swung"), once, "the new swing alone, not on top of the old one");
+        assert_eq!(card.open.as_ref().expect("open").1.shape().clips().len(), 1);
+        // After an edit of the points, the swing is no longer the button's to replace: the next goes on top.
+        assert!(card.escape());
+        press_drag(&mut card, (4.0, 1.0), (4.0, 0.5), Keys::default());
+        let (x, y) = at(&card, 4.0, 0.5);
+        card.mouse(mouse::LET_GO, x, y, Keys::default());
+        let moved = card.edited().expect("moved");
+        assert_eq!(card.swing_as_song(0.25, 0.5), SongSwing::Done);
+        assert!(card.step_back(true));
+        assert_eq!(card.edited().expect("the move stays"), moved);
     }
 
     #[test]

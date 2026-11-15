@@ -436,6 +436,12 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_curve_clear(move || {
+        if let Some(app) = weak.upgrade() {
+            change_curves(&app, mo_app::presets::CurveFilters::clear);
+        }
+    });
+    let weak = app.as_weak();
     data.on_clear_song(move || {
         if let Some(app) = weak.upgrade() {
             change(&app, |f| f.song = None);
@@ -908,7 +914,9 @@ fn show_everything(app: &AppWindow) {
             p.curve_shown.len(),
             p.curves_reading.is_some() || !p.curves_started,
             p.curves_failed.as_deref(),
+            p.curve_filters.any(),
         );
+        data.set_curve_any_filter(p.curve_filters.any());
         data.set_curve_empty_title(title.into());
         data.set_curve_empty_text(text.into());
     });
@@ -1503,12 +1511,9 @@ pub fn toggle_play(app: &AppWindow) -> bool {
     }
 }
 
-/// The player's key for a curve heard on its tone: this, then the curve's id.
-const CURVE_TONE_KEY: &str = "curve-tone:";
-
 /// The player's key for `sent` heard on its tone.
 fn curve_tone_key(sent: &Curve) -> String {
-    format!("{CURVE_TONE_KEY}{}", sent.id)
+    format!("{}{}", crate::curve_editor::TONE_KEY, sent.id)
 }
 
 /// Hears `sent` (the picked curve, at the speed it's shown at) as the volume of a tone, going round; or stops it when
@@ -1516,24 +1521,42 @@ fn curve_tone_key(sent: &Curve) -> String {
 fn hear_curve(app: &AppWindow, sent: Curve) {
     let player = crate::sounds::player();
     let key = curve_tone_key(&sent);
-    if player.playing().as_deref() == Some(key.as_str()) {
-        player.stop();
+    // Playing, or still being made: Hear again stops it.
+    if player.playing().as_deref() == Some(key.as_str()) || crate::curve_editor::tone_starting(&key) {
+        crate::curve_editor::stop_tone(app);
         curve_message(String::new());
         return;
     }
     crate::sounds::stop_for_another(app);
+    crate::midi::stop_for_another(app);
+    // The key that stops it, as the shortcut list has it now.
+    let stops = PAGE.with(|p| {
+        let p = p.borrow();
+        let play = p.shortcuts.key_of("app.play");
+        if play.is_empty() { p.shortcuts.key_of(curve_act::HEAR).to_owned() } else { play.to_owned() }
+    });
     // As the editor has it (its speed and metronome too); the editor makes it again as the curve is edited.
     let (points, length, hear) = crate::curve_editor::to_hear()
         .unwrap_or_else(|| (sent.points.clone(), sent.length_beats, mo_app::curve_hear::Hear::default()));
     crate::curve_editor::follow_tone(app, key.clone(), Some((points.clone(), length, hear)));
+    let asked = crate::curve_editor::tone_asked(&key);
     let started = background::spawn("Curve tone", move || {
         let tone = mo_app::curve_hear::tone(&points, length, hear);
-        crate::curve_editor::sounding(&key, length, hear);
-        crate::sounds::player().play_looped(std::sync::Arc::new(tone), key, 0.0);
-        curve_message(
-            "Playing the curve as a tone's volume, round and round. It follows your edits as it plays; Space stops it."
-                .to_owned(),
-        );
+        // Only if it's still wanted as it starts: a stop, a newer Hear or another sound came while it was made.
+        let played = crate::sounds::player().play_looped_if(std::sync::Arc::new(tone), key.clone(), 0.0, || {
+            if crate::curve_editor::tone_wanted(asked) {
+                crate::curve_editor::sounding(&key, length, hear);
+                Ok(())
+            } else {
+                Err(())
+            }
+        });
+        if played.is_ok() {
+            let stops = if stops.is_empty() { String::new() } else { format!("; {stops} stops it") };
+            curve_message(format!(
+                "Playing the curve as a tone's volume, round and round. It follows your edits as it plays{stops}."
+            ));
+        }
     });
     if let Err(e) = started {
         log::error("Curves", &format!("Couldn't start making the curve's tone: {e}"));
@@ -2727,7 +2750,8 @@ fn save_as_new(from: String, name: String, points: Vec<mo_formats::bitwig::curve
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
     let started = background::spawn("Curve save", move || {
-        match CurvesDb::open(&db).and_then(|db| db.save_made(&name, &points, length, now)) {
+        let saved = CurvesDb::open(&db).and_then(|db| db.save_made(&name, &points, length, now));
+        match saved {
             Ok(c) => {
                 let key = logic::CurveKey::of(&c);
                 on_window(move |app| {
@@ -2739,7 +2763,7 @@ fn save_as_new(from: String, name: String, points: Vec<mo_formats::bitwig::curve
                         format!("Saved as a new curve, \"{}\". Rename gives it your own name.", c.name)
                     };
                     // The curve the edits were made on is as it was found again: the edits live in the new one.
-                    crate::curve_editor::forget(app, &from);
+                    crate::curve_editor::forget(app, &from, &(points, length));
                     PAGE.with(|p| {
                         let mut p = p.borrow_mut();
                         match p.curves.iter().position(|o| o.id == c.id) {

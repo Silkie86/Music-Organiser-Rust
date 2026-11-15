@@ -62,6 +62,61 @@ impl Drop for Made {
 /// Counts the times Hear started a tone: one being made again for an earlier start never takes a later one's place.
 static ASKED: AtomicU64 = AtomicU64::new(0);
 
+/// The player's key for a curve heard on its tone: this, then the curve's id.
+pub const TONE_KEY: &str = "curve-tone:";
+
+/// The tone Hear asked for that is still being made: its key and its count in [`ASKED`]. Hear on it again, or Esc,
+/// calls it off.
+static STARTING: std::sync::Mutex<Option<(String, u64)>> = std::sync::Mutex::new(None);
+
+fn starting() -> std::sync::MutexGuard<'static, Option<(String, u64)>> {
+    STARTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Hear just asked for the tone under `key` ([`follow_tone`] came first): it's being made from here on. Gives the
+/// count to start it with ([`tone_wanted`]).
+pub fn tone_asked(key: &str) -> u64 {
+    let asked = ASKED.load(Ordering::Acquire);
+    *starting() = Some((key.to_owned(), asked));
+    asked
+}
+
+/// Whether the tone under `key` is still being made for Hear.
+pub fn tone_starting(key: &str) -> bool {
+    starting().as_ref().is_some_and(|(k, _)| k == key)
+}
+
+/// Whether the tone asked for at `asked` is still the one wanted, as it's about to start: no stop and no newer
+/// Hear came meanwhile. It isn't being made any longer either way.
+pub fn tone_wanted(asked: u64) -> bool {
+    let mut starting = starting();
+    if starting.as_ref().is_some_and(|(_, a)| *a == asked) {
+        *starting = None;
+    }
+    ASKED.load(Ordering::Acquire) == asked
+}
+
+/// Something else is about to play (a sound, a MIDI loop): a tone still being made doesn't start on top of it.
+pub fn call_off_tone() {
+    ASKED.fetch_add(1, Ordering::AcqRel);
+    *starting() = None;
+}
+
+/// Stops the curve's tone, playing or still being made, whichever page is on show (Esc's first step, the card
+/// closing, Hear again). Whether there was one.
+pub fn stop_tone(app: &AppWindow) -> bool {
+    ASKED.fetch_add(1, Ordering::AcqRel);
+    let made = starting().take().is_some();
+    let player = crate::sounds::player();
+    let playing = player.playing().is_some_and(|key| key.starts_with(TONE_KEY));
+    if playing {
+        player.stop();
+    }
+    card(Card::unfollow);
+    stop_play_line(app);
+    playing || made
+}
+
 /// The tone playing: its key, and the length in beats and the way of hearing it was made with. The play line and
 /// the place carried over go by this (not by what's wanted next), and it changes just as a new tone takes over.
 static SOUNDING: std::sync::Mutex<Option<(String, f64, Hear)>> = std::sync::Mutex::new(None);
@@ -202,7 +257,8 @@ pub fn open(app: &AppWindow, curve: Option<(&Curve, String)>) {
             data.set_picture(Image::default());
             data.set_ruler(ModelRc::default());
             data.set_end_x(-1.0);
-            stop_play_line(app);
+            // Its tone stops with it: with the card gone nothing would show it playing or stop it.
+            stop_tone(app);
         }
         // The page is in the middle of showing its card: it reads `changed` itself and isn't told.
         show_touch_quietly(app);
@@ -346,9 +402,9 @@ pub fn edited_id() -> Option<String> {
 }
 
 /// A curve's edits were saved as a new curve: the curve they were made on is as it was found again, on the card or
-/// kept for later.
-pub fn forget(app: &AppWindow, id: &str) {
-    if card(|c| c.forget(id)) {
+/// kept for later. `saved` is what was saved: edited on since, the curve on the card stays as it is.
+pub fn forget(app: &AppWindow, id: &str, saved: &(Vec<mo_formats::bitwig::curve::CurvePoint>, f64)) {
+    if card(|c| c.forget(id, saved)) {
         redraw(app);
         show_touch(app);
     }
@@ -479,6 +535,8 @@ pub fn follow_tone(app: &AppWindow, key: String, heard: Option<Heard>) {
     }
     if counts {
         ASKED.fetch_add(1, Ordering::AcqRel);
+        // The button says Stop from here on: a press while the tone is still being made calls it off.
+        app.global::<CurveEditorData>().set_playing(true);
     }
     let weak = app.as_weak();
     PLAY.with(|t| {

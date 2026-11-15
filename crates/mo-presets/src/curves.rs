@@ -318,8 +318,18 @@ impl Place<'_> {
     }
 }
 
-fn found(points: Option<Vec<curve::CurvePoint>>, length: f64, source: CurveSource) -> Option<Found> {
+/// The longest curve kept at its own length, in beats (25,000 bars): a longer one is a damaged number.
+const LONGEST: f64 = 100_000.0;
+
+/// A curve found, with its length and where it starts as the library can keep them: a damaged number in a save
+/// (not a number at all, none or less, or absurdly long) gives 4 beats, or a start at 0. SQLite keeps "not a number"
+/// as nothing, which the places table refuses: one such clip stopped every later scan from being kept.
+fn found(points: Option<Vec<curve::CurvePoint>>, length: f64, mut source: CurveSource) -> Option<Found> {
     let points = points?;
+    let length = if length.is_finite() && length > 0.0 && length <= LONGEST { length } else { 4.0 };
+    if !source.at.is_finite() {
+        source.at = 0.0;
+    }
     Some(Found { id: shape_id(&points), points, length, source })
 }
 
@@ -984,6 +994,27 @@ mod tests {
         assert_eq!(short, [p(0.0, 0.2, 0.0), p(0.5, 0.4, 0.5), p(1.0, 0.2, 0.0)]);
         assert_eq!(shape(&[(0.0, 0.5, 0.0), (4.0, 0.5, 0.0)], 4.0), None);
         assert_eq!(shape(&[(0.0, 0.5, 0.0)], 4.0), None);
+    }
+
+    #[test]
+    fn a_damaged_length_or_start_is_kept_as_a_number_the_library_takes() {
+        let source = |at: f64| CurveSource {
+            kind: SourceKind::BitwigClip,
+            path: "a.bwproject".into(),
+            song: "a".into(),
+            name: String::new(),
+            device: String::new(),
+            setting: String::new(),
+            at,
+            modified: 0,
+        };
+        let rise = || shape(&[(0.0, 0.0, 0.0), (4.0, 1.0, 0.0)], 4.0);
+        for bad in [f64::NAN, f64::INFINITY, -1.0, 0.0, 1e15] {
+            let f = found(rise(), bad, source(f64::NAN)).expect("a curve");
+            assert_eq!((f.length, f.source.at), (4.0, 0.0), "{bad}");
+        }
+        let f = found(rise(), 512.0, source(64.0)).expect("a curve");
+        assert_eq!((f.length, f.source.at), (512.0, 64.0));
     }
 
     fn temp_dir(name: &str) -> PathBuf {
