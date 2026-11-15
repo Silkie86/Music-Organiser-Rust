@@ -204,24 +204,23 @@ pub fn open(app: &AppWindow, curve: Option<(&Curve, String)>) {
             data.set_end_x(-1.0);
             stop_play_line(app);
         }
-        // Said here, not by `show_touch`: the page is in the middle of showing its card.
-        data.set_changed(false);
-        show_touch(app);
+        // The page is in the middle of showing its card: it reads `changed` itself and isn't told.
+        show_touch_quietly(app);
         return;
     };
     data.set_name(curve.name.as_str().into());
     if !card(|c| c.open(&curve.id, &curve.name, &curve.points, curve.length_beats)) {
         // Its name may be new (renamed): the strip's tile says it too.
-        show_touch(app);
+        show_touch_quietly(app);
         return;
     }
     data.set_picture(Image::default());
     data.set_ruler(ModelRc::default());
     data.set_end_x(-1.0);
     stop_play_line(app);
-    // Said here, not by `show_touch`: the page is in the middle of showing its card.
-    data.set_changed(false);
-    show_touch(app);
+    // The page is in the middle of showing its card: it reads `changed` itself and isn't told. (A curve left with
+    // edits comes back changed: telling the page here asked it for its list while it held it.)
+    show_touch_quietly(app);
     // Its tone may be playing already (picked again while it goes round): the play line follows it again.
     if crate::sounds::player().playing().as_deref() == Some(tone_key.as_str()) {
         follow_tone(app, tone_key, None);
@@ -358,16 +357,21 @@ pub fn forget(app: &AppWindow, id: &str) {
 /// Shows what lies over the picture as the mouse and the edits have it now: the dots, the lit line, the faint old
 /// curve, the pointer, the hint line and its lamps, the read-out, and whether there's something to undo or save.
 fn show_touch(app: &AppWindow) {
+    let was_changed = app.global::<CurveEditorData>().get_changed();
+    if show_touch_quietly(app) != was_changed {
+        // The card's own buttons follow: some wait for the edits to be saved.
+        crate::presets::curve_edits_changed(app);
+    }
+}
+
+/// [`show_touch`] without telling the page that the curve has edits or has none now. Whether it has.
+fn show_touch_quietly(app: &AppWindow) -> bool {
     let data = app.global::<CurveEditorData>();
-    let was_changed = data.get_changed();
     let now = card(|c| c.showing(cfg!(target_os = "macos")));
     let changed = now.changed;
     mo_app::show_curve_card!(data, now, EditorDot, ClipTile);
     data.set_changed(changed);
-    if changed != was_changed {
-        // The card's own buttons follow: some wait for the edits to be saved.
-        crate::presets::curve_edits_changed(app);
-    }
+    changed
 }
 
 /// The window's theme has new colours: the picture is drawn again in them.

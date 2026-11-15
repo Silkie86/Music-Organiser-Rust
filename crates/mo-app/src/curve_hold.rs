@@ -161,6 +161,8 @@ pub struct Hold {
     pub high: f64,
     pub x: f64,
     pub y: f64,
+    /// How far up or down the drag had got when the free key last changed: from there on it's counted from `y`.
+    pub reached: f64,
 }
 
 /// Takes hold of `part` at `x`, `y`. With nothing highlighted the whole curve is the part held: the caller highlights
@@ -168,7 +170,21 @@ pub struct Hold {
 pub fn hold(shape: &Shape, highlight: Option<Span>, part: Part, x: f64, y: f64) -> Hold {
     let span = highlight.unwrap_or(shape.whole());
     let (low, high) = shape.bounds(span);
-    Hold { part, span, low, high, x, y }
+    Hold { part, span, low, high, x, y, reached: 0.0 }
+}
+
+impl Hold {
+    /// The free key (which makes the top, the bottom and the corners finer) was pressed or let go with the mouse
+    /// at `y`, having been `was_fine` till then: the drag goes on from the height it has got to, and only what
+    /// comes after is finer or coarser.
+    pub fn fine_changed(self, frame: Frame, y: f64, was_fine: bool) -> Hold {
+        if matches!(self.part, Part::Bar | Part::Left | Part::Right) {
+            return self;
+        }
+        let fine = if was_fine { FINE } else { 1.0 };
+        let reached = self.reached + (frame.value_at(y) - frame.value_at(self.y)) * fine;
+        Hold { reached, y, ..self }
+    }
 }
 
 /// The edit a drag of a handle makes with the mouse now at `x`, `y`, and the read-out's words for it. The edit is
@@ -177,7 +193,7 @@ pub fn drag(hold: Hold, length: f64, frame: Frame, grid: Grid, keys: Keys, x: f6
     let Hold { span, low, high, .. } = hold;
     let beats = frame.beat_at(x) - frame.beat_at(hold.x);
     let fine = if keys.shift { FINE } else { 1.0 };
-    let values = (frame.value_at(y) - frame.value_at(hold.y)) * fine;
+    let values = hold.reached + (frame.value_at(y) - frame.value_at(hold.y)) * fine;
     // A level part has no height: it moves as it is, and a fade is counted against the picture's height.
     let level = high - low < 1e-6;
     let tall = if level { 1.0 } else { high - low };
