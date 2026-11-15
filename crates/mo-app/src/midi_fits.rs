@@ -91,9 +91,9 @@ pub struct SongChoice {
 
 impl SongChoice {
     /// The song's own parts in the catalogue, which a search for parts that fit it leaves out. Keep it while the
-    /// catalogue and the choice stay.
-    pub fn own(&self, cat: &Catalogue) -> Own {
-        Own::of(cat, self.saves.iter().map(String::as_str))
+    /// catalogue and the choice stay. The catalogue is gone over on `pool`'s threads.
+    pub fn own(&self, cat: &Catalogue, pool: &rayon::ThreadPool) -> Own {
+        Own::of(cat, self.saves.iter().map(String::as_str), pool)
     }
 
     /// This song among the songs offered `now`, which were made after it was: the one that has the save this one is
@@ -645,9 +645,10 @@ pub fn fitted_text(song: &Song, fitted: &Fitted) -> String {
     }
 }
 
-/// The parts tried for a song: every part the page's filters let through, without the song's `own`.
-pub fn tried<'a>(cat: &'a Catalogue, own: &Own, filters: &'a Filters) -> Tried<'a> {
-    mo_midi::fit::for_song::tried(cat, own, page::passing(cat, filters))
+/// The parts tried for a song: every part the page's filters let through, without the song's `own`. The filters
+/// are put to every part of the catalogue on `pool`'s threads.
+pub fn tried<'a>(cat: &'a Catalogue, own: &Own, filters: &'a Filters, pool: &rayon::ThreadPool) -> Tried<'a> {
+    mo_midi::fit::for_song::tried(cat, own, page::passing(cat, filters), pool)
 }
 
 /// One line of the list: a part that fits.
@@ -1035,8 +1036,9 @@ impl FittedFor {
 /// One search, start to end: the parts of the catalogue that go best with the song asked for. Reads the song when
 /// it isn't the one kept or its save has been written since, the slots and the song's own parts when the catalogue
 /// is another than the one they were made for (the slots also when a reading made some: `asked.slots_made`), then
-/// tries every part the filters let through ([`tried`], [`look`]). `stop` set ends it early. The first look and the
-/// judging run on `pool`; call it off the window's thread.
+/// tries every part the filters let through ([`tried`], [`look`]). `stop` set ends it early. Everything that goes
+/// over the catalogue (the song's own parts, the filters, the first look, the judging) runs on `pool`, the app's
+/// low-priority threads, and nothing on rayon's own (rule 21); call it off the window's thread.
 pub fn search(
     kept: &mut Kept,
     reads: &mut dyn Reads,
@@ -1091,10 +1093,10 @@ pub fn search(
         if stopped() {
             return Answer::Stopped;
         }
-        kept.own = Some((cat, asked.song.saves.clone(), asked.song.own(asked.cat)));
+        kept.own = Some((cat, asked.song.saves.clone(), asked.song.own(asked.cat, pool)));
     }
     let (Some((_, _, book)), Some((_, _, own))) = (&kept.book, &kept.own) else { return Answer::Stopped };
-    let tried = tried(asked.cat, own, asked.filters);
+    let tried = tried(asked.cat, own, asked.filters, pool);
     let looked = look(fitted, &tried, book, &mut |id, hash| reads.notes(id, hash), pool, stop);
     if looked.stopped {
         return Answer::Stopped;
@@ -1223,10 +1225,15 @@ mod tests {
         }
 
         fn look(&self, fitted: &Fitted, tried: &Tried) -> Looked {
-            let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+            let pool = pool();
             let mut notes = |_: i64, hash: &str| self.notes.get(hash).cloned();
             look(fitted, tried, &self.book, &mut notes, &pool, &AtomicBool::new(false))
         }
+    }
+
+    /// A pool of two threads, as the page hands in the app's low-priority one.
+    fn pool() -> rayon::ThreadPool {
+        rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap()
     }
 
     const SAVE: &str = "C:/Songs/Didums/Didums_70.flp";
@@ -1721,7 +1728,7 @@ mod tests {
         let filters = Filters::default();
         let fits = |song: &Song| {
             let over = fitted(song, Some(Wants::Tune)).unwrap();
-            let looked = index.look(&over, &tried(&cat, &choice().own(&cat), &filters));
+            let looked = index.look(&over, &tried(&cat, &choice().own(&cat, &pool()), &filters, &pool()));
             move |hash: &str| *looked.fits.iter().find(|f| f.entry == place(hash)).unwrap()
         };
 
@@ -1851,13 +1858,13 @@ mod tests {
         let cat = Catalogue::new(index.phrases.clone());
         let song = song();
         let over = fitted(&song, None).unwrap();
-        let own = choice().own(&cat);
+        let own = choice().own(&cat, &pool());
         assert_eq!(own.len(), 2);
         let place = |hash: &str| cat.find(hash).unwrap();
 
         // Settings' smallest part hides the scrap, so it isn't tried; nor are the song's own two.
         let filters = Filters { smallest: 3, ..Filters::default() };
-        let all = tried(&cat, &own, &filters);
+        let all = tried(&cat, &own, &filters, &pool());
         assert_eq!(all.len(), 3);
         let looked = index.look(&over, &all);
         assert_eq!((looked.tried, looked.looked, looked.close, looked.stopped), (3, 3, 3, false));
@@ -1875,16 +1882,22 @@ mod tests {
 
         // A kind chip narrows what's tried, as it narrows the page's own list.
         let basslines = Filters { smallest: 3, roles: vec![Role::Bass], ..Filters::default() };
-        let looked = index.look(&over, &tried(&cat, &own, &basslines));
+        let looked = index.look(&over, &tried(&cat, &own, &basslines, &pool()));
         assert_eq!(looked.fits.iter().map(|f| f.entry).collect::<Vec<_>>(), [place("bassline")]);
         assert_eq!(result_text(&looked), "1 part, best fit first");
         // And so do the words searched for.
         let words = Filters { text: "lead 02".into(), ..Filters::default() };
-        let looked = index.look(&over, &tried(&cat, &own, &words));
+        let looked = index.look(&over, &tried(&cat, &own, &words, &pool()));
         assert_eq!(looked.fits.iter().map(|f| f.entry).collect::<Vec<_>>(), [place("clashes")]);
         // And the years picked on the year strip (the made-up files are all of 2025).
         let years = |from, to| Filters { years: Some((from, to)), ..Filters::default() };
-        assert_eq!((tried(&cat, &own, &years(2025, 2025)).len(), tried(&cat, &own, &years(2001, 2024)).len()), (4, 0));
+        assert_eq!(
+            (
+                tried(&cat, &own, &years(2025, 2025), &pool()).len(),
+                tried(&cat, &own, &years(2001, 2024), &pool()).len()
+            ),
+            (4, 0)
+        );
 
         // Chords for the song's lead: the library here has none but the song's own.
         let under = fitted(&song, Some(Wants::Chords)).unwrap();
@@ -1900,8 +1913,8 @@ mod tests {
         let song = song();
         let over = fitted(&song, None).unwrap();
         let filters = Filters::default();
-        let all = tried(&cat, &Own::default(), &filters);
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let all = tried(&cat, &Own::default(), &filters, &pool());
+        let pool = pool();
 
         // An index read before slots were kept has none: nothing can be fitted until it's read again.
         let mut notes = |_: i64, hash: &str| index.notes.get(hash).cloned();
@@ -2064,7 +2077,7 @@ mod tests {
     fn a_search_keeps_the_song_its_own_parts_and_the_slots_until_they_change() {
         let index = library();
         let cat = Arc::new(Catalogue::new(index.phrases.clone()));
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let pool = pool();
         let filters = Filters { smallest: 3, ..Filters::default() };
         let song = choice();
         let go = AtomicBool::new(false);
@@ -2193,7 +2206,7 @@ mod tests {
     fn a_search_says_why_when_theres_nothing_to_fit_and_stops_when_told() {
         let index = library();
         let cat = Arc::new(Catalogue::new(index.phrases.clone()));
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let pool = pool();
         let filters = Filters::default();
         let song = choice();
         let go = AtomicBool::new(false);

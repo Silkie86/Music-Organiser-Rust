@@ -795,7 +795,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         let Some(library) = library else { return };
         let weak = app.as_weak();
         let started = background::spawn("MIDI index for Ctrl+K", move || {
-            let loaded = load(&library);
+            let loaded = guarded_load(&library);
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(app) = weak.upgrade() else { return };
                 // The page showed meanwhile and is waiting for this read: it takes it (and hands Ctrl+K its list).
@@ -1212,7 +1212,7 @@ pub fn shown(app: &AppWindow) {
     }
     let weak = app.as_weak();
     let started = background::spawn("MIDI index", move || {
-        let loaded = load(&library);
+        let loaded = guarded_load(&library);
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
                 show(&app, loaded);
@@ -1244,6 +1244,12 @@ pub fn load(library: &Path) -> Result<Loaded, String> {
     drop(store);
     let cat = background::on_pool(|| Catalogue::new(phrases));
     Ok(Loaded::new(cat, NotesFrom::Store(path)))
+}
+
+/// [`load`] on a thread of the page's own, which always hears back: a bug in the reading (the log has the crash in
+/// full) comes back as an index that couldn't be read, so the page says so rather than waiting for ever.
+fn guarded_load(library: &Path) -> Result<Loaded, String> {
+    background::guarded(|| load(library)).and_then(|loaded| loaded)
 }
 
 /// The index has been read: the page shows it.
@@ -1385,12 +1391,23 @@ pub fn read_midi(app: &AppWindow, retry: bool) {
                 });
             }
         };
-        let ran = read_into_index(&library, retry, &stop, &progress);
+        // Guarded: a bug in the reading (the log has the crash in full) still ends it here, so the page's busy line
+        // goes and "Read again" works. Left to end this thread, the page said "reading" until the app was started
+        // again, and after every start too when it was notes kept in the index that tripped it (the 14 November 2026
+        // review's MI-15; the indexer now passes such notes over as well, and they keep what they had).
+        let ran = background::guarded(|| read_into_index(&library, retry, &stop, &progress)).and_then(|ran| ran);
         match &ran {
             Ok(s) => {
                 let (title, detail) = page::read_done_text(s);
-                log::info("MIDI", &format!("{title}: {detail}"));
-                job.done(&format!("{title}: {detail}"));
+                let line = format!("{title}: {detail}");
+                // Notes that tripped a reader are a bug to hear about: the crash and the [Caught] lines above this one
+                // say where.
+                if s.tripped > 0 {
+                    log::warning("MIDI", &line);
+                } else {
+                    log::info("MIDI", &line);
+                }
+                job.done(&line);
             }
             Err(e) => {
                 log::warning("MIDI", &format!("Reading MIDI failed: {e}"));
@@ -1401,7 +1418,7 @@ pub fn read_midi(app: &AppWindow, retry: bool) {
         let changed = ran.as_ref().map_or(true, |s| s.read > 0 || s.forgotten > 0 || s.rekeyed > 0 || s.shaped > 0);
         // Slots alone change no line of the list, only what "Fits my song" can look at.
         let slots_made = ran.as_ref().is_ok_and(|s| s.slots > 0);
-        let loaded = changed.then(|| load(&library));
+        let loaded = changed.then(|| guarded_load(&library));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
             PAGE.with(|p| p.borrow_mut().reading = None);
