@@ -790,6 +790,7 @@ pub fn page_shown(place: Place) {
 
 /// As the app closes: a change the writer hasn't saved yet is saved now, so the last one isn't lost.
 pub fn finish_up() {
+    crate::beta::finish_up();
     let job = PAGE.with(|p| {
         let p = p.borrow();
         let p = p.as_ref()?;

@@ -49,6 +49,18 @@ pub fn steps() -> Vec<Step> {
     parse(LIST)
 }
 
+/// The lines of `text` that are none of those (a step with its `|` left out, say), which [`steps`] leaves out.
+pub fn bad_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("=="))
+        .filter(|l| {
+            let parts: Vec<&str> = l.splitn(3, '|').map(str::trim).collect();
+            parts.len() < 3 || parts.iter().any(|p| p.is_empty())
+        })
+        .collect()
+}
+
 fn parse(text: &'static str) -> Vec<Step> {
     let mut area = "";
     let mut out = Vec::new();
@@ -82,7 +94,7 @@ impl Mark {
         match self {
             Mark::Works => "Works",
             Mark::Problem => "Problem",
-            Mark::Skipped => "Skip",
+            Mark::Skipped => "Skipped",
         }
     }
 }
@@ -224,7 +236,7 @@ pub struct Line {
     pub expect: &'static str,
     pub mark: Option<Mark>,
     pub note: String,
-    /// "Problem on 0.1.0 (abc), 15 Nov 18:04", or empty.
+    /// "Problem on 0.1.0 (abc), 2026-11-15 18:04", or empty.
     pub said: String,
 }
 
@@ -278,6 +290,8 @@ mod tests {
 
     #[test]
     fn the_list_reads_and_every_name_is_its_own() {
+        assert!(bad_lines(LIST).is_empty(), "not read as steps: {:?}", bad_lines(LIST));
+        assert_eq!(bad_lines("== A\na.1 | One | x\na.2 One | x\n"), ["a.2 One | x"]);
         let steps = steps();
         assert!(steps.len() > 20, "{}", steps.len());
         let mut ids: Vec<_> = steps.iter().map(|s| s.id).collect();

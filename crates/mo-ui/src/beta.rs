@@ -23,6 +23,8 @@ struct Checklist {
     /// Whether marks are written (not for the screenshots, nor when the file was there but couldn't be read: it's
     /// left as it is).
     writable: bool,
+    /// A change not yet saved by the writer, for the last save as the app closes.
+    unsaved: bool,
     /// Notes typed on a step not yet marked, kept until it is (and while the lines are drawn again).
     waiting: HashMap<&'static str, String>,
     to_try: bool,
@@ -34,6 +36,20 @@ struct Checklist {
 thread_local! {
     static LIST: RefCell<Option<Checklist>> = const { RefCell::new(None) };
     static WRITER: RefCell<Option<Newest<(PathBuf, String)>>> = const { RefCell::new(None) };
+}
+
+/// One save at a time: the writer thread and the last save as the app closes ([`finish_up`]) both write through the
+/// same `beta-checklist.json.mo-part`. Holding it, the close sets the `bool` to true, and the writer then skips any
+/// save it hadn't started (an older one than the close's own).
+static SAVING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+/// Counts this run's `[Beta]` lines, so the same mark said again isn't taken for a repeat and only counted.
+static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn beta_log(problem: bool, line: &str) {
+    let n = SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let line = format!("#{n} {line}");
+    if problem { log::warning("Beta", &line) } else { log::info("Beta", &line) }
 }
 
 /// Reads the marks so far and answers the card. `live` is false for the screenshots: nothing is read or written.
@@ -53,22 +69,50 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
     } else {
         (Marks::default(), false, String::new())
     };
-    if live {
-        match Newest::start("Save the beta checklist", |(folder, json): (PathBuf, String)| {
-            if let Err(e) = Marks::save(&folder, &json) {
+    let (mut writable, mut message) = (live && writable, message);
+    if writable {
+        let weak = app.as_weak();
+        match Newest::start("Save the beta checklist", move |(folder, json): (PathBuf, String)| {
+            let saved = {
+                let closed = SAVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if *closed {
+                    return;
+                }
+                Marks::save(&folder, &json)
+            };
+            if let Err(e) = &saved {
                 log::error("Beta", &format!("Couldn't save {}: {e}", beta::FILE));
-                let why = e.to_string();
-                let _ = slint::invoke_from_event_loop(move || {
-                    LIST.with(|l| {
-                        if let Some(l) = l.borrow_mut().as_mut() {
-                            l.message = format!("Your last mark couldn't be kept: {why}");
-                        }
-                    });
-                });
             }
+            let said = saved.err().map(|e| format!("Your last mark couldn't be kept: {e}"));
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                LIST.with(|l| {
+                    if let Some(l) = l.borrow_mut().as_mut() {
+                        match said {
+                            Some(said) => l.message = said,
+                            // A save that worked: an earlier failure is mended, and nothing waits to be kept.
+                            None => {
+                                if l.message.starts_with("Your last mark") {
+                                    l.message.clear();
+                                }
+                                if l.marks.to_json() == json {
+                                    l.unsaved = false;
+                                }
+                            }
+                        }
+                    }
+                });
+                if let Some(app) = weak.upgrade() {
+                    redraw(&app, false);
+                }
+            });
         }) {
             Ok(w) => WRITER.with(|slot| *slot.borrow_mut() = Some(w)),
-            Err(e) => log::error("Beta", &format!("Couldn't start the checklist's writer: {e}")),
+            Err(e) => {
+                log::error("Beta", &format!("Couldn't start the checklist's writer: {e}"));
+                writable = false;
+                message = format!("Your marks can't be kept this run: the app couldn't start saving them ({e}).");
+            }
         }
     }
     let steps = beta::steps();
@@ -84,7 +128,8 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
             steps,
             marks,
             folder: folder.to_owned(),
-            writable: live && writable,
+            writable,
+            unsaved: false,
             waiting: HashMap::new(),
             to_try: false,
             message,
@@ -117,12 +162,9 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
     data.on_beta_show_file(move || {
         let found = LIST.with(|l| l.borrow().as_ref().map(|l| (l.folder.clone(), l.feed.clone())));
         let Some((folder, feed)) = found else { return };
+        // The folder when there's no file yet (looked at off the window's thread).
         let file = folder.join(beta::FILE);
-        if file.exists() {
-            crate::files::reveal(&feed, &file.display().to_string(), &folder.display().to_string());
-        } else {
-            crate::files::open_folder(&feed, &folder.display().to_string());
-        }
+        crate::files::reveal(&feed, &file.display().to_string(), &folder.display().to_string());
     });
 }
 
@@ -135,8 +177,8 @@ fn marked(app: &AppWindow, id: &str, mark: i32, note: &str) {
         let step = l.steps.iter().find(|s| s.id == id)?.clone();
         let had = l.marks.get(step.id).map(|m| m.mark);
         let mark = if had == mark { None } else { mark };
-        let note =
-            if note.trim().is_empty() { l.waiting.get(step.id).cloned().unwrap_or_default() } else { note.into() };
+        // The box shows a waiting note, so what's in it now is the note (an emptied box, no note).
+        let note = note.to_owned();
         let version = mo_app::version::version();
         let current = log::current();
         let moment = Moment {
@@ -150,18 +192,14 @@ fn marked(app: &AppWindow, id: &str, mark: i32, note: &str) {
             log_file: current.and_then(|c| c.path()),
         };
         // The log's line goes first, so a Problem's lines end just before it.
-        let line = beta::log_line(&step, mark, &note);
-        if mark == Some(Mark::Problem) {
-            log::warning("Beta", &line)
-        } else {
-            log::info("Beta", &line)
-        }
+        beta_log(mark == Some(Mark::Problem), &beta::log_line(&step, mark, &note));
         l.marks.set(&step, mark, &note, moment);
-        if mark.is_some() {
+        if mark.is_some() || note.trim().is_empty() {
             l.waiting.remove(step.id);
-        } else if !note.trim().is_empty() {
+        } else {
             l.waiting.insert(step.id, note);
         }
+        l.unsaved |= l.writable;
         l.writable.then(|| (l.folder.clone(), l.marks.to_json()))
     });
     save(job);
@@ -181,7 +219,8 @@ fn noted(app: &AppWindow, id: &str, note: &str) {
         if !l.marks.set_note(step.id, note) {
             return None;
         }
-        log::info("Beta", &format!("{}: note changed: {}", step.id, note.trim()));
+        beta_log(false, &format!("{}: note changed: {}", step.id, note.trim()));
+        l.unsaved |= l.writable;
         l.writable.then(|| (l.folder.clone(), l.marks.to_json()))
     });
     save(job);
@@ -198,9 +237,46 @@ fn save(job: Option<(PathBuf, String)>) {
     }
 }
 
-/// Shows the lines again. With `whole` (or while only the steps to try show, where a mark takes a step away) the list
-/// is made anew; otherwise each line that changed is changed in place, so the card keeps its place and the box you're
-/// typing in keeps the keys.
+/// As the app closes: a mark the writer hasn't saved yet is saved now, so the last one isn't lost.
+pub fn finish_up() {
+    let job = LIST.with(|l| {
+        let l = l.borrow();
+        let l = l.as_ref()?;
+        (l.unsaved && l.writable).then(|| (l.folder.clone(), l.marks.to_json()))
+    });
+    // Waits for a save the writer is part way through, and stops it starting another.
+    let mut closed = SAVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *closed = true;
+    if let Some((folder, json)) = job
+        && let Err(e) = Marks::save(&folder, &json)
+    {
+        log::error("Beta", &format!("Couldn't save {} as the app closed: {e}", beta::FILE));
+    }
+}
+
+/// Whether `new` is `old` with some lines taken out (a mark took a step out of Only to try, and maybe its area's
+/// heading): then the rows to take out, last first.
+fn taken_out(old: &VecModel<BetaLineInfo>, new: &[BetaLineInfo]) -> Option<Vec<usize>> {
+    let same = |a: &BetaLineInfo, b: &BetaLineInfo| a.id == b.id && a.area == b.area;
+    let mut out = Vec::new();
+    let mut j = 0;
+    for i in 0..old.row_count() {
+        let row = old.row_data(i)?;
+        if j < new.len() && same(&row, &new[j]) {
+            j += 1;
+        } else {
+            out.push(i);
+        }
+    }
+    (j == new.len()).then(|| {
+        out.reverse();
+        out
+    })
+}
+
+/// Shows the lines again. With `whole` the list is made anew; otherwise the lines a mark took out of Only to try are
+/// taken out and each line that changed is changed in place, so the card keeps its place, the box you're typing in
+/// keeps the keys, and words typed in other boxes stay.
 fn redraw(app: &AppWindow, whole: bool) {
     LIST.with(|l| {
         let l = l.borrow();
@@ -221,7 +297,13 @@ fn redraw(app: &AppWindow, whole: bool) {
                 said: line.said.into(),
             })
             .collect();
-        if whole || l.to_try || lines.len() != l.model.row_count() {
+        let gone = if whole { None } else { taken_out(&l.model, &lines) };
+        if let Some(gone) = gone {
+            for i in gone {
+                l.model.remove(i);
+            }
+        }
+        if whole || lines.len() != l.model.row_count() {
             l.model.set_vec(lines);
         } else {
             for (i, line) in lines.into_iter().enumerate() {
