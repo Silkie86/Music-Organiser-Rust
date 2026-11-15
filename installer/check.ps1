@@ -1,0 +1,105 @@
+<#
+  Tries a setup .exe the way people will use it, on a CI machine (never on Solomon's PC: it plays with the user's
+  %LOCALAPPDATA%\MusicOrganiser and puts it back as it was):
+
+    1. A new PC, data where it usually goes: the app and its shortcut are in, the Apps list has it, no data note.
+    2. A new PC, data picked elsewhere: the folder starts there (started-here.txt) and the pointer names it.
+    3. A PC with data: it stays where it is, untouched; picking another place only leaves the app the ask to move.
+    4. An update over the top keeps the data and its notes; uninstalling takes the app away and leaves the data.
+
+    installer\check.ps1 -Setup dist\DAWmate-Setup-0.1.0.exe
+
+  Plain ASCII on purpose: Windows PowerShell 5.1 misreads anything else in a file without a BOM.
+#>
+param([Parameter(Mandatory = $true)][string]$Setup)
+$ErrorActionPreference = 'Stop'
+$setupFile = (Resolve-Path -LiteralPath $Setup).Path
+$local = [Environment]::GetFolderPath('LocalApplicationData')
+$first = Join-Path $local 'MusicOrganiser'
+$pointer = Join-Path $local 'MusicOrganiser-folder.txt'
+$asked = Join-Path $local 'MusicOrganiser-move-asked.txt'
+$scratch = Join-Path ([IO.Path]::GetTempPath()) "installer-check-$PID"
+$app = Join-Path $scratch 'app'
+$failed = 0
+
+function Check([bool]$ok, [string]$what) {
+    if ($ok) { Write-Output "ok:   $what" } else { Write-Output "FAIL: $what"; $script:failed++ }
+}
+
+function Run-Setup([string[]]$more) {
+    $log = Join-Path $scratch "setup-$([guid]::NewGuid().ToString('N').Substring(0, 6)).log"
+    $p = Start-Process -FilePath $setupFile -Wait -PassThru `
+        -ArgumentList (@('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$app`"", "/LOG=`"$log`"") + $more)
+    if ($p.ExitCode -ne 0) { Get-Content -LiteralPath $log -ErrorAction SilentlyContinue; throw "setup stopped with $($p.ExitCode)" }
+}
+
+function Uninstall {
+    $unins = Get-ChildItem -LiteralPath $app -Filter 'unins*.exe' | Select-Object -First 1
+    $p = Start-Process -FilePath $unins.FullName -Wait -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+    if ($p.ExitCode -ne 0) { throw "uninstall stopped with $($p.ExitCode)" }
+    # The uninstaller finishes removing itself a moment after it returns.
+    for ($i = 0; $i -lt 30 -and (Test-Path -LiteralPath $app); $i++) { Start-Sleep -Milliseconds 500 }
+}
+
+function Clear-Data {
+    foreach ($f in $pointer, $asked) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $first -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# The machine's own data, put aside and back afterwards.
+$aside = Join-Path ([IO.Path]::GetTempPath()) "installer-check-aside-$PID"
+New-Item -ItemType Directory -Force -Path $scratch, $aside | Out-Null
+foreach ($f in $first, $pointer, $asked) { if (Test-Path -LiteralPath $f) { Move-Item -LiteralPath $f -Destination $aside } }
+try {
+    # 1. A new PC, the usual place.
+    Run-Setup @()
+    Check (Test-Path -LiteralPath (Join-Path $app 'music-organiser.exe')) 'the app is in'
+    $menu = Join-Path ([Environment]::GetFolderPath('Programs')) '*.lnk'
+    Check ($null -ne (Get-ChildItem -Path $menu -ErrorAction SilentlyContinue)) 'a Start menu shortcut'
+    $apps = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+        Where-Object { $_.PSChildName -like '{*}_is1' -and (Get-ItemProperty $_.PSPath).InstallLocation -like "$app*" }
+    Check ($null -ne $apps) 'in the Apps list, for this user only'
+    Check (-not (Test-Path -LiteralPath $pointer)) 'no pointer for the usual place'
+    Check (-not (Test-Path -LiteralPath $first)) 'nothing written to a data folder'
+    Uninstall
+    Check (-not (Test-Path -LiteralPath $app)) 'uninstall takes the app away'
+    Clear-Data
+
+    # 2. A new PC, data picked elsewhere (a drive's root means a folder of the app's own name in it).
+    $picked = Join-Path $scratch 'fast drive'
+    New-Item -ItemType Directory -Force -Path $picked | Out-Null
+    Run-Setup @("/DATADIR=`"$picked`"")
+    $started = Join-Path $picked 'MusicOrganiser'
+    Check (Test-Path -LiteralPath (Join-Path $started 'started-here.txt')) 'the data folder starts where picked'
+    Check ((Test-Path -LiteralPath $pointer) -and ((Get-Content -LiteralPath $pointer -Raw).Trim() -eq $started)) 'the pointer names it'
+    Uninstall
+    Check (Test-Path -LiteralPath (Join-Path $started 'started-here.txt')) 'uninstall leaves the data folder'
+    Clear-Data
+
+    # 3. A PC with data: it stays put, and its files are never touched.
+    New-Item -ItemType Directory -Force -Path $first | Out-Null
+    $settings = Join-Path $first 'rust-settings.json'
+    Set-Content -LiteralPath $settings -Value '{"kept": true}'
+    $before = (Get-FileHash -LiteralPath $settings).Hash
+    Run-Setup @()
+    Check (-not (Test-Path -LiteralPath $asked)) 'no ask to move when the place is kept'
+    Check (-not (Test-Path -LiteralPath $pointer)) 'no pointer when the place is kept'
+    $other = Join-Path $scratch 'I'
+    Run-Setup @("/DATADIR=`"$other`"")
+    Check ((Test-Path -LiteralPath $asked) -and ((Get-Content -LiteralPath $asked -Raw).Trim() -eq (Join-Path $other 'MusicOrganiser'))) 'another place: the app is asked to move it'
+    Check (-not (Test-Path -LiteralPath $pointer)) 'the installer never points at an empty folder'
+    Check (-not (Test-Path -LiteralPath (Join-Path $other 'MusicOrganiser'))) 'the installer copies nothing'
+
+    # 4. An update over the top, then uninstall: the data stays as it was.
+    Run-Setup @()
+    Uninstall
+    Check ((Get-FileHash -LiteralPath $settings).Hash -eq $before) 'the data is untouched throughout'
+    Check (-not (Test-Path -LiteralPath $app)) 'uninstall takes the app away'
+}
+finally {
+    Clear-Data
+    foreach ($f in Get-ChildItem -LiteralPath $aside) { Move-Item -LiteralPath $f.FullName -Destination $local }
+    Remove-Item -LiteralPath $scratch, $aside -Recurse -Force -ErrorAction SilentlyContinue
+}
+if ($failed -gt 0) { throw "$failed installer checks failed" }
+Write-Output 'Every installer check passed'

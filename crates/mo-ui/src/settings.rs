@@ -251,6 +251,26 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             }
         });
     }
+    // The installer was asked to put the data somewhere else while there was data already (mo_app::install_choice):
+    // the app's own checked move does it, once, after start-up loading as above. The ask goes as the move starts, so
+    // it's never acted on twice; a move under way already (or called off) wins and the ask just goes.
+    else if let Some(to) = mo_app::install_choice::move_asked().filter(|_| setup_live) {
+        let weak = app.as_weak();
+        slint::Timer::single_shot(std::time::Duration::from_secs(30), move || {
+            mo_app::install_choice::take_move_ask();
+            if mo_app::data_move::pending().is_some() {
+                log::info(
+                    "Data folder",
+                    &format!("The installer's ask to move to {} is dropped: a move is under way already", to.display()),
+                );
+                return;
+            }
+            if let Some(app) = weak.upgrade() {
+                log::info("Data folder", &format!("The installer asked for the data to go to {}", to.display()));
+                move_data(&app, to);
+            }
+        });
+    }
 
     let data = app.global::<SettingsData>();
     data.set_tabs(ModelRc::new(VecModel::from(

@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 pub const POINTER_FILE: &str = "MusicOrganiser-folder.txt";
 
 /// In a folder the data moved into, from the moment of the switch: says where from and when. A pointer to a folder
-/// without it isn't followed (that folder isn't a finished move: a drive letter given to another disk, a folder made
+/// without it (or the installer's [`crate::install_choice::STARTED_HERE_FILE`]) isn't followed (that folder isn't a finished move: a drive letter given to another disk, a folder made
 /// by hand).
 pub const MOVED_IN_FILE: &str = "moved-in.json";
 
@@ -81,7 +81,8 @@ pub(crate) fn resolve_in(first: &Path) -> Resolved {
     let Some(named) = absolute(Some(PathBuf::from(text.trim()))) else {
         return fallback(Some(format!("{POINTER_FILE} doesn't name a whole folder path. Using {}", first.display())));
     };
-    if named.join(MOVED_IN_FILE).is_file() {
+    // A finished move, or a folder the installer started the data in (crate::install_choice).
+    if named.join(MOVED_IN_FILE).is_file() || named.join(crate::install_choice::STARTED_HERE_FILE).is_file() {
         Resolved { folder: named, problem: None, missing: false }
     } else {
         Resolved {
@@ -168,6 +169,14 @@ mod tests {
         fs::write(moved.join(MOVED_IN_FILE), "{}").unwrap();
         let r = resolve_in(&first);
         assert_eq!((r.folder.as_path(), r.problem), (moved.as_path(), None));
+
+        // A folder the installer started the data in, with no move: its folder too.
+        let started = root.join("picked").join("MusicOrganiser");
+        fs::create_dir_all(&started).unwrap();
+        fs::write(started.join(crate::install_choice::STARTED_HERE_FILE), "").unwrap();
+        fs::write(pointer_file(&first), format!("{}\r\n", started.display())).unwrap();
+        let r = resolve_in(&first);
+        assert_eq!((r.folder.as_path(), r.problem), (started.as_path(), None));
 
         // A relative path is never followed.
         fs::write(pointer_file(&first), "MusicOrganiser").unwrap();

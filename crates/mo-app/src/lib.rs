@@ -39,6 +39,7 @@ pub mod galaxy_picture;
 pub mod galaxy_view;
 pub mod helper;
 pub mod helper_start;
+pub mod install_choice;
 pub mod live;
 pub mod log;
 pub mod midi;
