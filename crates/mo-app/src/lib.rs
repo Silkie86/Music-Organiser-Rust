@@ -8,6 +8,7 @@ pub mod background;
 pub mod backup;
 pub mod backup_gone;
 pub mod backup_older;
+pub mod beta;
 pub mod binned;
 pub mod bitwig_convert;
 pub mod bitwig_favourites;

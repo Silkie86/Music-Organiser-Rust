@@ -196,6 +196,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         apply_helper(true, app.as_weak());
     }
     crate::midi::smallest_part(None, smallest_part(&setup.settings));
+    crate::beta::connect(app, &setup.folder, setup.live, setup.feed.clone());
     PAGE.with(|p| {
         *p.borrow_mut() = Some(Page {
             outputs: page::outputs(&[], setup.settings.get(SOUND_OUTPUT_KEY), cfg!(windows)),
@@ -827,6 +828,7 @@ pub fn page_shown(place: Place) {
 
 /// As the app closes: a change the writer hasn't saved yet is saved now, so the last one isn't lost.
 pub fn finish_up() {
+    crate::beta::finish_up();
     let job = PAGE.with(|p| {
         let p = p.borrow();
         let p = p.as_ref()?;

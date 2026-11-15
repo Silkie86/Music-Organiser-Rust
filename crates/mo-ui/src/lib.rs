@@ -11,6 +11,7 @@ pub use screens::*;
 
 pub mod arrangement;
 pub mod backup;
+pub mod beta;
 mod canvas;
 pub mod cards;
 pub mod curve_editor;
