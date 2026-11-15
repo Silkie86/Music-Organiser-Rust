@@ -35,6 +35,13 @@ export component ListView inherits SlintListView {
     in-out property <int> show-done;
     // Where the list is turned to (its `content-y`). Two-way with the page's own, so a list made again comes back.
     in-out property <length> kept-y;
+    // A place to turn to exactly (a `content-y`) once the list has laid out the lines it was just given, and a count
+    // that goes up each time it's asked: when the window's width changes how many tiles fit in a row, Sounds turns its
+    // tiles so the ones you were looking at stay in sight. The last one turned to is two-way with the page's own, as
+    // `show-done` is, so a list made again doesn't turn to an old one.
+    in property <length> place-y;
+    in property <int> place-ask;
+    in-out property <int> place-done;
 
     // Until the list has laid out the lines it was just given, its height is still the old lines' height: a turn then
     // stopped short, or with fewer lines left none drawn (7 Nov). So a turn waits for them. A list just made has its
@@ -45,6 +52,14 @@ export component ListView inherits SlintListView {
     // top as it's made, and its lines can move it as they come.
     property <bool> back: false;
     property <bool> back-now: !self.back && self.laid-out && self.rows > 0;
+    // Only once it has come back: a list just made comes back to where it was kept instead.
+    property <bool> place-now: self.place-ask != self.place-done && self.laid-out && self.back;
+    changed place-now => {
+        if (self.place-now) {
+            self.place-done = self.place-ask;
+            self.go(-clamp(-self.place-y, 0px, max(0px, self.rows * self.row-height - self.visible-height)));
+        }
+    }
     init => {
         if (self.back-now) {
             self.come-back();

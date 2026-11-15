@@ -4,7 +4,7 @@
 // buttons. The picture's still layers (grid, fill, curve) are one picture drawn off the window's thread
 // (mo_app::curve_picture, mo-ui/src/curve_editor.rs); what moves with the mouse or the sound is laid over it here.
 // Only shared parts from studio.slint.
-import { Theme, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, TempoStepper, FilterName, Tip, CardAction, CardActions, SidePanel, MouseField } from "../studio.slint";
+import { Theme, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, TempoStepper, FilterName, Tip, CardAction, CardActions, SidePanel, MouseField, MenuArrow } from "../studio.slint";
 
 // One of the ruler's marks: where (from the picture's left) and its bar and beat ("1", "1.2"; none when the marks are
 // too close to number each).
@@ -852,7 +852,7 @@ export component CurveEditor inherits SidePanel {
             vertical-alignment: center;
         }
         found := Text {
-            text: CurveEditorData.found + (root.found-opens ? "  ▾" : "");
+            text: CurveEditorData.found;
             color: Theme.text;
             font-size: Type.meta;
             font-weight: 500;
@@ -862,6 +862,20 @@ export component CurveEditor inherits SidePanel {
             found-touch := TouchArea {
                 enabled: root.found-opens;
                 mouse-cursor: root.found-opens ? MouseCursor.pointer : MouseCursor.default;
+                clicked => {
+                    root.found-clicked(found.absolute-position.x, found.absolute-position.y + found.height);
+                }
+            }
+        }
+        // The arrow that says it opens a menu (the app's fonts have no "▾": it showed as an empty box).
+        if root.found-opens: Rectangle {
+            width: 8px;
+            MenuArrow {
+                y: (parent.height - self.height) / 2;
+                stroke: found.color;
+            }
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
                 clicked => {
                     root.found-clicked(found.absolute-position.x, found.absolute-position.y + found.height);
                 }

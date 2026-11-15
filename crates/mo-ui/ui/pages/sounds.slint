@@ -414,8 +414,14 @@ export global SoundsData {
     in property <int> shown;
     in property <[TileRow]> tile-rows;
     in property <[SoundLine]> lines;
-    // How many tiles fit side by side; the page says when that changes.
-    callback columns-changed(int);
+    // How many tiles fit side by side; the page says when that changes, with how far the tiles were turned down, how
+    // tall the room they're in is and a row's height, so it can keep the tiles you were looking at in sight.
+    callback columns-changed(int, length, length, length);
+    // Where the tiles turn to then (list.slint's ListView `place-y`), a count that changes each time, and the last one
+    // they turned to.
+    in property <length> tiles-place-y;
+    in property <int> tiles-place-ask;
+    in-out property <int> tiles-place-done;
     // The place of the picked sound's line or tile row, to bring it into view, and a count that changes each time.
     in property <int> show-row;
     in property <int> show-ask;
@@ -1756,12 +1762,19 @@ export component SoundsPage inherits Rectangle {
                                 show-ask: SoundsData.show-ask;
                                 show-done <=> SoundsData.show-done;
                                 kept-y <=> SoundsData.tiles-y;
-                                changed columns => { SoundsData.columns-changed(self.columns); }
+                                place-y: SoundsData.tiles-place-y;
+                                place-ask: SoundsData.tiles-place-ask;
+                                place-done <=> SoundsData.tiles-place-done;
+                                // Said before the rows are made again for the new count, so where the list was
+                                // turned to is still the old rows'.
+                                changed columns => {
+                                    SoundsData.columns-changed(self.columns, -self.content-y, self.visible-height, self.row-height);
+                                }
                                 // `list-made` first: tiles made again don't turn to the picked sound while their
                                 // count of columns settles (sounds.rs `columns_before`).
                                 init => {
                                     SoundsData.list-made();
-                                    SoundsData.columns-changed(self.columns);
+                                    SoundsData.columns-changed(self.columns, -self.content-y, self.visible-height, self.row-height);
                                 }
                                 for r in SoundsData.tile-rows: HorizontalLayout {
                                     // Every row this height: the list counts on it.

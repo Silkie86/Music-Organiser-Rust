@@ -2514,6 +2514,7 @@ fn sounds_shots(
     shots.push(("sounds-paper.png".into(), capture(window)));
     mo_ui::apply_look(app, graphite);
     found_turned_down(app, window)?;
+    tiles_keep_their_place(app, window)?;
     // Your say on the card, last of the Sounds shots as it stays on the page (the screenshots keep none of it): your
     // own type, a tag added and one taken away, and the heart taken off (the tile's goes too). The tiles
     // are still turned down to their end from the check before: the search leaves one, at the top.
@@ -2610,6 +2611,49 @@ fn found_turned_down(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> 
     }
     turn_down(100.0 * PAGE_DOWN);
     draw();
+    Ok(())
+}
+
+/// A resize that changes how many tiles fit in a row keeps the tiles you were looking at in sight (Solomon's note of
+/// 15 Nov 2026: "strange behaviour when i scroll fast and resize"). With none picked, the first tile in sight is in
+/// the first row in sight still in the narrow window, and back in the wide one the tiles are where they were. They
+/// used to stay turned as far down, which showed other tiles. Starts and ends on the tiles turned down to their end.
+fn tiles_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let data = app.global::<mo_ui::SoundsData>();
+    data.invoke_close_panel();
+    capture(window);
+    // The tiles of the first row in sight, as their places among the tiles. A row of tiles and the gap under it: 112
+    // and 8 points (sounds.slint's TileSize, Space.sm).
+    let first_row = || {
+        let row = (-data.get_tiles_y() / 120.0).floor().max(0.0) as usize;
+        data.get_tile_rows()
+            .row_data(row)
+            .map(|r| r.tiles.iter().map(|t| t.row).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let (turned, first) = (data.get_tiles_y(), first_row().first().copied());
+    let Some(first) = first.filter(|_| turned < 0.0) else {
+        return Err(format!("sounds tiles: not turned down ({turned} px), or no tile in sight"));
+    };
+    // Drawn a few times: the first draw finds the new count of tiles a row, the next lays out the rows made again for
+    // it, and then the tiles turn.
+    let settle = |size: (u32, u32)| {
+        window.set_size(PhysicalSize::new(size.0, size.1));
+        for _ in 0..4 {
+            capture_sized(window, size, Duration::ZERO);
+        }
+    };
+    settle((NARROW, HEIGHT));
+    let narrow = first_row();
+    settle((WIDTH, HEIGHT));
+    let back = (data.get_tiles_y(), first_row());
+    if !narrow.contains(&first) || back.1.first() != Some(&first) || (back.0 - turned).abs() > 0.5 {
+        return Err(format!(
+            "sounds tiles: the first in sight was {first} turned {turned} px; the first row in sight in the narrow \
+             window held {narrow:?}, and back in the wide one {:?} turned {} px",
+            back.1, back.0
+        ));
+    }
     Ok(())
 }
 
