@@ -122,6 +122,8 @@ fn main() -> Result<(), slint::PlatformError> {
     if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
         mo_ui::one_copy::connect(&app, held);
     }
+    // A close asked from outside closes the app properly, minimised or not.
+    mo_ui::close_ask::connect();
     mo_ui::gpu::connect(&app);
     // The window's moves, resizes and hiding, for the freeze lines.
     mo_ui::watchdog::watch_window(&app);

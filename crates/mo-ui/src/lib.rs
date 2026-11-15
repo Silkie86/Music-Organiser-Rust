@@ -14,6 +14,7 @@ pub mod backup;
 pub mod beta;
 mod canvas;
 pub mod cards;
+pub mod close_ask;
 pub mod curve_editor;
 pub mod daws;
 pub mod drag;
