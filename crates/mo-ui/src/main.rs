@@ -178,6 +178,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::startup::step("Space page");
     // The rail's "In your DAWs": what Bitwig has open, asked on a thread of its own.
     mo_ui::daws::connect(&app);
+    // A while after start, once a day: whether a newer version is out (an installed copy only; Settings turns it off).
+    mo_ui::update::connect(&app, feed.clone(), true);
     // Maximised under full screen, so F11 out of full screen leaves the window filling the screen beside the taskbar.
     app.window().set_maximized(true);
     if full_screen {
@@ -263,11 +265,17 @@ fn main() -> Result<(), slint::PlatformError> {
     // The sweep's and the frames' last few seconds, before the log closes.
     mo_app::sweep_timing::finish();
     mo_app::frame_timing::finish();
+    // The setup "Restart to update" asked for: started only once everything is written and the log has closed, as it
+    // closes whatever is left of the app.
+    let setup = mo_ui::update::asked();
     session.close();
-    // Everything is written. The port goes now, not with the process, so the copy the launcher starts next is never
-    // held up by this one taking its time to end.
+    // Everything is written. The port goes now, not with the process, so the copy started next (by the launcher, or
+    // by the setup below) is never held up by this one taking its time to end.
     if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
         held.let_go();
+    }
+    if let Some(setup) = setup {
+        mo_ui::update::run(&setup);
     }
     // Off Windows the usual way out stays: the window is taken apart first, which an exit on the spot there
     // wouldn't wait for.

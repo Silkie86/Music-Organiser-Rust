@@ -280,7 +280,7 @@ fn the_project_folders_are_the_ones_with_a_bitwig_project_and_its_copies() {
 fn saved(dir: &Path, rel: &str, minutes: u64) -> PathBuf {
     write(dir, rel, b"project");
     let path = dir.join(rel);
-    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + minutes * 60);
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000 + minutes * 60);
     fs::File::options().write(true).open(&path).unwrap().set_modified(at).unwrap();
     path
 }
@@ -321,6 +321,17 @@ fn a_project_folders_saves_are_listed_newest_first_each_with_its_fixed_project()
     saved(&song, "Song v2.bwproject", 50);
     let saves = saves_in(&song, &stop).unwrap();
     assert_eq!(saves[0].fixed, Some((second, false)));
+
+    // A fixed project an older Fix wrote (before 11 Nov 2026) is out of date too, though it's newer than its save.
+    let other = dir.join("Other");
+    saved(&other, "Other.bwproject", 0);
+    let early = other.join("Other (fixed).bwproject");
+    write(&other, "Other (fixed).bwproject", b"project");
+    let at = mo_space::bitwig::fix_writes_library_files() - Duration::from_secs(60);
+    fs::File::options().write(true).open(&early).unwrap().set_modified(at).unwrap();
+    let older_save = other.join("Other.bwproject");
+    fs::File::options().write(true).open(&older_save).unwrap().set_modified(at - Duration::from_secs(600)).unwrap();
+    assert_eq!(saves_in(&other, &stop).unwrap()[0].fixed, Some((early, false)));
     assert!(saves_in(&song, &AtomicBool::new(true)).is_err());
 }
 

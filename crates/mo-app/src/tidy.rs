@@ -29,6 +29,8 @@
 //! - `Trimmed sounds\` in the export folder: a trimmed copy Trim silence was still making
 //!   (`<copy>.<number>.wav` or `.wav.part`, [`crate::trim_copy::is_half_made`]), an hour old. Never the copies: DAW
 //!   projects use them.
+//! - `updates\`: a fetched setup (`DAWmate-Setup-<version>.exe`, and its `.sha256`) once that version or a newer one
+//!   runs, and a fetch cut short (`… .exe.mo-part`), an hour old.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
 //! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old;
 //!   and the Play in Bitwig files (`MO Play <n>-<n>.mid`, and `.bwpreset` for an audition, removed once Bitwig has
@@ -325,6 +327,11 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     // A Chord check take whose writing was cut short (its own name, only while it's written). Never the takes.
     if let Some(takes) = real_folder(&places.data, &[crate::chord_check::FOLDER]) {
         done.add(remove_older(&takes, crate::chord_check::is_half_written, WRITING, now, false));
+    }
+    // Fetched setups once their version is in (or older), and a fetch cut short (its own name, only while it's written).
+    if let Some(updates) = real_folder(&places.data, &[crate::update::FOLDER]) {
+        let current = env!("CARGO_PKG_VERSION");
+        done.add(remove_older(&updates, |n| crate::update::is_spent(n, current), WRITING, now, false));
     }
     if let Some(twin) = real_folder(&places.data, &["twin", "cs"]) {
         done.add(remove_older(&twin, is_library_copy, DAY, now, false));
