@@ -141,7 +141,7 @@ impl Recorder {
         drop(input);
         let audio = take.finish();
         let seconds = audio.file_seconds;
-        let name = format!("Recording {}", chrono::Local::now().format("%Y-%m-%d %H-%M-%S"));
+        let name = format!("Recording {}", chrono::Local::now().format(mo_app::tidy::TAKE_TIME));
         let folder = folder();
         match record::save(audio, trim_db.map(mo_audio::trim::level_of_db), &folder, &name) {
             Ok(path) => {
