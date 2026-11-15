@@ -707,6 +707,25 @@ impl World {
     }
 
     /// Takes out an audition clip the link noted, while it keeps its name, as the link's `deleteClip` (3.19).
+    /// A take-out's Stop (`transport`). The extension from 3.28 presses it only while Bitwig plays; an older one
+    /// pressed it on a stopped Bitwig too, which moves the play start to the beginning (the review's BW-2).
+    fn stop_transport(&mut self) {
+        if self.playing {
+            self.playing = false;
+            return;
+        }
+        let guarded = self
+            .hello
+            .get("extension")
+            .and_then(Value::as_str)
+            .and_then(|v| v.split_once('.'))
+            .and_then(|(major, minor)| Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?)))
+            .is_some_and(|version| version >= (3, 28));
+        if !guarded {
+            self.transport.play_start = 0.0;
+        }
+    }
+
     fn delete_clip(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
         let id = match request.get("trackId") {
             Some(Value::String(id)) if !id.is_empty() => id.clone(),
@@ -719,7 +738,7 @@ impl World {
             )
         })?;
         if request.get("transport").and_then(Value::as_bool) == Some(true) {
-            self.playing = false;
+            self.stop_transport();
         }
         let noted = self.auditions.iter().position(|(t, s, _)| *t == id && *s == slot);
         let name = noted.and_then(|n| self.auditions.get(n)).map(|(_, _, name)| name.clone());
@@ -801,7 +820,7 @@ impl World {
             self.launched.retain(|&(lt, _)| lt != t);
         }
         if request.get("transport").and_then(Value::as_bool) == Some(true) {
-            self.playing = false;
+            self.stop_transport();
         }
         self.loop_back_for(|(t, _)| *t == id);
         let deleted = match (at, &noted) {
@@ -842,7 +861,7 @@ impl World {
             }
         }
         if request.get("transport").and_then(Value::as_bool) == Some(true) {
-            self.playing = false;
+            self.stop_transport();
         }
         Ok(json!({ "stopped": stopped }))
     }

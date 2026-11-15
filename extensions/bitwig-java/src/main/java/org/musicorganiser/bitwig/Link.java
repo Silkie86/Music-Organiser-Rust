@@ -2112,12 +2112,11 @@ final class Link {
             }
             if (now < 0) throw new LinkError("The track went before its clip could be launched.");
             m.put("launched", true);
-            // A launch starts a stopped Bitwig a moment later: a Stop asked for meanwhile waits for it (see afterStart).
-            launchAsked = clock.millis();
             if (!looping) {
                 // In step with the song (extension 3.17): a swapped clip carries on from where Bitwig is, not from its own
                 // start, so it stays with the parts that didn't change.
                 trackSlots[now][index].launchWithOptions("default", "synced");
+                watchStart();
                 finish.ok(m);
                 return;
             }
@@ -2128,7 +2127,7 @@ final class Link {
             loop.clip = idOf(now) + "#" + index;
             trackSlots[now][index].launchWithOptions("none", "from_start");
             m.put("looping", true);
-            watchStart(loop);
+            watchStart();
             finish.ok(m);
         }, finish);
     }
@@ -2191,23 +2190,46 @@ final class Link {
         // None of them is this part's until it's launched (see putClip): a failure before then puts the loop back.
         songLoop.clip = "";
         songLoop.settings = settings;
-        songLoop.starting = false;
         for (Setting s : settings)
             if (!same(s.read().get(), s.wanted())) s.write().accept(s.wanted());
     }
 
     /**
-     * A part with its song's bars was just launched, which starts Bitwig a moment later: `starting` until Bitwig is seen
-     * playing (or START_WAIT has passed), so a deleteclip that comes meanwhile waits for the start it's to stop (see
-     * deleteClip). Looked at outside the changes' line: the launch's change has answered.
-     */
-    /**
-     * When the link last launched a clip (which starts a stopped Bitwig a moment later), or -1 once Bitwig was seen
-     * playing after it (extension 3.28).
+     * When the link last launched a clip without Bitwig being seen playing since, else -1: a launch starts a stopped
+     * Bitwig a moment later, and a Stop asked for meanwhile waits for that start (see afterStart). Any part from
+     * extension 3.28; before, only one with its song's bars.
      */
     private long launchAsked = -1;
+    /** When the link last pressed Stop for a take-out, else -1 (see stopIfPlaying). */
+    private long stopAsked = -1;
 
-    /** Whether a launch the link asked for less than START_WAIT ago may still be about to start Bitwig. */
+    /**
+     * A clip was just launched: the start it causes counts as on its way until Bitwig is seen playing or START_WAIT has
+     * passed. Looked at outside the changes' line (the launch's change has answered), so a Bitwig you stop yourself a
+     * moment after it started isn't waited for.
+     */
+    private void watchStart() {
+        long asked = clock.millis();
+        launchAsked = asked;
+        stopAsked = -1;
+        Runnable look = new Runnable() {
+            @Override
+            public void run() {
+                if (launchAsked != asked) return;
+                boolean playing;
+                try {
+                    playing = transport.isPlaying().get();
+                } catch (RuntimeException | LinkageError e) {
+                    playing = true;
+                }
+                if (playing || clock.millis() - asked >= START_WAIT) launchAsked = -1;
+                else host.scheduleTask(this, 50);
+            }
+        };
+        host.scheduleTask(look, 50);
+    }
+
+    /** Whether a launch the link asked for a moment ago may still be about to start Bitwig. */
     private boolean startPending() {
         if (launchAsked < 0) return false;
         if (transport.isPlaying().get() || clock.millis() - launchAsked >= START_WAIT) {
@@ -2219,8 +2241,9 @@ final class Link {
 
     /**
      * Runs `work`, which may press Stop (`transport` in the request): straight away, unless Bitwig is stopped and a launch
-     * the link asked for a moment ago hasn't shown yet. Then it waits for that start first (START_WAIT at most), so the
-     * Stop stops it, instead of landing on a stopped Bitwig with the start coming after it (extension 3.28).
+     * the link asked for a moment ago hasn't shown yet. Stop now would find Bitwig stopped (which moves your play start
+     * to the beginning), and the start would come after it: so `work` waits for the start it's to stop, START_WAIT at
+     * most. A start that never shows is never told to stop.
      */
     private void afterStart(Map<String, Object> request, Runnable work, Finish finish) {
         if (flag(request, "transport", false) && transport != null && startPending()) {
@@ -2232,34 +2255,19 @@ final class Link {
 
     /**
      * Presses Stop for a change that asked for it (`transport`), only while Bitwig plays: Stop on a Bitwig that's stopped
-     * already (you stopped it, or what the app started never did) moves your play start to the beginning (extension
-     * 3.28; before, only a part with its song's bars was kept from it). Says whether it pressed Stop.
+     * already (you stopped it, or what the app started never did) moves your play start to the beginning. Bitwig still
+     * shows playing for a moment after a Stop, so a second take-out within RESTOP of the link's own Stop doesn't press
+     * it again. Says whether Bitwig is being stopped.
      */
     private boolean stopIfPlaying(Map<String, Object> request) {
         if (!flag(request, "transport", false) || transport == null || !transport.isPlaying().get()) return false;
-        transport.stop();
+        long now = clock.millis();
+        if (stopAsked < 0 || now - stopAsked >= RESTOP) {
+            transport.stop();
+            stopAsked = now;
+        }
         launchAsked = -1;
         return true;
-    }
-
-    private void watchStart(SongLoop loop) {
-        long start = clock.millis();
-        loop.starting = true;
-        Runnable look = new Runnable() {
-            @Override
-            public void run() {
-                if (songLoop != loop || !loop.starting) return;
-                boolean playing;
-                try {
-                    playing = transport.isPlaying().get();
-                } catch (RuntimeException | LinkageError e) {
-                    playing = true;
-                }
-                if (playing || clock.millis() - start >= START_WAIT) loop.starting = false;
-                else host.scheduleTask(this, 50);
-            }
-        };
-        host.scheduleTask(look, 50);
     }
 
     /** The loop's settings that don't show the song's bars yet. */
@@ -2406,17 +2414,7 @@ final class Link {
         int index = index(s);
         String key = id + "#" + index;
         SongLoop loop = songLoop != null && key.equals(songLoop.clip) ? songLoop : null;
-        // A part launched with its song's bars a moment ago may not have started Bitwig yet. Stop now would find Bitwig
-        // stopped (which moves your play start to the beginning), and the start would come after it: so the take-out
-        // waits for the start it's to stop, a moment at most (see watchStart).
-        if (loop != null && loop.starting && flag(request, "transport", false) && transport != null && !transport.isPlaying().get()) {
-            waitFor(() -> !loop.starting || transport.isPlaying().get(), START_WAIT, seen -> {
-                loop.starting = false;
-                takeClipOut(request, (String) id, index, loop, finish);
-            }, finish);
-            return;
-        }
-        // Any other part launched a moment ago waits the same way (extension 3.28).
+        // A part launched a moment ago may not have started Bitwig yet: the take-out waits for the start it's to stop.
         afterStart(request, () -> takeClipOut(request, (String) id, index, loop, finish), finish);
     }
 
@@ -2460,13 +2458,9 @@ final class Link {
      * renamed (so it's yours now), or is already gone.
      */
     private void deleteTrack(Map<String, Object> request, Finish finish) {
-        Object id = field(request, "trackId");
-        if (!(id instanceof String) || ((String) id).isEmpty()) throw new LinkError("Say which track, by its ID.");
-        afterStart(request, () -> takeTrackOut(request, (String) id, finish), finish);
-    }
-
-    /** deleteTrack's work, on the track with ID `id`. */
-    private void takeTrackOut(Map<String, Object> request, String id, Finish finish) {
+        Object given = field(request, "trackId");
+        if (!(given instanceof String) || ((String) given).isEmpty()) throw new LinkError("Say which track, by its ID.");
+        String id = (String) given;
         String noted = auditionTracks.remove(id);
         // Its clips go with it, or stay yours with a track you kept: either way they're not the app's to take out now.
         auditionClips.keySet().removeIf(k -> k.startsWith(id + "#"));
@@ -2478,17 +2472,21 @@ final class Link {
             // As stoptracks does: a track you keep plays its arranger clips again, not the empty launcher.
             trackItems[t].returnToArrangement();
         }
-        stopIfPlaying(request);
-        Map<String, Object> m = new LinkedHashMap<>();
-        if (t < 0 || noted == null || !noted.equals(str(trackItems[t].name().get()))) {
-            m.put("deleted", false);
-            finish.ok(m);
-            return;
-        }
-        trackItems[t].deleteObject();
-        waitFor(() -> indexOf(id) < 0, CHANGE_WAIT, gone -> {
-            m.put("deleted", gone);
-            finish.ok(m);
+        // The track is stopped at once; only Bitwig's own Stop, and the take-out after it, wait for a start on its way.
+        afterStart(request, () -> {
+            stopIfPlaying(request);
+            Map<String, Object> m = new LinkedHashMap<>();
+            int now = indexOf(id);
+            if (now < 0 || noted == null || !noted.equals(str(trackItems[now].name().get()))) {
+                m.put("deleted", false);
+                finish.ok(m);
+                return;
+            }
+            trackItems[now].deleteObject();
+            waitFor(() -> indexOf(id) < 0, CHANGE_WAIT, gone -> {
+                m.put("deleted", gone);
+                finish.ok(m);
+            }, finish);
         }, finish);
     }
 
@@ -2503,15 +2501,16 @@ final class Link {
         for (Object id : (List<?>) given) {
             if (!(id instanceof String)) throw new LinkError("A track's ID is text.");
         }
+        List<Object> stopped = new ArrayList<>();
+        for (Object id : (List<?>) given) {
+            int t = indexOf((String) id);
+            if (t < 0) continue;
+            trackItems[t].stop();
+            trackItems[t].returnToArrangement();
+            stopped.add(id);
+        }
+        // The tracks are stopped at once; only Bitwig's own Stop waits for a start on its way.
         afterStart(request, () -> {
-            List<Object> stopped = new ArrayList<>();
-            for (Object id : (List<?>) given) {
-                int t = indexOf((String) id);
-                if (t < 0) continue;
-                trackItems[t].stop();
-                trackItems[t].returnToArrangement();
-                stopped.add(id);
-            }
             stopIfPlaying(request);
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("stopped", stopped);
@@ -4983,8 +4982,6 @@ final class Link {
         List<Setting> settings = List.of();
         /** The clip the bars go round for: the newest launched with them. "" from the loop being set until its launch. */
         String clip = "";
-        /** Whether the clip was just launched and Bitwig hasn't been seen playing yet (see watchStart). */
-        boolean starting;
 
         SongLoop(String project) {
             this.project = project;
