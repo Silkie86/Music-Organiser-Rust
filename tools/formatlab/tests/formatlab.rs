@@ -396,6 +396,31 @@ fn refuses_files_from_other_apps() {
     assert!(LabFile::read(b"FLhd", "short.flp").is_err());
 }
 
+#[test]
+fn an_extended_event_is_shown_and_counted_under_its_own_number() {
+    // FL 25 and 26: event 172, the real event's four-byte number, then its value (a length first for text).
+    let raw = Flp::new()
+        .ascii(199, "26.1.5.5618")
+        .raw(&[172, 1, 1, 0])
+        .text(192, "FL Studio 26.1.5.5618")
+        .word(64, 0)
+        .raw(&[172, 0, 1, 0, 0, 1])
+        .build();
+    let tree = ops::tree(&fl(&raw), usize::MAX);
+    assert!(tree.contains("172 0xC0000101 written by (extended 0xC0000101) = \"FL Studio 26.1.5.5618\""), "{tree}");
+    assert!(tree.contains("  172 0x100 = 1"), "{tree}");
+    assert!(!tree.contains("192"), "{tree}");
+    assert_eq!(ops::find(&fl(&raw), "26.1.5.5618", true).len(), 2, "the version and who wrote the file");
+
+    let dir = common::test_dir("formatlab-census-extended");
+    write(&dir, "Next.flp", &raw);
+    let census = Census::run(&mo_formatlab::census::find_projects(&[dir]), |_| {});
+    let unknown = census.unknown_fl_events();
+    let [(id, tally)] = unknown.as_slice() else { panic!("{unknown:?}") };
+    assert_eq!((*id, tally.times, tally.shapes.keys().collect::<Vec<_>>()), (0x100, 1, vec![&1]));
+    assert!(census.fl_events.contains_key(&0xC000_0101) && !census.fl_events.contains_key(&172));
+}
+
 // ---- The census ----
 
 #[test]

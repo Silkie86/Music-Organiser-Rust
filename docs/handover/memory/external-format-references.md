@@ -14,7 +14,8 @@ Full fact list: /mnt/project-files/notes/fl-facts-from-lynx-share.md (to check: 
 ProjectConverter (git-moss, LGPL-3.0, checked 2026-10-31): Reaper <-> DAWproject only, no FL/Bitwig/S1 reading.
 For the phase 5 DAWproject export, follow bitwig/dawproject (MIT, schema). Notes: /mnt/project-files/notes/projectconverter-notes.md
 GitHub reader survey 2026-10-31: /mnt/project-files/notes/github-daw-readers-survey.md. Key: Meowrium/PyFLP says event
-172 is 4 bytes in FL24/25 and varint in FL26 (clashes with rule 9: formatlab census needed); jdormit/bwpreset (MIT)
+172 is 4 bytes in FL24/25 and varint in FL26 (settled 15 Nov 2026: 172 starts an extended event, the next four
+bytes its number; counted on 60 of his saves, none FL 26, where a census is still wanted); jdormit/bwpreset (MIT)
 maps Bitwig Grid patches (classes, cables as text paths) for the phase 5 Grid plan.
 
 See [[rust-app-design-decisions]], [[fl-to-bitwig-converter-plan]].

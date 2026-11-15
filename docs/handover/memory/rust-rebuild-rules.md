@@ -18,7 +18,8 @@ read-only reference (public; scratch clone, never push).
 6. Never add a column to `plugins`; schema changes only add. RELAXED (Solomon, 2026-11-05, C# dead): each Rust DB carries a version; a new version may rebuild its file by copy, check, rename. See [[app-feel-instant]].
 7. Bump a reader's version when what it finds changes.
 8. Bitwig: objects defined at first use; no class-1 ref in single-object field; decode must end at the zip offset.
-9. FL: 3-byte event 172 from FL 25; note size by FL version; read damaged saves on with a warning.
+9. FL: event 172 from FL 25 starts an extended event (the next four bytes are its number; it was first read as a
+   3-byte event); note size by FL version; read damaged saves on with a warning.
 10. Live tests only touch a project named "MO Live Test…" with changes allowed.
 11. DAW scripts plain ASCII; tests never reach a real DAW, folder or MIDI port.
 12. No lag: shared slots, low priority, no UI waits, newest wins, virtualised lists, read big files once.

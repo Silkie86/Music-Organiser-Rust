@@ -281,6 +281,17 @@ fn an_extended_event_inside_a_channel_is_not_the_channels_light_or_name() {
         let bytes = Flp::new().ascii(199, "25.2.5.5319").raw(&odd).raw(&[0x50, 0, 0]).dword(156, 90_000).build();
         assert_eq!(read(&bytes).tempo, Some(90.0), "{odd:?}");
     }
+    // A real event straight after a 172 that isn't one stays an event: its id isn't taken for the number's top byte.
+    let bytes = Flp::new().ascii(199, "25.2.5.5319").raw(&[172, 0, 0, 0]).word(65, 1).dword(156, 90_000).build();
+    let flp = events::load(&bytes).unwrap();
+    assert!(flp.events.iter().any(|e| e.id == 65) && flp.events.iter().all(|e| e.extended().is_none()));
+    // The number is looked for in the events only: one that ends them with three bytes reads as before, whatever
+    // follows the events in the file.
+    let mut bytes = Flp::new().ascii(199, "25.2.5.5319").dword(156, 90_000).raw(&[172, 0, 1, 0]).build();
+    bytes.extend([0xC0, 9, 9]);
+    let flp = events::load(&bytes).unwrap();
+    assert!(flp.warning.is_none() && !flp.cut_short);
+    assert_eq!(flp.events.last().map(|e| (e.id, e.data.len())), Some((172, 3)));
     // One cut off part-way reads up to there, with the warning (rule 9).
     let cut = Flp::new().ascii(199, "26.1.5.5618").dword(156, 90_000).raw(&[172, 2, 1, 0, 0xC0, 40, 1, 2]).build();
     let flp = events::load(&cut).unwrap();

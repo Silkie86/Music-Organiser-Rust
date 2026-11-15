@@ -344,8 +344,8 @@ the same files, and every difference is listed and judged (section 11's "twin te
 
 - `FLhd` header then `FLdt` + length, then events: id < 64 byte, < 128 word, < 192 dword, ≥ 192 variable length.
 - **Rule:** when the FL version (event 199) is 25 or later, event 172 starts an extended event: the next four
-  bytes are the real event's number, whose top four bits give its value's size (0 one byte, 4 two, 8 four, 0xC a
-  length then bytes). It was first read as "3 bytes", which only worked for the one in the header (0xC0000101, the
+  bytes are the real event's number, whose top four bits give its value's size (0xC a length then bytes, the only
+  kind seen in Solomon's saves; 0 one byte, 4 two, 8 four are from other readers' notes). It was first read as "3 bytes", which only worked for the one in the header (0xC0000101, the
   text of who wrote the file) because that number's last byte looks like a text event.
 - Some FL 4 to 7 saves have junk after `FLhd`; read on with a warning. A file with no `FLhd` is "empty or damaged",
   not an error.

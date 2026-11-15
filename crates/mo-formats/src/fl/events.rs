@@ -80,15 +80,17 @@ pub struct Event<'a> {
 
 impl Event<'_> {
     /// An extended event's own number and value (see [`EV_EXTENDED`]); `None` for every other event, and for an
-    /// event 172 that isn't one.
+    /// event 172 that isn't a whole one.
     pub fn extended(&self) -> Option<(u32, &[u8])> {
         let id = u32::from_le_bytes(bytes_at(&self.data, 0).filter(|_| self.id == EV_EXTENDED)?);
-        let value = self.data.get(4..)?;
-        match extended_size(id)? {
-            Some(size) => (value.len() == size).then_some((id, value)),
-            // Past the length, which ends at the first byte without its top bit.
-            None => Some((id, value.get(value.iter().position(|b| b & 0x80 == 0)? + 1..)?)),
-        }
+        let value = match extended_size(id)? {
+            Some(size) => self.data.get(4..).filter(|v| v.len() == size)?,
+            None => {
+                let (size, at) = length_at(&self.data, 4, self.data.len())?;
+                self.data.get(at..).filter(|v| v.len() == size)?
+            }
+        };
+        Some((id, value))
     }
 
     /// The value of a one-, two-, three- or four-byte event (ids below 192).
@@ -182,11 +184,13 @@ pub(crate) fn f32_at(d: &[u8], at: usize) -> f32 {
     f32::from_le_bytes(zero_filled(d, at))
 }
 
-/// How long an extended event's value is, from its number's top four bits: one, two or four bytes, or `Some(None)`
-/// for a length followed by that many bytes. `None` when the four bytes after an event 172 can't be an extended
-/// event's number: every one FL writes is above 255 and has one of those four kinds.
+/// How long an extended event's value is, from its number's top four bits: 0 one byte, 4 two, 8 four, or 0xC
+/// (`Some(None)`) a length followed by that many bytes: the four sizes plain ids have. `None` when the four bytes
+/// after an event 172 can't be an extended event's number: the ones known are 0x100 to 0x102 under those four bits,
+/// so anything from 256 to 65535 is taken, and nothing else (a damaged save's bytes, or a real event's id sitting
+/// where the number's top byte would be).
 fn extended_size(id: u32) -> Option<Option<usize>> {
-    if id & 0x0FFF_FFFF < 0x100 {
+    if !(0x100..=0xFFFF).contains(&(id & 0x0FFF_FFFF)) {
         return None;
     }
     match id >> 28 {
@@ -295,11 +299,15 @@ pub fn load(raw: &[u8]) -> Result<Flp<'_>, Damaged> {
             // that number's kind says. All of it is one event here, so nothing after it reads as an event of its own
             // (the value of 0x100 would look like "channel on", the text of 0xC0000101 like an old channel name).
             // One that isn't an extended number is read as three bytes, as FL 25's were before this was known.
-            EV_EXTENDED if major >= 25 => match bytes_at(raw, pos).map(u32::from_le_bytes).and_then(extended_size) {
-                Some(Some(size)) => Some(4 + size),
-                Some(None) => length_at(raw, pos + 4, end).map(|(n, value)| n.saturating_add(value - pos)),
-                None => Some(3),
-            },
+            // The number is only looked for inside the events (`end`), never in what follows them in the file.
+            EV_EXTENDED if major >= 25 => {
+                let number = raw.get(pos..end).and_then(|d| bytes_at(d, 0)).map(u32::from_le_bytes);
+                match number.and_then(extended_size) {
+                    Some(Some(size)) => Some(4 + size),
+                    Some(None) => length_at(raw, pos + 4, end).map(|(n, value)| n.saturating_add(value - pos)),
+                    None => Some(3),
+                }
+            }
             128..192 => Some(4),
             _ => length_at(raw, pos, end).map(|(n, value)| {
                 pos = value;
