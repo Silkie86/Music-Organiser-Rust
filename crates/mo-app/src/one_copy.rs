@@ -42,6 +42,8 @@ pub const PORT: u16 = 19793;
 /// How long a closing copy gets to end: it writes its settings and stops its work first, and waits up to a minute for
 /// a plugin move to stop.
 pub const CLOSE_WAIT: Duration = Duration::from_secs(80);
+/// How long [`OneCopy::let_go`] waits for the answering thread to let go of the port.
+const LET_GO_WAIT: Duration = Duration::from_secs(1);
 /// The longest request line read: anything longer isn't a request.
 const MOST_LINE: u64 = 64 * 1024;
 /// The most connections answered at once; more are closed at once.
@@ -79,6 +81,9 @@ pub struct OneCopy {
     hello: Hello,
     closing: AtomicBool,
     port: u16,
+    /// Set by [`OneCopy::let_go`]: the thread that answers stops and lets go of the port; and whether it has.
+    going: AtomicBool,
+    gone: AtomicBool,
     connections: AtomicUsize,
     /// What the window does when asked, once there is a window; what was asked before then waits.
     handler: Mutex<(Option<Handler>, Vec<Asked>)>,
@@ -196,6 +201,8 @@ impl OneCopy {
             hello: Hello { app: version.to_owned(), pid: std::process::id(), exe: exe.to_owned(), closing: false },
             closing: AtomicBool::new(false),
             port,
+            going: AtomicBool::new(false),
+            gone: AtomicBool::new(false),
             connections: AtomicUsize::new(0),
             handler: Mutex::new((None, Vec::new())),
         });
@@ -211,6 +218,23 @@ impl OneCopy {
     /// are written, whatever becomes of this value.
     pub fn closing(&self) {
         self.closing.store(true, Ordering::Relaxed);
+    }
+
+    /// Lets go of the port now: call it at the very end, once the last settings and the log are written. The port
+    /// used to go only with the process, and a process can take a long time to go after its last line: on 15 Nov
+    /// 2026 Solomon's still held the port 15 seconds after "Closed" (the graphics card's driver was slow to let go),
+    /// and the copy the launcher started next waited two seconds for an answer that couldn't come, then opened
+    /// without the guard. Waits a moment for the answering thread to stop; says whether the port is free.
+    pub fn let_go(&self) -> bool {
+        self.closing();
+        self.going.store(true, Ordering::Release);
+        let until = Instant::now() + LET_GO_WAIT;
+        while !self.gone.load(Ordering::Acquire) && Instant::now() < until {
+            // Wakes the thread waiting for a connection, so it sees it's time to stop.
+            let _ = TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, self.port).into(), LET_GO_WAIT);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.gone.load(Ordering::Acquire)
     }
 
     fn hello(&self) -> Hello {
@@ -242,6 +266,9 @@ impl OneCopy {
 
     fn serve(self: Arc<Self>, listener: TcpListener) {
         for stream in listener.incoming() {
+            if self.going.load(Ordering::Acquire) {
+                break;
+            }
             let Ok(stream) = stream else { continue };
             if self.connections.fetch_add(1, Ordering::Relaxed) >= MOST_CONNECTIONS {
                 self.connections.fetch_sub(1, Ordering::Relaxed);
@@ -258,6 +285,9 @@ impl OneCopy {
                 log::warning("One copy", "Couldn't start a thread to answer a connection");
             }
         }
+        // The port is free from here: the listener goes first, then the word that it has.
+        drop(listener);
+        self.gone.store(true, Ordering::Release);
     }
 
     /// Answers one connection's requests, a line each, until it closes, goes quiet for [`ASK_TIMEOUT`] or sends
@@ -411,6 +441,29 @@ mod tests {
         assert_eq!(closed.as_deref(), Some("1.0 (old)"));
         assert_eq!(hello(port).unwrap().app, "1.1 (new)");
         drop(held);
+    }
+
+    /// The app's last step: the port goes before the process does, so the next copy opens at once and guarded even
+    /// when the old process takes its time to end.
+    #[test]
+    fn a_copy_that_let_go_of_the_port_no_longer_holds_up_the_next() {
+        let _one = crate::helper::one_at_a_time();
+        let port = free_port();
+        let (old, told) = open(port, "1.0", "");
+        assert!(taken(port));
+        assert!(old.let_go(), "the answering thread stopped");
+        assert!(!taken(port), "free while the old copy is still there");
+        // A second time changes nothing.
+        assert!(old.let_go());
+        let began = Instant::now();
+        let Claim::Ours { held, closed: None } = claim(port, "1.1", "", SOON, |_| panic!("nothing is asked to show"))
+        else {
+            panic!("the port was let go")
+        };
+        assert!(began.elapsed() < Duration::from_millis(500), "no wait for an answer");
+        assert_eq!(hello(port).unwrap().app, "1.1");
+        assert!(told.try_recv().is_err(), "the old copy was asked nothing");
+        drop((old, held));
     }
 
     /// The window was closed and the app is writing its last files, port still held, when it's started again: the

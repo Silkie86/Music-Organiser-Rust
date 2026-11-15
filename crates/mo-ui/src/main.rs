@@ -214,6 +214,8 @@ fn main() -> Result<(), slint::PlatformError> {
         log::warning("Freeze", "Couldn't start the freeze watchdog");
     }
     let ran = app.run();
+    // The window's thread answers no more knocks from here: what it does while closing isn't a freeze.
+    mo_ui::watchdog::stop();
     // The window is gone: a copy started from now on waits for this one to end (the port is let go with the process,
     // once everything below is written) instead of asking it to show.
     if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
@@ -255,7 +257,35 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_app::sweep_timing::finish();
     mo_app::frame_timing::finish();
     session.close();
-    ran
+    // Everything is written. The port goes now, not with the process, so the copy the launcher starts next is never
+    // held up by this one taking its time to end.
+    if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
+        held.let_go();
+    }
+    if let Err(e) = &ran {
+        eprintln!("Error: {e}");
+    }
+    end_now(i32::from(ran.is_err()))
+}
+
+/// Ends the app on the spot, once everything is written and the log is closed. Leaving `main` the usual way has the
+/// window's graphics taken apart piece by piece first, and then Windows unloads the graphics card's driver from the
+/// app: on 15 Nov 2026 that kept Solomon's app alive more than ten seconds after "Closed" (the card was busy with
+/// Bitwig), until the launcher forced it shut. Nothing in that work is the app's to keep: Windows takes back the
+/// window, the card's memory and every open file with the process, at once.
+#[allow(unsafe_code)]
+fn end_now(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+        // SAFETY: plain calls on this process itself; when the second comes back at all, it failed, and the usual
+        // way out below is taken.
+        unsafe { TerminateProcess(GetCurrentProcess(), code.cast_unsigned()) };
+    }
+    std::process::exit(code)
 }
 
 /// Rule 17, crashes always log: a panic anywhere goes into the session log, with where it happened, and is written out
