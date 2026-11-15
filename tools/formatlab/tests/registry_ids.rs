@@ -85,6 +85,7 @@ const NOT_IDS: &[(&str, &str)] = &[
     // FL: colours FL gives a track or channel that doesn't say.
     ("fl/arrangement.rs", "DEFAULT_TRACK_COLOUR"),
     ("fl/arrangement.rs", "DEFAULT_CHANNEL_COLOUR"),
+    ("fl/arrangement.rs", "MARKER_SIGNATURE"),
     // FL: values inside an automation link (event 227), not events.
     ("fl/automation.rs", "TARGET_VOLUME"),
     ("fl/automation.rs", "TARGET_PAN"),

@@ -311,7 +311,14 @@ mod tests {
     }
 
     fn arrangement(lanes: Vec<mo_formats::arrangement::PreviewLane>) -> Arrangement {
-        Arrangement { view: "Test", tempo: 120.0, beats_per_bar: 4, lanes, markers: Vec::new(), notes: Vec::new() }
+        Arrangement {
+            view: "Test",
+            tempo: 120.0,
+            signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
+            lanes,
+            markers: Vec::new(),
+            notes: Vec::new(),
+        }
     }
 
     fn up(notes: &[NoteEvent], semitones: u8) -> Vec<NoteEvent> {

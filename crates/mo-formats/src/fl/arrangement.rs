@@ -16,7 +16,7 @@ use super::song::{
 use super::{Rack, channels as known_channels};
 use crate::arrangement::{
     Arrangement, AudioPart, LaneKind, NoteBudget, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, PreviewPoint,
-    Stretch, TOO_MANY_NOTES,
+    Stretch, TOO_MANY_NOTES, TimeSignature, fades_within,
 };
 use crate::fl::automation::{FlPoint, cut_curve};
 use crate::paths::file_name;
@@ -24,12 +24,22 @@ use crate::paths::file_name;
 pub const PLAYLIST_VIEW: &str = "FL Studio playlist";
 pub const BITWIG_VIEW: &str = "As it opens in Bitwig";
 
-/// Beats in a bar (one byte).
+/// The time signature's top number (one byte).
 const EV_TIME_SIG_NUMERATOR: u8 = 17;
+/// Its bottom number when [`EV_TIME_SIG_MODE`] is 1; otherwise the steps in a beat (one byte).
+const EV_TIME_SIG_DENOMINATOR: u8 = 18;
+/// 1 when the project's Time settings are "Set as time signature" (FL 20 onwards; one byte).
+const EV_TIME_SIG_MODE: u8 = 35;
 /// A channel's colour, 0x00BBGGRR.
 const EV_CHANNEL_COLOUR: u8 = 128;
-/// A marker's position in ticks (the top bits say what kind of marker).
+/// A marker: its kind in the top byte ([`MARKER_SIGNATURE`], 0 a plain one, others loop, pause and the like) and its
+/// position in ticks in the other three (PyFLP and Lynx Share; Solomon's saves hold kinds 0, 4, 6, 8 and 11).
 const EV_TIME_MARKER: u8 = 148;
+/// The kind of marker that changes the time signature from where it stands.
+const MARKER_SIGNATURE: u32 = 8;
+/// A marker's own time signature, top then bottom number, after its position (4 and 4 on a marker of another kind).
+const EV_MARKER_NUMERATOR: u8 = 33;
+const EV_MARKER_DENOMINATOR: u8 = 34;
 /// A pattern's colour, 0x00BBGGRR.
 const EV_PATTERN_COLOUR: u8 = 150;
 /// A marker's name, after its position.
@@ -54,26 +64,65 @@ pub fn read(flp: &Flp<'_>) -> Vec<Arrangement> {
     views.into()
 }
 
-/// The song's beats in a bar, and its first arrangement's markers in beats, as [`read`]'s playlist view gives them:
+/// The song's time signature, and its first arrangement's markers in beats, as [`read`]'s playlist view gives them:
 /// for a reader that needs no more of the playlist (one pass over the events, no notes read).
-pub fn bars_and_markers(flp: &Flp<'_>) -> (u32, Vec<PreviewMarker>) {
-    let mut timeline = Timeline::new();
+pub fn bars_and_markers(flp: &Flp<'_>) -> (TimeSignature, Vec<PreviewMarker>) {
+    let mut timeline = Timeline::new(flp);
     for e in &flp.events {
         timeline.step(flp, e);
     }
-    (timeline.beats_per_bar, markers(&timeline.markers, flp.ppq))
+    (timeline.signature(), markers(&timeline.markers, flp.ppq))
 }
 
-/// The song's beats in a bar and its first arrangement's markers (ticks, name), found event by event.
+/// The song's time signature and its first arrangement's markers (ticks, name), found event by event.
 struct Timeline {
-    beats_per_bar: u32,
+    /// The first of each of events 17, 18 and 35: a later 17 or 18 is a pattern's own.
+    top: Option<u32>,
+    bottom: Option<u32>,
+    mode: Option<u32>,
     markers: Vec<(i64, String)>,
     arrangements: u32,
+    /// The save has arrangements (FL 20 onwards): a marker before the first is a pattern's Piano roll marker, not
+    /// the song's. An older save has no such markers, and all of its are the song's.
+    has_arrangements: bool,
+    /// The song's last marker changes the time signature: where it stands, and its numbers as they are read.
+    change: Option<(i64, Option<u32>, Option<u32>)>,
+    /// The time signature a marker at the very start of the song sets.
+    start: Option<TimeSignature>,
 }
 
 impl Timeline {
-    fn new() -> Timeline {
-        Timeline { beats_per_bar: 4, markers: Vec::new(), arrangements: 0 }
+    fn new(flp: &Flp<'_>) -> Timeline {
+        Timeline {
+            top: None,
+            bottom: None,
+            mode: None,
+            markers: Vec::new(),
+            arrangements: 0,
+            has_arrangements: flp.events.iter().any(|e| e.id == EV_ARRANGEMENT_NEW),
+            change: None,
+            start: None,
+        }
+    }
+
+    /// The song's time signature. Tempo and ticks count quarter notes whatever it says, so 6/8 is a bar of 3 of
+    /// them. Event 18 is only the bottom number when event 35 says "Set as time signature", as every FL 20, 21 and
+    /// 25 save of Solomon's does (always with 18 = 4: no save in x/8 has been seen, so that it holds 8 there is from
+    /// PyFLP and Lynx Share, not from a save). Before FL 20 there is no event 35 and event 18 is the steps in a
+    /// beat (4, or 6 in one FL 12 song), so event 17 counts quarter notes.
+    ///
+    /// A time signature marker at the very start of the playlist says it over the project's own.
+    fn signature(&self) -> TimeSignature {
+        if let Some(start) = self.start {
+            return start;
+        }
+        // Without a top number that can be one, nothing else said counts: 4/4.
+        let Some(top) = self.top.filter(|top| (1..=32).contains(top)) else { return TimeSignature::FOUR_FOUR };
+        let as_written = match (self.mode, self.bottom) {
+            (Some(1), Some(bottom @ (2 | 4 | 8 | 16))) => TimeSignature::new(top, bottom),
+            _ => None,
+        };
+        as_written.or(TimeSignature::quarters(top)).unwrap_or_default()
     }
 
     /// Still in the first arrangement: the next one repeats its playlist, tracks and markers.
@@ -81,18 +130,55 @@ impl Timeline {
         self.arrangements <= 1
     }
 
+    /// Where the song's own markers are: in the first arrangement, or anywhere in a save from before FL had them.
+    /// In Solomon's FL 20 to 25 saves every marker before the first arrangement comes straight after a pattern's
+    /// event 65 (scales mostly), and every one of the song's after its playlist.
+    fn songs_markers(&self) -> bool {
+        if self.has_arrangements { self.arrangements == 1 } else { true }
+    }
+
     fn step(&mut self, flp: &Flp<'_>, e: &Event<'_>) {
-        let first = self.first();
         match e.id {
-            EV_TIME_SIG_NUMERATOR if (1..=32).contains(&e.int()) => self.beats_per_bar = e.int(),
-            EV_ARRANGEMENT_NEW => self.arrangements += 1,
-            EV_TIME_MARKER if first => self.markers.push(((e.int() & 0x07FF_FFFF) as i64, String::new())),
-            EV_MARKER_NAME if first => {
-                if let Some(m) = self.markers.last_mut() {
-                    m.1 = flp.text(&e.data);
+            EV_TIME_SIG_NUMERATOR if self.top.is_none() => self.top = Some(e.int()),
+            EV_TIME_SIG_DENOMINATOR if self.bottom.is_none() => self.bottom = Some(e.int()),
+            EV_TIME_SIG_MODE if self.mode.is_none() => self.mode = Some(e.int()),
+            EV_ARRANGEMENT_NEW => {
+                self.arrangements += 1;
+                self.change = None;
+            }
+            EV_TIME_MARKER if self.songs_markers() => {
+                let at = (e.int() & 0x00FF_FFFF) as i64;
+                self.markers.push((at, String::new()));
+                self.change = (e.int() >> 24 == MARKER_SIGNATURE).then_some((at, None, None));
+            }
+            EV_MARKER_NUMERATOR | EV_MARKER_DENOMINATOR if self.songs_markers() => self.signature_marker(e),
+            EV_MARKER_NAME if self.songs_markers() => {
+                // The name comes after the marker's numbers; an empty one leaves the name they gave it.
+                let name = flp.text(&e.data);
+                if let Some(m) = self.markers.last_mut().filter(|m| !name.is_empty() || m.1.is_empty()) {
+                    m.1 = name;
                 }
             }
             _ => {}
+        }
+    }
+
+    /// One of the two numbers of the last marker, when it changes the time signature: with both, the marker is
+    /// named by them if it has no name, and one at the very start sets the song's. What it changes further on isn't
+    /// followed: a song is read by the time signature it starts with.
+    fn signature_marker(&mut self, e: &Event<'_>) {
+        let Some((at, top, bottom)) = &mut self.change else { return };
+        match e.id {
+            EV_MARKER_NUMERATOR => *top = Some(e.int()),
+            _ => *bottom = Some(e.int()),
+        }
+        let (Some(top), Some(bottom)) = (*top, *bottom) else { return };
+        let Some(signature) = TimeSignature::new(top, bottom) else { return };
+        if *at == 0 {
+            self.start = Some(signature);
+        }
+        if let Some(m) = self.markers.last_mut().filter(|m| m.1.is_empty()) {
+            m.1 = format!("{top}/{bottom}");
         }
     }
 }
@@ -146,14 +232,13 @@ struct Placement {
 
 /// A clip's fades in beats, from seconds: together they can't be longer than the clip.
 fn fades((fade_in, fade_out): (f64, f64), length: f64, tempo: f64) -> (f64, f64) {
-    let fade_in = (fade_in * tempo / 60.0).clamp(0.0, length.max(0.0));
-    (fade_in, (fade_out * tempo / 60.0).clamp(0.0, (length - fade_in).max(0.0)))
+    fades_within(fade_in * tempo / 60.0, fade_out * tempo / 60.0, length)
 }
 
 /// The playlist as FL Studio shows it (its first arrangement).
 struct Playlist {
     ppq: u16,
-    beats_per_bar: u32,
+    signature: TimeSignature,
     tracks: BTreeMap<u32, Track>,
     patterns: BTreeMap<u32, Pattern>,
     items: Vec<Placement>,
@@ -165,7 +250,7 @@ struct Playlist {
 
 fn read_playlist(flp: &Flp<'_>) -> Playlist {
     let known = known_channels(flp);
-    let mut timeline = Timeline::new();
+    let mut timeline = Timeline::new(flp);
     let mut channel_colours = HashMap::new();
     let mut channel_names = HashMap::new();
     let mut automation_channels = HashSet::new();
@@ -288,7 +373,7 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
 
     Playlist {
         ppq: flp.ppq,
-        beats_per_bar: timeline.beats_per_bar,
+        signature: timeline.signature(),
         tracks,
         patterns,
         items,
@@ -474,7 +559,7 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
     Arrangement {
         view: PLAYLIST_VIEW,
         tempo,
-        beats_per_bar: pl.beats_per_bar,
+        signature: pl.signature,
         lanes,
         markers: markers(&pl.markers, pl.ppq),
         notes,
@@ -599,7 +684,7 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
     }
     // The lanes come from the song, which stops placing notes or points at its limit.
     notes.extend(song.warning.map(str::to_owned));
-    Arrangement { view: BITWIG_VIEW, tempo, beats_per_bar: pl.beats_per_bar, lanes, markers: Vec::new(), notes }
+    Arrangement { view: BITWIG_VIEW, tempo, signature: pl.signature, lanes, markers: Vec::new(), notes }
 }
 
 /// A channel's sample playing in a clip `beats` long, from `from` seconds in, stretched as the channel says.

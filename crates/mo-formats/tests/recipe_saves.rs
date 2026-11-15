@@ -212,13 +212,13 @@ fn fl_reads_the_first_arrangement_only() {
 #[test]
 fn time_signature_and_marker() {
     let a = fl("16 time signature and marker");
-    assert_eq!(a.beats_per_bar, 3);
+    assert_eq!(a.signature.beats(), 3.0);
     assert_eq!(a.markers.len(), 1);
     assert_eq!(a.markers[0].name, "Verse");
     assert!(near(a.markers[0].beat, 3.0));
     // Fender's marker went on beat 4 (where the tone starts), not bar 2 of 3/4.
     let a = fender("12 time signature and marker");
-    assert_eq!(a.beats_per_bar, 3);
+    assert_eq!(a.signature.beats(), 3.0);
     assert_eq!(a.markers[0].name, "Verse");
     assert!(near(a.markers[0].beat, 4.0));
 }
@@ -379,7 +379,7 @@ fn fender_bus() {
 #[test]
 fn bitwig_time_signature_and_marker() {
     let a = bitwig("16 time signature and marker");
-    assert_eq!(a.beats_per_bar, 3);
+    assert_eq!(a.signature.beats(), 3.0);
     assert_eq!(a.markers.len(), 1);
     assert_eq!(a.markers[0].name, "Verse");
     // The save has the cue marker on beat 4, where the tone starts.

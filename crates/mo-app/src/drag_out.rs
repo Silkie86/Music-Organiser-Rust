@@ -220,7 +220,7 @@ pub fn from_part(name: &str, notes: &[NoteEvent], bars: i32, tint: u32) -> Resul
     let length = clip.end.unwrap_or(0) as f64 / ppq;
     let card = Card {
         title: name.to_owned(),
-        detail: ["MIDI".to_owned(), count_of(heard.len(), "note", "notes"), bars_text(length, 4)]
+        detail: ["MIDI".to_owned(), count_of(heard.len(), "note", "notes"), bars_text(length, 4.0)]
             .into_iter()
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
@@ -409,7 +409,7 @@ pub fn from_arrangement(
         Pick::Lane(_) => lane.colour.or_else(|| clips.first().and_then(|(c, _)| c.colour)),
     }
     .unwrap_or(0);
-    let bars = bars_text(length, arrangement.beats_per_bar);
+    let bars = bars_text(length, arrangement.signature.beats());
     let mut out = Outgoing { missing: gathered.missing, ..Outgoing::default() };
     if notes > 0 {
         let midi = midi_clip(&name, &gathered.parts, length);
@@ -586,11 +586,11 @@ fn thumb_notes(notes: &[BeatNote], length: f64) -> Vec<ThumbNote> {
 }
 
 /// "2 bars", "1.5 bars"; nothing when it can't be told.
-fn bars_text(beats: f64, beats_per_bar: u32) -> String {
-    if !(beats > 0.0 && beats.is_finite()) || beats_per_bar == 0 {
+fn bars_text(beats: f64, beats_per_bar: f64) -> String {
+    if !(beats > 0.0 && beats_per_bar > 0.0 && beats.is_finite()) {
         return String::new();
     }
-    let bars = beats / f64::from(beats_per_bar);
+    let bars = beats / beats_per_bar;
     let rounded = (bars * 10.0).round() / 10.0;
     if (rounded - rounded.round()).abs() < 1e-9 {
         count_of(rounded.round() as usize, "bar", "bars")
@@ -1014,7 +1014,14 @@ mod tests {
     }
 
     fn song(lanes: Vec<PreviewLane>) -> Arrangement {
-        Arrangement { view: "Test", tempo: 120.0, beats_per_bar: 4, lanes, markers: Vec::new(), notes: Vec::new() }
+        Arrangement {
+            view: "Test",
+            tempo: 120.0,
+            signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
+            lanes,
+            markers: Vec::new(),
+            notes: Vec::new(),
+        }
     }
 
     fn no_waves(_: &str) -> Option<Vec<f32>> {
@@ -1231,12 +1238,12 @@ mod tests {
 
     #[test]
     fn bars_read_plainly() {
-        assert_eq!(bars_text(8.0, 4), "2 bars");
-        assert_eq!(bars_text(4.0, 4), "1 bar");
-        assert_eq!(bars_text(6.0, 4), "1.5 bars");
-        assert_eq!(bars_text(0.0, 4), "");
-        assert_eq!(bars_text(f64::NAN, 4), "");
-        assert_eq!(bars_text(8.0, 0), "");
+        assert_eq!(bars_text(8.0, 4.0), "2 bars");
+        assert_eq!(bars_text(4.0, 4.0), "1 bar");
+        assert_eq!(bars_text(6.0, 4.0), "1.5 bars");
+        assert_eq!(bars_text(0.0, 4.0), "");
+        assert_eq!(bars_text(f64::NAN, 4.0), "");
+        assert_eq!(bars_text(8.0, 0.0), "");
     }
 
     /// An empty folder of the test's own to stand for the Temp folder (rule 11: never the real one), named for the test.

@@ -648,7 +648,7 @@ fn bitwig_deactivated_tracks_time_signature_markers_and_automation() {
         None,
     );
     let a = read("Song.bwproject", &bytes);
-    assert_eq!(a.beats_per_bar, 3);
+    assert_eq!(a.signature.beats(), 3.0);
     let markers: Vec<_> = a.markers.iter().map(|m| (m.name.as_str(), m.beat)).collect();
     assert_eq!(markers, [("Marker", 2.0), ("Drop", 8.0)]);
     let shown: Vec<_> =
@@ -852,7 +852,8 @@ fn studio_one_tracks_folders_parts_patterns_audio_and_markers() {
         ("Performances/Beat.pattern", pattern.as_bytes()),
     ]);
     let a = read("Song.song", &bytes);
-    assert_eq!((a.view, a.tempo, a.beats_per_bar), ("Studio One arrangement", 120.0, 3));
+    assert_eq!((a.view, a.tempo, a.signature.beats()), ("Studio One arrangement", 120.0, 3.0));
+    assert_eq!((a.signature.top(), a.signature.bottom()), (6, 8));
     assert!(a.notes.is_empty(), "{:?}", a.notes);
     assert_eq!(
         lanes(&a),
@@ -1293,4 +1294,54 @@ fn notes_on_muted_tracks_dont_count_as_playing() {
     let a = read("Muted.song", &stored_zip(&[("Song/song.xml", song.as_bytes())]));
     assert_eq!(a.lanes.iter().map(|l| l.muted).collect::<Vec<_>>(), [false, true]);
     assert_eq!(a.note_count(), 1);
+}
+
+#[test]
+fn a_bar_can_be_half_a_beat_longer_and_a_damaged_signature_is_four_four() {
+    // Studio One: 7/8 is three and a half quarter notes, not rounded to 4.
+    let studio_one = |signature: &str| {
+        let song = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Song><Attributes x:id="tempoMap"><TempoMapSegment tempo="0.5"/></Attributes>{signature}<List x:id="Tracks"/></Song>"#
+        );
+        let a = read("Song.song", &stored_zip(&[("Song/song.xml", song.as_bytes())]));
+        (a.signature.top(), a.signature.bottom(), a.signature.beats())
+    };
+    assert_eq!(studio_one(r#"<TimeSignatureMapSegment numerator="7" denominator="8"/>"#), (7, 8, 3.5));
+    assert_eq!(studio_one(r#"<TimeSignatureMapSegment numerator="5" denominator="8"/>"#), (5, 8, 2.5));
+    assert_eq!(studio_one(r#"<TimeSignatureMapSegment numerator="3"/>"#), (3, 4, 3.0));
+    assert_eq!(studio_one(""), (4, 4, 4.0));
+    // A denominator of 0 used to make a bar of four billion beats.
+    for damaged in [
+        r#"numerator="4" denominator="0""#,
+        r#"numerator="0" denominator="4""#,
+        r#"numerator="7.5" denominator="8""#,
+        r#"numerator="900" denominator="3""#,
+    ] {
+        assert_eq!(studio_one(&format!("<TimeSignatureMapSegment {damaged}/>")), (4, 4, 4.0), "{damaged}");
+    }
+    // Bitwig says the bar's length in sixteenth notes: 14 is 7/8.
+    let bitwig = |packed: i32| {
+        let bytes = BwWriter::file(
+            |_| {},
+            |b| {
+                b.begin(0x520);
+                b.obj(0x190);
+                b.begin(0xd7);
+                b.obj(0x212);
+                b.begin(0x7f4);
+                b.i32(0x1cbe, packed);
+                b.end();
+                b.end();
+                b.end();
+            },
+            None,
+        );
+        let a = read("Song.bwproject", &bytes);
+        (a.signature.top(), a.signature.bottom(), a.signature.beats())
+    };
+    assert_eq!(bitwig(0x0E00_0024), (7, 8, 3.5));
+    assert_eq!(bitwig(0x1000_0024), (4, 4, 4.0));
+    assert_eq!(bitwig(0x0500_0024), (5, 16, 1.25));
+    assert_eq!(bitwig(0x0000_0024), (4, 4, 4.0));
 }
