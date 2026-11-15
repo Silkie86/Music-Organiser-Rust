@@ -263,6 +263,8 @@ export global SoundsData {
     in property <string> galaxy-trail;
     in property <[TrailDot]> galaxy-trail-dots;
     in property <[SweptLine]> galaxy-swept;
+    // The line Back and Next are on, from the top: kept in sight when the card is too short for every line.
+    in property <int> galaxy-swept-at;
     callback galaxy-swept-go(int);
     callback galaxy-swept-step(int);
     // The Swept card was clicked into: Up and Down go through its sounds until the map is clicked (or Left or Right).
@@ -1916,7 +1918,9 @@ export component SoundsPage inherits Rectangle {
                                 opacity: l.fade;
                                 clicked => { SoundsData.galaxy-label(l.region); }
                             }
-                            if SoundsData.galaxy-mini-shown: MapInset {
+                            // There shown or not, so the Swept card can leave its real height free.
+                            mini := MapInset {
+                                visible: SoundsData.galaxy-mini-shown;
                                 x: sky.width - self.width - Space.md;
                                 y: sky.height - self.height - Space.md;
                                 picture: SoundsData.galaxy-mini-image;
@@ -1927,21 +1931,28 @@ export component SoundsPage inherits Rectangle {
                                 box-height: SoundsData.galaxy-mini-height;
                                 go(x, y) => { SoundsData.galaxy-mini(x, y); }
                             }
+                            // Below the map's own settings: in a map too narrow for them on one line, their second
+                            // line lay over the card's top. It stops above the mini-map, as the plugin's does, so a
+                            // long sweep in a short window doesn't lie over it and take its clicks (the whole-app
+                            // review of 14 Nov, SO-8).
                             if SoundsData.galaxy-swept.length > 0: Panel {
                                 x: sky.width - self.width - Space.md;
-                                y: Space.md;
+                                y: map-settings.y + map-settings.height + Space.sm;
                                 width: 250px;
-                                height: min(swept-card.preferred-height, sky.height - 2 * Space.md);
+                                height: min(swept-card.preferred-height,
+                                    sky.height - self.y - Space.md - (mini.visible ? mini.height + Space.md : 0px));
                                 // Accent while the arrow keys go through it.
                                 border-color: SoundsData.galaxy-swept-keys && keys.has-focus ? Theme.accent : Theme.edge;
                                 clip: true;
                                 // The card takes its own clicks and the wheel, so they don't reach the map under it; a
-                                // click on it hands it the arrow keys.
+                                // click on it hands it the arrow keys. Without its own say, the wheel went on and
+                                // zoomed the map (SO-8).
                                 TouchArea {
                                     clicked => {
                                         keys.focus();
                                         SoundsData.galaxy-swept-keys = true;
                                     }
+                                    scroll-event(e) => { accept }
                                 }
                                 swept-card := VerticalLayout {
                                     padding: Space.md;
@@ -1972,45 +1983,65 @@ export component SoundsPage inherits Rectangle {
                                             }
                                         }
                                     }
-                                    for line[i] in SoundsData.galaxy-swept: ListLine {
-                                        height: 30px;
-                                        selected: line.current;
-                                        tip: line.kind;
-                                        draggable: true;
-                                        lifted: line.place == SoundsData.lifted-alike;
-                                        landed: line.place == SoundsData.landed-alike;
-                                        drag-out => { SoundsData.drag-alike(line.place); }
-                                        drag-let-go => { SoundsData.drag-let-go(); }
-                                        clicked => {
-                                            keys.focus();
-                                            SoundsData.galaxy-swept-keys = true;
-                                            SoundsData.galaxy-swept-go(i);
-                                        }
-                                        HorizontalLayout {
-                                            padding-left: Space.sm;
-                                            padding-right: Space.sm;
-                                            spacing: Space.sm;
-                                            alignment: start;
-                                            VerticalLayout {
-                                                alignment: center;
-                                                Dot { tint: Theme.sound-type(line.colour); }
-                                            }
-                                            Text {
-                                                text: line.name;
-                                                color: line.current ? Theme.text : Theme.muted;
-                                                font-size: Type.meta;
-                                                vertical-alignment: center;
-                                                overflow: elide;
-                                                horizontal-stretch: 1;
+                                    // The lines, in a box that gives way when the card is too short for them all (a
+                                    // long sweep in a short window), so the card's top and its Clear line stay in sight,
+                                    // and the line Back and Next are on with them: before, the card cut off its end.
+                                    lines-box := Rectangle {
+                                        min-height: 0px;
+                                        preferred-height: swept-lines.preferred-height;
+                                        vertical-stretch: 1;
+                                        clip: true;
+                                        swept-lines := VerticalLayout {
+                                            // Whole lines from the top, moved up a line at a time just enough for
+                                            // the one Back and Next are on to show.
+                                            y: -max(0, SoundsData.galaxy-swept-at + 1
+                                                - max(1, floor((lines-box.height + Space.xs) / (30px + Space.xs))))
+                                                * (30px + Space.xs);
+                                            width: parent.width;
+                                            height: self.preferred-height;
+                                            spacing: Space.xs;
+                                            for line[i] in SoundsData.galaxy-swept: ListLine {
+                                                height: 30px;
+                                                selected: line.current;
+                                                tip: line.kind;
+                                                draggable: true;
+                                                lifted: line.place == SoundsData.lifted-alike;
+                                                landed: line.place == SoundsData.landed-alike;
+                                                drag-out => { SoundsData.drag-alike(line.place); }
+                                                drag-let-go => { SoundsData.drag-let-go(); }
+                                                clicked => {
+                                                    keys.focus();
+                                                    SoundsData.galaxy-swept-keys = true;
+                                                    SoundsData.galaxy-swept-go(i);
+                                                }
+                                                HorizontalLayout {
+                                                    padding-left: Space.sm;
+                                                    padding-right: Space.sm;
+                                                    spacing: Space.sm;
+                                                    alignment: start;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Dot { tint: Theme.sound-type(line.colour); }
+                                                    }
+                                                    Text {
+                                                        text: line.name;
+                                                        color: line.current ? Theme.text : Theme.muted;
+                                                        font-size: Type.meta;
+                                                        vertical-alignment: center;
+                                                        overflow: elide;
+                                                        horizontal-stretch: 1;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                     HorizontalLayout {
                                         spacing: Space.sm;
-                                        // What the arrow keys do here, so it's seen, not guessed.
+                                        // What the arrow keys do here, so it's seen, not guessed. Short enough to
+                                        // fit beside Clear on the card ("Up and Down go through these" lost its end).
                                         Text {
                                             text: SoundsData.galaxy-swept-keys && keys.has-focus
-                                                ? "Up and Down go through these"
+                                                ? "Up and Down: these sounds"
                                                 : "Click here, then Up and Down";
                                             color: SoundsData.galaxy-swept-keys && keys.has-focus ? Theme.accent : Theme.muted;
                                             font-size: Type.meta;
@@ -2030,7 +2061,7 @@ export component SoundsPage inherits Rectangle {
                             // The map's own settings, on the map (they were a row of chips above it, among the
                             // filters): how it places and lights its stars and what a sweep plays, as small
                             // drop-downs in its top left corner, and the two buttons after them.
-                            FlexboxLayout {
+                            map-settings := FlexboxLayout {
                                 x: Space.md;
                                 y: Space.md;
                                 width: sky.width - 2 * Space.md;

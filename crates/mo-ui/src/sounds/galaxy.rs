@@ -30,7 +30,7 @@ use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
 
 use super::sky::{Shine, Sky};
-use super::{CHOICES, FEED, HERE, PAGE, click_on, clicked, pick, play_picked};
+use super::{CHOICES, FEED, HERE, PAGE, click_on, clicked, did, pick, play_picked};
 use crate::gpu;
 use crate::{AppWindow, GalaxyLabel, SoundsData, SweptLine, Theme, TrailDot};
 
@@ -590,7 +590,8 @@ pub(super) fn wire(app: &AppWindow) {
     });
     // A double-click plays the star, as a tile's does: from its start when its first click stopped it (it was the one
     // playing) or only picked it (Autoplay off), and on from its first click's start when that played it. Its
-    // button's coming up, heard after this, is no click of its own.
+    // button's coming up, heard after this, is no click of its own. Either way it's a play you meant, kept for History
+    // and Most liked as a tile's or a line's double-click is (the whole-app review of 14 Nov, SO-6).
     let weak = app.as_weak();
     data.on_galaxy_double(move || {
         let Some(app) = weak.upgrade() else { return };
@@ -599,12 +600,12 @@ pub(super) fn wire(app: &AppWindow) {
             p.galaxy.doubled = true;
             (p.galaxy.view.mouse, p.playing.map(|(i, _)| i))
         });
-        if let Some(at) = star_at(x, y)
-            && playing != Some(at)
-        {
+        let Some(at) = star_at(x, y) else { return };
+        if playing != Some(at) {
             pick(&app, at);
             play_picked(&app, 0.0);
         }
+        did::played(&app, at);
     });
     let weak = app.as_weak();
     data.on_galaxy_mini(move |fx, fy| {
@@ -1048,7 +1049,9 @@ fn swept_step(app: &AppWindow, by: i32) {
 }
 
 /// The trail on the map (a line through the swept stars and a dot on each, fainter with age) and on the Swept card.
-fn show_trail(app: &AppWindow) {
+/// Shown again after [`forget`] lets the trail go, so the card doesn't go on with lines whose places were in the old
+/// list: a drag from one carried whatever sound took that place (the whole-app review of 14 Nov, SO-5).
+pub(super) fn show_trail(app: &AppWindow) {
     let _doing = crate::watchdog::doing("Galaxy: show the trail");
     let (path, dots, lines) = PAGE.with(|p| {
         let p = p.borrow();
@@ -1096,6 +1099,8 @@ fn show_trail(app: &AppWindow) {
     let data = app.global::<SoundsData>();
     data.set_galaxy_trail(path.into());
     data.set_galaxy_trail_dots(ModelRc::new(VecModel::from(dots)));
+    let at = lines.iter().position(|line| line.current).unwrap_or(0);
+    data.set_galaxy_swept_at(i32::try_from(at).unwrap_or(0));
     data.set_galaxy_swept(ModelRc::new(VecModel::from(lines)));
 }
 
@@ -1220,7 +1225,8 @@ fn star_at_in(g: &Galaxy, x: f32, y: f32) -> Option<usize> {
     g.grid.as_ref()?.nearest(mx, my, NEAR / g.view.unit())
 }
 
-/// A new library: its stars are placed afresh (they're kept by place in the list).
+/// A new library: its stars are placed afresh (they're kept by place in the list). The trail goes with them: the
+/// caller shows it again once the page is let go ([`show_trail`]), which empties the Swept card.
 pub(super) fn forget(g: &mut Galaxy) {
     if let Some(old) = g.loading.take() {
         old.store(true, Ordering::Relaxed);
