@@ -61,6 +61,10 @@ final class Reports {
     private Path folder;
     /** Finds the folder again ({@link #refresh}), or null for one that stays where it is. */
     private final Supplier<Path> find;
+    /** How long a look for the folder holds before {@link #refresh} looks again. */
+    static final long LOOK_AGAIN_MS = 60_000;
+    /** When the folder was last looked for, by the clock; none yet at first. */
+    private long lookedAt = Long.MIN_VALUE;
     private final Clock clock;
     private String problem;
 
@@ -75,6 +79,7 @@ final class Reports {
         this.folder = find.get();
         this.find = find;
         this.clock = clock;
+        this.lookedAt = clock.millis();
     }
 
     /**
@@ -84,6 +89,11 @@ final class Reports {
      */
     boolean refresh() {
         if (find == null) return false;
+        // Not at every connection: looking reads two small files, one of them on the drive the folder moved to, which
+        // may be slow to wake, and this runs on Bitwig's own thread.
+        long now0 = clock.millis();
+        if (lookedAt != Long.MIN_VALUE && now0 - lookedAt < LOOK_AGAIN_MS) return false;
+        lookedAt = now0;
         try {
             Path now = find.get();
             if (now == null || now.equals(folder)) return false;

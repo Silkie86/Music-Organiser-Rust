@@ -284,7 +284,9 @@ pub fn bitwig_words(state: Option<&State>) -> String {
         None => "Paused".into(),
         Some(State::Connecting) => "Looking for Bitwig".into(),
         Some(State::NoBitwig) => "Bitwig isn't open, or the extension isn't added in it".into(),
-        Some(State::NoAnswer(_)) => "Bitwig is busy, or something else has its port (19791)".into(),
+        Some(State::NoAnswer) => {
+            "Bitwig isn't answering: it may be busy or closing, or something else has its port".into()
+        }
         Some(State::TooOld(what)) => format!("Bitwig has {what}: install the extension again (Settings > DAWs)"),
         Some(State::Refused(why)) => format!("Bitwig said no: {why}"),
         Some(State::Watching) => "Bitwig connected".into(),

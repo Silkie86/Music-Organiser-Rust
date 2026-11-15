@@ -5,7 +5,7 @@
 use std::net::TcpListener;
 use std::time::Duration;
 
-use mo_dawlink::bitwig::fake::{CHANGES_OFF, FakeBitwig, OnConnect, World};
+use mo_dawlink::bitwig::fake::{CHANGES_OFF, FakeBitwig, OnConnect, SELF_CHECK_SAYS, World};
 use mo_dawlink::bitwig::{DeviceId, Error, Inserted, Link, Pad};
 use serde_json::{Value, json};
 
@@ -276,10 +276,7 @@ fn an_old_script_or_changes_off_take_nothing() {
 #[test]
 fn a_link_that_didnt_start_says_why() {
     let bitwig = with(|w| {
-        w.hello.insert(
-            "error".into(),
-            json!("The Bitwig extension failed: no transport. Ask for a selftest to see what's wrong."),
-        );
+        w.hello.insert("error".into(), json!(format!("The Bitwig extension failed: no transport.{SELF_CHECK_SAYS}")));
     });
     let link = connect(&bitwig);
     assert_eq!(link.hello().project, "");
@@ -287,8 +284,10 @@ fn a_link_that_didnt_start_says_why() {
     assert!(matches!(err, Error::NotStarted(_)));
     assert_eq!(
         err.to_string(),
-        "Part of the Music Organiser extension didn't start in Bitwig, so the app didn't send anything. Restarting \
-         Bitwig may help. Bitwig said: The Bitwig extension failed: no transport. Ask for a selftest to see what's wrong."
+        format!(
+            "Part of the Music Organiser extension didn't start in Bitwig, so the app didn't send anything. \
+             Restarting Bitwig may help. Bitwig said: The Bitwig extension failed: no transport.{SELF_CHECK_SAYS}"
+        )
     );
 }
 

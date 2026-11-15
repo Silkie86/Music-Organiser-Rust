@@ -386,6 +386,11 @@ impl Default for World {
     }
 }
 
+/// How the extension's errors about a part of Bitwig it couldn't use end from 3.30 (`Link.SELF_CHECK_SAYS` in the
+/// Java, which this copies).
+pub const SELF_CHECK_SAYS: &str = " The self-check Bitwig wrote as it started says why: the newest self-check file \
+                                   in the app's data folder, under reports, then bitwig.";
+
 /// A selection that moves when a request comes ([`World::select_on`]), before the request is answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectOn {
@@ -1184,8 +1189,7 @@ impl World {
         };
         // As the greeting says (`songLoop`): a Bitwig that didn't let the link reach its loop refuses the bars.
         if self.greeting().get("songLoop").and_then(Value::as_bool) == Some(false) {
-            return Err("This Bitwig didn't let the link set the arranger's loop. The self-check Bitwig wrote as it started says \
-                        why: the newest self-check file in the app's data folder, under reports, then bitwig.".into());
+            return Err(format!("This Bitwig didn't let the link set the arranger's loop.{SELF_CHECK_SAYS}"));
         }
         Ok(Some(bars))
     }

@@ -992,8 +992,16 @@ final class Link {
         clients.add(client);
         knownPort();
         // The app may have moved its data folder since Bitwig started (it switches at its own start, with Bitwig
-        // often left open): the reports follow it from the next connection on, and the new folder is tidied.
-        if (reports.refresh()) reports.tidy();
+        // often left open): the reports follow it from the next connection on. The new folder is tidied and gets a
+        // self-check of its own, which the errors point at (SELF_CHECK_SAYS).
+        if (reports.refresh()) {
+            reports.tidy();
+            try {
+                selfTest("moved");
+            } catch (RuntimeException | LinkageError e) {
+                host.errorln("Music Organiser: the self-check failed (" + e + ").");
+            }
+        }
         connection.setDisconnectCallback(() -> {
             client.open = false;
             clients.remove(client);

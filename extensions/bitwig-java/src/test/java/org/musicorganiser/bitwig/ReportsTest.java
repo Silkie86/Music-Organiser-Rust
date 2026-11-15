@@ -14,6 +14,7 @@ import java.nio.file.Paths;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -91,11 +92,30 @@ class ReportsTest {
     @Test
     void followsAFolderThatMovesWhileBitwigIsOpen() throws IOException {
         Path[] where = {temp.resolve("first")};
-        Reports reports = new Reports(() -> where[0], CLOCK);
+        Instant[] now = {CLOCK.instant()};
+        Clock clock = new Clock() {
+            @Override
+            public ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(ZoneId zone) {
+                return this;
+            }
+
+            @Override
+            public Instant instant() {
+                return now[0];
+            }
+        };
+        Reports reports = new Reports(() -> where[0], clock);
         reports.log(Map.of("event", "connected"));
-        assertFalse(reports.refresh(), "still there");
         where[0] = temp.resolve("moved");
+        assertFalse(reports.refresh(), "looked a moment ago: not again at every connection");
+        now[0] = now[0].plusMillis(Reports.LOOK_AGAIN_MS);
         assertTrue(reports.refresh());
+        assertFalse(reports.refresh(), "still there");
         assertEquals(temp.resolve("moved"), reports.folder());
         reports.log(Map.of("event", "connected"));
         assertTrue(Files.isRegularFile(temp.resolve("moved").resolve("2026-10-14-link.jsonl")));

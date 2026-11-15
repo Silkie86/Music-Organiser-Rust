@@ -82,8 +82,8 @@ fn part_sent(job: Job, sent: Result<bitwig::SentPart, bitwig::Error>, says: &dyn
             match sent.mark {
                 bitwig::Mark::NotAsked | bitwig::Mark::Moved => job.done_as(&sent.title(), detail.trim()),
                 // The part is in, but its bar isn't marked, and the words say what to do about it: a card that
-                // stays until it's closed, as a failure's does, not a line gone in a few seconds.
-                _ => job.failed_as(&format!("{}, but its bar isn't marked", sent.title()), detail.trim()),
+                // stays until it's closed, not a line gone in a few seconds. Done all the same: the part went in.
+                _ => job.done_to_read(&format!("{}, but its bar isn't marked", sent.title()), detail.trim()),
             }
             true
         }

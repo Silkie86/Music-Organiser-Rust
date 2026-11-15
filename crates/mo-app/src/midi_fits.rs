@@ -453,7 +453,7 @@ pub fn put_words(put: &PutIn, place: &PutPlace, name: &str, song: &str) -> (bool
     (whole && put.not_back.is_empty() && !put.clip_left, title, line)
 }
 
-/// What a sent part's card adds (after its own line) about Bitwig's play start marking the first of the song's bars
+/// What a sent part's card says (before its own line: `mo_app::to_bitwig` trims the space in front) about Bitwig's play start marking the first of the song's bars
 /// the part was found for (`mo_dawlink::bitwig::Bitwig::send_part_for_song`): where to drag the clip to, or why the
 /// play start is where it was. "" when the mark wasn't asked for.
 pub fn mark_words(mark: &Mark, with: &SongBars, song: &str) -> String {

@@ -81,7 +81,7 @@ fn says_when_something_else_answers_on_the_port() {
     });
     let watch = Watch::start(port);
     let live = until(&watch, |l| l.state != State::Connecting);
-    assert!(matches!(&live.state, State::NoAnswer(why) if !why.is_empty()), "{:?}", live.state);
+    assert_eq!(live.state, State::NoAnswer);
     drop(watch);
     other.join().unwrap();
 }
