@@ -576,6 +576,11 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.on_keys_search_edited(move |words| {
         PAGE.with(|p| {
             if let Some(p) = p.borrow_mut().as_mut() {
+                // Typing in the search stops a line listening: the new words may hide it, and it would take the next
+                // key out of sight (the whole-app review of 14 Nov, AP-3).
+                if p.keys_search != words.as_str() {
+                    p.listening = None;
+                }
                 p.keys_search = words.to_string();
             }
         });
@@ -752,10 +757,9 @@ fn keys_now(app: &AppWindow, keys: &mo_app::shortcuts::Shortcuts, said: String) 
     show(app);
 }
 
-/// Remembers the page on show, for "Last page I used": only while that's the start page, so other clicks on the rail
-/// write nothing.
 /// Shows one tab (picked on the page, or by Ctrl+K).
 pub fn show_tab(app: &AppWindow, tab: Tab) {
+    left_shortcuts(tab);
     change(TAB_KEY, tab.name());
     show(app);
     if tab == Tab::Daws {
@@ -766,18 +770,52 @@ pub fn show_tab(app: &AppWindow, tab: Tab) {
 /// Goes to Settings on `tab` (from Ctrl+K, or the rail's DAW lines): the tab first, so the page asks Bitwig once as
 /// it shows when that's the DAWs tab ([`show_tab`] after going there would ask again).
 pub fn open_on(app: &AppWindow, tab: Tab) {
+    left_shortcuts(tab);
     change(TAB_KEY, tab.name());
     crate::go_to(app, Place::Settings.index() as i32);
 }
 
+/// Another tab than Shortcuts on show stops it listening, as leaving Settings does: nothing on the tab says a key is
+/// awaited, and the next key there would take a shortcut's place (the whole-app review of 14 Nov, AP-6).
+fn left_shortcuts(tab: Tab) {
+    if tab != Tab::Shortcuts {
+        stop_listening();
+    }
+}
+
+/// Shortcuts stops listening for a key, so the next key works as a key again.
+fn stop_listening() {
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.listening = None;
+        }
+    });
+}
+
+/// Whether the Shortcuts tab is the one on show, so Ctrl+F has its search box to go to.
+pub fn on_shortcuts() -> bool {
+    PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| Tab::from_setting(p.settings.get(TAB_KEY)) == Tab::Shortcuts))
+}
+
+/// Esc on Settings (`app.escape`, once a line listening has had its Esc): the Shortcuts search's words come off, as
+/// every page's search clears first (the whole-app review of 14 Nov, AP-7). Says whether it did (when not, the key
+/// goes on).
+pub fn escape(app: &AppWindow) -> bool {
+    let data = app.global::<SettingsData>();
+    if !on_shortcuts() || data.get_keys_search().is_empty() {
+        return false;
+    }
+    data.set_keys_search(SharedString::new());
+    data.invoke_keys_search_edited(SharedString::new());
+    true
+}
+
+/// Remembers the page on show, for "Last page I used": only while that's the start page, so other clicks on the rail
+/// write nothing.
 pub fn page_shown(place: Place) {
     // Leaving Settings stops Shortcuts listening, so the next key on another page works as a key again.
     if place != Place::Settings {
-        PAGE.with(|p| {
-            if let Some(p) = p.borrow_mut().as_mut() {
-                p.listening = None;
-            }
-        });
+        stop_listening();
     }
     let wanted = PAGE.with(|p| {
         p.borrow().as_ref().is_some_and(|p| p.settings.get(START_PAGE_KEY) == Some(mo_app::places::LAST_PAGE_CHOICE))

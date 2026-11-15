@@ -658,8 +658,11 @@ export component TickBox inherits Rectangle {
     }
 }
 
-// A slider from 0 to 1 between two words ("Safe" … "Adventurous"): drag or click the track, or use the arrow keys.
-// `moved` follows the knob; `released` says where it was let go, for work that should only run then.
+// A slider from 0 to 1 between two words ("Safe" … "Adventurous"): drag or click the track. `moved` follows the knob;
+// `released` says where it was let go, for work that should only run then. It takes no keys, as the Tempo slider
+// (RangeSlider) doesn't: the keys stay where they were. Keys of its own went with it when the part holding it went
+// (Favourites unticked, another view, the filter column folded), and then nothing had them, so no key worked until a
+// click (the whole-app review of 14 Nov, AP-2).
 export component StudioSlider inherits HorizontalLayout {
     in property <string> low;
     in property <string> high;
@@ -699,12 +702,12 @@ export component StudioSlider inherits HorizontalLayout {
             width: 14px;
             height: 14px;
             border-radius: 7px;
-            background: keys.has-focus ? Theme.accent : Theme.text;
+            // Lit while it's held.
+            background: touch.pressed ? Theme.accent : Theme.text;
         }
         touch := TouchArea {
             pointer-event(e) => {
                 if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
-                    keys.focus();
                     root.value = clamp(self.mouse-x / self.width, 0, 1);
                     root.moved(root.value);
                 } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
@@ -714,17 +717,6 @@ export component StudioSlider inherits HorizontalLayout {
             moved => {
                 root.value = clamp(self.mouse-x / self.width, 0, 1);
                 root.moved(root.value);
-            }
-        }
-        keys := FocusScope {
-            key-pressed(e) => {
-                if e.text == Key.LeftArrow || e.text == Key.RightArrow {
-                    root.value = clamp(root.value + (e.text == Key.LeftArrow ? -0.1 : 0.1), 0, 1);
-                    root.moved(root.value);
-                    root.released(root.value);
-                    return accept;
-                }
-                reject
             }
         }
         Tip {
