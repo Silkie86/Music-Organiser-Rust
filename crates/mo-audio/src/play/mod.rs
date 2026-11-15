@@ -154,6 +154,19 @@ impl Player {
         self.start(sound, key.into(), start_seconds, true, wanted)
     }
 
+    /// [`Player::play_looped_if`], where `from` says where the loop starts, given the key of the sound playing and where
+    /// it is at that moment (in seconds), with nothing able to start or stop meanwhile; or says no (`Err`), and
+    /// nothing starts. So a loop made again while the old one played on goes on from where the old one really is as
+    /// the new one goes in, not from where it was when it was asked for.
+    pub fn play_looped_from<E>(
+        &self,
+        sound: Arc<AudioData>,
+        key: impl Into<String>,
+        from: impl FnOnce(Option<(&str, f64)>) -> Result<f64, E>,
+    ) -> Result<(), E> {
+        self.start_from(sound, key.into(), true, from)
+    }
+
     /// [`Player::play`], only if `wanted` still says so as the sound starts, with no other play or stop able to come
     /// in between: so a stop or a newer sound asked for just before can't be undone by this one starting after it.
     /// Gives back what `wanted` said. `wanted` should only take a quick look (a stop waits for it).
@@ -175,11 +188,25 @@ impl Player {
         looping: bool,
         wanted: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
-        let start = start_seconds.max(0.0);
+        self.start_from(sound, key, looping, |_| wanted().map(|()| start_seconds))
+    }
+
+    fn start_from<E>(
+        &self,
+        sound: Arc<AudioData>,
+        key: String,
+        looping: bool,
+        from: impl FnOnce(Option<(&str, f64)>) -> Result<f64, E>,
+    ) -> Result<(), E> {
         // Held until the order is sent, as `seek` and `stop` hold it, so the player's thread gets the orders in the
         // order they were decided in.
         let mut now = lock(&self.shared.now);
-        wanted()?;
+        let playing = now.as_ref().map(|n| {
+            let place = lock(&self.shared.place).as_ref().and_then(|p| p.of(n.id)).unwrap_or(n.start);
+            (n.key.as_str(), place)
+        });
+        let start = from(playing)?;
+        let start = if start.is_finite() { start.max(0.0) } else { 0.0 };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         *now = Some(Now { id, key, start });
         self.send(Order::Play { id, sound, start, looping });

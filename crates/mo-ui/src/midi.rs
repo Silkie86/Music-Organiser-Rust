@@ -427,7 +427,7 @@ impl Page {
     fn with_song_line(&self, at: usize) -> Option<String> {
         let with = self.heard_with(at)?;
         let song = self.heard_song(at)?;
-        Some(midi_fits::with_song_line(&page::gm_sound(self.cat.entry(at)?), &song.name, &with))
+        Some(midi_fits::with_song_line(&page::gm_sound(self.cat.entry(at)?), &song.name, &with, self.speed))
     }
 
     /// The song whose parts the part at `at` plays with ([`Page::heard_with`]): the picked part's is the song of the
@@ -459,9 +459,6 @@ impl Page {
         Some(BitwigSong { bars: midi_fits::bitwig_loop(&with, song), name: song.name.clone(), with })
     }
 
-    /// The card's sound line for the picked part `at`, as it plays now: what of the song it plays with
-    /// ([`Page::with_song_line`]); alone, its sound and its own tempo once that's read (`card_alone`), and until
-    /// then its sound with no tempo rather than a made-up one.
     /// The speed Play loop plays the picked part at: yours, else the song's when it plays with the song, else its own
     /// (once read).
     fn play_bpm(&self) -> f64 {
@@ -469,8 +466,17 @@ impl Page {
         self.speed.or(own).unwrap_or(page::PLAY_TEMPO)
     }
 
+    /// The card's sound line for the picked part `at`, as it plays now: what of the song it plays with
+    /// ([`Page::with_song_line`]); alone, its sound and its own tempo once that's read (`card_alone`), and until
+    /// then its sound with no tempo rather than a made-up one. A speed you set is said in place of the tempo (MI-4).
     fn sound_line_now(&self, at: usize) -> Option<String> {
+        let alone_at_speed = || {
+            let speed = self.speed?;
+            let own = self.card_bpm.filter(|_| self.picked == Some(at));
+            Some(page::sound_line_at_speed(&page::gm_sound(self.cat.entry(at)?), speed, own))
+        };
         self.with_song_line(at)
+            .or_else(alone_at_speed)
             .or_else(|| self.card_alone.clone())
             .or_else(|| Some(page::sound_line(&page::gm_sound(self.cat.entry(at)?), None)))
     }
@@ -3391,13 +3397,26 @@ struct PlayAsk {
     /// Your speed, when it isn't its own tempo (or the song's), and whether a metronome clicks with it.
     speed: Option<f64>,
     metronome: bool,
-    /// Made again while it plays (a speed, the metronome, a move): where the loop playing was, in seconds, and at
-    /// what BPM, so the new one goes on from the same beat.
-    resume: Option<(f64, f64)>,
+    /// Made again while it plays (a speed, the metronome, a move): the new one goes on from the beat the loop playing
+    /// is on as it goes in ([`resume_from`]).
+    resume: bool,
 }
 
 /// The BPM the loop playing was made at (as its bits), for [`PlayAsk::resume`].
 static LOOP_BPM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Where a loop made at `tempo`, `seconds` long, starts: from the top, or, made again while one of the page's loops
+/// plays (`playing`: its key and where it is), from the same beat that one is on. Asked as it goes in, under the
+/// player's lock, so the place and [`LOOP_BPM`] belong to the same loop.
+fn resume_from(resume: bool, playing: Option<(&str, f64)>, tempo: f64, seconds: f64) -> f64 {
+    match playing {
+        Some((key, at)) if resume && key.starts_with(PLAY_KEY) => {
+            let was = f64::from_bits(LOOP_BPM.load(std::sync::atomic::Ordering::SeqCst));
+            page::resume_seconds(at, was, tempo, seconds)
+        }
+        _ => 0.0,
+    }
+}
 
 thread_local! {
     static PLAYS: RefCell<Option<Newest<PlayAsk>>> = const { RefCell::new(None) };
@@ -3574,12 +3593,6 @@ fn replay(app: &AppWindow, at: usize) {
 }
 
 fn play_from(app: &AppWindow, at: usize, resume: bool) {
-    let resume = if resume && loop_playing() {
-        let was = f64::from_bits(LOOP_BPM.load(std::sync::atomic::Ordering::SeqCst));
-        crate::sounds::player().position().map(|at| (at, was))
-    } else {
-        None
-    };
     let data = app.global::<MidiData>();
     let Some(font) = soundfont() else {
         stop_playing(app);
@@ -3635,21 +3648,21 @@ fn play_from(app: &AppWindow, at: usize, resume: bool) {
                 let made = make_loop(&ask, &mut open);
                 let problem = match made {
                     Ok((sound, tempo)) => {
-                        let from =
-                            ask.resume.map_or(0.0, |(at, was)| page::resume_seconds(at, was, tempo, sound.seconds()));
-                        // Only if it's still the newest ask as it starts: a Stop or another part meanwhile wins.
-                        let _ = crate::sounds::player().play_looped_if(
+                        let seconds = sound.seconds();
+                        // Only if it's still the newest ask as it starts: a Stop or another part meanwhile wins. Made
+                        // again, it goes on from where the loop playing is as this one goes in (MI-1: the old one
+                        // played on while this was made).
+                        let _ = crate::sounds::player().play_looped_from(
                             Arc::new(sound),
                             format!("{PLAY_KEY}{id}"),
-                            from,
-                            || {
-                                if PLAY_ASKED.load(std::sync::atomic::Ordering::SeqCst) == id {
-                                    PLAY_STARTED.store(id, std::sync::atomic::Ordering::SeqCst);
-                                    LOOP_BPM.store(tempo.to_bits(), std::sync::atomic::Ordering::SeqCst);
-                                    Ok(())
-                                } else {
-                                    Err(())
+                            |playing| {
+                                if PLAY_ASKED.load(std::sync::atomic::Ordering::SeqCst) != id {
+                                    return Err(());
                                 }
+                                let from = resume_from(ask.resume, playing, tempo, seconds);
+                                PLAY_STARTED.store(id, std::sync::atomic::Ordering::SeqCst);
+                                LOOP_BPM.store(tempo.to_bits(), std::sync::atomic::Ordering::SeqCst);
+                                Ok(from)
                             },
                         );
                         return;
@@ -4550,6 +4563,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_loop_made_again_goes_on_from_the_beat_the_page_s_loop_is_on_as_it_goes_in() {
+        LOOP_BPM.store(120.0f64.to_bits(), std::sync::atomic::Ordering::SeqCst);
+        let ours = format!("{PLAY_KEY}7");
+        // Two seconds into a loop at 120 (4 beats) is 4 beats in at 60: four seconds into an eight-second loop.
+        assert_eq!(resume_from(true, Some((&ours, 2.0)), 60.0, 8.0), 4.0);
+        // From the top: not made again, nothing playing, or what plays is another page's sound.
+        assert_eq!(resume_from(false, Some((&ours, 2.0)), 60.0, 8.0), 0.0);
+        assert_eq!(resume_from(true, None, 60.0, 8.0), 0.0);
+        assert_eq!(resume_from(true, Some(("sound:1", 2.0)), 60.0, 8.0), 0.0);
+    }
+
+    #[test]
     fn the_sample_holds_every_kind_and_a_copy() {
         let s = sample();
         assert_eq!(s.cat.entries.len(), 9);
@@ -4725,7 +4750,7 @@ mod tests {
         // Picked: its card's sound line says what it plays with, at once (the song's tempo needs no reading).
         p.picked = Some(4);
         p.fit_picked();
-        let line = midi_fits::with_song_line(&page::gm_sound(&p.cat.entries[4]), "Night drive", &chords);
+        let line = midi_fits::with_song_line(&page::gm_sound(&p.cat.entries[4]), "Night drive", &chords, None);
         assert!(line.ends_with("with Keys from Night drive (bars 9–12), at the song's 128 BPM"), "{line}");
         assert_eq!((p.heard_with(4), p.with_song_line(4)), (Some(chords.clone()), Some(line.clone())));
         assert_eq!(p.sound_line_now(4), Some(line.clone()));
@@ -4741,8 +4766,15 @@ mod tests {
         assert_eq!(p.sound_line_now(4), Some(alone.clone()));
         p.card_alone = Some(format!("{alone} · 96 BPM"));
         assert_eq!(p.sound_line_now(4), Some(format!("{alone} · 96 BPM")));
-        // On again: the song's parts and tempo, whatever the part's own.
+        // A speed you set is said in place of its own tempo (MI-4)...
+        p.speed = Some(100.0);
+        p.card_bpm = Some(96.0);
+        assert_eq!(p.sound_line_now(4), Some(format!("{alone} · 100 BPM, your speed (its own is 96 BPM)")));
+        // ...and of the song's.
         p.with_song = true;
+        assert!(p.sound_line_now(4).unwrap().ends_with("at 100 BPM, your speed (the song's is 128 BPM)"));
+        p.speed = None;
+        // On again: the song's parts and tempo, whatever the part's own.
         assert_eq!(p.sound_line_now(4), Some(line));
         // The same parts and bars read again (the song saved with nothing changed) are the same to play with.
         let again = Arc::new((*chords).clone());
@@ -5173,7 +5205,7 @@ mod tests {
             with,
             speed: None,
             metronome: false,
-            resume: None,
+            resume: false,
         };
         let started = Instant::now();
         let (together, tempo) = make_loop(&ask(Some(Arc::clone(&with))), &mut None).unwrap();

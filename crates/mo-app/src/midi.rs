@@ -1152,6 +1152,22 @@ pub fn bpm_text(bpm: f64) -> String {
     if tenths.fract() == 0.0 { format!("{tenths:.0} BPM") } else { format!("{tenths:.1} BPM") }
 }
 
+/// The card's words for a speed you set on it: "100 BPM, your speed (its own is 92)", or with the song "100 BPM,
+/// your speed (the song's is 128)"; `own` none when it isn't known yet.
+pub fn your_speed_words(speed: f64, own: Option<f64>, song: bool) -> String {
+    let speed = bpm_text(speed);
+    match own {
+        Some(own) if song => format!("{speed}, your speed (the song's is {})", bpm_text(own)),
+        Some(own) => format!("{speed}, your speed (its own is {})", bpm_text(own)),
+        None => format!("{speed}, your speed"),
+    }
+}
+
+/// The card's sound line for a part playing alone at a speed you set (`own`: its own tempo, once read).
+pub fn sound_line_at_speed(sound: &mo_midi::gm::GmSound, speed: f64, own: Option<f64>) -> String {
+    format!("{} · {}", sound_line(sound, None), your_speed_words(speed, own, false))
+}
+
 /// Where a loop made again at another speed starts, in seconds, so it goes on from the same beat rather than from
 /// the top: `position` seconds into the loop at `was` BPM is that many beats in, at `now` BPM, round a loop
 /// `seconds` long.
@@ -1483,6 +1499,18 @@ pub(crate) mod tests {
         assert_eq!(parts.len(), 1, "one line for the loop");
         let g = crate::finder::find(&[parts], "pad loop fsm", None, 4);
         assert_eq!(g.len(), 1, "the other key's file is found by its own name");
+    }
+
+    #[test]
+    fn a_speed_you_set_is_what_the_card_says() {
+        assert_eq!(your_speed_words(100.0, Some(92.0), false), "100 BPM, your speed (its own is 92 BPM)");
+        assert_eq!(your_speed_words(100.0, Some(127.96), true), "100 BPM, your speed (the song's is 128 BPM)");
+        assert_eq!(your_speed_words(92.5, None, false), "92.5 BPM, your speed");
+        let sound = mo_midi::gm::sound_for(mo_midi::Role::Melody, false, None, &[], None);
+        assert_eq!(
+            sound_line_at_speed(&sound, 100.0, Some(92.0)),
+            "Saw Lead · for its kind of part · 100 BPM, your speed (its own is 92 BPM)"
+        );
     }
 
     #[test]

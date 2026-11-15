@@ -259,7 +259,9 @@ impl SongBars {
 /// The card's sound line for a part found that plays with the song: its sound, what of `song` it's heard with, and
 /// whose tempo they play at. "Saw Lead · for its kind of part · with Keys and Sub from Night drive (bars
 /// 9–16), at the song's 128 BPM".
-pub fn with_song_line(sound: &mo_midi::gm::GmSound, song: &str, with: &SongBars) -> String {
+/// `speed`: a speed you set on the card, which the part and the song's parts play at (MI-4), said in place of the
+/// song's tempo.
+pub fn with_song_line(sound: &mo_midi::gm::GmSound, song: &str, with: &SongBars, speed: Option<f64>) -> String {
     let bars = bars_words(&with.bars);
     let heard = match (with.names.is_empty(), with.wants) {
         (false, _) => format!("with {} from {song} ({bars})", with.names),
@@ -267,9 +269,10 @@ pub fn with_song_line(sound: &mo_midi::gm::GmSound, song: &str, with: &SongBars)
         (true, Wants::Chords) => format!("with {song}'s melody ({bars})"),
     };
     let bpm = (with.bpm() * 10.0).round() / 10.0;
-    let tempo = match with.tempo {
-        Some(_) => format!("at the song's {bpm} BPM"),
-        None => format!("at {bpm} BPM, as the song gives no tempo"),
+    let tempo = match (speed, with.tempo) {
+        (Some(speed), _) => format!("at {}", page::your_speed_words(speed, Some(bpm), true)),
+        (None, Some(_)) => format!("at the song's {bpm} BPM"),
+        (None, None) => format!("at {bpm} BPM, as the song gives no tempo"),
     };
     format!("{} · {heard}, {tempo}", page::sound_line(sound, None))
 }
@@ -1395,20 +1398,26 @@ mod tests {
         let sound = mo_midi::gm::sound_for(Role::Melody, false, None, &[], None);
         let with = fitted(&song(), None).unwrap().with;
         assert_eq!(
-            with_song_line(&sound, "Night drive", &with),
+            with_song_line(&sound, "Night drive", &with, None),
             "Saw Lead · for its kind of part · with Keys from Night drive (bars 9–12), at the song's 120 BPM"
         );
         // Parts with no names: what they are to the song. A tempo that isn't a whole number keeps a tenth.
         let unnamed = SongBars { names: String::new(), tempo: Some(127.96), ..(*with).clone() };
         assert_eq!(
-            with_song_line(&sound, "Night drive", &unnamed),
+            with_song_line(&sound, "Night drive", &unnamed, None),
             "Saw Lead · for its kind of part · with Night drive's chords (bars 9–12), at the song's 128 BPM"
         );
         let under = SongBars { wants: Wants::Chords, bars: 12..13, tempo: None, ..unnamed };
         assert_eq!(
-            with_song_line(&sound, "Night drive", &under),
+            with_song_line(&sound, "Night drive", &under, None),
             "Saw Lead · for its kind of part · with Night drive's melody (bar 13), at 120 BPM, as the song \
              gives no tempo"
+        );
+        // A speed you set: said in place of the song's tempo (MI-4).
+        assert_eq!(
+            with_song_line(&sound, "Night drive", &with, Some(100.0)),
+            "Saw Lead · for its kind of part · with Keys from Night drive (bars 9–12), at 100 BPM, your speed (the \
+             song's is 120 BPM)"
         );
     }
 
