@@ -17,7 +17,8 @@
 //! - `transpose` is semitones and `tune` cents. The event's `volumeCurve` holds its gain (`level`, a plain multiple: 1
 //!   is 0 dB) and its fades, in seconds.
 //! - A track with layers (takes) has no Events list of its own: each layer's events are under `Layers`, and
-//!   `activeLayer` says which one plays.
+//!   `activeLayer` says which one plays. The others are shown as muted lanes under the track, as Studio One shows
+//!   them when the track's layers are opened.
 //! - An AudioPartEvent is an audio part: its events are in the media pool's AudioPartClip, timed from the part's start.
 //! - A track's AutomationRegionList names its automation curves, each in a file of its own: `Envelopes/*.envelopex`
 //!   (binary JSON: events with a start and a value from 0 to 1) or, before Studio One 4, `*.envelope` (the same as XML).
@@ -48,6 +49,8 @@ const TOO_MANY_POINTS: &str =
 /// The most events inside audio parts a song's preview looks at: each part looks at every event of its clip, so a
 /// damaged song with many parts on one long clip could go on for hours.
 const MOST_PART_EVENTS: usize = 2_000_000;
+/// The most other layers (takes) shown under one track: a track made by hand has a handful.
+const MOST_LAYERS: usize = 64;
 /// Said when a song reaches [`MOST_PART_EVENTS`].
 const TOO_MANY_PART_EVENTS: &str =
     "This song's audio parts hold more events than the preview looks at (2 million), so the last parts are left out.";
@@ -365,7 +368,6 @@ impl Song<'_> {
             let lists = |name: &'static str| {
                 track.children().filter(move |l| l.is_element() && l.tag_name().name() == "List" && id(*l) == name)
             };
-            let mut clips = Vec::new();
             // A track that doesn't follow the tempo (timeFormat 0) counts its events' starts in seconds.
             let track_seconds = attr(track, "timeFormat") == "0";
             let stretch = stretch_of(track);
@@ -382,173 +384,194 @@ impl Song<'_> {
                     .flat_map(|a| a.children().filter(|l| l.is_element() && id(*l) == "Events"))
                     .collect();
             }
-            for ev in event_lists.into_iter().flat_map(|l| l.children().filter(Node::is_element)) {
-                let name = attr(ev, "name");
-                let start = place(ev, track_seconds);
-                let seconds = in_seconds(ev);
-                let mut length = map.span(start, n(ev, "length"), seconds);
-                let offset = map.span(start, n(ev, "offset"), seconds);
-                let muted = attr(ev, "mute") == "1";
-                let clip_id = attr(ev, "clipID");
-                match ev.tag_name().name() {
-                    "AudioEvent" => {
-                        let event = AudioEvent::read(ev);
-                        let file = pool.audio.get(&event.clip_id);
-                        let played = event.played(file, start, &map, stretch);
-                        let part = event.part(file, &played);
-                        let length = played.length;
-                        let name = if name.is_empty() {
-                            paths::stem(paths::file_name(&part.path)).to_owned()
-                        } else {
-                            name.to_owned()
-                        };
-                        // The fades are in seconds; together they can't be longer than the clip.
-                        let (fade_in, fade_out) = fades_within(
-                            map.span(start, event.fade_in, true),
-                            map.span_before(start + length, event.fade_out),
-                            length,
-                        );
-                        clips.push(PreviewClip {
-                            name,
-                            start,
-                            length,
-                            muted,
-                            fade_in,
-                            fade_out,
-                            audio: vec![part],
-                            ..PreviewClip::default()
-                        });
-                    }
-                    "AudioPartEvent" => {
-                        // An audio part: the events are the pool's, timed from the part's own start, and the part
-                        // shows them from `offset` on for its length.
-                        let Some(inside) = pool.parts.get(&clip_id.to_lowercase()) else { continue };
-                        let Some(left) = part_events_left.checked_sub(inside.events.len()) else {
-                            too_many_part_events = true;
-                            continue;
-                        };
-                        part_events_left = left;
-                        // Where the part's own time starts: `offset` before the part does.
-                        let origin = start - offset;
-                        let inner: Vec<_> = inside
-                            .events
-                            .iter()
-                            .map(|event| {
-                                let begins = origin + map.span(origin, event.start, inside.seconds);
-                                let file = pool.audio.get(&event.clip_id);
-                                (begins - start, event, file, event.played(file, begins, &map, stretch))
-                            })
-                            .collect();
-                        // No length saved: the part runs to the end of its last event.
-                        if length <= 0.0 {
-                            let ends = inner.iter().map(|(at, _, _, played)| at + played.length);
-                            length = ends.filter(|e| e.is_finite()).reduce(f64::max).unwrap_or(0.0).max(0.0);
+            // The track's other layers (its takes): what Studio One shows under the track when its layers are
+            // opened. They don't play, so each is a muted lane under the track. The one that plays is left out
+            // here, also when the track has an Events list of its own.
+            let playing = match attr(track, "activeLayer") {
+                "" => "0",
+                layer => layer,
+            };
+            let other_layers = lists("Layers")
+                .flat_map(|l| l.children().filter(|a| a.is_element() && id(*a) != playing))
+                .map(|a| (a, a.children().filter(|l| l.is_element() && id(*l) == "Events").collect::<Vec<_>>()))
+                .filter(|(_, events)| events.iter().any(|l| l.children().any(|c| c.is_element())))
+                .take(MOST_LAYERS);
+            // What plays first, then each other layer, read the same way.
+            let mut read: Vec<(Option<Node<'_, '_>>, Vec<PreviewClip>)> = Vec::new();
+            let sets = std::iter::once((None, event_lists)).chain(other_layers.map(|(a, events)| (Some(a), events)));
+            for (layer, event_lists) in sets {
+                let mut clips = Vec::new();
+                for ev in event_lists.into_iter().flat_map(|l| l.children().filter(Node::is_element)) {
+                    let name = attr(ev, "name");
+                    let start = place(ev, track_seconds);
+                    let seconds = in_seconds(ev);
+                    let mut length = map.span(start, n(ev, "length"), seconds);
+                    let offset = map.span(start, n(ev, "offset"), seconds);
+                    let muted = attr(ev, "mute") == "1";
+                    let clip_id = attr(ev, "clipID");
+                    match ev.tag_name().name() {
+                        "AudioEvent" => {
+                            let event = AudioEvent::read(ev);
+                            let file = pool.audio.get(&event.clip_id);
+                            let played = event.played(file, start, &map, stretch);
+                            let part = event.part(file, &played);
+                            let length = played.length;
+                            let name = if name.is_empty() {
+                                paths::stem(paths::file_name(&part.path)).to_owned()
+                            } else {
+                                name.to_owned()
+                            };
+                            // The fades are in seconds; together they can't be longer than the clip.
+                            let (fade_in, fade_out) = fades_within(
+                                map.span(start, event.fade_in, true),
+                                map.span_before(start + length, event.fade_out),
+                                length,
+                            );
+                            clips.push(PreviewClip {
+                                name,
+                                start,
+                                length,
+                                muted,
+                                fade_in,
+                                fade_out,
+                                audio: vec![part],
+                                ..PreviewClip::default()
+                            });
                         }
-                        let mut audio = Vec::new();
-                        for (at, event, file, played) in inner {
-                            // Cut to what the part shows of it.
-                            let cut = (-at).max(0.0);
-                            let shown = (at + played.length).min(length) - at.max(0.0);
-                            if event.muted || shown.is_nan() || shown <= 0.0 {
+                        "AudioPartEvent" => {
+                            // An audio part: the events are the pool's, timed from the part's own start, and the part
+                            // shows them from `offset` on for its length.
+                            let Some(inside) = pool.parts.get(&clip_id.to_lowercase()) else { continue };
+                            let Some(left) = part_events_left.checked_sub(inside.events.len()) else {
+                                too_many_part_events = true;
                                 continue;
+                            };
+                            part_events_left = left;
+                            // Where the part's own time starts: `offset` before the part does.
+                            let origin = start - offset;
+                            let inner: Vec<_> = inside
+                                .events
+                                .iter()
+                                .map(|event| {
+                                    let begins = origin + map.span(origin, event.start, inside.seconds);
+                                    let file = pool.audio.get(&event.clip_id);
+                                    (begins - start, event, file, event.played(file, begins, &map, stretch))
+                                })
+                                .collect();
+                            // No length saved: the part runs to the end of its last event.
+                            if length <= 0.0 {
+                                let ends = inner.iter().map(|(at, _, _, played)| at + played.length);
+                                length = ends.filter(|e| e.is_finite()).reduce(f64::max).unwrap_or(0.0).max(0.0);
                             }
-                            let mut part = event.part(file, &played);
-                            part.start = at.max(0.0);
-                            part.length = shown;
-                            part.from += cut * played.rate;
-                            audio.push(part);
+                            let mut audio = Vec::new();
+                            for (at, event, file, played) in inner {
+                                // Cut to what the part shows of it.
+                                let cut = (-at).max(0.0);
+                                let shown = (at + played.length).min(length) - at.max(0.0);
+                                if event.muted || shown.is_nan() || shown <= 0.0 {
+                                    continue;
+                                }
+                                let mut part = event.part(file, &played);
+                                part.start = at.max(0.0);
+                                part.length = shown;
+                                part.from += cut * played.rate;
+                                audio.push(part);
+                            }
+                            audio.sort_by(|a, b| a.start.total_cmp(&b.start));
+                            let name = if name.is_empty() { attr(track, "name") } else { name };
+                            clips.push(PreviewClip {
+                                name: name.to_owned(),
+                                start,
+                                length,
+                                muted,
+                                audio,
+                                ..PreviewClip::default()
+                            });
                         }
-                        audio.sort_by(|a, b| a.start.total_cmp(&b.start));
-                        let name = if name.is_empty() { attr(track, "name") } else { name };
-                        clips.push(PreviewClip {
-                            name: name.to_owned(),
-                            start,
-                            length,
-                            muted,
-                            audio,
-                            ..PreviewClip::default()
-                        });
-                    }
-                    "MusicPart" | "NotePart" => {
-                        // A damaged song's huge transpose ("1e10") is cut to a whole keyboard's worth either way.
-                        let transpose = num(attr(ev, "transpose")).unwrap_or(0.0).clamp(-128.0, 128.0) as i32;
-                        let all = match pool.music.get(&clip_id.to_lowercase()) {
-                            Some(file) => self.musicx_notes(file),
-                            None => inline_notes(ev),
-                        };
-                        let from_offset = |n: &&PreviewNote| n.start >= offset - 1e-9;
-                        // No length saved: the part runs to the end of its last note.
-                        if length <= 0.0 {
-                            length = all
+                        "MusicPart" | "NotePart" => {
+                            // A damaged song's huge transpose ("1e10") is cut to a whole keyboard's worth either way.
+                            let transpose = num(attr(ev, "transpose")).unwrap_or(0.0).clamp(-128.0, 128.0) as i32;
+                            let all = match pool.music.get(&clip_id.to_lowercase()) {
+                                Some(file) => self.musicx_notes(file),
+                                None => inline_notes(ev),
+                            };
+                            let from_offset = |n: &&PreviewNote| n.start >= offset - 1e-9;
+                            // No length saved: the part runs to the end of its last note.
+                            if length <= 0.0 {
+                                length = all
+                                    .iter()
+                                    .filter(from_offset)
+                                    .map(|n| n.start + n.length - offset)
+                                    .reduce(f64::max)
+                                    .unwrap_or(4.0);
+                            }
+                            let notes = all
                                 .iter()
                                 .filter(from_offset)
-                                .map(|n| n.start + n.length - offset)
-                                .reduce(f64::max)
-                                .unwrap_or(4.0);
+                                .filter(|n| n.start < offset + length)
+                                .take_while(|_| budget.take())
+                                .map(|n| PreviewNote {
+                                    start: n.start - offset,
+                                    length: n.length.min(offset + length - n.start),
+                                    key: (n.key as i32 + transpose).clamp(0, 127) as u8,
+                                    ..*n
+                                })
+                                .collect();
+                            let name = if name.is_empty() { attr(track, "name") } else { name };
+                            clips.push(PreviewClip {
+                                name: name.to_owned(),
+                                start,
+                                length,
+                                muted,
+                                notes,
+                                ..PreviewClip::default()
+                            });
                         }
-                        let notes = all
-                            .iter()
-                            .filter(from_offset)
-                            .filter(|n| n.start < offset + length)
-                            .take_while(|_| budget.take())
-                            .map(|n| PreviewNote {
-                                start: n.start - offset,
-                                length: n.length.min(offset + length - n.start),
-                                key: (n.key as i32 + transpose).clamp(0, 127) as u8,
-                                ..*n
-                            })
-                            .collect();
-                        let name = if name.is_empty() { attr(track, "name") } else { name };
-                        clips.push(PreviewClip {
-                            name: name.to_owned(),
-                            start,
-                            length,
-                            muted,
-                            notes,
-                            ..PreviewClip::default()
-                        });
-                    }
-                    "MusicPatternPart" => {
-                        let (steps, loop_beats) = match pool.music.get(&clip_id.to_lowercase()) {
-                            Some(file) => self.pattern_notes(file),
-                            None => (Vec::new(), 0.0),
-                        };
-                        let mut notes = Vec::new();
-                        if loop_beats > 0.0 && length.is_finite() {
-                            let mut at = 0.0;
-                            // Stops when the arrangement holds all the notes it can, however short the loop.
-                            // A pass that places nothing ends it too: `at` only grows, so no later pass can (a
-                            // damaged pattern's steps all past the part, or a loop too short to move `at` on).
-                            'passes: while at < length - 1e-9 {
-                                let mut placed = false;
-                                for n in steps.iter().filter(|n| at + n.start < length) {
-                                    if !budget.take() {
-                                        break 'passes;
+                        "MusicPatternPart" => {
+                            let (steps, loop_beats) = match pool.music.get(&clip_id.to_lowercase()) {
+                                Some(file) => self.pattern_notes(file),
+                                None => (Vec::new(), 0.0),
+                            };
+                            let mut notes = Vec::new();
+                            if loop_beats > 0.0 && length.is_finite() {
+                                let mut at = 0.0;
+                                // Stops when the arrangement holds all the notes it can, however short the loop.
+                                // A pass that places nothing ends it too: `at` only grows, so no later pass can (a
+                                // damaged pattern's steps all past the part, or a loop too short to move `at` on).
+                                'passes: while at < length - 1e-9 {
+                                    let mut placed = false;
+                                    for n in steps.iter().filter(|n| at + n.start < length) {
+                                        if !budget.take() {
+                                            break 'passes;
+                                        }
+                                        notes.push(PreviewNote { start: at + n.start, ..*n });
+                                        placed = true;
                                     }
-                                    notes.push(PreviewNote { start: at + n.start, ..*n });
-                                    placed = true;
+                                    let next = at + loop_beats;
+                                    if !placed || next <= at {
+                                        break;
+                                    }
+                                    at = next;
                                 }
-                                let next = at + loop_beats;
-                                if !placed || next <= at {
-                                    break;
-                                }
-                                at = next;
                             }
+                            let name = if name.is_empty() { "Pattern" } else { name };
+                            clips.push(PreviewClip {
+                                name: name.to_owned(),
+                                start,
+                                length,
+                                muted,
+                                notes,
+                                ..PreviewClip::default()
+                            });
                         }
-                        let name = if name.is_empty() { "Pattern" } else { name };
-                        clips.push(PreviewClip {
-                            name: name.to_owned(),
-                            start,
-                            length,
-                            muted,
-                            notes,
-                            ..PreviewClip::default()
-                        });
+                        _ => {}
                     }
-                    _ => {}
                 }
+                clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+                read.push((layer, clips));
             }
-            clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+            let mut read = read.into_iter();
+            let clips = read.next().map(|(_, clips)| clips).unwrap_or_default();
             let name = match attr(track, "name") {
                 "" if kind == LaneKind::Audio => "Audio",
                 "" if kind == LaneKind::Automation => "Automation",
@@ -616,6 +639,23 @@ impl Song<'_> {
                     curve.muted = silent || attr(region, "mute") == "1";
                     lanes.push(curve);
                 }
+            }
+            // Its other layers, under its curves.
+            for (layer, clips) in read {
+                let Some(layer) = layer else { continue };
+                // Studio One counts its layers from 1 where the song counts from 0.
+                let layer_name = match (attr(layer, "layerName"), id(layer).parse::<u32>()) {
+                    ("", Ok(number)) => format!("Layer {}", number.saturating_add(1)),
+                    ("", Err(_)) => "Layer".to_owned(),
+                    (n, _) => n.to_owned(),
+                };
+                let mut lane = PreviewLane::new(layer_name, kind);
+                lane.detail = format!("A layer of {name} that isn't playing");
+                lane.colour = colour(attr(layer, "color")).or(colour(attr(track, "color")));
+                lane.depth = depth + 1;
+                lane.muted = true;
+                lane.clips = clips;
+                lanes.push(lane);
             }
             if kind == LaneKind::Group
                 && let Some(inner) = lists("Tracks").next()

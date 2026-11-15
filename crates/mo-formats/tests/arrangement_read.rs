@@ -969,6 +969,14 @@ fn studio_one_stretch_layers_audio_parts_automation_and_channels() {
             <AudioPartEvent name="Lost" start="90" length="4" timeFormat="0" clipID="{NOWHERE}"/>
           </List>
         </Attributes>
+        <Attributes id="2" layerName="Second go" color="FF336699">
+          <List x:id="Events">
+            <AudioEvent name="Late" start="20" length="2" timeFormat="0" clipID="{HIT}"/>
+            <AudioEvent name="Early" start="4" length="2" timeFormat="0" mute="1" clipID="{HIT}"/>
+          </List>
+        </Attributes>
+        <Attributes id="3" layerName="Nothing in it"><List x:id="Events"/></Attributes>
+        <Attributes id="4" layerName="No list"/>
       </List>
     </MediaTrack>
     <MediaTrack name="Keys" mediaType="Music" timeFormat="2"><UID x:id="channelID" uid="{CH-KEYS}"/></MediaTrack>
@@ -1051,6 +1059,9 @@ fn studio_one_stretch_layers_audio_parts_automation_and_channels() {
             // A pan that never moves, and a curve whose file is gone, have no lane.
             ("Tape", LaneKind::Audio, "", 0),
             ("Mix", LaneKind::Audio, "", 0),
+            // Its other layers (takes), under it: the one that plays is the track itself, an empty one has no lane.
+            ("Layer 1", LaneKind::Audio, "A layer of Mix that isn't playing", 1),
+            ("Second go", LaneKind::Audio, "A layer of Mix that isn't playing", 1),
             // The instrument's own name, found by its id (its input is called "2 - Kontakt 5/CH 1").
             ("Keys", LaneKind::Instrument, "Kontakt 5, to Drum bus", 0),
             // Named after its instrument, so that isn't said twice.
@@ -1071,7 +1082,20 @@ fn studio_one_stretch_layers_audio_parts_automation_and_channels() {
     assert_eq!(points(3), [(2.0, 0.0), (6.0, 0.0), (6.0, 1.0), (7.0, 1.0), (7.0, 0.0)]);
     assert!(a.lanes[3].muted);
     // The old XML curve: in time order, values kept to 0..1, a point that isn't a number and the anchor left out.
-    assert_eq!(points(8), [(8.0, 1.0), (16.0, 0.25)]);
+    assert_eq!(points(10), [(8.0, 1.0), (16.0, 0.25)]);
+    // A layer that isn't playing is a muted lane with its own clips, in time order, in its colour or the track's.
+    let layers: Vec<_> = a.lanes[6..8]
+        .iter()
+        .map(|l| (l.muted, l.colour, l.clips.iter().map(|c| (c.name.as_str(), c.muted)).collect::<Vec<_>>()))
+        .collect();
+    assert_eq!(
+        layers,
+        [
+            (true, a.lanes[5].colour, vec![("Old take", false)]),
+            (true, Some(0x33_6699), vec![("Early", true), ("Late", false)])
+        ]
+    );
+    assert!(!a.lanes[5].muted && a.lanes[5].clips.iter().all(|c| c.name != "Old take"));
 
     // The disabled track is muted too (its disabled insert is not the track's own switch).
     assert!(a.lanes[1].disabled && a.lanes[1].muted);
@@ -1110,6 +1134,41 @@ fn studio_one_stretch_layers_audio_parts_automation_and_channels() {
             (r"C:\Samples\Loop 90.wav", 2.0, 6.0, 2.25),
         ]
     );
+}
+
+/// The other way a track with layers is saved: what plays in the track's own Events list, the layers beside it.
+#[test]
+fn studio_one_layers_show_under_a_track_that_keeps_its_own_events() {
+    let song = r#"<Song xmlns:x="x">
+  <List x:id="Tracks">
+    <MediaTrack name="Keys" mediaType="Music" timeFormat="2" color="FF102030" layerCount="3">
+      <List x:id="Events"><MusicPart name="Keeper" start="0" length="4"/></List>
+      <List x:id="Layers">
+        <Attributes id="0"><List x:id="Events"><MusicPart name="Keeper again" start="0" length="4"/></List></Attributes>
+        <Attributes id="1"><List x:id="Events"><MusicPart name="First try" start="8" length="4"/></List></Attributes>
+        <Attributes id="2" layerName="Loose"><List x:id="Events"><MusicPart name="Second try" start="2" length="2"/></List></Attributes>
+      </List>
+    </MediaTrack>
+    <MediaTrack name="After" mediaType="Music" timeFormat="2"/>
+  </List>
+</Song>"#;
+    let a = read("Song.song", &stored_zip(&[("Song/song.xml", song.as_bytes())]));
+    let shown: Vec<_> = a
+        .lanes
+        .iter()
+        .map(|l| (l.name.as_str(), l.depth, l.muted, l.clips.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("Keys", 0, false, vec!["Keeper"]),
+            // The layer that plays (0 when the track doesn't say) is the track, not a lane of its own.
+            ("Layer 2", 1, true, vec!["First try"]),
+            ("Loose", 1, true, vec!["Second try"]),
+            ("After", 0, false, vec![]),
+        ]
+    );
+    assert!(a.lanes[1..3].iter().all(|l| l.kind == LaneKind::Instrument && l.colour == Some(0x10_2030)));
 }
 
 #[test]
