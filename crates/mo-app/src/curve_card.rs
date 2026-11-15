@@ -571,6 +571,11 @@ impl Card {
         self.open.as_ref().map_or(curve_picture::BAR, |(_, e)| e.shape().length())
     }
 
+    /// How many points the open curve has (none with no curve).
+    pub fn points(&self) -> usize {
+        self.open.as_ref().map_or(0, |(_, e)| e.shape().points().len())
+    }
+
     /// The picture's room and what's in sight.
     pub fn frame(&self) -> Frame {
         Frame { width: self.width, height: self.height, view: self.view.within(self.length()) }
