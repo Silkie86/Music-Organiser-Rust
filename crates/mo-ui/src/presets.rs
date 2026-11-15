@@ -2292,6 +2292,10 @@ static PUT_BACK: crate::in_flight::PutBack<mo_dawlink::bitwig::Auditioning> = cr
 /// slot and is waiting its turn to stop), for [`finish_up`] to stop as the app closes (the 10 Nov review's D-2).
 static HELD: crate::in_flight::Held<mo_dawlink::bitwig::Auditioning> = crate::in_flight::Held::new();
 
+/// Auditions kept (Keep) whose stop is still waiting its turn, for [`finish_up`] to stop as the app closes while the
+/// track stays (the 14 Nov review's MI-16). Not in [`HELD`]: those have their track taken out.
+static KEEPING: crate::in_flight::Held<mo_dawlink::bitwig::Auditioning> = crate::in_flight::Held::new();
+
 /// An audition that couldn't be stopped: back in its place, unless another plays by now (then it's let go), and a start
 /// in Bitwig still on its way behind it (from this page or the MIDI page) is called off, so one thing plays there at a
 /// time (the review's D-8). Run inside the stop's turn, so the start behind sees it. The card says why and what to do.
@@ -2465,9 +2469,14 @@ fn keep_audition(app: &AppWindow) {
     let words = format!("Kept: {track} stays in Bitwig, on its own track with the part.");
     let ticket = mo_dawlink::bitwig::ticket();
     let on_its_way = crate::in_flight::Start::begin();
+    // Held while it waits its turn, so the app closing behind a long job still stops it (MI-16).
+    let held = KEEPING.hold(auditioning);
     let started = background::spawn("Keep audition", move || {
         let _on_its_way = on_its_way;
-        let kept = mo_dawlink::bitwig::Bitwig::default().keep_audition(auditioning, &ticket.wait());
+        let turn = ticket.wait();
+        // Not there when the app took it as it closed, and stopped it there.
+        let Some(auditioning) = KEEPING.release(held) else { return };
+        let kept = mo_dawlink::bitwig::Bitwig::default().keep_audition(auditioning, &turn);
         if let Err(e) = kept {
             log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped as it was kept: {e}"));
             message_later(format!("{track} stays in Bitwig, but it couldn't be stopped there: {e}"));
@@ -2506,7 +2515,13 @@ pub fn after_crash() {
     let to = crate::in_flight::closing_link(Duration::from_millis(500));
     for auditioning in slot.take().into_iter().chain(HELD.try_take_all()) {
         if to.stop_audition_as_app_closes(&auditioning).is_err() {
-            break;
+            return;
+        }
+    }
+    // Kept ones still waiting their turn: stopped, their tracks staying (MI-16).
+    for auditioning in KEEPING.try_take_all() {
+        if to.keep_audition_as_app_closes(&auditioning).is_err() {
+            return;
         }
     }
 }
@@ -2524,10 +2539,18 @@ pub fn finish_up() {
         first.or_else(|| slot.take()).into_iter().chain(HELD.take_all()).collect()
     };
     let to = crate::in_flight::closing_link(Duration::from_secs(3));
-    for auditioning in all {
+    // Kept ones still waiting their turn (MI-16): stopped with their tracks staying.
+    let kept = KEEPING.take_all();
+    let stops = all.into_iter().map(|a| (a, false)).chain(kept.into_iter().map(|a| (a, true)));
+    for (auditioning, keep) in stops {
         // Without waiting its turn: what would go first is closing too, and the extension still makes the stop once
         // the app has gone (3.21).
-        if let Err(e) = to.stop_audition_as_app_closes(&auditioning) {
+        let stopped = if keep {
+            to.keep_audition_as_app_closes(&auditioning)
+        } else {
+            to.stop_audition_as_app_closes(&auditioning).map(|_| ())
+        };
+        if let Err(e) = stopped {
             log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped as the app closed: {e}"));
             // Bitwig gone or not answering: the rest would only make the app slower to close.
             if e.bitwig_gone() || e == mo_dawlink::bitwig::Error::TimedOut {

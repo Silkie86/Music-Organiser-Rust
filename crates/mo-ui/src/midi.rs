@@ -881,6 +881,9 @@ pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     data.set_play_key(shortcuts.key_of("app.play").into());
     data.set_bitwig_key(shortcuts.key_of("midi.playBitwig").into());
     data.set_fl_key(shortcuts.key_of("midi.playFl").into());
+    data.set_metronome_key(shortcuts.key_of("midi.metronome").into());
+    data.set_faster_key(shortcuts.key_of("midi.faster").into());
+    data.set_slower_key(shortcuts.key_of("midi.slower").into());
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.shortcuts = shortcuts.clone();
@@ -1163,11 +1166,7 @@ fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_metronome_toggled(move || {
         if let Some(app) = weak.upgrade() {
-            PAGE.with(|p| {
-                let mut p = p.borrow_mut();
-                p.metronome = !p.metronome;
-            });
-            played_differently(&app);
+            toggle_metronome(&app);
         }
     });
     let weak = app.as_weak();
@@ -1345,7 +1344,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         data.set_empty_title("No MIDI here yet".into());
         data.set_empty_text(
             "Every part in your projects and MIDI folders shows up here once it's been read. The files are only \
-             read, never changed. MIDI folders are the ones set in the old app's MIDI page for now."
+             read, never changed. Add your MIDI folders in Settings \u{203a} Folders."
                 .into(),
         );
     } else {
@@ -1984,6 +1983,10 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
 
 /// The switch for what's looked for was pressed ([`Page::fit_wants_press`]): the list is worked out again for it.
 fn fit_wants_picked(app: &AppWindow, wants: Wants) {
+    // The chip that's lit already: nothing changes, and parts picked by hand stay (MI-5).
+    if app.global::<MidiData>().get_fit_wants() == wants_place(Some(wants)) {
+        return;
+    }
     if PAGE.with(|p| p.borrow_mut().fit_wants_press(wants)) {
         remember_fit_picks(true);
     }
@@ -2777,6 +2780,15 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         }
         ("midi.putInSong", Some((at, _))) => put_in_song(app, at),
         ("app.play", _) => toggle_play(app),
+        ("midi.metronome", _) => {
+            toggle_metronome(app);
+            true
+        }
+        ("midi.faster", _) | ("midi.slower", _) => {
+            let by = if id == "midi.faster" { 1 } else { -1 };
+            change_speed(app, |p| Some(page::step_bpm(p.play_bpm(), by)));
+            true
+        }
         ("midi.playBitwig", _) => toggle_daw(app, Daw::Bitwig),
         ("midi.playFl", _) => toggle_daw(app, Daw::Fl),
         ("midi.copyPath", Some((_, path))) => {
@@ -3108,6 +3120,10 @@ fn put_part(
         Ok(written) => written,
         Err(why) => return failed(job, midi_fits::PUT_FAILED, why),
     };
+    // Noted, so the next start removes it if the app closes or crashes before it goes (MI-6, rule 28).
+    let note = page::note_put(&mo_app::paths::data_dir(), &file)
+        .inspect_err(|e| log::warning("MIDI", &format!("Couldn't note the part's file for the start-up sweep: {e}")))
+        .ok();
     let place = midi_fits::put_place(fitted, &song.with, ticks);
     job.progress(0.0, Some(&midi_fits::recording_line(&place)));
     let turn = ticket.wait();
@@ -3151,6 +3167,9 @@ fn put_part(
     drop(turn);
     // Bitwig has the notes, or took nothing: the file was new, under a name this gave it, and goes again.
     let _ = std::fs::remove_file(&file);
+    if let Some(note) = &note {
+        page::forget_put(note);
+    }
     // Whether a recording under way was told to stop: what it ends with is the stop's doing then.
     let heard = clock.ok().and_then(|clock| clock.join().ok()).unwrap_or(false);
     // The clock has ended, so the card is this thread's alone again; were it not, it fails by itself as it goes.
@@ -3578,6 +3597,15 @@ pub fn toggle_play(app: &AppWindow) -> bool {
         }
         None => false,
     }
+}
+
+/// Turns Play loop's metronome on or off, heard at once.
+fn toggle_metronome(app: &AppWindow) {
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.metronome = !p.metronome;
+    });
+    played_differently(app);
 }
 
 /// Sets Play loop's speed (`speed` of the page as it is: yours, or none for each part's own tempo).
@@ -4603,6 +4631,14 @@ fn choose_soundfont(app: &AppWindow) {
         let kept = crate::settings::remember(page::SOUNDFONT_KEY, &path.to_string_lossy());
         SOUNDFONT.with(|s| *s.borrow_mut() = Some(Some(path.clone())));
         data.set_soundfont_missing(false);
+        log::info("MIDI", &format!("Parts play with the SoundFont {}", path.display()));
+        // A loop playing goes on with the new sounds.
+        if data.get_playing()
+            && let Some(at) = PAGE.with(|p| p.borrow().looping)
+        {
+            replay(&app, at);
+        }
+        // After the replay, which clears the note under Play: so a setting that couldn't be kept is said.
         data.set_play_note(
             if kept {
                 ""
@@ -4611,13 +4647,6 @@ fn choose_soundfont(app: &AppWindow) {
             }
             .into(),
         );
-        log::info("MIDI", &format!("Parts play with the SoundFont {}", path.display()));
-        // A loop playing goes on with the new sounds.
-        if data.get_playing()
-            && let Some(at) = PAGE.with(|p| p.borrow().looping)
-        {
-            replay(&app, at);
-        }
     });
     if let Err(e) = asked {
         log::error("MIDI", &format!("Couldn't open the file picker: {e}"));
@@ -5608,8 +5637,8 @@ mod tests {
         assert_eq!(
             said(&octave),
             [
-                ("Octave down".to_owned(), "Alt+Down".to_owned(), true),
-                ("Octave up".to_owned(), "Alt+Up".to_owned(), false),
+                ("Octave down".to_owned(), "Shift+Alt+Down".to_owned(), true),
+                ("Octave up".to_owned(), "Shift+Alt+Up".to_owned(), false),
                 ("The app's octave".to_owned(), String::new(), true),
             ]
         );

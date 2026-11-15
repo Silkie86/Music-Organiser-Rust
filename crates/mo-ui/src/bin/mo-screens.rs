@@ -289,7 +289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // The octave by hand, on the picked part's card (the best fit, 3 semitones up for the key): Octave down takes
     // it an octave under that. Its card, its roll, its buttons and its line's drag all say so, a list worked out
-    // again keeps it there, Alt+Up takes it back up, and The app's octave makes it the app's again.
+    // again keeps it there, Shift+Alt+Up takes it back up, and The app's octave makes it the app's again.
     let octave_buttons = || midi.get_octave_actions().iter().map(|a| a.text.to_string()).collect::<Vec<_>>();
     if octave_buttons() != ["Octave down", "Octave up"] {
         return Err("midi-fits-octave.png: the card of a part that's fitted has no octave buttons".into());
@@ -315,10 +315,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if carried(0) != Some(format!("{} (9 semitones down)", moved.title)) || midi.get_picked().fit != lower.fit {
         return Err("midi-fits-octave.png: a list worked out again lost the octave chosen".into());
     }
-    // Alt+Up, as a key: up an octave, back where the app had it, and still yours. Held down it steps once only.
+    // Shift+Alt+Up, as a key: up an octave, back where the app had it, and still yours. Held down it steps once only.
     let alt_up = |repeat| {
         let up = char::from(slint::platform::Key::UpArrow).to_string();
-        app.global::<mo_ui::AppKeys>().invoke_key(up.into(), false, false, true, false, repeat)
+        app.global::<mo_ui::AppKeys>().invoke_key(up.into(), false, true, true, false, repeat)
     };
     let pressed = alt_up(false);
     let upper = midi.get_picked();
@@ -328,19 +328,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         || upper.roll_low != moved.roll_low
         || octave_buttons().len() != 3
     {
-        return Err("midi-fits-octave.png: Alt+Up didn't take the part up an octave".into());
+        return Err("midi-fits-octave.png: Shift+Alt+Up didn't take the part up an octave".into());
     }
     if !alt_up(true) || midi.get_picked().fit != upper.fit {
-        return Err("midi-fits-octave.png: Alt+Up held down went on stepping, or wasn't the page's key".into());
+        return Err("midi-fits-octave.png: Shift+Alt+Up held down went on stepping, or wasn't the page's key".into());
     }
     // Up to the last octave (3 up): there the key is still the page's, and does nothing rather than something else.
     let stepped = (0..3).all(|_| alt_up(false));
     let top = midi.get_picked();
     if !stepped || !top.fit.starts_with("Moved 3 octaves and 3 semitones up") {
-        return Err(format!("midi-fits-octave.png: three more Alt+Up gave \"{}\"", top.fit).into());
+        return Err(format!("midi-fits-octave.png: three more Shift+Alt+Up gave \"{}\"", top.fit).into());
     }
     if !alt_up(false) || midi.get_picked().fit != top.fit {
-        return Err("midi-fits-octave.png: at the last octave Alt+Up wasn't the page's key any more".into());
+        return Err("midi-fits-octave.png: at the last octave Shift+Alt+Up wasn't the page's key any more".into());
     }
     let back = mo_ui::midi::run_action(&app, "midi.octaveApp");
     let again = midi.get_picked();

@@ -22,6 +22,10 @@
 //!   which are yours.
 //! - `Recordings\`: a Record take the test plugin was still saving (`Recording <time>.wav.part`), an hour old.
 //!   Never the takes, which are yours.
+//! - `MIDI browser\` in the export folder: a part Put in the song wrote for Bitwig to record, left when the app closed
+//!   or crashed while Bitwig recorded it. Its name is the part's own, so it goes only when `midi-puts\` in the data
+//!   folder has a note from that run naming its whole path, its size and when it was changed, and the file is still
+//!   just so (a part you sent since under that name stays); the note goes either way ([`crate::midi::note_put`]).
 //! - `Trimmed sounds\` in the export folder: a trimmed copy Trim silence was still making
 //!   (`<copy>.<number>.wav` or `.wav.part`, [`crate::trim_copy::is_half_made`]), an hour old. Never the copies: DAW
 //!   projects use them.
@@ -340,6 +344,11 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     // A part Send to Bitwig was still writing when the app stopped (its own name, given only while it's written).
     if let Some(sent) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER])) {
         done.add(remove_older(&sent, crate::midi::is_half_sent, WRITING, now, false));
+    }
+    // A part Put in the song left in MIDI browser when the app closed or crashed while Bitwig recorded it (MI-6).
+    if let Some(notes) = real_folder(&places.data, &[crate::midi::PUTS_FOLDER]) {
+        let sent = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER]));
+        done.add(clear_puts(&notes, sent.as_deref(), std::process::id()));
     }
     // A trimmed copy Trim silence was still making when the app or the plugin stopped (its own name, given only
     // while it's written). Never the copies: DAW projects use them (DF-5).
@@ -908,6 +917,36 @@ fn own_files(folder: &Path, is_kind: impl Fn(&str) -> bool) -> Vec<(PathBuf, Met
         .collect()
 }
 
+/// Put in the song's files an earlier run left (MI-6): each note in `notes` from another process than `this` names a
+/// file; that goes only when it's right in `sent` (the export folder's MIDI browser, not through a link), a plain
+/// file, with the size and changed time the note gives. Then the note goes, so a file that's changed since (you
+/// sent a part under that name) is never looked at again.
+fn clear_puts(notes: &Path, sent: Option<&Path>, this: u32) -> Tidied {
+    let mut done = Tidied::default();
+    let earlier = |name: &str| crate::midi::put_note_process(name).is_some_and(|p| p != this);
+    for (note, _) in own_files(notes, earlier) {
+        let Ok(text) = fs::read_to_string(&note) else {
+            done.failed += 1;
+            continue;
+        };
+        if let (Some((size, changed, file)), Some(sent)) = (crate::midi::read_put_note(&text), sent)
+            && file.parent() == Some(sent)
+            && let Ok(meta) = fs::symlink_metadata(&file)
+            && meta.is_file()
+            && meta.len() == size
+            && crate::midi::put_time(&meta) == Some(changed)
+        {
+            done.remove(&file, size, false);
+        }
+        match fs::remove_file(&note) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(_) => done.failed += 1,
+        }
+    }
+    done
+}
+
 /// The folders right inside `folder`, never a link or a junction.
 fn real_subfolders(folder: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(folder) else { return Vec::new() };
@@ -1021,6 +1060,54 @@ mod tests {
             exports: None,
             sample_folders: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_part_put_in_the_song_goes_only_when_its_note_says_so_and_it_is_as_it_was() {
+        let dir = test_folder("puts");
+        let data = dir.join("data");
+        let sent = dir.join("exports").join(crate::midi::EXPORT_SUBFOLDER);
+        let left = sent.join("Lead · Pattern 3.mid");
+        let changed = sent.join("Keys · Pattern 1.mid");
+        let elsewhere = dir.join("Bass · Pattern 2.mid");
+        let yours = sent.join("Pad · Pattern 4.mid");
+        for file in [&left, &changed, &elsewhere, &yours] {
+            fresh(file);
+        }
+        for file in [&left, &changed, &elsewhere] {
+            crate::midi::note_put(&data, file).unwrap();
+        }
+        // Sent again since under that name: another size, so it's yours now.
+        fs::write(&changed, b"a part you sent").unwrap();
+        let notes = data.join(crate::midi::PUTS_FOLDER);
+        // This run's own notes are left alone: its puts may still be recording.
+        let done = clear_puts(&notes, Some(&sent), std::process::id());
+        assert_eq!((done.removed, names(&notes).len()), (0, 3));
+        // An earlier run's: only the file as it was, right in MIDI browser, goes; every note goes.
+        let done = clear_puts(&notes, Some(&sent), std::process::id().wrapping_add(1));
+        assert_eq!((done.removed, done.failed), (1, 0));
+        assert!(!left.exists() && changed.exists() && elsewhere.exists() && yours.exists());
+        assert!(names(&notes).is_empty());
+        // Through the sweep, with no export folder known: the file stays, and the note isn't there to try again.
+        crate::midi::note_put(&data, &yours).unwrap();
+        let note = names(&notes).pop().unwrap();
+        fs::rename(notes.join(&note), notes.join("put-1-0.txt")).unwrap();
+        let mut places = test_places(&dir);
+        places.exports = None;
+        sweep(&places, SystemTime::now(), &TestBin(dir.join("bin")));
+        assert!(yours.exists() && names(&notes).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_put_note_is_known_by_its_whole_name() {
+        assert_eq!(crate::midi::put_note_process("put-123-4.txt"), Some(123));
+        for name in ["put-123.txt", "put--4.txt", "put-1-2.txt.bak", "Put-1-2.txt", "put-a-2.txt"] {
+            assert_eq!(crate::midi::put_note_process(name), None, "{name}");
+        }
+        let read = crate::midi::read_put_note("12\n345\nC:\\Exports\\MIDI browser\\Lead.mid");
+        assert_eq!(read, Some((12, 345, PathBuf::from("C:\\Exports\\MIDI browser\\Lead.mid"))));
+        assert_eq!(crate::midi::read_put_note("12\n345\n"), None);
     }
 
     /// A folder for one test, made by the test and removed after: never a real data or temp folder (rule 11).
