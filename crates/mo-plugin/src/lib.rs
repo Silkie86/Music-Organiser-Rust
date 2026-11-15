@@ -13,9 +13,10 @@
 //! A DAW calls a plugin from several threads: the main thread (opening the window, starting and stopping the audio)
 //! and the audio thread ([`Processor`]). What they share lives in [`Instance`].
 
-// The CLAP plugin wrapper (clack) catches a panic in any call from the DAW and tells the DAW the call failed, so a bug
-// here never takes the DAW down with it; background threads catch theirs too. Each is written to the plugin's crash
-// note ([`threads`]).
+// The CLAP plugin wrapper (clack) catches a panic in any call the DAW makes and tells the DAW the call failed; the
+// window's own events (drawing, the mouse, keys, its timer) come through Windows' window code instead, so the window
+// catches its own (`window.rs`); background threads catch theirs too. Each is written to the plugin's crash note
+// ([`threads`]).
 
 pub mod audition;
 pub mod check;
@@ -65,7 +66,8 @@ use clack_extensions::note_ports::{
     NoteDialect, NoteDialects, NotePortInfo, NotePortInfoWriter, PluginNotePorts, PluginNotePortsImpl,
 };
 use clack_extensions::params::{
-    ParamDisplayWriter, ParamInfoWriter, PluginAudioProcessorParams, PluginMainThreadParams, PluginParams,
+    HostParams, ParamDisplayWriter, ParamInfoWriter, ParamRescanFlags, PluginAudioProcessorParams,
+    PluginMainThreadParams, PluginParams,
 };
 use clack_extensions::preset_discovery::prelude::{HostPresetLoad, Location, PluginPresetLoad, PluginPresetLoadImpl};
 use clack_extensions::remote_controls::{PluginRemoteControls, PluginRemoteControlsImpl, RemoteControlsPageWriter};
@@ -149,6 +151,8 @@ impl DefaultPluginFactory for MoPlugin {
             // It keeps one data folder for as long as the DAW runs and saves takes there: the app's start mustn't
             // move the data folder from under it (DF-3).
             mo_app::data_move::hold_open_lock();
+            // A take cut off last time (the DAW closed or crashed as it was saved) is saved now.
+            threads::background("mo-plugin-mend", record::mend_cut_off_takes);
         }
         let offered = check::ask(&info);
         let yes = offered.iter().filter(|o| o.offered).count();
@@ -177,6 +181,7 @@ impl DefaultPluginFactory for MoPlugin {
             track_info: host.shared().info().get_extension::<HostTrackInfo>(),
             log: host.shared().info().get_extension::<HostLog>(),
             preset_load: host.shared().info().get_extension::<HostPresetLoad>(),
+            params: host.shared().info().get_extension::<HostParams>(),
             shared,
             window: RefCell::new(None),
             scale: Cell::new(1.0),
@@ -198,11 +203,19 @@ pub struct Shared {
 
 impl PluginShared<'_> for Shared {}
 
+impl Drop for Shared {
+    /// The plugin is going: a take under way is saved before the DAW can end (the 14 Nov review's RC-1).
+    fn drop(&mut self) {
+        self.instance.recorder.finish_before_going(std::time::Duration::from_secs(5));
+    }
+}
+
 pub struct MainThread<'a> {
     host: HostMainThreadHandle<'a>,
     track_info: Option<HostTrackInfo>,
     log: Option<HostLog>,
     preset_load: Option<HostPresetLoad>,
+    params: Option<HostParams>,
     shared: &'a Shared,
     window: RefCell<Option<baseview::Window>>,
     /// The screen's scaling the DAW gave (Windows and Linux): the window's size in pixels is the panel's times it.
@@ -262,7 +275,8 @@ impl MainThread<'_> {
 impl PluginStateImpl for MainThread<'_> {
     fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
         use std::io::Write;
-        let state = state::write(self.panel.get());
+        let knobs = &self.shared.instance.knobs;
+        let state = state::write(self.panel.get(), |k| knobs.get(k));
         output.write_all(state.as_bytes()).map_err(|_| PluginError::Message("The DAW didn't take the plugin's state"))
     }
 
@@ -278,6 +292,14 @@ impl PluginStateImpl for MainThread<'_> {
         if let Some((width, height)) = kept.panel {
             // For the next time the window opens: an open one keeps the size it has.
             self.panel.set(fit_panel(width, height));
+        }
+        // The knobs where the project left them (the 14 Nov review's PL-4); the DAW then reads them again, which it
+        // doesn't record as turns.
+        for &(knob, value) in &kept.knobs {
+            self.shared.instance.knobs.restore(knob, value, &self.shared.instance.player);
+        }
+        if let (false, Some(params)) = (kept.knobs.is_empty(), self.params) {
+            params.rescan(&self.host, ParamRescanFlags::VALUES);
         }
         log::line("State", &format!("The DAW handed back the plugin's state: {kept:?}"));
         Ok(())

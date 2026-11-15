@@ -10,8 +10,8 @@
 //! only the sound you stop on (and the one being read when you started).
 //!
 //! A sound can also be made instead of read ([`Player::play_made`]: a MIDI part played with a SoundFont), on a thread
-//! of its own so a slow one holds up no file; it loops until it's stopped or replaced, and it too plays only if it's
-//! still the newest pick once it's made.
+//! of its own so a slow one holds up no file; it loops until it's stopped or replaced. Loops are made one at a time
+//! and newest first, as files are read, and one plays only if it's still the newest pick once it's made.
 
 use crate::threads::lock;
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -661,6 +661,15 @@ pub enum Played {
 }
 
 /// The panel's side, shared by everything in the plugin that isn't the audio thread.
+/// The thread the loops picked are made on ([`Player::make_and_play`]).
+struct Maker(crate::threads::OneAtATime);
+
+impl Default for Maker {
+    fn default() -> Maker {
+        Maker(crate::threads::OneAtATime::named("mo-plugin-make"))
+    }
+}
+
 #[derive(Default)]
 pub struct Player {
     asks: Mutex<Option<Producer<Ask>>>,
@@ -691,6 +700,8 @@ pub struct Player {
     free: AtomicBool,
     /// Send MIDI: a MIDI part plays as notes out of the plugin, not with the SoundFont.
     midi_out: AtomicBool,
+    /// Makes the loops picked (a MIDI part, a curve), one at a time, newest first.
+    maker: Maker,
 }
 
 impl Player {
@@ -957,7 +968,9 @@ impl Player {
         // A file still to be read is no longer the newest pick.
         lock(&self.next).take();
         let me = Arc::clone(self);
-        crate::threads::background("mo-plugin-make", move || {
+        // One loop is made at a time, and a pick made while one is made takes the place of the one waiting: turning
+        // the MIDI part knob across sixty parts makes two, not sixty at once (the 14 Nov review's PL-5).
+        self.maker.0.ask(move || {
             if let Some(played) = me.made(&name, make, number, swap) {
                 told(played);
             }
@@ -966,6 +979,10 @@ impl Player {
 
     /// Makes a sound to loop and plays it, if its pick is still the newest when it's made (none when it isn't).
     fn made(&self, name: &str, make: Made, number: u64, swap: bool) -> Option<Played> {
+        // Not made at all once a newer pick came.
+        if self.picks.load(Ordering::Acquire) != number {
+            return None;
+        }
         let started = std::time::Instant::now();
         let made = make();
         if self.picks.load(Ordering::Acquire) != number {
@@ -1046,6 +1063,9 @@ impl Player {
 
     /// Hands `voice` to the audio thread to play, in place of what plays from its place when `swap`.
     fn hand_over_as(&self, mut voice: Box<Voice>, name: String, swap: bool) -> Played {
+        // The sounds the audio thread is done with are freed here first: with the panel shut nothing else frees them,
+        // and the audio thread takes a new pick only with room to hand one back (the 14 Nov review's PL-3).
+        self.tidy();
         // With In time off, it isn't held for the next beat.
         voice.fresh = self.in_time();
         voice.timed = voice.fresh;
@@ -1492,6 +1512,26 @@ mod tests {
     }
 
     #[test]
+    fn picks_keep_playing_with_the_panel_shut() {
+        // Favourites picked in the DAW's browser with no panel to tidy: each pick frees what the audio thread is
+        // done with first, so the 20th plays as the 1st did.
+        let player = Arc::new(Player::default());
+        let mut playing = player.start(4);
+        let (mut l, mut r) = (vec![0.0; 1], vec![0.0; 1]);
+        for n in 0..20u8 {
+            let value = f32::from(n) / 100.0;
+            let Played::Playing(_, number) =
+                player.hand_over(Box::new(Voice::new(&[vec![value; 4]], 4, 4)), "x".into())
+            else {
+                panic!("pick {n} not handed over")
+            };
+            playing.fill(&mut l, &mut r);
+            assert!(player.still_playing(number), "pick {n}");
+            assert_eq!(l, vec![value * LEVEL], "pick {n}");
+        }
+    }
+
+    #[test]
     fn a_swapped_loop_goes_on_from_where_the_last_one_was() {
         // A curve edited while Hear plays: the new tone takes over at the same place, not from its start.
         let player = Arc::new(Player::default());
@@ -1545,6 +1585,41 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         player.play_made("x".into(), Box::new(|| Err("No SoundFont".into())), move |p| tx.send(p).unwrap());
         assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(), Played::Not("No SoundFont".into()));
+    }
+
+    #[test]
+    fn a_burst_of_made_picks_makes_only_the_one_under_way_and_the_newest() {
+        let player = Arc::new(Player::default());
+        let _playing = player.start(48_000);
+        let made = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (go, held) = std::sync::mpsc::channel::<()>();
+        let (under_way, started) = std::sync::mpsc::channel::<()>();
+        let mut held = Some((held, under_way));
+        let (tx, rx) = std::sync::mpsc::channel();
+        // The first is held up while it's made, and twenty more are picked meanwhile.
+        for i in 0..21 {
+            let (made, held, tx) = (Arc::clone(&made), held.take(), tx.clone());
+            let make: Made = Box::new(move || {
+                if let Some((held, under_way)) = held {
+                    let _ = under_way.send(());
+                    let _ = held.recv_timeout(std::time::Duration::from_secs(10));
+                }
+                made.fetch_add(1, Ordering::AcqRel);
+                let audio =
+                    mo_audio::AudioData { sample_rate: 48_000, channels: vec![vec![0.5; 4]], ..Default::default() };
+                Ok((MadeLoop::Sound(audio), None))
+            });
+            player.play_made(format!("Part {i}"), make, move |p| {
+                let _ = tx.send(p);
+            });
+            if i == 0 {
+                started.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            }
+        }
+        go.send(()).unwrap();
+        let told = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(matches!(&told, Played::Playing(name, _) if name == "Part 20"), "{told:?}");
+        assert_eq!(made.load(Ordering::Acquire), 2, "the one under way, and the newest");
     }
 
     #[test]

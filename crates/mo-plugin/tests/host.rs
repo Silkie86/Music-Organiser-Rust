@@ -146,6 +146,36 @@ fn eight_knobs_on_one_page_that_the_daw_can_turn() {
     assert_eq!(params.get_value(&handle, in_time), Some(0.0));
 }
 
+/// Volume and the switches are kept in the project: a copy made from it (a project reopened, a device duplicated)
+/// starts where they were left.
+#[test]
+fn the_knobs_that_are_settings_go_into_the_project_and_come_back() {
+    let entry = entry();
+    let (volume, looped) = (ClapId::new(5), ClapId::new(6));
+    let mut saved = Vec::new();
+    {
+        let mut plugin = instance(&entry);
+        let handle = plugin.plugin_handle();
+        let params = handle.get_extension::<PluginParams>().unwrap();
+        let mut turned = EventBuffer::new();
+        turned.push(&ParamValueEvent::new(0, volume, Pckn::match_all(), 0.4));
+        turned.push(&ParamValueEvent::new(0, looped, Pckn::match_all(), 1.0));
+        let mut told = EventBuffer::new();
+        let mut inactive = plugin.inactive_plugin_handle().unwrap();
+        params.flush(&mut inactive, &turned.as_input(), &mut told.as_output());
+        let handle = plugin.plugin_handle();
+        handle.get_extension::<PluginState>().unwrap().save(&handle, &mut saved).unwrap();
+    }
+    let mut plugin = instance(&entry);
+    let handle = plugin.plugin_handle();
+    let params = handle.get_extension::<PluginParams>().unwrap();
+    assert_eq!(params.get_value(&handle, volume), Some(1.0));
+    assert_eq!(params.get_value(&handle, looped), Some(0.0));
+    handle.get_extension::<PluginState>().unwrap().load(&handle, &mut &saved[..]).unwrap();
+    assert_eq!(params.get_value(&handle, volume), Some(0.4));
+    assert_eq!(params.get_value(&handle, looped), Some(1.0));
+}
+
 #[test]
 fn silent_until_something_is_picked_and_starts_again_cleanly() {
     let entry = entry();

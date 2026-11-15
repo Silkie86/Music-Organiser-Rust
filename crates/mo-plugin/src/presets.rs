@@ -49,13 +49,16 @@ pub enum Read {
 /// The presets read last, kept while the plugin is loaded ([`crate::kept`]).
 pub(crate) static KEPT: crate::kept::Kept<Presets> = crate::kept::Kept::new();
 
-/// The app's files the presets are read from: the library, the songs' sounds the app keeps, and its preset files'
-/// store. A preset file added to a folder since shows once one of them changes, or the plugin is loaded again.
+/// The app's files the presets are read from: the library, the songs' sounds the app keeps, its preset files' store,
+/// and the part fixes made on its Presets page (laid over the songs' sounds: a fix there reads the list again, the
+/// 14 Nov review's PW-3). A preset file added to a folder since shows once one of them changes, or the plugin is
+/// loaded again.
 fn read_from_files(data: &Path) -> Vec<PathBuf> {
     vec![
         mo_library::songs_db::to_read(data),
         data.join(mo_presets::sound_store::FILE_NAME),
         data.join(file_store::FILE_NAME),
+        data.join(mo_presets::fixes::FILE_NAME),
     ]
 }
 
@@ -326,4 +329,16 @@ pub fn status_line(total: usize, shown: Option<usize>, songs_missed: usize) -> S
 pub fn hint(item: &Item) -> String {
     let hint = page::load_hint(&item.row.extension);
     if hint.is_empty() { "Drag it onto a track or a device to load it".into() } else { hint }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_part_fix_in_the_app_reads_the_kept_list_again() {
+        let data = Path::new("data");
+        let files = read_from_files(data);
+        assert!(files.contains(&data.join(mo_presets::fixes::FILE_NAME)));
+    }
 }

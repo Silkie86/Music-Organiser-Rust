@@ -176,6 +176,81 @@ pub fn save(mut take: AudioData, trim: Option<f32>, folder: &Path, name: &str) -
     Ok(path)
 }
 
+/// The size of the WAV header [`crate::write_wav`] writes, before the samples.
+const HEAD: u64 = 44;
+
+/// Saves the takes in `folder` whose saving was cut off (the DAW closed or crashed while a take was written): each
+/// `Recording ….wav.part` not written to for `older_than` is cut to its whole frames, its sizes are mended to what's
+/// there, and it's renamed "Recording … (recovered).wav". They're the user's takes, so they're never thrown away, only
+/// one with nothing in it (shorter than its header). What became of each, in plain words.
+///
+/// Only the takes' own part files: a part still being written (a take another copy of the plugin is saving) has
+/// just been written to, so it's left for `older_than`. Writes to the disk: off the UI and audio threads.
+pub fn mend_parts(folder: &Path, older_than: std::time::Duration) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
+    let mut said = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".wav.part").filter(|s| s.starts_with("Recording ")) else { continue };
+        // A plain file only, never through a link (rule 28).
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.file_type().is_file() {
+            continue;
+        }
+        let quiet = meta.modified().ok().and_then(|m| m.elapsed().ok()).is_some_and(|e| e >= older_than);
+        if !quiet {
+            continue;
+        }
+        let part = entry.path();
+        if meta.len() <= HEAD {
+            if std::fs::remove_file(&part).is_ok() {
+                said.push(format!("Removed {name}: nothing had been saved in it"));
+            }
+            continue;
+        }
+        let mut to = folder.join(format!("{stem} (recovered).wav"));
+        let mut n = 2;
+        while to.exists() {
+            to = folder.join(format!("{stem} (recovered {n}).wav"));
+            n += 1;
+        }
+        match mend(&part, meta.len()).and_then(|()| std::fs::rename(&part, &to)) {
+            Ok(()) => said.push(format!("Saved a take that was cut off as {}", to.display())),
+            Err(e) => said.push(format!("Couldn't mend {name}: {e}")),
+        }
+    }
+    said
+}
+
+/// Cuts the part file at `part` (`len` bytes) to its whole frames and sets its sizes to them.
+fn mend(part: &Path, len: u64) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).open(part)?;
+    let mut head = [0u8; HEAD as usize];
+    file.read_exact(&mut head)?;
+    let not_ours = || std::io::Error::other("it isn't a WAV file the app wrote");
+    if &head[..4] != b"RIFF" || &head[8..16] != b"WAVEfmt " || &head[36..40] != b"data" {
+        return Err(not_ours());
+    }
+    let block = u64::from(u16::from_le_bytes([head[32], head[33]]));
+    if block == 0 {
+        return Err(not_ours());
+    }
+    let data = ((len - HEAD) / block * block).min(u64::from(u32::MAX - 37));
+    let pad = data & 1;
+    file.set_len(HEAD + data + pad)?;
+    if pad == 1 {
+        file.seek(SeekFrom::Start(HEAD + data))?;
+        file.write_all(&[0])?;
+    }
+    let size = |n: u64| u32::try_from(n).unwrap_or(u32::MAX).to_le_bytes();
+    file.seek(SeekFrom::Start(4))?;
+    file.write_all(&size(36 + data + pad))?;
+    file.seek(SeekFrom::Start(40))?;
+    file.write_all(&size(data))?;
+    file.sync_all()
+}
+
 /// A sound card's input, open and recording into a [`Feed`] (feature `record`). Dropping it closes the input, which
 /// ends the take.
 #[cfg(feature = "record")]
@@ -275,6 +350,33 @@ pub mod card {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn a_take_cut_off_while_it_was_saved_is_mended_not_thrown_away() {
+        let dir = std::env::temp_dir().join(format!("mo-audio-mend-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A whole take, written as a save writes it, then cut off part-way through a frame.
+        let whole = dir.join("whole.wav");
+        crate::write_wav(&whole, &[vec![0.5; 100], vec![-0.5; 100]], 1000, 24).unwrap();
+        let bytes = std::fs::read(&whole).unwrap();
+        std::fs::remove_file(&whole).unwrap();
+        std::fs::write(dir.join("Recording 2026-11-15 21-04-10.wav.part"), &bytes[..44 + 6 * 40 + 4]).unwrap();
+        std::fs::write(dir.join("Recording 2026-11-15 21-05-00.wav.part"), &bytes[..20]).unwrap();
+        std::fs::write(dir.join("Kit.wav.part"), &bytes[..60]).unwrap();
+        let said = mend_parts(&dir, std::time::Duration::ZERO);
+        assert_eq!(said.len(), 2, "{said:?}");
+        let mended = dir.join("Recording 2026-11-15 21-04-10 (recovered).wav");
+        let audio = crate::read(&mended, 60.0).unwrap();
+        assert_eq!(audio.channels.len(), 2);
+        assert_eq!(audio.channels[0].len(), 40);
+        assert!(!dir.join("Recording 2026-11-15 21-05-00.wav.part").exists(), "an empty part goes");
+        assert!(dir.join("Kit.wav.part").exists(), "only a take's own part files");
+        // One being written just now is left.
+        std::fs::write(dir.join("Recording 2026-11-15 22-00-00.wav.part"), &bytes).unwrap();
+        assert!(mend_parts(&dir, std::time::Duration::from_secs(600)).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_take_is_what_came_in() {
