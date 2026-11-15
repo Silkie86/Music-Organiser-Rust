@@ -3,7 +3,11 @@
 //! limited to favourites and make that something you can adjust how adventurous").
 //!
 //! Each sound is compared with the favourites of its type (a kick with your favourite kicks), in the same fingerprints
-//! "Sounds like this" uses ([`SoundIndex::active`]), and goes with the favourite it's most like. Each favourite's sounds
+//! "Sounds like this" uses ([`SoundIndex::active`]): CLAP's when deep listening is on, but only for a type CLAP has
+//! heard every favourite and 9 in 10 of the other sounds of. This app never makes CLAP's fingerprints, so the sounds
+//! its own scan added have only the analyser's: a type with many of those (or a favourite among them) is compared in
+//! the analyser's fingerprints, which every analysed sound has, as "Sounds like this" falls back to them for a sound
+//! CLAP never heard (review SO-1). Each sound goes with the favourite it's most like. Each favourite's sounds
 //! are then put in order, the closest first, and each is given its reach ([`reach`]): how many sounds like each
 //! favourite must be let through for it to show. So "3 like each" shows the 3 sounds most like every favourite, not
 //! 30 piled round one of them in a crowded corner while the others get none.
@@ -15,7 +19,7 @@
 
 use rayon::prelude::*;
 
-use crate::index::{SoundIndex, dot};
+use crate::index::{SoundIndex, VectorIndex, dot};
 
 /// The most favourites of one type each sound is compared with.
 pub const POINTS: usize = 24;
@@ -36,10 +40,9 @@ pub enum Role {
 /// For each of `sounds` (its id, its type as shown, and what it is to the favourites), in the same order: how many
 /// sounds like each favourite of its type must be let through for it to show ([`NEVER`] when it can't be). A
 /// favourite's is 0. Types are matched in any case ("kick" is Kick), as the Type filter matches them. A sound the
-/// fingerprints don't have, every sound of a type with no favourite that has one, and every [`Role::Out`], is
-/// [`NEVER`].
-pub fn reach(index: &SoundIndex, sounds: &[(i64, &str, Role)]) -> Vec<u32> {
-    let index = index.active();
+/// fingerprints its type is compared in don't have ([`for_type`]), every sound of a type with no favourite that has
+/// one, and every [`Role::Out`], is [`NEVER`].
+pub fn reach(whole: &SoundIndex, sounds: &[(i64, &str, Role)]) -> Vec<u32> {
     let mut out = vec![NEVER; sounds.len()];
     // Each type's places. A library has a few dozen types at most, so a list is quicker than lowering each name.
     let mut by_type: Vec<(&str, Vec<usize>)> = Vec::new();
@@ -50,6 +53,7 @@ pub fn reach(index: &SoundIndex, sounds: &[(i64, &str, Role)]) -> Vec<u32> {
         }
     }
     for (_, places) in by_type {
+        let index = for_type(whole, sounds, &places);
         let favourites: Vec<Vec<f32>> = places
             .iter()
             .filter(|&&i| sounds[i].2 == Role::Favourite)
@@ -86,6 +90,24 @@ pub fn reach(index: &SoundIndex, sounds: &[(i64, &str, Role)]) -> Vec<u32> {
         }
     }
     out
+}
+
+/// The fingerprints a type's sounds (`places` in `sounds`) are compared in: CLAP's ([`SoundIndex::active`]) when it has
+/// every favourite of the type and 9 in 10 of its other sounds, else the analyser's.
+fn for_type<'a>(whole: &'a SoundIndex, sounds: &[(i64, &str, Role)], places: &[usize]) -> &'a VectorIndex {
+    let active = whole.active();
+    if std::ptr::eq(active, &whole.features) {
+        return active;
+    }
+    let favourites_heard =
+        places.iter().filter(|&&i| sounds[i].2 == Role::Favourite).all(|&i| active.contains(sounds[i].0));
+    let others: Vec<i64> = places.iter().filter(|&&i| sounds[i].2 == Role::Other).map(|&i| sounds[i].0).collect();
+    let heard = others.iter().filter(|&&id| active.contains(id)).count();
+    if favourites_heard && (others.is_empty() || crate::learn::heard_enough(heard, others.len())) {
+        active
+    } else {
+        &whole.features
+    }
 }
 
 /// The one of `points` that `like` finds most alike (its place and how alike); none when `like` knows none of them.
@@ -192,6 +214,43 @@ mod tests {
         let sounds = [(1, "Kick", F), (2, "Kick", O), (3, "Kick", O), (4, "Kick", O), (5, "Kick", F), (6, "Kick", O)];
         // "1 like each": 2 for the first, 6 for the second, though 3 and 4 are closer to a favourite than 6 is.
         assert_eq!(reach(&index, &sounds), [0, 0, 1, 2, 0, 0]);
+    }
+
+    #[test]
+    fn a_type_clap_has_not_heard_is_compared_in_the_analysers_fingerprints() {
+        use Role::{Favourite as F, Other as O};
+        use std::sync::Arc;
+        let list = |l: &[(i64, [f32; 2])]| l.iter().map(|(id, v)| (*id, v.to_vec())).collect();
+        // The analyser heard every sound; CLAP only 1 to 4 (the scan's sounds, 5 to 8, it never hears).
+        let features = list(&[
+            (1, [1.0, 0.0]),
+            (2, [0.9, 0.1]),
+            (3, [0.0, 1.0]),
+            (4, [0.1, 0.9]),
+            (5, [1.0, 0.0]),
+            (6, [0.95, 0.05]),
+            (7, [0.0, 1.0]),
+            (8, [0.05, 0.95]),
+        ]);
+        // CLAP puts 2 nearest 1 the other way round from the analyser, so which one is used shows.
+        let clap = list(&[(1, [1.0, 0.0]), (2, [0.0, 1.0]), (3, [0.9, 0.1]), (4, [0.5, 0.5])]);
+        let deep = SoundIndex {
+            features: VectorIndex::clap(&features),
+            clap: Some(Arc::new(VectorIndex::clap(&clap))),
+            deep: true,
+        };
+        // Kicks 1 to 4, all heard by CLAP: CLAP's, so 3 is the closest to favourite 1.
+        let kicks = [(1, "Kick", F), (2, "Kick", O), (3, "Kick", O), (4, "Kick", O)];
+        assert_eq!(reach(&deep, &kicks), [0, 2, 0, 1]);
+        // Snares 5 to 8, none heard by CLAP, the favourite among them: the analyser's, and every one has its reach.
+        let snares = [(5, "Snare", F), (6, "Snare", O), (7, "Snare", O), (8, "Snare", O)];
+        assert_eq!(reach(&deep, &snares), [0, 0, 2, 1]);
+        // A favourite CLAP heard among sounds it mostly didn't: the analyser's too.
+        let mixed = [(1, "Hat", F), (6, "Hat", O), (7, "Hat", O), (8, "Hat", O)];
+        assert_eq!(reach(&deep, &mixed), [0, 0, 2, 1]);
+        // CLAP heard the sounds but not the favourite: the analyser's, so the favourite still counts.
+        let unheard = [(5, "Perc", F), (2, "Perc", O), (3, "Perc", O), (4, "Perc", O)];
+        assert_eq!(reach(&deep, &unheard), [0, 0, 2, 1]);
     }
 
     #[test]

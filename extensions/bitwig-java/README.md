@@ -268,6 +268,12 @@ hears of it. `hello` says `loopback`:
 whether the link's own MIDI has come back, from the message it sends itself as Bitwig starts it and each time
 the app connects.
 
+New in 3.28: Stop is never pressed on a Bitwig that's stopped already. Before, only a part played with its song's
+bars was kept from it: stopping any other part or a preset audition (`deleteclip`, `deletetrack` and `stoptracks`
+with `transport`) pressed Stop even when you had stopped Bitwig yourself, or when what the app started never did, and
+Bitwig then moves the play start back to the beginning. Now Stop goes only while Bitwig plays, and a take-out that
+comes straight after a launch waits for that start (3 s at most) so it still stops it.
+
 New in 3.27: the watch feed has the song's Groove, as a section `groove`: `on`, `shuffle` (the shuffle amount, 0 to
 1) and `rate` (as Bitwig shows it: `"1/8"` or `"1/16"`). It's there for the curve editor's "Swing: from the
 project", which comes in a later change. The self-check's "watch: groove" says what Bitwig shows for each of the

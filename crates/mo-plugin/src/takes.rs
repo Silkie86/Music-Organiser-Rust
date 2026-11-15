@@ -104,7 +104,8 @@ pub fn typed(text: &str, lowest: Option<u8>) -> Option<Spelled> {
 /// A take that's over.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ended {
-    /// When it started, to the millisecond, as its file is named: "2026-11-13 07-12-03-250".
+    /// When it started, to the millisecond, as its file is named: "2026-11-13 07-12-03-250" (the list adds the
+    /// plugin copy's own end to it: [`crate::chordcheck::Checker::add_take`]).
     pub id: String,
     /// The day, for the bench's group, and the time for the panel ("07:12").
     pub day: String,

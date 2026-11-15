@@ -27,6 +27,8 @@ struct PresetSlots {
     found: Mutex<Option<(u64, Filtered)>>,
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
+    /// Works the list out, one asking at a time ([`crate::threads::OneAtATime`]).
+    lister: crate::threads::OneAtATime,
 }
 
 /// The list's lines, made only for the rows shown.
@@ -295,13 +297,15 @@ impl PresetsTab {
 /// number, and only the newest asking's answer is shown.
 fn view(presets: Arc<Presets>, filters: Filters, slots: Arc<PresetSlots>) {
     let number = slots.searches.fetch_add(1, Ordering::AcqRel) + 1;
-    background("mo-plugin-presets-view", move || {
+    let theirs = Arc::clone(&slots);
+    slots.lister.ask(move || {
+        let slots = theirs;
         if slots.searches.load(Ordering::Acquire) != number {
             return;
         }
         let started = Instant::now();
         let found = presets.view(&filters);
         crate::log::took_if_slow("Presets", &format!("Worked out a list of {} presets", found.shown.len()), started);
-        *lock(&slots.found) = Some((number, found));
+        crate::threads::newer(&slots.found, number, found);
     });
 }

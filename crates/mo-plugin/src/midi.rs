@@ -156,7 +156,9 @@ impl Parts {
     /// every core: call it off the panel's thread.
     pub fn view(&self, asked: &Asked) -> (Vec<usize>, ChoiceCounts) {
         let filters = Filters { smallest: self.smallest, ..asked.filters.clone() };
-        let (hits, counts) = page::view(&self.cat, &filters, asked.order, false, None, None);
+        // On the app's low-priority pool, not rayon's own at normal priority (rule 21).
+        let (hits, counts) =
+            mo_app::background::on_pool(|| page::view(&self.cat, &filters, asked.order, false, None, None));
         (hits.into_iter().map(|h| h.entry).collect(), counts)
     }
 

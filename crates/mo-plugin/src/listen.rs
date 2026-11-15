@@ -95,6 +95,8 @@ pub struct Listener {
     bar: AtomicU64,
     /// Counts the DAW's starts of the track's audio: the listening thread of an older one ends.
     run: AtomicU64,
+    /// The listening thread's sleep between looks, cut short when it's told to end.
+    nap: crate::threads::Nap,
     /// The newest for the panel.
     pub hears: Mutex<Option<Hears>>,
 }
@@ -114,6 +116,7 @@ impl Listener {
     /// The DAW started the track's audio: a new listening thread with this `ear`, and the old one ends.
     pub fn start(self: &Arc<Self>, ear: Ear) {
         let run = self.run.fetch_add(1, Ordering::AcqRel) + 1;
+        self.nap.wake();
         let me = Arc::clone(self);
         background("mo-plugin-listen", move || me.listen(run, ear));
     }
@@ -121,6 +124,7 @@ impl Listener {
     /// The DAW stopped the track's audio: the listening thread ends.
     pub fn stop(&self) {
         self.run.fetch_add(1, Ordering::AcqRel);
+        self.nap.wake();
     }
 
     /// On the audio thread, after each block went into the tap: how many frames the tap has had, and where the song
@@ -153,7 +157,10 @@ impl Listener {
         let mut told = Instant::now();
         let mut sound = false;
         while self.run.load(Ordering::Acquire) == run {
-            std::thread::sleep(HEAR_EVERY);
+            self.nap.sleep(HEAR_EVERY);
+            if self.run.load(Ordering::Acquire) != run {
+                break;
+            }
             let bar = f64::from_bits(self.bar.load(Ordering::Relaxed));
             track.set_bar(bar);
             if let Some(heard) = ear.hear() {
