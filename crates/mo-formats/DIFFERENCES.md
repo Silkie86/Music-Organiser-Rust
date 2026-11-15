@@ -93,6 +93,7 @@ tests don't have.
 | An audio part (AudioPartEvent; its events are the media pool's AudioPartClip) | Left out. | A clip with each of its events' audio, cut to what the part shows. | Better |
 | An audio event's stretch mode, transpose and tune, gain and fades; a disabled track; the bus a track is sent to; automation curves (`Envelopes/*.envelopex`, older `*.envelope`, the tempo's in song.xml) | Not read. | Read (10 Nov 2026). The gain is taken as a plain multiple (0.631 is -4 dB): Solomon's songs hold 3.2 and 6.5, too much for any other reading, but it hasn't been checked against the number Studio One shows. | Better |
 | The time signature (whole-app review FX-2, 15 Nov 2026) | The bar rounded to whole beats (7/8 gets 4); a denominator of 0 gives a bar of four billion beats. | Both numbers kept: 7/8 is 3.5 beats, and 6/8 is six eighth notes for the chord reader. Numbers that can't be a time signature (a 0, a fraction, over 64) leave the song in 4/4. | Better |
+| A track's other layers (takes) in the arrangement preview (Solomon's beta note, 15 Nov 2026) | Not read. | Each layer that isn't the playing one is a muted lane under its track, named as the song names it (or "Layer 2"), with its own clips; a layer with nothing in it has no lane. Before, only the playing layer showed, so a track whose playing layer was empty looked empty. Tried on one song of his with four layered tracks. | Better |
 
 ## MIDI files
 

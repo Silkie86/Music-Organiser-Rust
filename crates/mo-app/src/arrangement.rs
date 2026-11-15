@@ -438,8 +438,10 @@ pub fn summary(a: &Arrangement) -> String {
             format!("{}:{:02}", seconds / 60, seconds % 60)
         });
     }
-    parts.push(count(a.lanes.iter().filter(|l| l.kind != LaneKind::Group).count() as u64, "track"));
-    parts.push(count(a.clip_count() as u64, "clip"));
+    // A take that isn't playing (a Studio One layer) is drawn under its track, but isn't a track or its clips.
+    let tracks = || a.lanes.iter().filter(|l| !l.layer);
+    parts.push(count(tracks().filter(|l| l.kind != LaneKind::Group).count() as u64, "track"));
+    parts.push(count(tracks().map(|l| l.clips.len()).sum::<usize>() as u64, "clip"));
     let notes = a.note_count();
     if notes > 0 {
         parts.push(count(notes as u64, "note"));
@@ -1593,6 +1595,12 @@ mod tests {
     #[test]
     fn sums_up_the_song() {
         assert_eq!(summary(&song()), "140 BPM · 8 bars · 0:14 · 3 tracks · 4 clips · 2 notes");
+        // A take that isn't playing (a Studio One layer) is drawn, but isn't one of the song's tracks or clips.
+        let mut a = song();
+        let mut take = a.lanes[0].clone();
+        (take.layer, take.muted) = (true, true);
+        a.lanes.push(take);
+        assert_eq!(summary(&a), summary(&song()));
         let mut a = song();
         a.tempo = 92.5;
         a.lanes.clear();
