@@ -29,6 +29,7 @@ use mo_app::sounds::{CopiesFound, SoundList};
 use mo_app::space::{self, Drive, Holds, OnPlugins, Opens, Part};
 use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
+use mo_app::space_fix_note;
 use mo_app::space_old::{self, Found, OLD_COPIES};
 use mo_app::space_plugins::{self, UNUSED_PLUGINS};
 use mo_app::space_removing::{self, Removable, Tally};
@@ -951,7 +952,9 @@ fn fix_ticked(app: &AppWindow, feed: Feed) {
     let jobs = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let p = &mut *p;
-        if p.fixes.busy() {
+        // Not while the fixed projects go to the Recycle Bin either: that reads the app's note of what Fix wrote once,
+        // as it starts.
+        if p.fixes.busy() || p.fixed_removing {
             return Vec::new();
         }
         let jobs = p.bitwig.as_ref().map(|found| p.fixes.to_fix(found)).unwrap_or_default();
@@ -978,14 +981,16 @@ fn fix_ticked(app: &AppWindow, feed: Feed) {
 }
 
 /// Fix's own work, off the window's thread: each save in turn, inside the low-priority pool (rule 21), with an
-/// activity card saying how far it is and how it went, and each save's line told how it went.
+/// activity card saying how far it is and how it went, and each save's line told how it went. What it writes goes on
+/// the app's note in the data folder ([`space_fix_note`]).
 fn fix_each(jobs: &[ToFix], feed: &Feed, weak: &slint::Weak<AppWindow>) {
     let card = feed.start(space_bitwig::FIXING, "");
+    let note = space_fix_note::file();
     let (mut written, mut failed) = (0, 0);
     for (n, job) in jobs.iter().enumerate() {
         card.progress(n as f32 / jobs.len() as f32, Some(&space_bitwig::fix_progress_words(n, jobs.len())));
         // A crash (logged as one) fails this save only: the rest are still tried.
-        let done = catch_crash(AssertUnwindSafe(|| background::on_pool(|| space_bitwig::fix(job))))
+        let done = catch_crash(AssertUnwindSafe(|| background::on_pool(|| space_bitwig::fix(job, &note))))
             .unwrap_or_else(|_| Fixing::Failed("it stopped with an error, which the log says".to_owned()));
         let save = job.save.display();
         match &done {
@@ -1008,9 +1013,11 @@ fn fix_each(jobs: &[ToFix], feed: &Feed, weak: &slint::Weak<AppWindow>) {
 }
 
 /// Sends every "(fixed)" project Fix wrote in the projects the last look found to the Recycle Bin, so their saves can
-/// be fixed again (Solomon, 11 Nov 2026, while he tries Fix). Off the window's thread, on the pool for long work over a
-/// disk (rule 21), with an activity card saying how far it is and how it went. What went is noted as it goes and kept,
-/// so Put back on the Recycle Bin line brings it back, after a restart too. Then the page looks for copies again.
+/// be fixed again (Solomon, 11 Nov 2026, while he tries Fix): each one still as Fix left it, as the app's note of what
+/// Fix wrote says ([`space_fix_note`]). One you've saved in since stays, and the card names it (the whole-app review of
+/// 14 Nov, FX-5: Solomon, 15 Nov). Off the window's thread, on the pool for long work over a disk (rule 21), with an
+/// activity card saying how far it is and how it went. What went is noted as it goes and kept, so Put back on the
+/// Recycle Bin line brings it back, after a restart too. Then the page looks for copies again.
 fn remove_fixed(app: &AppWindow, feed: Feed) {
     let folders = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -1036,6 +1043,9 @@ fn remove_fixed(app: &AppWindow, feed: Feed) {
         let ran = catch_crash(AssertUnwindSafe(|| {
             let card = card_ref;
             let files = background::on_bulk_pool(|| bitwig::fixed_projects(&folders, stop)).unwrap_or_default();
+            // The note as it is now (Fix can't write while this runs): one that can't be read keeps them all.
+            let check = space_fix_note::Check::new(&space_fix_note::file());
+            let as_fix_left = |path: &Path, meta: &std::fs::Metadata| check.as_fix_left(path, meta);
             let of = files.len();
             let tally = Mutex::new(Tally::new(SystemBin.admin().can_ask()));
             let hear = |_: &Path, sent: &Result<(), String>| {
@@ -1046,7 +1056,7 @@ fn remove_fixed(app: &AppWindow, feed: Feed) {
             let note = binned::Going::start(&data, space_bitwig::BITWIG_FIXED, when);
             let goes = |removed: &Removed| note.went(removed);
             let bin = Heard::new(&SystemBin, &hear).noting(&goes);
-            let done = background::on_bulk_pool(|| bitwig::remove_fixed_projects(&files, &bin, stop));
+            let done = background::on_bulk_pool(|| bitwig::remove_fixed_projects(&files, &as_fix_left, &bin, stop));
             for (warning, line) in
                 space_removing::log_lines(&done, ("a fixed project", "A fixed project"), "fixed projects")
             {
@@ -1054,7 +1064,7 @@ fn remove_fixed(app: &AppWindow, feed: Feed) {
             }
             let (kept, _) = binned::record(&data, &SystemBin, space_bitwig::BITWIG_FIXED, when, &done);
             note.finish(kept.noted);
-            (space_bitwig::removed_fixed_words(&done), kept)
+            (space_bitwig::removed_fixed_words(&done, &check.stayed()), kept)
         }));
         let kept = match ran {
             Ok((words, kept)) => {

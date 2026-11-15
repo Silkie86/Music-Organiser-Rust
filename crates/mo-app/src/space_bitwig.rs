@@ -11,7 +11,8 @@
 //!
 //! While Fix is being tried, every "(fixed)" project it wrote can go to the Recycle Bin in one go, so the saves can be
 //! fixed again (Solomon, 11 Nov 2026: "if i need to delete all the fixed ones as im testing i should be able to do
-//! that easily"). Put back on the Recycle Bin line brings them back.
+//! that easily"). Put back on the Recycle Bin line brings them back. One you've saved in since Fix wrote it stays, as
+//! the app's note of what Fix wrote says ([`crate::space_fix_note`]; Solomon, 15 Nov 2026).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ use mo_space::{Stopped, key};
 use crate::songs::{plural, thousands};
 use crate::space::{Card, Line, Opens, Part, and_list};
 use crate::space_bin::BIN;
+use crate::space_fix_note::Stays;
 
 /// The Bitwig copies line's id.
 pub const BITWIG_COPIES: &str = "bitwig-copies";
@@ -334,8 +336,10 @@ pub struct ToFix {
 /// Writes a "(fixed)" project beside a save that uses the Library's own files instead of its project's copies
 /// (`mo_convert::relink`): never over a file that's there, and only once it reads back as a Bitwig project. The save and
 /// its copies aren't changed (rule 3). Every copy of the project goes in the one call: a copy the save doesn't use is
-/// left alone. Reads and writes the disk, so call it off the window's thread, inside the low-priority pool (rule 21).
-pub fn fix(job: &ToFix) -> Fixing {
+/// left alone. What it wrote goes on the app's note in `note` ([`crate::space_fix_note`]), so the button that sends
+/// every fixed project to the Recycle Bin can tell it from one you've saved in since. Reads and writes the disk, so
+/// call it off the window's thread, inside the low-priority pool (rule 21).
+pub fn fix(job: &ToFix, note: &Path) -> Fixing {
     let relinks: Vec<Relink> = job
         .copies
         .iter()
@@ -343,6 +347,7 @@ pub fn fix(job: &ToFix) -> Fixing {
         .collect();
     match relink::fix_bitwig_project_in(&job.save, &relinks, &job.libraries) {
         Ok(fixed) => {
+            crate::space_fix_note::wrote(note, &fixed.file);
             for line in &fixed.found {
                 crate::log::info("Space", &format!("Fix found again in {}: {line}", job.save.display()));
             }
@@ -658,22 +663,83 @@ pub fn remove_fixed_button(found: Option<&Copies>, wait: bool) -> Option<(String
     })
 }
 
-/// The activity card's line once the fixed projects went: Err when none did (the card then fails).
-pub fn removed_fixed_words(done: &mo_space::clean::Done) -> Result<String, String> {
+/// The activity card's line once the fixed projects went, from what went and why each one the app's note held back
+/// stayed (`stayed`, by the path as Space compares paths: [`crate::space_fix_note::Check::stayed`]): Err when none went
+/// and one stayed for a
+/// reason of its own (the card then fails). Those the note held back stay on purpose, so they're named: the ones you've
+/// saved in since Fix wrote them, and the ones the app has no record of Fix writing (the whole-app review of 14 Nov,
+/// FX-5).
+pub fn removed_fixed_words(done: &mo_space::clean::Done, stayed: &HashMap<String, Stays>) -> Result<String, String> {
     let went: HashSet<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
-    let stayed = done.problems.iter().filter(|p| !went.contains(p.path.as_str())).count();
-    match (done.removed.len(), stayed) {
-        (0, 0) => Err("No fixed project was found, so nothing went.".to_owned()),
-        (0, m) => Err(format!("None could go ({} stayed): the log says why.", thousands(m))),
+    let mut seen = HashSet::new();
+    let (mut changed, mut not_noted, mut other) = (Vec::new(), Vec::new(), 0);
+    for p in done.problems.iter().filter(|p| !went.contains(p.path.as_str()) && seen.insert(p.path.as_str())) {
+        let name = paths::stem(&p.path).to_owned();
+        match stayed.get(&key(&p.path)) {
+            Some(Stays::Changed) => changed.push(name),
+            Some(Stays::NotNoted) => not_noted.push(name),
+            Some(Stays::NoTime) | None => other += 1,
+        }
+    }
+    let held: Vec<String> =
+        [changed_words(&changed), not_noted_words(&not_noted)].into_iter().filter(|w| !w.is_empty()).collect();
+    let held = held.join(" ");
+    match (done.removed.len(), other) {
+        (0, 0) if held.is_empty() => Err("No fixed project was found, so nothing went.".to_owned()),
+        (0, 0) => Ok(format!("Nothing went. {held}")),
+        (0, m) => Err(format!("None could go ({} stayed): the log says why.{}", thousands(m), spaced(&held))),
         (n, m) => {
             let stayed = if m == 0 { String::new() } else { format!("; {} stayed (the log says why)", thousands(m)) };
             Ok(format!(
                 "Sent {} ({}) to the {BIN}{stayed}. Fix can write them again; Put back on the {BIN} line brings them \
-                 back.",
+                 back.{}",
                 plural(n, "fixed project"),
                 size_text(done.bytes()),
+                spaced(&held),
             ))
         }
+    }
+}
+
+/// A sentence after another: a space before it, unless it's empty.
+fn spaced(sentence: &str) -> String {
+    if sentence.is_empty() { String::new() } else { format!(" {sentence}") }
+}
+
+/// Projects by name, in quotes: the first three, then how many more.
+fn named(names: &[String]) -> String {
+    const NAMED: usize = 3;
+    let mut shown: Vec<String> = names.iter().take(NAMED).map(|n| format!("\"{n}\"")).collect();
+    if names.len() > NAMED {
+        shown.push(format!("{} more", thousands(names.len() - NAMED)));
+    }
+    and_list(&shown)
+}
+
+/// The "(fixed)" projects that stayed because they've changed since Fix wrote them, named; nothing when there are none.
+fn changed_words(names: &[String]) -> String {
+    match names.len() {
+        0 => String::new(),
+        1 => format!("{} stayed: it has changed since Fix wrote it, so it's yours now.", named(names)),
+        _ => format!("{} stayed: they've changed since Fix wrote them, so they're yours now.", named(names)),
+    }
+}
+
+/// The "(fixed)" projects that stayed because the app has no record of Fix writing them, so it can't tell if you've
+/// saved in them, named, with what you can do; nothing when there are none.
+fn not_noted_words(names: &[String]) -> String {
+    match names.len() {
+        0 => String::new(),
+        1 => format!(
+            "{} stayed: the app has no record of Fix writing it, so it can't tell if you've saved in it. If you \
+             haven't, you can delete it yourself.",
+            named(names)
+        ),
+        _ => format!(
+            "{} stayed: the app has no record of Fix writing them, so it can't tell if you've saved in them. If you \
+             haven't, you can delete them yourself.",
+            named(names)
+        ),
     }
 }
 
@@ -945,6 +1011,85 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let local = chrono::DateTime::<chrono::Local>::from(at).format("%-d %b %Y, %H:%M").to_string();
         assert_eq!(saved_words(Some(at)), format!("Saved {local}"));
+    }
+
+    /// The ones the app's note of what Fix wrote held back stay on purpose, so the card names them, apart from the
+    /// ones that stayed for a reason of their own (the whole-app review of 14 Nov, FX-5).
+    #[test]
+    fn the_bin_card_names_the_fixed_projects_the_note_held_back() {
+        use mo_space::clean::{Done, Problem, Removed, What};
+        let path = |name: &str| format!("K:/Bitwig Studio/Projects/Garage/{name}.bwproject");
+        let went = |name: &str| Removed {
+            path: path(name),
+            real: path(name),
+            bytes: 2 * MB,
+            what: What::FixedProject,
+            when: 0,
+            bin_id: None,
+            binned: None,
+            binned_zone: None,
+            stamp: None,
+        };
+        let stayed = |name: &str, stays: Option<Stays>| {
+            let why = stays.map_or("It isn't there any more.", Stays::why);
+            (Problem { path: path(name), why: why.to_owned() }, stays.map(|s| (key(&path(name)), s)))
+        };
+        let words = |removed: Vec<Removed>, problems: Vec<(Problem, Option<(String, Stays)>)>| {
+            let held: HashMap<String, Stays> = problems.iter().filter_map(|(_, h)| h.clone()).collect();
+            let problems = problems.into_iter().map(|(p, _)| p).collect();
+            removed_fixed_words(&Done { removed, problems, went_with: Vec::new() }, &held)
+        };
+        let back = format!("Fix can write them again; Put back on the {BIN} line brings them back.");
+        assert_eq!(
+            words(vec![went("Garage 2 (fixed)")], Vec::new()).unwrap(),
+            format!("Sent 1 fixed project (2 MB) to the {BIN}. {back}")
+        );
+        // One saved in since: named, and it stays on purpose, so the card doesn't fail.
+        let saved_in = "\"Garage 3 (fixed)\" stayed: it has changed since Fix wrote it, so it's yours now.";
+        assert_eq!(
+            words(vec![went("Garage 2 (fixed)")], vec![stayed("Garage 3 (fixed)", Some(Stays::Changed))]).unwrap(),
+            format!("Sent 1 fixed project (2 MB) to the {BIN}. {back} {saved_in}")
+        );
+        assert_eq!(
+            words(Vec::new(), vec![stayed("Garage 3 (fixed)", Some(Stays::Changed))]).unwrap(),
+            format!("Nothing went. {saved_in}")
+        );
+        // One the app has no record of: named, with what you can do.
+        assert_eq!(
+            words(Vec::new(), vec![stayed("Old (fixed)", Some(Stays::NotNoted))]).unwrap(),
+            "Nothing went. \"Old (fixed)\" stayed: the app has no record of Fix writing it, so it can't tell if you've \
+             saved in it. If you haven't, you can delete it yourself."
+        );
+        // Named apart from the ones that stayed for a reason of their own (a time that can't be read is one), the first
+        // three, once each.
+        let held: Vec<_> = (1..=5)
+            .map(|n| stayed(&format!("Song {n} (fixed)"), Some(Stays::Changed)))
+            .chain([
+                stayed("Song 1 (fixed)", Some(Stays::Changed)),
+                stayed("Old 1 (fixed)", Some(Stays::NotNoted)),
+                stayed("Old 2 (fixed)", Some(Stays::NotNoted)),
+                stayed("Gone (fixed)", None),
+                stayed("Timeless (fixed)", Some(Stays::NoTime)),
+            ])
+            .collect();
+        let named = "\"Song 1 (fixed)\", \"Song 2 (fixed)\", \"Song 3 (fixed)\" and 2 more stayed: they've changed since \
+                     Fix wrote them, so they're yours now. \"Old 1 (fixed)\" and \"Old 2 (fixed)\" stayed: the app has \
+                     no record of Fix writing them, so it can't tell if you've saved in them. If you haven't, you can \
+                     delete them yourself.";
+        assert_eq!(
+            words(vec![went("Garage 2 (fixed)")], held.clone()).unwrap(),
+            format!("Sent 1 fixed project (2 MB) to the {BIN}; 2 stayed (the log says why). {back} {named}")
+        );
+        // None went and one stayed for a reason of its own: the card fails, and still names the ones held back.
+        assert_eq!(
+            words(Vec::new(), held).unwrap_err(),
+            format!("None could go (2 stayed): the log says why. {named}")
+        );
+        assert_eq!(
+            words(Vec::new(), vec![stayed("Gone (fixed)", None)]).unwrap_err(),
+            "None could go (1 stayed): the log says why."
+        );
+        assert_eq!(words(Vec::new(), Vec::new()).unwrap_err(), "No fixed project was found, so nothing went.");
     }
 
     #[test]
