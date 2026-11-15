@@ -24,6 +24,7 @@ pub mod helper;
 mod in_flight;
 pub mod midi;
 pub mod note;
+pub mod one_copy;
 mod piano_roll;
 pub mod plugins;
 pub mod presets;

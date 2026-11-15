@@ -17,12 +17,12 @@ use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, HICON, KillTimer, LR_DEFAULTCOLOR, MF_CHECKED,
-    MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
-    SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP,
-    WM_TIMER, WNDCLASSW,
+    AllowSetForegroundWindow, AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, HICON, KillTimer,
+    LR_DEFAULTCOLOR, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_DESTROY,
+    WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 use windows::core::{PCWSTR, w};
 
@@ -264,9 +264,19 @@ fn menu(window: HWND) {
     }
 }
 
-/// Starts the full app: this same program, without the helper's flag, at normal priority (it would take on the
-/// helper's below-normal otherwise).
+/// Opens the full app. One that's open already is asked to show its window (the 14 Nov review's DF-1: a second copy
+/// would write over the first one's settings); only when none answers is it started: this same program, without the
+/// helper's flag, at normal priority (it would take on the helper's below-normal otherwise).
 fn open_app() {
+    if let Some(open) = mo_app::one_copy::hello(mo_app::one_copy::PORT) {
+        // Windows only lets a program put its window in front when the one in front (this icon's click) allows it.
+        // SAFETY: a plain call with a process id; one that's gone is refused, not a fault.
+        let _ = unsafe { AllowSetForegroundWindow(open.pid) };
+        if mo_app::one_copy::ask_to_show(mo_app::one_copy::PORT) {
+            return;
+        }
+        log::warning("Helper", "The open Music Organiser didn't answer when asked to show its window: starting it");
+    }
     use std::os::windows::process::CommandExt;
     const NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
     let opened = std::env::current_exe()

@@ -23,6 +23,12 @@ fn main() -> Result<(), slint::PlatformError> {
         mo_ui::helper::run();
         return Ok(());
     }
+    // One copy at a time (DF-1): a copy of this build that's open already is asked to show its window, and this one
+    // stops; a copy of another build is asked to close, and waited for. Before anything of the data folder is opened.
+    let one_copy = mo_ui::one_copy::claim();
+    if matches!(one_copy, mo_app::one_copy::Claim::Shown) {
+        return Ok(());
+    }
     mo_ui::startup::begin();
     // Before the log starts, so a crash while it starts still gets its crash file.
     log_crashes();
@@ -50,6 +56,7 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(problem) = mo_app::paths::problem() {
         log::warning("Data folder", &problem);
     }
+    mo_ui::one_copy::log_claim(&one_copy);
     // While this copy runs, another started meanwhile never switches folders under it.
     mo_app::data_move::hold_open_lock();
     // Programs the app opens (DAWs, folders) start at the window's priority, not a background thread's.
@@ -110,6 +117,14 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     };
     mo_ui::startup::step("window");
+    // Held until the app ends, so the port is let go only once the last settings are written.
+    let _one_copy = match &one_copy {
+        mo_app::one_copy::Claim::Ours { held, .. } => {
+            mo_ui::one_copy::connect(&app, held);
+            Some(std::sync::Arc::clone(held))
+        }
+        _ => None,
+    };
     mo_ui::gpu::connect(&app);
     // The window's moves, resizes and hiding, for the freeze lines.
     mo_ui::watchdog::watch_window(&app);
