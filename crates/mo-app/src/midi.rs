@@ -1213,9 +1213,17 @@ pub fn read_done_text(s: &mo_midi::indexer::Summary) -> (String, String) {
     if s.stopped {
         return ("Stopped reading MIDI".to_owned(), "It carries on from there next time".to_owned());
     }
+    // Notes kept in the index that tripped the key finder, or what's made from them for a search: a bug, said here
+    // so it gets heard of. The reading went on without them, and they keep what they had. (A reading that was
+    // stopped doesn't say: the next one asks for them again and does.)
+    let tripped = match s.tripped {
+        0 => String::new(),
+        1 => "; 1 part's notes couldn't be worked on (the log says why)".to_owned(),
+        n => format!("; {} parts' notes couldn't be worked on (the log says why)", thousands(n)),
+    };
     if s.read == 0 {
         let rekeyed = if s.rekeyed > 0 { format!("; {} keys read again", thousands(s.rekeyed)) } else { String::new() };
-        return ("MIDI up to date".to_owned(), format!("Nothing new to read{rekeyed}"));
+        return ("MIDI up to date".to_owned(), format!("Nothing new to read{rekeyed}{tripped}"));
     }
     let files = if s.read == 1 { "1 file".to_owned() } else { format!("{} files", thousands(s.read)) };
     let parts = if s.parts == 1 { "1 part".to_owned() } else { format!("{} parts", thousands(s.parts)) };
@@ -1223,6 +1231,7 @@ pub fn read_done_text(s: &mo_midi::indexer::Summary) -> (String, String) {
     if s.failed > 0 {
         detail.push_str(&format!("; {} couldn't be read", thousands(s.failed)));
     }
+    detail.push_str(&tripped);
     ("MIDI read".to_owned(), detail)
 }
 
@@ -1776,6 +1785,15 @@ pub(crate) mod tests {
         assert_eq!(read_done_text(&Default::default()).0, "MIDI up to date");
         let s = mo_midi::indexer::Summary { read: 3, parts: 1, ..Default::default() };
         assert_eq!(read_done_text(&s).1, "3 files, 1 part");
+        // Notes that tripped a reader were passed over, and it says so: after a reading, and when there was nothing
+        // new to read.
+        let s = mo_midi::indexer::Summary { read: 3, parts: 1, tripped: 1, ..Default::default() };
+        assert_eq!(read_done_text(&s).1, "3 files, 1 part; 1 part's notes couldn't be worked on (the log says why)");
+        let s = mo_midi::indexer::Summary { rekeyed: 4_000, tripped: 1_200, ..Default::default() };
+        assert_eq!(
+            read_done_text(&s).1,
+            "Nothing new to read; 4,000 keys read again; 1,200 parts' notes couldn't be worked on (the log says why)"
+        );
         // Files, then the files' last call, then keys.
         let mut p = ReadProgress::default();
         assert_eq!(p.text(5, 10, "L:\\x\\a.mid"), "Reading MIDI: 5 of 10 · a.mid");
