@@ -1,5 +1,5 @@
 //! The plugin's knobs in the DAW (CLAP's `params` and `remote-controls` extensions): Bitwig shows the eight on its
-//! device, under the plugin's own page, "Music Organiser", so they can be turned with the mouse or a controller.
+//! device, under the plugin's own page, "DAWmate", so they can be turned with the mouse or a controller.
 //!
 //! - **Sound**, **MIDI part** and **Preset** go through their tab's list: turned, the line that far down the list is
 //!   picked and plays (a preset is picked), as a click on it would.
@@ -304,9 +304,9 @@ impl Knobs {
     /// The one page of knobs the DAW shows (Bitwig: the device's remote controls).
     pub fn page(writer: &mut RemoteControlsPageWriter) {
         writer.set(&RemoteControlsPage {
-            section_name: b"Music Organiser",
+            section_name: b"DAWmate",
             page_id: ClapId::new(1),
-            page_name: b"Music Organiser",
+            page_name: b"DAWmate",
             param_ids: Knob::ALL.map(|k| Some(k.id())),
             is_for_preset: false,
         });

@@ -142,7 +142,7 @@ pub fn note_crashes() {
             let thread = std::thread::current().name().unwrap_or("a thread with no name").to_owned();
             let at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
             let backtrace = std::backtrace::Backtrace::force_capture();
-            let mut text = format!("Music Organiser test plugin crashed at {at} on {thread}:\n{info}\n\n{backtrace}\n");
+            let mut text = format!("DAWmate test plugin crashed at {at} on {thread}:\n{info}\n\n{backtrace}\n");
             if text.len() > MOST_BYTES {
                 let mut cut = MOST_BYTES;
                 while !text.is_char_boundary(cut) {

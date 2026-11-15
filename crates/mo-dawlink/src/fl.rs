@@ -1,7 +1,7 @@
 //! Play on the selected channel in FL Studio: a MIDI part plays, round and round, through whatever is on the channel
-//! selected in FL's channel rack, as if it were played on a keyboard. The app sends the notes out of the "Music
-//! Organiser" MIDI port (the loopMIDI port FL's Music Organiser script listens on); the script leaves notes alone, so
-//! FL plays them on the selected channel, as it does any controller's.
+//! selected in FL's channel rack, as if it were played on a keyboard. The app sends the notes out of the "DAWmate"
+//! MIDI port (the loopMIDI port FL's DAWmate script listens on, or "Music Organiser" from before the rename); the
+//! script leaves notes alone, so FL plays them on the selected channel, as it does any controller's.
 //!
 //! Nothing goes into the FL project: the notes are only played, so stopping leaves the project as it was. They go at
 //! the part's own tempo, not FL's, since FL isn't playing along. The notes keep MIDI 2.0's velocity until the last
@@ -19,9 +19,13 @@ use std::time::{Duration, Instant};
 
 pub use mo_formats::NoteEvent;
 
-/// The MIDI port the app plays into for FL Studio: the one FL's Music Organiser script is set to. Never the Bitwig
+/// The MIDI port the app plays into for FL Studio: the one FL's DAWmate script is set to. Never the Bitwig
 /// extension's loopback port ([`crate::bitwig::LOOPBACK_PORT`]).
-pub const FL_PORT: &str = "Music Organiser";
+pub const FL_PORT: &str = "DAWmate";
+
+/// The port's name before the app was called DAWmate (15 Nov 2026). A loopMIDI port made then keeps working: the app
+/// plays into it when there's no [`FL_PORT`], and the script is offered for both.
+pub const FIRST_FL_PORT: &str = "Music Organiser";
 
 /// The longest the timing thread sleeps at a time, so Stop takes effect this soon.
 const STEP: Duration = Duration::from_millis(4);
@@ -68,7 +72,7 @@ impl fmt::Display for Error {
             Error::NoPort { .. } => write!(
                 f,
                 "There's no MIDI port called \u{201c}{FL_PORT}\u{201d}. Make it in loopMIDI (it's the port FL Studio's \
-                 Music Organiser script listens on), then try again."
+                 DAWmate script listens on), then try again."
             ),
             Error::Port(why) => write!(
                 f,
@@ -81,22 +85,28 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
-/// Whether a MIDI output's name is FL's port: the name itself, or as Windows numbers a second device of the same name
-/// ("Music Organiser 1"), ignoring case. Never the Bitwig loopback ("Music Organiser Bitwig").
+/// Whether a MIDI output's name is FL's port ([`FL_PORT`], or [`FIRST_FL_PORT`] from before the rename): the name
+/// itself, or as Windows numbers a second device of the same name ("DAWmate 1"), ignoring case. Never the Bitwig
+/// loopback ("DAWmate Bitwig", or "Music Organiser Bitwig").
 pub fn is_fl_port(name: &str) -> bool {
+    is_numbered(name, FL_PORT) || is_numbered(name, FIRST_FL_PORT)
+}
+
+/// Whether `name` is `port`, or `port` with a number after it, ignoring case.
+fn is_numbered(name: &str, port: &str) -> bool {
     let name = name.trim();
-    let n = FL_PORT.len();
+    let n = port.len();
     let (Some(head), Some(rest)) = (name.get(..n), name.get(n..)) else {
         return false;
     };
-    if !head.eq_ignore_ascii_case(FL_PORT) {
+    if !head.eq_ignore_ascii_case(port) {
         return false;
     }
     let rest = rest.trim();
     rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Opens the "Music Organiser" MIDI output (on Windows, the loopMIDI port of that name).
+/// Opens the "DAWmate" MIDI output (on Windows, the loopMIDI port of that name), or "Music Organiser", its first name.
 #[cfg(feature = "midi-port")]
 pub fn open_port() -> Result<Box<dyn NoteOut>, Error> {
     use midir::{MidiOutput, MidiOutputConnection};
@@ -108,17 +118,18 @@ pub fn open_port() -> Result<Box<dyn NoteOut>, Error> {
         }
     }
 
-    let out = MidiOutput::new("Music Organiser").map_err(|e| Error::NoMidi(e.to_string()))?;
+    let out = MidiOutput::new("DAWmate").map_err(|e| Error::NoMidi(e.to_string()))?;
     let ports = out.ports();
     let names: Vec<String> = ports.iter().map(|p| out.port_name(p).unwrap_or_default()).collect();
-    // The exact name first, then a numbered one.
+    // The exact name first, then the first name, then a numbered one.
     let at = names
         .iter()
         .position(|n| n.trim().eq_ignore_ascii_case(FL_PORT))
+        .or_else(|| names.iter().position(|n| n.trim().eq_ignore_ascii_case(FIRST_FL_PORT)))
         .or_else(|| names.iter().position(|n| is_fl_port(n)))
         .ok_or_else(|| Error::NoPort { ports: names.clone() })?;
     let port = ports.get(at).ok_or_else(|| Error::NoPort { ports: names.clone() })?;
-    let connection = out.connect(port, "Music Organiser play").map_err(|e| Error::Port(e.to_string()))?;
+    let connection = out.connect(port, "DAWmate play").map_err(|e| Error::Port(e.to_string()))?;
     Ok(Box::new(Port(connection)))
 }
 
@@ -319,6 +330,11 @@ mod tests {
 
     #[test]
     fn knows_fls_port_by_name() {
+        assert!(is_fl_port("DAWmate"));
+        assert!(is_fl_port("dawmate "));
+        assert!(is_fl_port("DAWmate 1"));
+        assert!(!is_fl_port("DAWmate Bitwig"));
+        // The port's first name still is, so a set-up from before the rename keeps working.
         assert!(is_fl_port("Music Organiser"));
         assert!(is_fl_port("music organiser "));
         assert!(is_fl_port("Music Organiser 1"));

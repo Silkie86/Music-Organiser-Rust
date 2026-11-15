@@ -794,7 +794,11 @@ mod tests {
         };
         assert_eq!(kits_folder(Some(&set(&here))), Ok(here.join("Kits")));
         let in_documents = |f: Result<PathBuf, String>| {
-            f.is_ok_and(|f| f.ends_with(Path::new("Music Organiser Exports").join("Kits")))
+            f.is_ok_and(|f| {
+                [bitwig_convert::EXPORTS, bitwig_convert::FIRST_EXPORTS]
+                    .iter()
+                    .any(|e| f.ends_with(Path::new(e).join("Kits")))
+            })
         };
         assert!(in_documents(kits_folder(None)));
         assert!(in_documents(kits_folder(Some(&song_library("kits-none-set.db", &[])))));

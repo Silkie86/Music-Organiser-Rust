@@ -31,7 +31,7 @@ fn greets_and_says_what_bitwig_has_open() {
     assert_eq!((hello.link, hello.product.as_str(), hello.version.as_str()), (3, "Bitwig Studio", "6.1.5"));
     assert_eq!((hello.project.as_str(), hello.modified, hello.engine), ("Night Drive", false, true));
     assert_eq!((hello.changes, hello.only_in, hello.loopback), (true, true, Some(true)));
-    assert_eq!(hello.answering(), "the Music Organiser extension 3.30");
+    assert_eq!(hello.answering(), "the DAWmate extension 3.30");
     assert_eq!(hello.can_send(), Ok(()));
 
     // Asking again sees what changed in Bitwig meanwhile.
@@ -67,7 +67,7 @@ fn says_when_nothing_answers() {
         assert!(answered.len() < 10, "something answered on every port tried: {answered:?}");
     };
     assert!(err.to_string().starts_with("Bitwig isn't answering. Check that Bitwig Studio is open"), "{err}");
-    assert!(err.to_string().contains("\u{201c}Music Organiser Bitwig\u{201d}"), "{err}");
+    assert!(err.to_string().contains("\u{201c}DAWmate Bitwig\u{201d}"), "{err}");
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn something_else_on_the_port_isnt_taken_for_the_link() {
         assert_eq!(
             err.to_string(),
             format!(
-                "Something answered on port {}, but not the Music Organiser extension in Bitwig. If Bitwig is busy \
+                "Something answered on port {}, but not the DAWmate extension in Bitwig. If Bitwig is busy \
                  (opening a project, say), try again in a moment.",
                 bitwig.port()
             )
@@ -259,7 +259,7 @@ fn an_old_script_or_changes_off_take_nothing() {
         w.hello.remove("runtime");
     });
     let mut link = connect(&bitwig);
-    assert_eq!(link.hello().answering(), "the Music Organiser script");
+    assert_eq!(link.hello().answering(), "the DAWmate script");
     assert_eq!(link.new_track("Kick").unwrap_err(), Error::OldLink);
     assert_eq!(link.insert_file(2, "C:\\Kit\\Kick.wav").unwrap_err(), Error::OldLink);
     assert_eq!(link.fill_pads(&[pad(36, "C:\\Kit\\Kick.wav", "")], None).unwrap_err(), Error::OldLink);
@@ -285,7 +285,7 @@ fn a_link_that_didnt_start_says_why() {
     assert_eq!(
         err.to_string(),
         format!(
-            "Part of the Music Organiser extension didn't start in Bitwig, so the app didn't send anything. \
+            "Part of the DAWmate extension didn't start in Bitwig, so the app didn't send anything. \
              Restarting Bitwig may help. Bitwig said: The Bitwig extension failed: no transport.{SELF_CHECK_SAYS}"
         )
     );

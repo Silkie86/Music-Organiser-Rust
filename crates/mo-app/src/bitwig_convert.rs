@@ -30,13 +30,24 @@ pub fn convert_key(file: &Path) -> String {
     mo_library::converts::key(file)
 }
 
-/// Where every export goes (Bitwig converts, kits, MIDI parts): the export folder setting, or "Music Organiser
-/// Exports" in `documents` (the Documents folder [`documents`] finds). None when there's neither, rather than writing
-/// wherever the app started. Only works the path out: [`export_folder`] checks it before anything is written.
+/// The app's own export folder in Documents.
+pub const EXPORTS: &str = "DAWmate Exports";
+
+/// Its name before the app was called DAWmate (15 Nov 2026): when that folder is there, exports go on going into it,
+/// so what was exported before stays beside what's exported now.
+pub const FIRST_EXPORTS: &str = "Music Organiser Exports";
+
+/// Where every export goes (Bitwig converts, kits, MIDI parts): the export folder setting, or the app's own folder in
+/// `documents` (the Documents folder [`documents`] finds): [`FIRST_EXPORTS`] when that's there, else [`EXPORTS`]. None
+/// when there's neither a setting nor Documents, rather than writing wherever the app started. Only works the path out
+/// (and looks whether the first folder is there): [`export_folder`] checks it before anything is written.
 pub fn export_root(setting: Option<&str>, documents: Option<&Path>) -> Option<PathBuf> {
     match setting.map(str::trim).filter(|s| !s.is_empty()) {
         Some(folder) => Some(PathBuf::from(folder)),
-        None => documents.map(|d| d.join("Music Organiser Exports")),
+        None => documents.map(|d| {
+            let first = d.join(FIRST_EXPORTS);
+            if first.is_dir() { first } else { d.join(EXPORTS) }
+        }),
     }
 }
 
@@ -250,10 +261,23 @@ mod tests {
     fn exports_go_where_settings_say_or_in_documents() {
         assert_eq!(export_root(Some(r"D:\Exports"), None), Some(PathBuf::from(r"D:\Exports")));
         let documents = Path::new("Documents");
-        let exports = documents.join("Music Organiser Exports");
+        let exports = documents.join(EXPORTS);
         assert_eq!(export_root(Some("  "), Some(documents)), Some(exports.clone()));
         assert_eq!(export_root(None, Some(documents)), Some(exports));
         assert_eq!(export_root(None, None), None);
+    }
+
+    #[test]
+    fn exports_from_before_the_rename_stay_in_their_folder() {
+        let documents = std::env::temp_dir().join(format!("mo-app-first-exports-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&documents);
+        std::fs::create_dir_all(&documents).unwrap();
+        assert_eq!(export_root(None, Some(&documents)), Some(documents.join(EXPORTS)));
+        std::fs::create_dir_all(documents.join(FIRST_EXPORTS)).unwrap();
+        assert_eq!(export_root(None, Some(&documents)), Some(documents.join(FIRST_EXPORTS)));
+        // A setting still wins.
+        assert_eq!(export_root(Some(r"D:\Exports"), Some(&documents)), Some(PathBuf::from(r"D:\Exports")));
+        let _ = std::fs::remove_dir_all(&documents);
     }
 
     #[test]
@@ -285,7 +309,7 @@ mod tests {
             );
         }
         // None set: the one in Documents, made when it's needed.
-        assert_eq!(export_folder(Some(" "), Some(&dir)), Ok(dir.join("Music Organiser Exports")));
+        assert_eq!(export_folder(Some(" "), Some(&dir)), Ok(dir.join(EXPORTS)));
         assert_eq!(export_folder(None, None), Err(NO_EXPORT_FOLDER.to_owned()));
         // A file where the folder should be, and a path that isn't a full one: each says what's wrong.
         let file = dir.join("a file");

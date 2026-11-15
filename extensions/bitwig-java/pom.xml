@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  The Music Organiser extension for Bitwig Studio (a Java controller extension).
+  The DAWmate extension for Bitwig Studio (a Java controller extension).
 
-    mvn package    builds target/MusicOrganiser.bwextension (tests included)
+    mvn package    builds target/DAWmate.bwextension (tests included)
     ./mvnw package does the same with only a JDK installed (mvnw.cmd on Windows)
 
   Bitwig's API comes from Bitwig's own Maven repository and is "provided": Bitwig has it at run time, so
@@ -17,7 +17,7 @@
   <artifactId>music-organiser-bitwig</artifactId>
   <version>3.30</version>
   <packaging>jar</packaging>
-  <name>Music Organiser extension for Bitwig Studio</name>
+  <name>DAWmate extension for Bitwig Studio</name>
 
   <properties>
     <!-- Bitwig runs extensions on its own Java (25 in Bitwig 6.1); building for 17 leaves room to spare. -->
@@ -60,8 +60,8 @@
   </dependencies>
 
   <build>
-    <!-- target/MusicOrganiser.jar, copied to MusicOrganiser.bwextension below: the name Bitwig looks for. -->
-    <finalName>MusicOrganiser</finalName>
+    <!-- target/DAWmate.jar, copied to DAWmate.bwextension below: the name Bitwig looks for. -->
+    <finalName>DAWmate</finalName>
     <plugins>
       <plugin>
         <artifactId>maven-clean-plugin</artifactId>
@@ -96,7 +96,7 @@
           <archive>
             <addMavenDescriptor>false</addMavenDescriptor>
             <manifestEntries>
-              <Implementation-Title>Music Organiser</Implementation-Title>
+              <Implementation-Title>DAWmate</Implementation-Title>
               <Implementation-Version>${project.version}</Implementation-Version>
             </manifestEntries>
           </archive>
@@ -115,7 +115,7 @@
             <configuration>
               <target>
                 <copy file="${project.build.directory}/${project.build.finalName}.jar"
-                      tofile="${project.build.directory}/MusicOrganiser.bwextension" overwrite="true"/>
+                      tofile="${project.build.directory}/DAWmate.bwextension" overwrite="true"/>
               </target>
             </configuration>
           </execution>

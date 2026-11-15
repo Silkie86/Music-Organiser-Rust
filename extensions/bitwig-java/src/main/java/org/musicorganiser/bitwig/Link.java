@@ -74,9 +74,9 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * The Music Organiser link for Bitwig Studio.
+ * The DAWmate link for Bitwig Studio.
  *
- * Lets the Music Organiser app see what's in the open Bitwig project: its tracks and devices, the selected
+ * Lets the DAWmate app see what's in the open Bitwig project: its tracks and devices, the selected
  * device's parameters (with the IDs Bitwig saves them under) and Bitwig's actions. With "Let the app make
  * changes" turned on in this controller's settings, the app can also add tracks, set a parameter, insert a
  * plugin, device, preset or sample, put a MIDI file in a clip slot, fill a Drum Machine's pads, run an action
@@ -200,7 +200,7 @@ final class Link {
      * link sent itself comes back through the loopback, "button" by pressing one of the link's own hardware buttons through
      * the loopback, which Bitwig runs the command for itself, and "buttonCode" by pressing another, whose press the link
      * runs the command for. The last three need the controller's MIDI in and out set to the loopMIDI port called
-     * "Music Organiser Bitwig". Bitwig 6.1.3 has only carried out Save for the link once they were set (from its flush both
+     * "DAWmate Bitwig" (or "Music Organiser Bitwig", its first name). Bitwig 6.1.3 has only carried out Save for the link once they were set (from its flush both
      * times, straight away once in two); without them only "direct" was tried, and it didn't save.
      */
     static final List<String> ROUTES = List.of("direct", "flush", "midi", "button", "buttonCode");
@@ -231,11 +231,12 @@ final class Link {
      */
     static final String SYSEX_START = "F07D4D4F42";
     /** How to set up the loopback, for the self-check and the answers that need it. */
-    static final String LOOPBACK_SETUP = "In Bitwig, Settings > Controllers > Music Organiser, set both MIDI in and MIDI out to \""
-                                         + MusicOrganiserExtensionDefinition.LOOPBACK_PORT + "\" (the loopMIDI port), never \"Music Organiser\", "
-                                         + "which is the FL Studio link's.";
+    static final String LOOPBACK_SETUP = "In Bitwig, Settings > Controllers > DAWmate, set both MIDI in and MIDI out to \""
+                                         + MusicOrganiserExtensionDefinition.LOOPBACK_PORT + "\" (the loopMIDI port; \""
+                                         + MusicOrganiserExtensionDefinition.FIRST_LOOPBACK_PORT + "\", its first name, works too), "
+                                         + "never \"DAWmate\" or \"DAWmate\", which are the FL Studio link's.";
     static final String CHANGES_OFF = "Changes are turned off. To let the app change things, turn on \"Let the app make changes\" "
-                                      + "in Bitwig: Settings > Controllers > Music Organiser.";
+                                      + "in Bitwig: Settings > Controllers > DAWmate.";
     /** Why a change that waited behind others wasn't made: the app that asked had closed its connection (extension 3.18). */
     static final String APP_GONE = "The app stopped waiting for this change, so the link didn't make it.";
     /**
@@ -309,7 +310,7 @@ final class Link {
     /** Whether Bitwig has been told the port is taken (once is enough). */
     private boolean portWarned;
     /** What most often takes the port: the link itself, loaded twice. */
-    static final String TWICE = "If Music Organiser is listed twice in Bitwig's Settings > Controllers, remove one; "
+    static final String TWICE = "If DAWmate is listed twice in Bitwig's Settings > Controllers, remove one; "
                                 + "otherwise close what's using the port. Then restart Bitwig.";
 
     // Newer API (version 20 to 23), each null when Bitwig wouldn't make it.
@@ -513,7 +514,7 @@ final class Link {
 
         // The track and device selected in Bitwig.
         feature("cursor track", () -> {
-            cursorTrack = host.createCursorTrack("MO_LINK", "Music Organiser", 0, 0, true);
+            cursorTrack = host.createCursorTrack("MO_LINK", "DAWmate", 0, 0, true);
             cursorTrack.exists().markInterested();
             cursorTrack.name().markInterested();
             cursorEnd = cursorTrack.endOfDeviceChainInsertionPoint();
@@ -649,6 +650,7 @@ final class Link {
         }, () -> popupBrowser.exists().get() ? "Bitwig's browser is open." : "Bitwig's browser is closed.");
 
         feature("settings", () -> {
+            // The category keeps the name the app had when the setting was first saved, so Bitwig keeps its value.
             changesSetting = host.getPreferences().getBooleanSetting("Let the app make changes", "Music Organiser", false);
             changesSetting.markInterested();
         }, () -> changesSetting.get() ? "The app may make changes." : "Changes are turned off.");
@@ -671,7 +673,7 @@ final class Link {
                  + Arrays.stream(controls).filter(c -> c.exists().get()).count() + " controls.");
 
         feature("last clicked parameter", () -> {
-            LastClickedParameter clicked = host.createLastClickedParameter("MO_CLICKED", "Music Organiser");
+            LastClickedParameter clicked = host.createLastClickedParameter("MO_CLICKED", "DAWmate");
             Parameter parameter = clicked.parameter();
             parameter.exists().markInterested();
             parameter.name().markInterested();
@@ -870,11 +872,11 @@ final class Link {
                 HardwareButton bound = made.createHardwareButton("MO_BUTTON_" + id);
                 bound.pressedAction().setActionMatcher(in.createNoteOnActionMatcher(CHANNEL, NOTE_BOUND + i));
                 bound.pressedAction().addBinding(action);
-                bound.pressedAction().addBinding(host.createAction(() -> pressed(id, "button"), () -> "Music Organiser: " + id + " pressed"));
+                bound.pressedAction().addBinding(host.createAction(() -> pressed(id, "button"), () -> "DAWmate: " + id + " pressed"));
                 // The link runs the command for a press of this one, while Bitwig handles it.
                 HardwareButton code = made.createHardwareButton("MO_CODE_" + id);
                 code.pressedAction().setActionMatcher(in.createNoteOnActionMatcher(CHANNEL, NOTE_CODE + i));
-                code.pressedAction().setBinding(host.createAction(() -> pressed(id, "buttonCode"), () -> "Music Organiser: run " + id));
+                code.pressedAction().setBinding(host.createAction(() -> pressed(id, "buttonCode"), () -> "DAWmate: run " + id));
                 found.put(id, i);
             }
             midiIn = in;
@@ -888,7 +890,7 @@ final class Link {
                                + "and the routes through MIDI need them. Bitwig 6.1.3 has only saved for the link once they were set. " + LOOPBACK_SETUP));
 
         feature("remote connection", () -> {
-            socket = host.createRemoteConnection("Music Organiser", PORT);
+            socket = host.createRemoteConnection("DAWmate", PORT);
             socket.setClientConnectCallback(this::connected);
             port = socket.getPort();
             listening = true;
@@ -900,10 +902,10 @@ final class Link {
             return "Waiting for the app on port " + now + ", with " + clients.size() + " connected now.";
         });
         if (listening) {
-            host.println("Music Organiser: waiting for the app on port " + (port > 0 ? port : PORT) + ".");
+            host.println("DAWmate: waiting for the app on port " + (port > 0 ? port : PORT) + ".");
             warnIfPortTaken();
         } else {
-            host.showPopupNotification("Music Organiser: Bitwig couldn't listen for the app. The self-check in " + reports.folder()
+            host.showPopupNotification("DAWmate: Bitwig couldn't listen for the app. The self-check in " + reports.folder()
                                        + " says why.");
         }
 
@@ -920,7 +922,7 @@ final class Link {
             try {
                 selfTest("start");
             } catch (RuntimeException | LinkageError e) {
-                host.errorln("Music Organiser: the self-check failed (" + e + ").");
+                host.errorln("DAWmate: the self-check failed (" + e + ").");
             }
         }, SELF_CHECK_DELAY);
     }
@@ -999,7 +1001,7 @@ final class Link {
             try {
                 selfTest("moved");
             } catch (RuntimeException | LinkageError e) {
-                host.errorln("Music Organiser: the self-check failed (" + e + ").");
+                host.errorln("DAWmate: the self-check failed (" + e + ").");
             }
         }
         connection.setDisconnectCallback(() -> {
@@ -1033,7 +1035,7 @@ final class Link {
     private void warnIfPortTaken() {
         if (port <= 0 || port == PORT || portWarned) return;
         portWarned = true;
-        host.showPopupNotification("Music Organiser: port " + PORT + " is taken, so the app can't connect. " + TWICE);
+        host.showPopupNotification("DAWmate: port " + PORT + " is taken, so the app can't connect. " + TWICE);
     }
 
     /** Handles one request from the app. */
@@ -1146,7 +1148,7 @@ final class Link {
         if (e instanceof LinkError) return e.getMessage();
         StringWriter trace = new StringWriter();
         e.printStackTrace(new PrintWriter(trace));
-        host.errorln("Music Organiser: " + trace);
+        host.errorln("DAWmate: " + trace);
         return "The Bitwig extension failed: " + e;
     }
 
@@ -1232,7 +1234,7 @@ final class Link {
         } catch (Exception e) {   // Exception: some builds of the API declare an IOException here
             client.open = false;
             clients.remove(client);
-            host.errorln("Music Organiser: lost the connection to the app (" + e + ").");
+            host.errorln("DAWmate: lost the connection to the app (" + e + ").");
         }
     }
 
@@ -1712,7 +1714,7 @@ final class Link {
             sent.run.run();
             sent.ran = true;
         } catch (RuntimeException | LinkageError e) {
-            host.errorln("Music Organiser: couldn't run " + sent.id + " via " + sent.route + " (" + e + ").");
+            host.errorln("DAWmate: couldn't run " + sent.id + " via " + sent.route + " (" + e + ").");
         }
     }
 
@@ -1751,7 +1753,7 @@ final class Link {
         try {
             midiOut.sendSysex(message(nextToken()));
         } catch (RuntimeException | LinkageError e) {
-            host.errorln("Music Organiser: couldn't send a message through the loopback (" + e + ").");
+            host.errorln("DAWmate: couldn't send a message through the loopback (" + e + ").");
         }
     }
 
@@ -2447,7 +2449,7 @@ final class Link {
         try {
             putLoopBack(loop);
         } catch (RuntimeException | LinkageError e) {
-            host.errorln("Music Organiser: couldn't put Bitwig's loop back (" + e + ").");
+            host.errorln("DAWmate: couldn't put Bitwig's loop back (" + e + ").");
         }
     }
 
@@ -2783,7 +2785,7 @@ final class Link {
         try {
             into.put(name, read.get());
         } catch (RuntimeException | LinkageError e) {
-            if (!watchWarned) host.errorln("Music Organiser: the watch feed couldn't read the " + name + " (" + e + ").");
+            if (!watchWarned) host.errorln("DAWmate: the watch feed couldn't read the " + name + " (" + e + ").");
             watchWarned = true;
         }
     }
@@ -4553,7 +4555,7 @@ final class Link {
             try {
                 step.run();
             } catch (RuntimeException | LinkageError e) {
-                host.errorln("Music Organiser: couldn't put Bitwig back after recording (" + e + ").");
+                host.errorln("DAWmate: couldn't put Bitwig back after recording (" + e + ").");
             }
         }
 
@@ -4777,7 +4779,7 @@ final class Link {
             create.run();
         } catch (RuntimeException | LinkageError e) {
             error = String.valueOf(e);
-            host.errorln("Music Organiser: couldn't set up the " + name + " (" + e + ").");
+            host.errorln("DAWmate: couldn't set up the " + name + " (" + e + ").");
         }
         features.add(new Feature(name, error, clock.millis() - start, probe));
     }

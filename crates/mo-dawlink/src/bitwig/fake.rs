@@ -1,4 +1,4 @@
-//! A stand-in for the Music Organiser link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
+//! A stand-in for the DAWmate link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
 //! on a free port on this computer, greets each connection as extension 3.30 does, and answers `hello`, `newtrack`,
 //! `insert`, `pads`, `clip`, `selectedtrack`, `transport`, `watch`, `stoptracks`, `deleteclip` and `deletetrack` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
@@ -30,7 +30,7 @@ use super::{Bitwig, DRUM_MACHINE_NAME, DeviceId, Hello, Metre, PLAY_START_NEEDS,
 
 /// The extension's words when "Let the app make changes" is off.
 pub const CHANGES_OFF: &str = "Changes are turned off. To let the app change things, turn on \"Let the app make \
-                               changes\" in Bitwig: Settings > Controllers > Music Organiser.";
+                               changes\" in Bitwig: Settings > Controllers > DAWmate.";
 
 /// The sections the stand-in's watch feed gives (extension 3.24, the Groove from 3.27), as a Bitwig with every part of the API does.
 const WATCH_SECTIONS: [&str; 8] =

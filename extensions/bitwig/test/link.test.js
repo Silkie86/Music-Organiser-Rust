@@ -44,7 +44,7 @@ test("says hello when the app connects", () => {
   const bitwig = startBitwig(song);
   assert.equal(bitwig.api, 18);
   const [vendor, model, , id] = bitwig.defined;
-  assert.deepEqual([vendor, model], ["Music Organiser", "DAW link"]);
+  assert.deepEqual([vendor, model], ["DAWmate", "DAW link"]);
   assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 
   const app = bitwig.connect();

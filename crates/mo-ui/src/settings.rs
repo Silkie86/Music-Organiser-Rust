@@ -968,7 +968,7 @@ fn edit_folder(app: &AppWindow, list: FolderList, folder: String, add: bool) {
     }
 }
 
-/// Chooses the folder exports go into (`Some`), or goes back to "Music Organiser Exports" in Documents (`None`), in
+/// Chooses the folder exports go into (`Some`), or goes back to the app's own folder in Documents (`None`), in
 /// the library, away from the window; then reads the folders again. One change at a time, with the folder lists'.
 /// Only the setting changes: no folder is made, moved or emptied, and what was exported before stays where it is.
 fn edit_export(app: &AppWindow, folder: Option<String>) {
@@ -994,7 +994,7 @@ fn edit_export(app: &AppWindow, folder: Option<String>) {
         let done = folders::set_export_folder(&library, folder.as_deref());
         match (&done, &folder) {
             (Ok(true), Some(folder)) => log::info("Settings", &format!("Exports go into {folder}")),
-            (Ok(true), None) => log::info("Settings", "Exports go into Music Organiser Exports in Documents again"),
+            (Ok(true), None) => log::info("Settings", "Exports go into the app's own folder in Documents again"),
             (Ok(false), _) => {}
             (Err(e), _) => log::warning("Settings", &format!("Couldn't change the export folder: {e}")),
         }

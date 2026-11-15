@@ -1471,7 +1471,7 @@ mod tests {
             ", alone: Bitwig didn't say which project it has open, so the app left Night drive's bars alone"
         );
         assert_eq!(
-            words(Ok(&WithSong::OldExtension("the Music Organiser extension 3.21".into()))),
+            words(Ok(&WithSong::OldExtension("the DAWmate extension 3.21".into()))),
             ", alone: to hear it with Night drive there, install the Bitwig extension again from Settings > DAWs \
              (Install on Bitwig's row)"
         );
@@ -1569,7 +1569,7 @@ mod tests {
         );
         assert!(words(Mark::OtherProject(String::new())).starts_with(" Bitwig didn't say which project it has open"));
         assert_eq!(
-            words(Mark::OldExtension("the Music Organiser extension 3.22".into())),
+            words(Mark::OldExtension("the DAWmate extension 3.22".into())),
             " It fits Night drive from bar 9: to have Bitwig's play start mark the bar, install the Bitwig extension \
              again from Settings > DAWs (Install on Bitwig's row)."
         );

@@ -715,7 +715,7 @@ fn finish_in(first: &Path) -> Option<AtStart> {
                 Ok(()) => {
                     let _ = lock.unlock();
                     not_yet(
-                        "another copy of the app, or a DAW with the Music Organiser test plugin, is open (close the DAW \
+                        "another copy of the app, or a DAW with the DAWmate test plugin, is open (close the DAW \
                          and start the app again to switch)"
                             .to_owned(),
                     )

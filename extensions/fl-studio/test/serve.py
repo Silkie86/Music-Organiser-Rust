@@ -1,6 +1,6 @@
 """
 Runs the FL Studio script in the stand-in FL Studio (fake_fl.py) for the app's own tests, in place of the
-Music Organiser MIDI port: a line "sysex <hex>" on its input is a SysEx message coming in on the port, and it
+DAWmate MIDI port: a line "sysex <hex>" on its input is a SysEx message coming in on the port, and it
 prints each message the script sends out the same way. Changes are allowed. Prints "ready" once it's
 running, and stops when its input closes. Each other line of input changes the stand-in, as if done in FL
 Studio: {"title": "Other Song - FL Studio 2025", "modified": 1} opens another project or edits this one,
@@ -25,7 +25,7 @@ from fake_fl import Channel, Plugin, SysEx, load_script, night_drive  # noqa: E4
 
 
 def main():
-    installed = tempfile.mkdtemp()   # stands in for FL Studio's Settings/Hardware/Music Organiser
+    installed = tempfile.mkdtemp()   # stands in for FL Studio's Settings/Hardware/DAWmate
     studio = night_drive()
     printing = threading.Lock()
 

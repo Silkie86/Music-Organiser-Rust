@@ -1,8 +1,13 @@
-//! Installing the Music Organiser links in the DAWs (Settings › DAWs), as the C# app's `DawScripts` does:
-//! - FL Studio: the app's copy of `extensions/fl-studio/device_MusicOrganiser.py` goes into
-//!   `Settings\Hardware\Music Organiser` in each of FL Studio's user data folders. FL Studio picks it up when it starts.
-//! - Bitwig: the built extension (`extensions/bitwig-java`, `MusicOrganiser.bwextension`) goes into `Extensions` in
-//!   each of Bitwig's user folders, and the older JavaScript script it replaces comes out of `Controller Scripts`.
+//! Installing the DAWmate links in the DAWs (Settings › DAWs), as the C# app's `DawScripts` does:
+//! - FL Studio: the app's copy of `extensions/fl-studio/device_DAWmate.py` goes into `Settings\Hardware\DAWmate` in
+//!   each of FL Studio's user data folders. FL Studio picks it up when it starts.
+//! - Bitwig: the built extension (`extensions/bitwig-java`, `DAWmate.bwextension`) goes into `Extensions` in each of
+//!   Bitwig's user folders, and the older JavaScript script it replaces comes out of `Controller Scripts`.
+//!
+//! The app was called Music Organiser until 15 Nov 2026, and so were its links: `device_MusicOrganiser.py` in
+//! `Settings\Hardware\Music Organiser`, and `MusicOrganiser.bwextension`. Installing takes those copies out (only those
+//! files, and the script's folder when that's left empty), so a DAW never runs the link twice, and a copy of them
+//! counts as one to update. The FL script's setting comes over from the old copy.
 //!
 //! Only those files are ever written, never anything of the DAWs' own. Each is written beside itself first
 //! (`.mo-part`), read back to check, and only then put in place, so a copy that can't be written leaves the old one
@@ -13,10 +18,19 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// The script's file name, as FL Studio wants it (`device_` first).
-pub const FL_SCRIPT_NAME: &str = "device_MusicOrganiser.py";
+pub const FL_SCRIPT_NAME: &str = "device_DAWmate.py";
+
+/// The folder in FL Studio's `Settings\Hardware` the script goes in.
+pub const FL_FOLDER: &str = "DAWmate";
+
+/// The script's file name before the rename, which installing takes out.
+pub const FIRST_FL_SCRIPT_NAME: &str = "device_MusicOrganiser.py";
+
+/// The folder in `Settings\Hardware` it was in, beside [`FL_FOLDER`].
+pub const FIRST_FL_FOLDER: &str = "Music Organiser";
 
 /// The app's own copy of the script.
-pub const FL_SCRIPT: &str = include_str!("../../../extensions/fl-studio/device_MusicOrganiser.py");
+pub const FL_SCRIPT: &str = include_str!("../../../extensions/fl-studio/device_DAWmate.py");
 
 /// The start of the script's setting for letting the app make changes, which an update keeps.
 pub const FL_KEPT: &str = "LET_THE_APP_MAKE_CHANGES = ";
@@ -67,14 +81,26 @@ pub fn fl_user_data_folders(documents: &Path, project_folders: &[String]) -> Vec
 
 /// Where the script goes in each user data folder.
 pub fn fl_script_folders(user_data: &[PathBuf]) -> Vec<PathBuf> {
-    user_data.iter().map(|f| f.join("Settings").join("Hardware").join("Music Organiser")).collect()
+    user_data.iter().map(|f| f.join("Settings").join("Hardware").join(FL_FOLDER)).collect()
 }
 
-/// Whether the script in `folders` is the app's own.
+/// Where the script from before the rename is, for a folder [`fl_script_folders`] gives: beside it, in
+/// `Settings\Hardware\Music Organiser`. None for a folder that isn't in a `Hardware` folder.
+fn first_fl_script(folder: &Path) -> Option<PathBuf> {
+    let hardware = folder.parent().filter(|h| h.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Hardware")))?;
+    let first = hardware.join(FIRST_FL_FOLDER);
+    let same = mo_formats::case::key(&first.to_string_lossy()) == mo_formats::case::key(&folder.to_string_lossy());
+    (!same).then(|| first.join(FIRST_FL_SCRIPT_NAME))
+}
+
+/// Whether the script in `folders` is the app's own. A copy from before the rename is one to update.
 pub fn fl_state(folders: &[PathBuf]) -> ScriptState {
     let shipped = lines(FL_SCRIPT);
     let mut any = false;
     for folder in folders {
+        if first_fl_script(folder).is_some_and(|f| f.is_file()) {
+            return ScriptState::Outdated;
+        }
         let Ok(theirs) = fs::read_to_string(folder.join(FL_SCRIPT_NAME)) else { continue };
         any = true;
         if lines(&theirs) != shipped {
@@ -91,25 +117,46 @@ pub struct Installed {
     pub went: Vec<PathBuf>,
     /// The folders that couldn't take it, and the system's words for why.
     pub failed: Vec<(PathBuf, String)>,
+    /// The copies from before the rename it took out.
+    pub removed: Vec<PathBuf>,
 }
 
-/// Puts the app's script into every folder, keeping the `LET_THE_APP_MAKE_CHANGES` line each copy has. A folder that
-/// can't take it (a drive that isn't there now) doesn't stop the others.
+/// Puts the app's script into every folder, keeping the `LET_THE_APP_MAKE_CHANGES` line each copy has (or, when the
+/// folder has none yet, the one the copy from before the rename has), then takes that older copy out. A folder that
+/// can't take it (a drive that isn't there now) doesn't stop the others, and keeps its older copy.
 pub fn install_fl(folders: &[PathBuf]) -> Installed {
     let mut done = Installed::default();
     for folder in folders {
-        match copy_into(folder) {
+        let first = first_fl_script(folder).filter(|f| f.is_file());
+        match copy_into(folder, first.as_deref()) {
             Ok(()) => done.went.push(folder.clone()),
-            Err(e) => done.failed.push((folder.clone(), e.to_string())),
+            Err(e) => {
+                done.failed.push((folder.clone(), e.to_string()));
+                continue;
+            }
+        }
+        let Some(first) = first else { continue };
+        match fs::remove_file(&first) {
+            Ok(()) => {
+                if let Some(old_folder) = first.parent()
+                    && fs::read_dir(old_folder).is_ok_and(|mut d| d.next().is_none())
+                {
+                    let _ = fs::remove_dir(old_folder);
+                }
+                done.removed.push(first);
+            }
+            Err(e) => done.failed.push((first, e.to_string())),
         }
     }
     done
 }
 
-/// Writes the script into `folder`: beside itself first, checked, then in place.
-fn copy_into(folder: &Path) -> io::Result<()> {
+/// Writes the script into `folder`: beside itself first, checked, then in place. The kept setting is the copy's
+/// there, else the one in `first` (the copy from before the rename).
+fn copy_into(folder: &Path, first: Option<&Path>) -> io::Result<()> {
     let target = folder.join(FL_SCRIPT_NAME);
-    let text = with_kept(FL_SCRIPT, fs::read_to_string(&target).ok().as_deref());
+    let theirs = fs::read_to_string(&target).ok().or_else(|| first.and_then(|f| fs::read_to_string(f).ok()));
+    let text = with_kept(FL_SCRIPT, theirs.as_deref());
     write_checked(folder, FL_SCRIPT_NAME, text.as_bytes())
 }
 
@@ -173,7 +220,11 @@ fn lines(text: &str) -> Vec<&str> {
 }
 
 /// The Bitwig extension's file name.
-pub const BITWIG_EXTENSION_NAME: &str = "MusicOrganiser.bwextension";
+pub const BITWIG_EXTENSION_NAME: &str = "DAWmate.bwextension";
+
+/// The extension's file name before the rename, which installing takes out: it has the same ID, so Bitwig would list
+/// the controller twice.
+pub const FIRST_BITWIG_EXTENSION_NAME: &str = "MusicOrganiser.bwextension";
 
 /// The older JavaScript script's file name, which the extension replaces.
 pub const BITWIG_SCRIPT_NAME: &str = "MusicOrganiser.control.js";
@@ -219,8 +270,9 @@ pub fn bitwig_user_folders(chosen: Option<&str>, documents: &[PathBuf]) -> Vec<P
 pub fn bitwig_extension_folders(user_folders: &[PathBuf], loaded_from: Option<&str>) -> Vec<PathBuf> {
     let mut folders: Vec<PathBuf> = user_folders.iter().map(|f| f.join("Extensions")).collect();
     let seen = loaded_from.map(Path::new).filter(|f| {
-        f.file_name().is_some_and(|n| n.eq_ignore_ascii_case(BITWIG_EXTENSION_NAME))
-            && f.parent().and_then(Path::file_name).is_some_and(|n| n.eq_ignore_ascii_case("Extensions"))
+        f.file_name().is_some_and(|n| {
+            n.eq_ignore_ascii_case(BITWIG_EXTENSION_NAME) || n.eq_ignore_ascii_case(FIRST_BITWIG_EXTENSION_NAME)
+        }) && f.parent().and_then(Path::file_name).is_some_and(|n| n.eq_ignore_ascii_case("Extensions"))
     });
     if let Some(folder) = seen.and_then(Path::parent).filter(|f| f.is_dir()) {
         let key = mo_formats::case::key(&folder.to_string_lossy());
@@ -242,9 +294,13 @@ pub fn extension_version(file: &Path) -> Option<String> {
     })
 }
 
-/// Whether the extension in `folders` is the one `source` holds, byte for byte.
+/// Whether the extension in `folders` is the one `source` holds, byte for byte. A copy from before the rename is one
+/// to update.
 pub fn bitwig_state(source: &Path, folders: &[PathBuf]) -> ScriptState {
     let Ok(built) = fs::read(source) else { return ScriptState::NotInstalled };
+    if folders.iter().any(|f| f.join(FIRST_BITWIG_EXTENSION_NAME).is_file()) {
+        return ScriptState::Outdated;
+    }
     let mut any = false;
     for folder in folders {
         let Ok(theirs) = fs::read(folder.join(BITWIG_EXTENSION_NAME)) else { continue };
@@ -256,10 +312,11 @@ pub fn bitwig_state(source: &Path, folders: &[PathBuf]) -> ScriptState {
     if any { ScriptState::Installed } else { ScriptState::NotInstalled }
 }
 
-/// Puts the extension from `source` into every folder, then takes out the older script
+/// Puts the extension from `source` into every folder and takes out the copy from before the rename
+/// (`MusicOrganiser.bwextension`) in each folder it went into, then takes out the older script
 /// (`Controller Scripts\Music Organiser\MusicOrganiser.control.js`) from each user folder the extension went into, so
-/// Bitwig doesn't run both: only that file, and its `Music Organiser` folder when that's left empty. On Windows,
-/// Bitwig keeps its extensions open, so a copy it has open can't be replaced: close Bitwig first.
+/// Bitwig doesn't run two: only those files, and the script's `Music Organiser` folder when that's left empty. On
+/// Windows, Bitwig keeps its extensions open, so a copy it has open can't be replaced or taken out: close Bitwig first.
 pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBuf]) -> BitwigInstalled {
     let mut done = BitwigInstalled::default();
     let built = match fs::read(source) {
@@ -272,7 +329,17 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
     for folder in folders {
         match write_checked(folder, BITWIG_EXTENSION_NAME, &built) {
             Ok(()) => done.installed.went.push(folder.clone()),
-            Err(e) => done.installed.failed.push((folder.clone(), e.to_string())),
+            Err(e) => {
+                done.installed.failed.push((folder.clone(), e.to_string()));
+                continue;
+            }
+        }
+        let first = folder.join(FIRST_BITWIG_EXTENSION_NAME);
+        if first.is_file() {
+            match fs::remove_file(&first) {
+                Ok(()) => done.removed.push(first),
+                Err(e) => done.installed.failed.push((first, e.to_string())),
+            }
         }
     }
     for user in user_folders {
@@ -297,7 +364,7 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
     done
 }
 
-/// What installing the Bitwig extension did: where it went, and the older scripts it took out.
+/// What installing the Bitwig extension did: where it went, and the older copies and scripts it took out.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BitwigInstalled {
     pub installed: Installed,

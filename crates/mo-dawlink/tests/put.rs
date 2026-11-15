@@ -118,7 +118,7 @@ fn needs_the_extension_3_19_and_changes_on() {
     });
     assert_eq!(
         put(&bitwig, "Old"),
-        Err(Error::OldExtension { has: "the Music Organiser extension 3.18".into(), needs: "3.19" })
+        Err(Error::OldExtension { has: "the DAWmate extension 3.18".into(), needs: "3.19" })
     );
     let bitwig = with(|w| w.changes = false);
     assert_eq!(put(&bitwig, "Changes off"), Err(Error::ChangesOff));

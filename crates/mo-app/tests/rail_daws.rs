@@ -155,7 +155,7 @@ fn nothing_listening_says_not_linked() {
         let line = watch.ask().line.unwrap();
         if line.text == "Not linked" {
             assert!(!line.linked && line.project.is_empty());
-            assert!(line.tip.contains("it's closed, or the Music Organiser controller isn't on"), "{}", line.tip);
+            assert!(line.tip.contains("it's closed, or the DAWmate controller isn't on"), "{}", line.tip);
             return;
         }
     }

@@ -103,7 +103,7 @@ fn needs_the_extension_3_19() {
         w.hello.insert("extension".into(), json!("3.18"));
     });
     let refused = old.bitwig().play_on_selected(part("MO Play 6"), &turn(), &|| true).unwrap_err();
-    assert_eq!(refused, Error::OldExtension { has: "the Music Organiser extension 3.18".into(), needs: "3.19" });
+    assert_eq!(refused, Error::OldExtension { has: "the DAWmate extension 3.18".into(), needs: "3.19" });
     let script = with(|w| {
         w.hello.insert("link".into(), json!(2));
         w.hello.remove("runtime");
@@ -225,7 +225,7 @@ fn an_older_extension_plays_the_part_alone() {
     });
     let before = old.world().transport;
     let playing = old.bitwig().play_with_song(part("MO Play 25"), Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
-    assert_eq!(playing.with_song, WithSong::OldExtension("the Music Organiser extension 3.21".into()));
+    assert_eq!(playing.with_song, WithSong::OldExtension("the DAWmate extension 3.21".into()));
     let world = old.world();
     assert!(world.requests.iter().find(|r| r["cmd"] == "clip").unwrap().get("loop").is_none());
     assert_eq!((world.transport, world.playing), (before, true));
@@ -454,7 +454,7 @@ fn audition_needs_the_extension_3_20() {
     });
     let refused =
         old.bitwig().audition_preset(preset("Old"), part("MO Play 12"), "Old", &turn(), &|| true).unwrap_err();
-    assert_eq!(refused, Error::OldExtension { has: "the Music Organiser extension 3.19".into(), needs: "3.20" });
+    assert_eq!(refused, Error::OldExtension { has: "the DAWmate extension 3.19".into(), needs: "3.20" });
     assert!(old.world().requests.is_empty());
 }
 

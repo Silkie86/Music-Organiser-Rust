@@ -1,16 +1,17 @@
-# name=Music Organiser
-# supportedDevices=Music Organiser
+# name=DAWmate
+# supportedDevices=DAWmate,Music Organiser
 """
-The Music Organiser link for FL Studio.
+The DAWmate link for FL Studio.
 
-Lets the Music Organiser app ask FL Studio what it shows for the open project: the tempo, the channels,
+Lets the DAWmate app ask FL Studio what it shows for the open project: the tempo, the channels,
 the mixer and the plugins, and each plugin's parameters. The app uses this to check how it reads .flp
 files and to learn what plugin settings mean.
 
 FL Studio runs the script once it's the controller type of a MIDI input (Options > MIDI settings). A MIDI
-input called "Music Organiser" (for example a loopMIDI port) gets it by itself. FL Studio doesn't let scripts
+input called "DAWmate" (for example a loopMIDI port), or "Music Organiser" as it was first called, gets it by
+itself. FL Studio doesn't let scripts
 open files or connect to anything, so the app and the script talk in SysEx messages on that MIDI port: the
-app sends a request into the port, and the script answers through the Music Organiser MIDI output, which
+app sends a request into the port, and the script answers through the DAWmate MIDI output, which
 needs the same Port number as the input in FL Studio's MIDI settings.
 
 Nothing in the project changes unless LET_THE_APP_MAKE_CHANGES below is True.
@@ -41,16 +42,16 @@ except ImportError:  # a Python without its standard library can't read the app'
     json = None
 
 LINK_VERSION = 2
-SCRIPT = "device_MusicOrganiser.py"
+SCRIPT = "device_DAWmate.py"
 STALE_SECONDS = 15    # a request older than this is one the app gave up on
 PAGE_SECONDS = 0.04   # how long one list of parameters may take, so FL Studio never stalls
 SLOTS = 10            # effect slots on each mixer track
 VST_PARAMS = 4096     # VST plugins list 4240 parameters: their own 4096, then MIDI CC and aftertouch
 CHANGES_OFF = ("Changes are off. To let the app change FL Studio, set LET_THE_APP_MAKE_CHANGES = True in "
-               "device_MusicOrganiser.py (in FL Studio's Settings, Hardware, Music Organiser folder), then "
+               "device_DAWmate.py (in FL Studio's Settings, Hardware, DAWmate folder), then "
                "reload the script.")
-NO_OUTPUT = ("Music Organiser: the app asked something, but the script has no MIDI output to answer through. In "
-             "Options > MIDI settings, give the Music Organiser output the same Port number as the Music Organiser "
+NO_OUTPUT = ("DAWmate: the app asked something, but the script has no MIDI output to answer through. In "
+             "Options > MIDI settings, give the DAWmate output the same Port number as the DAWmate "
              "input.")
 
 # The messages: F0, 7D (the maker ID MIDI keeps for non-commercial use), "MO", then whether it's a request (1)
@@ -76,11 +77,11 @@ _told = False     # said there's no MIDI output to answer through
 def OnInit():
     global _on, _script, _told
     if json is None:
-        print("Music Organiser: this FL Studio's Python can't read the app's requests, which the link needs.")
+        print("DAWmate: this FL Studio's Python can't read the app's requests, which the link needs.")
         return
     _on, _told = True, False
     _script = script_folder()
-    print("Music Organiser link " + str(LINK_VERSION) + " is on: the app's requests come in on this MIDI port.")
+    print("DAWmate link " + str(LINK_VERSION) + " is on: the app's requests come in on this MIDI port.")
     if not device.isAssigned():
         print(NO_OUTPUT.replace("the app asked something, but ", ""))
 
@@ -189,13 +190,13 @@ def measure():
         if _measuring is None:
             needed = -(-(FADER_STEPS + 1) // PER_NAME) - (-(TEMPO_STEPS + 1) // PER_NAME)
             if mixer.trackCount() - 1 <= needed:
-                print("Music Organiser: this FL Studio has too few mixer inserts to measure on (" +
+                print("DAWmate: this FL Studio has too few mixer inserts to measure on (" +
                       str(mixer.trackCount()) + "), so nothing changed.")
                 _measuring = "done"
                 return
             _measuring = {"step": 0, "readings": [], "tempo": tempo(), "fader": mixer.getTrackVolume(FADER),
                           "tempos": []}
-            print("Music Organiser: measuring the fader and tempo in " + MEASURE_PROJECT)
+            print("DAWmate: measuring the fader and tempo in " + MEASURE_PROJECT)
         m = _measuring
         step = m["step"]
         fader_end = 2 * (FADER_STEPS + 1)
@@ -230,12 +231,12 @@ def measure():
             for track, name in enumerate(names, 1):
                 mixer.setTrackName(track, "; ".join(name))
             transport.globalTransport(midi.FPT_Save, 1)
-            print("Music Organiser: measured and saved " + MEASURE_PROJECT)
+            print("DAWmate: measured and saved " + MEASURE_PROJECT)
             _measuring = "done"
             return
         m["step"] = step + 1
     except Exception as e:  # never stop FL Studio over a measurement
-        print("Music Organiser: measuring stopped: " + str(e))
+        print("DAWmate: measuring stopped: " + str(e))
         _measuring = "done"
 
 
