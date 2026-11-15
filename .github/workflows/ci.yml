@@ -31,6 +31,7 @@ jobs:
       formats: ${{ steps.scope.outputs.formats }}
       galaxy: ${{ steps.scope.outputs.galaxy }}
       launcher: ${{ steps.scope.outputs.launcher }}
+      installer: ${{ steps.scope.outputs.installer }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -131,6 +132,50 @@ jobs:
       - name: Galaxy check tests
         working-directory: tools/galaxycheck
         run: cargo test
+
+  # The Windows installer (installer/, docs/installer.md): the setup .exe is built from a plain debug build (quick, and
+  # the installer doesn't care which) and tried by installer/check.ps1 on GitHub's machine: a new PC, a picked data
+  # folder, a PC with data, an update and an uninstall. The setup is kept as a download.
+  installer:
+    name: Installer
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.installer == 'true') }}
+    runs-on: windows-latest
+    steps:
+      - name: Stop if working out what changed failed
+        if: needs.scope.result != 'success'
+        run: exit 1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Build the app
+        run: cargo build -p mo-ui --bin music-organiser
+      - name: Build the setup
+        shell: pwsh
+        run: |
+          $setup = installer\build.ps1 -Exe target\debug\music-organiser.exe -Out dist
+          "SETUP=$setup" >> $env:GITHUB_ENV
+      - name: Try the setup
+        shell: pwsh
+        run: installer\check.ps1 -Setup $env:SETUP
+      - name: The scripts parse in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          foreach ($f in 'installer\build.ps1', 'installer\check.ps1') {
+            $errors = $null
+            [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw $f), [ref]$errors) | Out-Null
+            if ($errors) { $errors; exit 1 }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: setup
+          path: dist/*.exe
 
   # Every library the app uses (deny.toml): no known security holes, only licences that let the app be shared, and
   # only from crates.io. The galaxy check's libraries too.

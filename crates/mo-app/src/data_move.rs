@@ -883,7 +883,7 @@ pub fn renew_moved_out_note(moved_into: &Path, data: &Path, first: &Path) -> boo
 }
 
 /// Whether two folder paths name the same folder as written (Windows and a Mac ignore case).
-fn paths_match(a: &Path, b: &Path) -> bool {
+pub(crate) fn paths_match(a: &Path, b: &Path) -> bool {
     mo_backup::folders::within(a, b) && mo_backup::folders::within(b, a)
 }
 

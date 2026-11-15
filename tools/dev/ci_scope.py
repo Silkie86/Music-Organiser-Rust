@@ -12,6 +12,8 @@ Reads the files the PR changes (one per line, on stdin) and writes GitHub Action
              and mo-sounds, or the twin tool): the twin test runs.
 - galaxy:    "true" when the galaxy check (a workspace of its own), mo-app or what mo-app uses changed.
 - launcher:  "true" when the PowerShell launcher scripts changed.
+- installer: "true" when the Windows installer (installer/) or the name and logo it takes (product.toml, assets/)
+             changed: the setup .exe is built and tried.
 - rust:      "true" when any crate is to be checked at all (a PR of only notes checks none).
 
 Pushes to main and runs started by hand (before an ultracode review) skip this and check everything.
@@ -45,11 +47,16 @@ def packages():
 
 def scope(changed, crates, full=False):
     """What to check for these changed files (paths from the repo's root, with forward slashes); `full` checks all."""
-    result = {"full": full, "test": set(), "ui": False, "formats": False, "galaxy": False, "launcher": False}
+    result = {"full": full, "test": set(), "ui": False, "formats": False, "galaxy": False, "launcher": False,
+              "installer": False}
     for path in changed:
         if path.startswith("tools/galaxycheck/"):
             result["galaxy"] = True
             continue
+        if path.startswith(("installer/", "assets/")) or path == "product.toml":
+            result["installer"] = True
+            if path.startswith("installer/"):
+                continue
         if path.startswith("tools/dev/") and path.endswith(".ps1"):
             result["launcher"] = True
         if path.startswith(WHOLE) or path in WHOLE:
@@ -77,7 +84,8 @@ def scope(changed, crates, full=False):
     result["galaxy"] = result["galaxy"] or "mo-app" in check
     result["check"] = check
     if result["full"]:
-        result.update(test=set(crates), check=set(crates), ui=True, formats=True, galaxy=True, launcher=True)
+        result.update(test=set(crates), check=set(crates), ui=True, formats=True, galaxy=True, launcher=True,
+                      installer=True)
     return result
 
 
@@ -98,6 +106,7 @@ def main():
         f"formats={str(s['formats']).lower()}",
         f"galaxy={str(s['galaxy']).lower()}",
         f"launcher={str(s['launcher']).lower()}",
+        f"installer={str(s['installer']).lower()}",
         f"rust={str(bool(s['check'])).lower()}",
     ]
     print("\n".join(lines))

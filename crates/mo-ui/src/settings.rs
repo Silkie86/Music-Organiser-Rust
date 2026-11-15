@@ -251,6 +251,35 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             }
         });
     }
+    // The installer was asked to put the data somewhere else while there was data already (mo_app::install_choice):
+    // the app's own checked move does it, once, after start-up loading as above. The ask goes as the move starts, so
+    // it's never acted on twice; a move under way already (or called off) wins and the ask just goes.
+    else if let Some(to) = mo_app::install_choice::move_asked().filter(|_| setup_live) {
+        let weak = app.as_weak();
+        slint::Timer::single_shot(std::time::Duration::from_secs(30), move || {
+            // The data folder in use isn't the real one this run (its drive is missing, say): copying it would move
+            // the wrong data. The ask stays for a start that finds the data.
+            if let Some(why) = mo_app::paths::problem() {
+                log::warning("Data folder", &format!("The installer's ask to move to {} waits: {why}", to.display()));
+                return;
+            }
+            if mo_app::data_move::pending().is_some() {
+                mo_app::install_choice::take_move_ask();
+                log::info(
+                    "Data folder",
+                    &format!("The installer's ask to move to {} is dropped: a move is under way already", to.display()),
+                );
+                return;
+            }
+            let Some(app) = weak.upgrade() else { return };
+            log::info("Data folder", &format!("The installer asked for the data to go to {}", to.display()));
+            if move_data(&app, to) {
+                mo_app::install_choice::take_move_ask();
+            } else {
+                log::info("Data folder", "The installer's ask waits for the next start: a copy is going already");
+            }
+        });
+    }
 
     let data = app.global::<SettingsData>();
     data.set_tabs(ModelRc::new(VecModel::from(
@@ -1238,7 +1267,9 @@ fn install_fl(app: &AppWindow) {
 
 /// Copies the app's data folder to `to` and checks it, away from the window, with a card that shows how far it is.
 /// The switch is made at the next start (`mo_app::data_move`).
-fn move_data(app: &AppWindow, to: PathBuf) {
+///
+/// Whether the copy started: not while one is going already, or before the page is built.
+fn move_data(app: &AppWindow, to: PathBuf) -> bool {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let feed = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -1247,7 +1278,7 @@ fn move_data(app: &AppWindow, to: PathBuf) {
         p.data_message = format!("Copying to {}\u{2026}", to.display());
         Some(p.feed.clone())
     });
-    let Some(feed) = feed else { return };
+    let Some(feed) = feed else { return false };
     show(app);
     let from = mo_app::paths::data_dir();
     log::info("Data folder", &format!("Copying {} to {}", from.display(), to.display()));
@@ -1314,7 +1345,9 @@ fn move_data(app: &AppWindow, to: PathBuf) {
             }
         });
         show(app);
+        return false;
     }
+    true
 }
 
 /// Puts the app's own Bitwig extension in Bitwig's folders and takes out the older script (Solomon's OK, 2026-11-03),
