@@ -3649,6 +3649,7 @@ fn play_from(app: &AppWindow, at: usize, resume: bool) {
         stop_daw(app);
     }
     crate::sounds::stop_for_another(app);
+    crate::curve_editor::call_off_tone();
     data.set_playing(true);
     data.set_play_note("".into());
     if HERE.with(|h| *h.borrow()) {

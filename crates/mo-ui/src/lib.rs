@@ -618,13 +618,14 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
 }
 
 /// Esc's first step on every page: whatever plays stops, whichever page started it (a sound on Sounds, the MIDI page's
-/// loop or a part playing in a DAW go on after their page goes; an audition in Bitwig stops as its page goes). Each
-/// one, as two can play at once. Whether anything was playing.
+/// loop, a curve's tone or a part playing in a DAW go on after their page goes; an audition in Bitwig stops as its
+/// page goes). Each one, as two can play at once. Whether anything was playing.
 fn stop_what_plays(app: &AppWindow) -> bool {
     let sound = sounds::stop_on_escape(app);
     let midi = midi::stop_on_escape(app);
     let audition = presets::stop_on_escape(app);
-    sound || midi || audition
+    let tone = curve_editor::stop_tone(app);
+    sound || midi || audition || tone
 }
 
 /// Moves the pick of the list on show one line up (`by` -1) or down (1), as its Up and Down keys do (on Sounds' Tiles, a

@@ -106,7 +106,7 @@ impl SourceKind {
 pub const SHAPE_BEATS: f64 = 4.0;
 
 /// Goes up by one whenever this file finds other curves in the same saves (its filters and shapes; rule 7).
-const CURVES_VERSION: i64 = 1;
+const CURVES_VERSION: i64 = 2;
 
 /// What reads a save's curves: this file's version and its DAW reader's (for Bitwig, its clip or curve reader's and
 /// the decoder's, as the project reader's version follows it), so a change to any of them reads it again.
@@ -216,8 +216,7 @@ pub fn made_id(points: &[curve::CurvePoint], length_beats: f64) -> String {
 /// A run of moves as a curve: beats from its start become 0 to 1 across `length`, values are kept within 0 to 1, and
 /// points past the end are dropped. None when it's no curve at all: fewer than two points, or a flat line.
 pub fn shape(points: &[(f64, f64, f64)], length: f64) -> Option<Vec<curve::CurvePoint>> {
-    let last = points.iter().map(|p| p.0).fold(0.0, f64::max);
-    let length = if length.is_finite() && length > 0.0 { length } else { last };
+    let length = span_of(points, length);
     if length <= 0.0 {
         return None;
     }
@@ -318,8 +317,30 @@ impl Place<'_> {
     }
 }
 
-fn found(points: Option<Vec<curve::CurvePoint>>, length: f64, source: CurveSource) -> Option<Found> {
+/// The longest curve kept at its own length, in beats (25,000 bars): a longer one is a damaged number.
+const LONGEST: f64 = 100_000.0;
+
+/// How long a run of moves is, in beats: the `length` its save gives, or with a damaged one (not a number, none or
+/// less, absurdly long) as far as its last move; 0 when that's no good either. [`shape`] spreads the points over
+/// this, and the curve is kept this long.
+fn span_of(points: &[(f64, f64, f64)], length: f64) -> f64 {
+    let good = |l: f64| l.is_finite() && l > 0.0 && l <= LONGEST;
+    if good(length) {
+        return length;
+    }
+    let last = points.iter().map(|p| p.0).filter(|b| b.is_finite()).fold(0.0, f64::max);
+    if good(last) { last } else { 0.0 }
+}
+
+/// A curve found, with its length and where it starts as the library can keep them: a damaged number in a save
+/// (not a number at all, none or less, or absurdly long) gives 4 beats, or a start at 0. SQLite keeps "not a number"
+/// as nothing, which the places table refuses: one such clip stopped every later scan from being kept.
+fn found(points: Option<Vec<curve::CurvePoint>>, length: f64, mut source: CurveSource) -> Option<Found> {
     let points = points?;
+    let length = if length.is_finite() && length > 0.0 && length <= LONGEST { length } else { 4.0 };
+    if !source.at.is_finite() {
+        source.at = 0.0;
+    }
     Some(Found { id: shape_id(&points), points, length, source })
 }
 
@@ -333,7 +354,7 @@ fn fl_curves(automation: &[FlAutomation], plugin_of: &dyn Fn(Option<u32>) -> Str
         for part in &a.parts {
             let points: Vec<(f64, f64, f64)> = part.points.iter().map(|p| (p.beat, p.value, 0.0)).collect();
             let source = place.source(SourceKind::FlKnobMoves, "", &plugin, &setting, part.start);
-            out.extend(found(shape(&points, part.length), part.length, source));
+            out.extend(found(shape(&points, part.length), span_of(&points, part.length), source));
         }
     }
     out
@@ -350,7 +371,7 @@ fn bitwig_curves(clips: &[automation::AutomationClip], place: &Place<'_>) -> Vec
             let top = clip.points.iter().map(|p| p.value).fold(1.0, f64::max);
             let points: Vec<(f64, f64, f64)> = clip.points.iter().map(|p| (p.beat, p.value / top, p.bend)).collect();
             let source = place.source(SourceKind::BitwigClip, &clip.name, &clip.device, &clip.setting, clip.start);
-            found(shape(&points, clip.length), clip.length, source)
+            found(shape(&points, clip.length), span_of(&points, clip.length), source)
         })
         .collect()
 }
@@ -984,6 +1005,31 @@ mod tests {
         assert_eq!(short, [p(0.0, 0.2, 0.0), p(0.5, 0.4, 0.5), p(1.0, 0.2, 0.0)]);
         assert_eq!(shape(&[(0.0, 0.5, 0.0), (4.0, 0.5, 0.0)], 4.0), None);
         assert_eq!(shape(&[(0.0, 0.5, 0.0)], 4.0), None);
+    }
+
+    #[test]
+    fn a_damaged_length_or_start_is_kept_as_a_number_the_library_takes() {
+        let source = |at: f64| CurveSource {
+            kind: SourceKind::BitwigClip,
+            path: "a.bwproject".into(),
+            song: "a".into(),
+            name: String::new(),
+            device: String::new(),
+            setting: String::new(),
+            at,
+            modified: 0,
+        };
+        let rise = || shape(&[(0.0, 0.0, 0.0), (4.0, 1.0, 0.0)], 4.0);
+        for bad in [f64::NAN, f64::INFINITY, -1.0, 0.0, 1e15] {
+            let f = found(rise(), bad, source(f64::NAN)).expect("a curve");
+            assert_eq!((f.length, f.source.at), (4.0, 0.0), "{bad}");
+            // A clip's moves say how long it is then: as far as the last one, which is what they're spread over.
+            let moves = [(0.0, 0.0, 0.0), (8.0, 1.0, 0.0), (16.0, 0.5, 0.0)];
+            assert_eq!(span_of(&moves, bad), 16.0, "{bad}");
+            assert_eq!(shape(&moves, bad).expect("a curve")[1].x, 0.5, "{bad}");
+        }
+        let f = found(rise(), 512.0, source(64.0)).expect("a curve");
+        assert_eq!((f.length, f.source.at), (512.0, 64.0));
     }
 
     fn temp_dir(name: &str) -> PathBuf {

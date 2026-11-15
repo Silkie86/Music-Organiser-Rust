@@ -1526,6 +1526,10 @@ fn presets_shots(
     mo_ui::curve_editor::mouse_sample(app, 2, 9.0, 0.7, keys);
     mo_ui::curve_editor::mouse_sample(app, 4, 9.0, 0.7, keys);
     shots.push(("curves-edited.png".into(), capture(window)));
+    // Another curve picked and then this one again: it comes back with its edit (this once closed the app).
+    mo_ui::presets::pick_row(app, 1);
+    mo_ui::presets::pick_row(app, 0);
+    capture(window);
     if !mo_ui::curve_editor::undo(app, true) {
         return Err("curves-edited.png: the dragged point left nothing to undo".into());
     }

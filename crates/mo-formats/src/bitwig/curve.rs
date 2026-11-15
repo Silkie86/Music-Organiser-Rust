@@ -48,6 +48,22 @@ pub struct CurvePoint {
     pub bend: f64,
 }
 
+/// The bend that takes a line `middle` of the way up half way across (0 to 1; 0.5 is a straight line): how the
+/// readers of other programs' curves turn their own bends into the app's.
+///
+/// The app draws a line from (0, 0) to (1, 1) bent by `b` as a curve pulled towards (0.5 + b/2, 0.5 - b/2). Where
+/// that curve is half way across, at its step `s`, its height is `m`, with `s = (0.5 + m) / 2` and
+/// `m = 0.5 - 2 s (1 - s) b`; this is that, turned round. Past the fullest bend it's the fullest bend.
+pub fn bend_through(middle: f64) -> f64 {
+    if !middle.is_finite() {
+        return 0.0;
+    }
+    let m = middle.clamp(0.0, 1.0);
+    let s = (0.5 + m) / 2.0;
+    let bend = ((0.5 - m) / (2.0 * s * (1.0 - s))).clamp(-1.0, 1.0);
+    if bend.abs() < 0.01 { 0.0 } else { bend }
+}
+
 /// A curve file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Curve {

@@ -32,7 +32,7 @@ use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
     WindowHandler, WindowSettings, WindowSize,
 };
-use keyboard_types::{Key, KeyState, NamedKey};
+use keyboard_types::{Key, KeyState, Modifiers, NamedKey};
 use mo_app::backup::thousands;
 use mo_app::filters::{Filter, Shown as Choice};
 use mo_app::galaxy_grid::Grid;
@@ -577,6 +577,8 @@ struct Shown {
     /// The panel is being told of the right button going down or coming up, now: a line under the mouse takes
     /// that as a click too (the app's lines open a menu with it), and [`line_click`] has to tell the two apart.
     right_now: Rc<Cell<bool>>,
+    /// Whether Slint was last told Shift, Ctrl and Alt are held ([`Self::keys_held`]).
+    keys_told: Cell<[bool; 3]>,
     /// What was last clicked to be heard, and whether it has started playing: a click on it again stops it.
     heard: Rc<Cell<Option<(Heard, bool)>>>,
     /// The Galaxy: its map, its view and which picture is on show.
@@ -643,6 +645,7 @@ impl Shown {
             wave_width: Cell::new(waves::WIDTH as f32),
             dragging: Cell::new(false),
             right_now: Rc::default(),
+            keys_told: Cell::new([false; 3]),
             heard: Rc::default(),
             sky: Rc::default(),
             sky_names: RefCell::default(),
@@ -1987,6 +1990,22 @@ impl Shown {
         self.pointer.set(at);
         at
     }
+
+    /// The mouse says which of Shift, Ctrl and Alt are held: Slint is told of any it doesn't know of. A key
+    /// pressed while the DAW had the keys never came here as a key, and Slint forgets them all when its window
+    /// loses the keys; the curve editor's drags go by them from the very press.
+    fn keys_held(&self, modifiers: Modifiers) {
+        use slint::platform::{Key as S, WindowEvent as Slint};
+        let ctrl = if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL };
+        let now = [modifiers.contains(Modifiers::SHIFT), modifiers.contains(ctrl), modifiers.contains(Modifiers::ALT)];
+        let told = self.keys_told.replace(now);
+        for (at, key) in [S::Shift, S::Control, S::Alt].into_iter().enumerate() {
+            if now[at] != told[at] {
+                let text: SharedString = key.into();
+                self.send(if now[at] { Slint::KeyPressed { text } } else { Slint::KeyReleased { text } });
+            }
+        }
+    }
 }
 
 impl WindowHandler for Shown {
@@ -2008,20 +2027,23 @@ impl WindowHandler for Shown {
         use slint::platform::WindowEvent as Slint;
         match event {
             Event::Mouse(mouse) => match mouse {
-                MouseEvent::CursorMoved { position, .. } => {
+                MouseEvent::CursorMoved { position, modifiers } => {
+                    self.keys_held(modifiers);
                     let position = self.at(position);
                     self.send(Slint::PointerMoved { position });
                 }
-                MouseEvent::ButtonPressed { button, .. } => {
+                MouseEvent::ButtonPressed { button, modifiers } => {
                     // The keys come to the panel once it's clicked (for the search box).
                     if !self.context.has_focus() {
                         let _ = self.context.focus();
                     }
+                    self.keys_held(modifiers);
                     self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerPressed { position: self.pointer.get(), button: slint_button(button) });
                     self.right_now.set(false);
                 }
-                MouseEvent::ButtonReleased { button, .. } => {
+                MouseEvent::ButtonReleased { button, modifiers } => {
+                    self.keys_held(modifiers);
                     self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerReleased { position: self.pointer.get(), button: slint_button(button) });
                     self.right_now.set(false);
@@ -2046,6 +2068,12 @@ impl WindowHandler for Shown {
                     self.stop();
                 }
                 let Some(text) = key_text(&key.key) else { return EventStatus::Ignored };
+                // What Slint knows of Shift, Ctrl and Alt from here on.
+                if let Some(at) = held_key(&key.key) {
+                    let mut told = self.keys_told.get();
+                    told[at] = key.state == KeyState::Down;
+                    self.keys_told.set(told);
+                }
                 self.send(match (key.state, key.repeat) {
                     (KeyState::Down, false) => Slint::KeyPressed { text },
                     (KeyState::Down, true) => Slint::KeyPressRepeated { text },
@@ -2053,7 +2081,11 @@ impl WindowHandler for Shown {
                 });
             }
             Event::Window(WindowEvent::Focused) => self.send(Slint::WindowActiveChanged(true)),
-            Event::Window(WindowEvent::Unfocused) => self.send(Slint::WindowActiveChanged(false)),
+            Event::Window(WindowEvent::Unfocused) => {
+                // Slint lets go of Shift, Ctrl and Alt itself when its window loses the keys.
+                self.keys_told.set([false; 3]);
+                self.send(Slint::WindowActiveChanged(false));
+            }
             _ => return EventStatus::Ignored,
         }
         EventStatus::Captured
@@ -2240,6 +2272,18 @@ fn slint_button(button: MouseButton) -> PointerEventButton {
     }
 }
 
+/// Which of Shift (0), Ctrl (1) and Alt (2) a key is, as Slint has them. On a Mac, Cmd is Slint's Ctrl (as in
+/// Slint's own windows): the curve editor's hints name Cmd there.
+fn held_key(key: &Key) -> Option<usize> {
+    match key {
+        Key::Named(NamedKey::Shift) => Some(0),
+        Key::Named(NamedKey::Control) if !cfg!(target_os = "macos") => Some(1),
+        Key::Named(NamedKey::Meta) if cfg!(target_os = "macos") => Some(1),
+        Key::Named(NamedKey::Alt) => Some(2),
+        _ => None,
+    }
+}
+
 /// What Slint is told a key typed: the letters it gives, or Slint's own sign for a key that types none.
 fn key_text(key: &Key) -> Option<SharedString> {
     use slint::platform::Key as S;
@@ -2262,6 +2306,9 @@ fn key_text(key: &Key) -> Option<SharedString> {
         NamedKey::PageUp => S::PageUp,
         NamedKey::PageDown => S::PageDown,
         NamedKey::Shift => S::Shift,
+        // On a Mac, Cmd is Slint's Ctrl and Ctrl its Meta, as in Slint's own windows.
+        NamedKey::Control if cfg!(target_os = "macos") => S::Meta,
+        NamedKey::Meta if cfg!(target_os = "macos") => S::Control,
         NamedKey::Control => S::Control,
         NamedKey::Alt => S::Alt,
         _ => return None,

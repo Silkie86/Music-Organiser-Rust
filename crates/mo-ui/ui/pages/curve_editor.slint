@@ -4,7 +4,7 @@
 // buttons. The picture's still layers (grid, fill, curve) are one picture drawn off the window's thread
 // (mo_app::curve_picture, mo-ui/src/curve_editor.rs); what moves with the mouse or the sound is laid over it here.
 // Only shared parts from studio.slint.
-import { Theme, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, TempoStepper, Tip, CardAction, CardActions, SidePanel, MouseField } from "../studio.slint";
+import { Theme, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, TempoStepper, FilterName, Tip, CardAction, CardActions, SidePanel, MouseField } from "../studio.slint";
 
 // One of the ruler's marks: where (from the picture's left) and its bar and beat ("1", "1.2"; none when the marks are
 // too close to number each).
@@ -464,20 +464,8 @@ export component GridStrip inherits HorizontalLayout {
     alignment: start;
     if root.named: VerticalLayout {
         alignment: center;
-        Rectangle {
-            width: name.preferred-width + 2 * Space.md;
-            height: 28px;
-            border-top-left-radius: 14px;
-            border-bottom-left-radius: 14px;
-            border-width: 1px;
-            border-color: Theme.edge;
-            background: Theme.well;
-            name := Text {
-                text: "Grid";
-                color: Theme.muted;
-                font-size: Type.meta;
-                font-weight: 500;
-            }
+        FilterName {
+            text: "Grid";
         }
     }
     for g[i] in ["1/4", "1/8", "1/16", "1/32", "Triplet", "Dotted", "Off"]: VerticalLayout {
@@ -899,6 +887,8 @@ export component CurveEditor inherits SidePanel {
             faster-key: CurveEditorData.faster-key;
             bpm-text: CurveEditorData.speed-words;
             changed: CurveEditorData.speed-changed;
+            // A curve has no tempo of its own: it goes back to the usual one.
+            reset-tip: "Back to 120 BPM";
             stepped(by) => { CurveEditorData.speed-stepped(by); }
             reset => { CurveEditorData.speed-stepped(0); }
         }

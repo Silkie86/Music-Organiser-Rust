@@ -1587,6 +1587,14 @@ impl CurveFilters {
         !self.kinds.is_empty() || !self.shapes.is_empty() || !self.rhythms.is_empty() || !self.feels.is_empty()
     }
 
+    /// "Clear filters": nothing is picked in Found in, Shape, Rhythm and Feel. The search and the ticks stay.
+    pub fn clear(&mut self) {
+        self.kinds.clear();
+        self.shapes.clear();
+        self.rhythms.clear();
+        self.feels.clear();
+    }
+
     /// Picks or unpicks a way curves are found, by its words: more than one can be picked.
     pub fn toggle_kind(&mut self, label: &str) {
         chips::toggle_as(&mut self.kinds, label, true, kind_label, kind_from);
@@ -2031,7 +2039,13 @@ pub fn curves_summary(total: usize, shown: usize, hidden: usize) -> String {
 }
 
 /// The curves list's words when it shows nothing.
-pub fn curves_empty(total: usize, shown: usize, reading: bool, failed: Option<&str>) -> (String, String) {
+pub fn curves_empty(
+    total: usize,
+    shown: usize,
+    reading: bool,
+    failed: Option<&str>,
+    filtered: bool,
+) -> (String, String) {
     if let Some(why) = failed {
         return ("Couldn't read the curves".into(), why.to_owned());
     }
@@ -2049,6 +2063,9 @@ pub fn curves_empty(total: usize, shown: usize, reading: bool, failed: Option<&s
                     .into(),
             )
         };
+    }
+    if filtered {
+        return ("No curves match".into(), "Try fewer filters or other words, or show the hidden ones.".into());
     }
     ("No curves match".into(), "Try other words, or show the hidden ones.".into())
 }
