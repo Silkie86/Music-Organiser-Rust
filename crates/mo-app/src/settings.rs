@@ -798,7 +798,10 @@ pub fn bitwig_installed_note(done: &BitwigInstalled) -> String {
     for (folder, why) in &done.installed.failed {
         out.push_str(&format!(" Couldn't put it in {}: {why}", folder.display()));
     }
-    if !done.installed.failed.is_empty() {
+    for (file, why) in &done.installed.left {
+        out.push_str(&format!(" Couldn't take out the older copy {}: {why}", file.display()));
+    }
+    if !done.installed.failed.is_empty() || !done.installed.left.is_empty() {
         out.push_str(" If Bitwig is open, close it, then press Install again.");
     }
     out.trim_start().to_owned()
@@ -824,6 +827,12 @@ pub fn installed_note(done: &Installed) -> String {
             out.push(' ');
         }
         out.push_str(&format!("Couldn't put it in {}: {why}", folder.display()));
+    }
+    for (file, why) in &done.left {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("Couldn't take out the older copy {}: {why}", file.display()));
     }
     out
 }

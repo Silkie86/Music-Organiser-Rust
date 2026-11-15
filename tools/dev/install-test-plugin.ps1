@@ -111,8 +111,12 @@ $worked = AsAdmin $copy
 # Checked by its contents, so an old copy left in place (Bitwig had it open) is never taken for the new one.
 $same = (Test-Path -LiteralPath $Plugin) -and
     ((Get-FileHash -LiteralPath $Plugin).Hash -eq (Get-FileHash -LiteralPath $Built).Hash)
-if (-not $worked -or -not $same -or (Test-Path -LiteralPath $FirstPlugin)) {
+if (-not $worked -or -not $same) {
     Say "Couldn't put the plugin in $ClapDir : is Bitwig open? Close it and double-click this again." 'Red'
+    exit 1
+}
+if (Test-Path -LiteralPath $FirstPlugin) {
+    Say "The new plugin is in, but the older copy $FirstPlugin is still there: is Bitwig open? Close it and double-click this again." 'Red'
     exit 1
 }
 RemoveOld

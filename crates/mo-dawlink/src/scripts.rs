@@ -119,6 +119,8 @@ pub struct Installed {
     pub failed: Vec<(PathBuf, String)>,
     /// The copies from before the rename it took out.
     pub removed: Vec<PathBuf>,
+    /// Older copies it couldn't take out (the new one is in place), and the system's words for why.
+    pub left: Vec<(PathBuf, String)>,
 }
 
 /// Puts the app's script into every folder, keeping the `LET_THE_APP_MAKE_CHANGES` line each copy has (or, when the
@@ -145,7 +147,7 @@ pub fn install_fl(folders: &[PathBuf]) -> Installed {
                 }
                 done.removed.push(first);
             }
-            Err(e) => done.failed.push((first, e.to_string())),
+            Err(e) => done.left.push((first, e.to_string())),
         }
     }
     done
@@ -327,18 +329,35 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
         }
     };
     for folder in folders {
+        // The copy from before the rename is moved aside first: Bitwig holding it open stops that, and then the new
+        // one isn't written either, so Bitwig never has two (same controller ID). It goes back if the write fails.
+        let first = folder.join(FIRST_BITWIG_EXTENSION_NAME);
+        let aside = folder.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old"));
+        let moved = if first.is_file() {
+            if let Err(e) = fs::rename(&first, &aside) {
+                done.installed
+                    .failed
+                    .push((folder.clone(), format!("the older copy {} is in use ({e})", first.display())));
+                continue;
+            }
+            true
+        } else {
+            false
+        };
         match write_checked(folder, BITWIG_EXTENSION_NAME, &built) {
             Ok(()) => done.installed.went.push(folder.clone()),
             Err(e) => {
+                if moved {
+                    let _ = fs::rename(&aside, &first);
+                }
                 done.installed.failed.push((folder.clone(), e.to_string()));
                 continue;
             }
         }
-        let first = folder.join(FIRST_BITWIG_EXTENSION_NAME);
-        if first.is_file() {
-            match fs::remove_file(&first) {
+        if moved {
+            match fs::remove_file(&aside) {
                 Ok(()) => done.removed.push(first),
-                Err(e) => done.installed.failed.push((first, e.to_string())),
+                Err(e) => done.installed.left.push((aside, e.to_string())),
             }
         }
     }
@@ -358,7 +377,7 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
                     let _ = fs::remove_dir(&script_folder);
                 }
             }
-            Err(e) => done.installed.failed.push((old, e.to_string())),
+            Err(e) => done.installed.left.push((old, e.to_string())),
         }
     }
     done

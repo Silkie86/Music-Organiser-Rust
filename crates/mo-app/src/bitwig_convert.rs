@@ -39,16 +39,27 @@ pub const FIRST_EXPORTS: &str = "Music Organiser Exports";
 
 /// Where every export goes (Bitwig converts, kits, MIDI parts): the export folder setting, or the app's own folder in
 /// `documents` (the Documents folder [`documents`] finds): [`FIRST_EXPORTS`] when that's there, else [`EXPORTS`]. None
-/// when there's neither a setting nor Documents, rather than writing wherever the app started. Only works the path out
-/// (and looks whether the first folder is there): [`export_folder`] checks it before anything is written.
+/// when there's neither a setting nor Documents, rather than writing wherever the app started. Only works the path out:
+/// whether the first folder is there is looked at once a run for each Documents folder (so exports, the save lists and
+/// the tidy sweep never disagree mid-run); [`export_folder`] checks it before anything is written.
 pub fn export_root(setting: Option<&str>, documents: Option<&Path>) -> Option<PathBuf> {
     match setting.map(str::trim).filter(|s| !s.is_empty()) {
         Some(folder) => Some(PathBuf::from(folder)),
-        None => documents.map(|d| {
-            let first = d.join(FIRST_EXPORTS);
-            if first.is_dir() { first } else { d.join(EXPORTS) }
-        }),
+        None => documents.map(own_export_folder),
     }
+}
+
+/// The app's own export folder in `documents`, decided the first time it's asked for in this run.
+fn own_export_folder(documents: &Path) -> PathBuf {
+    static DECIDED: std::sync::Mutex<Vec<(PathBuf, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+    let mut decided = DECIDED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, folder)) = decided.iter().find(|(d, _)| d == documents) {
+        return folder.clone();
+    }
+    let first = documents.join(FIRST_EXPORTS);
+    let folder = if first.is_dir() { first } else { documents.join(EXPORTS) };
+    decided.push((documents.to_owned(), folder.clone()));
+    folder
 }
 
 /// The export folder ([`export_root`], with this computer's Documents) that the lists of saves leave out, so Open in
@@ -269,15 +280,19 @@ mod tests {
 
     #[test]
     fn exports_from_before_the_rename_stay_in_their_folder() {
-        let documents = std::env::temp_dir().join(format!("mo-app-first-exports-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&documents);
-        std::fs::create_dir_all(&documents).unwrap();
-        assert_eq!(export_root(None, Some(&documents)), Some(documents.join(EXPORTS)));
-        std::fs::create_dir_all(documents.join(FIRST_EXPORTS)).unwrap();
-        assert_eq!(export_root(None, Some(&documents)), Some(documents.join(FIRST_EXPORTS)));
+        let root = std::env::temp_dir().join(format!("mo-app-first-exports-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (fresh, before) = (root.join("fresh"), root.join("before"));
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::create_dir_all(before.join(FIRST_EXPORTS)).unwrap();
+        assert_eq!(export_root(None, Some(&fresh)), Some(fresh.join(EXPORTS)));
+        assert_eq!(export_root(None, Some(&before)), Some(before.join(FIRST_EXPORTS)));
+        // Decided once a run: an old folder that turns up later doesn't move exports mid-run.
+        std::fs::create_dir_all(fresh.join(FIRST_EXPORTS)).unwrap();
+        assert_eq!(export_root(None, Some(&fresh)), Some(fresh.join(EXPORTS)));
         // A setting still wins.
-        assert_eq!(export_root(Some(r"D:\Exports"), Some(&documents)), Some(PathBuf::from(r"D:\Exports")));
-        let _ = std::fs::remove_dir_all(&documents);
+        assert_eq!(export_root(Some(r"D:\Exports"), Some(&before)), Some(PathBuf::from(r"D:\Exports")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

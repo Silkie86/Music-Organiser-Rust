@@ -234,7 +234,7 @@ final class Link {
     static final String LOOPBACK_SETUP = "In Bitwig, Settings > Controllers > DAWmate, set both MIDI in and MIDI out to \""
                                          + MusicOrganiserExtensionDefinition.LOOPBACK_PORT + "\" (the loopMIDI port; \""
                                          + MusicOrganiserExtensionDefinition.FIRST_LOOPBACK_PORT + "\", its first name, works too), "
-                                         + "never \"DAWmate\" or \"DAWmate\", which are the FL Studio link's.";
+                                         + "never \"DAWmate\" or \"Music Organiser\", which are the FL Studio link's.";
     static final String CHANGES_OFF = "Changes are turned off. To let the app change things, turn on \"Let the app make changes\" "
                                       + "in Bitwig: Settings > Controllers > DAWmate.";
     /** Why a change that waited behind others wasn't made: the app that asked had closed its connection (extension 3.18). */
