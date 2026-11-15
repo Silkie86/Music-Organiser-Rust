@@ -19,7 +19,7 @@ pub fn asked(args: &[String]) -> bool {
     args.iter().any(|a| a == helper::FLAG)
 }
 
-/// Runs the helper until it's asked to quit (from its icon, the app or the launcher). Returns at once, writing
+/// Runs the helper until it's asked to quit (from its icon or by the app). Returns at once, writing
 /// nothing, when another helper is already running.
 pub fn run() {
     leave_console();

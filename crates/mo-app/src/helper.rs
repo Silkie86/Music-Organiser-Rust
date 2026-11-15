@@ -1,5 +1,7 @@
 //! The background helper (live-together step 2): a small part of the app that runs on its own, started at login, so
-//! the plugins and the full app have one place that's always connected to Bitwig.
+//! the plugins and the full app have one place that's always connected to Bitwig. That's what it's for: today nothing
+//! connects to it yet but the app's own start and stop of it (step 2c brings the plugins and the app), so all it
+//! shows is whether Bitwig is connected.
 //!
 //! It's the app's own program started with [`FLAG`] (`music-organiser --helper`): no window, no pages, no sound
 //! library in memory. It holds the watch on Bitwig ([`mo_dawlink::bitwig::Watch`]) and answers on its own port on this
@@ -7,7 +9,9 @@
 //!
 //! - `{"ask":"hello"}`: which helper this is, whether it has Bitwig, and whether it's paused ([`Hello`]);
 //! - `{"ask":"pause","on":true}` stops watching Bitwig (and `false` starts again);
-//! - `{"ask":"quit"}` ends it (the launcher asks before it builds, the app when its build is newer).
+//! - `{"ask":"quit"}` ends it (the app asks when the helper running is from another build or program than its own,
+//!   and when the helper is turned off in Settings; the launcher never does, and needn't: each build runs from a
+//!   folder of its own, so a helper left running holds up no build).
 //!
 //! Only one runs at a time: the port is the proof. A second helper finds it taken and stops at once
 //! ([`Start::AlreadyRunning`]).
@@ -279,7 +283,8 @@ pub fn bitwig_words(state: Option<&State>) -> String {
     match state {
         None => "Paused".into(),
         Some(State::Connecting) => "Looking for Bitwig".into(),
-        Some(State::NoBitwig) => "Bitwig isn't open".into(),
+        Some(State::NoBitwig) => "Bitwig isn't open, or the extension isn't added in it".into(),
+        Some(State::NoAnswer(_)) => "Bitwig is busy, or something else has its port (19791)".into(),
         Some(State::TooOld(what)) => format!("Bitwig has {what}: install the extension again (Settings > DAWs)"),
         Some(State::Refused(why)) => format!("Bitwig said no: {why}"),
         Some(State::Watching) => "Bitwig connected".into(),
@@ -354,7 +359,7 @@ mod tests {
             assert!(Instant::now() < deadline, "{:?}", helper.bitwig());
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(hello(helper.port()).unwrap().bitwig, "Bitwig isn't open");
+        assert_eq!(hello(helper.port()).unwrap().bitwig, "Bitwig isn't open, or the extension isn't added in it");
         helper.quit();
     }
 

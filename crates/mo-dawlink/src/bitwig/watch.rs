@@ -48,6 +48,9 @@ pub enum State {
     Connecting,
     /// Nothing answered on the link's port: Bitwig isn't running, or the extension isn't added in it.
     NoBitwig,
+    /// Something has the link's port but didn't greet as the link in time, or the connection broke as it began, in
+    /// the error's words: a busy Bitwig (opening a project, say) greets late, and another program may have the port.
+    NoAnswer(String),
     /// The link answered, but it's older than [`WATCH_NEEDS`]: what answered, in words ("the Music Organiser
     /// extension 3.23"). Installing the extension again (Settings > DAWs) brings the feed.
     TooOld(String),
@@ -266,8 +269,14 @@ fn run(port: u16, shared: &Shared) {
 fn watch_once(port: u16, shared: &Shared) {
     let mut link = match Link::connect(port, CONNECT_TIMEOUT) {
         Ok(link) => link,
-        Err(_) => {
+        Err(super::Error::NotRunning) => {
             publish(shared, |live| *live = fresh(live, State::NoBitwig));
+            return;
+        }
+        // Not "Bitwig isn't open": something has the port (the review's BW-4).
+        Err(error) => {
+            let words = error.to_string();
+            publish(shared, |live| *live = fresh(live, State::NoAnswer(words)));
             return;
         }
     };
@@ -319,11 +328,18 @@ fn fresh(live: &Live, state: State) -> Live {
 }
 
 /// Changes the picture (a copy of it: readers holding the old one keep it) and says it changed.
+///
+/// The lock is held only to take the picture and to put the new one in, never while it's copied and changed: this
+/// thread runs at the lowest priority, and a reader at the window's ([`Watch::now`]) would wait for as long as Windows
+/// kept it off a core with the lock held (the review's BW-12). Only this thread writes, so nothing is lost between.
 fn publish(shared: &Shared, change: impl FnOnce(&mut Live)) {
-    let mut live = lock(&shared.live);
-    let mut next = Live::clone(&live);
+    let was = Arc::clone(&lock(&shared.live));
+    let mut next = Live::clone(&was);
     change(&mut next);
-    *live = Arc::new(next);
+    let next = Arc::new(next);
+    let old = std::mem::replace(&mut *lock(&shared.live), next);
+    // Let go of outside the lock too: the last holder frees the track list.
+    drop((old, was));
     shared.version.fetch_add(1, Ordering::AcqRel);
 }
 

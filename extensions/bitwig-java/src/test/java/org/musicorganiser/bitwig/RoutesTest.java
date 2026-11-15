@@ -372,7 +372,7 @@ class RoutesTest {
             assertJson(obj("project", "MO Live Test", "via", via, "ran", true), saveVia(via).get("result"));
         for (String via : LOOPBACK)
             assertEquals("This Bitwig didn't let the link set up its MIDI ports and buttons, so it can't run a command via " + via
-                         + ". A selftest says why.", error(saveVia(via)));
+                         + "." + Link.SELF_CHECK_SAYS, error(saveVia(via)));
         Map<String, Object> result = SelfCheckTest.map(app.ask(obj("id", 2, "cmd", "selftest")).get("result"));
         assertEquals(List.of("command routes"), listAt(result, "checks").stream().filter(c -> !(Boolean) at(c, "ok")).map(c -> at(c, "name"))
                                                                       .collect(Collectors.toList()));

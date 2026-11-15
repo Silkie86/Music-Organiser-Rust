@@ -180,7 +180,8 @@ impl Listener {
 fn hears_of(track: &Track, sound: bool) -> Hears {
     let lately = track.newest_bar().map_or_else(Vec::new, |newest| {
         let mut chroma = [0f32; 12];
-        for (_, bar) in track.bars().filter(|(n, _)| *n > newest - LATELY_BARS) {
+        // Up to the newest and no further: after a loop or a jump back, the bars past it were heard longer ago.
+        for (_, bar) in track.bars().filter(|(n, _)| *n > newest - LATELY_BARS && *n <= newest) {
             for (sum, c) in chroma.iter_mut().zip(bar.chroma) {
                 *sum += c * bar.seconds;
             }
@@ -248,5 +249,33 @@ mod tests {
         notes.sort_unstable();
         assert_eq!(notes, [0, 4, 9], "{hears:?}");
         assert!(hears.bars >= 1, "{hears:?}");
+    }
+
+    /// The review's RC-6: after the song loops back, "lately" is the bars up to the one playing, not every bar past
+    /// it too.
+    #[test]
+    fn lately_stops_at_the_newest_bar_after_a_loop_back() {
+        let rate = 8000.0;
+        let (mut tap, mut ear) = mo_listen::tap(rate, 1);
+        let mut track = Track::for_ear(&ear);
+        let tone = |n: usize, f: f64| (2.0 * std::f64::consts::PI * f * n as f64 / rate).sin() as f32 * 0.2;
+        let mut at = 0usize;
+        // 120 BPM in 4/4: a bar is 2 seconds. An A for bars 4 to 11, then the song jumps back and plays an E in bar 0.
+        let mut play = |track: &mut Track, f: f64, from_beat: f64, blocks: usize| {
+            for i in 0..blocks {
+                let block: Vec<f32> = (at..at + 800).map(|n| tone(n, f)).collect();
+                at += 800;
+                tap.push(&[&block]);
+                let beat = from_beat + (i + 1) as f64 * 0.2;
+                if let Some(heard) = ear.hear() {
+                    track.add(&heard, Some(beat));
+                }
+            }
+        };
+        play(&mut track, 220.0, 16.0, 160);
+        play(&mut track, 329.63, 0.0, 18);
+        assert!(track.newest_bar().is_some_and(|n| n <= 1), "{:?}", track.newest_bar());
+        let hears = hears_of(&track, true);
+        assert_eq!(hears.lately.first(), Some(&4), "the E just played, not the A of the bars after it: {hears:?}");
     }
 }

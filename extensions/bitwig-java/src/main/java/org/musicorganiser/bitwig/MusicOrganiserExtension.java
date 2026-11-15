@@ -11,7 +11,7 @@ public final class MusicOrganiserExtension extends ControllerExtension {
     MusicOrganiserExtension(MusicOrganiserExtensionDefinition definition, ControllerHost host) {
         super(definition, host);
         Clock clock = Clock.systemUTC();
-        link = new Link(host, new Reports(Reports.defaultFolder(), clock), clock);
+        link = new Link(host, new Reports(Reports::defaultFolder, clock), clock);
     }
 
     @Override

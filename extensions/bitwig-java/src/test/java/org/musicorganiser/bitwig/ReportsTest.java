@@ -1,6 +1,7 @@
 package org.musicorganiser.bitwig;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -84,6 +85,23 @@ class ReportsTest {
         assertEquals(List.of("{\"time\":\"2026-10-14T09:52:42.123Z\",\"cmd\":\"project\",\"ms\":3,\"ok\":true}",
                              "{\"time\":\"2026-10-14T09:52:42.123Z\",\"event\":\"connected\"}"), lines);
         assertNull(reports.problem());
+    }
+
+    /** The review's DF-7: the app moved its data folder with Bitwig left open. The reports follow from the next look. */
+    @Test
+    void followsAFolderThatMovesWhileBitwigIsOpen() throws IOException {
+        Path[] where = {temp.resolve("first")};
+        Reports reports = new Reports(() -> where[0], CLOCK);
+        reports.log(Map.of("event", "connected"));
+        assertFalse(reports.refresh(), "still there");
+        where[0] = temp.resolve("moved");
+        assertTrue(reports.refresh());
+        assertEquals(temp.resolve("moved"), reports.folder());
+        reports.log(Map.of("event", "connected"));
+        assertTrue(Files.isRegularFile(temp.resolve("moved").resolve("2026-10-14-link.jsonl")));
+        assertEquals(1, Files.readAllLines(temp.resolve("first").resolve("2026-10-14-link.jsonl")).size());
+        // A folder given outright stays where it is.
+        assertFalse(new Reports(temp, CLOCK).refresh());
     }
 
     @Test

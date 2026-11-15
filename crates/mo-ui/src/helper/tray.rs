@@ -124,9 +124,12 @@ fn refresh(again: bool) {
         }
         return;
     }
-    TRAY.with(|t| {
+    // What to tell Windows is made inside the borrow and told outside it: the call waits for Explorer, and while it
+    // waits Windows hands this window the messages other programs send, which window_proc borrows for too (the
+    // review's BW-11).
+    let data = TRAY.with(|t| {
         let mut t = t.borrow_mut();
-        let Some(tray) = t.as_mut() else { return };
+        let tray = t.as_mut()?;
         let state = tray.helper.bitwig();
         let colour = match &state {
             None => AMBER,
@@ -136,7 +139,7 @@ fn refresh(again: bool) {
         let words = format!("Music Organiser helper: {}", helper::bitwig_words(state.as_ref()));
         let now = (colour, words);
         if !again && tray.shown.as_ref() == Some(&now) {
-            return;
+            return None;
         }
         let changed_colour = tray.shown.as_ref().is_none_or(|(c, _)| *c != colour);
         if changed_colour || tray.icon.is_none() {
@@ -150,15 +153,16 @@ fn refresh(again: bool) {
             }
         }
         tray.shown = Some(now);
-        let data = icon_data(tray);
-        // SAFETY: `data` is filled in for this window's icon 1.
-        unsafe {
-            // Adding fails when it's already there (Explorer kept it): it's changed instead.
-            if !again || !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
-                let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
-            }
-        }
+        Some(icon_data(tray))
     });
+    let Some(data) = data else { return };
+    // SAFETY: `data` is filled in for this window's icon 1, whose icon handle the tray keeps until the next refresh.
+    unsafe {
+        // Adding fails when it's already there (Explorer kept it): it's changed instead.
+        if !again || !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+        }
+    }
 }
 
 fn icon_data(tray: &Tray) -> NOTIFYICONDATAW {
@@ -183,7 +187,12 @@ fn icon_data(tray: &Tray) -> NOTIFYICONDATAW {
 }
 
 extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let taskbar_back = TRAY.with(|t| t.borrow().as_ref().map(|t| t.taskbar_back));
+    // A message that comes while the tray is being changed is Windows' own to answer: never a panic, which can't
+    // leave this function and would end the helper.
+    let Ok(taskbar_back) = TRAY.with(|t| t.try_borrow().map(|t| t.as_ref().map(|t| t.taskbar_back))) else {
+        // SAFETY: the default answer to a message for this thread's own window.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    };
     match message {
         ICON_MESSAGE => {
             match (lparam.0 & 0xffff) as u32 {
@@ -290,8 +299,16 @@ fn open_app() {
 fn start_app() {
     use std::os::windows::process::CommandExt;
     const NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
-    let opened = std::env::current_exe()
-        .and_then(|exe| std::process::Command::new(exe).creation_flags(NORMAL_PRIORITY_CLASS).spawn());
+    // A debug build is a console program, and the helper has no console to hand on: without this Windows would give
+    // the app a black window of its own, and closing that ends the app on the spot (the review's BW-9).
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let opened = std::env::current_exe().and_then(|exe| {
+        std::process::Command::new(exe)
+            .creation_flags(NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW)
+            // The launcher watches the copy it started, not this one.
+            .env_remove("MO_WATCH")
+            .spawn()
+    });
     if let Err(e) = opened {
         log::warning("Helper", &format!("Couldn't open Music Organiser: {e}"));
     }

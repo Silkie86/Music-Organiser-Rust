@@ -76,7 +76,15 @@ pub fn send_part_for_song(
 fn part_sent(job: Job, sent: Result<bitwig::SentPart, bitwig::Error>, says: &dyn Fn(&bitwig::Mark) -> String) -> bool {
     match sent {
         Ok(sent) if sent.went_in() => {
-            job.done_as(&sent.title(), &format!("{}{}", sent.detail(), says(&sent.mark)));
+            // The mark's words first: the rail shows a done card as one cut-off line (the review's BW-8).
+            let mark = says(&sent.mark);
+            let detail = format!("{} {}", mark.trim(), sent.detail());
+            match sent.mark {
+                bitwig::Mark::NotAsked | bitwig::Mark::Moved => job.done_as(&sent.title(), detail.trim()),
+                // The part is in, but its bar isn't marked, and the words say what to do about it: a card that
+                // stays until it's closed, as a failure's does, not a line gone in a few seconds.
+                _ => job.failed_as(&format!("{}, but its bar isn't marked", sent.title()), detail.trim()),
+            }
             true
         }
         Ok(sent) => {

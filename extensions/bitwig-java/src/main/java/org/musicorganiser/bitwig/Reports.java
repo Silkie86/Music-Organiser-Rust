@@ -15,6 +15,7 @@ import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * The extension's reports, in the app's data folder next to MO Probe's, so what happened in a real Bitwig can
@@ -57,13 +58,40 @@ final class Reports {
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT)
                                                                    .withZone(ZoneOffset.UTC);
 
-    private final Path folder;
+    private Path folder;
+    /** Finds the folder again ({@link #refresh}), or null for one that stays where it is. */
+    private final Supplier<Path> find;
     private final Clock clock;
     private String problem;
 
     Reports(Path folder, Clock clock) {
         this.folder = folder;
+        this.find = null;
         this.clock = clock;
+    }
+
+    /** Reports in the folder {@code find} gives, asked again at each {@link #refresh}. */
+    Reports(Supplier<Path> find, Clock clock) {
+        this.folder = find.get();
+        this.find = find;
+        this.clock = clock;
+    }
+
+    /**
+     * Looks again where the reports go (extension 3.30): the app's Settings can move its data folder while Bitwig
+     * stays open, and the reports then follow it instead of going on in the old folder until Bitwig restarts (and
+     * making it again once you've removed it). Says whether the folder changed.
+     */
+    boolean refresh() {
+        if (find == null) return false;
+        try {
+            Path now = find.get();
+            if (now == null || now.equals(folder)) return false;
+            folder = now;
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     Path folder() {

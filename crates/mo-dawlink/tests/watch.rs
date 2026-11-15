@@ -66,6 +66,26 @@ fn says_when_bitwig_isnt_there() {
     assert_eq!(until(&watch, |l| l.state != State::Connecting).state, State::NoBitwig);
 }
 
+/// The review's BW-4: something has the port but doesn't greet as the link. That isn't "Bitwig isn't open".
+#[test]
+fn says_when_something_else_answers_on_the_port() {
+    use std::io::Write;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let other = thread::spawn(move || {
+        for stream in listener.incoming().take(1) {
+            let mut stream = stream.unwrap();
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+            thread::sleep(Duration::from_millis(300));
+        }
+    });
+    let watch = Watch::start(port);
+    let live = until(&watch, |l| l.state != State::Connecting);
+    assert!(matches!(&live.state, State::NoAnswer(why) if !why.is_empty()), "{:?}", live.state);
+    drop(watch);
+    other.join().unwrap();
+}
+
 #[test]
 fn dropping_the_watch_closes_its_connection_at_once() {
     let bitwig = FakeBitwig::start().unwrap();

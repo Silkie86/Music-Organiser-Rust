@@ -63,7 +63,8 @@ The extension writes to the app's data folder, next to MO Probe's reports:
 That's where the data folder starts out. When the app's Settings moved it to another drive, the reports go to
 `reports/bitwig` in the new folder (from 3.26): the extension reads `MusicOrganiser-folder.txt` beside the first
 folder, as the app does, and follows it only to a folder the move finished in (one with the app's `moved-in.json`).
-It looks once, when Bitwig starts the extension. Reports already written in the first folder stay there.
+It looks when Bitwig starts the extension, and (from 3.30) again each time the app or a plugin connects, so a move
+made with Bitwig open is followed without restarting Bitwig. Reports already written in the first folder stay there.
 
 - **`<date>-link.jsonl`** (UTC date): one line for each command the app sent (but a `hello` that went well: the
   app says hello every couple of seconds), with `time`, `cmd`, `ms` (how long
@@ -267,6 +268,12 @@ press never runs the command, except a late `button` press, whose command Bitwig
 hears of it. `hello` says `loopback`:
 whether the link's own MIDI has come back, from the message it sends itself as Bitwig starts it and each time
 the app connects.
+
+New in 3.30: two small things. The reports follow the app's data folder when Settings moves it while Bitwig is open:
+the folder is looked up again each time the app or a plugin connects, not only when Bitwig starts (before, they went
+on in the old folder until Bitwig restarted, and made it again after you had removed it). And an error about a part
+of Bitwig the link couldn't use no longer ends "A selftest says why", which the app has no button for: it points at
+the self-check file the extension writes each time Bitwig starts, in the app's data folder under `reports\bitwig`.
 
 New in 3.29: a file put in the selected device's place (`insert` with `at: "replace"`) says whether it went in, and
 only goes in the device the app meant. Before, the answer came before Bitwig had done anything, so the app could take

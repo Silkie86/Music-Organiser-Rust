@@ -112,9 +112,9 @@ class SelfCheckTest {
         bitwig.allowChanges(true);
 
         assertEquals(true, app.ask(obj("id", 1, "cmd", "project")).get("ok"));
-        assertEquals("This Bitwig didn't let the link follow the last clicked parameter. A selftest says why.",
+        assertEquals("This Bitwig didn't let the link follow the last clicked parameter." + Link.SELF_CHECK_SAYS,
                      error(app.ask(obj("id", 2, "cmd", "clicked"))));
-        assertEquals("This Bitwig didn't let the link use its master recorder. A selftest says why.",
+        assertEquals("This Bitwig didn't let the link use its master recorder." + Link.SELF_CHECK_SAYS,
                      error(app.ask(obj("id", 3, "cmd", "recorder", "do", "start"))));
 
         Map<String, Object> result = map(app.ask(obj("id", 4, "cmd", "selftest")).get("result"));

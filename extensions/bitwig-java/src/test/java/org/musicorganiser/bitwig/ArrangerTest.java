@@ -487,7 +487,7 @@ class ArrangerTest {
         studio(m -> m.broken.add("createArranger"));
         assertEquals("MO Live Test", at(app.ask(obj("id", 1, "cmd", "hello")), "result", "project"));
         assertEquals(true, app.ask(obj("id", 2, "cmd", "project")).get("ok"));
-        assertEquals("This Bitwig didn't let the link reach its arranger. A selftest says why.", error(app.ask(arrange(3, 0, 0, BAR_5))));
+        assertEquals("This Bitwig didn't let the link reach its arranger." + Link.SELF_CHECK_SAYS, error(app.ask(arrange(3, 0, 0, BAR_5))));
 
         Map<String, Object> result = SelfCheckTest.map(app.ask(obj("id", 4, "cmd", "selftest")).get("result"));
         assertEquals(SelfCheckTest.CHECKS, SelfCheckTest.names(result));
