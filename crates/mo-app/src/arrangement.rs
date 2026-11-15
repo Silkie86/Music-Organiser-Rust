@@ -90,43 +90,138 @@ impl Measured {
 const SLOW: Duration = Duration::from_secs(1);
 
 /// An audio file's sound boiled down for drawing its waveform: the loudest a channel gets in each slice of the file.
+/// Made by [`Peaks::new`] (or [`Peaks::of`], [`Peaks::read`]), which keeps a coarser copy as well, for drawing a long
+/// file zoomed out.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Peaks {
-    /// How long the whole file is, in seconds (it may be longer than what was read).
-    pub file_seconds: f64,
+    /// How long the whole file is, in seconds (it may be longer than what was read: a damaged file's sound stops at
+    /// the damage).
+    file_seconds: f64,
     /// How many seconds each value covers.
-    pub step: f64,
+    step: f64,
     /// The loudest (0 to 1) in each slice, from the file's start.
-    pub values: Vec<f32>,
+    values: Vec<f32>,
+    /// The loudest of each [`COARSE`] values in turn ([`Peaks::loudest`]).
+    coarse: Vec<f32>,
 }
 
 /// Each slice of a waveform: 5 ms, so even a clip zoomed far in looks smooth, and a minute is 12,000 numbers.
 const PEAK_STEP: f64 = 0.005;
 
+/// How many of a waveform's values each coarser one stands for (a third of a second), as the whole of each file is
+/// read now: a pixel that stands for a long stretch of a file (an hour-long one, zoomed out) looks at one number for
+/// each third of a second instead of 64, and at most 63 either side one by one.
+const COARSE: usize = 64;
+
+/// How much of a file [`Peaks::read`] holds at a time: half a minute (10 MB of a stereo 44.1 kHz file), however long
+/// the file is.
+const PART_SECONDS: f64 = 30.0;
+
+/// What reads the waveforms ([`Peaks::read`]), for the store kept between runs (`peaks_store::PeakStore::open`): when
+/// it changes, waveforms read before are read again. They were read from a file's first minute only, up to 15 Nov
+/// (a beta F12 note: a long clip's waveform stopped part way along).
+pub const PEAKS_READER: &str = "mo-audio, the whole file";
+
 impl Peaks {
-    /// Boils down a file's samples (`channels`, at `sample_rate` a second).
-    pub fn of(sample_rate: u32, channels: &[Vec<f32>], file_seconds: f64) -> Peaks {
-        let per = ((f64::from(sample_rate) * PEAK_STEP).round() as usize).max(1);
-        let frames = channels.iter().map(Vec::len).max().unwrap_or(0);
-        let values = (0..frames.div_ceil(per))
-            .map(|i| {
-                let (a, b) = (i * per, ((i + 1) * per).min(frames));
-                channels
-                    .iter()
-                    .flat_map(|c| c.get(a..b.min(c.len())).unwrap_or(&[]))
-                    .fold(0.0f32, |m, v| m.max(v.abs()))
-                    .min(1.0)
-            })
-            .collect();
-        Peaks { file_seconds, step: per as f64 / f64::from(sample_rate.max(1)), values }
+    /// The waveform of a file `file_seconds` long, `step` seconds to each of its `values`.
+    pub fn new(file_seconds: f64, step: f64, values: Vec<f32>) -> Peaks {
+        let coarse = values.chunks(COARSE).map(|c| c.iter().fold(0.0f32, |m, &v| m.max(v))).collect();
+        Peaks { file_seconds, step, values, coarse }
     }
 
-    /// The loudest from `from` to `to` seconds into the file, or none past what was read.
+    /// Boils down a file's samples (`channels`, at `sample_rate` a second).
+    pub fn of(sample_rate: u32, channels: &[Vec<f32>], file_seconds: f64) -> Peaks {
+        let mut fold = Fold::new(sample_rate);
+        fold.add(channels);
+        fold.done(file_seconds)
+    }
+
+    /// Reads the whole of the sound file at `path` a part at a time ([`PART_SECONDS`]), so even an hour-long file
+    /// never has more than a part of it in memory, and boils it down as [`Peaks::of`] does. None when it can't be read,
+    /// or when `wanted` says, between parts, that it isn't wanted any more. Reads the disk, so never on the window's
+    /// thread.
+    pub fn read(path: &Path, wanted: &dyn Fn() -> bool) -> Option<Peaks> {
+        let mut fold: Option<Fold> = None;
+        let mut stopped = false;
+        let file_seconds = mo_audio::read_parts(path, PART_SECONDS, &mut |sample_rate, channels| {
+            fold.get_or_insert_with(|| Fold::new(sample_rate)).add(channels);
+            stopped = !wanted();
+            !stopped
+        })
+        .ok()?;
+        if stopped {
+            return None;
+        }
+        // A file with no sound in it is kept as one, so it isn't read again at each pick.
+        Some(fold.map_or_else(|| Peaks::new(file_seconds, PEAK_STEP, Vec::new()), |f| f.done(file_seconds)))
+    }
+
+    /// The loudest from `from` to `to` seconds into the file, or none past what was read. Whole runs of [`COARSE`]
+    /// values in the stretch are looked at by their coarser one, and only the values either side one by one: the same
+    /// answer, as each coarser value is the loudest of its run.
     pub fn loudest(&self, from: f64, to: f64) -> Option<f32> {
         let (from, to) = (from.min(to), from.max(to));
         let first = (from / self.step).floor().max(0.0) as usize;
         let last = ((to / self.step).ceil() as usize).max(first.saturating_add(1)).min(self.values.len());
-        (first < last).then(|| self.values[first..last].iter().fold(0.0f32, |m, &v| m.max(v)))
+        if first >= last {
+            return None;
+        }
+        let loudest = |values: &[f32]| values.iter().fold(0.0f32, |m, &v| m.max(v));
+        let (runs_from, runs_to) = (first.div_ceil(COARSE), last / COARSE);
+        Some(if runs_from < runs_to && runs_to <= self.coarse.len() {
+            loudest(&self.values[first..runs_from * COARSE])
+                .max(loudest(&self.coarse[runs_from..runs_to]))
+                .max(loudest(&self.values[runs_to * COARSE..last]))
+        } else {
+            loudest(&self.values[first..last])
+        })
+    }
+}
+
+/// A file's samples boiled down into [`Peaks`] as they come, a part at a time: a slice can start in one part and end in
+/// the next, so it gives what [`Peaks::of`] gives for the whole file at once.
+struct Fold {
+    sample_rate: u32,
+    /// Frames in a slice ([`PEAK_STEP`] at the file's rate).
+    per: usize,
+    /// How many frames of the slice being boiled down have come so far, and the loudest of them.
+    filled: usize,
+    loudest: f32,
+    values: Vec<f32>,
+}
+
+impl Fold {
+    fn new(sample_rate: u32) -> Fold {
+        let per = ((f64::from(sample_rate) * PEAK_STEP).round() as usize).max(1);
+        Fold { sample_rate, per, filled: 0, loudest: 0.0, values: Vec::new() }
+    }
+
+    /// The next part of the file, a channel each: as long as its longest channel (a shorter one adds nothing past its
+    /// end).
+    fn add(&mut self, channels: &[Vec<f32>]) {
+        let frames = channels.iter().map(Vec::len).max().unwrap_or(0);
+        let mut at = 0;
+        while at < frames {
+            let to = (at + self.per - self.filled).min(frames);
+            self.loudest = channels
+                .iter()
+                .flat_map(|c| c.get(at..to.min(c.len())).unwrap_or(&[]))
+                .fold(self.loudest, |m, v| m.max(v.abs()));
+            self.filled += to - at;
+            at = to;
+            if self.filled == self.per {
+                self.values.push(self.loudest.min(1.0));
+                (self.filled, self.loudest) = (0, 0.0);
+            }
+        }
+    }
+
+    /// The waveform of all that came, the last slice as full as it got, for a file `file_seconds` long.
+    fn done(mut self, file_seconds: f64) -> Peaks {
+        if self.filled > 0 {
+            self.values.push(self.loudest.min(1.0));
+        }
+        Peaks::new(file_seconds, self.per as f64 / f64::from(self.sample_rate.max(1)), self.values)
     }
 }
 
@@ -1275,6 +1370,77 @@ mod tests {
         // A place in the file no number can hold (a damaged save's "1e300" or "Infinity") is just past the end.
         assert_eq!(p.loudest(1e300, f64::INFINITY), None);
         assert_eq!(p.loudest(f64::NAN, f64::NAN), Some(0.1));
+    }
+
+    #[test]
+    fn a_long_waveform_gives_the_same_loudest_through_its_coarser_copy() {
+        // 1,000 values of a made-up wave, so runs of 64 are cut every way by the stretches asked for.
+        let values: Vec<f32> = (0..1000u32).map(|i| ((i * 7919 % 1000) as f32 / 1000.0).powi(3)).collect();
+        let peaks = Peaks::new(5.0, 0.005, values.clone());
+        let plain = |first: usize, last: usize| values[first..last].iter().fold(0.0f32, |m, &v| m.max(v));
+        for first in (0..1000).step_by(13) {
+            for last in (first + 1..=1000).step_by(29).chain([1000]) {
+                let (from, to) = (first as f64 * 0.005 + 0.0001, last as f64 * 0.005 - 0.0001);
+                assert_eq!(peaks.loudest(from, to), Some(plain(first, last)), "{first}..{last}");
+            }
+        }
+        // Without its coarser copy (as `Default` makes it) it still answers, value by value.
+        let bare = Peaks { file_seconds: 5.0, step: 0.005, values: values.clone(), ..Peaks::default() };
+        assert_eq!(bare.loudest(0.0, 5.0), peaks.loudest(0.0, 5.0));
+        assert_eq!(peaks.coarse.len(), 16);
+    }
+
+    #[test]
+    fn a_waveform_boiled_down_a_part_at_a_time_is_the_same_as_all_at_once() {
+        // 1,000 frames a second, so a slice is 5 frames: the parts end part way through slices, one is a single frame
+        // and one is empty, and the last slice is cut short by the file's end.
+        let left: Vec<f32> = (0..23).map(|i| (i as f32 * 0.37).sin() * 0.9).collect();
+        let right: Vec<f32> = (0..23).map(|i| -(i as f32 * 0.21).cos() * 0.5).collect();
+        let whole = Peaks::of(1000, &[left.clone(), right.clone()], 0.023);
+        assert_eq!(whole.values.len(), 5);
+        let mut fold = Fold::new(1000);
+        for (a, b) in [(0, 3), (3, 10), (10, 11), (11, 11), (11, 23)] {
+            fold.add(&[left[a..b].to_vec(), right[a..b].to_vec()]);
+        }
+        assert_eq!(fold.done(0.023), whole);
+    }
+
+    #[test]
+    fn a_long_file_is_read_whole_for_its_waveform() {
+        // The beta F12 note of 15 Nov: a long clip's waveform stopped part way along, as only the file's first minute
+        // was read. 70 seconds at 1,300 frames a second (a slice is 7 frames, so the half-minute parts end part way
+        // through one), quiet but for a click at 65 s.
+        let dir = std::env::temp_dir().join(format!("mo-app-arrangement-long-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test folder");
+        let path = dir.join("long.wav");
+        let mut samples = vec![0.01f32; 91_000];
+        samples[84_503] = -0.8;
+        mo_audio::write_wav(&path, &[samples], 1_300, 24).expect("write");
+
+        let peaks = Peaks::read(&path, &|| true).expect("read");
+        assert_eq!((peaks.file_seconds, peaks.values.len()), (70.0, 13_000));
+        assert!(peaks.loudest(65.0, 65.01).is_some_and(|v| v > 0.79), "{:?}", peaks.loudest(65.0, 65.01));
+        assert!(peaks.loudest(69.9, 70.0).is_some_and(|v| v < 0.02));
+        let all = mo_audio::read(&path, f64::INFINITY).expect("read all at once");
+        assert_eq!(peaks, Peaks::of(all.sample_rate, &all.channels, all.file_seconds));
+
+        // Another song picked meanwhile: stopped after the part being read, and nothing to keep.
+        let asked = std::cell::Cell::new(0);
+        let gone = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        assert_eq!(Peaks::read(&path, &gone), None);
+        assert_eq!(asked.get(), 1);
+        // A file that can't be read: none, drawn as a plain band.
+        assert_eq!(Peaks::read(&dir.join("not here.wav"), &|| true), None);
+        // A file with no sound in it: kept as one, empty.
+        let empty = dir.join("empty.wav");
+        mo_audio::write_wav(&empty, &[Vec::new()], 1_300, 24).expect("write");
+        let none = Peaks::read(&empty, &|| true).expect("read");
+        assert!(none.values.is_empty() && none.file_seconds == 0.0, "{none:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
     use mo_formats::arrangement::{PreviewMarker, PreviewNote, PreviewPoint};
 

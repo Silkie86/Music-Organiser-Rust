@@ -1,6 +1,6 @@
 //! Arrangement waveforms kept between picks and runs in `arrangement-peaks.db` (the app's own, in its data folder), so
 //! picking a song again doesn't decode its audio files again: before, every pick decoded up to a minute of each clip's
-//! file, 16 to 32 at once.
+//! file, 16 to 32 at once (now the whole of each file is read: [`Peaks::read`]).
 //!
 //! Each file's [`Peaks`] are kept with its size and last-written time (to the nanosecond), and used again only while
 //! both are as they were. A value is kept as one byte (0 to 255 for 0 to 1): finer than a pixel of the tallest lane,
@@ -27,7 +27,7 @@ const VERSION: i64 = 1;
 /// Marks the file as this app's waveform store (`PRAGMA application_id`): "MOAP".
 const APPLICATION_ID: i64 = 0x4D4F_4150;
 
-/// The most bytes of peaks kept: about 5,000 one-minute files.
+/// The most bytes of peaks kept: about 5,500 minutes of sound (some 1,100 five-minute files).
 pub const LIMIT: i64 = 64 * 1024 * 1024;
 
 const SCHEMA: &str =
@@ -146,7 +146,7 @@ impl PeakStore {
             .ok()
             .flatten();
         let (file_seconds, step, bytes) = row?;
-        Some(Peaks { file_seconds, step, values: from_bytes(&bytes) })
+        Some(Peaks::new(file_seconds, step, from_bytes(&bytes)))
     }
 
     /// Keeps the waveforms read now, each for its file as it was (`stamp`), and marks the kept ones `used` now, in one
@@ -224,7 +224,7 @@ mod tests {
         let audio = dir.join("kick.wav");
         std::fs::write(&audio, b"pretend audio").expect("write");
         let stamp = stamp(&audio).expect("stamp");
-        let peaks = Peaks { file_seconds: 2.0, step: 0.005, values: vec![0.0, 0.5, 1.0, 0.25] };
+        let peaks = Peaks::new(2.0, 0.005, vec![0.0, 0.5, 1.0, 0.25]);
         let mut store = PeakStore::open(&store_path, "test 60 s").expect("open");
         assert_eq!(store.get(&audio, stamp), None);
         store.put(&[(audio.clone(), stamp, &peaks)], &[]).expect("put");
@@ -250,7 +250,7 @@ mod tests {
         let dir = folder("limit");
         let mut store = PeakStore::open(&dir.join(FILE_NAME), "test").expect("open");
         // Each a quarter of the limit: the fifth pushes out the first.
-        let big = Peaks { file_seconds: 1.0, step: 0.005, values: vec![0.5; (LIMIT / 4) as usize] };
+        let big = Peaks::new(1.0, 0.005, vec![0.5; (LIMIT / 4) as usize]);
         for n in 0..5 {
             let path = dir.join(format!("{n}.wav"));
             store.conn.execute("UPDATE peaks SET used = used - 10", []).expect("age the ones before");

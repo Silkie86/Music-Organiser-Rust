@@ -6,10 +6,12 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use mo_app::arrangement::peaks_store::{self, PeakStore};
 use mo_app::arrangement::{self as arr, Area, Frame, Hover, Palette, Peaks, Preview, Style, View};
@@ -181,8 +183,10 @@ pub fn connect(app: &AppWindow) {
         let shown = found.clone();
         let _ = weak.upgrade_in_event_loop(move |app| samples_found(&app, asked, shown));
         if !found.is_empty() && wanted() {
-            let peaks = read_peaks(&found, asked);
-            let _ = weak.upgrade_in_event_loop(move |app| waves_arrived(&app, asked, peaks));
+            let show = |peaks: Arc<HashMap<String, Arc<Peaks>>>| {
+                let _ = weak.upgrade_in_event_loop(move |app| waves_arrived(&app, asked, peaks));
+            };
+            show(read_peaks(&found, asked, &show));
         }
     });
     let finder = match finder {
@@ -325,12 +329,30 @@ fn arrived(app: &AppWindow, asked: u64, read: Result<Preview, String>) {
     pick_view(app, 0);
 }
 
+/// How often the waves read so far are shown while others are still being read: the whole of each file is read, so
+/// a long one (an hour's mix) would otherwise hold back the waves of all the rest.
+const SHOW_EVERY: Duration = Duration::from_millis(300);
+
+/// The waves read so far ([`read_peaks`]), and when they were last shown.
+struct SoFar {
+    peaks: HashMap<String, Arc<Peaks>>,
+    shown: Instant,
+    /// Whether some have been read since.
+    new: bool,
+}
+
 /// Each audio file the arrangement plays boiled down to a waveform: kept from an earlier pick (or run) while the file is
-/// unchanged, else read (up to its first minute) on the bulk pool, a few files at a time, and kept for next time.
-/// Stops early when another song has been picked; a file that can't be read is drawn as a plain band. Runs on the
-/// page's finder thread, never the window's.
-fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<String, Arc<Peaks>>> {
-    let started = std::time::Instant::now();
+/// unchanged, else read (the whole file, a part at a time: [`Peaks::read`]) on the bulk pool, a few files at a time,
+/// and kept for next time. What's ready goes to `show` while the rest are read: the kept ones at once, then those read,
+/// every [`SHOW_EVERY`] at the most (as each file is read, and between the parts of a long one). Stops early when
+/// another song has been picked, between files and between the parts of one; a file that can't be read is drawn as a
+/// plain band. Runs on the page's finder thread, never the window's.
+fn read_peaks(
+    found: &HashMap<String, PathBuf>,
+    asked: u64,
+    show: &(dyn Fn(Arc<HashMap<String, Arc<Peaks>>>) + Sync),
+) -> Arc<HashMap<String, Arc<Peaks>>> {
+    let started = Instant::now();
     let wanted = || SHOWN.load(Ordering::Relaxed) == asked;
     // Each file once, with the names the save gives it.
     let mut files: HashMap<&PathBuf, Vec<&String>> = HashMap::new();
@@ -341,7 +363,7 @@ fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<Strin
         let mut cell = cell.borrow_mut();
         if matches!(*cell, Kept::NotYet) {
             let at = mo_app::paths::data_dir().join(peaks_store::FILE_NAME);
-            *cell = match PeakStore::open(&at, &format!("mo-audio, {} s", mo_audio::MAX_SECONDS)) {
+            *cell = match PeakStore::open(&at, arr::PEAKS_READER) {
                 Ok(store) => Kept::Open(store),
                 Err(e) => {
                     // Said once: the waveforms are read each time until the app starts again.
@@ -372,24 +394,43 @@ fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<Strin
             }
         }
         let kept = used.len();
-        // On the bulk pool, a few at a time: each decodes up to a minute of sound into memory, they're usually on one
-        // drive, and other pages' jobs aren't held up behind them.
+        if !todo.is_empty() && !peaks.is_empty() {
+            show(Arc::new(peaks.clone()));
+        }
+        let so_far = Mutex::new(SoFar { peaks, shown: Instant::now(), new: false });
+        let show_due = || {
+            let mut s = so_far.lock().unwrap_or_else(PoisonError::into_inner);
+            if s.new && s.shown.elapsed() >= SHOW_EVERY && wanted() {
+                show(Arc::new(s.peaks.clone()));
+                (s.shown, s.new) = (Instant::now(), false);
+            }
+        };
+        // On the bulk pool, a few at a time: each goes through its whole file, holding half a minute of it in memory
+        // at a time, they're usually on one drive, and other pages' jobs aren't held up behind them.
         let read: Vec<(&PathBuf, Stamp, Arc<Peaks>)> = background::on_bulk_pool(|| {
             todo.par_iter()
                 .filter_map(|&(file, stamp)| {
                     if !wanted() {
                         return None;
                     }
+                    let between_parts = || {
+                        show_due();
+                        wanted()
+                    };
                     // A sound that trips the reader is drawn without its wave; the others still come.
-                    mo_catch::catch(|| {
-                        let audio = mo_audio::read(file, mo_audio::MAX_SECONDS).ok()?;
-                        Some((file, stamp, Arc::new(Peaks::of(audio.sample_rate, &audio.channels, audio.file_seconds))))
-                    })
-                    .ok()
-                    .flatten()
+                    let p = mo_catch::catch(AssertUnwindSafe(|| Peaks::read(file, &between_parts))).ok().flatten()?;
+                    let p = Arc::new(p);
+                    if let Some(names) = files.get(file) {
+                        let mut s = so_far.lock().unwrap_or_else(PoisonError::into_inner);
+                        s.peaks.extend(names.iter().map(|n| ((*n).clone(), p.clone())));
+                        s.new = true;
+                    }
+                    show_due();
+                    Some((file, stamp, p))
                 })
                 .collect()
         });
+        let peaks = so_far.into_inner().unwrap_or_else(PoisonError::into_inner).peaks;
         if let Some(store) = store.as_mut() {
             // Kept only for a file that didn't change while it was read.
             let keep: Vec<(PathBuf, (i64, i64), &Peaks)> = read
@@ -404,11 +445,6 @@ fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<Strin
             }
         }
         let decoded = read.len();
-        for (file, _, p) in read {
-            if let Some(names) = files.get(file) {
-                peaks.extend(names.iter().map(|n| ((*n).clone(), p.clone())));
-            }
-        }
         if decoded > 0 {
             log::info(
                 "Arrangement",
@@ -928,7 +964,7 @@ pub fn sample_peaks() -> Arc<HashMap<String, Arc<Peaks>>> {
             (swell * wobble * if phrase > 0.9 { 0.1 } else { 0.95 }) as f32
         })
         .collect();
-    let peaks = Peaks { file_seconds: 16.0, step, values };
+    let peaks = Peaks::new(16.0, step, values);
     Arc::new(HashMap::from([(SAMPLE_TAKE.to_owned(), Arc::new(peaks))]))
 }
 
