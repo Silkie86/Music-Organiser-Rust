@@ -307,7 +307,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
 fn finder_opens() {
     crate::finder::on_open(Kind::Preset, |app, hit, _| {
         // Found by what it is, not where it was: a read again puts the lines in another order (M-1).
-        let at = PAGE.with(|p| p.borrow().items.iter().position(|i| logic::audition_id(i) == hit.id));
+        let at = PAGE.with(|p| p.borrow().items.iter().position(|i| logic::has_audition_id(i, &hit.id)));
         let Some(at) = at else { return false };
         crate::go_to(app, Place::Presets.index() as i32);
         show_preset(app, at);
