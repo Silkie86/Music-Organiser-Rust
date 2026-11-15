@@ -13,7 +13,10 @@ export struct SongLine {
     details: string,
     date: string,
     date-tip: string,
+    // What's missing: "1 plugin, 3 samples", for the wide list's column, and said in full ("1 plugin, 3 samples
+    // missing") for after the details in the narrow one.
     missing: string,
+    missing-words: string,
     rating: int,
     favourite: bool,
     status: string,
@@ -911,7 +914,8 @@ export component SongsPage inherits Rectangle {
                         y: 0;
                         height: parent.height;
                         width: parent.width;
-                        // Narrow beside the panel: what's missing and the status make room for the name.
+                        // Narrow beside the panel: the status goes beside the name and what's missing after the details,
+                        // so the name keeps its room.
                         property <bool> wide: self.width > 640px;
                         if SongsData.message != "": EmptyState {
                             title: SongsData.message;
@@ -1036,11 +1040,30 @@ export component SongsPage inherits Rectangle {
                                                                 }
                                                             }
                                                         }
-                                                        Text {
-                                                            text: line.details;
-                                                            color: Theme.muted;
-                                                            font-size: Type.meta;
-                                                            overflow: elide;
+                                                        // Then what's missing, in red (Solomon, 15 Nov 2026: "should be
+                                                        // able to see if a song has something missing without seeing
+                                                        // its card"). The details give way to it first. A wide list has
+                                                        // it in a column of its own.
+                                                        HorizontalLayout {
+                                                            alignment: start;
+                                                            spacing: Space.xs;
+                                                            Text {
+                                                                text: line.details
+                                                                    + (line.missing-words != "" && !list-well.wide && line.details != "" ? " ·" : "");
+                                                                color: Theme.muted;
+                                                                font-size: Type.meta;
+                                                                overflow: elide;
+                                                                // A text's stretch is 0 unless it's given one: both
+                                                                // would give way alike.
+                                                                horizontal-stretch: 1;
+                                                            }
+                                                            if line.missing-words != "" && !list-well.wide: Text {
+                                                                text: line.missing-words;
+                                                                color: Theme.missing;
+                                                                font-size: Type.meta;
+                                                                overflow: elide;
+                                                                horizontal-stretch: 0;
+                                                            }
                                                         }
                                                     }
                                                     if list-well.wide: VerticalLayout {
