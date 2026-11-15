@@ -146,6 +146,9 @@ impl DefaultPluginFactory for MoPlugin {
                 env!("CARGO_PKG_VERSION"),
                 check::host_line(&info)
             ));
+            // It keeps one data folder for as long as the DAW runs and saves takes there: the app's start mustn't
+            // move the data folder from under it (DF-3).
+            mo_app::data_move::hold_open_lock();
         }
         let offered = check::ask(&info);
         let yes = offered.iter().filter(|o| o.offered).count();

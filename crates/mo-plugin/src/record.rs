@@ -177,7 +177,7 @@ impl Recorder {
 
 /// Where takes are saved: the app's Recordings folder, in its data folder.
 pub fn folder() -> PathBuf {
-    mo_app::paths::data_dir().join("Recordings")
+    mo_app::paths::data_dir().join(mo_app::data_move::RECORDINGS_FOLDER)
 }
 
 /// The sound card inputs to record from, by name. Asks the system: off the panel's thread.

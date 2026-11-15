@@ -58,6 +58,9 @@ pub const OPEN_LOCK_FILE: &str = "app-open.lock";
 pub const RUNNING_LOCKS: [&str; 3] = [OPEN_LOCK_FILE, crate::tidy::NOTES_LOCK_FILE, crate::note::WRITING_FILE];
 /// Folders at the top of the data folder that are the launchers', not the app's data: never copied.
 pub const LAUNCHER_FOLDERS: [&str; 2] = ["run-latest-rust", "run-latest"];
+/// The test plugin's recordings, in the data folder. A move copies them like the rest, but a DAW project a take was
+/// dragged into plays it from here by its path, so the note left behind says to keep them (DF-3, DF-4).
+pub const RECORDINGS_FOLDER: &str = "Recordings";
 /// Files at the top of the data folder the app no longer opens, so not copied (the old databases once the Rust ones
 /// replace them: they stay in the old folder for the archive step), each with the file that replaced it: one is left
 /// behind only while that's there to go instead, so a folder without it keeps the old file. `sounds.db` (the C# app's
@@ -711,7 +714,11 @@ fn finish_in(first: &Path) -> Option<AtStart> {
             return match lock.try_lock_shared() {
                 Ok(()) => {
                     let _ = lock.unlock();
-                    not_yet("another copy of the app is open".to_owned())
+                    not_yet(
+                        "another copy of the app, or a DAW with the Music Organiser test plugin, is open (close the DAW \
+                         and start the app again to switch)"
+                            .to_owned(),
+                    )
                 }
                 Err(fs::TryLockError::WouldBlock) => {
                     if !wait_for_switch(&lock) {
@@ -815,6 +822,11 @@ fn moved_out_note(from: &Path, first: &Path, to: &Path, data: &Path, when: &str)
             keep.push(format!("{}: the launcher, which the Desktop shortcut starts", launchers.join(" and ")));
         }
     }
+    if from.join(RECORDINGS_FOLDER).is_dir() {
+        keep.push(format!(
+            "{RECORDINGS_FOLDER}: the test plugin's takes; DAW projects you dragged one into play it from here"
+        ));
+    }
     let left = still_waited(from, data);
     if !left.is_empty() {
         keep.push(format!("{}: not copied, kept here until the app has archived them", left.join(", ")));
@@ -875,7 +887,9 @@ fn paths_match(a: &Path, b: &Path) -> bool {
 }
 
 /// Holds [`OPEN_LOCK_FILE`] in the data folder shared for the rest of the run, so a second copy of the app started
-/// meanwhile never switches folders under this one. Call once, after [`finish_at_start`].
+/// meanwhile never switches folders under this one. Call once, after [`finish_at_start`]. The test plugin calls it
+/// too, as it loads in a DAW: it learns its data folder once and saves takes there, so while a DAW has it open the
+/// switch waits for a start with the DAW closed (DF-3).
 pub fn hold_open_lock() {
     static HELD: OnceLock<File> = OnceLock::new();
     let path = paths::data_dir().join(OPEN_LOCK_FILE);
@@ -1247,7 +1261,9 @@ mod tests {
         let s = Setup::new("note");
         fs::write(s.first.join("sounds.db"), b"old").unwrap();
         fs::write(s.first.join(mo_sounds::compact::FILE_NAME), b"new").unwrap();
+        fs::create_dir_all(s.first.join(RECORDINGS_FOLDER)).unwrap();
         let note = moved_out_note(&s.first, &s.first, &s.to, &s.to, "now");
+        assert!(note.contains("Recordings:"), "takes DAW projects play from here are kept");
         assert!(note.contains("run-latest-rust:") && note.contains(paths::POINTER_FILE));
         assert!(note.contains("sounds.db:") && !note.contains("sounds.db-wal"));
         // A second move, out of a folder a move went to: no launcher or pointer there.
