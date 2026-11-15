@@ -8,7 +8,6 @@
 
 == Start
 start.release | Start the app from the launcher's Release shortcut, then close it and start it again | It opens in a few seconds both times; Settings > Developer says Build: Release
-start.no-old-dbs | Start the app with the old library.db, sounds.db and midi.db gone | No error card; the Songs, Sounds and MIDI pages all fill
 start.close-clean | Use the app for a while, then close it with the window's X | It closes at once; no new crash-....log in the logs folder
 
 == Songs

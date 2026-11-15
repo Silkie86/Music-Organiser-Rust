@@ -3915,11 +3915,11 @@ fn settings_shots(
     data.invoke_tab_picked(4);
     // Two steps of the beta checklist marked (nothing is written for the screenshots), then taken off again.
     data.invoke_beta_mark("start.release".into(), 0, "".into());
-    data.invoke_beta_mark("start.no-old-dbs".into(), 1, "The MIDI page stayed empty".into());
+    data.invoke_beta_mark("start.close-clean".into(), 1, "A crash log was left".into());
     capture(window);
     shots.push(("settings-developer.png".into(), capture(window)));
     data.invoke_beta_mark("start.release".into(), 0, "".into());
-    data.invoke_beta_mark("start.no-old-dbs".into(), 1, "".into());
+    data.invoke_beta_mark("start.close-clean".into(), 1, "".into());
     data.invoke_tab_picked(0);
 }
 
