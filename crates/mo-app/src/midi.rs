@@ -1115,24 +1115,80 @@ pub fn loop_notes(notes: &[NoteEvent], bars: i32) -> (Vec<NoteEvent>, i64) {
 pub const METRONOME_BAR_KEY: u8 = 76;
 pub const METRONOME_BEAT_KEY: u8 = 77;
 
-/// A metronome for a loop `length` ticks long, as drum notes: a click on every beat (4 to a bar), the bar's first
-/// louder. Played with the part, on the SoundFont's drums, so it keeps exact time with it at any speed.
-pub fn metronome_notes(length: i64) -> Vec<NoteEvent> {
-    let beat = mo_midi::PPQ;
-    (0..(length.max(0) + beat - 1) / beat)
-        .map(|at| {
-            let bar = at % 4 == 0;
-            NoteEvent {
-                start: at * beat,
-                length: beat / 4,
-                key: if bar { METRONOME_BAR_KEY } else { METRONOME_BEAT_KEY },
-                velocity: if bar { 65_535 } else { 45_000 },
-                muted: false,
-                step: false,
-                attribute: mo_formats::NoteAttribute::default(),
-            }
+/// A metronome for a loop `length` ticks long, as drum notes: a click on every beat from each bar line, the bar's
+/// first louder. `bar` is a bar's ticks: [`mo_midi::BAR`] for a part alone (the index counts every part in bars of
+/// 4/4), the song's own for a part playing with a song, so a waltz clicks in three (the 14 November 2026 review's
+/// MI-12: the loud click came every four beats whatever the song's bars). Played on the SoundFont's drums at the
+/// part's tempo, so it keeps exact time with it at any speed.
+pub fn metronome_notes(length: i64, bar: i64) -> Vec<NoteEvent> {
+    let (beat, bar) = (mo_midi::PPQ, bar.max(1));
+    let click = |start: i64, first: bool| NoteEvent {
+        start,
+        length: beat / 4,
+        key: if first { METRONOME_BAR_KEY } else { METRONOME_BEAT_KEY },
+        velocity: if first { 65_535 } else { 45_000 },
+        muted: false,
+        step: false,
+        attribute: mo_formats::NoteAttribute::default(),
+    };
+    (0i64..)
+        .map(|n| n.saturating_mul(bar))
+        .take_while(|line| *line < length)
+        .flat_map(|line| {
+            let end = line.saturating_add(bar).min(length);
+            (0i64..).map(move |n| line + n * beat).take_while(move |at| *at < end).map(move |at| (at, at == line))
         })
+        .map(|(at, first)| click(at, first))
         .collect()
+}
+
+/// A loop held to what can be made into sound: `most` ticks (`mo_audio::gm::longest_ticks`: two minutes, which a
+/// long part is over at a slow speed). A longer one keeps as many whole bars of 4/4 as fit, one at the least, so it
+/// goes round on a bar line and the beat never jumps (the 14 November 2026 review's MI-11: it was cut at two minutes
+/// wherever that fell, half way through bar 13 of 16 at 25 BPM): the notes that start in those bars, none held past
+/// their end, and how long it then is. What the card says of it is [`held_note`].
+pub fn loop_held(notes: Vec<NoteEvent>, length: i64, most: i64) -> (Vec<NoteEvent>, i64) {
+    let bar = mo_midi::BAR;
+    let held = (most / bar).max(1).saturating_mul(bar);
+    if length <= most || held >= length {
+        return (notes, length);
+    }
+    let notes = notes
+        .into_iter()
+        .filter(|n| n.start < held)
+        .map(|n| NoteEvent { length: n.length.min(held - n.start), ..n })
+        .collect();
+    (notes, held)
+}
+
+/// What the card says under Play while only the first `plays` ticks of a loop `length` ticks long play, the rest
+/// being more than a loop can be at this speed ([`loop_held`]; with a song, where the song's bars say it goes
+/// round); nothing when all of it plays. `heard`: the loop's notes, since a part that starts late can have none in
+/// what plays. Bars are the part's own, of 4/4, as its card counts them; with a song in other bars what plays can
+/// end inside one, and is then said as "about".
+pub fn held_note(heard: &[NoteEvent], plays: i64, length: i64) -> String {
+    if plays >= length {
+        return String::new();
+    }
+    let bar = mo_midi::BAR;
+    let (whole, of) = (plays / bar, length.saturating_add(bar - 1) / bar);
+    let about = if plays % bar == 0 { "" } else { "about " };
+    let why = "at this speed: a loop can be two minutes long at the most.";
+    if !heard.iter().any(|n| n.start < plays) {
+        let first = match whole {
+            0 => "the start of the first bar".to_owned(),
+            1 => format!("{about}the first bar"),
+            n => format!("{about}the first {n} bars"),
+        };
+        return format!(
+            "Nothing is heard: none of its notes start in {first} of its {of}, which is all that plays {why}"
+        );
+    }
+    match whole {
+        0 => format!("Only the start of the first of its {of} bars plays {why}"),
+        1 => format!("Only {about}the first of its {of} bars plays {why}"),
+        n => format!("Only {about}the first {n} of its {of} bars play {why}"),
+    }
 }
 
 /// How far one press of the stepper's minus or plus moves the speed, in BPM (as the curve editor's).
@@ -1525,13 +1581,21 @@ pub(crate) mod tests {
     #[test]
     fn the_metronome_and_the_speed() {
         // Two bars and a half: a click a beat, rounded up to the last beat begun, the bars' first beats high.
-        let clicks = metronome_notes(2 * BAR + mo_midi::PPQ / 2);
+        let clicks = metronome_notes(2 * BAR + mo_midi::PPQ / 2, BAR);
         assert_eq!(clicks.len(), 9);
         let keys: Vec<u8> = clicks.iter().map(|n| n.key).collect();
         assert_eq!(&keys[..5], &[76, 77, 77, 77, 76]);
         assert_eq!(clicks[8].key, METRONOME_BAR_KEY);
         assert!(clicks[0].velocity > clicks[1].velocity);
-        assert!(metronome_notes(0).is_empty());
+        assert!(metronome_notes(0, BAR).is_empty());
+        // With a song in 3/4 the loud click is on each of the song's bar lines (MI-12), a click a beat as before.
+        let waltz = metronome_notes(2 * 3 * mo_midi::PPQ, 3 * mo_midi::PPQ);
+        let starts: Vec<i64> = waltz.iter().map(|n| n.start / mo_midi::PPQ).collect();
+        assert_eq!(starts, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(waltz.iter().map(|n| n.key).collect::<Vec<_>>(), [76, 77, 77, 76, 77, 77]);
+        // A bar of three and a half beats (7/8): the last beat is cut short by the next bar's loud click.
+        let seven = metronome_notes(2 * 336, 336);
+        assert_eq!(seven.iter().map(|n| (n.start, n.key)).collect::<Vec<_>>()[3..5], [(288, 77), (336, 76)]);
         // Steps go to the next 5 BPM, and stay where a part can play.
         assert_eq!(step_bpm(120.0, 1), 125.0);
         assert_eq!(step_bpm(120.0, -1), 115.0);
@@ -1546,6 +1610,56 @@ pub(crate) mod tests {
         assert_eq!(resume_seconds(5.0, 120.0, 60.0, 8.0), 2.0);
         assert_eq!(resume_seconds(f64::NAN, 120.0, 60.0, 8.0), 0.0);
         assert_eq!(resume_seconds(1.0, 120.0, 120.0, 0.0), 0.0);
+    }
+
+    /// The 14 November 2026 review's MI-11: a 16-bar part at 25 BPM is over the two minutes a loop can be (12 bars
+    /// and a half), and was cut there, half way through bar 13.
+    #[test]
+    fn a_loop_too_long_for_its_speed_keeps_its_first_whole_bars() {
+        let note = |start: i64, length: i64| NoteEvent {
+            start,
+            length,
+            key: 60,
+            velocity: 40_000,
+            muted: false,
+            step: false,
+            attribute: mo_formats::NoteAttribute::default(),
+        };
+        // A note in each bar, the one in bar 12 held into bar 14.
+        let notes: Vec<NoteEvent> =
+            (0..16).map(|b| note(b * BAR, if b == 11 { 2 * BAR + 10 } else { BAR / 2 })).collect();
+        let most = 12 * BAR + BAR / 2;
+        let (held, length) = loop_held(notes.clone(), 16 * BAR, most);
+        assert_eq!((held.len(), length), (12, 12 * BAR));
+        assert_eq!(held[11].start + held[11].length, 12 * BAR, "no note is held past where it goes round");
+        let why = "at this speed: a loop can be two minutes long at the most.";
+        assert_eq!(held_note(&notes, length, 16 * BAR), format!("Only the first 12 of its 16 bars play {why}"));
+        // One that fits is left as it is, to the tick, whole bars or not, with nothing to say; and a bar is the
+        // least there is.
+        assert_eq!(loop_held(notes.clone(), 12 * BAR + BAR / 2, most), (notes.clone(), 12 * BAR + BAR / 2));
+        assert_eq!(loop_held(notes.clone(), 16 * BAR, 16 * BAR), (notes.clone(), 16 * BAR));
+        assert_eq!(held_note(&notes, 16 * BAR, 16 * BAR), "");
+        let (one, length) = loop_held(notes.clone(), 16 * BAR, 10);
+        assert_eq!((one.len(), length), (1, BAR));
+        assert_eq!(held_note(&notes, BAR, 3 * BAR), format!("Only the first of its 3 bars plays {why}"));
+        // With a song in other bars, what plays can end inside one of the part's: ten bars and a half here.
+        assert_eq!(
+            held_note(&notes, 10 * BAR + BAR / 2, 16 * BAR),
+            format!("Only about the first 10 of its 16 bars play {why}")
+        );
+        assert_eq!(
+            held_note(&notes, BAR / 2, 16 * BAR),
+            format!("Only the start of the first of its 16 bars plays {why}")
+        );
+        // A part that comes in late has nothing in what plays: said, where it would only be silence.
+        let late: Vec<NoteEvent> = notes[12..].to_vec();
+        assert_eq!(
+            held_note(&late, 12 * BAR, 16 * BAR),
+            format!(
+                "Nothing is heard: none of its notes start in the first 12 bars of its 16, which is all that plays {why}"
+            )
+        );
+        assert_eq!(held_note(&late, 13 * BAR, 16 * BAR), format!("Only the first 13 of its 16 bars play {why}"));
     }
 
     #[test]

@@ -231,6 +231,8 @@ export global MidiData {
     callback bpm-reset();
     callback metronome-toggled();
     in property <string> play-note;
+    // What the loop playing says of itself (only its first bars play at this speed): shown on its own part's card.
+    in property <string> loop-note;
     in property <string> play-key;
     // No SoundFont to play with yet: what to do, and a button to choose one.
     in property <bool> soundfont-missing;
@@ -677,6 +679,13 @@ component PartPanel inherits SidePanel {
     }
     if MidiData.play-note != "": Text {
         text: MidiData.play-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    if MidiData.loop-note != "" && MidiData.playing && MidiData.loop-picked: Text {
+        text: MidiData.loop-note;
         color: Theme.muted;
         font-size: Type.meta;
         wrap: word-wrap;
