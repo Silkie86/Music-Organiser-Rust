@@ -29,11 +29,17 @@ pub fn move_asked_file(first: &Path) -> PathBuf {
 /// ask is dropped (its note taken away) when it can't be read, names no whole path, or names the folder in use.
 pub fn move_asked_in(first: &Path, in_use: &Path) -> Option<PathBuf> {
     let file = move_asked_file(first);
-    let text = fs::read_to_string(&file).ok()?;
-    let to = PathBuf::from(text.trim());
-    let same = mo_formats::case::key(to.to_string_lossy().trim_end_matches(['\\', '/']))
-        == mo_formats::case::key(in_use.to_string_lossy().trim_end_matches(['\\', '/']));
-    if to.is_absolute() && !same {
+    let text = match fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => {
+            let _ = fs::remove_file(&file);
+            return None;
+        }
+    };
+    // The installer writes UTF-8, which may start with a byte-order mark.
+    let to = PathBuf::from(text.trim_start_matches('\u{feff}').trim());
+    if to.is_absolute() && !crate::data_move::paths_match(&to, in_use) {
         Some(to)
     } else {
         let _ = fs::remove_file(&file);
@@ -74,6 +80,10 @@ mod tests {
         fs::write(&file, format!("{}\r\n", to.display())).unwrap();
         assert_eq!(move_asked_in(&first, &first), Some(to.clone()));
         assert!(file.is_file(), "kept until the move starts");
+
+        // As the installer writes it: UTF-8 with a byte-order mark.
+        fs::write(&file, format!("\u{feff}{}\r\n", to.display())).unwrap();
+        assert_eq!(move_asked_in(&first, &first), Some(to.clone()));
 
         // The folder in use already (whatever the case or a last slash): nothing to do, and the ask goes.
         let upper = format!("{}{}", to.display().to_string().to_uppercase(), std::path::MAIN_SEPARATOR);

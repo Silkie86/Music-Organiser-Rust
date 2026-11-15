@@ -13,6 +13,11 @@
 #>
 param([Parameter(Mandatory = $true)][string]$Setup)
 $ErrorActionPreference = 'Stop'
+# Only on GitHub's throwaway machines: it puts this user's data folder aside while it works (rule 11).
+if ($env:GITHUB_ACTIONS -ne 'true') { throw 'installer\check.ps1 runs only in CI: it would touch this PC''s data folder' }
+$top = Split-Path -Parent $PSScriptRoot
+$name = (Get-Content -LiteralPath (Join-Path $top 'product.toml') | Where-Object { $_ -match '^name = "([^"]+)"' } |
+    ForEach-Object { $Matches[1] } | Select-Object -First 1)
 $setupFile = (Resolve-Path -LiteralPath $Setup).Path
 $local = [Environment]::GetFolderPath('LocalApplicationData')
 $first = Join-Path $local 'MusicOrganiser'
@@ -54,8 +59,8 @@ try {
     # 1. A new PC, the usual place.
     Run-Setup @()
     Check (Test-Path -LiteralPath (Join-Path $app 'music-organiser.exe')) 'the app is in'
-    $menu = Join-Path ([Environment]::GetFolderPath('Programs')) '*.lnk'
-    Check ($null -ne (Get-ChildItem -Path $menu -ErrorAction SilentlyContinue)) 'a Start menu shortcut'
+    $menu = Join-Path ([Environment]::GetFolderPath('Programs')) "$name.lnk"
+    Check (Test-Path -LiteralPath $menu) "a Start menu shortcut called $name'
     $apps = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
         Where-Object { $_.PSChildName -like '{*}_is1' -and (Get-ItemProperty $_.PSPath).InstallLocation -like "$app*" }
     Check ($null -ne $apps) 'in the Apps list, for this user only'
@@ -63,6 +68,15 @@ try {
     Check (-not (Test-Path -LiteralPath $first)) 'nothing written to a data folder'
     Uninstall
     Check (-not (Test-Path -LiteralPath $app)) 'uninstall takes the app away'
+    Check (-not (Test-Path -LiteralPath $menu)) 'uninstall takes the shortcut away'
+    Clear-Data
+
+    # 1b. Only the launcher's folder in the usual place: still a new PC, so a picked folder starts the data there.
+    New-Item -ItemType Directory -Force -Path (Join-Path $first 'run-latest-rust') | Out-Null
+    $fresh = Join-Path $scratch 'fresh'
+    Run-Setup @("/DATADIR=`"$fresh`"")
+    Check (Test-Path -LiteralPath (Join-Path $fresh 'MusicOrganiser\started-here.txt')) 'the launcher alone is not data'
+    Uninstall
     Clear-Data
 
     # 2. A new PC, data picked elsewhere (a drive's root means a folder of the app's own name in it).
@@ -89,6 +103,15 @@ try {
     Check ((Test-Path -LiteralPath $asked) -and ((Get-Content -LiteralPath $asked -Raw).Trim() -eq (Join-Path $other 'MusicOrganiser'))) 'another place: the app is asked to move it'
     Check (-not (Test-Path -LiteralPath $pointer)) 'the installer never points at an empty folder'
     Check (-not (Test-Path -LiteralPath (Join-Path $other 'MusicOrganiser'))) 'the installer copies nothing'
+
+    # 3b. The pointer names a folder that isn't there (a drive unplugged): nothing about the data changes.
+    Remove-Item -LiteralPath $asked -Force
+    $gone = Join-Path $scratch 'unplugged\MusicOrganiser'
+    Set-Content -LiteralPath $pointer -Value $gone
+    Run-Setup @("/DATADIR=`"$other`"")
+    Check (-not (Test-Path -LiteralPath $asked)) 'no ask while the data can''t be found'
+    Check ((Get-Content -LiteralPath $pointer -Raw).Trim() -eq $gone) 'the pointer is left as it was'
+    Remove-Item -LiteralPath $pointer -Force
 
     # 4. An update over the top, then uninstall: the data stays as it was.
     Run-Setup @()

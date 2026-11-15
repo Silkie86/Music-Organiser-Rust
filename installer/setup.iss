@@ -70,7 +70,7 @@ Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; Comment: "{#AppD
 
 [Run]
 Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
-; An update the app started itself (it passes /UPDATED) opens the new version once it's in place.
+; An update the app started itself (it passes /UPDATED=1) opens the new version once it's in place.
 Filename: "{app}\{#ExeName}"; Flags: nowait; Check: StartAfterUpdate
 
 [UninstallDelete]
@@ -85,8 +85,7 @@ const
   PointerFileName = 'MusicOrganiser-folder.txt';
   StartedHereFileName = 'started-here.txt';
   MoveAskedFileName = 'MusicOrganiser-move-asked.txt';
-  SettingsFileName = 'rust-settings.json';
-  OldLibraryFileName = 'library.db';
+  MovedInFileName = 'moved-in.json';
   // mo_app::helper_start: the helper's line in the user's startup list.
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   HelperEntry = 'MusicOrganiserHelper';
@@ -95,6 +94,8 @@ var
   DataPage: TInputDirWizardPage;
   CurrentData: String;
   HasData: Boolean;
+  // The pointer names a folder that isn't there now (its drive unplugged, say): nothing about the data is changed.
+  DataMissing: Boolean;
 
 function FirstDataDir: String;
 begin
@@ -111,24 +112,58 @@ begin
   Result := ExpandConstant('{localappdata}\') + MoveAskedFileName;
 end;
 
-// The folder the data is in now: the pointer's, when there is one, else the first folder.
-function DataInUse: String;
+// The folder the pointer names, or '' (no pointer, or nothing in it). The app writes it as UTF-8; a folder name
+// outside plain ASCII may read wrongly here, which only changes what the page shows (the app judges an ask itself).
+function PointerNames: String;
 var
   Text: AnsiString;
 begin
-  Result := FirstDataDir;
+  Result := '';
   if FileExists(PointerFile) and LoadStringFromFile(PointerFile, Text) then
-    if Trim(String(Text)) <> '' then
-      Result := Trim(String(Text));
+    Result := Trim(String(Text));
 end;
 
-// Whether this PC has the app's data already: a pointer, or settings or a library in the first folder (the
-// launcher's own folder in it alone doesn't count).
-function DataThere: Boolean;
+// Whether the first folder holds anything of the app's: any file or folder but the launchers' own folders.
+function FirstFolderUsed: Boolean;
+var
+  Found: TFindRec;
 begin
-  Result := FileExists(PointerFile)
-    or FileExists(FirstDataDir + '\' + SettingsFileName)
-    or FileExists(FirstDataDir + '\' + OldLibraryFileName);
+  Result := False;
+  if FindFirst(FirstDataDir + '\*', Found) then
+  try
+    repeat
+      if (Found.Name <> '.') and (Found.Name <> '..') and (CompareText(Found.Name, 'run-latest-rust') <> 0) and
+         (CompareText(Found.Name, 'run-latest') <> 0) then
+      begin
+        Result := True;
+        Exit;
+      end;
+    until not FindNext(Found);
+  finally
+    FindClose(Found);
+  end;
+end;
+
+// Where the data is now, as the app judges it (mo_app::paths::resolve_in): the pointer's folder when a move finished
+// there or the installer started it there, else the first folder. Sets HasData and DataMissing.
+procedure LookAtData;
+var
+  Named: String;
+begin
+  CurrentData := FirstDataDir;
+  DataMissing := False;
+  Named := PointerNames;
+  if Named <> '' then
+  begin
+    if FileExists(AddBackslash(Named) + MovedInFileName) or FileExists(AddBackslash(Named) + StartedHereFileName) then
+      CurrentData := Named
+    else
+    begin
+      CurrentData := Named;
+      DataMissing := True;
+    end;
+  end;
+  HasData := (Named <> '') or FirstFolderUsed;
 end;
 
 // The folder the data goes into for a pick, as Settings > Data does it (mo_app::data_move::target_in): a folder of
@@ -151,15 +186,17 @@ procedure InitializeWizard;
 var
   Words: String;
 begin
-  HasData := DataThere;
-  CurrentData := DataInUse;
-  if HasData then
+  LookAtData;
+  if DataMissing then
+    Words := 'Your data is in ' + CurrentData + ', which can''t be found now (is its drive plugged in?). The ' +
+      'setup leaves it as it is: once the drive is back, {#AppName} finds it again, and Settings can move it.'
+  else if HasData then
     Words := 'Your data (songs, sounds, settings, notes) is in ' + CurrentData + '. It stays there unless you ' +
       'pick another place: then {#AppName} copies it there, checks every file, and switches at its next start. ' +
       'Nothing is removed from the old folder.'
   else
     Words := '{#AppName} keeps its databases, settings, notes and logs in one folder. A fast drive with room to ' +
-      'spare is best. You can move it later in Settings > Folders.';
+      'spare is best. You can move it later in Settings > General.';
   DataPage := CreateInputDirPage(wpSelectDir, 'Where should your data go?', Words,
     'Data folder:', False, '');
   DataPage.Add('');
@@ -192,6 +229,25 @@ begin
   SetPreviousData(PreviousDataKey, 'DataFolder', DataPage.Values[0]);
 end;
 
+// One line, as UTF-8 (what the app reads; it skips the byte-order mark this may start with).
+function SaveLine(FileName, Line: String): Boolean;
+var
+  Lines: TArrayOfString;
+begin
+  SetArrayLength(Lines, 1);
+  Lines[0] := Line;
+  Result := SaveStringsToUTF8File(FileName, Lines, False);
+  if not Result then
+    Log('Could not write ' + FileName);
+end;
+
+// Says what didn't work, on a message the user sees (and in the setup's log).
+procedure Tell(Words: String);
+begin
+  Log(Words);
+  SuppressibleMsgBox(Words, mbError, MB_OK, IDOK);
+end;
+
 // After the files are in: leave the app the note it needs for the data folder (mo_app::install_choice).
 procedure CurStepChanged(CurStep: TSetupStep);
 var
@@ -200,26 +256,25 @@ begin
   if CurStep <> ssPostInstall then
     Exit;
   Target := TargetIn(DataPage.Values[0]);
+  if DataMissing then
+    Exit;
   if HasData then
   begin
     // Data here already: the app moves it itself, checked, if another place was picked.
     if not SameFolder(Target, CurrentData) and not SameFolder(DataPage.Values[0], CurrentData) then
-      if not SaveStringToFile(MoveAskedFile, Target + #13#10, False) then
-        Log('Could not write ' + MoveAskedFile);
+      if not SaveLine(MoveAskedFile, Target) then
+        Tell('The setup couldn''t leave {#AppName} the ask to move your data to ' + Target + '. Your data stays in ' +
+          CurrentData + '; Settings > General can move it.');
   end
   else if not SameFolder(Target, FirstDataDir) then
   begin
     // A new PC: start the data in the picked folder. The pointer is written last, so a half-done step leaves the
     // app starting in its usual folder.
-    if ForceDirectories(Target) and
-       SaveStringToFile(Target + '\' + StartedHereFileName,
-         'The {#AppName} installer started the app''s data in this folder.' + #13#10, False) then
-    begin
-      if not SaveStringToFile(PointerFile, Target + #13#10, False) then
-        Log('Could not write ' + PointerFile);
-    end
-    else
-      Log('Could not start the data folder in ' + Target);
+    if not (ForceDirectories(Target) and
+            SaveLine(Target + '\' + StartedHereFileName, 'The {#AppName} installer started the app''s data in this folder.') and
+            SaveLine(PointerFile, Target)) then
+      Tell('The setup couldn''t start the data folder in ' + Target + ' (can this account write there?). ' +
+        '{#AppName} keeps its data in ' + FirstDataDir + ' for now; Settings > General can move it.');
   end;
 end;
 

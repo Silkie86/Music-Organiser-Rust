@@ -78,7 +78,8 @@ pub(crate) fn resolve_in(first: &Path) -> Resolved {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return fallback(None),
         Err(e) => return fallback(Some(format!("Couldn't read {POINTER_FILE}: {e}. Using {}", first.display()))),
     };
-    let Some(named) = absolute(Some(PathBuf::from(text.trim()))) else {
+    // The installer writes it as UTF-8, which may start with a byte-order mark (crate::install_choice).
+    let Some(named) = absolute(Some(PathBuf::from(text.trim_start_matches('\u{feff}').trim()))) else {
         return fallback(Some(format!("{POINTER_FILE} doesn't name a whole folder path. Using {}", first.display())));
     };
     // A finished move, or a folder the installer started the data in (crate::install_choice).
