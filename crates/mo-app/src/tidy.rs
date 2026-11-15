@@ -20,6 +20,11 @@
 //! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
 //! - `Chord check\`: a take the test plugin was still saving (`take <time>.json.mo-part`), an hour old. Never the takes,
 //!   which are yours.
+//! - `Recordings\`: a Record take the test plugin was still saving (`Recording <time>.wav.part`), an hour old.
+//!   Never the takes, which are yours.
+//! - `Trimmed sounds\` in the export folder: a trimmed copy Trim silence was still making
+//!   (`<copy>.<number>.wav` or `.wav.part`, [`crate::trim_copy::is_half_made`]), an hour old. Never the copies: DAW
+//!   projects use them.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
 //! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old;
 //!   and the Play in Bitwig files (`MO Play <n>-<n>.mid`, and `.bwpreset` for an audition, removed once Bitwig has
@@ -60,7 +65,7 @@
 //! first: they may hold the newest words, and the next draft written the same way clears one left behind), the words
 //! of a save that failed (`unsaved.txt`) or the lock (`writing.lock`) (rule 17).
 //!
-//! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports, F12 notes under 3 months
+//! Never touched: samples (rule 2), projects, "(fixed)" copies (rule 3), converts and exports (only the half-made files named above go from the export folder), F12 notes under 3 months
 //! old and the drafts (rule 17), Playground ideas, settings, the databases (library.db, sounds.db and midi.db are the
 //! C# app's too, and opened read-only), the C# app's own logs and reports, the launcher's folders (`run-latest-rust\`
 //! and its build folders, which it keeps in bounds itself), and everything else in those folders.
@@ -224,7 +229,7 @@ pub struct Places {
     /// says nothing about where an earlier run wrote).
     pub beside_first: Option<PathBuf>,
     /// The export folder (the one set, else the one in Documents), whose "MIDI browser" folder Send to Bitwig writes
-    /// parts to; none when it can't be told.
+    /// parts to and whose "Trimmed sounds" folder Trim silence writes copies to; none when it can't be told.
     pub exports: Option<PathBuf>,
     /// The sample folders, whose "From Bitwig" folder Favourites from Bitwig saves samples into
     /// ([`crate::bitwig_favourites::save_missing`]).
@@ -957,19 +962,23 @@ fn is_move_part(name: &str) -> bool {
     WRITTEN_WHOLE_BESIDE_FIRST.iter().any(|f| is_whole_part_of(name, f))
 }
 
-/// The plugin's Record folder in the data folder (mo-plugin `record::folder`).
+/// The plugin's Record folder in the data folder (mo-plugin `record::folder` uses it).
 pub const RECORDINGS: &str = "Recordings";
+
+/// How a Record take's name gives its time, after "Recording " (mo-plugin `record` uses it): "2026-11-15 21-02-44".
+pub const TAKE_TIME: &str = "%Y-%m-%d %H-%M-%S";
 
 /// A take `write_wav` was still writing: "Recording 2026-11-15 21-02-44.wav.part", or with " (2)" after the time.
 fn is_half_recorded(name: &str) -> bool {
     let Some(rest) = name.strip_suffix(".wav.part").and_then(|n| n.strip_prefix("Recording ")) else { return false };
+    // A second take in the same second is " (2)", then " (3)" and on (mo_audio::record::save): never " (1)" or " (02)".
     let (when, n) = match rest.split_once(" (") {
         Some((when, n)) => {
-            (when, n.strip_suffix(')').filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
+            (when, n.strip_suffix(')').filter(|n| !n.starts_with('0') && n.parse::<u32>().is_ok_and(|n| n >= 2)))
         }
         None => (rest, Some("")),
     };
-    n.is_some() && chrono::NaiveDateTime::parse_from_str(when, "%Y-%m-%d %H-%M-%S").is_ok()
+    n.is_some() && chrono::NaiveDateTime::parse_from_str(when, TAKE_TIME).is_ok()
 }
 
 /// The saves-list copy of library.db ([`mo_library::list_copy`]), or the journal SQLite may leave beside it.
@@ -1696,6 +1705,8 @@ mod tests {
             trimmed.join("Kick.wav"),
             takes.join("Recording 2026-11-15 21-02-44.wav"),
             takes.join("Recording of mine.wav.part"),
+            takes.join("Recording 2026-11-15 21-02-44 (1).wav.part"),
+            takes.join("Recording 2026-11-15 21-02-44 (02).wav.part"),
         ];
         for f in gone.iter().chain(&kept) {
             fs::write(f, b"x").unwrap();

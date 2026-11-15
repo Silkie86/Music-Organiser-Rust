@@ -36,7 +36,7 @@ const REMEMBERED: usize = 4_096;
 /// thread.
 pub fn to_drag(original: &Path, db: Option<i32>, is_loop: bool) -> (PathBuf, Option<String>) {
     let Some(db) = db.filter(|_| !is_loop) else { return (original.to_path_buf(), None) };
-    let folder = match folder_in(&crate::paths::data_dir()) {
+    let folder = match folder_now() {
         Ok(folder) => folder,
         Err(why) => return (original.to_path_buf(), Some(format!("Dragged the whole file, untrimmed: {why}"))),
     };
@@ -44,6 +44,26 @@ pub fn to_drag(original: &Path, db: Option<i32>, is_loop: bool) -> (PathBuf, Opt
         Made::Copy(copy) => (copy, None),
         Made::AsItIs(why) => {
             (original.to_path_buf(), why.map(|why| format!("Dragged the whole file, untrimmed: {why}")))
+        }
+    }
+}
+
+/// How long the copies' folder, once looked up, is used for drags before it's looked up again (a change in Settings
+/// reaches drags within this; the song library isn't opened twice for each drag in between).
+const FOLDER_KEPT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The copies' folder this run, and when it was looked up.
+static FOLDER_NOW: Mutex<Option<(std::time::Instant, Result<PathBuf, String>)>> = Mutex::new(None);
+
+/// [`folder_in`] for the data folder in use, looked up again at most every [`FOLDER_KEPT`].
+fn folder_now() -> Result<PathBuf, String> {
+    let mut now = FOLDER_NOW.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match &*now {
+        Some((at, folder)) if at.elapsed() < FOLDER_KEPT => folder.clone(),
+        _ => {
+            let folder = folder_in(&crate::paths::data_dir());
+            *now = Some((std::time::Instant::now(), folder.clone()));
+            folder
         }
     }
 }
@@ -56,9 +76,6 @@ pub fn folder_in(data: &Path) -> Result<PathBuf, String> {
     let library = mo_library::songs_db::to_read(data);
     crate::bitwig_convert::export_folder_in(&library).map(|exports| exports.join(FOLDER))
 }
-
-/// How far ahead of now an original's date may be and still be believed (a clock a little out, another time zone).
-const AHEAD: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Whether `name` is a copy whose making was cut short, in [`FOLDER`]: written under this program's own name first
 /// (`<copy>.<pid>.wav`, and `write_wav`'s `<copy>.<pid>.wav.part` beside it) and renamed after (DF-5, for the
@@ -96,12 +113,11 @@ pub fn for_drag(original: &Path, db: i32, folder: &Path) -> Made {
     let path = original.to_string_lossy();
     let copy = folder.join(mo_sounds::trimmed::copy_name(&path, db));
     let changed = meta.modified().ok();
-    // Made before, and the original hasn't changed since. An original dated ahead of now (a pack's files can say 2107)
-    // can't be told by its date: its copy stands, rather than being made again at every drag (DF-6).
-    let ahead = changed.is_some_and(|o| o > SystemTime::now() + AHEAD);
+    // Made before, and the original hasn't changed since: a copy carries its original's date (stamped as it's made,
+    // so an original dated ahead of now, as a pack's files can be, keeps its copy rather than having it made again at
+    // every drag: DF-6). A copy made before copies were stamped is dated when it was made, after its original.
     let fresh = |copy: &Path| {
-        std::fs::metadata(copy)
-            .is_ok_and(|c| c.is_file() && (ahead || c.modified().ok().zip(changed).is_none_or(|(c, o)| c >= o)))
+        std::fs::metadata(copy).is_ok_and(|c| c.is_file() && c.modified().ok().zip(changed).is_none_or(|(c, o)| c >= o))
     };
     if fresh(&copy) {
         return Made::Copy(copy);
@@ -116,7 +132,7 @@ pub fn for_drag(original: &Path, db: i32, folder: &Path) -> Made {
     if fresh(&copy) {
         return Made::Copy(copy);
     }
-    let made = make(original, db, &copy, folder);
+    let made = make(original, db, &copy, folder, changed);
     if let Made::AsItIs(why) = &made {
         if remembered.len() >= REMEMBERED {
             remembered.clear();
@@ -126,8 +142,9 @@ pub fn for_drag(original: &Path, db: i32, folder: &Path) -> Made {
     made
 }
 
-/// Reads `original` whole, trims it at `db` and writes it to `copy` in `folder`, or says why it goes as it is.
-fn make(original: &Path, db: i32, copy: &Path, folder: &Path) -> Made {
+/// Reads `original` whole, trims it at `db` and writes it to `copy` in `folder`, dated `changed` (the original's
+/// date), or says why it goes as it is.
+fn make(original: &Path, db: i32, copy: &Path, folder: &Path, changed: Option<SystemTime>) -> Made {
     let as_it_is = |why: String| Made::AsItIs(Some(why));
     let mut audio = match mo_audio::read(original, MOST_SECONDS) {
         Ok(a) => a,
@@ -163,6 +180,7 @@ fn make(original: &Path, db: i32, copy: &Path, folder: &Path) -> Made {
     let mine = copy.with_extension(format!("{}.wav", std::process::id()));
     let written = mo_audio::write_wav(&mine, &audio.channels, audio.sample_rate, 24)
         .map_err(|e| e.to_string())
+        .and_then(|()| stamp(&mine, changed).map_err(|e| e.to_string()))
         .and_then(|()| std::fs::rename(&mine, copy).map_err(|e| e.to_string()));
     match written {
         Ok(()) => Made::Copy(copy.to_path_buf()),
@@ -170,6 +188,14 @@ fn make(original: &Path, db: i32, copy: &Path, folder: &Path) -> Made {
             let _ = std::fs::remove_file(&mine);
             as_it_is(format!("couldn't write {}: {e}", copy.display()))
         }
+    }
+}
+
+/// Dates the file at `path` `when` (nothing for `None`); a rename keeps the date.
+fn stamp(path: &Path, when: Option<SystemTime>) -> std::io::Result<()> {
+    match when {
+        Some(when) => std::fs::File::options().write(true).open(path)?.set_modified(when),
+        None => Ok(()),
     }
 }
 
@@ -259,14 +285,20 @@ mod tests {
         let dir = folder("ahead");
         let original = dir.join("Ahead.wav");
         quiet_loud_quiet(&original);
+        let later = SystemTime::now() + std::time::Duration::from_secs(80 * 365 * 24 * 60 * 60);
+        stamp(&original, Some(later)).unwrap();
         let copies = dir.join(FOLDER);
         let Made::Copy(copy) = for_drag(&original, -60, &copies) else { panic!("no copy") };
-        let later = SystemTime::now() + std::time::Duration::from_secs(80 * 365 * 24 * 60 * 60);
-        std::fs::File::options().write(true).open(&original).unwrap().set_modified(later).unwrap();
-        // Marked, so a copy made again would show.
+        assert_eq!(std::fs::metadata(&copy).unwrap().modified().unwrap(), later, "the copy carries its date");
+        // Marked (and dated as made), so a copy made again would show.
         std::fs::write(&copy, b"kept").unwrap();
+        stamp(&copy, Some(later)).unwrap();
         assert_eq!(for_drag(&original, -60, &copies), Made::Copy(copy.clone()));
         assert_eq!(std::fs::read(&copy).unwrap(), b"kept");
+        // The original changed (dated ahead again, later still): made again.
+        stamp(&original, Some(later + std::time::Duration::from_secs(60))).unwrap();
+        assert_eq!(for_drag(&original, -60, &copies), Made::Copy(copy.clone()));
+        assert_ne!(std::fs::read(&copy).unwrap(), b"kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
