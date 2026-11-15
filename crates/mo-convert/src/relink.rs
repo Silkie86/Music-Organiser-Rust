@@ -56,7 +56,8 @@ const BITWIG_FILES: [&str; 3] = ["bwproject", "bwclip", "bwpreset"];
 /// file unpacks to gigabytes. One that's bigger can't be looked through, so it counts as naming every copy.
 const LONGEST_ZIP_ENTRY: u64 = 256 << 20;
 
-/// A copy in a project's `multi-samples` folder, and the Library file it's a byte-identical copy of.
+/// A copy in a project's `multi-samples` or `samples` folder, and the file it's a byte-identical copy of (a Library
+/// multisample, or the sample it was copied from).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Relink {
     pub copy: PathBuf,
@@ -126,9 +127,16 @@ fn needles(forms: &[String]) -> Vec<Vec<u8>> {
     out
 }
 
-/// The copies, checked: each must be in this project's `multi-samples` folder, and its Library file must be there.
+/// The folders in a project Bitwig keeps its copies in: multisamples in `multi-samples`, single samples (a WAV it
+/// copied in when the project was saved with "copy samples") in `samples` (Solomon, 15 Nov 2026: his Selector Grids'
+/// snares).
+pub const COPY_FOLDERS: [&str; 2] = ["multi-samples", "samples"];
+
+/// The copies, checked: each must be in one of this project's copy folders ([`COPY_FOLDERS`]), and the file it's a
+/// copy of (a Library multisample, or the sample it was copied from) must be there.
 fn listed(project_dir: &Path, relinks: &[Relink]) -> Result<Vec<Listed>, String> {
-    let folder = key(&project_dir.join("multi-samples").to_string_lossy());
+    let folders: Vec<(String, &str)> =
+        COPY_FOLDERS.iter().map(|f| (key(&project_dir.join(f).to_string_lossy()), *f)).collect();
     relinks
         .iter()
         .map(|r| {
@@ -138,24 +146,27 @@ fn listed(project_dir: &Path, relinks: &[Relink]) -> Result<Vec<Listed>, String>
             if shown.is_empty() {
                 return Err(format!("{copy} has no file name, so nothing was written"));
             }
-            if !r.copy.parent().is_some_and(|p| key(&p.to_string_lossy()) == folder) {
-                return Err(format!("{copy} isn't in this project's multi-samples folder, so nothing was written"));
-            }
+            let parent = r.copy.parent().map(|p| key(&p.to_string_lossy())).unwrap_or_default();
+            let Some(&(_, inside)) = folders.iter().find(|(f, _)| *f == parent) else {
+                return Err(format!(
+                    "{copy} isn't in this project's multi-samples or samples folder, so nothing was written"
+                ));
+            };
             if !r.library.is_absolute() || !r.library.is_file() {
                 return Err(format!("{full} isn't a Library file on disk, so nothing was written"));
             }
             let library_name = file_name(&full).to_owned();
             let name = key(&shown);
             let bare = key(&library_name) != name;
-            // Where the names match, only a path into the multi-samples folder is the copy.
+            // Where the names match, only a path into the copy's folder is the copy.
             let forms = if bare {
                 vec![shown.clone()]
             } else {
-                vec![format!("multi-samples/{shown}"), format!("multi-samples\\{shown}")]
+                vec![format!("{inside}/{shown}"), format!("{inside}\\{shown}")]
             };
             Ok(Listed {
                 needles: needles(&forms),
-                tail: format!("MULTI-SAMPLES/{name}"),
+                tail: format!("{}/{name}", key(inside)),
                 shown,
                 bare,
                 name,

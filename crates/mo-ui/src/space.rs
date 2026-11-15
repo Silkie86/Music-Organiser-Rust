@@ -1690,17 +1690,30 @@ fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &
     let mut told: Option<Instant> = None;
     // On the pool for long work over a disk (rule 21): it reads every copy, hundreds of gigabytes, so on the shared
     // pool it would hold up the pages' quick jobs, and its threads are low in the system's memory there.
-    let prints = mo_app::paths::data_dir().join(mo_space::prints::FILE_NAME);
+    let data = mo_app::paths::data_dir();
+    let prints = data.join(mo_space::prints::FILE_NAME);
+    // The Sounds library finds the originals of the single sample copies in each project's samples folder.
+    let sounds = mo_app::sound_library::shared(&mo_app::sound_library::database_in(&data));
+    let named = |name: &str| sounds.named(name).to_vec();
     let found = background::on_bulk_pool(|| {
-        space_bitwig::look(&roots, &studios, &ask.libraries, index, Some(&prints), &ask.stop, |done, of| {
-            if of > 0 {
-                job.progress(done as f32 / of as f32, Some(&space_bitwig::progress_words(done, of)));
-            }
-            if done == 0 || done == of || told.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
-                told = Some(Instant::now());
-                arrive(weak, Step::BitwigLooking(ask.id, (done, of)));
-            }
-        })
+        space_bitwig::look(
+            &roots,
+            &studios,
+            &ask.libraries,
+            index,
+            Some(&prints),
+            Some(&named),
+            &ask.stop,
+            |done, of| {
+                if of > 0 {
+                    job.progress(done as f32 / of as f32, Some(&space_bitwig::progress_words(done, of)));
+                }
+                if done == 0 || done == of || told.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
+                    told = Some(Instant::now());
+                    arrive(weak, Step::BitwigLooking(ask.id, (done, of)));
+                }
+            },
+        )
     });
     match found {
         Ok(copies) => {
