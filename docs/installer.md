@@ -46,8 +46,8 @@ removed at the next look.
    (Pushing a tag such as `v0.9.0-beta.1` on `main` does the same.)
 3. The Release workflow builds the Bitwig extension and the app (`dist` profile, about 25 minutes). It then makes the
    setup, tries it with `installer/check.ps1`, and puts a **draft** release on the Releases page, tagged `v` plus the
-   version. The draft has the setup and its SHA-256. A run that isn't on `main`, or a tag that doesn't match the
-   version, stops before anything is built. A version already published is never changed: raise the version first.
+   version. The draft has the setup and its SHA-256. A ticked run that isn't on `main`, a tag that doesn't match the
+   version, or a version that's already published stops before anything is built: raise the version first.
 4. Read the draft over and publish it. Nobody sees it until then. Publishing makes the tag, which starts the workflow
    once more; that run sees the release is out and stops at once.
 
