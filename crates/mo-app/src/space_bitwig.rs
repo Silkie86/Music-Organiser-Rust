@@ -72,16 +72,41 @@ pub struct Project {
     pub saves: Vec<Save>,
 }
 
+/// One song's saves beside a project, as its card lists them.
+#[derive(Clone, Debug)]
+pub struct SongSaves<'a> {
+    /// Its newest save: the one Fix is ticked for out of the box.
+    pub newest: &'a Save,
+    /// Its older saves, newest first.
+    pub older: Vec<&'a Save>,
+}
+
 impl Project {
-    /// Its newest save beside the project: the one Fix is ticked for out of the box.
-    pub fn newest(&self) -> Option<&Save> {
-        self.saves.iter().find(|s| !s.below)
+    /// The songs beside the project, each with its saves, the song with the newest save first. A folder can hold more
+    /// than one song (a remix, or another track made from its sounds: Solomon, 17 Nov 2026), told apart by name as the
+    /// Songs page tells them (`mo_library::songs::key`: "Song v2" and "Song final" are one song, "Song remix"
+    /// another). Songs you joined by hand on the Songs page aren't known here, so their saves may show as two songs.
+    pub fn songs(&self) -> Vec<SongSaves<'_>> {
+        let folder = self.folder.to_string_lossy();
+        let mut keys: Vec<String> = Vec::new();
+        let mut songs: Vec<SongSaves<'_>> = Vec::new();
+        for save in self.saves.iter().filter(|s| !s.below) {
+            let name = paths::stem(&save.path.to_string_lossy()).to_owned();
+            let key = mo_library::songs::key(&folder, "Bitwig", &name);
+            match keys.iter().position(|k| *k == key) {
+                Some(at) => songs[at].older.push(save),
+                None => {
+                    keys.push(key);
+                    songs.push(SongSaves { newest: save, older: Vec::new() });
+                }
+            }
+        }
+        songs
     }
 
-    /// Its other saves, as its card lists them under it.
-    pub fn others(&self) -> impl Iterator<Item = &Save> {
-        let newest = self.newest().map(|s| s.path.as_path());
-        self.saves.iter().filter(move |s| Some(s.path.as_path()) != newest)
+    /// Bitwig's backups of it, in a folder below.
+    pub fn backups(&self) -> impl Iterator<Item = &Save> {
+        self.saves.iter().filter(|s| s.below)
     }
 
     /// The room its copies take.
@@ -436,14 +461,13 @@ impl Fixes {
 
     /// A save's tick: None when it can't be fixed now (it's fixed or being written, or it's one of Bitwig's backups
     /// in a folder below, which the converter only fixes beside the project); else whether it's ticked. Out of the box
-    /// that's its project's newest save, unless Fix has just failed on it: pressing Fix again wouldn't help until
+    /// that's each song's `newest` save, unless Fix has just failed on it: pressing Fix again wouldn't help until
     /// something changes, so it waits for you to tick it again.
-    fn tick(&self, project: &Project, save: &Save) -> Option<bool> {
+    fn tick(&self, newest: bool, save: &Save) -> Option<bool> {
         let state = self.state(save);
         if save.below || !matches!(state, State::Failed(_) | State::Outdated(_) | State::Open) {
             return None;
         }
-        let newest = project.newest().is_some_and(|n| n.path == save.path);
         let out_of_the_box = newest && !matches!(state, State::Failed(_));
         Some(self.ticks.get(&save.path).copied().unwrap_or(out_of_the_box))
     }
@@ -476,14 +500,19 @@ impl Fixes {
         }
     }
 
+    /// Each save of a project with its tick ([`tick`](Self::tick)), in the order of its saves.
+    fn ticks<'a>(&self, project: &'a Project) -> Vec<(&'a Save, Option<bool>)> {
+        let newest: HashSet<&Path> = project.songs().iter().map(|s| s.newest.path.as_path()).collect();
+        project.saves.iter().map(|s| (s, self.tick(newest.contains(s.path.as_path()), s))).collect()
+    }
+
     /// The ticked saves, project by project, each with its project's copies.
     pub fn to_fix(&self, found: &Copies) -> Vec<ToFix> {
-        let ticked = |p: &Project, s: &Save| self.tick(p, s) == Some(true);
         found
             .projects
             .iter()
             .flat_map(|p| {
-                p.saves.iter().filter(move |s| ticked(p, s)).map(|s| ToFix {
+                self.ticks(p).into_iter().filter(|(_, t)| *t == Some(true)).map(|(s, _)| ToFix {
                     save: s.path.clone(),
                     copies: p.copies.clone(),
                     libraries: found.library.clone(),
@@ -498,7 +527,7 @@ impl Fixes {
             return Some(("Fixing…".to_owned(), false));
         }
         let found = found?;
-        let any = found.projects.iter().any(|p| p.saves.iter().any(|s| self.tick(p, s).is_some()));
+        let any = found.projects.iter().any(|p| self.ticks(p).iter().any(|(_, t)| t.is_some()));
         let ticked = self.to_fix(found).len();
         any.then(|| {
             if ticked == 0 { ("Fix".to_owned(), false) } else { (format!("Fix {}", plural(ticked, "save")), true) }
@@ -530,9 +559,20 @@ const WHY_SHOWN: usize = 280;
 /// Why a save Fix didn't get to wasn't fixed: Fix stopped first, with an error the log has.
 const STOPPED: &str = "Fix stopped before it was written; the log says why";
 
-/// What a save's line says about it, and whether that's a problem. `newest` is for a project's own line, which speaks
-/// for its newest save.
-fn state_words(project: &Project, save: &Save, state: &State<'_>, newest: bool) -> (String, bool) {
+/// How a save's line speaks for it.
+#[derive(Clone, Copy)]
+enum Speaks<'a> {
+    /// The project's own line, for the newest save of its one song; with how many other saves the project has.
+    Project(usize),
+    /// A song's own line, in a folder with more than one song.
+    Song,
+    /// An older save, of the song whose newest save this is (None for a backup, or in a folder with one song).
+    Older(Option<&'a Save>),
+}
+
+/// What a save's line says about it, and whether that's a problem.
+fn state_words(project: &Project, save: &Save, state: &State<'_>, speaks: Speaks<'_>) -> (String, bool) {
+    let newest = !matches!(speaks, Speaks::Older(_));
     let file = |f: &Path| paths::file_name(&f.to_string_lossy()).to_owned();
     match state {
         State::Writing if newest => (format!("Writing a fixed project for \"{}\"…", save_name(project, save)), false),
@@ -548,8 +588,12 @@ fn state_words(project: &Project, save: &Save, state: &State<'_>, newest: bool) 
         State::Outdated(f) => {
             (format!("\"{}\" is older than this save or than the newest Fix: fix it again.", file(f)), false)
         }
-        State::Open if newest => {
-            let others = project.others().count();
+        State::Open if matches!(speaks, Speaks::Song) => ("The newest save of this song.".to_owned(), false),
+        State::Open if save.below => (BACKUP.to_owned(), false),
+        State::Open if let Speaks::Older(Some(of)) = speaks => {
+            (format!("An older save of \"{}\".", save_name(project, of)), false)
+        }
+        State::Open if let Speaks::Project(others) = speaks => {
             let also = if others == 0 {
                 String::new()
             } else {
@@ -557,7 +601,6 @@ fn state_words(project: &Project, save: &Save, state: &State<'_>, newest: bool) 
             };
             (format!("The tick is for its newest save, \"{}\".{also}", save_name(project, save)), false)
         }
-        State::Open if save.below => (BACKUP.to_owned(), false),
         State::Open => (String::new(), false),
     }
 }
@@ -571,7 +614,8 @@ const BACKUP: &str = "Bitwig's own backup. Fix only writes beside the project's 
 const NO_SAVE: &str = "No save of its own is beside it, only fixed projects or backups, so there's nothing to fix.";
 
 /// The Bitwig copies card: the room they take, the Library they're the same as, each project's copies biggest first
-/// with its newest save's tick and how it's doing, then (when you show them) its other saves, and what Fix does. While
+/// with its newest save's tick and how it's doing (or in a folder with more than one song, a line for each song's
+/// newest save), then (when you show them) its other saves, and what Fix does. While
 /// the first look is on (`looking`), how far it is.
 pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fixes) -> Card {
     let projects = found.map(|c| c.projects.as_slice()).unwrap_or_default();
@@ -584,17 +628,46 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
             size: size_text(p.bytes()),
             ..Part::default()
         };
-        if let Some(newest) = p.newest() {
-            let state = fixes.state(newest);
-            (line.status, line.problem) = state_words(p, newest, &state, true);
-            line.tick = fixes.tick(p, newest).map(|t| (vec![newest.path.clone()], t));
-            if let State::Fixed(f) = state {
-                line.open = Some((Opens::InBitwig, f.to_path_buf()));
+        let songs = p.songs();
+        let backups: Vec<&Save> = p.backups().collect();
+        let others = songs.iter().map(|s| s.older.len()).sum::<usize>() + backups.len();
+        let ticks: HashMap<&Path, Option<bool>> =
+            fixes.ticks(p).into_iter().map(|(s, t)| (s.path.as_path(), t)).collect();
+        let tick_of =
+            |save: &Save| ticks.get(save.path.as_path()).copied().flatten().map(|t| (vec![save.path.clone()], t));
+        let save_line = |save: &Save, speaks: Speaks<'_>| {
+            let state = fixes.state(save);
+            let (status, problem) = state_words(p, save, &state, speaks);
+            Part {
+                name: save_name(p, save),
+                what: saved_words(save.modified),
+                under: true,
+                tick: tick_of(save),
+                status,
+                problem,
+                open: if let State::Fixed(f) = state { Some((Opens::InBitwig, f.to_path_buf())) } else { None },
+                ..Part::default()
             }
-        } else {
-            line.status = NO_SAVE.to_owned();
+        };
+        match songs.as_slice() {
+            [] => line.status = NO_SAVE.to_owned(),
+            [one] => {
+                let state = fixes.state(one.newest);
+                (line.status, line.problem) = state_words(p, one.newest, &state, Speaks::Project(others));
+                line.tick = tick_of(one.newest);
+                if let State::Fixed(f) = state {
+                    line.open = Some((Opens::InBitwig, f.to_path_buf()));
+                }
+            }
+            many => {
+                let failed = many.iter().filter(|s| matches!(fixes.state(s.newest), State::Failed(_))).count();
+                line.status = format!("{} songs in this folder use these copies: each has its own line.", many.len());
+                if failed > 0 {
+                    line.status.push_str(&format!(" {} couldn't be fixed.", plural(failed, "song")));
+                    line.problem = true;
+                }
+            }
         }
-        let others = p.others().count();
         let shown = fixes.shown.contains(&p.folder);
         if others > 0 {
             let words = match (shown, others) {
@@ -605,22 +678,20 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
             line.more = Some((words, p.folder.clone()));
         }
         parts.push(line);
-        if !shown {
-            continue;
+        // In a folder with more than one song, each song has its own line, always shown (each is fixed on its own),
+        // with its older saves under it when shown.
+        let many = songs.len() > 1;
+        for song in &songs {
+            if many {
+                parts.push(save_line(song.newest, Speaks::Song));
+            }
+            if shown {
+                let of = many.then_some(song.newest);
+                parts.extend(song.older.iter().map(|save| save_line(save, Speaks::Older(of))));
+            }
         }
-        for save in p.others() {
-            let state = fixes.state(save);
-            let (status, problem) = state_words(p, save, &state, false);
-            parts.push(Part {
-                name: save_name(p, save),
-                what: saved_words(save.modified),
-                under: true,
-                tick: fixes.tick(p, save).map(|t| (vec![save.path.clone()], t)),
-                status,
-                problem,
-                open: if let State::Fixed(f) = state { Some((Opens::InBitwig, f.to_path_buf())) } else { None },
-                ..Part::default()
-            });
+        if shown {
+            parts.extend(backups.iter().map(|save| save_line(save, Speaks::Older(None))));
         }
     }
     Card {
@@ -878,8 +949,8 @@ mod tests {
     fn with_saves() -> Project {
         let mut p = project("GARAGE FOR BW 1", &[200 * MB, 42 * MB]);
         let folder = r"K:\Bitwig Studio\Projects\GARAGE FOR BW 1";
-        let mut older = save(&format!(r"{folder}\GARAGE v1.bwproject"));
-        older.fixed = Some((PathBuf::from(format!(r"{folder}\GARAGE v1 (fixed).bwproject")), false));
+        let mut older = save(&format!(r"{folder}\GARAGE FOR BW 1 v1.bwproject"));
+        older.fixed = Some((PathBuf::from(format!(r"{folder}\GARAGE FOR BW 1 v1 (fixed).bwproject")), false));
         let mut backup = save(&format!(r"{folder}\auto-backups\GARAGE FOR BW 1-3.bwproject"));
         backup.below = true;
         p.saves.extend([older, backup]);
@@ -908,12 +979,15 @@ mod tests {
         fixes.shown.insert(p.folder.clone());
         let card = super::card(Some(&found), None, &fixes);
         let names: Vec<&str> = card.parts.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(names, ["GARAGE FOR BW 1", "GARAGE v1.bwproject", r"auto-backups\GARAGE FOR BW 1-3.bwproject"]);
+        assert_eq!(
+            names,
+            ["GARAGE FOR BW 1", "GARAGE FOR BW 1 v1.bwproject", r"auto-backups\GARAGE FOR BW 1-3.bwproject"]
+        );
         assert_eq!(card.parts[0].more.as_ref().map(|m| m.0.as_str()), Some("Hide its other saves"));
         assert!(card.parts[1].under && card.parts[1].tick == Some((vec![p.saves[1].path.clone()], false)));
         assert_eq!(
             card.parts[1].status,
-            "\"GARAGE v1 (fixed).bwproject\" is older than this save or than the newest Fix: fix it again."
+            "\"GARAGE FOR BW 1 v1 (fixed).bwproject\" is older than this save or than the newest Fix: fix it again."
         );
         assert!(card.parts[2].under);
         assert_eq!((card.parts[2].tick.clone(), card.parts[2].status.as_str()), (None, BACKUP));
@@ -933,6 +1007,55 @@ mod tests {
         let card = super::card(Some(&found), None, &Fixes::default());
         assert_eq!((card.parts[0].tick.clone(), card.parts[0].status.as_str()), (None, NO_SAVE));
         assert_eq!(Fixes::default().button(Some(&found)), None);
+    }
+
+    #[test]
+    fn each_song_in_a_folder_gets_its_own_tick() {
+        // A folder with a song, a later save of it, and another track made from the same sounds.
+        let mut p = project("the moonlight garage", &[200 * MB]);
+        let folder = r"K:\Bitwig Studio\Projects\the moonlight garage";
+        p.saves = vec![
+            save(&format!(r"{folder}\the moonlight TECH.bwproject")),
+            save(&format!(r"{folder}\the moonlight garage v3.bwproject")),
+            save(&format!(r"{folder}\the moonlight garage v2.bwproject")),
+        ];
+        let found = Copies { library: sample().library, folders: 1, projects: vec![p.clone()] };
+        let fixes = Fixes::default();
+        assert_eq!(p.songs().len(), 2);
+        let card = card(Some(&found), None, &fixes);
+        let names: Vec<&str> = card.parts.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["the moonlight garage", "the moonlight TECH.bwproject", "the moonlight garage v3.bwproject"]
+        );
+        assert_eq!(card.parts[0].tick, None);
+        assert_eq!(card.parts[0].status, "2 songs in this folder use these copies: each has its own line.");
+        assert!(card.parts[1..].iter().all(|l| l.under && l.tick.as_ref().is_some_and(|t| t.1)));
+        assert_eq!(card.parts[1].status, "The newest save of this song.");
+        // The older save of the garage song is a link away, unticked.
+        assert_eq!(card.parts[0].more, Some(("Show its other save".to_owned(), p.folder.clone())));
+        let wanted: Vec<PathBuf> = fixes.to_fix(&found).into_iter().map(|t| t.save).collect();
+        assert_eq!(wanted, [p.saves[0].path.clone(), p.saves[1].path.clone()]);
+        assert_eq!(fixes.button(Some(&found)), Some(("Fix 2 saves".to_owned(), true)));
+
+        // Shown, a song's older save sits under its song and says whose it is. A song Fix failed on shows on the
+        // folder's own line too.
+        let mut fixes = Fixes::default();
+        fixes.shown.insert(p.folder.clone());
+        fixes.done(p.saves[0].path.clone(), Fixing::Failed("it broke".to_owned()));
+        let card = super::card(Some(&found), None, &fixes);
+        let names: Vec<&str> = card.parts.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "the moonlight garage",
+                "the moonlight TECH.bwproject",
+                "the moonlight garage v3.bwproject",
+                "the moonlight garage v2.bwproject"
+            ]
+        );
+        assert_eq!(card.parts[3].status, "An older save of \"the moonlight garage v3.bwproject\".");
+        assert!(card.parts[0].problem && card.parts[0].status.ends_with(" 1 song couldn't be fixed."));
     }
 
     #[test]
@@ -1011,7 +1134,11 @@ mod tests {
         assert_eq!(status(&p, &fixes).status, format!("Not fixed: {STOPPED}"));
         // A long why is cut short on the card.
         let long = "x".repeat(400);
-        assert!(state_words(&p, &p.saves[0], &State::Failed(&long), true).0.ends_with("… (the log has it all)"));
+        assert!(
+            state_words(&p, &p.saves[0], &State::Failed(&long), Speaks::Project(0))
+                .0
+                .ends_with("… (the log has it all)")
+        );
     }
 
     #[test]
