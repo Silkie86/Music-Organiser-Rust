@@ -247,7 +247,10 @@ component SpaceCard inherits SidePanel {
         font-size: Type.meta;
         wrap: word-wrap;
     }
+    // In the card's columns, as on the other pages' cards: a button whose words are wider than the card puts them on
+    // two lines, instead of running past its edge (Solomon's F12 note, 17 Nov 2026).
     CardActions {
+        room: root.inside;
         actions: SpaceData.card-actions;
         chosen(id) => { SpaceData.chosen(id); }
     }
@@ -260,7 +263,10 @@ component SpaceCard inherits SidePanel {
     if SpaceData.card-parts.length > 0: VerticalLayout {
         alignment: start;
         min-height: root.parts-end;
-        for part[i] in SpaceData.card-parts: HorizontalLayout {
+        for part[i] in SpaceData.card-parts: line := HorizontalLayout {
+            // The room its words get, between its tick and its size: worked out here, not left to the layouts, as the
+            // parts are measured before the layouts say how wide things are, and the links need to know it then.
+            property <length> words-width: root.inside - (part.under ? Space.xl : 0px) - (SpaceData.card-ticks ? 26px + Space.sm : 0px) - Space.sm - size.preferred-width;
             spacing: Space.sm;
             // The gap above each part but the first: a gap between them in the box would come before the marker below
             // too, and make the box a gap taller than its parts.
@@ -301,9 +307,12 @@ component SpaceCard inherits SidePanel {
                     wrap: word-wrap;
                     min-width: 0px;
                 }
-                if part.open != "" || part.more != "": HorizontalLayout {
-                    spacing: Space.md;
-                    alignment: start;
+                // Side by side, or one under the other when the card is too narrow for both: beside each other they
+                // pushed the size past the card's edge (Solomon's F12 note, 17 Nov 2026).
+                if part.open != "" || part.more != "": FlexboxLayout {
+                    width: line.words-width;
+                    spacing-horizontal: Space.md;
+                    spacing-vertical: Space.xs;
                     if part.open != "": LinkText {
                         text: part.open;
                         font-size: Type.meta;
@@ -316,7 +325,7 @@ component SpaceCard inherits SidePanel {
                     }
                 }
             }
-            Text {
+            size := Text {
                 text: part.size;
                 color: Theme.text;
                 font-family: Theme.number-font;
