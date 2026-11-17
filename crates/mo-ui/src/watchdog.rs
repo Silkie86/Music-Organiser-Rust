@@ -182,6 +182,11 @@ pub fn watch_window(app: &crate::AppWindow) {
         if matches!(what, "minimised" | "restored" | "hidden" | "shown again") {
             log::info("Window", &format!("The window was {what}"));
         }
+        if what == "restored"
+            && let Some(app) = weak.upgrade()
+        {
+            crate::settings::restored(&app);
+        }
         EventResult::Propagate
     });
 }

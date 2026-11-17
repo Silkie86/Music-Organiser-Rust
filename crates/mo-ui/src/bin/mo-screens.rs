@@ -502,6 +502,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::space::show_sample(&app, mo_ui::space::Sample { fixes: sample_fixes(), ..sample_space() }, bitwig);
     capture(&window);
     shots.push(("space-bitwig.png".into(), capture(&window)));
+    // The same card at its narrowest: a button whose words are wider than the card puts them on two lines, and a
+    // save's two links go one under the other, so nothing runs past the card's edge (Solomon's F12 note, 17 Nov 2026).
+    // Then wide: four buttons to a line, and the links side by side.
+    let space = app.global::<mo_ui::SpaceData>();
+    let was = space.get_panel_width();
+    space.set_panel_width(320.0);
+    capture(&window);
+    shots.push(("space-bitwig-narrow.png".into(), capture(&window)));
+    space.set_panel_width(700.0);
+    capture(&window);
+    shots.push(("space-bitwig-wide.png".into(), capture(&window)));
+    space.set_panel_width(was);
     // The old copies card: what moving plugin folders to another drive left, biggest first, with ticks: one that can't
     // go yet, files a try kept aside that wait for your tick, and one with presets saved since its move, which stays
     // until you look.

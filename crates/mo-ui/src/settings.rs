@@ -718,9 +718,37 @@ pub fn sweep_hold(settings: &AppSettings) -> bool {
     settings.get(SWEEP_HOLD_KEY) == Some("1")
 }
 
+/// Whether the window should be full screen: set at the start from the setting, and changed only by F11. Windows
+/// drops full screen when a minimised window comes back (Solomon's F12 note of 17 Nov: "clicking on the space tab took
+/// the app out of full screen", just after a restore), so [`restored`] puts it back from this.
+static FULL_SCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The window opens full screen (or not), as the setting says.
+pub fn full_screen_at_start(on: bool) {
+    FULL_SCREEN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// F11 turned full screen on or off: the window opens that way next time.
 pub fn full_screen_changed(on: bool) {
+    FULL_SCREEN.store(on, std::sync::atomic::Ordering::Relaxed);
     change(app_settings::FULL_SCREEN_KEY, if on { "1" } else { "0" });
+}
+
+/// The window came back from the taskbar: full screen again if it was full screen (only F11 takes it out). Done a
+/// moment later, on the event loop, so it isn't changed in the middle of the restore's own resize.
+pub fn restored(app: &AppWindow) {
+    if !FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let weak = app.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(0), move || {
+        if let Some(app) = weak.upgrade()
+            && !app.window().is_fullscreen()
+        {
+            app.window().set_fullscreen(true);
+            log::info("Window", "Full screen again after the window came back");
+        }
+    });
 }
 
 /// Changes a setting and writes the file in the background, when it changed.
