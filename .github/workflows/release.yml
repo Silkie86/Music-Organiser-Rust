@@ -1,6 +1,7 @@
 name: Release
 
-# A release starts from a version tag on main, like v1.0.0 (docs/installer.md). GitHub builds the Bitwig extension and
+# A release starts from a version tag on main, like v1.0.0, or from Run workflow on main with "Make the draft release"
+# ticked, which tags it itself (docs/installer.md). GitHub builds the Bitwig extension and
 # the app (dist profile), makes the setup .exe, tries it (installer/check.ps1), and puts a DRAFT release on the
 # Releases page with the setup and its SHA-256. Nothing is public until Solomon publishes the draft.
 # The tag must match the workspace version in Cargo.toml (v1.0.0 for 1.0.0), so the app's version and the setup agree.
@@ -8,16 +9,23 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  # A try-out from any branch (Actions, Release, Run workflow): everything but the release itself; the setup is kept
-  # as a download.
+  # Run workflow (Actions, Release): a try-out from any branch, everything but the release itself, with the setup kept
+  # as a download; or, ticked and on main, the draft release too, its tag made from Cargo.toml's version.
   workflow_dispatch:
+    inputs:
+      release:
+        description: Make the draft release (main only; the tag is v plus Cargo.toml's version)
+        type: boolean
+        default: false
 
 # Read-only everywhere; only the job that drafts the release may write.
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Every run that makes a release waits for the one before (a ticked Run workflow and a tag push of the same version
+  # can't both make a draft); try-outs only wait for their own branch.
+  group: release-${{ (github.event_name == 'push' || inputs.release) && 'release' || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -29,21 +37,58 @@ jobs:
   tag:
     name: Tag
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      published: ${{ steps.published.outputs.published }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: The tag is on main and matches the app's version
-        if: github.event_name == 'push'
+      - name: The version, and for a release that it's on main and matches the tag
+        id: tag
+        env:
+          RELEASE: ${{ github.event_name == 'push' || inputs.release }}
         run: |
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_REF_NAME is not a commit on main"; exit 1; }
           version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
-          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "the tag $GITHUB_REF_NAME doesn't match Cargo.toml's version $version: raise the version first"; exit 1; }
+          [ -n "$version" ] || { echo "Cargo.toml has no workspace version"; exit 1; }
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          [ "$RELEASE" = "true" ] || exit 0
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_SHA is not a commit on main"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "the tag $GITHUB_REF_NAME doesn't match Cargo.toml's version $version: raise the version first"; exit 1; }
+          else
+            [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "a release is made from main only, not $GITHUB_REF_NAME"; exit 1; }
+            # A tag of this version made before (by hand, say) would hold the draft instead of this commit.
+            at=$(git rev-parse -q --verify "refs/tags/v$version^{commit}" || true)
+            [ -z "$at" ] || [ "$at" = "$GITHUB_SHA" ] || { echo "v$version is a tag at $at already, not this commit: raise the version first"; exit 1; }
+          fi
+      # Publishing a draft made by Run workflow makes its tag, and that tag starts this workflow again: nothing to do.
+      # A ticked Run workflow for a version that's out already stops here, before anything is built.
+      - name: Whether this version's release is out already
+        id: published
+        if: github.event_name == 'push' || inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # This address lists published releases only, never drafts: not found means not out yet.
+          if answer=$(gh api "repos/$GH_REPO/releases/tags/$TAG" --jq .tag_name 2>&1); then
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              echo "$TAG is published already: nothing to build"
+              echo "published=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$TAG is published already: raise the version in Cargo.toml first"; exit 1
+            fi
+          elif ! echo "$answer" | grep -q "HTTP 404"; then
+            echo "couldn't ask GitHub whether $TAG is out: $answer"; exit 1
+          fi
 
   bitwig-extension:
     name: Bitwig extension
     needs: tag
+    if: needs.tag.outputs.published != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +126,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: dist
-          save-if: ${{ github.event_name == 'push' }}
+          save-if: ${{ github.event_name == 'push' || inputs.release }}
       - name: Build the app (dist)
         # --locked: exactly the libraries Cargo.lock names, the ones CI tested.
         run: cargo build --locked --profile dist -p mo-ui --bin music-organiser
@@ -111,8 +156,8 @@ jobs:
   # The only job that writes: it puts the tried setup on a draft release.
   release:
     name: Draft release
-    needs: setup
-    if: github.event_name == 'push'
+    needs: [tag, setup]
+    if: github.event_name == 'push' || inputs.release
     runs-on: windows-latest
     permissions:
       contents: write
@@ -126,6 +171,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.tag.outputs.tag }}
         run: |
           $env:SETUP = (Get-ChildItem dist -Filter *.exe | Select-Object -First 1).FullName
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:SETUP).Hash.ToLower()
@@ -133,15 +179,25 @@ jobs:
           "$hash  $file" | Set-Content -Encoding ascii -NoNewline "$env:SETUP.sha256"
           $notes = "Download **$file** and run it. Windows may say ""Windows protected your PC"" until the setup is " +
             "signed: click More info, then Run anyway.`n`nSHA-256: ``$hash``"
-          # Run again (a re-run, say): the draft that's there gets the new files, never a second draft.
-          gh release view $env:GITHUB_REF_NAME *> $null
+          # Run again (a re-run, say): the draft that's there gets the new files, never a second draft. A release
+          # that's already published is never changed: raise the version for a new one.
+          $draft = gh release view $env:TAG --json isDraft --jq .isDraft 2> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:GITHUB_REF_NAME $env:SETUP "$env:SETUP.sha256" --clobber
+            if ($draft -ne 'true') { throw "$env:TAG is already published: raise the version in Cargo.toml first" }
+            # From Run workflow on a newer main, the draft's tag moves to the commit these files were built from.
+            if ($env:GITHUB_EVENT_NAME -ne 'push') {
+              gh release edit $env:TAG --target $env:GITHUB_SHA
+              if ($LASTEXITCODE -ne 0) { throw "the draft's commit could not be changed" }
+            }
+            gh release upload $env:TAG $env:SETUP "$env:SETUP.sha256" --clobber
           } else {
             # A version with a dash (0.9.0-beta.1) is a test release, marked so on the page.
             $more = @()
-            if ($env:GITHUB_REF_NAME -like '*-*') { $more += '--prerelease' }
-            gh release create $env:GITHUB_REF_NAME $env:SETUP "$env:SETUP.sha256" --draft --verify-tag `
-              --title "$env:GITHUB_REF_NAME" --notes $notes @more
+            if ($env:TAG -like '*-*') { $more += '--prerelease' }
+            # From a tag push the tag is there already; from Run workflow it's made at this commit when the draft is
+            # published.
+            if ($env:GITHUB_EVENT_NAME -eq 'push') { $more += '--verify-tag' } else { $more += @('--target', $env:GITHUB_SHA) }
+            gh release create $env:TAG $env:SETUP "$env:SETUP.sha256" --draft `
+              --title "$env:TAG" --notes $notes @more
           }
           if ($LASTEXITCODE -ne 0) { throw 'the release could not be made' }

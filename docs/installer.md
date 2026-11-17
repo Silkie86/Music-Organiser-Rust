@@ -42,15 +42,17 @@ removed at the next look.
 
 1. Raise `version` in `Cargo.toml`'s `[workspace.package]` (a PR like any other). A version with a dash, like
    `0.9.0-beta.1`, is a test release.
-2. Tag that commit on `main` with the version plus a `v` in front, and push the tag: `git tag v0.9.0-beta.1` and then
-   `git push origin v0.9.0-beta.1`.
+2. On GitHub: Actions, Release, Run workflow. Leave the branch on `main`, tick **Make the draft release**, and run it.
+   (Pushing a tag such as `v0.9.0-beta.1` on `main` does the same.)
 3. The Release workflow builds the Bitwig extension and the app (`dist` profile, about 25 minutes). It then makes the
-   setup, tries it with `installer/check.ps1`, and puts a **draft** release on the Releases page. The draft has the
-   setup and its SHA-256. A tag that isn't on `main`, or doesn't match the version, stops the workflow before anything is built.
-4. Read the draft over and publish it. Nobody sees it until then.
+   setup, tries it with `installer/check.ps1`, and puts a **draft** release on the Releases page, tagged `v` plus the
+   version. The draft has the setup and its SHA-256. A ticked run that isn't on `main`, a tag that doesn't match the
+   version, or a version that's already published stops before anything is built: raise the version first.
+4. Read the draft over and publish it. Nobody sees it until then. Publishing makes the tag, which starts the workflow
+   once more; that run sees the release is out and stops at once.
 
-To try the workflow without releasing anything: Actions, Release, Run workflow. It does everything except the release,
-and keeps the setup as a download.
+To try the workflow without releasing anything: Run workflow without the tick, from any branch. It does everything
+except the release, and keeps the setup as a download.
 
 ## Building one by hand (on Windows)
 

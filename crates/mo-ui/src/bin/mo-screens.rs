@@ -388,8 +388,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("backup.png".into(), capture(&window)));
     // The Remove older versions menu, opened.
     let before = capture(&window);
-    click(&window, REMOVE_OLDER_BUTTON.0, REMOVE_OLDER_BUTTON.1);
-    let after = capture(&window);
+    // The card's words above the button take two lines or three, as the made-up backups' first date (a year ago
+    // today) is shorter or longer: the button is at one of the two heights.
+    let mut after = before.clone();
+    for y in REMOVE_OLDER_BUTTON.1 {
+        click(&window, REMOVE_OLDER_BUTTON.0, y);
+        after = capture(&window);
+        if before != after {
+            break;
+        }
+    }
     if before == after {
         return Err("backup-older-menu.png: the menu didn't open; has the Remove older versions button moved?".into());
     }
@@ -3774,7 +3782,7 @@ fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::Scann
 }
 
 /// The Backup page's Remove older versions button, and how far the page is turned down to show the question it asks.
-const REMOVE_OLDER_BUTTON: (f32, f32) = (1150.0, 822.0);
+const REMOVE_OLDER_BUTTON: (f32, [f32; 2]) = (1150.0, [822.0, 840.0]);
 /// The Presets page's Plugin menu: the first thing in its filter column.
 const PLUGIN_CHIP: (f32, f32) = (288.0, 152.0);
 /// A page's turn of the wheel: `-PAGE_DOWN` turns a page down, `PAGE_DOWN` up ([`scroll`]).
