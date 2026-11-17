@@ -185,6 +185,7 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::update::connect(&app, feed.clone(), true);
     // Maximised under full screen, so F11 out of full screen leaves the window filling the screen beside the taskbar.
     app.window().set_maximized(true);
+    mo_ui::settings::full_screen_at_start(full_screen);
     if full_screen {
         app.window().set_fullscreen(true);
     }

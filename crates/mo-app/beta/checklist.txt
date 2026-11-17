@@ -8,7 +8,7 @@
 
 == Start
 start.release | Start the app from the launcher's Release shortcut, then close it and start it again | It opens in a few seconds both times; Settings > Developer says Build: Release
-start.full-screen | Start the app, press F11, close it and start it again; then F11 back to full screen | It opens in full screen; after F11 it opens as you left it
+start.full-screen | Start the app, minimise it and bring it back; press F11, close it and start it again; then F11 back to full screen | It opens in full screen and stays full screen after a minimise; after F11 it opens as you left it
 start.close-clean | Use the app for a while, then close it (Alt+F4, or F11 out of full screen and the window's X) | It closes at once; no new crash-....log in the logs folder
 
 == Install
