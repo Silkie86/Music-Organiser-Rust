@@ -10,6 +10,11 @@ yanked = "deny"
 # Given up on by its makers: checked for the libraries the app asks for itself. Slint's own (font and Linux
 # accessibility parts) are Slint's to change.
 unmaintained = "workspace"
+ignore = [
+    # chrono was declared unmaintained on 17 Nov 2026, with no fixed version. Slint 1.18 needs it itself, so it stays
+    # in the build whatever the app does. Allowed by Solomon on 17 Nov 2026; look again at Slint's next release.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; Slint depends on it, no safe upgrade yet" },
+]
 
 [licenses]
 version = 2
