@@ -137,6 +137,11 @@ fn needles(forms: &[String]) -> Vec<Vec<u8>> {
 /// snares).
 pub const COPY_FOLDERS: [&str; 2] = ["multi-samples", "samples"];
 
+/// [`listed`] for one copy.
+fn listed_one(project_dir: &Path, relink: &Relink) -> Result<Listed, String> {
+    listed(project_dir, std::slice::from_ref(relink))?.pop().ok_or_else(|| "it wasn't read".to_owned())
+}
+
 /// The copies, checked: each must be in one of this project's copy folders ([`COPY_FOLDERS`]), and the file it's a
 /// copy of (a Library multisample, or the sample it was copied from) must be there.
 fn listed(project_dir: &Path, relinks: &[Relink]) -> Result<Vec<Listed>, String> {
@@ -832,10 +837,18 @@ pub fn still_named_except(
     };
     let shown = |r: &Relink| r.copy.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let everyone = |why: &str| relinks.iter().map(|r| Some(format!("{} stays: {why}.", shown(r)))).collect();
-    let listed = match listed(&dir, relinks) {
-        Ok(l) => l,
-        Err(e) => return everyone(&e),
-    };
+    // Each copy on its own: one whose original is gone (or that isn't in a copy folder) stays, the others are asked.
+    let mut listed: Vec<Listed> = Vec::new();
+    let each: Vec<Option<String>> = relinks
+        .iter()
+        .map(|r| match listed_one(&dir, r) {
+            Ok(l) => {
+                listed.push(l);
+                None
+            }
+            Err(e) => Some(e),
+        })
+        .collect();
     let others = match other_bitwig_files(original, &dir) {
         Ok(o) => o,
         Err(e) => return everyone(&e),
@@ -852,14 +865,42 @@ pub fn still_named_except(
             (p.strip_prefix(&dir).unwrap_or(p).to_string_lossy().into_owned(), named)
         })
         .collect();
+    let mut at = 0;
     relinks
         .iter()
-        .enumerate()
-        .map(|(c, r)| {
+        .zip(&each)
+        .map(|(r, l)| {
+            if let Some(e) = l {
+                return Some(format!("{} stays: {e}.", shown(r)));
+            }
+            let c = at;
+            at += 1;
             let (other, _) = named.iter().find(|(_, n)| n[c])?;
             Some(format!("{other} still uses {}, so it stays.", shown(r)))
         })
         .collect()
+}
+
+/// Each Bitwig file [`bitwig_files_now`] found, with its size and when it was last saved.
+pub type FilesNow = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
+
+/// The Bitwig files [`still_named_except`] would read for `original`, each with its size and when it was last saved:
+/// cheap to take again (no file is read), so a caller that keeps that check's answers can tell when they're stale.
+pub fn bitwig_files_now(original: &Path) -> Result<FilesNow, String> {
+    let dir = match original.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let mut files: FilesNow = other_bitwig_files(original, &dir)?
+        .into_iter()
+        .map(|p| {
+            let m = std::fs::metadata(&p).ok();
+            let (len, when) = (m.as_ref().map_or(0, |m| m.len()), m.and_then(|m| m.modified().ok()));
+            (p, len, when)
+        })
+        .collect();
+    files.sort();
+    Ok(files)
 }
 
 /// The other Bitwig files in the project's folder and below it (Bitwig's auto-backups, an earlier fixed project, clips

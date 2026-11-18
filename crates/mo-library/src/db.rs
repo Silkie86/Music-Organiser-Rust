@@ -418,6 +418,30 @@ impl Library {
         Ok(out)
     }
 
+    /// The saves that use one of these sample files, as the library last read them: each with the sample's path as
+    /// stored and the save's path. A file matches as Clean up matches them (letter case, `/` or `\\`, and the drive
+    /// letter aside: a save made when the drive was F: still counts now it's K:). A path stored relative to its save
+    /// isn't one of these files. For Space's Free the space: a save in another folder can name a project's copy.
+    pub fn saves_using(&self, files: &[String]) -> Result<Vec<(String, String)>, LibraryError> {
+        let wanted: HashSet<String> =
+            files.iter().map(|f| crate::plugins::sample_key(f)).filter(|k| !k.is_empty()).collect();
+        if wanted.is_empty() || !self.has("samples") || !self.has("projects") {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare(
+            "SELECT s.path AS path, p.path AS project_path FROM samples s JOIN projects p ON p.id = s.project_id",
+        )?;
+        let rows = st.query_map([], |r| Ok((text(r, "path"), text(r, "project_path"))))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (sample, save) = row?;
+            if wanted.contains(&crate::plugins::sample_key(&sample)) {
+                out.push((sample, save));
+            }
+        }
+        Ok(out)
+    }
+
     /// Your say on which saves are one song (table `song_choices`).
     pub fn song_choices(&self) -> Result<SongChoices, LibraryError> {
         if !self.has("song_choices") {

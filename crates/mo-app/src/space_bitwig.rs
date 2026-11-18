@@ -21,6 +21,7 @@ use std::time::SystemTime;
 
 use mo_convert::relink::{self, Relink};
 use mo_formats::paths;
+use mo_library::songs::SongChoices;
 use mo_space::bitwig::{self, LibraryCopy, LibraryIndex, Save};
 use mo_space::size::size_text;
 use mo_space::{Stopped, key};
@@ -59,6 +60,9 @@ pub const FREEING: &str =
 /// The Bitwig card's Free the space button: its words and whether it can be pressed now. None when no fixed save is
 /// ticked as playing.
 pub fn free_button(found: Option<&Copies>, fixes: &Fixes, wait: bool) -> Option<(String, bool)> {
+    if fixes.heard.is_empty() {
+        return None;
+    }
     let songs: usize = found?.projects.iter().map(|p| fixes.heard_in(p).len()).sum();
     (songs > 0).then(|| (format!("Free the space: copies of {} to the {BIN}", plural(songs, "checked song")), !wait))
 }
@@ -402,6 +406,21 @@ pub struct ToFree {
     pub checked: Vec<(PathBuf, PathBuf)>,
     /// Bitwig's Library folders, as the look found them: a multisample's Library file must be in one.
     pub libraries: Vec<PathBuf>,
+    /// Your say on the Songs page on which saves are one song: a save you split off, or a song you said is another,
+    /// isn't left behind with a checked song's saves. Read from the library with [`ToFree::elsewhere`], off the
+    /// window's thread.
+    pub choices: SongChoices,
+    /// The saves the library knows that use one of the project's copies by its path, with the copy's path as stored
+    /// (`mo_library::Library::saves_using`): one in another folder keeps the copy. Err (and why) when the library
+    /// couldn't be read: every copy stays then. Nothing goes until it's been read.
+    pub elsewhere: Result<Vec<(String, String)>, String>,
+}
+
+impl ToFree {
+    /// The copies' paths, as [`ToFree::elsewhere`] asks the library about them.
+    pub fn copy_paths(&self) -> Vec<String> {
+        self.project.copies.iter().map(|c| c.in_project.clone()).collect()
+    }
 }
 
 /// The saves whose copies stop being found when a project's copies go (Solomon, 17 Nov 2026: he chose that they go
@@ -412,11 +431,19 @@ pub fn left_behind(job: &ToFree) -> Vec<PathBuf> {
     let checked: HashSet<&Path> = job.checked.iter().map(|(save, _)| save.as_path()).collect();
     let mut out = Vec::new();
     let mut songs: HashSet<String> = HashSet::new();
+    // By name, as the card shows songs; then your say on the Songs page: an older save you split off or put under
+    // another song isn't this song's, so it still keeps its copies.
+    let chosen = |s: &Save| {
+        let path = s.path.to_string_lossy();
+        job.choices.key_of(&path, &job.project.folder.to_string_lossy(), "Bitwig", paths::stem(&path))
+    };
     for song in job.project.songs() {
         if checked.contains(song.newest.path.as_path()) {
+            let key = chosen(song.newest);
             songs.insert(song_key(&job.project, song.newest));
+            songs.insert(key.clone());
             out.push(song.newest.path.clone());
-            out.extend(song.older.iter().map(|s| s.path.clone()));
+            out.extend(song.older.iter().filter(|s| chosen(s) == key).map(|s| s.path.clone()));
         }
     }
     // Only Bitwig's own backups, in its auto-backups folder, and only a checked song's (by name, with the number
@@ -424,7 +451,12 @@ pub fn left_behind(job: &ToFree) -> Vec<PathBuf> {
     out.extend(
         job.project
             .backups()
-            .filter(|s| in_auto_backups(&job.project, s) && songs.contains(&backup_song_key(&job.project, s)))
+            .filter(|s| {
+                in_auto_backups(&job.project, s) && {
+                    let k = backup_song_key(&job.project, s);
+                    songs.contains(&k) && songs.contains(&job.choices.follow(&k))
+                }
+            })
             .map(|s| s.path.clone()),
     );
     out
@@ -457,19 +489,30 @@ fn backup_song_key(project: &Project, save: &Save) -> String {
     mo_library::songs::key(&project.folder.to_string_lossy(), "Bitwig", name)
 }
 
-/// Why a checked save can't have its copies freed now, from the disk just before they'd go: it has been saved again
-/// since the look (so its newest work may use them), or its fixed project is gone or older than it.
+/// Why a project's copies can't be freed now, from the disk just before they'd go: one of its saves has been saved
+/// again since the look (an older one too: your newest work may be in it now, and it would lose them), or a checked
+/// save's fixed project is gone or older than it. A time within [`crate::space_fix_note::SAME_TIME`] of the look's is
+/// the same save (a folder's listing and the file itself can give a time a little apart).
 fn changed_since(job: &ToFree) -> Option<String> {
     let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    for (save, fixed) in &job.checked {
-        let name = paths::file_name(&save.to_string_lossy()).to_owned();
-        let looked = job.project.saves.iter().find(|s| s.path == *save).and_then(|s| s.modified);
-        let now = modified(save);
-        if now.is_none() || now != looked {
+    let near = |a: SystemTime, b: SystemTime| {
+        a.duration_since(b).or_else(|_| b.duration_since(a)).is_ok_and(|d| d <= crate::space_fix_note::SAME_TIME)
+    };
+    for save in job.project.saves.iter().filter(|s| !s.below) {
+        let name = paths::file_name(&save.path.to_string_lossy()).to_owned();
+        let same = match (modified(&save.path), save.modified) {
+            (Some(now), Some(looked)) => near(now, looked),
+            _ => false,
+        };
+        if !same {
             return Some(format!(
-                "\"{name}\" was saved again since the page looked, so its copies stay: measure again."
+                "\"{name}\" was saved again since the page looked, so the copies stay: measure again."
             ));
         }
+    }
+    for (save, fixed) in &job.checked {
+        let name = paths::file_name(&save.to_string_lossy()).to_owned();
+        let now = modified(save);
         if modified(fixed).is_none_or(|f| now.is_some_and(|n| f < n)) {
             return Some(format!("\"{name}\"'s fixed project is gone or older than it now, so its copies stay."));
         }
@@ -478,21 +521,47 @@ fn changed_since(job: &ToFree) -> Option<String> {
 }
 
 /// Sends the copies a project's checked fixed saves no longer use to the Recycle Bin (`mo_space::bitwig::
-/// remove_copies`), each checked again just before it goes: still the same as what's used instead, and named by no
-/// Bitwig file in the folder but those [`left_behind`] lists. The saves themselves stay. Reads the disks, so call it
-/// off the window's thread.
+/// remove_copies`), each checked again just before it goes: still the same as what's used instead, named by no Bitwig
+/// file in the folder but those [`left_behind`] lists, and used by no save in another folder the library knows of. The
+/// saves themselves stay. Reads the disks, so call it off the window's thread.
 pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> mo_space::clean::Done {
     let mut done = mo_space::clean::Done::default();
     let Some((original, fixed)) = job.checked.first() else { return done };
+    let everyone = |why: &str| -> Vec<mo_space::clean::Problem> {
+        job.project
+            .copies
+            .iter()
+            .map(|c| mo_space::clean::Problem { path: c.in_project.clone(), why: why.to_owned() })
+            .collect()
+    };
     if let Some(why) = changed_since(job) {
-        done.problems.extend(
-            job.project
-                .copies
-                .iter()
-                .map(|c| mo_space::clean::Problem { path: c.in_project.clone(), why: why.clone() }),
-        );
+        done.problems.extend(everyone(&why));
         return done;
     }
+    let elsewhere = match &job.elsewhere {
+        Ok(e) => e,
+        Err(why) => {
+            done.problems.extend(everyone(&format!("The library couldn't be read to see who else uses it ({why}).")));
+            return done;
+        }
+    };
+    let folder = key(&job.project.folder.to_string_lossy());
+    let inside = |save: &str| {
+        let k = key(save);
+        k.strip_prefix(&folder).is_some_and(|rest| rest.starts_with(['/', '\\']))
+    };
+    // A save in another folder that names a copy by its full path (saved without copying its samples) keeps it.
+    let used_elsewhere = |copy: &Path| -> Option<String> {
+        let name = paths::file_name(&copy.to_string_lossy()).to_owned();
+        let copy_key = without_drive(key(&copy.to_string_lossy()));
+        elsewhere
+            .iter()
+            .filter(|(sample, save)| {
+                !inside(save) && Path::new(save).is_file() && without_drive(key(sample)) == copy_key
+            })
+            .map(|(_, save)| format!("{save} uses {name} too, so it stays."))
+            .next()
+    };
     let left: HashSet<String> = left_behind(job).iter().map(|p| key(&p.to_string_lossy())).collect();
     let left_out = |p: &Path| {
         let full = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
@@ -500,15 +569,33 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
     };
     let changed: Vec<(PathBuf, PathBuf)> =
         job.project.copies.iter().map(|c| (PathBuf::from(&c.in_project), PathBuf::from(&c.library_file))).collect();
-    // Every other Bitwig file in the folder is read once for all the copies, just before they go.
     let relinks: Vec<Relink> = changed.iter().map(|(c, l)| Relink { copy: c.clone(), library: l.clone() }).collect();
-    let why: HashMap<String, Option<String>> = relinks
-        .iter()
-        .map(|r| key(&r.copy.to_string_lossy()))
-        .zip(relink::still_named_except(original, &relinks, &left_out))
-        .collect();
+    // Every other Bitwig file in the folder is read once for all the copies, and read again only when one of them has
+    // changed since (a size or a time, or a file come or gone): each copy is asked just before it goes, and again
+    // before Windows asks to send what it guards, so a save made meanwhile is still seen.
+    let ask = || -> (Result<relink::FilesNow, String>, HashMap<String, Option<String>>) {
+        let files = relink::bitwig_files_now(original);
+        let why = relinks
+            .iter()
+            .map(|r| key(&r.copy.to_string_lossy()))
+            .zip(relink::still_named_except(original, &relinks, &left_out))
+            .collect();
+        (files, why)
+    };
+    let asked = std::sync::Mutex::new(ask());
     let still_named = |copy: &Path, _: &Path| {
-        why.get(&key(&copy.to_string_lossy())).cloned().unwrap_or_else(|| Some("It wasn't asked about.".to_owned()))
+        if let Some(why) = used_elsewhere(copy) {
+            return Some(why);
+        }
+        let mut asked = asked.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = relink::bitwig_files_now(original);
+        if now.is_err() || now != asked.0 {
+            *asked = ask();
+        }
+        if let Err(why) = &asked.0 {
+            return Some(format!("{why}, so it stays."));
+        }
+        asked.1.get(&key(&copy.to_string_lossy())).cloned().unwrap_or_else(|| Some("It wasn't asked about.".to_owned()))
     };
     let fixed = bitwig::FixedProject {
         file: fixed,
@@ -519,12 +606,26 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
     bitwig::remove_copies(&fixed, bin, stop)
 }
 
+/// A path as Space compares them, without its drive letter and with `/` between folders: the library keeps the path a
+/// save had when it was read, and the drive may have had another letter then.
+fn without_drive(k: String) -> String {
+    let k = k.replace('\\', "/");
+    match k.as_bytes() {
+        [d, b':', ..] if d.is_ascii_alphabetic() => k[2..].to_owned(),
+        _ => k,
+    }
+}
+
 /// Notes that the copies of a project's checked songs went, so the button for every fixed project never sends their
 /// fixed projects ([`crate::space_fix_note::freed`]): they're the ones that play now. Call it once any went.
-pub fn note_freed(job: &ToFree, note: &Path) {
+pub fn note_freed(job: &ToFree, note: &Path) -> Result<(), String> {
+    let mut failed = Vec::new();
     for (_, fixed) in &job.checked {
-        let _ = crate::space_fix_note::freed(note, fixed);
+        if let Err(why) = crate::space_fix_note::freed(note, fixed) {
+            failed.push(why);
+        }
     }
+    if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
 }
 
 /// Writes a "(fixed)" project beside a save that uses the Library's own files instead of its project's copies
@@ -731,7 +832,13 @@ impl Fixes {
             .iter()
             .filter_map(|p| {
                 let checked = self.heard_in(p);
-                (!checked.is_empty()).then(|| ToFree { project: p.clone(), checked, libraries: found.library.clone() })
+                (!checked.is_empty()).then(|| ToFree {
+                    project: p.clone(),
+                    checked,
+                    libraries: found.library.clone(),
+                    choices: SongChoices::default(),
+                    elsewhere: Err("the library wasn't asked yet".to_owned()),
+                })
             })
             .collect()
     }

@@ -252,3 +252,12 @@ fn copies_the_library_without_changing_it() {
     // A copy is never written over.
     assert!(lib.copy_to(&to).is_err());
 }
+
+#[test]
+fn finds_the_saves_using_a_sample_file_whatever_its_drive_letter_or_slashes() {
+    let lib = Library::open_read_only(&make("saves-using.db", false)).unwrap();
+    let found = lib.saves_using(&["K:/S/KICK.wav".to_owned(), "C:\\s\\other.wav".to_owned()]).unwrap();
+    assert_eq!(found, vec![("C:\\s\\kick.wav".to_owned(), "C:\\beats\\Didums.flp".to_owned())]);
+    assert!(lib.saves_using(&[]).unwrap().is_empty());
+    assert!(lib.saves_using(&["kick.wav".to_owned()]).unwrap().is_empty(), "a bare name isn't that file");
+}

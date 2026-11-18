@@ -474,7 +474,8 @@ pub struct FixedProject<'a> {
 
 /// Sends the copies a "(fixed)" project no longer uses to the Recycle Bin. This is the one place Space removes samples,
 /// an exception to rule 2 that Solomon chose (31 Oct 2026): a copy goes only while the same sound stays in the
-/// Library. The app calls it only after you've opened the fixed project and checked it plays, and says first that
+/// Library. On 17 Nov 2026 he widened it to a project's own sample copies ("Bin them anyway"): one goes only while the
+/// sample it was copied from stays where it is, outside every project's own folders. The app calls it only after you've opened the fixed project and checked it plays, and says first that
 /// the original project can't find these copies once they've gone.
 ///
 /// Each is checked again just before it goes: the fixed project is there and is a "(fixed)" one; the copy is a

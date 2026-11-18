@@ -14,7 +14,7 @@
 //! again as if it had always been kept ([`Note::since`] 0), so nothing it held goes until Fix writes it again. The note
 //! keeps at most [`KEEP_AT_MOST`] (rule 28): past that, the ones Fix wrote longest ago go first (and stay on disk).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -65,7 +65,13 @@ impl Stays {
             Stays::NoTime => {
                 "When it last changed can't be read, so whether you've saved in it can't be told: it stays."
             }
-            Stays::Freed => "Its song's copies went to the Recycle Bin, so it's the one that plays now: it stays.",
+            Stays::Freed => {
+                if cfg!(windows) {
+                    "Its song's copies went to the Recycle Bin, so it's the one that plays now: it stays."
+                } else {
+                    "Its song's copies went to the Trash, so it's the one that plays now: it stays."
+                }
+            }
         }
     }
 }
@@ -109,32 +115,70 @@ struct Waiting {
 }
 
 /// Notes that Free the space sent away the copies the save of the "(fixed)" project `fixed` used, in `file`: the
-/// button for every fixed project leaves it then. One that isn't on the note yet is put on as it is now. What can't be
-/// noted is said in the log and returned.
+/// button for every fixed project leaves it then. One that isn't on the note yet is put on as it is now. A note that
+/// can't be saved keeps the mark while the app runs, as Fix's own do; what can't be noted is said in the log and
+/// returned.
 pub fn freed(file: &Path, fixed: &Path) -> Result<(), String> {
-    let mut waiting = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut note = load_or_begin(file, &mut waiting)?;
-    match note.written.iter_mut().find(|w| same(&w.path, &fixed.to_string_lossy())) {
-        Some(w) => w.freed = true,
-        None => {
-            let meta = fs::symlink_metadata(fixed).map_err(|e| e.to_string())?;
-            let modified = meta.modified().ok().and_then(nanos).unwrap_or(0);
-            note.written.push(Written {
-                path: fixed.to_string_lossy().into_owned(),
-                bytes: meta.len(),
-                modified,
-                freed: true,
-            });
-        }
+    mark(file, &[fixed.to_path_buf()], true)
+}
+
+/// Takes Free the space's mark off the fixed projects in the folders whose copies all came back with Put back
+/// (`copies`, their paths in the project's `multi-samples` or `samples` folder; `missed`, those that couldn't be put
+/// back): with their copies there again, they're fixed projects like any other. A folder where any copy stayed in the
+/// Recycle Bin keeps the mark. What can't be noted is said in the log.
+pub fn put_back(file: &Path, copies: &[&str], missed: &[&str]) {
+    let folder_of = |c: &str| Path::new(c).parent().and_then(Path::parent).map(|f| mo_space::key(&f.to_string_lossy()));
+    let lost: HashSet<String> = missed.iter().filter_map(|c| folder_of(c)).collect();
+    let back: HashSet<String> = copies.iter().filter_map(|c| folder_of(c)).filter(|f| !lost.contains(f)).collect();
+    if back.is_empty() {
+        return;
     }
-    serde_json::to_string(&note)
-        .map_err(std::io::Error::other)
-        .and_then(|text| crate::backup::write_whole(file, &text))
-        .map_err(|e| {
-            let why = format!("Couldn't note that {}'s copies went ({e})", fixed.display());
-            crate::log::warning("Space", &why);
-            why
-        })
+    let fixed: Vec<PathBuf> = {
+        let mut waiting = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
+        let Ok(note) = load_or_begin(file, &mut waiting) else { return };
+        note.written
+            .iter()
+            .filter(|w| w.freed)
+            .map(|w| PathBuf::from(&w.path))
+            .filter(|w| w.parent().is_some_and(|f| back.contains(&mo_space::key(&f.to_string_lossy()))))
+            .collect()
+    };
+    if !fixed.is_empty()
+        && let Err(why) = mark(file, &fixed, false)
+    {
+        crate::log::warning("Space", &why);
+    }
+}
+
+/// Sets Free the space's mark on these fixed projects to `freed`, through what waits to be put on the note.
+fn mark(file: &Path, fixed: &[PathBuf], freed: bool) -> Result<(), String> {
+    let mut waiting = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
+    let note = load_or_begin(file, &mut waiting)?;
+    for one in fixed {
+        let text = one.to_string_lossy();
+        let waits = waiting.written.iter().find(|(f, w)| f == file && same(&w.path, &text)).map(|(_, w)| w.clone());
+        let mut written = match waits.or_else(|| note.written.iter().find(|w| same(&w.path, &text)).cloned()) {
+            Some(w) => w,
+            None if !freed => continue,
+            None => {
+                let meta = fs::symlink_metadata(one)
+                    .map_err(|e| format!("Couldn't note that {}'s copies went ({e})", one.display()))?;
+                let modified = meta.modified().ok().and_then(nanos).unwrap_or(0);
+                Written { path: text.into_owned(), bytes: meta.len(), modified, freed }
+            }
+        };
+        written.freed = freed;
+        waiting.written.retain(|(f, w)| !(f == file && same(&w.path, &written.path)));
+        waiting.written.push((file.to_owned(), written));
+    }
+    load_or_begin(file, &mut waiting)?;
+    if waiting.written.iter().any(|(f, _)| f == file) {
+        return Err(format!(
+            "The note of what Free the space did couldn't be saved in {}: kept while the app runs",
+            file.display()
+        ));
+    }
+    Ok(())
 }
 
 /// One change at a time to a note, from any thread, with what waits to be put on it.
@@ -284,7 +328,7 @@ pub struct Noted {
     /// Size and modified time, by the path as Space compares paths (`mo_space::key`).
     by_path: HashMap<String, (u64, u64)>,
     /// The ones Free the space sent the copies of, by the path as Space compares paths.
-    freed: std::collections::HashSet<String>,
+    freed: HashSet<String>,
 }
 
 /// The note in `file`, for the bin button: begun now if it isn't there yet, with what Fix wrote this run that couldn't

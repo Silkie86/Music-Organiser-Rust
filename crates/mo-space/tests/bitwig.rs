@@ -688,3 +688,43 @@ fn one_copy_given_two_ways_goes_once_and_a_good_second_way_still_counts() {
     assert_eq!(why.len(), 2);
     assert!(why[0].contains("isn't there now") && why[1].starts_with("It's the same file as "), "{why:?}");
 }
+
+#[test]
+fn a_sample_copy_goes_only_while_its_original_is_outside_every_project() {
+    let dir = fixtures("mo-space-bitwig-remove-samples");
+    let project = dir.join("Projects/Garage");
+    write(&project, "Garage (fixed).bwproject", b"fixed");
+    write(&project, "samples/Snare-2.wav", b"snare");
+    write(&project, "samples/Hat-2.wav", b"hat");
+    write(&project, "samples/Clap-2.wav", b"clap");
+    write(&project, "samples/Pad-2.multisample", b"pad");
+    write(&dir, "Packs/Snare.wav", b"snare");
+    write(&dir, "Projects/Other/samples/Hat.wav", b"hat");
+    write(&dir, "Projects/Other/Other.bwproject", b"other");
+    write(&dir, "Projects/Old (old copy)/Clap.wav", b"clap");
+    write(&dir, "Library/Pad.multisample", b"pad");
+    let sm = project.join("samples");
+    let changed = [
+        // From a sample pack: it goes.
+        (sm.join("Snare-2.wav"), dir.join("Packs/Snare.wav")),
+        // Another project's own copy: never what's used instead.
+        (sm.join("Hat-2.wav"), dir.join("Projects/Other/samples/Hat.wav")),
+        // In a folder a move left behind: it may go any time, so it's never what's used instead.
+        (sm.join("Clap-2.wav"), dir.join("Projects/Old (old copy)/Clap.wav")),
+        // A multisample belongs in multi-samples: one in samples isn't a copy this knows, so it stays.
+        (sm.join("Pad-2.multisample"), dir.join("Library/Pad.multisample")),
+    ];
+    let libraries = [dir.join("Library")];
+    let bin = FolderBin::new(&dir);
+    let done = remove_copies(
+        &fixed(&project.join("Garage (fixed).bwproject"), &changed, &libraries),
+        &bin,
+        &AtomicBool::new(false),
+    );
+    let gone: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(gone, [s(&sm.join("Snare-2.wav"))], "{:?}", done.problems);
+    assert_eq!(done.problems.len(), 3, "{:?}", done.problems);
+    assert!(dir.join("Packs/Snare.wav").exists() && sm.join("Hat-2.wav").exists() && sm.join("Clap-2.wav").exists());
+    assert!(undo(&done, &bin).is_empty());
+    assert!(sm.join("Snare-2.wav").exists());
+}

@@ -288,6 +288,9 @@ struct Page {
     fixes: Fixes,
     /// Whether the fixed projects are on their way to the Recycle Bin.
     fixed_removing: bool,
+    /// Whether it's Free the space that sends them (`fixed_removing` is on then too, so nothing else starts): only its
+    /// own button says so.
+    freeing: bool,
     /// The look for old copies, what the last one found (it stays on show while the next one looks), and whether one
     /// is on; and how many of the Plugins page's moves had finished when the newest one was asked for: once another
     /// has, it looks again ([`plugin_moved`]).
@@ -718,19 +721,19 @@ fn busy(p: &Page) -> bool {
 /// copies is on, or something else goes or comes back.
 fn remove_fixed_button(p: &Page) -> Option<(String, bool)> {
     let wait = p.fixes.busy() || p.bitwig_looking.is_some() || busy(p);
-    if p.fixed_removing {
+    if p.fixed_removing && !p.freeing {
         return Some((format!("Sending to the {BIN}…"), false));
     }
-    space_bitwig::remove_fixed_button(p.bitwig.as_ref(), wait)
+    space_bitwig::remove_fixed_button(p.bitwig.as_ref(), wait || p.freeing)
 }
 
 /// The Bitwig card's Free the space button: it waits as the button for the fixed projects does.
 fn free_bitwig_button(p: &Page) -> Option<(String, bool)> {
     let wait = p.fixes.busy() || p.bitwig_looking.is_some() || busy(p);
-    if p.fixed_removing {
+    if p.freeing {
         return Some((format!("Sending to the {BIN}…"), false));
     }
-    space_bitwig::free_button(p.bitwig.as_ref(), &p.fixes, wait)
+    space_bitwig::free_button(p.bitwig.as_ref(), &p.fixes, wait || p.fixed_removing)
 }
 
 /// What's going to the Recycle Bin or coming back now, by its clean-up's kind: none when nothing is.
@@ -1113,9 +1116,10 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
         }
         let jobs = p.fixes.to_free(p.bitwig.as_ref()?);
         p.fixed_removing = true;
-        Some(jobs)
+        p.freeing = true;
+        Some((jobs, p.library.clone()))
     });
-    let Some(jobs) = jobs else { return };
+    let Some((mut jobs, library)) = jobs else { return };
     let weak = app.as_weak();
     let data = paths::data_dir();
     let when = binned::now();
@@ -1128,6 +1132,21 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
         let card_ref = &card;
         let ran = catch_crash(AssertUnwindSafe(|| {
             let card = card_ref;
+            // Your say on which saves are one song, and the saves in other folders that use a copy: from the library,
+            // here off the window's thread. Unread, nothing goes.
+            let lib = open_library(&library);
+            let choices = lib.as_ref().map(|l| l.song_choices().map_err(|e| e.to_string()));
+            for job in &mut jobs {
+                match &choices {
+                    Some(Ok(c)) => job.choices = c.clone(),
+                    Some(Err(e)) => job.elsewhere = Err(e.clone()),
+                    None => job.elsewhere = Err("it couldn't be opened".to_owned()),
+                }
+                if let (Some(lib), Some(Ok(_))) = (&lib, &choices) {
+                    job.elsewhere = lib.saves_using(&job.copy_paths()).map_err(|e| e.to_string());
+                }
+            }
+            drop(lib);
             let of: usize = jobs.iter().map(|j| j.project.copies.len()).sum();
             let tally = Mutex::new(Tally::new(SystemBin.admin().can_ask()));
             let hear = |_: &Path, sent: &Result<(), String>| {
@@ -1153,8 +1172,10 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
                     ),
                 );
                 let one = background::on_bulk_pool(|| space_bitwig::free(job, &bin, stop));
-                if !one.removed.is_empty() {
-                    space_bitwig::note_freed(job, &space_fix_note::file());
+                if !one.removed.is_empty()
+                    && let Err(why) = space_bitwig::note_freed(job, &space_fix_note::file())
+                {
+                    log::warning("Space", &why);
                 }
                 done.removed.extend(one.removed);
                 done.problems.extend(one.problems);
@@ -1184,7 +1205,11 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
     });
     if let Err(e) = started {
         log::error("Space", &format!("Couldn't start sending the Bitwig copies to the {BIN}: {e}"));
-        PAGE.with(|p| p.borrow_mut().fixed_removing = false);
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.fixed_removing = false;
+            p.freeing = false;
+        });
     }
     show_wins(app);
 }
@@ -1666,6 +1691,12 @@ fn put_back(app: &AppWindow, feed: Feed, kind: String, when: i64, done: Done) {
         }
         for problem in &problems {
             log::warning("Space", &format!("Couldn't put back {}: {}", problem.path, problem.why));
+        }
+        // Copies Free the space sent that all came back: their songs' fixed projects are like any other again.
+        if kind == space_bitwig::BITWIG_COPIES_FREED {
+            let back: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+            let missed: Vec<&str> = problems.iter().map(|p| p.path.as_str()).collect();
+            space_fix_note::put_back(&space_fix_note::file(), &back, &missed);
         }
         match space_bin::put_back_words(done.removed.len(), &problems) {
             Ok(words) => card.done(&words),
@@ -2402,6 +2433,7 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 Step::FixedRemoved(kept) => {
                     keep(&mut p, kept);
                     p.fixed_removing = false;
+                    p.freeing = false;
                     Changed::LookAgain
                 }
                 Step::Kept(kept) => {
