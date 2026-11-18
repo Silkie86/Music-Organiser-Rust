@@ -324,3 +324,108 @@ fn added_library_folders_come_after_the_bitwig_studio_folders_own() {
     let found = mo_app::space_bitwig::library_folders(&[], &studios, &extra);
     assert_eq!(found, [studio.join("Library"), old, documents.join("Library")]);
 }
+
+/// A Recycle Bin in a folder of the test's own.
+struct FolderBin {
+    dir: PathBuf,
+    held: std::cell::RefCell<Vec<(String, PathBuf)>>,
+}
+
+impl mo_space::clean::Bin for FolderBin {
+    fn send(&self, path: &Path) -> Result<(), String> {
+        let mut held = self.held.borrow_mut();
+        let to = self.dir.join(held.len().to_string());
+        fs::create_dir_all(&self.dir).unwrap();
+        fs::rename(path, &to).map_err(|e| e.to_string())?;
+        held.push((path.to_string_lossy().into_owned(), to));
+        Ok(())
+    }
+    fn find(&self, _removed: &mut [mo_space::clean::Removed]) -> Vec<mo_space::clean::Problem> {
+        Vec::new()
+    }
+    fn put_back(&self, _removed: &[mo_space::clean::Removed]) -> Vec<mo_space::clean::Problem> {
+        Vec::new()
+    }
+}
+
+#[test]
+fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
+    use mo_app::space_bitwig::{free, free_button, left_behind};
+    let dir = fixtures("mo-app-space-bitwig-free");
+    let studio = dir.join("Bitwig Studio");
+    let kicks = b"<multisample kicks/>";
+    write(&studio, "Library/Multisamples/Kicks.multisample", kicks);
+    let song = studio.join("Projects/Song");
+    let note = dir.join(space_fix_note::FILE_NAME);
+    write(&song, "multi-samples/Kicks-2.multisample", kicks);
+    // Two saves of one song, a remix made from the same sounds, and one of Bitwig's backups.
+    project(&song.join("Song v1.bwproject"), "Kicks-2.multisample", 10);
+    project(&song.join("Song v2.bwproject"), "Kicks-2.multisample", 20);
+    project(&song.join("Song remix.bwproject"), "Kicks-2.multisample", 30);
+    project(&song.join("auto-backups/Song v2-1.bwproject"), "Kicks-2.multisample", 25);
+    let roots = [studio.join("Projects")];
+    let stop = AtomicBool::new(false);
+    let mut index = None;
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+
+    // Each song's newest save is fixed.
+    let mut fixes = Fixes::default();
+    let jobs = fixes.to_fix(&found);
+    let mut names: Vec<String> = jobs.iter().map(|j| name(&j.save)).collect();
+    names.sort();
+    assert_eq!(names, ["Song remix.bwproject", "Song v2.bwproject"]);
+    for job in &jobs {
+        assert!(matches!(fix(job, &note), Fixing::Written(_)));
+    }
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+    assert!(fixes.to_fix(&found).is_empty() && fixes.to_free(&found).is_empty(), "nothing is checked out of the box");
+    assert_eq!(free_button(Some(&found), &fixes, false), None);
+
+    // Only the song is checked: the remix's own save still uses the copy, so it stays.
+    fixes.set_tick(Some(&found), song.join("Song v2.bwproject"), true);
+    let jobs = fixes.to_free(&found);
+    assert_eq!(
+        free_button(Some(&found), &fixes, false),
+        Some((
+            "Free the space: copies of 1 checked song to the Recycle Bin"
+                .replace("Recycle Bin", mo_app::space_bin::BIN),
+            true
+        ))
+    );
+    let behind: Vec<String> = left_behind(&jobs[0]).iter().map(|p| name(p)).collect();
+    assert_eq!(behind, ["Song v2.bwproject", "Song v1.bwproject", "Song v2-1.bwproject"]);
+    let bin = FolderBin { dir: dir.join("bin"), held: Default::default() };
+    let done = free(&jobs[0], &bin, &stop);
+    assert!(done.removed.is_empty(), "{:?}", done.problems);
+    assert!(done.problems.iter().any(|p| p.why.contains("Song remix.bwproject still uses")), "{:?}", done.problems);
+    assert!(song.join("multi-samples/Kicks-2.multisample").is_file());
+
+    // Both checked: the copy goes; every save stays.
+    fixes.set_tick(Some(&found), song.join("Song remix.bwproject"), true);
+    let jobs = fixes.to_free(&found);
+    assert_eq!(jobs.len(), 1);
+
+    // Saved again since the page looked: nothing goes until it looks again.
+    let remix = song.join("Song remix.bwproject");
+    let later = SystemTime::now() + Duration::from_secs(120);
+    fs::File::options().write(true).open(&remix).unwrap().set_modified(later).unwrap();
+    let done = free(&jobs[0], &bin, &stop);
+    assert!(
+        done.removed.is_empty() && done.problems.iter().all(|p| p.why.contains("saved again")),
+        "{:?}",
+        done.problems
+    );
+    fs::File::options()
+        .write(true)
+        .open(&remix)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + 30 * 60))
+        .unwrap();
+    let done = free(&jobs[0], &bin, &stop);
+    assert_eq!(done.removed.len(), 1, "{:?}", done.problems);
+    assert!(!song.join("multi-samples/Kicks-2.multisample").exists());
+    assert!(studio.join("Library/Multisamples/Kicks.multisample").is_file());
+    for save in ["Song v1", "Song v2", "Song remix", "Song v2 (fixed)", "Song remix (fixed)"] {
+        assert!(song.join(format!("{save}.bwproject")).is_file(), "{save} stays");
+    }
+}

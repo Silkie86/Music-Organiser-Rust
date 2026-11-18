@@ -49,6 +49,8 @@ pub enum Stays {
     NotNoted,
     /// When it last changed can't be read.
     NoTime,
+    /// Free the space sent away the copies its save used: it's the one that plays now, so it's never binned here.
+    Freed,
 }
 
 impl Stays {
@@ -63,6 +65,7 @@ impl Stays {
             Stays::NoTime => {
                 "When it last changed can't be read, so whether you've saved in it can't be told: it stays."
             }
+            Stays::Freed => "Its song's copies went to the Recycle Bin, so it's the one that plays now: it stays.",
         }
     }
 }
@@ -85,6 +88,10 @@ pub struct Written {
     pub bytes: u64,
     /// When it last changed, in nanoseconds from 1970.
     pub modified: u64,
+    /// Free the space sent away the copies its save used (Solomon, 17 Nov 2026): it stays out of the Recycle Bin
+    /// whatever else is true of it.
+    #[serde(default)]
+    pub freed: bool,
 }
 
 /// The file in the app's data folder.
@@ -99,6 +106,35 @@ struct Waiting {
     begun: Vec<(PathBuf, i64)>,
     /// What Fix wrote.
     written: Vec<(PathBuf, Written)>,
+}
+
+/// Notes that Free the space sent away the copies the save of the "(fixed)" project `fixed` used, in `file`: the
+/// button for every fixed project leaves it then. One that isn't on the note yet is put on as it is now. What can't be
+/// noted is said in the log and returned.
+pub fn freed(file: &Path, fixed: &Path) -> Result<(), String> {
+    let mut waiting = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut note = load_or_begin(file, &mut waiting)?;
+    match note.written.iter_mut().find(|w| same(&w.path, &fixed.to_string_lossy())) {
+        Some(w) => w.freed = true,
+        None => {
+            let meta = fs::symlink_metadata(fixed).map_err(|e| e.to_string())?;
+            let modified = meta.modified().ok().and_then(nanos).unwrap_or(0);
+            note.written.push(Written {
+                path: fixed.to_string_lossy().into_owned(),
+                bytes: meta.len(),
+                modified,
+                freed: true,
+            });
+        }
+    }
+    serde_json::to_string(&note)
+        .map_err(std::io::Error::other)
+        .and_then(|text| crate::backup::write_whole(file, &text))
+        .map_err(|e| {
+            let why = format!("Couldn't note that {}'s copies went ({e})", fixed.display());
+            crate::log::warning("Space", &why);
+            why
+        })
 }
 
 /// One change at a time to a note, from any thread, with what waits to be put on it.
@@ -223,7 +259,7 @@ pub fn wrote(file: &Path, fixed: &Path) {
         .and_then(|m| Ok((m.len(), m.modified().map_err(|e| e.to_string())?)))
         .and_then(|(bytes, modified)| {
             let modified = nanos(modified).ok_or("its modified time is out of range")?;
-            Ok(Written { path: fixed.to_string_lossy().into_owned(), bytes, modified })
+            Ok(Written { path: fixed.to_string_lossy().into_owned(), bytes, modified, freed: false })
         });
     let written = match written {
         Ok(written) => written,
@@ -247,6 +283,8 @@ pub struct Noted {
     since: u64,
     /// Size and modified time, by the path as Space compares paths (`mo_space::key`).
     by_path: HashMap<String, (u64, u64)>,
+    /// The ones Free the space sent the copies of, by the path as Space compares paths.
+    freed: std::collections::HashSet<String>,
 }
 
 /// The note in `file`, for the bin button: begun now if it isn't there yet, with what Fix wrote this run that couldn't
@@ -264,6 +302,7 @@ impl From<&Note> for Noted {
         Noted {
             since: u64::try_from(note.since).unwrap_or(0).saturating_mul(1_000_000_000),
             by_path: note.written.iter().map(|w| (mo_space::key(&w.path), (w.bytes, w.modified))).collect(),
+            freed: note.written.iter().filter(|w| w.freed).map(|w| mo_space::key(&w.path)).collect(),
         }
     }
 }
@@ -278,6 +317,9 @@ impl Noted {
         modified: Option<SystemTime>,
         made: Option<SystemTime>,
     ) -> Result<(), Stays> {
+        if self.freed.contains(&mo_space::key(&path.to_string_lossy())) {
+            return Err(Stays::Freed);
+        }
         let modified = modified.and_then(nanos).ok_or(Stays::NoTime)?;
         if let Some(&(was_bytes, was_modified)) = self.by_path.get(&mo_space::key(&path.to_string_lossy())) {
             return if bytes == was_bytes && near(modified, was_modified, SAME_TIME) {
@@ -354,7 +396,12 @@ mod tests {
     fn noted(since: u64, written: &[(&str, u64, u64)]) -> Noted {
         let written = written
             .iter()
-            .map(|&(path, bytes, secs)| Written { path: path.to_owned(), bytes, modified: secs * 1_000_000_000 })
+            .map(|&(path, bytes, secs)| Written {
+                path: path.to_owned(),
+                bytes,
+                modified: secs * 1_000_000_000,
+                freed: false,
+            })
             .collect();
         Noted::from(&Note { since: since as i64, written })
     }
@@ -508,7 +555,12 @@ mod tests {
         let d = folder("keep");
         let file = d.join(FILE_NAME);
         let written: Vec<Written> = (0..KEEP_AT_MOST + 2)
-            .map(|n| Written { path: format!("K:/P/{n} (fixed).bwproject"), bytes: 1, modified: n as u64 })
+            .map(|n| Written {
+                path: format!("K:/P/{n} (fixed).bwproject"),
+                bytes: 1,
+                modified: n as u64,
+                freed: false,
+            })
             .collect();
         let since = BEGAN as i64;
         crate::backup::write_whole(&file, &serde_json::to_string(&Note { since, written }).unwrap()).unwrap();

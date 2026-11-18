@@ -559,7 +559,7 @@ fn a_copy_the_fixed_project_no_longer_uses_goes_only_while_its_still_the_library
         why,
         [
             "It isn't the same as the Library file now, so it stays.",
-            "It isn't in the fixed project's own multi-samples folder, so it stays.",
+            "It isn't a multisample or sample file of the project's own, so it stays.",
             "What the fixed project uses instead isn't in the Library, so the copy stays.",
             "The Library file the fixed project uses isn't there now, so the copy stays.",
             "Garage 19.bwproject still uses it, so it stays.",
@@ -647,12 +647,12 @@ fn a_link_a_linked_folder_or_a_hard_link_to_the_library_file_stays() {
     fs::create_dir_all(one.join("multi-samples")).unwrap();
     std::os::unix::fs::symlink(dir.join("Elsewhere/A-2.multisample"), one.join("multi-samples/A-2.multisample"))
         .unwrap();
-    assert_eq!(go(&one), "It isn't a multisample file of the project's own, so it stays.");
+    assert_eq!(go(&one), "It isn't a multisample or sample file of the project's own, so it stays.");
     // The multisample folder is a link to a folder elsewhere.
     let two = dir.join("Two");
     fs::create_dir_all(&two).unwrap();
     std::os::unix::fs::symlink(dir.join("Elsewhere"), two.join("multi-samples")).unwrap();
-    assert_eq!(go(&two), "It isn't in the fixed project's own multi-samples folder, so it stays.");
+    assert_eq!(go(&two), "It isn't in the fixed project's own multi-samples or samples folder, so it stays.");
     // The copy is the Library file itself, by a hard link.
     let three = dir.join("Three");
     fs::create_dir_all(three.join("multi-samples")).unwrap();

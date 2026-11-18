@@ -45,7 +45,23 @@ pub const LOOK_STOPPED: (&str, &str) = ("Stopped finding Bitwig's copies", "A ne
 /// What the card says about Fix, under the projects.
 pub const NEXT: &str = "Fix writes a \"(fixed)\" project beside each ticked save, using the Library's own files \
     instead of the copies. The saves and their copies stay as they are. Once you've opened a fixed project in Bitwig \
-    and heard it play, its copies can go to the Recycle Bin: that part comes next.";
+    and heard it play, tick it: Free the space then sends the copies it no longer uses to the Recycle Bin. That \
+    song's older saves and Bitwig's backups won't find those copies any more, so use the fixed project from then on; \
+    a copy another song in the folder still uses stays. Put back brings them all back.";
+
+/// The kind of clean-up the Bitwig copies Free the space sends are noted as, so Put back finds them.
+pub const BITWIG_COPIES_FREED: &str = "bitwig-copies";
+
+/// The activity card's title while Free the space sends copies.
+pub const FREEING: &str =
+    if cfg!(windows) { "Sending Bitwig copies to the Recycle Bin" } else { "Sending Bitwig copies to the Trash" };
+
+/// The Bitwig card's Free the space button: its words and whether it can be pressed now. None when no fixed save is
+/// ticked as playing.
+pub fn free_button(found: Option<&Copies>, fixes: &Fixes, wait: bool) -> Option<(String, bool)> {
+    let songs: usize = found?.projects.iter().map(|p| fixes.heard_in(p).len()).sum();
+    (songs > 0).then(|| (format!("Free the space: copies of {} to the {BIN}", plural(songs, "checked song")), !wait))
+}
 
 /// The activity card's title while Fix writes.
 pub const FIXING: &str = "Fixing Bitwig saves";
@@ -378,6 +394,139 @@ pub struct ToFix {
     pub libraries: Vec<PathBuf>,
 }
 
+/// A project whose copies may go, once you've heard its fixed saves play.
+#[derive(Clone, Debug)]
+pub struct ToFree {
+    pub project: Project,
+    /// Each save you ticked as playing, with its fixed project.
+    pub checked: Vec<(PathBuf, PathBuf)>,
+    /// Bitwig's Library folders, as the look found them: a multisample's Library file must be in one.
+    pub libraries: Vec<PathBuf>,
+}
+
+/// The saves whose copies stop being found when a project's copies go (Solomon, 17 Nov 2026: he chose that they go
+/// once each song using them is fixed and checked): every save of each checked song (the save itself and its older
+/// ones) and Bitwig's backups. Every other Bitwig file in the folder (another song's saves, a fixed project, a template
+/// or clip) still keeps a copy it names. Newest first.
+pub fn left_behind(job: &ToFree) -> Vec<PathBuf> {
+    let checked: HashSet<&Path> = job.checked.iter().map(|(save, _)| save.as_path()).collect();
+    let mut out = Vec::new();
+    let mut songs: HashSet<String> = HashSet::new();
+    for song in job.project.songs() {
+        if checked.contains(song.newest.path.as_path()) {
+            songs.insert(song_key(&job.project, song.newest));
+            out.push(song.newest.path.clone());
+            out.extend(song.older.iter().map(|s| s.path.clone()));
+        }
+    }
+    // Only Bitwig's own backups, in its auto-backups folder, and only a checked song's (by name, with the number
+    // Bitwig adds taken off): any other project in a folder below, or another song's backup, still keeps its copies.
+    out.extend(
+        job.project
+            .backups()
+            .filter(|s| in_auto_backups(&job.project, s) && songs.contains(&backup_song_key(&job.project, s)))
+            .map(|s| s.path.clone()),
+    );
+    out
+}
+
+/// Bitwig's folder for its automatic backups, in a project's folder.
+const AUTO_BACKUPS: &str = "auto-backups";
+
+/// Whether a save below a project is in its own auto-backups folder.
+fn in_auto_backups(project: &Project, save: &Save) -> bool {
+    save.path.parent().is_some_and(|p| {
+        p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(AUTO_BACKUPS))
+            && p.parent().is_some_and(|f| key(&f.to_string_lossy()) == key(&project.folder.to_string_lossy()))
+    })
+}
+
+/// The song a save beside a project is of, as [`Project::songs`] tells them.
+fn song_key(project: &Project, save: &Save) -> String {
+    let name = paths::stem(&save.path.to_string_lossy()).to_owned();
+    mo_library::songs::key(&project.folder.to_string_lossy(), "Bitwig", &name)
+}
+
+/// The song one of Bitwig's backups is of: its name with the "-3" Bitwig adds taken off, as for a save beside it.
+fn backup_song_key(project: &Project, save: &Save) -> String {
+    let stem = paths::stem(&save.path.to_string_lossy()).to_owned();
+    let name = match stem.rsplit_once('-') {
+        Some((before, n)) if !before.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => before,
+        _ => stem.as_str(),
+    };
+    mo_library::songs::key(&project.folder.to_string_lossy(), "Bitwig", name)
+}
+
+/// Why a checked save can't have its copies freed now, from the disk just before they'd go: it has been saved again
+/// since the look (so its newest work may use them), or its fixed project is gone or older than it.
+fn changed_since(job: &ToFree) -> Option<String> {
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    for (save, fixed) in &job.checked {
+        let name = paths::file_name(&save.to_string_lossy()).to_owned();
+        let looked = job.project.saves.iter().find(|s| s.path == *save).and_then(|s| s.modified);
+        let now = modified(save);
+        if now.is_none() || now != looked {
+            return Some(format!(
+                "\"{name}\" was saved again since the page looked, so its copies stay: measure again."
+            ));
+        }
+        if modified(fixed).is_none_or(|f| now.is_some_and(|n| f < n)) {
+            return Some(format!("\"{name}\"'s fixed project is gone or older than it now, so its copies stay."));
+        }
+    }
+    None
+}
+
+/// Sends the copies a project's checked fixed saves no longer use to the Recycle Bin (`mo_space::bitwig::
+/// remove_copies`), each checked again just before it goes: still the same as what's used instead, and named by no
+/// Bitwig file in the folder but those [`left_behind`] lists. The saves themselves stay. Reads the disks, so call it
+/// off the window's thread.
+pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> mo_space::clean::Done {
+    let mut done = mo_space::clean::Done::default();
+    let Some((original, fixed)) = job.checked.first() else { return done };
+    if let Some(why) = changed_since(job) {
+        done.problems.extend(
+            job.project
+                .copies
+                .iter()
+                .map(|c| mo_space::clean::Problem { path: c.in_project.clone(), why: why.clone() }),
+        );
+        return done;
+    }
+    let left: HashSet<String> = left_behind(job).iter().map(|p| key(&p.to_string_lossy())).collect();
+    let left_out = |p: &Path| {
+        let full = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        left.contains(&key(&full.to_string_lossy())) || left.contains(&key(&p.to_string_lossy()))
+    };
+    let changed: Vec<(PathBuf, PathBuf)> =
+        job.project.copies.iter().map(|c| (PathBuf::from(&c.in_project), PathBuf::from(&c.library_file))).collect();
+    // Every other Bitwig file in the folder is read once for all the copies, just before they go.
+    let relinks: Vec<Relink> = changed.iter().map(|(c, l)| Relink { copy: c.clone(), library: l.clone() }).collect();
+    let why: HashMap<String, Option<String>> = relinks
+        .iter()
+        .map(|r| key(&r.copy.to_string_lossy()))
+        .zip(relink::still_named_except(original, &relinks, &left_out))
+        .collect();
+    let still_named = |copy: &Path, _: &Path| {
+        why.get(&key(&copy.to_string_lossy())).cloned().unwrap_or_else(|| Some("It wasn't asked about.".to_owned()))
+    };
+    let fixed = bitwig::FixedProject {
+        file: fixed,
+        changed: &changed,
+        library_folders: &job.libraries,
+        still_named: &still_named,
+    };
+    bitwig::remove_copies(&fixed, bin, stop)
+}
+
+/// Notes that the copies of a project's checked songs went, so the button for every fixed project never sends their
+/// fixed projects ([`crate::space_fix_note::freed`]): they're the ones that play now. Call it once any went.
+pub fn note_freed(job: &ToFree, note: &Path) {
+    for (_, fixed) in &job.checked {
+        let _ = crate::space_fix_note::freed(note, fixed);
+    }
+}
+
 /// Writes a "(fixed)" project beside a save that uses the Library's own files instead of its project's copies
 /// (`mo_convert::relink`): never over a file that's there, and only once it reads back as a Bitwig project. The save and
 /// its copies aren't changed (rule 3). Every copy of the project goes in the one call: a copy the save doesn't use is
@@ -413,6 +562,9 @@ pub struct Fixes {
     pub ticks: HashMap<PathBuf, bool>,
     /// By the project's folder.
     pub shown: HashSet<PathBuf>,
+    /// The fixed saves you've ticked as heard playing, by the save's path, with the fixed project you heard: the tick
+    /// counts only while that's still its fixed project.
+    pub heard: HashMap<PathBuf, PathBuf>,
     /// From the moment Fix starts until it has finished, as planned or not.
     running: bool,
 }
@@ -463,8 +615,15 @@ impl Fixes {
     /// in a folder below, which the converter only fixes beside the project); else whether it's ticked. Out of the box
     /// that's each song's `newest` save, unless Fix has just failed on it: pressing Fix again wouldn't help until
     /// something changes, so it waits for you to tick it again.
+    ///
+    /// A fixed save's tick says you've opened its fixed project in Bitwig and heard it play: its copies may then go
+    /// to the Recycle Bin ([`to_free`](Self::to_free)). It's never ticked out of the box.
     fn tick(&self, newest: bool, save: &Save) -> Option<bool> {
         let state = self.state(save);
+        if let State::Fixed(file) = state {
+            // Only a song's newest save frees its copies; while Fix writes, nothing can be ticked.
+            return (newest && !save.below && !self.running).then(|| self.heard.get(&save.path) == Some(&file.into()));
+        }
         if save.below || !matches!(state, State::Failed(_) | State::Outdated(_) | State::Open) {
             return None;
         }
@@ -474,8 +633,10 @@ impl Fixes {
 
     /// How a save went, from Fix: kept for its line. One that couldn't be fixed loses any tick you gave it.
     pub fn done(&mut self, save: PathBuf, fixing: Fixing) {
-        if matches!(fixing, Fixing::Failed(_)) {
+        // A tick for Fix isn't a tick for "it plays": a save fixed now starts unticked.
+        if matches!(fixing, Fixing::Failed(_) | Fixing::Written(_)) {
             self.ticks.remove(&save);
+            self.heard.remove(&save);
         }
         self.fixing.insert(save, fixing);
     }
@@ -506,17 +667,71 @@ impl Fixes {
         project.saves.iter().map(|s| (s, self.tick(newest.contains(s.path.as_path()), s))).collect()
     }
 
-    /// The ticked saves, project by project, each with its project's copies.
+    /// Whether Fix can write for a save now (not fixed, or its fixed project is out of date, or Fix failed on it).
+    fn fixable(&self, save: &Save) -> bool {
+        matches!(self.state(save), State::Failed(_) | State::Outdated(_) | State::Open)
+    }
+
+    /// The ticked saves Fix can write for, project by project, each with its project's copies.
     pub fn to_fix(&self, found: &Copies) -> Vec<ToFix> {
         found
             .projects
             .iter()
             .flat_map(|p| {
-                self.ticks(p).into_iter().filter(|(_, t)| *t == Some(true)).map(|(s, _)| ToFix {
+                let ticked = self.ticks(p).into_iter().filter(|(s, t)| *t == Some(true) && self.fixable(s));
+                ticked.map(|(s, _)| ToFix {
                     save: s.path.clone(),
                     copies: p.copies.clone(),
                     libraries: found.library.clone(),
                 })
+            })
+            .collect()
+    }
+
+    /// Ticks or unticks a save, as its line's tick box asks: a fixed save's tick says you heard its fixed project play
+    /// (kept with that fixed project), any other's whether Fix writes for it.
+    pub fn set_tick(&mut self, found: Option<&Copies>, save: PathBuf, ticked: bool) {
+        let fixed =
+            found.into_iter().flat_map(|f| &f.projects).flat_map(|p| &p.saves).find(|s| s.path == save).and_then(|s| {
+                match self.state(s) {
+                    State::Fixed(file) => Some(file.to_path_buf()),
+                    _ => None,
+                }
+            });
+        match (fixed, ticked) {
+            (Some(file), true) => {
+                self.heard.insert(save, file);
+            }
+            (Some(_), false) => {
+                self.heard.remove(&save);
+            }
+            (None, _) => {
+                self.ticks.insert(save, ticked);
+            }
+        }
+    }
+
+    /// A project's fixed saves ticked as heard playing (each a song's newest save), with their fixed projects.
+    fn heard_in(&self, project: &Project) -> Vec<(PathBuf, PathBuf)> {
+        self.ticks(project)
+            .into_iter()
+            .filter(|(_, t)| *t == Some(true))
+            .filter_map(|(s, _)| match self.state(s) {
+                State::Fixed(f) => Some((s.path.clone(), f.to_path_buf())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The projects whose copies can go, for the fixed saves you've ticked as heard playing: each project once, with
+    /// every save of it ticked so.
+    pub fn to_free(&self, found: &Copies) -> Vec<ToFree> {
+        found
+            .projects
+            .iter()
+            .filter_map(|p| {
+                let checked = self.heard_in(p);
+                (!checked.is_empty()).then(|| ToFree { project: p.clone(), checked, libraries: found.library.clone() })
             })
             .collect()
     }
@@ -527,7 +742,7 @@ impl Fixes {
             return Some(("Fixing…".to_owned(), false));
         }
         let found = found?;
-        let any = found.projects.iter().any(|p| self.ticks(p).iter().any(|(_, t)| t.is_some()));
+        let any = found.projects.iter().any(|p| self.ticks(p).iter().any(|(s, t)| t.is_some() && self.fixable(s)));
         let ticked = self.to_fix(found).len();
         any.then(|| {
             if ticked == 0 { ("Fix".to_owned(), false) } else { (format!("Fix {}", plural(ticked, "save")), true) }
@@ -577,7 +792,10 @@ fn state_words(project: &Project, save: &Save, state: &State<'_>, speaks: Speaks
     match state {
         State::Writing if newest => (format!("Writing a fixed project for \"{}\"…", save_name(project, save)), false),
         State::Writing => ("Writing its fixed project…".to_owned(), false),
-        State::Fixed(f) => (format!("Fixed: \"{}\". Open it in Bitwig and check it plays.", file(f)), false),
+        State::Fixed(f) => (
+            format!("Fixed: \"{}\". Open it in Bitwig and check it plays, then tick it so its copies can go.", file(f)),
+            false,
+        ),
         State::Failed(why) => {
             let mut why = why.to_string();
             if why.chars().count() > WHY_SHOWN {
@@ -764,17 +982,23 @@ pub fn remove_fixed_button(found: Option<&Copies>, wait: bool) -> Option<(String
 pub fn removed_fixed_words(done: &mo_space::clean::Done, stayed: &HashMap<String, Stays>) -> Result<String, String> {
     let went: HashSet<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
     let mut seen = HashSet::new();
-    let (mut changed, mut not_noted, mut other) = (Vec::new(), Vec::new(), 0);
+    let (mut changed, mut not_noted, mut freed, mut other) = (Vec::new(), Vec::new(), Vec::new(), 0);
     for p in done.problems.iter().filter(|p| !went.contains(p.path.as_str()) && seen.insert(p.path.as_str())) {
         let name = paths::stem(&p.path).to_owned();
         match stayed.get(&key(&p.path)) {
             Some(Stays::Changed) => changed.push(name),
             Some(Stays::NotNoted) => not_noted.push(name),
+            Some(Stays::Freed) => freed.push(name),
             Some(Stays::NoTime) | None => other += 1,
         }
     }
+    let freed = match freed.len() {
+        0 => String::new(),
+        1 => format!("{} stayed: its song's copies have gone, so it's the one that plays now.", named(&freed)),
+        _ => format!("{} stayed: their songs' copies have gone, so they're the ones that play now.", named(&freed)),
+    };
     let held: Vec<String> =
-        [changed_words(&changed), not_noted_words(&not_noted)].into_iter().filter(|w| !w.is_empty()).collect();
+        [changed_words(&changed), not_noted_words(&not_noted), freed].into_iter().filter(|w| !w.is_empty()).collect();
     let held = held.join(" ");
     match (done.removed.len(), other) {
         (0, 0) if held.is_empty() => Err("No fixed project was found, so nothing went.".to_owned()),
@@ -788,6 +1012,33 @@ pub fn removed_fixed_words(done: &mo_space::clean::Done, stayed: &HashMap<String
                 plural(n, "fixed project"),
                 size_text(done.bytes()),
                 spaced(&held),
+            ))
+        }
+    }
+}
+
+/// The activity card's line once Free the space has run: Err when nothing went and something stayed.
+pub fn freed_words(done: &mo_space::clean::Done) -> Result<String, String> {
+    let went: HashSet<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+    let stayed = done.problems.iter().filter(|p| !went.contains(p.path.as_str())).count();
+    match (done.removed.len(), stayed) {
+        (0, 0) => Ok("Nothing went: the checked songs use no copies now.".to_owned()),
+        (0, m) => Err(format!(
+            "None went ({} stayed): another song, fixed project or file in the folder still uses them, or they \
+             changed. The log says why for each.",
+            thousands(m)
+        )),
+        (n, m) => {
+            let stayed = if m == 0 {
+                String::new()
+            } else {
+                format!("; {} stayed, still used or changed (the log says why)", thousands(m))
+            };
+            Ok(format!(
+                "Sent {} ({}) to the {BIN}{stayed}. Use the fixed projects from now on; Put back on the {BIN} line \
+                 brings them back.",
+                if n == 1 { "1 Bitwig copy".to_owned() } else { format!("{} Bitwig copies", thousands(n)) },
+                size_text(done.bytes()),
             ))
         }
     }
@@ -1087,7 +1338,7 @@ mod tests {
         let line = status(&p, &fixes);
         assert_eq!(
             line.status,
-            "Fixed: \"GARAGE FOR BW 1 (fixed 2).bwproject\". Open it in Bitwig and check it plays."
+            "Fixed: \"GARAGE FOR BW 1 (fixed 2).bwproject\". Open it in Bitwig and check it plays, then tick it so its copies can go."
         );
         assert_eq!((line.tick, line.open), (None, Some((Opens::InBitwig, fixed.clone()))));
         assert_eq!(fixes.button(Some(&found(&p))), Some(("Fixing…".to_owned(), false)));
