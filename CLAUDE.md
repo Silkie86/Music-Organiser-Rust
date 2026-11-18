@@ -10,9 +10,9 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
   scratch folder. Never push to it, never open PRs on it from here. Its C# readers are a reference for file formats.
   The format registry's source of truth is now the Rust copy, `tools/formatlab/registry/*.json` (Solomon, 2026-11-02:
   the C# app is frozen); new findings go there, not back into C#.
-- **Layout (spec section 12):** one Cargo workspace, `crates/mo-*` (formats, library, space, backup, work, audio, sounds, harmony,
-  midi, playground, dawlink, listen, convert, app, ui, catch) and `tools/` (formatlab, theorybench). UI is Slint; screen logic
-  lives in `mo-app` so it can be tested without a window.
+- **Layout (spec section 12):** one Cargo workspace, `crates/mo-*` and `tools/`. UI is Slint; screen logic lives in
+  `mo-app` so it can be tested without a window.
+- **Data folder:** every data path goes through `mo_app::paths::data_dir()` (Solomon moved his to `I:\MusicOrganiser`).
 - **Catching a panic:** only through `mo-catch` (clippy.toml forbids `catch_unwind`): `mo_catch::catch` for what a
   damaged file or a library can do (one warning line in the log), `mo_catch::catch_crash` for a bug a thread lives
   through (still logged as a crash, in full).
@@ -32,7 +32,8 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 5. Only counts and averages from Solomon's MIDI go in code. One exception (Solomon, 2026-11-01): the key finder's
    stream scales, minor weight and calibration (about 20 numbers) may be fitted on his packs (`theorybench keyfit
    --rescale`); nothing else is learned from them.
-6. Never add a column to `plugins`; schema changes only add.
+6. Never add a column to `plugins`; schema changes only add. Relaxed (Solomon, 2026-11-05, C# app retired): each Rust
+   database carries a version, and a new version may rebuild its file by copy, check, rename.
 7. Bump a reader's version when what it finds changes.
 8. Bitwig: define objects at first use; no class-1 reference in a single-object field; decode must end at the zip.
 9. FL: event 172 from FL 25 starts an extended event (the next four bytes are its number; it was first read as a
@@ -49,13 +50,20 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
     push to the build Solomon is testing without asking.
 19. A quick code review on each pull request before it is tested; after a batch merges (at the latest each phase), an
     ultracode code review of the whole app on `main`, then fixes.
-20. Claude sets the right effort level itself for each task and review: higher for file formats, data safety and
-    whole-app reviews, lower for small fixes. No need to ask first; say which level was used.
+20. Claude sets the right effort level itself for each task and review: xhigh for anything that writes files or
+    touches databases, high for readers, max (ultracode) for whole-app reviews, lower for small fixes. No need to ask
+    first; say which level was used.
 21. Highly multithreaded where it helps (rayon), at low priority, never on the UI thread.
 22. MIDI 2.0 ready: notes and controllers keep MIDI 2.0 resolution (16-bit velocity, 32-bit controllers, per-note
     controllers, MIDI Clip Files, UMP ports); only a MIDI 1.0 file, port or DAW gets 7-bit values (spec section 4.4).
 
-Rules 23 to 27 are Solomon's later rules in `docs/handover/memory/rust-rebuild-rules.md` (code already cites rule 23).
+23. Databases as small as possible: store each fact once; if it is quick to work out (a path, a join, a count),
+    work it out instead of storing it (Solomon, 2026-10-31).
+24. Don't port C# garbage-collector workarounds (pooling, object reuse); port the behaviour, then make it fast the
+    Rust way: borrow, don't copy.
+25. Show every screenshot taken (`mo-screens`): attach the new or changed ones to the result.
+26. Use whatever effort and tools the work needs; if more effort now saves corrections later, do it without asking.
+27. Don't wait for merges: start the next job while a PR's CI runs, if it won't get in the way.
 
 28. The app cleans up after itself: every cache, temp file and report it writes has a limit or is removed when done,
     and a start-up sweep (`mo_app::tidy`) clears leftovers (Solomon, 2026-11-02). It removes only plain files whose
@@ -71,15 +79,15 @@ Rules 23 to 27 are Solomon's later rules in `docs/handover/memory/rust-rebuild-r
 - Each page starts with a short question round and mock-ups (keep, fold, rethink), then gets built.
 - Small PRs from fresh branches off `main`. Solomon tests at home with the launcher; merges are batched so the app
   restarts once.
-- The Rust app shares `%LOCALAPPDATA%\MusicOrganiser` (`library.db`, `sounds.db`, `midi.db`, settings, playground
-  ideas) with the C# app. Until a Rust page is trusted and its twin tests pass, it opens the databases read-only.
+- The C# app is retired (Solomon, 2026-11-05): no need to stay compatible with its databases or formats.
 - Anything that changes files on disk is tried on copies first: copy, check, then rename.
 - Twin tests are a guide, not a cage: where Rust reads a file differently from C#, list the difference and judge it
   (better, or a bug).
 - Tests that scan sounds use the fixtures folder, never a random temp name.
 - Before pushing (what CI runs): `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace`; and the same with `--manifest-path tools/galaxycheck/Cargo.toml` when the galaxy check
-  or `mo-app` changes (the galaxy check is a workspace of its own).
+  or `mo-app` changes (the galaxy check is a workspace of its own). While working, test one crate with
+  `cargo test -p mo-<name>`.
 - CI on a pull request only tests the crates it changes and clippy-checks the crates that use them
   (`tools/dev/ci_scope.py`); pushes to `main` check everything. Before an ultracode review, start a full run by hand
   (Actions, CI, Run workflow on `main`) and make sure it's green.
