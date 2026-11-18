@@ -559,7 +559,7 @@ fn a_copy_the_fixed_project_no_longer_uses_goes_only_while_its_still_the_library
         why,
         [
             "It isn't the same as the Library file now, so it stays.",
-            "It isn't in the fixed project's own multi-samples folder, so it stays.",
+            "It isn't a multisample or sample file of the project's own, so it stays.",
             "What the fixed project uses instead isn't in the Library, so the copy stays.",
             "The Library file the fixed project uses isn't there now, so the copy stays.",
             "Garage 19.bwproject still uses it, so it stays.",
@@ -647,12 +647,12 @@ fn a_link_a_linked_folder_or_a_hard_link_to_the_library_file_stays() {
     fs::create_dir_all(one.join("multi-samples")).unwrap();
     std::os::unix::fs::symlink(dir.join("Elsewhere/A-2.multisample"), one.join("multi-samples/A-2.multisample"))
         .unwrap();
-    assert_eq!(go(&one), "It isn't a multisample file of the project's own, so it stays.");
+    assert_eq!(go(&one), "It isn't a multisample or sample file of the project's own, so it stays.");
     // The multisample folder is a link to a folder elsewhere.
     let two = dir.join("Two");
     fs::create_dir_all(&two).unwrap();
     std::os::unix::fs::symlink(dir.join("Elsewhere"), two.join("multi-samples")).unwrap();
-    assert_eq!(go(&two), "It isn't in the fixed project's own multi-samples folder, so it stays.");
+    assert_eq!(go(&two), "It isn't in the fixed project's own multi-samples or samples folder, so it stays.");
     // The copy is the Library file itself, by a hard link.
     let three = dir.join("Three");
     fs::create_dir_all(three.join("multi-samples")).unwrap();
@@ -687,4 +687,44 @@ fn one_copy_given_two_ways_goes_once_and_a_good_second_way_still_counts() {
     let why: Vec<&str> = done.problems.iter().map(|p| p.why.as_str()).collect();
     assert_eq!(why.len(), 2);
     assert!(why[0].contains("isn't there now") && why[1].starts_with("It's the same file as "), "{why:?}");
+}
+
+#[test]
+fn a_sample_copy_goes_only_while_its_original_is_outside_every_project() {
+    let dir = fixtures("mo-space-bitwig-remove-samples");
+    let project = dir.join("Projects/Garage");
+    write(&project, "Garage (fixed).bwproject", b"fixed");
+    write(&project, "samples/Snare-2.wav", b"snare");
+    write(&project, "samples/Hat-2.wav", b"hat");
+    write(&project, "samples/Clap-2.wav", b"clap");
+    write(&project, "samples/Pad-2.multisample", b"pad");
+    write(&dir, "Packs/Snare.wav", b"snare");
+    write(&dir, "Projects/Other/samples/Hat.wav", b"hat");
+    write(&dir, "Projects/Other/Other.bwproject", b"other");
+    write(&dir, "Projects/Old (old copy)/Clap.wav", b"clap");
+    write(&dir, "Library/Pad.multisample", b"pad");
+    let sm = project.join("samples");
+    let changed = [
+        // From a sample pack: it goes.
+        (sm.join("Snare-2.wav"), dir.join("Packs/Snare.wav")),
+        // Another project's own copy: never what's used instead.
+        (sm.join("Hat-2.wav"), dir.join("Projects/Other/samples/Hat.wav")),
+        // In a folder a move left behind: it may go any time, so it's never what's used instead.
+        (sm.join("Clap-2.wav"), dir.join("Projects/Old (old copy)/Clap.wav")),
+        // A multisample belongs in multi-samples: one in samples isn't a copy this knows, so it stays.
+        (sm.join("Pad-2.multisample"), dir.join("Library/Pad.multisample")),
+    ];
+    let libraries = [dir.join("Library")];
+    let bin = FolderBin::new(&dir);
+    let done = remove_copies(
+        &fixed(&project.join("Garage (fixed).bwproject"), &changed, &libraries),
+        &bin,
+        &AtomicBool::new(false),
+    );
+    let gone: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(gone, [s(&sm.join("Snare-2.wav"))], "{:?}", done.problems);
+    assert_eq!(done.problems.len(), 3, "{:?}", done.problems);
+    assert!(dir.join("Packs/Snare.wav").exists() && sm.join("Hat-2.wav").exists() && sm.join("Clap-2.wav").exists());
+    assert!(undo(&done, &bin).is_empty());
+    assert!(sm.join("Snare-2.wav").exists());
 }

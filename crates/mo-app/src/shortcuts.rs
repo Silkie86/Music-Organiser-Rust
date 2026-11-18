@@ -238,6 +238,15 @@ pub const SPACE_ACTIONS: &[Action] = &[
         "",
     ),
     action(
+        "space.freeBitwig",
+        if cfg!(windows) {
+            "Send the copies the Bitwig songs you've checked no longer use to the Recycle Bin"
+        } else {
+            "Send the copies the Bitwig songs you've checked no longer use to the Trash"
+        },
+        "",
+    ),
+    action(
         "space.remove",
         if cfg!(windows) { "Send what's ticked to the Recycle Bin" } else { "Send what's ticked to the Trash" },
         "",

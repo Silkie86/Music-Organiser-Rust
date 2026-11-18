@@ -12,7 +12,7 @@ use mo_space::size::size_text;
 use crate::binned::{Binned, Kept};
 use crate::songs::thousands;
 use crate::space::{Card, Line, Part};
-use crate::space_bitwig::BITWIG_FIXED;
+use crate::space_bitwig::{BITWIG_COPIES_FREED, BITWIG_FIXED};
 use crate::space_old::OLD_COPIES;
 use crate::space_songs::{self, COMPACT};
 use crate::space_spare::SPARE_COPIES;
@@ -88,6 +88,7 @@ pub fn kind_title(kind: &str) -> &'static str {
         PLUGIN_CLEAN => "A plugin's clean-up",
         PLUGIN_UNINSTALL => "Files an uninstall left",
         BITWIG_FIXED => "Fixed Bitwig projects",
+        BITWIG_COPIES_FREED => "Bitwig copies of checked songs",
         _ => "A clean-up",
     }
 }
@@ -101,6 +102,7 @@ pub fn putting_back_title(kind: &str) -> &'static str {
         PLUGIN_CLEAN => "Putting back what a plugin's clean-up removed",
         PLUGIN_UNINSTALL => "Putting back the files an uninstall left",
         BITWIG_FIXED => "Putting back fixed Bitwig projects",
+        BITWIG_COPIES_FREED => "Putting back Bitwig copies",
         _ => "Putting back what a clean-up removed",
     }
 }
@@ -123,6 +125,8 @@ fn things(b: &Binned) -> String {
         PLUGIN_UNINSTALL => format!("{} plugin files", thousands(n)),
         BITWIG_FIXED if n == 1 => "1 fixed Bitwig project".to_owned(),
         BITWIG_FIXED => format!("{} fixed Bitwig projects", thousands(n)),
+        BITWIG_COPIES_FREED if n == 1 => "1 Bitwig copy".to_owned(),
+        BITWIG_COPIES_FREED => format!("{} Bitwig copies", thousands(n)),
         _ if n == 1 => "1 file or folder".to_owned(),
         _ => format!("{} files and folders", thousands(n)),
     }

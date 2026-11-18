@@ -137,6 +137,11 @@ fn needles(forms: &[String]) -> Vec<Vec<u8>> {
 /// snares).
 pub const COPY_FOLDERS: [&str; 2] = ["multi-samples", "samples"];
 
+/// [`listed`] for one copy.
+fn listed_one(project_dir: &Path, relink: &Relink) -> Result<Listed, String> {
+    listed(project_dir, std::slice::from_ref(relink))?.pop().ok_or_else(|| "it wasn't read".to_owned())
+}
+
 /// The copies, checked: each must be in one of this project's copy folders ([`COPY_FOLDERS`]), and the file it's a
 /// copy of (a Library multisample, or the sample it was copied from) must be there.
 fn listed(project_dir: &Path, relinks: &[Relink]) -> Result<Vec<Listed>, String> {
@@ -813,30 +818,89 @@ fn fix(project: &Path, relinks: &[Relink], libraries: &[PathBuf], look_around: b
 /// Bitwig file in the project's folder and below it is looked through (the fixed projects and auto-backups too); one
 /// that can't be read, a folder that can't be listed, or a Library file that's gone keeps the copy.
 pub fn still_named(original: &Path, relink: &Relink) -> Option<String> {
+    still_named_except(original, std::slice::from_ref(relink), &|_| false).into_iter().next().flatten()
+}
+
+/// [`still_named`] for each of a project's copies at once, in a folder where some Bitwig files may stop finding them:
+/// those `left_out` says (the saves of songs you've fixed and checked, and their auto-backups, as Solomon chose on 17
+/// Nov 2026) aren't asked. Every other Bitwig file in the folder and below it still keeps a copy while it names it:
+/// another song's save, a fixed project, a template or clip saved there. `original` is left out too. Each file is
+/// read once for all the copies (rule 12), so ask just before they go. For each copy, in order: why it stays, or None.
+pub fn still_named_except(
+    original: &Path,
+    relinks: &[Relink],
+    left_out: &(dyn Fn(&Path) -> bool + Sync),
+) -> Vec<Option<String>> {
     let dir = match original.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
     };
-    let shown = relink.copy.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let listed = match listed(&dir, std::slice::from_ref(relink)) {
-        Ok(l) => l,
-        Err(e) => return Some(format!("{shown} stays: {e}.")),
-    };
+    let shown = |r: &Relink| r.copy.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let everyone = |why: &str| relinks.iter().map(|r| Some(format!("{} stays: {why}.", shown(r)))).collect();
+    // Each copy on its own: one whose original is gone (or that isn't in a copy folder) stays, the others are asked.
+    let mut listed: Vec<Listed> = Vec::new();
+    let each: Vec<Option<String>> = relinks
+        .iter()
+        .map(|r| match listed_one(&dir, r) {
+            Ok(l) => {
+                listed.push(l);
+                None
+            }
+            Err(e) => Some(e),
+        })
+        .collect();
     let others = match other_bitwig_files(original, &dir) {
         Ok(o) => o,
-        Err(e) => return Some(format!("{shown} stays: {e}.")),
+        Err(e) => return everyone(&e),
     };
-    others.par_iter().find_map_first(|p| {
-        let named = match std::fs::read(p) {
-            Ok(raw) if raw.is_empty() => false,
-            Ok(raw) => named_in(&raw, &listed)[0],
-            Err(_) => true,
-        };
-        named.then(|| {
-            let other = p.strip_prefix(&dir).unwrap_or(p).to_string_lossy().into_owned();
-            format!("{other} still uses {shown}, so it stays.")
+    let named: Vec<(String, Vec<bool>)> = others
+        .par_iter()
+        .filter(|p| !left_out(p))
+        .map(|p| {
+            let named = match std::fs::read(p) {
+                Ok(raw) if raw.is_empty() => vec![false; listed.len()],
+                Ok(raw) => named_in(&raw, &listed),
+                Err(_) => vec![true; listed.len()],
+            };
+            (p.strip_prefix(&dir).unwrap_or(p).to_string_lossy().into_owned(), named)
         })
-    })
+        .collect();
+    let mut at = 0;
+    relinks
+        .iter()
+        .zip(&each)
+        .map(|(r, l)| {
+            if let Some(e) = l {
+                return Some(format!("{} stays: {e}.", shown(r)));
+            }
+            let c = at;
+            at += 1;
+            let (other, _) = named.iter().find(|(_, n)| n[c])?;
+            Some(format!("{other} still uses {}, so it stays.", shown(r)))
+        })
+        .collect()
+}
+
+/// Each Bitwig file [`bitwig_files_now`] found, with its size and when it was last saved.
+pub type FilesNow = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
+
+/// The Bitwig files [`still_named_except`] would read for `original`, each with its size and when it was last saved:
+/// cheap to take again (no file is read), so a caller that keeps that check's answers can tell when they're stale.
+pub fn bitwig_files_now(original: &Path) -> Result<FilesNow, String> {
+    let dir = match original.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let mut files: FilesNow = other_bitwig_files(original, &dir)?
+        .into_iter()
+        .map(|p| {
+            let m = std::fs::metadata(&p).ok();
+            let (len, when) = (m.as_ref().map_or(0, |m| m.len()), m.and_then(|m| m.modified().ok()));
+            (p, len, when)
+        })
+        .collect();
+    files.sort();
+    Ok(files)
 }
 
 /// The other Bitwig files in the project's folder and below it (Bitwig's auto-backups, an earlier fixed project, clips
@@ -855,6 +919,11 @@ fn other_bitwig_files(project: &Path, dir: &Path) -> Result<Vec<PathBuf>, String
             if kind.is_dir() {
                 folders.push(path);
                 continue;
+            }
+            // A folder moved elsewhere with a link in its place can hold saves that use the copies: not followed (it
+            // could lead back in), so the copies stay.
+            if kind.is_symlink() && path.is_dir() {
+                return Err(format!("{} is a link to another folder, so it can't be looked through", path.display()));
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             let bitwig = path.extension().is_some_and(|x| BITWIG_FILES.iter().any(|b| x.eq_ignore_ascii_case(b)));

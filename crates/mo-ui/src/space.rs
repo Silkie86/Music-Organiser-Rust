@@ -70,6 +70,7 @@ const REMOVE: &str = "space.remove";
 const STOP: &str = "space.stop";
 const PUT_BACK: &str = "space.putBack";
 const REMOVE_FIXED: &str = "space.removeFixed";
+const FREE_BITWIG: &str = "space.freeBitwig";
 const RECYCLE_BIN: &str = "app.recycleBin";
 
 /// The name the library knows Bitwig by ("Bitwig Studio"), for the program picked for it in Settings.
@@ -287,6 +288,9 @@ struct Page {
     fixes: Fixes,
     /// Whether the fixed projects are on their way to the Recycle Bin.
     fixed_removing: bool,
+    /// Whether it's Free the space that sends them (`fixed_removing` is on then too, so nothing else starts): only its
+    /// own button says so.
+    freeing: bool,
     /// The look for old copies, what the last one found (it stays on show while the next one looks), and whether one
     /// is on; and how many of the Plugins page's moves had finished when the newest one was asked for: once another
     /// has, it looks again ([`plugin_moved`]).
@@ -431,7 +435,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
                     COMPACT => space_songs::tick(&mut p.songs_removing, p.songs.as_ref(), &paths, ticked),
                     _ => {
                         for save in paths {
-                            p.fixes.ticks.insert(save, ticked);
+                            p.fixes.set_tick(p.bitwig.as_ref(), save, ticked);
                         }
                     }
                 }
@@ -670,6 +674,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             REVEAL => p.picked == space::APP_FILES,
             FIX => p.picked == BITWIG_COPIES && !p.fixed_removing && enabled(p.fixes.button(p.bitwig.as_ref())),
             REMOVE_FIXED => p.picked == BITWIG_COPIES && enabled(remove_fixed_button(&p)),
+            FREE_BITWIG => p.picked == BITWIG_COPIES && enabled(free_bitwig_button(&p)),
             REMOVE => match p.picked.as_str() {
                 SPARE_COPIES => enabled(spare_remove_button(&p)),
                 OLD_COPIES => enabled(old_remove_button(&p)),
@@ -716,10 +721,19 @@ fn busy(p: &Page) -> bool {
 /// copies is on, or something else goes or comes back.
 fn remove_fixed_button(p: &Page) -> Option<(String, bool)> {
     let wait = p.fixes.busy() || p.bitwig_looking.is_some() || busy(p);
-    if p.fixed_removing {
+    if p.fixed_removing && !p.freeing {
         return Some((format!("Sending to the {BIN}…"), false));
     }
-    space_bitwig::remove_fixed_button(p.bitwig.as_ref(), wait)
+    space_bitwig::remove_fixed_button(p.bitwig.as_ref(), wait || p.freeing)
+}
+
+/// The Bitwig card's Free the space button: it waits as the button for the fixed projects does.
+fn free_bitwig_button(p: &Page) -> Option<(String, bool)> {
+    let wait = p.fixes.busy() || p.bitwig_looking.is_some() || busy(p);
+    if p.freeing {
+        return Some((format!("Sending to the {BIN}…"), false));
+    }
+    space_bitwig::free_button(p.bitwig.as_ref(), &p.fixes, wait || p.fixed_removing)
 }
 
 /// What's going to the Recycle Bin or coming back now, by its clean-up's kind: none when nothing is.
@@ -849,6 +863,7 @@ fn chosen(app: &AppWindow, id: &str) {
         (REVEAL, Some(feed)) => crate::files::open_folder(&feed, &paths::data_dir().to_string_lossy()),
         (FIX, Some(feed)) => fix_ticked(app, feed),
         (REMOVE_FIXED, Some(feed)) => remove_fixed(app, feed),
+        (FREE_BITWIG, Some(feed)) => free_bitwig(app, feed),
         (STOP, _) => {
             // The card on show's: old copies or your songs' things.
             PAGE.with(|p| {
@@ -1084,6 +1099,117 @@ fn remove_fixed(app: &AppWindow, feed: Feed) {
     if let Err(e) = started {
         log::error("Space", &format!("Couldn't start sending the fixed projects to the {BIN}: {e}"));
         PAGE.with(|p| p.borrow_mut().fixed_removing = false);
+    }
+    show_wins(app);
+}
+
+/// Sends the copies the Bitwig songs you've checked no longer use to the Recycle Bin ([`space_bitwig::free`]): each
+/// project once, each copy checked again just before it goes, the saves left as they are. Off the window's thread, on
+/// the pool for long work over a disk (rule 21), with an activity card saying how far it is and how it went. What went
+/// is noted as it goes and kept, so Put back on the Recycle Bin line brings it back, after a restart too. Then the
+/// page looks for copies again.
+fn free_bitwig(app: &AppWindow, feed: Feed) {
+    let jobs = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if !free_bitwig_button(&p).is_some_and(|(_, enabled)| enabled) {
+            return None;
+        }
+        let jobs = p.fixes.to_free(p.bitwig.as_ref()?);
+        p.fixed_removing = true;
+        p.freeing = true;
+        Some((jobs, p.library.clone()))
+    });
+    let Some((mut jobs, library)) = jobs else { return };
+    let weak = app.as_weak();
+    let data = paths::data_dir();
+    let when = binned::now();
+    let stop = Arc::new(AtomicBool::new(false));
+    let on_its_way = OnItsWay::new(stop);
+    let started = background::spawn("Space free Bitwig copies", move || {
+        let on_its_way = on_its_way;
+        let stop = &on_its_way.0;
+        let card = feed.start(space_bitwig::FREEING, "");
+        let card_ref = &card;
+        let ran = catch_crash(AssertUnwindSafe(|| {
+            let card = card_ref;
+            // Your say on which saves are one song, and the saves in other folders that use a copy: from the library,
+            // here off the window's thread. Unread, nothing goes.
+            let lib = open_library(&library);
+            let choices = lib.as_ref().map(|l| l.song_choices().map_err(|e| e.to_string()));
+            for job in &mut jobs {
+                match &choices {
+                    Some(Ok(c)) => job.choices = c.clone(),
+                    Some(Err(e)) => job.elsewhere = Err(e.clone()),
+                    None => job.elsewhere = Err("it couldn't be opened".to_owned()),
+                }
+                if let (Some(lib), Some(Ok(_))) = (&lib, &choices) {
+                    job.elsewhere = lib.saves_using(&job.copy_paths()).map_err(|e| e.to_string());
+                }
+            }
+            drop(lib);
+            let of: usize = jobs.iter().map(|j| j.project.copies.len()).sum();
+            let tally = Mutex::new(Tally::new(SystemBin.admin().can_ask()));
+            let hear = |_: &Path, sent: &Result<(), String>| {
+                let mut tally = tally.lock().unwrap_or_else(PoisonError::into_inner);
+                tally.heard(sent);
+                card.progress(tally.fraction(of), Some(&tally.words("Bitwig copies:", of)));
+            };
+            let note = binned::Going::start(&data, space_bitwig::BITWIG_COPIES_FREED, when);
+            let goes = |removed: &Removed| note.went(removed);
+            let bin = Heard::new(&SystemBin, &hear).noting(&goes);
+            let mut done = mo_space::clean::Done::default();
+            for job in &jobs {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let behind = space_bitwig::left_behind(job);
+                log::info(
+                    "Space",
+                    &format!(
+                        "Freeing {}: these saves won't find its copies that go: {}",
+                        job.project.folder.display(),
+                        behind.iter().map(|b| b.display().to_string()).collect::<Vec<_>>().join(", ")
+                    ),
+                );
+                let one = background::on_bulk_pool(|| space_bitwig::free(job, &bin, stop));
+                if !one.removed.is_empty()
+                    && let Err(why) = space_bitwig::note_freed(job, &space_fix_note::file())
+                {
+                    log::warning("Space", &why);
+                }
+                done.removed.extend(one.removed);
+                done.problems.extend(one.problems);
+            }
+            for (warning, line) in space_removing::log_lines(&done, ("a Bitwig copy", "A Bitwig copy"), "Bitwig copies")
+            {
+                if warning { log::warning("Space", &line) } else { log::info("Space", &line) }
+            }
+            let (kept, _) = binned::record(&data, &SystemBin, space_bitwig::BITWIG_COPIES_FREED, when, &done);
+            note.finish(kept.noted);
+            (space_bitwig::freed_words(&done), kept)
+        }));
+        let kept = match ran {
+            Ok((words, kept)) => {
+                match words {
+                    Ok(words) => card.done(&words),
+                    Err(words) => card.failed(&words),
+                }
+                Some(kept)
+            }
+            Err(_) => {
+                card.failed(&format!("It stopped with an error, which the log says. What went is in the {BIN}."));
+                None
+            }
+        };
+        arrive(&weak, Step::FixedRemoved(kept));
+    });
+    if let Err(e) = started {
+        log::error("Space", &format!("Couldn't start sending the Bitwig copies to the {BIN}: {e}"));
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.fixed_removing = false;
+            p.freeing = false;
+        });
     }
     show_wins(app);
 }
@@ -1565,6 +1691,12 @@ fn put_back(app: &AppWindow, feed: Feed, kind: String, when: i64, done: Done) {
         }
         for problem in &problems {
             log::warning("Space", &format!("Couldn't put back {}: {}", problem.path, problem.why));
+        }
+        // Copies Free the space sent that all came back: their songs' fixed projects are like any other again.
+        if kind == space_bitwig::BITWIG_COPIES_FREED {
+            let back: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+            let missed: Vec<&str> = problems.iter().map(|p| p.path.as_str()).collect();
+            space_fix_note::put_back(&space_fix_note::file(), &back, &missed);
         }
         match space_bin::put_back_words(done.removed.len(), &problems) {
             Ok(words) => card.done(&words),
@@ -2301,6 +2433,7 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 Step::FixedRemoved(kept) => {
                     keep(&mut p, kept);
                     p.fixed_removing = false;
+                    p.freeing = false;
                     Changed::LookAgain
                 }
                 Step::Kept(kept) => {
@@ -2353,7 +2486,7 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     let songs =
                         after.songs || kind == COMPACT && *p.songs_removing.stage() == space_songs::Stage::Picking;
                     // Fixed Bitwig projects that came back are on the Bitwig card again.
-                    let bitwig = kind == space_bitwig::BITWIG_FIXED;
+                    let bitwig = kind == space_bitwig::BITWIG_FIXED || kind == space_bitwig::BITWIG_COPIES_FREED;
                     Changed::Bin { spare, old, songs, bitwig }
                 }
                 _ => Changed::Nothing,
@@ -2579,8 +2712,10 @@ fn show_card(app: &AppWindow) {
                     .button(p.bitwig.as_ref())
                     .map(|(words, enabled)| Button::new(FIX, words, enabled && !p.fixed_removing));
                 let remove = remove_fixed_button(&p).map(|(words, enabled)| Button::new(REMOVE_FIXED, words, enabled));
+                let free =
+                    free_bitwig_button(&p).map(|(words, enabled)| Button::new(FREE_BITWIG, words, enabled).main());
                 let card = space_bitwig::card(p.bitwig.as_ref(), p.bitwig_looking, &p.fixes);
-                (card, fix.into_iter().chain(remove).chain([measure_button(&p)]).collect())
+                (card, free.into_iter().chain(fix).chain(remove).chain([measure_button(&p)]).collect())
             }
             // Send to the Recycle Bin first (the main button, as Plugins' clean-up is), or once it has run, Put back (the
             // main button then) and the Recycle Bin; Measure again waits while a look is on (which it shows) or something
@@ -2810,7 +2945,7 @@ mod tests {
 
     #[test]
     fn every_button_is_in_the_shortcut_list() {
-        for id in [MEASURE, REVEAL, FIX, REMOVE_FIXED, REMOVE, STOP, PUT_BACK, RECYCLE_BIN] {
+        for id in [MEASURE, REVEAL, FIX, REMOVE_FIXED, FREE_BITWIG, REMOVE, STOP, PUT_BACK, RECYCLE_BIN] {
             assert_ne!(what_of(id), "", "{id} isn't in the shortcut list");
         }
         let keys = mo_app::shortcuts::Shortcuts::default();

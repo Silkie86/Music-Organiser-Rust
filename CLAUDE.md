@@ -22,7 +22,9 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 ## Rules carried over (spec section 14)
 
 1. Offline, native, no web UI. Windows first, Mac and Linux ready.
-2. Never move or delete samples. Duplicates only hide in the app.
+2. Never move or delete samples. Duplicates only hide in the app. One exception (Solomon, 31 Oct and 17 Nov 2026):
+   Space's Bitwig card sends a project's own copies to the Recycle Bin once its fixed song is checked, only while
+   the original (a Library multisample, or the sample it was copied from) stays; Put back returns them.
 3. Never change an original project: Fix writes "(fixed)" beside it.
 4. Never commit Solomon's projects, samples, MIDI packs, Bitwig template, Bitwig binaries or model files.
    One exception (Solomon, 2026-11-07): the recipe test saves in `crates/mo-formats/tests/fixtures/recipe/`, made

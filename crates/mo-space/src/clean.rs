@@ -143,9 +143,16 @@ pub(crate) fn both(folder: &str) -> (&str, String) {
 }
 
 /// Whether a path is on a network drive: written with a server's name (`\\server\share`, what a mapped drive letter
-/// really is), or on a Mac or Linux, on a network share mounted into a folder (`/Volumes/Share`, `/mnt/nas`).
+/// really is), or on a Mac or Linux, on a network share mounted into a folder (`/Volumes/Share`, `/mnt/nas`). Windows'
+/// long-path form of a drive's path (`\\?\D:\…`, what a folder read where it really is gives) is that drive, not a
+/// server; its form of a server's (`\\?\UNC\server\share`) is a server.
 pub(crate) fn on_network(path: &str) -> bool {
-    path.starts_with(r"\\") || path.starts_with("//") || network_mount(path)
+    let long = path.strip_prefix(r"\\?\").or_else(|| path.strip_prefix("//?/"));
+    let server = match long {
+        Some(rest) => rest.get(..4).is_some_and(|u| u.eq_ignore_ascii_case(r"UNC\") || u.eq_ignore_ascii_case("UNC/")),
+        None => path.starts_with(r"\\") || path.starts_with("//"),
+    };
+    server || network_mount(path)
 }
 
 /// A Mac says which drives are its own: any other is on the network.
@@ -1899,6 +1906,14 @@ fn put_back_from_system_bin(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_drives_long_path_form_isnt_a_network_drive() {
+        assert!(on_network(r"\\server\share\a.wav") && on_network("//server/share/a.wav"));
+        assert!(on_network(r"\\?\UNC\server\share\a.wav") && on_network("//?/unc/server/share/a.wav"));
+        assert!(!on_network(r"\\?\D:\Projects\Song\a.wav") && !on_network("//?/D:/Projects/a.wav"));
+    }
+
     use super::{Bin, IN_USE, KEPT_BY_YOU, NEEDS_ADMIN, SystemBin, bin_problem, on_network, text};
 
     #[test]

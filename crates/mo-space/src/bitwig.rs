@@ -474,12 +474,14 @@ pub struct FixedProject<'a> {
 
 /// Sends the copies a "(fixed)" project no longer uses to the Recycle Bin. This is the one place Space removes samples,
 /// an exception to rule 2 that Solomon chose (31 Oct 2026): a copy goes only while the same sound stays in the
-/// Library. The app calls it only after you've opened the fixed project and checked it plays, and says first that
+/// Library. On 17 Nov 2026 he widened it to a project's own sample copies ("Bin them anyway"): one goes only while the
+/// sample it was copied from stays where it is, outside every project's own folders. The app calls it only after you've opened the fixed project and checked it plays, and says first that
 /// the original project can't find these copies once they've gone.
 ///
 /// Each is checked again just before it goes: the fixed project is there and is a "(fixed)" one; the copy is a
-/// multisample file (not a link) in that project's own `multi-samples` folder (not a link either), on a drive with a
-/// Recycle Bin; the file used instead is in a Library folder, isn't a project's copy and isn't the same file on disk;
+/// multisample file (not a link) in that project's own `multi-samples` folder, or a single sample in its `samples`
+/// folder (neither a link), on a drive with a Recycle Bin; the file used instead is in a Library folder (for a sample,
+/// anywhere outside a Bitwig project's own folders), isn't a project's copy and isn't the same file on disk;
 /// no other Bitwig file in the project folder names the copy ([`FixedProject::still_named`]); and the two are still
 /// the same byte for byte (each Library file read once). Any that Windows guards go in one administrator step at the
 /// end, checked again just before it asks.
@@ -641,16 +643,22 @@ fn still_a_copy(
         Err(e) if e.kind() == ErrorKind::NotFound => return stays("It isn't there any more."),
         Err(_) => return stays("It can't be looked at now, so it stays."),
     };
-    if meta.file_type().is_symlink() || !meta.is_file() || !is_multisample(copy) {
-        return stays("It isn't a multisample file of the project's own, so it stays.");
+    // A multisample in the project's multi-samples folder, or a single sample in its samples folder (15 Nov 2026).
+    let in_folder = copy.parent().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned());
+    let in_folder = in_folder.as_deref().unwrap_or_default();
+    let multisample = is_multisample(copy) && in_folder.eq_ignore_ascii_case(PROJECT_FOLDER);
+    let sample = !is_multisample(copy) && in_folder.eq_ignore_ascii_case(SAMPLES_FOLDER);
+    if meta.file_type().is_symlink() || !meta.is_file() || !(multisample || sample) {
+        return stays("It isn't a multisample or sample file of the project's own, so it stays.");
     }
-    // In the fixed project's own multi-samples folder, where both really are (letter case as on the drive).
-    let folder = fixed.file.parent().map(|p| p.join(PROJECT_FOLDER)).unwrap_or_default();
+    // In the fixed project's own folder of that kind, where both really are (letter case as on the drive).
+    let own = if multisample { PROJECT_FOLDER } else { SAMPLES_FOLDER };
+    let folder = fixed.file.parent().map(|p| p.join(own)).unwrap_or_default();
     let real_folder =
         fs::symlink_metadata(&folder).ok().filter(|m| m.is_dir()).and_then(|_| fs::canonicalize(&folder).ok());
     let real = fs::canonicalize(copy).map_err(|_| "It can't be looked at now, so it stays.".to_owned())?;
     if !real_folder.is_some_and(|f| real.starts_with(f)) {
-        return stays("It isn't in the fixed project's own multi-samples folder, so it stays.");
+        return stays("It isn't in the fixed project's own multi-samples or samples folder, so it stays.");
     }
     // As a plain path: Windows' long-path form (`\\?\C:\…`) would read as a server's name.
     let real_text = real_path(copy_text).ok_or_else(|| "It can't be looked at now, so it stays.".to_owned())?;
@@ -660,10 +668,13 @@ fn still_a_copy(
     let Some(real_library) = fs::canonicalize(library).ok().filter(|l| l.is_file()) else {
         return stays("The Library file the fixed project uses isn't there now, so the copy stays.");
     };
-    if !libraries.iter().any(|l| real_library.starts_with(l)) {
+    if multisample && !libraries.iter().any(|l| real_library.starts_with(l)) {
         return stays("What the fixed project uses instead isn't in the Library, so the copy stays.");
     }
-    if in_a_project(&real_library) {
+    // A sample's original may be anywhere (a sample pack), but never one of a Bitwig project's own files or in a
+    // folder a move left behind: those can go too.
+    let anothers = |p: &Path| in_bitwig_project(p) || in_old_copy(p);
+    if in_a_project(&real_library) || (sample && (anothers(library) || anothers(&real_library))) {
         return stays("What the fixed project uses instead is a project's copy too, so this one stays.");
     }
     let library_meta =
