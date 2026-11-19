@@ -52,16 +52,17 @@ pub fn memory_now() -> Option<Memory> {
 pub struct Memory {
     pub page_faults: u64,
     pub in_ram: u64,
-    /// The most it has had in RAM this run.
-    pub most_in_ram: u64,
+    /// All the memory it holds at that moment, in RAM or moved to disk by Windows (its commit charge). Not the most
+    /// it has had in RAM this run: memory the app gave back itself would then look like memory Windows took.
+    pub held: u64,
 }
 
 /// The words a freeze line carries when Windows had moved most of the app's memory to disk before it: the self-check
 /// and anyone reading the log can tell such a freeze (the computer short of memory) from the app being slow.
 pub const MOVED_TO_DISK: &str = "Windows had moved most of the app's memory to disk";
 
-/// When no more than this part of the most the app has had in RAM was still there as a freeze began, the freeze is
-/// put down to reading the rest back from disk. On 17 Nov 2026 Bitwig opened a project beside the app on Solomon's PC
+/// When no more than this part of the memory the app holds was in RAM as a freeze began, the freeze is put down to
+/// reading the rest back from disk. On 17 Nov 2026 Bitwig opened a project beside the app on Solomon's PC
 /// (32 GB, most of it in use): the app went from 1,700 MB in RAM to 49 MB, and every step after that waited on the
 /// disk: freezes of 5, 12 and 23 s with the window's thread somewhere different each time.
 const LEFT_IN_RAM: u64 = 4;
@@ -74,11 +75,11 @@ pub fn memory_words(before: Option<Memory>, after: Option<Memory>, own: u64) -> 
     const MB: u64 = 1024 * 1024;
     let mut words =
         format!("{} page faults in the app while stuck, {} MB in RAM", thousands(faults), after.in_ram / MB);
-    if before.in_ram.saturating_mul(LEFT_IN_RAM) <= before.most_in_ram {
+    if before.held > 0 && before.in_ram.saturating_mul(LEFT_IN_RAM) <= before.held {
         words.push_str(&format!(
-            "; {MOVED_TO_DISK} before this ({} MB of {} MB were left in RAM), and reading it back is slow",
+            "; {MOVED_TO_DISK} before this ({} MB of the {} MB it holds were left in RAM), and reading it back is slow",
             before.in_ram / MB,
-            before.most_in_ram / MB
+            before.held / MB
         ));
     }
     Some(words)
@@ -111,7 +112,7 @@ mod windows_memory {
         (ok != 0).then(|| super::Memory {
             page_faults: u64::from(counters.PageFaultCount),
             in_ram: counters.WorkingSetSize as u64,
-            most_in_ram: counters.PeakWorkingSetSize as u64,
+            held: counters.PagefileUsage as u64,
         })
     }
 }
@@ -519,8 +520,8 @@ mod tests {
     #[test]
     fn memory_over_a_freeze_in_words() {
         const MB: u64 = 1024 * 1024;
-        let before = Memory { page_faults: 1_000, in_ram: 800 * MB, most_in_ram: 900 * MB };
-        let after = Memory { page_faults: 42_200, in_ram: 812 * MB, most_in_ram: 900 * MB };
+        let before = Memory { page_faults: 1_000, in_ram: 800 * MB, held: 900 * MB };
+        let after = Memory { page_faults: 42_200, in_ram: 812 * MB, held: 900 * MB };
         assert_eq!(
             memory_words(Some(before), Some(after), 0).as_deref(),
             Some("41,200 page faults in the app while stuck, 812 MB in RAM")
@@ -531,18 +532,24 @@ mod tests {
         );
         assert_eq!(memory_words(None, Some(after), 0), None);
         // Solomon's 17 Nov: 94 MB left of 1,703 MB when the 23 s freeze began.
-        let trimmed = Memory { page_faults: 0, in_ram: 94 * MB, most_in_ram: 1_703 * MB };
-        let back = Memory { page_faults: 748, in_ram: 97 * MB, most_in_ram: 1_703 * MB };
+        let trimmed = Memory { page_faults: 0, in_ram: 94 * MB, held: 1_703 * MB };
+        let back = Memory { page_faults: 748, in_ram: 97 * MB, held: 1_703 * MB };
         assert_eq!(
             memory_words(Some(trimmed), Some(back), 0).as_deref(),
             Some(
                 "748 page faults in the app while stuck, 97 MB in RAM; Windows had moved most of the app's memory to \
-                 disk before this (94 MB of 1703 MB were left in RAM), and reading it back is slow"
+                 disk before this (94 MB of the 1703 MB it holds were left in RAM), and reading it back is slow"
             )
         );
         // A third gone isn't "most".
-        let some = Memory { page_faults: 0, in_ram: 600 * MB, most_in_ram: 900 * MB };
+        let some = Memory { page_faults: 0, in_ram: 600 * MB, held: 900 * MB };
         assert!(!memory_words(Some(some), Some(after), 0).unwrap().contains(MOVED_TO_DISK));
+        // Memory the app gave back itself isn't memory Windows took: little in RAM, little held.
+        let small = Memory { page_faults: 0, in_ram: 300 * MB, held: 320 * MB };
+        assert!(!memory_words(Some(small), Some(after), 0).unwrap().contains(MOVED_TO_DISK));
+        // Nothing known of what it holds: nothing claimed.
+        let unknown = Memory { page_faults: 0, in_ram: 0, held: 0 };
+        assert!(!memory_words(Some(unknown), Some(after), 0).unwrap().contains(MOVED_TO_DISK));
         assert_eq!(thousands(0), "0");
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_000), "1,000");
