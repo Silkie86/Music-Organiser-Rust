@@ -8,17 +8,22 @@
 //!
 //! Only a copy the installer put in place updates itself: one built by the launcher, or run from a build folder, never
 //! does ([`installed`]). Talking to GitHub goes through Windows' own `curl.exe` (System32), so no web library is built
-//! in and Windows' own certificates and proxy settings are used. Tests use a stand-in server on this computer, never
-//! GitHub.
+//! in and Windows' own certificates are used. A proxy set only in Windows' settings is not (curl.exe reads only the
+//! `HTTPS_PROXY` and `ALL_PROXY` environment variables), so behind one the look fails and says so in the log (UP-8).
+//! Tests use a stand-in server on this computer, never GitHub.
 //!
 //! Rule 28: a setup is removed once its version is the one running (or older), and a half-fetched one
-//! (`.mo-part`) at the next look ([`clear_old`]).
+//! (`.mo-part`) at the next look ([`clear_old`]). Whenever GitHub answers, a setup it no longer lists goes too, so a
+//! release taken back is never offered and at most one setup waits ([`clear_unlisted`], UP-3, UP-5); and when the look
+//! is turned off, a fetch going is stopped ([`stop_fetches`]) and every fetched setup goes (UP-4).
 
 use std::cmp::Ordering;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering as Atomic};
+use std::time::Duration;
 
 /// The setting that turns the daily look off ("0"). On unless turned off.
 pub const CHECK_KEY: &str = "update_check";
@@ -66,6 +71,51 @@ pub fn is_spent(name: &str, current: &str) -> bool {
     }
     let setup = name.strip_suffix(".sha256").or_else(|| name.strip_suffix(".log")).unwrap_or(name);
     setup_version(setup).is_some_and(|v| v <= current)
+}
+
+/// A fetch cut short (`.mo-part` after a setup's name): of no use to anyone, whichever copy of the app runs.
+pub fn is_part(name: &str) -> bool {
+    name.strip_suffix(".mo-part").is_some_and(|part| setup_version(part).is_some())
+}
+
+/// The setup a file in the updates folder belongs to, by its version: the setup, its `.sha256`, its `.log` or a fetch
+/// of it cut short.
+fn belongs_to(name: &str) -> Option<Version> {
+    let setup = [".sha256", ".log", ".mo-part"].iter().find_map(|end| name.strip_suffix(end)).unwrap_or(name);
+    setup_version(setup)
+}
+
+/// Whenever GitHub has answered: removes from `folder` every fetched setup newer than `current` but `listed` (the
+/// version GitHub offers now; none when it offers nothing newer), with its `.sha256`. A release taken off GitHub is
+/// never offered from what was fetched before, and no more than one setup waits (UP-3, UP-5). With `listed` none it
+/// also serves the look being turned off (UP-4). A setup's log stays: [`failed_update`] tells it once and takes it.
+pub fn clear_unlisted(folder: &Path, current: &str, listed: Option<&str>) {
+    let (Some(current), Ok(entries)) = (Version::parse(current), fs::read_dir(folder)) else { return };
+    let listed = listed.and_then(Version::parse);
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|k| k.is_file()) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        if name.ends_with(".log") {
+            continue;
+        }
+        if belongs_to(&name).is_some_and(|v| v > current && Some(&v) != listed.as_ref()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Bumped to stop every fetch going ([`stop_fetches`]).
+static STOPS: AtomicU64 = AtomicU64::new(0);
+
+/// What a stopped fetch says.
+pub const STOPPED: &str = "stopped";
+
+/// Stops every fetch going (curl is ended, and a setup cut short removed by its fetch): the look was turned off, or
+/// the app is closing, so nothing goes on fetching once it's said no (UP-4).
+pub fn stop_fetches() {
+    STOPS.fetch_add(1, Atomic::Relaxed);
 }
 
 /// The setup's own log for `setup` (its name with `.log` after it, beside it): the app names it, so the next start
@@ -133,7 +183,8 @@ pub fn wanted(setting: Option<&str>) -> bool {
     setting != Some("0")
 }
 
-/// Whether a look is due: none yet, or the last one [`EVERY_SECS`] ago (or a clock set back).
+/// Whether a look is due: none yet, or the last one [`EVERY_SECS`] ago (or a clock set back). The first look after a
+/// start is always made, whenever the last was (UP-9); this is for an app left open.
 pub fn due(checked: Option<&str>, now: u64) -> bool {
     match checked.and_then(|c| c.trim().parse::<u64>().ok()) {
         Some(then) => now < then || now - then >= EVERY_SECS,
@@ -336,11 +387,38 @@ pub fn fetch(url: &str, to: Option<&Path>, seconds: u32) -> Result<String, Strin
         // No console window flashing up.
         command.creation_flags(0x0800_0000);
     }
-    let out = command.output().map_err(|e| format!("couldn't start curl: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+    let stops = STOPS.load(Atomic::Relaxed);
+    let mut child = command.spawn().map_err(|e| format!("couldn't start curl: {e}"))?;
+    // Read as it comes, on threads of their own, so a long answer never fills the pipe while this waits.
+    let reader = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let out = reader(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err = reader(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let status = loop {
+        if STOPS.load(Atomic::Relaxed) != stops {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(STOPPED.to_owned());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(format!("couldn't wait for curl: {e}")),
+        }
+    };
+    let out = out.join().unwrap_or_default();
+    let err = err.join().unwrap_or_default();
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&err).trim().to_owned());
     }
-    String::from_utf8(out.stdout).map_err(|_| "the answer wasn't text".to_owned())
+    String::from_utf8(out).map_err(|_| "the answer wasn't text".to_owned())
 }
 
 /// Asks `api` (GitHub's, or a test's stand-in) for the releases and picks what's newer than `current`.
@@ -621,6 +699,69 @@ mod tests {
     }
 
     #[test]
+    fn only_the_setup_github_lists_waits() {
+        let dir = test_folder("unlisted");
+        for name in [
+            "DAWmate-Setup-1.0.0.exe",
+            "DAWmate-Setup-1.0.2.exe",
+            "DAWmate-Setup-1.0.2.exe.sha256",
+            "DAWmate-Setup-1.0.3.exe",
+            "DAWmate-Setup-1.0.3.exe.sha256",
+            "DAWmate-Setup-1.0.3.exe.log",
+            "DAWmate-Setup-1.0.4.exe.mo-part",
+            "Vital-Setup-2.0.0.exe",
+        ] {
+            fs::write(dir.join(name), "x").unwrap();
+        }
+        let left = || {
+            let mut names: Vec<String> =
+                fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            names.sort();
+            names
+        };
+        clear_unlisted(&dir, "1.0.1", Some("1.0.3"));
+        assert_eq!(
+            left(),
+            [
+                "DAWmate-Setup-1.0.0.exe",
+                "DAWmate-Setup-1.0.3.exe",
+                "DAWmate-Setup-1.0.3.exe.log",
+                "DAWmate-Setup-1.0.3.exe.sha256",
+                "Vital-Setup-2.0.0.exe"
+            ],
+            "the older one is clear_old's; another program's file is never touched"
+        );
+        clear_unlisted(&dir, "1.0.1", None);
+        assert_eq!(left(), ["DAWmate-Setup-1.0.0.exe", "DAWmate-Setup-1.0.3.exe.log", "Vital-Setup-2.0.0.exe"]);
+        assert!(is_part("DAWmate-Setup-1.0.4.exe.mo-part") && !is_part("DAWmate-Setup-1.0.4.exe"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Stopping stops every fetch going: the tests that fetch take turns.
+    static FETCHES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_stopped_fetch_says_so() {
+        let _alone = FETCHES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Command::new(curl()).arg("--version").output().is_err() {
+            eprintln!("no curl here: skipped");
+            return;
+        }
+        // A fetch that would take a while (nothing answers on this port, so curl waits for its connection): stopped.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/slow", listener.local_addr().unwrap().port());
+        let stopper = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            stop_fetches();
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(fetch(&url, None, 30), Err(STOPPED.to_owned()));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        stopper.join().unwrap();
+        drop(listener);
+    }
+
+    #[test]
     fn an_update_that_didnt_go_in_is_told_once() {
         let dir = test_folder("failed");
         fs::write(dir.join("DAWmate-Setup-1.0.1.exe"), "x").unwrap();
@@ -693,6 +834,7 @@ mod tests {
 
     #[test]
     fn a_newer_setup_is_found_fetched_and_checked() {
+        let _alone = FETCHES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if Command::new(curl()).arg("--version").output().is_err() {
             eprintln!("no curl here: skipped");
             return;

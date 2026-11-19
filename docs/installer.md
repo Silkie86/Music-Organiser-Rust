@@ -32,17 +32,19 @@ built.
 
 Only a copy the setup put in (its `unins000.exe` is beside it) updates itself; the launcher's builds never do, and while
 the installed copy is open the launcher's window keeps a new build waiting until it is closed, rather than opening it in
-its place (starting the launcher by hand still does). Three
-minutes after start, then once a day, it asks GitHub's Releases page (through Windows' own `curl.exe`) whether a newer
-version is out. That is all it sends online, and Settings › General › Updates turns it off. A newer setup is fetched into
-the data folder's `updates` folder, checked against the `.sha256` beside it on the release, and the rail then offers
+its place (starting the launcher by hand still does). Three minutes after every start, then once a day while it stays
+open, it asks GitHub's Releases page (through Windows' own `curl.exe`) whether a newer version is out. That is all it
+sends online, and Settings › General › Updates turns it off (a fetch going stops, and the fetched setups go). curl.exe
+doesn't use a proxy set only in Windows' settings (only the `HTTPS_PROXY` environment variable), so behind such a proxy
+the look fails and the log says so. A failed fetch is tried again within the hour. A newer setup is fetched into the
+data folder's `updates` folder, checked against the `.sha256` beside it on the release, and the rail then offers
 "Restart to update": the click checks the setup again and starts it, and the app closes as it always does. The setup
 waits for the app to end (`/WAITPID`), puts the new version in without pages and opens it (`/UPDATED=1`); if a file
 can't be replaced it says so with Retry, and if it stops before the files go in it opens the old version again. Its
 log goes beside it (`<setup>.log`), and when the next start is still the old version the app shows a card saying the
 update didn't go in, with the log's last lines in the app's log. Uninstalling asks the app and the helper to close
 first (`music-organiser.exe --close-for-setup`). A test version (with a dash) is offered only to a copy that is a test version too. Old setups are
-removed at the next look.
+removed at the next look, and so is a setup GitHub no longer lists (a release taken back is never offered).
 
 ## Making a release
 
