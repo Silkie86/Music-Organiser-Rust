@@ -565,7 +565,7 @@ fn bitwig_deactivated_tracks_time_signature_markers_and_automation() {
         |_| {},
         |b| {
             b.begin(0x520);
-            // The transport: 3/4 (12 sixteenths to the bar), two cue markers and the tempo's curve.
+            // The transport: 3/4, two cue markers and the tempo's curve.
             b.obj(0x190);
             b.begin(0xd7);
             b.obj(0x212);
@@ -1406,7 +1406,7 @@ fn a_bar_can_be_half_a_beat_longer_and_a_damaged_signature_is_four_four() {
     ] {
         assert_eq!(studio_one(&format!("<TimeSignatureMapSegment {damaged}/>")), (4, 4, 4.0), "{damaged}");
     }
-    // Bitwig says the bar's length in sixteenth notes: 14 is 7/8.
+    // Bitwig packs both numbers: the top one in the top six bits, the bottom one as a power of two in bits 4 to 7.
     let bitwig = |packed: i32| {
         let bytes = BwWriter::file(
             |_| {},
@@ -1426,8 +1426,16 @@ fn a_bar_can_be_half_a_beat_longer_and_a_damaged_signature_is_four_four() {
         let a = read("Song.bwproject", &bytes);
         (a.signature.top(), a.signature.bottom(), a.signature.beats())
     };
-    assert_eq!(bitwig(0x0E00_0024), (7, 8, 3.5));
     assert_eq!(bitwig(0x1000_0024), (4, 4, 4.0));
-    assert_eq!(bitwig(0x0500_0024), (5, 16, 1.25));
+    assert_eq!(bitwig(0x0C00_0024), (3, 4, 3.0));
+    // 6/8 as Bitwig 6.1.8 saves it: it used to read as 3/4, the same length of bar.
+    assert_eq!(bitwig(0x1800_0034), (6, 8, 3.0));
+    assert_eq!(bitwig(0x1C00_0034), (7, 8, 3.5));
+    assert_eq!(bitwig(0x0800_0014), (2, 2, 4.0));
+    assert_eq!(bitwig(0x1400_0044), (5, 16, 1.25));
+    // Numbers that can't be a signature: no top number, a bottom number past 32.
     assert_eq!(bitwig(0x0000_0024), (4, 4, 4.0));
+    assert_eq!(bitwig(0x1000_0064), (4, 4, 4.0));
+    assert_eq!(bitwig(0x1000_00F4), (4, 4, 4.0));
+    assert_eq!(bitwig(-1), (4, 4, 4.0));
 }
