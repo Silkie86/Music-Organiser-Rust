@@ -67,7 +67,7 @@ Requests are `{"id": 1, "cmd": "...", ...}`. Answers are `{"id": 1, "ok": true, 
 ✎ needs changes turned on. (3) only in link version 3, the extension. `insert` with a track, `newtrack`,
 `clip`, `pads`, `transpose`, `recorder`, `arrange` and `filetrack` wait for Bitwig to make the change (up to 5 seconds for
 each step), and run one at a time in the order sent; from extension 3.7 so does `action`, whose route may take up
-to a second to come back. In the app this is `Core/DawLink/BitwigLink.cs`.
+to a second to come back. In the app this is `crates/mo-dawlink/src/bitwig`.
 
 ### Only in one project
 
@@ -259,7 +259,7 @@ needs the focus in a panel could ever work. In the app they're `BitwigLink.Recor
 
 ### Sending into Bitwig
 
-`Core/DawLink/BitwigSend.cs` builds on these commands:
+The app's sending (`crates/mo-dawlink/src/bitwig`) builds on these commands:
 
 - **An FL Studio channel** (*To Bitwig* in the MIDI window) gets a new track named after it. A sample goes
   in a Sampler, whose Transpose makes up for the channel's root key and pitch knob (FL Studio plays a sample

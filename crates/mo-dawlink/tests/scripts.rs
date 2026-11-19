@@ -202,3 +202,55 @@ fn the_bitwig_extension_from_before_the_rename_comes_out() {
     let seen = elsewhere.join(FIRST_BITWIG_EXTENSION_NAME).display().to_string();
     assert_eq!(bitwig_extension_folders(std::slice::from_ref(&user), Some(&seen)), [extensions, elsewhere]);
 }
+
+#[test]
+fn an_older_bitwig_copy_that_cant_be_moved_aside_stops_the_update_in_every_folder() {
+    let root = fixture("bitwig-all-or-nothing");
+    let (a, b) = (root.join("A").join("Extensions"), root.join("B").join("Extensions"));
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    for folder in [&a, &b] {
+        fs::create_dir_all(folder).unwrap();
+        extension(&folder.join(FIRST_BITWIG_EXTENSION_NAME), "3.30");
+    }
+    // In B something is in the way where the older copy would be moved aside (as Bitwig holding it open would be).
+    let blocked = b.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old"));
+    fs::create_dir_all(blocked.join("in the way")).unwrap();
+    let folders = vec![a.clone(), b.clone()];
+    let done = install_bitwig(&source, &folders, &[]);
+    assert!(done.installed.went.is_empty() && done.removed.is_empty(), "{done:?}");
+    assert_eq!(done.installed.failed.len(), 2);
+    // Neither folder has the new copy, and each still has its older one, so Bitwig never has two.
+    for folder in [&a, &b] {
+        assert!(folder.join(FIRST_BITWIG_EXTENSION_NAME).is_file() && !folder.join(BITWIG_EXTENSION_NAME).exists());
+    }
+    assert!(!a.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old")).exists());
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Outdated);
+
+    // Once out of the way, it goes through.
+    fs::remove_dir_all(&blocked).unwrap();
+    let done = install_bitwig(&source, &folders, &[]);
+    assert_eq!(done.installed.went, folders);
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Installed);
+}
+
+#[test]
+fn an_older_bitwig_copy_left_aside_is_taken_out_by_the_next_install() {
+    let root = fixture("bitwig-left-aside");
+    let extensions = root.join("Extensions");
+    fs::create_dir_all(&extensions).unwrap();
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    let folders = vec![extensions.clone()];
+    install_bitwig(&source, &folders, &[]);
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Installed);
+    // An earlier install couldn't delete the copy it had moved aside.
+    let aside = extensions.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old"));
+    extension(&aside, "3.30");
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Outdated, "so the row offers Update");
+    let done = install_bitwig(&source, &folders, &[]);
+    assert!(done.installed.failed.is_empty() && done.installed.left.is_empty());
+    let names: Vec<_> = fs::read_dir(&extensions).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, [BITWIG_EXTENSION_NAME]);
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Installed);
+}

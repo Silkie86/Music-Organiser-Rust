@@ -58,8 +58,8 @@ pub trait NoteOut: Send + 'static {
 pub enum Error {
     /// There's no MIDI output called [`FL_PORT`]: the ports there are.
     NoPort { ports: Vec<String> },
-    /// The port is there, but wouldn't open: the system's words.
-    Port(String),
+    /// The port is there, but wouldn't open: its name, and the system's words.
+    Port { name: String, why: String },
     /// The computer's MIDI itself wouldn't start: the system's words.
     NoMidi(String),
     /// The part has no notes to play (all muted, or none).
@@ -71,12 +71,13 @@ impl fmt::Display for Error {
         match self {
             Error::NoPort { .. } => write!(
                 f,
-                "There's no MIDI port called \u{201c}{FL_PORT}\u{201d}. Make it in loopMIDI (it's the port FL Studio's \
-                 DAWmate script listens on), then try again."
+                "There's no MIDI port called \u{201c}{FL_PORT}\u{201d} (or \u{201c}{FIRST_FL_PORT}\u{201d}, its first \
+                 name). If you made one in loopMIDI, start loopMIDI; if not, make \u{201c}{FL_PORT}\u{201d} there (it's \
+                 the port FL Studio's DAWmate script listens on). Then try again."
             ),
-            Error::Port(why) => write!(
+            Error::Port { name, why } => write!(
                 f,
-                "The \u{201c}{FL_PORT}\u{201d} MIDI port wouldn't open ({why}). Another program may be holding it."
+                "The \u{201c}{name}\u{201d} MIDI port wouldn't open ({why}). Another program may be holding it."
             ),
             Error::NoMidi(why) => write!(f, "This computer's MIDI wouldn't start ({why})."),
             Error::Empty => f.write_str("There are no notes in it to play (they're all muted, or there are none)."),
@@ -129,7 +130,9 @@ pub fn open_port() -> Result<Box<dyn NoteOut>, Error> {
         .or_else(|| names.iter().position(|n| is_fl_port(n)))
         .ok_or_else(|| Error::NoPort { ports: names.clone() })?;
     let port = ports.get(at).ok_or_else(|| Error::NoPort { ports: names.clone() })?;
-    let connection = out.connect(port, "DAWmate play").map_err(|e| Error::Port(e.to_string()))?;
+    let name = names.get(at).map_or(FL_PORT, |n| n.trim()).to_owned();
+    let connection =
+        out.connect(port, "DAWmate play").map_err(|e| Error::Port { name: name.clone(), why: e.to_string() })?;
     Ok(Box::new(Port(connection)))
 }
 
@@ -223,7 +226,7 @@ pub fn play(out: Box<dyn NoteOut>, part: &Part) -> Result<Playing, Error> {
             let mut keys = Keys { out, sounding: [0; 128] };
             keys.run(&list, length, seconds_a_tick, &stopping);
         })
-        .map_err(|e| Error::Port(e.to_string()))?;
+        .map_err(|e| Error::Port { name: FL_PORT.to_owned(), why: e.to_string() })?;
     Ok(Playing { stop, thread })
 }
 

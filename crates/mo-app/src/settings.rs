@@ -619,8 +619,10 @@ pub fn bitwig_status(checked: &Result<mo_dawlink::bitwig::Hello, mo_dawlink::bit
                     "Working".to_owned()
                 } else {
                     format!(
-                        "Not coming back: set the controller's MIDI in and out to \u{201c}{}\u{201d}",
-                        mo_dawlink::bitwig::LOOPBACK_PORT
+                        "Not coming back: set the controller's MIDI in and out to \u{201c}{}\u{201d} (or \u{201c}{}\u{201d}, \
+                         its first name, if that's the loopMIDI port you have)",
+                        mo_dawlink::bitwig::LOOPBACK_PORT,
+                        mo_dawlink::bitwig::FIRST_LOOPBACK_PORT
                     )
                 },
             ));

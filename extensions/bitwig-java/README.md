@@ -26,12 +26,13 @@ when the extension runs, so nothing of Bitwig's goes in the extension or the rep
 
 ## Installing
 
-The app does it: building the app also builds the extension when a JDK is installed (on Windows,
-`winget install Microsoft.OpenJDK.21`; see `MusicOrganiser.BitwigExtension.targets`), and then **Install** in
-Settings → DAW links → Bitwig Studio puts the extension in place of the script. By hand: copy
+The app does it: the launcher (`tools/dev/run-latest.ps1`) builds the extension when a JDK is installed (on
+Windows, `winget install Microsoft.OpenJDK.21`), and then **Install** in Settings > DAWs, on Bitwig's row, puts it
+in place (close Bitwig first on Windows), taking out the older copies. By hand: close Bitwig, copy
 `DAWmate.bwextension` into `Extensions` in Bitwig's user folder (normally
-`Documents\Bitwig Studio\Extensions`; on Linux `~/Bitwig Studio/Extensions`), and take
-`Controller Scripts\Music Organiser` out of that folder if the JavaScript script is there. Bitwig picks the
+`Documents\Bitwig Studio\Extensions`; on Linux `~/Bitwig Studio/Extensions`), take `MusicOrganiser.bwextension`
+out of that folder if it's there (the same controller from before the rename: Bitwig would run both), and take
+`Controller Scripts\Music Organiser` out if the JavaScript script is there. Bitwig picks the
 extension up by itself (restart Bitwig if it doesn't). If the controller isn't added yet: Settings → Controllers → Add controller →
 DAWmate → DAW link.
 

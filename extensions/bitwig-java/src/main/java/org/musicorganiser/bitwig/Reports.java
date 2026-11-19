@@ -119,7 +119,7 @@ final class Reports {
                              System.getProperty("java.io.tmpdir", "."));
     }
 
-    /** Where reports go, worked out as MO Probe does (native/mo-probe/src/log.cpp) from the system and its settings. */
+    /** Where reports go, worked out as the C# app's MO Probe did, from the system and its settings. */
     static Path defaultFolder(String os, Map<String, String> env, String home, String temp) {
         String system = os.toLowerCase(Locale.ROOT);
         Path base = null;

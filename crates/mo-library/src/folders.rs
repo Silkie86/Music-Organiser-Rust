@@ -94,11 +94,11 @@ pub fn remove_folder(
     })
 }
 
-/// The setting naming the folder every export goes into (the C# app's key). Not set, or blank: "Music Organiser
+/// The setting naming the folder every export goes into (the C# app's key). Not set, or blank: "DAWmate
 /// Exports" in Documents.
 pub const EXPORT_FOLDER: &str = "export_folder";
 
-/// Sets the folder every export goes into (Settings › Folders), or with `None` goes back to "Music Organiser Exports"
+/// Sets the folder every export goes into (Settings › Folders), or with `None` goes back to "DAWmate Exports"
 /// in Documents (kept as "", the C# app's way of keeping "none"). The folder itself isn't looked at, made or moved.
 /// Says whether it changed anything: the folder already set (spelt the same, but for a separator at the end) is left
 /// as it is. Letter case counts, as Linux sees it; the folder picker gives a folder as it's spelt on the disk. Kept

@@ -1067,14 +1067,16 @@ fn parse_points(text: &str) -> Option<Vec<curve::CurvePoint>> {
         .collect()
 }
 
-/// The curve file's bytes for `c`.
+/// Who a curve file says made it, as Bitwig's browser shows it: the app's name.
+pub const CREATOR: &str = "DAWmate";
+
 /// `c` as a Bitwig curve file's bytes (`.bwcurve`), as [`file`] writes it: what a drag out of the plugin carries.
 pub fn curve_bytes(c: &Curve) -> Result<Vec<u8>, String> {
     let periodic =
         c.sources.iter().all(|s| !s.kind.is_song()) && c.points.first().map(|p| p.y) == c.points.last().map(|p| p.y);
     curve::write(&curve::Curve {
         name: c.name.clone(),
-        creator: "Music Organiser".into(),
+        creator: CREATOR.into(),
         comment: String::new(),
         category: if periodic { "Periodic" } else { "Sequence" }.into(),
         tags: String::new(),
@@ -1084,12 +1086,14 @@ pub fn curve_bytes(c: &Curve) -> Result<Vec<u8>, String> {
     .ok_or_else(|| "This curve has no points".to_owned())
 }
 
-/// Whether a curve file already holds this curve as it is now (its points and length).
+/// Whether a curve file already holds this curve as it is now (its points and length, and the app's name as its
+/// creator, so a file written before the rename is written again).
 fn holds(path: &Path, c: &Curve) -> bool {
-    std::fs::read(path)
-        .ok()
-        .and_then(curve::read)
-        .is_some_and(|back| back.points == c.points && back.beat_length == Some(c.length_beats).filter(|l| *l > 0.0))
+    std::fs::read(path).ok().and_then(curve::read).is_some_and(|back| {
+        back.points == c.points
+            && back.beat_length == Some(c.length_beats).filter(|l| *l > 0.0)
+            && back.creator == CREATOR
+    })
 }
 
 /// The curve file for `curve` in the app's own `Curves` folder (`folder`): written the first time it's asked for, and
@@ -1406,6 +1410,13 @@ mod tests {
         let written = file(&rise, &curves).unwrap();
         assert_eq!(file(&rise, &curves).unwrap(), written);
         assert_eq!(curve::read(std::fs::read(&written).unwrap()).unwrap().points, rise.points);
+        // Written before the app was called DAWmate, it's written again with the app's name as its maker.
+        let mut old = curve::read(std::fs::read(&written).unwrap()).unwrap();
+        assert_eq!(old.creator, CREATOR);
+        old.creator = "Music Organiser".into();
+        std::fs::write(&written, curve::write(&old).unwrap()).unwrap();
+        assert_eq!(file(&rise, &curves).unwrap(), written);
+        assert_eq!(curve::read(std::fs::read(&written).unwrap()).unwrap().creator, CREATOR);
         let library = dir.join("Library").join("Curves");
         let first = save_to_bitwig(&rise, &library).unwrap();
         let second = save_to_bitwig(&rise, &library).unwrap();

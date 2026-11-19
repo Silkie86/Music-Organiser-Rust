@@ -1336,6 +1336,12 @@ fn install_fl(app: &AppWindow) {
         for (f, why) in &done.failed {
             log::warning("Settings", &format!("Couldn't install the FL Studio script in {}: {why}", f.display()));
         }
+        for f in &done.removed {
+            log::info("Settings", &format!("Took out the FL Studio script from before the rename, {}", f.display()));
+        }
+        for (f, why) in &done.left {
+            log::warning("Settings", &format!("Couldn't take out the older FL Studio script {}: {why}", f.display()));
+        }
         let note = page::installed_note(&done);
         let _ = slint::invoke_from_event_loop(move || {
             PAGE.with(|p| {
@@ -1465,7 +1471,11 @@ fn install_bitwig(app: &AppWindow) {
             log::info("Settings", &format!("Installed the Bitwig extension in {}", f.display()));
         }
         for f in &done.removed {
-            log::info("Settings", &format!("Took out the older Bitwig script {}", f.display()));
+            let what = if f.extension().is_some_and(|e| e == "bwextension") { "extension" } else { "script" };
+            log::info("Settings", &format!("Took out the older Bitwig {what} {}", f.display()));
+        }
+        for (f, why) in &done.installed.left {
+            log::warning("Settings", &format!("Couldn't take out the older Bitwig copy {}: {why}", f.display()));
         }
         for (f, why) in &done.installed.failed {
             log::warning("Settings", &format!("Couldn't install the Bitwig extension in {}: {why}", f.display()));

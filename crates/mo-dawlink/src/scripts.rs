@@ -228,6 +228,10 @@ pub const BITWIG_EXTENSION_NAME: &str = "DAWmate.bwextension";
 /// the controller twice.
 pub const FIRST_BITWIG_EXTENSION_NAME: &str = "MusicOrganiser.bwextension";
 
+/// The copy from before the rename, moved aside while the new one is written (Bitwig loads only `.bwextension`
+/// files): taken out once it is, and by the next install if that failed.
+const FIRST_BITWIG_ASIDE: &str = "MusicOrganiser.bwextension.mo-old";
+
 /// The older JavaScript script's file name, which the extension replaces.
 pub const BITWIG_SCRIPT_NAME: &str = "MusicOrganiser.control.js";
 
@@ -300,7 +304,7 @@ pub fn extension_version(file: &Path) -> Option<String> {
 /// to update.
 pub fn bitwig_state(source: &Path, folders: &[PathBuf]) -> ScriptState {
     let Ok(built) = fs::read(source) else { return ScriptState::NotInstalled };
-    if folders.iter().any(|f| f.join(FIRST_BITWIG_EXTENSION_NAME).is_file()) {
+    if folders.iter().any(|f| f.join(FIRST_BITWIG_EXTENSION_NAME).is_file() || f.join(FIRST_BITWIG_ASIDE).is_file()) {
         return ScriptState::Outdated;
     }
     let mut any = false;
@@ -328,36 +332,49 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
             return done;
         }
     };
+    // The copies from before the rename are moved aside first, in every folder, before anything is written: Bitwig
+    // holding one open stops that, and then every one moved goes back and nothing is written, so Bitwig never has two
+    // copies (same controller ID), in one folder or across two it loads from. A copy left aside by an earlier install
+    // (its delete failed) goes first; Bitwig never loads that name.
+    let mut aside_in: Vec<Option<(PathBuf, PathBuf)>> = Vec::with_capacity(folders.len());
     for folder in folders {
-        // The copy from before the rename is moved aside first: Bitwig holding it open stops that, and then the new
-        // one isn't written either, so Bitwig never has two (same controller ID). It goes back if the write fails.
+        let aside = folder.join(FIRST_BITWIG_ASIDE);
+        if fs::symlink_metadata(&aside).is_ok_and(|m| m.is_file()) {
+            let _ = fs::remove_file(&aside);
+        }
         let first = folder.join(FIRST_BITWIG_EXTENSION_NAME);
-        let aside = folder.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old"));
-        let moved = if first.is_file() {
-            if let Err(e) = fs::rename(&first, &aside) {
-                done.installed
-                    .failed
-                    .push((folder.clone(), format!("the older copy {} is in use ({e})", first.display())));
-                continue;
+        if !first.is_file() {
+            aside_in.push(None);
+            continue;
+        }
+        if let Err(e) = fs::rename(&first, &aside) {
+            for (first, aside) in aside_in.iter().flatten() {
+                let _ = fs::rename(aside, first);
             }
-            true
-        } else {
-            false
-        };
+            let why = format!("the older copy {} is in use ({e})", first.display());
+            done.installed.failed = folders
+                .iter()
+                .map(|f| (f.clone(), if f == folder { why.clone() } else { format!("not updated, as {why}") }))
+                .collect();
+            return done;
+        }
+        aside_in.push(Some((first, aside)));
+    }
+    for (folder, moved) in folders.iter().zip(&aside_in) {
         match write_checked(folder, BITWIG_EXTENSION_NAME, &built) {
             Ok(()) => done.installed.went.push(folder.clone()),
             Err(e) => {
-                if moved {
-                    let _ = fs::rename(&aside, &first);
+                if let Some((first, aside)) = moved {
+                    let _ = fs::rename(aside, first);
                 }
                 done.installed.failed.push((folder.clone(), e.to_string()));
                 continue;
             }
         }
-        if moved {
-            match fs::remove_file(&aside) {
-                Ok(()) => done.removed.push(first),
-                Err(e) => done.installed.left.push((aside, e.to_string())),
+        if let Some((first, aside)) = moved {
+            match fs::remove_file(aside) {
+                Ok(()) => done.removed.push(first.clone()),
+                Err(e) => done.installed.left.push((aside.clone(), e.to_string())),
             }
         }
     }

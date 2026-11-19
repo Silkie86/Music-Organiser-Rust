@@ -21,7 +21,7 @@ use crate::{Confidence, PluginKind, STATUSES, Save};
 /// What went wrong reading the library.
 #[derive(Debug)]
 pub enum LibraryError {
-    /// The file isn't there, can't be opened, or isn't a Music Organiser library.
+    /// The file isn't there, can't be opened, or isn't a DAWmate library.
     Open { path: PathBuf, why: String },
     /// A read failed (the file is damaged, or locked for longer than the wait).
     Read(rusqlite::Error),
@@ -201,11 +201,11 @@ impl Library {
             st.query_map([], |r| r.get::<_, String>(0))?.collect()
         };
         let tables: HashSet<String> = names("SELECT name FROM sqlite_master WHERE type = 'table'")
-            .map_err(|e| open_error(format!("it isn't a Music Organiser library ({e})")))?
+            .map_err(|e| open_error(format!("it isn't a DAWmate library ({e})")))?
             .into_iter()
             .collect();
         if !tables.contains("projects") {
-            return Err(open_error("it isn't a Music Organiser library (it has no projects table)".into()));
+            return Err(open_error("it isn't a DAWmate library (it has no projects table)".into()));
         }
         let columns = names("SELECT name FROM pragma_table_info('projects')").map_err(|e| open_error(e.to_string()))?;
         let summaries = summaries_query(&columns, &tables);
