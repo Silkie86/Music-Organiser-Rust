@@ -26,6 +26,9 @@ pub const DAW: &str = "Bitwig Studio";
 ///
 /// What a plugin preset taken out of a project is ([`device_kind`], 14 Nov 2026) didn't raise it: only the presets list
 /// keeps that, and `mo_presets::sound_store::VERSION` went up for it, so the songs' MIDI and curves aren't read again.
+///
+/// The time signature read from both its numbers (6/8 no longer 3/4, 19 Nov 2026) didn't raise it either: only the
+/// Songs preview and the MIDI page's fits read it, from the save each time, and nothing keeps it.
 pub const VERSION: u32 = 4;
 
 /// Said when the plugin settings stored at the end of a project are missing or can't be opened.

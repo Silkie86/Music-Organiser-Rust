@@ -99,13 +99,6 @@ const F_ON: u32 = 0xd2;
 const F_TRANSPORT: u32 = F_SCENES_HOLDER;
 const F_TIME_SIGNATURE: u32 = 0x212;
 const F_SIGNATURE: u32 = 0x1cbe;
-
-/// The time signature in Bitwig's packed number: the top number in the top six bits, the bottom number as a power of
-/// two in bits 4 to 7 (2 for quarter notes, 3 for eighths). None for numbers that can't be a signature.
-fn signature_of(packed: u32) -> Option<TimeSignature> {
-    let bottom = 1u32.checked_shl(packed >> 4 & 15).filter(|b| *b <= 32)?;
-    TimeSignature::new(packed >> 26, bottom)
-}
 const F_CUE_MARKERS: u32 = 0x2adc;
 const F_CUE_NAME: u32 = 0x98b;
 // A track's (and the transport's) automation: 0x2dc9 → 0x4ba, a list of lanes. A lane's 0x2a3 says what it moves
@@ -132,6 +125,13 @@ const MOST_POINTS: usize = 500_000;
 /// Said when a project reaches [`MOST_POINTS`].
 const TOO_MANY_POINTS: &str =
     "This project has more automation than the preview holds (500,000 points), so only the first curves are drawn.";
+
+/// The time signature in Bitwig's packed number: the top number in the top six bits, the bottom number as a power of
+/// two in bits 4 to 7 (2 for quarter notes, 3 for eighths). Seen in 4/4, 3/4 and 6/8 saves only (bits 8 to 25 were
+/// zero in them, the low four bits 4). None for numbers that can't be a signature.
+fn signature_of(packed: u32) -> Option<TimeSignature> {
+    TimeSignature::new(packed >> 26, 1 << (packed >> 4 & 15))
+}
 
 /// The project's arrangement as Bitwig shows it: its arranger timeline, and its clip launcher's scenes one after
 /// another. The scenes come first when nothing is on the timeline. A project that didn't decode cleanly says so instead.

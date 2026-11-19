@@ -1430,6 +1430,7 @@ fn a_bar_can_be_half_a_beat_longer_and_a_damaged_signature_is_four_four() {
     assert_eq!(bitwig(0x0C00_0024), (3, 4, 3.0));
     // 6/8 as Bitwig 6.1.8 saves it: it used to read as 3/4, the same length of bar.
     assert_eq!(bitwig(0x1800_0034), (6, 8, 3.0));
+    // By the same rule; no save with these has been seen.
     assert_eq!(bitwig(0x1C00_0034), (7, 8, 3.5));
     assert_eq!(bitwig(0x0800_0014), (2, 2, 4.0));
     assert_eq!(bitwig(0x1400_0044), (5, 16, 1.25));
