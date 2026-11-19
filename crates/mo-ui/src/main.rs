@@ -59,7 +59,9 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     mo_ui::one_copy::log_claim(&one_copy);
     // While this copy runs, another started meanwhile never switches folders under it.
-    mo_app::data_move::hold_open_lock();
+    if let Err(why) = mo_app::data_move::hold_open_lock() {
+        log::warning("Data folder", &why);
+    }
     // Programs the app opens (DAWs, folders) start at the window's priority, not a background thread's.
     mo_app::shell::get_ready();
     mo_ui::startup::step("log");
