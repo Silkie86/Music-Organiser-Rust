@@ -746,7 +746,8 @@ fn finish_in(first: &Path) -> Option<AtStart> {
             from.display()
         ));
     }
-    let leaves = if in_use.missing.is_some() { std::mem::take(&mut record.leaves) } else { String::new() };
+    // Kept in moving-in.json for a later start if this one doesn't switch; carried on only while it still applies.
+    let leaves = if in_use.missing.is_some() { record.leaves.clone() } else { String::new() };
     // No other copy of the app may be open on the old folder while it's caught up and left.
     let Ok(lock) = File::options().create(true).truncate(false).write(true).open(from.join(OPEN_LOCK_FILE)) else {
         return not_yet(format!("{OPEN_LOCK_FILE} couldn't be opened"));
@@ -934,7 +935,7 @@ pub fn renew_moved_out_note(moved_into: &Path, data: &Path, first: &Path) -> boo
 }
 
 /// Whether two folder paths name the same folder as written (Windows and a Mac ignore case).
-pub(crate) fn paths_match(a: &Path, b: &Path) -> bool {
+pub fn paths_match(a: &Path, b: &Path) -> bool {
     mo_backup::folders::within(a, b) && mo_backup::folders::within(b, a)
 }
 
@@ -1249,6 +1250,12 @@ mod tests {
 
         let (s, gone) = missing_drive("leaves-yes");
         copy_in(&s.first, &s.to, &s.first, Some(&gone), &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+        // A start that gets past the last pass but can't switch keeps the yes for the next one.
+        fs::create_dir_all(s.to.join(MOVED_IN_FILE)).unwrap();
+        assert!(matches!(finish_in(&s.first), Some(AtStart::NotYet { .. })));
+        let record: Record = serde_json::from_str(&fs::read_to_string(s.to.join(MOVING_IN_FILE)).unwrap()).unwrap();
+        assert_eq!(record.leaves, gone.display().to_string());
+        fs::remove_dir(s.to.join(MOVED_IN_FILE)).unwrap();
         assert!(
             matches!(finish_in(&s.first), Some(AtStart::Switched { notes, .. }) if notes.iter().any(|n| n.contains("left behind")))
         );

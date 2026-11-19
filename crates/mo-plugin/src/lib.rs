@@ -761,8 +761,9 @@ fn hold_data_folder() {
     });
 }
 
-/// How many times, 5 s apart, the plugin tries the data folder's lock again: 10 minutes, far longer than a switch.
-const HOLD_TRIES: u32 = 120;
+/// How many times, 5 s apart, the plugin tries the data folder's lock again: 2 minutes, longer than a switch (at most
+/// 90 s), and short, as a DAW on a Mac may unload the plugin under a sleeping thread.
+const HOLD_TRIES: u32 = 24;
 
 #[cfg(test)]
 mod tests {

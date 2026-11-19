@@ -52,10 +52,11 @@ pub fn missing_now() -> Option<String> {
     now.problem.filter(|_| now.missing.is_some())
 }
 
-/// The folder the data moved to that can't be found now, read now: the real data, which a copy made this run (of the
-/// old copy in use instead) would leave behind (DA-2). `None` when it's there, or there was no move.
-pub fn missing_folder_now() -> Option<PathBuf> {
-    resolve_in(&first_dir()).missing
+/// The folder the data moved to that couldn't be found as this run started, so the run is on the old copy: the real
+/// data, which a copy made this run would leave behind (DA-2). This run's, not read again (no wait on a drive), as
+/// the copy is of this run's folder. `None` when it was there, or there was no move.
+pub fn missing_folder() -> Option<PathBuf> {
+    resolved().missing.clone()
 }
 
 /// The system's own place for the app's data, where it starts out and where [`POINTER_FILE`] sits beside it.

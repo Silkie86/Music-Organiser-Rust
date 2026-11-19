@@ -567,7 +567,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             let to = mo_app::data_move::target_in(&picked);
             // The folder the data moved to can't be found, so this run is on the old copy: copying that leaves the
             // real data behind, so ask first (DA-2).
-            let Some(missing) = mo_app::paths::missing_folder_now() else {
+            let missing = mo_app::paths::missing_folder().filter(|m| !mo_app::data_move::paths_match(m, &to));
+            let Some(missing) = missing else {
                 move_data(&app, to, None, false);
                 return;
             };
