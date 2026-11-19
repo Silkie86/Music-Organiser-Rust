@@ -146,7 +146,8 @@ pub const REPORTS: [&str; 9] = [
 /// The folder in the data folder that curve files are written to.
 const CURVES: &str = mo_presets::curves::FOLDER;
 
-/// How long a curve file the app made in its Curves folder stays: it's made again the next time it's asked for.
+/// How long a curve file the app made in its Curves folder stays after it was last used (`curves::file` stamps it
+/// at each use): it's made again the next time it's asked for.
 pub const CURVE_FILES_KEPT_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The twin test's copy of the library, beside its C# helper in `twin\cs\` (`tools/twin`, `run_songs`).
@@ -327,8 +328,7 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
         // The curve files made for a drag or for Show curve file: a cache, made again when asked for. Without this
         // the folder only grew: files of curves no longer found, of other speeds, of made curves removed (the
         // 19 Nov 2026 review's CU-5).
-        let made = |name: &str| mo_presets::curves::id_in_file_name(name).is_some();
-        done.add(remove_older(&curves, made, CURVE_FILES_KEPT_FOR, now, false));
+        done.add(remove_older(&curves, mo_presets::curves::is_made_file_name, CURVE_FILES_KEPT_FOR, now, false));
     }
     // A copy of an old database that was being put away when the app stopped (its own name, only while it's written).
     if let Some(archive) = real_folder(&places.data, &[crate::old_databases::FOLDER]) {
@@ -1991,6 +1991,7 @@ mod tests {
             // A curve file under a name the app doesn't give (yours, or dropped there): never the cache's to clear.
             data.join("Curves").join("Rise.bwcurve"),
             data.join("Curves").join("Rise abcd123.bwcurve"),
+            data.join("Curves").join("Wobble 20261119.bwcurve"),
             data.join("Curves").join(".mo-part-1-2"),
             data.join("twin").join("cs").join("twin-cs.dll"),
             data.join("twin").join("cs").join("library-copy.db.bak"),
@@ -2021,7 +2022,7 @@ mod tests {
         }
         // The curve files the app made for a drag stay 30 days (they're made again when asked for).
         let cached = [
-            places.data.join("Curves").join("Rise abcd1234.bwcurve"),
+            places.data.join("Curves").join("Rise 0123456789ABCDEF.bwcurve"),
             places.data.join("Curves").join("Rise (half speed) 0123456789abcdef.bwcurve"),
         ];
         cached.iter().for_each(|p| fresh(p));

@@ -159,10 +159,12 @@ fn is_inside(inner: &Path, outer: &Path) -> bool {
     mo_library::scan::is_inside(&inner.to_string_lossy(), &outer.to_string_lossy())
 }
 
-/// Where a curve goes in Bitwig's curves library: `<Bitwig Studio>\Library\Curves` in the first of
-/// [`bitwig_folders`], the one Bitwig uses as far as the app can tell.
-pub fn bitwig_curves_folder(bitwig: &[PathBuf]) -> Option<PathBuf> {
-    bitwig.first().map(|b| b.join("Library").join("Curves"))
+/// Where a curve goes in Bitwig's curves library: `<Bitwig Studio>\Library\Curves` in the first of `bitwig`
+/// ([`bitwig_folders`]) that has a Library folder (`is_folder` asks the disk: off the window's thread). Bitwig makes
+/// its Library itself, so a folder without one isn't the one it uses (a folder that only holds old projects, a
+/// drive picked by mistake), and none is made there. None when no folder has one.
+pub fn bitwig_curves_folder(bitwig: &[PathBuf], is_folder: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    bitwig.iter().map(|b| b.join("Library")).find(|library| is_folder(library)).map(|library| library.join("Curves"))
 }
 
 /// The curve files (`.bwcurve`) under `roots`, for the Curves section (Bitwig's curves library). Folders starting
@@ -2565,11 +2567,17 @@ mod tests {
         let chosen = bitwig_folders(Some(Path::new("/m/Music/Bitwig")), &documents, saves);
         assert_eq!(chosen[0], PathBuf::from("/m/Music/Bitwig"));
         assert_eq!(chosen.len(), 3);
-        assert_eq!(bitwig_curves_folder(&chosen), Some(PathBuf::from("/m/Music/Bitwig/Library/Curves")));
+        assert_eq!(bitwig_curves_folder(&chosen, |_| true), Some(PathBuf::from("/m/Music/Bitwig/Library/Curves")));
+        // A folder with no Library in it isn't the one Bitwig uses: the next one that has one gets the curve.
+        assert_eq!(
+            bitwig_curves_folder(&chosen, |l| l.starts_with("/c")),
+            Some(PathBuf::from("/c/Documents/Bitwig Studio/Library/Curves"))
+        );
         assert_eq!(bitwig_folders(Some(Path::new("/k/Bitwig Studio")), &documents, saves), both, "each once");
         assert_eq!(bitwig_folders(Some(Path::new("")), &documents, [""; 0]), documents);
         assert!(found.len() <= 1);
-        assert_eq!(bitwig_curves_folder(&unix), Some(PathBuf::from("/k/Bitwig Studio/Library/Curves")));
+        assert_eq!(bitwig_curves_folder(&unix, |_| true), Some(PathBuf::from("/k/Bitwig Studio/Library/Curves")));
+        assert_eq!(bitwig_curves_folder(&unix, |_| false), None, "no Library folder is made");
         let folders = preset_folders(&[PathBuf::from("/h/VST3 Presets")], &[PathBuf::from("/k/Bitwig Studio")]);
         assert_eq!(folders.len(), 2);
         // A folder inside one already there isn't walked twice.

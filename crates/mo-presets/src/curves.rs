@@ -193,11 +193,19 @@ pub fn at_speed(c: &Curve, speed: f64) -> Curve {
     }
     let words = if speed < 1.0 { "half speed" } else { "double speed" };
     let words = if speed == 0.5 || speed == 2.0 { words.to_owned() } else { format!("{speed}x speed") };
-    let mut h = Sha256::new();
-    h.update(c.id.as_bytes());
-    h.update(speed.to_le_bytes());
-    let id = h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect();
+    let id = id_at_speed(&c.id, speed);
     Curve { id, name: format!("{} ({words})", c.name), length_beats: c.length_beats / speed, ..c.clone() }
+}
+
+/// The id [`at_speed`] gives the curve with id `id` at `speed`: `id` itself at a speed of 1 (or a broken one).
+pub fn id_at_speed(id: &str, speed: f64) -> String {
+    if speed == 1.0 || !speed.is_finite() || speed <= 0.0 {
+        return id.to_owned();
+    }
+    let mut h = Sha256::new();
+    h.update(id.as_bytes());
+    h.update(speed.to_le_bytes());
+    h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
 /// A shape's fingerprint: the points stretched to the same length and height and rounded to three decimals, hashed
@@ -1099,6 +1107,12 @@ pub fn file(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
     let id = c.id.get(..ID_IN_NAME).unwrap_or(&c.id);
     let path = folder.join(format!("{} {id}.{}", names::safe_file_name(&c.name), curve::EXTENSION));
     if holds(&path, c) {
+        // Used again: its time says so, and the start-up sweep (which clears the files here that are a month old)
+        // counts from its last use, never from when it was first made. (Best effort: an old time only means it's
+        // made again one day.)
+        if let Ok(file) = std::fs::File::options().write(true).open(&path) {
+            let _ = file.set_modified(std::time::SystemTime::now());
+        }
         return Ok(path);
     }
     std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the Curves folder: {e}"))?;
@@ -1132,10 +1146,16 @@ fn curve_files(folder: &Path) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
+/// Whether a file's whole name is one [`file`] gives now: "<name> <16 hex>.bwcurve". The start-up sweep clears such
+/// files once they haven't been used for a month (`mo_app::tidy`): [`file`] makes one again when it's asked for.
+/// (Not the 8 digits of the first test builds: eight digits are a date too, and a file named so may be yours.)
+pub fn is_made_file_name(name: &str) -> bool {
+    id_in_file_name(name).is_some_and(|id| id.len() == ID_IN_NAME)
+}
+
 /// The curve id's start that a file's name ends with, when the name is one [`file`] gives: "<name> <16 hex>.bwcurve"
-/// (8 in the first test builds). The start-up sweep clears such files once they're old (`mo_app::tidy`): [`file`]
-/// makes one again when it's asked for.
-pub fn id_in_file_name(name: &str) -> Option<&str> {
+/// (8 in the first test builds).
+fn id_in_file_name(name: &str) -> Option<&str> {
     let stem = name.strip_suffix(curve::EXTENSION)?.strip_suffix('.')?;
     let (_, id) = stem.rsplit_once(' ')?;
     let hex = (id.len() == ID_IN_NAME || id.len() == 8) && id.bytes().all(|b| b.is_ascii_hexdigit());

@@ -761,8 +761,13 @@ impl Card {
             // and length; the list gives those of its newest place): with no edits made on the old picture, the
             // card shows it as it's found now (the 19 Nov 2026 review's CU-8). With edits it stays: they were made
             // on what's in sight.
+            // And while something is in hand, highlighted or picked: that isn't taken away under the mouse.
             let found = Shape::from_curve(points, length_beats);
-            let worked_on = editor.changed() || editor.can_undo() || editor.can_redo() || editor.dragging();
+            let worked_on = differs(editor, self.origin.as_ref())
+                || editor.dragging()
+                || editor.highlight().is_some()
+                || self.grab.is_some()
+                || !self.picked.is_empty();
             if worked_on || self.origin.as_ref() == Some(&found) {
                 return false;
             }
@@ -2425,6 +2430,12 @@ mod tests {
         assert!(card.act(curve_act::FLIP));
         assert!(!card.open("a", "Rise", &rise(), 4.0));
         assert!((card.length() - 8.0).abs() < 1e-9);
+        // With every edit undone it shows the old picture and nothing else: as found now again.
+        assert!(card.step_back(true));
+        assert!(card.open("a", "Rise", &rise(), 4.0));
+        // A highlight is kept under the mouse.
+        assert!(card.act(curve_act::HIGHLIGHT_ALL));
+        assert!(!card.open("a", "Rise", &rise(), 8.0));
     }
 
     #[test]

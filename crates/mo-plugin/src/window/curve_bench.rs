@@ -314,6 +314,10 @@ impl Bench {
                 *self.open.borrow_mut() = Some((at, now.clone()));
                 if anew {
                     self.stop(panel);
+                    let data = panel.global::<CurveEditorData>();
+                    data.set_picture(Image::default());
+                    data.set_ruler(ModelRc::default());
+                    data.set_end_x(-1.0);
                     self.redraw(panel);
                 }
                 self.show(panel, anew);

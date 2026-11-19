@@ -1071,7 +1071,7 @@ fn show_curve_card(app: &AppWindow) {
         editor.set_facts(facts.into());
         editor.set_found(found.into());
         let edited = editor.get_changed();
-        let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some(), edited);
+        let offers = logic::curve_offers(c, !p.bitwig.is_empty() || bitwig_chosen().is_some(), edited);
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
         editor.set_hear_key(key(curve_act::HEAR));
         editor.set_metronome_key(key(curve_act::METRONOME));
@@ -1271,7 +1271,7 @@ fn curve_of_card_id(p: &Page, card_id: &str) -> Option<(String, String)> {
     let at_speed = || {
         p.curve_shown.iter().zip(&p.curve_speeds).find_map(|(&at, &speed)| {
             let c = p.curves.get(at)?;
-            (speed != 1.0 && curves::at_speed(c, speed).id == card_id).then_some(at)
+            (speed != 1.0 && curves::id_at_speed(&c.id, speed) == card_id).then_some(at)
         })
     };
     let c = p.curves.get(own.or_else(at_speed)?)?;
@@ -1342,11 +1342,19 @@ struct Where {
 impl Where {
     /// On the window's thread.
     fn of(p: &Page) -> Where {
-        let bitwig = crate::settings::value(mo_app::app_settings::BITWIG_FOLDER_KEY)
-            .filter(|f| !f.trim().is_empty())
-            .map(PathBuf::from);
-        Where { library: p.library.clone(), data_dir: p.data_dir.clone(), bitwig }
+        Where { library: p.library.clone(), data_dir: p.data_dir.clone(), bitwig: bitwig_chosen() }
     }
+
+    /// The chosen folder, when it is Bitwig's: it has a Library folder in it. (A drive picked by mistake isn't
+    /// walked for presets.) Asks the disk: off the window's thread.
+    fn bitwig(&self) -> Option<&Path> {
+        self.bitwig.as_deref().filter(|c| c.join("Library").is_dir())
+    }
+}
+
+/// Your Bitwig Studio folder as Settings › DAWs has it now. On the window's thread.
+fn bitwig_chosen() -> Option<PathBuf> {
+    crate::settings::value(mo_app::app_settings::BITWIG_FOLDER_KEY).filter(|f| !f.trim().is_empty()).map(PathBuf::from)
 }
 
 fn read_sounds(_app: &AppWindow) {
@@ -1414,7 +1422,7 @@ fn read_all(at: &Where) -> Result<(), String> {
     let songs = mo_library::songs::group_songs(&saves, &choices, &mo_formats::dates::RealDates::now());
     let newest = logic::newest_saves(&songs, export_root.as_deref());
     let bitwig_folders =
-        logic::bitwig_folders(at.bitwig.as_deref(), &plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
+        logic::bitwig_folders(at.bitwig(), &plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     // Every song's newest save as it is now, read below or left out: Songs' link reads again only for another (U-2).
     let looked_at: HashMap<String, i64> = songs.iter().map(|s| (s.latest.path.clone(), s.latest.mtime)).collect();
     drop(songs);
@@ -2708,7 +2716,7 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
     drop(lib);
     let mut paths = logic::curve_saves(&saves, export_root.as_deref());
     let bitwig_folders =
-        logic::bitwig_folders(at.bitwig.as_deref(), &plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
+        logic::bitwig_folders(at.bitwig(), &plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     drop(saves);
     let library_roots: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).collect();
     // Bitwig's curves library and the plugins' LFO shapes (Serum, LFOTool, Vital, Duck), looked through side by side.
@@ -2841,8 +2849,20 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             }
         }
         curve_act::TO_BITWIG => {
-            let Some(folder) = logic::bitwig_curves_folder(&bitwig_folders) else { return false };
-            let started = background::spawn("Curve to Bitwig", move || match curves::save_to_bitwig(&sent, &folder) {
+            // The folder chosen in Settings as it is now (it may have been chosen since the curves were read), then
+            // the ones found then. Which has a Library folder is asked off the window's thread.
+            let folders: Vec<PathBuf> = bitwig_chosen().into_iter().chain(bitwig_folders).collect();
+            if folders.is_empty() {
+                return false;
+            }
+            let save = move || {
+                let folder = logic::bitwig_curves_folder(&folders, |library| library.is_dir()).ok_or_else(|| {
+                    "Couldn't find Bitwig's Library folder. Choose your Bitwig Studio folder in Settings › DAWs."
+                        .to_owned()
+                })?;
+                curves::save_to_bitwig(&sent, &folder)
+            };
+            let started = background::spawn("Curve to Bitwig", move || match save() {
                 Ok(path) => {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     // The folder by name: one that isn't the Library Bitwig uses is seen at once.
