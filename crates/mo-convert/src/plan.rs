@@ -516,18 +516,6 @@ impl Planner<'_> {
         }
     }
 
-    /// Says when a channel's sample keeps Ogg Vorbis inside a WAV file, as FL Studio's own sounds do: whether Bitwig
-    /// plays those hasn't been seen, and some programs don't.
-    fn ogg_in_wav_note(&mut self, c: &FlChannel, info: Option<&SampleFile>) {
-        if info.is_some_and(|i| i.ogg_in_wav) {
-            self.notes.push(format!(
-                "{}: {} keeps its sound packed inside a WAV file (Ogg Vorbis, as FL Studio's own sounds do); if Bitwig \
-                 can't play it, save it as a plain WAV and point the track at that",
-                c.name, c.sample
-            ));
-        }
-    }
-
     /// A channel that plays notes: a track with its sampler or plugin, and a clip for each FL pattern clip. Returns the
     /// track and, when it has a plugin, the plugin's place on it.
     fn instrument_track(&mut self, c: &FlChannel, at: usize) -> (Track, Option<(usize, FlPlugin)>) {
@@ -557,7 +545,6 @@ impl Planner<'_> {
                     }
                     Some(_) => {}
                 }
-                self.ogg_in_wav_note(c, info.as_ref());
                 devices.push(Device::Sampler {
                     sample: c.sample.clone(),
                     info,
@@ -693,7 +680,6 @@ impl Planner<'_> {
             )),
             Some(_) => {}
         }
-        self.ogg_in_wav_note(c, info.as_ref());
         if c.stretch.reversed {
             self.notes
                 .push(format!("{}: plays its sample backwards in FL Studio; reverse its clips in Bitwig", c.name));
@@ -1192,6 +1178,23 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     }
 
     let mut seen = HashSet::new();
+    // Samples that keep Ogg Vorbis inside a WAV file, as FL Studio's own sounds do: said once for the song, after
+    // what was left out. Whether Bitwig plays that kind hasn't been seen, and some programs don't.
+    let mut packed: Vec<&str> = planner
+        .samples
+        .iter()
+        .filter(|(_, info)| info.as_ref().is_some_and(|i| i.ogg_in_wav))
+        .map(|(path, _)| mo_formats::paths::file_name(path))
+        .collect();
+    packed.sort_unstable();
+    packed.dedup();
+    if !packed.is_empty() {
+        planner.notes.push(format!(
+            "Kept packed inside a WAV file (Ogg Vorbis, as FL Studio's own sounds are): {}. If Bitwig can't play one, \
+             save it as a plain WAV and point its track at that",
+            packed.join(", ")
+        ));
+    }
     let notes = planner.notes.into_iter().filter(|n| seen.insert(n.clone())).collect();
     Plan { title: song.title.clone(), tempo, ppq: song.ppq, tracks, master_effects, lanes, notes }
 }

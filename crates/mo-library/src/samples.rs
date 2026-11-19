@@ -211,10 +211,10 @@ impl SampleLocator {
     }
 
     /// Where the file to use for this sample is, when another program is to be pointed at it (the converter): as
-    /// [`SampleLocator::locate`], but the DAW's own content ([`is_daw_content`]) only where the DAW keeps it, never
-    /// another file with its name.
+    /// [`SampleLocator::locate`], but FL Studio's own content ([`is_fl_factory_content`]) only where FL Studio
+    /// keeps it, never another file with its name.
     pub fn locate_to_use(&self, sample: &str, project: &str) -> Option<String> {
-        if is_daw_content(sample) { self.fl_factory_file(sample, project) } else { self.locate(sample, project) }
+        if is_fl_factory_content(sample) { self.fl_factory_file(sample, project) } else { self.locate(sample, project) }
     }
 
     /// A sample of FL Studio's own content ("%FLStudioFactoryData%\Data\Patches\Packs\…"), where an FL Studio this
@@ -224,6 +224,10 @@ impl SampleLocator {
         // The rest of its path a folder at a time, as it's saved with either slash, so the file's path has this
         // computer's.
         let rest: Vec<&str> = sample[setting.len()..].split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+        // Only a file inside FL Studio's folder: a path that climbs out of it ("..") or names a drive isn't one.
+        if rest.iter().any(|p| matches!(*p, "." | "..") || p.contains(':')) {
+            return None;
+        }
         (self.content)(project).iter().find_map(|folder| {
             let packs = Path::new(folder);
             let ends: Vec<&str> = packs.iter().rev().take(FL_PACKS.len()).filter_map(|p| p.to_str()).collect();
@@ -570,6 +574,12 @@ fn split(path: &str) -> (&str, Vec<&str>) {
 /// path of its own.
 pub fn is_daw_content(sample: &str) -> bool {
     sample.starts_with('%')
+}
+
+/// Whether a sample is one of FL Studio's own sounds as FL Studio saves it ("%FLStudioFactoryData%…", in any case):
+/// a file in FL Studio's own folder, which no file of the same name somewhere else stands in for.
+pub fn is_fl_factory_content(sample: &str) -> bool {
+    sample.get(..FL_FACTORY_DATA.len()).is_some_and(|p| case::eq_ignore_case(p, FL_FACTORY_DATA))
 }
 
 /// The paths to try for a sample before searching folders, best first: as saved, then moved with a drive or a folder

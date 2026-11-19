@@ -2951,6 +2951,7 @@ version = "0.9.0-beta.1"
 dependencies = [
  "md-5",
  "memchr",
+ "mo-audio",
  "mo-formats",
  "mo-library",
  "rayon",

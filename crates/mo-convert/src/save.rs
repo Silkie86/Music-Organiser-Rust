@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mo_formats::fl::{events, song};
 use mo_formats::paths;
-use mo_library::samples::is_daw_content;
+use mo_library::samples::is_fl_factory_content;
 use rayon::prelude::*;
 
 use crate::plan::{Options, SampleFile, from_fl};
@@ -138,8 +138,8 @@ pub fn can_save_over(project: &Path, file: &Path, written_before: Option<&str>) 
 
 /// Converts an FL project into the export folder as `name` (see [`bitwig_name`]), from `template` (a project Bitwig
 /// saved). `written_before` is what [`Saved::written`] said about this name's earlier convert, if any. `find_sample`
-/// says where a sample that isn't where FL saved it is now, if anywhere; for FL Studio's own sounds (a path that
-/// starts with "%") it must answer only with the file in FL Studio's folder. The samples are looked for and read on every
+/// says where a sample that isn't where FL saved it is now, if anywhere; for FL Studio's own sounds
+/// ("%FLStudioFactoryData%…") it must answer only with the file in FL Studio's folder. The samples are looked for and read on every
 /// core, so the app calls this on its low-priority pool, never on the window's thread.
 pub fn bitwig_from_fl(
     project: &Path,
@@ -187,7 +187,7 @@ pub fn bitwig_from_fl(
     for c in &mut song.channels {
         if let Some((Some(f), _)) = read.get(&c.sample) {
             // FL Studio's own sound, in FL Studio's folder, is where it should be: not one to list.
-            if !is_daw_content(&c.sample) {
+            if !is_fl_factory_content(&c.sample) {
                 found.push(format!("{}: {} wasn't there, so {f} is used", c.name, c.sample));
             }
             c.sample = f.clone();

@@ -173,7 +173,8 @@ fn fl_studios_own_sound_is_used_from_fl_studios_folder_and_nowhere_else() {
     let dir = folder("fl own sound");
     let saved_as = r"%FLStudioFactoryData%\Data\Patches\Packs\Snare 01.wav";
     let song = project_with_fl_sound(&dir, saved_as);
-    let packs = dir.join("Image-Line/FL Studio 2024/Data/Patches/Packs");
+    let packs =
+        ["Image-Line", "FL Studio 2024", "Data", "Patches", "Packs"].iter().fold(dir.clone(), |p, part| p.join(part));
     std::fs::create_dir_all(&packs).unwrap();
     // A file with the same name beside the song: another sound, never used for FL Studio's own.
     let beside = snare(&dir);
@@ -200,7 +201,11 @@ fn fl_studios_own_sound_is_used_from_fl_studios_folder_and_nowhere_else() {
     let found = convert("found");
     assert!(found.found.is_empty(), "FL Studio's own sound in its own folder isn't listed as moved");
     assert!(!found.notes.iter().any(|n| n.contains("couldn't")), "{:?}", found.notes);
-    assert!(found.notes.iter().any(|n| n.contains("packed inside a WAV")), "{:?}", found.notes);
+    assert!(
+        found.notes.iter().any(|n| n.contains("packed inside a WAV") && n.contains("Snare 01.wav")),
+        "{:?}",
+        found.notes
+    );
     let bytes = std::fs::read(&found.file).unwrap();
     assert!(bytes.windows(own.len()).any(|w| w == own.as_bytes()), "the project points at FL Studio's file");
     assert!(!bytes.windows(saved_as.len()).any(|w| w == saved_as.as_bytes()), "not at FL Studio's placeholder");
@@ -229,6 +234,30 @@ fn compressed_samples_are_timed_by_their_decoder() {
         let expected: [u8; 16] = Md5::digest(&bytes).into();
         assert_eq!((s.bytes, s.md5), (bytes.len() as u64, expected), "{name}");
     }
+    // A sound as long as the start that's decoded to ask (FL Studio's drum hits are short), as an OGG and as FL Studio
+    // keeps its own: timed, not mistaken for a file that didn't say.
+    let own = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures");
+    let short_ogg = std::fs::read(own.join("tone-short.ogg")).unwrap();
+    let mut short_wav = ogg_in_wav();
+    short_wav.truncate(short_wav.len() - tone("tone.ogg").len() - 4);
+    short_wav.extend_from_slice(&(short_ogg.len() as u32).to_le_bytes());
+    short_wav.extend_from_slice(&short_ogg);
+    for (name, bytes) in [("short.ogg", &short_ogg), ("short.wav", &short_wav)] {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let s = read_sample(&path).unwrap();
+        assert!((s.seconds - 0.24).abs() < 1e-6, "{name}: {}", s.seconds);
+    }
+    // An MP3 with no length written in it is left for Bitwig: a decoder can only guess from its first frames and its
+    // size (far off for this one, a tone and then silence).
+    let s = read_sample(&own.join("tone-no-length.mp3")).unwrap();
+    assert_eq!((s.seconds, s.md5), (0.0, [0; 16]));
+    // A WAV of plain samples that was never finished isn't handed to a decoder: its header is all there is.
+    let unfinished = dir.join("unfinished.wav");
+    let mut wav = b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x44\xac\0\0\x88\x58\x01\0\x02\0\x10\0".to_vec();
+    wav.resize(4096, 0);
+    std::fs::write(&unfinished, &wav).unwrap();
+    assert_eq!(read_sample(&unfinished).unwrap().seconds, 0.0);
     // One the decoder can't read stays as before: read, its length left for Bitwig.
     let path = dir.join("broken.mp3");
     std::fs::write(&path, b"not audio").unwrap();
