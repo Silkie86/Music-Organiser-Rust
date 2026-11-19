@@ -312,6 +312,8 @@ pub fn stop() {
 }
 
 fn watch(feed: &Feed) {
+    // What the app held at its last `[Memory]` line, and when.
+    let mut held: Option<(u64, Instant)> = None;
     loop {
         std::thread::sleep(KNOCK_EVERY);
         if STOPPED.load(Ordering::Acquire) {
@@ -322,6 +324,13 @@ fn watch(feed: &Feed) {
         let a = answered.clone();
         let sent = Instant::now();
         let memory_before = crate::stuck::memory_now();
+        if let Some(now) = memory_before {
+            let (last, since) = held.unwrap_or((0, sent));
+            if let Some(words) = memory_line(last, since.elapsed(), now, crate::page_name(), &feed.running_titles()) {
+                log::info("Memory", &words);
+                held = Some((now.held, sent));
+            }
+        }
         let pauses = pauses_now();
         let answer = move || {
             let waited = u64::try_from(sent.elapsed().as_micros()).unwrap_or(u64::MAX).max(1);
@@ -403,6 +412,39 @@ fn watch(feed: &Feed) {
             log::warning("Freeze", &line(waited, false, crate::page_name(), &feed.running_titles(), &busy));
         }
     }
+}
+
+/// The app's memory gets a `[Memory]` line each time what it holds has changed by this much since the last one.
+const MEMORY_STEP: u64 = 100 * 1024 * 1024;
+
+/// A `[Memory]` line when what the app holds has moved [`MEMORY_STEP`] or more from `last` (what the line before
+/// said, `since` ago; 0 at the start): how much, on which page and with which jobs running, so the log shows what
+/// made it grow. The app held 1,700 MB on 17 Nov 2026 with nothing in the log to say what for; when Windows then
+/// needed the room for Bitwig, reading it all back from disk froze the window for up to 23 s.
+fn memory_line(
+    last: u64,
+    since: Duration,
+    now: crate::stuck::Memory,
+    page: &str,
+    running: &[String],
+) -> Option<String> {
+    const MB: u64 = 1024 * 1024;
+    if now.held.abs_diff(last) < MEMORY_STEP {
+        return None;
+    }
+    let change = if last == 0 {
+        String::new()
+    } else {
+        let way = if now.held > last { "more" } else { "less" };
+        format!(", {} MB {way} than {:.0} s ago", now.held.abs_diff(last) / MB, since.as_secs_f64())
+    };
+    let jobs =
+        if running.is_empty() { "no jobs running".to_owned() } else { format!("running: {}", running.join(", ")) };
+    Some(format!(
+        "The app holds {} MB{change} (page {page}; {jobs}; {} MB of it in RAM)",
+        now.held / MB,
+        now.in_ram / MB
+    ))
 }
 
 /// How much of a sleep of [`LOOK_EVERY`] that took `slept` was the watchdog being held up itself: nothing for the
@@ -529,6 +571,30 @@ mod tests {
             thread_line(LOOK_AT_THREAD, &["a".to_owned()]),
             "Stuck for 0.3 s, the window's thread was in:\n    a"
         );
+    }
+
+    #[test]
+    fn memory_gets_a_line_each_time_it_has_moved_a_hundred_megabytes() {
+        const MB: u64 = 1024 * 1024;
+        let at = |held: u64, in_ram: u64| crate::stuck::Memory { page_faults: 0, in_ram: in_ram * MB, held: held * MB };
+        let jobs = ["Reading sounds".to_owned()];
+        assert_eq!(
+            memory_line(0, Duration::ZERO, at(420, 400), "Songs", &[]).as_deref(),
+            Some("The app holds 420 MB (page Songs; no jobs running; 400 MB of it in RAM)")
+        );
+        assert_eq!(memory_line(420 * MB, Duration::from_secs(3), at(500, 480), "Songs", &[]), None);
+        assert_eq!(
+            memory_line(420 * MB, Duration::from_secs(12), at(1_060, 1_000), "Sounds", &jobs).as_deref(),
+            Some(
+                "The app holds 1060 MB, 640 MB more than 12 s ago (page Sounds; running: Reading sounds; 1000 MB of it in RAM)"
+            )
+        );
+        assert_eq!(
+            memory_line(1_060 * MB, Duration::from_secs(90), at(700, 49), "Space", &[]).as_deref(),
+            Some("The app holds 700 MB, 360 MB less than 90 s ago (page Space; no jobs running; 49 MB of it in RAM)")
+        );
+        // Nothing known, nothing said.
+        assert_eq!(memory_line(0, Duration::ZERO, at(0, 0), "Songs", &[]), None);
     }
 
     #[test]
