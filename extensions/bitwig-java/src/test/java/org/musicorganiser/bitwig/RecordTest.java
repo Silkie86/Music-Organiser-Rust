@@ -441,8 +441,11 @@ class RecordTest {
         bitwig.clock.advance(20000);
         assertEquals(List.of(), bitwig.calls.subList(from, bitwig.calls.size()), "nothing asked of the other project");
         assertTrue(bitwig.masterMuted);
-        // Back in the song: record off, Bitwig stopped, the track back on its arrangement, everything as it was.
+        // Back in the song: a change asked for before it's put back is told to wait, whatever Bitwig shows.
         bitwig.projectName.v = "MO Live Test";
+        assertEquals("The link is still putting Bitwig back after a recording that was cut off. Ask again in a moment.",
+                     error(app.ask(record(3, "rec", BAR_5))));
+        // Then: record off, Bitwig stopped, the track back on its arrangement, everything as it was.
         bitwig.clock.advance(3000);
         assertPutBack(0);
         assertTrue(calls().contains("returnToArrangement"), () -> calls().toString());

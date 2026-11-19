@@ -274,8 +274,8 @@ comes to the front while `record` runs, the job still touches nothing more and a
 what it had changed, and the answer says `putBackLater: true`. Twice a second the link looks whether the job's
 project is in front again, with the job's track in its listing. Then it turns arranger record off, presses Stop only
 if Bitwig plays and waits until it has stopped, returns the track to the arrangement, and sets back each setting and
-arm that still shows what the job set (one changed by hand since stays). `record` is refused in that project until
-this is done. If Bitwig stops the extension first, it does as much at once when the project is in front, else forgets
+arm that still shows what the job set (one changed by hand since stays). Changes are refused in that project
+until this is done ("still putting Bitwig back": a second or so). If Bitwig stops the extension first, it does as much at once when the project is in front, else forgets
 it.
 
 New in 3.31: the app is called DAWmate (15 Nov 2026), so the extension is too: Bitwig lists it as DAWmate > DAW
