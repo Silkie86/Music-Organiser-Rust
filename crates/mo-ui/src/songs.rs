@@ -402,6 +402,9 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
     let mut said_held = false;
     // What came while the thread was busy, still to do ([`next`]).
     let mut waiting: VecDeque<Told> = VecDeque::new();
+    // The start-up catch-up found saves songs.db didn't have, and the pages that took their saves from it before
+    // (Presets, Curves, MIDI) haven't been told yet: they are once it's kept.
+    let mut tell_pages = false;
     loop {
         let now = Instant::now();
         let due = |at: Option<Instant>| at.map_or(RETRY_AFTER, |at| at.saturating_duration_since(now));
@@ -461,6 +464,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                     mended_line(caught.mended)
                 ),
             );
+            tell_pages = caught.for_card();
             updated = updated.and(caught);
         }
         let closing = gave.take_waiting(live, &rx, &mut waiting);
@@ -504,6 +508,16 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                 }
                 None => None,
             };
+        }
+        // Presets, Curves and MIDI read their saves from songs.db, and since they're read just after the start that's
+        // before this catch-up: saves made as new files while the app was closed were missing from them for the whole
+        // run (the 19 November 2026 review's RA-1 and RA-2). Told once, and only when songs.db has them.
+        if tell_pages && keep_again_at.is_none() && !closing {
+            tell_pages = false;
+            let _ = weak.upgrade_in_event_loop(|app| {
+                crate::midi::songs_caught_up(&app);
+                crate::presets::songs_caught_up(&app);
+            });
         }
         if closing || (updated.is_empty() && !renumbered && !gave.any) {
             continue;

@@ -122,6 +122,9 @@ struct Page {
     reading: Option<Arc<AtomicBool>>,
     /// The index has been read once since the app opened (reading again is the Read MIDI again button's).
     read_once: bool,
+    /// The Songs page caught up with saves made while the app was closed during a reading that had taken its saves
+    /// before: your MIDI is read once more when that reading ends ([`songs_caught_up`]).
+    read_after: bool,
     library: PathBuf,
     feed: Option<Feed>,
     shortcuts: Shortcuts,
@@ -893,10 +896,22 @@ fn ahead_arrived(app: &AppWindow, loaded: Result<Loaded, String>) {
         show(app, loaded);
         return;
     }
-    if let Ok(l) = &loaded {
-        crate::finder::add_source(app, "midi", l.found.clone());
+    match loaded {
+        Ok(l) => {
+            crate::finder::add_source(app, "midi", l.found.clone());
+            PAGE.with(|p| p.borrow_mut().ahead_loaded = Some(Ok(l)));
+        }
+        // A read that failed isn't kept: shown at a first visit hours later it would be an old failure, and the page
+        // only reads the index again when a reading changes something (the 19 November 2026 review's RA-6). The
+        // first visit, or Ctrl+K, reads it afresh.
+        Err(e) => {
+            log::warning(
+                "MIDI",
+                &format!("The MIDI index couldn't be read ahead of the page ({e}): read at its first visit"),
+            );
+            PAGE.with(|p| p.borrow_mut().ahead_read = false);
+        }
     }
-    PAGE.with(|p| p.borrow_mut().ahead_loaded = Some(loaded));
 }
 
 /// Settings' smallest part changed since `kept` was read ahead: what it says is hidden and its Ctrl+K lines are made
@@ -904,10 +919,12 @@ fn ahead_arrived(app: &AppWindow, loaded: Result<Loaded, String>) {
 fn remake_ahead(app: &AppWindow, kept: Loaded) {
     let weak = app.as_weak();
     let started = background::spawn("MIDI index, ahead", move || {
-        let loaded = Loaded::new(kept.cat, kept.notes);
+        // Guarded, as the read itself is: a bug in making the lines still hands the page an answer, so it never
+        // waits for one that isn't coming (the 19 November 2026 review's RA-7).
+        let loaded = background::guarded(|| Loaded::new(kept.cat, kept.notes));
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
-                ahead_arrived(&app, Ok(loaded));
+                ahead_arrived(&app, loaded);
             }
         });
     });
@@ -1440,6 +1457,27 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
 /// (every save with the old app's "older saves" setting) and every MIDI file in the MIDI folders (the old app's list
 /// for now). Only new and changed files are read, newest first; `retry` reads the ones that failed before too. The
 /// files are only read. When it's done the page reads the index again, so every line has the new key finder's key.
+/// The Songs page has caught up with the saves made while the app was closed, and songs.db has them. A reading takes
+/// its saves from songs.db with the date and size it has for each, so one that began before this missed the new saves
+/// and took a save written over as read already, for the whole run (the 19 November 2026 review's RA-2): your MIDI is
+/// read once more, now or when the reading going on ends. Only saves whose date or size changed are read; the folders
+/// of MIDI files are walked again. Nothing when no reading has begun: the first one takes the saves as they are now.
+/// Called once a run, and only when the catch-up found something (never for each save a DAW makes).
+pub fn songs_caught_up(app: &AppWindow) {
+    let read_now = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if !p.read_once || HERE.with(|h| *h.borrow()) {
+            return false;
+        }
+        p.read_after = p.reading.is_some();
+        !p.read_after
+    });
+    if read_now {
+        log::info("MIDI", "Songs caught up with saves made while the app was closed: reading your MIDI once more");
+        read_midi(app, false);
+    }
+}
+
 pub fn read_midi(app: &AppWindow, retry: bool) {
     let Some((library, feed, stop)) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -1513,10 +1551,18 @@ pub fn read_midi(app: &AppWindow, retry: bool) {
         let loaded = changed.then(|| guarded_load(&library));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
-            PAGE.with(|p| p.borrow_mut().reading = None);
+            let read_after = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.reading = None;
+                std::mem::take(&mut p.read_after)
+            });
             let data = app.global::<MidiData>();
             data.set_reading(false);
             data.set_busy("".into());
+            // This reading took its saves before the Songs page had caught up: once more, for those ([`songs_caught_up`]).
+            if read_after {
+                read_midi(&app, false);
+            }
             if let Some(loaded) = loaded {
                 show(&app, loaded);
             } else if slots_made {
@@ -1577,7 +1623,10 @@ fn read_into_index(
         &format!("{} files wanted, {} to read, {} to forget", wanted.len(), plan.todo.len(), plan.forget.len()),
     );
     let own;
-    let pool = match background::bulk_pool() {
+    // The readers on a pool of their own: they hold every thread they're given until the list is read, and the bulk
+    // pool's other jobs (a song's waveforms) would wait for all of it (RA-3). The folder walk above gives its threads
+    // back as it goes.
+    let pool = match background::midi_read_pool() {
         Some(pool) => pool,
         None => {
             own = rayon::ThreadPoolBuilder::new()
