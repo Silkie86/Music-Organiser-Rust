@@ -173,7 +173,10 @@ struct Page {
     daw_move: i32,
     /// The song's bars the part in Bitwig was started with ([`BitwigSong::given`]), so [`fit_follows`] starts it
     /// again when they change (MI-3); none for a part alone, or in FL.
-    daw_song: Option<BitwigGiven>,
+    daw_song: BitwigGiven,
+    /// The part in a DAW (with `in_daw`, its phrase, which says the entry is still that part), so [`fit_follows`]
+    /// follows it while another part is picked for a right-click's menu (MP-1).
+    daw_at: Option<usize>,
     /// What the picked part's card says and offers about its fit now ([`show_card_fit`]).
     card_fit: CardFit,
     /// While a part is being put in its song in Bitwig ([`put_in_song`]; one at a time): set to have it stopped
@@ -211,14 +214,15 @@ struct BitwigSong {
     with: Arc<SongBars>,
 }
 
-/// What of a [`BitwigSong`] Bitwig and the card's Bitwig line are given: the arranger's loop (or why there's none)
-/// and the song's bars. Not the song's notes: Bitwig plays its own arrangement, so an edit to them (a save while it
-/// plays, a parts chip that keeps the bars) has it play on as it is.
-type BitwigGiven = (Result<mo_dawlink::bitwig::SongLoop, String>, std::ops::Range<i64>);
+/// What of a [`BitwigSong`] Bitwig is given: the arranger's loop, or none when the song has no bars Bitwig can go
+/// round (not a Bitwig project, or read from its clip launcher), and the part plays there alone, so other bars of
+/// that song change nothing it hears (MP-2). Not the song's notes: Bitwig plays its own arrangement, so an edit to
+/// them (a save while it plays, a parts chip that keeps the bars) has it play on as it is.
+type BitwigGiven = Option<mo_dawlink::bitwig::SongLoop>;
 
 impl BitwigSong {
     fn given(&self) -> BitwigGiven {
-        (self.bars.clone(), self.with.bars.clone())
+        self.bars.as_ref().ok().cloned()
     }
 }
 
@@ -471,7 +475,7 @@ impl Page {
     /// another song).
     fn daw_follows(&self, at: usize, now: i32, bitwig: bool) -> bool {
         let there = self.in_daw.is_some() && self.in_daw == self.cat.entry(at).map(|e| e.phrase.id);
-        let song = || self.bitwig_song(at).map(|song| song.given());
+        let song = || self.bitwig_song(at).and_then(|song| song.given());
         there && (now != self.daw_move || (bitwig && song() != self.daw_song))
     }
 
@@ -496,9 +500,17 @@ impl Page {
 
     /// The speed Play loop plays the picked part at: yours, else the song's when it plays with the song, else its own
     /// (once read).
-    fn play_bpm(&self) -> f64 {
+    fn play_bpm(&self) -> Option<f64> {
         let own = self.card_with.as_ref().map(|with| with.bpm()).or(self.card_bpm);
-        self.speed.or(own).unwrap_or(page::PLAY_TEMPO)
+        self.speed.or(own)
+    }
+
+    /// The speed a step of the stepper (or Alt+Up and Alt+Down) starts from: your speed; else, while a loop plays
+    /// another part than the one picked (picked for a right-click's menu), the tempo that loop was made at, as the key
+    /// steps the loop (MP-1); else the picked part's (none until its tempo is read: MP-5, no step from a made-up 120).
+    fn step_from(&self, loop_bpm: Option<f64>) -> Option<f64> {
+        let other = self.looping.is_some() && self.looping != self.picked;
+        self.speed.or(loop_bpm.filter(|_| other)).or_else(|| self.play_bpm())
     }
 
     /// The card's sound line for the picked part `at`, as it plays now: what of the song it plays with
@@ -1205,7 +1217,7 @@ fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_bpm_stepped(move |by| {
         if let Some(app) = weak.upgrade() {
-            change_speed(&app, |p| Some(page::step_bpm(p.play_bpm(), by)));
+            step_speed(&app, by);
         }
     });
     let weak = app.as_weak();
@@ -1425,7 +1437,9 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
     show_years(app);
     relist(app);
     match picked {
-        Some(at) => pick(app, Some((at, None))),
+        // The index read again shows the same pick: it starts and stops nothing, so a part picked for its menu
+        // while another plays isn't played or sent now (MP-1).
+        Some(at) => pick_as(app, Some((at, None)), false),
         None => data.set_panel_shown(false),
     }
     if let Some(hash) = PAGE.with(|p| p.borrow_mut().wanted.take()) {
@@ -2173,7 +2187,9 @@ fn show_sound(data: &MidiData, p: &mut Page) {
         data.set_sound_line(line.into());
     }
     data.set_play_with_song(p.card_with.is_some());
-    data.set_bpm_text(page::bpm_text(p.play_bpm()).into());
+    // Until the part's own tempo is read, no number rather than a made-up one (MP-5).
+    data.set_bpm_text(p.play_bpm().map_or_else(|| "\u{2026} BPM".to_owned(), page::bpm_text).into());
+    data.set_bpm_known(p.play_bpm().is_some());
     data.set_bpm_changed(p.speed.is_some());
     data.set_metronome(p.metronome);
     // Play in Bitwig's tip only promises the song's bars where Bitwig has some to go round.
@@ -2188,7 +2204,7 @@ fn show_sound(data: &MidiData, p: &mut Page) {
 /// they were (a filter, a word typed, the song saved with the same chords) touches nothing that plays.
 fn fit_follows(app: &AppWindow) {
     let data = app.global::<MidiData>();
-    let Some((at, ask, again)) = PAGE.with(|p| {
+    let Some((ask, again)) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let at = p.picked?;
         let now = p.fit_move(at);
@@ -2198,11 +2214,17 @@ fn fit_follows(app: &AppWindow) {
         if !same_bars(&with, &p.card_with) {
             show_sound(&data, &mut p);
         }
-        let looping = p.looping == Some(at) && (now != p.loop_move || !same_bars(&with, &p.loop_with));
+        // What plays follows: the picked part, or the part still playing while another is picked for a
+        // right-click's menu (MP-1), while its line is in the list (or the list isn't a song's any more). One that's
+        // left a list of the same song plays on as it was, as the picked part does (`fit_picked`).
+        let follows = |p: &Page, l: usize| p.picked == Some(l) || p.fit_of(l).is_some() || p.fits_song.is_none();
+        let looping = p.looping.filter(|&l| {
+            follows(&p, l) && (p.fit_move(l) != p.loop_move || !same_bars(&p.heard_with(l), &p.loop_with))
+        });
         let bitwig = data.get_daw_playing() == Daw::Bitwig.id() || data.get_daw_starting() == Daw::Bitwig.id();
-        let in_daw = p.daw_follows(at, now, bitwig);
+        let in_daw = p.daw_at.filter(|&l| follows(&p, l) && p.daw_follows(l, p.fit_move(l), bitwig));
         show_card_fit(&data, &mut p);
-        Some((at, ask, (looping, in_daw)))
+        Some((ask, (looping, in_daw)))
     }) else {
         return;
     };
@@ -2210,13 +2232,13 @@ fn fit_follows(app: &AppWindow) {
         ask_notes(app, ask);
     }
     let (looping, in_daw) = again;
-    if looping && data.get_playing() {
-        replay(app, at);
+    if let Some(l) = looping.filter(|_| data.get_playing()) {
+        replay(app, l);
     }
     let daw_now = if data.get_daw_starting() != "" { data.get_daw_starting() } else { data.get_daw_playing() };
-    if let Some(daw) = Daw::from_id(&daw_now).filter(|_| in_daw) {
+    if let (Some(daw), Some(l)) = (Daw::from_id(&daw_now), in_daw) {
         stop_daw(app);
-        start_daw(app, daw, at);
+        start_daw(app, daw, l);
     }
 }
 
@@ -2386,6 +2408,14 @@ fn step(app: &AppWindow, by: i32) {
 /// Picks part `picked` (none closes the card). `row` is its line when that's known; when it isn't (the index was just
 /// read again) the list finds it once it has been worked out.
 fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
+    // A line right-clicked is picked for its menu only: that pick starts and stops nothing (MI-2, as on Sounds); the
+    // card then offers to play it, and the menu's play lines play it.
+    let follow = !app.global::<crate::AppKeys>().get_picking_for_menu();
+    pick_as(app, picked, follow);
+}
+
+/// [`pick`], saying whether what plays (the loop, a DAW part) follows the pick.
+fn pick_as(app: &AppWindow, picked: Option<(usize, Option<usize>)>, follow: bool) {
     let row = picked.and_then(|(_, row)| row);
     let before = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -2445,9 +2475,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     });
     data.set_panel_shown(true);
     show_soundfont(app);
-    // A line right-clicked is picked for its menu only: that pick starts and stops nothing (MI-2, as on Sounds); the
-    // card then offers to play it, and the menu's play lines play it.
-    if app.global::<crate::AppKeys>().get_picking_for_menu() {
+    if !follow {
         show_picked_plays(app);
         if let Some(ask) = ask {
             ask_notes(app, ask);
@@ -2856,7 +2884,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         }
         ("midi.faster", _) | ("midi.slower", _) => {
             let by = if id == "midi.faster" { 1 } else { -1 };
-            change_speed(app, |p| Some(page::step_bpm(p.play_bpm(), by)));
+            step_speed(app, by);
             true
         }
         ("midi.playBitwig", _) => toggle_daw(app, Daw::Bitwig),
@@ -3678,6 +3706,13 @@ fn toggle_metronome(app: &AppWindow) {
     played_differently(app);
 }
 
+/// A step of the stepper or its keys: from [`Page::step_from`]; none while that isn't known yet.
+fn step_speed(app: &AppWindow, by: i32) {
+    let playing = loop_playing().then(|| f64::from_bits(LOOP_BPM.load(std::sync::atomic::Ordering::SeqCst)));
+    let Some(from) = PAGE.with(|p| p.borrow().step_from(playing.filter(|bpm| *bpm > 0.0))) else { return };
+    change_speed(app, |_| Some(page::step_bpm(from, by)));
+}
+
 /// Sets Play loop's speed (`speed` of the page as it is: yours, or none for each part's own tempo).
 fn change_speed(app: &AppWindow, speed: impl FnOnce(&Page) -> Option<f64>) {
     PAGE.with(|p| {
@@ -4345,7 +4380,8 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
         let mut p = p.borrow_mut();
         p.in_daw = Some(phrase_id);
         p.daw_move = part.semitones;
-        p.daw_song = song.as_ref().map(BitwigSong::given);
+        p.daw_song = song.as_ref().and_then(BitwigSong::given);
+        p.daw_at = Some(at);
     });
     show_picked_plays(app);
     data.set_daw_starting(daw.id().into());
@@ -4806,6 +4842,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_speed_step_starts_from_what_plays_and_never_from_a_made_up_tempo() {
+        let mut p = Page { cat: Arc::new(sample().cat), picked: Some(2), ..Page::default() };
+        // Its own tempo not read yet: no number, and no step (MP-5).
+        assert_eq!((p.play_bpm(), p.step_from(None)), (None, None));
+        p.card_bpm = Some(92.0);
+        assert_eq!(p.step_from(None), Some(92.0));
+        // Another part picked for a right-click's menu while part 4 loops at 90: the step is the loop's (MP-1).
+        p.looping = Some(4);
+        assert_eq!(p.step_from(Some(90.0)), Some(90.0));
+        // The picked part looping, or a speed of yours: those.
+        p.looping = Some(2);
+        assert_eq!(p.step_from(Some(90.0)), Some(92.0));
+        p.speed = Some(100.0);
+        p.looping = Some(4);
+        assert_eq!(p.step_from(Some(90.0)), Some(100.0));
+    }
+
+    #[test]
     fn a_loop_made_again_goes_on_from_the_beat_the_page_s_loop_is_on_as_it_goes_in() {
         LOOP_BPM.store(120.0f64.to_bits(), std::sync::atomic::Ordering::SeqCst);
         let ours = format!("{PLAY_KEY}7");
@@ -5114,7 +5168,7 @@ mod tests {
         p.with_song = true;
         listed(&mut p, &glass, &arranger);
         p.in_daw = p.cat.entry(4).map(|e| e.phrase.id);
-        p.daw_song = p.bitwig_song(4).map(|song| song.given());
+        p.daw_song = p.bitwig_song(4).and_then(|song| song.given());
         p.daw_move = 0;
         assert!(!p.daw_follows(4, 0, true));
         assert!(p.daw_follows(4, 2, false), "its move");
@@ -5131,6 +5185,16 @@ mod tests {
         p.with_song = false;
         assert!(p.daw_follows(4, 0, true), "the chip off");
         assert!(!p.daw_follows(2, 0, true), "another part");
+        // A song with no bars Bitwig can go round (an FL Studio song): the part plays there alone, so other bars of
+        // it, or the chip, change nothing it hears, and it isn't started again (MP-2).
+        p.with_song = true;
+        listed(&mut p, &night, &arranger);
+        p.daw_song = p.bitwig_song(4).and_then(|song| song.given());
+        assert_eq!(p.daw_song, None);
+        listed(&mut p, &night, &later);
+        assert!(!p.daw_follows(4, 0, true), "other bars of an FL Studio song");
+        p.with_song = false;
+        assert!(!p.daw_follows(4, 0, true), "the chip off for an FL Studio song");
         p.with_song = false;
         p.in_daw = None;
 
