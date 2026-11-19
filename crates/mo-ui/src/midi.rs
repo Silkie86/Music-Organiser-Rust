@@ -3266,6 +3266,14 @@ fn put_part(
         }
         // Stopped part way: the link's words say what Bitwig may have of it. A failure the stop had no part in (it
         // was pressed, but no recording heard it) keeps its own headline.
+        // Another project came to the front: the song is left set up for recording, and Bitwig is most likely over
+        // the app, so the card stays until it's read (the 19 Nov review's LK-1).
+        Err(e) if mo_dawlink::bitwig::was_cut_off_by_another_project(&e) => {
+            let why = e.to_string();
+            log::warning("MIDI", &format!("Putting {} in {} failed: {why}", part.name, song.name));
+            job.failed_to_read(midi_fits::PUT_FAILED, &why);
+            false
+        }
         Err(e) if heard => failed(job, midi_fits::PUT_STOPPED, e.to_string()),
         Err(e) => failed(job, midi_fits::PUT_FAILED, e.to_string()),
     }

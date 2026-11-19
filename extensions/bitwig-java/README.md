@@ -269,6 +269,15 @@ hears of it. `hello` says `loopback`:
 whether the link's own MIDI has come back, from the message it sends itself as Bitwig starts it and each time
 the app connects.
 
+New in 3.32: a recording cut off by another project is put back (the 19 Nov review's LK-1). When another project
+comes to the front while `record` runs, the job still touches nothing more and answers `abandoned`, but it now keeps
+what it had changed, and the answer says `putBackLater: true`. Twice a second the link looks whether the job's
+project is in front again, with the job's track in its listing. Then it turns arranger record off, presses Stop only
+if Bitwig plays and waits until it has stopped, returns the track to the arrangement, and sets back each setting and
+arm that still shows what the job set (one changed by hand since stays). `record` is refused in that project until
+this is done. If Bitwig stops the extension first, it does as much at once when the project is in front, else forgets
+it.
+
 New in 3.31: the app is called DAWmate (15 Nov 2026), so the extension is too: Bitwig lists it as DAWmate > DAW
 link, and the file is `DAWmate.bwextension`. Its ID is the same, so Bitwig treats it as the same controller. Two
 things keep their first names so nothing set up before is lost: the category of the "Let the app make changes"

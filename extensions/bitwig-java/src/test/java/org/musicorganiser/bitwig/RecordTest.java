@@ -429,6 +429,58 @@ class RecordTest {
     }
 
     @Test
+    @DisplayName("puts back what a recording cut off by another project had set, once its project is in front again")
+    void putsBackOnceItsProjectIsInFrontAgain() {
+        studio();
+        bitwig.during("record", () -> bitwig.playingNow, () -> bitwig.projectName.v = "My Song");
+        Map<String, Object> result = result(record(1, "rec", BAR_5, "arm", true));
+        assertEquals("abandoned", result.get("decided"));
+        assertEquals(true, result.get("putBackLater"));
+        // While the other project is in front, nothing is asked of Bitwig, however long it stays there.
+        int from = bitwig.calls.size();
+        bitwig.clock.advance(20000);
+        assertEquals(List.of(), bitwig.calls.subList(from, bitwig.calls.size()), "nothing asked of the other project");
+        assertTrue(bitwig.masterMuted);
+        // Back in the song: record off, Bitwig stopped, the track back on its arrangement, everything as it was.
+        bitwig.projectName.v = "MO Live Test";
+        bitwig.clock.advance(3000);
+        assertPutBack(0);
+        assertTrue(calls().contains("returnToArrangement"), () -> calls().toString());
+        // And it's over: nothing more is asked afterwards.
+        int after = bitwig.calls.size();
+        bitwig.clock.advance(5000);
+        assertEquals(List.of(), bitwig.calls.subList(after, bitwig.calls.size()));
+        // A new recording is taken again.
+        assertEquals("recorded", result(record(2, "rec", BAR_5)).get("decided"));
+    }
+
+    @Test
+    @DisplayName("leaves what was changed by hand since, and waits for the job's own track before it puts anything back")
+    void putsBackOnlyWhatStillShowsTheJobsValue() {
+        studio();
+        bitwig.during("record", () -> bitwig.playingNow, () -> bitwig.projectName.v = "My Song");
+        assertEquals("abandoned", result(record(1, "rec", BAR_5, "arm", true)).get("decided"));
+        // Another project of the same name hasn't the job's track: nothing is touched there.
+        TrackSpec rec = spec("Rec");
+        int at = bitwig.state.tracks.indexOf(rec);
+        bitwig.state.tracks.remove(rec);
+        bitwig.projectName.v = "MO Live Test";
+        int from = bitwig.calls.size();
+        bitwig.clock.advance(3000);
+        assertEquals(List.of(), bitwig.calls.subList(from, bitwig.calls.size()), "not the job's project");
+        // The song itself, with the pre-roll set by hand meanwhile: that stays, the rest goes back.
+        bitwig.state.tracks.add(at, rec);
+        bitwig.transportNow.put("preRoll", "two_bars");
+        bitwig.clock.advance(3000);
+        assertEquals("two_bars", bitwig.transportNow.get("preRoll"));
+        assertEquals("latch", bitwig.transportNow.get("automationWriteMode"));
+        assertEquals(false, bitwig.transportNow.get("isArrangerRecordEnabled"));
+        assertFalse(bitwig.masterMuted);
+        assertFalse(bitwig.playingNow);
+        assertEquals(List.of(false, true, false, false), bitwig.state.tracks.stream().map(t -> t.arm).collect(Collectors.toList()));
+    }
+
+    @Test
     @DisplayName("finds its track by its ID when a track goes in above it, and says the track is new")
     void findsItsTrackWhenOneGoesInAbove() {
         studio();
