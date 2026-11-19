@@ -154,6 +154,16 @@ pub fn like_favourites_words(step: u8, known: LikeKnown) -> String {
     }
 }
 
+/// The faint note under the slider at step `step`, when `by_measurements` of the sounds were matched by their
+/// measurements as deep listening never heard them: none at step 0 or when there are none.
+pub fn like_favourites_note(step: u8, by_measurements: usize) -> String {
+    match (step, by_measurements) {
+        (0, _) | (_, 0) => String::new(),
+        (_, 1) => "1 matched by measurements".to_owned(),
+        (_, n) => format!("{n} matched by measurements"),
+    }
+}
+
 /// Where the slider is (0 to 1) at step `step`.
 pub fn like_favourites_share(step: u8) -> f32 {
     f32::from(step.min(LIKE_STEPS)) / f32::from(LIKE_STEPS)
@@ -385,6 +395,16 @@ pub struct LikeFavourites {
     was_favourite: Vec<bool>,
     /// What it was worked out from ([`SoundList::like_key`]).
     key: u64,
+    /// How many were placed by the analyser's fingerprints though deep listening is on ([`mo_sounds::near::Reach`]).
+    by_analyser: usize,
+}
+
+impl LikeFavourites {
+    /// How many were matched by their measurements, as deep listening never heard them (or the favourite they're
+    /// closest to).
+    pub fn by_measurements(&self) -> usize {
+        self.by_analyser
+    }
 }
 
 /// Your say about a sound since it was read: what you changed, over what the sound says.
@@ -745,8 +765,13 @@ impl SoundList {
                 (now.sound.id, now.sound_type, role)
             })
             .collect();
-        let reach = mo_sounds::near::reach(index, &sounds);
-        Arc::new(LikeFavourites { reach, was_favourite, key: self.like_key() })
+        let near = mo_sounds::near::reach(index, &sounds);
+        Arc::new(LikeFavourites {
+            reach: near.each,
+            was_favourite,
+            key: self.like_key(),
+            by_analyser: near.by_analyser,
+        })
     }
 
     /// What how close the sounds are to your favourites is worked out from, as a number: which are favourites, each
@@ -821,6 +846,12 @@ impl SoundList {
     /// Whether this list knows how close its sounds are to your favourites.
     pub fn knows_like_favourites(&self) -> bool {
         self.like.is_some()
+    }
+
+    /// How many of the sounds like your favourites were matched by their measurements, as deep listening never heard
+    /// them (or the favourite they're closest to): 0 until it's known.
+    pub fn like_favourites_by_measurements(&self) -> usize {
+        self.like.as_ref().map_or(0, |l| l.by_measurements())
     }
 
     /// Whether this list shows your say over any of its sounds ([`SoundList::with_say`]).
@@ -2144,6 +2175,10 @@ mod tests {
         assert_eq!(like_favourites_words(2, LikeKnown::Finding), "Finding…");
         assert_eq!(like_favourites_words(2, LikeKnown::Missing), "No fingerprints");
         assert_eq!(like_favourites_words(2, LikeKnown::Yes), "+3 each");
+        assert_eq!(
+            [(0, 5), (2, 0), (2, 1), (2, 12)].map(|(s, n)| like_favourites_note(s, n)),
+            ["", "", "1 matched by measurements", "12 matched by measurements"]
+        );
         assert_eq!((like_favourites_share(0), like_favourites_share(4), like_favourites_share(99)), (0.0, 0.5, 1.0));
         assert_eq!(
             [0.0, 0.06, 0.07, 0.5, 1.0, 2.0, -1.0, f32::NAN].map(like_favourites_step),

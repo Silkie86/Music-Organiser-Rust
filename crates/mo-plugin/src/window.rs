@@ -2209,12 +2209,13 @@ impl Column {
         panel.set_hide_silent_words(mo_app::sounds::hide_silent_text(library.map(|l| l.list.silent())).into());
         let step = asked.filters.like_favourites;
         panel.set_like_favourites(mo_app::sounds::like_favourites_share(step));
-        let known = match library.map(Library::like) {
-            Some(Like::Ready(_)) => LikeKnown::Yes,
-            Some(Like::Not(_)) => LikeKnown::Missing,
-            _ => LikeKnown::Finding,
+        let (known, by_measurements) = match library.map(Library::like) {
+            Some(Like::Ready(like)) => (LikeKnown::Yes, like.by_measurements()),
+            Some(Like::Not(_)) => (LikeKnown::Missing, 0),
+            _ => (LikeKnown::Finding, 0),
         };
         panel.set_like_favourites_words(mo_app::sounds::like_favourites_words(step, known).into());
+        panel.set_like_favourites_note(mo_app::sounds::like_favourites_note(step, by_measurements).into());
         panel.set_tempo_low(chips.tempo.low);
         panel.set_tempo_high(chips.tempo.high);
         panel.set_tempo_words(chips.tempo.words.as_str().into());

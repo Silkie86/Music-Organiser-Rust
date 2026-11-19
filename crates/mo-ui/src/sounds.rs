@@ -3635,6 +3635,8 @@ fn show_chips(app: &AppWindow) {
             (false, None) => list::LikeKnown::Finding,
         };
         data.set_like_favourites_words(list::like_favourites_words(f.like_favourites, known).into());
+        let by_measurements = if known == list::LikeKnown::Yes { p.list.like_favourites_by_measurements() } else { 0 };
+        data.set_like_favourites_note(list::like_favourites_note(f.like_favourites, by_measurements).into());
         data.set_hide_copies(f.hide_copies);
         data.set_hide_copies_text(list::hide_copies_text(copies::found()).into());
         data.set_hide_silent(!f.show_silent);
