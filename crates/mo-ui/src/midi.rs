@@ -72,9 +72,14 @@ impl Loaded {
         let smallest = SMALLEST.load(Ordering::Relaxed);
         // Said with what Settings hides from the first, so the line doesn't change once the list is worked out.
         let hidden = page::hidden_text(&cat, page::line_count(&cat, smallest), smallest);
-        let summary = page::summary(&cat);
-        let years = page::year_counts(&cat);
-        let found = Arc::new(mo_app::finder::midi_parts(&cat, smallest));
+        // Side by side on the shared low-priority threads: the summary and years each go through every part, and
+        // Ctrl+K gets a line for each.
+        let ((summary, years), found) = background::on_pool(|| {
+            rayon::join(
+                || rayon::join(|| page::summary(&cat), || page::year_counts(&cat)),
+                || Arc::new(mo_app::finder::midi_parts(&cat, smallest)),
+            )
+        });
         Loaded { cat, notes, summary, hidden, years, found, smallest }
     }
 }
@@ -1299,9 +1304,13 @@ pub fn load(library: &Path) -> Result<Loaded, String> {
         return Ok(Loaded::new(Catalogue::default(), NotesFrom::Store(path)));
     }
     let began = Instant::now();
-    let store = MidiStore::open_read_only(&path).map_err(|e| e.to_string())?;
-    let phrases = store.all(&up.old_roles, &up.old_octaves).map_err(|e| e.to_string())?;
-    drop(store);
+    // In pieces at once, on the shared low-priority threads (rules 12 and 21).
+    let path_now = path.clone();
+    let phrases = background::on_pool(move || {
+        let store = MidiStore::open_read_only(&path_now)?;
+        store.all(&up.old_roles, &up.old_octaves)
+    })
+    .map_err(|e| e.to_string())?;
     let read = began.elapsed();
     let cat = background::on_pool(|| Catalogue::new(phrases));
     let grouped = began.elapsed() - read;

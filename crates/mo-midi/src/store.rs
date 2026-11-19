@@ -1052,104 +1052,70 @@ impl MidiStore {
     /// Every part, newest file first (a date that isn't real last), without its notes, as the page lists them.
     /// `cs_roles` and `cs_octaves` are the C# app's corrections when they're not yet taken in
     /// ([`BroughtUp::old_roles`]), which the index's own win over; empty once they are.
+    ///
+    /// A big index is read in several pieces at once, each on a connection of its own, on the threads of the pool
+    /// it's called in (the page calls it in its low-priority one): 359,000 parts took 1.9 s as one read (Solomon's
+    /// index, 19 Nov 2026). A piece sees the index as it is when its read starts; a part of a file saved to the index
+    /// in between (its reading is going on) is left for the next read rather than shown without its file.
     pub fn all(
         &self,
         cs_roles: &HashMap<String, Role>,
         cs_octaves: &HashMap<String, i32>,
     ) -> Result<Vec<StoredPhrase>, MidiError> {
-        // A key not read yet (version 0) has no word on whether it's cut.
-        let (key_fact, key_cut, keys_join) = if self.has_keys {
-            ("k.fact", "CASE WHEN k.version > 0 THEN k.cut END", "LEFT JOIN keys k ON k.notes = n.id")
-        } else {
-            ("NULL", "NULL", "")
+        use rayon::prelude::*;
+        let sources = self.sources()?;
+        let (first, last, count): (Option<i64>, Option<i64>, i64) =
+            self.conn.query_row("SELECT MIN(id), MAX(id), COUNT(*) FROM parts", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+        let (Some(first), Some(last)) = (first, last) else { return Ok(Vec::new()) };
+        let pieces = pieces_of(first, last, count, rayon::current_num_threads());
+        // Not `self` in what the threads share: its connection is one thread's.
+        let (path, has) = (self.path.as_path(), (self.has_keys, self.has_shapes));
+        let read = |&(from, to): &(i64, i64), conn: &Connection| {
+            parts_between(conn, has, from, to, &sources, cs_roles, cs_octaves)
         };
-        let (shape, shapes_join) =
-            if self.has_shapes { ("s.shape", "LEFT JOIN shapes s ON s.notes = n.id") } else { ("NULL", "") };
-        let mut st = self.conn.prepare(&format!(
-            "SELECT p.id, f.id, f.path, f.kind, f.mtime, f.size, p.part, p.clip, p.role, p.why, y.role, n.hash,
-                    n.count, n.bars, n.lowest, n.highest, n.chroma, n.features, p.members, o.octaves, p.program,
-                    p.drums, p.track_name, {key_fact}, y.hash IS NOT NULL, o.hash IS NOT NULL, {shape}, {key_cut}
-             FROM parts p JOIN files f ON f.id = p.file JOIN notes n ON n.id = p.notes
-                  LEFT JOIN your_roles y ON y.hash = n.hash LEFT JOIN your_octaves o ON o.hash = n.hash
-                  {keys_join} {shapes_join}"
-        ))?;
-        let mut rows = st.query([])?;
-        // One shared copy of each file's facts.
-        let mut sources: HashMap<i64, Arc<Source>> = HashMap::new();
-        let mut list = Vec::new();
-        while let Some(r) = rows.next()? {
-            let file: i64 = r.get(1)?;
-            let source = match sources.get(&file) {
-                Some(s) => Arc::clone(s),
-                None => {
-                    let path: String = r.get(2)?;
-                    let kind = if r.get::<_, i64>(3)? == 1 { SourceKind::File } else { SourceKind::Project };
-                    let s = Arc::new(Source {
-                        daw: daw_of(&path, kind).to_owned(),
-                        path,
-                        kind,
-                        mtime: r.get(4)?,
-                        size: r.get(5)?,
-                        // A song's tempo is in library.db.
-                        tempo: None,
-                    });
-                    sources.insert(file, Arc::clone(&s));
-                    s
+        let mut list = match pieces.as_slice() {
+            [one] => read(one, &self.conn)?,
+            pieces => {
+                let read: Vec<Result<Vec<StoredPhrase>, MidiError>> =
+                    pieces.par_iter().map(|piece| read(piece, &open_piece(path)?)).collect();
+                let mut list = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+                for piece in read {
+                    list.append(&mut piece?);
                 }
-            };
-            let hash: String = r.get(11)?;
-            let mut chroma = [0u8; 12];
-            for (to, from) in chroma.iter_mut().zip(r.get::<_, Vec<u8>>(16)?) {
-                *to = from;
+                list
             }
-            let key_fact = r.get::<_, Option<Vec<u8>>>(23)?.and_then(|b| <[u8; 8]>::try_from(b).ok()).map(KeyFact);
-            // A Rust row (even one saying "back to the guess") wins; with none, the C# app's correction counts.
-            let your_role = if r.get::<_, bool>(24)? {
-                r.get::<_, Option<i64>>(10)?.map(Role::from_code)
-            } else {
-                cs_roles.get(&hash).copied()
-            };
-            let your_octave = if r.get::<_, bool>(25)? {
-                r.get::<_, Option<i64>>(19)?.map(|o| o.clamp(-10, 10) as i32)
-            } else {
-                cs_octaves.get(&hash).copied()
-            };
-            list.push(StoredPhrase {
-                id: r.get(0)?,
-                source,
-                part: r.get(6)?,
-                clip: r.get(7)?,
-                role: Role::from_code(r.get(8)?),
-                role_why: r.get(9)?,
-                your_role,
-                bars: r.get::<_, i64>(13)?.clamp(0, i64::from(i32::MAX)) as i32,
-                notes: r.get::<_, i64>(12)?.clamp(0, i64::from(i32::MAX)) as i32,
-                lowest: r.get::<_, i64>(14)?.clamp(0, 255) as u8,
-                highest: r.get::<_, i64>(15)?.clamp(0, 255) as u8,
-                key: key_fact.as_ref().and_then(keys::sure_key),
-                key_fact,
-                chroma,
-                // The chords come with mo-harmony's chord reader.
-                chords: Vec::new(),
-                features: r.get(17)?,
-                members: r.get::<_, Option<String>>(18)?.unwrap_or_default(),
-                program: r.get::<_, Option<i64>>(20)?.filter(|p| (0..128).contains(p)).map(|p| p as u8),
-                drums: r.get(21)?,
-                track_name: r.get(22)?,
-                hash,
-                your_octave,
-                // 0: kept for notes with no shape.
-                shape: r.get::<_, Option<i64>>(26)?.filter(|s| *s != 0),
-                cut: r.get(27)?,
-            });
-        }
+        };
         // Newest file first, sorted here rather than in SQLite: no index has that order, so SQLite would hold a whole
         // sorted copy of every row in memory beside this list. A date that isn't real (a pack whose files all say
         // 31 Dec 2027) is no clue to when the file was saved, so it comes after every real one: it doesn't top the
         // list, and its file's copy of some notes doesn't stand for the copies with a real date.
         let real = RealDates::now();
-        list.sort_unstable_by_key(|p| (!real.seconds(p.source.mtime), std::cmp::Reverse(p.source.mtime), p.id));
+        list.par_sort_unstable_by_key(|p| (!real.seconds(p.source.mtime), std::cmp::Reverse(p.source.mtime), p.id));
         Ok(list)
+    }
+
+    /// Every file with its facts, by its id: one shared copy for all its parts.
+    fn sources(&self) -> Result<HashMap<i64, Arc<Source>>, MidiError> {
+        let mut st = self.conn.prepare("SELECT id, path, kind, mtime, size FROM files")?;
+        let mut rows = st.query([])?;
+        let mut sources = HashMap::new();
+        while let Some(r) = rows.next()? {
+            let path: String = r.get(1)?;
+            let kind = if r.get::<_, i64>(2)? == 1 { SourceKind::File } else { SourceKind::Project };
+            let source = Source {
+                daw: daw_of(&path, kind).to_owned(),
+                path,
+                kind,
+                mtime: r.get(3)?,
+                size: r.get(4)?,
+                // A song's tempo is in library.db.
+                tempo: None,
+            };
+            sources.insert(r.get(0)?, Arc::new(source));
+        }
+        Ok(sources)
     }
 
     /// Says what kind of part this is (every copy with the same notes), or `None` to go back to the app's guess.
@@ -1261,6 +1227,123 @@ impl MidiStore {
     }
 }
 
+/// The parts with ids `from` to `to` of the index `conn` has open (with its `keys` and `shapes` tables or not), in
+/// no order, each with its file's facts from `sources`.
+fn parts_between(
+    conn: &Connection,
+    (has_keys, has_shapes): (bool, bool),
+    from: i64,
+    to: i64,
+    sources: &HashMap<i64, Arc<Source>>,
+    cs_roles: &HashMap<String, Role>,
+    cs_octaves: &HashMap<String, i32>,
+) -> Result<Vec<StoredPhrase>, MidiError> {
+    // A key not read yet (version 0) has no word on whether it's cut.
+    let (key_fact, key_cut, keys_join) = if has_keys {
+        ("k.fact", "CASE WHEN k.version > 0 THEN k.cut END", "LEFT JOIN keys k ON k.notes = n.id")
+    } else {
+        ("NULL", "NULL", "")
+    };
+    let (shape, shapes_join) =
+        if has_shapes { ("s.shape", "LEFT JOIN shapes s ON s.notes = n.id") } else { ("NULL", "") };
+    let mut st = conn.prepare(&format!(
+        "SELECT p.id, p.file, p.part, p.clip, p.role, p.why, y.role, n.hash,
+                n.count, n.bars, n.lowest, n.highest, n.chroma, n.features, p.members, o.octaves, p.program,
+                p.drums, p.track_name, {key_fact}, y.hash IS NOT NULL, o.hash IS NOT NULL, {shape}, {key_cut}
+         FROM parts p JOIN notes n ON n.id = p.notes
+              LEFT JOIN your_roles y ON y.hash = n.hash LEFT JOIN your_octaves o ON o.hash = n.hash
+              {keys_join} {shapes_join}
+         WHERE p.id BETWEEN ?1 AND ?2"
+    ))?;
+    let mut rows = st.query([from, to])?;
+    let mut list = Vec::new();
+    while let Some(r) = rows.next()? {
+        let Some(source) = sources.get(&r.get::<_, i64>(1)?) else { continue };
+        let hash: String = r.get(7)?;
+        let mut chroma = [0u8; 12];
+        for (to, from) in chroma.iter_mut().zip(r.get_ref(12)?.as_blob().unwrap_or_default()) {
+            *to = *from;
+        }
+        let key_fact = match r.get_ref(19)? {
+            rusqlite::types::ValueRef::Blob(b) => <[u8; 8]>::try_from(b).ok().map(KeyFact),
+            _ => None,
+        };
+        // A Rust row (even one saying "back to the guess") wins; with none, the C# app's correction counts.
+        let your_role = if r.get::<_, bool>(20)? {
+            r.get::<_, Option<i64>>(6)?.map(Role::from_code)
+        } else {
+            cs_roles.get(&hash).copied()
+        };
+        let your_octave = if r.get::<_, bool>(21)? {
+            r.get::<_, Option<i64>>(15)?.map(|o| o.clamp(-10, 10) as i32)
+        } else {
+            cs_octaves.get(&hash).copied()
+        };
+        list.push(StoredPhrase {
+            id: r.get(0)?,
+            source: Arc::clone(source),
+            part: r.get(2)?,
+            clip: r.get(3)?,
+            role: Role::from_code(r.get(4)?),
+            role_why: r.get(5)?,
+            your_role,
+            bars: r.get::<_, i64>(9)?.clamp(0, i64::from(i32::MAX)) as i32,
+            notes: r.get::<_, i64>(8)?.clamp(0, i64::from(i32::MAX)) as i32,
+            lowest: r.get::<_, i64>(10)?.clamp(0, 255) as u8,
+            highest: r.get::<_, i64>(11)?.clamp(0, 255) as u8,
+            key: key_fact.as_ref().and_then(keys::sure_key),
+            key_fact,
+            chroma,
+            // The chords come with mo-harmony's chord reader.
+            chords: Vec::new(),
+            features: r.get(13)?,
+            members: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+            program: r.get::<_, Option<i64>>(16)?.filter(|p| (0..128).contains(p)).map(|p| p as u8),
+            drums: r.get(17)?,
+            track_name: r.get(18)?,
+            hash,
+            your_octave,
+            // 0: kept for notes with no shape.
+            shape: r.get::<_, Option<i64>>(22)?.filter(|s| *s != 0),
+            cut: r.get(23)?,
+        });
+    }
+    Ok(list)
+}
+
+/// The fewest parts worth a piece of their own in [`MidiStore::all`]: under this, opening another connection costs
+/// more than it saves.
+const PIECE_AT_LEAST: i64 = 20_000;
+/// The most pieces [`MidiStore::all`] reads at once: past this the disk and the memory bus are the limit, not cores.
+const MOST_PIECES: usize = 8;
+
+/// The id ranges [`MidiStore::all`] reads at once: `count` parts with ids `first` to `last`, on `threads` threads.
+/// Every id is in one range and only one; a small index is one range.
+fn pieces_of(first: i64, last: i64, count: i64, threads: usize) -> Vec<(i64, i64)> {
+    let most = usize::try_from(count / PIECE_AT_LEAST).unwrap_or(1);
+    let pieces = threads.min(MOST_PIECES).min(most).max(1) as i64;
+    let each = (last.saturating_sub(first) / pieces).saturating_add(1);
+    (0..pieces)
+        .map(|n| {
+            let from = first.saturating_add(n.saturating_mul(each));
+            (from, if n + 1 == pieces { last } else { from.saturating_add(each - 1) })
+        })
+        .collect()
+}
+
+/// Opens the index at `path` for one piece of [`MidiStore::all`]: read-only, as [`MidiStore::open_read_only`] does,
+/// with a smaller cache (there are several at once).
+fn open_piece(path: &Path) -> Result<Connection, MidiError> {
+    let open_error = |e: rusqlite::Error| MidiError::Open { path: path.to_owned(), why: e.to_string() };
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags).map_err(open_error)?;
+    conn.busy_timeout(Duration::from_secs(2)).map_err(open_error)?;
+    conn.pragma_update(None, "query_only", true).map_err(open_error)?;
+    conn.pragma_update(None, "temp_store", "MEMORY").map_err(open_error)?;
+    conn.pragma_update(None, "cache_size", -8_000).map_err(open_error)?;
+    Ok(conn)
+}
+
 /// What a file's DAW is, as the library names it ("Bitwig Studio"); "MIDI" for a `.mid` file.
 pub fn daw_of(path: &str, kind: SourceKind) -> &'static str {
     match kind {
@@ -1314,6 +1397,25 @@ pub fn decode_notes(data: &[u8]) -> Vec<NoteEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pieces_a_big_index_is_read_in_cover_every_id_once() {
+        // A small index is one read on the connection it has.
+        assert_eq!(pieces_of(1, 500, 500, 32), [(1, 500)]);
+        assert_eq!(pieces_of(7, 7, 1, 8), [(7, 7)]);
+        // Solomon's: 359,000 parts, on 32 threads: eight pieces at most.
+        let pieces = pieces_of(1, 400_000, 359_000, 32);
+        assert_eq!(pieces.len(), 8);
+        // Fewer threads, fewer pieces; fewer parts, fewer pieces.
+        assert_eq!(pieces_of(1, 400_000, 359_000, 3).len(), 3);
+        assert_eq!(pieces_of(1, 50_000, 45_000, 32).len(), 2);
+        for pieces in [pieces, pieces_of(-5, 99_999, 60_000, 4), pieces_of(i64::MAX - 100_000, i64::MAX, 90_000, 8)] {
+            assert!(pieces.iter().all(|(from, to)| from <= to), "{pieces:?}");
+            assert!(pieces.windows(2).all(|w| w[0].1 + 1 == w[1].0), "no gap and no overlap: {pieces:?}");
+        }
+        let ends = pieces_of(-5, 99_999, 60_000, 4);
+        assert_eq!((ends[0].0, ends[ends.len() - 1].1), (-5, 99_999));
+    }
 
     #[test]
     fn notes_keep_midi_2_resolution() {
