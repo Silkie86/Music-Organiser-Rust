@@ -115,15 +115,13 @@ struct Page {
     wanted: Option<String>,
     /// The list scrolls to the picked part once it's worked out (Ctrl+K picked it).
     scroll_to_pick: bool,
-    /// Ctrl+K read the index for its own list before the page was first shown.
+    /// The index was read before the page was first shown ([`read_before_shown`]), or is being read.
     finder_read: bool,
-    /// That read, kept until the page first shows, so the page doesn't read and group the whole index again (nothing
-    /// writes the index before then, so it can't be stale).
+    /// That read, kept until the page first shows, so the page has its list at once (nothing writes the index before
+    /// then, so it can't be stale).
     finder_loaded: Option<Result<Loaded, String>>,
     /// The page first showed while that read was still going: it's handed to the page when it ends.
     finder_for_page: bool,
-    /// That read was let go unused (the page wasn't shown soon after): the page reads the index itself (M-3).
-    finder_let_go: bool,
     /// The summary of the whole index, before what Settings' smallest part hides is said after it.
     summary: String,
     /// "Fits my song": the songs offered, and the one the list is fitted to (none: it's off).
@@ -651,10 +649,6 @@ pub fn smallest_part(app: Option<&AppWindow>, notes: usize) {
     }
 }
 
-/// How long the Ctrl+K read of the index is kept for the page: long enough to go from Ctrl+K to the MIDI page, short
-/// enough that a session that never opens it doesn't hold the whole index (M-3). Ctrl+K keeps its own lines.
-const KEEP_FINDER_READ: Duration = Duration::from_secs(120);
-
 struct Ask {
     id: u64,
     cat: Arc<Catalogue>,
@@ -800,57 +794,16 @@ fn why_text(p: &StoredPhrase) -> String {
     if p.your_role.is_some() { "You said so".to_owned() } else { p.role_why.clone() }
 }
 
-/// Wires the page up; the index is read the first time the page is shown ([`shown`]).
+/// Wires the page up; the index is read a little after the start ([`read_before_shown`]), or when the page is
+/// first shown ([`shown`]) if that's sooner.
 pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     crate::finder::on_open(Kind::MidiPart, |app, hit, _| {
         crate::go_to(app, Place::Midi.index() as i32);
         show_part(app, &hit.id);
         true
     });
-    // Ctrl+K finds your parts before this page is first shown: the index is read once for its list, in the
-    // background, without the reading of your MIDI the page itself starts.
-    crate::finder::when_opening(|app| {
-        let library = PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            let first = !p.started && !p.library.as_os_str().is_empty() && !std::mem::replace(&mut p.finder_read, true);
-            first.then(|| p.library.clone())
-        });
-        let Some(library) = library else { return };
-        let weak = app.as_weak();
-        let started = background::spawn("MIDI index for Ctrl+K", move || {
-            let loaded = guarded_load(&library);
-            let _ = slint::invoke_from_event_loop(move || {
-                let Some(app) = weak.upgrade() else { return };
-                // The page showed meanwhile and is waiting for this read: it takes it (and hands Ctrl+K its list).
-                if PAGE.with(|p| std::mem::take(&mut p.borrow_mut().finder_for_page)) {
-                    show(&app, loaded);
-                    return;
-                }
-                if let Ok(l) = &loaded {
-                    crate::finder::add_source(&app, "midi", l.found.clone());
-                }
-                PAGE.with(|p| p.borrow_mut().finder_loaded = Some(loaded));
-                slint::Timer::single_shot(KEEP_FINDER_READ, || {
-                    let unused = PAGE.with(|p| {
-                        let mut p = p.borrow_mut();
-                        let unused = p.finder_loaded.take();
-                        if unused.is_some() {
-                            p.finder_let_go = true;
-                        }
-                        unused
-                    });
-                    if let Some(unused) = unused {
-                        background::free_later(unused);
-                    }
-                });
-            });
-        });
-        if let Err(e) = started {
-            log::error("MIDI", &format!("Couldn't start reading the index for Ctrl+K: {e}"));
-            // Nothing is coming, so the page reads it itself.
-            PAGE.with(|p| p.borrow_mut().finder_read = false);
-        }
-    });
+    // Ctrl+K finds your parts before this page is first shown.
+    crate::finder::when_opening(read_before_shown);
     // "Play with the song" is on until you turn it off.
     let with_song = crate::settings::value(midi_fits::WITH_SONG_KEY).is_none_or(|v| v != "0");
     // What you picked of each song for "Fits my song" to fit to, the last time.
@@ -871,6 +824,49 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     data.set_empty_text("".into());
     if app.get_place() == mo_app::places::Place::Midi.index() as i32 {
         shown(app);
+    } else {
+        // The index is read a little after the start, so the first visit has its list at once.
+        let weak = app.as_weak();
+        slint::Timer::single_shot(crate::ahead::MIDI, move || {
+            if let Some(app) = weak.upgrade() {
+                read_before_shown(&app);
+            }
+        });
+    }
+}
+
+/// Reads the index once, in the background, for a page that hasn't been shown yet: a little after the start
+/// ([`crate::ahead::MIDI`]) or when Ctrl+K opens, whichever is first. Ctrl+K gets its list of your parts, and the
+/// read is kept for the page, which shows it at once on its first visit. Without the reading of your MIDI the page
+/// itself starts then. (It was once let go after two minutes unused, to hold less memory, review M-3; Solomon chose
+/// no wait on the page over that, 19 Nov 2026.)
+fn read_before_shown(app: &AppWindow) {
+    let library = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let first = !p.started && !p.library.as_os_str().is_empty() && !std::mem::replace(&mut p.finder_read, true);
+        first.then(|| p.library.clone())
+    });
+    let Some(library) = library else { return };
+    let weak = app.as_weak();
+    let started = background::spawn("MIDI index, ahead", move || {
+        let loaded = guarded_load(&library);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(app) = weak.upgrade() else { return };
+            // The page showed meanwhile and is waiting for this read: it takes it (and hands Ctrl+K its list).
+            if PAGE.with(|p| std::mem::take(&mut p.borrow_mut().finder_for_page)) {
+                show(&app, loaded);
+                return;
+            }
+            if let Ok(l) = &loaded {
+                crate::finder::add_source(&app, "midi", l.found.clone());
+            }
+            PAGE.with(|p| p.borrow_mut().finder_loaded = Some(loaded));
+        });
+    });
+    if let Err(e) = started {
+        log::error("MIDI", &format!("Couldn't start reading the index ahead of the page: {e}"));
+        // Nothing is coming, so the page reads it itself.
+        PAGE.with(|p| p.borrow_mut().finder_read = false);
     }
 }
 
@@ -1209,7 +1205,7 @@ pub fn shown(app: &AppWindow) {
         Some(p.library.clone())
     });
     let Some(library) = library else { return };
-    // Ctrl+K read the index already: the page takes that read, or waits for it if it's still going. The read goes in a
+    // The index was read ahead already: the page takes that read, or waits for it if it's still going. The read goes in a
     // Box: on Windows, where a PathBuf is bigger, it's over clippy's size limit for one arm of an enum.
     enum Kept {
         Read(Box<Result<Loaded, String>>),
@@ -1220,7 +1216,7 @@ pub fn shown(app: &AppWindow) {
         let mut p = p.borrow_mut();
         match p.finder_loaded.take() {
             Some(read) => Kept::Read(Box::new(read)),
-            None if p.finder_read && !p.finder_let_go => {
+            None if p.finder_read => {
                 p.finder_for_page = true;
                 Kept::Coming
             }
@@ -1261,11 +1257,26 @@ pub fn load(library: &Path) -> Result<Loaded, String> {
     if !path.exists() {
         return Ok(Loaded::new(Catalogue::default(), NotesFrom::Store(path)));
     }
+    let began = Instant::now();
     let store = MidiStore::open_read_only(&path).map_err(|e| e.to_string())?;
     let phrases = store.all(&up.old_roles, &up.old_octaves).map_err(|e| e.to_string())?;
     drop(store);
+    let read = began.elapsed();
     let cat = background::on_pool(|| Catalogue::new(phrases));
-    Ok(Loaded::new(cat, NotesFrom::Store(path)))
+    let grouped = began.elapsed() - read;
+    let loaded = Loaded::new(cat, NotesFrom::Store(path));
+    let listed = began.elapsed() - read - grouped;
+    log::info(
+        "MIDI",
+        &format!(
+            "Index read from {} in {:.1} s, sorted into parts in {:.1} s, its summary and Ctrl+K lines made in {:.1} s",
+            mo_midi::store::FILE_NAME,
+            read.as_secs_f64(),
+            grouped.as_secs_f64(),
+            listed.as_secs_f64()
+        ),
+    );
+    Ok(loaded)
 }
 
 /// [`load`] on a thread of the page's own, which always hears back: a bug in the reading (the log has the crash in

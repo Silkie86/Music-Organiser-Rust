@@ -1,11 +1,12 @@
 //! Fills the Presets page from `mo_app::presets` and answers it. Everything slow runs on low-priority threads (rules 12
 //! and 21) and only what they find comes back to the window:
 //!
-//! - **Sounds**, read once the page is first shown: the library (read-only), then the newest save of each song, a few
-//!   at a time over every core, each batch shown as it's read; then the preset files in the plugins' and Bitwig's
-//!   folders. Your part fixes are read from and written to the app's own `presets.db`.
-//! - **Curves**, read once the section is first opened: what `curves.db` already holds at once, then every save that
-//!   changed since is read again and the list shown afresh.
+//! - **Sounds**, read once, a little after the start or when the page is first shown ([`crate::ahead`]): the library
+//!   (read-only), then the newest save of each song, a few at a time over every core, each batch shown as it's read;
+//!   then the preset files in the plugins' and Bitwig's folders. Your part fixes are read from and written to the
+//!   app's own `presets.db`.
+//! - **Curves**, read once, a little after the start or when the section is first opened: what `curves.db` already
+//!   holds at once, then every save that changed since is read again and the list shown afresh.
 //!
 //! The lists are models that make each line only when the list asks for it, so a long list costs nothing to show
 //! (rule 12: virtualised lists).
@@ -287,12 +288,18 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     wire(app);
     finder_opens();
     // Ctrl+K finds your presets before this page is first shown: they're read once, in the background.
-    crate::finder::when_opening(|app| {
-        let start = PAGE.with(|p| !std::mem::replace(&mut p.borrow_mut().started, true));
-        if start {
-            read_sounds(app);
-        }
-    });
+    crate::finder::when_opening(read_before_shown);
+    // And a little after the start, each in its turn, so the first visit has its lists at once.
+    for (after, read) in
+        [(crate::ahead::PRESETS, read_before_shown as fn(&AppWindow)), (crate::ahead::CURVES, read_curves_before_shown)]
+    {
+        let weak = app.as_weak();
+        slint::Timer::single_shot(after, move || {
+            if let Some(app) = weak.upgrade() {
+                read(&app);
+            }
+        });
+    }
     // The app may start on this page: it was shown before the page knew where the library is.
     if crate::on_presets_page(app.get_place()) {
         // On Curves, the curves are read now: the place was noted before the page could read them.
@@ -589,6 +596,22 @@ fn wire(app: &AppWindow) {
         }
     });
     drag_out::wire(app);
+}
+
+/// Reads the sounds once, in the background, for a page that hasn't been shown yet.
+fn read_before_shown(app: &AppWindow) {
+    let start = PAGE.with(|p| !std::mem::replace(&mut p.borrow_mut().started, true));
+    if start {
+        read_sounds(app);
+    }
+}
+
+/// Reads the curves once, in the background, for a section that hasn't been opened yet.
+fn read_curves_before_shown(app: &AppWindow) {
+    let start = PAGE.with(|p| !std::mem::replace(&mut p.borrow_mut().curves_started, true));
+    if start {
+        read_curves(app);
+    }
 }
 
 /// The page came into view: the sounds are read the first time.
