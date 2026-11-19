@@ -38,6 +38,8 @@ impl Platform for Headless {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The pages are filled with made-up things: nothing is read ahead from a library that isn't there.
+    mo_ui::ahead::off();
     let out = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "screenshots".into()));
     std::fs::create_dir_all(&out)?;
 

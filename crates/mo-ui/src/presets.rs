@@ -290,16 +290,8 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     // Ctrl+K finds your presets before this page is first shown: they're read once, in the background.
     crate::finder::when_opening(read_before_shown);
     // And a little after the start, each in its turn, so the first visit has its lists at once.
-    for (after, read) in
-        [(crate::ahead::PRESETS, read_before_shown as fn(&AppWindow)), (crate::ahead::CURVES, read_curves_before_shown)]
-    {
-        let weak = app.as_weak();
-        slint::Timer::single_shot(after, move || {
-            if let Some(app) = weak.upgrade() {
-                read(&app);
-            }
-        });
-    }
+    crate::ahead::after(app, crate::ahead::PRESETS, read_before_shown);
+    crate::ahead::after(app, crate::ahead::CURVES, read_curves_before_shown);
     // The app may start on this page: it was shown before the page knew where the library is.
     if crate::on_presets_page(app.get_place()) {
         // On Curves, the curves are read now: the place was noted before the page could read them.

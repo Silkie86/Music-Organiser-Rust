@@ -461,7 +461,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     } else {
         // Otherwise the library is read a little after the start, so the first visit finds the list there rather
         // than an empty page for a second or two.
-        slint::Timer::single_shot(crate::ahead::PLUGINS, read_before_shown);
+        crate::ahead::after(app, crate::ahead::PLUGINS, |_| read_before_shown());
     }
 }
 

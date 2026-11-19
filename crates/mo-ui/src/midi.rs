@@ -63,6 +63,8 @@ pub struct Loaded {
     pub years: Vec<(i32, usize)>,
     /// What Ctrl+K finds: every part.
     pub found: Arc<mo_app::finder::Lines>,
+    /// Settings' smallest part as it was when `hidden` and `found` were made.
+    smallest: usize,
 }
 
 impl Loaded {
@@ -73,7 +75,7 @@ impl Loaded {
         let summary = page::summary(&cat);
         let years = page::year_counts(&cat);
         let found = Arc::new(mo_app::finder::midi_parts(&cat, smallest));
-        Loaded { cat, notes, summary, hidden, years, found }
+        Loaded { cat, notes, summary, hidden, years, found, smallest }
     }
 }
 
@@ -116,12 +118,12 @@ struct Page {
     /// The list scrolls to the picked part once it's worked out (Ctrl+K picked it).
     scroll_to_pick: bool,
     /// The index was read before the page was first shown ([`read_before_shown`]), or is being read.
-    finder_read: bool,
+    ahead_read: bool,
     /// That read, kept until the page first shows, so the page has its list at once (nothing writes the index before
-    /// then, so it can't be stale).
-    finder_loaded: Option<Result<Loaded, String>>,
+    /// then: only the page's own reading of your MIDI and your own changes on it do, so it can't be stale).
+    ahead_loaded: Option<Result<Loaded, String>>,
     /// The page first showed while that read was still going: it's handed to the page when it ends.
-    finder_for_page: bool,
+    ahead_for_page: bool,
     /// The summary of the whole index, before what Settings' smallest part hides is said after it.
     summary: String,
     /// "Fits my song": the songs offered, and the one the list is fitted to (none: it's off).
@@ -619,6 +621,13 @@ pub fn smallest_part(app: Option<&AppWindow>, notes: usize) {
         return;
     }
     let Some(app) = app else { return };
+    // The index was read ahead and the page hasn't taken it yet: what that read says is hidden, and its Ctrl+K lines,
+    // are made again.
+    match PAGE.with(|p| p.borrow_mut().ahead_loaded.take()) {
+        Some(Ok(kept)) => return remake_ahead(app, kept),
+        kept @ Some(Err(_)) => PAGE.with(|p| p.borrow_mut().ahead_loaded = kept),
+        None => {}
+    }
     let (cat, hidden_pick) = PAGE.with(|p| {
         let p = p.borrow();
         let hidden = p.picked.and_then(|at| p.cat.entry(at)).is_some_and(|e| !page::big_enough(e, notes));
@@ -826,12 +835,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         shown(app);
     } else {
         // The index is read a little after the start, so the first visit has its list at once.
-        let weak = app.as_weak();
-        slint::Timer::single_shot(crate::ahead::MIDI, move || {
-            if let Some(app) = weak.upgrade() {
-                read_before_shown(&app);
-            }
-        });
+        crate::ahead::after(app, crate::ahead::MIDI, read_before_shown);
     }
 }
 
@@ -843,7 +847,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
 fn read_before_shown(app: &AppWindow) {
     let library = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let first = !p.started && !p.library.as_os_str().is_empty() && !std::mem::replace(&mut p.finder_read, true);
+        let first = !p.started && !p.library.as_os_str().is_empty() && !std::mem::replace(&mut p.ahead_read, true);
         first.then(|| p.library.clone())
     });
     let Some(library) = library else { return };
@@ -851,22 +855,59 @@ fn read_before_shown(app: &AppWindow) {
     let started = background::spawn("MIDI index, ahead", move || {
         let loaded = guarded_load(&library);
         let _ = slint::invoke_from_event_loop(move || {
-            let Some(app) = weak.upgrade() else { return };
-            // The page showed meanwhile and is waiting for this read: it takes it (and hands Ctrl+K its list).
-            if PAGE.with(|p| std::mem::take(&mut p.borrow_mut().finder_for_page)) {
-                show(&app, loaded);
-                return;
+            if let Some(app) = weak.upgrade() {
+                ahead_arrived(&app, loaded);
             }
-            if let Ok(l) = &loaded {
-                crate::finder::add_source(&app, "midi", l.found.clone());
-            }
-            PAGE.with(|p| p.borrow_mut().finder_loaded = Some(loaded));
         });
     });
     if let Err(e) = started {
         log::error("MIDI", &format!("Couldn't start reading the index ahead of the page: {e}"));
         // Nothing is coming, so the page reads it itself.
-        PAGE.with(|p| p.borrow_mut().finder_read = false);
+        PAGE.with(|p| p.borrow_mut().ahead_read = false);
+    }
+}
+
+/// The read made ahead of the page is here: the page takes it if it showed meanwhile, else it's kept for it.
+fn ahead_arrived(app: &AppWindow, loaded: Result<Loaded, String>) {
+    let loaded = match loaded {
+        // Settings' smallest part changed while it was read.
+        Ok(l) if l.smallest != SMALLEST.load(Ordering::Relaxed) => return remake_ahead(app, l),
+        other => other,
+    };
+    // The page showed meanwhile and is waiting for this read: it takes it (and hands Ctrl+K its list).
+    if PAGE.with(|p| std::mem::take(&mut p.borrow_mut().ahead_for_page)) {
+        show(app, loaded);
+        return;
+    }
+    if let Ok(l) = &loaded {
+        crate::finder::add_source(app, "midi", l.found.clone());
+    }
+    PAGE.with(|p| p.borrow_mut().ahead_loaded = Some(loaded));
+}
+
+/// Settings' smallest part changed since `kept` was read ahead: what it says is hidden and its Ctrl+K lines are made
+/// again from the same parts, off the window's thread. A page that shows meanwhile waits for it, as for the read.
+fn remake_ahead(app: &AppWindow, kept: Loaded) {
+    let weak = app.as_weak();
+    let started = background::spawn("MIDI index, ahead", move || {
+        let loaded = Loaded::new(kept.cat, kept.notes);
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                ahead_arrived(&app, Ok(loaded));
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("MIDI", &format!("Couldn't start making the index's lines again: {e}"));
+        // The parts went with the thread that never started: the page reads the index itself, now if it's waiting.
+        let waiting = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.ahead_read = false;
+            std::mem::take(&mut p.ahead_for_page)
+        });
+        if waiting {
+            show(app, Err(format!("its reader couldn't start ({e})")));
+        }
     }
 }
 
@@ -1214,10 +1255,10 @@ pub fn shown(app: &AppWindow) {
     }
     let kept = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        match p.finder_loaded.take() {
+        match p.ahead_loaded.take() {
             Some(read) => Kept::Read(Box::new(read)),
-            None if p.finder_read => {
-                p.finder_for_page = true;
+            None if p.ahead_read => {
+                p.ahead_for_page = true;
                 Kept::Coming
             }
             None => Kept::None,

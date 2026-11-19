@@ -738,7 +738,7 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
         wanted();
     } else {
         // Nothing has asked for the sounds yet: they're read a little after the start all the same.
-        Timer::single_shot(crate::ahead::SOUNDS, wanted);
+        crate::ahead::after(app, crate::ahead::SOUNDS, |_| wanted());
     }
 }
 
