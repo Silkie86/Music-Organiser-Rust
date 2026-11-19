@@ -86,9 +86,15 @@ pub fn open(
         // The window's one timer, made after the panel so a panel that couldn't be made leaves none behind. It stays
         // through a move to the card: baseview can't stop a timer, so one made with each panel would go on ticking
         // beside the next, and the panel's work would run twice a tick (the 14 Nov review's PW-2).
-        let timer = context.create_timer(TICK).map_err(|e| {
-            HandlerError::from(std::io::Error::other(format!("Couldn't start the window's timer: {e}")))
-        })?;
+        let timer = match context.create_timer(TICK) {
+            Ok(timer) => timer,
+            Err(e) => {
+                let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| drop(shown)));
+                return Err(HandlerError::from(std::io::Error::other(format!(
+                    "Couldn't start the window's timer: {e}"
+                ))));
+            }
+        };
         Ok(Window { context, instance, shown: RefCell::new(Some(shown)), broken: Cell::new(false), _timer: timer })
     })
     .map_err(|e| format!("Couldn't open the plugin's window: {e}"))?;
@@ -550,6 +556,15 @@ impl Window {
             Ok(new) => *shown = Some(new),
             Err(why) => crate::log::line("Window", &format!("The panel couldn't be made again: {why}")),
         }
+    }
+}
+
+impl Drop for Window {
+    /// The window closes inside Windows' own window code, which a panic can't pass through: the panel goes inside a
+    /// catch (the 19 Nov review's PN-5).
+    fn drop(&mut self) {
+        let shown = self.shown.get_mut().take();
+        let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| drop(shown)));
     }
 }
 
