@@ -827,6 +827,13 @@ impl MidiStore {
         self.save_making(batch, analyser::shape_of, fit::slots_of)
     }
 
+    /// Whether making a newly read part's shape, and its slots, has tripped since the index was opened
+    /// ([`MidiStore::save`]): the bug is in the log in full then.
+    pub(crate) fn tripped(&self) -> (bool, bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.tripped.shape.load(Relaxed), self.tripped.slots.load(Relaxed))
+    }
+
     /// [`MidiStore::save`], with what makes a part's shape and its slots handed in (a test hands in ones that trip).
     pub(crate) fn save_making(
         &mut self,
@@ -1015,8 +1022,8 @@ impl MidiStore {
         Ok(())
     }
 
-    /// How many sets of notes have no shape yet (saved before the `shapes` table was there): two counts, each read
-    /// from a small index, so it's quick when there are none.
+    /// How many sets of notes have no shape yet (saved before the `shapes` table was there, or saved without as
+    /// theirs tripped): two counts, each read from a small index, so it's quick when there are none.
     pub fn unshaped_count(&self) -> Result<usize, MidiError> {
         let n: i64 =
             self.conn
