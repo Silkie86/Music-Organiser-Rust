@@ -322,15 +322,19 @@ fn watch(feed: &Feed) {
         // How long the knock waited, in microseconds (at least 1), once it's answered; 0 until then.
         let answered = Arc::new(AtomicU64::new(0));
         let a = answered.clone();
-        let sent = Instant::now();
         let memory_before = crate::stuck::memory_now();
+        // Before the knock is timed, so writing the line isn't counted as the window answering late; the page and
+        // the jobs are only asked for when there's a line to write.
         if let Some(now) = memory_before {
-            let (last, since) = held.unwrap_or((0, sent));
-            if let Some(words) = memory_line(last, since.elapsed(), now, crate::page_name(), &feed.running_titles()) {
+            let (last, since) = held.unwrap_or((0, Instant::now()));
+            if now.held.abs_diff(last) >= MEMORY_STEP
+                && let Some(words) = memory_line(last, since.elapsed(), now, crate::page_name(), &feed.running_titles())
+            {
                 log::info("Memory", &words);
-                held = Some((now.held, sent));
+                held = Some((now.held, Instant::now()));
             }
         }
+        let sent = Instant::now();
         let pauses = pauses_now();
         let answer = move || {
             let waited = u64::try_from(sent.elapsed().as_micros()).unwrap_or(u64::MAX).max(1);
