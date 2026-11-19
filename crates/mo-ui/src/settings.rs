@@ -734,6 +734,31 @@ pub fn full_screen_changed(on: bool) {
     change(app_settings::FULL_SCREEN_KEY, if on { "1" } else { "0" });
 }
 
+/// Once the window is up: full screen if F11 left it so, else maximised; then a line in the log with what it is, so a
+/// start that opened small shows there.
+pub fn fill_the_screen(app: &AppWindow) {
+    let window = app.window();
+    if FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed) {
+        window.set_fullscreen(true);
+    } else if !window.is_maximized() {
+        window.set_maximized(true);
+    }
+    let weak = app.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(500), move || {
+        let Some(app) = weak.upgrade() else { return };
+        let window = app.window();
+        let size = window.size();
+        let state = if window.is_fullscreen() {
+            "full screen"
+        } else if window.is_maximized() {
+            "maximised"
+        } else {
+            "neither maximised nor full screen"
+        };
+        log::info("Window", &format!("The window is {} x {}, {state}", size.width, size.height));
+    });
+}
+
 /// The window came back from the taskbar: full screen again if it was full screen (only F11 takes it out). Done a
 /// moment later, on the event loop, so it isn't changed in the middle of the restore's own resize.
 pub fn restored(app: &AppWindow) {

@@ -36,8 +36,9 @@ pub const LAST_PAGE_KEY: &str = "last_page";
 pub const PACE_KEY: &str = "performance";
 /// The output sounds play through, by name; empty for the computer's default. The C# app's name.
 pub const SOUND_OUTPUT_KEY: &str = "sound_output";
-/// Whether the window opens in full screen: "0" after F11 took it out of full screen, so it opens as it was left; on
-/// otherwise (Solomon's F12 note of 15 Nov: "app should default open full screen"). This app's own.
+/// Whether the window opens in full screen (no title bar or taskbar): "1" once F11 turned it on, "0" once F11 took it
+/// off. Off unless set: the window opens maximised. (Solomon's F12 note of 15 Nov, "app should default open full
+/// screen", meant maximised, he said on 19 Nov: "i used the wrong word not full screen".) This app's own.
 pub const FULL_SCREEN_KEY: &str = "full_screen";
 /// The Settings tab last shown, by its name. The C# app's name (its tabs had other names; an unknown one opens General).
 pub const TAB_KEY: &str = "settings_tab";
@@ -260,9 +261,9 @@ pub fn write_checked(path: &Path, text: &str) -> io::Result<()> {
     written
 }
 
-/// Whether the window opens in full screen: yes unless F11 last took it out (see [`FULL_SCREEN_KEY`]).
+/// Whether the window opens in full screen: only when F11 last turned it on (see [`FULL_SCREEN_KEY`]); else maximised.
 pub fn opens_full_screen(settings: &AppSettings) -> bool {
-    settings.get(FULL_SCREEN_KEY) != Some("0")
+    settings.get(FULL_SCREEN_KEY) == Some("1")
 }
 
 /// The place the app opens on, from the settings.
@@ -275,9 +276,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_window_opens_full_screen_until_f11_takes_it_out() {
+    fn the_window_opens_maximised_unless_f11_last_turned_full_screen_on() {
         let mut settings = AppSettings::default();
-        assert!(opens_full_screen(&settings));
+        assert!(!opens_full_screen(&settings));
         settings.set(FULL_SCREEN_KEY, "0");
         assert!(!opens_full_screen(&settings));
         settings.set(FULL_SCREEN_KEY, "1");

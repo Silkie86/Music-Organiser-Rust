@@ -218,6 +218,9 @@ fn main() -> Result<(), slint::PlatformError> {
         // The size of everything, once the window knows the screen's own scale.
         if let Some(app) = sized.upgrade() {
             mo_ui::settings::apply_size(&app);
+            // Maximised again now the window is up: set before it was made, Windows can lose it to the window's size
+            // limits and open a small window in the corner (Solomon, 19 Nov, on his 3440-wide screen).
+            mo_ui::settings::fill_the_screen(&app);
         }
         mo_ui::watchdog::start(watched);
     })
