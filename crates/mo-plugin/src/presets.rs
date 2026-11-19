@@ -80,7 +80,7 @@ pub fn read() -> Read {
     let stamp = crate::kept::Stamp::of(&files);
     let library = library_facts(&mo_library::songs_db::to_read(&data));
     let defaults = plib::default_folders();
-    let bitwig = page::bitwig_folders(&defaults, library.saves.iter().map(|s| s.path.as_str()));
+    let bitwig = page::bitwig_folders(None, &defaults, library.saves.iter().map(|s| s.path.as_str()));
     let roots = page::preset_folders(&defaults, &bitwig);
     // On the app's low-priority threads, as the app reads them: never at the DAW's own priority.
     let read = mo_app::background::on_pool(|| {
@@ -102,7 +102,7 @@ pub fn read() -> Read {
 pub fn folders() -> Vec<PathBuf> {
     let defaults = plib::default_folders();
     let data = mo_app::paths::data_dir();
-    let bitwig = page::bitwig_folders(&defaults, bitwig_saves(&mo_library::songs_db::to_read(&data)));
+    let bitwig = page::bitwig_folders(None, &defaults, bitwig_saves(&mo_library::songs_db::to_read(&data)));
     page::preset_folders(&defaults, &bitwig)
 }
 

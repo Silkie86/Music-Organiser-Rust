@@ -101,11 +101,18 @@ pub fn curve_saves(saves: &[Save], export_root: Option<&Path>) -> Vec<String> {
         .collect()
 }
 
-/// Bitwig's own folders ("…\Bitwig Studio", which holds Projects and Library): the one in Documents where it's there
-/// (`defaults`, from `mo_presets::library::default_folders`), plus any a Bitwig save sits in, so a Bitwig folder on
-/// another drive (Solomon's is on K:) is found without a setting.
-pub fn bitwig_folders(defaults: &[PathBuf], bitwig_saves: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = defaults.iter().filter(|d| is_bitwig_folder(d)).cloned().collect::<Vec<_>>();
+/// Bitwig's own folders ("…\Bitwig Studio", which holds Projects and Library), the one Bitwig uses first: your
+/// Bitwig Studio folder as Settings › DAWs has it (`chosen`), then any a Bitwig save sits in (so a Bitwig folder on
+/// another drive is found without the setting; Solomon's is on K:), and last the one in Documents where it's there
+/// (`defaults`, from `mo_presets::library::default_folders`): Bitwig makes that one when it's installed, and it's
+/// often a leftover beside the real one (the 19 Nov 2026 review's CU-2). Each folder once.
+pub fn bitwig_folders(
+    chosen: Option<&Path>,
+    defaults: &[PathBuf],
+    bitwig_saves: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> =
+        chosen.filter(|c| !c.as_os_str().is_empty()).map(Path::to_path_buf).into_iter().collect();
     for save in bitwig_saves {
         let save = save.as_ref();
         if !save.to_lowercase().ends_with(".bwproject") {
@@ -116,6 +123,11 @@ pub fn bitwig_folders(defaults: &[PathBuf], bitwig_saves: impl IntoIterator<Item
             && !out.iter().any(|o| same_folder(o, found))
         {
             out.push(found.to_path_buf());
+        }
+    }
+    for d in defaults.iter().filter(|d| is_bitwig_folder(d)) {
+        if !out.iter().any(|o| same_folder(o, d)) {
+            out.push(d.clone());
         }
     }
     out
@@ -147,7 +159,8 @@ fn is_inside(inner: &Path, outer: &Path) -> bool {
     mo_library::scan::is_inside(&inner.to_string_lossy(), &outer.to_string_lossy())
 }
 
-/// Where a curve goes in Bitwig's curves library: `<Bitwig Studio>\Library\Curves` in the first Bitwig folder found.
+/// Where a curve goes in Bitwig's curves library: `<Bitwig Studio>\Library\Curves` in the first of
+/// [`bitwig_folders`], the one Bitwig uses as far as the app can tell.
 pub fn bitwig_curves_folder(bitwig: &[PathBuf]) -> Option<PathBuf> {
     bitwig.first().map(|b| b.join("Library").join("Curves"))
 }
@@ -2534,14 +2547,27 @@ mod tests {
 
     #[test]
     fn bitwig_folders_are_found_from_its_saves() {
-        let found = bitwig_folders(&[], [r"K:\Bitwig Studio\Projects\Song\Song.bwproject", "/x/a.flp"]);
+        let found = bitwig_folders(None, &[], [r"K:\Bitwig Studio\Projects\Song\Song.bwproject", "/x/a.flp"]);
         let found: Vec<String> = found.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
         // On Linux the Windows path is one name, so check with forward slashes.
         let unix = bitwig_folders(
+            None,
             &[],
             ["/k/Bitwig Studio/Projects/Song/Song.bwproject", "/k/Bitwig Studio/Projects/B.bwproject"],
         );
         assert_eq!(unix, [PathBuf::from("/k/Bitwig Studio")]);
+        // The folder in Documents is often a leftover beside the real one: the one a save sits in comes before it,
+        // and the one chosen in Settings before both. Curves are saved into the first.
+        let documents = [PathBuf::from("/c/Documents/Bitwig Studio")];
+        let saves = ["/k/Bitwig Studio/Projects/Song/Song.bwproject"];
+        let both = bitwig_folders(None, &documents, saves);
+        assert_eq!(both, [PathBuf::from("/k/Bitwig Studio"), documents[0].clone()]);
+        let chosen = bitwig_folders(Some(Path::new("/m/Music/Bitwig")), &documents, saves);
+        assert_eq!(chosen[0], PathBuf::from("/m/Music/Bitwig"));
+        assert_eq!(chosen.len(), 3);
+        assert_eq!(bitwig_curves_folder(&chosen), Some(PathBuf::from("/m/Music/Bitwig/Library/Curves")));
+        assert_eq!(bitwig_folders(Some(Path::new("/k/Bitwig Studio")), &documents, saves), both, "each once");
+        assert_eq!(bitwig_folders(Some(Path::new("")), &documents, [""; 0]), documents);
         assert!(found.len() <= 1);
         assert_eq!(bitwig_curves_folder(&unix), Some(PathBuf::from("/k/Bitwig Studio/Library/Curves")));
         let folders = preset_folders(&[PathBuf::from("/h/VST3 Presets")], &[PathBuf::from("/k/Bitwig Studio")]);

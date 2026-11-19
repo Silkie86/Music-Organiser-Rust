@@ -17,7 +17,9 @@
 //!   folder holds every app's data, so nothing else in it is ever looked at.
 //! - `old-databases\`: a copy of one of the old app's databases that was being put away when the app stopped
 //!   (`sounds.db.part-<number>`, [`crate::old_databases`]), an hour old. Never the databases put away there.
-//! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
+//! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old; and the
+//!   curve files the app made there for a drag or Show curve file (`<name> <16 hex>.bwcurve`), 30 days old: the
+//!   folder is a cache, and a file is made again when it's asked for. Never a file under another name.
 //! - `Chord check\`: a take the test plugin was still saving (`take <time>.json.mo-part`), an hour old. Never the takes,
 //!   which are yours.
 //! - `Recordings\`: a Record take the test plugin was still saving (`Recording <time>.wav.part`), an hour old.
@@ -143,6 +145,9 @@ pub const REPORTS: [&str; 9] = [
 
 /// The folder in the data folder that curve files are written to.
 const CURVES: &str = mo_presets::curves::FOLDER;
+
+/// How long a curve file the app made in its Curves folder stays: it's made again the next time it's asked for.
+pub const CURVE_FILES_KEPT_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The twin test's copy of the library, beside its C# helper in `twin\cs\` (`tools/twin`, `run_songs`).
 const LIBRARY_COPY: &str = "library-copy.db";
@@ -319,6 +324,11 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     }
     if let Some(curves) = real_folder(&places.data, &[CURVES]) {
         done.add(remove_older(&curves, mo_presets::export::is_half_written, WRITING, now, false));
+        // The curve files made for a drag or for Show curve file: a cache, made again when asked for. Without this
+        // the folder only grew: files of curves no longer found, of other speeds, of made curves removed (the
+        // 19 Nov 2026 review's CU-5).
+        let made = |name: &str| mo_presets::curves::id_in_file_name(name).is_some();
+        done.add(remove_older(&curves, made, CURVE_FILES_KEPT_FOR, now, false));
     }
     // A copy of an old database that was being put away when the app stopped (its own name, only while it's written).
     if let Some(archive) = real_folder(&places.data, &[crate::old_databases::FOLDER]) {
@@ -1978,7 +1988,9 @@ mod tests {
             data.join("notes").join("backup.txt.mo-part"),
             data.join("playground").join("current.json"),
             data.join("Bitwig template").join("Music Organiser template.bwproject"),
-            data.join("Curves").join("Rise abcd1234.bwcurve"),
+            // A curve file under a name the app doesn't give (yours, or dropped there): never the cache's to clear.
+            data.join("Curves").join("Rise.bwcurve"),
+            data.join("Curves").join("Rise abcd123.bwcurve"),
             data.join("Curves").join(".mo-part-1-2"),
             data.join("twin").join("cs").join("twin-cs.dll"),
             data.join("twin").join("cs").join("library-copy.db.bak"),
@@ -2007,6 +2019,17 @@ mod tests {
         for path in writes.iter().chain(&days) {
             assert!(!path.exists(), "{} goes", path.display());
         }
+        // The curve files the app made for a drag stay 30 days (they're made again when asked for).
+        let cached = [
+            places.data.join("Curves").join("Rise abcd1234.bwcurve"),
+            places.data.join("Curves").join("Rise (half speed) 0123456789abcdef.bwcurve"),
+        ];
+        cached.iter().for_each(|p| fresh(p));
+        let made = SystemTime::now();
+        assert_eq!(sweep(&places, made + CURVE_FILES_KEPT_FOR - DAY, &bin), Tidied::default());
+        let done = sweep(&places, made + CURVE_FILES_KEPT_FOR + DAY, &bin);
+        assert_eq!(done.removed, cached.len());
+        assert!(cached.iter().all(|p| !p.exists()));
         assert_eq!(sweep(&places, made + DAY * 4000, &bin), Tidied::default());
         for path in &kept {
             assert!(path.exists(), "{} stays", path.display());
