@@ -58,8 +58,9 @@ pub struct Memory {
 }
 
 /// The words a freeze line carries when Windows had moved most of the app's memory to disk before it: the self-check
-/// and anyone reading the log can tell such a freeze (the computer short of memory) from the app being slow.
-pub const MOVED_TO_DISK: &str = "Windows had moved most of the app's memory to disk";
+/// and anyone reading the log can tell such a freeze (the computer short of memory) from the app being slow. Kept in
+/// `mo_app::self_check`, which counts them.
+pub use mo_app::self_check::MOVED_TO_DISK;
 
 /// When no more than this part of the memory the app holds was in RAM as a freeze began, the freeze is put down to
 /// reading the rest back from disk. On 17 Nov 2026 Bitwig opened a project beside the app on Solomon's PC

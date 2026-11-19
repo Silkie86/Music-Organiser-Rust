@@ -21,6 +21,9 @@ pub const DAYS: u64 = 7;
 pub const SLOW_START_SECS: f64 = 5.0;
 /// A freeze at least this long is a Problem.
 pub const FREEZE_MS: u64 = 1000;
+/// The words a freeze line carries when Windows had moved most of the app's memory to disk before it (written by
+/// `mo_ui::stuck`): such a freeze still counts, but the note says how many were the computer short of memory.
+pub const MOVED_TO_DISK: &str = "Windows had moved most of the app's memory to disk";
 /// The most lines kept for one step's Problem.
 const KEPT: usize = 20;
 
@@ -209,11 +212,17 @@ pub fn findings(facts: &LogFacts, data: &Path, windows: bool) -> Vec<Found> {
             };
             found("auto.freezes", Mark::Works, note, Vec::new())
         } else {
+            let paged = long.iter().filter(|(_, l)| l.contains(MOVED_TO_DISK)).count();
+            let paged = match paged {
+                0 => String::new(),
+                n if n == long.len() => format!(" (all {n} while Windows had moved the app's memory to disk)"),
+                n => format!(" ({n} of them while Windows had moved the app's memory to disk)"),
+            };
             found(
                 "auto.freezes",
                 Mark::Problem,
                 format!(
-                    "{} freezes of a second or more in {runs} runs; the longest was {} ms",
+                    "{} freezes of a second or more in {runs} runs; the longest was {} ms{paged}",
                     long.len(),
                     longest.unwrap_or(0)
                 ),
@@ -318,6 +327,19 @@ mod tests {
         let freezes = f.iter().find(|x| x.id == "auto.freezes").expect("there");
         assert_eq!(freezes.lines.len(), 3);
         assert!(freezes.note.contains("4100 ms"), "{}", freezes.note);
+        assert!(!freezes.note.contains("disk"), "{}", freezes.note);
+        // A freeze while the app's memory was on disk still counts, and the note says so.
+        let paged = format!(
+            "10:07:00.000 Warning [Freeze] The window was stuck for 2000 ms (page Space; no jobs running; {MOVED_TO_DISK} before this)\n"
+        );
+        let mut more = LogFacts { runs: 2, ..LogFacts::default() };
+        read_one("b.log", format!("{LOG}{paged}").as_bytes(), long_ago(), &mut more);
+        let f = findings(&more, Path::new("I:\\MusicOrganiser"), true);
+        let freezes = f.iter().find(|x| x.id == "auto.freezes").expect("there");
+        assert_eq!(freezes.mark, Mark::Problem);
+        // (The 10:06 "still stuck" ends with this line, so it is one freeze of 2000 ms, not two.)
+        assert!(freezes.note.starts_with("3 freezes"), "{}", freezes.note);
+        assert!(freezes.note.contains("(1 of them while Windows had moved"), "{}", freezes.note);
         let c = findings(&LogFacts::default(), Path::new("C:\\Users\\x\\AppData\\Local\\MusicOrganiser"), true);
         assert_eq!(c.len(), 1, "nothing to go on but the folder");
         assert_eq!(c[0].mark, Mark::Problem);
