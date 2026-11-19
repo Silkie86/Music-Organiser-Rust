@@ -341,6 +341,9 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     done.add(remove_older(&places.temp, crate::midi::is_play_file, DAY, now, true));
     // A Bitwig multisample's sample, written for a moment while Favourites from Bitwig looks for it: a crash can leave one.
     done.add(remove_older(&places.temp, crate::bitwig_favourites::is_temp_file, DAY, now, true));
+    if let Some(unpacked) = real_folder(&places.data, &[crate::bitwig_favourites::UNPACK_FOLDER]) {
+        done.add(remove_older(&unpacked, crate::bitwig_favourites::is_temp_file, DAY, now, false));
+    }
     // A sample Favourites from Bitwig was still saving into a sample folder's From Bitwig folder (a folder a
     // multisample, never through a link).
     for from in places.sample_folders.iter().filter_map(|f| real_folder(f, &[crate::bitwig_favourites::FROM_BITWIG])) {
@@ -1840,6 +1843,26 @@ mod tests {
         assert_eq!(sweep(&places, now + Duration::from_secs(60), &bin).removed, 0);
         assert_eq!(sweep(&places, now + WRITING * 2, &bin).removed, 1);
         assert!(!half.exists() && kept.iter().all(|k| k.exists()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bitwig_sample_left_unpacked_in_the_data_folder_goes() {
+        // Review SN-19: Favourites from Bitwig unpacks its samples there now, not in the system's Temp.
+        let dir = test_folder("bitwig-unpacked");
+        let places = test_places(&dir);
+        let bin = TestBin(dir.join("bin"));
+        let now = SystemTime::now();
+        let unpacked = places.data.join(crate::bitwig_favourites::UNPACK_FOLDER);
+        let left = unpacked.join("mo-bitwig-sample-4120-3.wav");
+        changed_at(&left, now);
+        let kept = [unpacked.join("Snare.wav"), places.data.join("mo-bitwig-sample-4120-4.wav")];
+        for k in &kept {
+            changed_at(k, now);
+        }
+        assert_eq!(sweep(&places, now + Duration::from_secs(60), &bin).removed, 0);
+        assert_eq!(sweep(&places, now + DAY * 2, &bin).removed, 1);
+        assert!(!left.exists() && kept.iter().all(|k| k.exists()));
         let _ = fs::remove_dir_all(&dir);
     }
 
