@@ -2,7 +2,7 @@
 //! copy without its quiet start and end (`mo_audio::trim`), so the DAW gets what you heard (Solomon, 12 Nov 2026).
 //!
 //! The original is never changed or moved (rule 2). Copies go in `Trimmed sounds` in the export folder (Settings, or
-//! "Music Organiser Exports" in Documents), beside the app's other exports: they're yours, as DAW projects go on using
+//! "DAWmate Exports" in Documents, or "Music Organiser Exports" when that folder is already there), beside the app's other exports: they're yours, as DAW projects go on using
 //! them, so the app never tidies them away and a data-folder move leaves them where they are. One copy for each sound
 //! and level, named by `mo_sounds::trimmed::copy_name` (so the Sounds page still counts a project using the copy as
 //! using the original): the next drag reuses it, and an original changed since gets it made again.

@@ -183,12 +183,15 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::daws::connect(&app);
     // A while after start, once a day: whether a newer version is out (an installed copy only; Settings turns it off).
     mo_ui::update::connect(&app, feed.clone(), true);
-    // Maximised under full screen, so F11 out of full screen leaves the window filling the screen beside the taskbar.
+    // The window opens maximised. Its size is given first: without one, Slint shrinks the window winit has just
+    // maximised back to its preferred size on the first show, and Windows still counts that small window as
+    // maximised, so it stayed small in the corner (the 19 Nov review, CL-1). 1440 x 900 is then only the size
+    // Restore gives. Full screen, when F11 left it on, is turned on once the window is up (fill_the_screen), so the
+    // place winit keeps for F11 is the maximised one and F11 out of full screen leaves the window filling the
+    // screen (CL-5).
+    app.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
     app.window().set_maximized(true);
     mo_ui::settings::full_screen_at_start(full_screen);
-    if full_screen {
-        app.window().set_fullscreen(true);
-    }
     // A little after start, a card if the app's drive or the temp folder's is almost full.
     mo_app::drive_room::watch(data.clone(), feed.clone());
     // A little after start, the MIDI files older drags left in Temp (rule 28).
@@ -218,8 +221,8 @@ fn main() -> Result<(), slint::PlatformError> {
         // The size of everything, once the window knows the screen's own scale.
         if let Some(app) = sized.upgrade() {
             mo_ui::settings::apply_size(&app);
-            // Maximised again now the window is up: set before it was made, Windows can lose it to the window's size
-            // limits and open a small window in the corner (Solomon, 19 Nov, on his 3440-wide screen).
+            // Maximised (or full screen) again now the window is up, and checked half a second later against the
+            // screen's width (Solomon, 19 Nov: a small window in the corner of his 3440-wide screen).
             mo_ui::settings::fill_the_screen(&app);
         }
         mo_ui::watchdog::start(watched);

@@ -22,7 +22,10 @@ $Data = $First
 $Pointer = Join-Path $env:LOCALAPPDATA 'MusicOrganiser-folder.txt'
 if (Test-Path -LiteralPath $Pointer) {
     $moved = ((Get-Content -LiteralPath $Pointer -Raw -Encoding UTF8 -ErrorAction SilentlyContinue) + '').Trim()
-    if ($moved -and [IO.Path]::IsPathRooted($moved) -and (Test-Path -LiteralPath (Join-Path $moved 'moved-in.json'))) { $Data = $moved }
+    # A finished move, or a folder the installer started the data in (as the app itself reads it, paths.rs).
+    $known = ($moved -and [IO.Path]::IsPathRooted($moved)) -and ((Test-Path -LiteralPath (Join-Path $moved 'moved-in.json')) -or
+        (Test-Path -LiteralPath (Join-Path $moved 'started-here.txt')))
+    if ($known) { $Data = $moved }
 }
 $Rust = Join-Path $First 'run-latest-rust\app'
 $Logs = Join-Path $Data 'logs'
@@ -38,24 +41,40 @@ $Report = Join-Path $Logs "real-files-report-$Stamp.txt"
 $State = Join-Path $Twin 'real-files-state.txt'
 $From = if ($Folders) { $Folders } else { @('--library', (Join-Path $Data 'library.db')) }
 
+# The launcher's build folder: the one it remembers (-BuildDir), else beside the code (as install-test-plugin.ps1).
+$TargetDir = Join-Path $Rust 'target'
+$BuildChoice = Join-Path (Join-Path $First 'run-latest-rust') 'build-folder.txt'
+if (Test-Path -LiteralPath $BuildChoice) {
+    $remembered = "$(Get-Content -LiteralPath $BuildChoice -TotalCount 1 -Encoding UTF8)".Trim()
+    if ($remembered -and (Test-Path -LiteralPath $remembered)) { $TargetDir = Join-Path $remembered 'MusicOrganiser-build' }
+}
+# Which code reads the files: the launcher's copy as it last left it (main, or a pull request's branch), which may
+# not be the installed beta's. Said here and at the top of the summary (the 19 Nov review, TC-8).
+$Branch = "$(& git -C $Rust rev-parse --abbrev-ref HEAD 2>$null)".Trim()
+$Commit = "$(& git -C $Rust log -1 --format='%h %cd' --date=format:'%Y-%m-%d %H:%M' 2>$null)".Trim()
+if (-not $Branch) { $Branch = 'unknown branch' }
+if (-not $Commit) { $Commit = 'unknown commit' }
+$Readers = "Readers: the launcher's code on $Branch, commit $Commit"
+
 # Below normal priority (rule 21), so a DAW open meanwhile stays quick.
 try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
+Write-Host $Readers
 Write-Host 'Building the check (a few minutes the first time)...'
 Push-Location $Rust
 # Cargo writes its progress to stderr, which Windows PowerShell 5.1 takes as an error under 'Stop'.
 $ErrorActionPreference = 'Continue'
 try {
-  cargo build --release -p mo-twin
+  cargo build --release -p mo-twin --target-dir $TargetDir
   if ($LASTEXITCODE -ne 0) { throw 'The check did not build.' }
   Write-Host 'Reading every FL Studio, Bitwig and Studio One project and MIDI file...'
   # Set-Content rather than Tee-Object, which writes UTF-16 in Windows PowerShell 5.1.
-  $Out = @(cargo run --release -q -p mo-twin -- check @From --state $State --report $Report)
+  $Out = @(cargo run --release -q -p mo-twin --target-dir $TargetDir -- check @From --state $State --report $Report)
   $Code = $LASTEXITCODE
 } finally { Pop-Location }
 $ErrorActionPreference = 'Stop'
 # Exit code 1: a reader panicked on a file. The summary still counts it.
 if ($Code -gt 1) { throw "The check stopped (exit code $Code); its summary wasn't written." }
-$Out | Set-Content -Encoding UTF8 -Path $Summary
+@($Readers) + $Out | Set-Content -Encoding UTF8 -Path $Summary
 $Out | Write-Host
 Write-Host ''
 Write-Host "Summary (safe to share): $Summary"

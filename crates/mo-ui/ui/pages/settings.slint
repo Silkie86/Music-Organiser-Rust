@@ -185,6 +185,9 @@ export global SettingsData {
     in property <bool> beta-to-try;
     in property <string> beta-message;
     in property <bool> beta-checking;
+    // Counted up when a step's row that had the keys goes (its mark took it out of Only to try, or the rows were made
+    // anew): the window takes the keys back, or no key would work until a click (the 19 Nov review, BT-1).
+    in-out property <int> beta-keys-back;
 
     // Shortcuts: every action with its key; the one listening for a new key (its id), or empty; what the last change
     // did; and whether any key isn't the one it started with.
@@ -228,6 +231,8 @@ export global SettingsData {
     // its note changed; Only to try switched; the checklist's file shown in its folder.
     callback beta-mark(string, int, string);
     callback beta-note(string, string);
+    // Words typed in a step's box, not yet kept: they stay if the lines are drawn again.
+    callback beta-draft(string, string);
     callback beta-toggle-to-try();
     callback beta-show-file();
     // Run the self-check now.
@@ -976,6 +981,7 @@ component DawsTab inherits VerticalLayout {
 // keeps the note; a mark keeps what's in the box with it.
 component BetaStep inherits VerticalLayout {
     in property <BetaLineInfo> line;
+
     spacing: Space.xs;
     padding-top: Space.xs;
     padding-bottom: Space.xs;
@@ -998,22 +1004,39 @@ component BetaStep inherits VerticalLayout {
         font-size: Type.meta;
         wrap: word-wrap;
     }
+    // A mark can take this row out of Only to try: if its box has the keys, the window takes them first (a chip never
+    // takes them, so they'd stay in a box that's gone: the 19 Nov review, BT-1).
     if !root.line.auto: HorizontalLayout {
         spacing: Space.sm;
         ToggleChip {
             text: "Works";
             on: root.line.mark == 0;
-            clicked => { SettingsData.beta-mark(root.line.id, 0, note.text); }
+            clicked => {
+                if (note.has-keys) {
+                    SettingsData.beta-keys-back += 1;
+                }
+                SettingsData.beta-mark(root.line.id, 0, note.text);
+            }
         }
         ToggleChip {
             text: "Problem";
             on: root.line.mark == 1;
-            clicked => { SettingsData.beta-mark(root.line.id, 1, note.text); }
+            clicked => {
+                if (note.has-keys) {
+                    SettingsData.beta-keys-back += 1;
+                }
+                SettingsData.beta-mark(root.line.id, 1, note.text);
+            }
         }
         ToggleChip {
             text: "Skip";
             on: root.line.mark == 2;
-            clicked => { SettingsData.beta-mark(root.line.id, 2, note.text); }
+            clicked => {
+                if (note.has-keys) {
+                    SettingsData.beta-keys-back += 1;
+                }
+                SettingsData.beta-mark(root.line.id, 2, note.text);
+            }
         }
         note := WordBox {
             horizontal-stretch: 1;
@@ -1021,6 +1044,7 @@ component BetaStep inherits VerticalLayout {
             hint: root.line.mark == 1 ? "What went wrong? (Enter keeps it)" : "A note, if any (Enter keeps it)";
             text: root.line.note;
             accepted(t) => { SettingsData.beta-note(root.line.id, t); }
+            edited(t) => { SettingsData.beta-draft(root.line.id, t); }
         }
     }
     if root.line.said != "": Text {
@@ -1048,7 +1072,11 @@ component DeveloperTab inherits VerticalLayout {
             ToggleChip {
                 text: "Only to try";
                 on: SettingsData.beta-to-try;
-                clicked => { SettingsData.beta-toggle-to-try(); }
+                clicked => {
+                    // Rows go as it turns on, maybe the one whose box has the keys: the window takes them.
+                    SettingsData.beta-keys-back += 1;
+                    SettingsData.beta-toggle-to-try();
+                }
             }
             StudioButton {
                 horizontal-stretch: 0;
@@ -1094,10 +1122,6 @@ component DeveloperTab inherits VerticalLayout {
                 clicked => { SettingsData.try-job(); }
             }
         }
-    }
-    SettingsCard {
-        title: "Coming here";
-        intro: "The self-check: the app checking itself with your real library, and ticking the checklist's automatic steps.";
     }
 }
 

@@ -718,9 +718,9 @@ pub fn sweep_hold(settings: &AppSettings) -> bool {
     settings.get(SWEEP_HOLD_KEY) == Some("1")
 }
 
-/// Whether the window should be full screen: set at the start from the setting, and changed only by F11. Windows
-/// drops full screen when a minimised window comes back (Solomon's F12 note of 17 Nov: "clicking on the space tab took
-/// the app out of full screen", just after a restore), so [`restored`] puts it back from this.
+/// Whether the window should be full screen: set at the start from the setting, and changed only by F11. When the
+/// window comes back from the taskbar, [`restored`] checks it still is (Solomon's F12 note of 17 Nov: "clicking on the
+/// space tab took the app out of full screen", just after a restore).
 static FULL_SCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The window opens full screen (or not), as the setting says.
@@ -734,44 +734,105 @@ pub fn full_screen_changed(on: bool) {
     change(app_settings::FULL_SCREEN_KEY, if on { "1" } else { "0" });
 }
 
-/// Once the window is up: full screen if F11 left it so, else maximised; then a line in the log with what it is, so a
-/// start that opened small shows there.
-pub fn fill_the_screen(app: &AppWindow) {
-    let window = app.window();
-    if FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed) {
-        window.set_fullscreen(true);
-    } else if !window.is_maximized() {
-        window.set_maximized(true);
-    }
-    let weak = app.as_weak();
-    slint::Timer::single_shot(std::time::Duration::from_millis(500), move || {
-        let Some(app) = weak.upgrade() else { return };
-        let window = app.window();
-        let size = window.size();
-        let state = if window.is_fullscreen() {
+/// What winit says about the window: its inside size, the width of the screen it is on, full screen, maximised.
+struct WindowLook {
+    width: u32,
+    height: u32,
+    screen: Option<u32>,
+    full_screen: bool,
+    maximised: bool,
+}
+
+impl WindowLook {
+    fn words(&self) -> String {
+        let state = if self.full_screen {
             "full screen"
-        } else if window.is_maximized() {
+        } else if self.maximised {
             "maximised"
         } else {
             "neither maximised nor full screen"
         };
-        log::info("Window", &format!("The window is {} x {}, {state}", size.width, size.height));
+        let screen = self.screen.map_or_else(|| " (screen not known)".to_owned(), |s| format!(" on a screen {s} wide"));
+        format!("{} x {}{screen}, {state}", self.width, self.height)
+    }
+
+    /// Narrower than its screen: a maximised or full-screen window this small didn't really fill it.
+    fn smaller_than_screen(&self) -> bool {
+        self.screen.is_some_and(|s| app_settings::smaller_than_screen(self.width, s))
+    }
+}
+
+fn look_at(window: &slint::winit_030::winit::window::Window) -> WindowLook {
+    let size = window.inner_size();
+    WindowLook {
+        width: size.width,
+        height: size.height,
+        screen: window.current_monitor().map(|m| m.size().width),
+        full_screen: window.fullscreen().is_some(),
+        maximised: window.is_maximized(),
+    }
+}
+
+/// Once the window is up: full screen if F11 left it so (turned on only now, so F11 later goes back to maximised),
+/// else maximised. Half a second later a line in the log says what it is, and a window that says it is maximised but
+/// is narrower than its screen is maximised again through winit itself: Slint and winit pass a maximise on only when
+/// they think it changes something, and Windows ignores one for a window it already counts as maximised (the 19 Nov
+/// review, CL-1).
+pub fn fill_the_screen(app: &AppWindow) {
+    let window = app.window();
+    if FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed) {
+        window.set_fullscreen(true);
+    } else {
+        window.set_maximized(true);
+    }
+    let weak = app.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(500), move || {
+        use slint::winit_030::WinitWindowAccessor;
+        let Some(app) = weak.upgrade() else { return };
+        let full = FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed);
+        let seen = app.window().with_winit_window(|w| {
+            let look = look_at(w);
+            let mend = !full && !look.full_screen && look.smaller_than_screen();
+            if mend {
+                w.set_maximized(false);
+                w.set_maximized(true);
+            }
+            (look, mend)
+        });
+        match seen {
+            Some((look, true)) => log::info(
+                "Window",
+                &format!("The window is {}: smaller than the screen, so it was maximised again", look.words()),
+            ),
+            Some((look, false)) => log::info("Window", &format!("The window is {}", look.words())),
+            None => log::info("Window", "The window's size couldn't be read"),
+        }
     });
 }
 
-/// The window came back from the taskbar: full screen again if it was full screen (only F11 takes it out). Done a
-/// moment later, on the event loop, so it isn't changed in the middle of the restore's own resize.
+/// The window came back from the taskbar: a line in the log with what winit says it is, and full screen put back
+/// through winit itself when F11 left it on and the window lost it (narrower than its screen, or no longer full
+/// screen). Slint's own is_fullscreen() can't tell: it still says full screen after a restore (the 19 Nov review,
+/// CL-6). Done a moment later, on the event loop, so it isn't changed in the middle of the restore's own resize.
 pub fn restored(app: &AppWindow) {
-    if !FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
     let weak = app.as_weak();
     slint::Timer::single_shot(std::time::Duration::from_millis(0), move || {
-        if let Some(app) = weak.upgrade()
-            && !app.window().is_fullscreen()
-        {
-            app.window().set_fullscreen(true);
-            log::info("Window", "Full screen again after the window came back");
+        use slint::winit_030::WinitWindowAccessor;
+        use slint::winit_030::winit::window::Fullscreen;
+        let Some(app) = weak.upgrade() else { return };
+        let full = FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed);
+        let seen = app.window().with_winit_window(|w| {
+            let look = look_at(w);
+            let mend = full && (!look.full_screen || look.smaller_than_screen());
+            if mend {
+                w.set_fullscreen(None);
+                w.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            }
+            (look, mend)
+        });
+        if let Some((look, mend)) = seen {
+            let after = if mend { ": full screen had gone, so it was put back" } else { "" };
+            log::info("Window", &format!("Back from the taskbar, the window is {}{after}", look.words()));
         }
     });
 }

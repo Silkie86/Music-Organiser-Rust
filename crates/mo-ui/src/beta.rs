@@ -26,8 +26,9 @@ struct Checklist {
     writable: bool,
     /// A change not yet saved by the writer, for the last save as the app closes.
     unsaved: bool,
-    /// Notes typed on a step not yet marked, kept until it is (and while the lines are drawn again).
-    waiting: HashMap<&'static str, String>,
+    /// Words typed in a step's box but not yet kept (by Enter or a mark), so they stay while the lines are drawn
+    /// again (the 19 Nov review, BT-1).
+    drafts: HashMap<&'static str, String>,
     to_try: bool,
     /// The self-check is running.
     checking: bool,
@@ -135,7 +136,7 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
             folder: folder.to_owned(),
             writable,
             unsaved: false,
-            waiting: HashMap::new(),
+            drafts: HashMap::new(),
             to_try: false,
             checking: false,
             message,
@@ -155,6 +156,15 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
         let Some(app) = weak.upgrade() else { return };
         noted(&app, &id, &note);
     });
+    data.on_beta_draft(|id, words| {
+        LIST.with(|l| {
+            let mut l = l.borrow_mut();
+            let Some(l) = l.as_mut() else { return };
+            if let Some(step) = l.steps.iter().find(|s| s.id == id.as_str()) {
+                l.drafts.insert(step.id, words.to_string());
+            }
+        });
+    });
     let weak = app.as_weak();
     data.on_beta_toggle_to_try(move || {
         let Some(app) = weak.upgrade() else { return };
@@ -163,7 +173,8 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
                 l.to_try = !l.to_try;
             }
         });
-        redraw(&app, true);
+        // Only the lines that come or go change, so the rows that stay keep their words.
+        redraw(&app, false);
     });
     let weak = app.as_weak();
     data.on_beta_self_check(move || {
@@ -306,7 +317,7 @@ fn marked(app: &AppWindow, id: &str, mark: i32, note: &str) {
         let step = l.steps.iter().find(|s| s.id == id)?.clone();
         let had = l.marks.get(step.id).map(|m| m.mark);
         let mark = if had == mark { None } else { mark };
-        // The box shows a waiting note, so what's in it now is the note (an emptied box, no note).
+        // The box shows the step's note (or words typed), so what's in it now is the note (an emptied box, no note).
         let note = note.to_owned();
         let version = mo_app::version::version();
         let current = log::current();
@@ -323,11 +334,7 @@ fn marked(app: &AppWindow, id: &str, mark: i32, note: &str) {
         // The log's line goes first, so a Problem's lines end just before it.
         beta_log(mark == Some(Mark::Problem), &beta::log_line(&step, mark, &note));
         l.marks.set(&step, mark, &note, moment);
-        if mark.is_some() || note.trim().is_empty() {
-            l.waiting.remove(step.id);
-        } else {
-            l.waiting.insert(step.id, note);
-        }
+        l.drafts.remove(step.id);
         l.unsaved |= l.writable;
         l.writable.then(|| (l.folder.clone(), l.marks.to_json()))
     });
@@ -335,16 +342,13 @@ fn marked(app: &AppWindow, id: &str, mark: i32, note: &str) {
     redraw(app, false);
 }
 
-/// A note kept with Enter: on a marked step it's saved; on an unmarked one it waits for the mark.
+/// A note kept with Enter: saved, on a marked step or not (an unmarked step's goes with its mark later).
 fn noted(app: &AppWindow, id: &str, note: &str) {
     let job = LIST.with(|l| {
         let mut l = l.borrow_mut();
         let l = l.as_mut()?;
         let step = l.steps.iter().find(|s| s.id == id)?.clone();
-        if l.marks.get(step.id).is_none() {
-            l.waiting.insert(step.id, note.to_owned());
-            return None;
-        }
+        l.drafts.remove(step.id);
         if !l.marks.set_note(step.id, note) {
             return None;
         }
@@ -403,9 +407,27 @@ fn taken_out(old: &VecModel<BetaLineInfo>, new: &[BetaLineInfo]) -> Option<Vec<u
     })
 }
 
-/// Shows the lines again. With `whole` the list is made anew; otherwise the lines a mark took out of Only to try are
-/// taken out and each line that changed is changed in place, so the card keeps its place, the box you're typing in
-/// keeps the keys, and words typed in other boxes stay.
+/// Whether `new` is `old` with some lines put in (Only to try turned off, or a self-check bringing a step back): then
+/// where they go in `new`, first first.
+fn put_in(old: &VecModel<BetaLineInfo>, new: &[BetaLineInfo]) -> Option<Vec<usize>> {
+    let same = |a: &BetaLineInfo, b: &BetaLineInfo| a.id == b.id && a.area == b.area;
+    let mut out = Vec::new();
+    let mut i = 0;
+    for (j, line) in new.iter().enumerate() {
+        if i < old.row_count() && old.row_data(i).is_some_and(|row| same(&row, line)) {
+            i += 1;
+        } else {
+            out.push(j);
+        }
+    }
+    (i == old.row_count()).then_some(out)
+}
+
+/// Shows the lines again. With `whole` (the first time) the list is made anew; otherwise the lines that went (a mark
+/// in Only to try, or turning it on) are taken out, the lines that came are put in, and each line that changed is
+/// changed in place, so the card keeps its place and every row that stays keeps its words and the keys. A row that
+/// had the keys gives them back to the window as it goes (its chip, or Only to try, says so: [`SettingsData`]'s
+/// beta-keys-back), and the rare redraw that must make every row anew does the same, so a key always works after.
 fn redraw(app: &AppWindow, whole: bool) {
     LIST.with(|l| {
         let l = l.borrow();
@@ -418,11 +440,7 @@ fn redraw(app: &AppWindow, whole: bool) {
                 what: line.what.into(),
                 expect: line.expect.into(),
                 mark: line.mark.and_then(|m| Mark::ALL.iter().position(|x| *x == m)).map_or(-1, |i| i as i32),
-                note: if line.note.is_empty() {
-                    l.waiting.get(line.id).cloned().unwrap_or_default().into()
-                } else {
-                    line.note.into()
-                },
+                note: l.drafts.get(line.id).cloned().unwrap_or(line.note).into(),
                 auto: line.auto,
                 said: line.said.into(),
             })
@@ -432,9 +450,17 @@ fn redraw(app: &AppWindow, whole: bool) {
             for i in gone {
                 l.model.remove(i);
             }
+        } else if !whole && let Some(come) = put_in(&l.model, &lines) {
+            for j in come {
+                l.model.insert(j, lines[j].clone());
+            }
         }
+        let data = app.global::<SettingsData>();
         if whole || lines.len() != l.model.row_count() {
             l.model.set_vec(lines);
+            if !whole {
+                data.set_beta_keys_back(data.get_beta_keys_back().wrapping_add(1));
+            }
         } else {
             for (i, line) in lines.into_iter().enumerate() {
                 if l.model.row_data(i).as_ref() != Some(&line) {
@@ -442,7 +468,6 @@ fn redraw(app: &AppWindow, whole: bool) {
                 }
             }
         }
-        let data = app.global::<SettingsData>();
         data.set_beta_progress(beta::progress(&l.steps, &l.marks).into());
         data.set_beta_to_try(l.to_try);
         data.set_beta_checking(l.checking);
