@@ -333,6 +333,8 @@ fn watch(feed: &Feed) {
         let mut said_still_stuck = false;
         let mut looked_at_thread = false;
         let mut looked_again = false;
+        // How long the watchdog itself was held up while waiting (its short sleeps that came back late).
+        let mut held_up = Duration::ZERO;
         // The page faults of the watchdog's own looks at the window's thread (reading the app's symbols), left out
         // of the freeze's count.
         let mut own_faults = 0;
@@ -342,7 +344,9 @@ fn watch(feed: &Feed) {
         // first few hundred looks: a longer wait is a freeze, which has its own line.
         let mut seen: Vec<Option<&'static str>> = Vec::new();
         while answered.load(Ordering::Acquire) == 0 {
+            let slept = Instant::now();
             std::thread::sleep(LOOK_EVERY);
+            held_up += late(slept.elapsed());
             // Answered while this look slept: what the window does now came after the answer, so it isn't looked at.
             if answered.load(Ordering::Acquire) != 0 {
                 break;
@@ -392,9 +396,32 @@ fn watch(feed: &Feed) {
                 busy.push_str("; ");
                 busy.push_str(&memory);
             }
+            if let Some(whole) = held_up_words(held_up) {
+                busy.push_str("; ");
+                busy.push_str(&whole);
+            }
             log::warning("Freeze", &line(waited, false, crate::page_name(), &feed.running_titles(), &busy));
         }
     }
+}
+
+/// How much of a sleep of [`LOOK_EVERY`] that took `slept` was the watchdog being held up itself: nothing for the
+/// usual few milliseconds over, the rest of it once that's past [`STALL`].
+fn late(slept: Duration) -> Duration {
+    let over = slept.saturating_sub(LOOK_EVERY);
+    if over >= STALL { over } else { Duration::ZERO }
+}
+
+/// For a freeze line, that the watchdog was held up too, when it was: then it wasn't the window's thread being busy
+/// but the whole app standing still (the computer asleep or out of memory, the app's memory on disk). On 17 Nov 2026
+/// a 23 s freeze got its first look only after 19.4 s, because the watchdog hadn't run either.
+fn held_up_words(held_up: Duration) -> Option<String> {
+    (held_up >= STALL).then(|| {
+        format!(
+            "the watchdog itself was held up for {:.1} s of it, so the whole app stood still, not only the window",
+            held_up.as_secs_f64()
+        )
+    })
 }
 
 /// Where the window's thread is, stuck for `waited`, as a `[Freeze]` line of its own (nothing where it can't be seen).
@@ -501,6 +528,18 @@ mod tests {
         assert_eq!(
             thread_line(LOOK_AT_THREAD, &["a".to_owned()]),
             "Stuck for 0.3 s, the window's thread was in:\n    a"
+        );
+    }
+
+    #[test]
+    fn a_watchdog_held_up_itself_says_the_whole_app_stood_still() {
+        // A sleep a few milliseconds long is the usual; one that comes back 19 s late is the app not running.
+        assert_eq!(late(LOOK_EVERY + Duration::from_millis(15)), Duration::ZERO);
+        assert_eq!(late(LOOK_EVERY + Duration::from_secs(19)), Duration::from_secs(19));
+        assert_eq!(held_up_words(Duration::ZERO), None);
+        assert_eq!(
+            held_up_words(Duration::from_millis(19_400)).as_deref(),
+            Some("the watchdog itself was held up for 19.4 s of it, so the whole app stood still, not only the window")
         );
     }
 

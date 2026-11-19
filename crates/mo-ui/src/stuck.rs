@@ -52,18 +52,36 @@ pub fn memory_now() -> Option<Memory> {
 pub struct Memory {
     pub page_faults: u64,
     pub in_ram: u64,
+    /// The most it has had in RAM this run.
+    pub most_in_ram: u64,
 }
 
+/// The words a freeze line carries when Windows had moved most of the app's memory to disk before it: the self-check
+/// and anyone reading the log can tell such a freeze (the computer short of memory) from the app being slow.
+pub const MOVED_TO_DISK: &str = "Windows had moved most of the app's memory to disk";
+
+/// When no more than this part of the most the app has had in RAM was still there as a freeze began, the freeze is
+/// put down to reading the rest back from disk. On 17 Nov 2026 Bitwig opened a project beside the app on Solomon's PC
+/// (32 GB, most of it in use): the app went from 1,700 MB in RAM to 49 MB, and every step after that waited on the
+/// disk: freezes of 5, 12 and 23 s with the window's thread somewhere different each time.
+const LEFT_IN_RAM: u64 = 4;
+
 /// What happened to the memory over a freeze, less `own` faults (the watchdog's own looks), for its line: "41,200 page
-/// faults in the app while stuck, 812 MB in RAM".
+/// faults in the app while stuck, 812 MB in RAM", and that Windows had moved most of its memory to disk when it had.
 pub fn memory_words(before: Option<Memory>, after: Option<Memory>, own: u64) -> Option<String> {
     let (before, after) = (before?, after?);
     let faults = after.page_faults.saturating_sub(before.page_faults).saturating_sub(own);
-    Some(format!(
-        "{} page faults in the app while stuck, {} MB in RAM",
-        thousands(faults),
-        after.in_ram / (1024 * 1024)
-    ))
+    const MB: u64 = 1024 * 1024;
+    let mut words =
+        format!("{} page faults in the app while stuck, {} MB in RAM", thousands(faults), after.in_ram / MB);
+    if before.in_ram.saturating_mul(LEFT_IN_RAM) <= before.most_in_ram {
+        words.push_str(&format!(
+            "; {MOVED_TO_DISK} before this ({} MB of {} MB were left in RAM), and reading it back is slow",
+            before.in_ram / MB,
+            before.most_in_ram / MB
+        ));
+    }
+    Some(words)
 }
 
 fn thousands(n: u64) -> String {
@@ -93,6 +111,7 @@ mod windows_memory {
         (ok != 0).then(|| super::Memory {
             page_faults: u64::from(counters.PageFaultCount),
             in_ram: counters.WorkingSetSize as u64,
+            most_in_ram: counters.PeakWorkingSetSize as u64,
         })
     }
 }
@@ -499,8 +518,9 @@ mod tests {
 
     #[test]
     fn memory_over_a_freeze_in_words() {
-        let before = Memory { page_faults: 1_000, in_ram: 0 };
-        let after = Memory { page_faults: 42_200, in_ram: 812 * 1024 * 1024 };
+        const MB: u64 = 1024 * 1024;
+        let before = Memory { page_faults: 1_000, in_ram: 800 * MB, most_in_ram: 900 * MB };
+        let after = Memory { page_faults: 42_200, in_ram: 812 * MB, most_in_ram: 900 * MB };
         assert_eq!(
             memory_words(Some(before), Some(after), 0).as_deref(),
             Some("41,200 page faults in the app while stuck, 812 MB in RAM")
@@ -510,6 +530,19 @@ mod tests {
             Some("40,000 page faults in the app while stuck, 812 MB in RAM")
         );
         assert_eq!(memory_words(None, Some(after), 0), None);
+        // Solomon's 17 Nov: 94 MB left of 1,703 MB when the 23 s freeze began.
+        let trimmed = Memory { page_faults: 0, in_ram: 94 * MB, most_in_ram: 1_703 * MB };
+        let back = Memory { page_faults: 748, in_ram: 97 * MB, most_in_ram: 1_703 * MB };
+        assert_eq!(
+            memory_words(Some(trimmed), Some(back), 0).as_deref(),
+            Some(
+                "748 page faults in the app while stuck, 97 MB in RAM; Windows had moved most of the app's memory to \
+                 disk before this (94 MB of 1703 MB were left in RAM), and reading it back is slow"
+            )
+        );
+        // A third gone isn't "most".
+        let some = Memory { page_faults: 0, in_ram: 600 * MB, most_in_ram: 900 * MB };
+        assert!(!memory_words(Some(some), Some(after), 0).unwrap().contains(MOVED_TO_DISK));
         assert_eq!(thousands(0), "0");
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_000), "1,000");
