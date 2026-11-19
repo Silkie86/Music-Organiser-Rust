@@ -4,7 +4,7 @@
 // Chords (Chord check: the chord the notes played in make, as the app's chord reader names it) and DAW check (every
 // CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card, TipLayer, TipState } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card, TipLayer, TipState, CutText } from "../../mo-ui/ui/studio.slint";
 import { CurveBench, GridStrip, CurveEditorData, EditorDot, ClipTile, RulerMark } from "../../mo-ui/ui/pages/curve_editor.slint";
 export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem }
 import { ListView } from "../../mo-ui/ui/list.slint";
@@ -283,6 +283,8 @@ export component Panel inherits Window {
     callback play(int, float);
     // A line is being dragged out (onto a track): its row.
     callback drag-out(int);
+    // The mouse was let go on a line dragged out: a drag whose file isn't ready yet is called off (PN-3).
+    callback drag-let-go();
     // Whether lines can be dragged out on this system, and the row being carried (-1 for none).
     in property <bool> can-drag;
     in property <int> carried: -1;
@@ -731,7 +733,9 @@ export component Panel inherits Window {
                             }
                         }
                     }
-                    Text {
+                    CutText {
+                        own-mouse: true;
+                        live: true;
                         horizontal-stretch: 1;
                         vertical-alignment: center;
                         text: root.record-said;
@@ -740,16 +744,19 @@ export component Panel inherits Window {
                         overflow: elide;
                     }
                 }
-                if root.recorded-name != "": ListLine {
+                if root.recorded-name != "": recorded-line := ListLine {
                     height: 36px;
                     draggable: root.can-drag;
                     lifted: root.recorded-carried;
                     clicked => { root.recorded-play(); }
                     drag-out => { root.recorded-drag-out(); }
+                    drag-let-go => { root.drag-let-go(); }
                     HorizontalLayout {
                         padding-left: Space.md;
                         padding-right: Space.md;
-                        Text {
+                        CutText {
+                            over: recorded-line.resting;
+                            mouse: recorded-line.mouse;
                             vertical-alignment: center;
                             text: root.recorded-name + "  \u{b7}  click to hear it, drag it into your project";
                             color: Theme.text;
@@ -757,7 +764,9 @@ export component Panel inherits Window {
                         }
                     }
                 }
-                if root.hears != "": Text {
+                if root.hears != "": CutText {
+                    own-mouse: true;
+                    live: true;
                     text: root.hears;
                     color: Theme.muted;
                     font-size: Type.meta;
@@ -765,7 +774,8 @@ export component Panel inherits Window {
                 }
                 HorizontalLayout {
                     spacing: Space.md;
-                    Text {
+                    CutText {
+                        own-mouse: true;
                         horizontal-stretch: 1;
                         vertical-alignment: center;
                         text: root.status;
@@ -989,7 +999,7 @@ export component Panel inherits Window {
                                         }
                                     }
                                 }
-                                for line[i] in root.sky-swept: ListLine {
+                                for line[i] in root.sky-swept: swept-line := ListLine {
                                     height: 30px;
                                     selected: line.current;
                                     tip: line.kind;
@@ -1007,7 +1017,9 @@ export component Panel inherits Window {
                                             alignment: center;
                                             Dot { tint: Theme.sound-type(line.colour); }
                                         }
-                                        Text {
+                                        CutText {
+                                            over: swept-line.resting;
+                                            mouse: swept-line.mouse;
                                             text: line.name;
                                             color: line.current ? Theme.text : Theme.muted;
                                             font-size: Type.meta;
@@ -1020,6 +1032,8 @@ export component Panel inherits Window {
                                 HorizontalLayout {
                                     spacing: Space.sm;
                                     // What the arrow keys do here, so it's seen, not guessed.
+                                    // Plain words, not CutText: its own mouse would take the click that hands the
+                                    // card the keys.
                                     Text {
                                         text: root.sky-swept-keys && sky-keys.has-focus ? "Up and Down go through these" : "Click here, then Up and Down";
                                         color: root.sky-swept-keys && sky-keys.has-focus ? Theme.accent : Theme.muted;
@@ -1061,7 +1075,7 @@ export component Panel inherits Window {
                         }
                         init => { self.fit(); }
                         changed width => { self.fit(); }
-                        for sound[i] in root.sounds: ListLine {
+                        for sound[i] in root.sounds: sound-line := ListLine {
                             height: 48px;
                             selected: i == root.picked;
                             draggable: root.can-drag;
@@ -1074,6 +1088,7 @@ export component Panel inherits Window {
                                     ? (self.pressed-x - (wave.absolute-position.x - self.absolute-position.x)) / wave.width : -1);
                             }
                             drag-out => { root.drag-out(i); }
+                            drag-let-go => { root.drag-let-go(); }
                             HorizontalLayout {
                                 padding-left: Space.md;
                                 padding-right: Space.md;
@@ -1087,13 +1102,17 @@ export component Panel inherits Window {
                                 VerticalLayout {
                                     horizontal-stretch: 1;
                                     alignment: center;
-                                    Text {
+                                    CutText {
+                                        over: sound-line.resting;
+                                        mouse: sound-line.mouse;
                                         text: sound.name;
                                         color: Theme.text;
                                         font-size: Type.row-title;
                                         overflow: elide;
                                     }
-                                    Text {
+                                    CutText {
+                                        over: sound-line.resting;
+                                        mouse: sound-line.mouse;
                                         text: sound.facts == "" ? sound.folder : sound.folder + "  ·  " + sound.facts;
                                         color: Theme.faint;
                                         font-size: Type.meta;
@@ -1130,7 +1149,9 @@ export component Panel inherits Window {
                         }
                     }
                 }
-                Text {
+                CutText {
+                    own-mouse: true;
+                    live: true;
                     text: root.playing;
                     color: Theme.accent;
                     font-size: Type.meta;
@@ -1191,7 +1212,8 @@ export component Panel inherits Window {
                 }
                 HorizontalLayout {
                     spacing: Space.md;
-                    Text {
+                    CutText {
+                        own-mouse: true;
                         horizontal-stretch: 1;
                         vertical-alignment: center;
                         text: root.midi-status;
@@ -1239,7 +1261,7 @@ export component Panel inherits Window {
                         rows: root.parts.length;
                         show-top: root.parts-show-top;
                         show-ask: root.parts-show-ask;
-                        for part[i] in root.parts: ListLine {
+                        for part[i] in root.parts: part-line := ListLine {
                             height: 48px;
                             selected: i == root.midi-picked;
                             draggable: root.can-drag;
@@ -1249,6 +1271,7 @@ export component Panel inherits Window {
                                 root.midi-play(i);
                             }
                             drag-out => { root.midi-drag-out(i); }
+                            drag-let-go => { root.drag-let-go(); }
                             HorizontalLayout {
                                 padding-left: Space.md;
                                 padding-right: Space.md;
@@ -1261,13 +1284,17 @@ export component Panel inherits Window {
                                 VerticalLayout {
                                     horizontal-stretch: 1;
                                     alignment: center;
-                                    Text {
+                                    CutText {
+                                        over: part-line.resting;
+                                        mouse: part-line.mouse;
                                         text: part.title;
                                         color: Theme.text;
                                         font-size: Type.row-title;
                                         overflow: elide;
                                     }
-                                    Text {
+                                    CutText {
+                                        over: part-line.resting;
+                                        mouse: part-line.mouse;
                                         text: part.from + "  ·  " + part.details;
                                         color: Theme.faint;
                                         font-size: Type.meta;
@@ -1310,7 +1337,8 @@ export component Panel inherits Window {
                 }
                 HorizontalLayout {
                     spacing: Space.md;
-                    Text {
+                    CutText {
+                        own-mouse: true;
                         horizontal-stretch: 1;
                         vertical-alignment: center;
                         text: root.midi-said != "" ? root.midi-said : root.playing != "" ? root.playing
@@ -1404,7 +1432,8 @@ export component Panel inherits Window {
                 }
                 HorizontalLayout {
                     spacing: Space.md;
-                    Text {
+                    CutText {
+                        own-mouse: true;
                         horizontal-stretch: 1;
                         vertical-alignment: center;
                         text: root.preset-status;
@@ -1452,7 +1481,7 @@ export component Panel inherits Window {
                         rows: root.presets.length;
                         show-top: root.presets-show-top;
                         show-ask: root.presets-show-ask;
-                        for preset[i] in root.presets: ListLine {
+                        for preset[i] in root.presets: preset-line := ListLine {
                             height: 48px;
                             selected: i == root.preset-picked;
                             draggable: root.can-drag;
@@ -1462,6 +1491,7 @@ export component Panel inherits Window {
                                 root.preset-click(i);
                             }
                             drag-out => { root.preset-drag-out(i); }
+                            drag-let-go => { root.drag-let-go(); }
                             HorizontalLayout {
                                 padding-left: Space.md;
                                 padding-right: Space.md;
@@ -1474,13 +1504,17 @@ export component Panel inherits Window {
                                 VerticalLayout {
                                     horizontal-stretch: 1;
                                     alignment: center;
-                                    Text {
+                                    CutText {
+                                        over: preset-line.resting;
+                                        mouse: preset-line.mouse;
                                         text: preset.name;
                                         color: Theme.text;
                                         font-size: Type.row-title;
                                         overflow: elide;
                                     }
-                                    Text {
+                                    CutText {
+                                        over: preset-line.resting;
+                                        mouse: preset-line.mouse;
                                         text: preset.details;
                                         color: Theme.faint;
                                         font-size: Type.meta;
@@ -1498,7 +1532,8 @@ export component Panel inherits Window {
                         }
                     }
                 }
-                Text {
+                CutText {
+                    own-mouse: true;
                     text: root.preset-said != "" ? root.preset-said
                         : root.can-drag ? "Drag a preset onto a track or a device to load it" : "Click a preset to see where it loads";
                     color: root.preset-said != "" ? Theme.accent : Theme.faint;
@@ -1520,7 +1555,8 @@ export component Panel inherits Window {
                     tip: "Back to the list. The edits are kept while the plugin's window is open";
                     clicked => { root.curve-back(); }
                 }
-                Text {
+                CutText {
+                    own-mouse: true;
                     text: CurveEditorData.name;
                     color: Theme.text;
                     font-size: Type.row-title;
@@ -1605,9 +1641,11 @@ export component Panel inherits Window {
                     draggable: root.can-drag;
                     lifted: root.curve-edit-lifted;
                     drag-out => { root.curve-edit-drag-out(); }
+                    drag-let-go => { root.drag-let-go(); }
                 }
             }
-            if root.curve-said != "": Text {
+            if root.curve-said != "": CutText {
+                own-mouse: true;
                 text: root.curve-said;
                 color: Theme.accent;
                 font-size: Type.meta;
@@ -1640,7 +1678,8 @@ export component Panel inherits Window {
                     text <=> root.curve-search-text;
                     edited(text) => { root.curve-search(text); }
                 }
-                Text {
+                CutText {
+                    own-mouse: true;
                     text: root.curve-status;
                     color: Theme.muted;
                     font-size: Type.meta;
@@ -1663,7 +1702,7 @@ export component Panel inherits Window {
                         row-height: 48px;
                         rows: root.curves.length;
                         kept-y <=> root.curve-list-y;
-                        for curve[i] in root.curves: ListLine {
+                        for curve[i] in root.curves: curve-line := ListLine {
                             height: 48px;
                             selected: i == root.curve-picked;
                             draggable: root.can-drag;
@@ -1673,6 +1712,7 @@ export component Panel inherits Window {
                                 root.curve-open(i);
                             }
                             drag-out => { root.curve-drag-out(i); }
+                            drag-let-go => { root.drag-let-go(); }
                             HorizontalLayout {
                                 padding-left: Space.md;
                                 padding-right: Space.md;
@@ -1696,13 +1736,17 @@ export component Panel inherits Window {
                                 VerticalLayout {
                                     horizontal-stretch: 1;
                                     alignment: center;
-                                    Text {
+                                    CutText {
+                                        over: curve-line.resting;
+                                        mouse: curve-line.mouse;
                                         text: curve.name;
                                         color: Theme.text;
                                         font-size: Type.row-title;
                                         overflow: elide;
                                     }
-                                    Text {
+                                    CutText {
+                                        over: curve-line.resting;
+                                        mouse: curve-line.mouse;
                                         text: curve.under;
                                         color: Theme.faint;
                                         font-size: Type.meta;
@@ -1729,7 +1773,8 @@ export component Panel inherits Window {
                         }
                     }
                 }
-                Text {
+                CutText {
+                    own-mouse: true;
                     text: root.curve-said != "" ? root.curve-said
                         : root.can-drag ? "Click a curve to edit it · drag one onto a Curves device or an automation lane" : "Click a curve to edit it";
                     color: root.curve-said != "" ? Theme.accent : Theme.faint;
@@ -1781,7 +1826,9 @@ export component Panel inherits Window {
                         color: Theme.muted;
                         font-size: Type.body;
                     }
-                    Text {
+                    CutText {
+                        own-mouse: true;
+                        live: true;
                         text: root.chord-line;
                         color: Theme.faint;
                         font-size: Type.meta;
@@ -1846,7 +1893,7 @@ export component Panel inherits Window {
                     width: 210px;
                     row-height: 44px;
                     rows: root.takes.length;
-                    for t[i] in root.takes: ListLine {
+                    for t[i] in root.takes: take-line := ListLine {
                         height: 44px;
                         selected: i == root.take-picked;
                         clicked => {
@@ -1857,13 +1904,17 @@ export component Panel inherits Window {
                             padding-left: Space.sm;
                             padding-right: Space.sm;
                             alignment: center;
-                            Text {
+                            CutText {
+                                over: take-line.resting;
+                                mouse: take-line.mouse;
                                 text: t.title;
                                 color: Theme.text;
                                 font-size: Type.body;
                                 overflow: elide;
                             }
-                            Text {
+                            CutText {
+                                over: take-line.resting;
+                                mouse: take-line.mouse;
                                 text: t.details;
                                 color: Theme.faint;
                                 font-size: Type.small;
@@ -1874,7 +1925,8 @@ export component Panel inherits Window {
                 }
                 VerticalLayout {
                     spacing: Space.sm;
-                    Text {
+                    CutText {
+                        own-mouse: true;
                         text: root.take-said;
                         color: Theme.accent;
                         font-size: Type.meta;
@@ -1905,7 +1957,8 @@ export component Panel inherits Window {
                                         font-weight: 600;
                                         vertical-alignment: center;
                                     }
-                                    Text {
+                                    CutText {
+                                        own-mouse: true;
                                         horizontal-stretch: 1;
                                         text: c.said == "" ? "" : "You said: " + c.said;
                                         color: Theme.accent;
@@ -2008,13 +2061,15 @@ export component Panel inherits Window {
                         }
                         VerticalLayout {
                             alignment: center;
-                            Text {
+                            CutText {
+                                own-mouse: true;
                                 text: ext.name;
                                 color: ext.offered ? Theme.text : Theme.muted;
                                 font-size: Type.body;
                                 overflow: elide;
                             }
-                            Text {
+                            CutText {
+                                own-mouse: true;
                                 text: ext.id;
                                 color: Theme.faint;
                                 font-size: Type.small;

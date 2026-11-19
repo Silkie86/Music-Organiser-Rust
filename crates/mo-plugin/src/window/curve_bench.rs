@@ -252,9 +252,10 @@ impl Bench {
                 None => found,
             };
             let slots = Arc::clone(&slots);
+            let asked = slots.ask_drag();
             background("mo-plugin-drag", move || {
                 let file = crate::curves::drag_file(&curve, &std::env::temp_dir());
-                *lock(&slots.drag) = Some((Carried::Curve(at), file));
+                slots.drag_ready(asked, Carried::Curve(at), file);
             });
         });
         let drawn = Arc::clone(&self.drawn);
