@@ -392,10 +392,6 @@ thread_local! {
     static START_READ: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
 }
 
-/// How long after the window opens the sounds are read when nothing has asked for them yet: the page on show reads
-/// its own things from the disk first.
-const READ_AFTER: Duration = Duration::from_secs(3);
-
 /// Asks for the sample folders to be scanned again ([`sample_folders_changed`]), for the thread that reads the sounds:
 /// it takes them once its first read and scan are done ([`scans`]).
 static SCAN_AGAIN: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
@@ -741,7 +737,8 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     if [Place::Sounds, Place::Space].iter().any(|p| p.index() as i32 == app.get_place()) {
         wanted();
     } else {
-        Timer::single_shot(READ_AFTER, wanted);
+        // Nothing has asked for the sounds yet: they're read a little after the start all the same.
+        crate::ahead::after(app, crate::ahead::SOUNDS, |_| wanted());
     }
 }
 
