@@ -130,6 +130,112 @@ fn a_sample_that_moved_is_found_and_used() {
     assert!(bytes.windows(found.len()).any(|w| w == found.as_bytes()));
 }
 
+/// The made-up song with its snare saved as one of FL Studio's own sounds instead: the path's text swapped in the
+/// save's bytes (its length byte and the save's own length with it).
+fn project_with_fl_sound(dir: &Path, sample: &str) -> PathBuf {
+    let utf16 = |t: &str| -> Vec<u8> { t.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect() };
+    let (was, now) = (utf16(r"C:\Samples\Snare 01.wav"), utf16(sample));
+    assert!(now.len() < 128, "one length byte");
+    let mut bytes = common::fl_studio_25_automation(false, false);
+    let at = bytes.windows(was.len()).position(|w| w == was).unwrap();
+    assert_eq!(usize::from(bytes[at - 1]), was.len());
+    bytes[at - 1] = now.len() as u8;
+    bytes.splice(at..at + was.len(), now.iter().copied());
+    // "FLhd", 4 bytes of length, 6 of header, "FLdt", then the length of the rest.
+    assert_eq!(&bytes[14..18], b"FLdt");
+    let rest = (bytes.len() - 22) as u32;
+    bytes[18..22].copy_from_slice(&rest.to_le_bytes());
+    let path = dir.join("Songs").join("civil_18.flp");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// A sound from mo-audio's fixtures: half a second of a tone, stereo, 22,050 Hz.
+fn tone(name: &str) -> Vec<u8> {
+    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../mo-audio/tests/fixtures").join(name)).unwrap()
+}
+
+/// A WAV as FL Studio keeps its own sounds: format 0x674F, a whole Ogg Vorbis stream in the data chunk.
+fn ogg_in_wav() -> Vec<u8> {
+    let ogg = tone("tone.ogg");
+    let mut wav = b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x4f\x67\x02\0\x22\x56\0\0\x88\x58\x01\0\x04\0\x10\0data".to_vec();
+    wav.extend_from_slice(&(ogg.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&ogg);
+    wav
+}
+
+/// Whole-app review 19 Nov 2026, CN-1: FL Studio's own sounds ("%FLStudioFactoryData%…") are used from FL Studio's
+/// folder, and never swapped for another file with the name.
+#[test]
+fn fl_studios_own_sound_is_used_from_fl_studios_folder_and_nowhere_else() {
+    use mo_library::samples::SampleLocator;
+    let dir = folder("fl own sound");
+    let saved_as = r"%FLStudioFactoryData%\Data\Patches\Packs\Snare 01.wav";
+    let song = project_with_fl_sound(&dir, saved_as);
+    let packs = dir.join("Image-Line/FL Studio 2024/Data/Patches/Packs");
+    std::fs::create_dir_all(&packs).unwrap();
+    // A file with the same name beside the song: another sound, never used for FL Studio's own.
+    let beside = snare(&dir);
+    let content = packs.to_str().unwrap().to_owned();
+    let locator = SampleLocator::new(Box::new(move |_| vec![content.clone()]));
+    let at = song.to_str().unwrap().to_owned();
+    let find = |s: &str| locator.locate_to_use(s, &at);
+    let template = bitwig_template(Template::default());
+    let convert = |name: &str| {
+        bitwig_from_fl(&song, &dir.join("Exports"), &template, name, None, Options::default(), &find).unwrap()
+    };
+
+    // Not in FL Studio's folder: said, and the file beside the song is left alone.
+    let missing = convert("missing");
+    assert!(missing.found.is_empty(), "{:?}", missing.found);
+    assert!(missing.notes.iter().any(|n| n.contains("couldn't read %FLStudioFactoryData%")), "{:?}", missing.notes);
+    let bytes = std::fs::read(&missing.file).unwrap();
+    assert!(!bytes.windows(beside.len()).any(|w| w == beside.as_bytes()), "never the same-named file");
+
+    // In FL Studio's folder, as FL Studio keeps it (Ogg Vorbis inside a WAV): used from there and timed.
+    let own = packs.join("Snare 01.wav");
+    std::fs::write(&own, ogg_in_wav()).unwrap();
+    let own = own.to_str().unwrap().to_owned();
+    let found = convert("found");
+    assert!(found.found.is_empty(), "FL Studio's own sound in its own folder isn't listed as moved");
+    assert!(!found.notes.iter().any(|n| n.contains("couldn't")), "{:?}", found.notes);
+    assert!(found.notes.iter().any(|n| n.contains("packed inside a WAV")), "{:?}", found.notes);
+    let bytes = std::fs::read(&found.file).unwrap();
+    assert!(bytes.windows(own.len()).any(|w| w == own.as_bytes()), "the project points at FL Studio's file");
+    assert!(!bytes.windows(saved_as.len()).any(|w| w == saved_as.as_bytes()), "not at FL Studio's placeholder");
+}
+
+/// CN-1 and CN-10: a sample whose header doesn't say how long it is (MP3, OGG, M4A, compressed WAVs) is timed by its
+/// decoder, so the Sampler gets its real end and Bitwig its MD5.
+#[test]
+fn compressed_samples_are_timed_by_their_decoder() {
+    use md5::{Digest, Md5};
+    let dir = folder("compressed samples");
+    let files = [
+        ("tone.mp3", tone("tone.mp3"), false),
+        ("tone.ogg", tone("tone.ogg"), false),
+        ("tone.m4a", tone("tone.m4a"), false),
+        ("tone-ms-adpcm.wav", tone("tone-ms-adpcm.wav"), false),
+        ("fl-own.wav", ogg_in_wav(), true),
+    ];
+    for (name, bytes, inside) in files {
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        let s = read_sample(&path).unwrap();
+        assert_eq!((s.rate, s.channels, s.ogg_in_wav), (22050, 2, inside), "{name}");
+        // MP3 and AAC pad their ends a little.
+        assert!((s.seconds - 0.5).abs() < 0.06, "{name}: {}", s.seconds);
+        let expected: [u8; 16] = Md5::digest(&bytes).into();
+        assert_eq!((s.bytes, s.md5), (bytes.len() as u64, expected), "{name}");
+    }
+    // One the decoder can't read stays as before: read, its length left for Bitwig.
+    let path = dir.join("broken.mp3");
+    std::fs::write(&path, b"not audio").unwrap();
+    let s = read_sample(&path).unwrap();
+    assert_eq!((s.seconds, s.md5), (0.0, [0; 16]));
+}
+
 /// A short WAV, as the snare the song plays.
 fn snare(dir: &Path) -> String {
     let snare = dir.join("Songs").join("Samples").join("Snare 01.wav");

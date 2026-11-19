@@ -210,6 +210,13 @@ impl SampleLocator {
         in_content.or_else(|| self.library.as_ref()?.get().find(name, folder))
     }
 
+    /// Where the file to use for this sample is, when another program is to be pointed at it (the converter): as
+    /// [`SampleLocator::locate`], but the DAW's own content ([`is_daw_content`]) only where the DAW keeps it, never
+    /// another file with its name.
+    pub fn locate_to_use(&self, sample: &str, project: &str) -> Option<String> {
+        if is_daw_content(sample) { self.fl_factory_file(sample, project) } else { self.locate(sample, project) }
+    }
+
     /// A sample of FL Studio's own content ("%FLStudioFactoryData%\Data\Patches\Packs\…"), where an FL Studio this
     /// project's DAW folders name keeps it (the folder its packs folder is in): no folder tree is read for it.
     fn fl_factory_file(&self, sample: &str, project: &str) -> Option<String> {

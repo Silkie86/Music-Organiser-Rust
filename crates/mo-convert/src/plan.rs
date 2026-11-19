@@ -24,8 +24,10 @@ pub struct SampleFile {
     pub md5: [u8; 16],
     pub rate: u32,
     pub channels: u16,
-    /// 0 when the file could be read but not decoded (a format the app doesn't play).
+    /// 0 when the file could be read but how long it is couldn't be told.
     pub seconds: f64,
+    /// A WAV file that keeps Ogg Vorbis inside, as FL Studio's own sounds do: not every program plays those.
+    pub ogg_in_wav: bool,
 }
 
 /// What the target DAW's writer can carry, and how steps are timed.
@@ -514,6 +516,18 @@ impl Planner<'_> {
         }
     }
 
+    /// Says when a channel's sample keeps Ogg Vorbis inside a WAV file, as FL Studio's own sounds do: whether Bitwig
+    /// plays those hasn't been seen, and some programs don't.
+    fn ogg_in_wav_note(&mut self, c: &FlChannel, info: Option<&SampleFile>) {
+        if info.is_some_and(|i| i.ogg_in_wav) {
+            self.notes.push(format!(
+                "{}: {} keeps its sound packed inside a WAV file (Ogg Vorbis, as FL Studio's own sounds do); if Bitwig \
+                 can't play it, save it as a plain WAV and point the track at that",
+                c.name, c.sample
+            ));
+        }
+    }
+
     /// A channel that plays notes: a track with its sampler or plugin, and a clip for each FL pattern clip. Returns the
     /// track and, when it has a plugin, the plugin's place on it.
     fn instrument_track(&mut self, c: &FlChannel, at: usize) -> (Track, Option<(usize, FlPlugin)>) {
@@ -530,7 +544,8 @@ impl Planner<'_> {
                         .notes
                         .push(format!("{}: couldn't read {}, so Bitwig will ask where it is", c.name, c.sample)),
                     Some(i) if i.seconds <= 0.0 => self.notes.push(format!(
-                        "{}: couldn't tell how long {} is, so Bitwig will ask where it is",
+                        "{}: couldn't tell how long {} is, so Bitwig will ask where it is, and the Sampler's end may \
+                         need setting by hand",
                         c.name, c.sample
                     )),
                     Some(i) if !self.options.steps_until_next_note => {
@@ -542,6 +557,7 @@ impl Planner<'_> {
                     }
                     Some(_) => {}
                 }
+                self.ogg_in_wav_note(c, info.as_ref());
                 devices.push(Device::Sampler {
                     sample: c.sample.clone(),
                     info,
@@ -677,6 +693,7 @@ impl Planner<'_> {
             )),
             Some(_) => {}
         }
+        self.ogg_in_wav_note(c, info.as_ref());
         if c.stretch.reversed {
             self.notes
                 .push(format!("{}: plays its sample backwards in FL Studio; reverse its clips in Bitwig", c.name));

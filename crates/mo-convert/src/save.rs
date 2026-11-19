@@ -10,7 +10,8 @@
 //!
 //! A sample that can't be read where FL saved it is looked for (rule 13) by the finder the caller passes in (for the
 //! app, mo-library's `SampleLocator`: the project's folders, then the DAW's), and the Bitwig project points at where
-//! it was found. The convert page, when it's built, passes the locator.
+//! it was found. FL Studio's own sounds ("%FLStudioFactoryData%…") are the finder's to find in FL Studio's own
+//! folder, and nowhere else: a same-named file somewhere else is another sound (`SampleLocator::locate_to_use`).
 //!
 //! Plugin sounds a save lost are taken from the song's older saves first ([`crate::lost`]).
 
@@ -21,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mo_formats::fl::{events, song};
 use mo_formats::paths;
+use mo_library::samples::is_daw_content;
 use rayon::prelude::*;
 
 use crate::plan::{Options, SampleFile, from_fl};
@@ -136,7 +138,8 @@ pub fn can_save_over(project: &Path, file: &Path, written_before: Option<&str>) 
 
 /// Converts an FL project into the export folder as `name` (see [`bitwig_name`]), from `template` (a project Bitwig
 /// saved). `written_before` is what [`Saved::written`] said about this name's earlier convert, if any. `find_sample`
-/// says where a sample that isn't where FL saved it is now, if anywhere. The samples are looked for and read on every
+/// says where a sample that isn't where FL saved it is now, if anywhere; for FL Studio's own sounds (a path that
+/// starts with "%") it must answer only with the file in FL Studio's folder. The samples are looked for and read on every
 /// core, so the app calls this on its low-priority pool, never on the window's thread.
 pub fn bitwig_from_fl(
     project: &Path,
@@ -163,7 +166,7 @@ pub fn bitwig_from_fl(
     let taken = lost::from_older_saves(&mut song, project);
     // Each sample read once, all at the same time (rule 21). One that can't be read where FL saved it is looked for
     // (rule 13), and used where it's found if it reads there. FL's own content ("%FLStudioFactoryData%…") is
-    // FL's to find, never another file with its name.
+    // only ever the file in FL Studio's own folder, never another file with its name: `find_sample` sees to that.
     let wanted: BTreeSet<&str> = song.channels.iter().map(|c| c.sample.as_str()).filter(|p| !p.is_empty()).collect();
     let read: HashMap<String, (Option<String>, Option<SampleFile>)> = wanted
         .into_par_iter()
@@ -175,7 +178,6 @@ pub fn bitwig_from_fl(
             };
             let got = match here {
                 Some(s) => (None, Some(s)),
-                None if p.starts_with('%') => (None, None),
                 None => moved().unwrap_or((None, None)),
             };
             (p.to_owned(), got)
@@ -184,7 +186,10 @@ pub fn bitwig_from_fl(
     let mut found: Vec<String> = Vec::new();
     for c in &mut song.channels {
         if let Some((Some(f), _)) = read.get(&c.sample) {
-            found.push(format!("{}: {} wasn't there, so {f} is used", c.name, c.sample));
+            // FL Studio's own sound, in FL Studio's folder, is where it should be: not one to list.
+            if !is_daw_content(&c.sample) {
+                found.push(format!("{}: {} wasn't there, so {f} is used", c.name, c.sample));
+            }
             c.sample = f.clone();
         }
     }
