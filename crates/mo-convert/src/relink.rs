@@ -628,11 +628,8 @@ fn scan(raw: &[u8], listed: &[Listed], names: fn(&[u8], &Listed) -> bool) -> Opt
     Some(named)
 }
 
-/// Whether a Bitwig file's bytes (made small in ASCII) name the file the copy is the same as, by its full path.
-fn names_original(lower: &[u8], copy: &Listed) -> bool {
-    copy.original.iter().any(|o| memmem::find(lower, o).is_some())
-}
-
+/// Whether bytes (made small in ASCII) name a copy: one of its needles found somewhere that isn't inside its original's
+/// own path.
 fn names_copy(lower: &[u8], copy: &Listed) -> bool {
     let mut original: Vec<(usize, usize)> = Vec::new();
     let mut looked = false;
@@ -885,11 +882,12 @@ pub fn still_named_except(
 }
 
 /// Whether each copy's checked fixed projects use the file the page found it the same as now (the whole-app review
-/// of 19 Nov, FS-2): for each (save, fixed project) you checked, a copy the save names must be one whose file the fixed
-/// project names by its full path. When the file Fix pointed it at has moved, been renamed or deleted since, and the
-/// page now finds the same sound somewhere else, the fixed project doesn't use it, so the copy stays (and says to Fix
-/// again). A fixed project that can't be read keeps every copy its save names. For each copy, in order: why it stays,
-/// or None.
+/// of 19 Nov, FS-2): for each (save, fixed project) you checked, a copy the save names must be one whose file a sample
+/// file of the fixed project finds it by (its file reference's path, the one Bitwig opens; not a "found before" path
+/// or any other text). When the file Fix pointed it at has moved, been renamed or deleted since, and the page now finds
+/// the same sound somewhere else, the fixed project doesn't use it, so the copy stays (and says to Fix again). A fixed
+/// project that can't be read keeps every copy its save names, and says so. For each copy, in order: why it stays, or
+/// None.
 pub fn fixed_use_originals(checked: &[(PathBuf, PathBuf)], relinks: &[Relink]) -> Vec<Option<String>> {
     let Some(dir) = checked.first().and_then(|(save, _)| save.parent()) else { return vec![None; relinks.len()] };
     let shown = |r: &Relink| r.copy.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -905,17 +903,19 @@ pub fn fixed_use_originals(checked: &[(PathBuf, PathBuf)], relinks: &[Relink]) -
         })
         .collect();
     let read = |p: &Path| std::fs::read(p).ok().filter(|raw| !raw.is_empty());
-    let looked: Vec<(String, Vec<bool>, Vec<bool>)> = checked
+    // For each pair: the fixed project's name, which copies its save names, and the paths its sample files find their
+    // files by (Err when it can't be read).
+    type Looked = (String, Vec<bool>, Result<HashSet<String>, ()>);
+    let looked: Vec<Looked> = checked
         .par_iter()
         .map(|(save, fixed)| {
             let named = read(save).map_or_else(|| vec![true; listed.len()], |raw| named_in(&raw, &listed));
-            let uses = read(fixed)
-                .and_then(|raw| scan(&raw, &listed, names_original))
-                .unwrap_or_else(|| vec![false; listed.len()]);
+            let uses = read(fixed).ok_or(()).and_then(|raw| reference_paths(&raw));
             let name = fixed.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             (name, named, uses)
         })
         .collect();
+    let bin = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
     let mut at = 0;
     relinks
         .iter()
@@ -926,16 +926,52 @@ pub fn fixed_use_originals(checked: &[(PathBuf, PathBuf)], relinks: &[Relink]) -
             }
             let c = at;
             at += 1;
-            let (fixed, _, _) = looked.iter().find(|(_, named, uses)| named[c] && !uses[c])?;
-            Some(format!(
-                "{fixed} doesn't use {} for {} (the file the page finds it the same as now): it has moved or changed \
-                 since Fix, so the copy stays. Send {fixed} to the {} and Fix it again.",
-                listed[c].full,
-                shown(r),
-                if cfg!(windows) { "Recycle Bin" } else { "Trash" }
-            ))
+            let wanted = path_key(&listed[c].full);
+            looked.iter().filter(|(_, named, _)| named[c]).find_map(|(fixed, _, uses)| match uses {
+                Err(()) => Some(format!("{fixed} couldn't be read now, so {} stays.", shown(r))),
+                Ok(paths) if !paths.contains(&wanted) => Some(format!(
+                    "{fixed} doesn't use {} for {} (the file the page finds it the same as now): it has moved or \
+                     changed since Fix, so the copy stays. Send {fixed} to the {bin} and Fix it again.",
+                    listed[c].full,
+                    shown(r)
+                )),
+                Ok(_) => None,
+            })
         })
         .collect()
+}
+
+/// Whether the Bitwig file `save` names any of these copies: true when it can't be read (the safe side).
+pub fn names_any(save: &Path, relinks: &[Relink]) -> bool {
+    let Some(dir) = save.parent() else { return true };
+    let listed: Vec<Listed> = relinks.iter().filter_map(|r| listed_one(dir, r).ok()).collect();
+    if listed.is_empty() {
+        return false;
+    }
+    match std::fs::read(save) {
+        Ok(raw) if !raw.is_empty() => named_in(&raw, &listed).into_iter().any(|n| n),
+        _ => true,
+    }
+}
+
+/// A path as [`fixed_use_originals`] compares them: `/` between folders, letter case aside.
+fn path_key(path: &str) -> String {
+    key(&path.replace('\\', "/"))
+}
+
+/// The paths a Bitwig project's sample files find their files by: each one's own file reference (0xd3b's 0x3b), not
+/// the places it was found before. Err when it can't be read as a Bitwig project.
+fn reference_paths(raw: &[u8]) -> Result<HashSet<String>, ()> {
+    let doc = bitwig::decode(raw).map_err(|_| ())?;
+    Ok((0..doc.objects.len())
+        .map(|i| ObjId(i as u32))
+        .filter(|&i| doc.obj(i).class == SAMPLE_FILE)
+        .filter_map(|f| doc.field_obj(f, F_FILE))
+        .filter_map(|r| match doc.obj(r).get(F_PATH) {
+            Some(Value::Str(t)) => Some(path_key(t.as_str())),
+            _ => None,
+        })
+        .collect())
 }
 
 /// Each Bitwig file [`bitwig_files_now`] found, with its size and when it was last saved.

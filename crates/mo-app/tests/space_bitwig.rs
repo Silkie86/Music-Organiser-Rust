@@ -222,6 +222,19 @@ fn project(path: &Path, copy: &str, minutes: u64) {
     let root = doc.root.unwrap();
     doc.objects[file.0 as usize].parent = Some((root, 0x7f10));
     doc.obj_mut(root).fields.push(Field { id: 0x7f10, value: Value::Obj(Slot::Obj(file)) });
+    // And a sample file as Bitwig keeps one (0x4a6): its name, its place in the project, and its file reference (0x2a,
+    // the path in 0x3b) where it was when the project was saved.
+    let mut reference = Object::new(0x2a);
+    reference.fields.push(text(0x3b, &format!(r"I:\Bitwig Studio\Projects\Song\multi-samples\{copy}")));
+    let reference = doc.add(reference);
+    let mut sample = Object::new(0x4a6);
+    sample.fields.push(text(0x512, copy));
+    sample.fields.push(text(0xd3a, &format!("multi-samples/{copy}")));
+    sample.fields.push(Field { id: 0xd3b, value: Value::Obj(Slot::Obj(reference)) });
+    let sample = doc.add(sample);
+    doc.objects[reference.0 as usize].parent = Some((sample, 0xd3b));
+    doc.objects[sample.0 as usize].parent = Some((root, 0x7f11));
+    doc.obj_mut(root).fields.push(Field { id: 0x7f11, value: Value::Obj(Slot::Obj(sample)) });
     let zip = doc.zip().map(<[u8]>::to_vec);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, bitwig::encode(&doc, zip.as_deref()).unwrap()).unwrap();
@@ -405,9 +418,9 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     let bin = FolderBin { dir: dir.join("bin"), held: Default::default() };
     // Until the library has been asked who else uses them, nothing goes; and as nothing went, the fixed project's mark
     // (put on before the first copy would go: FS-23) comes off again.
-    let done = free_noted(&unasked[0], &bin, &stop, &note);
+    let done = free_noted(&unasked[0], &bin, &stop, &note, 100);
     assert!(done.removed.is_empty() && done.problems.iter().all(|p| p.why.contains("library")), "{:?}", done.problems);
-    assert!(!space_fix_note::is_freed(&note, &song.join("Song v2 (fixed).bwproject")));
+    assert_eq!(space_fix_note::is_freed(&note, &song.join("Song v2 (fixed).bwproject")), Ok(false));
     // You split v1 off into a song of its own on the Songs page: it isn't left behind, so it keeps its copies.
     let mut split = jobs[0].clone();
     let v1 = song.join("Song v1.bwproject").to_string_lossy().into_owned();
@@ -475,7 +488,7 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     // A save the library knows in this folder is the folder's own check's to judge: it doesn't keep the copy.
     let copy = song.join("multi-samples/Kicks-2.multisample").to_string_lossy().into_owned();
     used.elsewhere = Ok(vec![(copy, song.join("Song v1.bwproject").to_string_lossy().into_owned())]);
-    let done = free_noted(&used, &bin, &stop, &note);
+    let done = free_noted(&used, &bin, &stop, &note, 200);
     assert_eq!(done.removed.len(), 1, "{:?}", done.problems);
     assert!(!song.join("multi-samples/Kicks-2.multisample").exists());
     assert!(studio.join("Library/Multisamples/Kicks.multisample").is_file());
@@ -492,20 +505,14 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
         assert_eq!(judged(f), Err(freed.why().to_owned()), "{}", f.display());
     }
     let copy = song.join("multi-samples/Kicks-2.multisample").to_string_lossy().into_owned();
-    // Put back with one copy left in the bin keeps the marks.
-    space_fix_note::put_back(&note, &[&copy], &[&copy], Some(&[]));
+    // Put back with the copy left in the bin keeps the marks.
+    space_fix_note::put_back(&note, 200, &[&copy], &[&copy]);
     assert_eq!(judged(&fixed), Err(freed.why().to_owned()));
-    // So does another Free the space of the same folder with a copy still in the bin (FS-1), and a list of what's in
-    // the bin that couldn't be read.
-    let other = song.join("samples/Snare-2.wav").to_string_lossy().into_owned();
-    space_fix_note::put_back(&note, &[&copy], &[], Some(&[&other]));
+    // Another Free the space's Put back doesn't take this one's off (FS-1).
+    space_fix_note::put_back(&note, 300, &[&copy], &[]);
     assert_eq!(judged(&remix_fixed), Err(freed.why().to_owned()));
-    space_fix_note::put_back(&note, &[&copy], &[], None);
-    assert_eq!(judged(&remix_fixed), Err(freed.why().to_owned()));
-    // A copy of another folder's in the bin doesn't keep them: once all of this folder's are back, they're fixed
-    // projects like any other.
-    let elsewhere = studio.join("Projects/Elsewhere/samples/Snare-2.wav").to_string_lossy().into_owned();
-    space_fix_note::put_back(&note, &[&copy], &[], Some(&[&elsewhere]));
+    // Once this one's copies are all back, they're fixed projects like any other.
+    space_fix_note::put_back(&note, 200, &[&copy], &[]);
     for f in [&fixed, &remix_fixed] {
         assert_eq!(judged(f), Ok(()), "{}", f.display());
     }

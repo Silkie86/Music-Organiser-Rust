@@ -13,6 +13,7 @@
 //! library and the sound library are only read.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1171,8 +1172,9 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
                         behind.iter().map(|b| b.display().to_string()).collect::<Vec<_>>().join(", ")
                     ),
                 );
-                let one =
-                    background::on_bulk_pool(|| space_bitwig::free_noted(job, &bin, stop, &space_fix_note::file()));
+                let one = background::on_bulk_pool(|| {
+                    space_bitwig::free_noted(job, &bin, stop, &space_fix_note::file(), when)
+                });
                 done.removed.extend(one.removed);
                 done.problems.extend(one.problems);
             }
@@ -1180,7 +1182,9 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
             {
                 if warning { log::warning("Space", &line) } else { log::info("Space", &line) }
             }
-            let (kept, _) = binned::record(&data, &SystemBin, space_bitwig::BITWIG_COPIES_FREED, when, &done);
+            let (kept, kept_at) = binned::record(&data, &SystemBin, space_bitwig::BITWIG_COPIES_FREED, when, &done);
+            // Its marks go with the time its line is kept under: Put back knows it by that.
+            space_fix_note::moved(&space_fix_note::file(), when, kept_at);
             note.finish(kept.noted);
             (space_bitwig::freed_words(&done), kept)
         }));
@@ -1688,27 +1692,20 @@ fn put_back(app: &AppWindow, feed: Feed, kind: String, when: i64, done: Done) {
         for problem in &problems {
             log::warning("Space", &format!("Couldn't put back {}: {}", problem.path, problem.why));
         }
-        // What came back isn't in the bin any more: looked at before the page hears Put back is done, so its line and
-        // card never show it there with Put back on again.
-        let kept = catch_crash(AssertUnwindSafe(|| binned::refresh(&folder, &SystemBin))).ok();
-        // Copies Free the space sent that all came back, with none of their folder's from another Free still in the
-        // bin (the whole-app review of 19 Nov, FS-1): their songs' fixed projects are like any other again.
+        // Copies this Free the space sent that all came back: its marks come off their songs' fixed projects (another
+        // Free's stay until that one comes back too: the whole-app review of 19 Nov, FS-1).
         if kind == space_bitwig::BITWIG_COPIES_FREED {
             let back: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
             let missed: Vec<&str> = problems.iter().map(|p| p.path.as_str()).collect();
-            let in_bin: Option<Vec<&str>> = kept.as_ref().filter(|k| k.noted).map(|k| {
-                k.list
-                    .iter()
-                    .filter(|b| b.kind == space_bitwig::BITWIG_COPIES_FREED)
-                    .flat_map(|b| b.done.removed.iter().map(|r| r.path.as_str()))
-                    .collect()
-            });
-            space_fix_note::put_back(&space_fix_note::file(), &back, &missed, in_bin.as_deref());
+            space_fix_note::put_back(&space_fix_note::file(), when, &back, &missed);
         }
         match space_bin::put_back_words(done.removed.len(), &problems) {
             Ok(words) => card.done(&words),
             Err(words) => card.failed(&words),
         }
+        // What came back isn't in the bin any more: looked at before the page hears Put back is done, so its line and
+        // card never show it there with Put back on again.
+        let kept = catch_crash(AssertUnwindSafe(|| binned::refresh(&folder, &SystemBin))).ok();
         arrive(&weak, Step::PutBack(kind, when, problems, kept));
     });
     if let Err(e) = spawned {
@@ -2468,6 +2465,34 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Bin { spare, old, songs, bitwig: false }
                 }
                 Step::PutBack(kind, when, problems, kept) => {
+                    // Copies that came back wait for a new check of their songs before they can go again (the
+                    // whole-app review of 19 Nov, FS-8): the saves in their folders lose their heard ticks. Read from
+                    // the list the page had, which still holds that line.
+                    if kind == space_bitwig::BITWIG_COPIES_FREED {
+                        let folders: HashSet<String> = p
+                            .kept
+                            .as_ref()
+                            .and_then(|k| k.list.iter().find(|b| b.kind == kind && b.when == when))
+                            .map(|b| {
+                                b.done
+                                    .removed
+                                    .iter()
+                                    .filter_map(|r| {
+                                        Path::new(&r.path)
+                                            .parent()?
+                                            .parent()
+                                            .map(|f| mo_space::key(&f.to_string_lossy()))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // Not known which: every song waits for a new check.
+                        let came_back = |save: &Path| {
+                            folders.is_empty()
+                                || save.parent().is_some_and(|f| folders.contains(&mo_space::key(&f.to_string_lossy())))
+                        };
+                        p.fixes.heard.retain(|save, _| !came_back(save));
+                    }
                     let plugins = kind == space_bin::PLUGIN_CLEAN || kind == space_bin::PLUGIN_UNINSTALL;
                     let list = kept.as_ref().filter(|_| plugins).and_then(plugins_page::trusted_binned);
                     // A list older than the one the page has may not hold what the Plugins page kept since.
@@ -2489,11 +2514,7 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     let old = after.old || kind == OLD_COPIES && *p.old_removing.stage() == space_old::Stage::Picking;
                     let songs =
                         after.songs || kind == COMPACT && *p.songs_removing.stage() == space_songs::Stage::Picking;
-                    // Fixed Bitwig projects that came back are on the Bitwig card again. Copies that came back wait for
-                    // a new check of their songs before they can go again (the whole-app review of 19 Nov, FS-8).
-                    if kind == space_bitwig::BITWIG_COPIES_FREED {
-                        p.fixes.heard.clear();
-                    }
+                    // Fixed Bitwig projects that came back are on the Bitwig card again.
                     let bitwig = kind == space_bitwig::BITWIG_FIXED || kind == space_bitwig::BITWIG_COPIES_FREED;
                     Changed::Bin { spare, old, songs, bitwig }
                 }
