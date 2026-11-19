@@ -90,8 +90,9 @@ const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   HelperEntry = 'MusicOrganiserHelper';
 
-  // OpenProcess's right to wait for a process to end.
+  // OpenProcess's rights to wait for a process to end, and to read which program it runs.
   SynchronizeRight = $00100000;
+  QueryLimitedRight = $00001000;
   // How long an update waits for the app that started it to end (UP-14), in milliseconds: five minutes.
   WaitForAppMs = 300000;
   WaitTimedOut = $00000102;
@@ -111,6 +112,8 @@ function WaitForSingleObject(Handle: THandle; Milliseconds: DWORD): DWORD;
   external 'WaitForSingleObject@kernel32.dll stdcall';
 function CloseHandle(Handle: THandle): BOOL;
   external 'CloseHandle@kernel32.dll stdcall';
+function QueryFullProcessImageName(Process: THandle; Flags: DWORD; ExeName: String; var Size: DWORD): BOOL;
+  external 'QueryFullProcessImageNameW@kernel32.dll stdcall';
 
 function FirstDataDir: String;
 begin
@@ -136,7 +139,8 @@ begin
   Result := '';
   if FileExists(PointerFile) and LoadStringFromFile(PointerFile, Text) then
   begin
-    if Copy(Text, 1, 3) = #$EF#$BB#$BF then
+    // Byte by byte, so no code page stands between (UP-1).
+    if (Length(Text) >= 3) and (Ord(Text[1]) = $EF) and (Ord(Text[2]) = $BB) and (Ord(Text[3]) = $BF) then
       Delete(Text, 1, 3);
     Result := Trim(Utf8Decode(Text));
   end;
@@ -201,6 +205,18 @@ begin
   Result := CompareText(RemoveBackslashUnlessRoot(A), RemoveBackslashUnlessRoot(B)) = 0;
 end;
 
+// Whether the process runs a program called {#ExeName} (the app; any folder, as a launcher's build may update too).
+function IsTheApp(Handle: THandle): Boolean;
+var
+  Name: String;
+  Size: DWORD;
+begin
+  Size := 1024;
+  Name := StringOfChar(' ', Size);
+  Result := QueryFullProcessImageName(Handle, 0, Name, Size) and
+    (CompareText(ExtractFileName(Copy(Name, 1, Size)), '{#ExeName}') = 0);
+end;
+
 // An update the app started passes /WAITPID=<its process>: nothing is touched until that app has ended, however long
 // Windows takes over it (UP-14). Five minutes at most; then the setup goes on, and closes what's left itself.
 function InitializeSetup: Boolean;
@@ -212,10 +228,18 @@ begin
   Pid := StrToIntDef(ExpandConstant('{param:WAITPID|0}'), 0);
   if Pid <= 0 then
     Exit;
-  Handle := OpenProcess(SynchronizeRight, False, Pid);
+  Handle := OpenProcess(SynchronizeRight or QueryLimitedRight, False, Pid);
   if Handle = 0 then
   begin
     Log('The app (process ' + IntToStr(Pid) + ') has ended already');
+    Exit;
+  end;
+  // The app may have ended before this started, and Windows given its number to another program: only the app
+  // itself is waited for.
+  if not IsTheApp(Handle) then
+  begin
+    Log('Process ' + IntToStr(Pid) + ' isn''t the app any more: it has ended already');
+    CloseHandle(Handle);
     Exit;
   end;
   Log('Waiting for the app (process ' + IntToStr(Pid) + ') to end');
@@ -228,7 +252,7 @@ end;
 
 procedure InitializeWizard;
 var
-  Words: String;
+  Words, Top: String;
 begin
   LookAtData;
   // The page's top line holds two lines at most: the explanation goes above the box, which grows to fit (UP-7).
@@ -242,8 +266,12 @@ begin
   else
     Words := '{#AppName} keeps its databases, settings, notes and logs in one folder. A fast drive with room to ' +
       'spare is best. You can move it later in Settings > General.';
-  DataPage := CreateInputDirPage(wpSelectDir, 'Where should your data go?',
-    'Pick the folder for your songs, sounds and settings.', Words + #13#10#13#10 + 'Data folder:', False, '');
+  if DataMissing then
+    Top := 'Your data folder can''t be found now, so nothing about it changes.'
+  else
+    Top := 'Pick the folder for your songs, sounds and settings.';
+  DataPage := CreateInputDirPage(wpSelectDir, 'Where should your data go?', Top,
+    Words + #13#10#13#10 + 'Data folder:', False, '');
   DataPage.Add('');
   DataPage.Values[0] := GetPreviousData('DataFolder', CurrentData);
   if HasData then
@@ -356,26 +384,26 @@ begin
   end;
 end;
 
-// Before uninstalling: the app and the background helper running from this copy are asked to close and waited for,
-// as Windows won't remove a program that runs (UP-12, mo_app::install_choice::close_for_setup).
-function InitializeUninstall: Boolean;
-var
-  Code: Integer;
-begin
-  Result := True;
-  if FileExists(ExpandConstant('{app}\{#ExeName}')) then
-    if not Exec(ExpandConstant('{app}\{#ExeName}'), '--close-for-setup', '', SW_HIDE, ewWaitUntilTerminated, Code) then
-      Log('Couldn''t ask the app and the helper to close: ' + SysErrorMessage(Code));
-end;
-
-// Uninstall: the helper's startup line goes only when it starts this copy of the app. Nothing of the data folder is
-// touched.
+// Uninstall, once it's been confirmed and before any file goes: the app and the background helper running from this
+// copy are asked to close and waited for, as Windows won't remove a program that runs (UP-12,
+// mo_app::install_choice::close_for_setup; it ends with 1 when one still runs). Then the helper's startup line goes,
+// only when it starts this copy of the app. Nothing of the data folder is touched.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Command: String;
+  Code: Integer;
 begin
   if CurUninstallStep <> usUninstall then
     Exit;
+  if FileExists(ExpandConstant('{app}\{#ExeName}')) then
+  begin
+    if not Exec(ExpandConstant('{app}\{#ExeName}'), '--close-for-setup', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+      Log('Couldn''t ask the app and the helper to close: ' + SysErrorMessage(Code))
+    else if Code <> 0 then
+      Log('The app or the helper is still running; its files may stay behind')
+    else
+      Log('Nothing of the app is running');
+  end;
   if RegQueryStringValue(HKCU, RunKey, HelperEntry, Command) then
     if Pos(Lowercase(ExpandConstant('{app}\{#ExeName}')), Lowercase(Command)) > 0 then
       RegDeleteValue(HKCU, RunKey, HelperEntry);

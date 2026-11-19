@@ -192,9 +192,10 @@ pub fn ask_to_show(port: u16) -> bool {
     ask(port, &json!({ "ask": "show" })).is_ok_and(|a| a.get("showing").and_then(Value::as_bool) == Some(true))
 }
 
-/// Asks the app on `port` to close, as a copy of another build does; says whether an app answered.
-pub fn ask_to_close(port: u16) -> bool {
-    ask(port, &json!({ "ask": "close" })).is_ok()
+/// Asks the app on `port` to close for `who` (said in its log), as a copy of another build does; says whether an app
+/// answered.
+pub fn ask_to_close_for(port: u16, who: &str) -> bool {
+    ask(port, &json!({ "ask": "close", "for": who })).is_ok()
 }
 
 /// Whether two paths name the same program: as Windows compares them (any case), exactly elsewhere. One that can't be
@@ -333,7 +334,8 @@ impl OneCopy {
                 Some("close") => {
                     // Once is enough: a second ask finds it closing.
                     if !self.closing.swap(true, Ordering::Relaxed) {
-                        log::info("One copy", "Asked to close by a copy from another build");
+                        let who = request.get("for").and_then(Value::as_str).unwrap_or("a copy from another build");
+                        log::info("One copy", &format!("Asked to close by {who}"));
                         self.asked(Asked::Close);
                     }
                     json!({ "closing": true })

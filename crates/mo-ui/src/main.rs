@@ -18,12 +18,19 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
     // Started by the uninstaller: the app and the helper running from this program are asked to close, and waited
-    // for, so their files can go (UP-12). No window, log or setting of its own.
+    // for, so their files can go (UP-12). No window or setting of its own; a crash still gets its crash file. Ends
+    // with 1 when one is still running, which the uninstaller's log shows.
     if args.iter().any(|a| a == mo_app::install_choice::CLOSE_FLAG) {
-        if let Ok(exe) = std::env::current_exe() {
-            for line in mo_app::install_choice::close_for_setup(&exe, std::time::Duration::from_secs(20)) {
-                eprintln!("{line}");
-            }
+        log_crashes();
+        let Ok(exe) = std::env::current_exe() else { return Ok(()) };
+        // As long as the app's own close may take, and a little more.
+        let wait = mo_app::one_copy::CLOSE_WAIT + std::time::Duration::from_secs(10);
+        let closed = mo_app::install_choice::close_for_setup(&exe, wait);
+        for line in &closed.lines {
+            eprintln!("{line}");
+        }
+        if !closed.all_ended {
+            std::process::exit(1);
         }
         return Ok(());
     }

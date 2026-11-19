@@ -65,6 +65,8 @@ pub fn connect(app: &AppWindow, feed: Feed, live: bool) {
         let started = mo_app::background::spawn("Update start", move || {
             let setup = PathBuf::from(setup);
             let outcome = if !update::still_whole(&setup) {
+                // Not the setup that was checked: it goes, and the next look fetches it again.
+                let _ = std::fs::remove_file(&setup);
                 Err("the fetched setup isn't whole any more, so it's fetched again on the next look".to_owned())
             } else {
                 update::run_setup(&setup, std::process::id()).map_err(|e| format!("Windows couldn't start it: {e}"))
@@ -77,9 +79,6 @@ pub fn connect(app: &AppWindow, feed: Feed, live: bool) {
                 }
                 Err(why) => {
                     log::warning("Update", &format!("Couldn't start the setup {}: {why}", setup.display()));
-                    if !update::still_whole(&setup) {
-                        let _ = std::fs::remove_file(&setup);
-                    }
                     feed.notice("The update couldn't start", &format!("{why}. The app stays as it is."));
                     if let Some(app) = weak.upgrade() {
                         app.set_update_ready("".into());

@@ -169,7 +169,7 @@ pub fn run(l: &Launch) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn detached(mut command: Command) -> io::Result<std::process::Child> {
+pub(crate) fn detached(mut command: Command) -> io::Result<std::process::Child> {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x8;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
@@ -210,7 +210,7 @@ pub fn get_ready() {
 }
 
 #[cfg(unix)]
-fn detached(command: Command) -> io::Result<std::process::Child> {
+pub(crate) fn detached(command: Command) -> io::Result<std::process::Child> {
     let Some(starter) = STARTER.get() else { return spawn_detached(command) };
     let (back, answer) = std::sync::mpsc::channel();
     match starter.send((command, back)) {
@@ -228,7 +228,7 @@ fn spawn_detached(mut command: Command) -> io::Result<std::process::Child> {
 }
 
 #[cfg(not(any(windows, unix)))]
-fn detached(mut command: Command) -> io::Result<std::process::Child> {
+pub(crate) fn detached(mut command: Command) -> io::Result<std::process::Child> {
     command.spawn()
 }
 

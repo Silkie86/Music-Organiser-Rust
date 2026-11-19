@@ -92,13 +92,32 @@ pub fn failed_update(folder: &Path, current: &str) -> Option<(String, String)> {
             continue;
         }
         let text = fs::read(entry.path()).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-        let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-        let tail = lines[lines.len().saturating_sub(6)..].join("\n");
-        let _ = fs::remove_file(entry.path());
+        // A setup still at work holds its log open, and Windows won't remove it: it isn't over yet, so nothing is
+        // told until it is.
+        if fs::remove_file(entry.path()).is_err() {
+            continue;
+        }
+        let tail = why_in(&text);
         let shown = setup[setup_prefix().len()..setup.len() - ".exe".len()].to_owned();
         return Some((shown, tail));
     }
     None
+}
+
+/// The lines of a setup's log that say why it stopped: its error lines, else the last few (the end of a log is
+/// mostly Inno taking itself down).
+fn why_in(log: &str) -> String {
+    let lines: Vec<&str> = log.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let errors: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| {
+            let l = l.to_ascii_lowercase();
+            ["error", "failed", "abort", "canceled", "code "].iter().any(|w| l.contains(w))
+        })
+        .collect();
+    let keep = if errors.is_empty() { &lines } else { &errors };
+    keep[keep.len().saturating_sub(6)..].join("\n")
 }
 
 /// Whether `setup` is still the whole setup that was fetched: its SHA-256 still the one kept beside it.
@@ -436,13 +455,10 @@ pub fn run_setup(setup: &Path, pid: u32) -> io::Result<()> {
     if !cfg!(windows) {
         return Err(io::Error::other("updates are put in by the Windows installer"));
     }
-    Command::new(setup)
-        .args(setup_args(setup, pid))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
+    let mut command = Command::new(setup);
+    command.args(setup_args(setup, pid)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // Out of the app's job, as a DAW is started: it has to outlive the app, which it waits for.
+    crate::shell::detached(command).map(|_| ())
 }
 
 #[cfg(test)]
@@ -615,6 +631,9 @@ mod tests {
         let (version, tail) = failed_update(&dir, "1.0.0").unwrap();
         assert_eq!(version, "1.0.1");
         assert!(tail.starts_with("line 5") && tail.ends_with("line 10"), "{tail}");
+        let log =
+            "Starting the installation process.\nDeleteFile failed; code 5.\nRolling back changes.\nLog closed.\n";
+        assert_eq!(why_in(log), "DeleteFile failed; code 5.", "the line that says why, not Inno's own ending");
         assert_eq!(failed_update(&dir, "1.0.0"), None, "told once");
         assert!(dir.join("DAWmate-Setup-1.0.1.exe").is_file(), "the setup stays, to be offered again");
         let setup = dir.join("DAWmate-Setup-1.0.1.exe");
