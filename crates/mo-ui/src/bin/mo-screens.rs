@@ -2438,9 +2438,22 @@ fn sounds_shots(
     capture(window);
     shots.push(("sounds-years.png".into(), capture(window)));
     data.invoke_years_cleared();
-    // The strip going by when each sound was first used in a song, not when its file was changed.
-    data.invoke_years_by_picked("First used".into());
+    // The strip going by when each sound was first used in a song, not when its file was changed: picked in its menu
+    // with the mouse, as a pick there was once lost when the menu closed (Solomon's beta note of 18 Nov).
+    let before = capture(window);
+    click(window, YEARS_BY_NAME.0, YEARS_BY_NAME.1);
+    if capture(window) == before {
+        return Err("sounds-years-first-used.png: the Years by menu didn't open; has the year strip moved?".into());
+    }
+    hover(window, YEARS_BY_FIRST_USED.0, YEARS_BY_FIRST_USED.1);
     capture(window);
+    click(window, YEARS_BY_FIRST_USED.0, YEARS_BY_FIRST_USED.1);
+    hover(window, -1.0, -1.0);
+    capture(window);
+    let by = data.get_years_by();
+    if by != "First used" {
+        return Err(format!("sounds-years-first-used.png: First used in the Years by menu left the years by {by}"));
+    }
     shots.push(("sounds-years-first-used.png".into(), capture(window)));
     data.invoke_years_by_picked("Changed".into());
     data.invoke_pick_view(3);
@@ -4084,6 +4097,11 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
 
 /// Settings, Shortcuts: where the fourth line's "No key" button shows once the mouse is on the line.
 const KEY_LINE_NO_KEY: (f32, f32) = (1218.0, 421.0);
+
+/// The Sounds list's year strip: the date's name at its top ("Changed"), which opens the Years by menu, and that
+/// menu's First used line (its fourth, under Made, Changed and Opened).
+const YEARS_BY_NAME: (f32, f32) = (972.0, 131.0);
+const YEARS_BY_FIRST_USED: (f32, f32) = (760.0, 282.0);
 
 /// Rediscover's How far afield slider in the filter column, near its track's right end (it rests nearer its left).
 const AFIELD_SLIDER: (f32, f32) = (385.0, 634.0);

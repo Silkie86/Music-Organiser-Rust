@@ -2705,9 +2705,13 @@ export component YearRange inherits Rectangle {
                         text: c;
                         on: root.by == c;
                         tickable: true;
+                        // The pick is passed on before the menu closes: a line of a menu is gone once its menu closes,
+                        // and then it can't reach the strip to say what was picked (that lost every pick: Solomon's
+                        // beta note of 18 Nov). A menu whose lines pass their pick to a part of it first (`PickLines`,
+                        // `MenuItems`) can close first: that part lives until its handler is done.
                         clicked => {
-                            by-menu.close();
                             root.by-picked(c);
+                            by-menu.close();
                         }
                     }
                     Text {
