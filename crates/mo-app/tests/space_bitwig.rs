@@ -350,7 +350,7 @@ impl mo_space::clean::Bin for FolderBin {
 
 #[test]
 fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
-    use mo_app::space_bitwig::{ToFree, free, free_button, left_behind, note_freed};
+    use mo_app::space_bitwig::{ToFree, free, free_button, free_noted, left_behind};
     // As the page fills them in from the library before anything goes: nothing elsewhere uses the copy.
     let asked = |mut jobs: Vec<ToFree>| {
         for job in &mut jobs {
@@ -403,9 +403,11 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     let behind: Vec<String> = left_behind(&jobs[0]).iter().map(|p| name(p)).collect();
     assert_eq!(behind, ["Song v2.bwproject", "Song v1.bwproject", "Song v2-1.bwproject"]);
     let bin = FolderBin { dir: dir.join("bin"), held: Default::default() };
-    // Until the library has been asked who else uses them, nothing goes.
-    let done = free(&unasked[0], &bin, &stop);
+    // Until the library has been asked who else uses them, nothing goes; and as nothing went, the fixed project's mark
+    // (put on before the first copy would go: FS-23) comes off again.
+    let done = free_noted(&unasked[0], &bin, &stop, &note);
     assert!(done.removed.is_empty() && done.problems.iter().all(|p| p.why.contains("library")), "{:?}", done.problems);
+    assert!(!space_fix_note::is_freed(&note, &song.join("Song v2 (fixed).bwproject")));
     // You split v1 off into a song of its own on the Songs page: it isn't left behind, so it keeps its copies.
     let mut split = jobs[0].clone();
     let v1 = song.join("Song v1.bwproject").to_string_lossy().into_owned();
@@ -442,6 +444,18 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     );
     fs::File::options().write(true).open(&v1).unwrap().set_modified(looked).unwrap();
 
+    // The Library file Fix pointed the copy at was renamed since: the page now finds the same sound under its new name,
+    // but the fixed songs still use the old one, so the copy stays (FS-2).
+    let multisamples = studio.join("Library/Multisamples");
+    fs::rename(multisamples.join("Kicks.multisample"), multisamples.join("Kicks renamed.multisample")).unwrap();
+    let renamed = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+    let renamed_jobs = asked(fixes.to_free(&renamed));
+    assert_eq!(renamed_jobs.len(), 1);
+    let done = free(&renamed_jobs[0], &bin, &stop);
+    assert!(done.removed.is_empty(), "{:?}", done.problems);
+    assert!(done.problems.iter().any(|p| p.why.contains("doesn't use")), "{:?}", done.problems);
+    fs::rename(multisamples.join("Kicks renamed.multisample"), multisamples.join("Kicks.multisample")).unwrap();
+
     // Saved again since the page looked: nothing goes until it looks again.
     let remix = song.join("Song remix.bwproject");
     let later = SystemTime::now() + Duration::from_secs(120);
@@ -461,7 +475,7 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     // A save the library knows in this folder is the folder's own check's to judge: it doesn't keep the copy.
     let copy = song.join("multi-samples/Kicks-2.multisample").to_string_lossy().into_owned();
     used.elsewhere = Ok(vec![(copy, song.join("Song v1.bwproject").to_string_lossy().into_owned())]);
-    let done = free(&used, &bin, &stop);
+    let done = free_noted(&used, &bin, &stop, &note);
     assert_eq!(done.removed.len(), 1, "{:?}", done.problems);
     assert!(!song.join("multi-samples/Kicks-2.multisample").exists());
     assert!(studio.join("Library/Multisamples/Kicks.multisample").is_file());
@@ -470,17 +484,29 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     }
 
     // Their fixed projects are the ones that play now: the button for every fixed project leaves them.
-    assert_eq!(note_freed(&jobs[0], &note), Ok(()));
-    let fixed = song.join("Song v2 (fixed).bwproject");
-    let check = space_fix_note::Check::new(&note);
     let freed = space_fix_note::Stays::Freed;
-    assert_eq!(check.as_fix_left(&fixed, &fs::metadata(&fixed).unwrap()), Err(freed.why().to_owned()));
-    // Put back with one copy left in the bin keeps that; once they're all back, they're fixed projects like any other.
+    let judged = |fixed: &Path| space_fix_note::Check::new(&note).as_fix_left(fixed, &fs::metadata(fixed).unwrap());
+    let fixed = song.join("Song v2 (fixed).bwproject");
+    let remix_fixed = song.join("Song remix (fixed).bwproject");
+    for f in [&fixed, &remix_fixed] {
+        assert_eq!(judged(f), Err(freed.why().to_owned()), "{}", f.display());
+    }
     let copy = song.join("multi-samples/Kicks-2.multisample").to_string_lossy().into_owned();
-    space_fix_note::put_back(&note, &[&copy], &[&copy]);
-    let check = space_fix_note::Check::new(&note);
-    assert_eq!(check.as_fix_left(&fixed, &fs::metadata(&fixed).unwrap()), Err(freed.why().to_owned()));
-    space_fix_note::put_back(&note, &[&copy], &[]);
-    let check = space_fix_note::Check::new(&note);
-    assert_eq!(check.as_fix_left(&fixed, &fs::metadata(&fixed).unwrap()), Ok(()));
+    // Put back with one copy left in the bin keeps the marks.
+    space_fix_note::put_back(&note, &[&copy], &[&copy], Some(&[]));
+    assert_eq!(judged(&fixed), Err(freed.why().to_owned()));
+    // So does another Free the space of the same folder with a copy still in the bin (FS-1), and a list of what's in
+    // the bin that couldn't be read.
+    let other = song.join("samples/Snare-2.wav").to_string_lossy().into_owned();
+    space_fix_note::put_back(&note, &[&copy], &[], Some(&[&other]));
+    assert_eq!(judged(&remix_fixed), Err(freed.why().to_owned()));
+    space_fix_note::put_back(&note, &[&copy], &[], None);
+    assert_eq!(judged(&remix_fixed), Err(freed.why().to_owned()));
+    // A copy of another folder's in the bin doesn't keep them: once all of this folder's are back, they're fixed
+    // projects like any other.
+    let elsewhere = studio.join("Projects/Elsewhere/samples/Snare-2.wav").to_string_lossy().into_owned();
+    space_fix_note::put_back(&note, &[&copy], &[], Some(&[&elsewhere]));
+    for f in [&fixed, &remix_fixed] {
+        assert_eq!(judged(f), Ok(()), "{}", f.display());
+    }
 }

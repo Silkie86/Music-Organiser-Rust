@@ -575,10 +575,12 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
     // before Windows asks to send what it guards, so a save made meanwhile is still seen.
     let ask = || -> (Result<relink::FilesNow, String>, HashMap<String, Option<String>>) {
         let files = relink::bitwig_files_now(original);
+        // And each checked song's fixed project must use the file the copy is the same as now (FS-2).
+        let uses = relink::fixed_use_originals(&job.checked, &relinks);
         let why = relinks
             .iter()
             .map(|r| key(&r.copy.to_string_lossy()))
-            .zip(relink::still_named_except(original, &relinks, &left_out))
+            .zip(relink::still_named_except(original, &relinks, &left_out).into_iter().zip(uses).map(|(n, u)| u.or(n)))
             .collect();
         (files, why)
     };
@@ -616,16 +618,33 @@ fn without_drive(k: String) -> String {
     }
 }
 
-/// Notes that the copies of a project's checked songs went, so the button for every fixed project never sends their
-/// fixed projects ([`crate::space_fix_note::freed`]): they're the ones that play now. Call it once any went.
-pub fn note_freed(job: &ToFree, note: &Path) -> Result<(), String> {
-    let mut failed = Vec::new();
-    for (_, fixed) in &job.checked {
+/// [`free`], with the app's note in `note` kept as it goes: each checked song's fixed project is marked before the first
+/// copy goes (so a crash, a power cut or a kill part way through leaves the mark on: the whole-app review of 19 Nov,
+/// FS-23), and the button for every fixed project never sends it ([`crate::space_fix_note::freed`]): it's the one
+/// that plays now. When nothing went after all, the marks it put on come off again. What couldn't be noted is said in
+/// the log (a mark that couldn't be saved is kept while the app runs).
+pub fn free_noted(
+    job: &ToFree,
+    bin: &dyn mo_space::clean::Bin,
+    stop: &AtomicBool,
+    note: &Path,
+) -> mo_space::clean::Done {
+    let new: Vec<PathBuf> = job
+        .checked
+        .iter()
+        .map(|(_, fixed)| fixed.clone())
+        .filter(|fixed| !crate::space_fix_note::is_freed(note, fixed))
+        .collect();
+    for fixed in &new {
         if let Err(why) = crate::space_fix_note::freed(note, fixed) {
-            failed.push(why);
+            crate::log::warning("Space", &why);
         }
     }
-    if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
+    let done = free(job, bin, stop);
+    if done.removed.is_empty() && !new.is_empty() {
+        crate::space_fix_note::unfreed(note, &new);
+    }
+    done
 }
 
 /// Writes a "(fixed)" project beside a save that uses the Library's own files instead of its project's copies

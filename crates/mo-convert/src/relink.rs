@@ -598,38 +598,41 @@ fn zip_start(raw: &[u8]) -> Option<usize> {
 /// settings, and the zip at the end, unpacked. Only ASCII letters are compared without case, and anything that can't
 /// be looked through counts as naming every copy, so this errs towards "still named".
 fn named_in(raw: &[u8], listed: &[Listed]) -> Vec<bool> {
+    scan(raw, listed, names_copy).unwrap_or_else(|| vec![true; listed.len()])
+}
+
+/// For each copy, whether a Bitwig file's bytes (and its zip's entries) hold what `names` looks for. None when it isn't
+/// a Bitwig file, or its zip can't be read.
+fn scan(raw: &[u8], listed: &[Listed], names: fn(&[u8], &Listed) -> bool) -> Option<Vec<bool>> {
     let mut named = vec![false; listed.len()];
     let mut look = |bytes: &[u8]| {
         let lower = bytes.to_ascii_lowercase();
         for (c, copy) in listed.iter().enumerate() {
-            named[c] = named[c] || names_copy(&lower, copy);
+            named[c] = named[c] || names(&lower, copy);
         }
     };
     if !bitwig::is_bitwig(raw) {
-        return vec![true; listed.len()];
+        return None;
     }
     look(raw);
-    let Some(start) = zip_start(raw) else { return named };
-    let unpacked = (|| {
-        let mut archive = zip::ZipArchive::new(Cursor::new(raw.get(start..)?)).ok()?;
-        for i in 0..archive.len() {
-            let mut entry = Vec::new();
-            archive.by_index(i).ok()?.take(LONGEST_ZIP_ENTRY + 1).read_to_end(&mut entry).ok()?;
-            if entry.len() as u64 > LONGEST_ZIP_ENTRY {
-                return None;
-            }
-            look(&entry);
+    let Some(start) = zip_start(raw) else { return Some(named) };
+    let mut archive = zip::ZipArchive::new(Cursor::new(raw.get(start..)?)).ok()?;
+    for i in 0..archive.len() {
+        let mut entry = Vec::new();
+        archive.by_index(i).ok()?.take(LONGEST_ZIP_ENTRY + 1).read_to_end(&mut entry).ok()?;
+        if entry.len() as u64 > LONGEST_ZIP_ENTRY {
+            return None;
         }
-        Some(())
-    })();
-    if unpacked.is_none() {
-        return vec![true; listed.len()];
+        look(&entry);
     }
-    named
+    Some(named)
 }
 
-/// Whether bytes (made small in ASCII) name a copy: one of its needles found somewhere that isn't inside its
-/// original's own path.
+/// Whether a Bitwig file's bytes (made small in ASCII) name the file the copy is the same as, by its full path.
+fn names_original(lower: &[u8], copy: &Listed) -> bool {
+    copy.original.iter().any(|o| memmem::find(lower, o).is_some())
+}
+
 fn names_copy(lower: &[u8], copy: &Listed) -> bool {
     let mut original: Vec<(usize, usize)> = Vec::new();
     let mut looked = false;
@@ -877,6 +880,60 @@ pub fn still_named_except(
             at += 1;
             let (other, _) = named.iter().find(|(_, n)| n[c])?;
             Some(format!("{other} still uses {}, so it stays.", shown(r)))
+        })
+        .collect()
+}
+
+/// Whether each copy's checked fixed projects use the file the page found it the same as now (the whole-app review
+/// of 19 Nov, FS-2): for each (save, fixed project) you checked, a copy the save names must be one whose file the fixed
+/// project names by its full path. When the file Fix pointed it at has moved, been renamed or deleted since, and the
+/// page now finds the same sound somewhere else, the fixed project doesn't use it, so the copy stays (and says to Fix
+/// again). A fixed project that can't be read keeps every copy its save names. For each copy, in order: why it stays,
+/// or None.
+pub fn fixed_use_originals(checked: &[(PathBuf, PathBuf)], relinks: &[Relink]) -> Vec<Option<String>> {
+    let Some(dir) = checked.first().and_then(|(save, _)| save.parent()) else { return vec![None; relinks.len()] };
+    let shown = |r: &Relink| r.copy.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut listed: Vec<Listed> = Vec::new();
+    let each: Vec<Option<String>> = relinks
+        .iter()
+        .map(|r| match listed_one(dir, r) {
+            Ok(l) => {
+                listed.push(l);
+                None
+            }
+            Err(e) => Some(e),
+        })
+        .collect();
+    let read = |p: &Path| std::fs::read(p).ok().filter(|raw| !raw.is_empty());
+    let looked: Vec<(String, Vec<bool>, Vec<bool>)> = checked
+        .par_iter()
+        .map(|(save, fixed)| {
+            let named = read(save).map_or_else(|| vec![true; listed.len()], |raw| named_in(&raw, &listed));
+            let uses = read(fixed)
+                .and_then(|raw| scan(&raw, &listed, names_original))
+                .unwrap_or_else(|| vec![false; listed.len()]);
+            let name = fixed.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            (name, named, uses)
+        })
+        .collect();
+    let mut at = 0;
+    relinks
+        .iter()
+        .zip(&each)
+        .map(|(r, l)| {
+            if let Some(e) = l {
+                return Some(format!("{} stays: {e}.", shown(r)));
+            }
+            let c = at;
+            at += 1;
+            let (fixed, _, _) = looked.iter().find(|(_, named, uses)| named[c] && !uses[c])?;
+            Some(format!(
+                "{fixed} doesn't use {} for {} (the file the page finds it the same as now): it has moved or changed \
+                 since Fix, so the copy stays. Send {fixed} to the {} and Fix it again.",
+                listed[c].full,
+                shown(r),
+                if cfg!(windows) { "Recycle Bin" } else { "Trash" }
+            ))
         })
         .collect()
 }

@@ -1171,12 +1171,8 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
                         behind.iter().map(|b| b.display().to_string()).collect::<Vec<_>>().join(", ")
                     ),
                 );
-                let one = background::on_bulk_pool(|| space_bitwig::free(job, &bin, stop));
-                if !one.removed.is_empty()
-                    && let Err(why) = space_bitwig::note_freed(job, &space_fix_note::file())
-                {
-                    log::warning("Space", &why);
-                }
+                let one =
+                    background::on_bulk_pool(|| space_bitwig::free_noted(job, &bin, stop, &space_fix_note::file()));
                 done.removed.extend(one.removed);
                 done.problems.extend(one.problems);
             }
@@ -1692,19 +1688,27 @@ fn put_back(app: &AppWindow, feed: Feed, kind: String, when: i64, done: Done) {
         for problem in &problems {
             log::warning("Space", &format!("Couldn't put back {}: {}", problem.path, problem.why));
         }
-        // Copies Free the space sent that all came back: their songs' fixed projects are like any other again.
+        // What came back isn't in the bin any more: looked at before the page hears Put back is done, so its line and
+        // card never show it there with Put back on again.
+        let kept = catch_crash(AssertUnwindSafe(|| binned::refresh(&folder, &SystemBin))).ok();
+        // Copies Free the space sent that all came back, with none of their folder's from another Free still in the
+        // bin (the whole-app review of 19 Nov, FS-1): their songs' fixed projects are like any other again.
         if kind == space_bitwig::BITWIG_COPIES_FREED {
             let back: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
             let missed: Vec<&str> = problems.iter().map(|p| p.path.as_str()).collect();
-            space_fix_note::put_back(&space_fix_note::file(), &back, &missed);
+            let in_bin: Option<Vec<&str>> = kept.as_ref().filter(|k| k.noted).map(|k| {
+                k.list
+                    .iter()
+                    .filter(|b| b.kind == space_bitwig::BITWIG_COPIES_FREED)
+                    .flat_map(|b| b.done.removed.iter().map(|r| r.path.as_str()))
+                    .collect()
+            });
+            space_fix_note::put_back(&space_fix_note::file(), &back, &missed, in_bin.as_deref());
         }
         match space_bin::put_back_words(done.removed.len(), &problems) {
             Ok(words) => card.done(&words),
             Err(words) => card.failed(&words),
         }
-        // What came back isn't in the bin any more: looked at before the page hears Put back is done, so its line and
-        // card never show it there with Put back on again.
-        let kept = catch_crash(AssertUnwindSafe(|| binned::refresh(&folder, &SystemBin))).ok();
         arrive(&weak, Step::PutBack(kind, when, problems, kept));
     });
     if let Err(e) = spawned {
@@ -2485,7 +2489,11 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     let old = after.old || kind == OLD_COPIES && *p.old_removing.stage() == space_old::Stage::Picking;
                     let songs =
                         after.songs || kind == COMPACT && *p.songs_removing.stage() == space_songs::Stage::Picking;
-                    // Fixed Bitwig projects that came back are on the Bitwig card again.
+                    // Fixed Bitwig projects that came back are on the Bitwig card again. Copies that came back wait for
+                    // a new check of their songs before they can go again (the whole-app review of 19 Nov, FS-8).
+                    if kind == space_bitwig::BITWIG_COPIES_FREED {
+                        p.fixes.heard.clear();
+                    }
                     let bitwig = kind == space_bitwig::BITWIG_FIXED || kind == space_bitwig::BITWIG_COPIES_FREED;
                     Changed::Bin { spare, old, songs, bitwig }
                 }
