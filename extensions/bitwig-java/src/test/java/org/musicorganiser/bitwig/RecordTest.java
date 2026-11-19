@@ -467,6 +467,7 @@ class RecordTest {
         TrackSpec rec = spec("Rec");
         int at = bitwig.state.tracks.indexOf(rec);
         bitwig.state.tracks.remove(rec);
+        bitwig.refresh();
         bitwig.projectName.v = "MO Live Test";
         int from = bitwig.calls.size();
         bitwig.clock.advance(3000);
@@ -474,6 +475,7 @@ class RecordTest {
         // The song itself, with the pre-roll set by hand meanwhile: that stays, the rest goes back.
         bitwig.state.tracks.add(at, rec);
         bitwig.transportNow.put("preRoll", "two_bars");
+        bitwig.refresh();
         bitwig.clock.advance(3000);
         assertEquals("two_bars", bitwig.transportNow.get("preRoll"));
         assertEquals("latch", bitwig.transportNow.get("automationWriteMode"));
