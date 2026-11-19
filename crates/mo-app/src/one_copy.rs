@@ -192,9 +192,14 @@ pub fn ask_to_show(port: u16) -> bool {
     ask(port, &json!({ "ask": "show" })).is_ok_and(|a| a.get("showing").and_then(Value::as_bool) == Some(true))
 }
 
+/// Asks the app on `port` to close, as a copy of another build does; says whether an app answered.
+pub fn ask_to_close(port: u16) -> bool {
+    ask(port, &json!({ "ask": "close" })).is_ok()
+}
+
 /// Whether two paths name the same program: as Windows compares them (any case), exactly elsewhere. One that can't be
 /// told ("") counts as the same.
-fn same_program(a: &str, b: &str) -> bool {
+pub(crate) fn same_program(a: &str, b: &str) -> bool {
     let plain = |p: &str| p.strip_prefix(r"\\?\").unwrap_or(p).to_owned();
     a.is_empty() || b.is_empty() || if cfg!(windows) { plain(a).eq_ignore_ascii_case(&plain(b)) } else { a == b }
 }

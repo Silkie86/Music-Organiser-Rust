@@ -12,6 +12,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// In a data folder the installer started: the pointer may name it though no move went there.
 pub const STARTED_HERE_FILE: &str = "started-here.txt";
@@ -55,6 +56,42 @@ pub fn move_asked() -> Option<PathBuf> {
 /// Takes the installer's ask away, as the move it asked for starts.
 pub fn take_move_ask() {
     let _ = fs::remove_file(move_asked_file(&crate::paths::first_dir()));
+}
+
+/// The uninstaller starts the app with this (installer/setup.iss, InitializeUninstall) before it removes the files:
+/// the app and the background helper running from the same program are asked to close, as Windows won't remove a
+/// program that runs (UP-12). The app first, so it can't start the helper again.
+pub const CLOSE_FLAG: &str = "--close-for-setup";
+
+/// Asks the open app and the helper to close, when they run from `exe` (never a launcher's build or another
+/// install), and waits up to `wait` for each to let go of its port. Says what it did, a line each.
+pub fn close_for_setup(exe: &Path, wait: Duration) -> Vec<String> {
+    let exe = exe.display().to_string();
+    let mut done = Vec::new();
+    let ours = |other: &str| crate::one_copy::same_program(other, &exe) && !other.is_empty();
+    if crate::one_copy::hello(crate::one_copy::PORT).is_some_and(|h| ours(&h.exe))
+        && crate::one_copy::ask_to_close(crate::one_copy::PORT)
+    {
+        done.push(format!("app asked to close; {}", wait_for(crate::one_copy::PORT, wait)));
+    }
+    if crate::helper::hello(crate::helper::PORT).is_some_and(|h| ours(&h.exe))
+        && crate::helper::ask_to_quit(crate::helper::PORT)
+    {
+        done.push(format!("helper asked to quit; {}", wait_for(crate::helper::PORT, wait)));
+    }
+    done
+}
+
+/// Waits up to `wait` for `port` to be free: how it went, in words.
+fn wait_for(port: u16, wait: Duration) -> String {
+    let until = Instant::now() + wait;
+    while crate::one_copy::taken(port) {
+        if Instant::now() >= until {
+            return "still running".into();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    "closed".into()
 }
 
 #[cfg(test)]

@@ -52,6 +52,17 @@ pub fn missing_now() -> Option<String> {
     now.problem.filter(|_| now.missing)
 }
 
+/// Whether the first data folder holds anything of the app's (anything but the launchers' own folders): when it holds
+/// nothing, opening on it while the data folder's drive is missing opens with no data at all, as on a PC the
+/// installer started the data elsewhere (DA-4).
+pub fn first_has_data() -> bool {
+    fs::read_dir(first_dir()).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| !crate::data_move::LAUNCHER_FOLDERS.iter().any(|l| e.file_name().eq_ignore_ascii_case(l)))
+    })
+}
+
 /// The system's own place for the app's data, where it starts out and where [`POINTER_FILE`] sits beside it.
 pub fn first_dir() -> PathBuf {
     let base = if cfg!(windows) {

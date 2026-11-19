@@ -2,8 +2,9 @@
 //! a low-priority thread, an installed copy asks GitHub's Releases page whether a newer version is out. That one
 //! question is all the app sends online, and Settings › General turns it off (rule 1: the app works fully offline).
 //! A newer setup is fetched in the background into the data folder's `updates` folder, checked against the SHA-256
-//! the release lists, and only then offered: "Restart to update". On a click the app closes as it always does and the
-//! setup runs silently, then opens the new version (`/UPDATED=1`, installer/setup.iss).
+//! the release lists, and only then offered: "Restart to update". On a click the setup is checked and started, and
+//! the app closes as it always does; the setup waits for it to end, then opens the new version (`/UPDATED=1`,
+//! `/WAITPID`, installer/setup.iss), or the old one again when it couldn't go in ([`failed_update`] tells it).
 //!
 //! Only a copy the installer put in place updates itself: one built by the launcher, or run from a build folder, never
 //! does ([`installed`]). Talking to GitHub goes through Windows' own `curl.exe` (System32), so no web library is built
@@ -63,8 +64,49 @@ pub fn is_spent(name: &str, current: &str) -> bool {
     if let Some(part) = name.strip_suffix(".mo-part") {
         return setup_version(part).is_some();
     }
-    let setup = name.strip_suffix(".sha256").unwrap_or(name);
+    let setup = name.strip_suffix(".sha256").or_else(|| name.strip_suffix(".log")).unwrap_or(name);
     setup_version(setup).is_some_and(|v| v <= current)
+}
+
+/// The setup's own log for `setup` (its name with `.log` after it, beside it): the app names it, so the next start
+/// can say how the update went ([`failed_update`]), and it goes with its setup (rule 28, [`is_spent`]).
+pub fn setup_log(setup: &Path) -> PathBuf {
+    let mut log = setup.as_os_str().to_owned();
+    log.push(".log");
+    PathBuf::from(log)
+}
+
+/// An update that didn't go in: a setup's log in `folder` for a version newer than `current` (the setup ran, but
+/// this is still the old version). Gives the version and the log's last few lines, and takes the log away, so it's
+/// told once; the setup stays, to be offered again.
+pub fn failed_update(folder: &Path, current: &str) -> Option<(String, String)> {
+    let current = Version::parse(current)?;
+    for entry in fs::read_dir(folder).ok()?.flatten() {
+        if !entry.file_type().is_ok_and(|k| k.is_file()) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        let Some(setup) = name.strip_suffix(".log") else { continue };
+        let Some(version) = setup_version(setup) else { continue };
+        if version <= current {
+            continue;
+        }
+        let text = fs::read(entry.path()).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let tail = lines[lines.len().saturating_sub(6)..].join("\n");
+        let _ = fs::remove_file(entry.path());
+        let shown = setup[setup_prefix().len()..setup.len() - ".exe".len()].to_owned();
+        return Some((shown, tail));
+    }
+    None
+}
+
+/// Whether `setup` is still the whole setup that was fetched: its SHA-256 still the one kept beside it.
+pub fn still_whole(setup: &Path) -> bool {
+    let mut sha_file = setup.as_os_str().to_owned();
+    sha_file.push(".sha256");
+    let Some(want) = fs::read_to_string(sha_file).ok().as_deref().and_then(sha_in) else { return false };
+    sha_of(setup).is_ok_and(|got| got == want)
 }
 
 /// Whether the daily look is on.
@@ -373,14 +415,29 @@ pub fn ready_in(folder: &Path, current: &str) -> Option<(String, PathBuf)> {
     })
 }
 
-/// Starts the fetched setup silently, to put the new version in place and open it (installer/setup.iss: it closes
-/// what's still running of the app, and `/UPDATED=1` starts the app once it's done). Windows only.
-pub fn run_setup(setup: &Path) -> io::Result<()> {
+/// The setup's switches for an update: no pages, `/UPDATED=1` opens the new version once it's in (or the old one
+/// again when it couldn't go in), `/WAITPID` waits for this app (process `pid`) to end before any file is touched
+/// (UP-14), and its log goes beside it ([`setup_log`], UP-6). Its own boxes are left to show: a file in use or a copy
+/// that won't close then says so, with Retry, instead of quietly giving up (UP-2).
+pub fn setup_args(setup: &Path, pid: u32) -> Vec<String> {
+    vec![
+        "/VERYSILENT".into(),
+        "/NORESTART".into(),
+        "/UPDATED=1".into(),
+        format!("/WAITPID={pid}"),
+        format!("/LOG={}", setup_log(setup).display()),
+    ]
+}
+
+/// Starts the fetched setup, to put the new version in place once this app (process `pid`) has ended
+/// (installer/setup.iss: it waits for it, closes what's still running of the app, and opens the app when it's
+/// done). Windows only.
+pub fn run_setup(setup: &Path, pid: u32) -> io::Result<()> {
     if !cfg!(windows) {
         return Err(io::Error::other("updates are put in by the Windows installer"));
     }
     Command::new(setup)
-        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATED=1"])
+        .args(setup_args(setup, pid))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -474,6 +531,9 @@ mod tests {
         assert!(!is_spent("Vital-Setup-1.0.0.exe", "1.0.0"));
         assert!(!is_spent("Vital-Setup-1.0.0.exe.mo-part", "1.0.0"));
         assert!(!is_spent("DAWmate-Setup-x.exe.mo-part", "1.0.0"));
+        assert!(is_spent("DAWmate-Setup-1.0.0.exe.log", "1.0.0"));
+        assert!(!is_spent("DAWmate-Setup-1.0.1.exe.log", "1.0.0"));
+        assert!(!is_spent("Setup Log 2026-11-19 #001.txt", "1.0.0"));
         let offer = Offer {
             version: "1.0.1".into(),
             setup_name: r"C:DAWmate-Setup-1.0.1.exe".into(),
@@ -541,6 +601,32 @@ mod tests {
         assert_eq!((version.as_str(), path), ("1.0.1", dir.join("DAWmate-Setup-1.0.1.exe")));
         assert_eq!(ready_in(&dir, "1.0.1"), None);
         assert_eq!(ready_in(&dir, "1.0.1-beta.1").unwrap().0, "1.1.0-beta.1", "a test version only for a tester");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_update_that_didnt_go_in_is_told_once() {
+        let dir = test_folder("failed");
+        fs::write(dir.join("DAWmate-Setup-1.0.1.exe"), "x").unwrap();
+        let lines: String = (1..=10).map(|n| format!("line {n}\r\n")).collect();
+        fs::write(dir.join("DAWmate-Setup-1.0.1.exe.log"), lines).unwrap();
+        fs::write(dir.join("DAWmate-Setup-1.0.0.exe.log"), "went in").unwrap();
+        assert_eq!(failed_update(&dir, "1.0.1"), None, "the running version's log means it went in");
+        let (version, tail) = failed_update(&dir, "1.0.0").unwrap();
+        assert_eq!(version, "1.0.1");
+        assert!(tail.starts_with("line 5") && tail.ends_with("line 10"), "{tail}");
+        assert_eq!(failed_update(&dir, "1.0.0"), None, "told once");
+        assert!(dir.join("DAWmate-Setup-1.0.1.exe").is_file(), "the setup stays, to be offered again");
+        let setup = dir.join("DAWmate-Setup-1.0.1.exe");
+        assert_eq!(setup_log(&setup), dir.join("DAWmate-Setup-1.0.1.exe.log"));
+        let args = setup_args(&setup, 42);
+        assert!(args.contains(&"/WAITPID=42".to_owned()) && args.contains(&"/UPDATED=1".to_owned()));
+        assert!(!args.iter().any(|a| a == "/SUPPRESSMSGBOXES"), "the setup's own boxes say what's wrong");
+        assert!(!still_whole(&setup), "no SHA-256 kept beside it");
+        fs::write(dir.join("DAWmate-Setup-1.0.1.exe.sha256"), format!("{}  x", sha_hex(b"x"))).unwrap();
+        assert!(still_whole(&setup));
+        fs::write(&setup, "changed").unwrap();
+        assert!(!still_whole(&setup));
         let _ = fs::remove_dir_all(&dir);
     }
 

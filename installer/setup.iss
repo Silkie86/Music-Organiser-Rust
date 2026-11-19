@@ -90,12 +90,27 @@ const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   HelperEntry = 'MusicOrganiserHelper';
 
+  // OpenProcess's right to wait for a process to end.
+  SynchronizeRight = $00100000;
+  // How long an update waits for the app that started it to end (UP-14), in milliseconds: five minutes.
+  WaitForAppMs = 300000;
+  WaitTimedOut = $00000102;
+
 var
   DataPage: TInputDirWizardPage;
   CurrentData: String;
   HasData: Boolean;
   // The pointer names a folder that isn't there now (its drive unplugged, say): nothing about the data is changed.
   DataMissing: Boolean;
+  // The files went in: an update that stops before this opens the old app again (DeinitializeSetup, UP-2).
+  Installed: Boolean;
+
+function OpenProcess(Access: DWORD; Inherit: BOOL; ProcessId: DWORD): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForSingleObject(Handle: THandle; Milliseconds: DWORD): DWORD;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): BOOL;
+  external 'CloseHandle@kernel32.dll stdcall';
 
 function FirstDataDir: String;
 begin
@@ -112,15 +127,19 @@ begin
   Result := ExpandConstant('{localappdata}\') + MoveAskedFileName;
 end;
 
-// The folder the pointer names, or '' (no pointer, or nothing in it). The app writes it as UTF-8; a folder name
-// outside plain ASCII may read wrongly here, which only changes what the page shows (the app judges an ask itself).
+// The folder the pointer names, or '' (no pointer, or nothing in it). Read as the app reads it (mo_app::paths):
+// UTF-8, with or without the byte-order mark at the front (an older setup wrote one, UP-1).
 function PointerNames: String;
 var
   Text: AnsiString;
 begin
   Result := '';
   if FileExists(PointerFile) and LoadStringFromFile(PointerFile, Text) then
-    Result := Trim(String(Text));
+  begin
+    if Copy(Text, 1, 3) = #$EF#$BB#$BF then
+      Delete(Text, 1, 3);
+    Result := Trim(Utf8Decode(Text));
+  end;
 end;
 
 // Whether the first folder holds anything of the app's: any file or folder but the launchers' own folders.
@@ -182,11 +201,37 @@ begin
   Result := CompareText(RemoveBackslashUnlessRoot(A), RemoveBackslashUnlessRoot(B)) = 0;
 end;
 
+// An update the app started passes /WAITPID=<its process>: nothing is touched until that app has ended, however long
+// Windows takes over it (UP-14). Five minutes at most; then the setup goes on, and closes what's left itself.
+function InitializeSetup: Boolean;
+var
+  Pid: Integer;
+  Handle: THandle;
+begin
+  Result := True;
+  Pid := StrToIntDef(ExpandConstant('{param:WAITPID|0}'), 0);
+  if Pid <= 0 then
+    Exit;
+  Handle := OpenProcess(SynchronizeRight, False, Pid);
+  if Handle = 0 then
+  begin
+    Log('The app (process ' + IntToStr(Pid) + ') has ended already');
+    Exit;
+  end;
+  Log('Waiting for the app (process ' + IntToStr(Pid) + ') to end');
+  if WaitForSingleObject(Handle, WaitForAppMs) = WaitTimedOut then
+    Log('The app (process ' + IntToStr(Pid) + ') is still ending after five minutes; going on')
+  else
+    Log('The app has ended');
+  CloseHandle(Handle);
+end;
+
 procedure InitializeWizard;
 var
   Words: String;
 begin
   LookAtData;
+  // The page's top line holds two lines at most: the explanation goes above the box, which grows to fit (UP-7).
   if DataMissing then
     Words := 'Your data is in ' + CurrentData + ', which can''t be found now (is its drive plugged in?). The ' +
       'setup leaves it as it is: once the drive is back, {#AppName} finds it again, and Settings can move it.'
@@ -197,8 +242,8 @@ begin
   else
     Words := '{#AppName} keeps its databases, settings, notes and logs in one folder. A fast drive with room to ' +
       'spare is best. You can move it later in Settings > General.';
-  DataPage := CreateInputDirPage(wpSelectDir, 'Where should your data go?', Words,
-    'Data folder:', False, '');
+  DataPage := CreateInputDirPage(wpSelectDir, 'Where should your data go?',
+    'Pick the folder for your songs, sounds and settings.', Words + #13#10#13#10 + 'Data folder:', False, '');
   DataPage.Add('');
   DataPage.Values[0] := GetPreviousData('DataFolder', CurrentData);
   if HasData then
@@ -206,6 +251,13 @@ begin
   // For tests and a silent install: /DATADIR=<folder>.
   if ExpandConstant('{param:DATADIR|}') <> '' then
     DataPage.Values[0] := ExpandConstant('{param:DATADIR|}');
+end;
+
+// A silent run with no /DATADIR (an update) has nothing to pick: the data page is passed by, so a folder it can't
+// judge (a drive unplugged, say) never stops the update (UP-1).
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = DataPage.ID) and WizardSilent and (ExpandConstant('{param:DATADIR|}') = '');
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -229,14 +281,14 @@ begin
   SetPreviousData(PreviousDataKey, 'DataFolder', DataPage.Values[0]);
 end;
 
-// One line, as UTF-8 (what the app reads; it skips the byte-order mark this may start with).
+// One line, as UTF-8 with no byte-order mark: what the app's own move writes, and what PointerNames reads.
 function SaveLine(FileName, Line: String): Boolean;
 var
   Lines: TArrayOfString;
 begin
   SetArrayLength(Lines, 1);
   Lines[0] := Line;
-  Result := SaveStringsToUTF8File(FileName, Lines, False);
+  Result := SaveStringsToUTF8FileWithoutBOM(FileName, Lines, False);
   if not Result then
     Log('Could not write ' + FileName);
 end;
@@ -255,6 +307,7 @@ var
 begin
   if CurStep <> ssPostInstall then
     Exit;
+  Installed := True;
   Target := TargetIn(DataPage.Values[0]);
   if DataMissing then
     Exit;
@@ -282,6 +335,37 @@ end;
 function StartAfterUpdate: Boolean;
 begin
   Result := WizardSilent and (ExpandConstant('{param:UPDATED|no}') <> 'no');
+end;
+
+// An update that stopped before its files went in (a file that couldn't be replaced, say): the old app is still in
+// place, so it's opened again rather than leaving nothing open (UP-2). It says what happened from the setup's log.
+procedure DeinitializeSetup;
+var
+  Code: Integer;
+begin
+  if not StartAfterUpdate or Installed then
+    Exit;
+  // {app} can't be read before the setup has chosen it, so this is all inside the try.
+  try
+    if not FileExists(ExpandConstant('{app}\{#ExeName}')) then
+      Exit;
+    Log('The update didn''t go in: opening the app as it was');
+    Exec(ExpandConstant('{app}\{#ExeName}'), '', '', SW_SHOWNORMAL, ewNoWait, Code);
+  except
+    Log('Couldn''t open the app again: ' + GetExceptionMessage);
+  end;
+end;
+
+// Before uninstalling: the app and the background helper running from this copy are asked to close and waited for,
+// as Windows won't remove a program that runs (UP-12, mo_app::install_choice::close_for_setup).
+function InitializeUninstall: Boolean;
+var
+  Code: Integer;
+begin
+  Result := True;
+  if FileExists(ExpandConstant('{app}\{#ExeName}')) then
+    if not Exec(ExpandConstant('{app}\{#ExeName}'), '--close-for-setup', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+      Log('Couldn''t ask the app and the helper to close: ' + SysErrorMessage(Code));
 end;
 
 // Uninstall: the helper's startup line goes only when it starts this copy of the app. Nothing of the data folder is
