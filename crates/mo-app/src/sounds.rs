@@ -395,15 +395,17 @@ pub struct LikeFavourites {
     was_favourite: Vec<bool>,
     /// What it was worked out from ([`SoundList::like_key`]).
     key: u64,
-    /// How many were placed by the analyser's fingerprints though deep listening is on ([`mo_sounds::near::Reach`]).
-    by_analyser: usize,
+    /// The reach of each sound placed by the analyser's fingerprints though deep listening is on
+    /// ([`mo_sounds::near::Reach`]), smallest first.
+    by_analyser: Vec<u32>,
 }
 
 impl LikeFavourites {
-    /// How many were matched by their measurements, as deep listening never heard them (or the favourite they're
-    /// closest to).
-    pub fn by_measurements(&self) -> usize {
-        self.by_analyser
+    /// How many of the sounds like your favourites that show at step `step` (before the other filters) were matched by
+    /// their measurements, as deep listening never heard them (or the favourite they're nearest).
+    pub fn by_measurements(&self, step: u8) -> usize {
+        let per = per_favourite(step);
+        self.by_analyser.partition_point(|&r| r < per)
     }
 }
 
@@ -766,12 +768,9 @@ impl SoundList {
             })
             .collect();
         let near = mo_sounds::near::reach(index, &sounds);
-        Arc::new(LikeFavourites {
-            reach: near.each,
-            was_favourite,
-            key: self.like_key(),
-            by_analyser: near.by_analyser,
-        })
+        let mut by_analyser: Vec<u32> = near.by_analyser.iter().map(|&i| near.each[i]).collect();
+        by_analyser.sort_unstable();
+        Arc::new(LikeFavourites { reach: near.each, was_favourite, key: self.like_key(), by_analyser })
     }
 
     /// What how close the sounds are to your favourites is worked out from, as a number: which are favourites, each
@@ -848,10 +847,10 @@ impl SoundList {
         self.like.is_some()
     }
 
-    /// How many of the sounds like your favourites were matched by their measurements, as deep listening never heard
-    /// them (or the favourite they're closest to): 0 until it's known.
-    pub fn like_favourites_by_measurements(&self) -> usize {
-        self.like.as_ref().map_or(0, |l| l.by_measurements())
+    /// How many of the sounds like your favourites that show at step `step` were matched by their measurements, as
+    /// deep listening never heard them (or the favourite they're nearest): 0 until it's known.
+    pub fn like_favourites_by_measurements(&self, step: u8) -> usize {
+        self.like.as_ref().map_or(0, |l| l.by_measurements(step))
     }
 
     /// Whether this list shows your say over any of its sounds ([`SoundList::with_say`]).

@@ -2210,7 +2210,7 @@ impl Column {
         let step = asked.filters.like_favourites;
         panel.set_like_favourites(mo_app::sounds::like_favourites_share(step));
         let (known, by_measurements) = match library.map(Library::like) {
-            Some(Like::Ready(like)) => (LikeKnown::Yes, like.by_measurements()),
+            Some(Like::Ready(like)) => (LikeKnown::Yes, like.by_measurements(step)),
             Some(Like::Not(_)) => (LikeKnown::Missing, 0),
             _ => (LikeKnown::Finding, 0),
         };

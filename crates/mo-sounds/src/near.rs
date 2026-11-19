@@ -43,9 +43,9 @@ pub struct Reach {
     /// For each sound, in the order given: how many sounds like each favourite of its type must be let through for it
     /// to show ([`NEVER`] when it can't be). A favourite's is 0.
     pub each: Vec<u32>,
-    /// How many of the sounds that can show were placed by the analyser's fingerprints while deep listening is on:
-    /// ones CLAP never heard, or closest to a favourite it never heard. Always 0 with deep listening off.
-    pub by_analyser: usize,
+    /// The sounds (places in the order given) placed by the analyser's fingerprints while deep listening is on: ones
+    /// CLAP never heard, or nearer a favourite it never heard. None with deep listening off.
+    pub by_analyser: Vec<usize>,
 }
 
 /// How close each of `sounds` (its id, its type as shown, and what it is to the favourites) is to the favourites of
@@ -58,7 +58,7 @@ pub struct Reach {
 /// nearer. So a new sound, or a new favourite, never hides the type's others (review SN-1). A sound with no
 /// fingerprint at all, every sound of a type with no favourite, and every [`Role::Out`], is [`NEVER`].
 pub fn reach(whole: &SoundIndex, sounds: &[(i64, &str, Role)]) -> Reach {
-    let mut out = Reach { each: vec![NEVER; sounds.len()], by_analyser: 0 };
+    let mut out = Reach { each: vec![NEVER; sounds.len()], by_analyser: Vec::new() };
     // Each type's places. A library has a few dozen types at most, so a list is quicker than lowering each name.
     let mut by_type: Vec<(&str, Vec<usize>)> = Vec::new();
     for (i, (_, t, _)) in sounds.iter().enumerate() {
@@ -99,14 +99,14 @@ pub fn reach(whole: &SoundIndex, sounds: &[(i64, &str, Role)]) -> Reach {
         for &(i, r) in &all {
             if !heard(&i) {
                 out.each[i] = r;
-                out.by_analyser += 1;
+                out.by_analyser.push(i);
             }
         }
         // The ones CLAP heard, against the favourites it didn't: nearer that way, they show sooner.
         for (i, r) in rank(&whole.features, sounds, &others, &unheard_favourites) {
             if heard(&i) && r < out.each[i] {
                 out.each[i] = r;
-                out.by_analyser += 1;
+                out.by_analyser.push(i);
             }
         }
     }
@@ -256,7 +256,7 @@ mod tests {
         use Role::{Favourite as F, Other as O};
         let sounds = [(1, "Kick", F), (2, "Kick", O), (3, "Kick", O), (4, "Kick", O), (5, "Kick", F), (6, "Kick", O)];
         // "1 like each": 2 for the first, 6 for the second, though 3 and 4 are closer to a favourite than 6 is.
-        assert_eq!(reach(&index, &sounds), Reach { each: vec![0, 0, 1, 2, 0, 0], by_analyser: 0 });
+        assert_eq!(reach(&index, &sounds), Reach { each: vec![0, 0, 1, 2, 0, 0], by_analyser: vec![] });
     }
 
     #[test]
@@ -285,7 +285,7 @@ mod tests {
         };
         let reach = |s: &[(i64, &str, Role)]| {
             let r = reach(&deep, s);
-            (r.each, r.by_analyser)
+            (r.each, r.by_analyser.len())
         };
         // Kicks 1 to 4, all heard by CLAP: CLAP's, so 3 is the closest to favourite 1.
         let kicks = [(1, "Kick", F), (2, "Kick", O), (3, "Kick", O), (4, "Kick", O)];
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(reach(&new_favourite), (vec![0, 2, 0, 1, 0, 1, 0], 2));
         // With deep listening off it's all the analyser's, said by no note.
         let off = SoundIndex { deep: false, ..deep.clone() };
-        assert_eq!(super::reach(&off, &kicks).by_analyser, 0);
+        assert!(super::reach(&off, &kicks).by_analyser.is_empty());
     }
 
     #[test]
