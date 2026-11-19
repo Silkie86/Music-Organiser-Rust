@@ -16,7 +16,10 @@
 //! copies would flood the list: sly_17 alone has 204 clips of 3 shapes).
 //!
 //! What's found is kept in the app's own `curves.db` beside `library.db`, so the page shows it at once; a save is read
-//! again only when it changes ([`CurvesDb::out_of_date`], [`CurvesDb::scan`]). Your names and hidden curves are kept
+//! again only when it changes ([`CurvesDb::out_of_date`], [`CurvesDb::scan`]). A curve's points are kept once
+//! (`curve_shapes`) however many places it was found in (`curve_places`): Solomon's `curves.db` was 857 MB with the
+//! points kept with each of 51,049 places, 2,287 different ones among them (19 Nov 2026; rule 23). One of that older
+//! layout is moved into this one the first time it's opened ([`to_shapes`]). Your names and hidden curves are kept
 //! apart from what a scan finds, so a rescan never loses them. Curve files are written on demand ([`file`]) into the
 //! app's own `Curves` folder; [`save_to_bitwig`] copies one into Bitwig's library under a new name, never over a file.
 
@@ -51,17 +54,27 @@ const STAGED: &str = ".mo-staged";
 /// was stopped part way: a save takes far less, so one another copy of the app is making right now is left alone.
 const STAGED_LEFT_BEHIND: Duration = Duration::from_secs(60);
 
-/// The tables, as made in a new database; only ever added to.
+/// The tables, as made in a new database. `curve_shapes`: each curve as found (its id, [`shape_id`], and the length
+/// and points it had there), once. `curve_places`: every place one was found.
 const SCHEMA: &str = "\
     CREATE TABLE IF NOT EXISTS curve_reads (path TEXT PRIMARY KEY NOT NULL, modified INTEGER NOT NULL, \
         size INTEGER NOT NULL, version INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS curve_places (id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL, \
-        device TEXT NOT NULL, setting TEXT NOT NULL, at REAL NOT NULL, length REAL NOT NULL, points TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS curve_shapes (n INTEGER PRIMARY KEY, id TEXT NOT NULL, length REAL NOT NULL, \
+        points TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS curve_shapes_id ON curve_shapes (id);
+    CREATE TABLE IF NOT EXISTS curve_places (shape INTEGER NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL, \
+        device TEXT NOT NULL, setting TEXT NOT NULL, at REAL NOT NULL);
     CREATE INDEX IF NOT EXISTS curve_places_path ON curve_places (path);
-    CREATE INDEX IF NOT EXISTS curve_places_id ON curve_places (id);
+    CREATE INDEX IF NOT EXISTS curve_places_shape ON curve_places (shape);
     CREATE TABLE IF NOT EXISTS your_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS made_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, length REAL NOT NULL, \
         points TEXT NOT NULL, made INTEGER NOT NULL);";
+
+/// Writes the file afresh without its free room, and brings its write-ahead file back to nothing.
+const GIVE_BACK: &str = "VACUUM; PRAGMA wal_checkpoint(TRUNCATE);";
+
+/// Free room in the file worth giving back to the disk ([`CurvesDb::give_back_room`]): this much, and half the file.
+const ROOM_WORTH_GIVING_BACK: i64 = 16 * 1024 * 1024;
 
 /// Where a curve was found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -460,6 +473,98 @@ type ReadSave = (String, (i64, i64), Vec<Found>);
 /// The curves library, open on `curves.db`. Asks the disk, so never on the window's thread.
 pub struct CurvesDb {
     conn: Connection,
+    /// What opening it did to the file ([`CurvesDb::notes`]).
+    notes: Vec<String>,
+}
+
+/// Whether `conn`'s database keeps the points with each place, as the first layout did.
+fn is_older_layout(conn: &Connection) -> Result<bool, CurvesError> {
+    let with_points: i64 =
+        conn.query_row("SELECT COUNT(*) FROM pragma_table_info('curve_places') WHERE name = 'points'", [], |r| {
+            r.get(0)
+        })?;
+    Ok(with_points > 0)
+}
+
+/// Moves a database of the first layout (the points kept with every place) into this one, where each curve as found
+/// is kept once: how many places it has, and how many curves as found. In one transaction, checked before it's kept:
+/// every place must come back with the id, length and points it had, or nothing is changed (and the error says so).
+/// A power cut or a crash part way leaves the file as it was, SQLite's own way, and the next opening moves it.
+/// Nothing is read from your saves again. The old points' room stays free inside the file until
+/// [`CurvesDb::give_back_room`].
+fn to_shapes(conn: &mut Connection) -> Result<(i64, i64), CurvesError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "CREATE TABLE curve_shapes (n INTEGER PRIMARY KEY, id TEXT NOT NULL, length REAL NOT NULL, points TEXT NOT NULL);
+         CREATE INDEX curve_shapes_id ON curve_shapes (id);
+         CREATE TABLE curve_places_now (shape INTEGER NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL, \
+             device TEXT NOT NULL, setting TEXT NOT NULL, at REAL NOT NULL);",
+    )?;
+    {
+        // One place at a time, the places of one id together (by the id's index: nothing is sorted, and the points
+        // of one curve at most are in memory at once), each given the shape it matches or a new one.
+        let mut places = tx.prepare(
+            "SELECT rowid, id, path, name, device, setting, at, length, points FROM curve_places ORDER BY id",
+        )?;
+        let mut new_shape = tx.prepare("INSERT INTO curve_shapes (id, length, points) VALUES (?1, ?2, ?3)")?;
+        let mut new_place = tx.prepare(
+            "INSERT INTO curve_places_now (rowid, shape, path, name, device, setting, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        let mut of_id: Option<rusqlite::types::Value> = None;
+        let mut shapes: Vec<(rusqlite::types::Value, rusqlite::types::Value, i64)> = Vec::new();
+        let mut rows = places.query([])?;
+        while let Some(r) = rows.next()? {
+            // As they're kept, whatever their type: a damaged line stays as damaged as it was.
+            let value = |at: usize| r.get::<_, rusqlite::types::Value>(at);
+            let (id, length, points) = (value(1)?, value(7)?, value(8)?);
+            if of_id.as_ref() != Some(&id) {
+                shapes.clear();
+                of_id = Some(id.clone());
+            }
+            let shape = match shapes.iter().find(|(l, p, _)| *l == length && *p == points) {
+                Some((_, _, n)) => *n,
+                None => {
+                    let n = new_shape.insert(params![id, length, points])?;
+                    shapes.push((length, points, n));
+                    n
+                }
+            };
+            new_place.execute(params![
+                r.get::<_, i64>(0)?,
+                shape,
+                value(2)?,
+                value(3)?,
+                value(4)?,
+                value(5)?,
+                value(6)?
+            ])?;
+        }
+    }
+    // Checked against the places as they were, each by its own line: all of them, each with what it had.
+    let (were, same): (i64, i64) = tx.query_row(
+        "SELECT (SELECT COUNT(*) FROM curve_places), \
+                (SELECT COUNT(*) FROM curve_places o JOIN curve_places_now p ON p.rowid = o.rowid \
+                     JOIN curve_shapes s ON s.n = p.shape \
+                 WHERE s.id IS o.id AND s.length IS o.length AND s.points IS o.points AND p.path IS o.path \
+                     AND p.name IS o.name AND p.device IS o.device AND p.setting IS o.setting AND p.at IS o.at)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let now: i64 = tx.query_row("SELECT COUNT(*) FROM curve_places_now", [], |r| r.get(0))?;
+    if were != same || were != now {
+        return Err(CurvesError(format!(
+            "couldn't keep each curve's points once: {same} of {were} places came back the same, so nothing was changed"
+        )));
+    }
+    let shapes: i64 = tx.query_row("SELECT COUNT(*) FROM curve_shapes", [], |r| r.get(0))?;
+    tx.execute_batch(
+        "DROP TABLE curve_places;
+         ALTER TABLE curve_places_now RENAME TO curve_places;
+         CREATE INDEX curve_places_path ON curve_places (path);
+         CREATE INDEX curve_places_shape ON curve_places (shape);",
+    )?;
+    tx.commit()?;
+    Ok((were, shapes))
 }
 
 impl CurvesDb {
@@ -468,11 +573,50 @@ impl CurvesDb {
         if !is_there(path)? {
             make_new(path, SCHEMA, "curve_places")?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
         conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
+        let mut notes = Vec::new();
+        if is_older_layout(&conn)? {
+            let (places, shapes) = to_shapes(&mut conn)?;
+            notes.push(format!(
+                "Moved curves.db to keeping each curve's points once: {places} places of {shapes} curves as found"
+            ));
+        }
         conn.execute_batch(SCHEMA)?;
-        Ok(CurvesDb { conn })
+        let mut db = CurvesDb { conn, notes };
+        db.give_back_room();
+        Ok(db)
+    }
+
+    /// What opening it did to the file, in words for the log: nothing, most times.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
+    /// Gives the file's free room back to the disk when there's a lot of it (after the move to this layout, which
+    /// leaves the old points' room free inside the file): SQLite writes the file afresh, small, its own all-or-nothing
+    /// way. Not now when something else has the file open (the plugin in a DAW): tried again at the next opening.
+    fn give_back_room(&mut self) {
+        let number = |name: &str| self.conn.pragma_query_value(None, name, |r| r.get::<_, i64>(0)).unwrap_or(0);
+        let (free, all, page) = (number("freelist_count"), number("page_count"), number("page_size"));
+        if free.saturating_mul(page) < ROOM_WORTH_GIVING_BACK || free.saturating_mul(2) < all {
+            return;
+        }
+        // Its working copy in memory (the file is small now), not in the system's temp folder on a full C:.
+        let given =
+            self.conn.pragma_update(None, "temp_store", "MEMORY").and_then(|()| self.conn.execute_batch(GIVE_BACK));
+        match given {
+            Ok(()) => {
+                let now = number("page_count");
+                self.notes.push(format!(
+                    "curves.db is {} MB now (it was {} MB)",
+                    now.saturating_mul(page) / 1_048_576,
+                    all.saturating_mul(page) / 1_048_576
+                ));
+            }
+            Err(e) => self.notes.push(format!("curves.db's free room stays for now ({e}): tried again next time")),
+        }
     }
 
     /// Opens the database at `path` only to read it, as the CLAP plugin does (it never writes the app's files): nothing
@@ -485,7 +629,13 @@ impl CurvesDb {
         let conn = Connection::open_with_flags(path, flags)?;
         conn.busy_timeout(Duration::from_secs(2))?;
         conn.pragma_update(None, "query_only", true)?;
-        Ok(CurvesDb { conn })
+        // Only the app changes its files: it moves an older layout into this one when its Curves are next read.
+        if is_older_layout(&conn)? {
+            return Err(CurvesError(
+                "it's from an older version of the app: open the app once to bring it up to date".into(),
+            ));
+        }
+        Ok(CurvesDb { conn, notes: Vec::new() })
     }
 
     /// Each save read before: its date, size and what read it.
@@ -563,19 +713,35 @@ impl CurvesDb {
             tx.execute("DELETE FROM curve_places WHERE path = ?1", [p])?;
             tx.execute("DELETE FROM curve_reads WHERE path = ?1", [p])?;
         }
-        for (path, (modified, size), found) in &read {
-            tx.execute(
-                "INSERT INTO curve_reads (path, modified, size, version) VALUES (?1, ?2, ?3, ?4)",
-                params![path, modified, size, read_version(path)],
+        {
+            let mut shape_of =
+                tx.prepare("SELECT n FROM curve_shapes WHERE id = ?1 AND length = ?2 AND points = ?3 LIMIT 1")?;
+            let mut new_shape = tx.prepare("INSERT INTO curve_shapes (id, length, points) VALUES (?1, ?2, ?3)")?;
+            let mut new_place = tx.prepare(
+                "INSERT INTO curve_places (shape, path, name, device, setting, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
-            for f in found {
-                let s = &f.source;
+            for (path, (modified, size), found) in &read {
                 tx.execute(
-                    "INSERT INTO curve_places (id, path, name, device, setting, at, length, points) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![f.id, s.path, s.name, s.device, s.setting, s.at, f.length, points_text(&f.points)],
+                    "INSERT INTO curve_reads (path, modified, size, version) VALUES (?1, ?2, ?3, ?4)",
+                    params![path, modified, size, read_version(path)],
                 )?;
+                for f in found {
+                    // The curve as found here, kept once: the one it matches, or a new one.
+                    let points = points_text(&f.points);
+                    let known: Option<i64> =
+                        shape_of.query_row(params![f.id, f.length, points], |r| r.get(0)).optional()?;
+                    let shape = match known {
+                        Some(n) => n,
+                        None => new_shape.insert(params![f.id, f.length, points])?,
+                    };
+                    let s = &f.source;
+                    new_place.execute(params![shape, s.path, s.name, s.device, s.setting, s.at])?;
+                }
             }
+        }
+        // A curve found nowhere any more goes with its last place.
+        if !gone.is_empty() || !read.is_empty() {
+            tx.execute("DELETE FROM curve_shapes WHERE n NOT IN (SELECT shape FROM curve_places)", [])?;
         }
         tx.commit()?;
         Ok(read.len())
@@ -593,13 +759,14 @@ impl CurvesDb {
     }
 
     fn curves(&self, only: Option<&str>) -> Result<Vec<Curve>, CurvesError> {
-        // The save's date from curve_reads, the kind and song from the path (rule 23).
+        // The save's date from curve_reads, the kind and song from the path (rule 23). Without the points: they're
+        // read once for each curve below, not for every place.
         let mut st = self.conn.prepare(
-            "SELECT c.id, c.path, c.name, c.device, c.setting, c.at, c.length, c.points, s.modified \
-             FROM curve_places c JOIN curve_reads s ON s.path = c.path \
-             WHERE ?1 IS NULL OR c.id = ?1 ORDER BY s.modified DESC, c.path, c.at",
+            "SELECT s.id, c.path, c.name, c.device, c.setting, c.at, s.length, c.shape, r.modified \
+             FROM curve_places c JOIN curve_shapes s ON s.n = c.shape JOIN curve_reads r ON r.path = c.path \
+             WHERE ?1 IS NULL OR s.id = ?1 ORDER BY r.modified DESC, c.path, c.at",
         )?;
-        type Row = (String, Option<SourceKind>, CurveSource, f64, Option<String>);
+        type Row = (String, Option<SourceKind>, CurveSource, f64, i64);
         let rows = st.query_map([only], |r| {
             let path: String = r.get(1)?;
             Ok((
@@ -616,16 +783,24 @@ impl CurvesDb {
                     modified: r.get(8)?,
                 },
                 r.get::<_, f64>(6)?,
-                text_at(r, 7)?,
+                r.get::<_, i64>(7)?,
             ))
         })?;
         let mut by_id: BTreeMap<String, Vec<(CurveSource, f64, Option<String>)>> = BTreeMap::new();
+        let mut points_of = self.conn.prepare("SELECT points FROM curve_shapes WHERE n = ?1")?;
         for row in rows {
-            let (id, kind, mut source, length, points): Row = row?;
+            let (id, kind, mut source, length, shape): Row = row?;
             // A file of a kind a newer app reads is passed over.
             let Some(kind) = kind else { continue };
             source.kind = kind;
-            by_id.entry(id).or_default().push((source, length, points));
+            let found = by_id.entry(id).or_default();
+            // The curve's points are its newest place's: the first of its places here.
+            let points = if found.is_empty() {
+                points_of.query_row([shape], |r| text_at(r, 0)).optional()?.flatten()
+            } else {
+                None
+            };
+            found.push((source, length, points));
         }
         let yours = self.yours(only)?;
         let made = self.made(only)?;
@@ -768,8 +943,8 @@ impl CurvesDb {
 
     /// Whether a curve with this id is found anywhere now (for a page holding an old id).
     pub fn has(&self, id: &str) -> Result<bool, CurvesError> {
-        Ok(self.conn.query_row("SELECT 1 FROM curve_places WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some()
-            || !self.made(Some(id))?.is_empty())
+        let found = "SELECT 1 FROM curve_shapes s JOIN curve_places c ON c.shape = s.n WHERE s.id = ?1 LIMIT 1";
+        Ok(self.conn.query_row(found, [id], |_| Ok(())).optional()?.is_some() || !self.made(Some(id))?.is_empty())
     }
 }
 
@@ -1131,8 +1306,13 @@ mod tests {
         assert_eq!(renamed.name, "My rise");
         assert!(db.set_hidden(&rise.id, true).unwrap().unwrap().hidden);
 
+        // Each curve as found is kept once: Rise, its taller copy (the same curve, other points) and Fall.
+        let shapes = |db: &CurvesDb| db.conn.query_row("SELECT COUNT(*) FROM curve_shapes", [], |r| r.get::<_, i64>(0));
+        assert_eq!(shapes(&db).unwrap(), 3);
+
         // A save left out of the list is forgotten; your name stays for when it comes back.
         db.scan(&[a.clone(), c.clone()], &progress).unwrap();
+        assert_eq!(shapes(&db).unwrap(), 2, "a curve found nowhere any more goes with its last place");
         let rise = db.get(&rise.id).unwrap().unwrap();
         assert_eq!((rise.name.as_str(), rise.hidden, rise.sources.len()), ("My rise", true, 1));
 
@@ -1155,6 +1335,99 @@ mod tests {
         assert_eq!(curve::read(curve_bytes(&rise).unwrap()).unwrap().points, rise.points);
         // Windows won't remove a folder while the database in it is open.
         drop(read_only);
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The first layout's tables: the points kept with every place.
+    const FIRST_LAYOUT: &str = "\
+        CREATE TABLE curve_reads (path TEXT PRIMARY KEY NOT NULL, modified INTEGER NOT NULL, \
+            size INTEGER NOT NULL, version INTEGER NOT NULL);
+        CREATE TABLE curve_places (id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL, \
+            device TEXT NOT NULL, setting TEXT NOT NULL, at REAL NOT NULL, length REAL NOT NULL, points TEXT NOT NULL);
+        CREATE INDEX curve_places_path ON curve_places (path);
+        CREATE INDEX curve_places_id ON curve_places (id);
+        CREATE TABLE your_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE made_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, length REAL NOT NULL, \
+            points TEXT NOT NULL, made INTEGER NOT NULL);";
+
+    #[test]
+    fn a_database_with_the_points_kept_at_every_place_is_moved_to_keeping_them_once() {
+        let dir = temp_dir("first-layout");
+        let path = dir.join(FILE_NAME);
+        // A long curve (knob moves: hundreds of points) found at 1,500 places in 30 saves, in two lengths; a short
+        // one found once; a line that can't be read; your name for one, and a curve of your own making.
+        let long: Vec<curve::CurvePoint> =
+            (0..800).map(|i| p(f64::from(i) / 799.0, f64::from(i % 7) / 6.0, 0.0)).collect();
+        let short = [p(0.0, 0.0, 0.0), p(1.0, 1.0, 0.5)];
+        let (long_id, short_id) = (shape_id(&long), shape_id(&short));
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0)).unwrap();
+            conn.execute_batch(FIRST_LAYOUT).unwrap();
+            let tx = conn.transaction().unwrap();
+            for save in 0..30 {
+                let song = format!("/songs/Tune {save}.flp");
+                tx.execute("INSERT INTO curve_reads VALUES (?1, ?2, 10, 1)", params![song, 1_700_000_000 + save])
+                    .unwrap();
+                for at in 0..50 {
+                    let length = if at % 2 == 0 { 4.0 } else { 8.0 };
+                    tx.execute(
+                        "INSERT INTO curve_places VALUES (?1, ?2, '', 'Serum', 'Cutoff', ?3, ?4, ?5)",
+                        params![long_id, song, f64::from(at) * 4.0, length, points_text(&long)],
+                    )
+                    .unwrap();
+                }
+            }
+            tx.execute(
+                "INSERT INTO curve_places VALUES (?1, '/songs/Tune 3.flp', 'Rise', 'Mixer', 'Volume', 0, 2, ?2)",
+                params![short_id, points_text(&short)],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO curve_places VALUES ('bad', '/songs/Tune 4.flp', '', '', '', 0, 1, 'not points')",
+                [],
+            )
+            .unwrap();
+            tx.execute("INSERT INTO your_curves VALUES (?1, 'My wobble', 0)", [&long_id]).unwrap();
+            tx.execute("INSERT INTO made_curves VALUES ('made1', 'Made', 4, ?1, 1800000000)", [points_text(&short)])
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        let size = |path: &Path| std::fs::metadata(path).unwrap().len();
+        let before = size(&path);
+        assert!(before > 30_000_000, "{before}");
+
+        // The plugin never changes the app's files: it says the app must open it first.
+        let old = CurvesDb::open_read_only(&path).err().unwrap().to_string();
+        assert!(old.contains("older version"), "{old}");
+
+        let db = CurvesDb::open(&path).unwrap();
+        assert_eq!(db.notes().len(), 2, "{:?}", db.notes());
+        assert_eq!(
+            db.notes()[0],
+            "Moved curves.db to keeping each curve's points once: 1502 places of 4 curves as found"
+        );
+        assert!(db.notes()[1].starts_with("curves.db is 0 MB now (it was "), "{:?}", db.notes());
+        let list = db.list().unwrap();
+        assert_eq!(list.len(), 3, "the two curves and the one made; the line that can't be read is passed over");
+        let wobble = list.iter().find(|c| c.id == long_id).unwrap();
+        assert_eq!((wobble.name.as_str(), wobble.sources.len(), &wobble.points), ("My wobble", 1500, &long));
+        // Its newest place's length: the newest save's first place.
+        assert_eq!((wobble.sources[0].song.as_str(), wobble.length_beats), ("Tune 29", 4.0));
+        let rise = list.iter().find(|c| c.id == short_id).unwrap();
+        assert_eq!((rise.name.as_str(), rise.length_beats, rise.points.as_slice()), ("Rise", 2.0, &short[..]));
+        assert_eq!(rise.sources[0].device, "Mixer");
+        assert!(list.iter().any(|c| c.id == "made1" && c.name == "Made"));
+        assert!(db.has(&long_id).unwrap() && !db.has("none").unwrap());
+        drop(db);
+        let after = size(&path);
+        assert!(after < before / 50, "{after} of {before}");
+
+        // Opened again: nothing to do, and the plugin reads the same.
+        let db = CurvesDb::open(&path).unwrap();
+        assert!(db.notes().is_empty(), "{:?}", db.notes());
+        assert_eq!(CurvesDb::open_read_only(&path).unwrap().list().unwrap(), list);
         drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
     }

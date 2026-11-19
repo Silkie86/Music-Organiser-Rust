@@ -2648,12 +2648,19 @@ fn set_curves(p: &mut Page, list: Vec<Curve>, keys: Vec<logic::CurveKey>) {
 fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String> {
     let mut db = CurvesDb::open(&at.data_dir.join(curves::FILE_NAME))
         .map_err(|e| format!("Couldn't open the curves: {}", e.0))?;
+    // What opening it did to the file (the move to keeping each curve's points once), for the log.
+    db.notes().iter().for_each(|note| log::info("Curves", note));
     // Each curve is drawn to sort it into its kinds: on the shared threads, at low priority.
     let with_keys = |list: Vec<Curve>| {
         let keys = background::on_pool(|| logic::CurveKey::all(&list));
         (list, keys)
     };
+    let started = std::time::Instant::now();
     let (first, keys) = with_keys(db.list().map_err(|e| format!("Couldn't read the curves: {}", e.0))?);
+    log::info(
+        "Curves",
+        &format!("{} curves read from curves.db in {:.1} s", first.len(), started.elapsed().as_secs_f32()),
+    );
     on_window(move |app| {
         PAGE.with(|p| set_curves(&mut p.borrow_mut(), first, keys));
         show_all(app);
