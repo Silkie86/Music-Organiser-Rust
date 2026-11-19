@@ -206,8 +206,8 @@ impl Catalogue {
         drop(seen);
         let mut firsts: Vec<StoredPhrase> = Vec::with_capacity(count);
         let mut others: Vec<Vec<Arc<Source>>> = vec![Vec::new(); count];
-        // The copies' own words aren't kept: they're let go together on another thread, not one by one here (146,000
-        // of Solomon's 359,000 parts are copies).
+        // The copies' own words aren't kept: they're let go together on another thread, not one by one here (about
+        // two parts in five are copies).
         let mut copies = Vec::with_capacity(phrase_count - count);
         for (p, at) in phrases.into_iter().zip(goes_to) {
             if at == firsts.len() {

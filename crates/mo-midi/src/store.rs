@@ -781,6 +781,7 @@ impl MidiStore {
     }
 
     /// A way to stop this index's current read from another thread (a newer read is wanted, rule 12).
+    /// Not [`MidiStore::all`] of a big index, which reads on connections of its own.
     pub fn stopper(&self) -> crate::index::Stopper {
         crate::index::Stopper(self.conn.get_interrupt_handle())
     }
@@ -1054,46 +1055,56 @@ impl MidiStore {
     /// ([`BroughtUp::old_roles`]), which the index's own win over; empty once they are.
     ///
     /// A big index is read in several pieces at once, each on a connection of its own, on the threads of the pool
-    /// it's called in (the page calls it in its low-priority one): 359,000 parts took 1.9 s as one read (Solomon's
-    /// index, 19 Nov 2026). A piece sees the index as it is when its read starts; a part of a file saved to the index
-    /// in between (its reading is going on) is left for the next read rather than shown without its file.
+    /// it's called in (the page calls it in its low-priority one): a made-up index of 359,000 parts took 1.9 s as one
+    /// read and 0.7 s in four pieces (19 Nov 2026). The pieces each see the index as it is when their read starts,
+    /// so if anything was written to it meanwhile (its reading is going on) it's read again, and after that as one
+    /// read: the list is always of one moment, as one statement's is.
     pub fn all(
         &self,
         cs_roles: &HashMap<String, Role>,
         cs_octaves: &HashMap<String, i32>,
     ) -> Result<Vec<StoredPhrase>, MidiError> {
         use rayon::prelude::*;
-        let sources = self.sources()?;
-        let (first, last, count): (Option<i64>, Option<i64>, i64) =
-            self.conn.query_row("SELECT MIN(id), MAX(id), COUNT(*) FROM parts", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?;
-        let (Some(first), Some(last)) = (first, last) else { return Ok(Vec::new()) };
-        let pieces = pieces_of(first, last, count, rayon::current_num_threads());
         // Not `self` in what the threads share: its connection is one thread's.
         let (path, has) = (self.path.as_path(), (self.has_keys, self.has_shapes));
-        let read = |&(from, to): &(i64, i64), conn: &Connection| {
-            parts_between(conn, has, from, to, &sources, cs_roles, cs_octaves)
-        };
-        let mut list = match pieces.as_slice() {
-            [one] => read(one, &self.conn)?,
-            pieces => {
-                let read: Vec<Result<Vec<StoredPhrase>, MidiError>> =
-                    pieces.par_iter().map(|piece| read(piece, &open_piece(path)?)).collect();
-                let mut list = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
-                for piece in read {
-                    list.append(&mut piece?);
-                }
-                list
+        for _ in 0..TRIES_IN_PIECES {
+            let before = self.written()?;
+            let pieces = pieces_of(&self.part_ids()?, rayon::current_num_threads());
+            if pieces.len() < 2 {
+                break;
             }
-        };
-        // Newest file first, sorted here rather than in SQLite: no index has that order, so SQLite would hold a whole
-        // sorted copy of every row in memory beside this list. A date that isn't real (a pack whose files all say
-        // 31 Dec 2027) is no clue to when the file was saved, so it comes after every real one: it doesn't top the
-        // list, and its file's copy of some notes doesn't stand for the copies with a real date.
-        let real = RealDates::now();
-        list.par_sort_unstable_by_key(|p| (!real.seconds(p.source.mtime), std::cmp::Reverse(p.source.mtime), p.id));
-        Ok(list)
+            let sources = self.sources()?;
+            let read: Vec<Result<Vec<StoredPhrase>, MidiError>> = pieces
+                .par_iter()
+                .map(|&(from, to)| parts_between(&open_piece(path)?, has, from, to, &sources, cs_roles, cs_octaves))
+                .collect();
+            let mut list = Vec::new();
+            for piece in read {
+                list.append(&mut piece?);
+            }
+            if self.written()? == before {
+                return Ok(newest_first(list));
+            }
+        }
+        // A small index, or one that kept being written: one read, in one view of it.
+        let view = self.conn.unchecked_transaction()?;
+        let sources = self.sources()?;
+        let list = parts_between(&self.conn, has, i64::MIN, i64::MAX, &sources, cs_roles, cs_octaves)?;
+        view.commit()?;
+        Ok(newest_first(list))
+    }
+
+    /// A number that changes each time another connection writes to the index (SQLite's `data_version`).
+    fn written(&self) -> Result<i64, MidiError> {
+        Ok(self.conn.pragma_query_value(None, "data_version", |r| r.get(0))?)
+    }
+
+    /// Every part's id, in order. Quick: SQLite reads them from the smallest index that has them.
+    fn part_ids(&self) -> Result<Vec<i64>, MidiError> {
+        let mut st = self.conn.prepare("SELECT id FROM parts")?;
+        let mut ids = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+        ids.sort_unstable();
+        Ok(ids)
     }
 
     /// Every file with its facts, by its id: one shared copy for all its parts.
@@ -1311,23 +1322,32 @@ fn parts_between(
     Ok(list)
 }
 
+/// Newest file first, sorted here rather than in SQLite: no index has that order, so SQLite would hold a whole
+/// sorted copy of every row in memory beside this list. A date that isn't real (a pack whose files all say
+/// 31 Dec 2027) is no clue to when the file was saved, so it comes after every real one: it doesn't top the list,
+/// and its file's copy of some notes doesn't stand for the copies with a real date.
+fn newest_first(mut list: Vec<StoredPhrase>) -> Vec<StoredPhrase> {
+    use rayon::prelude::*;
+    let real = RealDates::now();
+    list.par_sort_unstable_by_key(|p| (!real.seconds(p.source.mtime), std::cmp::Reverse(p.source.mtime), p.id));
+    list
+}
+
 /// The fewest parts worth a piece of their own in [`MidiStore::all`]: under this, opening another connection costs
 /// more than it saves.
-const PIECE_AT_LEAST: i64 = 20_000;
+const PIECE_AT_LEAST: usize = 20_000;
 /// The most pieces [`MidiStore::all`] reads at once: past this the disk and the memory bus are the limit, not cores.
 const MOST_PIECES: usize = 8;
+/// How many times [`MidiStore::all`] reads in pieces before it reads as one, when the index is written meanwhile.
+const TRIES_IN_PIECES: usize = 2;
 
-/// The id ranges [`MidiStore::all`] reads at once: `count` parts with ids `first` to `last`, on `threads` threads.
-/// Every id is in one range and only one; a small index is one range.
-fn pieces_of(first: i64, last: i64, count: i64, threads: usize) -> Vec<(i64, i64)> {
-    let most = usize::try_from(count / PIECE_AT_LEAST).unwrap_or(1);
-    let pieces = threads.min(MOST_PIECES).min(most).max(1) as i64;
-    let each = (last.saturating_sub(first) / pieces).saturating_add(1);
-    (0..pieces)
-        .map(|n| {
-            let from = first.saturating_add(n.saturating_mul(each));
-            (from, if n + 1 == pieces { last } else { from.saturating_add(each - 1) })
-        })
+/// The id ranges [`MidiStore::all`] reads at once, on `threads` threads: the parts' `ids` (in order) cut into pieces
+/// of the same number of parts, however their ids are spread (a long-used index has old ids close together and
+/// re-read projects' far up). Each part is in one range and only one; a small index is one range, none is none.
+fn pieces_of(ids: &[i64], threads: usize) -> Vec<(i64, i64)> {
+    let pieces = threads.min(MOST_PIECES).min(ids.len() / PIECE_AT_LEAST).max(1);
+    ids.chunks(ids.len().div_ceil(pieces).max(1))
+        .filter_map(|piece| piece.first().copied().zip(piece.last().copied()))
         .collect()
 }
 
@@ -1399,22 +1419,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_pieces_a_big_index_is_read_in_cover_every_id_once() {
-        // A small index is one read on the connection it has.
-        assert_eq!(pieces_of(1, 500, 500, 32), [(1, 500)]);
-        assert_eq!(pieces_of(7, 7, 1, 8), [(7, 7)]);
-        // Solomon's: 359,000 parts, on 32 threads: eight pieces at most.
-        let pieces = pieces_of(1, 400_000, 359_000, 32);
-        assert_eq!(pieces.len(), 8);
-        // Fewer threads, fewer pieces; fewer parts, fewer pieces.
-        assert_eq!(pieces_of(1, 400_000, 359_000, 3).len(), 3);
-        assert_eq!(pieces_of(1, 50_000, 45_000, 32).len(), 2);
-        for pieces in [pieces, pieces_of(-5, 99_999, 60_000, 4), pieces_of(i64::MAX - 100_000, i64::MAX, 90_000, 8)] {
-            assert!(pieces.iter().all(|(from, to)| from <= to), "{pieces:?}");
-            assert!(pieces.windows(2).all(|w| w[0].1 + 1 == w[1].0), "no gap and no overlap: {pieces:?}");
+    fn the_pieces_a_big_index_is_read_in_hold_every_part_once_and_as_many_each() {
+        let even: Vec<i64> = (1..=359_000).collect();
+        // A small index is one read; none is none.
+        assert_eq!(pieces_of(&even[..500], 32), [(1, 500)]);
+        assert_eq!(pieces_of(&[7], 8), [(7, 7)]);
+        assert!(pieces_of(&[], 8).is_empty());
+        // 359,000 parts on 32 threads: eight pieces at most. Fewer threads, fewer pieces; fewer parts, fewer pieces.
+        assert_eq!(pieces_of(&even, 32).len(), 8);
+        assert_eq!(pieces_of(&even, 3).len(), 3);
+        assert_eq!(pieces_of(&even[..45_000], 32).len(), 2);
+        // A long-used index: old ids close together, re-read projects' far up, a gap between.
+        let uneven: Vec<i64> = (1..=300_000).chain((2_000_000..2_200_000).map(|i| i * 3)).collect();
+        for (ids, threads) in [(&even, 32), (&uneven, 8), (&uneven, 5)] {
+            let pieces = pieces_of(ids, threads);
+            let held = |&(from, to): &(i64, i64)| ids.iter().filter(|id| (from..=to).contains(*id)).count();
+            assert_eq!(pieces.iter().map(held).sum::<usize>(), ids.len(), "every part");
+            assert!(pieces.windows(2).all(|w| w[0].1 < w[1].0), "in one piece only: {pieces:?}");
+            let sizes: Vec<usize> = pieces.iter().map(held).collect();
+            let (most, fewest) = (sizes.iter().max().copied().unwrap(), sizes.iter().min().copied().unwrap());
+            assert!(most - fewest <= pieces.len(), "as many in each: {sizes:?}");
         }
-        let ends = pieces_of(-5, 99_999, 60_000, 4);
-        assert_eq!((ends[0].0, ends[ends.len() - 1].1), (-5, 99_999));
     }
 
     #[test]
