@@ -35,6 +35,10 @@ pub const FL_SCRIPT: &str = include_str!("../../../extensions/fl-studio/device_D
 /// The start of the script's setting for letting the app make changes, which an update keeps.
 pub const FL_KEPT: &str = "LET_THE_APP_MAKE_CHANGES = ";
 
+/// The starts of every setting line of the script an update keeps and the "is it the app's own copy" check leaves
+/// out: [`FL_KEPT`], and the switch for the one-off measure, which is turned on by hand (the 19 Nov review's LK-6).
+const FL_KEPT_LINES: [&str; 2] = [FL_KEPT, "MEASURE_IN_LIVE_TEST = "];
+
 /// Whether a folder's copy of a script is the app's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScriptState {
@@ -184,16 +188,25 @@ fn write_checked(folder: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     written
 }
 
-/// The shipped script with the kept line from `theirs`, when their copy has one.
+/// The shipped script with the kept lines ([`FL_KEPT_LINES`]) from `theirs`, each when their copy has one.
 fn with_kept(shipped: &str, theirs: Option<&str>) -> String {
-    let Some(kept) = theirs.and_then(|t| t.lines().find(|l| l.starts_with(FL_KEPT))) else {
+    let mut text = shipped.to_owned();
+    for setting in FL_KEPT_LINES {
+        text = with_kept_line(&text, theirs, setting);
+    }
+    text
+}
+
+/// `shipped` with its first line that starts with `setting` taken from `theirs`, when their copy has one.
+fn with_kept_line(shipped: &str, theirs: Option<&str>, setting: &str) -> String {
+    let Some(kept) = theirs.and_then(|t| t.lines().find(|l| l.starts_with(setting))) else {
         return shipped.to_owned();
     };
     let kept = kept.trim_end_matches('\r');
     let mut out = String::with_capacity(shipped.len());
     let mut done = false;
     for line in shipped.split_inclusive('\n') {
-        if !done && line.starts_with(FL_KEPT) {
+        if !done && line.starts_with(setting) {
             let end = if line.ends_with("\r\n") {
                 "\r\n"
             } else if line.ends_with('\n') {
@@ -211,10 +224,13 @@ fn with_kept(shipped: &str, theirs: Option<&str>) -> String {
     out
 }
 
-/// The script's lines, whichever line endings it has, without the kept setting and the empty lines at its end.
+/// The script's lines, whichever line endings it has, without the kept settings and the empty lines at its end.
 fn lines(text: &str) -> Vec<&str> {
-    let mut lines: Vec<&str> =
-        text.lines().map(|l| l.trim_end_matches('\r')).filter(|l| !l.starts_with(FL_KEPT)).collect();
+    let mut lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !FL_KEPT_LINES.iter().any(|kept| l.starts_with(kept)))
+        .collect();
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }

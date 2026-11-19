@@ -21,7 +21,8 @@ Nothing in the project changes unless LET_THE_APP_MAKE_CHANGES below is True.
 LET_THE_APP_MAKE_CHANGES = False
 
 # True measures FL Studio's fader and tempo curves once, in the project "MO Live Test automation" only (see measure()):
-# it moves insert 1's fader and the tempo, puts them back, renames inserts 1 to 14 and saves it.
+# it moves insert 1's fader and the tempo, puts them back, renames inserts 1 to 14 and saves it. The app keeps this
+# setting too when it updates the script.
 MEASURE_IN_LIVE_TEST = False
 
 import channels

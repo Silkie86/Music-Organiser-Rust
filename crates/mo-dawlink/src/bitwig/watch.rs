@@ -48,7 +48,8 @@ pub enum State {
     Connecting,
     /// Nothing answered on the link's port: Bitwig isn't running, or the extension isn't added in it.
     NoBitwig,
-    /// Something has the link's port but didn't greet as the link in time, or the connection broke as it began: a
+    /// Something has the link's port but didn't greet as the link in time, the connection broke as it began, or the
+    /// ask to watch got no answer: a
     /// busy Bitwig (opening a project, say) greets late, one that's closing lets go, and another program may have
     /// the port.
     NoAnswer,
@@ -293,8 +294,15 @@ fn watch_once(port: u16, shared: &Shared) {
     }
     let answer = match link.start_watch() {
         Ok(answer) => answer,
-        Err(error) => {
+        // The link said no, in its words: asked again only after a while.
+        Err(error @ (super::Error::Bitwig(_) | super::Error::Unexpected)) => {
             settle_on(shared, State::Refused(error.to_string()));
+            return;
+        }
+        // No answer in time, or the connection went: a busy or closing Bitwig, tried again in a moment (the 19 Nov
+        // review's LK-8).
+        Err(_) => {
+            settle_on(shared, State::NoAnswer);
             return;
         }
     };

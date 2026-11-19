@@ -841,10 +841,9 @@ impl Shown {
                 let turn = mo_dawlink::bitwig::ticket().wait();
                 let said = match mo_dawlink::bitwig::Bitwig::default().swap_into_sampler(&path, &turn) {
                     Ok(swapped) => {
-                        crate::log::line(
-                            "Sampler",
-                            &format!("{} went in: {}", library::name(&path), swapped.summary()),
-                        );
+                        // "Went in" only when Bitwig showed it did (the 19 Nov review's LK-3).
+                        let how = if swapped.unknown { "may have gone in" } else { "went in" };
+                        crate::log::line("Sampler", &format!("{} {how}: {}", library::name(&path), swapped.summary()));
                         swapped.summary()
                     }
                     Err(e) => {

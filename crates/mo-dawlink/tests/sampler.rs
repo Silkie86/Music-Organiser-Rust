@@ -57,6 +57,7 @@ fn the_sound_goes_in_the_samplers_place_with_its_settings_set_back() {
             unread: vec!["Mod".into()],
             same_sound: false,
             trouble: None,
+            unknown: false,
         }
     );
     let world = bitwig.world();
@@ -186,6 +187,36 @@ fn a_selection_that_moves_after_the_swap_is_told_with_the_sound_in() {
 
 /// A sound of the name the Sampler holds already, on a Bitwig that shows no sign of the swap: the report says it
 /// can't tell, and every setting is set again instead of counted as come over.
+/// The 19 Nov review's LK-3: the selection moved before Bitwig showed the swap, so nothing says the sound went in.
+#[test]
+fn a_selection_that_moves_before_the_swap_shows_is_said_as_not_knowable() {
+    let bitwig = with_sampler(|w| w.moves_during_swap = true);
+    let swapped = bitwig.bitwig().swap_into_sampler(sample("Kick 7"), &turn()).unwrap();
+    assert!(swapped.unknown, "{swapped:?}");
+    assert!(swapped.set_back.is_empty() && swapped.carried.is_empty(), "{swapped:?}");
+    let said = swapped.summary();
+    assert!(said.contains("it can't be told whether the sound went in: another device is selected"), "{said}");
+    assert!(!said.contains("0 settings"), "{said}");
+    assert!(!bitwig.world().commands().contains(&"set".to_owned()));
+}
+
+/// The 19 Nov review's LK-7: another pad's Sampler, clicked while Bitwig swapped, sits at the same place on the same
+/// track. Only a Sampler showing the sound that was sent gets the old settings.
+#[test]
+fn a_sampler_showing_another_sample_after_the_swap_gets_no_settings() {
+    let bitwig = with_sampler(|w| w.shows_other_sample = Some("Snare D1.wav".into()));
+    let swapped = bitwig.bitwig().swap_into_sampler(sample("Kick 8"), &turn()).unwrap();
+    assert!(swapped.unknown, "{swapped:?}");
+    assert!(swapped.trouble.as_deref().is_some_and(|t| t.contains("Snare D1.wav")), "{swapped:?}");
+    assert!(!bitwig.world().commands().contains(&"set".to_owned()));
+    // A Bitwig that names the sample without its ending, or in another case, is still the sound sent.
+    for shown in ["kick 9", "KICK 9.WAV"] {
+        let bitwig = with_sampler(|w| w.shows_other_sample = Some(shown.into()));
+        let swapped = bitwig.bitwig().swap_into_sampler(sample("Kick 9"), &turn()).unwrap();
+        assert!(!swapped.unknown, "{shown}: {swapped:?}");
+    }
+}
+
 #[test]
 fn a_sound_of_the_same_name_with_no_sign_of_the_swap_is_said_as_not_knowable() {
     let file = sample("Old");

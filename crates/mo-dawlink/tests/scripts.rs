@@ -56,6 +56,28 @@ fn installs_and_keeps_the_users_changes_setting() {
     assert_eq!(names, [FL_SCRIPT_NAME]);
 }
 
+/// The 19 Nov review's LK-6: the measure's switch, turned on by hand, isn't "out of date", and an update keeps it.
+#[test]
+fn a_copy_with_the_measure_turned_on_is_the_apps_own_and_keeps_it_through_an_update() {
+    let root = fixture("measure");
+    let folders = fl_script_folders(&[root.join("A")]);
+    fs::create_dir_all(&folders[0]).unwrap();
+    let on = FL_SCRIPT.replace("MEASURE_IN_LIVE_TEST = False", "MEASURE_IN_LIVE_TEST = True");
+    assert_ne!(on, FL_SCRIPT);
+    fs::write(folders[0].join(FL_SCRIPT_NAME), &on).unwrap();
+    assert_eq!(fl_state(&folders), ScriptState::Installed);
+    // An older copy with both settings on: the update keeps both.
+    fs::write(folders[0].join(FL_SCRIPT_NAME), "# old\nLET_THE_APP_MAKE_CHANGES = True\nMEASURE_IN_LIVE_TEST = True\n")
+        .unwrap();
+    assert_eq!(fl_state(&folders), ScriptState::Outdated);
+    assert!(install_fl(&folders).failed.is_empty());
+    assert_eq!(fl_state(&folders), ScriptState::Installed);
+    let now = fs::read_to_string(folders[0].join(FL_SCRIPT_NAME)).unwrap();
+    assert!(now.lines().any(|l| l == "LET_THE_APP_MAKE_CHANGES = True"));
+    assert!(now.lines().any(|l| l == "MEASURE_IN_LIVE_TEST = True"));
+    assert_eq!(now.lines().count(), FL_SCRIPT.lines().count());
+}
+
 #[test]
 fn a_folder_that_cant_take_it_doesnt_stop_the_others() {
     let root = fixture("blocked");

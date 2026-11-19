@@ -193,6 +193,12 @@ pub struct World {
     pub no_sample_names: bool,
     /// Whether Bitwig shows no sign of a sample going in when it has the name of the one before: `replaced` is null.
     pub quiet_same_name: bool,
+    /// Whether the selection is gone by the time a swap would show (someone clicked another track): the file goes
+    /// in, and the answer is `replaced` null with `moved`.
+    pub moves_during_swap: bool,
+    /// The sample of another Sampler the swap's answer shows instead of the new one's, as when another pad's Sampler
+    /// was clicked while Bitwig swapped: the file goes in, the answer names this.
+    pub shows_other_sample: Option<String>,
     /// Selects another device when a request with a command comes, as if someone clicked elsewhere in Bitwig while
     /// the change waited its turn.
     pub select_on: Option<SelectOn>,
@@ -360,6 +366,8 @@ impl Default for World {
             select_on: None,
             no_sample_names: false,
             quiet_same_name: false,
+            moves_during_swap: false,
+            shows_other_sample: None,
             switch_while_filling: None,
             unnamed_devices: false,
             slow_pads: false,
@@ -1369,8 +1377,12 @@ impl World {
         if again && self.quiet_same_name {
             return Ok(json!({ "replaced": null }));
         }
+        if self.moves_during_swap {
+            return Ok(json!({ "replaced": null, "moved": true }));
+        }
+        let sample = self.shows_other_sample.clone().unwrap_or_else(|| file_name(&path).to_owned());
         Ok(json!({
-            "replaced": true, "device": shown, "trackId": track_id, "position": d, "sample": file_name(&path),
+            "replaced": true, "device": shown, "trackId": track_id, "position": d, "sample": sample,
             "fresh": fresh,
         }))
     }
