@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 use std::io::{Cursor, Read, Write};
 
+use mo_formats::arrangement::TimeSignature;
 use mo_formats::bitwig::{self, Blob, Copier, Document, ObjId, Object, Slot, Text, Value};
 use mo_formats::fl::song::FlPlugin;
 use mo_formats::paths;
@@ -133,6 +134,8 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
     }
 
     let made: Vec<ObjId> = tracks.iter().flatten().map(|(t, _)| *t).collect();
+    w.notes.extend(t.set_signature(plan.signature));
+    w.notes.extend(t.set_markers(&plan.markers));
     // The plan keeps the project's own tempo to what Bitwig plays (with a note); this is only a guard.
     let bytes = t.finish(&made, plan.tempo.max(MIN_BPM), &plan.title, &w.states)?;
     let mut seen = HashSet::new();
@@ -722,6 +725,17 @@ impl Template {
         if let Some(location) = self.doc.field_obj(file, 0xd3b) {
             self.doc.obj_mut(location).set(0x3b, text(path));
         }
+        // The file is outside the project's folder, wherever the template's was: a path left in 0xd3a is read from
+        // the project's folder, and the places the template's file was found at before (0x15, a list of file
+        // references in 0xc5b) aren't this file's. As the relink writes a file outside the project.
+        if self.doc.obj(file).has(0xd3a) {
+            put(self.doc.obj_mut(file), 0xd3a, text(""));
+        }
+        if let Some(found) = self.doc.field_obj(file, 0x15) {
+            for before in self.doc.field_list(found, 0xc5b) {
+                self.doc.obj_mut(before).set(0x3b, text(path));
+            }
+        }
         let hash = self.doc.field_obj(file, 0x513);
         let Some(i) = info.filter(|i| i.seconds > 0.0) else {
             if let Some(h) = hash {
@@ -1091,8 +1105,10 @@ impl Template {
         // FL automation clips move too keeps all its moves as points, as only it can say where each takes over.
         let in_clips: HashSet<usize> = lane.parts.iter().map(|p| p.source).collect();
         let only_edit_events = !in_clips.is_empty() && lane.points.iter().all(|p| in_clips.contains(&p.source));
+        // The tempo's lane keeps its moves as points too: its points are a kind of their own, and no save has shown
+        // an automation clip on it.
         let usable = only_edit_events
-            && !matches!(lane.target, Target::OnOff { .. })
+            && !matches!(lane.target, Target::OnOff { .. } | Target::Tempo)
             && self.doc.field_obj(made, 0x2aec).is_some();
         let auto_clip = self.auto_clip.zip(self.auto_point).filter(|_| usable);
         let clips = clips_in_order(&lane.parts);
@@ -1172,6 +1188,9 @@ impl Template {
             self.doc.obj_mut(list).set(0x21f, Value::List(points));
         }
         push(self.doc.obj_mut(lanes), 0x4ba, Slot::Obj(made));
+        if lane.target == Target::Tempo {
+            self.tempo_lane_as_bitwig_saves_one(track, lanes, made);
+        }
 
         // The plugin also lists the setting, as Bitwig saves an automated one.
         if let (Target::Plugin { device, id, .. }, Some(setting)) = (&lane.target, self.setting)
@@ -1192,6 +1211,115 @@ impl Template {
                 push(self.doc.obj_mut(def), 0x1318, Slot::Obj(copy));
             }
         }
+        None
+    }
+
+    /// Makes a tempo lane copied from a Volume or Pan lane what Bitwig saves for the tempo (6.1.6 recorded live, and
+    /// the 6.1.7 recipe saves): its points are class 0x387 in a list of class 0x389, where a mixer lane's are 0x108 in
+    /// 0x6e, with the same fields. And the transport's empty Tempo entry (class 0x23c in the list 0x3f83, which Bitwig
+    /// keeps only while the tempo isn't automated) gives way to the lane: out of that list, and the per-user view
+    /// state that pointed at it points at the lane.
+    fn tempo_lane_as_bitwig_saves_one(&mut self, transport: ObjId, lanes: ObjId, lane: ObjId) {
+        const TEMPO_POINTS: u32 = 0x389;
+        const TEMPO_POINT: u32 = 0x387;
+        if let Some(list) = self.doc.field_obj(lane, 0x2d8c).and_then(|a| self.doc.field_obj(a, 0x35ac)) {
+            self.doc.obj_mut(list).class = TEMPO_POINTS;
+            for point in self.doc.field_list(list, 0x21f) {
+                self.doc.obj_mut(point).class = TEMPO_POINT;
+            }
+        }
+        let Some(tempo) = self.doc.field_obj(transport, 0x211) else { return };
+        let is_tempo =
+            |doc: &Document, o: ObjId| doc.field_obj(o, 0x2a3).and_then(|t| doc.field_obj(t, 0x41)) == Some(tempo);
+        let listed = self.doc.field_list(lanes, 0x3f83);
+        let (empty, kept): (Vec<ObjId>, Vec<ObjId>) = listed.into_iter().partition(|&o| is_tempo(&self.doc, o));
+        if empty.is_empty() {
+            return;
+        }
+        self.doc.obj_mut(lanes).set(0x3f83, Value::List(kept.into_iter().map(Slot::Obj).collect()));
+        let states: Vec<ObjId> = match self.doc.obj(transport).get(0x168) {
+            Some(Value::Map(states)) => states.iter().filter_map(|(_, s)| self.doc.resolve(*s)).collect(),
+            _ => Vec::new(),
+        };
+        for state in states {
+            if self.doc.field_obj(state, 0x4e6).is_some_and(|o| empty.contains(&o)) {
+                put(self.doc.obj_mut(state), 0x4e6, Value::Obj(Slot::Obj(lane)));
+            }
+            if self.doc.field_obj(state, 0x41f0).is_some_and(|o| empty.contains(&o)) {
+                put(self.doc.obj_mut(state), 0x41f0, Value::Null);
+            }
+        }
+    }
+
+    /// Sets the project's time signature (the transport's 0x212 setting, packed in its 0x1cbe: the top number in the
+    /// top six bits, the bottom number as a power of two in bits 4 to 7; the template's other bits are kept). Says so
+    /// when it can't and the template's isn't the song's.
+    fn set_signature(&mut self, signature: TimeSignature) -> Option<String> {
+        const TOP_AND_BOTTOM: u32 = 63 << 26 | 15 << 4;
+        let setting = self.transport().and_then(|t| self.doc.field_obj(t, 0x212));
+        let packed = setting.and_then(|s| self.doc.obj(s).num(0x1cbe)).map(|n| n as i64 as u32);
+        let power = signature.bottom().trailing_zeros();
+        match (setting, packed) {
+            (Some(setting), Some(old)) if signature.top() <= 63 => {
+                let new = old & !TOP_AND_BOTTOM | signature.top() << 26 | power << 4;
+                put(self.doc.obj_mut(setting), 0x1cbe, Value::I32(new as i32));
+                None
+            }
+            // A template that says nothing opens in 4/4.
+            _ => {
+                let templates = packed.map_or(Some(TimeSignature::FOUR_FOUR), |p| {
+                    TimeSignature::new(p >> 26, 1u32.checked_shl(p >> 4 & 15).unwrap_or(0))
+                });
+                (templates != Some(signature)).then(|| {
+                    format!(
+                        "The song is in {}/{}, which couldn't be set in the Bitwig project: set its time signature in \
+                         Bitwig",
+                        signature.top(),
+                        signature.bottom()
+                    )
+                })
+            }
+        }
+    }
+
+    /// The song's markers as the project's cue markers (the transport's 0x2adc list: each a class 0x266 with its beat
+    /// in 0x2af and its name in 0x98b, as Bitwig 6.1.7 saves one), in place of the template's own. A marker of the
+    /// template's is the pattern when it has one. Says so when the template has no place for them.
+    fn set_markers(&mut self, markers: &[(f64, String)]) -> Option<String> {
+        const MARKER: u32 = 0x266;
+        /// The yellow Bitwig gives a new cue marker.
+        const YELLOW: [f32; 4] = [0.898_039_3, 0.898_039_3, 0.0, 1.0];
+        let Some(list) = self.transport().and_then(|t| self.doc.field_obj(t, 0x2adc)) else {
+            return (!markers.is_empty()).then(|| {
+                "The song's markers aren't carried over (the Bitwig template has no place for them)".to_owned()
+            });
+        };
+        let pattern = self.doc.field_list(list, 0x21f).into_iter().find(|&m| self.doc.obj(m).class == MARKER);
+        let made = markers
+            .iter()
+            .map(|(beat, name)| {
+                let marker = match pattern {
+                    // A marker holds only its own beat, name and colour: nothing it would share with its copy.
+                    Some(pattern) => {
+                        let like = self.doc.obj(pattern).clone();
+                        self.doc.add(like)
+                    }
+                    None => {
+                        let mut marker = Object::new(MARKER);
+                        marker.set(0x2af, Value::F64(0.0));
+                        marker.set(0x98b, text(""));
+                        marker.set(0xe52, Value::Color(YELLOW));
+                        marker.set(0x3506, text(""));
+                        self.doc.add(marker)
+                    }
+                };
+                let o = self.doc.obj_mut(marker);
+                put(o, 0x2af, Value::F64(*beat));
+                put(o, 0x98b, text(name));
+                Slot::Obj(marker)
+            })
+            .collect();
+        self.doc.obj_mut(list).set(0x21f, Value::List(made));
         None
     }
 

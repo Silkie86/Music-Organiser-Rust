@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use mo_formats::arrangement::TimeSignature;
 use mo_formats::fl::automation::{FlAutomation, FlControl, FlPoint};
 use mo_formats::fl::song::{self, FlAudioClip, FlChannel, FlClip, FlInsert, FlPlugin, FlSong, FlStretch};
 
@@ -196,6 +197,11 @@ pub struct Plan {
     pub master_effects: Vec<Device>,
     /// One lane per thing moved, in the order they were first met.
     pub lanes: Vec<Lane>,
+    /// The song's time signature. [`from_fl`] says 4/4: the song as it reads there doesn't hold one, so whoever has
+    /// the save sets it (`save::bitwig_from_fl`).
+    pub signature: TimeSignature,
+    /// The song's markers, in order: the beat each is at and its name. Set as the signature is.
+    pub markers: Vec<(f64, String)>,
     /// What couldn't come across, each said once.
     pub notes: Vec<String>,
 }
@@ -1196,5 +1202,15 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
         ));
     }
     let notes = planner.notes.into_iter().filter(|n| seen.insert(n.clone())).collect();
-    Plan { title: song.title.clone(), tempo, ppq: song.ppq, tracks, master_effects, lanes, notes }
+    Plan {
+        title: song.title.clone(),
+        tempo,
+        ppq: song.ppq,
+        tracks,
+        master_effects,
+        lanes,
+        signature: TimeSignature::FOUR_FOUR,
+        markers: Vec::new(),
+        notes,
+    }
 }
