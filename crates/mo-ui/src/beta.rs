@@ -315,7 +315,8 @@ fn marked(app: &AppWindow, id: &str, mark: i32, note: &str) {
         let mut l = l.borrow_mut();
         let l = l.as_mut()?;
         let step = l.steps.iter().find(|s| s.id == id)?.clone();
-        let had = l.marks.get(step.id).map(|m| m.mark);
+        // The mark as shown: a step reworded since its mark shows none, so a click marks it afresh.
+        let had = l.marks.current(&step).map(|m| m.mark);
         let mark = if had == mark { None } else { mark };
         // The box shows the step's note (or words typed), so what's in it now is the note (an emptied box, no note).
         let note = note.to_owned();
