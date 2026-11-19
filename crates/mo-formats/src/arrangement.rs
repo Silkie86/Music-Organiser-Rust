@@ -210,17 +210,6 @@ impl TimeSignature {
         TimeSignature::new(top, 4)
     }
 
-    /// From a bar's length in sixteenth notes, for a save that says only that: 14 is 7/8, 12 is 3/4 (6/8 is as long
-    /// and reads as 3/4 too), 16 is 4/4.
-    pub fn of_sixteenths(sixteenths: u32) -> Option<TimeSignature> {
-        match sixteenths {
-            0 => None,
-            n if n % 4 == 0 => TimeSignature::new(n / 4, 4),
-            n if n % 2 == 0 => TimeSignature::new(n / 2, 8),
-            n => TimeSignature::new(n, 16),
-        }
-    }
-
     pub const fn top(self) -> u32 {
         self.top
     }
@@ -396,14 +385,6 @@ mod signature_tests {
         for (top, bottom) in [(0, 4), (256, 4), (4, 0), (4, 3), (4, 64), (u32::MAX, u32::MAX)] {
             assert_eq!(TimeSignature::new(top, bottom), None, "{top}/{bottom}");
         }
-        assert_eq!(TimeSignature::of_sixteenths(16), Some(of(4, 4)));
-        assert_eq!(TimeSignature::of_sixteenths(12), Some(of(3, 4)));
-        assert_eq!(TimeSignature::of_sixteenths(14), Some(of(7, 8)));
-        assert_eq!(TimeSignature::of_sixteenths(7), Some(of(7, 16)));
-        assert_eq!(TimeSignature::of_sixteenths(0), None);
-        // A bar far longer than any real one keeps its length.
-        assert_eq!(TimeSignature::of_sixteenths(255).map(TimeSignature::beats), Some(63.75));
-        assert_eq!(TimeSignature::of_sixteenths(130).map(TimeSignature::beats), Some(32.5));
         let midi: crate::midi::write::TimeSignature = of(12, 8).into();
         assert_eq!((midi.numerator, midi.denominator), (12, 8));
     }

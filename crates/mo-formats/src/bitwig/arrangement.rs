@@ -92,8 +92,9 @@ const F_ACTIVE: u32 = 0x1380;
 const F_MIXER: u32 = 0x165;
 const F_MIXER_MUTE: u32 = 0x1a6;
 const F_ON: u32 = 0xd2;
-// The transport (root 0x190) holds the time signature (0x212, a setting whose 0x1cbe packs it: its top byte is the
-// bar's length in 16ths, 16 for 4/4 and 12 for 3/4; only signatures over 4 are checked) and the cue markers (0x2adc:
+// The transport (root 0x190) holds the time signature (0x212, a setting whose 0x1cbe packs it: the top six bits are
+// the top number, bits 4 to 7 the bottom number as a power of two, so 0x10000024 is 4/4, 0x0C000024 3/4 and
+// 0x18000034 6/8; checked on 4/4, 3/4 and 6/8 saves) and the cue markers (0x2adc:
 // a list of class 0x266, each with its beat and its name in 0x98b).
 const F_TRANSPORT: u32 = F_SCENES_HOLDER;
 const F_TIME_SIGNATURE: u32 = 0x212;
@@ -125,6 +126,13 @@ const MOST_POINTS: usize = 500_000;
 const TOO_MANY_POINTS: &str =
     "This project has more automation than the preview holds (500,000 points), so only the first curves are drawn.";
 
+/// The time signature in Bitwig's packed number: the top number in the top six bits, the bottom number as a power of
+/// two in bits 4 to 7 (2 for quarter notes, 3 for eighths). Seen in 4/4, 3/4 and 6/8 saves only (bits 8 to 25 were
+/// zero in them, the low four bits 4). None for numbers that can't be a signature.
+fn signature_of(packed: u32) -> Option<TimeSignature> {
+    TimeSignature::new(packed >> 26, 1 << (packed >> 4 & 15))
+}
+
 /// The project's arrangement as Bitwig shows it: its arranger timeline, and its clip launcher's scenes one after
 /// another. The scenes come first when nothing is on the timeline. A project that didn't decode cleanly says so instead.
 pub fn read(doc: &Document) -> Vec<Arrangement> {
@@ -141,14 +149,10 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
         .unwrap_or(120.0);
 
     let transport = field_obj(doc, root, F_TRANSPORT);
-    // The packed number's top byte is the bar's length in sixteenth notes (16 in 4/4, 12 in 3/4): the bar comes out
-    // the right length whatever the signature, but which notes it counts in isn't known (6/8 reads as 3/4).
     let signature = transport
         .and_then(|t| field_obj(doc, t, F_TIME_SIGNATURE))
         .and_then(|s| doc.obj(s).num(F_SIGNATURE))
-        .map(|packed| packed as i64 as u32 >> 24)
-        .filter(|sixteenths| (2..=256).contains(sixteenths))
-        .and_then(TimeSignature::of_sixteenths)
+        .and_then(|packed| signature_of(packed as i64 as u32))
         .unwrap_or_default();
     let mut markers: Vec<PreviewMarker> = transport
         .and_then(|t| field_obj(doc, t, F_CUE_MARKERS))
