@@ -151,7 +151,17 @@ fn carry_preset(app: &AppWindow, at: usize, spot: Spot) {
                     drag::glow(app, move |app, on| glow(app, spot, on));
                 }
                 if let Some(why) = why_not.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
-                    set_message(app, &why);
+                    // On the card when one is open; else in the activity feed, as a card only shows for a picked
+                    // line and a drag never picks the line it carries (PS-1).
+                    let (card_open, feed) = PAGE.with(|p| {
+                        let p = p.borrow();
+                        (p.picked.is_some() && app.global::<PresetsData>().get_section() == 0, p.feed.clone())
+                    });
+                    if card_open {
+                        set_message(app, &why);
+                    } else {
+                        feed.start("Dragged as its plugin's own preset", "").done(&why);
+                    }
                 }
             }),
         },
