@@ -314,6 +314,47 @@ fn smf(keys: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn a_big_index_read_in_pieces_at_once_gives_every_part_once_in_the_same_order() {
+    let dir = folder("pieces");
+    std::fs::write(dir.join("Tune.mid"), smf(&[72, 74, 76, 79, 76, 74, 72, 71])).unwrap();
+    std::fs::write(dir.join("Low.mid"), smf(&[36, 36, 43, 41, 36, 36, 43, 41])).unwrap();
+    let path = dir.join(store::FILE_NAME);
+    let mut store = MidiStore::open(&path).unwrap();
+    index(&mut store, &dir);
+    drop(store);
+    // A hundred thousand more parts of the two files' notes, with gaps in their ids as a long-used index has.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000)
+         INSERT INTO parts (id, file, notes, part, clip, role, why, drums, program, track_name, members)
+         SELECT 10 + i * 3, 1 + i % 2, 1 + i % 2, 'Part ' || i, 'Clip ' || i, i % 5, 'made up', 0, NULL, '', NULL
+         FROM n;",
+    )
+    .unwrap();
+    let ids: Vec<i64> = {
+        let mut st = conn.prepare("SELECT id FROM parts ORDER BY id").unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    };
+    drop(conn);
+    assert_eq!(ids.len(), 100_002);
+
+    // Opened on the pool's own thread, as the page does: a connection is one thread's.
+    let all = || MidiStore::open_read_only(&path).unwrap().all(&HashMap::new(), &HashMap::new()).unwrap();
+    // On four threads, whatever this computer has: four pieces.
+    let in_pieces = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(all);
+    // On one thread: one read, as a small index gets.
+    let in_one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(all);
+    let mut read: Vec<i64> = in_pieces.iter().map(|p| p.id).collect();
+    assert_eq!(read, in_one.iter().map(|p| p.id).collect::<Vec<_>>(), "the same order");
+    read.sort_unstable();
+    assert_eq!(read, ids, "every part once");
+    // Each file's facts are one shared copy, whichever piece read its parts.
+    let of = |clip: &str| in_pieces.iter().find(|p| p.clip == clip).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&of("Clip 2").source, &of("Clip 99998").source));
+    assert_eq!((of("Clip 7").part.as_str(), of("Clip 7").hash.as_str()), ("Part 7", of("Clip 99999").hash.as_str()));
+}
+
+#[test]
 fn the_old_apps_corrections_are_taken_in_once_and_midi_db_isnt_opened_again() {
     let dir = folder("corrections");
     std::fs::write(dir.join("Tune.mid"), smf(&[72, 74, 76, 79, 76, 74, 72, 71])).unwrap();

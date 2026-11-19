@@ -752,9 +752,10 @@ pub fn midi_parts(cat: &mo_midi::Catalogue, smallest: usize) -> Lines {
             }
         }
     }
+    // The lines themselves on every core of the pool it's called in: a line for each of 160,000 parts.
     let lines = cat
         .entries
-        .iter()
+        .par_iter()
         .enumerate()
         .filter(|(at, e)| cat.is_line(*at) && crate::midi::big_enough(e, smallest))
         .map(|(at, e)| {
@@ -768,8 +769,8 @@ pub fn midi_parts(cat: &mo_midi::Catalogue, smallest: usize) -> Lines {
                     .collect::<Vec<_>>()
                     .join(" · "),
                 also: {
-                    if let Some(words) = others.remove(&at) {
-                        from.push_str(&words);
+                    if let Some(words) = others.get(&at) {
+                        from.push_str(words);
                     }
                     from
                 },

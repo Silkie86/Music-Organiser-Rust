@@ -140,17 +140,20 @@ pub fn read_from(index: &Path, smallest: usize) -> Read {
     if !index.is_file() {
         return Read::Not("No MIDI yet: open the MIDI page in the app once to read your MIDI".into());
     }
-    let store = match MidiStore::open_read_only(index) {
-        Ok(store) => store,
-        Err(e) => return Read::Not(format!("Couldn't open the MIDI index: {e}")),
+    // On the app's low-priority pool, not rayon's own at normal priority (rule 21): a big index is read in pieces
+    // at once and sorted into parts on every core, and the DAW's own threads come first. One read, then the file is
+    // let go (the store drops with the read).
+    let read = mo_app::background::on_pool(|| {
+        let store = MidiStore::open_read_only(index).map_err(|e| format!("Couldn't open the MIDI index: {e}"))?;
+        let phrases =
+            store.all(&HashMap::new(), &HashMap::new()).map_err(|e| format!("Couldn't read the MIDI index: {e}"))?;
+        drop(store);
+        Ok::<_, String>(Catalogue::new(phrases))
+    });
+    let cat = match read {
+        Ok(cat) => cat,
+        Err(why) => return Read::Not(why),
     };
-    // One read, then the file is let go (`store` drops here).
-    let phrases = match store.all(&HashMap::new(), &HashMap::new()) {
-        Ok(phrases) => phrases,
-        Err(e) => return Read::Not(format!("Couldn't read the MIDI index: {e}")),
-    };
-    drop(store);
-    let cat = Catalogue::new(phrases);
     let years = page::year_counts(&cat);
     Read::Ready(Arc::new(Parts { cat, index: index.to_owned(), smallest, years, font: Mutex::new(None) }))
 }

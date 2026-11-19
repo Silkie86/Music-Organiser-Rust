@@ -67,14 +67,26 @@ pub struct Loaded {
     smallest: usize,
 }
 
+/// An index of fewer parts than this is summed up on the thread that asks, not on the shared threads.
+const SMALL_INDEX: usize = 1_000;
+
 impl Loaded {
+    /// Call it off the window's thread: for a big index it waits for the shared low-priority threads.
     pub fn new(cat: Catalogue, notes: NotesFrom) -> Loaded {
         let smallest = SMALLEST.load(Ordering::Relaxed);
         // Said with what Settings hides from the first, so the line doesn't change once the list is worked out.
         let hidden = page::hidden_text(&cat, page::line_count(&cat, smallest), smallest);
-        let summary = page::summary(&cat);
-        let years = page::year_counts(&cat);
-        let found = Arc::new(mo_app::finder::midi_parts(&cat, smallest));
+        let make = || {
+            rayon::join(
+                || rayon::join(|| page::summary(&cat), || page::year_counts(&cat)),
+                || Arc::new(mo_app::finder::midi_parts(&cat, smallest)),
+            )
+        };
+        // Side by side on the shared low-priority threads: the summary and years each go through every part, and
+        // Ctrl+K gets a line for each. A few parts (the screenshots' made-up ones, made on the window's thread) are
+        // made where they are: nothing waits for the pool.
+        let ((summary, years), found) =
+            if cat.entries.len() < SMALL_INDEX { make() } else { background::on_pool(make) };
         Loaded { cat, notes, summary, hidden, years, found, smallest }
     }
 }
@@ -644,7 +656,9 @@ pub fn smallest_part(app: Option<&AppWindow>, notes: usize) {
     // Ctrl+K's lines too, off the window's thread: they're a line for every part.
     let weak = app.as_weak();
     let made = background::spawn("MIDI finder lines", move || {
-        let lines: Arc<dyn mo_app::finder::Source> = Arc::new(mo_app::finder::midi_parts(&cat, notes));
+        // On the shared low-priority threads: the lines are made on every core.
+        let lines: Arc<dyn mo_app::finder::Source> =
+            Arc::new(background::on_pool(|| mo_app::finder::midi_parts(&cat, notes)));
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade()
                 && SMALLEST.load(Ordering::Relaxed) == notes
@@ -1299,9 +1313,13 @@ pub fn load(library: &Path) -> Result<Loaded, String> {
         return Ok(Loaded::new(Catalogue::default(), NotesFrom::Store(path)));
     }
     let began = Instant::now();
-    let store = MidiStore::open_read_only(&path).map_err(|e| e.to_string())?;
-    let phrases = store.all(&up.old_roles, &up.old_octaves).map_err(|e| e.to_string())?;
-    drop(store);
+    // In pieces at once, on the shared low-priority threads (rules 12 and 21).
+    let path_now = path.clone();
+    let phrases = background::on_pool(move || {
+        let store = MidiStore::open_read_only(&path_now)?;
+        store.all(&up.old_roles, &up.old_octaves)
+    })
+    .map_err(|e| e.to_string())?;
     let read = began.elapsed();
     let cat = background::on_pool(|| Catalogue::new(phrases));
     let grouped = began.elapsed() - read;

@@ -192,29 +192,45 @@ impl Catalogue {
             phrases.sort_by_key(undated);
         }
         let phrase_count = phrases.len();
-        let mut by_hash: HashMap<String, usize> = HashMap::with_capacity(phrases.len());
-        let mut firsts = Vec::new();
-        let mut others: Vec<Vec<Arc<Source>>> = Vec::new();
-        for p in phrases {
-            if let Some(&at) = by_hash.get(&p.hash) {
+        // Which entry each phrase goes to: the first with its notes makes one, and the rest are its copies. Found
+        // from the hashes where they are, before anything is moved.
+        let mut seen: HashMap<&str, usize> = HashMap::with_capacity(phrases.len());
+        let goes_to: Vec<usize> = phrases
+            .iter()
+            .map(|p| {
+                let next = seen.len();
+                *seen.entry(p.hash.as_str()).or_insert(next)
+            })
+            .collect();
+        let count = seen.len();
+        drop(seen);
+        let mut firsts: Vec<StoredPhrase> = Vec::with_capacity(count);
+        let mut others: Vec<Vec<Arc<Source>>> = vec![Vec::new(); count];
+        // The copies' own words aren't kept: they're let go together on another thread, not one by one here (about
+        // two parts in five are copies).
+        let mut copies = Vec::with_capacity(phrase_count - count);
+        for (p, at) in phrases.into_iter().zip(goes_to) {
+            if at == firsts.len() {
+                firsts.push(p);
+            } else {
                 if let Some(list) = others.get_mut(at) {
-                    list.push(p.source);
+                    list.push(Arc::clone(&p.source));
                 }
-                continue;
+                copies.push(p);
             }
-            by_hash.insert(p.hash.clone(), firsts.len());
-            firsts.push(p);
-            others.push(Vec::new());
         }
-        // Names, instruments and search text are worked out on every core: hundreds of thousands of parts.
-        let mut entries: Vec<Entry> = firsts
+        let by_hash: HashMap<String, usize> = firsts.iter().enumerate().map(|(at, p)| (p.hash.clone(), at)).collect();
+        rayon::spawn(move || drop(copies));
+        // Names, instruments and search text are worked out on every core: hundreds of thousands of parts. So is the
+        // folder each loop that may be in other keys is in (see below).
+        let (mut entries, folders): (Vec<Entry>, Vec<Option<String>>) = firsts
             .into_par_iter()
             .zip(others)
             .map(|(phrase, other_sources)| {
                 let instrument = instrument_of(&phrase);
                 let search_text = search_text_of(&phrase, phrase.role(), instrument.as_ref());
                 let members = PhraseMember::decode(&phrase.members);
-                Entry {
+                let entry = Entry {
                     phrase,
                     other_sources,
                     instrument,
@@ -224,9 +240,13 @@ impl Catalogue {
                     in_keys: None,
                     search_text,
                     songs: OnceLock::new(),
-                }
+                };
+                let p = &entry.phrase;
+                let in_keys = p.shape.is_some() && !entry.is_project() && !p.drums && entry.role() != Role::Drums;
+                let folder = in_keys.then(|| folder_key(&p.source.path));
+                (entry, folder)
             })
-            .collect();
+            .unzip();
 
         // Each clip learns which longer phrases it's part of.
         let mut within: Vec<(usize, usize)> = Vec::new();
@@ -249,10 +269,9 @@ impl Catalogue {
         // playing its riff on another root is another part of the song), only side by side in one folder (a short,
         // plain shape, such as a held chord, is in many places), never drums (a drum pattern moved is other drums).
         let mut by_shape: HashMap<(String, i64), Vec<usize>> = HashMap::new();
-        for (at, e) in entries.iter().enumerate() {
-            let p = &e.phrase;
-            if let Some(shape) = p.shape.filter(|_| !e.is_project() && !p.drums && e.role() != Role::Drums) {
-                by_shape.entry((folder_key(&p.source.path), shape)).or_default().push(at);
+        for (at, (e, folder)) in entries.iter().zip(folders).enumerate() {
+            if let Some((folder, shape)) = folder.zip(e.phrase.shape) {
+                by_shape.entry((folder, shape)).or_default().push(at);
             }
         }
         let mut line_count = entries.len();
