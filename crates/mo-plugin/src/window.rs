@@ -163,6 +163,9 @@ struct Slots {
     /// A line dragged out: which, and its file, once it's been checked to be there (or written, for a MIDI part),
     /// or why it can't go.
     drag: Mutex<Option<(Carried, Result<std::path::PathBuf, String>)>>,
+    /// A sound dragged out whole with Trim silence on, as its trimmed copy couldn't be made: what the panel says
+    /// (SN-12).
+    untrimmed: Mutex<Option<String>>,
     /// A drag out that has ended: its file, when it started and how it ended.
     dragged: Mutex<Option<Dragged>>,
     /// The waveforms read for the lines on show, with their asking's round ([`Kept::to_read`]).
@@ -847,10 +850,14 @@ impl Shown {
                 let path = std::path::PathBuf::from(path);
                 let found = if path.is_file() {
                     // Trim silence on: the trimmed copy goes instead, as the app drags it (loops go as they are), or
-                    // the whole file when one can't be made, and the log says why.
+                    // the whole file when one can't be made: the panel says so, and the log says why (SN-12).
                     let (path, why) = mo_app::trim_copy::to_drag(&path, trim, is_loop);
                     if let Some(why) = why {
                         crate::log::line("Drag", &why);
+                        *lock(&slots.untrimmed) = Some(format!(
+                            "{} went untrimmed (the log says why)",
+                            library::name(&path.to_string_lossy())
+                        ));
                     }
                     Ok(path)
                 } else {
@@ -1872,7 +1879,13 @@ impl Shown {
             Ok(path) => {
                 self.dragging.set(true);
                 match carried {
-                    Carried::Sound(row) => self.panel.set_carried(i32::try_from(row).unwrap_or(-1)),
+                    Carried::Sound(row) => {
+                        self.panel.set_carried(i32::try_from(row).unwrap_or(-1));
+                        if let Some(said) = take(&self.slots.untrimmed) {
+                            self.playing.set(None);
+                            self.panel.set_playing(said.into());
+                        }
+                    }
                     Carried::Part(at) => self.panel.set_midi_carried(self.midi.row_of(at)),
                     Carried::Preset(at) => self.panel.set_preset_carried(self.presets.row_of(at)),
                     Carried::Curve(at) => {
