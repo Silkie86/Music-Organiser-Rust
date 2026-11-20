@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
@@ -388,7 +388,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
         let _ = to_watch.send(Told::Changed(c));
     });
     // The card's status, stars, heart and tags come here too ([`give`]): this thread has the list.
-    *TELL.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx.clone());
+    *TELL.lock().unwrap_or_else(PoisonError::into_inner) = Some((tx.clone(), live.stopper()));
     // Held so the loop below waits rather than ends if the watch can't start: the catch-up and the retries still run.
     let _still_here = tx;
     let _watch = match watching {
@@ -466,10 +466,15 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
             catch_up_at = None;
             let began = Instant::now();
             let caught = live.catch_up();
+            let how = if caught.stopped {
+                "Stopped catching up with the project folders as the app closed, after"
+            } else {
+                "Caught up with the project folders in"
+            };
             log::info(
                 "Songs",
                 &format!(
-                    "Caught up with the project folders in {:.1} s: {} read, {} moved, {} gone{}",
+                    "{how} {:.1} s: {} read, {} moved, {} gone{}",
                     began.elapsed().as_secs_f32(),
                     caught.read.len(),
                     caught.moved.len(),
@@ -642,22 +647,30 @@ impl Gave {
     }
 }
 
-/// How the window's thread tells the page's thread ([`watch`]); None until the list is up, and once the app closes.
-static TELL: Mutex<Option<mpsc::Sender<Told>>> = Mutex::new(None);
+/// How the window's thread tells the page's thread ([`watch`]), and the switch that stops the page's thread reading
+/// your project folders part way as the app closes ([`Live::stopper`]); None until the list is up, and once the app
+/// closes.
+static TELL: Mutex<Option<(mpsc::Sender<Told>, Arc<AtomicBool>)>> = Mutex::new(None);
 
 /// How many songs given something on their cards the page's thread hasn't kept yet, waited for as the app closes.
 static GIVES_WAITING: AtomicUsize = AtomicUsize::new(0);
 
 /// How long the app waits as it closes for what you gave songs on their cards to be kept: the page's thread may be part
-/// way through reading your project folders.
+/// way through reading a folder or a save, which it finishes before it stops ([`Live::stopper`]), or waiting for
+/// songs.db.
 const CLOSE_WAIT: Duration = Duration::from_secs(10);
 
 /// As the app closes: the page's thread is told to stop once what you gave songs on their cards and it hasn't kept yet
-/// is kept, waited for [`CLOSE_WAIT`] at most (review SG-11). What still isn't kept is said in the log.
+/// is kept, waited for [`CLOSE_WAIT`] at most (review SG-11). Its catch-up with your project folders, or a batch of
+/// saves it's reading, stops part way so what you gave can't wait behind it (review SS-3): what's left is read at the
+/// next start. What still isn't kept is said in the log.
 pub fn finish_up() {
     let tell = TELL.lock().unwrap_or_else(PoisonError::into_inner).take();
     let (done, finished) = mpsc::channel();
-    let told = tell.is_some_and(|t| t.send(Told::Finish(done)).is_ok());
+    let told = tell.as_ref().is_some_and(|(t, _)| t.send(Told::Finish(done)).is_ok());
+    if let Some((_, stop)) = &tell {
+        stop.store(true, Ordering::SeqCst);
+    }
     if told && GIVES_WAITING.load(Ordering::SeqCst) > 0 {
         let _ = finished.recv_timeout(CLOSE_WAIT);
     }
@@ -749,7 +762,7 @@ fn give(app: &AppWindow, what: &str, value: &str) {
     LINES.with(|l| l.notify.reset());
     fill_panel(app);
     GIVES_WAITING.fetch_add(1, Ordering::SeqCst);
-    let told = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|t| t.send(Told::Give(given)));
+    let told = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|(t, _)| t.send(Told::Give(given)));
     if !matches!(told, Some(Ok(()))) {
         let _ = GIVES_WAITING.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
         failed("the song list isn't being kept up to date just now; it shows again as it was when the app next starts");
@@ -1680,6 +1693,19 @@ mod tests {
         // What the log says of changes the app closed before it kept.
         assert!(not_kept_line(1).starts_with("The app closed before 1 change given on song cards was kept"));
         assert!(not_kept_line(2).contains("2 changes given on song cards were kept"));
+    }
+
+    /// Review SS-3: as the app closes, the page's thread is told to finish, and its reading of your project folders is
+    /// stopped part way, so what you gave songs on their cards can't wait behind it.
+    #[test]
+    fn closing_stops_the_page_reading_your_project_folders() {
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        *TELL.lock().unwrap_or_else(PoisonError::into_inner) = Some((tx, stop.clone()));
+        finish_up();
+        assert!(stop.load(Ordering::SeqCst));
+        assert!(matches!(rx.try_recv(), Ok(Told::Finish(_))));
+        assert!(TELL.lock().unwrap_or_else(PoisonError::into_inner).is_none());
     }
 
     #[test]
