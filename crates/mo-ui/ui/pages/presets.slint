@@ -159,6 +159,8 @@ export global PresetsData {
     // Export these: every sound shown.
     in property <ActionKey> export-shown-key;
     in property <bool> exporting;
+    // Export these is running: its button stops it (PS-3).
+    in property <bool> exporting-shown;
     callback export-shown();
 
     // The Curves section (the search box is shared: `search` holds the section's words on show).
@@ -650,10 +652,10 @@ export component PresetsPage inherits Rectangle {
                 alignment: center;
                 StudioButton {
                     horizontal-stretch: 0;
-                    text: "Export these";
+                    text: PresetsData.exporting-shown ? "Stop export" : "Export these";
                     main: true;
-                    enabled: PresetsData.shown > 0 && !PresetsData.exporting;
-                    tip: PresetsData.export-shown-key.what;
+                    enabled: PresetsData.exporting-shown || (PresetsData.shown > 0 && !PresetsData.exporting);
+                    tip: PresetsData.exporting-shown ? "Stop the export after the save it's on" : PresetsData.export-shown-key.what;
                     key: PresetsData.export-shown-key.key;
                     clicked => { PresetsData.export-shown(); }
                 }

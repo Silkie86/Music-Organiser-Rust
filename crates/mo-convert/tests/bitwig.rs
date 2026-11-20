@@ -28,6 +28,7 @@ fn snare(path: &str) -> Option<SampleFile> {
         rate: 48000,
         channels: 2,
         seconds: 1.5,
+        ogg_in_wav: false,
     })
 }
 

@@ -154,9 +154,10 @@ impl CurvesTab {
                 panel.set_curve_said(SharedString::new());
             }
             let slots = Arc::clone(&slots);
+            let asked = slots.ask_drag();
             background("mo-plugin-drag", move || {
                 let file = curves.to_drag(at, &std::env::temp_dir());
-                *lock(&slots.drag) = Some((Carried::Curve(at), file));
+                slots.drag_ready(asked, Carried::Curve(at), file);
             });
         });
     }

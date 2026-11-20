@@ -23,8 +23,10 @@
 //! are, and the page marks them through the one writer of your say about sounds ([`crate::sound_notes`]). The
 //! multisamples are only read, never changed (Bitwig's folder is his).
 //!
-//! For step 3 a sample is written to the system's Temp folder for a moment, under a name of the app's own
-//! ([`temp_name`]), and removed once read; the start-up sweep removes one a crash left ([`is_temp_file`], rule 28).
+//! For steps 2 to 4 a sample is written to the data folder's [`UNPACK_FOLDER`] for a moment (never the system's Temp
+//! on C:, which may be full: review SN-19), under a name of the app's own ([`temp_name`]), and removed once read; the
+//! start-up sweep removes one a crash left ([`is_temp_file`], rule 28). One that can't be written says so
+//! ([`Why::NoRoom`]) and isn't offered to Save as sounds.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -164,6 +166,17 @@ pub enum Why {
     OtherAudio,
     /// The app couldn't read the sample's audio, so it could only look for the same file by name.
     Unplayable,
+    /// The sample couldn't be unpacked to be looked at (no room on the disk, say), so only the same file under its
+    /// own name could be looked for (review SN-19, 19 Nov 2026): it may well be in the library.
+    NoRoom,
+}
+
+impl Why {
+    /// Whether Save as sounds may save a sample not found for this reason: not when the app couldn't read its audio
+    /// (a scan couldn't either), nor when it couldn't look at it at all (it may be a sound of yours already).
+    pub fn saveable(self) -> bool {
+        matches!(self, Why::NoSuchName | Why::OtherAudio)
+    }
 }
 
 impl Why {
@@ -173,6 +186,7 @@ impl Why {
             Why::NoSuchName => "no sound by this name",
             Why::OtherAudio => "same name, different audio",
             Why::Unplayable => "its audio couldn't be read",
+            Why::NoRoom => "no room to unpack it and look",
         }
     }
 }
@@ -307,6 +321,10 @@ fn same_bytes(path: &Path, bytes: &[u8]) -> bool {
 /// (Bitwig's samples carry ID3 and ACID chunks of a few kB) and a cover picture.
 const NEAR_SIZE: u64 = 1 << 20;
 
+/// The folder in the data folder a look unpacks samples into for a moment (review SN-19: not the system's Temp on
+/// C:, which is nearly full on Solomon's PC); the start-up sweep clears what a crash left there ([`is_temp_file`]).
+pub const UNPACK_FOLDER: &str = "bitwig-samples";
+
 /// The start of the names a sample is written to Temp under: "mo-bitwig-sample-<process id>-<count>.<its kind>".
 const TEMP_PREFIX: &str = "mo-bitwig-sample-";
 
@@ -356,12 +374,13 @@ fn find(library: &Library, name: &str, bytes: &[u8], temp: &Path) -> Result<(Vec
         Ok(found) if !found.0.is_empty() => Ok(found),
         Ok(_) if library.named(name).is_empty() => Err(Why::NoSuchName),
         Ok(_) => Err(Why::OtherAudio),
-        Err(()) => Err(Why::Unplayable),
+        Err(why) => Err(why),
     }
 }
 
-/// [`find`]'s steps: `Err` when the sample's audio couldn't be read (only step 1 was tried, and found nothing).
-fn find_all(library: &Library, name: &str, bytes: &[u8], temp: &Path) -> Result<(Vec<usize>, bool), ()> {
+/// [`find`]'s steps: `Err` when the sample couldn't be unpacked, or its audio couldn't be read (only step 1 was tried,
+/// and found nothing).
+fn find_all(library: &Library, name: &str, bytes: &[u8], temp: &Path) -> Result<(Vec<usize>, bool), Why> {
     let path_of = |i: usize| Path::new(&library.sounds[i].path).to_owned();
     // 1: the same file under its own name. Every copy of it in the library is found, not just the first.
     let named = library.named(name);
@@ -372,13 +391,14 @@ fn find_all(library: &Library, name: &str, bytes: &[u8], temp: &Path) -> Result<
     }
     // Its length, rate and channels, from the sample itself, to find it under another name.
     let in_temp = InTemp(temp.join(temp_name(name)));
-    // Temp couldn't take it (full, say): its audio can't be looked at, so it's judged by its name alone.
+    // The folder couldn't take it (its disk full, say): it couldn't be looked at, and says so, never taken for a
+    // sample that isn't in the library (review SN-19).
     if std::fs::write(&in_temp.0, bytes).is_err() {
-        return Ok((found, false));
+        return Err(Why::NoRoom);
     }
-    let Ok(head) = mo_audio::read(&in_temp.0, 0.001) else { return Err(()) };
+    let Ok(head) = mo_audio::read(&in_temp.0, 0.001) else { return Err(Why::Unplayable) };
     if head.sample_rate == 0 || head.channels.is_empty() {
-        return Err(());
+        return Err(Why::Unplayable);
     }
     let shaped = library.shaped(head.sample_rate, head.channels.len(), millis(head.file_seconds));
     // 2: the same bytes under another name.
@@ -658,6 +678,11 @@ pub fn summary(found: &Found, marked: Marked) -> String {
                     "have a sound of yours by their name, but different audio",
                 ),
                 (Why::Unplayable, "couldn't be played", "couldn't be played"),
+                (
+                    Why::NoRoom,
+                    "couldn't be looked at: there was no room on the disk to unpack it",
+                    "couldn't be looked at: there was no room on the disk to unpack them",
+                ),
             ]
             .into_iter()
             .filter_map(|(why, one, more)| match count(why) {
@@ -780,7 +805,7 @@ pub fn save_missing(missing: &[Missing], into: &Path, stop: &AtomicBool) -> Save
     let mut saved = Saved::default();
     // A list a multisample, in order.
     let mut by_file: Vec<Vec<&Missing>> = Vec::new();
-    for m in missing.iter().filter(|m| m.why != Why::Unplayable) {
+    for m in missing.iter().filter(|m| m.why.saveable()) {
         match by_file.last_mut() {
             Some(samples) if samples[0].from == m.from => samples.push(m),
             _ => by_file.push(vec![m]),

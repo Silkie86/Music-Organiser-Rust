@@ -359,6 +359,7 @@ export global SoundsData {
     // ("+3 like each"), and the slider let go at a place (0 to 1).
     in-out property <float> like-favourites;
     in property <string> like-favourites-words;
+    in property <string> like-favourites-note;
     callback like-favourites-set(float);
     // Hide duplicates: on, and its words with how many copies it hides (or how far finding them has got).
     in property <bool> hide-copies;
@@ -2312,6 +2313,7 @@ export component SoundsPage inherits Rectangle {
                         if SoundsData.favourites: LikeFavourites {
                             value <=> SoundsData.like-favourites;
                             words: SoundsData.like-favourites-words;
+                            note: SoundsData.like-favourites-note;
                             released(v) => { SoundsData.like-favourites-set(v); }
                         }
                         if SoundsData.knows-use: TickLine {
