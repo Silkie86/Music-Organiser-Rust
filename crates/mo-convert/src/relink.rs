@@ -50,7 +50,7 @@ const F_SIZE: u32 = 0x17;
 const F_PATH: u32 = 0x3b;
 
 /// The Bitwig files that can name a multisample.
-const BITWIG_FILES: [&str; 3] = ["bwproject", "bwclip", "bwpreset"];
+pub const BITWIG_FILES: [&str; 3] = ["bwproject", "bwclip", "bwpreset"];
 
 /// The most of one zip entry that's looked through (as mo-formats' readers allow): a damaged zip can say a small
 /// file unpacks to gigabytes. One that's bigger can't be looked through, so it counts as naming every copy.
@@ -601,8 +601,15 @@ fn named_in(raw: &[u8], listed: &[Listed]) -> Vec<bool> {
     scan(raw, listed, names_copy).unwrap_or_else(|| vec![true; listed.len()])
 }
 
-/// For each copy, whether a Bitwig file's bytes (and its zip's entries) hold what `names` looks for. None when it isn't
-/// a Bitwig file, or its zip can't be read.
+/// How far the zlib streams in a Bitwig file are looked through for a copy's name: every one, and what one cut short
+/// gave; smaller than the reader's, as several files are looked through at once.
+const PACKED: bitwig::BlobLimits =
+    bitwig::BlobLimits { attempts: usize::MAX, each: 64_000_000, all: 256_000_000, thorough: true };
+
+/// For each copy, whether a Bitwig file's bytes, the zlib streams in them (some Bitwig versions keep parts of a project
+/// packed: the whole-app review of 19 Nov, FS-24) and its zip's entries hold what `names` looks for. None when it
+/// isn't a Bitwig file, its zip can't be read, or its packed parts are too big to look through ([`PACKED`]). Bytes
+/// that only look like a zlib header are common in a big file: each is tried, and what doesn't unpack names nothing.
 fn scan(raw: &[u8], listed: &[Listed], names: fn(&[u8], &Listed) -> bool) -> Option<Vec<bool>> {
     let mut named = vec![false; listed.len()];
     let mut look = |bytes: &[u8]| {
@@ -614,7 +621,10 @@ fn scan(raw: &[u8], listed: &[Listed], names: fn(&[u8], &Listed) -> bool) -> Opt
     if !bitwig::is_bitwig(raw) {
         return None;
     }
-    look(raw);
+    // Every stream, and what one cut short gave; one too big to look through whole counts as naming every copy.
+    if !bitwig::each_blob_within(raw, PACKED, &mut look) {
+        return None;
+    }
     let Some(start) = zip_start(raw) else { return Some(named) };
     let mut archive = zip::ZipArchive::new(Cursor::new(raw.get(start..)?)).ok()?;
     for i in 0..archive.len() {

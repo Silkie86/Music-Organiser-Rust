@@ -229,6 +229,28 @@ fn a_copy_named_in_packed_plugin_settings_or_an_auto_backup_is_kept() {
     assert!(fixed.left[0].contains("Song-1.bwproject"), "{:?}", fixed.left);
 }
 
+/// An older save in the folder that names the copy only inside a zlib-packed part (as some Bitwig versions keep parts
+/// of a project) still keeps it (the whole-app review of 19 Nov, FS-24).
+#[test]
+fn a_copy_named_only_in_a_zlib_packed_part_is_kept() {
+    use std::io::Write;
+    let dir = folder("relink zlib");
+    let project = project_with_copy(&dir, COPY);
+    let relink = relink(&dir, COPY, &library(&dir, "Kicks 1 Select.multisample"));
+    assert_eq!(still_named(&project, &relink), None, "only the original names it");
+    let mut doc = bitwig::decode(fixtures::bitwig_template(fixtures::Template::default())).unwrap();
+    let named: Vec<u8> = format!(r"multi-samples\{COPY}").encode_utf16().flat_map(u16::to_be_bytes).collect();
+    let mut packed = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    packed.write_all(&named).unwrap();
+    let packed = packed.finish().unwrap();
+    assert!(!packed.windows(COPY.len()).any(|w| w.eq_ignore_ascii_case(COPY.as_bytes())), "packed out of sight");
+    let root = doc.root.unwrap();
+    doc.obj_mut(root).fields.push(Field { id: 0x7f20, value: Value::Blob(Box::new(Blob::new(&packed))) });
+    std::fs::write(dir.join("Song old.bwproject"), bitwig::encode(&doc, None).unwrap()).unwrap();
+    let why = still_named(&project, &relink).unwrap();
+    assert!(why.contains("Song old.bwproject"), "{why}");
+}
+
 #[test]
 fn an_accented_copy_is_found_in_any_letter_case() {
     let dir = folder("relink accents");

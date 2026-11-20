@@ -292,6 +292,8 @@ struct Page {
     /// Whether it's Free the space that sends them (`fixed_removing` is on then too, so nothing else starts): only its
     /// own button says so.
     freeing: bool,
+    /// While Free the space runs: what stops it (its card's Stop; the whole-app review of 19 Nov, FS-11).
+    bitwig_stop: Option<Arc<AtomicBool>>,
     /// The look for old copies, what the last one found (it stays on show while the next one looks), and whether one
     /// is on; and how many of the Plugins page's moves had finished when the newest one was asked for: once another
     /// has, it looks again ([`plugin_moved`]).
@@ -683,6 +685,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
                 _ => false,
             },
             STOP => match p.picked.as_str() {
+                BITWIG_COPIES => enabled(bitwig_stop_button(&p)),
                 OLD_COPIES => enabled(old_stop_button(&p)),
                 COMPACT => enabled(songs_stop_button(&p)),
                 _ => false,
@@ -787,6 +790,12 @@ fn songs_stop_button(p: &Page) -> Option<(String, bool)> {
     stop_button(matches!(p.songs_removing.stage(), space_songs::Stage::Sending(_)), p.songs_stop.as_ref())
 }
 
+/// The Bitwig card's Stop, while Free the space runs: the copies not yet checked stay, and the marks are kept for
+/// what went.
+fn bitwig_stop_button(p: &Page) -> Option<(String, bool)> {
+    stop_button(p.freeing, p.bitwig_stop.as_ref())
+}
+
 /// A card's Stop while its Remove is on (`sending`), and `stop` what stops it: pressed, it says it's stopping.
 fn stop_button(sending: bool, stop: Option<&Arc<AtomicBool>>) -> Option<(String, bool)> {
     if !sending {
@@ -866,10 +875,11 @@ fn chosen(app: &AppWindow, id: &str) {
         (REMOVE_FIXED, Some(feed)) => remove_fixed(app, feed),
         (FREE_BITWIG, Some(feed)) => free_bitwig(app, feed),
         (STOP, _) => {
-            // The card on show's: old copies or your songs' things.
+            // The card on show's: Bitwig's copies, old copies or your songs' things.
             PAGE.with(|p| {
                 let p = p.borrow();
                 let (stop, what) = match p.picked.as_str() {
+                    BITWIG_COPIES => (&p.bitwig_stop, "Bitwig copies"),
                     OLD_COPIES => (&p.old_stop, "old copies"),
                     COMPACT => (&p.songs_stop, "old autosaves and caches"),
                     _ => return,
@@ -1118,13 +1128,14 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
         let jobs = p.fixes.to_free(p.bitwig.as_ref()?);
         p.fixed_removing = true;
         p.freeing = true;
-        Some((jobs, p.library.clone()))
+        let stop = Arc::new(AtomicBool::new(false));
+        p.bitwig_stop = Some(stop.clone());
+        Some((jobs, p.library.clone(), stop))
     });
-    let Some((mut jobs, library)) = jobs else { return };
+    let Some((mut jobs, library, stop)) = jobs else { return };
     let weak = app.as_weak();
     let data = paths::data_dir();
     let when = binned::now();
-    let stop = Arc::new(AtomicBool::new(false));
     let on_its_way = OnItsWay::new(stop);
     let started = background::spawn("Space free Bitwig copies", move || {
         let on_its_way = on_its_way;
@@ -1137,17 +1148,26 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
             // here off the window's thread. Unread, nothing goes.
             let lib = open_library(&library);
             let choices = lib.as_ref().map(|l| l.song_choices().map_err(|e| e.to_string()));
+            // The library's samples are read once for every project, not once each (the whole-app review of 19 Nov,
+            // FS-12); each project then gets the rows that name one of its own copies.
+            let using = match (&lib, &choices) {
+                (Some(lib), Some(Ok(_))) => {
+                    let all: Vec<String> = jobs.iter().flat_map(|j| j.copy_paths()).collect();
+                    Some(lib.saves_using(&all).map_err(|e| e.to_string()))
+                }
+                _ => None,
+            };
+            drop(lib);
             for job in &mut jobs {
                 match &choices {
                     Some(Ok(c)) => job.choices = c.clone(),
                     Some(Err(e)) => job.elsewhere = Err(e.clone()),
                     None => job.elsewhere = Err("it couldn't be opened".to_owned()),
                 }
-                if let (Some(lib), Some(Ok(_))) = (&lib, &choices) {
-                    job.elsewhere = lib.saves_using(&job.copy_paths()).map_err(|e| e.to_string());
+                if let Some(using) = &using {
+                    job.elsewhere = using.as_ref().map(|rows| space_bitwig::rows_for(job, rows)).map_err(Clone::clone);
                 }
             }
-            drop(lib);
             let reread = mo_library::song_writes::bitwig_reread(&library);
             for job in &mut jobs {
                 job.reread = reread;
@@ -1190,7 +1210,13 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
             // Its marks go with the time its line is kept under: Put back knows it by that.
             space_fix_note::moved(&space_fix_note::file(), when, kept_at);
             note.finish(kept.noted);
-            (space_bitwig::freed_words(&done), kept)
+            // Stopped by its Stop (not the app closing, which shows no card): it says so, not what was checked.
+            let words = if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                Ok(space_bitwig::stopped_words(&done))
+            } else {
+                space_bitwig::freed_words(&done)
+            };
+            (words, kept)
         }));
         let kept = match ran {
             Ok((words, kept)) => {
@@ -2433,6 +2459,7 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     keep(&mut p, kept);
                     p.fixed_removing = false;
                     p.freeing = false;
+                    p.bitwig_stop = None;
                     Changed::LookAgain
                 }
                 Step::Kept(kept) => {
@@ -2741,8 +2768,9 @@ fn show_card(app: &AppWindow) {
                 let remove = remove_fixed_button(&p).map(|(words, enabled)| Button::new(REMOVE_FIXED, words, enabled));
                 let free =
                     free_bitwig_button(&p).map(|(words, enabled)| Button::new(FREE_BITWIG, words, enabled).main());
+                let stop = bitwig_stop_button(&p).map(|(words, enabled)| Button::new(STOP, words, enabled));
                 let card = space_bitwig::card(p.bitwig.as_ref(), p.bitwig_looking, &p.fixes);
-                (card, free.into_iter().chain(fix).chain(remove).chain([measure_button(&p)]).collect())
+                (card, free.into_iter().chain(stop).chain(fix).chain(remove).chain([measure_button(&p)]).collect())
             }
             // Send to the Recycle Bin first (the main button, as Plugins' clean-up is), or once it has run, Put back (the
             // main button then) and the Recycle Bin; Measure again waits while a look is on (which it shows) or something

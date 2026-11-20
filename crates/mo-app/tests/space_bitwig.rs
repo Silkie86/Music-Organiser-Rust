@@ -494,15 +494,45 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
         "{:?}",
         done.problems
     );
+    // The card gives that one reason, not the general one (FS-15).
+    let words = mo_app::space_bitwig::freed_words(&done).unwrap_err();
+    assert!(words.starts_with("None went") && words.contains("saved again"), "{words}");
     fs::File::options()
         .write(true)
         .open(&remix)
         .unwrap()
         .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + 30 * 60))
         .unwrap();
-    // A save the library knows in this folder is the folder's own check's to judge: it doesn't keep the copy.
+    // An FL Studio save in this folder that uses the copy keeps it: the folder's own check reads only Bitwig files
+    // (FS-17).
     let copy = song.join("multi-samples/Kicks-2.multisample").to_string_lossy().into_owned();
-    used.elsewhere = Ok(vec![(copy, song.join("Song v1.bwproject").to_string_lossy().into_owned())]);
+    let flp = song.join("Song.flp");
+    fs::write(&flp, b"an FL Studio save").unwrap();
+    used.elsewhere = Ok(vec![(copy.clone(), flp.to_string_lossy().into_owned())]);
+    let done = free(&used, &bin, &stop);
+    assert!(done.removed.is_empty(), "{:?}", done.problems);
+    assert!(done.problems.iter().any(|p| p.why.contains("Song.flp uses")), "{:?}", done.problems);
+    fs::remove_file(&flp).unwrap();
+    // So does a save on a drive that's away now (its folder can't be opened).
+    let away = if cfg!(windows) {
+        r"B:\Projects\Away\Away.bwproject"
+    } else {
+        "/no-such-drive-mo-test/Projects/Away/Away.bwproject"
+    };
+    let away = away.to_owned();
+    used.elsewhere = Ok(vec![(copy.clone(), away)]);
+    let done = free(&used, &bin, &stop);
+    assert!(done.removed.is_empty(), "{:?}", done.problems);
+    assert!(done.problems.iter().any(|p| p.why.contains("can't be opened now")), "{:?}", done.problems);
+    // A save the library knows in this folder is the folder's own check's to judge, one gone from a folder that's
+    // there is gone, and so is one whose whole folder went from a drive that's here: none keeps the copy.
+    let gone = studio.join("Projects/Elsewhere/Gone.bwproject").to_string_lossy().into_owned();
+    let folder_gone = studio.join("Projects/Deleted/Deleted.bwproject").to_string_lossy().into_owned();
+    used.elsewhere = Ok(vec![
+        (copy.clone(), song.join("Song v1.bwproject").to_string_lossy().into_owned()),
+        (copy.clone(), gone),
+        (copy, folder_gone),
+    ]);
     let done = free_noted(&used, &bin, &stop, &note, 200);
     assert_eq!(done.removed.len(), 1, "{:?}", done.problems);
     assert!(!song.join("multi-samples/Kicks-2.multisample").exists());
@@ -531,4 +561,71 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     for f in [&fixed, &remix_fixed] {
         assert_eq!(judged(f), Ok(()), "{}", f.display());
     }
+}
+
+/// A Recycle Bin that, as the first copy goes, has the song saved again in Bitwig (one Ctrl+S while Free runs).
+struct SavedMeanwhile<'a> {
+    bin: FolderBin,
+    save: &'a Path,
+}
+
+impl mo_space::clean::Bin for SavedMeanwhile<'_> {
+    fn send(&self, path: &Path) -> Result<(), String> {
+        self.bin.send(path)?;
+        fs::File::options().write(true).open(self.save).unwrap().set_modified(SystemTime::now()).unwrap();
+        Ok(())
+    }
+    fn find(&self, removed: &mut [mo_space::clean::Removed]) -> Vec<mo_space::clean::Problem> {
+        self.bin.find(removed)
+    }
+    fn put_back(&self, removed: &[mo_space::clean::Removed]) -> Vec<mo_space::clean::Problem> {
+        self.bin.put_back(removed)
+    }
+}
+
+/// The song saved again while Free the space runs: the copies not gone yet stay (the whole-app review of 19 Nov, FS-18).
+#[test]
+fn a_save_made_while_free_the_space_runs_keeps_the_rest() {
+    let dir = fixtures("mo-app-space-bitwig-free-meanwhile");
+    let studio = dir.join("Bitwig Studio");
+    write(&studio, "Library/Multisamples/Kicks.multisample", b"<multisample kicks/>");
+    write(&studio, "Library/Multisamples/Snare.multisample", b"<multisample snare/>");
+    let song = studio.join("Projects/Song");
+    write(&song, "multi-samples/Kicks-2.multisample", b"<multisample kicks/>");
+    write(&song, "multi-samples/Snare-2.multisample", b"<multisample snare/>");
+    let save = song.join("Song.bwproject");
+    project(&save, "Kicks-2.multisample", 10);
+    let note = dir.join(space_fix_note::FILE_NAME);
+    let roots = [studio.join("Projects")];
+    let stop = AtomicBool::new(false);
+    let mut index = None;
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+    let mut fixes = Fixes::default();
+    for job in fixes.to_fix(&found) {
+        assert!(matches!(fix(&job, &note), Fixing::Written(_)));
+    }
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+    fixes.set_tick(Some(&found), save.clone(), true);
+    let mut jobs = fixes.to_free(&found);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].project.copies.len(), 2);
+    // The library's rows for every project at once: each project keeps the ones that name its own copies, in any
+    // letter case or drive (FS-12).
+    let kicks = song.join("multi-samples/Kicks-2.multisample").to_string_lossy().replace('/', "\\").to_uppercase();
+    let rows = [
+        (kicks, "Other.bwproject".to_owned()),
+        ("Q:/Elsewhere/multi-samples/Kicks-2.multisample".to_owned(), "Elsewhere.bwproject".to_owned()),
+    ];
+    let mine = mo_app::space_bitwig::rows_for(&jobs[0], &rows);
+    assert_eq!(mine.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(), ["Other.bwproject"]);
+    jobs[0].elsewhere = Ok(Vec::new());
+    jobs[0].reread = mo_library::song_writes::BitwigReread::Done;
+    let bin = SavedMeanwhile { bin: FolderBin { dir: dir.join("bin"), held: Default::default() }, save: &save };
+    let done = mo_app::space_bitwig::free(&jobs[0], &bin, &stop);
+    assert_eq!(done.removed.len(), 1, "{:?}", done.problems);
+    assert!(done.problems.iter().any(|p| p.why.contains("saved again")), "{:?}", done.problems);
+    assert_eq!(
+        ["Kicks-2", "Snare-2"].map(|c| song.join(format!("multi-samples/{c}.multisample")).is_file()),
+        [false, true]
+    );
 }
