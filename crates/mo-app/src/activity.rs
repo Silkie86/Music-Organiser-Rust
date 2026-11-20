@@ -48,6 +48,12 @@ impl Card {
         self.state == State::Failed || (self.state == State::Done && self.ended.is_none())
     }
 
+    /// Whether it's a card that never goes by itself: finished, with no end time ([`Feed::told`], [`Feed::notice`],
+    /// [`Job::done_to_read`], [`Job::failed_to_read`]).
+    pub fn stays(&self) -> bool {
+        self.state != State::Running && self.ended.is_none()
+    }
+
     /// Whether it finished long enough ago to go: [`DONE_STAYS`] after it was done, [`FAILED_STAYS`] after it failed.
     fn gone_by(&self, now: Instant) -> bool {
         let stays = if self.state == State::Failed { FAILED_STAYS } else { DONE_STAYS };
@@ -137,7 +143,24 @@ impl Feed {
             started: Instant::now(),
             ended: None,
         });
+        self.one_of_a_kind(id);
         self.changed();
+    }
+
+    /// Takes away the older cards that stay until closed and say the very same as card `id`: said again, it's the
+    /// one card, the newest. Each part sent while Bitwig had another project open, and each scan that found the
+    /// sounds gone, added one more of the same card, with nothing to take them away but their × (the 19 November 2026
+    /// review's RA-5).
+    fn one_of_a_kind(&self, id: u64) {
+        let mut inner = self.lock();
+        let Some(at) = inner.cards.iter().position(|c| c.id == id) else { return };
+        if !inner.cards[at].stays() {
+            return;
+        }
+        // It goes to the end, with the newest: said again it is news again, and the window shows the newest ones.
+        let new = inner.cards.remove(at);
+        inner.cards.retain(|c| !c.stays() || c.state != new.state || c.title != new.title || c.detail != new.detail);
+        inner.cards.push(new);
     }
 
     /// The cards to show now, oldest first: finished ones past their time are left out.
@@ -271,6 +294,7 @@ impl Job {
         self.retitle(title);
         self.end(State::Done, detail);
         self.feed.update(self.id, |c| c.ended = None);
+        self.feed.one_of_a_kind(self.id);
         self.feed.changed();
     }
 
@@ -280,6 +304,7 @@ impl Job {
         self.retitle(title);
         self.end(State::Failed, why);
         self.feed.update(self.id, |c| c.ended = None);
+        self.feed.one_of_a_kind(self.id);
         self.feed.changed();
     }
 
@@ -436,6 +461,40 @@ mod tests {
         assert_eq!(feed.running(), 0);
         feed.dismiss(feed.visible(later)[0].id);
         assert!(feed.visible(later).is_empty());
+    }
+
+    // The 19 November 2026 review's RA-5: the same card said again piled up, one more each time.
+    #[test]
+    fn a_card_that_stays_said_again_is_one_card_the_newest() {
+        let feed = Feed::default();
+        for _ in 0..3 {
+            feed.start("Send to Bitwig", "").done_to_read("Sent", "but its bar isn't marked");
+            feed.notice("Some sounds look gone", "Is a drive unplugged?");
+        }
+        feed.start("Send to Bitwig", "").done_to_read("Sent", "another line");
+        // A failed job's card goes by itself, so two of the same are left to.
+        feed.start("Copy", "").failed("no room");
+        feed.start("Copy", "").failed("no room");
+        let now = feed.visible(Instant::now());
+        let said: Vec<(&str, &str)> = now.iter().map(|c| (c.title.as_str(), c.detail.as_str())).collect();
+        assert_eq!(
+            said,
+            [
+                ("Sent", "but its bar isn't marked"),
+                ("Some sounds look gone", "Is a drive unplugged?"),
+                ("Sent", "another line"),
+                ("Copy", "no room"),
+                ("Copy", "no room")
+            ]
+        );
+        // The ones kept are the newest: the two said last in the loop.
+        assert!(now[0].id > 4 && now[1].id > now[0].id, "{:?}", now.iter().map(|c| c.id).collect::<Vec<_>>());
+        // Said again after other cards, it is the newest card, at the end (the window shows the newest ones).
+        feed.notice("Some sounds look gone", "Is a drive unplugged?");
+        let now = feed.visible(Instant::now());
+        assert_eq!(now.len(), 5);
+        assert_eq!(now[4].title, "Some sounds look gone");
+        assert!(now.iter().all(|c| c.stays() == (c.title != "Copy")));
     }
 
     // Review finding AP-8: a told card was shown as a line in the rail, which has no ×, so it stayed all session.

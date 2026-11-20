@@ -791,6 +791,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     feed.start("Copying Bitwig template", "").failed("The template folder isn't there any more");
     mo_ui::cards::refresh(&app, &feed);
     shots.push(("cards.png".into(), capture(&window)));
+    // More cards that stay than fit: the newest show, and a line above counts the ones waiting behind them. The same
+    // card said twice is one card.
+    for part in ["Bass", "Keys", "Lead", "Pad", "Pluck"] {
+        feed.told(&format!("{part} sent to Bitwig"), "Bitwig has another project open, so its bar isn't marked.");
+    }
+    feed.told("Pluck sent to Bitwig", "Bitwig has another project open, so its bar isn't marked.");
+    mo_ui::cards::refresh(&app, &feed);
+    shots.push(("cards-more.png".into(), capture(&window)));
     // Gone from the feed itself, not only from the window: the rail's timer reads the feed again once the done one's
     // time is up, and would put them back in whichever shot comes a few seconds later.
     going.done("");
