@@ -388,3 +388,29 @@ fn patterns_with_no_playlist_follow_each_other_in_the_songs_own_bars() {
     assert_eq!(song(4), (4, vec![(0, 384), (384, 384)]));
     assert_eq!(song(3), (3, vec![(0, 288), (288, 288)]));
 }
+
+/// Whole-app review CN-4 (19 Nov 2026): a channel is only said to have notes panned or finely pitched when a pattern
+/// the song plays holds one.
+#[test]
+fn a_channel_with_a_panned_note_is_found_only_when_the_song_plays_it() {
+    let song = |placed: u16| {
+        let mut panned = note(0, 0, 96, 50, 100);
+        panned[20] = 0;
+        let bytes = Flp::new()
+            .ascii(199, "25.2.5.5319")
+            .word(64, 0)
+            .byte(21, 2)
+            .text(201, "3x Osc")
+            .text(203, "Bass")
+            .word(65, 1)
+            .data(224, &note(0, 0, 96, 48, 100))
+            .word(65, 2)
+            .data(224, &panned)
+            .word(99, 0)
+            .data(233, &playlist_item_25_on(0, 20480 + placed, 384, 499, false))
+            .build();
+        mo_formats::fl::song::read_song(&events::load(&bytes).expect("an FL project")).fine_notes
+    };
+    assert_eq!(song(2), [0]);
+    assert_eq!(song(1), [0u32; 0]);
+}

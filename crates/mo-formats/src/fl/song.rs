@@ -249,8 +249,8 @@ pub struct FlSong {
     pub tempo: f64,
     /// The song's time signature, as the Songs preview reads it (`arrangement::bars_and_markers`).
     pub signature: TimeSignature,
-    /// The channels with a note panned or finely pitched in the piano roll, which the notes don't keep
-    /// (`notes::moved_pitch_or_pan`).
+    /// The channels with a note panned or finely pitched in the piano roll, in a pattern the song plays; the notes
+    /// don't keep either (`notes::moved_pitch_or_pan`).
     pub fine_notes: Vec<u32>,
     pub channels: Vec<FlChannel>,
     pub inserts: Vec<FlInsert>,
@@ -536,11 +536,20 @@ fn place_clips(
     known: &HashSet<u32>,
     pattern_names: &HashMap<u32, String>,
     signature: TimeSignature,
-) -> (BTreeMap<u32, Vec<FlClip>>, bool) {
+) -> (BTreeMap<u32, Vec<FlClip>>, bool, BTreeSet<u32>) {
     let mut patterns: BTreeMap<u32, Vec<(u32, NoteEvent)>> = BTreeMap::new();
+    // Each pattern's channels with a note panned or finely pitched (see [`notes::moved_pitch_or_pan`]), and those of
+    // them in a pattern the song plays (anywhere in it: which part of a pattern a clip plays isn't looked at).
+    let mut fine_in: HashMap<u32, BTreeSet<u32>> = HashMap::new();
+    let mut fine: BTreeSet<u32> = BTreeSet::new();
     for &(pattern, e) in raw_notes {
-        let size = notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(known));
+        let version = (flp.major, flp.minor);
+        let size = notes::note_size(&e.data, version, e.offset.is_none(), Some(known));
         patterns.entry(pattern).or_default().extend(notes::decode(&e.data, size));
+        let moved: BTreeSet<u32> = notes::moved_pitch_or_pan(&e.data, size, version).collect();
+        if !moved.is_empty() {
+            fine_in.entry(pattern).or_default().extend(moved);
+        }
     }
     // Each pattern's notes by start (with their place in the file), so a clip finds its part of the pattern without
     // looking at every note: a drum pattern placed hundreds of times is read once.
@@ -565,6 +574,12 @@ fn place_clips(
         if cut || placed_notes > MAX_PLACED_NOTES {
             cut = true;
             return;
+        }
+        if !muted
+            && !on_muted_track
+            && let Some(channels) = fine_in.get(&pattern)
+        {
+            fine.extend(channels);
         }
         // In file order again: channels in the order their first note appears, as the C# reader groups them.
         let mut hits: Vec<usize> =
@@ -630,7 +645,7 @@ fn place_clips(
             at += length;
         }
     }
-    (clips, cut)
+    (clips, cut, fine)
 }
 
 /// Audio clips in the playlist (the first arrangement), by channel: items whose index is a channel. An audio clip's
@@ -1004,16 +1019,8 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         .collect();
     let known = seen_channels;
     let signature = super::arrangement::signature(flp);
-    let fine_notes: Vec<u32> = raw_notes
-        .iter()
-        .flat_map(|(_, e)| {
-            let size = notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(&known));
-            notes::moved_pitch_or_pan(&e.data, size)
-        })
-        .collect::<BTreeSet<u32>>()
-        .into_iter()
-        .collect();
-    let (mut clips, too_many) = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names, signature);
+    let (mut clips, too_many, fine_notes) =
+        place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names, signature);
     // Only patterns the song plays (all of them where there's no playlist) lose anything: muted placements, and those
     // on a muted track, don't play.
     let placed: HashSet<u32> = items
@@ -1103,7 +1110,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         ppq: flp.ppq,
         tempo: tempo.unwrap_or(140.0),
         signature,
-        fine_notes,
+        fine_notes: fine_notes.into_iter().collect(),
         channels,
         inserts,
         routes: insert_routes,

@@ -666,14 +666,12 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                 .audio_clips
                 .iter()
                 .map(|k| {
-                    let (fade_in, fade_out) = fades((k.fade_in, k.fade_out), beats(k.length), tempo);
                     PreviewClip {
                         name: c.name.clone(),
                         start: beats(k.start),
                         length: beats(k.length),
                         muted: k.muted || k.on_muted_track,
-                        fade_in,
-                        fade_out,
+                        // No fades: a convert doesn't carry FL's to Bitwig yet (the playlist view shows them).
                         audio: if c.sample.is_empty() {
                             Vec::new()
                         } else {

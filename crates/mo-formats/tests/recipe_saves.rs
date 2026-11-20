@@ -315,13 +315,13 @@ fn fl_stretch_modes_and_pitch() {
 #[test]
 fn fl_clip_fades() {
     // Step 14b: the clip's own fades, dragged by hand to about a 16th each (112 and 127 milliseconds at 128 BPM), in
-    // both views.
+    // the playlist view. The Bitwig view has none: a convert doesn't carry them yet (whole-app review CN-3).
     let views = arrangement::read(&save("fl", "MO Recipe 14b clip fades.flp")).unwrap();
     assert_eq!(views.len(), 2);
-    for view in &views {
-        let clip = &lane(view, LaneKind::Audio).clips[0];
-        assert!(near(clip.fade_in, 0.2396) && near(clip.fade_out, 0.2708), "{}: {clip:?}", view.view);
-    }
+    let clip = &lane(&views[0], LaneKind::Audio).clips[0];
+    assert!(near(clip.fade_in, 0.2396) && near(clip.fade_out, 0.2708), "{}: {clip:?}", views[0].view);
+    let clip = &lane(&views[1], LaneKind::Audio).clips[0];
+    assert_eq!((clip.fade_in, clip.fade_out), (0.0, 0.0), "{}", views[1].view);
     // A clip with none has none.
     let plain = fl("04 audio clip");
     let clip = &lane(&plain, LaneKind::Audio).clips[0];

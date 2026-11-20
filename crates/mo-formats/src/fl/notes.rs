@@ -103,15 +103,18 @@ pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
         .collect()
 }
 
-/// The channels with a note whose fine pitch or pan was moved in the piano roll (24-byte records: byte 16 is the fine
-/// pitch, 120 in tune; byte 20 the pan, 64 the middle). The app doesn't keep either yet, so a converter can say so.
-/// The two bytes are as PyFLP has them, and every recipe save's notes hold 120 and 64 there; no save with one moved
-/// has been read.
-pub fn moved_pitch_or_pan(data: &[u8], size: usize) -> impl Iterator<Item = u32> + '_ {
+/// The channels with a note the song keeps (not muted, not above MIDI's top key) whose fine pitch or pan was moved in
+/// the piano roll (24-byte records: byte 16 is the fine pitch, 120 in tune; byte 20 the pan, 64 the middle). The app
+/// doesn't keep either yet, so a converter can say so. Only asked of saves from FL 20 on (`version`): the two bytes
+/// are as PyFLP has them (worked out on FL 20 and 21 saves), and every FL 25 recipe save's notes hold 120 and 64
+/// there. What older 24-byte notes hold there hasn't been counted, and no save with one moved has been read.
+pub fn moved_pitch_or_pan(data: &[u8], size: usize, version: (u32, u32)) -> impl Iterator<Item = u32> + '_ {
     const IN_TUNE: u8 = 120;
     const MIDDLE: u8 = 64;
+    let asked = size == 24 && version.0 >= 20;
     data.chunks_exact(size.max(1))
-        .filter(move |r| size == 24 && (byte_at(r, 16) != IN_TUNE || byte_at(r, 20) != MIDDLE))
+        .filter(move |r| asked && !above_midi(r) && byte_at(r, 19) & 0x20 == 0)
+        .filter(|r| byte_at(r, 16) != IN_TUNE || byte_at(r, 20) != MIDDLE)
         .map(|r| u16_at(r, 6) as u32)
 }
 
@@ -139,9 +142,14 @@ mod tests {
         };
         let data: Vec<u8> =
             [as_saved(0, 120, 64), as_saved(1, 90, 64), as_saved(2, 120, 0), as_saved(3, 120, 64)].concat();
-        assert_eq!(moved_pitch_or_pan(&data, 24).collect::<Vec<_>>(), [1, 2]);
-        // Older, 20-byte notes have neither.
-        assert_eq!(moved_pitch_or_pan(&note(0, 0, 96, 60, 100, 20), 20).count(), 0);
+        assert_eq!(moved_pitch_or_pan(&data, 24, (25, 2)).collect::<Vec<_>>(), [1, 2]);
+        // A note muted in the piano roll doesn't play, so it doesn't count.
+        let mut muted = as_saved(4, 90, 0);
+        muted[19] = 0x20;
+        assert_eq!(moved_pitch_or_pan(&muted, 24, (25, 2)).count(), 0);
+        // Older, 20-byte notes have neither, and what a save from before FL 20 holds there isn't known.
+        assert_eq!(moved_pitch_or_pan(&note(0, 0, 96, 60, 100, 20), 20, (7, 0)).count(), 0);
+        assert_eq!(moved_pitch_or_pan(&data, 24, (12, 5)).count(), 0);
     }
 
     #[test]

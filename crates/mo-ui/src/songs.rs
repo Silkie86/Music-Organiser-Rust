@@ -1568,7 +1568,7 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
                 log::warning("Convert", &format!("{path}: {e}"));
                 // No screen picks a template yet, so the words say where the app looks for it.
                 let more = if e.starts_with("The Bitwig template") {
-                    " Save a project that has it over \"Music Organiser template.bwproject\" in the \"Bitwig \
+                    " Save a working template over \"Music Organiser template.bwproject\" in the \"Bitwig \
                      template\" folder of the app's data folder."
                 } else {
                     ""
