@@ -20,6 +20,7 @@ pub mod index;
 pub mod indexer;
 pub mod instruments;
 pub mod keys;
+mod made;
 pub mod member;
 pub mod playing;
 pub mod rejoin;

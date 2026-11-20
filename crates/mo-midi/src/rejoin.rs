@@ -16,9 +16,13 @@
 //! handing to a lead is two parts). Channels named the same with " #2" and so on that play the same sample or plugin
 //! are one voice first ([`voices`]): FL users copied a channel to add hits or a doubled layer.
 //!
-//! Everything here is from the song as the playlist lays it out ([`fl::song::extract_channels`]).
+//! Everything here is from the song as the playlist lays it out ([`fl::song::extract_channels`]), counted in the
+//! song's own bars: a bar of 3/4 is three beats here, so a phrase is from the bar FL's playlist shows it in, and four
+//! bars of a waltz are a tidy length. The notes of a phrase stay as every part in the library has them, in ticks from
+//! the bar line it starts on (where the song's bars are longer than 4/4's and it comes in late in its first bar, from
+//! whole bars of 4/4 after that line: [`anchor_of`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mo_formats::{MidiChannel, NoteEvent, case};
 
@@ -30,14 +34,19 @@ use crate::{BAR, PPQ};
 /// What joining makes of the same song: raised when that changes, so that FL songs (the only ones joined) are read
 /// again once, and nothing else is ([`crate::extract::project_version`]; rule 7). 2: a hand-over too long to join is
 /// no way on (its first stretch was listed again, as "joined" with one piece, and its second could start no phrase).
-pub const VERSION: u32 = 2;
+/// 3 (the 19 November 2026 review's MP-7 and MP-8): two layers that hand over to the same synth join the same way
+/// every time (which one won was left to chance each time the phrase came back, so the phrase was often lost); a
+/// hand-over two layers play in unison counts once each time it comes back; and bars are the song's own (a song in
+/// 3/4 or 6/8 was counted in bars of 4/4: the bar a phrase is from was wrong, and fewer phrases joined).
+pub const VERSION: u32 = 3;
 
 /// How many times two stretches must come back together, the same way, to be one phrase.
 pub const MIN_REPEATS: usize = 2;
 /// The score a pair of stretches needs to be joined ([`score`]).
 pub const JOIN_SCORE: i32 = 6;
-/// The most a phrase is joined to: longer, it's a section of the song, not a phrase (and the index would cut it into
-/// pieces again, [`analyser::MAX_BARS`]).
+/// The most a phrase is joined to, in the song's bars: longer, it's a section of the song, not a phrase. Nor is it
+/// longer than as many bars of 4/4, where the song's bars are longer than those: the index would cut it into pieces
+/// again ([`analyser::MAX_BARS`], [`fits`]).
 pub const MAX_JOINED_BARS: i64 = analyser::MAX_BARS;
 /// How far apart, in semitones, the middles of two pieces may be and still be one voice.
 pub const MAX_REGISTER_GAP: f64 = 12.0;
@@ -60,7 +69,8 @@ pub struct Voice {
 }
 
 /// A phrase joined from several voices' stretches: the names joined ("LegacyCell #3 + M1"), its notes from its first
-/// bar, where it first plays in the song (as a bar from 0), how many times it comes back, and its pieces.
+/// bar, where it first plays in the song (as one of the song's own bars, from 0), how many times it comes back, and
+/// its pieces.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Joined {
     pub name: String,
@@ -70,7 +80,8 @@ pub struct Joined {
     pub members: Vec<PhraseMember>,
 }
 
-/// A run of one voice's notes with no empty bar in it, in bars from the song's start (`to` is the bar after its last).
+/// A run of one voice's notes with no empty bar in it, in the song's own bars from its start (`to` is the bar after
+/// its last).
 #[derive(Clone, Debug)]
 struct Stretch {
     voice: usize,
@@ -79,7 +90,10 @@ struct Stretch {
     /// Ticks: its first note's start, and where its last note ends.
     first: i64,
     last_end: i64,
-    /// The notes moved to start in its first bar, and their fingerprint: a stretch that comes back the same way.
+    /// The tick its notes are counted from where it lists on its own ([`anchor_of`]).
+    anchor: i64,
+    /// The notes moved to start in its first bar (from `anchor`), and their fingerprint: a stretch that comes back
+    /// the same way.
     hash: String,
     notes: Vec<NoteEvent>,
     middle: f64,
@@ -155,22 +169,22 @@ fn same_notes(a: &[NoteEvent], b: &[NoteEvent]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.start == y.start && x.key == y.key && x.length == y.length)
 }
 
-/// A voice's notes cut wherever a whole bar goes by with no note sounding.
-fn stretches(at: usize, v: &Voice) -> Vec<Stretch> {
+/// A voice's notes cut wherever a whole bar of the song (`bar` ticks) goes by with no note sounding.
+fn stretches(at: usize, v: &Voice, bar: i64) -> Vec<Stretch> {
     let mut out = Vec::new();
     let mut run: Vec<NoteEvent> = Vec::new();
     let mut sounding_until = i64::MIN;
     for n in &v.notes {
         // The next note starts after a bar that has nothing in it.
-        let empty_bar = sounding_until != i64::MIN && n.start.div_euclid(BAR) > sounding_until.div_euclid(BAR) + 1;
+        let empty_bar = sounding_until != i64::MIN && n.start.div_euclid(bar) > sounding_until.div_euclid(bar) + 1;
         if empty_bar && !run.is_empty() {
-            out.push(stretch_of(at, std::mem::take(&mut run)));
+            out.push(stretch_of(at, std::mem::take(&mut run), bar));
         }
         sounding_until = sounding_until.max(n.start + n.length - 1);
         run.push(*n);
     }
     if !run.is_empty() {
-        out.push(stretch_of(at, run));
+        out.push(stretch_of(at, run, bar));
     }
     out
 }
@@ -192,12 +206,22 @@ fn sounding_together(notes: &[NoteEvent]) -> usize {
         .count()
 }
 
-fn stretch_of(voice: usize, notes: Vec<NoteEvent>) -> Stretch {
+/// The tick a stretch's notes are counted from where it lists on its own: the song's bar line it starts on (its bar
+/// `from`, of `bar` ticks). Where the song's bars are longer than 4/4's and its first note comes a bar of 4/4 or more
+/// after that line, it's that many whole bars of 4/4 on, as every part in the library starts in its first bar of 4/4
+/// ([`analyser::normalise`]).
+fn anchor_of(first: i64, from: i64, bar: i64) -> i64 {
+    let line = from * bar;
+    line + (first - line).div_euclid(BAR) * BAR
+}
+
+fn stretch_of(voice: usize, notes: Vec<NoteEvent>, bar: i64) -> Stretch {
     let first = notes.first().map_or(0, |n| n.start);
     let last_end = notes.iter().map(|n| n.start + n.length).max().unwrap_or(first);
-    let from = first.div_euclid(BAR);
-    let to = (last_end - 1).div_euclid(BAR) + 1;
-    let moved: Vec<NoteEvent> = notes.iter().map(|n| NoteEvent { start: n.start - from * BAR, ..*n }).collect();
+    let from = first.div_euclid(bar);
+    let to = (last_end - 1).div_euclid(bar) + 1;
+    let anchor = anchor_of(first, from, bar);
+    let moved: Vec<NoteEvent> = notes.iter().map(|n| NoteEvent { start: n.start - anchor, ..*n }).collect();
     let middle = notes.iter().map(|n| f64::from(n.key)).sum::<f64>() / notes.len().max(1) as f64;
     let lowest = notes.iter().map(|n| n.key).min().unwrap_or(0);
     let highest = notes.iter().map(|n| n.key).max().unwrap_or(0);
@@ -211,6 +235,7 @@ fn stretch_of(voice: usize, notes: Vec<NoteEvent>) -> Stretch {
         to,
         first,
         last_end,
+        anchor,
         hash: analyser::hash_of(&moved),
         notes: moved,
         middle,
@@ -239,6 +264,62 @@ fn plays_in(stretches: &[&Stretch], from: i64, to: i64) -> bool {
 
 /// Each time one stretch hands to another the same way, as places in the song's stretches.
 type Pairs = Vec<(usize, usize)>;
+
+/// How many times a hand-over comes back: once for each place in the song it starts at. Two layers playing the same
+/// notes under two names both hand over there (or are both handed to), which is the phrase once, not twice.
+fn times(pairs: &[(usize, usize)], all: &[Stretch]) -> usize {
+    let mut places: Vec<i64> = pairs.iter().filter_map(|&(i, _)| all.get(i)).map(|a| a.first).collect();
+    places.sort_unstable();
+    places.dedup();
+    places.len()
+}
+
+/// The largest number both divide by.
+const fn gcd(a: i64, b: i64) -> i64 {
+    let (mut a, mut b) = (a.abs(), b.abs());
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// The hash a stretch's notes have where the page lists them on their own, as one of the song's patterns, when they
+/// are one: `listed` are the hashes of the song's own parts.
+///
+/// A pattern lists from the bar of 4/4 its first note is in, counted from the pattern's own start. In 4/4 that's the
+/// bar line of the song the stretch is counted from (a clip starts on a bar line), so its hash here is the one. In
+/// any other time it needn't be: a waltz's clip on the song's bar 18 starts three beats into a bar of 4/4, and a
+/// pattern that rests for its first bar lists with that rest. So the stretch is tried from each beat of a bar of
+/// 4/4 that a clip on one of the song's bar lines can put it on (four of them in 3/4), and the first that is one of
+/// the song's parts is it. None is: it isn't a pattern on its own (two clips back to back, or a clip cut short), and
+/// keeps the hash it has from the song's bar line, which links it to nothing.
+fn listed_hash(s: &Stretch, bar: i64, listed: &HashSet<String>) -> String {
+    let step = gcd(bar, BAR).max(1);
+    if step == BAR || listed.contains(&s.hash) {
+        return s.hash.clone();
+    }
+    // Where its first note is now, in its bar of 4/4, and where a clip `back` of the song's bars earlier puts it.
+    let now = s.first - s.anchor;
+    (1..BAR / step)
+        .take(MOST_PLACES)
+        .map(|back| (now + back * bar).rem_euclid(BAR) - now)
+        .map(|by| {
+            analyser::hash_of(&s.notes.iter().map(|n| NoteEvent { start: n.start + by, ..*n }).collect::<Vec<_>>())
+        })
+        .find(|hash| listed.contains(hash))
+        .unwrap_or_else(|| s.hash.clone())
+}
+
+/// The most places in a bar of 4/4 a stretch is tried at ([`listed_hash`]): every sixteenth, which is more than any
+/// time signature a song can have asks for.
+const MOST_PLACES: usize = 16;
+
+/// Whether the stretches from `first` to `last` are no more than is joined to one phrase ([`MAX_JOINED_BARS`]): of
+/// the song's bars (`bar` ticks each), and of bars of 4/4 from where the phrase's notes start, so the index never
+/// cuts it again.
+fn fits(first: &Stretch, last: &Stretch, bar: i64) -> bool {
+    last.to - first.from <= MAX_JOINED_BARS && last.to * bar - first.anchor <= MAX_JOINED_BARS * BAR
+}
 
 /// Whether two stretches' ranges overlap, or come within 3 semitones of each other.
 fn ranges_meet(a: &Stretch, b: &Stretch) -> bool {
@@ -294,9 +375,19 @@ fn score(a: &Stretch, b: &Stretch, repeats: usize) -> i32 {
 
 /// The phrases the song spreads over several voices, each once (with how often it comes back), first in the song
 /// first. Nothing is joined that doesn't hand over, come back together and sound like one voice ([`score`]).
-pub fn join(voices: &[Voice]) -> Vec<Joined> {
+///
+/// `bar` is one of the song's own bars in ticks at [`PPQ`] ([`BAR`] in 4/4, three beats in 3/4 or 6/8): bars are
+/// counted in it, so a phrase's first bar is the one FL's playlist shows (the 19 November 2026 review's MP-8: a
+/// song in 3/4 was counted in bars of 4/4, so its bar 17 was called bar 13, and its 8-bar phrases, 6 bars of 4/4,
+/// never got the point for a tidy length). A song that changes its time signature part way is counted in the one it
+/// starts with all through, as it is wherever else it's read ([`fl::arrangement::bars_and_markers`]).
+///
+/// `listed` are the hashes of the song's own parts, as the page lists its patterns: a piece of a phrase that is one
+/// of them is known by that hash, so the pattern's card can show the whole phrase ([`listed_hash`]).
+pub fn join(voices: &[Voice], bar: i64, listed: &HashSet<String>) -> Vec<Joined> {
+    let bar = bar.max(1);
     let all: Vec<Stretch> =
-        voices.iter().enumerate().filter(|(_, v)| !v.drums).flat_map(|(at, v)| stretches(at, v)).collect();
+        voices.iter().enumerate().filter(|(_, v)| !v.drums).flat_map(|(at, v)| stretches(at, v, bar)).collect();
     // Every hand-over, by what the two stretches play: the same hand-over again is the phrase coming back.
     // Each voice's stretches, and the stretches starting in each bar: a song has thousands, so only the ones that
     // could take over are looked at.
@@ -328,20 +419,25 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
     // joins the same way (a map has no order).
     let mut strong: Vec<(i32, (u8, u8), Pairs)> = handovers
         .into_values()
-        .filter(|pairs| pairs.len() >= MIN_REPEATS)
         .filter_map(|pairs| {
+            let times = times(&pairs, &all);
             let &(i, j) = pairs.first()?;
             let (a, b) = (all.get(i)?, all.get(j)?);
-            Some((score(a, b, pairs.len()), (unlike(a, b), step(a, b)), pairs))
+            (times >= MIN_REPEATS).then(|| (score(a, b, times), (unlike(a, b), step(a, b)), pairs))
         })
         .filter(|(score, ..)| *score >= JOIN_SCORE)
         .collect();
     strong.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2)));
+    // One way on from each stretch: the strongest keeps it. `rank` is how strong that way on is, as its link's
+    // place in `strong`.
     let mut next: HashMap<usize, usize> = HashMap::new();
-    for (.., pairs) in &strong {
+    let mut rank: HashMap<usize, usize> = HashMap::new();
+    for (place, (.., pairs)) in strong.iter().enumerate() {
         for &(i, j) in pairs {
-            // One way on from each stretch: the strongest keeps it.
-            next.entry(i).or_insert(j);
+            if let std::collections::hash_map::Entry::Vacant(way) = next.entry(i) {
+                way.insert(j);
+                rank.insert(i, place);
+            }
         }
     }
     // A hand-over whose two stretches are more than is joined is no way on: the first stops there (alone it's one
@@ -349,17 +445,25 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
     // second is free to start a phrase with what it hands to. So every chain below is two pieces or more. The first
     // doesn't take its next strongest way on instead: its strongest is where the tune goes, and a tune that goes on
     // for longer than a phrase isn't joined to something else beside it (a pad that came in at the same bar).
-    next.retain(|i, j| all.get(*i).zip(all.get(*j)).is_some_and(|(a, b)| b.to - a.from <= MAX_JOINED_BARS));
-    let taken: std::collections::HashSet<usize> = next.values().copied().collect();
+    next.retain(|i, j| all.get(*i).zip(all.get(*j)).is_some_and(|(a, b)| fits(a, b, bar)));
+    let taken: HashSet<usize> = next.values().copied().collect();
     let starts_a_chain = |i: &usize| !taken.contains(i);
+    // The stretches that start a phrase, first in the song first. Two that start on the same tick (a lead and a layer
+    // of it on another synth, or a harmony over it) and hand to the same stretch make two chains over the same
+    // bars, and only the first of them is kept below: the one with the stronger way on, then the first of the song's
+    // channels. So the same layer wins each time the phrase comes back, and its repeats count together. (The 19
+    // November 2026 review's MP-7: they came in the order a map gave its keys, another each time. Each time the
+    // phrase came back another layer could win, so neither came back twice, and the phrase was lost: about every
+    // second reading of a song with a lead and its harmony handing to one synth.) A layer that starts even a tick
+    // before the other is first, as it always was, whichever has the stronger way on: that never was left to chance.
     let mut heads: Vec<usize> = next.keys().copied().filter(starts_a_chain).collect();
-    heads.sort_by_key(|&i| all.get(i).map_or(0, |s| s.first));
+    heads.sort_by_key(|&i| (all.get(i).map_or(0, |s| s.first), rank.get(&i).copied().unwrap_or(usize::MAX), i));
     let mut chains: Vec<Vec<usize>> = Vec::new();
     for head in heads {
         let mut chain = vec![head];
         let mut at = head;
         while let Some(&j) = next.get(&at) {
-            let too_long = all.get(j).zip(all.get(head)).is_some_and(|(s, h)| s.to - h.from > MAX_JOINED_BARS);
+            let too_long = all.get(j).zip(all.get(head)).is_some_and(|(s, h)| !fits(h, s, bar));
             if chain.contains(&j) || too_long || chain.len() >= MAX_PIECES {
                 break;
             }
@@ -397,15 +501,17 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
     let mut by_hash: HashMap<String, usize> = HashMap::new();
     for chain in kept {
         let Some(first) = chain.first().and_then(|&i| all.get(i)) else { continue };
-        let origin = first.from * BAR;
+        let origin = first.anchor;
         let mut notes = Vec::new();
         let mut members = Vec::new();
         let mut names: Vec<&str> = Vec::new();
         for s in chain.iter().filter_map(|&i| all.get(i)) {
-            let start = s.from * BAR - origin;
+            let start = s.anchor - origin;
             notes.extend(s.notes.iter().map(|n| NoteEvent { start: n.start + start, ..*n }));
-            // As the piece lists on its own: from its first bar.
-            members.push(PhraseMember { hash: s.hash.clone(), start, length: (s.to - s.from) * BAR });
+            // The piece by the hash it lists under on its own; where it sits in the phrase, from the bar line it's
+            // counted from here to the bar line of the song after its last note.
+            let hash = listed_hash(s, bar, listed);
+            members.push(PhraseMember { hash, start, length: s.to * bar - s.anchor });
             if let Some(v) = voices.get(s.voice).filter(|v| !names.contains(&v.name.as_str())) {
                 names.push(&v.name);
             }
@@ -457,6 +563,16 @@ mod tests {
         }
     }
 
+    /// What a song in 4/4 with these channels joins.
+    fn in_four(channels: &[MidiChannel]) -> Vec<Joined> {
+        join(&voices(channels), BAR, &HashSet::new())
+    }
+
+    /// What a song with these voices joins, none of its pieces one of the song's patterns.
+    fn join_in(voices: &[Voice], bar: i64) -> Vec<Joined> {
+        join(voices, bar, &HashSet::new())
+    }
+
     /// A tune of `bars` bars from `from`, a note each beat, climbing from `low`.
     fn tune(from: i64, bars: i64, low: u8) -> Vec<NoteEvent> {
         (0..bars).flat_map(|b| (0..4).map(move |beat| note(from + b, beat, low + (beat as u8) * 2))).collect()
@@ -498,8 +614,7 @@ mod tests {
 
     #[test]
     fn a_lead_handed_between_synths_and_a_pickup_with_its_answer_join() {
-        let voices = voices(&song());
-        let joined = join(&voices);
+        let joined = in_four(&song());
         let names: Vec<&str> = joined.iter().map(|j| j.name.as_str()).collect();
         assert_eq!(names, ["Pickup + Answer", "Synth A + Synth B"]);
         let fill = &joined[0];
@@ -538,11 +653,11 @@ mod tests {
                 })
             }));
         }
-        let joined = join(&voices(&[
+        let joined = in_four(&[
             channel("Cell #3", "LegacyCell", first),
             channel("M1", "M1", lead),
             channel("Pad #2", "Wavestation", pad),
-        ]));
+        ]);
         assert_eq!(joined.iter().map(|j| j.name.as_str()).collect::<Vec<_>>(), ["Cell #3 + M1"]);
         assert_eq!(joined[0].repeats, 3);
     }
@@ -585,7 +700,7 @@ mod tests {
                 b.extend(tune(cycle * 16 + bar + 1, 1, 62));
             }
         }
-        let joined = join(&voices(&[channel("A", "Sytrus", a), channel("B", "Harmor", b)]));
+        let joined = in_four(&[channel("A", "Sytrus", a), channel("B", "Harmor", b)]);
         assert!(joined.iter().all(|j| j.members.len() <= MAX_PIECES));
         assert!(joined.iter().all(|j| j.repeats >= MIN_REPEATS));
         // No two of them over the same bars of the song.
@@ -603,17 +718,17 @@ mod tests {
             bass.extend(tune(cycle * 8, 8, 36));
             lead.extend(tune(cycle * 8, 8, 72));
         }
-        assert!(join(&voices(&[channel("Bass", "Sytrus", bass), channel("Lead", "Harmor", lead)])).is_empty());
+        assert!(in_four(&[channel("Bass", "Sytrus", bass), channel("Lead", "Harmor", lead)]).is_empty());
         // A hand-over heard once is two parts that happen to meet.
         let once = [channel("A", "Sytrus", tune(0, 8, 60)), channel("B", "Harmor", tune(8, 8, 64))];
-        assert!(join(&voices(&once)).is_empty());
+        assert!(in_four(&once).is_empty());
         // Far apart registers: a bass handing to a lead, again and again, stays two parts.
         let (mut low, mut high) = (Vec::new(), Vec::new());
         for cycle in 0..3 {
             low.extend(tune(cycle * 16, 8, 28));
             high.extend(tune(cycle * 16 + 8, 8, 76));
         }
-        assert!(join(&voices(&[channel("Low", "Sytrus", low), channel("High", "Harmor", high)])).is_empty());
+        assert!(in_four(&[channel("Low", "Sytrus", low), channel("High", "Harmor", high)]).is_empty());
         // Drums answering a lead never join it.
         let (mut lead, mut fill) = (Vec::new(), Vec::new());
         for cycle in 0..3 {
@@ -621,7 +736,7 @@ mod tests {
             fill.extend(tune(cycle * 8 + 7, 1, 48));
         }
         let drums = [channel("Lead", "Sytrus", lead), channel("Snare fill", "Sampler", fill)];
-        assert!(join(&voices(&drums)).is_empty());
+        assert!(in_four(&drums).is_empty());
         // Nor do one-shot samples with any name ("01 #3"), however neatly they take turns.
         let (mut a, mut b) = (Vec::new(), Vec::new());
         for cycle in 0..4 {
@@ -632,7 +747,7 @@ mod tests {
             sample_path: format!(r"C:\Samples\{name}.wav"),
             ..channel(name, "", notes)
         };
-        assert!(join(&voices(&[shots("01", a), shots("01 #3", b)])).is_empty());
+        assert!(in_four(&[shots("01", a), shots("01 #3", b)]).is_empty());
     }
 
     /// The 14 November 2026 review's MI-10: a lead's 12 bars answered by 8 on another synth, three times over. The
@@ -651,7 +766,7 @@ mod tests {
                 }
             }
             let (a, b) = (channel("Lead A", "Sytrus", a), channel("Lead B", "Harmor", b));
-            join(&voices(&[a, b, channel("Lead C", "3x Osc", c)]))
+            in_four(&[a, b, channel("Lead C", "3x Osc", c)])
         };
         let names = |joined: &[Joined]| joined.iter().map(|j| j.name.clone()).collect::<Vec<_>>();
         let shape = |j: &Joined| (j.members.len(), j.repeats, analyser::bars_of(&j.notes));
@@ -666,6 +781,204 @@ mod tests {
         assert_eq!(names(&joined), ["Lead B + Lead C"]);
         assert_eq!((shape(&joined[0]), joined[0].first_bar), ((2, 3, 16), 12));
         // A joined phrase is always two pieces or more, in every song these tests make.
-        assert!(join(&voices(&song())).iter().all(|j| j.members.len() >= 2));
+        assert!(in_four(&song()).iter().all(|j| j.members.len() >= 2));
+    }
+
+    /// The 19 November 2026 review's MP-7: a lead with a layer of it on another synth, both handing to the same
+    /// third synth. Which layer's chain was kept was left to the order a map gave its keys, another each time the
+    /// phrase came back: about every second reading neither came back twice, and the phrase was lost.
+    #[test]
+    fn two_layers_that_hand_to_one_synth_join_the_same_way_every_time() {
+        // Eight bars on two synths at once, then eight on a third; twice. `second` is how far up the layer plays.
+        let layered = |second: u8| {
+            let (mut lead, mut layer, mut answer) = (Vec::new(), Vec::new(), Vec::new());
+            for cycle in 0..2 {
+                lead.extend(tune(cycle * 24, 8, 60));
+                layer.extend(tune(cycle * 24, 8, 60 + second));
+                answer.extend(tune(cycle * 24 + 8, 8, 62));
+            }
+            // The layer is the first channel of the song: it isn't the order of the channels that picks the lead.
+            [channel("Layer", "Harmor", layer), channel("Lead", "Sytrus", lead), channel("Answer", "3x Osc", answer)]
+        };
+        // Each call's maps come in an order of their own, so 40 calls are every order there is, many times over.
+        for _ in 0..40 {
+            // A harmony a third up: the answer starts inside the lead's range and two semitones under the layer's,
+            // so it's the lead the tune steps on from most smoothly.
+            let joined = in_four(&layered(4));
+            assert_eq!(joined.iter().map(|j| (j.name.as_str(), j.repeats)).collect::<Vec<_>>(), [("Lead + Answer", 2)]);
+            assert_eq!((joined[0].first_bar, analyser::bars_of(&joined[0].notes)), (0, 16));
+            // The same notes under another name: nothing tells the two apart, so the song's first channel has it.
+            let joined = in_four(&layered(0));
+            assert_eq!(
+                joined.iter().map(|j| (j.name.as_str(), j.repeats)).collect::<Vec<_>>(),
+                [("Layer + Answer", 2)]
+            );
+        }
+    }
+
+    /// Two layers in unison both hand over each time the phrase comes back: that's the phrase once, not twice.
+    #[test]
+    fn a_hand_over_two_layers_play_in_unison_counts_once_each_time_it_comes_back() {
+        // Three bars answered by three, an untidy six: coming back twice isn't enough to join them (a score of 5).
+        let song = |times: i64, layered: bool| {
+            let (mut lead, mut answer) = (Vec::new(), Vec::new());
+            for cycle in 0..times {
+                lead.extend(tune(cycle * 16, 3, 60));
+                answer.extend(tune(cycle * 16 + 3, 3, 62));
+            }
+            let layer = if layered { lead.clone() } else { Vec::new() };
+            in_four(&[
+                channel("Lead", "Sytrus", lead),
+                channel("Layer", "Harmor", layer),
+                channel("Answer", "M1", answer),
+            ])
+        };
+        assert!(song(2, false).is_empty());
+        // A layer of the lead doubled the count: twice read as four times, and joined.
+        assert!(song(2, true).is_empty());
+        // Three times is enough, with a layer or without, and it's said as three.
+        for layered in [false, true] {
+            let joined = song(3, layered);
+            assert_eq!(joined.iter().map(|j| (j.name.as_str(), j.repeats)).collect::<Vec<_>>(), [("Lead + Answer", 3)]);
+        }
+    }
+
+    /// A note on each beat of `bars` bars of `beats` beats each, from the song's bar `from`, climbing from `low`.
+    fn tune_in(beats: i64, from: i64, bars: i64, low: u8) -> Vec<NoteEvent> {
+        (0..bars * beats)
+            .map(|at| NoteEvent { start: (from * beats + at) * PPQ, ..note(0, 0, low + (at % beats) as u8 * 2) })
+            .collect()
+    }
+
+    /// The 19 November 2026 review's MP-8: a waltz's lead, eight bars on one synth and eight on another from the
+    /// song's bar 17, twice. Counted in bars of 4/4 that was "bar 13", and its 16 bars were an untidy 12, so with
+    /// only two times round it never joined.
+    #[test]
+    fn a_song_in_three_four_is_counted_in_its_own_bars() {
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for cycle in 0..2 {
+            a.extend(tune_in(3, 16 + cycle * 32, 8, 60));
+            b.extend(tune_in(3, 24 + cycle * 32, 8, 62));
+        }
+        let waltz = voices(&[channel("Synth A", "Sytrus", a), channel("Synth B", "3x Osc", b)]);
+        let joined = join_in(&waltz, 3 * PPQ);
+        assert_eq!(joined.iter().map(|j| j.name.as_str()).collect::<Vec<_>>(), ["Synth A + Synth B"]);
+        let lead = &joined[0];
+        assert_eq!((lead.first_bar, lead.repeats, lead.notes.len()), (16, 2, 48));
+        assert_eq!(crate::extract::joined_clip(lead), "From bar 17 of the song, twice");
+        // Its notes are as every part in the library has them: ticks from the bar line it starts on, the song's own
+        // here (12 bars of 4/4 long). Each piece is where it sits in them, by the song's bars.
+        assert_eq!((lead.notes[0].start, analyser::bars_of(&lead.notes)), (0, 12));
+        let places: Vec<(i64, i64)> = lead.members.iter().map(|m| (m.start, m.length)).collect();
+        assert_eq!(places, [(0, 8 * 3 * PPQ), (8 * 3 * PPQ, 8 * 3 * PPQ)]);
+        // Each piece is known by the hash its notes have from their own first bar, as the page lists it.
+        assert_eq!(lead.members[0].hash, analyser::hash_of(&tune_in(3, 0, 8, 60)));
+        assert_eq!(lead.members[1].hash, analyser::hash_of(&tune_in(3, 0, 8, 62)));
+        // As it was counted: nothing joined.
+        assert!(join_in(&waltz, BAR).is_empty());
+
+        // A pickup and its answer every five bars of the waltz (15 beats): in bars of 4/4 they fell on another beat
+        // of the bar each of the four times, so they never came back "the same way" at all.
+        let (mut pickup, mut answer) = (Vec::new(), Vec::new());
+        for five in 0..4 {
+            pickup.push(NoteEvent { start: ((five * 5 + 3) * 3 + 2) * PPQ, ..note(0, 0, 67) });
+            answer.extend(tune_in(3, five * 5 + 4, 1, 70));
+        }
+        let fills = voices(&[channel("Pickup", "TS404", pickup), channel("Answer", "SimSynth", answer)]);
+        let joined = join_in(&fills, 3 * PPQ);
+        assert_eq!(
+            joined.iter().map(|j| (j.name.as_str(), j.first_bar, j.repeats)).collect::<Vec<_>>(),
+            [("Pickup + Answer", 3, 4)]
+        );
+        assert!(join_in(&fills, BAR).is_empty());
+    }
+
+    /// A piece of a phrase that is one of the song's patterns is known by the hash that pattern lists under, on
+    /// whichever of the song's bars its clip sits. In a waltz that isn't always the hash it has from the song's bar
+    /// line: a pattern that rests for its first bar lists with that rest in front.
+    #[test]
+    fn a_piece_that_is_one_of_the_songs_patterns_is_known_by_the_hash_it_lists_under() {
+        // Synth A's pattern rests for a bar, then plays seven; Synth B's plays eight. Three times, 32 bars apart.
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for cycle in 0..3 {
+            a.extend(tune_in(3, 17 + cycle * 32, 7, 60));
+            b.extend(tune_in(3, 24 + cycle * 32, 8, 62));
+        }
+        let waltz = voices(&[channel("Synth A", "Sytrus", a), channel("Synth B", "3x Osc", b)]);
+        // As the page lists the two patterns: from the bar of 4/4 each one's first note is in.
+        let (rests_first, answer) =
+            (analyser::hash_of(&tune_in(3, 1, 7, 60)), analyser::hash_of(&tune_in(3, 0, 8, 62)));
+        let listed = HashSet::from([rests_first.clone(), answer.clone()]);
+        let joined = join(&waltz, 3 * PPQ, &listed);
+        assert_eq!(
+            joined.iter().map(|j| (j.name.as_str(), j.first_bar, j.repeats)).collect::<Vec<_>>(),
+            [("Synth A + Synth B", 17, 3)]
+        );
+        assert_eq!(joined[0].members.iter().map(|m| m.hash.as_str()).collect::<Vec<_>>(), [&rests_first, &answer]);
+        // Where each piece sits in the phrase is by the song's bars all the same.
+        let places: Vec<(i64, i64)> = joined[0].members.iter().map(|m| (m.start, m.length)).collect();
+        assert_eq!(places, [(0, 7 * 3 * PPQ), (7 * 3 * PPQ, 8 * 3 * PPQ)]);
+        // A piece that is none of the song's patterns keeps the hash it has from the song's bar line.
+        let alone = join_in(&waltz, 3 * PPQ);
+        assert_eq!(alone[0].members[0].hash, analyser::hash_of(&tune_in(3, 0, 7, 60)));
+        assert_eq!((&alone[0].notes, alone[0].repeats), (&joined[0].notes, 3));
+        // In 4/4 a clip's bar line is the pattern's own: only the one hash is ever tried.
+        let bar_late = analyser::hash_of(&[note(0, 1, 60)]);
+        let on_the_beat = stretch_of(0, vec![note(5, 0, 60)], BAR);
+        assert_eq!(listed_hash(&on_the_beat, BAR, &HashSet::from([bar_late.clone()])), on_the_beat.hash);
+        // In 3/4 the same note on a bar line of the song can be a pattern's note on its second beat.
+        let in_three = stretch_of(0, vec![NoteEvent { start: 7 * 3 * PPQ, ..note(0, 0, 60) }], 3 * PPQ);
+        assert_eq!(listed_hash(&in_three, 3 * PPQ, &HashSet::from([bar_late.clone()])), bar_late);
+    }
+
+    /// A hand-over counts once for each place in the song it starts at: layers starting together are one time, the
+    /// same figure twice in one long bar is two.
+    #[test]
+    fn a_hand_over_counts_once_for_each_place_it_starts_at() {
+        let six_four = 6 * PPQ;
+        let at =
+            |voice: usize, tick: i64| stretch_of(voice, vec![NoteEvent { start: tick, ..note(0, 0, 60) }], six_four);
+        // Two layers on beat 1 of the first bar, the same note on its beat 5, and again six bars on.
+        let all = [at(0, 0), at(1, 0), at(2, 4 * PPQ), at(3, 6 * six_four)];
+        assert!(all.iter().all(|s| s.hash == all[0].hash));
+        assert_eq!(all.iter().map(|s| s.from).collect::<Vec<_>>(), [0, 0, 0, 6]);
+        assert_eq!(times(&[(0, 9), (1, 9)], &all), 1);
+        assert_eq!(times(&[(0, 9), (2, 9)], &all), 2);
+        assert_eq!(times(&[(0, 9), (1, 9), (2, 9), (3, 9)], &all), 3);
+    }
+
+    /// Where the song's bars are longer than 4/4's, a phrase is still no longer than the index keeps whole (16 bars
+    /// of 4/4), and its notes still start in their first bar of 4/4, as every part in the library does.
+    #[test]
+    fn a_song_with_long_bars_joins_no_more_than_the_index_keeps_whole() {
+        let five_four = 5 * PPQ;
+        let handed = |bars: i64, pickup: bool| {
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            for cycle in 0..3 {
+                let mut first = tune_in(5, cycle * 40, bars, 60);
+                if pickup {
+                    // It comes in on the fifth beat of its first bar: a bar of 4/4 after the song's bar line.
+                    first.retain(|n| n.start >= cycle * 40 * five_four + 4 * PPQ);
+                }
+                a.extend(first);
+                b.extend(tune_in(5, cycle * 40 + bars, bars, 62));
+            }
+            join_in(&voices(&[channel("Synth A", "Sytrus", a), channel("Synth B", "3x Osc", b)]), five_four)
+        };
+        // 8 + 8 bars of 5/4 are 20 bars of 4/4: a section, which the index would cut in pieces again.
+        assert!(handed(8, false).is_empty());
+        // 4 + 4 are 10: one phrase.
+        let joined = handed(4, false);
+        assert_eq!(joined.iter().map(|j| (j.name.as_str(), j.repeats)).collect::<Vec<_>>(), [("Synth A + Synth B", 3)]);
+        assert_eq!((joined[0].notes[0].start, analyser::bars_of(&joined[0].notes)), (0, 10));
+        assert_eq!(analyser::split(&joined[0].notes, None).len(), 1);
+        // With the pickup the phrase's notes start a bar of 4/4 after the song's bar line, and the second piece
+        // sits four of the song's bars after that line.
+        let joined = handed(4, true);
+        assert_eq!(joined.len(), 1);
+        assert_eq!((joined[0].first_bar, joined[0].notes[0].start), (0, 0));
+        assert_eq!(joined[0].members.iter().map(|m| m.start).collect::<Vec<_>>(), [0, 4 * five_four - BAR]);
+        assert_eq!(joined[0].members[0].length, 4 * five_four - BAR);
+        assert_eq!(analyser::split(&joined[0].notes, None).len(), 1);
     }
 }

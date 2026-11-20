@@ -225,8 +225,17 @@ impl Job {
 
     /// How far it is, 0 to 1, with an optional new detail line. Passed on at most every 250 ms.
     pub fn progress(&self, fraction: f32, detail: Option<&str>) {
+        // The card's new numbers and the mark that they're not shown yet go in under one lock: under two, a redraw
+        // between them took the mark and showed the old numbers, which then stayed until the job's next report (the
+        // 19 November 2026 review's RA-9).
         let due = {
             let mut inner = self.feed.lock();
+            if let Some(c) = inner.cards.iter_mut().find(|c| c.id == self.id) {
+                c.progress = Some(fraction.clamp(0.0, 1.0));
+                if let Some(d) = detail {
+                    c.detail = d.to_owned();
+                }
+            }
             let now = Instant::now();
             let due = now.duration_since(inner.last_progress) >= PROGRESS_EVERY;
             if due {
@@ -236,12 +245,6 @@ impl Job {
             }
             due
         };
-        self.feed.update(self.id, |c| {
-            c.progress = Some(fraction.clamp(0.0, 1.0));
-            if let Some(d) = detail {
-                c.detail = d.to_owned();
-            }
-        });
         if due {
             self.feed.changed();
         }
@@ -267,6 +270,15 @@ impl Job {
     pub fn done_to_read(mut self, title: &str, detail: &str) {
         self.retitle(title);
         self.end(State::Done, detail);
+        self.feed.update(self.id, |c| c.ended = None);
+        self.feed.changed();
+    }
+
+    /// Failed, leaving something set that needs a look: the card stays until its × takes it away, as
+    /// [`Feed::notice`]'s does, where a failed job's goes after [`FAILED_STAYS`].
+    pub fn failed_to_read(mut self, title: &str, why: &str) {
+        self.retitle(title);
+        self.end(State::Failed, why);
         self.feed.update(self.id, |c| c.ended = None);
         self.feed.changed();
     }
@@ -436,11 +448,14 @@ mod tests {
         feed.told("Put the old app's databases away", "In Old databases");
         feed.notice("Using the old copy of your data", "The drive is missing");
         feed.start("Sending Keys", "").done_to_read("Keys is in Bitwig, but its bar isn't marked", "Why");
+        feed.start("Putting Keys in", "").failed_to_read("Keys didn't go in", "Why");
         let cards = feed.visible(Instant::now() + FAILED_STAYS);
-        let kept = cards.iter().find(|c| c.title.starts_with("Keys")).unwrap();
+        let kept = cards.iter().find(|c| c.title.starts_with("Keys is")).unwrap();
         assert_eq!((kept.state, kept.to_close()), (State::Done, true), "done, and it stays to be read");
+        let kept = cards.iter().find(|c| c.title == "Keys didn't go in").unwrap();
+        assert_eq!((kept.state, kept.to_close()), (State::Failed, true), "failed, and it stays to be read");
         let close: Vec<bool> = feed.visible(Instant::now()).iter().map(Card::to_close).collect();
-        assert_eq!(close, [false, false, true, true, true, true]);
+        assert_eq!(close, [false, false, true, true, true, true, true]);
         drop(running);
     }
 }

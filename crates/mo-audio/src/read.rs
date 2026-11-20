@@ -321,7 +321,7 @@ fn wav_chunks(f: &mut File, len: u64) -> Result<WavChunks, AudioError> {
 
 /// The WAV formats that hold Ogg Vorbis ("Og", "Pg", "Qg" and their "+" twins "og", "pg", "qg"): FL Studio's own
 /// sounds are kept this way (0x674F, an ordinary Ogg stream in the data chunk).
-const OGG_IN_WAV: [u16; 6] = [0x674F, 0x6750, 0x6751, 0x676F, 0x6770, 0x6771];
+pub const OGG_IN_WAV: [u16; 6] = [0x674F, 0x6750, 0x6751, 0x676F, 0x6770, 0x6771];
 
 /// Up to `max_seconds` of a WAV whose audio is an Ogg Vorbis stream, from `from_frame` on. Only the kinds that keep a
 /// whole Ogg stream in the data chunk are decoded: the ones that keep the Vorbis headers apart say so.

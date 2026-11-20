@@ -54,11 +54,23 @@ pub struct Swapped {
     pub same_sound: bool,
     /// Why the settings weren't (all) set back after the sound went in, when something got in the way.
     pub trouble: Option<String>,
+    /// Whether it can't be told that the sound went in this Sampler: the selection moved before Bitwig showed the
+    /// swap, or the Sampler it showed holds another sample than the one sent. Nothing was set back then, and
+    /// [`Swapped::trouble`] says which.
+    pub unknown: bool,
 }
 
 impl Swapped {
     /// In plain words, for the log and the report: counts, then the names of what didn't come over.
     pub fn summary(&self) -> String {
+        if self.unknown {
+            return format!(
+                "On \"{}\": it can't be told whether the sound went in: {} Look in Bitwig: if it did, the Sampler \
+                 has none of its old settings, and Bitwig's undo puts back what changed.",
+                self.track,
+                self.trouble.as_deref().unwrap_or(MOVED)
+            );
+        }
         let mut said = format!(
             "On \"{}\": {} settings came over by themselves, {} were set back, {} didn't take, {} the new Sampler \
              doesn't have, {} weren't readable.",
@@ -96,7 +108,8 @@ impl Bitwig {
     /// module's words. Fails with nothing changed when no Sampler is selected, the file isn't there, the extension is
     /// older than 3.29, changes are off, another project came to the front, another device is selected by the time
     /// Bitwig gets to it, or Bitwig doesn't take the file. Once the sound is in, what goes wrong is told in
-    /// [`Swapped::trouble`], not as an error. Waits for Bitwig: call it off the UI thread, in its `_turn`.
+    /// [`Swapped::trouble`], not as an error; when it can't be told whether it is in, [`Swapped::unknown`] says so.
+    /// Waits for Bitwig: call it off the UI thread, in its `_turn`.
     pub fn swap_into_sampler(&self, path: impl AsRef<Path>, _turn: &Turn<'_>) -> Result<Swapped, Error> {
         let mut link = self.connect()?;
         check_version(link.hello(), SWAP_NEEDS)?;
@@ -139,8 +152,29 @@ impl Bitwig {
                      takes it back.)"
                 )));
             }
+            // The selection moved before Bitwig showed the swap: whether the sound went in can't be told (the 19 Nov
+            // review's LK-3).
             Replaced::Moved => {
                 swapped.trouble = Some(MOVED.into());
+                swapped.unknown = true;
+                return Ok(swapped);
+            }
+            // No device is selected any more once the swap showed (the link then names no sample): the selection moved.
+            Replaced::Yes if answer.sample.trim().is_empty() => {
+                swapped.trouble = Some(MOVED.into());
+                swapped.unknown = true;
+                return Ok(swapped);
+            }
+            // Only a Sampler showing the sound that was sent is the new one: another pad's Sampler, selected while
+            // Bitwig swapped, sits at the same place on the same track and would get the old one's settings (the 19
+            // Nov review's LK-7).
+            Replaced::Yes if !names_file(&answer.sample, path.as_ref()) => {
+                swapped.trouble = Some(format!(
+                    "the Sampler selected in Bitwig now holds \u{201c}{}\u{201d}, not this sound, so nothing was \
+                     set back.",
+                    answer.sample
+                ));
+                swapped.unknown = true;
                 return Ok(swapped);
             }
             Replaced::Yes => place.sample = Some(answer.sample.clone()),
@@ -211,6 +245,17 @@ impl Bitwig {
         }
         Ok(swapped)
     }
+}
+
+/// Whether `sample`, as Bitwig names the sample a Sampler holds, is the file at `path`: its name or its name without
+/// the ending, whatever the case, with or without folders before it (the rule the extension has for "the same sample
+/// again"; how a real Bitwig names it is untried).
+fn names_file(sample: &str, path: &Path) -> bool {
+    let tidy = |name: &str| name.trim().to_lowercase();
+    let shown = tidy(sample.rsplit(['/', '\\']).next().unwrap_or(sample));
+    let part = |part: Option<&std::ffi::OsStr>| part.map(|n| tidy(&n.to_string_lossy()));
+    !shown.is_empty()
+        && (part(path.file_name()).as_ref() == Some(&shown) || part(path.file_stem()).as_ref() == Some(&shown))
 }
 
 /// Whether `now` is the Sampler at `place`: on the same track, at the same place in its chain, with the same sample

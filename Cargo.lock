@@ -3267,6 +3267,7 @@ dependencies = [
  "flate2",
  "md-5",
  "memchr",
+ "mo-audio",
  "mo-formats",
  "mo-library",
  "rayon",

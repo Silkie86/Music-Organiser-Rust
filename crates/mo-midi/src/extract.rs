@@ -184,13 +184,15 @@ pub(crate) fn damaged(what: &str) -> Unread {
 
 /// Each pattern or clip as one part per channel or track with notes.
 fn from_project(path: &str, raw: &[u8]) -> Result<Vec<Found>, Unread> {
-    let mut joined: Vec<crate::rejoin::Joined> = Vec::new();
+    // An FL song as the playlist lays it out, with one of its own bars in ticks: for the phrases it spreads over
+    // channels, joined once its patterns' own parts are found (below).
+    let mut song: Option<(Vec<crate::rejoin::Voice>, i64)> = None;
     let clips: Vec<MidiClip> = match case::to_lower(paths::extension(paths::file_name(path))).as_str() {
         ".flp" => {
             let flp = fl::events::load(raw).map_err(|_| damaged("not an FL Studio project, or damaged"))?;
-            // The song as the playlist lays it out, for the phrases it spreads over channels (added after the
-            // patterns' own parts, below).
-            joined = crate::rejoin::join(&crate::rejoin::voices(&fl::song::extract_channels(&flp)));
+            // Counted in the song's own bars: where a phrase is from is told in them.
+            let bar = fl::arrangement::bars_and_markers(&flp).0.bar_ticks(crate::PPQ);
+            song = Some((crate::rejoin::voices(&fl::song::extract_channels(&flp)), bar));
             fl::song::extract_midi(&flp)
         }
         // A file that isn't Bitwig's has no clips, as in the C# reader.
@@ -209,14 +211,18 @@ fn from_project(path: &str, raw: &[u8]) -> Result<Vec<Found>, Unread> {
             add(&mut found, &mut seen, notes, track, clip_name, &hints, drums, None, String::new());
         }
     }
+    // `seen` is every part found so far: the patterns' own, which a joined phrase's pieces are known by.
+    let joined = song.map(|(voices, bar)| crate::rejoin::join(&voices, bar, &seen)).unwrap_or_default();
     for j in joined {
         let clip = joined_clip(&j);
         let hints = project_hints(&j.name, &j.name);
-        let before = found.len();
+        let (before, whole) = (found.len(), analyser::hash_of(&j.notes));
         add(&mut found, &mut seen, j.notes, &j.name, &clip, &hints, false, None, String::new());
-        // Its pieces, so each one's card can show the whole phrase. It's never cut again: it's 16 bars at most.
-        if found.len() == before + 1
-            && let Some(f) = found.last_mut()
+        // Its pieces, so each one's card can show the whole phrase: only where the part just added is the whole
+        // phrase. It's 16 bars at most, so it isn't cut again; but in a song with bars over twice as long as 4/4's
+        // a rest in it can be long enough to cut it after all, and a cut piece isn't what the pieces are of.
+        if found.len() > before
+            && let Some(f) = found.last_mut().filter(|f| f.analysis.hash == whole)
         {
             f.members = j.members;
         }
@@ -224,8 +230,8 @@ fn from_project(path: &str, raw: &[u8]) -> Result<Vec<Found>, Unread> {
     Ok(found)
 }
 
-/// A joined phrase's clip line: where it first plays in the song and how often it comes back ("From bar 9 of the
-/// song, 3 times").
+/// A joined phrase's clip line: where it first plays in the song, as one of the song's own bars (the one FL's
+/// playlist shows), and how often it comes back ("From bar 9 of the song, 3 times").
 pub fn joined_clip(j: &crate::rejoin::Joined) -> String {
     let times = match j.repeats {
         1 => String::new(),

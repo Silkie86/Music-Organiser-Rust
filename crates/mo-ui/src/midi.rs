@@ -122,6 +122,9 @@ struct Page {
     reading: Option<Arc<AtomicBool>>,
     /// The index has been read once since the app opened (reading again is the Read MIDI again button's).
     read_once: bool,
+    /// The Songs page caught up with saves made while the app was closed during a reading that had taken its saves
+    /// before: your MIDI is read once more when that reading ends ([`songs_caught_up`]).
+    read_after: bool,
     library: PathBuf,
     feed: Option<Feed>,
     shortcuts: Shortcuts,
@@ -133,7 +136,9 @@ struct Page {
     ahead_read: bool,
     /// That read, kept until the page first shows, so the page has its list at once (nothing writes the index before
     /// then: only the page's own reading of your MIDI and your own changes on it do, so it can't be stale).
-    ahead_loaded: Option<Result<Loaded, String>>,
+    ahead_loaded: Option<Loaded>,
+    /// The read ahead of the page failed: left to the page's first visit, not tried again at each Ctrl+K.
+    ahead_failed: bool,
     /// The page first showed while that read was still going: it's handed to the page when it ends.
     ahead_for_page: bool,
     /// The summary of the whole index, before what Settings' smallest part hides is said after it.
@@ -635,10 +640,8 @@ pub fn smallest_part(app: Option<&AppWindow>, notes: usize) {
     let Some(app) = app else { return };
     // The index was read ahead and the page hasn't taken it yet: what that read says is hidden, and its Ctrl+K lines,
     // are made again.
-    match PAGE.with(|p| p.borrow_mut().ahead_loaded.take()) {
-        Some(Ok(kept)) => return remake_ahead(app, kept),
-        kept @ Some(Err(_)) => PAGE.with(|p| p.borrow_mut().ahead_loaded = kept),
-        None => {}
+    if let Some(kept) = PAGE.with(|p| p.borrow_mut().ahead_loaded.take()) {
+        return remake_ahead(app, kept);
     }
     let (cat, hidden_pick) = PAGE.with(|p| {
         let p = p.borrow();
@@ -861,7 +864,12 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
 fn read_before_shown(app: &AppWindow) {
     let library = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let first = !p.started && !p.library.as_os_str().is_empty() && !std::mem::replace(&mut p.ahead_read, true);
+        // One that failed isn't tried again here (every Ctrl+K would read the whole index and fail again): the
+        // page's first visit reads it.
+        let first = !p.started
+            && !p.ahead_failed
+            && !p.library.as_os_str().is_empty()
+            && !std::mem::replace(&mut p.ahead_read, true);
         first.then(|| p.library.clone())
     });
     let Some(library) = library else { return };
@@ -893,10 +901,26 @@ fn ahead_arrived(app: &AppWindow, loaded: Result<Loaded, String>) {
         show(app, loaded);
         return;
     }
-    if let Ok(l) = &loaded {
-        crate::finder::add_source(app, "midi", l.found.clone());
+    match loaded {
+        Ok(l) => {
+            crate::finder::add_source(app, "midi", l.found.clone());
+            PAGE.with(|p| p.borrow_mut().ahead_loaded = Some(l));
+        }
+        // A read that failed isn't kept: shown at a first visit hours later it would be an old failure, and the page
+        // only reads the index again when a reading changes something (the 19 November 2026 review's RA-6). The
+        // first visit, or Ctrl+K, reads it afresh.
+        Err(e) => {
+            log::warning(
+                "MIDI",
+                &format!("The MIDI index couldn't be read ahead of the page ({e}): read at its first visit"),
+            );
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.ahead_read = false;
+                p.ahead_failed = true;
+            });
+        }
     }
-    PAGE.with(|p| p.borrow_mut().ahead_loaded = Some(loaded));
 }
 
 /// Settings' smallest part changed since `kept` was read ahead: what it says is hidden and its Ctrl+K lines are made
@@ -904,10 +928,12 @@ fn ahead_arrived(app: &AppWindow, loaded: Result<Loaded, String>) {
 fn remake_ahead(app: &AppWindow, kept: Loaded) {
     let weak = app.as_weak();
     let started = background::spawn("MIDI index, ahead", move || {
-        let loaded = Loaded::new(kept.cat, kept.notes);
+        // Guarded, as the read itself is: a bug in making the lines still hands the page an answer, so it never
+        // waits for one that isn't coming (the 19 November 2026 review's RA-7).
+        let loaded = background::guarded(|| Loaded::new(kept.cat, kept.notes));
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
-                ahead_arrived(&app, Ok(loaded));
+                ahead_arrived(&app, loaded);
             }
         });
     });
@@ -1263,7 +1289,7 @@ pub fn shown(app: &AppWindow) {
     // The index was read ahead already: the page takes that read, or waits for it if it's still going. The read goes in a
     // Box: on Windows, where a PathBuf is bigger, it's over clippy's size limit for one arm of an enum.
     enum Kept {
-        Read(Box<Result<Loaded, String>>),
+        Read(Box<Loaded>),
         Coming,
         None,
     }
@@ -1279,7 +1305,7 @@ pub fn shown(app: &AppWindow) {
         }
     });
     match kept {
-        Kept::Read(read) => return show(app, *read),
+        Kept::Read(read) => return show(app, Ok(*read)),
         Kept::Coming => return,
         Kept::None => {}
     }
@@ -1436,6 +1462,27 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
     }
 }
 
+/// The Songs page has caught up with the saves made while the app was closed, and songs.db has them. A reading takes
+/// its saves from songs.db with the date and size it has for each, so one that began before this missed the new saves
+/// and took a save written over as read already, for the whole run (the 19 November 2026 review's RA-2): your MIDI is
+/// read once more, now or when the reading going on ends. Only saves whose date or size changed are read; the folders
+/// of MIDI files are walked again. Nothing when no reading has begun: the first one takes the saves as they are now.
+/// Called once a run, and only when the catch-up found something (never for each save a DAW makes).
+pub fn songs_caught_up(app: &AppWindow) {
+    let read_now = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if !p.read_once || HERE.with(|h| *h.borrow()) {
+            return false;
+        }
+        p.read_after = p.reading.is_some();
+        !p.read_after
+    });
+    if read_now {
+        log::info("MIDI", "Songs caught up with saves made while the app was closed: reading your MIDI once more");
+        read_midi(app, false);
+    }
+}
+
 /// Reads your MIDI into the Rust app's own index, `midi-index.db` beside the library: the newest save of each song
 /// (every save with the old app's "older saves" setting) and every MIDI file in the MIDI folders (the old app's list
 /// for now). Only new and changed files are read, newest first; `retry` reads the ones that failed before too. The
@@ -1513,10 +1560,18 @@ pub fn read_midi(app: &AppWindow, retry: bool) {
         let loaded = changed.then(|| guarded_load(&library));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
-            PAGE.with(|p| p.borrow_mut().reading = None);
+            let read_after = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.reading = None;
+                std::mem::take(&mut p.read_after)
+            });
             let data = app.global::<MidiData>();
             data.set_reading(false);
             data.set_busy("".into());
+            // This reading took its saves before the Songs page had caught up: once more, for those ([`songs_caught_up`]).
+            if read_after {
+                read_midi(&app, false);
+            }
             if let Some(loaded) = loaded {
                 show(&app, loaded);
             } else if slots_made {
@@ -1557,8 +1612,8 @@ fn read_into_index(
     // Only a full path can be an unplugged drive; anything else in the list is never found and so never counted as away.
     let (folders, away): (Vec<String>, Vec<String>) =
         listed.into_iter().filter(|f| mo_formats::paths::is_absolute(f)).partition(|f| Path::new(f).is_dir());
-    // The folder walk and the reading run on the bulk pool: a few threads keep one drive (L:, holding every pack) busy,
-    // where one per core made it jump between files, and the pages' quick jobs on the main pool aren't held up.
+    // The folder walk runs on the bulk pool: a few threads keep one drive (L:, holding every pack) busy, where one per
+    // core made it jump between files, and the pages' quick jobs on the main pool aren't held up.
     let found = background::on_bulk_pool(|| {
         mo_library::scan::find_files(
             &folders,
@@ -1577,7 +1632,10 @@ fn read_into_index(
         &format!("{} files wanted, {} to read, {} to forget", wanted.len(), plan.todo.len(), plan.forget.len()),
     );
     let own;
-    let pool = match background::bulk_pool() {
+    // The readers on a pool of their own: they hold every thread they're given until the list is read, and the bulk
+    // pool's other jobs (a song's waveforms) would wait for all of it (RA-3). The folder walk above gives its threads
+    // back as it goes.
+    let pool = match background::midi_read_pool() {
         Some(pool) => pool,
         None => {
             own = rayon::ThreadPoolBuilder::new()
@@ -1599,7 +1657,10 @@ fn read_into_index(
 /// Stops the reading at the next file; what's been read is kept, and the next reading carries on from there.
 fn stop_reading() {
     PAGE.with(|p| {
-        if let Some(stop) = p.borrow().reading.as_ref() {
+        let mut p = p.borrow_mut();
+        // Stopped is stopped: the reading Songs' catch-up asked for after this one isn't started either.
+        p.read_after = false;
+        if let Some(stop) = p.reading.as_ref() {
             stop.store(true, Ordering::Relaxed);
         }
     });
@@ -3266,6 +3327,14 @@ fn put_part(
         }
         // Stopped part way: the link's words say what Bitwig may have of it. A failure the stop had no part in (it
         // was pressed, but no recording heard it) keeps its own headline.
+        // Another project came to the front: the song is left set up for recording, and Bitwig is most likely over
+        // the app, so the card stays until it's read (the 19 Nov review's LK-1).
+        Err(e) if mo_dawlink::bitwig::was_cut_off_by_another_project(&e) => {
+            let why = e.to_string();
+            log::warning("MIDI", &format!("Putting {} in {} failed: {why}", part.name, song.name));
+            job.failed_to_read(midi_fits::PUT_FAILED, &why);
+            false
+        }
         Err(e) if heard => failed(job, midi_fits::PUT_STOPPED, e.to_string()),
         Err(e) => failed(job, midi_fits::PUT_FAILED, e.to_string()),
     }
