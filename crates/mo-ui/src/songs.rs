@@ -1804,7 +1804,7 @@ mod tests {
     }
 
     #[test]
-    fn open_uses_the_program_the_c_sharp_app_chose_until_settings_changes_it() {
+    fn the_program_the_c_sharp_app_chose_is_the_one_open_reads() {
         // The C# app kept each DAW's program in its settings, which songs.db took over. Open reads it as it stands at
         // the click (`settings::value`), so Settings › DAWs shows and changes the one Open uses (review SS-4).
         let fl = r"C:\Program Files\Image-Line\FL Studio 2025\FL64.exe";
