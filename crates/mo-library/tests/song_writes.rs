@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use mo_library::song_fields::{self, Change, KeepCopy, Kept, SaveRow};
-use mo_library::song_writes::{self, Batch, Missing, Put};
+use mo_library::song_writes::{self, Batch, BitwigReread, Missing, Put};
 use mo_library::songs_db::{self, State};
 use mo_library::{Library, PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail};
 use rusqlite::Connection;
@@ -309,25 +309,40 @@ fn the_fl_studio_saves_the_app_kept_are_read_again_once_for_their_muted_samples(
         .map(|(detail, known_as)| Put { detail, known_as: known_as.map(str::to_owned) })
         .collect();
     song_writes::write(&songs, &Batch { put, ..Batch::default() }).unwrap();
-    // The FL Studio ones that aren't in library.db as they are, whenever they changed.
+    // The FL Studio ones that aren't in library.db as they are, whenever they changed; and every Bitwig save, once,
+    // for the multisamples it finds outside its folder (FS-5).
     let mut ids = song_writes::to_mend(&songs).unwrap().unwrap();
     ids.sort_unstable();
-    assert_eq!(ids, [1, 2, 3]);
+    assert_eq!(ids, [1, 2, 3, 4]);
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Waiting);
     // With library.db gone: a guess, those changed since a month before the library became the app's own.
     std::fs::rename(dir.join("library.db"), dir.join("library.db.away")).unwrap();
-    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2, 4]));
     // Read again but for two that couldn't be: noted with them, and only those still FL Studio saves there are
-    // given after that (one since gone missing, one no longer in the library).
+    // given after that (one since gone missing, one no longer in the library); the Bitwig one was read.
     assert!(!song_writes::mend_noted(&songs), "library.db is still wanted for the mend");
     let noted = song_writes::write(&songs, &Batch { mended: true, owed: vec![2, 5, 99], ..Batch::default() }).unwrap();
     assert!(noted.mended);
     assert!(song_writes::mend_noted(&songs), "from here on library.db isn't looked at");
     assert!(!song_writes::mend_noted(&dir.join("no-songs.db")));
     assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Done);
+    // A Bitwig save owed keeps Free the space waiting till it's read.
+    song_writes::write(&songs, &Batch { mended: true, owed: vec![4], ..Batch::default() }).unwrap();
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Owed(1));
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![4]));
     // Once they're read again, a batch notes it (on its own too): none after that.
     let noted = song_writes::write(&songs, &Batch { mended: true, ..Batch::default() }).unwrap();
     assert!(noted.mended);
     assert_eq!(song_writes::to_mend(&songs).unwrap(), None);
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Done);
+    // One read again in the batch that noted the rest that the library then wouldn't take: owed after all, once.
+    song_writes::owe(&songs, &[4, 2, 4]).unwrap();
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2, 4]));
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Owed(1));
+    song_writes::write(&songs, &Batch { mended: true, ..Batch::default() }).unwrap();
+    // Not the app's own library: never read again here.
+    assert_eq!(song_writes::bitwig_reread(&not_own), BitwigReread::NotOwn);
 }
 
 /// The path the tests' second save is at.

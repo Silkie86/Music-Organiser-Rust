@@ -1148,6 +1148,10 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
                 }
             }
             drop(lib);
+            let reread = mo_library::song_writes::bitwig_reread(&library);
+            for job in &mut jobs {
+                job.reread = reread;
+            }
             let of: usize = jobs.iter().map(|j| j.project.copies.len()).sum();
             let tally = Mutex::new(Tally::new(SystemBin.admin().can_ask()));
             let hear = |_: &Path, sent: &Result<(), String>| {
