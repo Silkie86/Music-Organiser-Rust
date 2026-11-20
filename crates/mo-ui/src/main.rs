@@ -228,16 +228,59 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         log::warning("Freeze", "Couldn't start the freeze watchdog");
     }
+    let held = match &one_copy {
+        mo_app::one_copy::Claim::Ours { held, .. } => Some(held.clone()),
+        _ => None,
+    };
+    // Signing out, shutting down or restarting Windows with the app open: Windows ends the app as soon as it has
+    // answered, so everything waiting is written there and then (the 19 November 2026 review's CL-2).
+    #[cfg(windows)]
+    {
+        let held = held.clone();
+        mo_ui::close_ask::on_session_end(move || {
+            log::last(log::Level::Info, "App", "Windows is ending the session: closing");
+            mo_ui::watchdog::stop();
+            // A setup waiting for "Restart to update" isn't started while Windows shuts down: it's offered again.
+            let _ = finish(held.as_deref(), session, None);
+            end_now(0)
+        });
+    }
     let ran = app.run();
     // The window's thread answers no more knocks from here: what it does while closing isn't a freeze. (Said already
     // when the window was asked to close; this is for an end that came another way.)
     mo_ui::watchdog::stop();
+    let setup = finish(held.as_deref(), session, ran.as_ref().err().map(ToString::to_string));
+    if let Some(setup) = setup {
+        mo_ui::update::run(&setup);
+    }
+    // Off Windows the usual way out stays: the window is taken apart first, which an exit on the spot there
+    // wouldn't wait for.
+    #[cfg(windows)]
+    {
+        if let Err(e) = &ran {
+            eprintln!("Error: {e}");
+        }
+        end_now(u32::from(ran.is_err()))
+    }
+    #[cfg(not(windows))]
+    ran
+}
+
+/// The close: everything still waiting is written, what plays in a DAW is stopped, and the log is closed. Run once
+/// the window's loop has ended, or from inside it when Windows ends the session (it ends the app straight after).
+/// `held` is this copy's hold on being the one open copy; `error` is how the window stopped, when it stopped with an
+/// error. Gives back the setup "Restart to update" asked for, to start now that everything is written.
+fn finish(
+    held: Option<&mo_app::one_copy::OneCopy>,
+    session: &'static log::SessionLog,
+    error: Option<String>,
+) -> Option<PathBuf> {
     // The window is gone: a copy started from now on waits for this one to end (the port is let go at the very
     // end, once everything below is written) instead of asking it to show.
-    if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
+    if let Some(held) = held {
         held.closing();
     }
-    if let Err(e) = &ran {
+    if let Some(e) = &error {
         // A line of how the run ends: it shows even once the log is full.
         log::last(log::Level::Error, "App", &format!("The window stopped with an error: {e}"));
     }
@@ -278,23 +321,10 @@ fn main() -> Result<(), slint::PlatformError> {
     session.close();
     // Everything is written. The port goes now, not with the process, so the copy started next (by the launcher, or
     // by the setup below) is never held up by this one taking its time to end.
-    if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
+    if let Some(held) = held {
         held.let_go();
     }
-    if let Some(setup) = setup {
-        mo_ui::update::run(&setup);
-    }
-    // Off Windows the usual way out stays: the window is taken apart first, which an exit on the spot there
-    // wouldn't wait for.
-    #[cfg(windows)]
-    {
-        if let Err(e) = &ran {
-            eprintln!("Error: {e}");
-        }
-        end_now(u32::from(ran.is_err()))
-    }
-    #[cfg(not(windows))]
-    ran
+    setup
 }
 
 /// Ends the app on the spot (Windows), once everything is written and the log is closed. Leaving `main` the usual

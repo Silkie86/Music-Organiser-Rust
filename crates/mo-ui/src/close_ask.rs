@@ -24,6 +24,31 @@ pub fn connect() {
     }
 }
 
+thread_local! {
+    /// What to do when Windows ends the session ([`on_session_end`]).
+    static SESSION_END: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// From now on, when Windows ends the session (sign out, shut down, restart) with the app open, `work` runs on the
+/// window's thread, once: Windows ends the app as soon as it has answered, so `work` writes what is waiting and ends
+/// the app itself. Call it on the window's thread, after [`connect`]. Windows asks every window; it's winit's unseen
+/// one that answers here, as it is there whatever the real window is doing.
+///
+/// Not for a setup closing the app (Windows' Restart Manager): it asks the same way, then asks the window to close,
+/// which closes the app as usual.
+pub fn on_session_end(work: impl FnOnce() + 'static) {
+    SESSION_END.with(|s| *s.borrow_mut() = Some(Box::new(work)));
+}
+
+#[cfg(windows)]
+fn session_end() {
+    // Taken out first, so the work runs with nothing borrowed, and only ever once.
+    let work = SESSION_END.with(|s| s.borrow_mut().take());
+    if let Some(work) = work {
+        work();
+    }
+}
+
 #[cfg(windows)]
 fn close() {
     mo_app::log::last(mo_app::log::Level::Info, "App", "Asked to close from outside while out of sight: closing");
@@ -36,11 +61,15 @@ fn close() {
 mod on_windows {
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId, WM_CLOSE, WM_NCDESTROY};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, GetWindowThreadProcessId, WM_CLOSE, WM_ENDSESSION, WM_NCDESTROY,
+    };
     use windows::core::{PCWSTR, w};
 
     /// The class of winit's unseen window (winit 0.30, `THREAD_EVENT_TARGET_WINDOW_CLASS`).
     pub(super) const WINIT_UNSEEN: PCWSTR = w!("Winit Thread Event Target");
+    /// The bit of a session end's `lparam` that says a setup is closing the app (`ENDSESSION_CLOSEAPP`).
+    const FOR_A_SETUP: isize = 0x1;
     /// Our mark on the windows guarded here ("MOCA").
     const OURS: usize = 0x4d4f_4341;
 
@@ -71,8 +100,8 @@ mod on_windows {
         unsafe { SetWindowSubclass(window, Some(asked), OURS, on_close as usize) }.as_bool()
     }
 
-    /// What a guarded window does with each message: a close calls the function kept with it; the rest goes on to the
-    /// window as before.
+    /// What a guarded window does with each message: a close calls the function kept with it, the session's end does
+    /// [`super::on_session_end`]'s work; the rest goes on to the window as before.
     unsafe extern "system" fn asked(
         window: HWND,
         message: u32,
@@ -85,6 +114,11 @@ mod on_windows {
             // SAFETY: `on_close` is the `fn()` [`guard`] put there, and nothing else sets it.
             let on_close = unsafe { std::mem::transmute::<usize, fn()>(on_close) };
             on_close();
+            return LRESULT(0);
+        }
+        // The session is ending (wparam says it really is, after every program was asked), and not for a setup.
+        if message == WM_ENDSESSION && wparam.0 != 0 && lparam.0 & FOR_A_SETUP == 0 {
+            super::session_end();
             return LRESULT(0);
         }
         if message == WM_NCDESTROY {
@@ -160,6 +194,34 @@ mod on_windows {
 
             // No such window on this thread: said, not guessed.
             assert!(!guard_class(w!("Static"), note));
+        }
+
+        // The 19 November 2026 review's CL-2: nothing answered Windows ending the session, so nothing was written.
+        #[test]
+        fn the_session_ending_runs_its_work_once_and_a_setup_closing_the_app_does_not() {
+            static ENDED: AtomicUsize = AtomicUsize::new(0);
+            fn note() {}
+            let send = |window: HWND, really: usize, why: isize| {
+                // SAFETY: a message to this thread's own window.
+                unsafe { SendMessageW(window, WM_ENDSESSION, Some(WPARAM(really)), Some(LPARAM(why))) };
+            };
+            let guarded = window();
+            assert!(guard(guarded, note));
+            crate::close_ask::on_session_end(|| {
+                ENDED.fetch_add(1, Ordering::SeqCst);
+            });
+            // The session isn't ending after all (another program said no).
+            send(guarded, 0, 0);
+            // A setup closing the app: its close comes next, the usual way.
+            send(guarded, 1, FOR_A_SETUP);
+            assert_eq!(ENDED.load(Ordering::SeqCst), 0);
+            // Signing out (the logoff bit set) and shutting down.
+            send(guarded, 1, 0x8000_0000_u32 as isize);
+            assert_eq!(ENDED.load(Ordering::SeqCst), 1);
+            send(guarded, 1, 0);
+            assert_eq!(ENDED.load(Ordering::SeqCst), 1, "only once");
+            // SAFETY: this thread's own window.
+            unsafe { DestroyWindow(guarded) }.expect("destroyed");
         }
     }
 }
