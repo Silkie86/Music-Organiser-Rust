@@ -168,7 +168,10 @@ struct Slots {
     inputs: Mutex<Option<Vec<String>>>,
     /// A line dragged out: which, and its file, once it's been checked to be there (or written, for a MIDI part),
     /// or why it can't go.
-    drag: Mutex<Option<(Carried, Result<std::path::PathBuf, String>)>>,
+    drag: Mutex<Option<(u64, DragReady)>>,
+    /// How many drags have been asked for, or called off by letting go before their file was ready: only the answer
+    /// to the newest asking starts a drag (the 19 Nov review's PN-3).
+    drag_asked: AtomicU64,
     /// A sound dragged out whole with Trim silence on, as its trimmed copy couldn't be made: what the panel says
     /// (SN-12).
     untrimmed: Mutex<Option<String>>,
@@ -184,9 +187,29 @@ struct Slots {
     /// The neighbourhoods the names over the map are for, with their asking's number ([`Sky::names_ask`]).
     names: Mutex<Option<(u64, Vec<mo_app::galaxy_names::Region>)>>,
     /// The stars made ready for the graphics card, and how they're lit ([`Sky::pack_ask`]).
-    packed: Mutex<Option<galaxy::Packed>>,
+    packed: Mutex<Option<(u64, galaxy::Packed)>>,
     /// The mini-map's picture, with its asking's number ([`Sky::mini_ask`]).
     mini: Mutex<Option<(u64, SkyPixels)>>,
+}
+
+/// A dragged line, and its file once it's ready (or why it can't go).
+type DragReady = (Carried, Result<std::path::PathBuf, String>);
+
+impl Slots {
+    /// A line was dragged out: the number of this asking. An answer to an older one is dropped.
+    fn ask_drag(&self) -> u64 {
+        self.drag_asked.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// The file for drag asking `asked` is ready (or why it can't go).
+    fn drag_ready(&self, asked: u64, carried: Carried, found: Result<std::path::PathBuf, String>) {
+        crate::threads::newer(&self.drag, asked, (carried, found));
+    }
+
+    /// The mouse was let go: a drag whose file isn't ready yet is called off.
+    fn drag_let_go(&self) {
+        self.drag_asked.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 /// The line being dragged out: a row of the Sounds list, a part of the MIDI tab's (its place in the catalogue), or a
@@ -855,12 +878,15 @@ impl Shown {
                 *lock(&slots.sampler) = Some(said);
             });
         });
+        let let_go = Arc::clone(&self.slots);
+        panel.on_drag_let_go(move || let_go.drag_let_go());
         panel.on_drag_out(move |row| {
             let Some((row, path)) = usize::try_from(row).ok().and_then(|r| Some((r, lines.path(r)?))) else { return };
             let slots = Arc::clone(&slots);
             let trim = player.trim();
             let is_loop = lines.is_loop(row);
             // Whether the file is there is asked off the window's thread: its drive may be asleep or away.
+            let asked = slots.ask_drag();
             background("mo-plugin-drag", move || {
                 let path = std::path::PathBuf::from(path);
                 let found = if path.is_file() {
@@ -878,7 +904,7 @@ impl Shown {
                 } else {
                     Err(format!("Can't drag {}: the file isn't there", library::name(&path.to_string_lossy())))
                 };
-                *lock(&slots.drag) = Some((Carried::Sound(row), found));
+                slots.drag_ready(asked, Carried::Sound(row), found);
             });
         });
         panel.set_orders(ModelRc::new(slint::VecModel::from(
@@ -1216,13 +1242,14 @@ impl Shown {
             let Some(path) = recorded.borrow().clone() else { return };
             let slots = Arc::clone(&slots);
             // Saved trimmed already: it goes as it is, once it's checked to be there still.
+            let asked = slots.ask_drag();
             background("mo-plugin-drag", move || {
                 let found = if path.is_file() {
                     Ok(path)
                 } else {
                     Err(format!("Can't drag {}: the file isn't there any more", path.display()))
                 };
-                *lock(&slots.drag) = Some((Carried::Recording, found));
+                slots.drag_ready(asked, Carried::Recording, found);
             });
         });
     }
@@ -1543,7 +1570,7 @@ impl Shown {
                 let started = Instant::now();
                 let grid = Grid::new(&stars, &shown);
                 crate::log::took_if_slow("Galaxy", &format!("Made the grid of {} stars", grid.len()), started);
-                *lock(&slots.grid) = Some((set, grid));
+                crate::threads::newer(&slots.grid, set, grid);
             });
         }
         let packed = self.sky_stars(&mut sky);
@@ -1574,7 +1601,7 @@ impl Shown {
                 let started = Instant::now();
                 let found = naming.find();
                 crate::log::took_if_slow("Galaxy", &format!("Named {} neighbourhoods", found.len()), started);
-                *lock(&slots.names) = Some((naming.set, found));
+                crate::threads::newer(&slots.names, naming.set, found);
             });
         }
         if let Some((set, regions)) = take(&self.slots.names) {
@@ -1640,7 +1667,7 @@ impl Shown {
                 let drawn = mo_catch::catch_crash(AssertUnwindSafe(|| sky_pixels(&picture.draw())));
                 crate::log::took_if_slow("Galaxy", "Drew the mini-map", started);
                 if let Some(pixels) = drawn.ok().flatten() {
-                    *lock(&slots.mini) = Some((set, pixels));
+                    crate::threads::newer(&slots.mini, set, pixels);
                 }
             });
         }
@@ -1669,12 +1696,13 @@ impl Shown {
             let slots = Arc::clone(&self.slots);
             background("mo-plugin-galaxy-stars", move || {
                 let started = Instant::now();
+                let asked = pack.asked;
                 let packed = pack.pack();
                 crate::log::took_if_slow("Galaxy", "Made the stars ready and lit", started);
-                *lock(&slots.packed) = Some(packed);
+                crate::threads::newer(&slots.packed, asked, packed);
             });
         }
-        take(&self.slots.packed).filter(|packed| sky.packed(packed))
+        take(&self.slots.packed).map(|(_, packed)| packed).filter(|packed| sky.packed(packed))
     }
 
     /// The Galaxy's stars painted by the graphics card, with the app's own painter: every star goes to the card once
@@ -1888,7 +1916,11 @@ impl Shown {
         if self.dragging.get() {
             return;
         }
-        let Some((carried, found)) = take(&self.slots.drag) else { return };
+        let Some((asked, (carried, found))) = take(&self.slots.drag) else { return };
+        // An older drag's file, or one let go before it was ready, never starts a drag under a later press.
+        if asked != self.slots.drag_asked.load(Ordering::Acquire) {
+            return;
+        }
         self.carried.set(Some(carried));
         match found {
             Ok(path) => {
@@ -2000,7 +2032,9 @@ impl Shown {
         background("mo-plugin-waves", move || {
             let found = library::waves(&ids);
             let pictures = found.iter().map(|(id, peaks)| (*id, waves::picture(peaks, width, height))).collect();
-            *lock(&slots.waves) = Some((round, pictures));
+            // An older round's answer never takes the newest's place (the 19 Nov review's PN-6): the newest is
+            // the one whose sounds wait in `reading`.
+            crate::threads::newer(&slots.waves, round, pictures);
         });
     }
 
@@ -2416,6 +2450,24 @@ fn label_take(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_newest_drag_asked_for_starts_and_letting_go_calls_it_off() {
+        let slots = Slots::default();
+        let (first, second) = (slots.ask_drag(), slots.ask_drag());
+        // The newer one's file comes first; the older one's, slow, comes after and never takes its place.
+        slots.drag_ready(second, Carried::Preset(2), Ok("two.bwpreset".into()));
+        slots.drag_ready(first, Carried::Preset(1), Ok("one.bwpreset".into()));
+        let (asked, (carried, _)) = take(&slots.drag).unwrap();
+        assert_eq!((asked, carried), (second, Carried::Preset(2)));
+        assert_eq!(asked, slots.drag_asked.load(Ordering::Acquire), "the newest: it starts");
+        // Let go before the file is ready: when it comes, it's no longer the newest asking.
+        let third = slots.ask_drag();
+        slots.drag_let_go();
+        slots.drag_ready(third, Carried::Sound(0), Ok("kick.wav".into()));
+        let (asked, _) = take(&slots.drag).unwrap();
+        assert_ne!(asked, slots.drag_asked.load(Ordering::Acquire), "called off");
+    }
 
     #[test]
     fn pixels_blend_as_premultiplied_colour() {
