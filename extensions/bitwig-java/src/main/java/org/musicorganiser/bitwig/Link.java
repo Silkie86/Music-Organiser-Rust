@@ -169,6 +169,10 @@ final class Link {
     static final int OTHER_COLOUR = 64;
     /** How often the record job (extension 3.9) looks at what Bitwig is doing, in milliseconds. */
     static final long RECORD_TICK = 25;
+    /** How often the link looks whether the project of a record job that was cut off is in front again (see Abandoned). */
+    static final long ABANDONED_LOOK = 500;
+    /** How many times a put-back that failed part way is tried before the link gives it up. */
+    static final int ABANDONED_TRIES = 5;
     /** How long the record job gives Bitwig to start playing once it has launched the clip, in milliseconds. */
     static final long START_WAIT = 3000;
     /**
@@ -358,6 +362,9 @@ final class Link {
     private MasterTrack master;
     /** The record job running now, if any: recordabort and Bitwig stopping the link reach it here. */
     private Recording recording;
+    /** What record jobs cut off by another project coming to the front left changed, each put back once its project is in front again (see Abandoned). */
+    private final List<Abandoned> abandoned = new ArrayList<>();
+    private boolean abandonedLooking;
 
     // The watch feed (extension 3.24): what's sent to the apps that watch, as Bitwig changes it.
     /** Whether the notes each track plays could be followed. */
@@ -942,6 +949,12 @@ final class Link {
             stopping.emergency();
             stopping.done = true;
         }
+        // What a record job cut off by another project left changed goes back now if its project is in front, and is
+        // forgotten either way: nothing looks for it once the link has stopped.
+        String front = frontProject();
+        for (Abandoned left : abandoned)
+            if (left.project.equals(front)) left.atOnce();
+        abandoned.clear();
         // Nor do a song's bars stay looped for a part the link can no longer take out: put back, as far as can be.
         loopLeft();
         watching.clear();
@@ -1117,6 +1130,7 @@ final class Link {
         };
         attempt(() -> {
             checkAllowed(job.request(), job.changes());
+            if (job.changes()) notPuttingBack();
             job.run().run(job.request(), finish);
         }, finish);
     }
@@ -3788,8 +3802,8 @@ final class Link {
      * Records a launcher clip into Bitwig's arranger (extension 3.9), the way a person does: with Bitwig's arranger record on,
      * launching a clip while Bitwig is stopped starts it playing from the play start, and Bitwig records what the clip plays
      * onto its track's arranger timeline. Copy and paste never did this for the link (Bitwig copies whatever was clicked last
-     * in it, not what the API selected), while every step here is an ordinary call of the API. Only the live tests send it
-     * so far, in their own project.
+     * in it, not what the API selected), while every step here is an ordinary call of the API. The live tests send it in
+     * their own project, and the app's "Put in the song" in the song it names.
      *
      * The request names the track by its ID (`trackId`), which stays put when a track goes in above it, the launcher `slot`,
      * where to record (`at`, beats from the start) and for how long (`length`, in beats), both whole bars. With `record`
@@ -3820,8 +3834,9 @@ final class Link {
      * </ol>
      * Nothing touches a parameter while record is on (Bitwig can write automation then), and every step checks that Bitwig
      * still has the project the job started in: when another comes to the front, the transport would steer that one, so the
-     * job stops touching anything and answers `abandoned`. If the extension stops meanwhile, record goes off and Bitwig
-     * stops (see emergency).
+     * job stops touching anything and answers `abandoned`. What it had changed is kept (see Abandoned) and put back once its
+     * project is in front again (extension 3.32; the answer's `putBackLater` says so). If the extension stops meanwhile,
+     * record goes off and Bitwig stops (see emergency).
      *
      * The answer's `decided` sums it up: `recorded` (the replay heard the clip's notes with the launcher clip not playing),
      * `nothing` (they were heard as it played, not in the replay), `cantTell` (no notes heard either time, so only a look at
@@ -3864,6 +3879,149 @@ final class Link {
         if (busy != null) throw new LinkError("A launcher clip on \"" + busy + "\" is playing, recording or about to. Stop it, then ask again.");
         new Recording(finish, (String) id, index(s), at, length, bar, rec, arm, delete, replay, replayFrom, tempo,
                       pass instanceof String ? (String) pass : null).start();
+    }
+
+    /**
+     * What a record job left changed when another project came to the front (extension 3.32, the 19 Nov review's LK-1): the
+     * job touches nothing more then, as the transport would steer the other project, so its song stays set up for recording
+     * (master muted, record on, arms and transport settings changed). This keeps what the job would have put back, and the
+     * link looks every ABANDONED_LOOK whether the job's project is in front again, with the job's track in its listing
+     * (another project of the same name hasn't that track ID). Then it turns record off, presses Stop only if Bitwig plays
+     * and waits until it has stopped, returns the track to the arrangement, and sets back each setting and arm that still
+     * shows what the job set (one changed by hand since stays as it is), as putLoopBack does for the song's loop.
+     */
+    private final class Abandoned {
+        final String project;
+        final String trackId;
+        final boolean arm;
+        final boolean recordOn;
+        final List<Setting> settings;
+        final Map<String, Object> saved;
+        final Map<String, Boolean> arms;
+        long stopSent = Long.MIN_VALUE / 2;
+        /** Since when Bitwig has shown stopped, else null. */
+        Long quietFrom;
+        /** How many looks failed part way. */
+        int failed;
+
+        Abandoned(Recording job) {
+            project = job.projectName;
+            trackId = job.trackId;
+            arm = job.arm;
+            recordOn = job.recordOn;
+            settings = job.settings;
+            saved = job.saved;
+            arms = job.arms;
+        }
+
+        /**
+         * One look, with a project of the job's name in front: true once everything is back. While the job's track isn't
+         * in the listing nothing is touched: it's another project of that name, or the track was deleted (the link can't
+         * tell which, so the settings stay as they are, and changes aren't held back: see notPuttingBack).
+         */
+        boolean look() {
+            if (indexOf(trackId) < 0) {
+                quietFrom = null;
+                return false;
+            }
+            long now = clock.millis();
+            if (recordOn && transport.isArrangerRecordEnabled().get()) transport.isArrangerRecordEnabled().set(false);
+            if (transport.isPlaying().get()) {
+                // Never while Bitwig is stopped: Stop then moves the play start to the beginning.
+                if (now - stopSent >= RESTOP) {
+                    transport.stop();
+                    stopSent = now;
+                }
+                quietFrom = null;
+                return false;
+            }
+            if (quietFrom == null) quietFrom = now;
+            if (now - quietFrom < SETTLE) return false;
+            host.println("DAWmate: \"" + project + "\" is in front again, so what the recording that was cut off had set is put back ("
+                         + String.join(", ", putBack()) + ").");
+            return true;
+        }
+
+        /** As far as can be with nothing waited for, as the link stops (see Recording.emergency). */
+        void atOnce() {
+            try {
+                if (indexOf(trackId) < 0) return;
+                if (recordOn && transport.isArrangerRecordEnabled().get()) transport.isArrangerRecordEnabled().set(false);
+                if (transport.isPlaying().get()) transport.stop();
+                putBack();
+            } catch (RuntimeException | LinkageError e) {
+                host.errorln("DAWmate: couldn't put Bitwig back after a recording that was cut off (" + e + ").");
+            }
+        }
+
+        /** Returns the track to the arrangement and sets back what still shows the job's value; the names of what it set back. */
+        List<String> putBack() {
+            List<String> back = new ArrayList<>();
+            int track = indexOf(trackId);
+            if (track >= 0) trackItems[track].returnToArrangement();
+            for (Setting s : settings) {
+                Object now = s.read().get();
+                Object was = saved.get(s.name());
+                if (same(now, s.wanted()) && !same(now, was)) {
+                    s.write().accept(was);
+                    back.add(s.name());
+                }
+            }
+            Map<String, Integer> places = placesById();
+            boolean armed = false;
+            for (Map.Entry<String, Boolean> e : arms.entrySet()) {
+                Integer t = places.get(e.getKey());
+                boolean set = arm && e.getKey().equals(trackId);
+                if (t != null && trackItems[t].arm().get() == set && set != e.getValue()) {
+                    trackItems[t].arm().set(e.getValue());
+                    armed = true;
+                }
+            }
+            if (armed) back.add("arm");
+            return back;
+        }
+    }
+
+    /**
+     * Refuses a change while the project in front is one a cut-off record job's changes are about to be put back in (its
+     * track is there): the change would keep the job's values as "before" (the song's loop, the next recording), or cross
+     * the put-back. It takes a second or so.
+     */
+    private void notPuttingBack() {
+        if (abandoned.isEmpty()) return;
+        String front = frontProject();
+        for (Abandoned left : abandoned)
+            if (left.project.equals(front) && indexOf(left.trackId) >= 0)
+                throw new LinkError("The link is still putting Bitwig back after a recording that was cut off. Ask again in a moment.");
+    }
+
+    /** Has the link look for the projects of record jobs that were cut off (see Abandoned), until none is left. */
+    private void lookForAbandoned() {
+        if (abandonedLooking || abandoned.isEmpty()) return;
+        abandonedLooking = true;
+        host.scheduleTask(() -> {
+            abandonedLooking = false;
+            // Not while a change is under way: its steps and these would cross.
+            if (recording == null && currentJob == null) {
+                String front = frontProject();
+                for (Abandoned left : new ArrayList<>(abandoned)) {
+                    if (!left.project.equals(front)) {
+                        // Next time it's in front, Bitwig gets its moment to show how things are again.
+                        left.quietFrom = null;
+                        continue;
+                    }
+                    try {
+                        if (left.look()) abandoned.remove(left);
+                    } catch (RuntimeException | LinkageError e) {
+                        // Tried again at the next looks: what is back already no longer shows the job's value, so it's left.
+                        if (++left.failed >= ABANDONED_TRIES) abandoned.remove(left);
+                        host.errorln("DAWmate: couldn't put Bitwig back after a recording that was cut off (" + e + ")"
+                                     + (left.failed >= ABANDONED_TRIES ? ": given up." : ": trying again."));
+                    }
+                }
+            }
+            lookForAbandoned();
+        }, ABANDONED_LOOK);
     }
 
     /** Stops the record job running now, if any (extension 3.9): it ends as soon as it next looks, and puts everything back. */
@@ -4127,6 +4285,8 @@ final class Link {
         Boolean launcherClipDeleted;
         boolean replayLauncherPlayed;
         String error;
+        /** Whether the job was cut off with its changes kept for putting back later (see Abandoned). */
+        boolean putBackLater;
 
         Recording(Finish finish, String trackId, int scene, double at, double length, double bar, boolean rec, boolean arm, boolean delete,
                   boolean replay, double replayFrom, Double tempo, String pass) {
@@ -4515,6 +4675,11 @@ final class Link {
         void guarded(Runnable step) {
             if (done || job != currentJob) return;
             if (!projectName.equals(frontProject())) {
+                if (changed) {
+                    abandoned.add(new Abandoned(this));
+                    putBackLater = true;
+                    lookForAbandoned();
+                }
                 answer("abandoned");
                 return;
             }
@@ -4641,6 +4806,7 @@ final class Link {
             // Null when the job didn't wait to see everything come back (it was abandoned, or a step failed).
             after.put("restoreFailed", restoreFailed);
             m.put("after", after);
+            if (putBackLater) m.put("putBackLater", true);
             m.put("diff", front && tracksBefore != null ? diff() : null);
             m.put("ms", clock.millis() - began);
             m.put("trace", trace);

@@ -1,7 +1,7 @@
 //! The Bitwig link: the app talks to the DAWmate extension (or the script it took over from) running inside
 //! Bitwig Studio, over a connection on this computer, and Send to Bitwig puts things into the project open there.
 //!
-//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.31; the C# app's copy is frozen):
+//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.32; the C# app's copy is frozen):
 //! Bitwig only runs Java extensions. Settings > DAWs installs it. Changing anything needs "Let the app make changes"
 //! on in Bitwig (Settings > Controllers > DAWmate); reading never does.
 //!
@@ -51,7 +51,7 @@ pub use link::{
     PLAY_START_NEEDS, PORT, PadContents, PadsFilled, Recorded, ReplaceAnswer, Replaced, SelectedDevice, SelectedTrack,
     TIMEOUT, TakenOut,
 };
-pub use put::{PUT_NEEDS, PutIn, Seen};
+pub use put::{PUT_NEEDS, PutIn, Seen, was_cut_off_by_another_project};
 pub use sampler::{SWAP_NEEDS, Swapped};
 pub use send::{
     Bitwig, KIT_FAILED, KitSound, KitTarget, Mark, PART_FAILED, PART_IN, PART_PLACE, Pad, SOUND_FAILED, SOUND_PLACE,

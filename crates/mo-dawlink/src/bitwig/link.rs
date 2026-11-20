@@ -124,6 +124,9 @@ pub struct Recorded {
     /// The settings Bitwig didn't show back as they were, by the link's names ("master mute"). None when the job
     /// didn't wait to see them back: another project came to the front, or a step failed.
     pub not_back: Option<Vec<String>>,
+    /// Whether the job, cut off by another project coming to the front, kept what it had changed and puts it back
+    /// once its own project is in front again (extension 3.32; an older one drops it).
+    pub puts_back_later: bool,
 }
 
 impl Recorded {
@@ -142,6 +145,7 @@ impl Recorded {
             why: why.unwrap_or_default(),
             launcher_clip_deleted: flag(v, "launcherClipDeleted"),
             not_back: names(v.get("after").and_then(|after| after.get("restoreFailed"))),
+            puts_back_later: flag(v, "putBackLater"),
         })
     }
 }
