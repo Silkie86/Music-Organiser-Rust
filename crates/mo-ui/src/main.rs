@@ -308,7 +308,8 @@ fn finish(
     mo_ui::note::finish_up();
     // The MIDI files this run's drags wrote, once the DAW has long read them (rule 28).
     mo_ui::drag::finish_up();
-    // The last plays, drags and sends, and a galaxy map being kept, go into the sound library.
+    // The last plays, drags and sends, hearts, types and tags, and a galaxy map being kept, go into the sound library:
+    // waited for up to 10 seconds, only while some are waiting.
     mo_ui::sounds::finish_up();
     // A part playing in Bitwig or FL stops with the app.
     mo_ui::midi::finish_up();
