@@ -1434,6 +1434,32 @@ pub fn export_plan(items: &[Item], shown: &[usize]) -> (Vec<(String, Vec<String>
     (order.into_iter().map(|s| (by.remove(&s).unwrap_or_default(), s)).map(|(k, s)| (s, k)).collect(), files)
 }
 
+/// The free room an export of the sounds shown leaves on the drive it writes to, as a folder move keeps (PS-3): his C:
+/// is nearly full, and Windows and his DAWs' autosaves need room there too.
+pub const EXPORT_HEADROOM: u64 = 2 << 30;
+
+/// Whether an export of the sounds shown may write its next save, from the free room on the export folder's drive
+/// (`None` when it can't be told, which doesn't stop it). `Err` is the card's line saying why it stopped, or didn't
+/// start, with what was written so far (`done`, saves) when it had begun.
+pub fn export_room(free: Option<u64>, folder: &str, done: usize) -> Result<(), String> {
+    match free {
+        Some(free) if free < EXPORT_HEADROOM => {
+            let so_far = if done == 0 {
+                "Nothing was exported".to_owned()
+            } else {
+                format!("It stopped after {} saves", crate::backup::thousands(done))
+            };
+            Err(format!(
+                "{so_far}: only {} is free on the drive of {folder}, and an export keeps {} free. Make room there, or \
+                 pick an export folder on another drive in Settings.",
+                crate::data_move::size_text(free),
+                crate::data_move::size_text(EXPORT_HEADROOM)
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The card's line about an export: what was written, how many also as Bitwig presets, what failed, and which
 /// plugins could get a Bitwig preset after one save in Bitwig (the C# `ExportSummary`). `without` is those plugins.
 pub fn export_summary(done: &[Exported], without: &[String], failed_saves: &[String]) -> String {
@@ -1496,10 +1522,31 @@ pub fn sent_words(name: &str) -> String {
 
 /// The card's line when a preset couldn't go into Bitwig: why, and that it's shown to drag in instead.
 pub fn send_failed(why: &str) -> String {
+    format!(
+        "Couldn't put it into Bitwig: {}. The Bitwig preset is shown in its folder: drag it onto a track.",
+        said(why)
+    )
+}
+
+/// The card's line when a Bitwig preset made from a plugin's own preset file (in Temp, as `temp_name`) couldn't go
+/// into Bitwig (PS-2). `kept` is the name it was kept under to drag in by hand, when it could be kept: that name
+/// stands in for the Temp one in `why`. When it couldn't, the plugin's own file is no use on a track, so it says so.
+pub fn made_send_failed(why: &str, temp_name: &str, kept: Option<&str>) -> String {
+    match kept {
+        Some(kept) => send_failed(&why.replace(temp_name, kept)),
+        None => format!(
+            "Couldn't put it into Bitwig: {}. No Bitwig preset could be kept to drag in: press Send to Bitwig again \
+             once Bitwig is open.",
+            said(&why.replace(temp_name, "the Bitwig preset"))
+        ),
+    }
+}
+
+/// `why` as the middle of a sentence's words: no full stop, a capital first letter.
+fn said(why: &str) -> String {
     let why = why.trim_end_matches('.');
     let mut c = why.chars();
-    let why: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
-    format!("Couldn't put it into Bitwig: {why}. The Bitwig preset is shown in its folder: drag it onto a track.")
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2523,6 +2570,17 @@ mod tests {
     }
 
     #[test]
+    fn an_export_keeps_room_free() {
+        // PS-3: under the headroom it stops (or never starts), saying how far it got; unknown room doesn't stop it.
+        assert!(export_room(Some(EXPORT_HEADROOM), "C:\\Exports", 0).is_ok());
+        assert!(export_room(None, "C:\\Exports", 0).is_ok());
+        let none = export_room(Some(EXPORT_HEADROOM - 1), "C:\\Exports", 0).unwrap_err();
+        assert!(none.starts_with("Nothing was exported: only "), "{none}");
+        let some = export_room(Some(1 << 20), "C:\\Exports", 12).unwrap_err();
+        assert!(some.starts_with("It stopped after 12 saves: only "), "{some}");
+    }
+
+    #[test]
     fn send_words() {
         assert_eq!(sent_words("Sub"), "Sub is in Bitwig, on a new track.");
         assert_eq!(
@@ -2530,6 +2588,18 @@ mod tests {
             "Couldn't put it into Bitwig: Bitwig isn't open. The Bitwig preset is shown in its folder: drag it onto a \
              track."
         );
+        // PS-2: the Temp name never shows; with nothing kept, it doesn't point at a file Bitwig won't take.
+        assert_eq!(
+            made_send_failed(
+                "bitwig didn't load MO Play 12-3.bwpreset",
+                "MO Play 12-3.bwpreset",
+                Some("Serum Pad.bwpreset")
+            ),
+            "Couldn't put it into Bitwig: Bitwig didn't load Serum Pad.bwpreset. The Bitwig preset is shown in its \
+             folder: drag it onto a track."
+        );
+        let none = made_send_failed("bitwig didn't load MO Play 12-3.bwpreset", "MO Play 12-3.bwpreset", None);
+        assert!(!none.contains("MO Play") && !none.contains("shown in its folder"), "{none}");
     }
 
     #[test]
