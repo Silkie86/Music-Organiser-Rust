@@ -5120,8 +5120,7 @@ mod tests {
             })
         };
         let (chords, lead) = (bars(Wants::Tune, "Keys"), bars(Wants::Chords, "Lead"));
-        let mut p =
-            Page { cat: sample().cat, notes: Some(sample().notes), with_song: true, ..Page::default() };
+        let mut p = Page { cat: sample().cat, notes: Some(sample().notes), with_song: true, ..Page::default() };
         p.fit_song = Some(songs[0].clone());
         let listed = |p: &mut Page, entries: &[usize], with: Option<&Arc<SongBars>>| {
             p.fits = with.map(|_| Arc::new(entries.iter().map(|&entry| fit(entry)).collect()));
@@ -5219,8 +5218,7 @@ mod tests {
             bars: 8..12,
             view: mo_formats::bitwig::arrangement::VIEW,
         });
-        let mut p =
-            Page { cat: sample().cat, notes: Some(sample().notes), with_song: true, ..Page::default() };
+        let mut p = Page { cat: sample().cat, notes: Some(sample().notes), with_song: true, ..Page::default() };
         let listed = |p: &mut Page, song: &SongChoice, with: &Arc<SongBars>| {
             p.fit_song = Some(song.clone());
             p.fits = Some(Arc::new(vec![fit(4), fit(2)]));
