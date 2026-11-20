@@ -108,7 +108,8 @@ impl Bitwig {
     /// module's words. Fails with nothing changed when no Sampler is selected, the file isn't there, the extension is
     /// older than 3.29, changes are off, another project came to the front, another device is selected by the time
     /// Bitwig gets to it, or Bitwig doesn't take the file. Once the sound is in, what goes wrong is told in
-    /// [`Swapped::trouble`], not as an error; when it can't be told whether it is in, [`Swapped::unknown`] says so. Waits for Bitwig: call it off the UI thread, in its `_turn`.
+    /// [`Swapped::trouble`], not as an error; when it can't be told whether it is in, [`Swapped::unknown`] says so.
+    /// Waits for Bitwig: call it off the UI thread, in its `_turn`.
     pub fn swap_into_sampler(&self, path: impl AsRef<Path>, _turn: &Turn<'_>) -> Result<Swapped, Error> {
         let mut link = self.connect()?;
         check_version(link.hello(), SWAP_NEEDS)?;
@@ -154,6 +155,12 @@ impl Bitwig {
             // The selection moved before Bitwig showed the swap: whether the sound went in can't be told (the 19 Nov
             // review's LK-3).
             Replaced::Moved => {
+                swapped.trouble = Some(MOVED.into());
+                swapped.unknown = true;
+                return Ok(swapped);
+            }
+            // No device is selected any more once the swap showed (the link then names no sample): the selection moved.
+            Replaced::Yes if answer.sample.trim().is_empty() => {
                 swapped.trouble = Some(MOVED.into());
                 swapped.unknown = true;
                 return Ok(swapped);
@@ -244,10 +251,11 @@ impl Bitwig {
 /// the ending, whatever the case, with or without folders before it (the rule the extension has for "the same sample
 /// again"; how a real Bitwig names it is untried).
 fn names_file(sample: &str, path: &Path) -> bool {
-    let shown = sample.rsplit(['/', '\\']).next().unwrap_or(sample).trim().to_lowercase();
-    let name = |part: Option<&std::ffi::OsStr>| part.map(|n| n.to_string_lossy().to_lowercase());
+    let tidy = |name: &str| name.trim().to_lowercase();
+    let shown = tidy(sample.rsplit(['/', '\\']).next().unwrap_or(sample));
+    let part = |part: Option<&std::ffi::OsStr>| part.map(|n| tidy(&n.to_string_lossy()));
     !shown.is_empty()
-        && (name(path.file_name()).as_deref() == Some(&shown) || name(path.file_stem()).as_deref() == Some(&shown))
+        && (part(path.file_name()).as_ref() == Some(&shown) || part(path.file_stem()).as_ref() == Some(&shown))
 }
 
 /// Whether `now` is the Sampler at `place`: on the same track, at the same place in its chain, with the same sample

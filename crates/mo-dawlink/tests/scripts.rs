@@ -76,6 +76,15 @@ fn a_copy_with_the_measure_turned_on_is_the_apps_own_and_keeps_it_through_an_upd
     assert!(now.lines().any(|l| l == "LET_THE_APP_MAKE_CHANGES = True"));
     assert!(now.lines().any(|l| l == "MEASURE_IN_LIVE_TEST = True"));
     assert_eq!(now.lines().count(), FL_SCRIPT.lines().count());
+    // A setting mistyped by hand isn't the app's own copy, and the update writes the app's line, not the typo.
+    fs::write(
+        folders[0].join(FL_SCRIPT_NAME),
+        FL_SCRIPT.replace("MEASURE_IN_LIVE_TEST = False", "MEASURE_IN_LIVE_TEST = Ture"),
+    )
+    .unwrap();
+    assert_eq!(fl_state(&folders), ScriptState::Outdated);
+    assert!(install_fl(&folders).failed.is_empty());
+    assert_eq!(fs::read_to_string(folders[0].join(FL_SCRIPT_NAME)).unwrap(), FL_SCRIPT);
 }
 
 #[test]

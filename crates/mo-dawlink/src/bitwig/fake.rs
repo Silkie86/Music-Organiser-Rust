@@ -197,7 +197,7 @@ pub struct World {
     /// in, and the answer is `replaced` null with `moved`.
     pub moves_during_swap: bool,
     /// The sample of another Sampler the swap's answer shows instead of the new one's, as when another pad's Sampler
-    /// was clicked while Bitwig swapped: the file goes in, the answer names this.
+    /// was clicked while Bitwig swapped: the answer names this, and the selected device holds it from then on.
     pub shows_other_sample: Option<String>,
     /// Selects another device when a request with a command comes, as if someone clicked elsewhere in Bitwig while
     /// the change waited its turn.
@@ -1371,6 +1371,9 @@ impl World {
         // A sample of the name that was there: its name can't show the swap.
         let again = file_name(&device.sample).eq_ignore_ascii_case(file_name(&path));
         *device = sampler;
+        if let Some(other) = &self.shows_other_sample {
+            device.sample = other.clone();
+        }
         let shown = device.described(d);
         let fresh: Vec<&str> = device.params.iter().map(|p| p.id.as_str()).collect();
         self.modified = true;

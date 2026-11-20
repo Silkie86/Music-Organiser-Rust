@@ -185,8 +185,6 @@ fn a_selection_that_moves_after_the_swap_is_told_with_the_sound_in() {
     assert_eq!(bitwig.world().tracks[2].devices[0].params[0], FakeParam::new("CONTENTS/GAIN", "Gain", 0.8));
 }
 
-/// A sound of the name the Sampler holds already, on a Bitwig that shows no sign of the swap: the report says it
-/// can't tell, and every setting is set again instead of counted as come over.
 /// The 19 Nov review's LK-3: the selection moved before Bitwig showed the swap, so nothing says the sound went in.
 #[test]
 fn a_selection_that_moves_before_the_swap_shows_is_said_as_not_knowable() {
@@ -214,9 +212,13 @@ fn a_sampler_showing_another_sample_after_the_swap_gets_no_settings() {
         let bitwig = with_sampler(|w| w.shows_other_sample = Some(shown.into()));
         let swapped = bitwig.bitwig().swap_into_sampler(sample("Kick 9"), &turn()).unwrap();
         assert!(!swapped.unknown, "{shown}: {swapped:?}");
+        assert_eq!(swapped.trouble, None, "{shown}");
+        assert_eq!(swapped.set_back, ["Gain"], "{shown}: its settings are set back");
     }
 }
 
+/// A sound of the name the Sampler holds already, on a Bitwig that shows no sign of the swap: the report says it
+/// can't tell, and every setting is set again instead of counted as come over.
 #[test]
 fn a_sound_of_the_same_name_with_no_sign_of_the_swap_is_said_as_not_knowable() {
     let file = sample("Old");
