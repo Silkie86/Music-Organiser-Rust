@@ -875,6 +875,13 @@ impl Template {
             if a.muted || c.has(0x10f8) {
                 put(c, 0x10f8, Value::Bool(a.muted.into()));
             }
+            // No fade (0x1947 in, 0x1948 out): the template clip's own isn't the song's. FL's fades aren't written
+            // yet, as what Bitwig's number counts isn't worked out; the plan says which channels have them.
+            for fade in [0x1947, 0x1948] {
+                if c.has(fade) {
+                    put(c, fade, Value::F64(0.0));
+                }
+            }
         }
         if let Some(range) = self.doc.field_obj(clip, 0x2adb) {
             self.set_range(range, a.offset, a.length);

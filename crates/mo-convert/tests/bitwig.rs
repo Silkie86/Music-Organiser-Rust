@@ -126,6 +126,7 @@ fn song() -> FlSong {
         ppq: 96,
         tempo: 128.0,
         signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
+        fine_notes: Vec::new(),
         channels: vec![snare, synth],
         inserts: Vec::new(),
         routes: Default::default(),
@@ -703,6 +704,8 @@ fn audio_clips_come_across_stretched_and_pitched_on_a_copy_of_the_audio_track() 
     assert_eq!(clips.len(), 1);
     let c = doc.obj(clips[0]);
     assert_eq!((c.class, c.num(0x2af), c.num(0x26)), (0xee, Some(2.0), Some(1.0)));
+    // The template clip's fades aren't the song's (CN-3).
+    assert_eq!((c.num(0x1947), c.num(0x1948)), (Some(0.0), Some(0.0)));
     // 1.5 seconds an octave up plays 0.75 seconds: 1.5 beats at 120 BPM. It starts a third of the way in.
     let lane = doc.field_list(obj(&doc, clips[0], &[0x2ae9, 0x10e9, 0x49c]), 0x18cb);
     let audio = doc.field_list(lane[0], 0x21f);

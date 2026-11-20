@@ -103,6 +103,18 @@ pub fn decode(data: &[u8], size: usize) -> Vec<(u32, NoteEvent)> {
         .collect()
 }
 
+/// The channels with a note whose fine pitch or pan was moved in the piano roll (24-byte records: byte 16 is the fine
+/// pitch, 120 in tune; byte 20 the pan, 64 the middle). The app doesn't keep either yet, so a converter can say so.
+/// The two bytes are as PyFLP has them, and every recipe save's notes hold 120 and 64 there; no save with one moved
+/// has been read.
+pub fn moved_pitch_or_pan(data: &[u8], size: usize) -> impl Iterator<Item = u32> + '_ {
+    const IN_TUNE: u8 = 120;
+    const MIDDLE: u8 = 64;
+    data.chunks_exact(size.max(1))
+        .filter(move |r| size == 24 && (byte_at(r, 16) != IN_TUNE || byte_at(r, 20) != MIDDLE))
+        .map(|r| u16_at(r, 6) as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +127,21 @@ mod tests {
         r[12..14].copy_from_slice(&key.to_le_bytes());
         r[size - 3] = velocity;
         r
+    }
+
+    /// Whole-app review CN-4 (19 Nov 2026).
+    #[test]
+    fn channels_with_a_note_panned_or_finely_pitched_are_found() {
+        let as_saved = |channel: u16, fine: u8, pan: u8| {
+            let mut r = note(0, channel, 96, 60, 100, 24);
+            (r[16], r[20]) = (fine, pan);
+            r
+        };
+        let data: Vec<u8> =
+            [as_saved(0, 120, 64), as_saved(1, 90, 64), as_saved(2, 120, 0), as_saved(3, 120, 64)].concat();
+        assert_eq!(moved_pitch_or_pan(&data, 24).collect::<Vec<_>>(), [1, 2]);
+        // Older, 20-byte notes have neither.
+        assert_eq!(moved_pitch_or_pan(&note(0, 0, 96, 60, 100, 20), 20).count(), 0);
     }
 
     #[test]

@@ -243,6 +243,7 @@ fn an_fl_songs_sounds_get_their_channels_parts_and_effects_their_inserts() {
         ppq: 96,
         tempo: 140.0,
         signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
+        fine_notes: Vec::new(),
         channels: vec![
             // Written high, but the root key two octaves up makes it a bass.
             channel(0, "Wobble", "Serum", 2, 84, line(&[60, 62, 67])),
@@ -426,6 +427,7 @@ fn serums_own_octave_counts_in_the_guess() {
         ppq: 96,
         tempo: 140.0,
         signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
+        fine_notes: Vec::new(),
         channels: vec![channel(0, "Synth", "Serum", 1, root_key, line(&[60, 62, 67]))],
         inserts: Vec::new(),
         routes: Default::default(),
