@@ -225,8 +225,17 @@ impl Job {
 
     /// How far it is, 0 to 1, with an optional new detail line. Passed on at most every 250 ms.
     pub fn progress(&self, fraction: f32, detail: Option<&str>) {
+        // The card's new numbers and the mark that they're not shown yet go in under one lock: under two, a redraw
+        // between them took the mark and showed the old numbers, which then stayed until the job's next report (the
+        // 19 November 2026 review's RA-9).
         let due = {
             let mut inner = self.feed.lock();
+            if let Some(c) = inner.cards.iter_mut().find(|c| c.id == self.id) {
+                c.progress = Some(fraction.clamp(0.0, 1.0));
+                if let Some(d) = detail {
+                    c.detail = d.to_owned();
+                }
+            }
             let now = Instant::now();
             let due = now.duration_since(inner.last_progress) >= PROGRESS_EVERY;
             if due {
@@ -236,12 +245,6 @@ impl Job {
             }
             due
         };
-        self.feed.update(self.id, |c| {
-            c.progress = Some(fraction.clamp(0.0, 1.0));
-            if let Some(d) = detail {
-                c.detail = d.to_owned();
-            }
-        });
         if due {
             self.feed.changed();
         }

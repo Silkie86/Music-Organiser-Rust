@@ -216,13 +216,14 @@ pub fn big_enough(e: &Entry, smallest: usize) -> bool {
 }
 
 /// How many lines the whole list has with parts under `smallest` notes hidden (the same loop in other keys is one
-/// line; those all have the same notes).
+/// line; those all have the same notes). One after another, where it's called: a quick count, and spread over
+/// rayon's own threads it made a thread a core at normal priority for the whole run when the caller was in no pool
+/// (rule 21; the 19 November 2026 review's RA-4).
 pub fn line_count(cat: &Catalogue, smallest: usize) -> usize {
     if smallest <= 1 {
         return cat.line_count;
     }
     (0..cat.entries.len())
-        .into_par_iter()
         .filter(|&at| cat.is_line(at) && cat.entry(at).is_some_and(|e| big_enough(e, smallest)))
         .count()
 }

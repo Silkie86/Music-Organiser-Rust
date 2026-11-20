@@ -355,6 +355,11 @@ const RETRY_AFTER: Duration = Duration::from_secs(5);
 /// closed: the pages read what they show first.
 const CATCH_UP_AFTER: Duration = Duration::from_secs(20);
 
+/// How long after the catch-up a save it couldn't read (still being written, locked), read by a later try, is still
+/// told to the other pages as the catch-up's own are. Later ones are saves made in this run: those pages take them
+/// at their next reading, not at each save.
+const CATCH_UP_TRIES: Duration = Duration::from_secs(120);
+
 /// How long after what was read couldn't be kept in songs.db (another copy of the app holding it) it's tried again.
 const KEEP_AGAIN_AFTER: Duration = Duration::from_secs(60);
 
@@ -402,6 +407,12 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
     let mut said_held = false;
     // What came while the thread was busy, still to do ([`next`]).
     let mut waiting: VecDeque<Told> = VecDeque::new();
+    // The start-up catch-up found saves songs.db didn't have, and the pages that took their saves from it before
+    // (Presets, Curves, MIDI) haven't been told yet: they are once it's kept.
+    let mut tell_pages = false;
+    // Until when a save the catch-up couldn't read first time (still being written, locked), read by a later try,
+    // still counts as the catch-up's: the pages are told of it too.
+    let mut catch_up_tries_until: Option<Instant> = None;
     loop {
         let now = Instant::now();
         let due = |at: Option<Instant>| at.map_or(RETRY_AFTER, |at| at.saturating_duration_since(now));
@@ -410,6 +421,8 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
         // What you gave songs on their cards: kept, and the list made again with it. If it can't be kept the list is
         // made again all the same, so the card goes back to what the library has, and a card says why.
         let mut gave = Gave::default();
+        // A try again at saves that couldn't be read, not a change the folder watch saw.
+        let mut tried_again = false;
         let changes = match next(&rx, &mut waiting, wait) {
             Ok(Told::Changed(changes)) => Some(changes),
             Ok(Told::Give(given)) => {
@@ -421,7 +434,10 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                 let _ = done.send(());
                 break;
             }
-            Err(RecvTimeoutError::Timeout) => live.retries(),
+            Err(RecvTimeoutError::Timeout) => {
+                tried_again = true;
+                live.retries()
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         };
         let mut updated = Updated::default();
@@ -461,13 +477,20 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                     mended_line(caught.mended)
                 ),
             );
+            tell_pages = caught.for_card();
+            catch_up_tries_until = Some(Instant::now() + CATCH_UP_TRIES);
             updated = updated.and(caught);
+        } else if tried_again && updated.for_card() && catch_up_tries_until.is_some_and(|until| Instant::now() < until)
+        {
+            // A save the catch-up couldn't read (still being written, locked) is read now: the pages hear of it too.
+            tell_pages = true;
         }
         let closing = gave.take_waiting(live, &rx, &mut waiting);
         // Kept in songs.db with each change, or a while after it couldn't be kept. As the app closes, only when you gave
         // a song something just now: a save it went to that the library hadn't taken yet (just read) has it here only
         // till it's kept.
         let mut renumbered = false;
+        let mut kept_now = false;
         let keep_now = if closing {
             gave.any
         } else {
@@ -489,6 +512,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                         log::warning("Songs", &format!("Couldn't keep {path} in songs.db: {why}"));
                     }
                     renumbered = !w.ids.is_empty();
+                    kept_now = true;
                     None
                 }
                 Some(Err(e)) if closing => {
@@ -504,6 +528,16 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                 }
                 None => None,
             };
+        }
+        // Presets, Curves and MIDI read their saves from songs.db, and since they're read just after the start that's
+        // before this catch-up: saves made as new files while the app was closed were missing from them for the whole
+        // run (the 19 November 2026 review's RA-1 and RA-2). Told once, and only when songs.db has them.
+        if tell_pages && kept_now && !closing {
+            tell_pages = false;
+            let _ = weak.upgrade_in_event_loop(|app| {
+                crate::midi::songs_caught_up(&app);
+                crate::presets::songs_caught_up(&app);
+            });
         }
         if closing || (updated.is_empty() && !renumbered && !gave.any) {
             continue;
