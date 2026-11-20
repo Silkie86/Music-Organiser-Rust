@@ -115,6 +115,46 @@ fn library_db_is_never_written() {
     let path = library(&dir, std::slice::from_ref(&record));
     let new = copy(&dir, "Day");
     assert!(!converts::remember(&path, &new, "638100000000000000 C:\\Music\\Day.flp").unwrap());
+    assert!(!converts::remember_opened(&path, &new, 1_800_000_000).unwrap());
     // Not even the gone copy's record went.
     assert_eq!(settings(&path), [record]);
+}
+
+/// Whole-app review CN-11 (19 Nov 2026): a copy opened in Bitwig is remembered for a day, through a restart.
+#[test]
+fn a_copy_opened_in_bitwig_counts_as_open_for_a_day_and_old_records_are_let_go() {
+    let dir = folder("opened");
+    let (night, day) = (copy(&dir, "Night"), copy(&dir, "Day"));
+    let gone = dir.join("Exports").join("Old").join("Old.bwproject");
+    let hour = 60 * 60;
+    let start = 1_800_000_000;
+    library(&dir, &[(converts::opened_key(&gone), start.to_string()), ("theme".to_owned(), "Graphite".to_owned())]);
+    let songs = dir.join(songs_db::FILE_NAME);
+    songs_db::make(&dir.join("library.db"), &songs, &mut |_| {}).unwrap();
+    assert_eq!(songs_db::at_start(&dir, "test").state, State::Switched);
+
+    assert!(converts::remember_opened(&songs, &night, start).unwrap());
+    // The record of a copy that has gone went with it; every other setting stayed.
+    let mut want = vec![(converts::opened_key(&night), start.to_string()), ("theme".to_owned(), "Graphite".to_owned())];
+    want.sort();
+    assert_eq!(settings(&songs), want);
+    let lately = |now: u64| {
+        let mut names = converts::opened_lately(&Library::open_read_only(&songs).unwrap(), now).unwrap();
+        names.sort();
+        names
+    };
+    assert_eq!(lately(start + 23 * hour), std::slice::from_ref(&night));
+    assert_eq!(lately(start + 24 * hour), Vec::<PathBuf>::new());
+    // A clock set back a little never makes a fresh record old; one far behind the record doesn't hold the name for
+    // good.
+    assert_eq!(lately(start - hour), std::slice::from_ref(&night));
+    assert_eq!(lately(start - 25 * hour), Vec::<PathBuf>::new());
+
+    // Another copy opened a day later: Night's record says nothing any more, and goes.
+    assert!(converts::remember_opened(&songs, &day, start + 25 * hour).unwrap());
+    assert_eq!(lately(start + 26 * hour), std::slice::from_ref(&day));
+    let lib = Library::open_read_only(&songs).unwrap();
+    assert_eq!(lib.settings_starting(converts::OPENED_PREFIX).unwrap().len(), 1);
+    // A record that can't be read, or none, says nothing.
+    assert!(!converts::may_be_open(Some("soon"), start) && !converts::may_be_open(None, start));
 }
