@@ -51,7 +51,9 @@ removed at the next look, and so is a setup GitHub no longer lists (a release ta
 
 1. Raise `version` in `Cargo.toml`'s `[workspace.package]` (a PR like any other). A version with a dash, like
    `0.9.0-beta.1`, is a test release.
-2. On GitHub: Actions, Release, Run workflow. Leave the branch on `main`, tick **Make the draft release**, and run it.
+2. Wait until main's own CI run for that commit is green (Actions, CI, the run for the merge). The release stops at
+   its first step if it isn't, as a PR's run only tests what the PR changed. Then on GitHub: Actions, Release, Run
+   workflow. Leave the branch on `main`, tick **Make the draft release**, and run it.
    (Pushing a tag such as `v0.9.0-beta.1` on `main` does the same.)
 3. The Release workflow builds the Bitwig extension and the app (`dist` profile, about 25 minutes). It then makes the
    setup, tries it with `installer/check.ps1`, and puts a **draft** release on the Releases page, tagged `v` plus the
