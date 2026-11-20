@@ -106,10 +106,10 @@ impl Swapped {
 impl Bitwig {
     /// Puts the sample at `path` in the place of the Sampler selected in Bitwig, keeping its settings: see the
     /// module's words. Fails with nothing changed when no Sampler is selected, the file isn't there, the extension is
-    /// older than 3.29, changes are off, another project came to the front, another device is selected by the time
-    /// Bitwig gets to it, or Bitwig doesn't take the file. Once the sound is in, what goes wrong is told in
-    /// [`Swapped::trouble`], not as an error; when it can't be told whether it is in, [`Swapped::unknown`] says so.
-    /// Waits for Bitwig: call it off the UI thread, in its `_turn`.
+    /// older than 3.29, changes are off, another device is selected by the time Bitwig gets to it, or Bitwig doesn't
+    /// take the file. When another project comes to the front the error says the sound may be in all the same. Once
+    /// the sound is in, what goes wrong is told in [`Swapped::trouble`], not as an error; when it can't be told
+    /// whether it is in, [`Swapped::unknown`] says so. Waits for Bitwig: call it off the UI thread, in its `_turn`.
     pub fn swap_into_sampler(&self, path: impl AsRef<Path>, _turn: &Turn<'_>) -> Result<Swapped, Error> {
         let mut link = self.connect()?;
         check_version(link.hello(), SWAP_NEEDS)?;
@@ -133,7 +133,21 @@ impl Bitwig {
                     .into(),
             ));
         }
-        let answer = link.replace_selected_with_file(&shown, &before)?;
+        // Another project in front once the swap had begun: Bitwig may have made the new Sampler already, with none of
+        // the old one's settings (the 19 Nov review's LK-5). The link says "before changing anything" here too, which
+        // can't be taken at its word: the file goes in before the link waits to see it.
+        let answer = link.replace_selected_with_file(&shown, &before).map_err(|e| {
+            if e.is_elsewhere() && link.only_in().is_some() {
+                Error::Bitwig(format!(
+                    "Another project came to the front in Bitwig as the sound went in, so the link stopped. The sound \
+                     may be in the Sampler on \"{}\" in the song you had in front, without its settings: look \
+                     there first, and if it is, Bitwig's undo puts the Sampler back.",
+                    before.track
+                ))
+            } else {
+                e
+            }
+        })?;
         let mut swapped = Swapped {
             track: before.track.clone(),
             same_sound: answer.replaced == Replaced::CantTell,

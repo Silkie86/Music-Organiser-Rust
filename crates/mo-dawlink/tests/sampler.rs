@@ -185,6 +185,17 @@ fn a_selection_that_moves_after_the_swap_is_told_with_the_sound_in() {
     assert_eq!(bitwig.world().tracks[2].devices[0].params[0], FakeParam::new("CONTENTS/GAIN", "Gain", 0.8));
 }
 
+/// The 19 Nov review's LK-5: another project comes to the front once the file has gone in. The link's "stopped before
+/// changing anything" isn't passed on: the sound may be in, without the old settings.
+#[test]
+fn another_project_in_front_during_the_swap_says_the_sound_may_be_in() {
+    let bitwig = with_sampler(|w| w.switch_during = Some(("insert".into(), "Other Song".into())));
+    let said = bitwig.bitwig().swap_into_sampler(sample("Kick 10"), &turn()).unwrap_err().to_string();
+    assert!(said.starts_with("Another project came to the front in Bitwig as the sound went in"), "{said}");
+    assert!(said.contains("may be in the Sampler on \"Bass\""), "{said}");
+    assert!(!said.contains("before changing anything"), "{said}");
+}
+
 /// The 19 Nov review's LK-3: the selection moved before Bitwig showed the swap, so nothing says the sound went in.
 #[test]
 fn a_selection_that_moves_before_the_swap_shows_is_said_as_not_knowable() {

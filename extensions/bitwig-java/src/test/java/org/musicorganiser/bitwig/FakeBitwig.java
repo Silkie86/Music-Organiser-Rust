@@ -511,6 +511,14 @@ final class FakeBitwig {
         sync();
     }
 
+    /** You click a device in Bitwig (a track by its place in the listing, a device by its place in the chain): it's the selected one at once. */
+    void clickDevice(int track, int device) {
+        TrackSpec spec = trackSpec(track);
+        cursorIndex = track;
+        cursorSpec = spec.devices.get(device);
+        sync();
+    }
+
     /** You press Stop in Bitwig: it stops playing; Stop while it's stopped moves the play start to the beginning. */
     void pressStop() {
         if (playingNow) stopPlaying();

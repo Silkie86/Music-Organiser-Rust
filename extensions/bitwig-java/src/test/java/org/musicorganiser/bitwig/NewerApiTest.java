@@ -923,6 +923,32 @@ class NewerApiTest {
     }
 
     @Test
+    @DisplayName("still knows its audition track when a take-out was stopped while it waited for Bitwig to start (extension 3.33)")
+    void takesTheTrackOutOnASecondAskAfterAStoppedOne() {
+        Model m = LinkTest.song();
+        m.newTrackIds = true;
+        m.scenes = 2;
+        m.startDelay = 400;
+        start(m);
+        bitwig.allowChanges(true);
+        int before = bitwig.state.tracks.size();
+        String id = (String) SelfCheckTest.map(
+            app.waitFor(obj("id", 1, "cmd", "newtrack", "name", "Warm Pad", "audition", true)).get("result")).get("id");
+        // Stop straight after the launch: while the extension waits for Bitwig to start, another project comes to the front.
+        bitwig.switchDuring("deletetrack", "My Song");
+        app.send(obj("id", 2, "cmd", "clip", "trackId", id, "path", "C:\\MIDI\\MO Play 1.mid", "launch", true, "audition", true));
+        app.send(obj("id", 3, "cmd", "deletetrack", "trackId", id, "transport", true, "onlyIn", "Night Drive"));
+        bitwig.clock.advance(10000);
+        assertEquals(LinkTest.elsewhere("My Song", "Night Drive"), error(app.take().get(1)));
+        assertEquals(before + 1, bitwig.state.tracks.size());
+        // Back in the song, the second ask still finds the track the app's own.
+        bitwig.projectName.v = "Night Drive";
+        assertJson(obj("deleted", true),
+                   app.waitFor(obj("id", 4, "cmd", "deletetrack", "trackId", id, "transport", true, "onlyIn", "Night Drive")).get("result"));
+        assertEquals(before, bitwig.state.tracks.size());
+    }
+
+    @Test
     @DisplayName("never takes out a track it didn't make for an audition, or one renamed since")
     void leavesOtherTracksAlone() {
         Model m = LinkTest.song();
