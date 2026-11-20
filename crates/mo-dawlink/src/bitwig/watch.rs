@@ -48,9 +48,9 @@ pub enum State {
     Connecting,
     /// Nothing answered on the link's port: Bitwig isn't running, or the extension isn't added in it.
     NoBitwig,
-    /// Something has the link's port but didn't greet as the link in time, or the connection broke as it began: a
-    /// busy Bitwig (opening a project, say) greets late, one that's closing lets go, and another program may have
-    /// the port.
+    /// Something has the link's port but didn't greet as the link in time, the connection broke as it began, or the
+    /// ask to watch got no answer: a busy Bitwig (opening a project, say) greets or answers late, one that's closing
+    /// lets go, and another program may have the port.
     NoAnswer,
     /// The link answered, but it's older than [`WATCH_NEEDS`]: what answered, in words ("the DAWmate
     /// extension 3.23"). Installing the extension again (Settings > DAWs) brings the feed.
@@ -293,8 +293,16 @@ fn watch_once(port: u16, shared: &Shared) {
     }
     let answer = match link.start_watch() {
         Ok(answer) => answer,
-        Err(error) => {
+        // The link said no, in its words: asked again only after a while.
+        Err(error @ (super::Error::Bitwig(_) | super::Error::Unexpected)) => {
             settle_on(shared, State::Refused(error.to_string()));
+            return;
+        }
+        // No answer in time, or the connection went: a busy or closing Bitwig, tried again in a moment (the 19 Nov
+        // review's LK-8). An answer that couldn't be read comes as a broken connection too, and is tried again the
+        // same way: the two can't be told apart here.
+        Err(_) => {
+            settle_on(shared, State::NoAnswer);
             return;
         }
     };
