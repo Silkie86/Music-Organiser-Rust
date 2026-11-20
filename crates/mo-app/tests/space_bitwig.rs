@@ -368,6 +368,7 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     let asked = |mut jobs: Vec<ToFree>| {
         for job in &mut jobs {
             job.elsewhere = Ok(Vec::new());
+            job.reread = mo_library::song_writes::BitwigReread::Done;
         }
         jobs
     };
@@ -416,6 +417,20 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     let behind: Vec<String> = left_behind(&jobs[0]).iter().map(|p| name(p)).collect();
     assert_eq!(behind, ["Song v2.bwproject", "Song v1.bwproject", "Song v2-1.bwproject"]);
     let bin = FolderBin { dir: dir.join("bin"), held: Default::default() };
+    // Until the library has read every Bitwig save again for multisamples outside their folders, a multisample copy
+    // stays (FS-5).
+    let mut not_read = jobs[0].clone();
+    not_read.reread = mo_library::song_writes::BitwigReread::Waiting;
+    let done = free(&not_read, &bin, &stop);
+    assert!(done.removed.is_empty() && !done.problems.is_empty(), "{:?}", done.problems);
+    assert!(done.problems.iter().all(|p| p.why.contains("still reading")), "{:?}", done.problems);
+    not_read.reread = mo_library::song_writes::BitwigReread::Owed(2);
+    let done = free(&not_read, &bin, &stop);
+    assert!(
+        done.problems.iter().any(|p| p.why.contains("2 Bitwig saves couldn't be read again")),
+        "{:?}",
+        done.problems
+    );
     // Until the library has been asked who else uses them, nothing goes; and as nothing went, the fixed project's mark
     // (put on before the first copy would go: FS-23) comes off again.
     let done = free_noted(&unasked[0], &bin, &stop, &note, 100);

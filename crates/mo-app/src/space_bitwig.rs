@@ -21,6 +21,7 @@ use std::time::SystemTime;
 
 use mo_convert::relink::{self, Relink};
 use mo_formats::paths;
+use mo_library::song_writes::BitwigReread;
 use mo_library::songs::SongChoices;
 use mo_space::bitwig::{self, LibraryCopy, LibraryIndex, Save};
 use mo_space::size::size_text;
@@ -414,6 +415,11 @@ pub struct ToFree {
     /// (`mo_library::Library::saves_using`): one in another folder keeps the copy. Err (and why) when the library
     /// couldn't be read: every copy stays then. Nothing goes until it's been read.
     pub elsewhere: Result<Vec<(String, String)>, String>,
+    /// How far the library is with reading every Bitwig save again for the multisamples it finds outside its folder by
+    /// their full path (`mo_library::song_writes::bitwig_reread`): until it's done, [`ToFree::elsewhere`] can't name a
+    /// save in another folder that uses a multisample copy, so every multisample copy stays (the whole-app review of
+    /// 19 Nov, FS-5). Read with it, off the window's thread.
+    pub reread: BitwigReread,
 }
 
 impl ToFree {
@@ -553,6 +559,33 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
     // A save in another folder that names a copy by its full path (saved without copying its samples) keeps it.
     let used_elsewhere = |copy: &Path| -> Option<String> {
         let name = paths::file_name(&copy.to_string_lossy()).to_owned();
+        let multisample = copy
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(relink::COPY_FOLDERS[0]));
+        let not_yet = match job.reread {
+            BitwigReread::Done => None,
+            BitwigReread::Waiting => Some(
+                "the app is still reading your Bitwig saves again to see which use a multisample copy from another \
+                 folder. Try again once that's done (the Songs page's look through your folders)."
+                    .to_owned(),
+            ),
+            BitwigReread::Owed(n) => Some(format!(
+                "{} couldn't be read again (on a drive that's away, say), so whether {} a multisample copy from \
+                 another folder isn't known. {} tried again at each start.",
+                plural(n, "Bitwig save"),
+                if n == 1 { "it uses" } else { "they use" },
+                if n == 1 { "It's" } else { "They're" }
+            )),
+            BitwigReread::NotOwn => Some(
+                "the app doesn't keep its own song library yet, so which saves in other folders use a multisample copy \
+                 can't be told."
+                    .to_owned(),
+            ),
+        };
+        if multisample && let Some(why) = not_yet {
+            return Some(format!("{name} stays: {why}"));
+        }
         let copy_key = without_drive(key(&copy.to_string_lossy()));
         elsewhere
             .iter()
@@ -878,6 +911,7 @@ impl Fixes {
                     libraries: found.library.clone(),
                     choices: SongChoices::default(),
                     elsewhere: Err("the library wasn't asked yet".to_owned()),
+                    reread: BitwigReread::Waiting,
                 })
             })
             .collect()

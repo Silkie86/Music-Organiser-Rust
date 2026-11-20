@@ -560,7 +560,9 @@ impl Live {
                 self.mend = Mend::Reading { ids, owed: HashSet::new(), missed: false };
             }
             Ok(None) => {}
-            Err(e) => crate::log::warning("Songs", &format!("{e}; the muted samples are mended at the next start")),
+            Err(e) => {
+                crate::log::warning("Songs", &format!("{e}; the saves to read again once are read at the next start"))
+            }
         }
     }
 
@@ -1640,15 +1642,16 @@ mod tests {
             let lib = Library::open_read_only(&songs).unwrap();
             Live::load(&lib, 6, LiveDetails::default()).unwrap().with_writes(songs.clone())
         };
-        // Nothing changed, but the FL Studio save the app kept is read again, and that's not on the card.
+        // Nothing changed, but the FL Studio save the app kept is read again, and so is every Bitwig save once (to
+        // find the multisamples it uses from outside its folder, review FS-5); that's not on the card.
         let mut live = open();
         assert_eq!(live.saves.len(), 3);
         let caught = live.catch_up();
-        assert_eq!((caught.read.len(), caught.moved.len(), caught.gone, caught.mended), (0, 0, 0, 1));
+        assert_eq!((caught.read.len(), caught.moved.len(), caught.gone, caught.mended), (0, 0, 0, 2));
         assert!(!caught.for_card());
         assert!(live.note_to_keep());
         let kept = live.keep().unwrap().unwrap();
-        assert_eq!((kept.written.put, kept.written.mended), (1, true));
+        assert_eq!((kept.written.put, kept.written.mended), (2, true));
         assert_eq!(live.mend, Mend::Done);
         assert!(live.keep().is_none(), "kept once");
         // Noted: the next start reads nothing again.

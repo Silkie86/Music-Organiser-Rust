@@ -29,6 +29,11 @@ pub const DAW: &str = "Bitwig Studio";
 ///
 /// The time signature read from both its numbers (6/8 no longer 3/4, 19 Nov 2026) didn't raise it either: only the
 /// Songs preview and the MIDI page's fits read it, from the save each time, and nothing keeps it.
+///
+/// Listing a multisample a sample file finds outside the project by its full path (the whole-app review of 19 Nov,
+/// FS-5, so Space can tell another folder's save uses a project's copy) didn't raise it: only the songs library keeps a
+/// save's samples, and it reads every Bitwig save again once for it (`mo_library::song_writes::to_mend`); raising it
+/// would extract every save's MIDI, presets and curves again for nothing.
 pub const VERSION: u32 = 4;
 
 /// Said when the plugin settings stored at the end of a project are missing or can't be opened.
@@ -45,6 +50,11 @@ pub(super) const CLS_CLIP: u32 = 0x47;
 const CLS_KEY_LANE: u32 = 0x42;
 pub(super) const CLS_NOTE: u32 = 0x66;
 const CLS_FILE_REF: u32 = 0x2a;
+/// A sample file a device uses (a multisample, wavetable or sample): 0xd3a its place inside the project's folder ("" when
+/// it isn't in it), 0xd3b its file reference (a [`CLS_FILE_REF`]) that Bitwig finds it by.
+const CLS_SAMPLE_FILE: u32 = 0x4a6;
+const F_IN_PROJECT: u32 = 0xd3a;
+const F_SAMPLE_FILE_REF: u32 = 0xd3b;
 const CLS_HARDWARE_IO: u32 = 0x461;
 // Fields.
 pub(super) const F_DEVICE_NAME: u32 = 0x9a;
@@ -371,6 +381,22 @@ fn read_decoded(project: &Project, collected: &HashSet<String>, info: &mut Proje
             && !collected.contains(&paths::file_name(f).to_lowercase())
         {
             info.samples.push(f.to_owned());
+        }
+    }
+
+    // A multisample a sample file finds outside the project folder by its full path (its place in the project, 0xd3a,
+    // empty; the path in its file reference, 0xd3b): Bitwig leaves one it didn't collect out of `used_files`, so a save
+    // can use another project's copy this way (the whole-app review of 19 Nov, FS-5). Only that reference counts, not
+    // the places it was found before (0x15), which hold old paths.
+    for f in ids(doc).filter(|&o| doc.obj(o).class == CLS_SAMPLE_FILE) {
+        // Only one that says it isn't inside (an empty text): one without the field is left as it was.
+        if !matches!(doc.obj(f).get(F_IN_PROJECT), Some(Value::Str(t)) if t.as_str().is_empty()) {
+            continue;
+        }
+        let Some(r) = doc.field_obj(f, F_SAMPLE_FILE_REF) else { continue };
+        let p = doc.obj(r).str(F_FILE_PATH);
+        if plugins::ends_with_ignore_case(p, ".multisample") && paths::is_absolute(p) {
+            info.samples.push(p.to_owned());
         }
     }
 
@@ -811,6 +837,14 @@ fn text_scan(
                 info.version = s.to_owned();
             }
             expect_version = s.ends_with("application_version_name");
+            // A damaged save's multisample by its full path: which text is the one Bitwig opens can't be told here, so
+            // each counts (a place it was found before may show as a missing sample), as a save that uses another
+            // project's copy must say so (the whole-app review of 19 Nov, FS-5).
+            if plugins::ends_with_ignore_case(s, ".multisample")
+                && let Some(p) = scanned_path(s).filter(|p| paths::is_absolute(p))
+            {
+                info.samples.push(p.to_owned());
+            }
             if textscan::is_audio_path(s) {
                 // As in a full read, an original that was collected into the project counts once, as its copy.
                 if let Some(p) = scanned_path(s) {
