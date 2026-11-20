@@ -180,18 +180,19 @@ pub fn save(mut take: AudioData, trim: Option<f32>, folder: &Path, name: &str) -
 const HEAD: u64 = 44;
 
 /// Saves the takes in `folder` whose saving was cut off (the DAW closed or crashed while a take was written): each
-/// `Recording ….wav.part` not written to for `older_than` is cut to its whole frames, its sizes are mended to what's
-/// there, and it's renamed "Recording … (recovered).wav". They're the user's takes, so they're never thrown away, only
+/// part file `is_take` says is a take's (only the names the app gives its takes as they're saved) not written to for
+/// `older_than` is cut to its whole frames, its sizes are mended to what's there, and it's renamed
+/// "Recording … (recovered).wav". They're the user's takes, so they're never thrown away, only
 /// one with nothing in it (shorter than its header). What became of each, in plain words.
 ///
 /// Only the takes' own part files: a part still being written (a take another copy of the plugin is saving) has
 /// just been written to, so it's left for `older_than`. Writes to the disk: off the UI and audio threads.
-pub fn mend_parts(folder: &Path, older_than: std::time::Duration) -> Vec<String> {
+pub fn mend_parts(folder: &Path, older_than: std::time::Duration, is_take: impl Fn(&str) -> bool) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
     let mut said = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(stem) = name.strip_suffix(".wav.part").filter(|s| s.starts_with("Recording ")) else { continue };
+        let Some(stem) = name.strip_suffix(".wav.part").filter(|_| is_take(&name)) else { continue };
         // A plain file only, never through a link (rule 28).
         let Ok(meta) = entry.metadata() else { continue };
         if !meta.file_type().is_file() {
@@ -364,7 +365,8 @@ mod tests {
         std::fs::write(dir.join("Recording 2026-11-15 21-04-10.wav.part"), &bytes[..44 + 6 * 40 + 4]).unwrap();
         std::fs::write(dir.join("Recording 2026-11-15 21-05-00.wav.part"), &bytes[..20]).unwrap();
         std::fs::write(dir.join("Kit.wav.part"), &bytes[..60]).unwrap();
-        let said = mend_parts(&dir, std::time::Duration::ZERO);
+        let is_take = |n: &str| n.starts_with("Recording 2026") && n.ends_with(".wav.part");
+        let said = mend_parts(&dir, std::time::Duration::ZERO, is_take);
         assert_eq!(said.len(), 2, "{said:?}");
         let mended = dir.join("Recording 2026-11-15 21-04-10 (recovered).wav");
         let audio = crate::read(&mended, 60.0).unwrap();
@@ -374,7 +376,7 @@ mod tests {
         assert!(dir.join("Kit.wav.part").exists(), "only a take's own part files");
         // One being written just now is left.
         std::fs::write(dir.join("Recording 2026-11-15 22-00-00.wav.part"), &bytes).unwrap();
-        assert!(mend_parts(&dir, std::time::Duration::from_secs(600)).is_empty());
+        assert!(mend_parts(&dir, std::time::Duration::from_secs(600), is_take).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

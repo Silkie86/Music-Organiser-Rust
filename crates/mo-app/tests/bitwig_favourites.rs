@@ -287,3 +287,29 @@ fn two_samples_of_one_name_in_a_multisample_are_both_saved() {
     assert_eq!(fs::read(&saved.paths[1]).unwrap(), fs::read(&two).unwrap());
     assert_eq!(saved.types, vec![Some("Tom"), Some("Tom")]);
 }
+
+#[test]
+fn a_sample_that_cant_be_unpacked_says_so_and_isnt_saved() {
+    // Review SN-19: no room to unpack it is never taken for a sample that isn't in the library.
+    let dir = folder("no-room");
+    let samples = dir.join("samples");
+    fs::create_dir_all(&samples).unwrap();
+    let snare = samples.join("Snare 036 - c1.wav");
+    wav(&snare, &tone(43, 1500));
+    let library = vec![sound(1, &snare, 1500)];
+    let padded = dir.join("padded.wav");
+    let mut audio = vec![0.0; 900];
+    audio.extend(tone(43, 1500));
+    wav(&padded, &audio);
+    let m = multisample(&dir.join("Snares.multisample"), &[("Snare 036 - c1.wav", fs::read(&padded).unwrap())]);
+    // A folder that isn't there takes nothing, as a full disk wouldn't.
+    let found = look(&[m], &library, &dir.join("not there"), &AtomicBool::new(false), |_, _| {});
+    assert_eq!(found.missing.len(), 1);
+    assert_eq!(found.missing[0].why, Why::NoRoom);
+    assert!(!Why::NoRoom.saveable() && Why::NoSuchName.saveable() && Why::OtherAudio.saveable());
+    let saved = save_missing(&found.missing, &samples, &AtomicBool::new(false));
+    assert!(saved.paths.is_empty());
+    assert!(!samples.join(bitwig_favourites::FROM_BITWIG).exists());
+    let said = summary(&found, Marked::default());
+    assert!(said.ends_with("1 couldn't be looked at: there was no room on the disk to unpack it."), "{said}");
+}

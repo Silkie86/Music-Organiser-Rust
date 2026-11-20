@@ -22,8 +22,10 @@
 //!   folder is a cache, and a file is made again when it's asked for. Never a file under another name.
 //! - `Chord check\`: a take the test plugin was still saving (`take <time>.json.mo-part`), an hour old. Never the takes,
 //!   which are yours.
-//! - `Recordings\`: a Record take the test plugin was still saving (`Recording <time>.wav.part`), an hour old.
-//!   Never the takes, which are yours.
+//! - `Recordings\`: a Record take the test plugin was still saving (`Recording <time>.wav.part`), an hour old, is
+//!   mended, not removed: what was saved of it is yours, so it's cut to whole frames and renamed
+//!   "Recording <time> (recovered).wav" ([`mo_audio::record::mend_parts`]). Only one with nothing saved in it goes.
+//!   Never the takes.
 //! - `MIDI browser\` in the export folder: a part Put in the song wrote for Bitwig to record, left when the app closed
 //!   or crashed while Bitwig recorded it. Its name is the part's own, so it goes only when `midi-puts\` in the data
 //!   folder has a note from that run naming its whole path, its size and when it was changed, and the file is still
@@ -185,6 +187,8 @@ pub struct Tidied {
     pub notes_stay: Option<String>,
     /// No more F12 notes go to the Recycle Bin by themselves from now on (`notes_stay` says why): said as a warning.
     pub notes_stopped: bool,
+    /// What became of each Record take whose saving was cut off, in plain words.
+    pub takes: Vec<String>,
 }
 
 impl Tidied {
@@ -198,6 +202,7 @@ impl Tidied {
             self.notes_stay = other.notes_stay;
         }
         self.notes_stopped |= other.notes_stopped;
+        self.takes.extend(other.takes);
     }
 
     /// Removes one file, counting it. In a `shared` folder (the system's Temp, which on a Mac or Linux holds every
@@ -286,6 +291,9 @@ pub fn start(library: PathBuf) {
 
 fn report(done: &Tidied) {
     let files = |n: usize| if n == 1 { "1 file".to_owned() } else { format!("{n} files") };
+    for take in &done.takes {
+        crate::log::info("Tidy up", take);
+    }
     if done.removed > 0 {
         let size = mo_space::size_text(done.bytes);
         crate::log::info("Tidy up", &format!("Cleared {} the app had left behind ({size})", files(done.removed)));
@@ -351,6 +359,9 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     done.add(remove_older(&places.temp, crate::midi::is_play_file, DAY, now, true));
     // A Bitwig multisample's sample, written for a moment while Favourites from Bitwig looks for it: a crash can leave one.
     done.add(remove_older(&places.temp, crate::bitwig_favourites::is_temp_file, DAY, now, true));
+    if let Some(unpacked) = real_folder(&places.data, &[crate::bitwig_favourites::UNPACK_FOLDER]) {
+        done.add(remove_older(&unpacked, crate::bitwig_favourites::is_temp_file, DAY, now, false));
+    }
     // A sample Favourites from Bitwig was still saving into a sample folder's From Bitwig folder (a folder a
     // multisample, never through a link).
     for from in places.sample_folders.iter().filter_map(|f| real_folder(f, &[crate::bitwig_favourites::FROM_BITWIG])) {
@@ -372,9 +383,11 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     if let Some(trimmed) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::trim_copy::FOLDER])) {
         done.add(remove_older(&trimmed, crate::trim_copy::is_half_made, WRITING, now, false));
     }
-    // A Record take the plugin was still saving when the DAW stopped (DF-5). Never the takes.
+    // A Record take the plugin was still saving when the DAW stopped (DF-5) is mended, never thrown away: it's his
+    // audio (the 19 Nov review's DA-1). Only one with nothing saved in it goes. Only the app's own take names.
     if let Some(takes) = real_folder(&places.data, &[RECORDINGS]) {
-        done.add(remove_older(&takes, is_half_recorded, WRITING, now, false));
+        let quiet = now.duration_since(SystemTime::now()).map_or(WRITING, |ahead| WRITING.saturating_sub(ahead));
+        done.add(Tidied { takes: mo_audio::record::mend_parts(&takes, quiet, is_half_recorded), ..Tidied::default() });
     }
     if let Some(notes) = real_folder(&places.data, &[crate::note::FOLDER]) {
         done.add(old_notes_to_bin(&notes, &places.data.join(NOTES_DONE_FILE), NOTES_KEPT_FOR, now, bin));
@@ -1025,7 +1038,9 @@ pub const RECORDINGS: &str = crate::data_move::RECORDINGS_FOLDER;
 pub const TAKE_TIME: &str = "%Y-%m-%d %H-%M-%S";
 
 /// A take `write_wav` was still writing: "Recording 2026-11-15 21-02-44.wav.part", or with " (2)" after the time.
-fn is_half_recorded(name: &str) -> bool {
+/// Whether `name` is a Record take the plugin is saving (or was, when it was cut off): `Recording <time>.wav.part`,
+/// or `Recording <time> (2).wav.part` and on, exactly as `mo_audio::record::save` names them.
+pub fn is_half_recorded(name: &str) -> bool {
     let Some(rest) = name.strip_suffix(".wav.part").and_then(|n| n.strip_prefix("Recording ")) else { return false };
     // A second take in the same second is " (2)", then " (3)" and on (mo_audio::record::save): never " (1)" or " (02)".
     let (when, n) = match rest.split_once(" (") {
@@ -1787,7 +1802,7 @@ mod tests {
     }
 
     #[test]
-    fn half_made_trimmed_copies_and_takes_go_and_nothing_else_there() {
+    fn half_made_trimmed_copies_go_takes_are_mended_and_nothing_else_there() {
         let dir = test_folder("trimmed-takes");
         let exports = dir.join("Music Organiser Exports");
         let places = Places { exports: Some(exports.clone()), ..test_places(&dir) };
@@ -1815,14 +1830,24 @@ mod tests {
         for f in gone.iter().chain(&kept) {
             fs::write(f, b"x").unwrap();
         }
+        // A take with audio in it, cut off as it was saved: it's his, so it's mended, never removed (DA-1).
+        let whole = takes.join("Recording 2026-11-15 21-05-00.wav");
+        mo_audio::write_wav(&whole, &[vec![0.5; 100]], 1000, 24).unwrap();
+        let cut = takes.join("Recording 2026-11-15 21-05-00.wav.part");
+        fs::write(&cut, &fs::read(&whole).unwrap()[..44 + 3 * 60 + 1]).unwrap();
+        fs::remove_file(&whole).unwrap();
         // Long after they were written.
-        sweep(&places, SystemTime::now() + WRITING + Duration::from_secs(60), &bin);
+        let done = sweep(&places, SystemTime::now() + WRITING + Duration::from_secs(60), &bin);
         for f in &gone {
             assert!(!f.exists(), "{} should go", f.display());
         }
         for f in &kept {
             assert!(f.exists(), "{} should stay", f.display());
         }
+        assert!(!cut.exists());
+        let mended = takes.join("Recording 2026-11-15 21-05-00 (recovered).wav");
+        assert_eq!(mo_audio::read(&mended, 60.0).unwrap().channels[0].len(), 60);
+        assert!(done.takes.iter().any(|t| t.contains("(recovered)")), "{:?}", done.takes);
     }
 
     #[test]
@@ -1850,6 +1875,26 @@ mod tests {
         assert_eq!(sweep(&places, now + Duration::from_secs(60), &bin).removed, 0);
         assert_eq!(sweep(&places, now + WRITING * 2, &bin).removed, 1);
         assert!(!half.exists() && kept.iter().all(|k| k.exists()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bitwig_sample_left_unpacked_in_the_data_folder_goes() {
+        // Review SN-19: Favourites from Bitwig unpacks its samples there now, not in the system's Temp.
+        let dir = test_folder("bitwig-unpacked");
+        let places = test_places(&dir);
+        let bin = TestBin(dir.join("bin"));
+        let now = SystemTime::now();
+        let unpacked = places.data.join(crate::bitwig_favourites::UNPACK_FOLDER);
+        let left = unpacked.join("mo-bitwig-sample-4120-3.wav");
+        changed_at(&left, now);
+        let kept = [unpacked.join("Snare.wav"), places.data.join("mo-bitwig-sample-4120-4.wav")];
+        for k in &kept {
+            changed_at(k, now);
+        }
+        assert_eq!(sweep(&places, now + Duration::from_secs(60), &bin).removed, 0);
+        assert_eq!(sweep(&places, now + DAY * 2, &bin).removed, 1);
+        assert!(!left.exists() && kept.iter().all(|k| k.exists()));
         let _ = fs::remove_dir_all(&dir);
     }
 

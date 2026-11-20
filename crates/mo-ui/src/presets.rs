@@ -95,6 +95,8 @@ struct Page {
     /// Every song's newest save the last reading looked at, with its time then.
     looked_at: HashMap<String, i64>,
     exporting: bool,
+    /// Whether the export running is Export these, which its button (or key) stops (PS-3).
+    exporting_shown: bool,
     message: String,
     /// The line being auditioned in Bitwig ([`logic::audition_id`]) and how far it's got.
     hearing: Option<(String, logic::Hearing)>,
@@ -912,6 +914,7 @@ fn show_everything(app: &AppWindow) {
         data.set_years_from(from);
         data.set_years_to(to);
         data.set_exporting(p.exporting);
+        data.set_exporting_shown(p.exporting_shown);
 
         // The curves.
         data.set_curve_hidden(p.curve_filters.hidden);
@@ -1809,6 +1812,7 @@ fn set_exporting(on: bool, message: Option<String>) {
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
             p.exporting = on;
+            p.exporting_shown &= on;
             if let Some(m) = message {
                 p.message = m;
             }
@@ -1855,7 +1859,7 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
                     (text, went) = match &bwpreset {
                         Some(p) => match send_to_bitwig(p, &stem_of(p)) {
                             Ok(words) => (words, true),
-                            Err(words) => (words, false),
+                            Err(why) => (logic::send_failed(&why), false),
                         },
                         None => (no_bitwig_preset(&item), false),
                     };
@@ -1917,9 +1921,20 @@ fn without_template(items: &[&Item], templates: &Templates) -> Vec<String> {
     out
 }
 
+/// Asks the Export these running to stop after the save it's on (its button, or its key, while it runs: PS-3).
+static EXPORT_STOP: AtomicBool = AtomicBool::new(false);
+
 /// Export these: every sound shown, save by save, into the export folder. Preset files are left (they're files).
+/// While it runs, the same button (or key) stops it after the save it's on. Before each save it checks the free room
+/// on the export folder's drive, and stops while [`logic::EXPORT_HEADROOM`] is still free (PS-3).
 fn export_shown(app: &AppWindow) -> bool {
-    // A key still reaches here while an export runs (the button is off): it says so rather than anything else (H-11).
+    if PAGE.with(|p| p.borrow().exporting_shown) {
+        EXPORT_STOP.store(true, Ordering::SeqCst);
+        set_message(app, "Stopping the export after the save it's on.");
+        return true;
+    }
+    // A key still reaches here while another export runs (the button is off): it says so rather than anything else
+    // (H-11).
     if PAGE.with(|p| p.borrow().exporting) {
         set_message(app, "An export is running: wait for it to finish, then try again.");
         return false;
@@ -1938,7 +1953,12 @@ fn export_shown(app: &AppWindow) -> bool {
         return false;
     }
     let (library, templates, bitwig_folders, feed) = export_setup();
-    PAGE.with(|p| p.borrow_mut().exporting = true);
+    EXPORT_STOP.store(false, Ordering::SeqCst);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.exporting = true;
+        p.exporting_shown = true;
+    });
     show_all(app);
     let job = feed.start("Exporting presets", &format!("{} sounds", logic::thousands(shown.len() - files)));
     let started = background::spawn("Preset export", move || {
@@ -1964,7 +1984,21 @@ fn export_shown(app: &AppWindow) -> bool {
         let none = HashMap::new();
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         let total = plan.len();
+        let folder_text = root.to_string_lossy().into_owned();
+        let mut stopped = None;
         for (n, (save, keys)) in plan.iter().enumerate() {
+            if EXPORT_STOP.swap(false, Ordering::SeqCst) {
+                stopped = Some(format!(
+                    "You stopped the export after {} of {} saves.",
+                    logic::thousands(n),
+                    logic::thousands(total)
+                ));
+                break;
+            }
+            if let Err(why) = logic::export_room(mo_app::data_move::free_room(&root), &folder_text, n) {
+                stopped = Some(why);
+                break;
+            }
             match background::on_pool(|| {
                 let kinds = kinds.get(save).unwrap_or(&none);
                 export::export_from_save(save, Choice::default(), Some(keys), kinds, &root, Some(&templates))
@@ -1975,21 +2009,32 @@ fn export_shown(app: &AppWindow) -> bool {
             job.progress((n + 1) as f32 / total as f32, Some(&format!("{} of {}", n + 1, total)));
         }
         let mut text = logic::export_summary(&done, &without, &failed);
+        if let Some(stopped) = &stopped {
+            text = if done.is_empty() { stopped.clone() } else { format!("{stopped} {text}") };
+        }
         if files > 0 {
             text += &format!(
                 " The {} preset files shown are files already, so they were left as they are.",
                 logic::thousands(files)
             );
         }
-        job.done(&text);
-        let folder = if done.len() == 1 { done[0].folder.clone() } else { root.clone() };
-        let folder = folder.to_string_lossy().into_owned();
-        crate::files::reveal(&feed, &folder, &folder);
+        if stopped.is_some() && done.is_empty() {
+            job.failed(&text);
+        } else {
+            job.done(&text);
+            let folder = if done.len() == 1 { done[0].folder.clone() } else { root.clone() };
+            let folder = folder.to_string_lossy().into_owned();
+            crate::files::reveal(&feed, &folder, &folder);
+        }
         set_exporting(false, Some(text));
     });
     if let Err(e) = started {
         log::error("Presets", &format!("Couldn't start the export: {e}"));
-        PAGE.with(|p| p.borrow_mut().exporting = false);
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.exporting = false;
+            p.exporting_shown = false;
+        });
     }
     true
 }
@@ -2012,9 +2057,9 @@ fn send_file(path: String) {
         let name = Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let text = match send_to_bitwig(Path::new(&path), &name) {
             Ok(words) => words,
-            Err(words) => {
+            Err(why) => {
                 crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
-                words
+                logic::send_failed(&why)
             }
         };
         set_exporting(false, Some(text));
@@ -2025,21 +2070,30 @@ fn send_file(path: String) {
 }
 
 /// A plugin's own preset file (.fxp, .fxb, .vstpreset) sent into Bitwig as a Bitwig preset made from it, in Temp
-/// under a name the sweep knows, removed once Bitwig has it (PR-3, rule 28). The file itself is only read.
+/// under a name the sweep knows, removed once Bitwig has it (PR-3, rule 28). The file itself is only read. When it
+/// can't go, the made preset is kept as a drag file under the file's own name and shown, to drag onto a track by
+/// hand (PS-2): the plugin's own file is no use there. The sweep clears drag files a day later (rule 28).
 fn send_made_from_file(item: Item) {
     let (_, templates, bitwig_folders, feed) = export_setup();
     PAGE.with(|p| p.borrow_mut().exporting = true);
     on_window(show_all);
     let started = background::spawn("Send to Bitwig", move || {
         let text = match made_from_file(&item, templates, &bitwig_folders) {
-            Ok((made, name)) => {
-                let sent = send_to_bitwig(&made.0, &name);
-                drop(made);
-                sent.unwrap_or_else(|words| {
-                    crate::files::reveal(&feed, item.path(), mo_app::shell::folder_of(item.path()));
-                    words
-                })
-            }
+            Ok((made, name)) => send_to_bitwig(&made.0, &name).unwrap_or_else(|why| {
+                let temp_name = made.0.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let file = format!("{name}.bwpreset");
+                match keep_to_drag(&made.0, &file) {
+                    Ok(kept) => {
+                        let kept = kept.to_string_lossy().into_owned();
+                        crate::files::reveal(&feed, &kept, mo_app::shell::folder_of(&kept));
+                        logic::made_send_failed(&why, &temp_name, Some(&file))
+                    }
+                    Err(e) => {
+                        log::warning("Presets", &format!("Couldn't keep the Bitwig preset made of {name}: {e}"));
+                        logic::made_send_failed(&why, &temp_name, None)
+                    }
+                }
+            }),
             Err(words) => words,
         };
         set_exporting(false, Some(text));
@@ -2048,6 +2102,16 @@ fn send_made_from_file(item: Item) {
         log::error("Presets", &format!("Couldn't start sending to Bitwig: {e}"));
         PAGE.with(|p| p.borrow_mut().exporting = false);
     }
+}
+
+/// A copy of the made Bitwig preset at `made`, as a drag file named `name` in a drag folder of its own in Temp, which
+/// the sweep clears later (rule 28, [`mo_app::drag_out::write_drag_files`]). Gives where it is.
+fn keep_to_drag(made: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let bytes = std::fs::read(made)?;
+    let file = mo_app::drag_out::MadeFile { name: name.to_owned(), bytes };
+    mo_app::drag_out::write_drag_files(&std::env::temp_dir(), &[file])?
+        .pop()
+        .ok_or_else(|| std::io::Error::other("no file was written"))
 }
 
 /// A Bitwig preset made from a plugin's own preset file, in Temp (removed when the [`Gone`] goes), and its name (the
@@ -2073,8 +2137,8 @@ fn made_from_file(
 
 /// Sends a Bitwig preset into the project open in Bitwig, through the Bitwig link (`mo-dawlink`): a new track named
 /// after the preset, with the preset loaded on it, as if it were dropped there. Waits for Bitwig, so only ever on a
-/// thread away from the window. `Ok` says what happened in Bitwig; `Err` says why it didn't go, and the caller shows
-/// the file in its folder instead, to drag onto a track.
+/// thread away from the window. `Ok` says what happened in Bitwig; `Err` says why it didn't go (the caller puts it in
+/// its words, [`logic::send_failed`]), and the caller shows a Bitwig preset in its folder instead, to drag in.
 fn send_to_bitwig(preset: &Path, name: &str) -> Result<String, String> {
     let name = name.to_owned();
     // The link's own send: it waits its turn behind sounds and kits sent from the Sounds page, checks the file is
@@ -2082,9 +2146,9 @@ fn send_to_bitwig(preset: &Path, name: &str) -> Result<String, String> {
     match mo_dawlink::bitwig::send_preset(preset, &name) {
         Ok(sent) => match sent.problem {
             None => Ok(logic::sent_words(&name)),
-            Some(problem) => Err(logic::send_failed(&problem)),
+            Some(problem) => Err(problem),
         },
-        Err(e) => Err(logic::send_failed(&e.to_string())),
+        Err(e) => Err(e.to_string()),
     }
 }
 

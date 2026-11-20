@@ -333,16 +333,22 @@ fn many_changes_under_one_number_are_kept_in_one_write() {
     let c = Connection::open(&copy).unwrap();
     let tags =
         || c.query_row("SELECT COUNT(*) FROM sound_tags WHERE sound_id = 1", [], |r| r.get::<_, i64>(0)).unwrap();
-    loop {
+    // A bounded wait (review TC-1): changes that can't be kept fail the test rather than hang it.
+    let mut written = false;
+    for _ in 0..500 {
         let held = noter.hold();
         let count = tags();
         if held.holds().has(number) {
             // Beside the tag it had.
             assert_eq!(count, 2001);
+            written = true;
             break;
         }
         assert!(count <= 1, "{count} tags in before the number was");
+        drop(held);
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    assert!(written, "the 2000 changes were never written");
     noter.finish();
 }
 
