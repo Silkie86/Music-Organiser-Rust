@@ -549,7 +549,7 @@ pub(crate) mod tests {
             part: part.into(),
             clip: clip.into(),
             role,
-            role_why: String::new(),
+            role_why: crate::roles::RoleWhy::NONE,
             your_role: None,
             bars: 4,
             notes: 8,

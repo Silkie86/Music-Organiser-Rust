@@ -28,6 +28,7 @@ pub fn connect() {
 fn close() {
     mo_app::log::last(mo_app::log::Level::Info, "App", "Asked to close from outside while out of sight: closing");
     crate::watchdog::stop();
+    crate::one_copy::closing();
     let _ = slint::quit_event_loop();
 }
 

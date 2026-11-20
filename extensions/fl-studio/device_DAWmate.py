@@ -21,7 +21,8 @@ Nothing in the project changes unless LET_THE_APP_MAKE_CHANGES below is True.
 LET_THE_APP_MAKE_CHANGES = False
 
 # True measures FL Studio's fader and tempo curves once, in the project "MO Live Test automation" only (see measure()):
-# it moves insert 1's fader and the tempo, puts them back, renames inserts 1 to 14 and saves it.
+# it moves insert 1's fader and the tempo, puts them back, renames inserts 1 to 14 and saves it. Where FL Studio
+# doesn't tell scripts the project's file name (FL Studio 2025), insert 1 must also be named "MO measure" first.
 MEASURE_IN_LIVE_TEST = False
 
 import channels
@@ -139,6 +140,7 @@ FADER_STEPS = 100     # insert 1's fader at 0.00, 0.01 ... 1.00
 TEMPO_STEPS = 20      # the tempo at 0.00, 0.05 ... 1.00
 PER_NAME = 10         # readings written in each insert's name, from insert 1 on ("v0.80 0.0dB; v0.81 ...")
 FADER = 1             # the insert whose fader is moved
+MEASURE_MARK = "MO measure"   # insert 1's name that allows a measurement where the file name can't be read
 
 _measuring = None     # the measurement under way: the step, what was found, and what to put back
 
@@ -162,20 +164,27 @@ def project_name(title):
 
 def in_live_test():
     """
-    Whether the project open is exactly MEASURE_PROJECT: by the title, or by the title set in the project's own info
-    (File > Project info), as FL Studio 2025 gives scripts only "FL Studio 2025" for the title.
+    Whether the project open is exactly MEASURE_PROJECT. By the project's name in FL Studio's title, where the title
+    names it: nothing else counts then. FL Studio 2025 gives scripts only "FL Studio 2025" for the title, so there it
+    is the title set in the project's own info (File > Project info) and, as every project saved as a copy of the
+    live test keeps that title, insert 1 named MEASURE_MARK as well. The measurement writes its readings over that
+    name, so a copy made afterwards isn't measured in, and nor is the same project a second time.
     """
-    if project_name(ui.getProgTitle()) == MEASURE_PROJECT:
-        return True
+    name = project_name(ui.getProgTitle())
+    if name:
+        return name == MEASURE_PROJECT
     try:
-        return general.getProjectTitle().strip() == MEASURE_PROJECT
+        if general.getProjectTitle().strip() != MEASURE_PROJECT:
+            return False
     except AttributeError:
         return False
+    return mixer.getTrackName(FADER).strip() == MEASURE_MARK
 
 
 def measure():
     """
-    Runs once, a step at each idle, when MEASURE_IN_LIVE_TEST is True and the project open is MEASURE_PROJECT: sets
+    Runs once, a step at each idle, when MEASURE_IN_LIVE_TEST is True and the project open is MEASURE_PROJECT (see
+    in_live_test: looked at before every step, and the mark it goes by is only written over by the last one): sets
     insert 1's fader to known values and reads, at the next idle each time, the decibels FL Studio shows; then the
     tempo to known automation values and reads the BPM; puts the fader and tempo back, writes what it found in the
     inserts' names, PER_NAME readings to a name from insert 1 on, and saves the project, so Format Lab reads the table

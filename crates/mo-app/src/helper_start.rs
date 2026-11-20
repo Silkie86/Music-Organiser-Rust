@@ -54,6 +54,8 @@ pub enum Running {
     Started,
     /// One from another build (its version) was asked to quit, and this build's started.
     Replaced(String),
+    /// One of this build that ran on another data folder (that folder) was asked to quit, and one started on this.
+    Moved(String),
     /// Asked to quit.
     Stopped,
     /// None was running.
@@ -80,6 +82,9 @@ impl Done {
             Running::Already => "The helper is running".to_owned(),
             Running::Started => "The helper was started".to_owned(),
             Running::Replaced(old) => format!("The helper from another build ({old}) was replaced by this one's"),
+            Running::Moved(old) => {
+                format!("The helper was started again: it was still writing its log in the old data folder ({old})")
+            }
             Running::Stopped => "The helper was asked to quit".to_owned(),
             Running::NotRunning => "The helper wasn't running".to_owned(),
             Running::Failed(why) => format!("The helper couldn't be started: {why}"),
@@ -92,13 +97,19 @@ impl Done {
     }
 }
 
-/// Makes sure the helper starts at login and runs now, from `exe` at `version` ([`crate::version::version`]).
-/// `start` starts it ([`start_detached`]). Call it off the window's thread: it may wait for an older helper to quit.
+/// Makes sure the helper starts at login and runs now, from `exe` at `version` ([`crate::version::version`]), on the
+/// data folder `data` ([`crate::paths::data_dir`]). `start` starts it ([`start_detached`]). Call it off the window's
+/// thread: it may wait for an older helper to quit.
+///
+/// A helper of this build that runs on another data folder is replaced too (the 19 Nov review's DA-5): it started
+/// at login, before the app switched to the folder the data was moved to, and would go on writing its log in the
+/// old one, which then can't be deleted while it runs.
 pub fn turn_on(
     list: &dyn LoginList,
     port: u16,
     exe: &Path,
     version: &str,
+    data: &Path,
     start: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Done {
     let wanted = command(exe);
@@ -109,18 +120,26 @@ pub fn turn_on(
         _ => change(list.set(&wanted)),
     };
     let exe_text = exe.display().to_string();
-    let ours = |hello: &helper::Hello| {
+    let data_text = data.display().to_string();
+    let same_build = |hello: &helper::Hello| {
         hello.helper == version && (hello.exe.is_empty() || same_program(&hello.exe, &exe_text))
     };
+    let ours =
+        |hello: &helper::Hello| same_build(hello) && (hello.data.is_empty() || same_program(&hello.data, &data_text));
+    // The process id of a helper of this build that was on another folder, so it isn't taken for the new one.
+    let mut old_pid = None;
     let replaced = match helper::hello(port) {
         Some(hello) if ours(&hello) => return Done { login_problem, login_list, running: Running::Already },
         Some(hello) => {
+            if same_build(&hello) {
+                old_pid = Some(hello.pid);
+            }
             helper::ask_to_quit(port);
             let until = Instant::now() + QUIT_WAIT;
             while helper::hello(port).is_some() && Instant::now() < until {
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Some(hello.helper)
+            Some(if same_build(&hello) { Running::Moved(hello.data) } else { Running::Replaced(hello.helper) })
         }
         None => None,
     };
@@ -131,7 +150,17 @@ pub fn turn_on(
             let until = Instant::now() + ANSWER_WAIT;
             loop {
                 match helper::hello(port) {
-                    Some(hello) if ours(&hello) => break replaced.map_or(Running::Started, Running::Replaced),
+                    // The one just started is this build's whichever folder it says: it reads the data folder afresh,
+                    // and that can differ from this run's (the app opened on the old copy, and the drive came back).
+                    Some(hello) if ours(&hello) || (same_build(&hello) && Some(hello.pid) != old_pid) => {
+                        break replaced.unwrap_or(Running::Started);
+                    }
+                    Some(hello) if Instant::now() >= until && same_build(&hello) => {
+                        break Running::Failed(format!(
+                            "the helper still running on the old data folder ({}) didn't quit",
+                            hello.data
+                        ));
+                    }
                     Some(hello) if Instant::now() >= until => {
                         break Running::Failed(format!("the helper from another build ({}) didn't quit", hello.helper));
                     }
@@ -144,7 +173,7 @@ pub fn turn_on(
     Done { login_problem, login_list, running }
 }
 
-/// Whether two paths name the same program: as Windows compares them (any case, with or without the `\\?\` in
+/// Whether two paths name the same program or folder: as Windows compares them (any case, with or without the `\\?\` in
 /// front), exactly elsewhere.
 fn same_program(a: &str, b: &str) -> bool {
     if cfg!(windows) {
@@ -346,9 +375,14 @@ mod tests {
 
     /// One that says it's build `version`.
     fn helper_as(version: &str, port: u16) -> Arc<Helper> {
+        helper_in(version, "", port)
+    }
+
+    /// One that says it's build `version` running on the data folder `data`.
+    fn helper_in(version: &str, data: &str, port: u16) -> Arc<Helper> {
         let until = Instant::now() + Duration::from_secs(5);
         loop {
-            match Helper::start_as(version.to_owned(), port, free_port()).unwrap() {
+            match Helper::start_in(version.to_owned(), data.to_owned(), port, free_port()).unwrap() {
                 Start::Started(h) => return h,
                 Start::AlreadyRunning => assert!(Instant::now() < until, "the port stayed taken"),
             }
@@ -358,6 +392,11 @@ mod tests {
 
     fn this_exe() -> PathBuf {
         std::env::current_exe().unwrap()
+    }
+
+    /// A made-up data folder: nothing is read or written there.
+    fn data() -> PathBuf {
+        PathBuf::from("/made-up/DAWmate")
     }
 
     #[test]
@@ -392,11 +431,11 @@ mod tests {
             started.lock().unwrap().push(helper_on(port));
             Ok(())
         };
-        let done = turn_on(&list, port, &exe, &crate::version::version(), start);
+        let done = turn_on(&list, port, &exe, &crate::version::version(), &data(), start);
         assert_eq!(done, Done { login_problem: None, login_list: true, running: Running::Started });
         assert_eq!(list.get().unwrap(), Some(command(&exe)));
         // Again: nothing to start.
-        let done = turn_on(&list, port, &exe, &crate::version::version(), |_| panic!("started twice"));
+        let done = turn_on(&list, port, &exe, &crate::version::version(), &data(), |_| panic!("started twice"));
         assert_eq!(done.running, Running::Already);
         assert_eq!(done.line(), "The helper is running");
 
@@ -407,6 +446,31 @@ mod tests {
         assert_eq!(turn_off(&list, free_port()).running, Running::NotRunning);
     }
 
+    /// The 19 Nov review's DA-5: the helper started at login, on the folder the data was then moved from.
+    #[test]
+    fn a_helper_left_on_the_old_data_folder_is_started_again_on_the_new_one() {
+        let _one = crate::helper::one_at_a_time();
+        let list = FakeList::default();
+        let port = free_port();
+        let version = crate::version::version();
+        let old = helper_in(&version, "/made-up/old/DAWmate", port);
+        let new = Mutex::new(None);
+        let done = turn_on(&list, port, &this_exe(), &version, &data(), |_| {
+            *new.lock().unwrap() = Some(helper_in(&version, &data().display().to_string(), port));
+            Ok(())
+        });
+        assert_eq!(done.running, Running::Moved("/made-up/old/DAWmate".into()));
+        assert_eq!(
+            done.line(),
+            "The helper was started again: it was still writing its log in the old data folder (/made-up/old/DAWmate)"
+        );
+        assert!(old.quitting());
+        // The one on this folder stays, and so does one that doesn't say (a helper from before it did).
+        let done = turn_on(&list, port, &this_exe(), &version, &data(), |_| panic!("started twice"));
+        assert_eq!(done.running, Running::Already);
+        new.lock().unwrap().take().unwrap().quit();
+    }
+
     #[test]
     fn a_helper_from_another_build_is_replaced() {
         let _one = crate::helper::one_at_a_time();
@@ -415,7 +479,7 @@ mod tests {
         let port = free_port();
         let old = helper_on(port);
         let new = Mutex::new(None);
-        let done = turn_on(&list, port, &this_exe(), "9.9.9 (newer)", |_| {
+        let done = turn_on(&list, port, &this_exe(), "9.9.9 (newer)", &data(), |_| {
             *new.lock().unwrap() = Some(helper_as("9.9.9 (newer)", port));
             Ok(())
         });
@@ -429,7 +493,7 @@ mod tests {
     fn says_when_the_list_or_the_start_fails() {
         let _one = crate::helper::one_at_a_time();
         let list = FakeList { broken: true, ..FakeList::default() };
-        let done = turn_on(&list, free_port(), &this_exe(), "1", |_| Err(io::Error::other("no such program")));
+        let done = turn_on(&list, free_port(), &this_exe(), "1", &data(), |_| Err(io::Error::other("no such program")));
         assert_eq!(done.running, Running::Failed("no such program".into()));
         assert_eq!(done.login_problem.as_deref(), Some("the list is locked"));
         assert!(done.line().contains("couldn't be started") && done.line().contains("startup list"));
@@ -451,7 +515,7 @@ mod tests {
             }
         }
         let list = Unreadable(FakeList::default());
-        let done = turn_on(&list, free_port(), &this_exe(), "1", |_| Err(io::Error::other("no")));
+        let done = turn_on(&list, free_port(), &this_exe(), "1", &data(), |_| Err(io::Error::other("no")));
         assert_eq!(done.login_problem, None);
         assert_eq!(list.0.get().unwrap(), Some(command(&this_exe())));
         assert_eq!(turn_off(&list, free_port()).login_problem, None);
@@ -462,7 +526,7 @@ mod tests {
     fn a_helper_that_never_answers_is_a_failed_start() {
         let _one = crate::helper::one_at_a_time();
         // Nothing is started at all: the port stays silent.
-        let done = turn_on(&FakeList::default(), free_port(), &this_exe(), "1", |_| Ok(()));
+        let done = turn_on(&FakeList::default(), free_port(), &this_exe(), "1", &data(), |_| Ok(()));
         assert_eq!(done.running, Running::Failed("it started but doesn't answer".into()));
     }
 
@@ -490,7 +554,7 @@ mod tests {
         }
         let port = free_port();
         let started = Mutex::new(None);
-        let done = turn_on(&NoList, port, &this_exe(), &crate::version::version(), |_| {
+        let done = turn_on(&NoList, port, &this_exe(), &crate::version::version(), &data(), |_| {
             *started.lock().unwrap() = Some(helper_on(port));
             Ok(())
         });

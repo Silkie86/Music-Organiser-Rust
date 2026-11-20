@@ -1538,6 +1538,28 @@ const BITWIG_STUDIO: &str = mo_formats::bitwig::reader::DAW;
 /// convert of the same song takes the next name.
 static OPENED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
 
+/// The saves being converted for Bitwig just now.
+static CONVERTING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
+
+/// A save's convert while it runs: it goes from [`CONVERTING`] when this is dropped, however the convert ends.
+struct Converting(String);
+
+impl Converting {
+    /// None when `path` is already being converted.
+    fn start(path: &str) -> Option<Converting> {
+        let mut converting = CONVERTING.lock().ok()?;
+        converting.insert(path.to_owned()).then(|| Converting(path.to_owned()))
+    }
+}
+
+impl Drop for Converting {
+    fn drop(&mut self) {
+        if let Ok(mut converting) = CONVERTING.lock() {
+            converting.remove(&self.0);
+        }
+    }
+}
+
 /// The main Open button: FL Studio songs go to Bitwig (as in the C# app), the rest open in their own DAW.
 fn open_main(page: &Page, save: &mo_library::Save) {
     if save.daw == FL { open_in_bitwig(page, save) } else { open_save(save) }
@@ -1550,7 +1572,10 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
     // The Bitwig program chosen on Settings › DAWs, kept under the library's own name for Bitwig.
     let chosen = crate::settings::value(&shell::daw_exe_key(BITWIG_STUDIO));
     let (db, path, name) = (page.db.clone(), save.path.clone(), save.name.clone());
+    // A second press while the first still converts would pick the same name: the first is the one that counts.
+    let Some(converting) = Converting::start(&path) else { return };
     let started = background::spawn("Convert", move || {
+        let _converting = converting;
         if !shell::exists(&path) {
             feed.start(&format!("Can't find {name}"), "").failed(MOVED_OR_DELETED);
             return;
@@ -1571,6 +1596,8 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
                             Some(with) => job.done(&format!("{} {with}", c.message)),
                             None => job.done(&c.message),
                         }
+                        // After the card says so: a busy library never holds the result up.
+                        remember_opened(&db, &c.file);
                     }
                     Err(e) => {
                         log::warning("Convert", &format!("{file}: {e}"));
@@ -1609,6 +1636,21 @@ fn remember_convert(db: &Path, c: &Converted) {
     }
 }
 
+/// Remembers in the app's own songs.db that Bitwig was asked to open a convert, so for a day a new convert of the same
+/// song takes the next name even after the app restarts: Bitwig may still show this one, and only brings an open
+/// project forward (review CN-11). Not being able to only costs that: the log says why. Writes the disk: never on the
+/// window's thread.
+fn remember_opened(db: &Path, file: &Path) {
+    if let Err(e) = mo_library::converts::remember_opened(db, file, seconds_now()) {
+        log::warning("Convert", &format!("Couldn't remember that {} was opened: {e}", file.display()));
+    }
+}
+
+/// Seconds since 1970, as the opened records count them.
+fn seconds_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 /// Reads the settings (export folder, template, how steps play) and converts `project` on the low-priority pool.
 /// What was written is remembered after, in songs.db ([`remember_convert`]).
 fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
@@ -1618,7 +1660,14 @@ fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
     let template = bitwig::template_path(&paths::data_dir(), setting(bitwig::BITWIG_TEMPLATE_KEY)?.as_deref())
         .ok_or(bitwig::NO_TEMPLATE)?;
     let steps = setting(bitwig::STEPS_UNTIL_NEXT_NOTE_KEY)?.as_deref() == Some("1");
-    let opened = OPENED.lock().map(|o| o.clone()).unwrap_or_default();
+    let mut opened = OPENED.lock().map(|o| o.clone()).unwrap_or_default();
+    // And this song's copies Bitwig was asked to open in the last day, by this run of the app or an earlier one:
+    // Bitwig may still show them (review CN-11). Not being able to read them only means the names this run opened
+    // count, and the log says so.
+    match mo_library::converts::opened_lately(&lib, seconds_now()) {
+        Ok(lately) => opened.extend(bitwig::opened_names(project, &root, &lately)),
+        Err(e) => log::warning("Convert", &format!("Couldn't read which converts were opened lately: {e}")),
+    }
     let locator = sound_library::locator(Some(&sound_library::database_beside(db)));
     let at = project.to_string_lossy().into_owned();
     background::on_pool(move || {
