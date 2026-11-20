@@ -1977,6 +1977,83 @@ pub fn kept_alone_title(salvaged: &mo_sounds::compact::Salvaged) -> &'static str
     if salvaged.kept > 0 { "Kept what could be read of your sound library" } else { "Made your sound library again" }
 }
 
+/// What the card says when the app's own sound library was found damaged and its backup copy was damaged too
+/// ([`Synced::backup_salvaged`]: the whole-app review of 19 Nov, SN-3): what could still be read of both was kept in
+/// a new one, the library's rows over the backup copy's, made on `sounds.db` (`on_sounds_db`) or on nothing. How much
+/// was kept (`salvaged`, of the library; `from_backup`, of the backup copy), and where the damaged ones are kept: the
+/// library for a week, or for good (`for_good`, [`Synced::kept_for_good`]), and the backup copy for a week, or for as
+/// long as a library kept for good is there.
+pub fn both_damaged_line(
+    salvaged: &mo_sounds::compact::Salvaged,
+    from_backup: &mo_sounds::compact::Salvaged,
+    for_good: bool,
+    on_sounds_db: bool,
+) -> String {
+    let rest = |on_sounds_db: bool| {
+        if on_sounds_db {
+            " (the rest is as sounds.db has it)"
+        } else {
+            ": a scan of your sample folders finds the rest of your sounds"
+        }
+    };
+    let kept = match (salvaged.unread, salvaged.kept, from_backup.kept, on_sounds_db) {
+        (0, 0, 0, false) => {
+            "There was nothing in either to keep, so it starts empty: a scan of your sample folders finds your sounds \
+             again"
+                .to_owned()
+        }
+        (0, _, _, true) => "It kept all of it: your favourites, tags, plays and the sounds the scan added".to_owned(),
+        (0, _, _, false) => "It kept all of it: your sounds, favourites, tags and plays".to_owned(),
+        (_, 0, 0, true) => "None of either could still be read, so it's as sounds.db has it".to_owned(),
+        (_, 0, 0, false) => {
+            "None of either could still be read, so it starts empty: a scan of your sample folders finds your sounds \
+             again"
+                .to_owned()
+        }
+        (_, 0, _, on_sounds_db) => {
+            format!("None of it could still be read, so it has what its backup copy still had{}", rest(on_sounds_db))
+        }
+        (_, _, _, on_sounds_db) => format!(
+            "It kept all of it that could still be read, and filled the gaps from its backup copy{}",
+            rest(on_sounds_db)
+        ),
+    };
+    let file = std::path::Path::new(mo_sounds::compact::FILE_NAME);
+    let name = |path: std::path::PathBuf| path.display().to_string();
+    let made = if on_sounds_db {
+        "so it was made again from sounds.db with what could still be read of both"
+    } else {
+        "and there's no sounds.db to make it again from, so a new one was made from what could still be read of both"
+    };
+    let damaged = if for_good {
+        format!(
+            "The damaged one is kept beside it, as {}: the app never removes it, as what couldn't be read of it is \
+             nowhere else. The damaged backup copy is kept too, as {}, for as long as that one is there",
+            name(mo_sounds::compact::backup::kept_of(file)),
+            name(mo_sounds::compact::backup::backup_damaged_of(file))
+        )
+    } else {
+        format!(
+            "The damaged one is kept beside it for a week, as {}, and the damaged backup copy as {}",
+            name(mo_sounds::compact::backup::damaged_of(file)),
+            name(mo_sounds::compact::backup::backup_damaged_of(file))
+        )
+    };
+    format!("It was damaged, and so was its backup copy, {made}. {kept}. {damaged}.")
+}
+
+/// The card's title for [`both_damaged_line`]: what was done, as far as anything of either could be kept.
+pub fn both_damaged_title(
+    salvaged: &mo_sounds::compact::Salvaged,
+    from_backup: &mo_sounds::compact::Salvaged,
+) -> &'static str {
+    if salvaged.kept > 0 || from_backup.kept > 0 {
+        "Kept what could be read of your sound library"
+    } else {
+        "Made your sound library again"
+    }
+}
+
 /// Why the app's own copy of the sound library couldn't be made or brought up to date, for a card: what went wrong,
 /// without the copy's whole path.
 pub fn copy_failed_line(e: &SoundsError) -> String {
@@ -2954,6 +3031,56 @@ mod tests {
         assert_eq!(title(12, 3), "Kept what could be read of your sound library");
         assert_eq!(title(0, 1), "Made your sound library again");
         assert_eq!(title(0, 0), "Made your sound library again");
+        // Its backup copy damaged too: what could still be read of both kept in a new one, and both damaged ones kept
+        // (the whole-app review of 19 Nov, SN-3).
+        let both = |kept, unread, backup_kept, on_sounds_db| {
+            let salvaged = mo_sounds::compact::Salvaged { kept, unread };
+            let from_backup = mo_sounds::compact::Salvaged { kept: backup_kept, unread: 1 };
+            both_damaged_line(&salvaged, &from_backup, unread > 0 && !on_sounds_db, on_sounds_db)
+        };
+        assert_eq!(
+            both(12, 3, 40, false),
+            "It was damaged, and so was its backup copy, and there's no sounds.db to make it again from, so a new one \
+             was made from what could still be read of both. It kept all of it that could still be read, and filled \
+             the gaps from its backup copy: a scan of your sample folders finds the rest of your sounds. The damaged \
+             one is kept beside it, as sounds-rust.db.damaged-kept: the app never removes it, as what couldn't be read \
+             of it is nowhere else. The damaged backup copy is kept too, as sounds-rust.db.backup-damaged, for as long \
+             as that one is there."
+        );
+        assert_eq!(
+            both(12, 0, 40, true),
+            "It was damaged, and so was its backup copy, so it was made again from sounds.db with what could still be \
+             read of both. It kept all of it: your favourites, tags, plays and the sounds the scan added. The damaged \
+             one is kept beside it for a week, as sounds-rust.db.damaged, and the damaged backup copy as \
+             sounds-rust.db.backup-damaged."
+        );
+        assert!(
+            both(0, 1, 40, false)
+                .contains(". None of it could still be read, so it has what its backup copy still had: a scan")
+        );
+        assert!(
+            both(0, 1, 40, true)
+                .contains(". None of it could still be read, so it has what its backup copy still had (the rest is")
+        );
+        assert!(
+            both(0, 1, 0, false).contains(". None of either could still be read, so it starts empty: a scan of your")
+        );
+        assert!(both(0, 1, 0, true).contains(". None of either could still be read, so it's as sounds.db has it. The"));
+        assert!(both(12, 3, 40, true).contains(". It kept all of it that could still be read, and filled the gaps from its backup copy (the rest is as sounds.db has it). The"));
+        assert!(both(0, 0, 0, false).contains(". There was nothing in either to keep, so it starts empty: a scan of"));
+        assert!(both(3, 0, 0, false).contains(
+            ". It kept all of it: your sounds, favourites, tags and plays. The damaged one is kept beside it for a week"
+        ));
+        let both_title = |kept, backup_kept| {
+            let (salvaged, from_backup) = (
+                mo_sounds::compact::Salvaged { kept, unread: 1 },
+                mo_sounds::compact::Salvaged { kept: backup_kept, unread: 1 },
+            );
+            both_damaged_title(&salvaged, &from_backup)
+        };
+        assert_eq!(both_title(0, 40), "Kept what could be read of your sound library");
+        assert_eq!(both_title(3, 0), "Kept what could be read of your sound library");
+        assert_eq!(both_title(0, 0), "Made your sound library again");
         let full = SoundsError::Copy {
             path: "C:\\Users\\Solomon\\AppData\\Local\\MusicOrganiser\\sounds-rust.db".into(),
             why: "only 3.1 GB is free on its disk".into(),

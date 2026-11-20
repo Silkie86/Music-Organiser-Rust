@@ -20,6 +20,10 @@
 //!   thrown away at once; it goes a week after it was set aside. One that had nothing to mend it from, with parts that
 //!   couldn't be read, is kept for good instead, as `sounds-rust.db.damaged-kept` ([`kept_of`]): those parts are
 //!   nowhere else.
+//! - **Damaged too** ([`NotRestored::Damaged`]): what can still be read of it is kept all the same, under what can be
+//!   read of the library ([`super::mend_reading`]), and it's set aside as `sounds-rust.db.backup-damaged`
+//!   ([`backup_damaged_of`]) before the mended library takes the damaged one's place, so no backup copy is ever made
+//!   over it (the whole-app review of 19 Nov, SN-3).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,6 +48,10 @@ const DAMAGED_END: &str = ".damaged";
 
 /// A damaged library kept for good is set aside under its name and this: `sounds-rust.db.damaged-kept` ([`kept_of`]).
 const KEPT_END: &str = ".damaged-kept";
+
+/// A damaged backup copy is set aside under the library's name and this: `sounds-rust.db.backup-damaged`
+/// ([`backup_damaged_of`]).
+const BACKUP_DAMAGED_END: &str = ".backup-damaged";
 
 /// A week: a damaged library set aside goes once it's been there this long, and a backup copy that hasn't been looked
 /// at for this long is checked again.
@@ -71,6 +79,14 @@ pub fn damaged_of(copy: &Path) -> PathBuf {
 /// replaced by one set aside after it (the whole-app review of 14 Nov: [`super::mend_reading`]).
 pub fn kept_of(copy: &Path) -> PathBuf {
     side(copy, KEPT_END)
+}
+
+/// Where the backup copy of the library at `copy` is set aside when it's found damaged too as the library is mended:
+/// what could still be read of it went into the mended library, and no backup copy is made over it (the whole-app
+/// review of 19 Nov, SN-3). It goes a week after it was set aside once there's a whole backup copy again, but never
+/// while a damaged library kept for good is there ([`kept_of`]): it may hold some of what that one couldn't give.
+pub fn backup_damaged_of(copy: &Path) -> PathBuf {
+    side(copy, BACKUP_DAMAGED_END)
 }
 
 /// What [`back_up`] did.
@@ -137,13 +153,22 @@ pub fn back_up_when(sounds_db: &Path, when: When) -> Option<BackedUp> {
             Err(not) => not,
         })
     };
+    let week_old = |path: &Path| {
+        fs::metadata(path)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| SystemTime::now().duration_since(t).is_ok_and(|age| age > A_WEEK))
+    };
     // A library set aside as damaged goes a week after: the library has been whole (and backed up) since.
     let damaged = damaged_of(&copy);
-    let old = fs::metadata(&damaged)
-        .and_then(|m| m.modified())
-        .is_ok_and(|t| SystemTime::now().duration_since(t).is_ok_and(|age| age > A_WEEK));
-    if old && backup.exists() {
+    if week_old(&damaged) && backup.exists() {
         let _ = remove_database(&damaged);
+    }
+    // So does a damaged backup copy set aside, once a whole one has been made or found since; never while a damaged
+    // library kept for good is there, as it may hold some of what that one couldn't give.
+    let whole_now = up_to_date || matches!(made, Some(BackedUp::Made { .. }));
+    let backup_damaged = backup_damaged_of(&copy);
+    if whole_now && week_old(&backup_damaged) && database_there(&kept_of(&copy)).is_none() {
+        let _ = remove_database(&backup_damaged);
     }
     made
 }
@@ -194,7 +219,7 @@ fn still_whole(backup: &Path) -> bool {
             let _ = fs::File::options().write(true).open(backup).and_then(|f| f.set_modified(SystemTime::now()));
             true
         }
-        Err(NotRestored::NoBackup(_)) => false,
+        Err(NotRestored::NoBackup(_) | NotRestored::Damaged(_)) => false,
         Err(NotRestored::NotNow(_)) => true,
     }
 }
@@ -252,7 +277,8 @@ fn make(copy: &Path, backup: &Path) -> Result<u64, BackedUp> {
         conn.close().map_err(|(_, e)| e)
     })()
     .map_err(|e| not_now(format!("it couldn't be noted ({e})")))?;
-    check(&part, Some(sounds), true).map_err(|(NotRestored::NoBackup(why) | NotRestored::NotNow(why))| not_now(why))?;
+    check(&part, Some(sounds), true)
+        .map_err(|(NotRestored::NoBackup(why) | NotRestored::Damaged(why) | NotRestored::NotNow(why))| not_now(why))?;
     fs::OpenOptions::new().write(true).open(&part).and_then(|f| f.sync_all()).map_err(|e| not_now(e.to_string()))?;
     fs::rename(&part, backup).map_err(|e| not_now(format!("it couldn't be given its name ({e})")))?;
     Ok(size_of(backup))
@@ -260,27 +286,29 @@ fn make(copy: &Path, backup: &Path) -> Result<u64, BackedUp> {
 
 /// Checks the backup copy at `path`: whole (SQLite's `integrity_check`, or with `whole` false its quicker
 /// `quick_check`), the app's own library in a format this version reads, with `sounds` sounds when that's known.
-/// [`NotRestored::NoBackup`] when it isn't; [`NotRestored::NotNow`] when it couldn't be read just now.
+/// [`NotRestored::Damaged`] when SQLite finds it damaged, [`NotRestored::NoBackup`] when it isn't such a copy;
+/// [`NotRestored::NotNow`] when it couldn't be read just now.
 fn check(path: &Path, sounds: Option<i64>, whole: bool) -> Result<(), NotRestored> {
-    let checked = (|| -> rusqlite::Result<Result<(), String>> {
+    use NotRestored::{Damaged, NoBackup};
+    let checked = (|| -> rusqlite::Result<Result<(), NotRestored>> {
         let conn = open_read_only(path)?;
         let pragma = if whole { "PRAGMA integrity_check" } else { "PRAGMA quick_check" };
         let said: String = conn.query_row(pragma, [], |r| r.get(0))?;
         if said != "ok" {
-            return Ok(Err(format!("it's damaged ({said})")));
+            return Ok(Err(Damaged(format!("it's damaged ({said})"))));
         }
         if !format_of(&conn)?.is_some_and(readable) || info_value(&conn, OWN_SINCE)?.is_none() {
-            return Ok(Err("it isn't a whole copy of the app's own sound library".into()));
+            return Ok(Err(NoBackup("it isn't a whole copy of the app's own sound library".into())));
         }
         let held: i64 = conn.query_row("SELECT COUNT(*) FROM sounds", [], |r| r.get(0))?;
         if let Some(sounds) = sounds.filter(|&s| s != held) {
-            return Ok(Err(format!("it holds {held} sounds, not {sounds}")));
+            return Ok(Err(NoBackup(format!("it holds {held} sounds, not {sounds}"))));
         }
         Ok(Ok(()))
     })();
     match checked {
-        Ok(checked) => checked.map_err(NotRestored::NoBackup),
-        Err(e) if is_damage(&e) => Err(NotRestored::NoBackup(format!("it's damaged ({e})"))),
+        Ok(checked) => checked,
+        Err(e) if is_damage(&e) => Err(Damaged(format!("it's damaged ({e})"))),
         Err(e) => Err(NotRestored::NotNow(format!("it couldn't be read just now ({e})"))),
     }
 }
@@ -298,16 +326,21 @@ pub fn usable(copy: &Path) -> Result<(), String> {
         Ok(_) => return Err("the sound library's backup copy isn't a whole copy of it".into()),
         Err(why) => return Err(format!("the sound library's backup copy couldn't be read just now ({why})")),
     }
-    check(&backup, None, false).map_err(|(NotRestored::NoBackup(why) | NotRestored::NotNow(why))| {
-        format!("the sound library's backup copy can't be used: {why}")
-    })
+    check(&backup, None, false).map_err(
+        |(NotRestored::NoBackup(why) | NotRestored::Damaged(why) | NotRestored::NotNow(why))| {
+            format!("the sound library's backup copy can't be used: {why}")
+        },
+    )
 }
 
 /// Why [`restore`] didn't put the library back from its backup copy. Either way, nothing has changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NotRestored {
-    /// There's no backup copy to put it back from: none there, or it's damaged too, or not a whole copy.
+    /// There's no backup copy to put it back from: none there, or not a whole copy of the app's own library.
     NoBackup(String),
+    /// There's one, but it's damaged too: nothing can be read where it's looked at, or SQLite's `quick_check` finds a
+    /// fault. What can still be read of it is kept all the same ([`super::mend_reading`]).
+    Damaged(String),
     /// There's one, but it couldn't be put back just now (the disk short of room, something else holding the library
     /// or its backup…): it's tried again the next time.
     NotNow(String),
@@ -318,17 +351,26 @@ pub(crate) enum NotRestored {
 /// [`super::salvage`]), and given the library's name; the damaged library set aside ([`damaged_of`]), with its log.
 /// When the backup was made and what was kept of the damaged library, or why it wasn't put back.
 pub(crate) fn restore(copy: &Path) -> Result<(SystemTime, Salvaged), NotRestored> {
-    use NotRestored::{NoBackup, NotNow};
+    use NotRestored::{Damaged, NoBackup, NotNow};
     let backup = backup_of(copy);
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+    // A copy left half made by a mend cut off before (the app closed as it ran) goes first: it would take the room this
+    // one needs (the whole-app review of 19 Nov, SN-15).
+    remove_parts(copy, true);
     match look_at(&backup, WAIT) {
         Ok(Found::Copy { format, own: Some(_), .. }) if readable(format) => {}
         Ok(Found::Nothing) => return Err(NoBackup("there's no backup copy".into())),
+        Ok(Found::Unreadable) => {
+            return Err(Damaged(
+                "the backup copy can't be put back: it's damaged (its first part can't be read)".into(),
+            ));
+        }
         Ok(_) => return Err(NoBackup("the backup copy isn't a whole copy of the library".into())),
         Err(why) => return Err(NotNow(format!("the backup copy couldn't be read just now ({why})"))),
     }
     check(&backup, None, false).map_err(|not| match not {
         NoBackup(why) => NoBackup(format!("the backup copy can't be used: {why}")),
+        Damaged(why) => Damaged(format!("the backup copy can't be put back: {why}")),
         NotNow(why) => NotNow(format!("the backup copy: {why}")),
     })?;
     let made = open_read_only(&backup)
@@ -465,6 +507,39 @@ pub(super) fn put_back_from(copy: &Path, aside: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
+}
+
+/// Sets the damaged backup copy of the library at `copy` aside ([`backup_damaged_of`]), with any log SQLite left
+/// beside it, once what can still be read of it is in the library mended from it: no backup copy is ever made over it
+/// (the whole-app review of 19 Nov, SN-3). The one set aside before goes. Nothing to do when there's none. Its time is
+/// set to now, as it goes a week from now. Why not, when it couldn't be: then it's where it was.
+pub(super) fn set_backup_aside(copy: &Path) -> Result<(), String> {
+    let (backup, aside) = (backup_of(copy), backup_damaged_of(copy));
+    let failed = |e: std::io::Error| format!("its damaged backup copy couldn't be set aside ({e})");
+    if database_there(&backup).is_none() {
+        return Ok(());
+    }
+    remove_database(&aside).map_err(failed)?;
+    for end in ["-shm", "-journal"] {
+        match fs::remove_file(side(&backup, end)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(e)),
+            _ => {}
+        }
+    }
+    // The copy first, then its log: if the log can't follow, the copy is put back, so the two stay together.
+    match fs::rename(&backup, &aside) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(e)),
+        _ => {}
+    }
+    match fs::rename(side(&backup, "-wal"), side(&aside, "-wal")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            let _ = fs::rename(&aside, &backup);
+            return Err(failed(e));
+        }
+        _ => {}
+    }
+    let _ = fs::File::options().write(true).open(&aside).and_then(|f| f.set_modified(SystemTime::now()));
+    Ok(())
 }
 
 /// Whether something else (another copy of the app) has the library at `copy` open. SQLite lets go of the library's

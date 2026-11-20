@@ -1881,6 +1881,16 @@ fn say_made(
             log::warning("Sounds", &format!("The app's own sound library was damaged: {line}"));
             Some(("Mended your sound library from its backup copy".to_owned(), line, true))
         }
+        // Its backup copy damaged too: what could still be read of both kept in a new one (the whole-app review of 19
+        // Nov, SN-3).
+        Ok(synced) if synced.made && synced.backup_salvaged.is_some() => {
+            let salvaged = synced.salvaged.unwrap_or_default();
+            let from_backup = synced.backup_salvaged.unwrap_or_default();
+            let on_sounds_db = !synced.kept_alone;
+            let line = list::both_damaged_line(&salvaged, &from_backup, synced.kept_for_good, on_sounds_db);
+            log::warning("Sounds", &format!("The app's own sound library was damaged: {line} ({synced:?})"));
+            Some((list::both_damaged_title(&salvaged, &from_backup).to_owned(), line, true))
+        }
         // Nothing to mend it from: what could still be read of it kept in a new one (the whole-app review of 14 Nov,
         // SO-3).
         Ok(synced) if synced.made && synced.kept_alone => {
