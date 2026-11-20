@@ -711,7 +711,37 @@ impl CurvesDb {
         }
     }
 
-    /// Opens the database at `path` only to read it, as the CLAP plugin does (it never writes the app's files): nothing
+    /// Opens the database at `path` to keep a curve made in the CLAP plugin's editor ([`CurvesDb::save_made`]), the one
+    /// thing the plugin writes in the app's files (Solomon, 20 Nov 2026: "Yes plugin too"). Nothing is made or moved
+    /// here: an error when the file isn't there yet, is of an older layout or lacks the table for made curves (the app
+    /// makes and moves it when its Curves are opened).
+    pub fn open_to_save_made(path: &Path) -> Result<CurvesDb, CurvesError> {
+        if !is_there(path)? {
+            return Err(CurvesError(format!("{} isn't there yet", path.display())));
+        }
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
+        conn.busy_timeout(Duration::from_secs(2))?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
+        let tables: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('made_curves', 'your_curves')",
+            [],
+            |r| r.get(0),
+        )?;
+        if version_of(&conn)? != VERSION || is_older_layout(&conn)? || tables != 2 {
+            return Err(CurvesError(
+                "it's from an older version of the app: update the app, then open its Curves once".into(),
+            ));
+        }
+        Ok(CurvesDb { conn, notes: Vec::new() })
+    }
+
+    /// The ids of the curves made in an editor (the app's or the plugin's), for a page to see one it doesn't list yet.
+    pub fn made_ids(&self) -> Result<Vec<String>, CurvesError> {
+        Ok(self.made(None)?.into_iter().map(|m| m.id).collect())
+    }
+
+    /// Opens the database at `path` only to read it, as the CLAP plugin's list does: nothing
     /// is made or changed, and an error when it isn't there yet (the app makes it when its Curves are first opened).
     pub fn open_read_only(path: &Path) -> Result<CurvesDb, CurvesError> {
         if !is_there(path)? {
@@ -1372,7 +1402,20 @@ mod tests {
         assert_eq!(read_only.list().unwrap(), db.list().unwrap());
         assert!(db.remove_made(&made.id).unwrap() && !db.remove_made(&made.id).unwrap());
         assert!(!db.has(&made.id).unwrap());
+        // The plugin keeps one too, in a file that's there and whole; it makes and changes nothing else.
+        let plugin = CurvesDb::open_to_save_made(&dir.join(FILE_NAME)).unwrap();
+        let ramp = [p(0.0, 0.0, 0.0), p(1.0, 0.25, 0.0)];
+        let from_plugin = plugin.save_made("From the plugin", &ramp, 2.0, 5).unwrap();
+        assert!(db.made_ids().unwrap().contains(&from_plugin.id));
+        assert_eq!(db.get(&from_plugin.id).unwrap().unwrap().name, "From the plugin");
+        drop(plugin);
+        assert!(CurvesDb::open_to_save_made(&dir.join("none.db")).is_err());
+        assert!(!dir.join("none.db").exists(), "nothing is made for the plugin");
         db.conn.execute_batch("DROP TABLE made_curves").unwrap();
+        assert!(
+            CurvesDb::open_to_save_made(&dir.join(FILE_NAME)).is_err(),
+            "no table for made curves: the app's to make"
+        );
         let old = CurvesDb::open_read_only(&dir.join(FILE_NAME)).unwrap();
         assert_eq!(old.list().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&dir);

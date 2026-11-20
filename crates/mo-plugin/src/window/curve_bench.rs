@@ -5,6 +5,7 @@
 
 use super::{Carried, Slots};
 use crate::audition::{MadeLoop, Played, Player};
+use crate::curves::Saved;
 use crate::threads::{background, lock};
 use crate::{ClipTile, CurveEditorData, EditorDot, MenuItem, Panel, RulerMark, Theme};
 use mo_app::background::Newest;
@@ -108,6 +109,9 @@ pub(super) struct Bench {
     seen: RefCell<Option<(State, bool, Option<Groove>)>>,
     unwatched: Cell<Option<Instant>>,
     groove: Cell<Option<Swing>>,
+    /// Save as new curve: how it went, once that's known; and whether one is on its way (not asked again meanwhile).
+    saved: Arc<Mutex<Option<Result<Saved, String>>>>,
+    saving: Cell<bool>,
 }
 
 impl Bench {
@@ -128,6 +132,8 @@ impl Bench {
             seen: RefCell::new(None),
             unwatched: Cell::new(None),
             groove: Cell::new(None),
+            saved: Arc::default(),
+            saving: Cell::new(false),
         })
     }
 
@@ -254,6 +260,25 @@ impl Bench {
             panel.set_curve_editing(false);
             panel.set_curve_said(SharedString::new());
         });
+        let (me, weak) = (Rc::clone(self), panel.as_weak());
+        panel.on_curve_save_as_new(move || {
+            let Some(panel) = weak.upgrade() else { return };
+            let Some((_, found)) = me.open.borrow().clone() else { return };
+            let Some(shape) = me.card.borrow().edited() else {
+                panel.set_curve_said("Nothing to save: the curve is as it was found.".into());
+                return;
+            };
+            if me.saving.replace(true) {
+                return;
+            }
+            panel.set_curve_said(SharedString::new());
+            let saved = Arc::clone(&me.saved);
+            background("mo-plugin-curve-save", move || {
+                let path = mo_app::paths::data_dir().join(mo_presets::curves::FILE_NAME);
+                let how = crate::curves::save_as_new(&path, found.id, &found.name, shape);
+                *lock(&saved) = Some(how);
+            });
+        });
         let (me, weak, slots) = (Rc::clone(self), panel.as_weak(), Arc::clone(slots));
         panel.on_curve_edit_drag_out(move || {
             let Some((at, found)) = me.open.borrow().clone() else { return };
@@ -295,6 +320,23 @@ impl Bench {
         panel.set_curve_editing(true);
         self.redraw(panel);
         self.show(panel, true);
+    }
+
+    /// A curve just kept by Save as new curve, for the list to take in (then [`Bench::open`] shows it): the curve the
+    /// edits were made on is as it was found again, as in the app. A save that failed says why.
+    pub(super) fn take_saved(&self, panel: &Panel) -> Option<Saved> {
+        let how = lock(&self.saved).take()?;
+        self.saving.set(false);
+        match how {
+            Ok(saved) => {
+                self.card.borrow_mut().forget(&saved.from, &saved.shape);
+                Some(saved)
+            }
+            Err(why) => {
+                panel.set_curve_said(why.into());
+                None
+            }
+        }
     }
 
     /// Which key does what, as the app's Settings have it now.

@@ -167,6 +167,27 @@ impl CurvesTab {
         self.shown.lines.row_of(at)
     }
 
+    /// A curve kept by Save as new curve: put in the list and opened in the editor, as the app picks it.
+    fn take_in(&self, panel: &Panel, saved: curves::Saved) {
+        let Some(list) = self.shown.lines.curves.borrow().clone() else { return };
+        let before = list.curves.len();
+        let (list, at) = list.with(saved);
+        let name = list.curves[at].name.clone();
+        let text = if list.curves.len() == before {
+            format!("That shape was saved before: it's \"{name}\" in the list.")
+        } else {
+            format!("Saved as a new curve, \"{name}\". It's in the app's Curves list too.")
+        };
+        let list = Arc::new(list);
+        *self.shown.lines.curves.borrow_mut() = Some(Arc::clone(&list));
+        self.shown.show(panel);
+        // Only while the editor is still open: gone back to the list meanwhile, the list just has it.
+        if panel.get_curve_editing() {
+            self.bench.open(panel, at, &list.curves[at]);
+        }
+        panel.set_curve_said(text.into());
+    }
+
     /// Reads the curves each time the tab is shown, and takes in what was read.
     pub(super) fn tick(&self, panel: &Panel) {
         let shown = panel.get_view() == VIEW;
@@ -175,6 +196,9 @@ impl CurvesTab {
             background("mo-plugin-curves", move || *lock(&read) = Some(curves::read()));
         }
         self.bench.tick(panel, shown);
+        if let Some(saved) = self.bench.take_saved(panel) {
+            self.take_in(panel, saved);
+        }
         let Some(read) = lock(&self.read).take() else { return };
         self.reading.set(false);
         match read {

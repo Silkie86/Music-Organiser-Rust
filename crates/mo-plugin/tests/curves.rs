@@ -65,3 +65,40 @@ fn the_apps_curves_are_listed_searched_and_dragged_as_a_bitwig_curve() {
     assert_eq!(std::fs::read(&db_path).unwrap(), before, "curves.db is only read");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_edited_curve_is_kept_as_a_new_curve_in_the_apps_list() {
+    let dir = folder("curves-saved");
+    let db_path = dir.join(FILE_NAME);
+    let p = |x: f64, y: f64| curve::CurvePoint { x, y, bend: 0.0 };
+    let shape = (vec![p(0.0, 0.0), p(0.5, 1.0), p(1.0, 0.0)], 4.0);
+    // No list yet: nothing is made for it, and the words say what to do.
+    let none = curves::save_as_new(&db_path, "from".into(), "Rise", shape.clone()).err().unwrap();
+    assert!(none.contains("Open Presets"), "{none}");
+    assert!(!db_path.exists(), "the plugin makes no curves.db of its own");
+    {
+        let mut db = CurvesDb::open(&db_path).unwrap();
+        db.scan(&[curve_file(&dir, "Rise", &[0.0, 1.0])], &Progress::default()).unwrap();
+    }
+    let Read::Ready(found) = curves::read_from(&db_path) else { panic!("not read") };
+    let from = found.curves[0].id.clone();
+    let saved = curves::save_as_new(&db_path, from.clone(), "Rise", shape.clone()).unwrap();
+    assert_eq!((saved.curve.name.as_str(), saved.from.as_str()), ("Rise (edited)", from.as_str()));
+    assert_eq!(saved.curve.points, shape.0);
+    let id = saved.curve.id.clone();
+    let (list, at) = found.with(saved);
+    assert_eq!((list.curves.len(), at), (2, 1));
+    // The app reads it from its own file, and the plugin reads it again next time.
+    assert!(CurvesDb::open(&db_path).unwrap().list().unwrap().iter().any(|c| c.id == id && c.name == "Rise (edited)"));
+    let Read::Ready(again) = curves::read_from(&db_path) else { panic!("not read") };
+    assert_eq!(again.curves.len(), 2);
+    // The same shape saved again is the same curve, in its place in the list.
+    let twice = curves::save_as_new(&db_path, from, "Another name", shape).unwrap();
+    assert_eq!(twice.curve.name, "Rise (edited)");
+    let (list, at) = list.with(twice);
+    assert_eq!((list.curves.len(), at), (2, 1));
+    // What's no curve is refused, in words.
+    let bad = curves::save_as_new(&db_path, String::new(), "Bad", (vec![p(0.0, 0.0)], 4.0)).err().unwrap();
+    assert!(bad.starts_with("Couldn't save the curve"), "{bad}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

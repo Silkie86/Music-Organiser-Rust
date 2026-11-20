@@ -1,10 +1,13 @@
-//! The Curves tab's curves: the ones the app's Presets › Curves keeps in `curves.db`, read without changing it (the
-//! plugin never writes the app's files), searched and filtered as the app's list is (mo-app's
+//! The Curves tab's curves: the ones the app's Presets › Curves keeps in `curves.db`, read without changing it, searched and filtered as the app's list is (mo-app's
 //! `presets::shown_curves`), and dragged out as a Bitwig curve file (Solomon, 13 Nov: "both presets and curves should
 //! be draggable").
 //!
 //! A dragged curve is written to a drag folder of its own in Temp, as a dragged MIDI part is
 //! ([`mo_app::drag_out::write_drag_files`]), and cleared a day later: the app's own Curves folder is the app's.
+//!
+//! The one thing written in the app's files: a curve edited here, kept as a new curve of its own ([`save_as_new`];
+//! Solomon, 20 Nov 2026: "Yes plugin too"). It's added to `curves.db` as the app's own Save as new curve adds it, and
+//! the app lists it when its window next comes to the front.
 
 use mo_app::curve_keys::{self, KeyMap};
 use mo_app::presets::{self as page, CurveFilters, CurveKey};
@@ -60,7 +63,64 @@ pub fn read_from(path: &Path) -> Read {
     }
 }
 
+/// A curve kept by [`save_as_new`], as the list takes it in.
+pub struct Saved {
+    pub curve: Curve,
+    key: CurveKey,
+    /// The id of the curve the edits were made on, and the points and length that were saved.
+    pub from: String,
+    pub shape: (Vec<mo_formats::bitwig::curve::CurvePoint>, f64),
+}
+
+/// Keeps the editor's curve (`shape`: its points and length) as a new curve of its own in the `curves.db` at `path`,
+/// named as an edit of `from_name`. The same shape saved before is that curve, under the name it has. Writes to the
+/// disk: call it off the panel's thread.
+pub fn save_as_new(
+    path: &Path,
+    from: String,
+    from_name: &str,
+    shape: (Vec<mo_formats::bitwig::curve::CurvePoint>, f64),
+) -> Result<Saved, String> {
+    if !path.is_file() {
+        return Err("Open Presets › Curves in the app once first: it makes the list this curve is kept in".into());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let saved = CurvesDb::open_to_save_made(path)
+        .and_then(|db| db.save_made(&page::edited_name(from_name), &shape.0, shape.1, now));
+    match saved {
+        Ok(curve) => {
+            crate::log::line("Curves", &format!("Saved \"{}\" as a new curve in the app's list", curve.name));
+            Ok(Saved { key: CurveKey::of(&curve), curve, from, shape })
+        }
+        Err(e) => {
+            crate::log::line("Curves", &format!("Couldn't save a new curve: {e}"));
+            Err(format!("Couldn't save the curve: {e}"))
+        }
+    }
+}
+
 impl Curves {
+    /// The list with `saved` in it (in the place of the curve with its id, when that shape was saved before), and
+    /// its place.
+    pub fn with(&self, saved: Saved) -> (Curves, usize) {
+        let (mut curves, mut keys) = (self.curves.clone(), self.keys.clone());
+        let at = match curves.iter().position(|c| c.id == saved.curve.id) {
+            Some(at) => {
+                curves[at] = saved.curve;
+                keys[at] = saved.key;
+                at
+            }
+            None => {
+                curves.push(saved.curve);
+                keys.push(saved.key);
+                curves.len() - 1
+            }
+        };
+        (Curves { curves, keys, editor_keys: self.editor_keys }, at)
+    }
+
     /// The curves `filters` let through, newest found first, as places in [`Curves::curves`], with the Found in
     /// filter's chips.
     pub fn view(&self, filters: &CurveFilters) -> (Vec<usize>, mo_app::filters::Filter) {
