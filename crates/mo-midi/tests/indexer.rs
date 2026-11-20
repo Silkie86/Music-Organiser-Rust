@@ -105,7 +105,7 @@ fn reads_only_what_changed_and_stores_notes_once() {
     assert_eq!(all.len(), 3);
     let bass = all.iter().find(|p| p.clip == "Low 01").unwrap();
     assert_eq!(bass.role, Role::Bass);
-    assert_eq!(bass.role_why, "Single notes, low down, and its name agrees", "the Basslines folder says so");
+    assert_eq!(bass.role_why.words(), "Single notes, low down, and its name agrees", "the Basslines folder says so");
     assert_eq!(bass.source.daw, "MIDI");
     assert_eq!(store.notes(bass.id, &bass.hash).unwrap().len(), 8);
     assert_eq!(store.notes(bass.id, &bass.hash).unwrap()[0].velocity7(), 100);

@@ -414,7 +414,7 @@ mod tests {
             drums: false,
             sample: false,
             role,
-            role_why: String::new(),
+            role_why: crate::roles::RoleWhy::NONE,
             bars: 0..1,
             clips: Vec::new(),
         }

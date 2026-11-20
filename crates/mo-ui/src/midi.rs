@@ -838,7 +838,7 @@ impl Model for Lines {
 }
 
 fn why_text(p: &StoredPhrase) -> String {
-    if p.your_role.is_some() { "You said so".to_owned() } else { p.role_why.clone() }
+    if p.your_role.is_some() { "You said so".to_owned() } else { p.role_why.words() }
 }
 
 /// Wires the page up; the index is read a little after the start ([`read_before_shown`]), or when the page is
@@ -3620,7 +3620,15 @@ pub fn sample() -> Loaded {
             part: part.to_owned(),
             clip: clip.to_owned(),
             role,
-            role_why: format!("Its notes play like {}", page::role_label(role).to_lowercase()),
+            // The reason the analyser gives a part of each kind from its notes.
+            role_why: match role {
+                Role::Chords => mo_midi::RoleWhy::MOSTLY_CHORDS,
+                Role::Bass => mo_midi::RoleWhy::SINGLE_LOW,
+                Role::Arp => mo_midi::RoleWhy::FAST_EVEN,
+                Role::Drums => mo_midi::RoleWhy::GM_DRUMS,
+                Role::Melody => mo_midi::RoleWhy::ONE_AFTER_ANOTHER,
+                Role::Other => mo_midi::RoleWhy::ONE_NOTE,
+            },
             your_role: None,
             bars,
             notes: keys.len() as i32,

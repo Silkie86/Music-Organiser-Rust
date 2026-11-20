@@ -1265,7 +1265,7 @@ mod tests {
             part: String::new(),
             clip: "Long take · bars 9–16".into(),
             role: Role::Melody,
-            role_why: String::new(),
+            role_why: crate::roles::RoleWhy::NONE,
             your_role: None,
             bars: 8,
             notes: 16,
