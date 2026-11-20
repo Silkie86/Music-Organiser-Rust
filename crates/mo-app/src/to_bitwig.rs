@@ -1,5 +1,5 @@
 //! Send to Bitwig from the Sounds page (the picked sound, or the kit on show) and the MIDI page (the picked part), into
-//! the project open in Bitwig, through the Music Organiser extension there (`mo_dawlink::bitwig` does the sending, and
+//! the project open in Bitwig, through the DAWmate extension there (`mo_dawlink::bitwig` does the sending, and
 //! has the words, the C# app's). Each waits for Bitwig, so the page calls them on a thread of their own, never the
 //! window's (rule 12). Each has an activity card from the moment it's asked for, which says how it went once Bitwig
 //! answers.
