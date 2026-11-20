@@ -31,14 +31,10 @@ use mo_library::{Library, LibraryError, Save, SaveDetail, SongChoices};
 use rayon::prelude::*;
 
 use crate::background::{on_bulk_pool, on_pool};
-use crate::shell;
 use crate::songs::{ASK_DOUBTS, DOUBTS_ACROSS_FOLDERS, RUN_GAP, Songs, run_gap, shown_tags};
 
 /// The details of the saves read here, by their ids, shared with the song panel's reader.
 pub type LiveDetails = Arc<Mutex<HashMap<i64, SaveDetail>>>;
-
-/// The DAWs the scanner reads, so a song from one the library has no save of yet still opens in yours.
-const DAWS: [&str; 3] = ["Bitwig Studio", "FL Studio", "Studio One"];
 
 /// How long the folders a sample locator has read are trusted: saves a minute apart share them, later ones look again.
 const SAMPLES_FRESH: Duration = Duration::from_secs(60);
@@ -62,7 +58,6 @@ pub struct Live {
     tags: Vec<String>,
     gap_months: u32,
     asking: Option<bool>,
-    daw_exes: HashMap<String, String>,
     roots: Vec<String>,
     /// The export folder Open in Bitwig writes its copies into, as it was when the list was loaded: never listed, even
     /// inside a project folder, as Presets leaves them out (review finding A-7).
@@ -296,13 +291,6 @@ impl Live {
             .then(|| library.setting(DOUBTS_ACROSS_FOLDERS).map(|v| v.as_deref() == Some("1")))
             .transpose()?;
         let gap_months = run_gap(library.setting(RUN_GAP)?.as_deref(), gap_months);
-        let mut daw_exes = HashMap::new();
-        let daws: BTreeSet<String> = saves.iter().map(|s| s.daw.clone()).chain(DAWS.map(String::from)).collect();
-        for daw in daws {
-            if let Some(exe) = library.setting(&shell::daw_exe_key(&daw))?.filter(|e| !e.trim().is_empty()) {
-                daw_exes.insert(daw, exe);
-            }
-        }
         let kept_as = saves.iter().map(|s| (s.id, s.path.clone())).collect();
         Ok(Live {
             saves,
@@ -310,7 +298,6 @@ impl Live {
             tags: library.all_tags()?.into_iter().map(|(t, _)| t).collect(),
             gap_months,
             asking,
-            daw_exes,
             roots,
             export,
             installed: library.installed()?,
@@ -502,9 +489,7 @@ impl Live {
 
     /// The list, grouped into songs.
     pub fn songs(&self) -> Songs {
-        let mut songs = Songs::from_saves(&self.saves, &self.choices, self.tags.clone(), self.gap_months, self.asking);
-        songs.daw_exes = self.daw_exes.clone();
-        songs
+        Songs::from_saves(&self.saves, &self.choices, self.tags.clone(), self.gap_months, self.asking)
     }
 
     /// The saves whose read failed last time, to read again a moment later; None when there are none.
@@ -1314,7 +1299,6 @@ mod tests {
             tags: Vec::new(),
             gap_months: 6,
             asking: None,
-            daw_exes: HashMap::new(),
             roots: Vec::new(),
             export: None,
             installed: Installed::default(),

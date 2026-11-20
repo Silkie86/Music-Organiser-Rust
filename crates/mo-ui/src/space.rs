@@ -1214,15 +1214,11 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
     show_wins(app);
 }
 
-/// Opens a fixed project in Bitwig: the program picked for it in Settings (shared with the C# app), else whatever opens
-/// Bitwig projects. Off the window's thread, with an activity card saying how it went.
+/// Opens a fixed project in Bitwig: the program chosen for it on Settings › DAWs (as it stands at the click), else
+/// whatever opens Bitwig projects. Off the window's thread, with an activity card saying how it went.
 fn open_in_bitwig(file: PathBuf) {
-    let Some((feed, library)) = PAGE.with(|p| {
-        let p = p.borrow();
-        Some((p.feed.clone()?, p.library.clone()))
-    }) else {
-        return;
-    };
+    let Some(feed) = PAGE.with(|p| p.borrow().feed.clone()) else { return };
+    let chosen = crate::settings::value(&shell::daw_exe_key(BITWIG));
     let started = background::spawn("Open", move || {
         let path = file.to_string_lossy().into_owned();
         let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
@@ -1231,12 +1227,10 @@ fn open_in_bitwig(file: PathBuf) {
                 .failed("It has moved or been deleted since. Measure again to see what's there now.");
             return;
         }
-        let exe = open_library(&library)
-            .and_then(|lib| lib.setting(&shell::daw_exe_key(BITWIG)).ok().flatten())
-            .filter(|e| shell::usable_exe(e));
+        let exe = chosen.as_deref().filter(|e| shell::usable_exe(e));
         let card = feed.start(&format!("Opening {name}"), "");
-        match shell::run(&shell::open(&path, exe.as_deref(), shell::Os::THIS)) {
-            Ok(()) => card.done("Sent to Bitwig. It opens there in a moment."),
+        match shell::run(&shell::open(&path, exe, shell::Os::THIS)) {
+            Ok(()) => card.done(&shell::sent_to("Bitwig", chosen.as_deref(), exe.is_some(), shell::Os::THIS)),
             Err(e) => {
                 log::warning("Open", &format!("{path}: {e}"));
                 card.failed(&format!("Couldn't open it in Bitwig: {e}"));

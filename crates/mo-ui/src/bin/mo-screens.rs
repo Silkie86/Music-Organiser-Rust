@@ -3981,6 +3981,8 @@ fn settings_shots(
         "3.19",
         vec![std::path::PathBuf::from(r"K:\Bitwig Studio\Extensions")],
     );
+    let fl_program = mo_app::shell::daw_exe_key("FL Studio");
+    mo_ui::settings::remember(&fl_program, r"C:\Program Files\Image-Line\FL Studio 2025\FL64.exe");
     mo_ui::settings::show_fl(
         app,
         mo_dawlink::scripts::ScriptState::Outdated,
@@ -3988,6 +3990,12 @@ fn settings_shots(
     );
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));
+    // Further down, the program each DAW's songs open in: FL Studio's chosen (an invented path, set before show_fl
+    // showed the tab), the others Windows' choice.
+    scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
+    shots.push(("settings-daws-programs.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, 4.0 * PAGE_DOWN);
+    mo_ui::settings::remember(&fl_program, "");
     // No Bitwig Studio folder in Documents and none chosen: the card says to choose it (the 10 Nov review's X3-5).
     mo_ui::settings::remember(mo_app::app_settings::BITWIG_FOLDER_KEY, "");
     mo_ui::settings::remember(mo_app::app_settings::BITWIG_LIBRARIES_KEY, "");

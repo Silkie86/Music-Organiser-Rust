@@ -244,8 +244,8 @@ pub fn connect(app: &AppWindow, ahead: Ahead, feed: Feed) {
     FEED.with(|f| *f.borrow_mut() = Some(feed));
     PAGE.with(|p| p.borrow_mut().db = path.clone());
     data.on_open(|| with_picked(|p, r| open_main(p, aimed(r))));
-    data.on_open_own(|| with_picked(|p, r| open_save(p, aimed(r))));
-    data.on_open_save(|path| with_save(&path, open_save));
+    data.on_open_own(|| with_picked(|_, r| open_save(aimed(r))));
+    data.on_open_save(|path| with_save(&path, |_, s| open_save(s)));
     let weak = app.as_weak();
     data.on_save_menu_for(move |path| {
         let Some(app) = weak.upgrade() else { return };
@@ -1349,7 +1349,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
                     open_in_bitwig(p, save);
                     done = true;
                 } else if save.daw.starts_with(BITWIG) {
-                    open_save(p, save);
+                    open_save(save);
                     done = true;
                 }
             });
@@ -1379,7 +1379,7 @@ fn with_save(path: &str, f: impl FnOnce(&Page, &mo_library::Save)) {
 /// "copy" (its path), from its right-click menu or the buttons on its line.
 fn do_to_save(path: &str, what: &str) {
     with_save(path, |p, s| match what {
-        "open" => open_save(p, s),
+        "open" => open_save(s),
         "bitwig" => open_in_bitwig(p, s),
         "reveal" => reveal(s),
         "copy" => copy_path(&s.path),
@@ -1500,22 +1500,22 @@ pub fn has_pick() -> bool {
 const MOVED_OR_DELETED: &str =
     "It has moved or been deleted. The list catches up by itself when it next looks in that folder.";
 
-/// Opens a save in its DAW: the one picked in Settings, else whatever opens its kind of file. Off the window's
-/// thread: handing a file to a DAW that's already running can keep the system busy for seconds. The save's "last
-/// opened" isn't noted yet.
-fn open_save(page: &Page, save: &mo_library::Save) {
+/// Opens a save in its DAW: the program chosen for it on Settings › DAWs (as it stands at the click), else whatever
+/// opens its kind of file. Off the window's thread: handing a file to a DAW that's already running can keep the system
+/// busy for seconds. The save's "last opened" isn't noted yet.
+fn open_save(save: &mo_library::Save) {
     let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
-    let exe = page.songs.daw_exes.get(&save.daw).cloned();
+    let chosen = crate::settings::value(&shell::daw_exe_key(&save.daw));
     let (path, daw, name) = (save.path.clone(), save.daw.clone(), save.name.clone());
     let started = background::spawn("Open", move || {
         if !shell::exists(&path) {
             feed.start(&format!("Can't find {name}"), "").failed(MOVED_OR_DELETED);
             return;
         }
-        let exe = exe.filter(|e| shell::usable_exe(e));
+        let exe = chosen.as_deref().filter(|e| shell::usable_exe(e));
         let job = feed.start(&format!("Opening {name}"), "");
-        match shell::run(&shell::open(&path, exe.as_deref(), shell::Os::THIS)) {
-            Ok(()) => job.done(&format!("Sent to {daw}. It opens there in a moment.")),
+        match shell::run(&shell::open(&path, exe, shell::Os::THIS)) {
+            Ok(()) => job.done(&shell::sent_to(&daw, chosen.as_deref(), exe.is_some(), shell::Os::THIS)),
             Err(e) => {
                 log::warning("Open", &format!("{path}: {e}"));
                 job.failed(&format!("Couldn't open it in {daw}: {e}"));
@@ -1528,7 +1528,8 @@ fn open_save(page: &Page, save: &mo_library::Save) {
 }
 
 /// The library's names for the two DAWs Open in Bitwig is about. Bitwig's saves are named "Bitwig Studio" (as the
-/// Settings' program for it is kept, `daw_exe:Bitwig Studio`); `BITWIG` is what every one of them starts with.
+/// program chosen for it on Settings › DAWs is kept, `daw_exe:Bitwig Studio`); `BITWIG` is what every one of them
+/// starts with.
 const FL: &str = "FL Studio";
 const BITWIG: &str = "Bitwig";
 const BITWIG_STUDIO: &str = mo_formats::bitwig::reader::DAW;
@@ -1539,15 +1540,15 @@ static OPENED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
 
 /// The main Open button: FL Studio songs go to Bitwig (as in the C# app), the rest open in their own DAW.
 fn open_main(page: &Page, save: &mo_library::Save) {
-    if save.daw == FL { open_in_bitwig(page, save) } else { open_save(page, save) }
+    if save.daw == FL { open_in_bitwig(page, save) } else { open_save(save) }
 }
 
 /// Converts an FL Studio save for Bitwig into the export folder and opens the new project in Bitwig, on a background
 /// thread; the card says how it went. The FL project and the template are only read.
 fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
     let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
-    // The Bitwig program picked in Settings, kept under the library's own name for Bitwig.
-    let exe = page.songs.daw_exes.get(BITWIG_STUDIO).cloned();
+    // The Bitwig program chosen on Settings › DAWs, kept under the library's own name for Bitwig.
+    let chosen = crate::settings::value(&shell::daw_exe_key(BITWIG_STUDIO));
     let (db, path, name) = (page.db.clone(), save.path.clone(), save.name.clone());
     let started = background::spawn("Convert", move || {
         if !shell::exists(&path) {
@@ -1559,14 +1560,17 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
         match convert_save(&db, Path::new(&path)) {
             Ok(c) => {
                 log::info("Convert", &format!("{path} became {} in {:.1?}", c.file.display(), started.elapsed()));
-                let exe = exe.filter(|e| shell::usable_exe(e));
+                let exe = chosen.as_deref().filter(|e| shell::usable_exe(e));
                 let file = c.file.to_string_lossy().into_owned();
-                match shell::run(&shell::open(&file, exe.as_deref(), shell::Os::THIS)) {
+                match shell::run(&shell::open(&file, exe, shell::Os::THIS)) {
                     Ok(()) => {
                         if let Ok(mut opened) = OPENED.lock() {
                             opened.insert(c.name.clone());
                         }
-                        job.done(&c.message);
+                        match shell::sent_with(chosen.as_deref(), exe.is_some(), shell::Os::THIS) {
+                            Some(with) => job.done(&format!("{} {with}", c.message)),
+                            None => job.done(&c.message),
+                        }
                     }
                     Err(e) => {
                         log::warning("Convert", &format!("{file}: {e}"));
@@ -1796,6 +1800,32 @@ mod tests {
         mo_library::songs_db::make(&library, &songs, &mut |_| {}).expect("made");
         assert!(load(&songs, LiveDetails::default(), true).expect("read").live.writes());
         assert!(!load(&songs, LiveDetails::default(), false).expect("read").live.writes());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_uses_the_program_the_c_sharp_app_chose_until_settings_changes_it() {
+        // The C# app kept each DAW's program in its settings, which songs.db took over. Open reads it as it stands at
+        // the click (`settings::value`), so Settings › DAWs shows and changes the one Open uses (review SS-4).
+        let fl = r"C:\Program Files\Image-Line\FL Studio 2025\FL64.exe";
+        let dir = std::env::temp_dir().join(format!("mo-ui-songs-program-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("made");
+        let library = dir.join(mo_library::songs_db::FILE_NAME);
+        let c = rusqlite::Connection::open(&library).expect("opened");
+        c.execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE, name TEXT NOT NULL,
+                 daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, file_missing INTEGER DEFAULT 0);",
+        )
+        .expect("made");
+        c.execute("INSERT INTO settings (key, value) VALUES ('daw_exe:FL Studio', ?1)", [fl]).expect("kept");
+        drop(c);
+        let (settings, _) = crate::settings::load(&dir.join("no-settings-folder"), &library);
+        let program = |daw: &str| crate::settings::value(&shell::daw_exe_key(daw));
+        assert_eq!(settings.get("daw_exe:FL Studio"), Some(fl));
+        assert_eq!(program(mo_formats::fl::DAW).as_deref(), Some(fl));
+        assert_eq!(program(BITWIG_STUDIO), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

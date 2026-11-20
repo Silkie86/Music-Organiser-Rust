@@ -179,6 +179,7 @@ pub fn start_detached(exe: &Path) -> io::Result<()> {
     crate::shell::run(&crate::shell::Launch {
         program: exe.display().to_string(),
         args: vec![FLAG.to_owned()],
+        raw: false,
         check: crate::shell::Check::Started,
     })
 }

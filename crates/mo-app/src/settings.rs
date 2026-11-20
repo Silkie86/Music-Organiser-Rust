@@ -14,6 +14,7 @@ use mo_space::folder_move::MovedFolder;
 
 use crate::background::Pace;
 use crate::places::{LAST_PAGE_CHOICE, Place};
+use crate::shell::{self, Os};
 use crate::themes::{ACCENTS, FONTS, SIZES, THEMES, Theme, font_named, parse_hex, size_from_setting};
 use mo_library::folders::FolderList;
 
@@ -837,6 +838,107 @@ pub fn installed_note(done: &Installed) -> String {
     out
 }
 
+/// The program each DAW's songs open in, a line on the DAWs tab's "Opening your songs" card (the 19 Nov review, SS-4:
+/// a program picked in the C# app was used with no way to see it or go back).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DawProgram {
+    /// The DAW, by the name its saves carry in the library.
+    pub daw: &'static str,
+    /// The program chosen (its whole path), with "(chosen in the old app)" when it's the C# app's; else the words for
+    /// the system's choice.
+    pub program: String,
+    /// Whether one is chosen: its path shows, and the line has a button to go back to the system's choice.
+    pub chosen: bool,
+    pub choose_tip: String,
+    /// The button that goes back to the system's choice, and its tip.
+    pub reset: String,
+    pub reset_tip: String,
+}
+
+/// The "Opening your songs" card's title and words.
+pub const PROGRAMS_TITLE: &str = "Opening your songs";
+
+pub fn programs_intro(os: Os) -> String {
+    format!(
+        "Open sends a song to the program chosen here for its DAW. With none chosen, {} picks, as it does when you \
+         open the file yourself.",
+        os.name()
+    )
+}
+
+/// The lines of the "Opening your songs" card. `setting` is a setting as it stands, `changed_here` whether this app
+/// changed it (else it's the C# app's).
+pub fn daw_programs(
+    setting: impl Fn(&str) -> Option<String>,
+    changed_here: impl Fn(&str) -> bool,
+    os: Os,
+) -> Vec<DawProgram> {
+    shell::DAW_PROGRAMS
+        .iter()
+        .map(|&(daw, key, ending)| {
+            let chosen = setting(key).map(|e| e.trim().to_owned()).filter(|e| !e.is_empty());
+            let system = format!("What {} opens {ending} files with", os.name());
+            DawProgram {
+                daw,
+                chosen: chosen.is_some(),
+                program: match chosen {
+                    Some(exe) if changed_here(key) => exe,
+                    Some(exe) => format!("{exe} (chosen in the old app)"),
+                    None => system,
+                },
+                choose_tip: format!("Pick the program {daw} songs open in"),
+                reset: format!("Use {}", possessive(os)),
+                reset_tip: format!("{daw} songs open in what {} opens {ending} files with again", os.name()),
+            }
+        })
+        .collect()
+}
+
+/// "Windows' choice", "your Mac's choice".
+fn possessive(os: Os) -> String {
+    match os {
+        Os::Windows => "Windows' choice".to_owned(),
+        Os::Mac | Os::Linux => format!("{}'s choice", os.name()),
+    }
+}
+
+/// What the picker for a DAW's program asks (the C# app's words), and the kinds of file it offers: an .exe on Windows,
+/// an .app on a Mac, any file on Linux.
+pub fn program_pick(daw: &str, os: Os) -> (String, &'static [&'static str]) {
+    let kinds: &'static [&'static str] = match os {
+        Os::Windows => &["exe"],
+        Os::Mac => &["app"],
+        Os::Linux => &[],
+    };
+    (format!("Choose the {daw} program"), kinds)
+}
+
+/// What the tab says once a DAW's program is chosen (`None`: the system's choice again), and whether it's kept past
+/// this run.
+pub fn program_note(daw: &str, exe: Option<&str>, kept: bool, os: Os) -> String {
+    let mut note = match exe {
+        Some(exe) => format!("{daw} songs open in {exe} now."),
+        None => format!("{daw} songs open in what {} picks again.", os.name()),
+    };
+    if !kept {
+        note.push_str(" It's only kept until the app closes: your settings file couldn't be read.");
+    }
+    note
+}
+
+/// The log's line at the start: the program each DAW's songs open in, and where that choice came from.
+pub fn programs_line(setting: impl Fn(&str) -> Option<String>, changed_here: impl Fn(&str) -> bool, os: Os) -> String {
+    let lines: Vec<String> = shell::DAW_PROGRAMS
+        .iter()
+        .map(|&(daw, key, _)| match setting(key).map(|e| e.trim().to_owned()).filter(|e| !e.is_empty()) {
+            Some(exe) if changed_here(key) => format!("{daw}: {exe}"),
+            Some(exe) => format!("{daw}: {exe} (chosen in the C# app)"),
+            None => format!("{daw}: {}", possessive(os)),
+        })
+        .collect();
+    format!("Open uses {}", lines.join("; "))
+}
+
 /// Under the DAW rows: where the scripts are installed from for now.
 pub const DAWS_NOTE: &str = "The scripts that let the app talk to Bitwig and FL Studio. Checking Bitwig only \
     reads. Install puts the app's own copy in the DAW's folders: on FL Studio's row its script (keeping your setting \
@@ -1206,5 +1308,56 @@ mod tests {
         assert_eq!(bitwig_folder_note(None, false, true), "Your Bitwig Studio folder is the one in Documents again.");
         let note = bitwig_folder_note(None, false, false);
         assert!(note.ends_with("only kept until the app closes: your settings file couldn't be read."), "{note}");
+    }
+
+    #[test]
+    fn each_daw_s_program_shows_where_it_came_from_and_can_go_back_to_the_system_s_choice() {
+        let fl = r"C:\Program Files\Image-Line\FL Studio 2025\FL64.exe";
+        let studio_one = r"C:\Program Files\PreSonus\Studio One 6\Studio One.exe";
+        // FL Studio's from the C# app, Studio One's chosen here, Bitwig's taken back to Windows' choice ("" is none).
+        let settings = crate::app_settings::AppSettings::from_parts(
+            Some(&format!(r#"{{"daw_exe:Studio One":{studio_one:?},"daw_exe:Bitwig Studio":""}}"#)),
+            [("daw_exe:FL Studio".to_owned(), fl.to_owned()), ("daw_exe:Bitwig Studio".to_owned(), "B.exe".to_owned())]
+                .into(),
+        )
+        .unwrap();
+        let get = |key: &str| settings.get(key).map(str::to_owned);
+        let here = |key: &str| settings.changed_here(key);
+        let lines = daw_programs(get, here, Os::Windows);
+        let shown: Vec<_> = lines.iter().map(|l| (l.daw, l.program.as_str(), l.chosen)).collect();
+        assert_eq!(
+            shown,
+            [
+                ("Bitwig Studio", "What Windows opens .bwproject files with", false),
+                ("FL Studio", &*format!("{fl} (chosen in the old app)"), true),
+                ("Studio One", studio_one, true),
+            ]
+        );
+        assert_eq!(lines[1].reset, "Use Windows' choice");
+        assert_eq!(lines[1].reset_tip, "FL Studio songs open in what Windows opens .flp files with again");
+        assert_eq!(lines[1].choose_tip, "Pick the program FL Studio songs open in");
+        assert_eq!(daw_programs(|_| None, |_| false, Os::Mac)[0].reset, "Use your Mac's choice");
+        assert_eq!(
+            programs_line(get, here, Os::Windows),
+            format!(
+                "Open uses Bitwig Studio: Windows' choice; FL Studio: {fl} (chosen in the C# app); Studio One: {studio_one}"
+            )
+        );
+        assert!(
+            programs_intro(Os::Windows)
+                .ends_with("With none chosen, Windows picks, as it does when you open the file yourself.")
+        );
+        assert_eq!(program_pick("FL Studio", Os::Windows), ("Choose the FL Studio program".to_owned(), &["exe"][..]));
+        assert_eq!(program_pick("Bitwig Studio", Os::Mac).1, ["app"]);
+        assert!(program_pick("Bitwig Studio", Os::Linux).1.is_empty());
+        assert_eq!(
+            program_note("FL Studio", Some(fl), true, Os::Windows),
+            format!("FL Studio songs open in {fl} now.")
+        );
+        assert_eq!(
+            program_note("FL Studio", None, true, Os::Windows),
+            "FL Studio songs open in what Windows picks again."
+        );
+        assert!(program_note("FL Studio", None, false, Os::Windows).ends_with("your settings file couldn't be read."));
     }
 }

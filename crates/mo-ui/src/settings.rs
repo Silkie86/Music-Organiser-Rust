@@ -13,6 +13,7 @@ use mo_app::log;
 use mo_app::midi::{SMALLEST_PART_CHOICES, SMALLEST_PART_KEY};
 use mo_app::places::Place;
 use mo_app::settings::{self as page, Outputs, Tab};
+use mo_app::shell::{self, Os};
 use mo_app::themes::{
     ACCENT_KEY, FONT_KEY, FONTS, Look, SIZE_KEY, SIZES, THEME_KEY, THEMES, size_from_setting, theme_named,
 };
@@ -23,7 +24,8 @@ use slint::platform::WindowEvent;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::{
-    AccentInfo, AppWindow, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact, ThemeCardInfo,
+    AccentInfo, AppWindow, DawProgramInfo, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact,
+    ThemeCardInfo,
 };
 
 /// What the page knows, on the window's thread.
@@ -139,6 +141,9 @@ pub fn load(folder: &Path, library: &Path) -> (AppSettings, bool) {
     for p in &loaded.problems {
         log::warning("Settings", p);
     }
+    // Which program each DAW's songs open in, and whether the C# app chose it (the 19 Nov review, SS-4).
+    let s = &loaded.settings;
+    log::info("Settings", &page::programs_line(|k| s.get(k).map(str::to_owned), |k| s.changed_here(k), Os::THIS));
     EARLY.with(|e| *e.borrow_mut() = Some(loaded.settings.clone()));
     (loaded.settings, loaded.writable)
 }
@@ -401,6 +406,37 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             && PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live))
         {
             choose_bitwig_folder(&app, None);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_choose_daw_program(move |daw| {
+        // Not for the screenshots: nothing would be kept, and they never look at real files.
+        if !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live)) {
+            return;
+        }
+        let weak = weak.clone();
+        let (title, kinds) = page::program_pick(&daw, Os::THIS);
+        let asked = slint::spawn_local(async move {
+            let mut picker = rfd::AsyncFileDialog::new().set_title(&title);
+            if !kinds.is_empty() {
+                picker = picker.add_filter("Programs", kinds);
+            }
+            if let Some(exe) = picker.pick_file().await
+                && let Some(app) = weak.upgrade()
+            {
+                choose_program(&app, &daw, Some(exe.path()));
+            }
+        });
+        if let Err(e) = asked {
+            log::error("Settings", &format!("Couldn't open the program picker: {e}"));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_reset_daw_program(move |daw| {
+        if let Some(app) = weak.upgrade()
+            && PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live))
+        {
+            choose_program(&app, &daw, None);
         }
     });
     let weak = app.as_weak();
@@ -1300,6 +1336,23 @@ fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
     show(app);
 }
 
+/// Keeps the program `daw`'s songs open in (`None`: the system's choice, kept as "" so the C# app's choice no longer
+/// counts) in the app's own settings file. Open reads it at each click, so it counts from the next one.
+fn choose_program(app: &AppWindow, daw: &str, exe: Option<&Path>) {
+    let value = exe.map(|e| e.display().to_string()).unwrap_or_default();
+    let kept = remember(&shell::daw_exe_key(daw), &value);
+    match exe {
+        Some(e) => log::info("Settings", &format!("{daw} songs open in {} from now on", e.display())),
+        None => log::info("Settings", &format!("{daw} songs open in the system's choice from now on")),
+    }
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.daws_message = page::program_note(daw, exe.map(|_| value.as_str()), kept, Os::THIS);
+        }
+    });
+    show(app);
+}
+
 /// Changes the list of more Bitwig Library folders and keeps it in the app's own settings file. Space reads it at its
 /// next look for Bitwig copies.
 fn edit_bitwig_libraries(app: &AppWindow, edit: impl FnOnce(&mut Vec<PathBuf>)) {
@@ -1785,6 +1838,23 @@ fn show(app: &AppWindow) {
         data.set_bitwig_chosen(p.settings.get(app_settings::BITWIG_FOLDER_KEY).is_some_and(|f| !f.trim().is_empty()));
         let libraries = app_settings::folder_list(p.settings.get(app_settings::BITWIG_LIBRARIES_KEY).unwrap_or(""));
         data.set_bitwig_libraries(strings(libraries.iter().map(|f| f.display().to_string())));
+        // The screenshots show the words as on Windows, where the app is used.
+        let os = if p.live { Os::THIS } else { Os::Windows };
+        let programs: Vec<DawProgramInfo> =
+            page::daw_programs(|k| p.settings.get(k).map(str::to_owned), |k| p.settings.changed_here(k), os)
+                .into_iter()
+                .map(|l| DawProgramInfo {
+                    daw: l.daw.into(),
+                    program: l.program.into(),
+                    chosen: l.chosen,
+                    choose_tip: l.choose_tip.into(),
+                    reset: l.reset.into(),
+                    reset_tip: l.reset_tip.into(),
+                })
+                .collect();
+        data.set_programs_title(page::PROGRAMS_TITLE.into());
+        data.set_programs_intro(page::programs_intro(os).into());
+        data.set_daw_programs(ModelRc::new(VecModel::from(programs)));
         data.set_folders_busy(p.folders_busy);
         data.set_folders_message(p.folders_message.clone().into());
 
