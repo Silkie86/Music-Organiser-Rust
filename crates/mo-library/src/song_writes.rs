@@ -356,6 +356,14 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<(i64, bool)> {
         None if !id_taken()? => (insert(tx, Some(save.id), put)?, true),
         None => (insert(tx, None, put)?, true),
     };
+    // Moved: if its song is shown from it (of the same file in several places), it still is (review SS-1).
+    if let Some(known) = put.known_as.as_deref().filter(|k| !mo_formats::case::eq_ignore_case(k, &save.path))
+        && crate::song_fields::move_kept(tx, known, &save.path)?
+        && !crate::song_fields::is_kept(tx, &save.path)?
+    {
+        let why = format!("the note that its song is shown from {} didn't move with it", save.path);
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(why))));
+    }
     for table in ["plugins", "samples"] {
         tx.execute(&format!("DELETE FROM {table} WHERE project_id = ?1"), [id])?;
     }

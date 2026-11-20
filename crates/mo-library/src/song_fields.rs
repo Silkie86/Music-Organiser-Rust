@@ -9,6 +9,9 @@
 //! Songs list does both in one step, on the thread that reads saves, so neither can come between
 //! (`mo_app::live::Live::give`).
 //!
+//! A change to a song whose files are also found in other folders goes to those copies too, and the copy the song is
+//! shown from is noted with it ([`set_all_keeping`], review SS-1), so the change can't make another copy take over.
+//!
 //! It waits for another write (up to five seconds), so call it away from the window's thread.
 
 use std::path::Path;
@@ -151,6 +154,15 @@ pub fn same_tag(tag: &str) -> String {
     case::to_lower(tag.trim())
 }
 
+/// Of a file found in several places, the one its song is shown from (`shown`) and the file's other places
+/// (`copies`), as `song_choices` keeps it ([`crate::songs::SongChoices::is_kept`]): kept with a change given to the
+/// song ([`set_all_keeping`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeepCopy {
+    pub shown: String,
+    pub copies: Vec<String>,
+}
+
 /// What [`set`] did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Kept {
@@ -172,6 +184,18 @@ pub fn set(songs_db: &Path, saves: &[SaveRow], change: &Change) -> Result<Kept, 
 /// [`set`] for several changes, made in order in the one transaction: every one of them for every save, or nothing.
 /// A tag put on with the tags the song shows, so its newest save holds them all (review SG-1).
 pub fn set_all(songs_db: &Path, saves: &[SaveRow], changes: &[Change]) -> Result<Kept, LibraryError> {
+    set_all_keeping(songs_db, saves, changes, &[])
+}
+
+/// [`set_all`], and in the same transaction the copies the song is shown from (`keep`, review SS-1): each `shown`
+/// noted as a `kept` row of `song_choices`, its `copies` no longer, read back with the rest. A library without that
+/// table keeps the changes alone (no table is made).
+pub fn set_all_keeping(
+    songs_db: &Path,
+    saves: &[SaveRow],
+    changes: &[Change],
+    keep: &[KeepCopy],
+) -> Result<Kept, LibraryError> {
     let write_error = |why: String| LibraryError::Write { path: songs_db.to_owned(), why };
     let sql = |e| write_failed(songs_db, e);
     let changes: Vec<Change> = changes.iter().map(Change::checked).collect::<Result<_, _>>().map_err(write_error)?;
@@ -197,8 +221,75 @@ pub fn set_all(songs_db: &Path, saves: &[SaveRow], changes: &[Change]) -> Result
             }
         }
     }
+    if !keep.is_empty() && has_choices(&tx).map_err(sql)? {
+        for k in keep {
+            keep_shown(&tx, k).map_err(sql)?;
+        }
+        for k in keep {
+            if !shown_kept(&tx, k).map_err(sql)? {
+                return Err(write_error(format!("what was written didn't read back the same ({})", k.shown)));
+            }
+        }
+    }
     tx.commit().map_err(sql)?;
     Ok(kept)
+}
+
+/// A save noted as the copy its song is shown from ([`set_all_keeping`]) has moved from `from` to `to`: its note goes
+/// with it, in `tx` (`song_writes::write`, with the save's row). Whether it had one. Nothing for a library without
+/// `song_choices`.
+pub(crate) fn move_kept(tx: &rusqlite::Transaction<'_>, from: &str, to: &str) -> rusqlite::Result<bool> {
+    if !has_choices(tx)? {
+        return Ok(false);
+    }
+    let moved = tx.execute(
+        "UPDATE OR REPLACE song_choices SET a = ?2 WHERE kind = 'kept' AND a = ?1",
+        [case::to_lower(from), case::to_lower(to)],
+    )?;
+    Ok(moved > 0)
+}
+
+/// Whether the library notes the save at `path` as the copy its song is shown from, in `tx`.
+pub(crate) fn is_kept(tx: &rusqlite::Transaction<'_>, path: &str) -> rusqlite::Result<bool> {
+    if !has_choices(tx)? {
+        return Ok(false);
+    }
+    tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM song_choices WHERE kind = 'kept' AND a = ?1)",
+        [case::to_lower(path)],
+        |r| r.get(0),
+    )
+}
+
+/// Whether the library has `song_choices` (every `songs.db` the app makes does).
+fn has_choices(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'song_choices')",
+        [],
+        |r| r.get(0),
+    )
+}
+
+/// Notes `k.shown` as the copy its song is shown from, and none of `k.copies` (paths in small letters, as
+/// `SongChoices` reads them), in `tx`.
+fn keep_shown(tx: &rusqlite::Transaction<'_>, k: &KeepCopy) -> rusqlite::Result<()> {
+    let mut forget = tx.prepare_cached("DELETE FROM song_choices WHERE kind = 'kept' AND a = ?1")?;
+    for copy in &k.copies {
+        forget.execute([case::to_lower(copy)])?;
+    }
+    tx.execute("INSERT OR REPLACE INTO song_choices (kind, a, b) VALUES ('kept', ?1, '')", [case::to_lower(&k.shown)])?;
+    Ok(())
+}
+
+/// Whether `k` reads back as [`keep_shown`] made it, in `tx`.
+fn shown_kept(tx: &rusqlite::Transaction<'_>, k: &KeepCopy) -> rusqlite::Result<bool> {
+    let mut is_kept = tx.prepare_cached("SELECT EXISTS (SELECT 1 FROM song_choices WHERE kind = 'kept' AND a = ?1)")?;
+    let shown: bool = is_kept.query_row([case::to_lower(&k.shown)], |r| r.get(0))?;
+    let mut any_copy = false;
+    for copy in &k.copies {
+        any_copy |= is_kept.query_row([case::to_lower(copy)], |r| r.get::<_, bool>(0))?;
+    }
+    Ok(shown && !any_copy)
 }
 
 /// Makes `change` (checked) to the saves `ids`, in `tx`.
