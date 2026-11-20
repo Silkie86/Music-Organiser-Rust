@@ -103,6 +103,9 @@ pub struct Live {
     reread: HashSet<i64>,
     /// Those read again, to take off the library's note once they're kept ([`plugin_writes::read_again_kept`]).
     reread_put: HashSet<i64>,
+    /// Notes that a song is shown from a save that moved before the library had it ([`Batch::moved_notes`], review
+    /// SS-1): kept with the next batch.
+    moved_notes: Vec<(String, String)>,
 }
 
 /// Where reading again the saves whose "muted" sample marks were lost is (review finding A-1): looked for once a start,
@@ -322,6 +325,7 @@ impl Live {
             said_renumbered: false,
             reread: HashSet::new(),
             reread_put: HashSet::new(),
+            moved_notes: Vec::new(),
         })
     }
 
@@ -425,10 +429,13 @@ impl Live {
             return Given { ids: save_ids.to_vec(), changes: vec![change.clone()], keep: Vec::new() };
         };
         let ids: Vec<i64> = song.saves().chain(&song.copies).map(|s| s.id).collect();
-        // The tags the song shows, to put on every save: not the newest save's own hardware tags, which stay on it by
-        // themselves, so a save that doesn't use that hardware isn't tagged with it. One an older library holds that
-        // couldn't be put on now (too long, say) stays on the save it's on.
-        let own_hardware: HashSet<String> = song.latest.hardware.iter().map(|h| song_fields::same_tag(h)).collect();
+        // The tags the song shows, to put on every save: not the hardware tags the newest save holds for hardware it
+        // uses, which stay on it by themselves, so a save that doesn't use that hardware isn't tagged with it. One the
+        // song shows from an older save goes on the newest too, or it would stop showing. One an older library holds
+        // that couldn't be put on now (too long, say) stays on the save it's on.
+        let held: HashSet<String> = song.latest.tags.iter().map(|t| song_fields::same_tag(t)).collect();
+        let own_hardware: HashSet<String> =
+            song.latest.hardware.iter().map(|h| song_fields::same_tag(h)).filter(|t| held.contains(t)).collect();
         let put_on = |tags: Vec<String>| {
             tags.into_iter()
                 .filter(|t| !own_hardware.contains(&song_fields::same_tag(t)))
@@ -698,6 +705,7 @@ impl Live {
         drop(details);
         self.to_put.clear();
         self.to_mark.clear();
+        self.moved_notes.clear();
         // Saves read again for a plugin that isn't found now, kept: off the library's note of them (review P-2). One
         // not taken off is only read again at the next start.
         let read_again: Vec<i64> = self
@@ -758,6 +766,7 @@ impl Live {
                 batch.missing.push(Missing { id: s.id, path: path.clone() });
             }
         }
+        batch.moved_notes = self.moved_notes.clone();
         batch
     }
 
@@ -946,7 +955,13 @@ impl Live {
                     detail.save.id = old.id;
                     if moved.is_some() {
                         // Its song is still shown from it, if it was (review SS-1): `song_writes` moves the note in the
-                        // library with its row.
+                        // library with its row, or with the next batch while the library hasn't got the save.
+                        if self.writes.is_some()
+                            && !self.kept_as.contains_key(&old.id)
+                            && self.choices.is_kept(&old.path)
+                        {
+                            self.moved_notes.push((old.path.clone(), detail.save.path.clone()));
+                        }
                         self.choices.moved(&old.path, &detail.save.path);
                         index.remove(&case::key(&old.path));
                         index.insert(case::key(&detail.save.path), i);
@@ -971,8 +986,8 @@ impl Live {
                 None => {
                     detail.save.id = self.next_id;
                     self.next_id += 1;
-                    self.inherit(&mut detail.save);
-                    add_hardware_tags(&mut detail.save, &[]);
+                    let taken_off = self.inherit(&mut detail.save);
+                    add_hardware_tags(&mut detail.save, &taken_off);
                     index.insert(case::key(&detail.save.path), self.saves.len());
                     self.to_put.insert(detail.save.id);
                     self.saves.push(detail.save.clone());
@@ -1069,7 +1084,10 @@ impl Live {
     /// from the save just before it: the highest number below its own, else the last one saved. Tags the scan put on
     /// for that save's hardware aren't carried over. As the C# library's InheritFromEarlierSave, but a save dated still
     /// to come, or with no date, isn't taken for the last one saved (mo_formats::dates): one with a real date is.
-    fn inherit(&self, new: &mut Save) {
+    ///
+    /// Gives the hardware that save uses whose tag you took off it, so the new save isn't tagged for it either
+    /// ([`add_hardware_tags`], review SS-2).
+    fn inherit(&self, new: &mut Save) -> Vec<String> {
         let song = self.choices.key_of(&new.path, &new.folder, &new.daw, &new.name);
         let root = case::key(&songs::song_folder(&new.folder, &new.name));
         let number = songs::split(&new.name).1;
@@ -1089,7 +1107,7 @@ impl Live {
             .iter()
             .filter(|s| songs::split(&s.name).1 < number)
             .max_by_key(|s| (songs::split(&s.name).1, saved(s)));
-        let Some(from) = before.or_else(|| candidates.iter().max_by_key(|s| saved(s))) else { return };
+        let Some(from) = before.or_else(|| candidates.iter().max_by_key(|s| saved(s))) else { return Vec::new() };
         copy_song_fields(new, from);
         let hardware: HashSet<String> = from.hardware.iter().map(|h| case::to_lower(h)).collect();
         for tag in from.tags.iter().filter(|t| !hardware.contains(t.as_str())) {
@@ -1097,6 +1115,8 @@ impl Live {
                 new.tags.push(tag.clone());
             }
         }
+        let tagged: HashSet<String> = from.tags.iter().map(|t| case::to_lower(t)).collect();
+        hardware.into_iter().filter(|h| !tagged.contains(h)).collect()
     }
 }
 
@@ -1127,7 +1147,7 @@ pub struct Kept {
 /// stops it: everything is tried again the next time (what's written already is the same written again).
 fn one_by_one(songs_db: &std::path::Path, batch: Batch) -> Result<Kept, LibraryError> {
     let mut kept = Kept::default();
-    let Batch { put, missing, mended, owed } = batch;
+    let Batch { put, missing, mended, owed, moved_notes } = batch;
     let alone = put
         .into_iter()
         .map(|p| (p.detail.save.path.clone(), Batch { put: vec![p], ..Batch::default() }))
@@ -1142,6 +1162,20 @@ fn one_by_one(songs_db: &std::path::Path, batch: Batch) -> Result<Kept, LibraryE
             Err(e) if e.is_busy() => return Err(e),
             Err(e) => kept.not_kept.push((path, e.to_string())),
         }
+    }
+    // The notes that moved with saves the library hadn't got, for the saves it took, on their own: one that isn't kept
+    // stays where it was.
+    let moved_notes: Vec<(String, String)> = moved_notes
+        .into_iter()
+        .filter(|(_, to)| !kept.not_kept.iter().any(|(path, _)| case::eq_ignore_case(path, to)))
+        .collect();
+    if !moved_notes.is_empty()
+        && let Err(e) = song_writes::write(songs_db, &Batch { moved_notes, ..Batch::default() })
+    {
+        if e.is_busy() {
+            return Err(e);
+        }
+        crate::log::warning("Songs", &format!("Couldn't move in songs.db which copy a song is shown from: {e}"));
     }
     // The note that the muted samples were mended goes last, on its own, and only if the library took every save (a
     // save it refused may be one of them): if it isn't kept, they're mended again at the next start.
@@ -1184,9 +1218,10 @@ fn keep_your_fields(new: &mut Save, old: &Save) {
     new.created = new.created.or(old.created);
 }
 
-/// Tags for the hardware a save uses, put on as it's read, as the C# library does; the app never takes one off. A save
-/// read again gets one only for hardware it didn't use before (`before`): one you took off stays off (review SS-2),
-/// where the C# library put it back at the next read.
+/// Tags for the hardware a save uses, put on as it's read, as the C# library does; the app never takes one off. Not for
+/// hardware in `before`: what a save read again used before, or what the save before a new one used with its tag
+/// taken off ([`Live::inherit`]). So a tag you took off stays off (review SS-2), where the C# library put it back at
+/// the next read.
 fn add_hardware_tags(save: &mut Save, before: &[String]) {
     let before: HashSet<String> = before.iter().map(|h| case::to_lower(h)).collect();
     for hw in save.hardware.iter().map(|h| case::to_lower(h)) {
@@ -1238,6 +1273,7 @@ mod tests {
             said_renumbered: false,
             reread: HashSet::new(),
             reread_put: HashSet::new(),
+            moved_notes: Vec::new(),
         }
     }
 
@@ -1372,6 +1408,21 @@ mod tests {
         let mut new = Save { hardware: vec!["Digitakt".into()], ..Save::default() };
         add_hardware_tags(&mut new, &[]);
         assert_eq!(new.tags, ["digitakt"]);
+        // The song's next save, using the same hardware: not for one taken off the save before it, and one for each
+        // other.
+        let before =
+            Save { hardware: vec!["Digitakt".into()], tags: vec!["dark".into()], ..save(1, "C:\\M", "Night_1") };
+        let next = || Save { hardware: vec!["Digitakt".into(), "Analog Rytm".into()], ..save(2, "C:\\M", "Night_2") };
+        let mut new = next();
+        let taken_off = live(vec![before.clone()]).inherit(&mut new);
+        add_hardware_tags(&mut new, &taken_off);
+        assert_eq!(new.tags, ["dark", "analog rytm"]);
+        // Still on the save before it, it goes on the next.
+        let before = Save { tags: vec!["dark".into(), "digitakt".into()], ..before };
+        let mut new = next();
+        let taken_off = live(vec![before]).inherit(&mut new);
+        add_hardware_tags(&mut new, &taken_off);
+        assert_eq!(new.tags, ["dark", "digitakt", "analog rytm"]);
     }
 
     /// Review SS-2: a tag put on a song goes on every save with the tags the song shows, but not the newest save's own
@@ -1389,6 +1440,18 @@ mod tests {
         assert_eq!(live.saves[0].tags, ["dark", "digitakt", "live"]);
         assert_eq!(live.saves[1].tags, ["dark", "live"]);
         assert_eq!(live.songs().rows[0].tags, ["dark", "digitakt", "live"]);
+        // A hardware tag the song shows from an older save (the newest has none) goes on the newest too: it would
+        // stop showing otherwise.
+        let older = || Save { tags: vec!["digitakt".into(), "dark".into()], ..save(1, "C:\\Music\\Day", "Day_1") };
+        let newest = || Save { hardware: vec!["Digitakt".into()], ..save(2, "C:\\Music\\Day", "Day_2") };
+        let mut put_on = self::live(vec![newest(), older()]);
+        let key = put_on.songs().rows[0].song.key.clone();
+        assert_eq!(put_on.songs().rows[0].tags, ["digitakt", "dark"]);
+        assert!(put_on.give(&key, &[2], &Change::AddTag("live".into())).unwrap().differs);
+        assert_eq!(put_on.songs().rows[0].tags, ["digitakt", "dark", "live"]);
+        let mut taken_off = self::live(vec![newest(), older()]);
+        assert!(taken_off.give(&key, &[2], &Change::RemoveTag("dark".into())).unwrap().differs);
+        assert_eq!(taken_off.songs().rows[0].tags, ["digitakt"]);
     }
 
     /// Review SS-2: taking off the last tag a song shows leaves it with none, rather than an older save's it never
@@ -1792,6 +1855,64 @@ mod tests {
         db.execute_batch("DELETE FROM song_choices WHERE kind = 'kept';").unwrap();
         assert_ne!(shown(&open()).0, second);
         drop((live, db));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review SS-1: a save noted as the copy its song is shown from that moves before the library has it (refused, or
+    /// songs.db busy a moment) takes its note with it when it's kept.
+    #[test]
+    fn a_noted_save_the_library_hasnt_got_takes_its_note_when_it_moves() {
+        let dir = std::env::temp_dir().join(format!("mo-live-kept-later-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join("Projects");
+        for folder in ["Old", "Music", "Moved"] {
+            std::fs::create_dir_all(projects.join(folder)).unwrap();
+        }
+        rusqlite::Connection::open(dir.join("library.db"))
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE roots (path TEXT PRIMARY KEY);
+                 CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT);
+                 INSERT INTO roots VALUES ('{}');",
+                projects.display()
+            ))
+            .unwrap();
+        let songs = dir.join(mo_library::songs_db::FILE_NAME);
+        mo_library::songs_db::make(&dir.join("library.db"), &songs, &mut |_| {}).unwrap();
+        assert!(mo_library::songs_db::at_start(&dir, "test").is_songs_db());
+        let old = projects.join("Old").join("Night.flp").to_string_lossy().into_owned();
+        std::fs::write(&old, tiny_flp()).unwrap();
+        let lib = Library::open_read_only(&songs).unwrap();
+        let mut live = Live::load(&lib, 6, LiveDetails::default()).unwrap().with_writes(songs.clone());
+        live.catch_up();
+        live.keep().unwrap().unwrap();
+        // A copy is read, and noted as the one shown, before the library has it.
+        let copy = projects.join("Music").join("Night.flp").to_string_lossy().into_owned();
+        std::fs::write(&copy, tiny_flp()).unwrap();
+        live.catch_up();
+        let id = live.saves.iter().find(|s| s.path == copy).unwrap().id;
+        assert!(!live.kept_as.contains_key(&id));
+        let db = rusqlite::Connection::open(&songs).unwrap();
+        db.execute("INSERT INTO song_choices (kind, a, b) VALUES ('kept', ?1, '')", [case::to_lower(&copy)]).unwrap();
+        live.choices.keep(&copy, [old.as_str()]);
+        // It moves, and then the library takes it.
+        let moved = projects.join("Moved").join("Night.flp").to_string_lossy().into_owned();
+        std::fs::rename(&copy, &moved).unwrap();
+        assert_eq!(live.catch_up().moved.len(), 1);
+        assert!(live.choices.is_kept(&moved));
+        live.keep().unwrap().unwrap();
+        let kept: Vec<String> = db
+            .prepare("SELECT a FROM song_choices WHERE kind = 'kept'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(kept, [case::to_lower(&moved)]);
+        assert!(live.moved_notes.is_empty(), "kept, so not again");
+        drop((live, lib, db));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

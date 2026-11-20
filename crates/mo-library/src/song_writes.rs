@@ -54,11 +54,15 @@ pub struct Batch {
     /// With `mended`: those of them that couldn't be read this time (in a folder that couldn't be read, a drive
     /// that's away), noted with it so [`to_mend`] gives them, and only them, at the next start.
     pub owed: Vec<i64>,
+    /// Notes that a song is shown from a save ([`crate::song_fields::KeepCopy`], review SS-1) to move with the save:
+    /// (the path the note is under, the save's path now), for saves that moved before the library had them. One the
+    /// library has moves its note with its row ([`Put::known_as`]).
+    pub moved_notes: Vec<(String, String)>,
 }
 
 impl Batch {
     pub fn is_empty(&self) -> bool {
-        self.put.is_empty() && self.missing.is_empty() && !self.mended
+        self.put.is_empty() && self.missing.is_empty() && !self.mended && self.moved_notes.is_empty()
     }
 }
 
@@ -295,6 +299,9 @@ pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
             .execute("UPDATE projects SET file_missing = 1 WHERE id = ?1 AND path = ?2", params![m.id, m.path])
             .map_err(sql)?;
     }
+    for (from, to) in &batch.moved_notes {
+        crate::song_fields::move_kept(&tx, from, to).map_err(sql)?;
+    }
     if batch.mended {
         tx.execute(
             "INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)",
@@ -357,12 +364,8 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<(i64, bool)> {
         None => (insert(tx, None, put)?, true),
     };
     // Moved: if its song is shown from it (of the same file in several places), it still is (review SS-1).
-    if let Some(known) = put.known_as.as_deref().filter(|k| !mo_formats::case::eq_ignore_case(k, &save.path))
-        && crate::song_fields::move_kept(tx, known, &save.path)?
-        && !crate::song_fields::is_kept(tx, &save.path)?
-    {
-        let why = format!("the note that its song is shown from {} didn't move with it", save.path);
-        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(why))));
+    if let Some(known) = put.known_as.as_deref().filter(|k| !mo_formats::case::eq_ignore_case(k, &save.path)) {
+        crate::song_fields::move_kept(tx, known, &save.path)?;
     }
     for table in ["plugins", "samples"] {
         tx.execute(&format!("DELETE FROM {table} WHERE project_id = ?1"), [id])?;

@@ -236,29 +236,16 @@ pub fn set_all_keeping(
 }
 
 /// A save noted as the copy its song is shown from ([`set_all_keeping`]) has moved from `from` to `to`: its note goes
-/// with it, in `tx` (`song_writes::write`, with the save's row). Whether it had one. Nothing for a library without
+/// with it, in `tx` (`song_writes::write`, with the save's row). Nothing when it had none, or for a library without
 /// `song_choices`.
-pub(crate) fn move_kept(tx: &rusqlite::Transaction<'_>, from: &str, to: &str) -> rusqlite::Result<bool> {
-    if !has_choices(tx)? {
-        return Ok(false);
+pub(crate) fn move_kept(tx: &rusqlite::Transaction<'_>, from: &str, to: &str) -> rusqlite::Result<()> {
+    if has_choices(tx)? {
+        tx.execute(
+            "UPDATE OR REPLACE song_choices SET a = ?2 WHERE kind = 'kept' AND a = ?1",
+            [case::to_lower(from), case::to_lower(to)],
+        )?;
     }
-    let moved = tx.execute(
-        "UPDATE OR REPLACE song_choices SET a = ?2 WHERE kind = 'kept' AND a = ?1",
-        [case::to_lower(from), case::to_lower(to)],
-    )?;
-    Ok(moved > 0)
-}
-
-/// Whether the library notes the save at `path` as the copy its song is shown from, in `tx`.
-pub(crate) fn is_kept(tx: &rusqlite::Transaction<'_>, path: &str) -> rusqlite::Result<bool> {
-    if !has_choices(tx)? {
-        return Ok(false);
-    }
-    tx.query_row(
-        "SELECT EXISTS (SELECT 1 FROM song_choices WHERE kind = 'kept' AND a = ?1)",
-        [case::to_lower(path)],
-        |r| r.get(0),
-    )
+    Ok(())
 }
 
 /// Whether the library has `song_choices` (every `songs.db` the app makes does).

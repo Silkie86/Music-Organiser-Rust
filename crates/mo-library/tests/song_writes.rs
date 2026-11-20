@@ -451,6 +451,12 @@ fn the_copy_a_song_is_shown_from_is_noted_with_a_change_and_moves_with_its_save(
     // Read again where it is: nothing moves.
     song_writes::write(&songs, &put(read(2, moved), Some(moved))).unwrap();
     assert_eq!(noted(), [moved.to_lowercase()]);
+    // A save the library didn't have yet when it moved: its note goes with the batch.
+    let again = "E:\\Music\\Night_12.flp";
+    let notes = Batch { moved_notes: vec![(moved.to_owned(), again.to_owned())], ..Batch::default() };
+    assert!(!notes.is_empty());
+    song_writes::write(&songs, &notes).unwrap();
+    assert_eq!(noted(), [again.to_lowercase()]);
     // A library without song_choices keeps the change alone, and no table is made for the note.
     Connection::open(&songs).unwrap().execute_batch("DROP TABLE song_choices;").unwrap();
     song_fields::set_all_keeping(&songs, &both, &[Change::Rating(5)], &keep(ONE, TWO)).unwrap();
