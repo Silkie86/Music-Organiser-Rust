@@ -48,6 +48,12 @@ impl Card {
         self.state == State::Failed || (self.state == State::Done && self.ended.is_none())
     }
 
+    /// Whether it's a card that never goes by itself: finished, with no end time ([`Feed::told`], [`Feed::notice`],
+    /// [`Job::done_to_read`], [`Job::failed_to_read`]).
+    pub fn stays(&self) -> bool {
+        self.state != State::Running && self.ended.is_none()
+    }
+
     /// Whether it finished long enough ago to go: [`DONE_STAYS`] after it was done, [`FAILED_STAYS`] after it failed.
     fn gone_by(&self, now: Instant) -> bool {
         let stays = if self.state == State::Failed { FAILED_STAYS } else { DONE_STAYS };
@@ -147,13 +153,14 @@ impl Feed {
     /// review's RA-5).
     fn one_of_a_kind(&self, id: u64) {
         let mut inner = self.lock();
-        let Some(new) = inner.cards.iter().find(|c| c.id == id).cloned() else { return };
-        if new.ended.is_some() || new.state == State::Running {
+        let Some(at) = inner.cards.iter().position(|c| c.id == id) else { return };
+        if !inner.cards[at].stays() {
             return;
         }
-        inner.cards.retain(|c| {
-            c.id == id || c.ended.is_some() || c.state != new.state || c.title != new.title || c.detail != new.detail
-        });
+        // It goes to the end, with the newest: said again it is news again, and the window shows the newest ones.
+        let new = inner.cards.remove(at);
+        inner.cards.retain(|c| !c.stays() || c.state != new.state || c.title != new.title || c.detail != new.detail);
+        inner.cards.push(new);
     }
 
     /// The cards to show now, oldest first: finished ones past their time are left out.
@@ -482,6 +489,12 @@ mod tests {
         );
         // The ones kept are the newest: the two said last in the loop.
         assert!(now[0].id > 4 && now[1].id > now[0].id, "{:?}", now.iter().map(|c| c.id).collect::<Vec<_>>());
+        // Said again after other cards, it is the newest card, at the end (the window shows the newest ones).
+        feed.notice("Some sounds look gone", "Is a drive unplugged?");
+        let now = feed.visible(Instant::now());
+        assert_eq!(now.len(), 5);
+        assert_eq!(now[4].title, "Some sounds look gone");
+        assert!(now.iter().all(|c| c.stays() == (c.title != "Copy")));
     }
 
     // Review finding AP-8: a told card was shown as a line in the rail, which has no ×, so it stayed all session.

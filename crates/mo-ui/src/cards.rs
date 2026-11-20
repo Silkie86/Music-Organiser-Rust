@@ -59,7 +59,7 @@ pub fn connect(app: &AppWindow, feed: &Feed) {
 /// How many jobs the rail lists; the rest are counted under them ("and 2 more").
 const RAIL_JOBS: usize = 4;
 
-/// How many cards show in the window's corner; the older ones wait behind them, counted on a line above ("and 2
+/// How many cards that stay until closed show in the window's corner; the older ones wait behind them, counted on a line above ("and 2
 /// more"), and each shows as one in front is closed. More than this ran off the top of the window, where their ×
 /// couldn't be reached (the 19 November 2026 review's RA-5).
 const CARDS_SHOWN: usize = 4;
@@ -71,10 +71,19 @@ const CARDS_SHOWN: usize = 4;
 pub fn refresh(app: &AppWindow, feed: &Feed) {
     let visible = feed.visible(Instant::now());
     let (cards, jobs): (Vec<&Card>, Vec<&Card>) = visible.iter().partition(|c| c.to_close());
-    let mut cards: Vec<CardInfo> = cards.into_iter().map(card_info).collect();
-    // The newest are at the end, as with the rail's jobs.
-    let more_cards = cards.len().saturating_sub(CARDS_SHOWN);
-    cards.drain(..more_cards);
+    // Only the cards that stay wait behind the newest of them (they are kept newest last). A failed job's card
+    // always shows: it goes by itself in a few seconds, and behind the others it would go unseen.
+    let more_cards = cards.iter().filter(|c| c.stays()).count().saturating_sub(CARDS_SHOWN);
+    let mut behind = more_cards;
+    let cards: Vec<CardInfo> = cards
+        .into_iter()
+        .filter(|c| {
+            let waits = c.stays() && behind > 0;
+            behind -= usize::from(waits);
+            !waits
+        })
+        .map(card_info)
+        .collect();
     let mut jobs: Vec<CardInfo> = jobs.into_iter().map(card_info).collect();
     // The newest are at the end: they are the ones kept when there are too many for the rail.
     let more = jobs.len().saturating_sub(RAIL_JOBS);
