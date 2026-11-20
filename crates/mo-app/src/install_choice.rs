@@ -108,6 +108,7 @@ fn wait_for(port: u16, pid: u32, wait: Duration) -> bool {
 
 /// Waits up to `wait` for process `pid` to end (Windows); elsewhere the free port is taken as the end.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn process_ended(pid: u32, wait: Duration) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
