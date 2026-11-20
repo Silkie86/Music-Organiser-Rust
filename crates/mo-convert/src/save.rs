@@ -195,10 +195,21 @@ pub fn bitwig_from_fl(
     }
     let samples: HashMap<String, Option<SampleFile>> =
         read.into_iter().map(|(p, (f, s))| (f.unwrap_or(p), s)).collect();
-    let plan = from_fl(&song, options, &mut |p| match samples.get(p) {
+    let mut plan = from_fl(&song, options, &mut |p| match samples.get(p) {
         Some(s) => s.clone(),
         None => read_sample(Path::new(p)),
     });
+    // The playlist's markers, as the Songs preview reads them.
+    let (_, markers) = mo_formats::fl::arrangement::bars_and_markers(&flp);
+    plan.markers = markers.into_iter().map(|m| (m.beat, m.name)).collect();
+    if mo_formats::fl::arrangement::changes_time_signature(&flp) {
+        plan.notes.push(format!(
+            "The song changes time signature part-way through: the Bitwig project is in {}/{} all the way (the one \
+             it starts in), with a marker where each change was",
+            plan.signature.top(),
+            plan.signature.bottom()
+        ));
+    }
     let mut converted = bitwig::write(&plan, template)?;
     // A damaged save, or one too big to read whole, is converted as far as it goes, and that's said first (rule 9).
     let trouble = mo_formats::fl::notes::trouble(&flp);

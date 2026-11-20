@@ -553,11 +553,21 @@ pub struct Template {
     pub audio_track: bool,
     pub device_power: bool,
     pub master_plugin: bool,
+    /// More of what Bitwig 6.1 saves: the transport's empty Tempo entry (in its view state and its automation list),
+    /// its time signature (4/4) and a cue marker ("Drop" at beat 64); and the Sampler's sample collected into the
+    /// project's folder, with a place it was found at before.
+    pub as_6_1_saves: bool,
 }
 
 impl Default for Template {
     fn default() -> Template {
-        Template { automation_lane: true, audio_track: true, device_power: true, master_plugin: false }
+        Template {
+            automation_lane: true,
+            audio_track: true,
+            device_power: true,
+            master_plugin: false,
+            as_6_1_saves: false,
+        }
     }
 }
 
@@ -833,8 +843,56 @@ fn template_body(b: &mut BwWriter, t: Template, sampler: &str, note_transpose: &
     // The transport, holding the tempo, as Bitwig 6.1.6 saves it.
     b.obj(0x190);
     b.begin(0xd7);
-    b.obj(0x211);
-    param(b, 0x4c1, "TEMPO", 120.0);
+    if t.as_6_1_saves {
+        // The tempo is first written in the view state's empty Tempo entry, which the automation list names too.
+        b.map(0x168);
+        b.map_key("user");
+        b.begin(0xf96);
+        b.bool(0x115a, false);
+        b.obj(0x4e6);
+        let entry = b.begin(0x23c);
+        b.obj(0x2a3);
+        b.begin(0xf1);
+        b.obj(0x41);
+        let tempo = b.begin(0x4c1);
+        b.str(0x2bd, "TEMPO");
+        b.f64(0x2c8, 120.0);
+        b.end();
+        b.str(0x133b, "Transport");
+        b.str(0x133a, "Tempo");
+        b.end();
+        b.end();
+        b.bare_ref(0x41f0, entry);
+        b.end();
+        b.end_map();
+        b.obj(0x2dc9);
+        b.begin(0xfa3);
+        b.null(0x1832);
+        b.list(0x4ba);
+        b.end_list();
+        b.list(0x3f83);
+        b.list_ref(entry);
+        b.end_list();
+        b.end();
+        b.bare_ref(0x211, tempo);
+        b.obj(0x212);
+        b.begin(0x7f4);
+        b.i32(0x1cbe, 0x1000_0024);
+        b.end();
+        b.obj(0x2adc);
+        b.begin(0x26a);
+        b.list(0x21f);
+        b.begin(0x266);
+        b.f64(0x2af, 64.0);
+        b.str(0x98b, "Drop");
+        b.str(0x3506, "");
+        b.end();
+        b.end_list();
+        b.end();
+    } else {
+        b.obj(0x211);
+        param(b, 0x4c1, "TEMPO", 120.0);
+    }
     b.end();
     b.obj(0x4dd);
     b.begin(0x1dd);
@@ -877,8 +935,19 @@ fn template_body(b: &mut BwWriter, t: Template, sampler: &str, note_transpose: &
                         b.obj(0x129e);
                         b.begin(0x4a6);
                         b.str(0x512, "Kick.wav");
+                        if t.as_6_1_saves {
+                            b.str(0xd3a, r"samples\Kick.wav");
+                        }
                         b.obj(0xd3b);
                         file_ref(b, r"J:\samples\Kick.wav");
+                        if t.as_6_1_saves {
+                            b.obj(0x15);
+                            b.begin(0x2b4);
+                            b.list(0xc5b);
+                            file_ref(b, r"J:\samples\Kick.wav");
+                            b.end_list();
+                            b.end();
+                        }
                         b.obj(0x513);
                         b.begin(0x1e2);
                         b.blob(0x16, &[0; 16]);

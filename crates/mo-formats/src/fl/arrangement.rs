@@ -74,6 +74,25 @@ pub fn bars_and_markers(flp: &Flp<'_>) -> (TimeSignature, Vec<PreviewMarker>) {
     (timeline.signature(), markers(&timeline.markers, flp.ppq))
 }
 
+/// The song changes time signature after its start (a time signature marker further on). A song is read by the one
+/// it starts with, so whoever carries it somewhere else can say so.
+pub fn changes_time_signature(flp: &Flp<'_>) -> bool {
+    let mut timeline = Timeline::new(flp);
+    for e in &flp.events {
+        timeline.step(flp, e);
+    }
+    timeline.changes_later
+}
+
+/// The song's time signature alone, as [`bars_and_markers`] gives it.
+pub(crate) fn signature(flp: &Flp<'_>) -> TimeSignature {
+    let mut timeline = Timeline::new(flp);
+    for e in &flp.events {
+        timeline.step(flp, e);
+    }
+    timeline.signature()
+}
+
 /// The song's time signature and its first arrangement's markers (ticks, name), found event by event.
 struct Timeline {
     /// The first of each of events 17, 18 and 35: a later 17 or 18 is a pattern's own.
@@ -89,6 +108,8 @@ struct Timeline {
     change: Option<(i64, Option<u32>, Option<u32>)>,
     /// The time signature a marker at the very start of the song sets.
     start: Option<TimeSignature>,
+    /// A marker after the start changes the time signature.
+    changes_later: bool,
 }
 
 impl Timeline {
@@ -102,6 +123,7 @@ impl Timeline {
             has_arrangements: flp.events.iter().any(|e| e.id == EV_ARRANGEMENT_NEW),
             change: None,
             start: None,
+            changes_later: false,
         }
     }
 
@@ -176,6 +198,8 @@ impl Timeline {
         let Some(signature) = TimeSignature::new(top, bottom) else { return };
         if *at == 0 {
             self.start = Some(signature);
+        } else {
+            self.changes_later = true;
         }
         if let Some(m) = self.markers.last_mut().filter(|m| m.1.is_empty()) {
             m.1 = format!("{top}/{bottom}");
@@ -684,7 +708,15 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
     }
     // The lanes come from the song, which stops placing notes or points at its limit.
     notes.extend(song.warning.map(str::to_owned));
-    Arrangement { view: BITWIG_VIEW, tempo, signature: pl.signature, lanes, markers: Vec::new(), notes }
+    // The markers come across too: a convert makes them the Bitwig project's cue markers.
+    Arrangement {
+        view: BITWIG_VIEW,
+        tempo,
+        signature: pl.signature,
+        lanes,
+        markers: markers(&pl.markers, pl.ppq),
+        notes,
+    }
 }
 
 /// A channel's sample playing in a clip `beats` long, from `from` seconds in, stretched as the channel says.

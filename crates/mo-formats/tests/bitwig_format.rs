@@ -44,8 +44,13 @@ fn an_untouched_project_writes_back_byte_for_byte() {
 
 #[test]
 fn every_template_variant_writes_back_byte_for_byte() {
-    for (a, b, c, d) in [(false, false, false, false), (true, false, true, true), (false, true, false, true)] {
-        let t = Template { automation_lane: a, audio_track: b, device_power: c, master_plugin: d };
+    for (a, b, c, d, e) in [
+        (false, false, false, false, false),
+        (true, false, true, true, false),
+        (false, true, false, true, false),
+        (true, true, true, false, true),
+    ] {
+        let t = Template { automation_lane: a, audio_track: b, device_power: c, master_plugin: d, as_6_1_saves: e };
         let raw = bitwig_template(t);
         let doc = decode(&raw);
         assert_eq!(doc.body_error, None);
