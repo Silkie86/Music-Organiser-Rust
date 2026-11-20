@@ -346,6 +346,126 @@ fn a_cut_short_mp3_flac_or_ogg_is_damage_not_a_read_failure() {
     }
 }
 
+/// CRC-32 as Ogg pages carry it (polynomial 0x04C11DB7, not reflected), over a page with its own CRC as zeros.
+fn ogg_crc(page: &[u8]) -> u32 {
+    page.iter().fold(0u32, |mut crc, &b| {
+        crc ^= u32::from(b) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 { (crc << 1) ^ 0x04C1_1DB7 } else { crc << 1 };
+        }
+        crc
+    })
+}
+
+/// An Ogg file with each page changed by `change` (its bytes, and which page it is from 0), and its CRC made again.
+fn ogg_changed(ogg: &[u8], change: impl Fn(&mut [u8], usize)) -> Vec<u8> {
+    let (mut out, mut at) = (Vec::new(), 0);
+    while at < ogg.len() {
+        assert_eq!(&ogg[at..at + 4], b"OggS");
+        let segments = usize::from(ogg[at + 26]);
+        let body: usize = ogg[at + 27..at + 27 + segments].iter().map(|&n| usize::from(n)).sum();
+        let mut page = ogg[at..at + 27 + segments + body].to_vec();
+        change(&mut page, out.len());
+        page[22..26].fill(0);
+        let crc = ogg_crc(&page);
+        page[22..26].copy_from_slice(&crc.to_le_bytes());
+        at += page.len();
+        out.push(page);
+    }
+    out.concat()
+}
+
+/// The whole-app review of 19 Nov, SN-11: a chained Ogg file (two joined into one, a radio recording) got no waveform
+/// at all, as the read stopped with an error where the second stream begins, and was decoded again at every pick. It's
+/// read on into the next stream, as players do, while its sound matches the first one's; one that doesn't match ends
+/// with the first.
+#[test]
+fn a_chained_ogg_is_read_on_into_the_stream_joined_on() {
+    let ogg = std::fs::read(tone("tone.ogg")).unwrap();
+    let one = read(&tone("tone.ogg"), f64::INFINITY).unwrap();
+    // The stream joined on has a serial number of its own, as an encoder gives it.
+    let second = |rate: u32| {
+        ogg_changed(&ogg, |page, n| {
+            page[14..18].copy_from_slice(&0x5EC0_2D00u32.to_le_bytes());
+            if n == 0 {
+                // The first page holds the identification header alone: its sample rate is 12 bytes in.
+                assert_eq!((page[26], &page[28..35]), (1, &b"\x01vorbis"[..]));
+                page[40..44].copy_from_slice(&rate.to_le_bytes());
+            }
+        })
+    };
+    let chained = fixture("chained.ogg", &[ogg.clone(), second(22050)].concat());
+    let both = read(&chained, f64::INFINITY).unwrap();
+    assert_eq!((both.sample_rate, both.channels.len(), both.len()), (22050, 2, 2 * one.len()));
+    for (b, o) in both.channels.iter().zip(&one.channels) {
+        assert_eq!((&b[..o.len()], &b[o.len()..]), (&o[..], &o[..]), "the tone twice");
+    }
+    assert_eq!(both.file_seconds, 2.0 * one.len() as f64 / 22050.0);
+    // A part at a time, as a waveform reads it: the same, and the whole length.
+    let InParts { all, seconds, .. } = in_parts(&chained, 0.1).unwrap();
+    assert_eq!((all, seconds), (both.channels, both.file_seconds));
+    // Joined on at another sample rate: the first stream alone.
+    let other_rate = fixture("chained other rate.ogg", &[ogg.clone(), second(44100)].concat());
+    assert_eq!(read(&other_rate, f64::INFINITY).unwrap().channels, one.channels);
+    let InParts { all, seconds, .. } = in_parts(&other_rate, 0.1).unwrap();
+    assert_eq!((all, seconds), (one.channels.clone(), one.len() as f64 / 22050.0));
+}
+
+/// Where each MP3 frame starts, after the ID3v2 tag: the tone's frames are MPEG-2 layer III at 22,050 a second, 64k.
+fn mp3_frames(mp3: &[u8]) -> Vec<usize> {
+    let tag = 10 + mp3[6..10].iter().fold(0usize, |n, &b| n << 7 | usize::from(b & 0x7F));
+    let (mut frames, mut at) = (Vec::new(), tag);
+    while at + 4 <= mp3.len() {
+        assert_eq!((mp3[at], mp3[at + 1], mp3[at + 2] & 0xF0), (0xFF, 0xF3, 0x80), "frame header at {at}");
+        frames.push(at);
+        at += 72 * 64_000 / 22_050 + usize::from(mp3[at + 2] >> 1 & 1);
+    }
+    frames
+}
+
+/// The whole-app review of 19 Nov, SN-18: a frame the decoder refuses (damaged on its own) was left out, so all the
+/// sound after it came early (26 ms an MP3 frame), and the length came out short. An MP3 whose sound changes part way
+/// (bounced in two halves, mono then stereo) has every frame after the change refused, so all the rest was lost. A
+/// refused frame is silence of its length now: what comes after stays in its place, and the length is kept.
+#[test]
+fn a_damaged_frame_is_silence_and_what_follows_stays_in_place() {
+    let mp3 = std::fs::read(tone("tone.mp3")).unwrap();
+    let whole = read(&tone("tone.mp3"), f64::INFINITY).unwrap();
+    let frames = mp3_frames(&mp3);
+    let mono = |from: usize, to: usize| {
+        let mut damaged = mp3.clone();
+        // The channel mode a frame's header says: mono, in a stereo file, so the decoder refuses it.
+        for &at in &frames[from..to] {
+            damaged[at + 3] |= 0xC0;
+        }
+        damaged
+    };
+    // One frame half way refused: silence where it was (576 frames), and the tone after it in its place once the
+    // decoder has settled (a frame or two: it carries bits and sound over from frame to frame).
+    let k = frames.len() / 2;
+    let one = fixture("damaged frame.mp3", &mono(k, k + 1));
+    let a = read(&one, f64::INFINITY).unwrap();
+    assert_eq!((a.sample_rate, a.channels.len(), a.len()), (22050, 2, whole.len()));
+    let close = |from: usize| {
+        a.channels
+            .iter()
+            .zip(&whole.channels)
+            .all(|(x, y)| x[from..].iter().zip(&y[from..]).all(|(x, y)| (x - y).abs() < 1e-4))
+    };
+    assert!(close(whole.len() - 4 * 576), "the tone's last frames where they were");
+    let silent = a.mono().windows(576).any(|w| w.iter().all(|&s| s == 0.0));
+    assert!(silent, "the refused frame is silence");
+    let InParts { all, seconds, .. } = in_parts(&one, 0.1).unwrap();
+    assert_eq!((all, seconds), (a.channels.clone(), whole.file_seconds));
+    // The sound changes half way: the rest is silence, and the length is the whole file's.
+    let changed = fixture("changes half way.mp3", &mono(k, frames.len()));
+    let b = read(&changed, f64::INFINITY).unwrap();
+    assert_eq!((b.len(), b.file_seconds), (whole.len(), whole.file_seconds));
+    assert!(b.mono()[b.len() - 4 * 576..].iter().all(|&s| s == 0.0), "the rest is silence");
+    let InParts { all, seconds, .. } = in_parts(&changed, 0.1).unwrap();
+    assert_eq!((all, seconds), (b.channels, whole.file_seconds));
+}
+
 /// An IMA ADPCM WAV of `blocks` 8-byte mono blocks (9 frames each), with a `fact` chunk saying `frames`.
 fn ima_wav(blocks: u8, frames: u32) -> Vec<u8> {
     let mut f = Vec::new();

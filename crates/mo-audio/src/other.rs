@@ -12,6 +12,7 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::units::{Duration, TimeBase};
 
 use crate::parts::{Each, Ended, Parts};
 use crate::{AudioData, AudioError};
@@ -25,7 +26,8 @@ pub fn is_other(path: &Path) -> bool {
 }
 
 /// Up to `max_seconds` from the start of an MP3, FLAC, M4A, OGG or AAC file. A damaged stretch part way in ends the
-/// read there with what came before it; a decoder that falls over on a damaged file gives an error, never a crash.
+/// read there with what came before it (a frame damaged on its own is silence); a decoder that falls over on a damaged
+/// file gives an error, never a crash.
 pub fn read_other(path: &Path, max_seconds: f64) -> Result<AudioData, AudioError> {
     let file = File::open(path)?;
     mo_catch::catch(AssertUnwindSafe(|| decode(file, path, max_seconds)))
@@ -133,6 +135,10 @@ struct AudioTrack {
     id: u32,
     /// How many frames the file says it has, when it says.
     frames: Option<u64>,
+    /// What its packets' times count in, when the file says, and its sample rate as the file says it: how long a
+    /// packet is in frames ([`frames_in`]).
+    time_base: Option<TimeBase>,
+    rate: Option<u32>,
     decoder: Box<dyn AudioDecoder>,
 }
 
@@ -149,29 +155,80 @@ fn audio_track(format: &dyn FormatReader) -> Result<AudioTrack, AudioError> {
     let decoder = symphonia::default::get_codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default())
         .map_err(format_error)?;
-    Ok(AudioTrack { id: track.id, frames: track.num_frames, decoder })
+    Ok(AudioTrack {
+        id: track.id,
+        frames: track.num_frames,
+        time_base: track.time_base,
+        rate: params.sample_rate,
+        decoder,
+    })
+}
+
+/// The most frames a packet holds (FLAC's biggest block), whatever a damaged file says its length is.
+const MOST_IN_A_PACKET: u64 = 65_536;
+
+/// How many frames a packet `dur` long holds: its length counts in the track's `time_base`, at `rate` frames a second
+/// (the sound's, or what the file says before any is decoded); with neither known, in frames.
+fn frames_in(dur: Duration, time_base: Option<TimeBase>, rate: Option<u32>) -> u64 {
+    let frames = match (time_base, rate) {
+        (Some(tb), Some(rate)) if rate != 0 => {
+            u128::from(dur.get()) * u128::from(tb.numer.get()) * u128::from(rate) / u128::from(tb.denom.get())
+        }
+        _ => u128::from(dur.get()),
+    };
+    u64::try_from(frames).unwrap_or(u64::MAX).min(MOST_IN_A_PACKET)
+}
+
+/// Hands `frames` of silence to `take`, `count` channels at `rate`, a packet's worth at a time: frames refused as
+/// damaged ([`each_stretch`]). False once `take` says to stop.
+fn silence(rate: u32, count: usize, frames: u64, take: &mut dyn FnMut(u32, &[Vec<f32>]) -> bool) -> bool {
+    let mut left = frames;
+    while left > 0 {
+        let n = left.min(MOST_IN_A_PACKET);
+        let piece = vec![vec![0.0f32; n as usize]; count];
+        if !take(rate, &piece) {
+            return false;
+        }
+        left -= n;
+    }
+    true
 }
 
 /// Goes through a probed file's audio (`track`) from its start, handing each stretch its decoder gives to `take`: its
 /// sample rate, and its samples, a channel each, as long as each other. Until the file ends, damage ends it (what came
-/// before is kept), or `take` says to stop (false). A frame that's damaged on its own is skipped, as players do.
-/// Damage before any sound, or a real read failure (a drive gone), is an error rather than a part passed off as the
-/// whole file. Both [`decode_format`] and [`decode_parts`] go through a file this way, so they read it the same.
+/// before is kept), or `take` says to stop (false). A frame that's damaged on its own is silence of its length, so what
+/// comes after it stays in its place, as players keep their time, and the length comes out right. Another stream
+/// joined on (a chained Ogg file: two joined into one) is gone on into with a decoder of its own, as players do, for
+/// as long as its sound matches the first one's. Damage before any sound, or a real read failure (a drive gone), is an
+/// error rather than a part passed off as the whole file. Both [`decode_format`] and [`decode_parts`] go through a
+/// file this way, so they read it the same.
 fn each_stretch(
     format: &mut dyn FormatReader,
     track: AudioTrack,
     take: &mut dyn FnMut(u32, &[Vec<f32>]) -> bool,
 ) -> Result<Ended, AudioError> {
-    let AudioTrack { id: track_id, mut decoder, .. } = track;
+    let AudioTrack { id: mut track_id, mut decoder, mut time_base, rate: mut told_rate, .. } = track;
     let mut rate = 0u32;
     let mut count = 0usize;
     let mut scratch: Vec<Vec<f32>> = Vec::new();
-    loop {
+    // Frames refused as damaged since the last stretch: silence, handed on before the next one.
+    let mut owed = 0u64;
+    let ended = loop {
         let packet = match format.next_packet() {
             Ok(Some(p)) => p,
-            Ok(None) => return Ok(Ended::End),
-            Err(Error::DecodeError(_)) if rate != 0 => return Ok(Ended::Damage),
-            Err(Error::IoError(e)) if rate != 0 && e.kind() == ErrorKind::UnexpectedEof => return Ok(Ended::Damage),
+            Ok(None) => break Ended::End,
+            // The first page of a stream joined on: its packets come with an id and decoder of their own. Where it
+            // has no sound this app decodes, the sound ends with the stream before it.
+            Err(Error::ResetRequired) => match audio_track(format) {
+                Ok(next) => {
+                    (track_id, decoder, time_base, told_rate) = (next.id, next.decoder, next.time_base, next.rate);
+                    continue;
+                }
+                Err(_) if rate != 0 => break Ended::End,
+                Err(e) => return Err(e),
+            },
+            Err(Error::DecodeError(_)) if rate != 0 => break Ended::Damage,
+            Err(Error::IoError(e)) if rate != 0 && e.kind() == ErrorKind::UnexpectedEof => break Ended::Damage,
             Err(e) => return Err(format_error(e)),
         };
         if packet.track_id != track_id {
@@ -179,8 +236,18 @@ fn each_stretch(
         }
         let buf = match decoder.decode(&packet) {
             Ok(buf) => buf,
-            // A frame whose bits run out comes as an I/O error: the packet is already in memory, so that's damage too.
-            Err(Error::DecodeError(_) | Error::IoError(_)) => continue,
+            // A frame damaged on its own (one whose bits run out comes as an I/O error: the packet is already in
+            // memory, so that's damage too), or each one after an MP3's sound changes part way (mono to stereo), which
+            // its decoder refuses: silence of the length it would have given. The decoder takes an encoder's delay and
+            // padding off a stream's first and last packets, and symphonia's MP3 reader counts them in a packet's
+            // length; its Ogg reader leaves them out already, so a refused last Ogg packet counts that much short,
+            // which moves nothing.
+            Err(Error::DecodeError(_) | Error::IoError(_)) => {
+                let valid =
+                    packet.dur.get().saturating_sub(packet.trim_start.get()).saturating_sub(packet.trim_end.get());
+                owed += frames_in(Duration::new(valid), time_base, Some(rate).filter(|&r| r != 0).or(told_rate));
+                continue;
+            }
             Err(e) => return Err(format_error(e)),
         };
         let spec = buf.spec();
@@ -189,16 +256,26 @@ fn each_stretch(
             count = spec.channels().count().max(1);
         } else if spec.rate() != rate {
             // The sound changes part way (a chained stream): the part that matches.
-            return Ok(Ended::End);
+            break Ended::End;
         }
         buf.copy_to_vecs_planar(&mut scratch);
         if scratch.len() != count {
-            return Ok(Ended::End);
+            break Ended::End;
+        }
+        if owed > 0 && !silence(rate, count, std::mem::take(&mut owed), take) {
+            return Ok(Ended::Stopped);
         }
         if !take(rate, &scratch) {
             return Ok(Ended::Stopped);
         }
+    };
+    // Frames refused at the end are silence too, so the sound keeps its length. That's what came, as the read went to
+    // the end: the length the file says is no surer (for an MP3 without a header saying it, it's worked out from its
+    // size).
+    if rate != 0 && owed > 0 && !silence(rate, count, owed, take) {
+        return Ok(Ended::Stopped);
     }
+    Ok(ended)
 }
 
 /// Decodes up to `max_seconds` of a probed file's audio, leaving out its first `skip` frames.
