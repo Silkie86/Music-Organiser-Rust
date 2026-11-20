@@ -58,6 +58,10 @@ pub struct Hello {
     /// left from an older build. Empty when it can't be told.
     #[serde(default)]
     pub exe: String,
+    /// The data folder it runs on, fixed when it started (its log is written there), so the app can tell a helper
+    /// left on the folder the data was moved from. Empty from a helper older than this, and when it can't be told.
+    #[serde(default)]
+    pub data: String,
     /// Whether it has Bitwig, in words ([`bitwig_words`]).
     pub bitwig: String,
     /// Whether watching is paused (from the tray icon).
@@ -76,6 +80,8 @@ pub enum Start {
 pub struct Helper {
     /// What it says its version is: [`crate::version::version`], but for a test standing in for another build.
     version: String,
+    /// The data folder it says it runs on ([`Hello::data`]).
+    data: String,
     port: u16,
     bitwig_port: u16,
     watch: Mutex<Option<Watch>>,
@@ -89,11 +95,12 @@ impl Helper {
     /// Starts a helper answering on `port`, watching the Bitwig extension on `bitwig_port`. Only fails when the system
     /// won't start a thread or the port can't be opened for another reason than a helper having it.
     pub fn start(port: u16, bitwig_port: u16) -> io::Result<Start> {
-        Helper::start_as(crate::version::version(), port, bitwig_port)
+        let data = crate::paths::data_dir().display().to_string();
+        Helper::start_in(crate::version::version(), data, port, bitwig_port)
     }
 
-    /// [`Helper::start`], saying it's build `version`.
-    pub(crate) fn start_as(version: String, port: u16, bitwig_port: u16) -> io::Result<Start> {
+    /// [`Helper::start`], saying it's build `version` running on the data folder `data` (empty: it doesn't say).
+    pub(crate) fn start_in(version: String, data: String, port: u16, bitwig_port: u16) -> io::Result<Start> {
         let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
             Ok(l) => l,
             Err(e) if e.kind() == io::ErrorKind::AddrInUse => return Ok(Start::AlreadyRunning),
@@ -102,6 +109,7 @@ impl Helper {
         let port = listener.local_addr()?.port();
         let helper = Arc::new(Helper {
             version,
+            data,
             port,
             bitwig_port,
             watch: Mutex::new(Some(Watch::start(bitwig_port))),
@@ -126,6 +134,7 @@ impl Helper {
             helper: self.version.clone(),
             pid: std::process::id(),
             exe: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
+            data: self.data.clone(),
             bitwig: bitwig_words(self.bitwig().as_ref()),
             paused: self.paused(),
         }

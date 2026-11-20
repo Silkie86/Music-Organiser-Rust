@@ -90,6 +90,7 @@ fn apply_now(on: bool) -> String {
                 helper::PORT,
                 &exe,
                 &mo_app::version::version(),
+                &mo_app::paths::data_dir(),
                 helper_start::start_detached,
             ),
             Err(e) => {

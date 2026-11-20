@@ -63,7 +63,9 @@ pub fn connect(app: &AppWindow, feed: Feed, live: bool) {
         if let Ok(mut s) = RUN_AT_EXIT.lock() {
             *s = Some(PathBuf::from(setup));
         }
-        // Closes as the window's own close does, so everything waiting is written first.
+        // Closes as the window's own close does, so everything waiting is written first. A copy started meanwhile
+        // waits for this one to end.
+        crate::one_copy::closing();
         let _ = slint::quit_event_loop();
     });
     if !live || !installed() {
