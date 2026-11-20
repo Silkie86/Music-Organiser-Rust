@@ -93,6 +93,7 @@ fn song(channels: Vec<FlChannel>, inserts: Vec<FlInsert>, automation: Vec<FlAuto
         title: "Test".into(),
         ppq: 96,
         tempo: 120.0,
+        signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
         channels,
         inserts,
         routes: Default::default(),

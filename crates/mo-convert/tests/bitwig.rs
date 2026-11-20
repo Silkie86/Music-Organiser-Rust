@@ -125,6 +125,7 @@ fn song() -> FlSong {
         title: "Test".into(),
         ppq: 96,
         tempo: 128.0,
+        signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
         channels: vec![snare, synth],
         inserts: Vec::new(),
         routes: Default::default(),
@@ -505,6 +506,135 @@ fn tempo_automation_is_the_transports_tempo_lane_in_bpm() {
     // The lanes list comes before the tempo it points at, so the tempo is defined in the lane, as Bitwig saves it.
     let fields: Vec<u32> = doc.obj(transport).fields.iter().map(|f| f.id).collect();
     assert!(fields.iter().position(|&f| f == 0x2dc9) < fields.iter().position(|&f| f == 0x211));
+    // Whole-app review 19 Nov 2026, CN-2: the lane's points are the kind Bitwig saves for the tempo (0x387 in a
+    // list of 0x389, as recipe save 03), not a Volume lane's (0x108 in 0x6e), which the lane was copied from.
+    let points = obj(&doc, lanes[0], &[0x2d8c, 0x35ac]);
+    assert_eq!(doc.obj(points).class, 0x389);
+    assert!(doc.field_list(points, 0x21f).iter().all(|&p| doc.obj(p).class == 0x387));
+    // The Volume lanes keep theirs.
+    let (doc, _, _) = convert(&song(), &bitwig_template(Template::default()));
+    let volume = doc.field_list(obj(&doc, tracks(&doc).1[0], &[0x2dc9]), 0x4ba);
+    let volume_points = obj(&doc, volume[0], &[0x2d8c, 0x35ac]);
+    assert_ne!(doc.obj(volume_points).class, 0x389);
+    assert!(doc.field_list(volume_points, 0x21f).iter().all(|&p| doc.obj(p).class != 0x387));
+}
+
+/// CN-2: Bitwig keeps an empty Tempo entry on the transport only while the tempo isn't automated (recipe saves 01
+/// and 02 against 03). The convert's lane takes its place, in the automation list and in the view state.
+#[test]
+fn the_tempo_lane_takes_the_place_of_the_transports_empty_tempo_entry() {
+    let saved = Template { as_6_1_saves: true, ..Template::default() };
+    let mut s = song();
+    s.automation =
+        vec![FlAutomation { channel: None, ..automation("Tempo", 0, FlControl::Tempo, 0, &[(0.0, 0.2), (4.0, 0.25)]) }];
+    let (doc, notes, _) = convert(&s, &bitwig_template(saved));
+    assert!(!notes.iter().any(|n| n.contains("automation left out")), "{notes:?}");
+    let transport = obj(&doc, doc.root.unwrap(), &[0x190]);
+    let list = obj(&doc, transport, &[0x2dc9]);
+    let lanes = doc.field_list(list, 0x4ba);
+    assert_eq!(lanes.len(), 1);
+    assert_eq!(doc.obj(lanes[0]).class, 0x23d);
+    assert!(doc.field_list(list, 0x3f83).is_empty(), "the empty Tempo entry is gone");
+    let Some(Value::Map(states)) = doc.obj(transport).get(0x168) else { panic!("no view state") };
+    let state = doc.resolve(states[0].1).unwrap();
+    assert_eq!(doc.field_obj(state, 0x4e6), Some(lanes[0]));
+    assert_eq!(doc.field_obj(state, 0x41f0), None);
+    assert_eq!(doc.obj(state).get(0x115a), Some(&Value::Bool(1)), "as every saved transport with a lane has it");
+    // The tempo itself is still the transport's, and holds the project's tempo.
+    let tempo = obj(&doc, transport, &[0x211]);
+    assert_eq!(doc.field_obj(obj(&doc, lanes[0], &[0x2a3]), 0x41), Some(tempo));
+    assert_eq!(doc.obj(tempo).num(0x2c8), Some(128.0));
+    // With no tempo automation the entry stays as the template has it.
+    let (doc, _, _) = convert(&song(), &bitwig_template(saved));
+    let transport = obj(&doc, doc.root.unwrap(), &[0x190]);
+    assert_eq!(doc.field_list(obj(&doc, transport, &[0x2dc9]), 0x3f83).len(), 1);
+    let Some(Value::Map(states)) = doc.obj(transport).get(0x168) else { panic!("no view state") };
+    assert_eq!(doc.obj(doc.resolve(states[0].1).unwrap()).get(0x115a), Some(&Value::Bool(0)));
+}
+
+/// CN-6: the song's time signature is the Bitwig project's, packed as Bitwig packs it (his 3/4 and 6/8 saves).
+#[test]
+fn the_songs_time_signature_is_set_in_the_project() {
+    use mo_formats::arrangement::TimeSignature;
+    let saved = bitwig_template(Template { as_6_1_saves: true, ..Template::default() });
+    let packed = |top: u32, bottom: u32, template: &[u8]| {
+        let mut plan = from_fl(&song(), Options::default(), &mut snare);
+        plan.signature = TimeSignature::new(top, bottom).unwrap();
+        let made = write(&plan, template).expect("written");
+        let doc = decode(made.bytes).expect("a Bitwig file");
+        let setting = doc.field_obj(obj(&doc, doc.root.unwrap(), &[0x190]), 0x212);
+        (setting.and_then(|s| doc.obj(s).num(0x1cbe)).map(|n| n as i64 as u32), made.notes)
+    };
+    // The plan takes it from the song.
+    let waltz = FlSong { signature: TimeSignature::new(3, 4).unwrap(), ..song() };
+    assert_eq!(from_fl(&waltz, Options::default(), &mut snare).signature, TimeSignature::new(3, 4).unwrap());
+    assert_eq!(packed(4, 4, &saved).0, Some(0x1000_0024));
+    assert_eq!(packed(3, 4, &saved).0, Some(0x0C00_0024));
+    assert_eq!(packed(6, 8, &saved).0, Some(0x1800_0034));
+    assert!(!packed(6, 8, &saved).1.iter().any(|n| n.contains("time signature")));
+    // More beats than Bitwig's number holds: the template's stays, and it's said.
+    let (kept, notes) = packed(64, 4, &saved);
+    assert_eq!(kept, Some(0x1000_0024));
+    assert!(notes.iter().any(|n| n.starts_with("The song is in 64/4")), "{notes:?}");
+    // A template with no time signature in it: said, unless the song is in 4/4 as such a project opens.
+    let bare = bitwig_template(Template::default());
+    assert!(packed(6, 8, &bare).1.iter().any(|n| n.starts_with("The song is in 6/8")));
+    assert!(!packed(4, 4, &bare).1.iter().any(|n| n.contains("time signature")));
+}
+
+/// CN-5: the song's markers are the project's cue markers, and the template's own don't come along.
+#[test]
+fn the_songs_markers_take_the_place_of_the_templates() {
+    let saved = bitwig_template(Template { as_6_1_saves: true, ..Template::default() });
+    let markers = |markers: &[(f64, &str)], template: &[u8]| {
+        let mut plan = from_fl(&song(), Options::default(), &mut snare);
+        plan.markers = markers.iter().map(|&(beat, name)| (beat, name.to_owned())).collect();
+        let made = write(&plan, template).expect("written");
+        let doc = decode(made.bytes).expect("a Bitwig file");
+        assert_eq!(doc.body_error, None);
+        let list = doc.field_obj(obj(&doc, doc.root.unwrap(), &[0x190]), 0x2adc);
+        let found: Vec<(u32, f64, String)> = list
+            .map(|l| doc.field_list(l, 0x21f))
+            .unwrap_or_default()
+            .iter()
+            .map(|&m| (doc.obj(m).class, doc.obj(m).num(0x2af).unwrap(), doc.obj(m).str(0x98b).to_owned()))
+            .collect();
+        (found, made.notes)
+    };
+    let (found, notes) = markers(&[(4.0, "Verse"), (36.0, "Drop")], &saved);
+    assert_eq!(found, [(0x266, 4.0, "Verse".to_owned()), (0x266, 36.0, "Drop".to_owned())]);
+    assert!(!notes.iter().any(|n| n.contains("markers")), "{notes:?}");
+    // Bitwig lists them in time order, whatever order FL's file has them in.
+    let (found, _) = markers(&[(36.0, "Drop"), (4.0, "Verse")], &saved);
+    assert_eq!(found, [(0x266, 4.0, "Verse".to_owned()), (0x266, 36.0, "Drop".to_owned())]);
+    // A song with none: the template's "Drop" at beat 64 isn't the song's.
+    assert_eq!(markers(&[], &saved).0, []);
+    // A template with no place for markers: said, when the song has some.
+    let bare = bitwig_template(Template::default());
+    assert!(markers(&[(4.0, "Verse")], &bare).1.iter().any(|n| n.starts_with("The song's markers aren't")));
+    assert!(!markers(&[], &bare).1.iter().any(|n| n.contains("markers")));
+    // And the Songs preview reads them back as the project's.
+    let mut plan = from_fl(&song(), Options::default(), &mut snare);
+    plan.markers = vec![(4.0, "Verse".to_owned())];
+    let made = write(&plan, &saved).expect("written");
+    let views = mo_formats::arrangement::read_bytes(std::path::Path::new("a.bwproject"), &made.bytes);
+    assert!(views.iter().any(|v| v.markers.iter().any(|m| m.beat == 4.0 && m.name == "Verse")));
+}
+
+/// CN-12: a template whose Sampler sample was collected into the template's own folder: the converted sample is
+/// outside the project, so nothing says it's inside, and the places the template's file was found at aren't kept.
+#[test]
+fn a_converted_sample_is_never_said_to_be_inside_the_project() {
+    let saved = bitwig_template(Template { as_6_1_saves: true, ..Template::default() });
+    let (doc, _, _) = convert(&song(), &saved);
+    let sampler = chain(&doc, tracks(&doc).1[0])[0];
+    let zone = obj(&doc, param(&doc, sampler, "SAMPLE"), &[0x74c]);
+    let file = obj(&doc, zone, &[0x4112, 0x748, 0x129e]);
+    assert_eq!(doc.obj(file).str(0x512), "Snare 01.wav");
+    assert_eq!(doc.obj(file).get(0xd3a), Some(&Value::Str(mo_formats::bitwig::Text::new(""))));
+    assert_eq!(doc.obj(obj(&doc, file, &[0xd3b])).str(0x3b), r"C:\Samples\Snare 01.wav");
+    let before = doc.field_list(obj(&doc, file, &[0x15]), 0xc5b);
+    assert!(before.iter().all(|&f| doc.obj(f).str(0x3b) == r"C:\Samples\Snare 01.wav"));
 }
 
 #[test]
