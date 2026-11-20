@@ -4,7 +4,7 @@
 // Chords (Chord check: the chord the notes played in make, as the app's chord reader names it) and DAW check (every
 // CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card, TipLayer, TipState } from "../../mo-ui/ui/studio.slint";
 import { CurveBench, GridStrip, CurveEditorData, EditorDot, ClipTile, RulerMark } from "../../mo-ui/ui/pages/curve_editor.slint";
 export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem }
 import { ListView } from "../../mo-ui/ui/list.slint";
@@ -157,6 +157,7 @@ export component Panel inherits Window {
     // and the slider let go at a place (0 to 1).
     in-out property <float> like-favourites;
     in property <string> like-favourites-words;
+    in property <string> like-favourites-note;
     callback like-favourites-set(float);
     // The Tempo slider: its ends and step, where its handles are, what's picked in words, and its bars.
     in property <int> tempo-low-end;
@@ -171,6 +172,17 @@ export component Panel inherits Window {
     in property <int> order;
     in-out property <int> picked: -1;
     in-out property <int> view: 0;
+    // A control whose tip is up can go without its Tip being told (another tab, the editor closed, Match tempo gone
+    // with Loop off): the tip goes with it.
+    changed view => {
+        TipState.hide();
+    }
+    changed curve-editing => {
+        TipState.hide();
+    }
+    changed loop-on => {
+        TipState.hide();
+    }
     // How wide a line's waveform is: it grows with the window (the list sets it); mo-plugin's waves.rs makes the
     // pictures this wide.
     in-out property <length> wave-width: 120px;
@@ -620,6 +632,7 @@ export component Panel inherits Window {
                         if root.favourites: LikeFavourites {
                             value <=> root.like-favourites;
                             words: root.like-favourites-words;
+                            note: root.like-favourites-note;
                             released(v) => { root.like-favourites-set(v); }
                         }
                         TickLine {
@@ -870,6 +883,7 @@ export component Panel inherits Window {
                             width: 0;
                             height: 0;
                             key-pressed(e) => {
+                                TipState.hide();
                                 if e.text == Key.LeftArrow {
                                     root.sky-arrow(-1);
                                 } else if e.text == Key.RightArrow {
@@ -2020,5 +2034,11 @@ export component Panel inherits Window {
                 font-size: Type.small;
             }
         }
+    }
+    // The tips the panel's controls give (the 19 Nov review's PN-1): a `Tip` only fills in TipState, and this draws
+    // it, over everything, as the app's window does.
+    TipLayer {
+        width: 100%;
+        height: 100%;
     }
 }
