@@ -241,7 +241,7 @@ fn main() -> Result<(), slint::PlatformError> {
             log::last(log::Level::Info, "App", "Windows is ending the session: closing");
             mo_ui::watchdog::stop();
             // A setup waiting for "Restart to update" isn't started while Windows shuts down: it's offered again.
-            let _ = finish(held.as_deref(), session, None);
+            let _ = finish(held.as_deref(), session, None, false);
             end_now(0)
         });
     }
@@ -249,7 +249,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // The window's thread answers no more knocks from here: what it does while closing isn't a freeze. (Said already
     // when the window was asked to close; this is for an end that came another way.)
     mo_ui::watchdog::stop();
-    let setup = finish(held.as_deref(), session, ran.as_ref().err().map(ToString::to_string));
+    let setup = finish(held.as_deref(), session, ran.as_ref().err().map(ToString::to_string), true);
     if let Some(setup) = setup {
         mo_ui::update::run(&setup);
     }
@@ -269,11 +269,13 @@ fn main() -> Result<(), slint::PlatformError> {
 /// The close: everything still waiting is written, what plays in a DAW is stopped, and the log is closed. Run once
 /// the window's loop has ended, or from inside it when Windows ends the session (it ends the app straight after).
 /// `held` is this copy's hold on being the one open copy; `error` is how the window stopped, when it stopped with an
-/// error. Gives back the setup "Restart to update" asked for, to start now that everything is written.
+/// error. With `setup_too`, gives back the setup "Restart to update" asked for, to start now that everything is
+/// written; without, that setup is left for another time and not spoken of.
 fn finish(
     held: Option<&mo_app::one_copy::OneCopy>,
     session: &'static log::SessionLog,
     error: Option<String>,
+    setup_too: bool,
 ) -> Option<PathBuf> {
     // The window is gone: a copy started from now on waits for this one to end (the port is let go at the very
     // end, once everything below is written) instead of asking it to show.
@@ -317,7 +319,7 @@ fn finish(
     mo_app::frame_timing::finish();
     // The setup "Restart to update" asked for: started only once everything is written and the log has closed, as it
     // closes whatever is left of the app.
-    let setup = mo_ui::update::asked();
+    let setup = if setup_too { mo_ui::update::asked() } else { None };
     session.close();
     // Everything is written. The port goes now, not with the process, so the copy started next (by the launcher, or
     // by the setup below) is never held up by this one taking its time to end.

@@ -19,7 +19,8 @@ pub fn connect() {
     if !on_windows::guard_class(on_windows::WINIT_UNSEEN, close) {
         mo_app::log::warning(
             "App",
-            "Couldn't find winit's unseen window: a close asked of a minimised app may not close it",
+            "Couldn't find winit's unseen window: a close asked of a minimised app may not close it, and Windows \
+             shutting down ends the app without its last writes",
         );
     }
 }
@@ -34,8 +35,8 @@ thread_local! {
 /// the app itself. Call it on the window's thread, after [`connect`]. Windows asks every window; it's winit's unseen
 /// one that answers here, as it is there whatever the real window is doing.
 ///
-/// Not for a setup closing the app (Windows' Restart Manager): it asks the same way, then asks the window to close,
-/// which closes the app as usual.
+/// A setup closing the app (Windows' Restart Manager) asks the same way, and so does a restart that brings the apps
+/// back: Windows says of both that the app must close, so `work` runs for them too.
 pub fn on_session_end(work: impl FnOnce() + 'static) {
     SESSION_END.with(|s| *s.borrow_mut() = Some(Box::new(work)));
 }
@@ -45,7 +46,9 @@ fn session_end() {
     // Taken out first, so the work runs with nothing borrowed, and only ever once.
     let work = SESSION_END.with(|s| s.borrow_mut().take());
     if let Some(work) = work {
-        work();
+        // A panic can't pass through Windows' call into the app: it's logged as the crash it is, and Windows ends
+        // the app as it was about to.
+        let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(work));
     }
 }
 
@@ -60,6 +63,7 @@ fn close() {
 #[allow(unsafe_code)]
 mod on_windows {
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy};
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
         FindWindowExW, GetWindowThreadProcessId, WM_CLOSE, WM_ENDSESSION, WM_NCDESTROY,
@@ -68,8 +72,6 @@ mod on_windows {
 
     /// The class of winit's unseen window (winit 0.30, `THREAD_EVENT_TARGET_WINDOW_CLASS`).
     pub(super) const WINIT_UNSEEN: PCWSTR = w!("Winit Thread Event Target");
-    /// The bit of a session end's `lparam` that says a setup is closing the app (`ENDSESSION_CLOSEAPP`).
-    const FOR_A_SETUP: isize = 0x1;
     /// Our mark on the windows guarded here ("MOCA").
     const OURS: usize = 0x4d4f_4341;
 
@@ -116,9 +118,15 @@ mod on_windows {
             on_close();
             return LRESULT(0);
         }
-        // The session is ending (wparam says it really is, after every program was asked), and not for a setup.
-        if message == WM_ENDSESSION && wparam.0 != 0 && lparam.0 & FOR_A_SETUP == 0 {
+        // The session is ending (wparam says it really is, after every program was asked).
+        if message == WM_ENDSESSION && wparam.0 != 0 {
+            // If the work takes more than a few seconds, Windows shows these words beside the app's name on its
+            // "preventing shutdown" screen.
+            // SAFETY: this thread's own window, and words that end with a zero.
+            let _ = unsafe { ShutdownBlockReasonCreate(window, w!("Saving your changes")) };
             super::session_end();
+            // SAFETY: as above. Only reached if the work came back (it ends the app itself when it can).
+            let _ = unsafe { ShutdownBlockReasonDestroy(window) };
             return LRESULT(0);
         }
         if message == WM_NCDESTROY {
@@ -198,7 +206,7 @@ mod on_windows {
 
         // The 19 November 2026 review's CL-2: nothing answered Windows ending the session, so nothing was written.
         #[test]
-        fn the_session_ending_runs_its_work_once_and_a_setup_closing_the_app_does_not() {
+        fn the_session_ending_runs_its_work_once() {
             static ENDED: AtomicUsize = AtomicUsize::new(0);
             fn note() {}
             let send = |window: HWND, really: usize, why: isize| {
@@ -212,12 +220,12 @@ mod on_windows {
             });
             // The session isn't ending after all (another program said no).
             send(guarded, 0, 0);
-            // A setup closing the app: its close comes next, the usual way.
-            send(guarded, 1, FOR_A_SETUP);
             assert_eq!(ENDED.load(Ordering::SeqCst), 0);
-            // Signing out (the logoff bit set) and shutting down.
-            send(guarded, 1, 0x8000_0000_u32 as isize);
+            // A setup closing the app, or a restart that brings the apps back (`ENDSESSION_CLOSEAPP`): Windows says
+            // the app must close, so the work runs.
+            send(guarded, 1, 0x1);
             assert_eq!(ENDED.load(Ordering::SeqCst), 1);
+            // Shutting down, asked a second time.
             send(guarded, 1, 0);
             assert_eq!(ENDED.load(Ordering::SeqCst), 1, "only once");
             // SAFETY: this thread's own window.
