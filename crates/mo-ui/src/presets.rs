@@ -128,6 +128,9 @@ struct Page {
     sounds_stale: bool,
     /// The same for the curves, while a read of them was going on: read once more when it ends.
     curves_again: bool,
+    /// How many times you've changed a curve (a name, hidden, one saved): a read of the curves that one landed in lists
+    /// them again, as its own list was taken before the change.
+    curve_changes: u64,
     curves_reading: Option<(usize, usize)>,
     curves_failed: Option<String>,
     curve_message: String,
@@ -313,7 +316,11 @@ fn finder_opens() {
         // Found by what it is, not where it was: a read again puts the lines in another order (M-1).
         let at = PAGE.with(|p| p.borrow().items.iter().position(|i| logic::has_audition_id(i, &hit.id)));
         let Some(at) = at else { return false };
+        // The page opens on this line, by its place: a read again waiting for the page's next opening
+        // ([`songs_caught_up`]) would empty the list under it, so it waits for the opening after this one.
+        let stale = PAGE.with(|p| std::mem::take(&mut p.borrow_mut().sounds_stale));
         crate::go_to(app, Place::Presets.index() as i32);
+        PAGE.with(|p| p.borrow_mut().sounds_stale = stale);
         show_preset(app, at);
         true
     });
@@ -2651,10 +2658,10 @@ pub fn finish_up() {
 // The curves
 
 fn read_curves(_app: &AppWindow) {
-    let at = PAGE.with(|p| {
+    let (at, changes_before) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.curves_reading = Some((0, 0));
-        Where { library: p.library.clone(), data_dir: p.data_dir.clone() }
+        (Where { library: p.library.clone(), data_dir: p.data_dir.clone() }, p.curve_changes)
     });
     let started = background::spawn("Curves read", move || {
         // Guarded, as the sounds' read is (RA-8).
@@ -2663,7 +2670,10 @@ fn read_curves(_app: &AppWindow) {
             let again = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.curves_reading = None;
+                // A curve you changed while this ran isn't in its list as you left it: listed once more instead.
+                let changed_meanwhile = p.curve_changes != changes_before;
                 match result {
+                    Ok(_) if changed_meanwhile => p.curves_again = true,
                     Ok((list, keys)) => set_curves(&mut p, list, keys),
                     Err(e) => {
                         log::warning("Curves", &e);
@@ -2965,6 +2975,7 @@ fn save_as_new(from: String, name: String, points: Vec<mo_formats::bitwig::curve
                     crate::curve_editor::forget(app, &from, &(points, length));
                     PAGE.with(|p| {
                         let mut p = p.borrow_mut();
+                        p.curve_changes += 1;
                         match p.curves.iter().position(|o| o.id == c.id) {
                             // The same shape was saved before: it's that curve.
                             Some(at) => {
@@ -3033,6 +3044,7 @@ fn curve_db_change(
                 on_window(move |app| {
                     PAGE.with(|p| {
                         let mut p = p.borrow_mut();
+                        p.curve_changes += 1;
                         if let Some(at) = p.curves.iter().position(|o| o.id == c.id) {
                             p.curve_keys[at] = key;
                             p.curve_found_of = None;
