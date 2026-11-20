@@ -746,36 +746,37 @@ fn a_copy_behind_is_made_afresh_after_each_kind_of_save() {
 }
 
 /// A copy left half made by an app closed while it made one (minutes on Solomon's disk) goes at the next start, even
-/// though no copy is made then: it's most of a copy's size.
+/// though no copy is made then: it's most of a copy's size. One made then clears every one, whatever its age: only one
+/// copy of the app runs at a time, and the one closed just before may have left it (the whole-app review of 19 Nov,
+/// SN-15). The page's read, which makes none, leaves one changed in the last few minutes.
 #[test]
 fn a_copy_left_half_made_goes_at_the_next_start() {
     let dir = folder("left");
     let old = library(&dir, 30);
     let copy = compact::copy_of(&old);
     compact::sync(&old, &copy).unwrap();
-    let an_hour_ago = SystemTime::now() - Duration::from_secs(3600);
-    let left_long_ago = |path: &Path| {
-        std::fs::File::options().write(true).open(path).unwrap().set_modified(an_hour_ago).unwrap();
+    // Left by an app closed while it made a copy, an hour ago; and one left a moment ago.
+    let (left, just_now) = (dir.join("sounds-rust.db.part-77777"), dir.join("sounds-rust.db.part-66666"));
+    let leave = || {
+        for path in [&left, &just_now] {
+            std::fs::write(path, b"half a copy").unwrap();
+        }
+        set_time(&left, SystemTime::now() - Duration::from_secs(3600));
     };
-    // Left by an app closed while it made a copy, an hour ago; and one another app is making just now.
-    let (left, making) = (dir.join("sounds-rust.db.part-77777"), dir.join("sounds-rust.db.part-66666"));
-    for path in [&left, &making] {
-        std::fs::write(path, b"half a copy").unwrap();
-    }
-    left_long_ago(&left);
-    // Bringing the copy up to date clears what was left, and only that.
+    leave();
+    // Bringing the copy up to date clears both.
     cs(&old)
         .execute_batch("UPDATE sounds SET plays = COALESCE(plays, 0) + 1 WHERE id = (SELECT MIN(id) FROM sounds);")
         .unwrap();
     assert!(compact::sync(&old, &copy).unwrap().made);
-    assert_eq!(half_made(&dir), vec!["sounds-rust.db.part-66666".to_owned()]);
+    assert_eq!(half_made(&dir), Vec::<String>::new());
     same_answers(&old, &copy);
-    // So does the page's read of the copy, once the other has been left long enough too.
-    left_long_ago(&making);
+    // The page's read of the copy clears the one left long ago.
+    leave();
     let Ok(PageRead::Copy { .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
-    assert_eq!(half_made(&dir), Vec::<String>::new());
+    assert_eq!(half_made(&dir), vec!["sounds-rust.db.part-66666".to_owned()]);
 }
 
 /// Where SQLite keeps `table` in the file at `db`: the first byte of its first page.
@@ -866,9 +867,9 @@ fn a_copy_of_another_format_or_half_made_is_made_again() {
     let dir = folder("again");
     let old = library(&dir, 50);
     let copy = compact::copy_of(&old);
-    // Left from copies that stopped half way (this app's, and others' long since), and a log beside where the copy
-    // goes that isn't its own: none may end up in the new copy, or be left behind. One another copy of the app is
-    // making just now stays.
+    // Left from copies that stopped half way (this app's, and others', long since or just now), and a log beside where
+    // the copy goes that isn't its own: none may end up in the new copy, or be left behind (only one copy of the app
+    // runs at a time: the whole-app review of 19 Nov, SN-15).
     let an_hour_ago = SystemTime::now() - Duration::from_secs(3600);
     for name in [
         "sounds-rust.db.part".to_owned(),
@@ -886,12 +887,7 @@ fn a_copy_of_another_format_or_half_made_is_made_again() {
     std::fs::write(dir.join("sounds-rust.db-wal"), vec![0x37u8; 4096]).unwrap();
     let synced = compact::sync(&old, &copy).unwrap();
     assert!(synced.made);
-    let mut others = vec![format!("sounds-rust.db.part-{}0", std::process::id()), "sounds-rust.db.part-88888".into()];
-    others.sort();
-    assert_eq!(half_made(&dir), others, "only others' half-made copies being made just now are left");
-    for name in &others {
-        std::fs::remove_file(dir.join(name)).unwrap();
-    }
+    assert_eq!(half_made(&dir), Vec::<String>::new());
     same_answers(&old, &copy);
     // A copy an older version made, in another format: made again from the start.
     Connection::open(&copy).unwrap().execute("UPDATE copy_info SET value = 0 WHERE key = 'format'", []).unwrap();
@@ -2062,10 +2058,9 @@ fn a_damaged_library_and_backup_copy_keep_what_can_still_be_read_of_both() {
     damage(&backup, "sound_waves");
     let damaged_backup = std::fs::read(&backup).unwrap();
     damage(&copy, "sound_features");
-    // Left half made by a mend the app was closed in, a while ago.
+    // Left half made by a mend the app was closed in just before it started again.
     let left = dir.join(format!("{}.part-1", compact::FILE_NAME));
     std::fs::write(&left, b"half made").unwrap();
-    set_time(&left, SystemTime::now() - Duration::from_secs(11 * 60));
     let (everything, made) = compact::mend_reading(&old, &copy, now()).unwrap();
     let made = made.unwrap();
     assert!(made.made && made.kept_alone && made.kept_for_good && made.from_backup.is_none(), "{made:?}");
@@ -3179,9 +3174,11 @@ fn a_library_gone_is_put_back_from_its_backup_copy() {
     let (dir, _old, copy, id, backed_up) = backed_up_library("bring-back", 40);
     let backup = backup::backup_of(&copy);
     assert_eq!(backup::bring_back(&copy), Ok(None));
-    // Changed since its backup copy was made, then taken away: what changed since is lost.
+    // Changed since its backup copy was made, then taken away: what changed since is lost. A copy left half made by
+    // the app closed just before goes first (SN-15).
     changed(&copy, id);
     take_away(&copy);
+    std::fs::write(dir.join(format!("{}.part-1", compact::FILE_NAME)), b"half made").unwrap();
     let before = std::fs::read(&backup).unwrap();
     let Ok(Some(BroughtBack::Backup { made })) = backup::bring_back(&copy) else { panic!("put back from its backup") };
     assert!(SystemTime::now().duration_since(made).unwrap() < Duration::from_secs(600));
@@ -3220,61 +3217,109 @@ fn a_library_gone_is_put_back_from_its_backup_copy() {
     assert_eq!(half_made(&dir), Vec::<String>::new());
 }
 
+/// Notes in the backup copy at `backup` that it was made at `at`, as one notes when it's made.
+fn note_made(backup: &Path, at: SystemTime) {
+    let at = i64::try_from(at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()).unwrap();
+    let noted =
+        Connection::open(backup).unwrap().execute("UPDATE copy_info SET value = ?1 WHERE key = 'backed_up_at'", [at]);
+    assert_eq!(noted.unwrap(), 1);
+}
+
 /// A library set aside as it was being mended and never put back (the app stopped between the two renames that put
 /// the mended one in its place) is put back as it was, when it was set aside after its backup copy was made: it holds
 /// what the backup doesn't, and it's mended again as it's read. One set aside before that is older than the backup
 /// copy, which is put back instead; with no backup copy, the newest set aside is (the whole-app review of 19 Nov,
-/// SN-14).
+/// SN-14). A time ahead of now isn't trusted (the clock was wrong as it was written, or is now): over a whole backup
+/// copy, one set aside is put back only when it's sure to be newer, as it would undo what's in that.
 #[test]
 fn a_library_set_aside_as_it_was_mended_is_put_back_when_newer_than_its_backup_copy() {
     let (_dir, _old, copy, id, backed_up) = backed_up_library("bring-back-aside", 40);
+    let backup = backup::backup_of(&copy);
     let since = changed(&copy, id);
     let (damaged, kept) = (backup::damaged_of(&copy), backup::kept_of(&copy));
-    let in_a_minute = SystemTime::now() + Duration::from_secs(60);
-    set_aside_at(&copy, &damaged, in_a_minute);
+    let ago = |secs: u64| SystemTime::now() - Duration::from_secs(secs);
+    let ahead = |secs: u64| SystemTime::now() + Duration::from_secs(secs);
+    // The backup copy was made an hour ago; the library set aside a minute ago.
+    note_made(&backup, ago(60 * 60));
+    set_aside_at(&copy, &damaged, ago(60));
     assert_eq!(backup::bring_back(&copy), Ok(Some(BroughtBack::SetAside { from: damaged.clone() })));
     assert_eq!(rating_of(&copy, id), since);
     assert!(!damaged.exists());
     // Set aside before its backup copy was made: the backup copy is newer, and the one set aside stays.
-    let an_hour_ago = SystemTime::now() - Duration::from_secs(60 * 60);
-    set_aside_at(&copy, &damaged, an_hour_ago);
+    set_aside_at(&copy, &damaged, ago(2 * 60 * 60));
     assert!(matches!(backup::bring_back(&copy), Ok(Some(BroughtBack::Backup { .. }))));
     assert_eq!(rating_of(&copy, id), backed_up);
     assert!(damaged.exists());
     // One kept for good is put back the same way: the newer of the two, the other staying.
-    set_aside_at(&copy, &kept, in_a_minute);
+    set_aside_at(&copy, &kept, ago(60));
     assert_eq!(backup::bring_back(&copy), Ok(Some(BroughtBack::SetAside { from: kept.clone() })));
     assert_eq!(rating_of(&copy, id), backed_up);
     assert!(!kept.exists() && damaged.exists());
-    // With no backup copy, the one set aside is put back however old it is.
-    std::fs::remove_file(backup::backup_of(&copy)).unwrap();
+    // A backup copy noting a time ahead of now counts from when its file was last written (just now, as it was noted):
+    // the one set aside a minute ago isn't newer.
+    note_made(&backup, ahead(24 * 60 * 60));
+    set_aside_at(&copy, &kept, ago(60));
+    assert!(matches!(backup::bring_back(&copy), Ok(Some(BroughtBack::Backup { .. }))));
+    assert!(kept.exists());
+    // One set aside at a time ahead of now isn't sure to be newer either.
+    note_made(&backup, ago(60 * 60));
     take_away(&copy);
+    set_time(&kept, ahead(60 * 60));
+    assert!(matches!(backup::bring_back(&copy), Ok(Some(BroughtBack::Backup { .. }))));
+    assert!(kept.exists());
+    // With no backup copy, the newest set aside is put back however old it is.
+    std::fs::remove_file(&backup).unwrap();
+    take_away(&copy);
+    set_time(&kept, ago(3 * 60 * 60));
     assert_eq!(backup::bring_back(&copy), Ok(Some(BroughtBack::SetAside { from: damaged.clone() })));
     assert_eq!(rating_of(&copy, id), since);
-    assert!(!damaged.exists());
+    assert!(!damaged.exists() && kept.exists());
 }
 
 /// A library that isn't there, with only a damaged backup copy beside it, gets that, to be mended as it's read with
 /// what can still be read of it: the backup copy there, or the one set aside as it was found damaged before (the
-/// whole-app review of 19 Nov, SN-14 and SN-3).
+/// whole-app review of 19 Nov, SN-14 and SN-3). Moved into its place, not copied: the mend then sets it aside as the
+/// damaged library, kept for good where parts of it couldn't be read, and it's never kept twice.
 #[test]
 fn a_library_gone_with_only_a_damaged_backup_copy_gets_that_to_be_mended() {
     let (_dir, old, copy, _id, _rating) = backed_up_library("bring-back-damaged", 40);
-    let backup = backup::backup_of(&copy);
+    remove_db(&old);
+    let (backup, backup_damaged, kept) =
+        (backup::backup_of(&copy), backup::backup_damaged_of(&copy), backup::kept_of(&copy));
     damage(&backup, "sounds");
     let damaged_backup = std::fs::read(&backup).unwrap();
     take_away(&copy);
     assert_eq!(backup::bring_back(&copy), Ok(Some(BroughtBack::DamagedBackup { set_aside: false })));
     assert!(std::fs::read(&copy).unwrap() == damaged_backup);
-    assert!(std::fs::read(&backup).unwrap() == damaged_backup);
-    // Mended as it's read, the damaged backup copy set aside (SN-3).
+    assert!(!backup.exists());
+    // Mended as it's read: what couldn't be read of it is nowhere else, so it's kept for good, once.
     let Ok(PageRead::Library { made, .. }) = compact::read_for_page(&old, now(), |_| {}) else { panic!("mended") };
-    assert!(made.as_ref().is_some_and(|m| m.made), "{made:?}");
-    let backup_damaged = backup::backup_damaged_of(&copy);
-    assert!(backup_damaged.exists() && !backup.exists());
-    // Gone again, with only the damaged backup copy set aside: that's put back the same way.
+    let made = made.unwrap();
+    assert!(made.made && made.kept_alone && made.kept_for_good, "{made:?}");
+    assert!(std::fs::read(&kept).unwrap() == damaged_backup);
+    assert!(!backup.exists() && !backup_damaged.exists());
+    // Gone again, with only a damaged backup copy set aside (as a mend sets one aside): that's moved in the same way.
     take_away(&copy);
-    take_away(&backup::damaged_of(&copy));
+    std::fs::rename(&kept, &backup_damaged).unwrap();
     assert_eq!(backup::bring_back(&copy), Ok(Some(BroughtBack::DamagedBackup { set_aside: true })));
-    assert!(std::fs::read(&copy).unwrap() == std::fs::read(&backup_damaged).unwrap());
+    assert!(std::fs::read(&copy).unwrap() == damaged_backup);
+    assert!(!backup_damaged.exists());
+}
+
+/// A damaged backup copy set aside before stays while a damaged library kept for good is there: it may hold some of
+/// what that one couldn't give. A mend that would set another one aside in its place waits till they're moved
+/// somewhere safe (the review of SN-3's fix).
+#[test]
+fn a_damaged_backup_copy_set_aside_stays_while_a_library_kept_for_good_is_there() {
+    let (_dir, old, copy, _id, _rating) = backed_up_library("backup-aside-kept", 40);
+    let (backup, set_aside, kept) =
+        (backup::backup_of(&copy), backup::backup_damaged_of(&copy), backup::kept_of(&copy));
+    std::fs::write(&set_aside, b"a damaged backup copy set aside before").unwrap();
+    std::fs::write(&kept, b"a damaged library kept for good").unwrap();
+    damage(&backup, "sound_waves");
+    damage(&copy, "sound_features");
+    let why = compact::mend_reading(&old, &copy, now()).unwrap_err().to_string();
+    assert!(why.contains("put those somewhere safe"), "{why}");
+    assert_eq!(std::fs::read(&set_aside).unwrap(), b"a damaged backup copy set aside before");
+    assert!(backup.exists() && copy.exists());
 }

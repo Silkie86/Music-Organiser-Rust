@@ -1822,11 +1822,15 @@ fn part_of(copy: &Path) -> PathBuf {
     side(copy, &format!(".part-{}", std::process::id()))
 }
 
-/// Removes the copies left half made by an app that stopped while making one, and SQLite's files beside them: others'
-/// once they haven't changed for [`STALE`], and with `ours_too` this app's own (only while [`SYNCING`] is held: this
-/// app makes none meanwhile). Not one another copy of the app is still making (and Windows won't remove a file that's
-/// open anyway).
-fn remove_parts(copy: &Path, ours_too: bool) {
+/// Removes the copies left half made by an app that stopped while making one, and SQLite's files beside them. With
+/// `all` false, others' once they haven't changed for [`STALE`] (never this app's own: it may be making one just then).
+/// With `all`, every one, whatever its age: only while [`SYNCING`] is held, just before this app makes one (it makes
+/// none meanwhile). Only one copy of the app runs at a time (`mo_app::one_copy`), and a half-made copy is never the
+/// only one of anything (what it's made from stays as it is until it has its name), so one that another copy were
+/// still making would only stop that copy's work, with nothing changed; Windows won't remove one that's open anyway.
+/// Before, one left by a run that ended less than [`STALE`] ago stayed, taking the room that a mend at the next start
+/// needed (the whole-app review of 19 Nov, SN-15).
+fn remove_parts(copy: &Path, all: bool) {
     let Some(name) = copy.file_name() else { return };
     let dir = dir_of(copy);
     let start = format!("{}.part", name.to_string_lossy());
@@ -1837,15 +1841,15 @@ fn remove_parts(copy: &Path, ours_too: bool) {
         if !entry.file_name().to_string_lossy().starts_with(&start) {
             continue;
         }
-        let ours = ours_too && ["", "-wal", "-shm", "-journal"].iter().any(|end| path == side(&own, end));
+        let ours = || ["", "-wal", "-shm", "-journal"].iter().any(|end| path == side(&own, end));
         let stale = || {
             entry
                 .metadata()
                 .and_then(|m| m.modified())
                 .is_ok_and(|t| SystemTime::now().duration_since(t).is_ok_and(|age| age > STALE))
         };
-        if ours || stale() {
-            let _ = fs::remove_file(path);
+        if all || (!ours() && stale()) {
+            let _ = fs::remove_file(&path);
         }
     }
 }

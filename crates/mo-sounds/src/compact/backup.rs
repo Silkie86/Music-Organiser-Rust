@@ -406,15 +406,17 @@ fn checked_backup(backup: &Path) -> Result<SystemTime, NotRestored> {
     Ok(made_at(backup))
 }
 
-/// When the backup copy at `backup` was made: as it notes it ([`BACKED_UP_AT`]), else when its file was last written
-/// (a damaged one may not say).
+/// When the backup copy at `backup` was made, as it notes it ([`BACKED_UP_AT`]); `None` when that can't be read (a
+/// damaged one may not say).
+fn noted_made_at(backup: &Path) -> Option<SystemTime> {
+    let at = open_read_only(backup).and_then(|conn| info_value(&conn, BACKED_UP_AT)).ok().flatten()?;
+    u64::try_from(at).ok().map(|at| SystemTime::UNIX_EPOCH + Duration::from_secs(at))
+}
+
+/// When the backup copy at `backup` was made, for a card: as it notes it, else when its file was last written, else
+/// now.
 fn made_at(backup: &Path) -> SystemTime {
-    open_read_only(backup)
-        .and_then(|conn| info_value(&conn, BACKED_UP_AT))
-        .ok()
-        .flatten()
-        .and_then(|at| u64::try_from(at).ok())
-        .map(|at| SystemTime::UNIX_EPOCH + Duration::from_secs(at))
+    noted_made_at(backup)
         .or_else(|| fs::metadata(backup).and_then(|m| m.modified()).ok())
         .unwrap_or_else(SystemTime::now)
 }
@@ -424,14 +426,15 @@ fn made_at(backup: &Path) -> SystemTime {
 pub enum BroughtBack {
     /// The library itself, set aside at `from` as it was being mended ([`damaged_of`], or [`kept_of`] for one kept
     /// for good), after its backup copy was made or with none: it holds what the backup doesn't, so it's put back as it
-    /// was, and mended again as it's read.
+    /// was, to be mended again as it's read.
     SetAside { from: PathBuf },
     /// Its backup copy, made at `made`, copied into its place (it stays, as the backup): what changed in the library
     /// since is lost.
     Backup { made: SystemTime },
-    /// Its backup copy, which is damaged, copied into its place, with nothing newer to put back: it's mended as it's
-    /// read, with what can still be read of it. `set_aside`: the one set aside as it was found damaged before
-    /// ([`backup_damaged_of`]).
+    /// Its backup copy, which is damaged, moved into its place (it isn't a backup copy any more), with nothing newer to
+    /// put back: it's mended as it's read, with what can still be read of it, and then set aside as a damaged library
+    /// is (kept for good when parts of it couldn't be read). `set_aside`: the one set aside as it was found damaged
+    /// before ([`backup_damaged_of`]).
     DamagedBackup { set_aside: bool },
 }
 
@@ -442,11 +445,18 @@ pub enum BroughtBack {
 /// last of yours), so the Sounds page would say there's none at every start.
 ///
 /// The newest of them is put back: the library set aside after its backup copy was made (or with none), as it was;
-/// else the backup copy, copied (it stays the backup); else a damaged backup copy, copied, to be mended as it's read.
+/// else the backup copy, copied (it stays the backup); else a damaged backup copy, moved, to be mended as it's read
+/// (copied, it would be kept twice: the library made of it is set aside as it's mended, beside it). Which is newest
+/// goes by when each was set aside and when the backup copy was made, as far as that can be told: never by a time
+/// ahead of now, and a library set aside is put back over a whole backup copy only when it's sure to be newer, as it
+/// would undo what's in that (the mend takes the library's word over the backup copy's). Over a damaged one that was
+/// set aside as the library was mended, it's put back unless it's sure to be older: that mend set the library aside
+/// after it.
+///
 /// What was put back, or `None` when the library is there or there's nothing to put back. Why not, when it couldn't
 /// be: its log left without it (SQLite would read it into whatever is put there), the backup copy unreadable just
-/// now, the disk short of room. Reads the backup copy and writes about its size: for the background, never the
-/// window's thread; one at a time with every other change to the library.
+/// now, or not one this version can put back, the disk short of room. Reads the backup copy and writes about its size:
+/// for the background, never the window's thread; one at a time with every other change to the library.
 pub fn bring_back(copy: &Path) -> Result<Option<BroughtBack>, String> {
     use NotRestored::{Damaged, NoBackup, NotNow};
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
@@ -477,48 +487,89 @@ pub fn bring_back(copy: &Path) -> Result<Option<BroughtBack>, String> {
         }
         _ => {}
     }
-    let set_at = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
     let looked = there(&backup).then(|| checked_backup(&backup));
-    let made = match &looked {
-        Some(Ok(made)) => Some(*made),
-        Some(Err(Damaged(_))) => Some(made_at(&backup)),
-        Some(Err(NotNow(why))) => return Err(why.clone()),
-        Some(Err(NoBackup(_))) | None => None,
+    if let Some(Err(NotNow(why))) = looked {
+        return Err(why);
+    }
+    // A time ahead of now isn't trusted: the clock was wrong as it was written, or is now.
+    let now = SystemTime::now();
+    let trusted = |at: SystemTime| (at <= now).then_some(at);
+    let file_time = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
+    // When each was set aside (a file set aside is given that time), and when a backup copy was made at the latest: as
+    // it notes it, else when its file was last written, as it's never made after that (a whole one's time is set again
+    // when it's checked, a damaged one set aside has the time it was set aside).
+    let set_at = |aside: &PathBuf| file_time(aside);
+    let made_by =
+        |backup: &Path| noted_made_at(backup).and_then(trusted).or_else(|| file_time(backup).and_then(trusted));
+    let put_back = match &looked {
+        // The backup copy beside it, whole or damaged: a library set aside after it was made holds what it doesn't
+        // (the app stopped as that library was being mended), so it's put back as it was, to be mended with what the
+        // backup has. One set aside before, or one it can't be told of, would undo what's in the backup copy (the mend
+        // takes the library's word): the backup copy is put back in its place, and the library set aside stays as it
+        // is.
+        Some(Ok(_) | Err(Damaged(_))) => {
+            let made = made_by(&backup);
+            let newer =
+                |aside: &PathBuf| made.is_some_and(|made| set_at(aside).and_then(trusted).is_some_and(|at| at > made));
+            asides.into_iter().filter(newer).max_by_key(set_at)
+        }
+        // Only a damaged backup copy set aside: a mend sets that aside before the library, so the library set aside is
+        // put back unless it's sure to be older (set aside before the backup copy was made).
+        _ if there(&backup_damaged) => {
+            let made = made_by(&backup_damaged);
+            let older = |aside: &PathBuf| made.is_some_and(|made| set_at(aside).is_some_and(|at| at < made));
+            asides.into_iter().filter(|aside| !older(aside)).max_by_key(set_at)
+        }
+        // No backup copy: the newest set aside.
+        _ => asides.into_iter().max_by_key(set_at),
     };
-    // Set aside after its backup copy was made (or with none), the library holds what the backup doesn't: it's put back
-    // as it was, to be mended with what the backup has. One set aside before is older than the backup, which is put
-    // back in its place (and the library set aside stays as it is).
-    let newer = |aside: &PathBuf| made.is_none_or(|made| set_at(aside).is_some_and(|at| at > made));
-    if let Some(aside) = asides.into_iter().filter(newer).max_by_key(|aside| set_at(aside)) {
-        put_back_from(copy, &aside)
-            .map_err(|e| format!("{} couldn't be put back in its place ({e})", aside.display()))?;
+    if let Some(aside) = put_back {
+        move_in(&aside, copy)?;
         return Ok(Some(BroughtBack::SetAside { from: aside }));
     }
     match looked {
         Some(Ok(made)) => {
-            copy_in(&backup, copy, true)?;
+            copy_in(&backup, copy)?;
             Ok(Some(BroughtBack::Backup { made }))
         }
         Some(Err(Damaged(_))) => {
-            copy_in(&backup, copy, false)?;
+            move_in(&backup, copy)?;
             Ok(Some(BroughtBack::DamagedBackup { set_aside: false }))
         }
         _ if there(&backup_damaged) => {
-            copy_in(&backup_damaged, copy, false)?;
+            move_in(&backup_damaged, copy)?;
             Ok(Some(BroughtBack::DamagedBackup { set_aside: true }))
         }
-        // Only a backup copy this version can't put back (not the app's own library, or of another format): it stays
-        // as it is.
-        Some(Err(NoBackup(why) | NotNow(why))) => Err(why),
+        // Only a backup copy this version can't put back (not the app's own library, or of another format, which a
+        // newer version may have made): it stays as it is, and no library is made beside it either
+        // ([`super::make_empty`]: it would be backed up over it).
+        Some(Err(NoBackup(why) | NotNow(why))) => Err(format!(
+            "{} is there, but {why}, so it's left as it is (a newer version of the app may have made it), and no \
+             library is put back or made beside it until it's moved away",
+            backup.display()
+        )),
         None => Ok(None),
     }
 }
 
-/// Copies the backup copy at `from` into the place of the library at `copy`, which isn't there ([`bring_back`]): beside
-/// it first, then given its name, never over one that's there. A whole one (`whole`) is readied as [`restore`] readies
-/// one: what it was made from goes (it isn't a backup any more). A damaged one is copied as it is, to be mended as it's
-/// read: SQLite might not get through it. Why not, when it couldn't be.
-fn copy_in(from: &Path, copy: &Path, whole: bool) -> Result<(), String> {
+/// Moves the file at `from` (the library set aside as it was being mended, or a damaged backup copy) into the place of
+/// the library at `copy`, which isn't there ([`bring_back`]), with its log ([`put_back_from`]), while no reader in this
+/// app opens the library. A shared-memory file left beside it holds none of it: it goes first. Why not, when it
+/// couldn't be: then it's where it was.
+fn move_in(from: &Path, copy: &Path) -> Result<(), String> {
+    let _readers_wait = LAYING_OUT.lock().unwrap_or_else(PoisonError::into_inner);
+    let failed = |e: std::io::Error| format!("{} couldn't be put in its place ({e})", from.display());
+    match fs::remove_file(side(from, "-shm")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(e)),
+        _ => {}
+    }
+    put_back_from(copy, from).map_err(failed)
+}
+
+/// Copies the whole backup copy at `from` into the place of the library at `copy`, which isn't there ([`bring_back`]):
+/// beside it first, readied as [`restore`] readies one (what it was made from goes: it isn't a backup any more), then
+/// given its name, never over one that's there. Why not, when it couldn't be.
+fn copy_in(from: &Path, copy: &Path) -> Result<(), String> {
     // A copy left half made by a mend cut off before goes first: it would take the room this one needs (SN-15).
     remove_parts(copy, true);
     if let Ok(free) = fs4::available_space(dir_of(copy)) {
@@ -529,13 +580,6 @@ fn copy_in(from: &Path, copy: &Path, whole: bool) -> Result<(), String> {
     let _part = Part(part.clone());
     let copied = (|| -> Result<(), String> {
         fs::copy(from, &part).map_err(|e| e.to_string())?;
-        if !whole {
-            return fs::OpenOptions::new()
-                .write(true)
-                .open(&part)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| e.to_string());
-        }
         let conn =
             Connection::open_with_flags(&part, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
                 .map_err(|e| e.to_string())?;
@@ -648,27 +692,41 @@ pub(super) fn put_back(copy: &Path) -> std::io::Result<()> {
     put_back_from(copy, &damaged_of(copy))
 }
 
-/// [`put_back`], from where [`set_aside_as`] set it aside: `aside`.
+/// [`put_back`], from where [`set_aside_as`] set it aside: `aside`. Never beside a log that isn't its own; if its own
+/// can't follow it, it goes back where it was, so the two stay together.
 pub(super) fn put_back_from(copy: &Path, aside: &Path) -> std::io::Result<()> {
-    if copy.exists() {
+    if copy.exists() || side(copy, "-wal").exists() {
         return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "something else is there in its place"));
     }
     fs::rename(aside, copy)?;
     match fs::rename(side(aside, "-wal"), side(copy, "-wal")) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            let _ = fs::rename(copy, aside);
+            Err(e)
+        }
         _ => Ok(()),
     }
 }
 
 /// Sets the damaged backup copy of the library at `copy` aside ([`backup_damaged_of`]), with any log SQLite left
 /// beside it, once what can still be read of it is in the library mended from it: no backup copy is ever made over it
-/// (the whole-app review of 19 Nov, SN-3). The one set aside before goes. Nothing to do when there's none. Its time is
-/// set to now, as it goes a week from now. Why not, when it couldn't be: then it's where it was.
+/// (the whole-app review of 19 Nov, SN-3). The one set aside before goes, but never while a damaged library kept for
+/// good is there ([`kept_of`]): it may hold some of what that one couldn't give, so nothing is set aside meanwhile.
+/// Nothing to do when there's none. Its time is set to now, as it goes a week from now. Why not, when it couldn't be:
+/// then it's where it was.
 pub(super) fn set_backup_aside(copy: &Path) -> Result<(), String> {
     let (backup, aside) = (backup_of(copy), backup_damaged_of(copy));
     let failed = |e: std::io::Error| format!("its damaged backup copy couldn't be set aside ({e})");
     if database_there(&backup).is_none() {
         return Ok(());
+    }
+    if let (Some(before), Some(kept)) = (database_there(&aside), database_there(&kept_of(copy))) {
+        return Err(format!(
+            "its damaged backup copy couldn't be set aside: the one set aside before ({}) is kept while the damaged \
+             library kept for good ({}) is there, so put those somewhere safe",
+            before.display(),
+            kept.display()
+        ));
     }
     remove_database(&aside).map_err(failed)?;
     for end in ["-shm", "-journal"] {

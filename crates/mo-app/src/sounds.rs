@@ -2014,6 +2014,8 @@ pub fn both_damaged_line(
         (_, 0, _, on_sounds_db) => {
             format!("None of it could still be read, so it has what its backup copy still had{}", rest(on_sounds_db))
         }
+        // Nothing came of its backup copy: no gaps were filled from it.
+        (_, _, 0, on_sounds_db) => format!("It kept all of it that could still be read{}", rest(on_sounds_db)),
         (_, _, _, on_sounds_db) => format!(
             "It kept all of it that could still be read, and filled the gaps from its backup copy{}",
             rest(on_sounds_db)
@@ -2071,16 +2073,17 @@ pub fn copy_failed_line(e: &SoundsError) -> String {
 }
 
 /// What the card says when the app's own sound library wasn't there, and was put back from what was beside it
-/// ([`mo_sounds::compact::backup::bring_back`]: the whole-app review of 19 Nov, SN-14): its title and line.
-pub fn brought_back(back: &BroughtBack) -> (&'static str, String) {
+/// ([`mo_sounds::compact::backup::bring_back`]: the whole-app review of 19 Nov, SN-14): its title and line, and whether
+/// what was put back is damaged, to be mended as it's read (its card then ends saying how that went: one card for it).
+pub fn brought_back(back: &BroughtBack) -> (&'static str, String, bool) {
     match back {
         BroughtBack::SetAside { from } => (
             "Put your sound library back",
             format!(
-                "It wasn't there, but the one set aside as it was being mended was ({}): it's back in its place, and \
-                 mended again.",
+                "It wasn't there, but the one set aside as it was being mended was ({}): it's back in its place.",
                 from.file_name().unwrap_or_default().to_string_lossy()
             ),
+            true,
         ),
         BroughtBack::Backup { made } => (
             "Put your sound library back from its backup copy",
@@ -2089,18 +2092,22 @@ pub fn brought_back(back: &BroughtBack) -> (&'static str, String) {
                  since then are lost, and the scan finds the sounds added since again.",
                 chrono::DateTime::<chrono::Local>::from(*made).format("%-d %b %H:%M")
             ),
+            false,
         ),
         BroughtBack::DamagedBackup { .. } => (
             "Put your sound library back from its damaged backup copy",
-            "It wasn't there, and its backup copy is damaged: it's in its place, and mended with what can still be \
-             read of it."
-                .to_owned(),
+            "It wasn't there, and its backup copy is damaged: that's in its place now.".to_owned(),
+            true,
         ),
     }
 }
 
+/// The title of the card of a sound library put back that's damaged ([`brought_back`]) while it's read, to be mended.
+pub const PUTTING_BACK: &str = "Putting your sound library back";
+
 /// What the Sounds page says when there's no sound library to show (the whole-app review of 19 Nov, SN-8): its title
-/// and text. `why`: why none was put back or made, when that's known (a sentence of its own); else what the app does.
+/// and text. `why`: why none was put back or made, when that's known (a sentence of its own); else (only where none is
+/// made: the screenshots) what the app does.
 pub fn no_library(why: Option<&str>) -> (&'static str, String) {
     match why {
         Some(why) => ("No sound library", format!("{why} The app looks again at its next start.")),
@@ -2126,6 +2133,12 @@ pub fn not_made_line(e: &SoundsError) -> String {
 /// Why there's no sound library, for [`no_library`]: the app's data folder (`dir`) isn't there (on a drive that's away).
 pub fn data_folder_away_line(dir: &std::path::Path) -> String {
     format!("The app's data folder ({}) isn't there just now: is the drive it's on connected?", dir.display())
+}
+
+/// Why there's no sound library, for [`no_library`], when nothing else says: none was found in the app's data folder
+/// (`dir`), and none could be made there (a file in it couldn't be looked at just now).
+pub fn not_found_line(dir: &std::path::Path) -> String {
+    format!("None was found in the app's data folder ({}), and none could be made there just now.", dir.display())
 }
 
 /// The C# app's setting for how long each sound plays while a held arrow key steps through them (Settings › Sounds).
@@ -3092,7 +3105,7 @@ mod tests {
         assert_eq!(title(0, 0), "Made your sound library again");
         // Its backup copy damaged too: what could still be read of both kept in a new one, and both damaged ones kept
         // (the whole-app review of 19 Nov, SN-3).
-        let both = |kept, unread, backup_kept, on_sounds_db| {
+        let both = |kept, unread, backup_kept, on_sounds_db: bool| {
             let salvaged = mo_sounds::compact::Salvaged { kept, unread };
             let from_backup = mo_sounds::compact::Salvaged { kept: backup_kept, unread: 1 };
             both_damaged_line(&salvaged, &from_backup, unread > 0 && !on_sounds_db, on_sounds_db)
@@ -3127,6 +3140,15 @@ mod tests {
         assert!(both(0, 1, 0, true).contains(". None of either could still be read, so it's as sounds.db has it. The"));
         assert!(both(12, 3, 40, true).contains(". It kept all of it that could still be read, and filled the gaps from its backup copy (the rest is as sounds.db has it). The"));
         assert!(both(0, 0, 0, false).contains(". There was nothing in either to keep, so it starts empty: a scan of"));
+        // Nothing came of the backup copy: no gaps are said to be filled from it.
+        assert!(both(12, 3, 0, false).contains(
+            ". It kept all of it that could still be read: a scan of your sample folders finds the rest of your sounds. \
+             The damaged one is kept beside it, as"
+        ));
+        assert!(
+            both(12, 3, 0, true)
+                .contains(". It kept all of it that could still be read (the rest is as sounds.db has it). The")
+        );
         assert!(both(3, 0, 0, false).contains(
             ". It kept all of it: your sounds, favourites, tags and plays. The damaged one is kept beside it for a week"
         ));
@@ -3154,27 +3176,33 @@ mod tests {
     /// sounds.db (SN-8).
     #[test]
     fn a_library_put_back_or_not_there_says_why() {
-        let set_aside = BroughtBack::SetAside { from: "I:\\MusicOrganiser\\sounds-rust.db.damaged".into() };
+        // Joined, so the name is found on every system (a backslash isn't a separator on a Mac or Linux).
+        let set_aside =
+            BroughtBack::SetAside { from: std::path::Path::new("I:\\MusicOrganiser").join("sounds-rust.db.damaged") };
+        // Damaged, to be mended as it's read: no mend is said to be done yet (the mend's card ends the same card).
         assert_eq!(
             brought_back(&set_aside),
             (
                 "Put your sound library back",
                 "It wasn't there, but the one set aside as it was being mended was (sounds-rust.db.damaged): it's back \
-                 in its place, and mended again."
-                    .to_owned()
+                 in its place."
+                    .to_owned(),
+                true
             )
         );
         let made = chrono::Local.with_ymd_and_hms(2026, 11, 19, 10, 5, 0).unwrap();
-        let (title, line) = brought_back(&BroughtBack::Backup { made: made.into() });
+        let (title, line, to_mend) = brought_back(&BroughtBack::Backup { made: made.into() });
+        assert!(!to_mend);
         assert_eq!(title, "Put your sound library back from its backup copy");
         assert_eq!(
             line,
             "It wasn't there, so its backup copy of 19 Nov 10:05 is in its place. Plays, favourites, stars, types and \
              tags since then are lost, and the scan finds the sounds added since again."
         );
-        let (title, line) = brought_back(&BroughtBack::DamagedBackup { set_aside: true });
+        let (title, line, to_mend) = brought_back(&BroughtBack::DamagedBackup { set_aside: true });
+        assert!(to_mend);
         assert_eq!(title, "Put your sound library back from its damaged backup copy");
-        assert!(line.starts_with("It wasn't there, and its backup copy is damaged"), "{line}");
+        assert_eq!(line, "It wasn't there, and its backup copy is damaged: that's in its place now.");
         // None to show: why, when that's known, and that it's looked at again; never the old app's sounds.db.
         let wal = SoundsError::Copy {
             path: "I:\\MusicOrganiser\\sounds-rust.db".into(),
@@ -3195,6 +3223,14 @@ mod tests {
         );
         let (_, text) = no_library(Some(&data_folder_away_line(std::path::Path::new("I:\\MusicOrganiser"))));
         assert!(text.starts_with("The app's data folder (I:\\MusicOrganiser) isn't there just now"), "{text}");
+        let (title, text) = no_library(Some(&not_found_line(std::path::Path::new("I:\\MusicOrganiser"))));
+        assert_eq!(title, "No sound library");
+        assert_eq!(
+            text,
+            "None was found in the app's data folder (I:\\MusicOrganiser), and none could be made there just now. The \
+             app looks again at its next start."
+        );
+        // Only where none is made (the screenshots): what the app does.
         let (title, text) = no_library(None);
         assert_eq!(title, "No sound library yet");
         assert!(!text.contains("sounds.db") && !text.contains("can't make one"), "{text}");

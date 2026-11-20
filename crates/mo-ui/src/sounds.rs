@@ -941,10 +941,15 @@ fn read_all(
     let copy = compact::copy_of(sounds_db);
     // Why there's no library, when that's known: the page says so (the whole-app review of 19 Nov, SN-8).
     let mut none_because = None;
+    // A library put back that's damaged: its card ends as the read below mends it.
+    let mut put_back = None;
     // Not for the screenshots (no cards), which never write beside their fixture.
     if let Some(cards) = &cards {
         // One that isn't there, with what it could be mended from beside it, is put back (SN-14).
-        none_because = bring_back(&copy, cards).err();
+        match bring_back(&copy, cards) {
+            Ok(back) => put_back = back,
+            Err(why) => none_because = Some(why),
+        }
         // A fresh install, with no library at all: the app's own is made empty, for the scan to fill (it scans only
         // the app's own).
         match compact::make_empty(sounds_db, &copy) {
@@ -958,9 +963,11 @@ fn read_all(
     }
     // No library at all. Once the copy is the app's own, it's all there is: `sounds.db` may have been archived.
     if !sounds_db.exists() && (cards.is_none() || !copy.exists()) {
-        // Its folder not there is why, when nothing else is known: a drive that's away.
+        // Its folder not there is why, when nothing else is known: a drive that's away. Else something in it couldn't
+        // be looked at just now (only the screenshots, which make none, show what the app does).
         let away = copy.parent().filter(|dir| cards.is_some() && !matches!(dir.try_exists(), Ok(true)));
-        send(Step::NoLibrary(none_because.or_else(|| away.map(list::data_folder_away_line))));
+        let unknown = || copy.parent().filter(|_| cards.is_some()).map(list::not_found_line);
+        send(Step::NoLibrary(none_because.or_else(|| away.map(list::data_folder_away_line)).or_else(unknown)));
         return None;
     }
     let mut held = noter.map(Noter::hold);
@@ -984,7 +991,7 @@ fn read_all(
     // Only for Tiles and List, which show the shuffled list from its start: the other views need every sound.
     let seed = opening.filter(|o| matches!(o.view, TILES | LIST)).map(|o| o.seed);
     let first = match &cards {
-        Some(cards) => read_through_copy(sounds_db, now, cards, |db| {
+        Some(cards) => read_through_copy(sounds_db, now, cards, put_back, |db| {
             let Some(seed) = seed else { return };
             match db.shown_ids().and_then(|ids| {
                 let first = list::first_shuffled(&ids, seed, FIRST);
@@ -1054,7 +1061,7 @@ fn read_all(
     // own.
     let remake = |first: &mut FirstRead, remade: &mut Option<Vec<Sound>>, job: &mut Option<Job>| {
         let (mut everything, made) = compact::mend_reading(sounds_db, &first.source, now)?;
-        say_made(&made, &first.source, sounds_db, cards.as_ref(), job.take(), true);
+        say_made(&made, &first.source, sounds_db, cards.as_ref(), job.take(), None, true);
         if made.is_err() {
             // Not made again: the rest is read from sounds.db, as it is without a copy.
             first.source = sounds_db.to_owned();
@@ -1692,18 +1699,33 @@ fn read_in_place(sounds_db: &Path, now: NaiveDateTime) -> Result<FirstRead, Soun
 
 /// The sounds read from the app's own copy of the library beside `sounds_db`, or (with no copy it can read yet) from
 /// `sounds_db` while the copy is made on the same pass ([`compact::read_for_page`]). Making it goes on `cards`.
-/// `first` is handed the copy before its sounds are read, to send a few at once.
+/// `first` is handed the copy before its sounds are read, to send a few at once. A library just put back that's
+/// damaged (`put_back`) is mended here as it's read: its card ends saying how that went.
 fn read_through_copy(
     sounds_db: &Path,
     now: NaiveDateTime,
     cards: &Feed,
+    put_back: Option<PutBack>,
     first: impl FnOnce(&SoundsDb),
 ) -> Result<FirstRead, SoundsError> {
     let copy = compact::copy_of(sounds_db);
-    match compact::read_for_page(sounds_db, now, first)? {
+    let read = match compact::read_for_page(sounds_db, now, first) {
+        Ok(read) => read,
+        Err(e) => {
+            if let Some(back) = put_back {
+                back.not_mended(&e);
+            }
+            return Err(e);
+        }
+    };
+    match read {
         PageRead::Copy { db, sounds, behind, adopted } => {
             if adopted {
                 say_adopted();
+            }
+            // Read as it is, with nothing to mend where the page looks: what was put back is all there is to say.
+            if let Some(back) = put_back {
+                back.job.done_as(back.title, &back.line);
             }
             Ok(FirstRead {
                 sounds,
@@ -1715,7 +1737,8 @@ fn read_through_copy(
             })
         }
         PageRead::Library { everything, made } => {
-            say_made(&made, &copy, sounds_db, Some(cards), None, false);
+            let (job, before) = put_back.map(|back| (back.job, back.line)).unzip();
+            say_made(&made, &copy, sounds_db, Some(cards), job, before.as_deref(), false);
             // The rest is read from the copy made at the moment the sounds were read, or else (when it couldn't be
             // made, or opened just now) from `sounds.db`. What was played: the sounds are in hand, so a History that
             // can't be read just now stays empty.
@@ -1796,7 +1819,7 @@ fn back_up(
     let held = noter.map(Noter::hold);
     match compact::mend_reading(sounds_db, &copy, Local::now().naive_local()) {
         Ok((mut everything, made)) => {
-            say_made(&made, &copy, sounds_db, Some(cards), None, true);
+            say_made(&made, &copy, sounds_db, Some(cards), None, None, true);
             if made.is_err() {
                 return not_mended;
             }
@@ -1872,16 +1895,21 @@ fn say_adopted() {
 }
 
 /// Puts the app's own sound library back when it isn't there, but something it could be mended from is
-/// ([`compact::backup::bring_back`]: the whole-app review of 19 Nov, SN-14), saying so on a card. Why not, for the
-/// page ([`list::no_library`]), when it couldn't be.
-fn bring_back(copy: &Path, cards: &Feed) -> Result<(), String> {
+/// ([`compact::backup::bring_back`]: the whole-app review of 19 Nov, SN-14), saying so on a card. One put back that's
+/// damaged is mended as the page reads it ([`read_through_copy`]): its card stays open till then, and ends saying how
+/// that went, one card for it (as review SN-7 has it). Why not, for the page ([`list::no_library`]), when it couldn't
+/// be.
+fn bring_back(copy: &Path, cards: &Feed) -> Result<Option<PutBack>, String> {
     match compact::backup::bring_back(copy) {
-        Ok(None) => Ok(()),
+        Ok(None) => Ok(None),
         Ok(Some(back)) => {
-            let (title, line) = list::brought_back(&back);
+            let (title, line, to_mend) = list::brought_back(&back);
             log::warning("Sounds", &format!("The app's own sound library wasn't there: {line} ({back:?})"));
-            cards.start(title, "").done_as(title, &line);
-            Ok(())
+            if !to_mend {
+                cards.start(title, "").done_as(title, &line);
+                return Ok(None);
+            }
+            Ok(Some(PutBack { job: cards.start(list::PUTTING_BACK, &line), title, line }))
         }
         Err(why) => {
             log::warning(
@@ -1893,15 +1921,36 @@ fn bring_back(copy: &Path, cards: &Feed) -> Result<(), String> {
     }
 }
 
+/// A sound library put back that's damaged ([`bring_back`]), to be mended as the page reads it: its card, open till
+/// then, and what it says was put back (its title, its line).
+struct PutBack {
+    job: Job,
+    title: &'static str,
+    line: String,
+}
+
+impl PutBack {
+    /// The read failed, `e` says why: it couldn't be mended.
+    fn not_mended(self, e: &SoundsError) {
+        let why = match e {
+            SoundsError::Damaged { why, .. } | SoundsError::Copy { why, .. } => why.clone(),
+            e => e.to_string(),
+        };
+        self.job.failed_as("Couldn't mend your sound library", &format!("{} It couldn't be mended: {why}.", self.line));
+    }
+}
+
 /// Says (in the log, and on `cards`) how making the app's copy of the library beside `sounds_db` went: `again` when
-/// it was made again because it was damaged. On `job`'s card when there is one (the work it was found damaged in),
-/// which ends with it: one card for one event (review SN-7); else on a card of its own.
+/// it was made again because it was damaged. On `job`'s card when there is one (the work it was found damaged in, or
+/// the library put back that it was found damaged in, which `before` says), which ends with it: one card for one event
+/// (review SN-7); else on a card of its own.
 fn say_made(
     made: &Result<compact::Synced, SoundsError>,
     copy: &Path,
     sounds_db: &Path,
     cards: Option<&Feed>,
     job: Option<Job>,
+    before: Option<&str>,
     again: bool,
 ) {
     let size = |path: &Path| fs::metadata(path).map_or(0, |m| m.len());
@@ -1970,6 +2019,11 @@ fn say_made(
         }
     };
     let Some((title, line, went_well)) = card else { return };
+    let line = match before {
+        Some(before) if line.is_empty() => before.to_owned(),
+        Some(before) => format!("{before} {line}"),
+        None => line,
+    };
     match job.or_else(|| cards.map(|c| c.start(&title, ""))) {
         Some(job) if went_well => job.done_as(&title, &line),
         Some(job) => job.failed_as(&title, &line),
@@ -5008,9 +5062,24 @@ mod tests {
         assert_eq!(cards_said(&cards), Vec::<String>::new());
         // With nothing beside it at all, a new one is made: no one is left without a library.
         assert!(std::fs::remove_file(&wal).is_ok());
-        assert!(std::fs::remove_file(compact::backup::backup_of(&copy)).is_ok());
+        let backup = compact::backup::backup_of(&copy);
+        assert!(std::fs::remove_file(&backup).is_ok());
         let said = one_start(&sounds_db, &library_db, &Feed::default());
         assert_eq!(said.first().map(String::as_str), Some("0 sounds from sounds-rust.db, 0 plays"), "{said:?}");
+        // Gone again, with its backup copy damaged: that's moved into its place (it's never kept twice), and mended as
+        // it's read, on one card that says both (as review SN-7 has it).
+        assert!(matches!(compact::backup::back_up(&sounds_db), Some(compact::backup::BackedUp::Made { .. })));
+        damage_first_page(&backup, "sounds");
+        take_away();
+        let cards = Feed::default();
+        let said = one_start(&sounds_db, &library_db, &cards);
+        assert_eq!(said.first().map(String::as_str), Some("0 sounds from sounds-rust.db, 0 plays"), "{said:?}");
+        let shown = cards_said(&cards);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        let put_back = "Made your sound library again: It wasn't there, and its backup copy is damaged: that's in its \
+                        place now. It was damaged, there's no backup copy, and there's no sounds.db";
+        assert!(shown[0].starts_with(put_back), "{shown:?}");
+        assert!(!backup.exists() && compact::backup::kept_of(&copy).exists());
     }
 
     #[test]
