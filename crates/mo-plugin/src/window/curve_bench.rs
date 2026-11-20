@@ -167,9 +167,23 @@ impl Bench {
         });
         let strip = then(|c, (kind, x, _, keys)| c.strip(kind, x, keys));
         data.on_strip(move |kind, x, shift, alt, ctrl| strip((kind, f64::from(x), 0.0, Keys { shift, alt, ctrl })));
-        let wheel = then(|c, (along, x, by, _)| c.wheel(x, by, along != 0));
+        // What's in sight changed, not the curve: the picture is drawn again, and the part buttons stay as they are
+        // (working them out on every wheel notch held the DAW's thread on big curves: the 19 Nov 2026 review's CU-6).
+        let seen = |what: fn(&mut Card, (i32, f64, f64, Keys)) -> bool| {
+            let (me, weak) = (Rc::clone(self), panel.as_weak());
+            move |told: (i32, f64, f64, Keys)| {
+                let drawn = what(&mut me.card.borrow_mut(), told);
+                if let Some(panel) = weak.upgrade() {
+                    if drawn {
+                        me.redraw(&panel);
+                    }
+                    me.show(&panel, false);
+                }
+            }
+        };
+        let wheel = seen(|c, (along, x, by, _)| c.wheel(x, by, along != 0));
         data.on_wheel(move |x, by, along| wheel((i32::from(along), f64::from(x), f64::from(by), Keys::default())));
-        let laid_out = then(|c, (_, width, height, _)| {
+        let laid_out = seen(|c, (_, width, height, _)| {
             c.laid_out(width, height);
             true
         });
@@ -296,9 +310,18 @@ impl Bench {
             // As it's found now: its name may be new.
             Some((at, now)) => {
                 panel.global::<CurveEditorData>().set_name(now.name.as_str().into());
-                self.card.borrow_mut().open(&now.id, &now.name, &now.points, now.length_beats);
+                // (Found at another height or length, and not worked on: the card shows it as it's found now.)
+                let anew = self.card.borrow_mut().open(&now.id, &now.name, &now.points, now.length_beats);
                 *self.open.borrow_mut() = Some((at, now.clone()));
-                self.show(panel, false);
+                if anew {
+                    self.stop(panel);
+                    let data = panel.global::<CurveEditorData>();
+                    data.set_picture(Image::default());
+                    data.set_ruler(ModelRc::default());
+                    data.set_end_x(-1.0);
+                    self.redraw(panel);
+                }
+                self.show(panel, anew);
             }
             None => {
                 self.stop(panel);

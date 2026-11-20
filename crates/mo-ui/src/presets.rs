@@ -1120,7 +1120,7 @@ fn show_curve_card(app: &AppWindow) {
         editor.set_facts(facts.into());
         editor.set_found(found.into());
         let edited = editor.get_changed();
-        let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some(), edited);
+        let offers = logic::curve_offers(c, !p.bitwig.is_empty() || bitwig_chosen().is_some(), edited);
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
         editor.set_hear_key(key(curve_act::HEAR));
         editor.set_metronome_key(key(curve_act::METRONOME));
@@ -1294,16 +1294,37 @@ const ADDED: &str = "Added ";
 /// Undo (`back`) or Redo with no step left in the curve on the card: the page picks curve `id`, the one worked on
 /// before (or the one Undo came back from), and says so. False when that curve is no longer among the curves.
 pub(crate) fn curve_gone_back(app: &AppWindow, id: &str, back: bool) -> bool {
-    let name = PAGE.with(|p| p.borrow().curves.iter().find(|c| c.id == id).map(|c| c.name.clone()));
-    let Some(name) = name else { return false };
+    let found = PAGE.with(|p| curve_of_card_id(&p.borrow(), id));
+    let Some((id, name)) = found else { return false };
     // ("Back to", not "as you left it": one that has changed where it came from since comes back afresh.)
     let says = if back {
         format!("Back to {name}. Redo goes to the curve you came from again.")
     } else {
         format!("Forward to {name} again. Undo goes back.")
     };
-    pick_curve_saying(app, Some(id.to_owned()), says);
+    pick_curve_saying(app, Some(id), says);
     true
+}
+
+/// The curve the editor's card knows as `card_id`: its own id and its name. The card has a curve as it's sent, and
+/// a line shown at half or double speed is sent under an id of its own (`curves::at_speed`), so the card's id isn't
+/// always one of the list's. None when no curve would go on the card under that id now: it's gone, or its line
+/// shows it at another speed than when it was left (the 19 Nov 2026 review's CU-3).
+fn curve_of_card_id(p: &Page, card_id: &str) -> Option<(String, String)> {
+    let speed_of = |at: usize| {
+        let row = p.curve_shown.iter().position(|&i| i == at);
+        row.and_then(|row| p.curve_speeds.get(row).copied()).unwrap_or(1.0)
+    };
+    let own = p.curves.iter().position(|c| c.id == card_id).filter(|&at| speed_of(at) == 1.0);
+    // Only the lines at another speed have another id, and few are: each is worked out to see.
+    let at_speed = || {
+        p.curve_shown.iter().zip(&p.curve_speeds).find_map(|(&at, &speed)| {
+            let c = p.curves.get(at)?;
+            (speed != 1.0 && curves::id_at_speed(&c.id, speed) == card_id).then_some(at)
+        })
+    };
+    let c = p.curves.get(own.or_else(at_speed)?)?;
+    Some((c.id.clone(), c.name.clone()))
 }
 
 /// Undo or Redo took a step in the editor: the card no longer says a curve was added.
@@ -1363,13 +1384,33 @@ fn on_window(f: impl FnOnce(&AppWindow) + Send + 'static) {
 struct Where {
     library: PathBuf,
     data_dir: PathBuf,
+    /// Your Bitwig Studio folder as Settings › DAWs has it (the settings live on the window's thread).
+    bitwig: Option<PathBuf>,
+}
+
+impl Where {
+    /// On the window's thread.
+    fn of(p: &Page) -> Where {
+        Where { library: p.library.clone(), data_dir: p.data_dir.clone(), bitwig: bitwig_chosen() }
+    }
+
+    /// The chosen folder, when it is Bitwig's: it has a Library folder in it. (A drive picked by mistake isn't
+    /// walked for presets.) Asks the disk: off the window's thread.
+    fn bitwig(&self) -> Option<&Path> {
+        self.bitwig.as_deref().filter(|c| c.join("Library").is_dir())
+    }
+}
+
+/// Your Bitwig Studio folder as Settings › DAWs has it now. On the window's thread.
+fn bitwig_chosen() -> Option<PathBuf> {
+    crate::settings::value(mo_app::app_settings::BITWIG_FOLDER_KEY).filter(|f| !f.trim().is_empty()).map(PathBuf::from)
 }
 
 fn read_sounds(_app: &AppWindow) {
     let at = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.reading = Some((0, 0));
-        Where { library: p.library.clone(), data_dir: p.data_dir.clone() }
+        Where::of(&p)
     });
     let started = background::spawn("Presets read", move || {
         // Guarded: a bug in the read (the log has the crash) still ends it here, so the page says it couldn't read
@@ -1439,7 +1480,8 @@ fn read_all(at: &Where) -> Result<(), String> {
     drop(lib);
     let songs = mo_library::songs::group_songs(&saves, &choices, &mo_formats::dates::RealDates::now());
     let newest = logic::newest_saves(&songs, export_root.as_deref());
-    let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
+    let bitwig_folders =
+        logic::bitwig_folders(at.bitwig(), &plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     // Every song's newest save as it is now, read below or left out: Songs' link reads again only for another (U-2).
     let looked_at: HashMap<String, i64> = songs.iter().map(|s| (s.latest.path.clone(), s.latest.mtime)).collect();
     drop(songs);
@@ -2725,7 +2767,7 @@ fn read_curves(_app: &AppWindow) {
     let (at, changes_before) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.curves_reading = Some((0, 0));
-        (Where { library: p.library.clone(), data_dir: p.data_dir.clone() }, p.curve_changes)
+        (Where::of(&p), p.curve_changes)
     });
     let started = background::spawn("Curves read", move || {
         // Guarded, as the sounds' read is (RA-8).
@@ -2802,7 +2844,8 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
     let export_root = bitwig::export_left_out(&lib).ok().flatten();
     drop(lib);
     let mut paths = logic::curve_saves(&saves, export_root.as_deref());
-    let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
+    let bitwig_folders =
+        logic::bitwig_folders(at.bitwig(), &plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     drop(saves);
     let library_roots: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).collect();
     // Bitwig's curves library and the plugins' LFO shapes (Serum, LFOTool, Vital, Duck), looked through side by side.
@@ -2874,7 +2917,7 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
     let Some((curve, sent)) = curve else { return false };
     // These send the curve as it was found: with edits not saved they'd send the old shape (the keys and the finder
     // get here too, not only the card's greyed button).
-    if matches!(id, curve_act::TO_BITWIG | curve_act::REVEAL) && curves_edits_wait(app, &curve.id) {
+    if matches!(id, curve_act::TO_BITWIG | curve_act::REVEAL) && curves_edits_wait(app, &sent.id) {
         return true;
     }
     match id {
@@ -2943,11 +2986,27 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             }
         }
         curve_act::TO_BITWIG => {
-            let Some(folder) = logic::bitwig_curves_folder(&bitwig_folders) else { return false };
-            let started = background::spawn("Curve to Bitwig", move || match curves::save_to_bitwig(&sent, &folder) {
+            // The folder chosen in Settings as it is now (it may have been chosen since the curves were read), then
+            // the ones found then. Which has a Library folder is asked off the window's thread.
+            let folders: Vec<PathBuf> = bitwig_chosen().into_iter().chain(bitwig_folders).collect();
+            if folders.is_empty() {
+                return false;
+            }
+            let save = move || {
+                let folder = logic::bitwig_curves_folder(&folders, |library| library.is_dir()).ok_or_else(|| {
+                    "Couldn't find Bitwig's Library folder. Choose your Bitwig Studio folder in Settings › DAWs."
+                        .to_owned()
+                })?;
+                curves::save_to_bitwig(&sent, &folder)
+            };
+            let started = background::spawn("Curve to Bitwig", move || match save() {
                 Ok(path) => {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    let text = format!("Saved {name} in Bitwig's curves. It shows in Bitwig's browser under Curves.");
+                    // The folder by name: one that isn't the Library Bitwig uses is seen at once.
+                    let text = format!(
+                        "Saved {name} in {}. It shows in Bitwig's browser under Curves.",
+                        path.parent().unwrap_or(&path).display()
+                    );
                     feed.start("Saved a curve to Bitwig", "").done(&name);
                     curve_message(text);
                 }
@@ -3475,6 +3534,34 @@ fn sample_curves() -> Vec<Curve> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cards_id_of_a_curve_shown_at_another_speed_leads_back_to_its_line() {
+        let point = |x: f64, y: f64| mo_formats::bitwig::curve::CurvePoint { x, y, bend: 0.0 };
+        let curve = |id: &str| Curve {
+            id: id.into(),
+            name: format!("Curve {id}"),
+            points: vec![point(0.0, 0.0), point(1.0, 1.0)],
+            length_beats: 4.0,
+            hidden: false,
+            sources: Vec::new(),
+        };
+        let mut p = Page { curves: vec![curve("a"), curve("b"), curve("c")], ..Page::default() };
+        // "a" at its own speed, "b" at half speed; "c" isn't shown (filtered out).
+        p.curve_shown = vec![0, 1];
+        p.curve_speeds = vec![1.0, 0.5];
+        p.curve_picked = Some("b".into());
+        // The card has "b" as it's sent: under another id than the list's. That's the id its edits are known by
+        // (what the guard on Show curve file and Save to Bitwig's curves must be asked with).
+        let sent = picked_curve_as_sent(&p).expect("picked");
+        assert_ne!(sent.id, "b");
+        assert_eq!(curve_of_card_id(&p, &sent.id), Some(("b".into(), "Curve b".into())));
+        assert_eq!(curve_of_card_id(&p, "a"), Some(("a".into(), "Curve a".into())));
+        assert_eq!(curve_of_card_id(&p, "c"), Some(("c".into(), "Curve c".into())), "not shown: sent at its own speed");
+        // Left at its own speed and shown at half speed now, "b" wouldn't come back as it was left; nor one that's gone.
+        assert_eq!(curve_of_card_id(&p, "b"), None);
+        assert_eq!(curve_of_card_id(&p, "gone"), None);
+    }
 
     #[test]
     fn lines_read_while_a_filtering_holds_the_list_wait_and_are_never_copied_in() {
