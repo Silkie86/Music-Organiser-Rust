@@ -2209,12 +2209,12 @@ mod tests {
         };
         let mut live = open();
         live.look_for_mends();
-        assert_eq!(live.mend, Mend::Reading { ids: [1, 2].into(), owed: HashSet::new(), missed: false });
+        assert_eq!(live.mend, Mend::Reading { ids: [1, 2].into(), owed: HashSet::new(), read: HashSet::new() });
         live.stopper().store(true, Ordering::SeqCst);
         let caught = live.catch_up();
         assert_eq!((caught.read.len(), caught.moved.len(), caught.gone, caught.mended), (0, 0, 0, 0));
         assert!(caught.stopped);
-        assert_eq!(live.mend, Mend::Reading { ids: [1, 2].into(), owed: HashSet::new(), missed: false });
+        assert_eq!(live.mend, Mend::Reading { ids: [1, 2].into(), owed: HashSet::new(), read: HashSet::new() });
         assert!(!live.note_to_keep());
         assert!(live.keep().is_none(), "nothing to keep");
         // A batch from the folder watch reads nothing either.
@@ -2222,7 +2222,7 @@ mod tests {
         let updated = live.update(&Changes { files: vec![day], ..Changes::default() });
         assert!(updated.stopped && updated.read.is_empty());
         // A mend that's done isn't thrown away by a stop: it's still noted, with the saves read for it.
-        live.mend = Mend::Reading { ids: HashSet::new(), owed: HashSet::new(), missed: false };
+        live.mend = Mend::Reading { ids: HashSet::new(), owed: HashSet::new(), read: HashSet::new() };
         assert!(live.update(&Changes::default()).stopped);
         assert!(live.note_to_keep());
         // The next start catches up with all of it.
