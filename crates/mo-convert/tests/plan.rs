@@ -119,7 +119,7 @@ fn automation(name: &str, channel: Option<u32>, control: FlControl, points: &[(f
 }
 
 fn snare(_: &str) -> Option<SampleFile> {
-    Some(SampleFile { bytes: 1000, md5: [7; 16], rate: 44100, channels: 2, seconds: 0.5 })
+    Some(SampleFile { bytes: 1000, md5: [7; 16], rate: 44100, channels: 2, seconds: 0.5, ogg_in_wav: false })
 }
 
 fn plan(song: &FlSong) -> Plan {
