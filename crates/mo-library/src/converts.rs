@@ -43,3 +43,61 @@ pub fn remember(songs: &Path, file: &Path, written: &str) -> Result<bool, Librar
 fn is_gone(file: &Path) -> bool {
     matches!(std::fs::symlink_metadata(file), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
+
+/// What the setting that remembers a copy was opened in Bitwig is called, before the copy's path.
+pub const OPENED_PREFIX: &str = "bitwig_opened:";
+
+/// How long after a copy was opened in Bitwig it counts as maybe still open there (whole-app review CN-11, 19 Nov
+/// 2026). Bitwig only brings an open project forward, and the app can't see whether it still has one open, so for a
+/// day a new convert of the same song takes the next name, as it does while the app that opened it still runs.
+pub const OPEN_FOR_SECONDS: u64 = 24 * 60 * 60;
+
+/// The setting that remembers the copy at `file` was opened in Bitwig.
+pub fn opened_key(file: &Path) -> String {
+    format!("{OPENED_PREFIX}{}", file.display())
+}
+
+/// Whether a copy whose opened record is `opened` (seconds since 1970, as [`remember_opened`] keeps it) may still be
+/// open in Bitwig at `now`. A record from after `now` (the clock was set back) counts as open; one that can't be read
+/// doesn't.
+pub fn may_be_open(opened: Option<&str>, now: u64) -> bool {
+    opened.and_then(|o| o.parse::<u64>().ok()).is_some_and(|at| now < at.saturating_add(OPEN_FOR_SECONDS))
+}
+
+/// The names (each copy's file name without ".bwproject") of the copies opened in Bitwig that may still be open there
+/// at `now`, as `lib` remembers them.
+pub fn opened_lately(lib: &Library, now: u64) -> Result<Vec<String>, LibraryError> {
+    Ok(lib
+        .settings_starting(OPENED_PREFIX)?
+        .into_iter()
+        .filter(|(_, at)| may_be_open(Some(at), now))
+        .filter_map(|(k, _)| {
+            Path::new(k.get(OPENED_PREFIX.len()..)?).file_stem().map(|n| n.to_string_lossy().into_owned())
+        })
+        .collect())
+}
+
+/// Remembers that the copy at `file` was opened in Bitwig at `now` (seconds since 1970) in the song library at
+/// `songs`, and lets go of the records that say nothing any more (older than [`OPEN_FOR_SECONDS`], or of a copy that
+/// has gone), in one transaction (rule 28). Only while `songs` is the app's own library, as [`remember`]. A record
+/// lost only means a convert may replace a copy Bitwig still shows, as before there were records; none is ever a
+/// reason to save over anything. Looks at the disk: never on the window's thread.
+pub fn remember_opened(songs: &Path, file: &Path, now: u64) -> Result<bool, LibraryError> {
+    if songs_db::own_since(songs).is_none() {
+        return Ok(false);
+    }
+    let key = opened_key(file);
+    let stale: Vec<(String, String)> = Library::open_read_only(songs)?
+        .settings_starting(OPENED_PREFIX)?
+        .into_iter()
+        .filter(|(k, at)| {
+            *k != key
+                && (!may_be_open(Some(at), now)
+                    || k.get(OPENED_PREFIX.len()..).is_some_and(|copy| is_gone(Path::new(copy))))
+        })
+        .collect();
+    let at = now.to_string();
+    let edit = |was: Option<&str>| (was != Some(at.as_str())).then(|| at.clone());
+    setting_list::change_text_and_forget(songs, &key, edit, &stale)?;
+    Ok(true)
+}

@@ -118,3 +118,40 @@ fn library_db_is_never_written() {
     // Not even the gone copy's record went.
     assert_eq!(settings(&path), [record]);
 }
+
+/// Whole-app review CN-11 (19 Nov 2026): a copy opened in Bitwig is remembered for a day, through a restart.
+#[test]
+fn a_copy_opened_in_bitwig_counts_as_open_for_a_day_and_old_records_are_let_go() {
+    let dir = folder("opened");
+    let (night, day) = (copy(&dir, "Night"), copy(&dir, "Day"));
+    let gone = dir.join("Exports").join("Old").join("Old.bwproject");
+    let hour = 60 * 60;
+    let start = 1_800_000_000;
+    library(&dir, &[(converts::opened_key(&gone), start.to_string()), ("theme".to_owned(), "Graphite".to_owned())]);
+    let songs = dir.join(songs_db::FILE_NAME);
+    songs_db::make(&dir.join("library.db"), &songs, &mut |_| {}).unwrap();
+    assert_eq!(songs_db::at_start(&dir, "test").state, State::Switched);
+
+    assert!(converts::remember_opened(&songs, &night, start).unwrap());
+    // The record of a copy that has gone went with it; every other setting stayed.
+    let mut want = vec![(converts::opened_key(&night), start.to_string()), ("theme".to_owned(), "Graphite".to_owned())];
+    want.sort();
+    assert_eq!(settings(&songs), want);
+    let lately = |now: u64| {
+        let mut names = converts::opened_lately(&Library::open_read_only(&songs).unwrap(), now).unwrap();
+        names.sort();
+        names
+    };
+    assert_eq!(lately(start + 23 * hour), ["Night"]);
+    assert_eq!(lately(start + 24 * hour), [""; 0]);
+    // A clock set back never makes a fresh record old.
+    assert_eq!(lately(start - hour), ["Night"]);
+
+    // Another copy opened a day later: Night's record says nothing any more, and goes.
+    assert!(converts::remember_opened(&songs, &day, start + 25 * hour).unwrap());
+    assert_eq!(lately(start + 26 * hour), ["Day"]);
+    let lib = Library::open_read_only(&songs).unwrap();
+    assert_eq!(lib.settings_starting(converts::OPENED_PREFIX).unwrap().len(), 1);
+    // A record that can't be read, or none, says nothing.
+    assert!(!converts::may_be_open(Some("soon"), start) && !converts::may_be_open(None, start));
+}

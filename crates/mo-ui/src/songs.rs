@@ -1553,6 +1553,7 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
                         if let Ok(mut opened) = OPENED.lock() {
                             opened.insert(c.name.clone());
                         }
+                        remember_opened(&db, &c.file);
                         job.done(&c.message);
                     }
                     Err(e) => {
@@ -1592,6 +1593,21 @@ fn remember_convert(db: &Path, c: &Converted) {
     }
 }
 
+/// Remembers in the app's own songs.db that Bitwig was asked to open a convert, so for a day a new convert of the same
+/// song takes the next name even after the app restarts: Bitwig may still show this one, and only brings an open
+/// project forward (review CN-11). Not being able to only costs that: the log says why. Writes the disk: never on the
+/// window's thread.
+fn remember_opened(db: &Path, file: &Path) {
+    if let Err(e) = mo_library::converts::remember_opened(db, file, seconds_now()) {
+        log::warning("Convert", &format!("Couldn't remember that {} was opened: {e}", file.display()));
+    }
+}
+
+/// Seconds since 1970, as the opened records count them.
+fn seconds_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 /// Reads the settings (export folder, template, how steps play) and converts `project` on the low-priority pool.
 /// What was written is remembered after, in songs.db ([`remember_convert`]).
 fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
@@ -1601,7 +1617,10 @@ fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
     let template = bitwig::template_path(&paths::data_dir(), setting(bitwig::BITWIG_TEMPLATE_KEY)?.as_deref())
         .ok_or(bitwig::NO_TEMPLATE)?;
     let steps = setting(bitwig::STEPS_UNTIL_NEXT_NOTE_KEY)?.as_deref() == Some("1");
-    let opened = OPENED.lock().map(|o| o.clone()).unwrap_or_default();
+    let mut opened = OPENED.lock().map(|o| o.clone()).unwrap_or_default();
+    // And the names Bitwig was asked to open in the last day, by this run of the app or an earlier one: Bitwig may
+    // still show them (review CN-11). Not being able to read them only means the names this run opened count.
+    opened.extend(mo_library::converts::opened_lately(&lib, seconds_now()).unwrap_or_default());
     let locator = sound_library::locator(Some(&sound_library::database_beside(db)));
     let at = project.to_string_lossy().into_owned();
     background::on_pool(move || {
