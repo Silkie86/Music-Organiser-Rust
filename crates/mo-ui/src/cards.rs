@@ -59,6 +59,11 @@ pub fn connect(app: &AppWindow, feed: &Feed) {
 /// How many jobs the rail lists; the rest are counted under them ("and 2 more").
 const RAIL_JOBS: usize = 4;
 
+/// How many cards show in the window's corner; the older ones wait behind them, counted on a line above ("and 2
+/// more"), and each shows as one in front is closed. More than this ran off the top of the window, where their ×
+/// couldn't be reached (the 19 November 2026 review's RA-5).
+const CARDS_SHOWN: usize = 4;
+
 /// Puts the feed's jobs on screen now: the running and just-finished ones as lines in the rail, the ones that failed
 /// as cards (the UX review of 10 Nov, A3), and so the ones done that stay until closed (review finding AP-8: the
 /// rail's lines have no ×). Call on the window's thread. When the same jobs are on screen, only their
@@ -66,7 +71,10 @@ const RAIL_JOBS: usize = 4;
 pub fn refresh(app: &AppWindow, feed: &Feed) {
     let visible = feed.visible(Instant::now());
     let (cards, jobs): (Vec<&Card>, Vec<&Card>) = visible.iter().partition(|c| c.to_close());
-    let cards: Vec<CardInfo> = cards.into_iter().map(card_info).collect();
+    let mut cards: Vec<CardInfo> = cards.into_iter().map(card_info).collect();
+    // The newest are at the end, as with the rail's jobs.
+    let more_cards = cards.len().saturating_sub(CARDS_SHOWN);
+    cards.drain(..more_cards);
     let mut jobs: Vec<CardInfo> = jobs.into_iter().map(card_info).collect();
     // The newest are at the end: they are the ones kept when there are too many for the rail.
     let more = jobs.len().saturating_sub(RAIL_JOBS);
@@ -76,6 +84,7 @@ pub fn refresh(app: &AppWindow, feed: &Feed) {
     show(&app.get_cards(), cards, |m| app.set_cards(m));
     show(&app.get_jobs(), jobs, |m| app.set_jobs(m));
     app.set_more_jobs(more as i32);
+    app.set_more_cards(more_cards as i32);
 }
 
 /// How often the bar of a job that can't say how far it is moves on. Each move draws the whole window again, so it

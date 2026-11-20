@@ -102,10 +102,24 @@ component ActivityCard inherits Rectangle {
 // rest are lines in the rail, which have no ×).
 export component ActivityCards inherits VerticalLayout {
     in property <[CardInfo]> cards;
+    // How many older cards wait behind these: each shows as one of these is closed.
+    in property <int> more;
     callback dismiss(int);
     width: 320px;
     spacing: Space.sm;
     alignment: end;
+    if root.more > 0: Rectangle {
+        height: more-line.preferred-height + 2 * Space.xs;
+        border-radius: Theme.radius;
+        background: Theme.surface-raised;
+        border-width: 1px;
+        border-color: Theme.edge;
+        more-line := Text {
+            text: "and " + root.more + " more behind these";
+            color: Theme.muted;
+            font-size: Type.meta;
+        }
+    }
     for c in root.cards: ActivityCard {
         // Given, not left to the column, so each card knows how wide it is when the column measures it.
         width: root.width;

@@ -137,7 +137,23 @@ impl Feed {
             started: Instant::now(),
             ended: None,
         });
+        self.one_of_a_kind(id);
         self.changed();
+    }
+
+    /// Takes away the older cards that stay until closed and say the very same as card `id`: said again, it's the
+    /// one card, the newest. Each part sent while Bitwig had another project open, and each scan that found the
+    /// sounds gone, added one more of the same card, with nothing to take them away but their × (the 19 November 2026
+    /// review's RA-5).
+    fn one_of_a_kind(&self, id: u64) {
+        let mut inner = self.lock();
+        let Some(new) = inner.cards.iter().find(|c| c.id == id).cloned() else { return };
+        if new.ended.is_some() || new.state == State::Running {
+            return;
+        }
+        inner.cards.retain(|c| {
+            c.id == id || c.ended.is_some() || c.state != new.state || c.title != new.title || c.detail != new.detail
+        });
     }
 
     /// The cards to show now, oldest first: finished ones past their time are left out.
@@ -271,6 +287,7 @@ impl Job {
         self.retitle(title);
         self.end(State::Done, detail);
         self.feed.update(self.id, |c| c.ended = None);
+        self.feed.one_of_a_kind(self.id);
         self.feed.changed();
     }
 
@@ -280,6 +297,7 @@ impl Job {
         self.retitle(title);
         self.end(State::Failed, why);
         self.feed.update(self.id, |c| c.ended = None);
+        self.feed.one_of_a_kind(self.id);
         self.feed.changed();
     }
 
@@ -436,6 +454,34 @@ mod tests {
         assert_eq!(feed.running(), 0);
         feed.dismiss(feed.visible(later)[0].id);
         assert!(feed.visible(later).is_empty());
+    }
+
+    // The 19 November 2026 review's RA-5: the same card said again piled up, one more each time.
+    #[test]
+    fn a_card_that_stays_said_again_is_one_card_the_newest() {
+        let feed = Feed::default();
+        for _ in 0..3 {
+            feed.start("Send to Bitwig", "").done_to_read("Sent", "but its bar isn't marked");
+            feed.notice("Some sounds look gone", "Is a drive unplugged?");
+        }
+        feed.start("Send to Bitwig", "").done_to_read("Sent", "another line");
+        // A failed job's card goes by itself, so two of the same are left to.
+        feed.start("Copy", "").failed("no room");
+        feed.start("Copy", "").failed("no room");
+        let now = feed.visible(Instant::now());
+        let said: Vec<(&str, &str)> = now.iter().map(|c| (c.title.as_str(), c.detail.as_str())).collect();
+        assert_eq!(
+            said,
+            [
+                ("Sent", "but its bar isn't marked"),
+                ("Some sounds look gone", "Is a drive unplugged?"),
+                ("Sent", "another line"),
+                ("Copy", "no room"),
+                ("Copy", "no room")
+            ]
+        );
+        // The ones kept are the newest: the two said last in the loop.
+        assert!(now[0].id > 4 && now[1].id > now[0].id, "{:?}", now.iter().map(|c| c.id).collect::<Vec<_>>());
     }
 
     // Review finding AP-8: a told card was shown as a line in the rail, which has no ×, so it stayed all session.
