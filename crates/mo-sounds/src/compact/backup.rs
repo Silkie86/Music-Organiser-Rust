@@ -351,36 +351,13 @@ pub(crate) enum NotRestored {
 /// [`super::salvage`]), and given the library's name; the damaged library set aside ([`damaged_of`]), with its log.
 /// When the backup was made and what was kept of the damaged library, or why it wasn't put back.
 pub(crate) fn restore(copy: &Path) -> Result<(SystemTime, Salvaged), NotRestored> {
-    use NotRestored::{Damaged, NoBackup, NotNow};
+    use NotRestored::NotNow;
     let backup = backup_of(copy);
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
     // A copy left half made by a mend cut off before (the app closed as it ran) goes first: it would take the room this
     // one needs (the whole-app review of 19 Nov, SN-15).
     remove_parts(copy, true);
-    match look_at(&backup, WAIT) {
-        Ok(Found::Copy { format, own: Some(_), .. }) if readable(format) => {}
-        Ok(Found::Nothing) => return Err(NoBackup("there's no backup copy".into())),
-        Ok(Found::Unreadable) => {
-            return Err(Damaged(
-                "the backup copy can't be put back: it's damaged (its first part can't be read)".into(),
-            ));
-        }
-        Ok(_) => return Err(NoBackup("the backup copy isn't a whole copy of the library".into())),
-        Err(why) => return Err(NotNow(format!("the backup copy couldn't be read just now ({why})"))),
-    }
-    check(&backup, None, false).map_err(|not| match not {
-        NoBackup(why) => NoBackup(format!("the backup copy can't be used: {why}")),
-        Damaged(why) => Damaged(format!("the backup copy can't be put back: {why}")),
-        NotNow(why) => NotNow(format!("the backup copy: {why}")),
-    })?;
-    let made = open_read_only(&backup)
-        .and_then(|conn| info_value(&conn, BACKED_UP_AT))
-        .ok()
-        .flatten()
-        .and_then(|at| u64::try_from(at).ok())
-        .map(|at| SystemTime::UNIX_EPOCH + Duration::from_secs(at))
-        .or_else(|| fs::metadata(&backup).and_then(|m| m.modified()).ok())
-        .unwrap_or_else(SystemTime::now);
+    let made = checked_backup(&backup)?;
     if let Ok(free) = fs4::available_space(dir_of(copy)) {
         room_for(free, size_of(&backup), "putting it back from its backup copy").map_err(NotNow)?;
     }
@@ -403,6 +380,180 @@ pub(crate) fn restore(copy: &Path) -> Result<(SystemTime, Salvaged), NotRestored
     let salvaged = put.map_err(|why| NotNow(format!("it couldn't be copied from its backup copy ({why})")))?;
     swap_in(&part, copy, &damaged_of(copy), "the copy of its backup").map_err(NotNow)?;
     Ok((made, salvaged))
+}
+
+/// Checks the backup copy at `backup` before it's put back ([`restore`], [`bring_back`]): the app's own library in a
+/// format this version reads, and whole by SQLite's `quick_check`. When it was made ([`made_at`]), or why it can't be
+/// put back.
+fn checked_backup(backup: &Path) -> Result<SystemTime, NotRestored> {
+    use NotRestored::{Damaged, NoBackup, NotNow};
+    match look_at(backup, WAIT) {
+        Ok(Found::Copy { format, own: Some(_), .. }) if readable(format) => {}
+        Ok(Found::Nothing) => return Err(NoBackup("there's no backup copy".into())),
+        Ok(Found::Unreadable) => {
+            return Err(Damaged(
+                "the backup copy can't be put back: it's damaged (its first part can't be read)".into(),
+            ));
+        }
+        Ok(_) => return Err(NoBackup("the backup copy isn't a whole copy of the library".into())),
+        Err(why) => return Err(NotNow(format!("the backup copy couldn't be read just now ({why})"))),
+    }
+    check(backup, None, false).map_err(|not| match not {
+        NoBackup(why) => NoBackup(format!("the backup copy can't be used: {why}")),
+        Damaged(why) => Damaged(format!("the backup copy can't be put back: {why}")),
+        NotNow(why) => NotNow(format!("the backup copy: {why}")),
+    })?;
+    Ok(made_at(backup))
+}
+
+/// When the backup copy at `backup` was made: as it notes it ([`BACKED_UP_AT`]), else when its file was last written
+/// (a damaged one may not say).
+fn made_at(backup: &Path) -> SystemTime {
+    open_read_only(backup)
+        .and_then(|conn| info_value(&conn, BACKED_UP_AT))
+        .ok()
+        .flatten()
+        .and_then(|at| u64::try_from(at).ok())
+        .map(|at| SystemTime::UNIX_EPOCH + Duration::from_secs(at))
+        .or_else(|| fs::metadata(backup).and_then(|m| m.modified()).ok())
+        .unwrap_or_else(SystemTime::now)
+}
+
+/// What [`bring_back`] put in the place of the app's own sound library, which wasn't there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BroughtBack {
+    /// The library itself, set aside at `from` as it was being mended ([`damaged_of`], or [`kept_of`] for one kept
+    /// for good), after its backup copy was made or with none: it holds what the backup doesn't, so it's put back as it
+    /// was, and mended again as it's read.
+    SetAside { from: PathBuf },
+    /// Its backup copy, made at `made`, copied into its place (it stays, as the backup): what changed in the library
+    /// since is lost.
+    Backup { made: SystemTime },
+    /// Its backup copy, which is damaged, copied into its place, with nothing newer to put back: it's mended as it's
+    /// read, with what can still be read of it. `set_aside`: the one set aside as it was found damaged before
+    /// ([`backup_damaged_of`]).
+    DamagedBackup { set_aside: bool },
+}
+
+/// Puts the app's own sound library at `copy` back when it isn't there, but something it could be mended from is (the
+/// whole-app review of 19 Nov, SN-14): the library itself, set aside as it was being mended (the app stopped between
+/// the two renames that put the mended one in its place), or its backup copy (something else took the library away).
+/// Nothing else does: no library is made empty in its place ([`super::make_empty`]: it would be backed up over the
+/// last of yours), so the Sounds page would say there's none at every start.
+///
+/// The newest of them is put back: the library set aside after its backup copy was made (or with none), as it was;
+/// else the backup copy, copied (it stays the backup); else a damaged backup copy, copied, to be mended as it's read.
+/// What was put back, or `None` when the library is there or there's nothing to put back. Why not, when it couldn't
+/// be: its log left without it (SQLite would read it into whatever is put there), the backup copy unreadable just
+/// now, the disk short of room. Reads the backup copy and writes about its size: for the background, never the
+/// window's thread; one at a time with every other change to the library.
+pub fn bring_back(copy: &Path) -> Result<Option<BroughtBack>, String> {
+    use NotRestored::{Damaged, NoBackup, NotNow};
+    let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+    // A file that can't be looked at counts as there: nothing is put over what may be the library.
+    let there = |path: &Path| !matches!(path.try_exists(), Ok(false));
+    if there(copy) {
+        return Ok(None);
+    }
+    let (backup, backup_damaged) = (backup_of(copy), backup_damaged_of(copy));
+    let asides: Vec<PathBuf> = [damaged_of(copy), kept_of(copy)].into_iter().filter(|aside| there(aside)).collect();
+    if asides.is_empty() && !there(&backup) && !there(&backup_damaged) {
+        return Ok(None);
+    }
+    for end in ["-wal", "-journal"] {
+        let left = side(copy, end);
+        if there(&left) {
+            return Err(format!(
+                "{} is there without the library it's part of, so nothing is put back beside it until it's moved away \
+                 (it would be read into it)",
+                left.display()
+            ));
+        }
+    }
+    // A shared-memory file left without it holds none of it (Windows won't let one go that something has open).
+    match fs::remove_file(side(copy, "-shm")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("something else may have it open ({e})"));
+        }
+        _ => {}
+    }
+    let set_at = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
+    let looked = there(&backup).then(|| checked_backup(&backup));
+    let made = match &looked {
+        Some(Ok(made)) => Some(*made),
+        Some(Err(Damaged(_))) => Some(made_at(&backup)),
+        Some(Err(NotNow(why))) => return Err(why.clone()),
+        Some(Err(NoBackup(_))) | None => None,
+    };
+    // Set aside after its backup copy was made (or with none), the library holds what the backup doesn't: it's put back
+    // as it was, to be mended with what the backup has. One set aside before is older than the backup, which is put
+    // back in its place (and the library set aside stays as it is).
+    let newer = |aside: &PathBuf| made.is_none_or(|made| set_at(aside).is_some_and(|at| at > made));
+    if let Some(aside) = asides.into_iter().filter(newer).max_by_key(|aside| set_at(aside)) {
+        put_back_from(copy, &aside)
+            .map_err(|e| format!("{} couldn't be put back in its place ({e})", aside.display()))?;
+        return Ok(Some(BroughtBack::SetAside { from: aside }));
+    }
+    match looked {
+        Some(Ok(made)) => {
+            copy_in(&backup, copy, true)?;
+            Ok(Some(BroughtBack::Backup { made }))
+        }
+        Some(Err(Damaged(_))) => {
+            copy_in(&backup, copy, false)?;
+            Ok(Some(BroughtBack::DamagedBackup { set_aside: false }))
+        }
+        _ if there(&backup_damaged) => {
+            copy_in(&backup_damaged, copy, false)?;
+            Ok(Some(BroughtBack::DamagedBackup { set_aside: true }))
+        }
+        // Only a backup copy this version can't put back (not the app's own library, or of another format): it stays
+        // as it is.
+        Some(Err(NoBackup(why) | NotNow(why))) => Err(why),
+        None => Ok(None),
+    }
+}
+
+/// Copies the backup copy at `from` into the place of the library at `copy`, which isn't there ([`bring_back`]): beside
+/// it first, then given its name, never over one that's there. A whole one (`whole`) is readied as [`restore`] readies
+/// one: what it was made from goes (it isn't a backup any more). A damaged one is copied as it is, to be mended as it's
+/// read: SQLite might not get through it. Why not, when it couldn't be.
+fn copy_in(from: &Path, copy: &Path, whole: bool) -> Result<(), String> {
+    // A copy left half made by a mend cut off before goes first: it would take the room this one needs (SN-15).
+    remove_parts(copy, true);
+    if let Ok(free) = fs4::available_space(dir_of(copy)) {
+        room_for(free, size_of(from), "putting it back from its backup copy")?;
+    }
+    let part = part_of(copy);
+    remove_database(&part).map_err(|e| format!("a half-made copy couldn't be removed ({e})"))?;
+    let _part = Part(part.clone());
+    let copied = (|| -> Result<(), String> {
+        fs::copy(from, &part).map_err(|e| e.to_string())?;
+        if !whole {
+            return fs::OpenOptions::new()
+                .write(true)
+                .open(&part)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| e.to_string());
+        }
+        let conn =
+            Connection::open_with_flags(&part, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+                .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM copy_info WHERE key IN (?1, ?2)", [BACKED_UP_FROM, BACKED_UP_AT])
+            .map_err(|e| e.to_string())?;
+        finish_part(conn, &part)
+    })();
+    copied.map_err(|why| format!("it couldn't be copied from its backup copy ({why})"))?;
+    let _readers_wait = LAYING_OUT.lock().unwrap_or_else(PoisonError::into_inner);
+    // A second name for the file, which is never put over one that's there; where the disk can't give a file two (a
+    // FAT drive), renamed while nothing is. The half-made name goes as it's let go of.
+    match fs::hard_link(&part, copy) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists || copy.exists() => {
+            Err("another library was put in its place meanwhile".into())
+        }
+        Err(_) => fs::rename(&part, copy).map_err(|e| format!("it couldn't be given its name ({e})")),
+    }
 }
 
 /// Readies the new library made at `part`, open on `conn`, to take the library's name ([`swap_in`]): read and written

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
-use mo_sounds::compact::backup::{self, BackedUp, When};
+use mo_sounds::compact::backup::{self, BackedUp, BroughtBack, When};
 use mo_sounds::compact::did::{self, Did};
 use mo_sounds::compact::grow::{self, Kept, Listened};
 use mo_sounds::compact::{self, LaidOut, PageRead, Synced};
@@ -3140,4 +3140,141 @@ fn your_favourites_stars_types_and_tags_are_kept() {
         .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'ix_sound_tags_tag'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(index, 1);
+}
+
+/// Removes the library at `copy` and the files SQLite keeps beside it, as something outside the app might.
+fn take_away(copy: &Path) {
+    for end in ["", "-wal", "-shm", "-journal"] {
+        let _ = std::fs::remove_file(format!("{}{end}", copy.display()));
+    }
+}
+
+/// Sets the library at `copy` aside as `aside` at `at`, as a mend does just before the mended one takes its place.
+fn set_aside_at(copy: &Path, aside: &Path, at: SystemTime) {
+    std::fs::rename(copy, aside).unwrap();
+    let _ = std::fs::rename(format!("{}-wal", copy.display()), format!("{}-wal", aside.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", copy.display()));
+    set_time(aside, at);
+}
+
+/// The app's own library made from a sounds.db of `n` sounds in a folder of its own, `name`, with its backup copy made
+/// after a change to its first sound: the folder, sounds.db, the library, that sound and its rating then.
+fn backed_up_library(name: &str, n: i64) -> (PathBuf, PathBuf, PathBuf, i64, i64) {
+    let dir = folder(name);
+    let old = library(&dir, n);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    let id: i64 = Connection::open(&copy).unwrap().query_row("SELECT MIN(id) FROM sounds", [], |r| r.get(0)).unwrap();
+    let rating = changed(&copy, id);
+    assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
+    (dir, old, copy, id, rating)
+}
+
+/// A library that isn't there, with its backup copy beside it, is put back from it (the whole-app review of 19 Nov,
+/// SN-14): copied into its place, the backup copy staying as it was. Never beside a log left without it, nor from a
+/// backup copy this version can't put back; nothing to do while it's there, or with nothing to put back.
+#[test]
+fn a_library_gone_is_put_back_from_its_backup_copy() {
+    let (dir, _old, copy, id, backed_up) = backed_up_library("bring-back", 40);
+    let backup = backup::backup_of(&copy);
+    assert_eq!(backup::bring_back(&copy), Ok(None));
+    // Changed since its backup copy was made, then taken away: what changed since is lost.
+    changed(&copy, id);
+    take_away(&copy);
+    let before = std::fs::read(&backup).unwrap();
+    let Ok(Some(BroughtBack::Backup { made })) = backup::bring_back(&copy) else { panic!("put back from its backup") };
+    assert!(SystemTime::now().duration_since(made).unwrap() < Duration::from_secs(600));
+    assert_eq!(rating_of(&copy, id), backed_up);
+    assert!(std::fs::read(&backup).unwrap() == before);
+    // The app's own library, whole, in WAL mode, and not a backup copy any more.
+    assert!(compact::own_since(&copy).is_some());
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    assert_eq!(pragma(&copy, "journal_mode"), "wal");
+    assert_eq!(rows(&copy, "SELECT COUNT(*) FROM copy_info WHERE key LIKE 'backed_up%'"), ["Integer(0)"]);
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    assert_eq!(backup::bring_back(&copy), Ok(None));
+    // Gone again, its log left behind: nothing is put back beside that, which SQLite would read into it.
+    take_away(&copy);
+    let wal = format!("{}-wal", copy.display());
+    std::fs::write(&wal, b"what's left").unwrap();
+    let why = backup::bring_back(&copy).unwrap_err();
+    assert!(why.contains(&wal) && why.contains("without the library"), "{why}");
+    assert!(!copy.exists());
+    assert_eq!(std::fs::read(&wal).unwrap(), b"what's left");
+    std::fs::remove_file(&wal).unwrap();
+    // A shared-memory file left without it holds none of it: it goes.
+    let shm = format!("{}-shm", copy.display());
+    std::fs::write(&shm, b"").unwrap();
+    assert!(matches!(backup::bring_back(&copy), Ok(Some(BroughtBack::Backup { .. }))));
+    assert!(!Path::new(&shm).exists());
+    // A backup copy this version can't put back (a database of something else) is left as it is, and said.
+    take_away(&copy);
+    std::fs::remove_file(&backup).unwrap();
+    Connection::open(&backup).unwrap().execute_batch("CREATE TABLE other (x);").unwrap();
+    let why = backup::bring_back(&copy).unwrap_err();
+    assert!(why.contains("isn't a whole copy"), "{why}");
+    assert!(!copy.exists() && backup.exists());
+    std::fs::remove_file(&backup).unwrap();
+    assert_eq!(backup::bring_back(&copy), Ok(None));
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+}
+
+/// A library set aside as it was being mended and never put back (the app stopped between the two renames that put
+/// the mended one in its place) is put back as it was, when it was set aside after its backup copy was made: it holds
+/// what the backup doesn't, and it's mended again as it's read. One set aside before that is older than the backup
+/// copy, which is put back instead; with no backup copy, the newest set aside is (the whole-app review of 19 Nov,
+/// SN-14).
+#[test]
+fn a_library_set_aside_as_it_was_mended_is_put_back_when_newer_than_its_backup_copy() {
+    let (_dir, _old, copy, id, backed_up) = backed_up_library("bring-back-aside", 40);
+    let since = changed(&copy, id);
+    let (damaged, kept) = (backup::damaged_of(&copy), backup::kept_of(&copy));
+    let in_a_minute = SystemTime::now() + Duration::from_secs(60);
+    set_aside_at(&copy, &damaged, in_a_minute);
+    assert_eq!(backup::bring_back(&copy), Ok(Some(BroughtBack::SetAside { from: damaged.clone() })));
+    assert_eq!(rating_of(&copy, id), since);
+    assert!(!damaged.exists());
+    // Set aside before its backup copy was made: the backup copy is newer, and the one set aside stays.
+    let an_hour_ago = SystemTime::now() - Duration::from_secs(60 * 60);
+    set_aside_at(&copy, &damaged, an_hour_ago);
+    assert!(matches!(backup::bring_back(&copy), Ok(Some(BroughtBack::Backup { .. }))));
+    assert_eq!(rating_of(&copy, id), backed_up);
+    assert!(damaged.exists());
+    // One kept for good is put back the same way: the newer of the two, the other staying.
+    set_aside_at(&copy, &kept, in_a_minute);
+    assert_eq!(backup::bring_back(&copy), Ok(Some(BroughtBack::SetAside { from: kept.clone() })));
+    assert_eq!(rating_of(&copy, id), backed_up);
+    assert!(!kept.exists() && damaged.exists());
+    // With no backup copy, the one set aside is put back however old it is.
+    std::fs::remove_file(backup::backup_of(&copy)).unwrap();
+    take_away(&copy);
+    assert_eq!(backup::bring_back(&copy), Ok(Some(BroughtBack::SetAside { from: damaged.clone() })));
+    assert_eq!(rating_of(&copy, id), since);
+    assert!(!damaged.exists());
+}
+
+/// A library that isn't there, with only a damaged backup copy beside it, gets that, to be mended as it's read with
+/// what can still be read of it: the backup copy there, or the one set aside as it was found damaged before (the
+/// whole-app review of 19 Nov, SN-14 and SN-3).
+#[test]
+fn a_library_gone_with_only_a_damaged_backup_copy_gets_that_to_be_mended() {
+    let (_dir, old, copy, _id, _rating) = backed_up_library("bring-back-damaged", 40);
+    let backup = backup::backup_of(&copy);
+    damage(&backup, "sounds");
+    let damaged_backup = std::fs::read(&backup).unwrap();
+    take_away(&copy);
+    assert_eq!(backup::bring_back(&copy), Ok(Some(BroughtBack::DamagedBackup { set_aside: false })));
+    assert!(std::fs::read(&copy).unwrap() == damaged_backup);
+    assert!(std::fs::read(&backup).unwrap() == damaged_backup);
+    // Mended as it's read, the damaged backup copy set aside (SN-3).
+    let Ok(PageRead::Library { made, .. }) = compact::read_for_page(&old, now(), |_| {}) else { panic!("mended") };
+    assert!(made.as_ref().is_some_and(|m| m.made), "{made:?}");
+    let backup_damaged = backup::backup_damaged_of(&copy);
+    assert!(backup_damaged.exists() && !backup.exists());
+    // Gone again, with only the damaged backup copy set aside: that's put back the same way.
+    take_away(&copy);
+    take_away(&backup::damaged_of(&copy));
+    assert_eq!(backup::bring_back(&copy), Ok(Some(BroughtBack::DamagedBackup { set_aside: true })));
+    assert!(std::fs::read(&copy).unwrap() == std::fs::read(&backup_damaged).unwrap());
 }

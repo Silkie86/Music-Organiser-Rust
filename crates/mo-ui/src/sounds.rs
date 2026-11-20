@@ -765,6 +765,8 @@ enum Step {
     /// The sounds: all of them, or (from the app's own library, opening on Tiles or List) the first few to show at
     /// once ([`Read::partial`]), the rest to follow.
     Read(Result<Box<Read>, String>),
+    /// There's no sound library to read, and why when that's known ([`list::no_library`]).
+    NoLibrary(Option<String>),
     /// All the sounds, after the first few: the page takes them in place of those, which keep their places on show.
     Rest(Refreshed),
     Used(Arc<SoundList>),
@@ -782,6 +784,7 @@ fn arrive(app: &AppWindow, step: Step) {
     let _doing = crate::watchdog::doing("Sounds: the library arrived");
     match step {
         Step::Read(read) => loaded(app, read),
+        Step::NoLibrary(why) => no_library(app, why),
         Step::Rest(rest) => rest_arrived(app, rest),
         Step::Used(list) => use_known(app, list),
         Step::Index(index) => index_known(app, index),
@@ -935,19 +938,29 @@ fn read_all(
     noter: Option<&Noter>,
     send: impl Fn(Step),
 ) -> Option<OnShow> {
-    // A fresh install, with no library at all: the app's own is made empty, for the scan to fill (it scans only the
-    // app's own). Not for the screenshots (no cards), which never write beside their fixture.
     let copy = compact::copy_of(sounds_db);
-    if cards.is_some() {
+    // Why there's no library, when that's known: the page says so (the whole-app review of 19 Nov, SN-8).
+    let mut none_because = None;
+    // Not for the screenshots (no cards), which never write beside their fixture.
+    if let Some(cards) = &cards {
+        // One that isn't there, with what it could be mended from beside it, is put back (SN-14).
+        none_because = bring_back(&copy, cards).err();
+        // A fresh install, with no library at all: the app's own is made empty, for the scan to fill (it scans only
+        // the app's own).
         match compact::make_empty(sounds_db, &copy) {
             Ok(true) => log::info("Sounds", "Made the app's own sound library, empty, for the scan to fill"),
             Ok(false) => {}
-            Err(e) => log::warning("Sounds", &format!("Couldn't make the app's own sound library: {e}")),
+            Err(e) => {
+                log::warning("Sounds", &format!("Couldn't make the app's own sound library: {e}"));
+                none_because = Some(list::not_made_line(&e));
+            }
         }
     }
     // No library at all. Once the copy is the app's own, it's all there is: `sounds.db` may have been archived.
     if !sounds_db.exists() && (cards.is_none() || !copy.exists()) {
-        send(Step::Read(Err(String::new())));
+        // Its folder not there is why, when nothing else is known: a drive that's away.
+        let away = copy.parent().filter(|dir| cards.is_some() && !matches!(dir.try_exists(), Ok(true)));
+        send(Step::NoLibrary(none_because.or_else(|| away.map(list::data_folder_away_line))));
         return None;
     }
     let mut held = noter.map(Noter::hold);
@@ -1228,7 +1241,7 @@ fn read_guarded(read: impl FnOnce(&dyn Fn(Step)) -> Option<OnShow>, send: &impl 
     let told = |step: Step| {
         match &step {
             Step::Read(Ok(read)) if read.partial.is_some() => {}
-            Step::Read(_) | Step::Rest(_) => listed.set(true),
+            Step::Read(_) | Step::Rest(_) | Step::NoLibrary(_) => listed.set(true),
             Step::Index(_) | Step::NoIndex(_) => indexed.set(true),
             _ => {}
         }
@@ -1858,6 +1871,28 @@ fn say_adopted() {
     );
 }
 
+/// Puts the app's own sound library back when it isn't there, but something it could be mended from is
+/// ([`compact::backup::bring_back`]: the whole-app review of 19 Nov, SN-14), saying so on a card. Why not, for the
+/// page ([`list::no_library`]), when it couldn't be.
+fn bring_back(copy: &Path, cards: &Feed) -> Result<(), String> {
+    match compact::backup::bring_back(copy) {
+        Ok(None) => Ok(()),
+        Ok(Some(back)) => {
+            let (title, line) = list::brought_back(&back);
+            log::warning("Sounds", &format!("The app's own sound library wasn't there: {line} ({back:?})"));
+            cards.start(title, "").done_as(title, &line);
+            Ok(())
+        }
+        Err(why) => {
+            log::warning(
+                "Sounds",
+                &format!("The app's own sound library isn't there, and couldn't be put back: {why}"),
+            );
+            Err(list::not_brought_back_line(&why))
+        }
+    }
+}
+
 /// Says (in the log, and on `cards`) how making the app's copy of the library beside `sounds_db` went: `again` when
 /// it was made again because it was damaged. On `job`'s card when there is one (the work it was found damaged in),
 /// which ends with it: one card for one event (review SN-7); else on a card of its own.
@@ -2336,53 +2371,52 @@ fn move_places(p: &mut Page, moved: &[Option<usize>]) -> Gone {
     gone
 }
 
+/// There's no sound library to read ([`Step::NoLibrary`]): the page says so, and why when that's known, rather than
+/// that this version can't make one (it can, and the old app is retired: the whole-app review of 19 Nov, SN-8).
+fn no_library(app: &AppWindow, why: Option<String>) {
+    let _doing = crate::watchdog::doing("Sounds: there's no library");
+    let (title, text) = list::no_library(why.as_deref());
+    none_to_show(app, title, text);
+}
+
+/// The page has no sounds to show: `title` and `text` say why, in the list's place.
+fn none_to_show(app: &AppWindow, title: &str, text: String) {
+    let data = app.global::<SoundsData>();
+    // The first few were shown, and the rest couldn't be read: none are, so the page says why. Shown empty,
+    // their chips, years and Ctrl+K's list go with them.
+    if PAGE.with(|p| p.borrow_mut().partial.take().is_some()) {
+        data.set_panel_shown(false);
+        stop(app);
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.list = Arc::default();
+            p.places = Arc::default();
+            p.types.clear();
+            p.tags.clear();
+            p.played = Arc::default();
+            p.history.clear();
+            p.picked = None;
+            p.counts = None;
+            // Not read after all: the list's word ([`listed`]) doesn't take the place of why.
+            p.read = false;
+        });
+        crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(Arc::default())));
+        refresh(app);
+    }
+    PAGE.with(|p| p.borrow_mut().unread = true);
+    crate::space::sounds_changed(app);
+    data.set_empty_title(title.into());
+    data.set_empty_text(text.into());
+}
+
 fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
     let _doing = crate::watchdog::doing("Sounds: the sounds were read");
-    let data = app.global::<SoundsData>();
     let read = match read {
         Ok(read) => *read,
         Err(why) => {
-            if !why.is_empty() {
-                log::warning("Sounds", &format!("Couldn't read the sound library: {why}"));
-            }
-            // The first few were shown, and the rest couldn't be read: none are, so the page says why. Shown empty,
-            // their chips, years and Ctrl+K's list go with them.
-            if PAGE.with(|p| p.borrow_mut().partial.take().is_some()) {
-                data.set_panel_shown(false);
-                stop(app);
-                PAGE.with(|p| {
-                    let mut p = p.borrow_mut();
-                    p.list = Arc::default();
-                    p.places = Arc::default();
-                    p.types.clear();
-                    p.tags.clear();
-                    p.played = Arc::default();
-                    p.history.clear();
-                    p.picked = None;
-                    p.counts = None;
-                    // Not read after all: the list's word ([`listed`]) doesn't take the place of why.
-                    p.read = false;
-                });
-                crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(Arc::default())));
-                refresh(app);
-            }
-            PAGE.with(|p| p.borrow_mut().unread = true);
-            crate::space::sounds_changed(app);
+            log::warning("Sounds", &format!("Couldn't read the sound library: {why}"));
             // One there that couldn't be read is said to be so, not missing (review finding B-1).
-            data.set_empty_title(
-                if why.is_empty() { "No sound library yet" } else { "The sound library couldn't be read" }.into(),
-            );
-            data.set_empty_text(
-                if why.is_empty() {
-                    // Not the old app's Sound Lab, which is retired (review B-6).
-                    "This version can't make one yet. The page shows the sound library the old app made (sounds.db in \
-                     the app's data folder), and there isn't one there."
-                        .to_string()
-                } else {
-                    why
-                }
-                .into(),
-            );
+            none_to_show(app, "The sound library couldn't be read", why);
             return;
         }
     };
@@ -4801,6 +4835,7 @@ mod tests {
                 format!("the rest: {} sounds, the first {kept} kept", r.library.list.len())
             }
             Step::Read(Err(why)) => format!("couldn't read: {why}"),
+            Step::NoLibrary(why) => format!("no library: {}", why.unwrap_or_default()),
             Step::Index(index) => format!("{} fingerprints", index.features.len()),
             Step::NoIndex(why) => format!("no fingerprints: {why}"),
             Step::Used(list) => format!("used: {}", list.used_in(0).is_some()),
@@ -4933,6 +4968,49 @@ mod tests {
         assert_eq!(sounds_in(&backup), Some(1));
         let looked = back_up(&sounds_db, compact::backup::When::Daily, true, &cards, Some(&mut on_show), None, &send);
         assert_eq!(looked, Backup { made: false, mend: true, mended: false });
+    }
+
+    /// A sound library that isn't there, with its backup copy beside it, is put back from it as the page starts, and a
+    /// card says so (the whole-app review of 19 Nov, SN-14): before, the page said there was none at every start.
+    /// With its log left behind, nothing is put back or made beside that, and the page says why, rather than that this
+    /// version can't make one (SN-8).
+    #[test]
+    fn a_library_gone_with_its_backup_copy_beside_it_is_put_back_as_the_page_starts() {
+        let sounds_db = sound_library("gone");
+        let library_db = song_library("gone-songs.db", &[]);
+        one_start(&sounds_db, &library_db, &Feed::default());
+        let copy = compact::copy_of(&sounds_db);
+        assert!(matches!(compact::backup::back_up(&sounds_db), Some(compact::backup::BackedUp::Made { .. })));
+        // sounds.db archived (the old app is retired), then the library taken away.
+        let take_away = || {
+            for end in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{end}", copy.display()));
+            }
+        };
+        assert!(std::fs::remove_file(&sounds_db).is_ok());
+        take_away();
+        let cards = Feed::default();
+        let said = one_start(&sounds_db, &library_db, &cards);
+        assert_eq!(said.first().map(String::as_str), Some("5 sounds from sounds-rust.db, 0 plays"), "{said:?}");
+        let shown = cards_said(&cards);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(shown[0].starts_with("Put your sound library back from its backup copy: It wasn't there"), "{shown:?}");
+        // Gone again, its log left behind.
+        take_away();
+        let wal = format!("{}-wal", copy.display());
+        assert!(std::fs::write(&wal, b"what's left").is_ok());
+        let cards = Feed::default();
+        let said = one_start(&sounds_db, &library_db, &cards);
+        let why = "no library: It isn't in the app's data folder, and it couldn't be put back from what's beside it: ";
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with(why) && said[0].contains("-wal is there without the library"), "{said:?}");
+        assert!(!copy.exists());
+        assert_eq!(cards_said(&cards), Vec::<String>::new());
+        // With nothing beside it at all, a new one is made: no one is left without a library.
+        assert!(std::fs::remove_file(&wal).is_ok());
+        assert!(std::fs::remove_file(compact::backup::backup_of(&copy)).is_ok());
+        let said = one_start(&sounds_db, &library_db, &Feed::default());
+        assert_eq!(said.first().map(String::as_str), Some("0 sounds from sounds-rust.db, 0 plays"), "{said:?}");
     }
 
     #[test]

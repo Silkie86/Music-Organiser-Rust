@@ -10,6 +10,7 @@ use chrono::{Datelike, NaiveDateTime};
 use mo_formats::dates::RealDates;
 use mo_library::ProjectFile;
 use mo_sounds::compact::Synced;
+use mo_sounds::compact::backup::BroughtBack;
 use mo_sounds::copies::SameAudio;
 use mo_sounds::index::SoundIndex;
 use mo_sounds::usage::Usage;
@@ -2069,6 +2070,64 @@ pub fn copy_failed_line(e: &SoundsError) -> String {
     }
 }
 
+/// What the card says when the app's own sound library wasn't there, and was put back from what was beside it
+/// ([`mo_sounds::compact::backup::bring_back`]: the whole-app review of 19 Nov, SN-14): its title and line.
+pub fn brought_back(back: &BroughtBack) -> (&'static str, String) {
+    match back {
+        BroughtBack::SetAside { from } => (
+            "Put your sound library back",
+            format!(
+                "It wasn't there, but the one set aside as it was being mended was ({}): it's back in its place, and \
+                 mended again.",
+                from.file_name().unwrap_or_default().to_string_lossy()
+            ),
+        ),
+        BroughtBack::Backup { made } => (
+            "Put your sound library back from its backup copy",
+            format!(
+                "It wasn't there, so its backup copy of {} is in its place. Plays, favourites, stars, types and tags \
+                 since then are lost, and the scan finds the sounds added since again.",
+                chrono::DateTime::<chrono::Local>::from(*made).format("%-d %b %H:%M")
+            ),
+        ),
+        BroughtBack::DamagedBackup { .. } => (
+            "Put your sound library back from its damaged backup copy",
+            "It wasn't there, and its backup copy is damaged: it's in its place, and mended with what can still be \
+             read of it."
+                .to_owned(),
+        ),
+    }
+}
+
+/// What the Sounds page says when there's no sound library to show (the whole-app review of 19 Nov, SN-8): its title
+/// and text. `why`: why none was put back or made, when that's known (a sentence of its own); else what the app does.
+pub fn no_library(why: Option<&str>) -> (&'static str, String) {
+    match why {
+        Some(why) => ("No sound library", format!("{why} The app looks again at its next start.")),
+        None => (
+            "No sound library yet",
+            "The app makes one in its data folder as it starts, and fills it from your sample folders.".to_owned(),
+        ),
+    }
+}
+
+/// Why there's no sound library, for [`no_library`]: it wasn't there, and couldn't be put back from what's beside it
+/// (`why`, as [`mo_sounds::compact::backup::bring_back`] says it).
+pub fn not_brought_back_line(why: &str) -> String {
+    format!("It isn't in the app's data folder, and it couldn't be put back from what's beside it: {why}.")
+}
+
+/// Why there's no sound library, for [`no_library`]: none could be made in the app's data folder ([`copy_failed_line`]
+/// says why: a log left there without its library, the disk full…).
+pub fn not_made_line(e: &SoundsError) -> String {
+    format!("{}.", copy_failed_line(e))
+}
+
+/// Why there's no sound library, for [`no_library`]: the app's data folder (`dir`) isn't there (on a drive that's away).
+pub fn data_folder_away_line(dir: &std::path::Path) -> String {
+    format!("The app's data folder ({}) isn't there just now: is the drive it's on connected?", dir.display())
+}
+
 /// The C# app's setting for how long each sound plays while a held arrow key steps through them (Settings › Sounds).
 pub const STEP_KEY: &str = "sound_step_ms";
 /// Its choices, and the C# app's default.
@@ -3088,6 +3147,57 @@ mod tests {
         assert_eq!(copy_failed_line(&full), "Only 3.1 GB is free on its disk");
         let read = SoundsError::Open { path: "sounds.db".into(), why: "it's locked".into() };
         assert_eq!(copy_failed_line(&read), read.to_string());
+    }
+
+    /// A library that wasn't there, put back from what was beside it, says from what and what that costs (the
+    /// whole-app review of 19 Nov, SN-14); with none to show, the page says why rather than pointing at the old app's
+    /// sounds.db (SN-8).
+    #[test]
+    fn a_library_put_back_or_not_there_says_why() {
+        let set_aside = BroughtBack::SetAside { from: "I:\\MusicOrganiser\\sounds-rust.db.damaged".into() };
+        assert_eq!(
+            brought_back(&set_aside),
+            (
+                "Put your sound library back",
+                "It wasn't there, but the one set aside as it was being mended was (sounds-rust.db.damaged): it's back \
+                 in its place, and mended again."
+                    .to_owned()
+            )
+        );
+        let made = chrono::Local.with_ymd_and_hms(2026, 11, 19, 10, 5, 0).unwrap();
+        let (title, line) = brought_back(&BroughtBack::Backup { made: made.into() });
+        assert_eq!(title, "Put your sound library back from its backup copy");
+        assert_eq!(
+            line,
+            "It wasn't there, so its backup copy of 19 Nov 10:05 is in its place. Plays, favourites, stars, types and \
+             tags since then are lost, and the scan finds the sounds added since again."
+        );
+        let (title, line) = brought_back(&BroughtBack::DamagedBackup { set_aside: true });
+        assert_eq!(title, "Put your sound library back from its damaged backup copy");
+        assert!(line.starts_with("It wasn't there, and its backup copy is damaged"), "{line}");
+        // None to show: why, when that's known, and that it's looked at again; never the old app's sounds.db.
+        let wal = SoundsError::Copy {
+            path: "I:\\MusicOrganiser\\sounds-rust.db".into(),
+            why: "I:\\MusicOrganiser\\sounds-rust.db-wal is there without the library it's part of".into(),
+        };
+        let (title, text) = no_library(Some(&not_made_line(&wal)));
+        assert_eq!(title, "No sound library");
+        assert_eq!(
+            text,
+            "I:\\MusicOrganiser\\sounds-rust.db-wal is there without the library it's part of. The app looks again \
+             at its next start."
+        );
+        let (_, text) = no_library(Some(&not_brought_back_line("the backup copy couldn't be read just now (busy)")));
+        assert_eq!(
+            text,
+            "It isn't in the app's data folder, and it couldn't be put back from what's beside it: the backup copy \
+             couldn't be read just now (busy). The app looks again at its next start."
+        );
+        let (_, text) = no_library(Some(&data_folder_away_line(std::path::Path::new("I:\\MusicOrganiser"))));
+        assert!(text.starts_with("The app's data folder (I:\\MusicOrganiser) isn't there just now"), "{text}");
+        let (title, text) = no_library(None);
+        assert_eq!(title, "No sound library yet");
+        assert!(!text.contains("sounds.db") && !text.contains("can't make one"), "{text}");
     }
 
     #[test]

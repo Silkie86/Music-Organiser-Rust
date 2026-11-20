@@ -447,7 +447,8 @@ pub fn make_empty(sounds_db: &Path, copy: &Path) -> Result<bool, SoundsError> {
         let left = side(copy, end);
         if !gone(&left) {
             return Err(failed(format!(
-                "{} is there without the library it's part of: it's left as it is, and no library is made beside it",
+                "{} is there without the library it's part of: it may hold the last of yours, so it's left as it is, \
+                 and no library is made beside it until it's moved away",
                 left.display()
             )));
         }
