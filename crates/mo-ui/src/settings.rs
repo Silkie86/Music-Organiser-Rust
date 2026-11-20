@@ -4,6 +4,7 @@
 //! window's thread (rules 12 and 21); a change shows at once and is written in the background, newest first.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use mo_app::activity::Feed;
@@ -13,6 +14,7 @@ use mo_app::log;
 use mo_app::midi::{SMALLEST_PART_CHOICES, SMALLEST_PART_KEY};
 use mo_app::places::Place;
 use mo_app::settings::{self as page, Outputs, Tab};
+use mo_app::shell::{self, Os};
 use mo_app::themes::{
     ACCENT_KEY, FONT_KEY, FONTS, Look, SIZE_KEY, SIZES, THEME_KEY, THEMES, size_from_setting, theme_named,
 };
@@ -23,7 +25,8 @@ use slint::platform::WindowEvent;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::{
-    AccentInfo, AppWindow, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact, ThemeCardInfo,
+    AccentInfo, AppWindow, DawProgramInfo, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact,
+    ThemeCardInfo,
 };
 
 /// What the page knows, on the window's thread.
@@ -77,6 +80,10 @@ struct Page {
     scripts_asked: u64,
     daws_installing: bool,
     daws_message: String,
+    /// What the last choice on the "Opening your songs" card did, said under its lines.
+    programs_message: String,
+    /// The programs chosen for the DAWs that weren't there when the tab last looked ([`look_at_scripts`]).
+    programs_missing: HashSet<String>,
     /// Moving the data folder: set while the copy runs (its Stop), and what the last copy did.
     data_moving: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     data_message: String,
@@ -139,6 +146,9 @@ pub fn load(folder: &Path, library: &Path) -> (AppSettings, bool) {
     for p in &loaded.problems {
         log::warning("Settings", p);
     }
+    // Which program each DAW's songs open in, and whether the C# app chose it (the 19 Nov review, SS-4).
+    let s = &loaded.settings;
+    log::info("Settings", &page::programs_line(|k| s.get(k).map(str::to_owned), |k| s.changed_here(k), Os::THIS));
     EARLY.with(|e| *e.borrow_mut() = Some(loaded.settings.clone()));
     (loaded.settings, loaded.writable)
 }
@@ -235,6 +245,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             scripts_asked: 0,
             daws_installing: false,
             daws_message: String::new(),
+            programs_message: String::new(),
+            programs_missing: HashSet::new(),
             data_moving: None,
             data_message: String::new(),
             data_pending: mo_app::data_move::pending(),
@@ -401,6 +413,37 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             && PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live))
         {
             choose_bitwig_folder(&app, None);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_choose_daw_program(move |daw| {
+        // Not for the screenshots: nothing would be kept, and they never look at real files.
+        if !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live)) {
+            return;
+        }
+        let weak = weak.clone();
+        let (title, kinds) = page::program_pick(&daw, Os::THIS);
+        let asked = slint::spawn_local(async move {
+            let mut picker = rfd::AsyncFileDialog::new().set_title(&title);
+            if !kinds.is_empty() {
+                picker = picker.add_filter("Programs", kinds);
+            }
+            if let Some(exe) = picker.pick_file().await
+                && let Some(app) = weak.upgrade()
+            {
+                choose_program(&app, &daw, Some(exe.path()));
+            }
+        });
+        if let Err(e) = asked {
+            log::error("Settings", &format!("Couldn't open the program picker: {e}"));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_reset_daw_program(move |daw| {
+        if let Some(app) = weak.upgrade()
+            && PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live))
+        {
+            choose_program(&app, &daw, None);
         }
     });
     let weak = app.as_weak();
@@ -1214,9 +1257,14 @@ fn look_at_scripts(app: &AppWindow) {
         p.scripts_asked += 1;
         // Your Bitwig Studio folder as the card chose it, else as the C# app had it.
         let chosen = p.settings.get(app_settings::BITWIG_FOLDER_KEY).map(str::to_owned);
-        Some((p.library.clone(), p.bw_loaded_from.clone(), chosen, p.scripts_asked))
+        // The programs chosen for the DAWs, to see they're still there (a version uninstalled since).
+        let programs: Vec<String> = shell::DAW_PROGRAMS
+            .iter()
+            .filter_map(|(_, key, _)| p.settings.get(key).map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned))
+            .collect();
+        Some((p.library.clone(), p.bw_loaded_from.clone(), chosen, programs, p.scripts_asked))
     });
-    let Some((library, loaded_from, chosen, asked)) = asked else { return };
+    let Some((library, loaded_from, chosen, programs, asked)) = asked else { return };
     let weak = app.as_weak();
     let started = background::spawn("Settings DAW scripts", move || {
         let roots = match Library::open_read_only(&library) {
@@ -1234,10 +1282,12 @@ fn look_at_scripts(app: &AppWindow) {
         let source = std::env::current_exe().ok().and_then(|exe| scripts::bitwig_extension_source(&exe));
         let bw_version = source.as_deref().and_then(scripts::extension_version);
         let bw_state = source.as_deref().map_or(ScriptState::NotInstalled, |s| scripts::bitwig_state(s, &bw_folders));
+        let missing: HashSet<String> = programs.into_iter().filter(|exe| !shell::usable_exe(exe)).collect();
         let _ = slint::invoke_from_event_loop(move || {
             let newest = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 let Some(p) = p.as_mut().filter(|p| p.scripts_asked == asked) else { return false };
+                p.programs_missing = missing;
                 p.fl_state = Some(state);
                 p.fl_folders = folders;
                 p.bw_source = source;
@@ -1297,6 +1347,28 @@ fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
         }
     });
     look_at_scripts(app);
+    show(app);
+}
+
+/// Keeps the program `daw`'s songs open in (`None`: the system's choice, kept as "" so the C# app's choice no longer
+/// counts) in the app's own settings file. Open reads it at each click, so it counts from the next one.
+fn choose_program(app: &AppWindow, daw: &str, exe: Option<&Path>) {
+    let key = shell::daw_exe_key(daw);
+    let value = exe.map(|e| e.display().to_string()).unwrap_or_default();
+    // The one in use already (the C# app's, say): nothing changes, and the card says so.
+    let already = exe.is_some() && self::value(&key).is_some_and(|v| v.trim() == value);
+    let kept = remember(&key, &value);
+    match exe {
+        Some(e) => log::info("Settings", &format!("{daw} songs open in {} from now on", e.display())),
+        None => log::info("Settings", &format!("{daw} songs open in the system's choice from now on")),
+    }
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.programs_message = page::program_note(daw, exe.map(|_| value.as_str()), already, kept, Os::THIS);
+            // Just picked, so it's there.
+            p.programs_missing.remove(&value);
+        }
+    });
     show(app);
 }
 
@@ -1785,6 +1857,29 @@ fn show(app: &AppWindow) {
         data.set_bitwig_chosen(p.settings.get(app_settings::BITWIG_FOLDER_KEY).is_some_and(|f| !f.trim().is_empty()));
         let libraries = app_settings::folder_list(p.settings.get(app_settings::BITWIG_LIBRARIES_KEY).unwrap_or(""));
         data.set_bitwig_libraries(strings(libraries.iter().map(|f| f.display().to_string())));
+        // The screenshots show the words as on Windows, where the app is used.
+        let os = if p.live { Os::THIS } else { Os::Windows };
+        let programs: Vec<DawProgramInfo> = page::daw_programs(
+            |k| p.settings.get(k).map(str::to_owned),
+            |k| p.settings.changed_here(k),
+            |exe| p.programs_missing.contains(exe),
+            os,
+        )
+        .into_iter()
+        .map(|l| DawProgramInfo {
+            daw: l.daw.into(),
+            program: l.program.into(),
+            chosen: l.chosen,
+            note: l.note.into(),
+            choose_tip: l.choose_tip.into(),
+            reset: l.reset.into(),
+            reset_tip: l.reset_tip.into(),
+        })
+        .collect();
+        data.set_programs_title(page::PROGRAMS_TITLE.into());
+        data.set_programs_intro(page::programs_intro(os).into());
+        data.set_daw_programs(ModelRc::new(VecModel::from(programs)));
+        data.set_programs_note(p.programs_message.clone().into());
         data.set_folders_busy(p.folders_busy);
         data.set_folders_message(p.folders_message.clone().into());
 

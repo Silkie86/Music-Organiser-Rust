@@ -98,7 +98,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::settings::connect(
         &app,
         mo_ui::settings::Setup {
-            settings: mo_app::app_settings::AppSettings::default(),
+            // Made up: only the C# app's choice of program for Studio One's songs, which Settings › DAWs shows as
+            // chosen in the old app (nothing else here reads it).
+            settings: mo_app::app_settings::AppSettings::from_parts(
+                None,
+                [(
+                    mo_app::shell::daw_exe_key("Studio One"),
+                    r"C:\Program Files\PreSonus\Studio One 6\Studio One.exe".to_owned(),
+                )]
+                .into(),
+            )
+            .unwrap_or_default(),
             folder: out.join("no settings"),
             library: out.join("no library.db"),
             running_pace: mo_app::background::Pace::Fast,
@@ -3981,6 +3991,8 @@ fn settings_shots(
         "3.19",
         vec![std::path::PathBuf::from(r"K:\Bitwig Studio\Extensions")],
     );
+    let fl_program = mo_app::shell::daw_exe_key("FL Studio");
+    mo_ui::settings::remember(&fl_program, r"C:\Program Files\Image-Line\FL Studio 2025\FL64.exe");
     mo_ui::settings::show_fl(
         app,
         mo_dawlink::scripts::ScriptState::Outdated,
@@ -3988,6 +4000,12 @@ fn settings_shots(
     );
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));
+    // Further down, the program each DAW's songs open in: FL Studio's chosen here (an invented path, set before
+    // show_fl showed the tab), Studio One's chosen in the old app, Bitwig's Windows' choice.
+    scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
+    shots.push(("settings-daws-programs.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, 4.0 * PAGE_DOWN);
+    mo_ui::settings::remember(&fl_program, "");
     // No Bitwig Studio folder in Documents and none chosen: the card says to choose it (the 10 Nov review's X3-5).
     mo_ui::settings::remember(mo_app::app_settings::BITWIG_FOLDER_KEY, "");
     mo_ui::settings::remember(mo_app::app_settings::BITWIG_LIBRARIES_KEY, "");
