@@ -415,6 +415,23 @@ class LinkTest {
     }
 
     @Test
+    @DisplayName("doesn't take a device selected during the swap for the new Sampler (extension 3.33)")
+    void aSelectionThatMovesDuringTheSwapIsToldAsMoved() {
+        FakeBitwig bitwig = start(song());
+        bitwig.allowChanges(true);
+        App app = bitwig.connect();
+        app.take();
+        app.waitFor(obj("id", 1, "cmd", "select", "track", 1, "device", 0));
+        // Once the file is on its way, the EQ+ after the Serum is clicked: the selected device is at another place in the
+        // chain than the one the sample was put in, so nothing the link sees there says the swap happened.
+        bitwig.during("insert", () -> bitwig.calls.stream().anyMatch(c -> c.get(0).equals("insertFile")), () -> bitwig.clickDevice(1, 1));
+        Object moved = app.waitFor(obj("id", 2, "cmd", "insert", "kind", "file", "path", "C:\\Samples\\Kick.wav", "at", "replace"), 20000)
+                          .get("result");
+        assertEquals(null, at(moved, "replaced"), () -> Json.write(moved));
+        assertEquals(true, at(moved, "moved"));
+    }
+
+    @Test
     @DisplayName("leaves a device alone that isn't the one the replace was asked for (extension 3.29)")
     void replacesOnlyTheDeviceItWasAskedFor() {
         FakeBitwig bitwig = start(song());

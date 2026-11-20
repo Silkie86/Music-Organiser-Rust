@@ -60,10 +60,35 @@ fn says_when_the_extension_is_too_old_and_never_asks_it() {
 
 #[test]
 fn says_when_bitwig_isnt_there() {
-    // A port nothing listens on: taken, then let go.
-    let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
-    let watch = Watch::start(port);
-    assert_eq!(until(&watch, |l| l.state != State::Connecting).state, State::NoBitwig);
+    // A port nothing listens on: taken, then let go. Another test's stand-in may be given it meanwhile (the watch
+    // connects only when its low-priority thread gets a turn), so another is tried then (the 19 Nov review's TC-4).
+    let mut answered = Vec::new();
+    loop {
+        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+        let watch = Watch::start(port);
+        match until(&watch, |l| l.state != State::Connecting).state.clone() {
+            State::NoBitwig => break,
+            other => answered.push(other),
+        }
+        assert!(answered.len() < 10, "something answered on every port tried: {answered:?}");
+    }
+}
+
+/// The 19 Nov review's LK-8: Bitwig greets, then closes (or stalls) before it answers the ask to watch. That's a
+/// busy or closing Bitwig, tried again in a moment, not the link saying no.
+#[test]
+fn a_watch_ask_that_gets_no_answer_isnt_a_refusal() {
+    let mut world = World::default();
+    world.hang_up_on = vec!["watch".into()];
+    let bitwig = FakeBitwig::with(world).unwrap();
+    let watch = Watch::start(bitwig.port());
+    assert_eq!(until(&watch, |l| l.state != State::Connecting).state, State::NoAnswer);
+    // Tried again after the short wait, not the minute a refusal waits.
+    let began = Instant::now();
+    while bitwig.world().commands().iter().filter(|c| *c == "watch").count() < 2 {
+        assert!(began.elapsed() < Duration::from_secs(20), "the watch never asked again");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The review's BW-4: something has the port but doesn't greet as the link. That isn't "Bitwig isn't open".

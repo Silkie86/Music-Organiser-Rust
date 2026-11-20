@@ -109,6 +109,8 @@ export component AppWindow inherits Window {
     in property <[CardInfo]> jobs;
     in property <int> more-jobs;
     in property <[CardInfo]> cards;
+    // How many more cards wait behind the ones on show.
+    in property <int> more-cards;
     callback dismiss-card(int);
     // Settings' "Try an activity card", until real jobs exist.
     callback try-job();
@@ -430,6 +432,7 @@ export component AppWindow inherits Window {
             y: parent.height - self.height - 20px;
             height: self.preferred-height;
             cards: root.cards;
+            more: root.more-cards;
             dismiss(id) => { root.dismiss-card(id); }
         }
 

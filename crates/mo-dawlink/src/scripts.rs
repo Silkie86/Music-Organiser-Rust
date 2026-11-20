@@ -35,6 +35,18 @@ pub const FL_SCRIPT: &str = include_str!("../../../extensions/fl-studio/device_D
 /// The start of the script's setting for letting the app make changes, which an update keeps.
 pub const FL_KEPT: &str = "LET_THE_APP_MAKE_CHANGES = ";
 
+/// The starts of every setting line of the script an update keeps and the "is it the app's own copy" check leaves
+/// out: [`FL_KEPT`], and the switch for the one-off measure, which is turned on by hand (the 19 Nov review's LK-6).
+/// Only a line that is the setting with `True` or `False` counts ([`kept_setting`]): one mistyped by hand makes the
+/// copy out of date, and the update writes the app's own line.
+const FL_KEPT_LINES: [&str; 2] = [FL_KEPT, "MEASURE_IN_LIVE_TEST = "];
+
+/// Whether `line` is the kept setting that starts with `setting`, on or off, and nothing else.
+fn kept_setting(line: &str, setting: &str) -> bool {
+    let line = line.trim_end_matches('\r');
+    line.strip_prefix(setting).is_some_and(|value| value == "True" || value == "False")
+}
+
 /// Whether a folder's copy of a script is the app's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScriptState {
@@ -123,8 +135,8 @@ pub struct Installed {
     pub left: Vec<(PathBuf, String)>,
 }
 
-/// Puts the app's script into every folder, keeping the `LET_THE_APP_MAKE_CHANGES` line each copy has (or, when the
-/// folder has none yet, the one the copy from before the rename has), then takes that older copy out. A folder that
+/// Puts the app's script into every folder, keeping the setting lines each copy has ([`FL_KEPT_LINES`]; or, when the
+/// folder has none yet, the ones the copy from before the rename has), then takes that older copy out. A folder that
 /// can't take it (a drive that isn't there now) doesn't stop the others, and keeps its older copy.
 pub fn install_fl(folders: &[PathBuf]) -> Installed {
     let mut done = Installed::default();
@@ -153,8 +165,8 @@ pub fn install_fl(folders: &[PathBuf]) -> Installed {
     done
 }
 
-/// Writes the script into `folder`: beside itself first, checked, then in place. The kept setting is the copy's
-/// there, else the one in `first` (the copy from before the rename).
+/// Writes the script into `folder`: beside itself first, checked, then in place. The kept settings
+/// ([`FL_KEPT_LINES`]) are the copy's there, else the ones in `first` (the copy from before the rename).
 fn copy_into(folder: &Path, first: Option<&Path>) -> io::Result<()> {
     let target = folder.join(FL_SCRIPT_NAME);
     let theirs = fs::read_to_string(&target).ok().or_else(|| first.and_then(|f| fs::read_to_string(f).ok()));
@@ -184,16 +196,25 @@ fn write_checked(folder: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     written
 }
 
-/// The shipped script with the kept line from `theirs`, when their copy has one.
+/// The shipped script with the kept lines ([`FL_KEPT_LINES`]) from `theirs`, each when their copy has one.
 fn with_kept(shipped: &str, theirs: Option<&str>) -> String {
-    let Some(kept) = theirs.and_then(|t| t.lines().find(|l| l.starts_with(FL_KEPT))) else {
+    let mut text = shipped.to_owned();
+    for setting in FL_KEPT_LINES {
+        text = with_kept_line(&text, theirs, setting);
+    }
+    text
+}
+
+/// `shipped` with its first line that starts with `setting` taken from `theirs`, when their copy has one.
+fn with_kept_line(shipped: &str, theirs: Option<&str>, setting: &str) -> String {
+    let Some(kept) = theirs.and_then(|t| t.lines().find(|l| kept_setting(l, setting))) else {
         return shipped.to_owned();
     };
     let kept = kept.trim_end_matches('\r');
     let mut out = String::with_capacity(shipped.len());
     let mut done = false;
     for line in shipped.split_inclusive('\n') {
-        if !done && line.starts_with(FL_KEPT) {
+        if !done && line.starts_with(setting) {
             let end = if line.ends_with("\r\n") {
                 "\r\n"
             } else if line.ends_with('\n') {
@@ -211,10 +232,13 @@ fn with_kept(shipped: &str, theirs: Option<&str>) -> String {
     out
 }
 
-/// The script's lines, whichever line endings it has, without the kept setting and the empty lines at its end.
+/// The script's lines, whichever line endings it has, without the kept settings and the empty lines at its end.
 fn lines(text: &str) -> Vec<&str> {
-    let mut lines: Vec<&str> =
-        text.lines().map(|l| l.trim_end_matches('\r')).filter(|l| !l.starts_with(FL_KEPT)).collect();
+    let mut lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !FL_KEPT_LINES.iter().any(|kept| kept_setting(l, kept)))
+        .collect();
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }

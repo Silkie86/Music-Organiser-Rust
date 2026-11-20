@@ -43,9 +43,7 @@ pub fn on_bulk_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     install(bulk_pool(), work)
 }
 
-/// The bulk pool itself ([`on_bulk_pool`]), for work that hands jobs to a pool of its own choosing (the MIDI reader,
-/// which reads a whole drive of files: a few at a time keep one drive busy, where one per core made it jump between
-/// them). `None` when the system wouldn't start the threads.
+/// The bulk pool itself ([`on_bulk_pool`]). `None` when the system wouldn't start the threads.
 pub fn bulk_pool() -> Option<&'static rayon::ThreadPool> {
     static BULK: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
         let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
@@ -66,7 +64,21 @@ pub fn on_copy_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     install(COPY.as_ref(), work)
 }
 
-/// The most threads [`on_bulk_pool`] (and [`on_copy_pool`]) gets.
+/// A pool of its own for the reading of your MIDI, built as the bulk pool is. Its readers each hold their thread until
+/// every file on the list is read, minutes after an update that reads everything again, and a rayon thread only takes
+/// a job handed in from outside when it has nothing of its own: on the bulk pool, a song's waveforms (and with them
+/// the next song's file search), Space's looks and the Sounds page's file dates all waited for the whole reading (the
+/// 19 November 2026 review's RA-3). `None` when the system wouldn't start the threads.
+pub fn midi_read_pool() -> Option<&'static rayon::ThreadPool> {
+    static READ: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
+        let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+        let threads = if threads == 0 { cores() } else { threads };
+        build_bulk_pool("MIDI read", threads.clamp(1, BULK_THREADS))
+    });
+    READ.as_ref()
+}
+
+/// The most threads [`on_bulk_pool`] (and [`on_copy_pool`], and [`midi_read_pool`]) gets.
 const BULK_THREADS: usize = 4;
 
 /// A pool of `threads` low-priority threads called `name 0`, `name 1`...; 0 is rayon's own choice, one per core.

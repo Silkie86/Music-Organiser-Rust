@@ -216,13 +216,14 @@ pub fn big_enough(e: &Entry, smallest: usize) -> bool {
 }
 
 /// How many lines the whole list has with parts under `smallest` notes hidden (the same loop in other keys is one
-/// line; those all have the same notes).
+/// line; those all have the same notes). One after another, where it's called: a quick count, and spread over
+/// rayon's own threads it made a thread a core at normal priority for the whole run when the caller was in no pool
+/// (rule 21; the 19 November 2026 review's RA-4).
 pub fn line_count(cat: &Catalogue, smallest: usize) -> usize {
     if smallest <= 1 {
         return cat.line_count;
     }
     (0..cat.entries.len())
-        .into_par_iter()
         .filter(|&at| cat.is_line(at) && cat.entry(at).is_some_and(|e| big_enough(e, smallest)))
         .count()
 }
@@ -1608,7 +1609,8 @@ pub(crate) mod tests {
             p
         };
         let cat = Catalogue::new(vec![loop_in(9, "Am"), loop_in(6, "Fsm")]);
-        let parts: std::sync::Arc<dyn crate::finder::Source> = std::sync::Arc::new(crate::finder::midi_parts(&cat, 1));
+        let parts: std::sync::Arc<dyn crate::finder::Source> =
+            std::sync::Arc::new(crate::finder::midi_parts(&std::sync::Arc::new(cat), 1));
         assert_eq!(parts.len(), 1, "one line for the loop");
         let g = crate::finder::find(&[parts], "pad loop fsm", None, 4);
         assert_eq!(g.len(), 1, "the other key's file is found by its own name");
@@ -1748,7 +1750,7 @@ pub(crate) mod tests {
         assert_eq!(smallest_part_index(3), 2);
         assert_eq!(smallest_part_index(5), 2, "the default's place");
         // Ctrl+K finds only what the list can show.
-        let parts = crate::finder::midi_parts(&cat, 3);
+        let parts = crate::finder::midi_parts(&std::sync::Arc::new(cat), 3);
         assert_eq!(crate::finder::Source::len(&parts), 1);
     }
 

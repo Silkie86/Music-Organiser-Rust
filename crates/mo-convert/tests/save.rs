@@ -265,6 +265,29 @@ fn compressed_samples_are_timed_by_their_decoder() {
     assert_eq!((s.seconds, s.md5), (0.0, [0; 16]));
 }
 
+/// Whole-app review 19 Nov 2026, CN-5 and CN-6: the FL song's time signature and its playlist's markers are the
+/// Bitwig project's, read from FL recipe save 16 (3/4, a marker "Verse").
+#[test]
+fn the_fl_songs_time_signature_and_markers_come_across() {
+    let dir = folder("signature and markers");
+    let recipe = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mo-formats/tests/fixtures/recipe/fl");
+    let song = dir.join("Songs").join("recipe 16.flp");
+    std::fs::create_dir_all(song.parent().unwrap()).unwrap();
+    std::fs::copy(recipe.join("MO Recipe 16 time signature and marker.flp"), &song).unwrap();
+    let fl = &mo_formats::arrangement::read(&song).unwrap()[0];
+    assert_eq!((fl.signature.top(), fl.signature.bottom()), (3, 4));
+    assert!(!fl.markers.is_empty());
+    let template = bitwig_template(Template { as_6_1_saves: true, ..Template::default() });
+    let saved =
+        bitwig_from_fl(&song, &dir.join("Exports"), &template, "recipe 16", None, Options::default(), &|_| None)
+            .unwrap();
+    let bitwig = &mo_formats::arrangement::read(&saved.file).unwrap()[0];
+    assert_eq!(bitwig.signature, fl.signature);
+    assert_eq!(bitwig.markers, fl.markers, "FL's markers, and not the template's own");
+    // The song starts in 3/4 and never changes, so nothing is said about a change.
+    assert!(!saved.notes.iter().any(|n| n.contains("changes time signature")), "{:?}", saved.notes);
+}
+
 /// A short WAV, as the snare the song plays.
 fn snare(dir: &Path) -> String {
     let snare = dir.join("Songs").join("Samples").join("Snare 01.wav");

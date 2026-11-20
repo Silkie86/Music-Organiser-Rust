@@ -14,16 +14,19 @@ use crate::Save;
 
 /// Your own say on which saves are one song, over the guess from names and folders: a song joined to another, a save
 /// split off into a song of its own, and songs you said are different, so the app doesn't ask again (table
-/// `song_choices`).
+/// `song_choices`). And of a file found in several places, the one its song is shown from once you gave the song a
+/// change ([`SongChoices::is_kept`]).
 #[derive(Clone, Debug, Default)]
 pub struct SongChoices {
     joined: HashMap<String, String>,
     split: HashSet<String>,
     apart: HashSet<String>,
+    /// Paths in small letters ([`SongChoices::is_kept`]).
+    kept: HashSet<String>,
 }
 
 impl SongChoices {
-    /// From the rows of `song_choices`: its kind ("join", "split" or "apart"), `a` and `b`.
+    /// From the rows of `song_choices`: its kind ("join", "split", "apart" or "kept"), `a` and `b`.
     pub fn from_rows<'a>(rows: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>) -> SongChoices {
         let mut c = SongChoices::default();
         for (kind, a, b) in rows {
@@ -36,6 +39,9 @@ impl SongChoices {
                 }
                 "apart" => {
                     c.apart.insert(a.to_owned());
+                }
+                "kept" => {
+                    c.kept.insert(case::to_lower(a));
                 }
                 _ => {}
             }
@@ -73,6 +79,31 @@ impl SongChoices {
     /// Whether you said these two songs are different.
     pub fn apart(&self, a: &str, b: &str) -> bool {
         self.apart.contains(&pair(a, b))
+    }
+
+    /// Whether the save at `path` is the copy its song is shown from, of the same file found in several places: the
+    /// one the song showed when you gave it a change (review SS-1). The change goes to every copy (rule 14), which
+    /// leaves them all as organised as each other, so without this the copy the library found first would take over,
+    /// and with it the folder Open uses and what only the other copy held (its stars, its notes).
+    pub fn is_kept(&self, path: &str) -> bool {
+        self.kept.contains(&case::to_lower(path))
+    }
+
+    /// Notes the save at `path` as the copy its song is shown from, and none of `copies`, the same file's other places
+    /// ([`SongChoices::is_kept`]), as `song_fields::set_all_keeping` keeps it in the library.
+    pub fn keep<'a>(&mut self, path: &str, copies: impl IntoIterator<Item = &'a str>) {
+        for copy in copies {
+            self.kept.remove(&case::to_lower(copy));
+        }
+        self.kept.insert(case::to_lower(path));
+    }
+
+    /// The save noted at `from` ([`SongChoices::is_kept`]) has moved to `to`: the note goes with it, as
+    /// `song_writes::write` moves it in the library with the save's row.
+    pub fn moved(&mut self, from: &str, to: &str) {
+        if self.kept.remove(&case::to_lower(from)) {
+            self.kept.insert(case::to_lower(to));
+        }
     }
 
     /// Whether the song with this key was joined to another, or a save in it split off.
@@ -555,14 +586,16 @@ pub fn group_songs(saves: &[Save], choices: &SongChoices, real: &RealDates) -> V
             });
             let ordered: Vec<&Save> = g.iter().map(|(s, _)| *s).collect();
             let name = song_name(&k, &ordered);
-            // Of the same file in several places, the one you organised stays (rated, tagged, noted, opened), else
-            // the one the library found first; the others are its copies.
+            // Of the same file in several places, the one the song was shown from when you gave it a change stays
+            // (review SS-1), else the one you organised (rated, tagged, noted, opened), else the one the library found
+            // first; the others are its copies.
+            let rank = |s: &Save| (choices.is_kept(&s.path), original(s));
             let mut best: HashMap<&FileId, &Save> = HashMap::new();
             for (s, id) in &g {
                 if let Some(id) = id {
                     best.entry(id)
                         .and_modify(|b| {
-                            if original(s) > original(b) {
+                            if rank(s) > rank(b) {
                                 *b = s
                             }
                         })
@@ -630,6 +663,13 @@ fn same_file(s: &Save) -> Option<FileId> {
         plugins: s.plugin_names.len(),
         created: s.created,
     })
+}
+
+/// Of the same file in two places, whether [`group_songs`] shows its song from `a` rather than `b` while neither is
+/// noted as the one it's shown from ([`SongChoices::is_kept`]): the one you organised, else the one the library found
+/// first.
+pub fn shown_over(a: &Save, b: &Save) -> bool {
+    original(a) > original(b)
 }
 
 /// How much you've organised a save, then how early the library found it (a lower id): the higher, the more it's the

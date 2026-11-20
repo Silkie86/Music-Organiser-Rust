@@ -124,7 +124,8 @@ impl Bitwig {
                 now.time_signature.trim()
             )));
         }
-        let slot = link.add_clip_to_record(&track_id, &shown)?;
+        let slot =
+            link.add_clip_to_record(&track_id, &shown).map_err(|e| super::audition::clip_cut_off(e, &track, false))?;
         if !wanted() {
             return Err(if took_out(&mut link, &track_id, slot) {
                 Error::Cancelled

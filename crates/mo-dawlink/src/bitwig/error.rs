@@ -159,6 +159,10 @@ impl Error {
     /// Whether Bitwig refused a request, or stopped a change part way, because another project came to the front
     /// than the one the change was kept to ([`super::Link::only_in`]), in the words the extension and the script both
     /// use (the C# app's `BitwigLink.IsElsewhere`).
+    ///
+    /// The link says "before changing anything" also when it stopped a change that had begun, so for a change whose
+    /// first step already acts (a file put in, a track made) these words can't be taken at their word (the 10 Nov
+    /// review's D-3, the 19 Nov review's LK-5): the caller says what may be left.
     pub fn is_elsewhere(&self) -> bool {
         matches!(self, Error::Bitwig(words) if words.starts_with("Bitwig has \"")
             && words.ends_with("\", so the link stopped before changing anything there."))

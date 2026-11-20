@@ -529,8 +529,9 @@ mod tests {
         let (_held, told) = open(port, "1.0", "");
         let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         stream.set_read_timeout(Some(SOON)).unwrap();
-        writeln!(stream, "POST /close HTTP/1.1").unwrap();
-        writeln!(stream, "{}", json!({ "ask": "close" })).unwrap();
+        // Both lines in one write, and no unwrap: the app hangs up after the first, so a second write of its own
+        // could meet a closed connection (Broken pipe on a busy runner: the 19 Nov review's TC-3).
+        let _ = stream.write_all(b"POST /close HTTP/1.1\n{\"ask\":\"close\"}\n");
         let mut said = String::new();
         let _ = stream.read_to_string(&mut said);
         assert!(said.contains("not a request"), "{said}");
