@@ -125,8 +125,9 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
                     ));
                 }
                 // Trim silence on: the trimmed copy goes instead (made now, or the one made before). One that can't
-                // be made leaves the original to go, and the log says why.
+                // be made leaves the original to go: the card says so, and the log says why (SN-12).
                 let (path, why) = mo_app::trim_copy::to_drag(&item.path, trim.0, trim.1);
+                let untrimmed = why.is_some();
                 if let Some(why) = why {
                     mo_app::log::warning("Sounds", &why);
                 }
@@ -138,7 +139,11 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
                 {
                     item.card.thumb = drag_out::wave_thumb(wave);
                 }
-                drag_out::sounds(vec![item]).ok_or_else(|| "There's nothing to drag.".to_owned())
+                let mut payload = drag_out::sounds(vec![item]).ok_or_else(|| "There's nothing to drag.".to_owned())?;
+                if untrimmed {
+                    payload.caption.push_str(", untrimmed");
+                }
+                Ok(payload)
             }),
             done: Box::new(move |app, outcome| {
                 lift(app, spot, false);

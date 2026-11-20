@@ -157,6 +157,7 @@ export component Panel inherits Window {
     // and the slider let go at a place (0 to 1).
     in-out property <float> like-favourites;
     in property <string> like-favourites-words;
+    in property <string> like-favourites-note;
     callback like-favourites-set(float);
     // The Tempo slider: its ends and step, where its handles are, what's picked in words, and its bars.
     in property <int> tempo-low-end;
@@ -633,6 +634,7 @@ export component Panel inherits Window {
                         if root.favourites: LikeFavourites {
                             value <=> root.like-favourites;
                             words: root.like-favourites-words;
+                            note: root.like-favourites-note;
                             released(v) => { root.like-favourites-set(v); }
                         }
                         TickLine {
