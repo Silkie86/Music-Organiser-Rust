@@ -104,15 +104,19 @@ pub enum Claim {
 /// `close_wait` for a closing copy to end. `before_show` is called with the open copy's process id before it's asked
 /// to show its window (Windows only lets a window come to the front when the program in front allows it).
 pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration, before_show: impl Fn(u32)) -> Claim {
-    let until = Instant::now() + close_wait;
-    // The build of a copy that's being waited for, once there is one.
-    let mut closing: Option<String> = None;
-    let mut asked_to_close = false;
+    let mut until = Instant::now() + close_wait;
+    // However often the port changes hands meanwhile, the wait as a whole ends here.
+    let last = Instant::now() + close_wait * 3;
+    // The build of a copy this one asked to close, kept for the log whoever has the port after it.
+    let mut closed: Option<String> = None;
+    // The copy that's being waited for, once there is one, and when the port was last asked who has it.
+    let mut closing: Option<Hello> = None;
+    let mut looked = Instant::now();
     loop {
         match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
             Ok(listener) => {
                 return match OneCopy::start(listener, version, exe) {
-                    Ok(held) => Claim::Ours { held, closed: closing.filter(|_| asked_to_close) },
+                    Ok(held) => Claim::Ours { held, closed },
                     Err(e) => Claim::Unguarded(format!("couldn't answer on port {port}: {e}")),
                 };
             }
@@ -121,11 +125,29 @@ pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration, before_s
             }
             Err(_) => {}
         }
-        // Once a copy is closing, only the port is watched: asking it more would only keep it busy.
-        if closing.is_none() {
+        // Once a copy is closing, the port is mostly just watched: asking it more would only keep it busy. But about
+        // once a second it's asked who has it now: another copy that was waiting too may have taken it meanwhile, and
+        // that one is open, not closing (the 19 Nov review's CL-3: this copy would wait out its time and open beside
+        // it). Only a real answer ends the wait: a closing copy stops answering a moment before it lets go.
+        if let Some(waited) = &closing {
+            if looked.elapsed() >= LOOK_AGAIN {
+                looked = Instant::now();
+                if let Some(now) = hello(port)
+                    && (now.pid != waited.pid || !now.closing)
+                {
+                    // The next turn asks it afresh: to show, or to close, with the whole wait to do it in.
+                    closing = None;
+                    until = (Instant::now() + close_wait).min(last);
+                    if Instant::now() < last {
+                        continue;
+                    }
+                }
+            }
+        } else {
+            looked = Instant::now();
             match hello(port) {
                 // Closing by itself (its window was just closed): waited for, whatever its build.
-                Some(other) if other.closing => closing = Some(other.app),
+                Some(other) if other.closing => closing = Some(other),
                 Some(other) if other.app == version && same_program(&other.exe, exe) => {
                     before_show(other.pid);
                     match ask(port, &json!({ "ask": "show" })) {
@@ -134,7 +156,7 @@ pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration, before_s
                         }
                         // It began to close between the two asks.
                         Ok(answer) if answer.get("closing").and_then(Value::as_bool) == Some(true) => {
-                            closing = Some(other.app);
+                            closing = Some(other);
                         }
                         _ => {
                             return Claim::Unguarded(
@@ -147,8 +169,8 @@ pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration, before_s
                     if ask(port, &json!({ "ask": "close" })).is_err() {
                         return Claim::Unguarded(format!("the copy from another build ({}) didn't answer", other.app));
                     }
-                    asked_to_close = true;
-                    closing = Some(other.app);
+                    closed = Some(other.app.clone());
+                    closing = Some(Hello { closing: true, ..other });
                 }
                 // Just let go between the two looks: the next try takes it. Otherwise it isn't the app's.
                 // A copy at its very last step drops what it's asked and lets go a moment later, so the port gets
@@ -170,12 +192,15 @@ pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration, before_s
             }
         }
         if Instant::now() >= until {
-            let other = closing.unwrap_or_default();
+            let other = closing.map(|other| other.app).unwrap_or_default();
             return Claim::Unguarded(format!("the copy that was closing ({other}) didn't end in time"));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// How often a copy waiting for a closing one asks who has the port now ([`claim`]).
+const LOOK_AGAIN: Duration = Duration::from_secs(1);
 
 /// Whether something has `port`: told at once, without asking it anything.
 pub fn taken(port: u16) -> bool {
@@ -492,6 +517,38 @@ mod tests {
         assert!(matches!(&claimed, Claim::Unguarded(why) if why.contains("didn't end in time")));
         assert!(told.try_recv().is_err(), "it's only waited for");
         drop(listener);
+    }
+
+    /// The 19 Nov review's CL-3: two copies started while the open one closes. When it lets go, one takes the port
+    /// and opens; the other finds a new, open copy there and has it show its window, instead of waiting out its time
+    /// and opening beside it.
+    #[test]
+    fn two_copies_waiting_for_a_closing_one_end_as_one_open_copy() {
+        let _one = crate::helper::one_at_a_time();
+        let port = free_port();
+        let (old, _told) = open(port, "1.0", "");
+        old.closing();
+        let waiting: Vec<_> = (0..2)
+            .map(|_| std::thread::spawn(move || claim(port, "1.0", "", Duration::from_secs(20), |_| {})))
+            .collect();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(old.let_go());
+        let began = Instant::now();
+        let claims: Vec<Claim> = waiting.into_iter().map(|w| w.join().unwrap()).collect();
+        assert!(began.elapsed() < Duration::from_secs(10), "neither waited out its time");
+        let ours = claims.iter().filter(|c| matches!(c, Claim::Ours { .. })).count();
+        let shown = claims.iter().filter(|c| matches!(c, Claim::Shown)).count();
+        assert_eq!((ours, shown), (1, 1), "one opens, the other has it show its window");
+        // The copy that opened was asked to show, and does once it has a window.
+        let held =
+            claims.into_iter().find_map(|c| if let Claim::Ours { held, .. } = c { Some(held) } else { None }).unwrap();
+        let (tell, told) = mpsc::channel();
+        let tell = Mutex::new(tell);
+        held.on_asked(move |asked| {
+            let _ = tell.lock().unwrap().send(asked);
+        });
+        assert_eq!(told.recv_timeout(SOON), Ok(Asked::Show));
+        drop(old);
     }
 
     #[test]

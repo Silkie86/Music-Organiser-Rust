@@ -349,8 +349,8 @@ if __name__ == "__main__":
 
 
 class Measuring(unittest.TestCase):
-    def run_script(self, title, changes=True, idles=600, info_title=""):
-        studio = fake_fl.night_drive(title=title, mixer=[("Master", {})] + [("Insert", {})] * 125,
+    def run_script(self, title, changes=True, idles=600, info_title="", insert_1="Insert 1"):
+        studio = fake_fl.night_drive(title=title, mixer=[("Master", {}), (insert_1, {})] + [("Insert", {})] * 124,
                                      info_title=info_title)
         script = fake_fl.compile_script(studio)
         script.MEASURE_IN_LIVE_TEST = changes
@@ -381,7 +381,8 @@ class Measuring(unittest.TestCase):
 
     def test_measures_with_only_a_few_inserts(self):
         # A new FL Studio 2025 project on Solomon's PC: the master, 16 inserts and the "current" track (18).
-        studio = fake_fl.night_drive(title="FL Studio 2025", mixer=[("Master", {})] + [("Insert", {})] * 16,
+        studio = fake_fl.night_drive(title="FL Studio 2025",
+                                     mixer=[("Master", {}), ("MO measure", {})] + [("Insert", {})] * 15,
                                      info_title="MO Live Test automation")
         script = fake_fl.compile_script(studio)
         script.MEASURE_IN_LIVE_TEST = True
@@ -390,14 +391,38 @@ class Measuring(unittest.TestCase):
             script.OnIdle()
         self.assertEqual((studio.saves, len(studio.names)), (1, 14))
 
-    def test_knows_the_live_test_by_its_project_info_title(self):
+    def test_knows_the_live_test_by_its_project_info_title_and_insert_1s_name(self):
         # FL Studio 2025 gives scripts only "FL Studio 2025" as the title.
-        studio = self.run_script("FL Studio 2025", info_title="MO Live Test automation ")
+        studio = self.run_script("FL Studio 2025", info_title="MO Live Test automation ", insert_1=" MO measure")
         self.assertEqual(studio.saves, 1)
         self.assertIn("v0.80 0.0dB", studio.names[9])
         for other in ("", "Night Drive", "MO Live Test automation 2"):
-            studio = self.run_script("FL Studio 2025", info_title=other)
+            studio = self.run_script("FL Studio 2025", info_title=other, insert_1="MO measure")
             self.assertEqual((studio.saves, studio.names, studio.volumes), (0, {}, {}), other)
+
+    def test_a_copy_that_kept_the_live_tests_info_title_is_left_alone(self):
+        # The 19 Nov review's LK-10: a song started with Save As from the live test keeps its Project info title,
+        # and FL Studio 2025's title doesn't name the project. Its inserts aren't named for a measurement, or carry
+        # the readings of one made before the copy.
+        for insert_1 in ("Insert 1", "Kick", "v0.00 -infdB; v0.01 -38.062dB", "MO measure 2", ""):
+            studio = self.run_script("FL Studio 2025", info_title="MO Live Test automation", insert_1=insert_1)
+            self.assertEqual((studio.saves, studio.names, studio.volumes, studio.tempo), (0, {}, {}, 124000), insert_1)
+        # And where the title does name another project, neither the info title nor insert 1's name counts.
+        studio = self.run_script("Night Drive.flp - FL Studio 2025", info_title="MO Live Test automation",
+                                 insert_1="MO measure")
+        self.assertEqual((studio.saves, studio.names, studio.volumes), (0, {}, {}))
+
+    def test_measures_once_only(self):
+        studio = self.run_script("FL Studio 2025", idles=2000, info_title="MO Live Test automation",
+                                 insert_1="MO measure")
+        self.assertEqual(studio.saves, 1)
+        # The script loaded again in the project it just measured: the mark is gone, so nothing more happens.
+        script = fake_fl.compile_script(studio)
+        script.MEASURE_IN_LIVE_TEST = True
+        script.OnInit()
+        for _ in range(600):
+            script.OnIdle()
+        self.assertEqual(studio.saves, 1)
 
     def test_reads_the_project_name_from_the_title_as_the_app_does(self):
         script = fake_fl.compile_script(fake_fl.night_drive())

@@ -134,6 +134,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // graphics apart inside the event loop, which took over a second on 15 Nov 2026 and was logged as one).
     app.window().on_close_requested(|| {
         mo_ui::watchdog::stop();
+        // A copy started from this moment waits for this one to end, rather than being told this window will show.
+        mo_ui::one_copy::closing();
         slint::CloseRequestResponse::HideWindow
     });
     // Dragging sounds and clips out to a DAW says here when it can't.
