@@ -196,7 +196,14 @@ const DEEPEST: usize = 64;
 /// that isn't there (an unplugged drive) is counted as unreadable, so its saves stay as they were; a root inside
 /// another is walked once, as part of the outer one.
 pub fn find_projects(roots: &[String]) -> Found {
-    find_files(roots, &is_project_file, &skip_dir)
+    find_projects_until(roots, &|| false)
+}
+
+/// [`find_projects`], stopped part way once `stop` says so (the app closing): each folder not looked in by then is
+/// counted as unreadable, so the saves in it aren't taken for gone (review SS-3). A folder being looked in is
+/// finished first.
+pub fn find_projects_until(roots: &[String], stop: &(dyn Fn() -> bool + Sync)) -> Found {
+    find_files_until(roots, &is_project_file, &skip_dir, stop)
 }
 
 /// Every file under `roots` that `wanted` keeps, leaving out folders `skip` names (it's given the folder's name and its
@@ -207,6 +214,16 @@ pub fn find_files(
     roots: &[String],
     wanted: &(dyn Fn(&str) -> bool + Sync),
     skip: &(dyn Fn(&str, &str) -> bool + Sync),
+) -> Found {
+    find_files_until(roots, wanted, skip, &|| false)
+}
+
+/// [`find_files`], stopped part way once `stop` says so ([`find_projects_until`]).
+fn find_files_until(
+    roots: &[String],
+    wanted: &(dyn Fn(&str) -> bool + Sync),
+    skip: &(dyn Fn(&str, &str) -> bool + Sync),
+    stop: &(dyn Fn() -> bool + Sync),
 ) -> Found {
     let mut found = Found::default();
     // An empty entry (a blank line in a list) names no folder: as a key it would be "/", with every other root
@@ -228,7 +245,8 @@ pub fn find_files(
         if inner {
             continue;
         }
-        if Path::new(root.as_str()).is_dir() {
+        // Once stopped, held as one that can't be read: a drive that's away can take seconds to answer.
+        if !stop() && Path::new(root.as_str()).is_dir() {
             level.push(root.clone());
             outer.push(key.clone());
         } else {
@@ -236,14 +254,26 @@ pub fn find_files(
         }
     }
     // Where each root really is, so a folder link back into one isn't walked a second time.
-    let real_roots: Vec<String> =
-        level.iter().filter_map(|r| fs::canonicalize(r).ok()?.to_str().map(path_key)).collect();
+    let real_roots: Vec<String> = if stop() {
+        Vec::new()
+    } else {
+        level.iter().filter_map(|r| fs::canonicalize(r).ok()?.to_str().map(path_key)).collect()
+    };
     let mut linked: HashSet<String> = HashSet::new();
     for _ in 0..DEEPEST {
         if level.is_empty() {
             break;
         }
-        let read: Vec<Listing> = level.par_iter().map(|dir| list(dir, wanted, skip)).collect();
+        let read: Vec<Listing> = level
+            .par_iter()
+            .map(|dir| {
+                if stop() {
+                    Listing { unreadable: vec![dir.clone()], ..Listing::default() }
+                } else {
+                    list(dir, wanted, skip)
+                }
+            })
+            .collect();
         level = Vec::new();
         for l in read {
             found.files.extend(l.files);
