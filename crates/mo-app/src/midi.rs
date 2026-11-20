@@ -1609,7 +1609,8 @@ pub(crate) mod tests {
             p
         };
         let cat = Catalogue::new(vec![loop_in(9, "Am"), loop_in(6, "Fsm")]);
-        let parts: std::sync::Arc<dyn crate::finder::Source> = std::sync::Arc::new(crate::finder::midi_parts(&cat, 1));
+        let parts: std::sync::Arc<dyn crate::finder::Source> =
+            std::sync::Arc::new(crate::finder::midi_parts(&std::sync::Arc::new(cat), 1));
         assert_eq!(parts.len(), 1, "one line for the loop");
         let g = crate::finder::find(&[parts], "pad loop fsm", None, 4);
         assert_eq!(g.len(), 1, "the other key's file is found by its own name");
@@ -1749,7 +1750,7 @@ pub(crate) mod tests {
         assert_eq!(smallest_part_index(3), 2);
         assert_eq!(smallest_part_index(5), 2, "the default's place");
         // Ctrl+K finds only what the list can show.
-        let parts = crate::finder::midi_parts(&cat, 3);
+        let parts = crate::finder::midi_parts(&std::sync::Arc::new(cat), 3);
         assert_eq!(crate::finder::Source::len(&parts), 1);
     }
 
