@@ -165,7 +165,17 @@ fn copy_into(folder: &Path, first: Option<&Path>) -> io::Result<()> {
 /// Writes `bytes` as `name` in `folder` (made if it isn't there): as `name.mo-part` first, synced and read back, then
 /// renamed into place, so a write that fails part way leaves the old file as it was. The part file never stays.
 fn write_checked(folder: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
-    let target = folder.join(name);
+    let part = stage(folder, name, bytes)?;
+    let placed = fs::rename(&part, folder.join(name));
+    if placed.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    placed
+}
+
+/// Writes `bytes` beside `name` in `folder` (made if it isn't there) as `name.mo-part`, synced and read back, and
+/// returns that part file's path, for the caller to rename into place. A write that fails takes its part file out.
+fn stage(folder: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
     fs::create_dir_all(folder)?;
     let part = folder.join(format!("{name}.mo-part"));
     let written = (|| {
@@ -176,12 +186,15 @@ fn write_checked(folder: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
         if fs::read(&part)? != bytes {
             return Err(io::Error::other("the copy read back wasn't the one written"));
         }
-        fs::rename(&part, &target)
+        Ok(())
     })();
-    if written.is_err() {
-        let _ = fs::remove_file(&part);
+    match written {
+        Ok(()) => Ok(part),
+        Err(e) => {
+            let _ = fs::remove_file(&part);
+            Err(e)
+        }
     }
-    written
 }
 
 /// The shipped script with the kept line from `theirs`, when their copy has one.
@@ -304,7 +317,8 @@ pub fn extension_version(file: &Path) -> Option<String> {
 /// to update.
 pub fn bitwig_state(source: &Path, folders: &[PathBuf]) -> ScriptState {
     let Ok(built) = fs::read(source) else { return ScriptState::NotInstalled };
-    if folders.iter().any(|f| f.join(FIRST_BITWIG_EXTENSION_NAME).is_file() || f.join(FIRST_BITWIG_ASIDE).is_file()) {
+    if folders.iter().any(|f| f.join(FIRST_BITWIG_EXTENSION_NAME).is_file() || plain_file(&f.join(FIRST_BITWIG_ASIDE)))
+    {
         return ScriptState::Outdated;
     }
     let mut any = false;
@@ -319,10 +333,16 @@ pub fn bitwig_state(source: &Path, folders: &[PathBuf]) -> ScriptState {
 }
 
 /// Puts the extension from `source` into every folder and takes out the copy from before the rename
-/// (`MusicOrganiser.bwextension`) in each folder it went into, then takes out the older script
+/// (`MusicOrganiser.bwextension`) in each, then takes out the older script
 /// (`Controller Scripts\Music Organiser\MusicOrganiser.control.js`) from each user folder the extension went into, so
-/// Bitwig doesn't run two: only those files, and the script's `Music Organiser` folder when that's left empty. On
-/// Windows, Bitwig keeps its extensions open, so a copy it has open can't be replaced or taken out: close Bitwig first.
+/// Bitwig doesn't run two: only those files, and the script's `Music Organiser` folder when that's left empty.
+///
+/// All or nothing, so Bitwig never has two copies of the controller (one ID) in one folder or across two it loads
+/// from: every older copy is moved aside (as `MusicOrganiser.bwextension.mo-old`, a name Bitwig never loads) and the
+/// new one written beside itself in every folder first; if any of that fails, every step is undone and nothing is
+/// put in place anywhere. Only then does each new copy go into place and each older one go. An older copy left aside
+/// by an install that was cut off counts as the older copy. On Windows, Bitwig keeps its extensions open, so a copy
+/// it has open can't be moved or replaced: close Bitwig first. Folders listed twice (a link to one) are done once.
 pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBuf]) -> BitwigInstalled {
     let mut done = BitwigInstalled::default();
     let built = match fs::read(source) {
@@ -332,52 +352,91 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
             return done;
         }
     };
-    // The copies from before the rename are moved aside first, in every folder, before anything is written: Bitwig
-    // holding one open stops that, and then every one moved goes back and nothing is written, so Bitwig never has two
-    // copies (same controller ID), in one folder or across two it loads from. A copy left aside by an earlier install
-    // (its delete failed) goes first; Bitwig never loads that name.
-    let mut aside_in: Vec<Option<(PathBuf, PathBuf)>> = Vec::with_capacity(folders.len());
+    let mut unique: Vec<(&PathBuf, PathBuf)> = Vec::new();
     for folder in folders {
-        let aside = folder.join(FIRST_BITWIG_ASIDE);
-        if fs::symlink_metadata(&aside).is_ok_and(|m| m.is_file()) {
-            let _ = fs::remove_file(&aside);
+        let real = fs::canonicalize(folder).unwrap_or_else(|_| folder.clone());
+        if !unique.iter().any(|(_, r)| *r == real) {
+            unique.push((folder, real));
         }
+    }
+    let fail_all = |why: String, at: &Path| -> Vec<(PathBuf, String)> {
+        folders
+            .iter()
+            .map(|f| (f.clone(), if f == at { why.clone() } else { format!("not updated, as {why}") }))
+            .collect()
+    };
+    let mut olders: Vec<Option<Older>> = Vec::with_capacity(unique.len());
+    let undo = |olders: &[Option<Older>], parts: &[PathBuf]| {
+        for part in parts {
+            let _ = fs::remove_file(part);
+        }
+        // Back as it was before the install that moved it aside, this one or one cut off.
+        for older in olders.iter().flatten().filter(|o| !o.first.exists()) {
+            let _ = fs::rename(&older.aside, &older.first);
+        }
+    };
+    for (folder, _) in &unique {
         let first = folder.join(FIRST_BITWIG_EXTENSION_NAME);
-        if !first.is_file() {
-            aside_in.push(None);
+        let aside = folder.join(FIRST_BITWIG_ASIDE);
+        let aside_there = plain_file(&aside);
+        if !plain_file(&first) {
+            olders.push(aside_there.then_some(Older { first, aside }));
             continue;
         }
-        if let Err(e) = fs::rename(&first, &aside) {
-            for (first, aside) in aside_in.iter().flatten() {
-                let _ = fs::rename(aside, first);
-            }
-            let why = format!("the older copy {} is in use ({e})", first.display());
-            done.installed.failed = folders
-                .iter()
-                .map(|f| (f.clone(), if f == folder { why.clone() } else { format!("not updated, as {why}") }))
-                .collect();
+        // An older copy and one left aside before: the one left aside goes, so this one can take its place.
+        if aside_there && let Err(e) = fs::remove_file(&aside) {
+            undo(&olders, &[]);
+            done.installed.failed = fail_all(format!("{} can't be taken out ({e})", aside.display()), folder);
             return done;
         }
-        aside_in.push(Some((first, aside)));
+        if let Err(e) = fs::rename(&first, &aside) {
+            undo(&olders, &[]);
+            done.installed.failed = fail_all(format!("the older copy {} is in use ({e})", first.display()), folder);
+            return done;
+        }
+        olders.push(Some(Older { first, aside }));
     }
-    for (folder, moved) in folders.iter().zip(&aside_in) {
-        match write_checked(folder, BITWIG_EXTENSION_NAME, &built) {
-            Ok(()) => done.installed.went.push(folder.clone()),
+    let mut parts: Vec<PathBuf> = Vec::with_capacity(unique.len());
+    for (folder, _) in &unique {
+        match stage(folder, BITWIG_EXTENSION_NAME, &built) {
+            Ok(part) => parts.push(part),
             Err(e) => {
-                if let Some((first, aside)) = moved {
-                    let _ = fs::rename(aside, first);
-                }
-                done.installed.failed.push((folder.clone(), e.to_string()));
-                continue;
-            }
-        }
-        if let Some((first, aside)) = moved {
-            match fs::remove_file(aside) {
-                Ok(()) => done.removed.push(first.clone()),
-                Err(e) => done.installed.left.push((aside.clone(), e.to_string())),
+                undo(&olders, &parts);
+                done.installed.failed = fail_all(format!("{} couldn't take it ({e})", folder.display()), folder);
+                return done;
             }
         }
     }
+    let mut went: Vec<&PathBuf> = Vec::new();
+    for (((folder, _), part), older) in unique.iter().zip(&parts).zip(&olders) {
+        if let Err(e) = fs::rename(part, folder.join(BITWIG_EXTENSION_NAME)) {
+            // The copy there now (an earlier DAWmate one Bitwig has open) stays. The older copy goes back only where
+            // there's no DAWmate copy beside it, so the folder never has two.
+            let _ = fs::remove_file(part);
+            if let Some(o) = older
+                && !folder.join(BITWIG_EXTENSION_NAME).exists()
+            {
+                let _ = fs::rename(&o.aside, &o.first);
+            } else if let Some(o) = older {
+                take_out_aside(o, &mut done);
+            }
+            done.installed.failed.push(((*folder).clone(), e.to_string()));
+            continue;
+        }
+        went.push(folder);
+        if let Some(o) = older {
+            take_out_aside(o, &mut done);
+        }
+    }
+    // A folder listed twice went (or didn't) as its first listing did.
+    done.installed.went = folders
+        .iter()
+        .filter(|f| {
+            let real = fs::canonicalize(f).unwrap_or_else(|_| (*f).clone());
+            unique.iter().any(|(u, r)| *r == real && went.contains(u))
+        })
+        .cloned()
+        .collect();
     for user in user_folders {
         if !done.installed.went.iter().any(|f| f.parent() == Some(user.as_path())) {
             continue;
@@ -398,6 +457,26 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
         }
     }
     done
+}
+
+/// A folder's older copy of the extension, moved aside (by this install, or by one that was cut off): where it was,
+/// and where it is now.
+struct Older {
+    first: PathBuf,
+    aside: PathBuf,
+}
+
+/// Takes out an older copy moved aside, once the new one is in place: noted as taken out, or as left with why.
+fn take_out_aside(older: &Older, done: &mut BitwigInstalled) {
+    match fs::remove_file(&older.aside) {
+        Ok(()) => done.removed.push(older.first.clone()),
+        Err(e) => done.installed.left.push((older.aside.clone(), e.to_string())),
+    }
+}
+
+/// Whether `path` is a plain file itself (not a link to one).
+fn plain_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 
 /// What installing the Bitwig extension did: where it went, and the older copies and scripts it took out.

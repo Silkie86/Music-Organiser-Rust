@@ -17,7 +17,7 @@ use crate::{Peaks, Sound, SoundActivity, SoundAnalysis, Word, compact, event, ty
 /// What went wrong reading the sound library.
 #[derive(Debug)]
 pub enum SoundsError {
-    /// The file isn't there, can't be opened, or isn't a Music Organiser sound library.
+    /// The file isn't there, can't be opened, or isn't a DAWmate sound library.
     Open { path: PathBuf, why: String },
     /// A read failed (the file is damaged, or locked for longer than the wait).
     Read(rusqlite::Error),
@@ -260,12 +260,12 @@ impl SoundsDb {
         let tables: HashSet<String> = {
             let mut st = conn
                 .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-                .map_err(|e| open_error(format!("it isn't a Music Organiser sound library ({e})")))?;
+                .map_err(|e| open_error(format!("it isn't a DAWmate sound library ({e})")))?;
             let names = st.query_map([], |r| r.get::<_, String>(0)).and_then(|rows| rows.collect());
             names.map_err(|e: rusqlite::Error| open_error(e.to_string()))?
         };
         if !tables.contains("sounds") {
-            return Err(open_error("it isn't a Music Organiser sound library (it has no sounds table)".into()));
+            return Err(open_error("it isn't a DAWmate sound library (it has no sounds table)".into()));
         }
         let layout = if tables.contains(compact::INFO_TABLE) {
             // A copy laid out by another version of the app isn't read: its columns may mean something else.

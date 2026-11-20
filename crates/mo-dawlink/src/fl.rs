@@ -62,6 +62,8 @@ pub enum Error {
     Port { name: String, why: String },
     /// The computer's MIDI itself wouldn't start: the system's words.
     NoMidi(String),
+    /// The thread that plays the notes wouldn't start: the system's words.
+    NoThread(String),
     /// The part has no notes to play (all muted, or none).
     Empty,
 }
@@ -80,6 +82,7 @@ impl fmt::Display for Error {
                 "The \u{201c}{name}\u{201d} MIDI port wouldn't open ({why}). Another program may be holding it."
             ),
             Error::NoMidi(why) => write!(f, "This computer's MIDI wouldn't start ({why})."),
+            Error::NoThread(why) => write!(f, "The app couldn't start playing it ({why})."),
             Error::Empty => f.write_str("There are no notes in it to play (they're all muted, or there are none)."),
         }
     }
@@ -226,7 +229,7 @@ pub fn play(out: Box<dyn NoteOut>, part: &Part) -> Result<Playing, Error> {
             let mut keys = Keys { out, sounding: [0; 128] };
             keys.run(&list, length, seconds_a_tick, &stopping);
         })
-        .map_err(|e| Error::Port { name: FL_PORT.to_owned(), why: e.to_string() })?;
+        .map_err(|e| Error::NoThread(e.to_string()))?;
     Ok(Playing { stop, thread })
 }
 

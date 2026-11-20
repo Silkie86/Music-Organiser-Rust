@@ -64,7 +64,7 @@ use crate::{in_places, is_dir, key, not_there, parent_of, real_folder, real_path
 pub const MARKER: &str = "DAWmate - copy not finished.txt";
 
 /// The marker's name before the app was called DAWmate (15 Nov 2026): a copy cut off before then still has it, so
-/// it's still known for the half copy it is. Only [`MARKER`] is ever written.
+/// it's still known for the half copy it is. A new marker is always [`MARKER`]; an old one is updated where it is.
 pub const FIRST_MARKER: &str = "Music Organiser - copy not finished.txt";
 
 /// Whether a name at the top of a copy is a marker's, either name.
@@ -283,7 +283,9 @@ fn marker_bytes(folder: &Path) -> Option<Vec<u8>> {
 /// Takes the marker out of a copy that's in use now, trying again for a few seconds while something (a virus checker)
 /// has it open. Only ever a plain file of the marker's name (either name: both go). Says whether it's gone.
 pub(crate) fn unmark(folder: &Path) -> bool {
-    [MARKER, FIRST_MARKER].iter().all(|name| unmark_named(&folder.join(name)))
+    let new = unmark_named(&folder.join(MARKER));
+    let first = unmark_named(&folder.join(FIRST_MARKER));
+    new && first
 }
 
 /// Takes out one marker file, as [`unmark`] does.

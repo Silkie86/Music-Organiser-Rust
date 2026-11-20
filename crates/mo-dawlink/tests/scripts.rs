@@ -254,3 +254,60 @@ fn an_older_bitwig_copy_left_aside_is_taken_out_by_the_next_install() {
     assert_eq!(names, [BITWIG_EXTENSION_NAME]);
     assert_eq!(bitwig_state(&source, &folders), ScriptState::Installed);
 }
+
+#[test]
+fn a_new_copy_one_folder_cant_take_stops_the_update_everywhere() {
+    let root = fixture("bitwig-write-blocked");
+    let (a, b) = (root.join("A").join("Extensions"), root.join("B").join("Extensions"));
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    for folder in [&a, &b] {
+        fs::create_dir_all(folder).unwrap();
+        extension(&folder.join(FIRST_BITWIG_EXTENSION_NAME), "3.30");
+    }
+    // B can't take the new copy: something is in the way of the file it's first written as.
+    fs::create_dir_all(b.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")).join("in the way")).unwrap();
+    let folders = vec![a.clone(), b.clone()];
+    let done = install_bitwig(&source, &folders, &[]);
+    assert!(done.installed.went.is_empty() && done.removed.is_empty() && done.installed.failed.len() == 2);
+    for folder in [&a, &b] {
+        assert!(folder.join(FIRST_BITWIG_EXTENSION_NAME).is_file() && !folder.join(BITWIG_EXTENSION_NAME).exists());
+    }
+    assert!(!a.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")).exists(), "no part file stays");
+}
+
+#[test]
+fn an_older_copy_left_aside_by_a_cut_off_install_goes_back_if_this_one_stops() {
+    let root = fixture("bitwig-cut-off");
+    let extensions = root.join("Extensions");
+    fs::create_dir_all(&extensions).unwrap();
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    let aside = extensions.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old"));
+    extension(&aside, "3.30");
+    fs::create_dir_all(extensions.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")).join("in the way")).unwrap();
+    let folders = vec![extensions.clone()];
+    let done = install_bitwig(&source, &folders, &[]);
+    assert_eq!(done.installed.failed.len(), 1);
+    assert!(extensions.join(FIRST_BITWIG_EXTENSION_NAME).is_file() && !aside.exists(), "Bitwig keeps its link");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_listed_twice_through_a_link_is_done_once() {
+    let root = fixture("bitwig-twice");
+    let k = root.join("K").join("Extensions");
+    fs::create_dir_all(&k).unwrap();
+    std::os::unix::fs::symlink(root.join("K"), root.join("Docs")).unwrap();
+    let docs = root.join("Docs").join("Extensions");
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    extension(&k.join(FIRST_BITWIG_EXTENSION_NAME), "3.30");
+    let folders = vec![k.clone(), docs];
+    let done = install_bitwig(&source, &folders, &[]);
+    assert_eq!(done.installed.went, folders);
+    assert!(done.installed.failed.is_empty() && done.installed.left.is_empty(), "{done:?}");
+    assert_eq!(done.removed, [k.join(FIRST_BITWIG_EXTENSION_NAME)]);
+    let names: Vec<_> = fs::read_dir(&k).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, [BITWIG_EXTENSION_NAME]);
+}

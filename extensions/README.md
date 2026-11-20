@@ -186,7 +186,7 @@ before. The API can't say where an arranger clip starts, so `at` is where it was
 Bitwig shows whether it's there. Copy replaces whatever was on Bitwig's clipboard (one for every project open),
 and nothing is undone when it doesn't work (the layout, the play start and the launcher clip's colour stay as
 the link left them), so only the live tests send it, in their own test project (*Changes › Clip to arranger*);
-the app's sends don't use it yet. In the app it's `BitwigLink.ArrangeAsync`.
+the app's sends don't use it yet. In the app it's in `crates/mo-dawlink/src/bitwig`.
 
 From 3.7, `arrange` can run its copy, its paste and the two focus actions by a route
 ([above](#routes-and-the-midi-loopback)): `direct` works as before, with the API's copy and paste; any other
@@ -255,7 +255,7 @@ the Rust app's Put in the song now uses it for a part found for a song (`mo_dawl
 armed, the launcher clip taken out after, no replay; its Stop the recording sends `recordabort`,
 `Bitwig::stop_putting`).
 `probe` sees whether Bitwig carries out its panel commands for the link at all, which says whether a way that
-needs the focus in a panel could ever work. In the app they're `BitwigLink.RecordAsync` and `ProbeAsync`.
+needs the focus in a panel could ever work. In the app they're in `crates/mo-dawlink/src/bitwig`.
 
 ### Sending into Bitwig
 
