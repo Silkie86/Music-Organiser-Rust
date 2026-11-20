@@ -106,13 +106,13 @@ var
   // The files went in: an update that stops before this opens the old app again (DeinitializeSetup, UP-2).
   Installed: Boolean;
 
-function OpenProcess(Access: DWORD; Inherit: BOOL; ProcessId: DWORD): THandle;
+function OpenProcess(Access: DWORD; Inherit: Boolean; ProcessId: DWORD): THandle;
   external 'OpenProcess@kernel32.dll stdcall';
 function WaitForSingleObject(Handle: THandle; Milliseconds: DWORD): DWORD;
   external 'WaitForSingleObject@kernel32.dll stdcall';
-function CloseHandle(Handle: THandle): BOOL;
+function CloseHandle(Handle: THandle): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
-function QueryFullProcessImageName(Process: THandle; Flags: DWORD; ExeName: String; var Size: DWORD): BOOL;
+function QueryFullProcessImageName(Process: THandle; Flags: DWORD; ExeName: String; var Size: DWORD): Boolean;
   external 'QueryFullProcessImageNameW@kernel32.dll stdcall';
 
 function FirstDataDir: String;
@@ -213,8 +213,9 @@ var
 begin
   Size := 1024;
   Name := StringOfChar(' ', Size);
-  Result := QueryFullProcessImageName(Handle, 0, Name, Size) and
-    (CompareText(ExtractFileName(Copy(Name, 1, Size)), '{#ExeName}') = 0);
+  Result := False;
+  if QueryFullProcessImageName(Handle, 0, Name, Size) then
+    Result := CompareText(ExtractFileName(Copy(Name, 1, Size)), '{#ExeName}') = 0;
 end;
 
 // An update the app started passes /WAITPID=<its process>: nothing is touched until that app has ended, however long
