@@ -32,7 +32,7 @@ pub use chord::PhraseChord;
 pub use index::{Failure, Key, MidiError, MidiIndex, Source, SourceKind, Stopper, StoredPhrase};
 pub use instruments::{Family, InstrumentGuess};
 pub use member::PhraseMember;
-pub use roles::Role;
+pub use roles::{Role, RoleWhy};
 
 /// Every phrase is kept at this resolution: 96 ticks to a beat (the C# `PhraseAnalyser.Ppq`).
 pub const PPQ: i64 = 96;

@@ -25,7 +25,7 @@ use mo_harmony::Grid;
 use crate::PPQ;
 use crate::analyser::{self, Shape};
 use crate::extract::{self, Unread};
-use crate::roles::Role;
+use crate::roles::{Role, RoleWhy};
 
 /// The layout an FL Studio project is read in ([`Song::view`]): a part for each channel that's switched on, its notes
 /// where its patterns play.
@@ -56,8 +56,8 @@ pub struct Playing {
     pub sample: bool,
     /// What kind of part it is, guessed a phrase at a time from what it plays and its names.
     pub role: Role,
-    /// Why, in a few words.
-    pub role_why: String,
+    /// Why ([`RoleWhy::words`]).
+    pub role_why: RoleWhy,
     /// The bars it plays in, counted from 0: from its first note's bar to the bar after its last note ends.
     pub bars: Range<i64>,
     /// Its clips with notes that play, in the order they play.
@@ -246,7 +246,7 @@ impl Gathered {
             drums: false,
             sample,
             role: Role::Other,
-            role_why: String::new(),
+            role_why: RoleWhy::NONE,
             bars: 0..0,
             clips: Vec::new(),
         };
@@ -436,7 +436,7 @@ fn finish(gathered: Vec<Gathered>, bar: i64) -> Vec<Playing> {
 /// ([`analyser::split`]), and the kind most of its notes are in wins: a part's notes through a whole song aren't one
 /// phrase (an arp that comes in at bar 33 plays few notes for the song's length, and a lead's verse and chorus
 /// together wander further than either).
-fn role_of(part: &Playing, own_clips: bool) -> (Role, String) {
+fn role_of(part: &Playing, own_clips: bool) -> (Role, RoleWhy) {
     // Its names: its own, and each of its own clips' once.
     let mut names: Vec<&str> = Vec::new();
     for c in part.clips.iter().filter(|_| own_clips) {
@@ -451,7 +451,7 @@ fn role_of(part: &Playing, own_clips: bool) -> (Role, String) {
         return analyser::role(&Shape::of(judged), judged, &hints, true);
     }
     // Each kind found, why (the first time), and how many notes are in phrases of that kind.
-    let mut kinds: Vec<(Role, String, usize)> = Vec::new();
+    let mut kinds: Vec<(Role, RoleWhy, usize)> = Vec::new();
     for piece in analyser::split(judged, None) {
         let (role, why) = analyser::role(&Shape::of(&piece.notes), &piece.notes, &hints, false);
         match kinds.iter_mut().find(|(kind, ..)| *kind == role) {
@@ -460,13 +460,13 @@ fn role_of(part: &Playing, own_clips: bool) -> (Role, String) {
         }
     }
     // The kind with the most notes: the one found first when two have as many.
-    let mut most: Option<(Role, String, usize)> = None;
+    let mut most: Option<(Role, RoleWhy, usize)> = None;
     for kind in kinds {
         if most.as_ref().is_none_or(|(.., notes)| kind.2 > *notes) {
             most = Some(kind);
         }
     }
-    most.map_or((Role::Other, String::new()), |(role, why, _)| (role, why))
+    most.map_or((Role::Other, RoleWhy::NONE), |(role, why, _)| (role, why))
 }
 
 /// The saves written last, newest first, each with its song: the first is the song being worked on. Only saves whose

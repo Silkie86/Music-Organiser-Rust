@@ -7,7 +7,6 @@
 //! by both apps gets the same kind, shape and hash (the twin test checks this against your `midi.db`). The key and
 //! chords come from `mo-harmony` (phase 6): until then they're given by the caller, or left out.
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -17,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::chord::PhraseChord;
 use crate::index::Key;
-use crate::roles::Role;
+use crate::roles::{Role, RoleWhy};
 use crate::{BAR, PPQ};
 use mo_harmony::{KeyFact, KeyReader};
 
@@ -40,8 +39,8 @@ pub const CHORDS_IN_A_LINE: f64 = 0.25;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Analysis {
     pub role: Role,
-    /// Why, in a few words, for the tooltip.
-    pub role_why: String,
+    /// Why, for the card ([`RoleWhy::words`]).
+    pub role_why: RoleWhy,
     pub bars: i64,
     pub lowest: u8,
     pub highest: u8,
@@ -645,17 +644,12 @@ fn looks_like_gm_drums(keys: &HashSet<u8>, notes: &[NoteEvent], s: &Shape) -> bo
 
 /// What a part is for, and why, from its shape, notes and names. `drums`: known to be drums (MIDI channel 10, or a
 /// drum plugin).
-pub fn role(s: &Shape, notes: &[NoteEvent], hints: &str, drums: bool) -> (Role, String) {
-    let (role, why) = role_and_reason(s, notes, hints, drums);
-    (role, why.into_owned())
-}
-
-fn role_and_reason(s: &Shape, notes: &[NoteEvent], hints: &str, drums: bool) -> (Role, Cow<'static, str>) {
+pub fn role(s: &Shape, notes: &[NoteEvent], hints: &str, drums: bool) -> (Role, RoleWhy) {
     if drums {
-        return (Role::Drums, "Drums by where it's played (MIDI channel 10 or a drum plugin)".into());
+        return (Role::Drums, RoleWhy::DRUMS_BY_PLACE);
     }
     if s.notes == 0 {
-        return (Role::Other, "".into());
+        return (Role::Other, RoleWhy::NONE);
     }
     let split = words_of(hints);
     let mut named = roles_in(&split);
@@ -674,24 +668,24 @@ fn role_and_reason(s: &Shape, notes: &[NoteEvent], hints: &str, drums: bool) -> 
     // A name that says a tuned part (and not drums) wins over the drum notes test.
     let named_tuned = !named.contains(&Role::Drums) && tuned.iter().any(|r| named.contains(r));
     if !named_tuned && looks_like_gm_drums(&keys, notes, s) {
-        return (Role::Drums, "Uses the General MIDI kick, snare and hat notes, played like drums".into());
+        return (Role::Drums, RoleWhy::GM_DRUMS);
     }
 
     let (from_notes, why) = from_notes(s);
     if named.is_empty() {
-        return (from_notes, why.into());
+        return (from_notes, why);
     }
     if named.contains(&from_notes) {
-        return (from_notes, format!("{why}, and its name agrees").into());
+        return (from_notes, why.and_name_agrees());
     }
     if named.contains(&Role::Drums) && s.distinct <= 3 && s.chord_share < 0.2 {
-        return (Role::Drums, "Named like a drum part".into());
+        return (Role::Drums, RoleWhy::NAMED_DRUMS);
     }
     // Named after a drum sound and nothing tuned ("Tamb", "Chh Selector Grid"): drums, whatever notes play it, unless
     // it plays far more notes than a kit has.
     let sound_word = words.iter().any(|w| WORDS.drum_sounds.contains(w.as_str()));
     if sound_word && !tuned.iter().any(|r| named.contains(r)) && s.distinct <= 12 {
-        return (Role::Drums, "Named after a drum sound".into());
+        return (Role::Drums, RoleWhy::NAMED_DRUM_SOUND);
     }
     // A name wins unless the notes plainly say otherwise.
     for role in [Role::Chords, Role::Arp, Role::Bass, Role::Melody] {
@@ -707,31 +701,26 @@ fn role_and_reason(s: &Shape, notes: &[NoteEvent], hints: &str, drums: bool) -> 
             return (
                 role,
                 match role {
-                    Role::Arp => "Named as an arp",
-                    Role::Chords => "Named as chords",
-                    Role::Bass => "Named as a bass",
-                    _ => "Named as a melody",
-                }
-                .into(),
+                    Role::Arp => RoleWhy::NAMED_ARP,
+                    Role::Chords => RoleWhy::NAMED_CHORDS,
+                    Role::Bass => RoleWhy::NAMED_BASS,
+                    _ => RoleWhy::NAMED_MELODY,
+                },
             );
         }
     }
-    (from_notes, why.into())
+    (from_notes, why)
 }
 
-fn from_notes(s: &Shape) -> (Role, &'static str) {
+fn from_notes(s: &Shape) -> (Role, RoleWhy) {
     if s.chord_share >= 0.35 || s.voices >= 2.5 {
-        return (Role::Chords, "Mostly three or more notes at once");
+        return (Role::Chords, RoleWhy::MOSTLY_CHORDS);
     }
     if s.distinct == 1 {
-        return if s.median_key <= 52 {
-            (Role::Bass, "One low note, repeated")
-        } else {
-            (Role::Other, "One note, repeated")
-        };
+        return if s.median_key <= 52 { (Role::Bass, RoleWhy::ONE_LOW_NOTE) } else { (Role::Other, RoleWhy::ONE_NOTE) };
     }
     if s.median_key <= 50 && s.chord_share < 0.2 {
-        return (Role::Bass, "Single notes, low down");
+        return (Role::Bass, RoleWhy::SINGLE_LOW);
     }
     if s.onsets >= 8
         && s.chord_share < 0.15
@@ -742,9 +731,9 @@ fn from_notes(s: &Shape) -> (Role, &'static str) {
         && s.distinct >= 3
         && s.notes_per_bar <= 4.5
     {
-        return (Role::Arp, "Fast, evenly spaced notes of one chord at a time");
+        return (Role::Arp, RoleWhy::FAST_EVEN);
     }
-    (Role::Melody, "Single notes, one after another")
+    (Role::Melody, RoleWhy::ONE_AFTER_ANOTHER)
 }
 
 /// What a part is, from its notes (at [`PPQ`], as [`normalise`] gives them) and names. `hints` are names that may say
@@ -1038,7 +1027,10 @@ mod tests {
         let chords: Vec<NoteEvent> =
             [60u8, 65, 67, 60].iter().enumerate().flat_map(|(i, r)| triad(i as i64 * 384, *r)).collect();
         assert_eq!(analyse_named(&chords, "").role, Role::Chords);
-        assert_eq!(analyse_named(&chords, "Pad").role_why, "Mostly three or more notes at once, and its name agrees");
+        assert_eq!(
+            analyse_named(&chords, "Pad").role_why.words(),
+            "Mostly three or more notes at once, and its name agrees"
+        );
 
         let bass: Vec<NoteEvent> = (0..8).map(|i| note(i * 96, 90, [36, 36, 43, 41][i as usize % 4])).collect();
         assert_eq!(analyse_named(&bass, "").role, Role::Bass);
@@ -1048,7 +1040,10 @@ mod tests {
         assert_eq!(analyse_named(&tune, "").role, Role::Melody);
         // A name wins unless the notes plainly say otherwise.
         assert_eq!(analyse_named(&tune, "Sub bass").role, Role::Melody, "a bass doesn't sit this high");
-        assert_eq!(analyse_named(&tune, "Lead").role_why, "Single notes, one after another, and its name agrees");
+        assert_eq!(
+            analyse_named(&tune, "Lead").role_why.words(),
+            "Single notes, one after another, and its name agrees"
+        );
 
         let arp: Vec<NoteEvent> = (0..16).map(|i| note(i * 24, 20, [60, 64, 67, 72][i as usize % 4])).collect();
         assert_eq!(analyse_named(&arp, "").role, Role::Arp);
