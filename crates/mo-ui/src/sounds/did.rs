@@ -21,8 +21,11 @@ use mo_sounds::event;
 use super::{HISTORY, HISTORY_LENGTH, PAGE, Page, show_lists};
 use crate::AppWindow;
 
-/// How long the app waits as it closes for what's been done to be kept: the library may be busy with its backup copy.
-const CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// How long the app waits as it closes for what's been done to be kept, only while some of it is still waiting: the
+/// library may be busy with its backup copy (6 to 10 s on Solomon's PC, once a day), or being read again. As long as a
+/// change on a song's card is waited for (`songs::finish_up`); 2 s lost what was done in the first seconds after a start
+/// (review SN-2).
+const CLOSE_WAIT: Duration = Duration::from_secs(10);
 
 /// The number of what's done when it isn't kept (for the screenshots, or with no writer): never in the library.
 pub(super) const NOT_KEPT: u64 = u64::MAX;
@@ -44,7 +47,7 @@ pub(super) fn connect(sounds_db: &Path) -> Arc<Noter> {
     noter
 }
 
-/// As the app closes: what's been done and said and not kept yet is kept now, waiting a moment at most.
+/// As the app closes: what's been done and said and not kept yet is kept now, waiting [`CLOSE_WAIT`] at most.
 pub fn finish_up() {
     let Some(noter) = PAGE.with(|p| p.borrow_mut().noter.take()) else { return };
     if !noter.finish_within(Some(CLOSE_WAIT)) {
