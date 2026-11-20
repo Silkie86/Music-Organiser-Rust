@@ -1581,7 +1581,6 @@ export component Panel inherits Window {
                     horizontal-stretch: 0;
                     text: "Save as new";
                     tip: "Save as new curve: keeps the curve as it is now as a new curve, here and in the app's Curves list";
-                    enabled: CurveEditorData.changed;
                     clicked => { root.curve-save-as-new(); }
                 }
                 ToggleChip {

@@ -3131,8 +3131,8 @@ fn save_as_new(from: String, name: String, points: Vec<mo_formats::bitwig::curve
 }
 
 /// The app's window came to the front. A curve kept as new from the plugin's editor meanwhile (it adds it to
-/// `curves.db` itself; Solomon, 20 Nov 2026) is put in the list: looked for off the window's thread, and only the
-/// curves the list doesn't have are read.
+/// `curves.db` itself; Solomon, 20 Nov 2026) is put in the list, and one it saved again that was hidden shows again:
+/// looked for off the window's thread, and only the curves the list doesn't have as they are now are read.
 pub fn came_to_front(_app: &AppWindow) {
     let db = PAGE.with(|p| {
         let p = p.borrow();
@@ -3147,12 +3147,15 @@ pub fn came_to_front(_app: &AppWindow) {
         on_window(move |_| {
             let new = PAGE.with(|p| {
                 let p = p.borrow();
-                let mut new: std::collections::HashSet<&str> = made.iter().map(String::as_str).collect();
+                // Each made curve and whether it's hidden; those the list has that way already are taken away.
+                let mut new: HashMap<&str, bool> = made.iter().map(|(id, hidden)| (id.as_str(), *hidden)).collect();
                 p.curves.iter().for_each(|c| {
-                    new.remove(c.id.as_str());
+                    if new.get(c.id.as_str()) == Some(&c.hidden) {
+                        new.remove(c.id.as_str());
+                    }
                 });
                 // (A read on its way lists them itself.)
-                if p.curves_reading.is_some() { Vec::new() } else { new.into_iter().map(str::to_owned).collect() }
+                if p.curves_reading.is_some() { Vec::new() } else { new.into_keys().map(str::to_owned).collect() }
             });
             if new.is_empty() {
                 return;
@@ -3172,11 +3175,19 @@ pub fn came_to_front(_app: &AppWindow) {
                         let mut p = p.borrow_mut();
                         let mut added = 0;
                         for (c, key) in found {
-                            if p.curves.iter().all(|o| o.id != c.id) {
-                                p.curve_keys.push(key);
-                                p.curves.push(c);
-                                added += 1;
+                            match p.curves.iter().position(|o| o.id == c.id) {
+                                // Listed as it is now meanwhile (the app changed it itself): left alone.
+                                Some(at) if p.curves[at].hidden == c.hidden => continue,
+                                Some(at) => {
+                                    p.curve_keys[at] = key;
+                                    p.curves[at] = c;
+                                }
+                                None => {
+                                    p.curve_keys.push(key);
+                                    p.curves.push(c);
+                                }
                             }
+                            added += 1;
                         }
                         if added > 0 {
                             p.curve_changes += 1;
@@ -3188,7 +3199,7 @@ pub fn came_to_front(_app: &AppWindow) {
                     if added > 0 {
                         log::info(
                             "Curves",
-                            &format!("{added} curves saved in the plugin's editor are in the list now"),
+                            &format!("{added} curves saved in the plugin's editor are in the list as they are now"),
                         );
                         show_all(app);
                     }

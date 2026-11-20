@@ -1,6 +1,6 @@
 [package]
 name = "mo-plugin"
-description = "The test CLAP plugin: a small DAWmate panel inside a DAW (Bitwig first). It opens a Slint panel in the window the DAW lends it, lists sounds from the app's sound library, plays one through the track, and lists every CLAP extension the DAW offers. It reads the app's files and never writes them."
+description = "The test CLAP plugin: a small DAWmate panel inside a DAW (Bitwig first). It opens a Slint panel in the window the DAW lends it, lists sounds from the app's sound library, plays one through the track, and lists every CLAP extension the DAW offers. It reads the app's files; the one thing it writes in them is a curve saved as new from its curve editor."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

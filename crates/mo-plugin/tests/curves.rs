@@ -1,5 +1,6 @@
 //! The Curves tab's curves: a `curves.db` made as the app makes it from made-up curve files, read by the plugin
-//! without changing it, searched as the app's list is, and a curve handed to a drag as a Bitwig curve file.
+//! without changing it, searched as the app's list is, and a curve handed to a drag as a Bitwig curve file. And the
+//! one thing the plugin writes there: an edited curve kept as a new curve.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use mo_app::presets::CurveFilters;
@@ -86,8 +87,8 @@ fn an_edited_curve_is_kept_as_a_new_curve_in_the_apps_list() {
     assert_eq!((saved.curve.name.as_str(), saved.from.as_str()), ("Rise (edited)", from.as_str()));
     assert_eq!(saved.curve.points, shape.0);
     let id = saved.curve.id.clone();
-    let (list, at) = found.with(saved);
-    assert_eq!((list.curves.len(), at), (2, 1));
+    let mut list = found;
+    assert_eq!((list.add(saved), list.curves.len()), ((1, true), 2));
     // The app reads it from its own file, and the plugin reads it again next time.
     assert!(CurvesDb::open(&db_path).unwrap().list().unwrap().iter().any(|c| c.id == id && c.name == "Rise (edited)"));
     let Read::Ready(again) = curves::read_from(&db_path) else { panic!("not read") };
@@ -95,8 +96,7 @@ fn an_edited_curve_is_kept_as_a_new_curve_in_the_apps_list() {
     // The same shape saved again is the same curve, in its place in the list.
     let twice = curves::save_as_new(&db_path, from, "Another name", shape).unwrap();
     assert_eq!(twice.curve.name, "Rise (edited)");
-    let (list, at) = list.with(twice);
-    assert_eq!((list.curves.len(), at), (2, 1));
+    assert_eq!((list.add(twice), list.curves.len()), ((1, false), 2));
     // What's no curve is refused, in words.
     let bad = curves::save_as_new(&db_path, String::new(), "Bad", (vec![p(0.0, 0.0)], 4.0)).err().unwrap();
     assert!(bad.starts_with("Couldn't save the curve"), "{bad}");

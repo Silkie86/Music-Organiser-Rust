@@ -15,6 +15,7 @@ use mo_presets::curves::{self, Curve, CurvesDb};
 use std::path::{Path, PathBuf};
 
 /// The curves, read once each time the tab asks.
+#[derive(Clone)]
 pub struct Curves {
     pub curves: Vec<Curve>,
     keys: Vec<CurveKey>,
@@ -102,23 +103,21 @@ pub fn save_as_new(
 }
 
 impl Curves {
-    /// The list with `saved` in it (in the place of the curve with its id, when that shape was saved before), and
-    /// its place.
-    pub fn with(&self, saved: Saved) -> (Curves, usize) {
-        let (mut curves, mut keys) = (self.curves.clone(), self.keys.clone());
-        let at = match curves.iter().position(|c| c.id == saved.curve.id) {
+    /// Puts `saved` in the list (in the place of the curve with its id, when that shape was saved before): its
+    /// place, and whether it's new to the list.
+    pub fn add(&mut self, saved: Saved) -> (usize, bool) {
+        match self.curves.iter().position(|c| c.id == saved.curve.id) {
             Some(at) => {
-                curves[at] = saved.curve;
-                keys[at] = saved.key;
-                at
+                self.curves[at] = saved.curve;
+                self.keys[at] = saved.key;
+                (at, false)
             }
             None => {
-                curves.push(saved.curve);
-                keys.push(saved.key);
-                curves.len() - 1
+                self.curves.push(saved.curve);
+                self.keys.push(saved.key);
+                (self.curves.len() - 1, true)
             }
-        };
-        (Curves { curves, keys, editor_keys: self.editor_keys }, at)
+        }
     }
 
     /// The curves `filters` let through, newest found first, as places in [`Curves::curves`], with the Found in

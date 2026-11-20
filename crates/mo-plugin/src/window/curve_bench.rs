@@ -87,6 +87,28 @@ fn colour(c: slint::Color) -> Colour {
     Colour { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() }
 }
 
+/// Where a Save as new curve's answer goes. Let go with no answer given (the work stopped part way, or never ran), it
+/// answers that the save failed, so the button isn't left waiting.
+struct Answer {
+    to: Arc<Mutex<Option<Result<Saved, String>>>>,
+    given: bool,
+}
+
+impl Answer {
+    fn give(mut self, how: Result<Saved, String>) {
+        *lock(&self.to) = Some(how);
+        self.given = true;
+    }
+}
+
+impl Drop for Answer {
+    fn drop(&mut self) {
+        if !self.given {
+            *lock(&self.to) = Some(Err("Couldn't save the curve: the save stopped part way.".into()));
+        }
+    }
+}
+
 pub(super) struct Bench {
     card: RefCell<Card>,
     /// The curve open in the editor: its place in the list as read, and the curve as found.
@@ -272,12 +294,22 @@ impl Bench {
                 return;
             }
             panel.set_curve_said(SharedString::new());
-            let saved = Arc::clone(&me.saved);
-            background("mo-plugin-curve-save", move || {
+            // Answered however the work ends: a save that stopped part way (the crash note has why) says so, and the
+            // button works again.
+            let answer = Answer { to: Arc::clone(&me.saved), given: false };
+            let started = background("mo-plugin-curve-save", move || {
                 let path = mo_app::paths::data_dir().join(mo_presets::curves::FILE_NAME);
                 let how = crate::curves::save_as_new(&path, found.id, &found.name, shape);
-                *lock(&saved) = Some(how);
+                answer.give(how);
             });
+            if !started {
+                // (The answer went with the work that never ran: taken back, these words are the ones said.)
+                lock(&me.saved).take();
+                me.saving.set(false);
+                panel.set_curve_said(
+                    "Couldn't save the curve: the system gave no thread to do it on. Try again.".into(),
+                );
+            }
         });
         let (me, weak, slots) = (Rc::clone(self), panel.as_weak(), Arc::clone(slots));
         panel.on_curve_edit_drag_out(move || {
@@ -320,6 +352,11 @@ impl Bench {
         panel.set_curve_editing(true);
         self.redraw(panel);
         self.show(panel, true);
+    }
+
+    /// Whether the editor is open on the curve with this id.
+    pub(super) fn is_open_on(&self, id: &str) -> bool {
+        self.open.borrow().as_ref().is_some_and(|(_, c)| c.id == id)
     }
 
     /// A curve just kept by Save as new curve, for the list to take in (then [`Bench::open`] shows it): the curve the
