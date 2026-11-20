@@ -446,7 +446,7 @@ impl SampleIndex {
 /// A path to compare samples by: as the library compares paths (`/` between folders, no `/` at the end, letter case
 /// ignored), without Windows' long-path prefix, and with a drive letter left out (`c:/beats/kick.wav` and
 /// `k:/beats/kick.wav` are both `:/beats/kick.wav`).
-pub(crate) fn sample_key(path: &str) -> String {
+pub fn sample_key(path: &str) -> String {
     let slashes = path.trim().replace('\\', "/");
     let plain = match (slashes.strip_prefix("//?/UNC/"), slashes.strip_prefix("//?/")) {
         (Some(network), _) => format!("//{network}"),

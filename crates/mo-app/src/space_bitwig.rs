@@ -44,12 +44,17 @@ pub const LOOKING_WHY: &str = "Bitwig copies a Library multisample or a sample i
 /// The activity card's headline and line when a look stops because a newer one took its place.
 pub const LOOK_STOPPED: (&str, &str) = ("Stopped finding Bitwig's copies", "A newer look took its place.");
 
-/// What the card says about Fix, under the projects.
-pub const NEXT: &str = "Fix writes a \"(fixed)\" project beside each ticked save, using the Library's own files \
+/// What the card says about Fix, under the projects: the Recycle Bin on Windows, the Trash elsewhere, as its buttons
+/// say (the whole-app review of 19 Nov, FS-16).
+pub fn next() -> String {
+    format!(
+        "Fix writes a \"(fixed)\" project beside each ticked save, using the Library's own files \
     instead of the copies. The saves and their copies stay as they are. Once you've opened a fixed project in Bitwig \
-    and heard it play, tick it: Free the space then sends the copies it no longer uses to the Recycle Bin. That \
+    and heard it play, tick it: Free the space then sends the copies it no longer uses to the {BIN}. That \
     song's older saves and Bitwig's backups won't find those copies any more, so use the fixed project from then on; \
-    a copy another song in the folder still uses stays. Put back brings them all back.";
+    a copy another song in the folder still uses stays. Put back brings them all back."
+    )
+}
 
 /// The kind of clean-up the Bitwig copies Free the space sends are noted as, so Put back finds them.
 pub const BITWIG_COPIES_FREED: &str = "bitwig-copies";
@@ -429,6 +434,14 @@ impl ToFree {
     }
 }
 
+/// The rows of one `saves_using` asked for every project's copies at once that name one of this project's copies,
+/// matched as the library matches them (the whole-app review of 19 Nov, FS-12: the library is read once for them all).
+pub fn rows_for(job: &ToFree, rows: &[(String, String)]) -> Vec<(String, String)> {
+    let mine: HashSet<String> =
+        job.project.copies.iter().map(|c| mo_library::plugins::sample_key(&c.in_project)).collect();
+    rows.iter().filter(|(sample, _)| mine.contains(&mo_library::plugins::sample_key(sample))).cloned().collect()
+}
+
 /// The saves whose copies stop being found when a project's copies go (Solomon, 17 Nov 2026: he chose that they go
 /// once each song using them is fixed and checked): every save of each checked song (the save itself and its older
 /// ones) and Bitwig's backups. Every other Bitwig file in the folder (another song's saves, a fixed project, a template
@@ -551,56 +564,76 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
             return done;
         }
     };
-    let folder = key(&job.project.folder.to_string_lossy());
+    // Without the drive letter: the library keeps a save under the letter its drive had when it was read.
+    let folder = without_drive(key(&job.project.folder.to_string_lossy()));
     let inside = |save: &str| {
-        let k = key(save);
-        k.strip_prefix(&folder).is_some_and(|rest| rest.starts_with(['/', '\\']))
+        let k = without_drive(key(save));
+        k.strip_prefix(&folder).is_some_and(|rest| rest.starts_with('/'))
     };
-    // A save in another folder that names a copy by its full path (saved without copying its samples) keeps it.
+    // The same words for every copy, so the card can give them when nothing went (FS-15).
+    let not_yet = match job.reread {
+        BitwigReread::Done => None,
+        BitwigReread::Waiting => Some(
+            "The app is still reading your Bitwig saves again to see which use a multisample copy from another \
+             folder, so the multisample copies stay. Try again once that's done (the Songs page's look through \
+             your folders)."
+                .to_owned(),
+        ),
+        BitwigReread::Owed(n) => Some(format!(
+            "{} couldn't be read again (outside your project folders now, or on a drive that's away), so whether \
+             {} a multisample copy from another folder isn't known and the multisample copies stay. {} tried \
+             again at each start.",
+            plural(n, "Bitwig save"),
+            if n == 1 { "it uses" } else { "they use" },
+            if n == 1 { "It's" } else { "They're" }
+        )),
+        BitwigReread::NotOwn => Some(
+            "The app doesn't keep its own song library yet, so which saves in other folders use a multisample copy \
+             can't be told, and the multisample copies stay."
+                .to_owned(),
+        ),
+        BitwigReread::Unknown => Some(
+            "The song library couldn't be read just now, so the multisample copies stay. Try again in a moment."
+                .to_owned(),
+        ),
+    };
+    // Worked out once for the project, not for each copy (FS-10): the copies a save the library knows still uses,
+    // with that save. A save in another folder that names a copy by its full path (saved without copying its samples)
+    // keeps it; so does a save in the folder that the folder's own check below doesn't read, one an FL Studio or
+    // Ableton save made there, say (FS-17). A save whose file isn't there keeps it too while its drive is away (or has
+    // another letter now): that isn't a save that's gone. On a drive that's here, it's gone, even with its folder.
+    let bitwig_file = |save: &str| {
+        Path::new(save).extension().is_some_and(|x| relink::BITWIG_FILES.iter().any(|b| x.eq_ignore_ascii_case(b)))
+    };
+    let mut kept_by: HashMap<String, (&str, bool)> = HashMap::new();
+    for (sample, save) in elsewhere {
+        if inside(save) && bitwig_file(save) {
+            continue;
+        }
+        let there = Path::new(save).is_file();
+        if !there && !drive_away(Path::new(save)) {
+            continue;
+        }
+        kept_by.entry(without_drive(key(sample))).or_insert((save.as_str(), there));
+    }
     let used_elsewhere = |copy: &Path| -> Option<String> {
         let name = paths::file_name(&copy.to_string_lossy()).to_owned();
         let multisample = copy
             .parent()
             .and_then(Path::file_name)
             .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(relink::COPY_FOLDERS[0]));
-        // The same words for every copy, so the card can give them when nothing went (FS-15).
-        let not_yet = match job.reread {
-            BitwigReread::Done => None,
-            BitwigReread::Waiting => Some(
-                "The app is still reading your Bitwig saves again to see which use a multisample copy from another \
-                 folder, so the multisample copies stay. Try again once that's done (the Songs page's look through \
-                 your folders)."
-                    .to_owned(),
-            ),
-            BitwigReread::Owed(n) => Some(format!(
-                "{} couldn't be read again (outside your project folders now, or on a drive that's away), so whether \
-                 {} a multisample copy from another folder isn't known and the multisample copies stay. {} tried \
-                 again at each start.",
-                plural(n, "Bitwig save"),
-                if n == 1 { "it uses" } else { "they use" },
-                if n == 1 { "It's" } else { "They're" }
-            )),
-            BitwigReread::NotOwn => Some(
-                "The app doesn't keep its own song library yet, so which saves in other folders use a multisample copy \
-                 can't be told, and the multisample copies stay."
-                    .to_owned(),
-            ),
-            BitwigReread::Unknown => Some(
-                "The song library couldn't be read just now, so the multisample copies stay. Try again in a moment."
-                    .to_owned(),
-            ),
-        };
-        if multisample && let Some(why) = not_yet {
-            return Some(why);
+        if multisample && let Some(why) = &not_yet {
+            return Some(why.clone());
         }
-        let copy_key = without_drive(key(&copy.to_string_lossy()));
-        elsewhere
-            .iter()
-            .filter(|(sample, save)| {
-                !inside(save) && Path::new(save).is_file() && without_drive(key(sample)) == copy_key
-            })
-            .map(|(_, save)| format!("{save} uses {name} too, so it stays."))
-            .next()
+        kept_by.get(&without_drive(key(&copy.to_string_lossy()))).map(|(save, there)| {
+            if *there {
+                format!("{save} uses {name} too, so it stays.")
+            } else {
+                format!(
+                    "{save} uses {name} too, and its folder can't be opened now (a drive that's away?), so it stays."
+                )
+            }
+        })
     };
     let left: HashSet<String> = left_behind(job).iter().map(|p| key(&p.to_string_lossy())).collect();
     let left_out = |p: &Path| {
@@ -629,6 +662,13 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
         if let Some(why) = used_elsewhere(copy) {
             return Some(why);
         }
+        // A save of the checked songs made while Free runs (one Ctrl+S in Bitwig) stops the rest going (FS-18): it's
+        // one look at each save's time, not a read.
+        if let Some(why) = changed_since(job) {
+            return Some(why);
+        }
+        // The folder is listed again for each copy (it reads no file): a Bitwig file made or saved a moment ago is
+        // still seen. Only what the library knows is worked out once (FS-10).
         let mut asked = asked.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = relink::bitwig_files_now(original);
         if now.is_err() || now != asked.0 {
@@ -646,6 +686,21 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
         still_named: &still_named,
     };
     bitwig::remove_copies(&fixed, bin, stop)
+}
+
+/// Whether the drive a path is on isn't here now (unplugged, or another letter now): on Windows its drive's root isn't
+/// there; elsewhere, nothing on the path is there below a folder drives are put in (`/Volumes`, `/media`, `/mnt`,
+/// `/run/media`, or the top).
+fn drive_away(path: &Path) -> bool {
+    if cfg!(windows) {
+        return path.ancestors().last().is_none_or(|root| !root.is_dir());
+    }
+    const MOUNTS: [&str; 5] = ["/", "/Volumes", "/media", "/mnt", "/run/media"];
+    let here = path.ancestors().skip(1).find(|a| a.is_dir());
+    here.is_none_or(|h| {
+        MOUNTS.iter().any(|m| h == Path::new(m))
+            || h.parent().is_some_and(|p| p == Path::new("/media") || p == Path::new("/run/media"))
+    })
 }
 
 /// A path as Space compares them, without its drive letter and with `/` between folders: the library keeps the path a
@@ -1117,7 +1172,7 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
         ),
         ticks: true,
         parts,
-        note: if projects.is_empty() { String::new() } else { NEXT.to_owned() },
+        note: if projects.is_empty() { String::new() } else { next() },
         room: String::new(),
         warning: String::new(),
     }
@@ -1211,6 +1266,15 @@ pub fn freed_words(done: &mo_space::clean::Done) -> Result<String, String> {
     let stayed = done.problems.iter().filter(|p| !went.contains(p.path.as_str())).count();
     match (done.removed.len(), stayed) {
         (0, 0) => Ok("Nothing went: the checked songs use no copies now.".to_owned()),
+        // One reason for them all (a save made again since the look, a library that couldn't be read): that's the
+        // reason the card gives, not the general one (the whole-app review of 19 Nov, FS-15).
+        (0, m)
+            if m > 1
+                && let Some(why) = one_why(done, &went) =>
+        {
+            Err(format!("None went ({} stayed): {why}", thousands(m)))
+        }
+        (0, 1) if let Some(why) = one_why(done, &went) => Err(format!("None went: {why}")),
         (0, m) => Err(format!(
             "None went ({} stayed): another song, fixed project or file in the folder still uses them, or they \
              changed. The log says why for each.",
@@ -1230,6 +1294,26 @@ pub fn freed_words(done: &mo_space::clean::Done) -> Result<String, String> {
             ))
         }
     }
+}
+
+/// The Bitwig card's words once Free the space was stopped: what went before it stopped; the rest stay.
+pub fn stopped_words(done: &mo_space::clean::Done) -> String {
+    match done.removed.len() {
+        0 => "Stopped before any copy went: they all stay.".to_owned(),
+        n => format!(
+            "Stopped: {} ({}) went to the {BIN} before it stopped; the rest stay. Put back on the {BIN} line brings \
+             them back.",
+            if n == 1 { "1 Bitwig copy".to_owned() } else { format!("{} Bitwig copies", thousands(n)) },
+            size_text(done.bytes()),
+        ),
+    }
+}
+
+/// The one reason every copy that stayed has, when they all have the same.
+fn one_why<'a>(done: &'a mo_space::clean::Done, went: &HashSet<&str>) -> Option<&'a str> {
+    let mut whys = done.problems.iter().filter(|p| !went.contains(p.path.as_str())).map(|p| p.why.as_str());
+    let first = whys.next()?;
+    whys.all(|w| w == first).then_some(first)
 }
 
 /// A sentence after another: a space before it, unless it's empty.
@@ -1375,7 +1459,8 @@ mod tests {
         );
         assert_eq!(card.parts[1].what, r"1 copy, in K:\Bitwig Studio\Projects");
         assert!(card.ticks);
-        assert_eq!(card.note, NEXT);
+        assert_eq!(card.note, next());
+        assert!(card.note.contains(BIN));
         let first = super::card(None, Some((2, 9)), &Fixes::default());
         assert_eq!(
             (first.big.as_str(), first.big_note.as_str()),
@@ -1578,6 +1663,25 @@ mod tests {
                 .0
                 .ends_with("… (the log has it all)")
         );
+    }
+
+    #[test]
+    fn free_the_space_names_one_reason_for_them_all_and_a_stop() {
+        use mo_space::clean::{Done, Problem};
+        let stayed = |whys: &[&str]| Done {
+            problems: whys
+                .iter()
+                .enumerate()
+                .map(|(i, w)| Problem { path: format!("K:/Song/multi-samples/{i}.multisample"), why: (*w).to_owned() })
+                .collect(),
+            ..Done::default()
+        };
+        let one = "The song library couldn't be read just now, so the multisample copies stay. Try again in a moment.";
+        assert_eq!(freed_words(&stayed(&[one, one, one])), Err(format!("None went (3 stayed): {one}")));
+        assert_eq!(freed_words(&stayed(&[one])), Err(format!("None went: {one}")));
+        let mixed = freed_words(&stayed(&[one, "K:/Other.bwproject uses 1.multisample too, so it stays."]));
+        assert!(mixed.unwrap_err().contains("The log says why"));
+        assert_eq!(stopped_words(&Done::default()), "Stopped before any copy went: they all stay.");
     }
 
     #[test]

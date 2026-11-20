@@ -995,31 +995,68 @@ fn scan_strings(blob: &[u8]) -> Vec<String> {
     out
 }
 
+/// How far [`each_blob_within`] goes.
+#[derive(Clone, Copy, Debug)]
+pub struct BlobLimits {
+    /// The most bytes that look like a zlib header to try.
+    pub attempts: usize,
+    /// The most one stream is unpacked to.
+    pub each: u64,
+    /// The most all the streams together are unpacked to: made-up streams that each unpack to the most would be
+    /// tens of GB to scan.
+    pub all: u64,
+    /// Whether what a stream gave before it failed is looked through too (a save cut short), and a stream that
+    /// unpacked is stepped over, not tried again inside.
+    pub thorough: bool,
+}
+
+/// The reader's own limits, for a damaged save's text scan.
+pub const READER_BLOBS: BlobLimits = BlobLimits { attempts: 200, each: 200_000_000, all: 512_000_000, thorough: false };
+
 /// Hands over the raw file, then each zlib stream inside it (some Bitwig versions keep parts of a project
-/// compressed), one at a time, so only one stream is unpacked in memory at once.
-fn each_blob(raw: &[u8], mut scan: impl FnMut(&[u8])) {
-    const MOST: u64 = 200_000_000;
-    // All the streams together: made-up streams that each unpack to the most would be 40 GB to scan.
-    let mut left: u64 = 512_000_000;
+/// compressed), one at a time, so only one stream is unpacked in memory at once, within [`READER_BLOBS`].
+pub fn each_blob(raw: &[u8], scan: impl FnMut(&[u8])) {
+    each_blob_within(raw, READER_BLOBS, scan);
+}
+
+/// [`each_blob`] within `limits`: false when it stopped short of looking through everything (too many tries, a
+/// stream or all of them bigger than allowed), so a caller that must not miss a name can count the file as naming it.
+/// Space's check of which Bitwig files still name a copy looks through the streams too (the whole-app review of
+/// 19 Nov, FS-24).
+pub fn each_blob_within(raw: &[u8], limits: BlobLimits, mut scan: impl FnMut(&[u8])) -> bool {
+    let mut left = limits.all;
     scan(raw);
     let mut attempts = 0;
     let mut i = 0;
-    while let Some(rest) = raw.get(i..).filter(|r| r.len() > 2 && attempts < 200 && left > 0) {
+    while let Some(rest) = raw.get(i..).filter(|r| r.len() > 2) {
         // A zlib header: 0x78, and the two bytes as a number divisible by 31.
         if let [0x78, second, ..] = *rest
             && (0x7800 | second as u32).is_multiple_of(31)
         {
+            if attempts >= limits.attempts || left == 0 {
+                return false;
+            }
             attempts += 1;
             let mut inflated = Vec::new();
+            let most = limits.each.min(left);
+            let mut decoder = flate2::read::ZlibDecoder::new(rest);
             // Random bytes that happen to look like a zlib header fail in several ways; those are skipped.
-            let read = flate2::read::ZlibDecoder::new(rest).take(MOST.min(left)).read_to_end(&mut inflated);
+            let read = (&mut decoder).take(most).read_to_end(&mut inflated);
             left = left.saturating_sub(inflated.len() as u64);
-            if read.is_ok() && inflated.len() >= 8 {
+            if inflated.len() as u64 >= most && limits.thorough {
+                return false;
+            }
+            if (read.is_ok() || limits.thorough) && inflated.len() >= 8 {
                 scan(&inflated);
+            }
+            if limits.thorough && read.is_ok() {
+                i += usize::try_from(decoder.total_in()).unwrap_or(1).max(1);
+                continue;
             }
         }
         i += 1;
     }
+    true
 }
 
 #[cfg(test)]
