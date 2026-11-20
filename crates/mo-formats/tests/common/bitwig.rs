@@ -1035,6 +1035,9 @@ fn template_body(b: &mut BwWriter, t: Template, sampler: &str, note_transpose: &
                 b.f64(0x2af, 0.0);
                 b.f64(0x26, 64.0);
                 b.bool(0x10f8, false);
+                // The template clip's own fades, as recipe save 12 has them.
+                b.f64(0x1947, 0.25);
+                b.f64(0x1948, 0.25);
                 b.obj(0x2ae9);
                 b.begin(0xec2);
                 b.obj(0x10e9);

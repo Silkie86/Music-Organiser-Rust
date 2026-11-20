@@ -141,6 +141,8 @@ pub fn note(pos: u32, channel: u16, length: u32, key: u16, velocity: u8) -> Vec<
     b[6..8].copy_from_slice(&channel.to_le_bytes());
     b[8..12].copy_from_slice(&length.to_le_bytes());
     b[12..14].copy_from_slice(&key.to_le_bytes());
+    // In tune and in the middle, as FL saves a note nobody moved.
+    (b[16], b[20]) = (120, 64);
     b[21] = velocity;
     b
 }

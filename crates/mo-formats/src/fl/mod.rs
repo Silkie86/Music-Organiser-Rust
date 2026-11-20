@@ -36,6 +36,9 @@ pub const DAW: &str = "FL Studio";
 /// above MIDI's top key; 18 reads FL 25 and 26's extended events (event 172 and the real event after it) as one, so
 /// one inside a channel no longer reads as the channel's light or an old-style name; 19 lays the patterns of a song with
 /// nothing in its playlist one after another in the song's own bars (3 beats in 3/4 or 6/8), where every bar was 4.
+///
+/// The channels with notes panned or finely pitched (`FlSong::fine_notes`, 20 Nov 2026) didn't raise it: only a
+/// convert reads them, from the save each time, and nothing keeps them.
 pub const VERSION: u32 = 19;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 

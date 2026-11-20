@@ -174,7 +174,8 @@ pub fn template_path(data_dir: &Path, picked: Option<&str>) -> Option<PathBuf> {
 /// What the screen says when there's no template.
 pub const NO_TEMPLATE: &str = "Converting needs a Bitwig template: a project saved in Bitwig with a Sampler track, a \
      VST3 synth with a Note Transpose before it and a clip of notes, and a VST2 synth (and an audio track with an audio \
-     clip on it, for FL Studio's audio clips). Pick it in Settings or try again.";
+     clip on it, for FL Studio's audio clips). Save it as \"Music Organiser template.bwproject\" in the \"Bitwig template\" \
+     folder of the app's data folder, then try again.";
 
 /// A song converted for Bitwig.
 #[derive(Debug)]

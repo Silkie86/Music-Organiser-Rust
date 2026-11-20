@@ -1566,8 +1566,13 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
             }
             Err(e) => {
                 log::warning("Convert", &format!("{path}: {e}"));
-                let more =
-                    if e.starts_with("The Bitwig template") { " Pick another template in Settings." } else { "" };
+                // No screen picks a template yet, so the words say where the app looks for it.
+                let more = if e.starts_with("The Bitwig template") {
+                    " Save a working template over \"Music Organiser template.bwproject\" in the \"Bitwig \
+                     template\" folder of the app's data folder."
+                } else {
+                    ""
+                };
                 job.failed(&format!("Converting for Bitwig failed: {e}{more}"));
             }
         }

@@ -601,6 +601,13 @@ impl Planner<'_> {
         if c.volume_envelope.is_some() {
             self.notes.push(format!("{}: {}", c.name, notes::ENVELOPE_LEFT_OUT));
         }
+        if song.fine_notes.contains(&c.index) {
+            self.notes.push(format!(
+                "{}: some notes are panned or finely pitched in FL's piano roll, which isn't carried over (in Bitwig \
+                 they're in the middle and in tune)",
+                c.name
+            ));
+        }
         let track = Track {
             name: c.name.clone(),
             source: c.name.clone(),
@@ -625,6 +632,12 @@ impl Planner<'_> {
         let song = self.song;
         let mut skipped = Vec::new();
         let info = self.sample(&c.sample);
+        if c.audio_clips.iter().any(|x| x.fade_in > 0.0 || x.fade_out > 0.0) {
+            self.notes.push(format!(
+                "{}: its clips' fades aren't carried over yet, so they start and stop without one in Bitwig",
+                c.name
+            ));
+        }
         let mut sorted: Vec<&FlAudioClip> = c.audio_clips.iter().collect();
         sorted.sort_by_key(|x| x.start);
         let mut lanes: Vec<Vec<FlAudioClip>> = Vec::new();
