@@ -51,15 +51,15 @@ $OnWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
 $Exe = if ($OnWindows) { "$AppName.exe" } else { $AppName }
 $DataRoot = [Environment]::GetFolderPath('LocalApplicationData')
 $Home_ = Join-Path (Join-Path $DataRoot 'MusicOrganiser') 'run-latest-rust'
-# The app's data folder: the first one, or the one Settings moved it to (named in MusicOrganiser-folder.txt beside the
-# first, which the app writes as UTF-8). Looked up each time: the app switches at a start the launcher makes. The
-# launcher itself stays in the first one.
+# The app's data folder: the first one, or the one Settings moved it to or the installer started it in (named in
+# MusicOrganiser-folder.txt beside the first, which the app writes as UTF-8; review TC-6). Looked up each time: the
+# app switches at a start the launcher makes. The launcher itself stays in the first one.
 function Get-AppData {
     $first = Join-Path $DataRoot 'MusicOrganiser'
     $pointer = Join-Path $DataRoot 'MusicOrganiser-folder.txt'
     if (Test-Path -LiteralPath $pointer) {
         $moved = ((Get-Content -LiteralPath $pointer -Raw -Encoding UTF8 -ErrorAction SilentlyContinue) + '').Trim()
-        if ($moved -and [IO.Path]::IsPathRooted($moved) -and (Test-Path -LiteralPath (Join-Path $moved 'moved-in.json'))) { return $moved }
+        if ($moved -and [IO.Path]::IsPathRooted($moved) -and ((Test-Path -LiteralPath (Join-Path $moved 'moved-in.json')) -or (Test-Path -LiteralPath (Join-Path $moved 'started-here.txt')))) { return $moved }
     }
     return $first
 }
@@ -257,7 +257,7 @@ try { $gotLock = $LauncherLock.WaitOne(0) }
 catch [System.Threading.AbandonedMutexException] { $gotLock = $true }   # the last holder closed without letting go
 if (-not $gotLock) {
     Stop-WithMessage ("Another Music Organiser Rust launcher window is already running (it may be behind other windows). " +
-        "Close that one first, or keep using it.")
+        "If you closed the app, press Enter in that window to open it again. Or close that window first, then start this one.")
 }
 
 if (-not (Test-Path (Join-Path $Repo '.git'))) {
@@ -751,6 +751,19 @@ function Remove-OldBuilds([string]$Keep) {
         }
 }
 
+# Whether Enter was pressed in this window since the last look (other keys are let go). False when there's no window
+# to read keys from.
+function Test-EnterPressed {
+    $enter = $false
+    try {
+        while ([Console]::KeyAvailable) {
+            if ([Console]::ReadKey($true).Key -eq [ConsoleKey]::Enter) { $enter = $true }
+        }
+    }
+    catch { }
+    return $enter
+}
+
 function Start-App([string]$Path) {
     # The app's log then says the launcher is keeping it up to date.
     if (-not $NoWatch -and $PullEvery -gt 0) { $env:MO_WATCH = '1' }
@@ -897,8 +910,15 @@ try {
         }
         if ($app -and $app.HasExited -and -not $saidClosed) {
             $saidClosed = $true
-            if ($app.ExitCode -eq 0) { Say 'The app was closed. The next change from GitHub opens it again.' 'DarkGray' }
-            else { Say "The app stopped with exit code $($app.ExitCode). Its log is in $(Get-AppData)\logs. The next change opens it again." 'Yellow' }
+            if ($app.ExitCode -eq 0) { Say 'The app was closed. Press Enter here to open it again (the next change from GitHub opens it too).' 'DarkGray' }
+            else { Say "The app stopped with exit code $($app.ExitCode). Its log is in $(Get-AppData)\logs. Press Enter here to open it again (the next change opens it too)." 'Yellow' }
+        }
+        # Enter in this window opens the same build again, once the app is closed (review TC-5: a second launcher
+        # window from the shortcut stops, as this one holds the lock).
+        if ($app -and $app.HasExited -and $current -and (Test-EnterPressed)) {
+            $app = Start-App $current
+            $saidClosed = $false
+            Say "$(Get-Date -Format 'HH:mm:ss')  The app is open again." 'Green'
         }
         if ((Get-Date) -lt $next) { continue }
         $next = (Get-Date).AddSeconds($PullEvery)

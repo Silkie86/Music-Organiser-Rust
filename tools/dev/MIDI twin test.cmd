@@ -4,8 +4,12 @@ rem It only reads (midi.db and library.db are opened read-only). The summary goe
 where cargo >nul 2>nul || set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 set "DATA=%LOCALAPPDATA%\MusicOrganiser"
 set "APP=%DATA%\run-latest-rust\app"
-rem The data may have moved to another drive (Settings): MusicOrganiser-folder.txt beside the first folder names it.
-if exist "%LOCALAPPDATA%\MusicOrganiser-folder.txt" for /f "usebackq delims=" %%d in ("%LOCALAPPDATA%\MusicOrganiser-folder.txt") do if exist "%%d\moved-in.json" set "DATA=%%d"
+rem The data may have moved to another drive (Settings), or the installer started it there: MusicOrganiser-folder.txt
+rem beside the first folder names it. Read by PowerShell, which skips the byte-order mark an older setup wrote.
+if exist "%LOCALAPPDATA%\MusicOrganiser-folder.txt" for /f "usebackq delims=" %%d in (`powershell -NoProfile -Command "(Get-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'MusicOrganiser-folder.txt') -Raw -Encoding UTF8).Trim()"`) do (
+  if exist "%%d\moved-in.json" set "DATA=%%d"
+  if exist "%%d\started-here.txt" set "DATA=%%d"
+)
 if not exist "%APP%\Cargo.toml" (echo The Rust app code is not in %APP%. Run the Rust launcher once first. & pause & exit /b 1)
 if not exist "%DATA%\logs" mkdir "%DATA%\logs"
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd-HHmm"') do set "STAMP=%%i"
