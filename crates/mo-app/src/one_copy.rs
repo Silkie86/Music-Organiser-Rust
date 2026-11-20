@@ -105,15 +105,18 @@ pub enum Claim {
 /// to show its window (Windows only lets a window come to the front when the program in front allows it).
 pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration, before_show: impl Fn(u32)) -> Claim {
     let mut until = Instant::now() + close_wait;
+    // However often the port changes hands meanwhile, the wait as a whole ends here.
+    let last = Instant::now() + close_wait * 3;
+    // The build of a copy this one asked to close, kept for the log whoever has the port after it.
+    let mut closed: Option<String> = None;
     // The copy that's being waited for, once there is one, and when the port was last asked who has it.
     let mut closing: Option<Hello> = None;
     let mut looked = Instant::now();
-    let mut asked_to_close = false;
     loop {
         match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
             Ok(listener) => {
                 return match OneCopy::start(listener, version, exe) {
-                    Ok(held) => Claim::Ours { held, closed: closing.filter(|_| asked_to_close).map(|other| other.app) },
+                    Ok(held) => Claim::Ours { held, closed },
                     Err(e) => Claim::Unguarded(format!("couldn't answer on port {port}: {e}")),
                 };
             }
@@ -134,9 +137,10 @@ pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration, before_s
                 {
                     // The next turn asks it afresh: to show, or to close, with the whole wait to do it in.
                     closing = None;
-                    asked_to_close = false;
-                    until = Instant::now() + close_wait;
-                    continue;
+                    until = (Instant::now() + close_wait).min(last);
+                    if Instant::now() < last {
+                        continue;
+                    }
                 }
             }
         } else {
@@ -165,7 +169,7 @@ pub fn claim(port: u16, version: &str, exe: &str, close_wait: Duration, before_s
                     if ask(port, &json!({ "ask": "close" })).is_err() {
                         return Claim::Unguarded(format!("the copy from another build ({}) didn't answer", other.app));
                     }
-                    asked_to_close = true;
+                    closed = Some(other.app.clone());
                     closing = Some(Hello { closing: true, ..other });
                 }
                 // Just let go between the two looks: the next try takes it. Otherwise it isn't the app's.

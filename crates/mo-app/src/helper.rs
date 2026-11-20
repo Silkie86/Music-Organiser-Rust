@@ -343,7 +343,7 @@ mod tests {
     }
 
     fn started(port: u16) -> Arc<Helper> {
-        match Helper::start(port, free_port()).unwrap() {
+        match Helper::start_in(crate::version::version(), String::new(), port, free_port()).unwrap() {
             Start::Started(h) => h,
             Start::AlreadyRunning => panic!("the port was taken"),
         }
@@ -357,7 +357,10 @@ mod tests {
         assert_eq!(hello.pid, std::process::id());
         assert_eq!(hello.helper, crate::version::version());
         assert!(!hello.paused);
-        assert!(matches!(Helper::start(helper.port(), free_port()).unwrap(), Start::AlreadyRunning));
+        assert!(matches!(
+            Helper::start_in(crate::version::version(), String::new(), helper.port(), free_port()).unwrap(),
+            Start::AlreadyRunning
+        ));
         helper.quit();
     }
 
@@ -399,7 +402,9 @@ mod tests {
         // The port is free again once the thread answering it ends.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Ok(Start::Started(again)) = Helper::start(port, free_port()) {
+            if let Ok(Start::Started(again)) =
+                Helper::start_in(crate::version::version(), String::new(), port, free_port())
+            {
                 again.quit();
                 break;
             }

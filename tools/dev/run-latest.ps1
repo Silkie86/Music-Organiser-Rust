@@ -790,15 +790,22 @@ function Wait-ForNote {
 }
 
 function Get-InstalledOpen {
-    # The installed DAWmate's program, when that is the copy open now; nothing otherwise. The open copy answers on the
-    # app's one-copy port (mo_app::one_copy::PORT) with where it runs from, and an installed copy has the setup's
-    # uninstaller beside it (mo_app::update::installed). A copy that is closing already doesn't count.
+    # The installed DAWmate's program, when that is the copy open now (closing counts: it may be restarting to
+    # update); 'busy' when something has the app's port but didn't say in time who it is; nothing when the port is
+    # free or a launcher build has it. The open copy answers on the app's one-copy port (mo_app::one_copy::PORT) with
+    # where it runs from, and an installed copy has the setup's uninstaller beside it (mo_app::update::installed).
     $client = $null
     try {
         $client = New-Object Net.Sockets.TcpClient
-        $wait = $client.BeginConnect('127.0.0.1', 19793, $null, $null)
-        if (-not $wait.AsyncWaitHandle.WaitOne(500)) { return $null }
-        $client.EndConnect($wait)
+        try { $client.Connect('127.0.0.1', 19793) }
+        catch {
+            # Refused: nothing has the port. Anything else isn't known.
+            $why = $_.Exception
+            if ($why.InnerException) { $why = $why.InnerException }
+            if ($why -is [Net.Sockets.SocketException] -and
+                $why.SocketErrorCode -eq [Net.Sockets.SocketError]::ConnectionRefused) { return $null }
+            return 'busy'
+        }
         $stream = $client.GetStream()
         $stream.ReadTimeout = 1000
         $stream.WriteTimeout = 1000
@@ -807,14 +814,17 @@ function Get-InstalledOpen {
         $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8)
         $hello = $reader.ReadLine() | ConvertFrom-Json
         $exe = "$($hello.exe)"
-        if ($exe -and -not $hello.closing -and
-            [IO.File]::Exists([IO.Path]::Combine([IO.Path]::GetDirectoryName($exe), 'unins000.exe'))) {
-            return $exe
-        }
+        if (-not $exe) { return 'busy' }
+        if ([IO.File]::Exists([IO.Path]::Combine([IO.Path]::GetDirectoryName($exe), 'unins000.exe'))) { return $exe }
+        return $null
     }
-    catch { }
+    catch { return 'busy' }
     finally { if ($client) { $client.Close() } }
-    $null
+}
+
+function Test-SetupRunning {
+    # Whether a DAWmate setup is at work (Restart to update closes the app, and the setup opens the new version).
+    [bool](Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'DAWmate-Setup-*' })
 }
 
 Say ''
@@ -862,13 +872,18 @@ try {
     $saidGone = $false
     $couldntTake = ''   # a GitHub version that couldn't be brought in: not tried again until GitHub moves on
     $waiting = $null    # a new build that waits while the installed DAWmate is open
+    $freeLooks = 0      # looks in a row that found the installed DAWmate gone, while a build waits
     $nextLook = Get-Date
     $next = (Get-Date).AddSeconds($PullEvery)
     while ($true) {
         Start-Sleep -Milliseconds 500
         if ($waiting -and (Get-Date) -ge $nextLook) {
             $nextLook = (Get-Date).AddSeconds(3)
-            if (-not (Get-InstalledOpen)) {
+            # Gone means gone for a while: one look that got no answer isn't enough, and nor is the gap while the
+            # installed copy restarts to update (it closes, its setup runs, the new version opens).
+            if ((Get-InstalledOpen) -or (Test-SetupRunning)) { $freeLooks = 0 } else { $freeLooks++ }
+            if ($freeLooks -ge 5) {
+                $freeLooks = 0
                 Wait-ForNote
                 Stop-App $app
                 $app = Start-App $waiting
@@ -914,9 +929,11 @@ try {
         # A new build never takes the installed DAWmate's place by itself: starting it would close that copy without
         # a question, and a launcher build never updates itself (the 19 Nov review's CL-4). It waits until that copy
         # is closed. (Starting this launcher by hand still opens its build in place of whatever is open.)
-        if (Get-InstalledOpen) {
+        # (While the launcher's own build is open, the installed one isn't: only one copy is ever open.)
+        if ((-not $app -or $app.HasExited) -and (Get-InstalledOpen)) {
             if (-not $waiting) { Say "$(Get-Date -Format 'HH:mm:ss')  DAWmate (installed) is open: the new build opens when you close it." 'Yellow' }
             $waiting = $built
+            $freeLooks = 0
             $nextLook = (Get-Date).AddSeconds(3)
             continue
         }

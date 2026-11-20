@@ -126,9 +126,14 @@ pub fn turn_on(
     };
     let ours =
         |hello: &helper::Hello| same_build(hello) && (hello.data.is_empty() || same_program(&hello.data, &data_text));
+    // The process id of a helper of this build that was on another folder, so it isn't taken for the new one.
+    let mut old_pid = None;
     let replaced = match helper::hello(port) {
         Some(hello) if ours(&hello) => return Done { login_problem, login_list, running: Running::Already },
         Some(hello) => {
+            if same_build(&hello) {
+                old_pid = Some(hello.pid);
+            }
             helper::ask_to_quit(port);
             let until = Instant::now() + QUIT_WAIT;
             while helper::hello(port).is_some() && Instant::now() < until {
@@ -145,7 +150,17 @@ pub fn turn_on(
             let until = Instant::now() + ANSWER_WAIT;
             loop {
                 match helper::hello(port) {
-                    Some(hello) if ours(&hello) => break replaced.unwrap_or(Running::Started),
+                    // The one just started is this build's whichever folder it says: it reads the data folder afresh,
+                    // and that can differ from this run's (the app opened on the old copy, and the drive came back).
+                    Some(hello) if ours(&hello) || (same_build(&hello) && Some(hello.pid) != old_pid) => {
+                        break replaced.unwrap_or(Running::Started);
+                    }
+                    Some(hello) if Instant::now() >= until && same_build(&hello) => {
+                        break Running::Failed(format!(
+                            "the helper still running on the old data folder ({}) didn't quit",
+                            hello.data
+                        ));
+                    }
                     Some(hello) if Instant::now() >= until => {
                         break Running::Failed(format!("the helper from another build ({}) didn't quit", hello.helper));
                     }
