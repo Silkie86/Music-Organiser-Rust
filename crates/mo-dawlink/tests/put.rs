@@ -205,12 +205,25 @@ fn another_project_coming_to_the_front_stops_it_and_says_what_to_look_at() {
         said.starts_with("Another project came to the front in Bitwig while the part was being recorded"),
         "{said}"
     );
-    assert!(said.contains("the master's mute"), "{said}");
+    assert!(said.contains("the master is muted, arranger record is on"), "{said}");
+    assert!(said.contains("The link puts these back by itself once your song is in front again"), "{said}");
+    assert!(said.contains("the pre-roll (none)"), "{said}");
     // Its clip can't be taken out of a project that isn't in front, and the words say where it is.
     assert!(said.ends_with("The part's clip may still be in \u{201c}Bass\u{201d}'s clip launcher there."), "{said}");
     let world = bitwig.world();
     assert!(world.arranger.is_empty());
     assert_eq!(world.project, "Glass");
+    drop(world);
+    // An extension before 3.32 dropped what it had kept: the words say nothing puts it back.
+    let old = with(|w| {
+        w.switch_during = Some(("record".into(), "Glass".into()));
+        w.drops_put_back = true;
+    });
+    let failed = put(&old, "Switched old").unwrap_err();
+    assert!(mo_dawlink::bitwig::was_cut_off_by_another_project(&failed));
+    let said = failed.to_string();
+    assert!(said.contains("nothing puts it back"), "{said}");
+    assert!(said.contains("turn record off before you press Play"), "{said}");
 }
 
 #[test]

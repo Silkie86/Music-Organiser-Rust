@@ -24,8 +24,10 @@ pub struct SampleFile {
     pub md5: [u8; 16],
     pub rate: u32,
     pub channels: u16,
-    /// 0 when the file could be read but not decoded (a format the app doesn't play).
+    /// 0 when the file could be read but how long it is couldn't be told.
     pub seconds: f64,
+    /// A WAV file that keeps Ogg Vorbis inside, as FL Studio's own sounds do: not every program plays those.
+    pub ogg_in_wav: bool,
 }
 
 /// What the target DAW's writer can carry, and how steps are timed.
@@ -530,7 +532,8 @@ impl Planner<'_> {
                         .notes
                         .push(format!("{}: couldn't read {}, so Bitwig will ask where it is", c.name, c.sample)),
                     Some(i) if i.seconds <= 0.0 => self.notes.push(format!(
-                        "{}: couldn't tell how long {} is, so Bitwig will ask where it is",
+                        "{}: couldn't tell how long {} is, so Bitwig will ask where it is, and the Sampler's end may \
+                         need setting by hand",
                         c.name, c.sample
                     )),
                     Some(i) if !self.options.steps_until_next_note => {
@@ -1175,6 +1178,23 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     }
 
     let mut seen = HashSet::new();
+    // Samples that keep Ogg Vorbis inside a WAV file, as FL Studio's own sounds do: said once for the song, after
+    // what was left out. Whether Bitwig plays that kind hasn't been seen, and some programs don't.
+    let mut packed: Vec<&str> = planner
+        .samples
+        .iter()
+        .filter(|(_, info)| info.as_ref().is_some_and(|i| i.ogg_in_wav))
+        .map(|(path, _)| mo_formats::paths::file_name(path))
+        .collect();
+    packed.sort_unstable();
+    packed.dedup();
+    if !packed.is_empty() {
+        planner.notes.push(format!(
+            "Kept packed inside a WAV file (Ogg Vorbis, as FL Studio's own sounds are): {}. If Bitwig can't play one, \
+             save it as a plain WAV and point its track at that",
+            packed.join(", ")
+        ));
+    }
     let notes = planner.notes.into_iter().filter(|n| seen.insert(n.clone())).collect();
     Plan { title: song.title.clone(), tempo, ppq: song.ppq, tracks, master_effects, lanes, notes }
 }

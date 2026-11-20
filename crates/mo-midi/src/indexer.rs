@@ -10,7 +10,6 @@
 //! folders' files (found with the library's folder walk).
 
 use std::collections::{HashMap, HashSet};
-use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
@@ -25,6 +24,7 @@ use crate::analyser::FEATURE_COUNT;
 use crate::extract::{self, Unread};
 use crate::index::{MidiError, SourceKind};
 use crate::keys;
+use crate::made::made;
 use crate::roles::Role;
 use crate::store::{FileRead, MidiStore, Outcome, ReadKey, Stamp};
 
@@ -123,14 +123,16 @@ pub struct Summary {
     pub parts: usize,
     /// Sets of notes whose key was read again, as the key finder got better.
     pub rekeyed: usize,
-    /// Sets of notes given their shape (the same in any key), kept before the index kept shapes.
+    /// Sets of notes given their shape (the same in any key) after the reading: kept before the index kept shapes,
+    /// or saved without as theirs tripped ([`MidiStore::save`]).
     pub shaped: usize,
-    /// Sets of notes given their slots (what a search for parts that fit a song looks at first), kept before the
-    /// index kept slots or by another version of them.
+    /// Sets of notes given their slots (what a search for parts that fit a song looks at first) after the reading:
+    /// kept before the index kept slots or by another version of them, or saved without as theirs tripped.
     pub slots: usize,
-    /// Sets of notes kept in the index that tripped what reads their key again or makes their shape or slots (a bug
-    /// in it; the log has the first in full and a line for each): passed over, so the others still got theirs, and
-    /// asked for again at every run until it's put right ([`made`]).
+    /// Sets of notes kept in the index that tripped what reads their key again or makes their shape or slots after
+    /// the reading (a bug in it; the log has the first in full and a line for each): passed over, so the others
+    /// still got theirs, and asked for again at every run until it's put right ([`made`]). A new part's that
+    /// tripped as it was saved are among them: those steps ask for them again in the same run.
     pub tripped: usize,
     /// Stopped before the end, because a newer run was wanted.
     pub stopped: bool,
@@ -153,6 +155,24 @@ pub fn run(
     readers: usize,
     stop: &AtomicBool,
     progress: &dyn Fn(usize, usize, &str),
+) -> Result<Summary, MidiError> {
+    run_saving(store, plan, midi_folders, pool, readers, stop, progress, &MidiStore::save)
+}
+
+/// What saves a batch of files just read: [`MidiStore::save`].
+type Save = dyn Fn(&mut MidiStore, &[FileRead]) -> Result<(), MidiError>;
+
+/// [`run`], with what saves each batch handed in (a test hands in one whose new parts trip).
+#[allow(clippy::too_many_arguments)]
+fn run_saving(
+    store: &mut MidiStore,
+    plan: &Plan,
+    midi_folders: &[String],
+    pool: &rayon::ThreadPool,
+    readers: usize,
+    stop: &AtomicBool,
+    progress: &dyn Fn(usize, usize, &str),
+    save: &Save,
 ) -> Result<Summary, MidiError> {
     if pool.current_thread_index().is_some() {
         return Err(MidiError::Open {
@@ -220,7 +240,7 @@ pub fn run(
             let name = read.path.clone();
             batch.push(read);
             if batch.len() >= SAVE_FILES || last.elapsed() >= SAVE_EVERY {
-                if let Err(e) = store.save(&batch) {
+                if let Err(e) = save(store, &batch) {
                     saved = Err(e);
                     failed.store(true, Ordering::Relaxed);
                     break;
@@ -233,7 +253,7 @@ pub fn run(
         // Dropping the receiver lets readers still waiting to hand a file over stop too.
         drop(rx);
         if saved.is_ok()
-            && let Err(e) = store.save(&batch)
+            && let Err(e) = save(store, &batch)
         {
             saved = Err(e);
         }
@@ -248,7 +268,8 @@ pub fn run(
 }
 
 /// What's done once the files are read: notes no file has any more go, keys are read again where the key finder got
-/// better, and notes kept before shapes or slots were get theirs.
+/// better, and notes with no shape or slots get theirs (kept before the index kept those, or saved without as
+/// theirs tripped).
 fn after_reading(
     store: &mut MidiStore,
     pool: &rayon::ThreadPool,
@@ -288,28 +309,6 @@ struct Went {
     finished: bool,
 }
 
-/// Makes something from one set of notes kept in the index (its key, its shape, its slots), on the thread it's called
-/// on. Notes that trip what makes it (a bug: each of these is meant to take whatever notes a file can hold) give
-/// `None`. So one set of notes never ends the whole reading, which left the page "reading" until the app was started
-/// again, and again after every start as the same notes came up (the 14 November 2026 review's MI-15).
-///
-/// Notes passed over keep what they had (an older key finder's key, no shape, no slots), and every later run asks
-/// for them again: they get theirs with the build that puts the bug right, whatever it was in.
-///
-/// `tripped` is the step's own: whether any of its sets has tripped yet in this run. The first that does is logged as
-/// the crash it is, in full (where it came from, a crash log of its own), so the bug can be found. Those after it get
-/// one warning line each, counted by where they tripped: a crash in full waits for the log to be on disk and takes a
-/// backtrace, and a bug here can trip on every set of notes in the index. `make` never waits for other threads' work
-/// (`mo_catch::catch`'s rule).
-fn made<T>(tripped: &AtomicBool, make: impl FnOnce() -> T) -> Option<T> {
-    let make = AssertUnwindSafe(make);
-    let caught = if tripped.load(Ordering::Relaxed) { mo_catch::catch(make) } else { mo_catch::catch_crash(make) };
-    if caught.is_err() {
-        tripped.store(true, Ordering::Relaxed);
-    }
-    caught.ok()
-}
-
 /// Sets of notes given something made from them (their shape, their slots) at once.
 const FILL_BATCH: usize = 2_000;
 
@@ -318,17 +317,20 @@ const FILL_BATCH: usize = 2_000;
 /// `pool`), `save` keeps a batch's. `stop` ends it after the batch it's on.
 ///
 /// Notes that trip `make` are passed over ([`made`]) and keep none of it, so every later run asks for them again
-/// (each run then goes over the table once to find them, which is quick).
+/// (each run then goes over the table once to find them, which is quick). `tripped` is whether it has tripped
+/// already since the index was opened, as new parts were saved ([`MidiStore::tripped`]): the bug is in the log in
+/// full then, and the same notes asked for again here get a line each, not a second crash log.
 fn fill<T: Send>(
     store: &mut MidiStore,
     pool: &rayon::ThreadPool,
     stop: &AtomicBool,
+    tripped: bool,
     without: impl Fn(&MidiStore, i64, usize) -> Result<Vec<(i64, Vec<NoteEvent>)>, MidiError>,
     make: impl Fn(&[NoteEvent]) -> T + Sync,
     save: impl Fn(&mut MidiStore, &[(i64, T)]) -> Result<(), MidiError>,
 ) -> Result<Went, MidiError> {
     let mut went = Went::default();
-    let tripped = AtomicBool::new(false);
+    let tripped = AtomicBool::new(tripped);
     let mut after = 0;
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -349,22 +351,25 @@ fn fill<T: Send>(
     }
 }
 
-/// Works out the shape (the same in every key) of the notes saved before the index kept shapes ([`fill`]). Quick: a
-/// hash a set of notes.
+/// Works out the shape (the same in every key) of the notes with none: saved before the index kept shapes, or
+/// saved without as theirs tripped ([`fill`]). Quick: a hash a set of notes.
 fn fill_shapes(store: &mut MidiStore, pool: &rayon::ThreadPool, stop: &AtomicBool) -> Result<Went, MidiError> {
     if store.unshaped_count()? == 0 {
         return Ok(Went { finished: true, ..Went::default() });
     }
-    fill(store, pool, stop, MidiStore::unshaped, crate::analyser::shape_of, MidiStore::save_shapes)
+    let tripped = store.tripped().0;
+    fill(store, pool, stop, tripped, MidiStore::unshaped, crate::analyser::shape_of, MidiStore::save_shapes)
 }
 
-/// Works out the slots (for a search's first look) of the notes saved before the index kept slots, or whose slots
-/// another [`crate::fit::SLOTS_VERSION`] made ([`fill`]). Quick: a few microseconds a set of notes.
+/// Works out the slots (for a search's first look) of the notes with none of this [`crate::fit::SLOTS_VERSION`]:
+/// saved before the index kept slots, or by another version, or saved without as theirs tripped ([`fill`]). Quick:
+/// a few microseconds a set of notes.
 fn fill_slots(store: &mut MidiStore, pool: &rayon::ThreadPool, stop: &AtomicBool) -> Result<Went, MidiError> {
     if store.without_slots_count()? == 0 {
         return Ok(Went { finished: true, ..Went::default() });
     }
-    fill(store, pool, stop, MidiStore::without_slots, crate::fit::slots_of, MidiStore::save_slots)
+    let tripped = store.tripped().1;
+    fill(store, pool, stop, tripped, MidiStore::without_slots, crate::fit::slots_of, MidiStore::save_slots)
 }
 
 /// Sets of notes read again at once, for their key.
@@ -489,16 +494,15 @@ mod tests {
         }
     }
 
-    /// An index of three files, one part each, in `folder`.
-    fn index(folder: &Folder) -> (MidiStore, PathBuf) {
-        let dir = &folder.0;
+    /// Three files written into `folder`, one part each: the same tune from [`TUNE`], [`HIGHER`] and [`BASS`].
+    fn three_files(folder: &Folder) -> Vec<Wanted> {
         let tune = [0, 4, 7, 12, 11, 7, 5, 4, 2, -1, 0, 7];
         let files = [("Tune.mid", TUNE), ("Higher.mid", HIGHER), ("Bass.mid", BASS)];
-        let wanted: Vec<Wanted> = files
+        files
             .iter()
             .map(|(file, first)| {
                 let keys: Vec<u8> = tune.iter().map(|step| (i32::from(*first) + step) as u8).collect();
-                let path = dir.join(file);
+                let path = folder.0.join(file);
                 std::fs::write(&path, smf(&keys)).unwrap();
                 Wanted {
                     path: path.to_string_lossy().into_owned(),
@@ -507,7 +511,13 @@ mod tests {
                     size: std::fs::metadata(&path).unwrap().len() as i64,
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    /// An index of three files, one part each, in `folder`.
+    fn index(folder: &Folder) -> (MidiStore, PathBuf) {
+        let dir = &folder.0;
+        let wanted = three_files(folder);
         let db = dir.join("midi-index.db");
         let mut store = MidiStore::open(&db).unwrap();
         let plan = plan(&wanted, &[], &[], false);
@@ -608,7 +618,8 @@ mod tests {
             assert!(notes.first().is_none_or(|n| n.key != BASS), "these notes trip the slots (on purpose)");
             slots_of(notes)
         };
-        let went = fill(&mut store, &pool(), &go, MidiStore::without_slots, trips, MidiStore::save_slots).unwrap();
+        let went =
+            fill(&mut store, &pool(), &go, false, MidiStore::without_slots, trips, MidiStore::save_slots).unwrap();
         assert_eq!(went, Went { made: 2, tripped: 1, finished: true });
         // The two that didn't trip have theirs; the one that did has none, so a search doesn't take it for a part
         // with nothing in it.
@@ -624,17 +635,68 @@ mod tests {
         assert_eq!(stopped, Went::default());
     }
 
-    /// The first of a step's sets to trip is caught as a crash (logged in full); those after it as what a reader
-    /// expects (a line each).
+    /// The 19 November 2026 review's MP-11: MI-15 once more, for a part just read from a file. Its shape and its
+    /// slots are made as it's saved, and nothing caught them there: a bug in either on one new loop ended the
+    /// reading at that loop's file, the batch it was in unsaved, and again at every start.
     #[test]
-    fn only_the_first_to_trip_is_logged_in_full() {
-        let tripped = AtomicBool::new(false);
-        assert_eq!(made(&tripped, || 5), Some(5));
-        assert!(!tripped.load(Ordering::Relaxed));
-        let trips = || -> u8 { panic!("tripped (on purpose)") };
-        assert_eq!(made(&tripped, trips), None);
-        assert!(tripped.load(Ordering::Relaxed));
-        assert_eq!(made(&tripped, trips), None);
-        assert_eq!(made(&tripped, || 7), Some(7));
+    fn a_new_part_that_trips_its_shape_or_its_slots_is_saved_without_and_asked_for_again() {
+        let folder = Folder::new("fresh");
+        let batch: Vec<FileRead> = three_files(&folder)
+            .into_iter()
+            .map(|w| FileRead {
+                outcome: Outcome::Parts(extract::read(Path::new(&w.path), &[]).unwrap()),
+                version: w.version().unwrap(),
+                path: w.path,
+                kind: w.kind,
+                mtime: w.mtime,
+                size: w.size,
+            })
+            .collect();
+        let mut store = MidiStore::open(&folder.0.join("midi-index.db")).unwrap();
+        // The bassline's notes trip the shape, the higher tune's the slots, as a bug in either would.
+        let shape = |notes: &[NoteEvent]| {
+            assert!(notes.first().is_none_or(|n| n.key != BASS), "these notes trip the shape (on purpose)");
+            crate::analyser::shape_of(notes)
+        };
+        let slots = |notes: &[NoteEvent]| {
+            assert!(notes.first().is_none_or(|n| n.key != HIGHER), "these notes trip the slots (on purpose)");
+            slots_of(notes)
+        };
+        for _ in 0..2 {
+            // Twice: the second time the notes are there already (the same files read again), and trip again.
+            store.save_making(&batch, shape, slots).unwrap();
+            // Every file is saved and stamped, and every part is there with its notes.
+            assert_eq!(store.stamps().unwrap().iter().filter(|s| !s.failed && s.mtime > 0).count(), 3);
+            let parts = store.all(&HashMap::new(), &HashMap::new()).unwrap();
+            assert_eq!(parts.len(), 3);
+            // Only what tripped is missing: one shape, one set of slots.
+            assert_eq!((store.unshaped_count().unwrap(), store.without_slots_count().unwrap()), (1, 1));
+            let first_key = |list: Vec<(i64, Vec<NoteEvent>)>| list.iter().map(|(_, n)| n[0].key).collect::<Vec<_>>();
+            assert_eq!(first_key(store.unshaped(0, 10).unwrap()), [BASS]);
+            assert_eq!(first_key(store.without_slots(0, 10).unwrap()), [HIGHER]);
+        }
+        // The steps after the reading ask for them again, and with the bug put right they get theirs.
+        let go = AtomicBool::new(false);
+        assert_eq!(fill_shapes(&mut store, &pool(), &go).unwrap(), Went { made: 1, tripped: 0, finished: true });
+        assert_eq!(fill_slots(&mut store, &pool(), &go).unwrap(), Went { made: 1, tripped: 0, finished: true });
+        assert_eq!((store.unshaped_count().unwrap(), store.without_slots_count().unwrap()), (0, 0));
+        // And a file read again then keeps them.
+        store.save(&batch).unwrap();
+        assert_eq!((store.unshaped_count().unwrap(), store.without_slots_count().unwrap()), (0, 0));
+
+        // A whole run, as the page starts one: it gets to its end with every file read and saved, where it ended at
+        // the first batch with such a part in it. The steps after the reading (which don't trip here) make what the
+        // saving passed over.
+        let folder = Folder::new("fresh-run");
+        let wanted = three_files(&folder);
+        let mut store = MidiStore::open(&folder.0.join("midi-index.db")).unwrap();
+        let tripping = move |store: &mut MidiStore, batch: &[FileRead]| store.save_making(batch, shape, slots);
+        let plan = plan(&wanted, &[], &[], false);
+        let read = run_saving(&mut store, &plan, &[], &pool(), 2, &go, &|_, _, _| {}, &tripping).unwrap();
+        assert_eq!((read.read, read.parts, read.failed, read.stopped), (3, 3, 0, false));
+        assert_eq!((read.shaped, read.slots, read.tripped), (1, 1, 0));
+        assert_eq!(store.tripped(), (true, true));
+        assert_eq!(store.stamps().unwrap().iter().filter(|s| !s.failed && s.mtime > 0).count(), 3);
+        assert_eq!((store.unshaped_count().unwrap(), store.without_slots_count().unwrap()), (0, 0));
     }
 }

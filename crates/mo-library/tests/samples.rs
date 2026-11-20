@@ -190,6 +190,22 @@ fn fl_studios_own_content_is_looked_for_where_fl_studio_keeps_it() {
     assert_eq!(locator.locate(gone, &project), None);
     assert!(locator.trees_read() > 0);
     assert!(locator.found(gone, &project));
+    // For a program that will be pointed at the file (the converter): only FL Studio's own file, never one with its
+    // name somewhere else.
+    assert_eq!(locator.locate_to_use(saved, &project).map(PathBuf::from), Some(kick));
+    let beside = dir.join("Songs/Night Drive/Kick 99.wav");
+    fs::write(&beside, b"x").unwrap();
+    assert_eq!(locator.locate(gone, &project).map(PathBuf::from), Some(beside.clone()), "by name, for the lists");
+    assert_eq!(locator.locate_to_use(gone, &project), None);
+    // Nor a path that climbs out of FL Studio's folder.
+    fs::write(dir.join("Image-Line/outside.wav"), b"x").unwrap();
+    assert_eq!(locator.locate_to_use("%FLStudioFactoryData%/../outside.wav", &project), None);
+    // A sample of the user's own that FL Studio saved under another setting is looked for as any other.
+    assert_eq!(
+        locator.locate_to_use("%FLStudioUserData%/Audio/Kick 99.wav", &project).map(PathBuf::from),
+        Some(beside.clone())
+    );
+    assert_eq!(locator.locate_to_use("Kick 99.wav", &project).map(PathBuf::from), Some(beside));
 }
 
 #[test]

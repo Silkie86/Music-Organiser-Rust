@@ -575,10 +575,12 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
     // before Windows asks to send what it guards, so a save made meanwhile is still seen.
     let ask = || -> (Result<relink::FilesNow, String>, HashMap<String, Option<String>>) {
         let files = relink::bitwig_files_now(original);
+        // And each checked song's fixed project must use the file the copy is the same as now (FS-2).
+        let uses = relink::fixed_use_originals(&job.checked, &relinks);
         let why = relinks
             .iter()
             .map(|r| key(&r.copy.to_string_lossy()))
-            .zip(relink::still_named_except(original, &relinks, &left_out))
+            .zip(relink::still_named_except(original, &relinks, &left_out).into_iter().zip(uses).map(|(n, u)| u.or(n)))
             .collect();
         (files, why)
     };
@@ -616,16 +618,54 @@ fn without_drive(k: String) -> String {
     }
 }
 
-/// Notes that the copies of a project's checked songs went, so the button for every fixed project never sends their
-/// fixed projects ([`crate::space_fix_note::freed`]): they're the ones that play now. Call it once any went.
-pub fn note_freed(job: &ToFree, note: &Path) -> Result<(), String> {
-    let mut failed = Vec::new();
+/// [`free`], with the app's note in `note` kept as it goes, for the Free the space that runs at `when` (the time the
+/// app's list of what it put in the Recycle Bin keeps it under; [`crate::space_fix_note::moved`] when that turns out
+/// to be another): each checked song's fixed project is marked before the first copy goes, so a crash, a power cut or
+/// a kill part way through leaves the mark on (the whole-app review of 19 Nov, FS-23), and the button for every fixed
+/// project never sends it ([`crate::space_fix_note::freed`]): it's the one that plays now. Afterwards the mark comes
+/// off one whose save named none of the copies that went. When the note can't be read, nothing goes.
+pub fn free_noted(
+    job: &ToFree,
+    bin: &dyn mo_space::clean::Bin,
+    stop: &AtomicBool,
+    note: &Path,
+    when: i64,
+) -> mo_space::clean::Done {
     for (_, fixed) in &job.checked {
-        if let Err(why) = crate::space_fix_note::freed(note, fixed) {
-            failed.push(why);
+        if let Err(why) = crate::space_fix_note::freed(note, fixed, when) {
+            let mut done = mo_space::clean::Done::default();
+            let why = format!("The app's note of the fixed projects couldn't be kept ({why}), so the copies stay.");
+            done.problems = job
+                .project
+                .copies
+                .iter()
+                .map(|c| mo_space::clean::Problem { path: c.in_project.clone(), why: why.clone() })
+                .collect();
+            let marked: Vec<PathBuf> = job.checked.iter().map(|(_, f)| f.clone()).collect();
+            crate::space_fix_note::unfreed(note, &marked, when);
+            return done;
         }
     }
-    if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
+    let done = free(job, bin, stop);
+    let went: Vec<Relink> = done
+        .removed
+        .iter()
+        .filter_map(|r| {
+            let copy = PathBuf::from(&r.path);
+            let c = job.project.copies.iter().find(|c| key(&c.in_project) == key(&r.path))?;
+            Some(Relink { copy, library: PathBuf::from(&c.library_file) })
+        })
+        .collect();
+    let none_went: Vec<PathBuf> = job
+        .checked
+        .iter()
+        .filter(|(save, _)| went.is_empty() || !relink::names_any(save, &went))
+        .map(|(_, fixed)| fixed.clone())
+        .collect();
+    if !none_went.is_empty() {
+        crate::space_fix_note::unfreed(note, &none_went, when);
+    }
+    done
 }
 
 /// Writes a "(fixed)" project beside a save that uses the Library's own files instead of its project's copies

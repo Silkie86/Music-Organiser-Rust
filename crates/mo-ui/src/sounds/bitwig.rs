@@ -235,7 +235,9 @@ pub(super) fn mark(app: &AppWindow) {
         let job = feed.start(LOOKING, "Each ticked multisample's samples, looked for in your sound library.");
         // A bug in the look is logged as a crash, in full; the card and its activity card still end.
         let found = catch_crash(AssertUnwindSafe(|| {
-            let temp = std::env::temp_dir();
+            // The data folder (on I:), not the system's Temp on C: (review SN-19); Temp only if it can't be made.
+            let unpack = mo_app::paths::data_dir().join(favs::UNPACK_FOLDER);
+            let temp = if std::fs::create_dir_all(&unpack).is_ok() { unpack } else { std::env::temp_dir() };
             background::on_bulk_pool(|| {
                 favs::look(&picked, list.sounds(), &temp, &stop, |done, of| {
                     job.progress(done as f32 / of.max(1) as f32, Some(&format!("{done} of {of} multisamples")));
@@ -287,7 +289,7 @@ fn looked(app: &AppWindow, ask: u64, found: &Found, into: Option<PathBuf>) -> Ma
     CARD.with(|c| {
         let mut c = c.borrow_mut();
         if c.ask == ask {
-            c.saveable = found.missing.iter().filter(|m| m.why != Why::Unplayable).cloned().collect();
+            c.saveable = found.missing.iter().filter(|m| m.why.saveable()).cloned().collect();
             c.save_into = into;
         }
     });

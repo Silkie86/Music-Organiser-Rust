@@ -1567,7 +1567,8 @@ fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
     let at = project.to_string_lossy().into_owned();
     background::on_pool(move || {
         let written_of = |file: &Path| lib.setting(&bitwig::convert_key(file)).ok().flatten();
-        let find = |sample: &str| locator.locate(sample, &at);
+        // FL Studio's own sounds only from FL Studio's folder, never another file with the name.
+        let find = |sample: &str| locator.locate_to_use(sample, &at);
         bitwig::convert(project, &root, &template, steps, &opened, &written_of, &find)
     })
 }

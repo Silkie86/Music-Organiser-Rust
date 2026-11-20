@@ -271,6 +271,15 @@ impl Job {
         self.feed.changed();
     }
 
+    /// Failed, leaving something set that needs a look: the card stays until its × takes it away, as
+    /// [`Feed::notice`]'s does, where a failed job's goes after [`FAILED_STAYS`].
+    pub fn failed_to_read(mut self, title: &str, why: &str) {
+        self.retitle(title);
+        self.end(State::Failed, why);
+        self.feed.update(self.id, |c| c.ended = None);
+        self.feed.changed();
+    }
+
     /// Failed, with a headline that says what came of it.
     pub fn failed_as(mut self, title: &str, why: &str) {
         self.retitle(title);
@@ -436,11 +445,14 @@ mod tests {
         feed.told("Put the old app's databases away", "In Old databases");
         feed.notice("Using the old copy of your data", "The drive is missing");
         feed.start("Sending Keys", "").done_to_read("Keys is in Bitwig, but its bar isn't marked", "Why");
+        feed.start("Putting Keys in", "").failed_to_read("Keys didn't go in", "Why");
         let cards = feed.visible(Instant::now() + FAILED_STAYS);
-        let kept = cards.iter().find(|c| c.title.starts_with("Keys")).unwrap();
+        let kept = cards.iter().find(|c| c.title.starts_with("Keys is")).unwrap();
         assert_eq!((kept.state, kept.to_close()), (State::Done, true), "done, and it stays to be read");
+        let kept = cards.iter().find(|c| c.title == "Keys didn't go in").unwrap();
+        assert_eq!((kept.state, kept.to_close()), (State::Failed, true), "failed, and it stays to be read");
         let close: Vec<bool> = feed.visible(Instant::now()).iter().map(Card::to_close).collect();
-        assert_eq!(close, [false, false, true, true, true, true]);
+        assert_eq!(close, [false, false, true, true, true, true, true]);
         drop(running);
     }
 }

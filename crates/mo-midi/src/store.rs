@@ -39,6 +39,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -51,9 +52,10 @@ use crate::extract::Found;
 use crate::fit;
 use crate::index::{MidiError, MidiIndex, Source, SourceKind, StoredPhrase};
 use crate::keys;
+use crate::made::made;
 use crate::member::PhraseMember;
 use crate::roles::Role;
-use mo_harmony::KeyFact;
+use mo_harmony::{KeyFact, Slot};
 
 mod slots;
 
@@ -655,6 +657,16 @@ pub struct MidiStore {
     has_shapes: bool,
     /// Its layout ([`LAYOUT`] once the indexer has opened it; the page reads an older one as it is).
     layout: i64,
+    /// Whether what [`MidiStore::save`] makes from a newly read part's notes has tripped since the index was opened.
+    tripped: Tripped,
+}
+
+/// Whether making a newly read part's shape, and its slots, has tripped yet ([`MidiStore::save`]): the first of each
+/// is logged as the crash it is, those after it a line each ([`made`]).
+#[derive(Debug, Default)]
+struct Tripped {
+    shape: AtomicBool,
+    slots: AtomicBool,
 }
 
 /// Opens the index at `path` for writing, making it (and its tables) when it isn't there yet, and copying it into this
@@ -717,7 +729,9 @@ fn open_for_writing(path: &Path) -> Result<(MidiStore, Option<(i64, i64)>), Midi
             // A new index: of this layout from the start.
             .and_then(|()| if layout == LAYOUT { Ok(()) } else { conn.pragma_update(None, "user_version", LAYOUT) })
             .map_err(|e| open_error(e.to_string()))?;
-        let store = MidiStore { conn, path: path.to_owned(), has_keys: true, has_shapes: true, layout: LAYOUT };
+        let tripped = Tripped::default();
+        let store =
+            MidiStore { conn, path: path.to_owned(), has_keys: true, has_shapes: true, layout: LAYOUT, tripped };
         return Ok((store, copied));
     }
 }
@@ -767,7 +781,7 @@ impl MidiStore {
         let has_keys = has_table("keys")?;
         // One made before shapes were kept (until the indexer next opens it): listed with no loop in other keys.
         let has_shapes = has_table("shapes")?;
-        Ok(MidiStore { conn, path: path.to_owned(), has_keys, has_shapes, layout })
+        Ok(MidiStore { conn, path: path.to_owned(), has_keys, has_shapes, layout, tripped: Tripped::default() })
     }
 
     pub fn path(&self) -> &Path {
@@ -802,10 +816,35 @@ impl MidiStore {
     }
 
     /// Saves what was read from some files, each replacing what was there before, in one go.
+    ///
+    /// Each part's shape and slots are made here, from its notes. Notes that trip what makes either (a bug) are
+    /// saved without it, so one new loop never ends the whole reading: the steps after the reading ask for it again,
+    /// in this run and every later one ([`MidiStore::unshaped`], [`MidiStore::without_slots`]), until the build that
+    /// puts the bug right gives them theirs. (The 19 November 2026 review's MP-11: nothing caught these two here, so
+    /// the reading stopped at that loop's file with the batch unsaved, and again at every start, as the file came
+    /// up first each time.)
     pub fn save(&mut self, batch: &[FileRead]) -> Result<(), MidiError> {
+        self.save_making(batch, analyser::shape_of, fit::slots_of)
+    }
+
+    /// Whether making a newly read part's shape, and its slots, has tripped since the index was opened
+    /// ([`MidiStore::save`]): the bug is in the log in full then.
+    pub(crate) fn tripped(&self) -> (bool, bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.tripped.shape.load(Relaxed), self.tripped.slots.load(Relaxed))
+    }
+
+    /// [`MidiStore::save`], with what makes a part's shape and its slots handed in (a test hands in ones that trip).
+    pub(crate) fn save_making(
+        &mut self,
+        batch: &[FileRead],
+        shape_of: impl Fn(&[NoteEvent]) -> Option<i64>,
+        slots_of: impl Fn(&[NoteEvent]) -> Vec<Slot>,
+    ) -> Result<(), MidiError> {
         if batch.is_empty() {
             return Ok(());
         }
+        let tripped = &self.tripped;
         let tx = self.conn.transaction()?;
         {
             let mut upsert = tx.prepare_cached(
@@ -882,13 +921,16 @@ impl MidiStore {
                                 |r| r.get(0),
                             )?;
                             data.execute(params![notes, encoded])?;
-                            if let Some(s) = analyser::shape_of(&p.notes) {
+                            // Notes that trip the shape are saved with none, and asked for again after the reading.
+                            if let Some(Some(s)) = made(&tripped.shape, || shape_of(&p.notes)) {
                                 shape.execute(params![notes, s])?;
                             }
                             // Made here, a few microseconds a part, like the shape above: a part is in a search
-                            // as soon as it's saved.
-                            let slots = slots::encode(&fit::slots_of(&p.notes));
-                            slot.execute(params![notes, fit::SLOTS_VERSION, slots])?;
+                            // as soon as it's saved. Notes that trip the slots keep the ones they had, if any (an
+                            // older version's are made again after the reading), or none.
+                            if let Some(slots) = made(&tripped.slots, || slots::encode(&slots_of(&p.notes))) {
+                                slot.execute(params![notes, fit::SLOTS_VERSION, slots])?;
+                            }
                             key.execute(params![
                                 notes,
                                 keys::VERSION,
@@ -980,8 +1022,8 @@ impl MidiStore {
         Ok(())
     }
 
-    /// How many sets of notes have no shape yet (saved before the `shapes` table was there): two counts, each read
-    /// from a small index, so it's quick when there are none.
+    /// How many sets of notes have no shape yet (saved before the `shapes` table was there, or saved without as
+    /// theirs tripped): two counts, each read from a small index, so it's quick when there are none.
     pub fn unshaped_count(&self) -> Result<usize, MidiError> {
         let n: i64 =
             self.conn

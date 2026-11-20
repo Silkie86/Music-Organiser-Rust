@@ -21,7 +21,7 @@ does something else on purpose, it's listed here and judged.
 | A VST2 program that can't be turned into a bank | Saved as `.fxb` anyway, so Bitwig can't load it | Kept as `.fxp` | Better |
 | A VST2 with no id saved | Kept the template plugin's id under the new name | Id 0 | Better: Bitwig never loads the template's plugin by mistake |
 | A template whose Sampler has no sample, or whose patterns share a track | Failed on the first song | Turned down when it's chosen | Better |
-| MP3, OGG and M4A samples, and compressed WAVs | Length read through Windows' decoders | Left for Bitwig, which asks where they are (WAV, RF64, AIFF and FLAC are timed from their headers) | To do: when mo-audio decodes them, the convert uses it |
+| MP3, OGG and M4A samples, and compressed WAVs | Length read through Windows' decoders | Timed by mo-audio's decoders from the file's start (whole-app review CN-10, 19 Nov 2026), so the Sampler gets the sample's real end and Bitwig its MD5; WAV, RF64, AIFF and FLAC are timed from their headers. One whose length a decoder could only guess (an MP3 with no length written in it, a bare .aac file) is left for Bitwig, and the list says the Sampler's end may need setting | Same |
 | A WAV whose header says more audio than the file holds | Cut to the file | Same | Same |
 | A WAV with an odd chunk left unpadded, or its audio more than 1 MB in | (not compared) | Read on: the unpadded place is taken when the padded one isn't a chunk, and chunks past the first 1 MB are looked at one by one | Better: such a sample got no length, so Bitwig asked where it was |
 | A damaged FL save read on, or one too big to read whole | Converted without saying | Said first in the notes | Better (rule 9) |
@@ -31,5 +31,6 @@ does something else on purpose, it's listed here and judged.
 | Samples | Read one after another | Read on every core, after the template is checked | Faster; a bad template is said straight away |
 | An earlier convert saved in Bitwig while samples were read | Replaced | Asked again just before saving, so it's kept, with its own list of what didn't come across (the new list is put in place only after the project) | Better |
 | A sample that is not where FL saved it | Bitwig asks where it is | Looked for first in the project's and the DAW's folders (rule 13), and used where found, with a note | Better |
+| FL Studio's own sounds (`%FLStudioFactoryData%…`) | The placeholder is written as the path, so Bitwig can't find them | Used from FL Studio's own folder on this computer, and only from there: never another file with the name (whole-app review CN-1, 19 Nov 2026). They keep Ogg Vorbis inside a WAV: timed by the decoder, and the list says Bitwig may not play that kind (not tried in Bitwig yet) | Better |
 | Plugin sounds a save lost | Taken from the newest older save that has them, matched by id | Same, but matched by name when one save has no id (FL 9 may not save it), and a save before Fix's copy of it | Better |
 | Samples found somewhere else | (not looked for) | Listed under their own heading beside the project | New |

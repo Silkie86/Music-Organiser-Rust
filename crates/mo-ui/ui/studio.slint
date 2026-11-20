@@ -858,6 +858,8 @@ export component StudioSlider inherits HorizontalLayout {
 export component LikeFavourites inherits VerticalLayout {
     in-out property <float> value;
     in property <string> words;
+    // A faint line under the slider when some were matched by their measurements, as deep listening never heard them.
+    in property <string> note;
     callback released(float);
     padding-right: Space.sm;
     HorizontalLayout {
@@ -884,6 +886,12 @@ export component LikeFavourites inherits VerticalLayout {
         tip: "How adventurous: left shows only your favourites, right more and more sounds like them, further afield";
         value <=> root.value;
         released(v) => { root.released(v); }
+    }
+    if root.note != "": Text {
+        text: root.note;
+        color: Theme.faint;
+        font-size: Type.meta;
+        wrap: word-wrap;
     }
 }
 

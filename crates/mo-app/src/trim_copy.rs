@@ -27,7 +27,8 @@ const MOST_SECONDS: f64 = 5.0 * 60.0;
 const LEAST_CUT_SECONDS: f64 = 0.020;
 
 /// How many "goes as it is" answers are remembered for this run, so dragging the same long or loud sound again doesn't
-/// read it whole again (forgotten all at once when full).
+/// read it whole again (forgotten all at once when full). Only answers about the sound itself: a file that couldn't be
+/// read, or a copy that couldn't be written, is tried again at the next drag (SN-12, 19 Nov review).
 const REMEMBERED: usize = 4_096;
 
 /// What to drag for the sound at `original` with Trim silence at `db` below full scale (`None`: off), and what the
@@ -97,8 +98,8 @@ pub enum Made {
     AsItIs(Option<String>),
 }
 
-/// The copies being made, one at a time in this program, and the "goes as it is" answers remembered by file (its
-/// path, level, size and date).
+/// The copies being made, one at a time in this program, and the "goes as it is" answers about the sound itself
+/// remembered by file (its path, level, size and date).
 static MAKING: Mutex<Option<HashMap<FileKey, Option<String>>>> = Mutex::new(None);
 
 /// A file as [`MAKING`] remembers it: its path (as `mo_formats::case::key` has it), the level, its size and its date.
@@ -132,26 +133,32 @@ pub fn for_drag(original: &Path, db: i32, folder: &Path) -> Made {
     if fresh(&copy) {
         return Made::Copy(copy);
     }
-    let made = make(original, db, &copy, folder, changed);
-    if let Made::AsItIs(why) = &made {
-        if remembered.len() >= REMEMBERED {
-            remembered.clear();
+    match make(original, db, &copy, folder, changed) {
+        Ok(made) => {
+            if let Made::AsItIs(why) = &made {
+                if remembered.len() >= REMEMBERED {
+                    remembered.clear();
+                }
+                remembered.insert(key, why.clone());
+            }
+            made
         }
-        remembered.insert(key, why.clone());
+        // Trouble, not the sound: room may be made, or the file let go, before the next drag (SN-12).
+        Err(trouble) => Made::AsItIs(Some(trouble)),
     }
-    made
 }
 
 /// Reads `original` whole, trims it at `db` and writes it to `copy` in `folder`, dated `changed` (the original's
-/// date), or says why it goes as it is.
-fn make(original: &Path, db: i32, copy: &Path, folder: &Path, changed: Option<SystemTime>) -> Made {
-    let as_it_is = |why: String| Made::AsItIs(Some(why));
+/// date), or says why it goes as it is. `Err` is trouble reading or writing, which the next drag tries again; the
+/// rest are answers about the sound itself.
+fn make(original: &Path, db: i32, copy: &Path, folder: &Path, changed: Option<SystemTime>) -> Result<Made, String> {
+    let as_it_is = |why: String| Ok(Made::AsItIs(Some(why)));
     let mut audio = match mo_audio::read(original, MOST_SECONDS) {
         Ok(a) => a,
-        Err(e) => return as_it_is(format!("couldn't read {}: {e}", original.display())),
+        Err(e) => return Err(format!("couldn't read {}: {e}", original.display())),
     };
     if audio.sample_rate == 0 || audio.is_empty() {
-        return Made::AsItIs(None);
+        return Ok(Made::AsItIs(None));
     }
     let rate = f64::from(audio.sample_rate);
     // Read only so far (a long file; some files don't say how long they are, so the length read counts too).
@@ -160,20 +167,20 @@ fn make(original: &Path, db: i32, copy: &Path, folder: &Path, changed: Option<Sy
     }
     // The file says it's a loop.
     if audio.embedded_is_loop == Some(true) {
-        return Made::AsItIs(None);
+        return Ok(Made::AsItIs(None));
     }
     let Some((start, end)) = mo_audio::trim::sound_span(&audio, mo_audio::trim::level_of_db(db)) else {
-        return Made::AsItIs(None);
+        return Ok(Made::AsItIs(None));
     };
     if ((start + audio.len() - end) as f64) < LEAST_CUT_SECONDS * rate {
-        return Made::AsItIs(None);
+        return Ok(Made::AsItIs(None));
     }
     if audio.channels.iter().flatten().any(|s| s.abs() > 1.0) {
         return as_it_is(format!("{} goes over full scale, and a copy would clip it", original.display()));
     }
     audio.keep(start, end);
     if let Err(e) = std::fs::create_dir_all(folder) {
-        return as_it_is(format!("couldn't make {}: {e}", folder.display()));
+        return Err(format!("couldn't make {}: {e}", folder.display()));
     }
     // Written under a name of this program's own and then renamed, so two programs (the app and the plugin) making
     // the same copy never write into one file, and a half-made copy never takes the copy's name.
@@ -183,10 +190,10 @@ fn make(original: &Path, db: i32, copy: &Path, folder: &Path, changed: Option<Sy
         .and_then(|()| stamp(&mine, changed).map_err(|e| e.to_string()))
         .and_then(|()| std::fs::rename(&mine, copy).map_err(|e| e.to_string()));
     match written {
-        Ok(()) => Made::Copy(copy.to_path_buf()),
+        Ok(()) => Ok(Made::Copy(copy.to_path_buf())),
         Err(e) => {
             let _ = std::fs::remove_file(&mine);
-            as_it_is(format!("couldn't write {}: {e}", copy.display()))
+            Err(format!("couldn't write {}: {e}", copy.display()))
         }
     }
 }
@@ -238,6 +245,21 @@ mod tests {
         assert_eq!(for_drag(&original, -60, &copies), Made::Copy(copy.clone()));
         let Made::Copy(other) = for_drag(&original, -40, &copies) else { panic!("no copy") };
         assert_ne!(other, copy);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_copy_that_couldnt_be_made_is_tried_again_at_the_next_drag() {
+        let dir = folder("again");
+        let original = dir.join("Snare.wav");
+        quiet_loud_quiet(&original);
+        // A file where the copies' folder should be: the folder can't be made, as on a full or locked drive.
+        let copies = dir.join(FOLDER);
+        std::fs::write(&copies, b"in the way").unwrap();
+        assert!(matches!(for_drag(&original, -60, &copies), Made::AsItIs(Some(_))));
+        // Room made: the next drag makes the copy, rather than the original going until the app restarts (SN-12).
+        std::fs::remove_file(&copies).unwrap();
+        assert!(matches!(for_drag(&original, -60, &copies), Made::Copy(_)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

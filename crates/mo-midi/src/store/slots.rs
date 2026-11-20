@@ -106,8 +106,9 @@ impl SlotBook {
 }
 
 impl MidiStore {
-    /// How many sets of notes have no slots yet, or slots another [`SLOTS_VERSION`] made: two counts, each read
-    /// from a small index, so it's quick when there are none. (That's what each row's version and its index are
+    /// How many sets of notes have no slots yet (saved before the index kept slots, or saved without as theirs
+    /// tripped), or slots another [`SLOTS_VERSION`] made: two counts, each read from a small index, so it's quick
+    /// when there are none. (That's what each row's version and its index are
     /// for: one version for the whole table would do to know when to make them again, but counting the rows would
     /// then walk every slot the table holds, each time the indexer runs.)
     pub fn without_slots_count(&self) -> Result<usize, MidiError> {
