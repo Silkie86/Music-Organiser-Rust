@@ -530,7 +530,9 @@ mod tests {
         let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         stream.set_read_timeout(Some(SOON)).unwrap();
         writeln!(stream, "POST /close HTTP/1.1").unwrap();
-        writeln!(stream, "{}", json!({ "ask": "close" })).unwrap();
+        // The app may already have answered and shut the connection: on a Mac this write then fails with a broken
+        // pipe, which is what the test wants, so its result is left.
+        let _ = writeln!(stream, "{}", json!({ "ask": "close" }));
         let mut said = String::new();
         let _ = stream.read_to_string(&mut said);
         assert!(said.contains("not a request"), "{said}");
