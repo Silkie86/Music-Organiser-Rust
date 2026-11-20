@@ -122,7 +122,7 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
         }
     }
     let steps = beta::steps();
-    let done = steps.iter().filter(|s| marks.get(s.id).is_some()).count();
+    let done = steps.iter().filter(|s| marks.current(s).is_some()).count();
     if live {
         log::info("Beta", &format!("Checklist: {} steps, {done} marked so far", steps.len()));
     }
@@ -459,7 +459,11 @@ fn redraw(app: &AppWindow, whole: bool) {
         let data = app.global::<SettingsData>();
         if whole || lines.len() != l.model.row_count() {
             l.model.set_vec(lines);
-            if !whole {
+            // Every row is made anew, the one whose box had the keys too: the window takes them, but only while the
+            // card is in sight (a self-check ending on another page must leave a search box there alone).
+            let shown = app.get_place() == mo_app::places::Place::Settings.index() as i32
+                && data.get_tab() == mo_app::settings::Tab::Developer.index() as i32;
+            if !whole && shown {
                 data.set_beta_keys_back(data.get_beta_keys_back().wrapping_add(1));
             }
         } else {

@@ -1004,15 +1004,16 @@ component BetaStep inherits VerticalLayout {
         font-size: Type.meta;
         wrap: word-wrap;
     }
-    // A mark can take this row out of Only to try: if its box has the keys, the window takes them first (a chip never
-    // takes them, so they'd stay in a box that's gone: the 19 Nov review, BT-1).
+    // Works or Skip can take this row out of Only to try: if its box has the keys, the window takes them first (a chip
+    // never takes them, so they'd stay in a box that's gone: the 19 Nov review, BT-1).
     if !root.line.auto: HorizontalLayout {
         spacing: Space.sm;
         ToggleChip {
             text: "Works";
             on: root.line.mark == 0;
             clicked => {
-                if (note.has-keys) {
+                // Only to try takes the row out once marked (not when the mark is taken off).
+                if (note.has-keys && SettingsData.beta-to-try && root.line.mark != 0) {
                     SettingsData.beta-keys-back += 1;
                 }
                 SettingsData.beta-mark(root.line.id, 0, note.text);
@@ -1022,9 +1023,6 @@ component BetaStep inherits VerticalLayout {
             text: "Problem";
             on: root.line.mark == 1;
             clicked => {
-                if (note.has-keys) {
-                    SettingsData.beta-keys-back += 1;
-                }
                 SettingsData.beta-mark(root.line.id, 1, note.text);
             }
         }
@@ -1032,7 +1030,8 @@ component BetaStep inherits VerticalLayout {
             text: "Skip";
             on: root.line.mark == 2;
             clicked => {
-                if (note.has-keys) {
+                // Only to try takes the row out once marked (not when the mark is taken off).
+                if (note.has-keys && SettingsData.beta-to-try && root.line.mark != 2) {
                     SettingsData.beta-keys-back += 1;
                 }
                 SettingsData.beta-mark(root.line.id, 2, note.text);

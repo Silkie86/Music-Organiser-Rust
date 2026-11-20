@@ -53,10 +53,10 @@ pub struct LogFacts {
     pub cut_short: usize,
 }
 
-/// The day moves on when a line's time of day goes back more than this from the line before: midnight goes back
-/// about a day, a line from another thread that landed a moment late only milliseconds, the clock going back an
-/// hour (the 19 Nov review, BT-20).
-const PAST_MIDNIGHT: chrono::Duration = chrono::Duration::hours(12);
+/// The day moves on when a line's time of day goes back more than this from the line before: past midnight it goes
+/// back by anything up to a day (less after a quiet night: 20:00, then 09:00), a line from another thread that landed
+/// a moment late only milliseconds, the clock going back in autumn an hour (the 19 Nov review, BT-20).
+const PAST_MIDNIGHT: chrono::Duration = chrono::Duration::minutes(90);
 
 /// Reads the logs in `dir` from `since` on, this run's too: by each line's own time (a log's name has the day it
 /// started, its lines the time of day), so a run that started before `since` counts only its later lines.
@@ -436,6 +436,18 @@ mod tests {
         let mut later = LogFacts::default();
         read_one(name, text.as_bytes(), to, &mut later);
         assert_eq!(later.error_count, 0, "{later:?}");
+    }
+
+    #[test]
+    fn a_quiet_night_still_moves_the_day_on() {
+        let name = "rust-session-2026-11-01_10-00-00.log";
+        // Nothing between 20:00 and 09:00: the 09:00 line is 2 Nov.
+        let text = "20:00:00.000 Error   [A] evening\n09:00:00.000 Error   [A] next morning\n";
+        let from = chrono::NaiveDate::from_ymd_opt(2026, 11, 2).and_then(|d| d.and_hms_opt(0, 0, 0)).expect("a date");
+        let mut facts = LogFacts::default();
+        read_one(name, text.as_bytes(), from, &mut facts);
+        assert_eq!(facts.error_count, 1, "{facts:?}");
+        assert!(facts.errors[0].contains("next morning"));
     }
 
     #[test]

@@ -792,7 +792,7 @@ pub fn fill_the_screen(app: &AppWindow) {
         let full = FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed);
         let seen = app.window().with_winit_window(|w| {
             let look = look_at(w);
-            let mend = !full && !look.full_screen && look.smaller_than_screen();
+            let mend = !full && !look.full_screen && look.maximised && look.smaller_than_screen();
             if mend {
                 w.set_maximized(false);
                 w.set_maximized(true);
@@ -830,7 +830,8 @@ pub fn restored(app: &AppWindow) {
             }
             (look, mend)
         });
-        if let Some((look, mend)) = seen {
+        // Only with full screen on: the watchdog already logs each restore.
+        if let Some((look, mend)) = seen.filter(|_| full) {
             let after = if mend { ": full screen had gone, so it was put back" } else { "" };
             log::info("Window", &format!("Back from the taskbar, the window is {}{after}", look.words()));
         }

@@ -50,8 +50,16 @@ if (Test-Path -LiteralPath $BuildChoice) {
 }
 # Which code reads the files: the launcher's copy as it last left it (main, or a pull request's branch), which may
 # not be the installed beta's. Said here and at the top of the summary (the 19 Nov review, TC-8).
-$Branch = "$(& git -C $Rust rev-parse --abbrev-ref HEAD 2>$null)".Trim()
-$Commit = "$(& git -C $Rust log -1 --format='%h %cd' --date=format:'%Y-%m-%d %H:%M' 2>$null)".Trim()
+# Git writing a warning to stderr would stop the script under 'Stop' (Windows PowerShell 5.1), and no git at all
+# must not stop the check either: then the line says so.
+$Branch = ''
+$Commit = ''
+$ErrorActionPreference = 'Continue'
+try {
+    $Branch = "$(& git -C $Rust rev-parse --abbrev-ref HEAD 2>$null)".Trim()
+    $Commit = "$(& git -C $Rust log -1 --format='%h %cd' --date=format:'%Y-%m-%d %H:%M' 2>$null)".Trim()
+} catch { }
+$ErrorActionPreference = 'Stop'
 if (-not $Branch) { $Branch = 'unknown branch' }
 if (-not $Commit) { $Commit = 'unknown commit' }
 $Readers = "Readers: the launcher's code on $Branch, commit $Commit"
