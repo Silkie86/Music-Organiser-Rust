@@ -365,6 +365,7 @@ pub fn app_databases(data: &Path, library: PathBuf) -> Vec<AppDatabase> {
         mo_sounds::compact::backup::backup_of(&own_sounds),
         mo_sounds::compact::backup::damaged_of(&own_sounds),
         mo_sounds::compact::backup::kept_of(&own_sounds),
+        mo_sounds::compact::backup::backup_damaged_of(&own_sounds),
     ));
     databases.extend(app_files::presets_and_curves(
         data.join(mo_presets::fixes::FILE_NAME),
