@@ -73,9 +73,6 @@ const OWED_KEY: &str = "muted_marks_owed";
 /// by their full path (the whole-app review of 19 Nov, FS-5: the reader didn't list them before), with when.
 const BITWIG_MENDED_KEY: &str = "bitwig_outside_multisamples_mended";
 
-/// [`OWED_KEY`] for the Bitwig saves: the same list, of which only the Bitwig saves count here.
-const BITWIG_OWED_KEY: &str = "bitwig_outside_multisamples_owed";
-
 /// When `library.db` has gone: how long before the library became the app's own a save the app kept since may have
 /// last changed (the C# app kept the library up to date until about then).
 const MEND_SINCE: i64 = 30 * 24 * 60 * 60;
@@ -116,7 +113,8 @@ pub fn to_mend(songs_db: &Path) -> Result<Option<Vec<i64>>, LibraryError> {
 }
 
 /// The Bitwig saves still to read again for the multisamples they find outside their folder: all of them (whose file
-/// isn't missing) until that's noted, then those owed. None when there are none.
+/// isn't missing) until that's noted, then the Bitwig saves on [`OWED_KEY`]'s list (written with the note, and shared
+/// with the FL Studio saves': each fact stored once). None when there are none.
 fn bitwig_to_mend(conn: &rusqlite::Connection) -> Result<Option<Vec<i64>>, LibraryError> {
     let noted: Option<rusqlite::types::Value> =
         conn.query_row("SELECT value FROM songs_info WHERE key = ?1", [BITWIG_MENDED_KEY], |r| r.get(0)).optional()?;
@@ -127,7 +125,7 @@ fn bitwig_to_mend(conn: &rusqlite::Connection) -> Result<Option<Vec<i64>>, Libra
         return Ok(Some(ids));
     }
     let owed: Option<String> =
-        conn.query_row("SELECT value FROM songs_info WHERE key = ?1", [BITWIG_OWED_KEY], |r| r.get(0)).optional()?;
+        conn.query_row("SELECT value FROM songs_info WHERE key = ?1", [OWED_KEY], |r| r.get(0)).optional()?;
     let owed: Vec<i64> = owed.iter().flat_map(|o| o.split(',')).filter_map(|id| id.trim().parse().ok()).collect();
     if owed.is_empty() {
         return Ok(None);
@@ -154,8 +152,10 @@ pub enum BitwigReread {
     Waiting,
     /// Read again but for these many, which couldn't be (a drive that's away, say): tried again at each start.
     Owed(usize),
-    /// The library isn't the app's own (or can't be read now), so it's never read again here.
+    /// The library isn't the app's own, so it's never read again here.
     NotOwn,
+    /// The library couldn't be read just now (busy with a big write, say): try again in a moment.
+    Unknown,
 }
 
 /// [`BitwigReread`] for the library at `songs_db`.
@@ -172,7 +172,30 @@ pub fn bitwig_reread(songs_db: &Path) -> BitwigReread {
             Some(owed) => BitwigReread::Owed(owed.len()),
         })
     });
-    state.unwrap_or(BitwigReread::NotOwn)
+    state.unwrap_or(BitwigReread::Unknown)
+}
+
+/// Adds saves to the list of those still to read again ([`to_mend`]) once the rest were noted read: a save read again
+/// that the library then wouldn't take, in the same batch as the note (`mo_app::live`). Each id once.
+pub fn owe(songs_db: &Path, ids: &[i64]) -> Result<(), LibraryError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let sql = |e| write_failed(songs_db, e);
+    let mut conn = open_to_write(songs_db)?;
+    let tx = begin_own(&mut conn, songs_db)?;
+    let owed: Option<String> = tx
+        .query_row("SELECT value FROM songs_info WHERE key = ?1", [OWED_KEY], |r| r.get(0))
+        .optional()
+        .map_err(sql)?;
+    let mut all: Vec<i64> = owed.iter().flat_map(|o| o.split(',')).filter_map(|id| id.trim().parse().ok()).collect();
+    all.extend(ids);
+    all.sort_unstable();
+    all.dedup();
+    let all: Vec<String> = all.iter().map(i64::to_string).collect();
+    tx.execute("INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)", params![OWED_KEY, all.join(",")])
+        .map_err(sql)?;
+    tx.commit().map_err(sql)
 }
 
 /// The FL Studio part of [`to_mend`].
@@ -397,16 +420,6 @@ pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
             params![BITWIG_MENDED_KEY, Local::now().timestamp()],
         )
         .map_err(sql)?;
-        if batch.owed.is_empty() {
-            tx.execute("DELETE FROM songs_info WHERE key = ?1", [BITWIG_OWED_KEY]).map_err(sql)?;
-        } else {
-            let owed: Vec<String> = batch.owed.iter().map(i64::to_string).collect();
-            tx.execute(
-                "INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)",
-                params![BITWIG_OWED_KEY, owed.join(",")],
-            )
-            .map_err(sql)?;
-        }
         written.mended = true;
     }
     check(&tx, &kept, batch).map_err(|e| match e {

@@ -113,10 +113,11 @@ enum Mend {
     #[default]
     NotLooked,
     /// The saves still to be read again (by id, unchanged or not); those that couldn't be read this time (in a folder
-    /// that couldn't be read, a drive that's away): noted as owed, and only they are read again at the next start
-    /// (review finding G-1); and whether one couldn't be kept: then nothing is noted, and they're all read again at
-    /// the next start.
-    Reading { ids: HashSet<i64>, owed: HashSet<i64>, missed: bool },
+    /// that couldn't be read, a drive that's away, not on the list or not found by the walk): noted as owed, and only
+    /// they are read again at the next start (review finding G-1; for the Bitwig saves, the whole-app review of 19 Nov:
+    /// one not read again can't say which multisample copies it uses); and those read again: one of them the library
+    /// then won't take is owed too, not every save read again at the next start.
+    Reading { ids: HashSet<i64>, owed: HashSet<i64>, read: HashSet<i64> },
     /// Nothing (more) to do this time.
     Done,
 }
@@ -128,18 +129,21 @@ impl Mend {
 
     /// `id` was read again (`read`), or couldn't be.
     fn tried(&mut self, id: i64, read: bool) {
-        if let Mend::Reading { ids, owed, .. } = self
+        if let Mend::Reading { ids, owed, read: done } = self
             && ids.remove(&id)
-            && !read
         {
-            owed.insert(id);
+            if read {
+                done.insert(id)
+            } else {
+                owed.insert(id)
+            };
         }
     }
 
     /// Every save has been read again and kept, or couldn't be read: to be noted with the next batch, with those owed
     /// ([`Mend::owed`]).
     fn to_note(&self) -> bool {
-        matches!(self, Mend::Reading { ids, missed: false, .. } if ids.is_empty())
+        matches!(self, Mend::Reading { ids, .. } if ids.is_empty())
     }
 
     /// The saves that couldn't be read this time, by id, in order.
@@ -437,13 +441,15 @@ impl Live {
         }
         let mut done = self.update(&Changes { overflowed: roots, ..Changes::default() });
         done.rechecked += rechecked;
-        // One the walk didn't find (gone, so marked missing, or outside the project folders now) has nothing to read
-        // again: only those waiting to be tried again are still to come. One in a folder that couldn't be read is
-        // owed already ([`Live::walk`]).
-        if let Mend::Reading { ids, .. } = &mut self.mend {
+        // One the walk didn't find (gone, so marked missing, or outside the project folders now) can't be read again
+        // now: owed (one marked missing is left off the owed list at the next start, `song_writes::to_mend`). Only
+        // those waiting to be tried again are still to come. One in a folder that couldn't be read is owed already
+        // ([`Live::walk`]).
+        if let Mend::Reading { ids, owed, .. } = &mut self.mend {
             let waiting: HashSet<String> = self.retry.keys().map(|p| case::key(p)).collect();
             let waiting: HashSet<i64> =
                 self.saves.iter().filter(|s| waiting.contains(&case::key(&s.path))).map(|s| s.id).collect();
+            owed.extend(ids.iter().filter(|id| !waiting.contains(id)));
             ids.retain(|id| waiting.contains(id));
         }
         done
@@ -555,9 +561,10 @@ impl Live {
         let Some(songs_db) = &self.writes else { return };
         match song_writes::to_mend(songs_db) {
             Ok(Some(ids)) => {
+                // One not on the list (in a folder taken off the project folders, say) can't be read here: owed.
                 let listed: HashSet<i64> = self.saves.iter().map(|s| s.id).collect();
-                let ids = ids.into_iter().filter(|id| listed.contains(id)).collect();
-                self.mend = Mend::Reading { ids, owed: HashSet::new(), missed: false };
+                let (ids, owed) = ids.into_iter().partition(|id| listed.contains(id));
+                self.mend = Mend::Reading { ids, owed, read: HashSet::new() };
             }
             Ok(None) => {}
             Err(e) => {
@@ -634,6 +641,31 @@ impl Live {
                 );
             }
         }
+        // A save read again that the library wouldn't take is owed, to be read again at the next start: in the batch
+        // that noted the rest, added to the note's list.
+        if let Mend::Reading { owed, read, .. } = &mut self.mend
+            && !held.is_empty()
+        {
+            let refused: Vec<i64> = self
+                .saves
+                .iter()
+                .filter(|s| read.contains(&s.id) && held.contains(&case::key(&s.path)))
+                .map(|s| s.id)
+                .collect();
+            if kept.written.mended {
+                if let Err(e) = song_writes::owe(&songs_db, &refused) {
+                    crate::log::warning(
+                        "Songs",
+                        &format!("{e}; {} saves read again once that weren't kept aren't read again", refused.len()),
+                    );
+                }
+            } else {
+                for id in refused {
+                    read.remove(&id);
+                    owed.insert(id);
+                }
+            }
+        }
         if kept.written.mended {
             self.mend = Mend::Done;
         } else if let Some(why) = &kept.not_noted {
@@ -644,11 +676,6 @@ impl Live {
                 &format!("Couldn't note in songs.db that the muted samples are mended: {why}; tried again in a minute"),
             );
             self.note_after = Some(Instant::now() + REFUSED_AGAIN_AFTER);
-        } else if let Mend::Reading { missed, .. } = &mut self.mend
-            && !kept.not_kept.is_empty()
-        {
-            // One the library wouldn't take may be one of them.
-            *missed = true;
         }
         Some(Ok(kept))
     }
@@ -1298,7 +1325,7 @@ mod tests {
         let mut l = live(Vec::new());
         l.writes = Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("no such songs.db"));
         // The note alone to keep, refused: tried again in a minute, not at every pass.
-        l.mend = Mend::Reading { ids: HashSet::new(), owed: HashSet::new(), missed: false };
+        l.mend = Mend::Reading { ids: HashSet::new(), owed: HashSet::new(), read: HashSet::new() };
         assert!(l.note_to_keep());
         let kept = l.keep().unwrap().unwrap();
         assert!(kept.not_noted.is_some() && !kept.written.mended, "{kept:?}");

@@ -563,28 +563,35 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
             .parent()
             .and_then(Path::file_name)
             .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(relink::COPY_FOLDERS[0]));
+        // The same words for every copy, so the card can give them when nothing went (FS-15).
         let not_yet = match job.reread {
             BitwigReread::Done => None,
             BitwigReread::Waiting => Some(
-                "the app is still reading your Bitwig saves again to see which use a multisample copy from another \
-                 folder. Try again once that's done (the Songs page's look through your folders)."
+                "The app is still reading your Bitwig saves again to see which use a multisample copy from another \
+                 folder, so the multisample copies stay. Try again once that's done (the Songs page's look through \
+                 your folders)."
                     .to_owned(),
             ),
             BitwigReread::Owed(n) => Some(format!(
-                "{} couldn't be read again (on a drive that's away, say), so whether {} a multisample copy from \
-                 another folder isn't known. {} tried again at each start.",
+                "{} couldn't be read again (outside your project folders now, or on a drive that's away), so whether \
+                 {} a multisample copy from another folder isn't known and the multisample copies stay. {} tried \
+                 again at each start.",
                 plural(n, "Bitwig save"),
                 if n == 1 { "it uses" } else { "they use" },
                 if n == 1 { "It's" } else { "They're" }
             )),
             BitwigReread::NotOwn => Some(
-                "the app doesn't keep its own song library yet, so which saves in other folders use a multisample copy \
-                 can't be told."
+                "The app doesn't keep its own song library yet, so which saves in other folders use a multisample copy \
+                 can't be told, and the multisample copies stay."
+                    .to_owned(),
+            ),
+            BitwigReread::Unknown => Some(
+                "The song library couldn't be read just now, so the multisample copies stay. Try again in a moment."
                     .to_owned(),
             ),
         };
         if multisample && let Some(why) = not_yet {
-            return Some(format!("{name} stays: {why}"));
+            return Some(why);
         }
         let copy_key = without_drive(key(&copy.to_string_lossy()));
         elsewhere

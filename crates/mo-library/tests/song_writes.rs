@@ -336,6 +336,11 @@ fn the_fl_studio_saves_the_app_kept_are_read_again_once_for_their_muted_samples(
     assert!(noted.mended);
     assert_eq!(song_writes::to_mend(&songs).unwrap(), None);
     assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Done);
+    // One read again in the batch that noted the rest that the library then wouldn't take: owed after all, once.
+    song_writes::owe(&songs, &[4, 2, 4]).unwrap();
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2, 4]));
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Owed(1));
+    song_writes::write(&songs, &Batch { mended: true, ..Batch::default() }).unwrap();
     // Not the app's own library: never read again here.
     assert_eq!(song_writes::bitwig_reread(&not_own), BitwigReread::NotOwn);
 }

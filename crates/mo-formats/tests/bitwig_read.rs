@@ -225,7 +225,7 @@ fn a_multisample_found_outside_the_project_by_its_full_path_is_one_of_its_sample
     let mut doc = bitwig::decode(bitwig_template(Template::default())).unwrap();
     let text = |id: u32, t: &str| Field { id, value: Value::Str(Text::new(t)) };
     let root = doc.root.unwrap();
-    let mut sample = |name: &str, inside: &str, path: &str, before: &str, at: u32| {
+    let mut sample = |name: &str, inside: Option<&str>, path: &str, before: &str, at: u32| {
         let mut reference = Object::new(0x2a);
         reference.fields.push(text(0x3b, path));
         let reference = doc.add(reference);
@@ -237,7 +237,9 @@ fn a_multisample_found_outside_the_project_by_its_full_path_is_one_of_its_sample
         let found = doc.add(found);
         let mut file = Object::new(0x4a6);
         file.fields.push(text(0x512, name));
-        file.fields.push(text(0xd3a, inside));
+        if let Some(inside) = inside {
+            file.fields.push(text(0xd3a, inside));
+        }
         file.fields.push(Field { id: 0xd3b, value: Value::Obj(Slot::Obj(reference)) });
         file.fields.push(Field { id: 0x15, value: Value::Obj(Slot::Obj(found)) });
         let file = doc.add(file);
@@ -248,20 +250,27 @@ fn a_multisample_found_outside_the_project_by_its_full_path_is_one_of_its_sample
         doc.obj_mut(root).fields.push(Field { id: at, value: Value::Obj(Slot::Obj(file)) });
     };
     let other = r"K:\Bitwig Studio\Projects\Facebook Garage\multi-samples\Snare 5 Select.multisample";
-    sample("Snare 5 Select.multisample", "", other, r"D:\Library\Snare 5 Select.multisample", 0x7f20);
+    sample("Snare 5 Select.multisample", Some(""), other, r"D:\Library\Snare 5 Select.multisample", 0x7f20);
     // One inside the project is the project's own (in `used_files` when Bitwig collected it).
     sample(
         "Kick.multisample",
-        "multi-samples/Kick.multisample",
+        Some("multi-samples/Kick.multisample"),
         r"I:\Old\Kick.multisample",
         r"D:\Old.multisample",
         0x7f21,
     );
+    // A save without the field (from an older Bitwig, perhaps): outside unless it's in this project's own multi-samples
+    // folder by name (saved when the drive had another letter).
+    let older = r"K:\Bitwig Studio\Projects\Facebook Garage\multi-samples\Bass.multisample";
+    sample("Bass.multisample", None, older, r"D:\Old.multisample", 0x7f22);
+    let own = r"I:\Projects\Jazzy Garage\multi-samples\Pad.multisample";
+    sample("Pad.multisample", None, own, r"D:\Old.multisample", 0x7f23);
     let zip = doc.zip().map(<[u8]>::to_vec);
     let raw = bitwig::encode(&doc, zip.as_deref()).unwrap();
     let info = bitwig::read_from(&raw, Path::new(r"K:\Bitwig Studio\Projects\jazzy garage\jazzy garage 14.bwproject"));
     assert!(info.samples.iter().any(|s| s == other), "{:?}", info.samples);
-    for not in ["D:\\Library", "I:\\Old\\Kick", "D:\\Old"] {
+    assert!(info.samples.iter().any(|s| s == older), "{:?}", info.samples);
+    for not in ["D:\\Library", "I:\\Old\\Kick", "D:\\Old", "I:\\Projects"] {
         assert!(!info.samples.iter().any(|s| s.starts_with(not)), "{not}: {:?}", info.samples);
     }
 }

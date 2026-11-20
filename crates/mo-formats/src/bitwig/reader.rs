@@ -273,10 +273,14 @@ pub fn read_project(project: Option<&Project>, raw: &[u8], path: &Path, known: &
     let collected = || used_files.iter().flat_map(|f| collected_names(f)).map(|n| n.to_lowercase()).collect();
 
     match project {
-        Some(p) if p.doc.root.is_some() && p.doc.body_error.is_none() => read_decoded(p, &collected(), &mut info),
+        Some(p) if p.doc.root.is_some() && p.doc.body_error.is_none() => {
+            read_decoded(p, &path.to_string_lossy(), &collected(), &mut info)
+        }
         _ => {
             let collected = doc.map(|_| collected());
-            text_scan(raw, dir, &mut info, doc.and_then(|d| d.body_error.as_deref()), collected.as_ref(), known)
+            let save = path.to_string_lossy();
+            let why = doc.and_then(|d| d.body_error.as_deref());
+            text_scan(raw, (dir, &save), &mut info, why, collected.as_ref(), known)
         }
     }
 
@@ -311,7 +315,7 @@ fn ids(doc: &Document) -> impl Iterator<Item = ObjId> + '_ {
     (0..doc.objects.len() as u32).map(ObjId)
 }
 
-fn read_decoded(project: &Project, collected: &HashSet<String>, info: &mut ProjectInfo) {
+fn read_decoded(project: &Project, save: &str, collected: &HashSet<String>, info: &mut ProjectInfo) {
     let doc = &project.doc;
     info.confidence = Confidence::Partial;
 
@@ -389,13 +393,18 @@ fn read_decoded(project: &Project, collected: &HashSet<String>, info: &mut Proje
     // can use another project's copy this way (the whole-app review of 19 Nov, FS-5). Only that reference counts, not
     // the places it was found before (0x15), which hold old paths.
     for f in ids(doc).filter(|&o| doc.obj(o).class == CLS_SAMPLE_FILE) {
-        // Only one that says it isn't inside (an empty text): one without the field is left as it was.
-        if !matches!(doc.obj(f).get(F_IN_PROJECT), Some(Value::Str(t)) if t.as_str().is_empty()) {
-            continue;
-        }
         let Some(r) = doc.field_obj(f, F_SAMPLE_FILE_REF) else { continue };
         let p = doc.obj(r).str(F_FILE_PATH);
-        if plugins::ends_with_ignore_case(p, ".multisample") && paths::is_absolute(p) {
+        if !(plugins::ends_with_ignore_case(p, ".multisample") && paths::is_absolute(p)) {
+            continue;
+        }
+        let outside = match doc.obj(f).get(F_IN_PROJECT) {
+            Some(Value::Str(t)) => t.as_str().is_empty(),
+            // A save without the field (one from an older Bitwig, perhaps): outside unless the path is in this
+            // project's own multi-samples folder, by the folder's name (the drive may have had another letter then).
+            _ => !in_own_multisamples(save, p),
+        };
+        if outside {
             info.samples.push(p.to_owned());
         }
     }
@@ -443,6 +452,20 @@ fn culture_order(a: &str, b: &str) -> std::cmp::Ordering {
             .collect()
     };
     key(a).cmp(&key(b)).then_with(|| b.cmp(a))
+}
+
+/// Whether a multisample's full path is in the project's own `multi-samples` folder, by the project folder's name (the
+/// save's own folder, or the one above Bitwig's `auto-backups`): the drive may have had another letter then. `save` is
+/// the save's full path, with either separator.
+fn in_own_multisamples(save: &str, path: &str) -> bool {
+    let mut folders = path.rsplit(['/', '\\']).skip(1);
+    let (Some(multi), Some(project)) = (folders.next(), folders.next()) else { return false };
+    let mut above = save.rsplit(['/', '\\']).skip(1);
+    let own = match above.next() {
+        Some(n) if n.eq_ignore_ascii_case("auto-backups") => above.next(),
+        n => n,
+    };
+    multi.eq_ignore_ascii_case("multi-samples") && own.is_some_and(|o| o.to_lowercase() == project.to_lowercase())
 }
 
 /// The names a file collected into the project can have had before: its own, and its name without each "-2" style
@@ -810,7 +833,7 @@ pub const PROJECT_FOLDERS: [&str; 6] = ["samples", "recordings", "bounce", "audi
 
 fn text_scan(
     raw: &[u8],
-    dir: &Path,
+    (dir, save): (&Path, &str),
     info: &mut ProjectInfo,
     why: Option<&str>,
     collected: Option<&HashSet<String>>,
@@ -840,8 +863,11 @@ fn text_scan(
             // A damaged save's multisample by its full path: which text is the one Bitwig opens can't be told here, so
             // each counts (a place it was found before may show as a missing sample), as a save that uses another
             // project's copy must say so (the whole-app review of 19 Nov, FS-5).
+            // One collected into the project (by its name) is its own copy, as for audio below.
             if plugins::ends_with_ignore_case(s, ".multisample")
                 && let Some(p) = scanned_path(s).filter(|p| paths::is_absolute(p))
+                && !collected.is_some_and(|c| c.contains(&paths::file_name(p).to_lowercase()))
+                && !in_own_multisamples(save, p)
             {
                 info.samples.push(p.to_owned());
             }
