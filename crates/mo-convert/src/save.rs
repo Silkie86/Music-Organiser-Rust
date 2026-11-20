@@ -5,8 +5,8 @@
 //! Safety (rules 3 and "copy, check, then rename"): the FL project and the template are only read. The new project is
 //! written beside where it goes under a temporary name, flushed to the disk, read back and decoded to check it, and
 //! only then renamed into place. An earlier convert is only replaced when it's this song's own and nothing has changed
-//! it since ([`can_save_over`], asked again as the last thing before the rename); one saved in Bitwig, or another song's with the
-//! same name, is kept and the caller picks the next name ([`bitwig_name`]).
+//! it since ([`can_save_over`], asked again as the last thing before the rename); one saved in Bitwig, or another
+//! song's with the same name, is kept and the caller picks the next name ([`bitwig_name`]).
 //!
 //! A sample that can't be read where FL saved it is looked for (rule 13) by the finder the caller passes in (for the
 //! app, mo-library's `SampleLocator`: the project's folders, then the DAW's), and the Bitwig project points at where
@@ -421,7 +421,7 @@ mod tests {
     /// nothing beside it.
     #[test]
     fn a_save_asks_once_more_before_it_replaces_the_file() {
-        let dir = std::env::temp_dir().join("mo-convert save asks once more");
+        let dir = std::env::temp_dir().join(format!("mo-convert-save-asks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("Song.bwproject");

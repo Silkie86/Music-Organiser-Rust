@@ -5,8 +5,14 @@
 //! never written here. As a record is kept, the records of copies that aren't there any more go with it, in the same
 //! transaction, so they don't pile up (rule 28). A record lost that way only means the next convert keeps the copy and
 //! takes the next name: never that a copy is saved over.
+//!
+//! A second kind of record (`bitwig_opened:<file>`: when Bitwig was asked to open the copy) lasts a day, so a convert
+//! Bitwig may still show keeps its name through a restart of the app (review CN-11, [`remember_opened`]). It isn't
+//! the first kind's time over again: that one is the file's own save time and is kept for good, and a copy that
+//! couldn't be opened has none of this kind. Losing one of these is the less safe way round: the next convert may
+//! then replace a copy Bitwig still shows, as every convert could before there were any.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{Library, LibraryError, setting_list, songs_db};
 
@@ -58,22 +64,22 @@ pub fn opened_key(file: &Path) -> String {
 }
 
 /// Whether a copy whose opened record is `opened` (seconds since 1970, as [`remember_opened`] keeps it) may still be
-/// open in Bitwig at `now`. A record from after `now` (the clock was set back) counts as open; one that can't be read
-/// doesn't.
+/// open in Bitwig at `now`. A record from a little after `now` (the clock was set back) counts as open, but one from
+/// more than [`OPEN_FOR_SECONDS`] ahead says nothing, so a wrong clock never holds a name for good; one that can't be
+/// read doesn't count either.
 pub fn may_be_open(opened: Option<&str>, now: u64) -> bool {
-    opened.and_then(|o| o.parse::<u64>().ok()).is_some_and(|at| now < at.saturating_add(OPEN_FOR_SECONDS))
+    opened
+        .and_then(|o| o.parse::<u64>().ok())
+        .is_some_and(|at| now < at.saturating_add(OPEN_FOR_SECONDS) && at <= now.saturating_add(OPEN_FOR_SECONDS))
 }
 
-/// The names (each copy's file name without ".bwproject") of the copies opened in Bitwig that may still be open there
-/// at `now`, as `lib` remembers them.
-pub fn opened_lately(lib: &Library, now: u64) -> Result<Vec<String>, LibraryError> {
+/// The copies opened in Bitwig that may still be open there at `now`, as `lib` remembers them.
+pub fn opened_lately(lib: &Library, now: u64) -> Result<Vec<PathBuf>, LibraryError> {
     Ok(lib
         .settings_starting(OPENED_PREFIX)?
         .into_iter()
         .filter(|(_, at)| may_be_open(Some(at), now))
-        .filter_map(|(k, _)| {
-            Path::new(k.get(OPENED_PREFIX.len()..)?).file_stem().map(|n| n.to_string_lossy().into_owned())
-        })
+        .filter_map(|(k, _)| k.get(OPENED_PREFIX.len()..).map(PathBuf::from))
         .collect())
 }
 

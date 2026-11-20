@@ -193,8 +193,9 @@ pub struct Converted {
 }
 
 /// Converts `project` (an FL Studio save) for Bitwig into `export_root` with the template at `template`.
-/// `opened` are the names converted and opened in Bitwig this session (Bitwig only brings an open one forward, so a
-/// new convert takes the next name), and `written_of` what was remembered about a copy (see [`convert_key`]).
+/// `opened` are the names converted and opened in Bitwig that it may still have open: this session's, and those
+/// remembered from the last day ([`opened_names`]). Bitwig only brings an open one forward, so a new convert takes the
+/// next name, and `written_of` what was remembered about a copy (see [`convert_key`]).
 /// `find_sample` finds a sample that isn't where FL saved it (rule 13). Reads and writes the disk: never on the
 /// window's thread.
 pub fn convert(
@@ -228,6 +229,19 @@ pub fn convert(
         message += &format!(" {} this save lost were taken from an older save.", sounds(taken.len()));
     }
     Ok(Converted { file, name, notes, written, message })
+}
+
+/// The names of `project`'s own copies in `export_root` among `opened`, the copies Bitwig was asked to open lately
+/// (`mo_library::converts::opened_lately`): another song's copy, or one in another export folder, isn't this
+/// project's name to avoid.
+pub fn opened_names(project: &Path, export_root: &Path, opened: &[PathBuf]) -> Vec<String> {
+    opened
+        .iter()
+        .filter_map(|copy| {
+            let name = copy.file_stem()?.to_string_lossy().into_owned();
+            (bitwig_file(project, export_root, &name) == *copy).then_some(name)
+        })
+        .collect()
 }
 
 fn count(n: usize) -> String {
@@ -268,6 +282,22 @@ pub fn message(name: &str, plain: &str, renamed_kept: bool, notes: &[String]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whole-app review CN-11 (19 Nov 2026): a copy Bitwig was asked to open lately takes its name, for its own song
+    /// in this export folder only.
+    #[test]
+    fn a_copy_opened_lately_takes_its_name_for_its_own_song_only() {
+        let (project, root) = (Path::new("songs/Beat.flp"), Path::new("Exports"));
+        let lately = [
+            bitwig_file(project, root, "Beat"),
+            bitwig_file(Path::new("songs/Other.flp"), root, "Beat (2)"),
+            bitwig_file(project, Path::new("Old exports"), "Beat (3)"),
+        ];
+        let opened = opened_names(project, root, &lately);
+        assert_eq!(opened, ["Beat"]);
+        // And that is the name the next convert passes over.
+        assert_eq!(bitwig_name(project, |n| opened.iter().any(|o| o == n)), "Beat (2)");
+    }
 
     #[test]
     fn exports_go_where_settings_say_or_in_documents() {
