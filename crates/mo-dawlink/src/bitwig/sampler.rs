@@ -140,8 +140,8 @@ impl Bitwig {
             if e.is_elsewhere() && link.only_in().is_some() {
                 Error::Bitwig(format!(
                     "Another project came to the front in Bitwig as the sound went in, so the link stopped. The sound \
-                     may be in the Sampler on \"{}\" in the song you had in front, without its settings: Bitwig's \
-                     undo there puts it back.",
+                     may be in the Sampler on \"{}\" in the song you had in front, without its settings: look \
+                     there first, and if it is, Bitwig's undo puts the Sampler back.",
                     before.track
                 ))
             } else {

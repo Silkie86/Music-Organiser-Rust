@@ -2058,17 +2058,17 @@ final class Link {
     /**
      * Answers a sample put in the selected device's place (extension 3.29) once Bitwig shows it there: the selected
      * device, still on the same track and (extension 3.33, the 19 Nov review's LK-7) at the same place in its chain, with
-     * a sample named as the file is (its name, or its name without the ending). A sample of the same name as the one
-     * before can't show that way: for it, Bitwig telling the device's list of parameters again is the sign. `replaced`
-     * is true when the sign came, and with it `device`, `trackId`, `position`, `sample` and `fresh` (the IDs of the
-     * parameters whose values Bitwig has told since the file was put in: only those are the new device's for sure).
-     * When it never came within CHANGE_WAIT: false only while the device from before is still the selected one, with its
-     * sample (Bitwig ignored the file); true, with the sample it shows, when the device at that place shows another
-     * sample that isn't named as the file (the app then says which, and sets nothing: a Bitwig that names samples some
-     * other way shows up here); and null when it can't be told: another place or track is selected by now (`moved`:
-     * true), or the name is the same. A device that leaves the place, or stops showing the file, while its values
-     * settle is `moved` too: another Sampler at the same place (each pad of a Drum Machine is first in its chain) isn't
-     * taken for the new one.
+     * another sample than before. A sample of the same name as the one before can't show that way: for it, Bitwig
+     * telling the device's list of parameters again is the sign. `replaced` is true when the sign came, and with it
+     * `device`, `trackId`, `position`, `sample` (the app checks it names the file, and says which it is when it
+     * doesn't: how Bitwig names a sample isn't known for sure) and `fresh` (the IDs of the parameters whose values
+     * Bitwig has told since the file was put in: only those are the new device's for sure).
+     * When it never came within CHANGE_WAIT: false only while a device at that place still shows the sample from
+     * before and none has listed its parameters since (Bitwig ignored the file); null with `moved`: true when another
+     * place or track is selected by now, or a device listed its parameters since (another one was selected: each pad
+     * of a Drum Machine has its Sampler first in its chain, and two pads may hold the same sample); and plain null
+     * when it can't be told (the same name again, or no sample shown yet). A device that leaves the place, or that
+     * showed the file and stops showing it, while its values settle is `moved` too.
      */
     private void replaced(String path, String sampleBefore, String trackBefore, int placeBefore, long toldBefore, Finish finish) {
         String file = path.substring(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
@@ -2086,22 +2086,28 @@ final class Link {
             m.put("moved", true);
             return m;
         };
-        waitFor(() -> there.getAsBoolean() && (again ? params.listedAt > toldBefore : named.getAsBoolean()), CHANGE_WAIT, shown -> {
-            // Whether the device must go on showing the file while its values settle: not one that never did.
-            boolean byName = shown && !again;
+        // Shown once the device at that place holds another sample than before (any name: how Bitwig names a sample
+        // isn't known for sure, and the app is told the name), or, for the same sample again, lists its values anew.
+        BooleanSupplier other = () -> {
+            String now = str(cursorDevice.sampleName().get());
+            return !now.isEmpty() && !now.equals(sampleBefore);
+        };
+        waitFor(() -> there.getAsBoolean() && (again ? params.listedAt > toldBefore : other.getAsBoolean()), CHANGE_WAIT, shown -> {
+            // Whether the device must go on showing the file while its values settle: only one that did.
+            boolean byName = shown && !again && named.getAsBoolean();
             if (!shown) {
-                if (!there.getAsBoolean()) {
+                // Not at that place any more, or a device that listed its values since (selecting another device
+                // lists them: another pad's Sampler is first in its chain too, and may hold the same sample).
+                if (!there.getAsBoolean() || (!again && params.listedAt > toldBefore)) {
                     finish.ok(moved.get());
                     return;
                 }
-                String now = str(cursorDevice.sampleName().get());
-                if (again || now.equals(sampleBefore)) {
-                    Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("replaced", again ? null : Boolean.FALSE);
-                    finish.ok(m);
-                    return;
-                }
-                // Another sample than before at that place, not named as the file: told as it is (see above).
+                // The same sample still (ignored), or none shown yet (can't be told), or the same sample again.
+                boolean same = !again && str(cursorDevice.sampleName().get()).equals(sampleBefore);
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("replaced", same ? Boolean.FALSE : null);
+                finish.ok(m);
+                return;
             }
             // Until Bitwig has stopped telling the new device's values.
             settle(() -> {

@@ -160,11 +160,15 @@ pub(super) fn clip_cut_off(e: Error, track: &str, with_bars: bool) -> Error {
     if !e.is_elsewhere() {
         return e;
     }
-    let bars = if with_bars { ", and the arranger loop and the play start may be set to the song's bars" } else { "" };
+    let bars = if with_bars {
+        " The arranger loop and the play start may be left on the song's bars too: those are set back by hand."
+    } else {
+        ""
+    };
     Error::Bitwig(format!(
         "Another project came to the front in Bitwig as the part went in, so the link stopped. In the song you had in \
-         front before, the part's clip may be left in \u{201c}{track}\u{201d}'s clip launcher{bars}: Bitwig's undo there \
-         takes it back."
+         front before, the part's clip may be left in \u{201c}{track}\u{201d}'s clip launcher: look there first, and \
+         if it is, Bitwig's undo takes it out.{bars}"
     ))
 }
 
@@ -387,8 +391,8 @@ impl Bitwig {
             return undo(&mut link, Error::Cancelled, false);
         }
         if let Err(e) = link.add_audition_clip(&track_id, &part, None) {
-            // The clip may have been launched before whatever went wrong.
-            return undo(&mut link, e, true);
+            // The clip may have been launched before whatever went wrong, another project coming to the front too.
+            return undo(&mut link, clip_cut_off(e, name, false), true);
         }
         if !wanted() {
             return undo(&mut link, Error::Cancelled, true);
@@ -452,10 +456,8 @@ mod tests {
         );
         // A part's clip the same way (the 19 Nov review's LK-5): it may be in the launcher, and the bars may be looped.
         let said = clip_cut_off(elsewhere.clone(), "Bass", true).to_string();
-        assert!(
-            said.contains("the part's clip may be left in \u{201c}Bass\u{201d}'s clip launcher, and the arranger loop"),
-            "{said}"
-        );
+        assert!(said.contains("the part's clip may be left in \u{201c}Bass\u{201d}'s clip launcher: look"), "{said}");
+        assert!(said.contains("The arranger loop and the play start may be left"), "{said}");
         assert!(!clip_cut_off(elsewhere.clone(), "Bass", false).to_string().contains("arranger loop"));
         assert_eq!(clip_cut_off(Error::ChangesOff, "Bass", true), Error::ChangesOff);
         let said = new_track_failed(elsewhere, "Pad").to_string();

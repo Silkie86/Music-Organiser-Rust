@@ -274,9 +274,10 @@ the app connects.
 
 New in 3.33: four small things from the 19 Nov review. The reports find the data folder the installer started on a
 new PC (LK-2, see Reports above). A swap (`insert` at `replace` with a file) only counts the device still at the same
-place in its chain, showing a sample named as the file, as the new Sampler: another device selected meanwhile, such
-as another pad's Sampler, answers `replaced: null` with `moved: true`, and `false` is only said while the device from
-before is still selected with its sample (LK-7). `deletetrack` forgets its note of the track only after its wait for
+place in its chain, showing another sample than before, as the new Sampler (the app checks the sample's name against
+the file): another place selected meanwhile, or a device that listed its parameters without the sample changing
+(another pad's Sampler, say), answers `replaced: null` with `moved: true`, and `false` is only said while the sample
+from before still shows there and no device has listed its parameters since (LK-7). `deletetrack` forgets its note of the track only after its wait for
 a start on its way, so a take-out stopped during that wait can be asked again (LK-9). And the docs say when the
 reports folder is looked up (LK-4).
 
