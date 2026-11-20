@@ -84,6 +84,17 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
         t.set_chain(master, &chain);
     }
 
+    // A template with a tempo lane of its own keeps it, so the song would follow the template's tempo changes.
+    if let Some(transport) = t.transport()
+        && let Some(tempo) = t.doc.field_obj(transport, 0x211)
+        && t.automated(t.doc.field_obj(transport, 0x2dc9), tempo)
+    {
+        w.notes.push(
+            "The Bitwig template has tempo automation of its own, and the project keeps it: delete the tempo lane in \
+             Bitwig, or save the template without it"
+                .to_owned(),
+        );
+    }
     for lane in &plan.lanes {
         let (track, devices): (ObjId, &[Option<ObjId>]) = match lane.track {
             TrackRef::Master => (master, &master_devices),
@@ -1105,10 +1116,9 @@ impl Template {
         // FL automation clips move too keeps all its moves as points, as only it can say where each takes over.
         let in_clips: HashSet<usize> = lane.parts.iter().map(|p| p.source).collect();
         let only_edit_events = !in_clips.is_empty() && lane.points.iter().all(|p| in_clips.contains(&p.source));
-        // The tempo's lane keeps its moves as points too: its points are a kind of their own, and no save has shown
-        // an automation clip on it.
+        // (The tempo's lane never has edit events: only a plugin's setting is read from them.)
         let usable = only_edit_events
-            && !matches!(lane.target, Target::OnOff { .. } | Target::Tempo)
+            && !matches!(lane.target, Target::OnOff { .. })
             && self.doc.field_obj(made, 0x2aec).is_some();
         let auto_clip = self.auto_clip.zip(self.auto_point).filter(|_| usable);
         let clips = clips_in_order(&lane.parts);
@@ -1189,8 +1199,16 @@ impl Template {
         }
         push(self.doc.obj_mut(lanes), 0x4ba, Slot::Obj(made));
         if lane.target == Target::Tempo {
-            self.tempo_lane_as_bitwig_saves_one(track, lanes, made);
+            self.tempo_points(made);
         }
+        // The setting the lane moves: the tempo, or the track's fader or pan.
+        let setting = match lane.target {
+            Target::Tempo => self.doc.field_obj(track, 0x211),
+            Target::Volume => self.doc.field_obj(track, 0x165).and_then(|m| self.doc.field_obj(m, 0x1a4)),
+            Target::Pan => self.doc.field_obj(track, 0x165).and_then(|m| self.doc.field_obj(m, 0x1a5)),
+            _ => None,
+        };
+        self.lane_takes_the_empty_entrys_place(track, lanes, made, setting);
 
         // The plugin also lists the setting, as Bitwig saves an automated one.
         if let (Target::Plugin { device, id, .. }, Some(setting)) = (&lane.target, self.setting)
@@ -1216,10 +1234,8 @@ impl Template {
 
     /// Makes a tempo lane copied from a Volume or Pan lane what Bitwig saves for the tempo (6.1.6 recorded live, and
     /// the 6.1.7 recipe saves): its points are class 0x387 in a list of class 0x389, where a mixer lane's are 0x108 in
-    /// 0x6e, with the same fields. And the transport's empty Tempo entry (class 0x23c in the list 0x3f83, which Bitwig
-    /// keeps only while the tempo isn't automated) gives way to the lane: out of that list, and the per-user view
-    /// state that pointed at it points at the lane.
-    fn tempo_lane_as_bitwig_saves_one(&mut self, transport: ObjId, lanes: ObjId, lane: ObjId) {
+    /// 0x6e, with the same fields.
+    fn tempo_points(&mut self, lane: ObjId) {
         const TEMPO_POINTS: u32 = 0x389;
         const TEMPO_POINT: u32 = 0x387;
         if let Some(list) = self.doc.field_obj(lane, 0x2d8c).and_then(|a| self.doc.field_obj(a, 0x35ac)) {
@@ -1228,19 +1244,33 @@ impl Template {
                 self.doc.obj_mut(point).class = TEMPO_POINT;
             }
         }
-        let Some(tempo) = self.doc.field_obj(transport, 0x211) else { return };
-        let is_tempo =
-            |doc: &Document, o: ObjId| doc.field_obj(o, 0x2a3).and_then(|t| doc.field_obj(t, 0x41)) == Some(tempo);
+    }
+
+    /// A new lane on a track, the master or the transport, as Bitwig 6.1.7 saves one (the recipe saves). The empty
+    /// entry for the lane's setting (class 0x23c in the list 0x3f83, which the view shows while the setting isn't
+    /// automated) gives way to the lane: out of that list, and the per-user view state (the map 0x168) that pointed
+    /// at it (0x4e6, 0x41f0) points at the lane. And each view state says the owner has a lane (0x115a: 1 on every
+    /// track and transport with a lane in those saves, 0 on every one without; what it does in Bitwig isn't known).
+    fn lane_takes_the_empty_entrys_place(&mut self, owner: ObjId, lanes: ObjId, lane: ObjId, setting: Option<ObjId>) {
+        let states: Vec<ObjId> = match self.doc.obj(owner).get(0x168) {
+            Some(Value::Map(states)) => states.iter().filter_map(|(_, s)| self.doc.resolve(*s)).collect(),
+            _ => Vec::new(),
+        };
+        for &state in &states {
+            let o = self.doc.obj_mut(state);
+            if matches!(o.get(0x115a), Some(Value::Bool(_))) {
+                put(o, 0x115a, Value::Bool(1));
+            }
+        }
+        let Some(setting) = setting else { return };
+        let is_its =
+            |doc: &Document, o: ObjId| doc.field_obj(o, 0x2a3).and_then(|t| doc.field_obj(t, 0x41)) == Some(setting);
         let listed = self.doc.field_list(lanes, 0x3f83);
-        let (empty, kept): (Vec<ObjId>, Vec<ObjId>) = listed.into_iter().partition(|&o| is_tempo(&self.doc, o));
+        let (empty, kept): (Vec<ObjId>, Vec<ObjId>) = listed.into_iter().partition(|&o| is_its(&self.doc, o));
         if empty.is_empty() {
             return;
         }
         self.doc.obj_mut(lanes).set(0x3f83, Value::List(kept.into_iter().map(Slot::Obj).collect()));
-        let states: Vec<ObjId> = match self.doc.obj(transport).get(0x168) {
-            Some(Value::Map(states)) => states.iter().filter_map(|(_, s)| self.doc.resolve(*s)).collect(),
-            _ => Vec::new(),
-        };
         for state in states {
             if self.doc.field_obj(state, 0x4e6).is_some_and(|o| empty.contains(&o)) {
                 put(self.doc.obj_mut(state), 0x4e6, Value::Obj(Slot::Obj(lane)));
@@ -1294,12 +1324,25 @@ impl Template {
                 "The song's markers aren't carried over (the Bitwig template has no place for them)".to_owned()
             });
         };
-        let pattern = self.doc.field_list(list, 0x21f).into_iter().find(|&m| self.doc.obj(m).class == MARKER);
+        // A marker of the template's is copied field for field only when all it holds is plain values (as 6.1.7's:
+        // its beat, name, colour and a text), so nothing would be shared between the copies.
+        let plain = |o: &Object| {
+            o.fields
+                .iter()
+                .all(|f| !matches!(f.value, Value::Obj(_) | Value::BareRef(_) | Value::List(_) | Value::Map(_)))
+        };
+        let pattern = self
+            .doc
+            .field_list(list, 0x21f)
+            .into_iter()
+            .find(|&m| self.doc.obj(m).class == MARKER && plain(self.doc.obj(m)));
+        // In time order, as Bitwig lists them (FL's file needn't).
+        let mut markers: Vec<&(f64, String)> = markers.iter().collect();
+        markers.sort_by(|a, b| a.0.total_cmp(&b.0));
         let made = markers
-            .iter()
+            .into_iter()
             .map(|(beat, name)| {
                 let marker = match pattern {
-                    // A marker holds only its own beat, name and colour: nothing it would share with its copy.
                     Some(pattern) => {
                         let like = self.doc.obj(pattern).clone();
                         self.doc.add(like)

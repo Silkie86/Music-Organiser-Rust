@@ -848,6 +848,7 @@ fn template_body(b: &mut BwWriter, t: Template, sampler: &str, note_transpose: &
         b.map(0x168);
         b.map_key("user");
         b.begin(0xf96);
+        b.bool(0x115a, false);
         b.obj(0x4e6);
         let entry = b.begin(0x23c);
         b.obj(0x2a3);
@@ -861,7 +862,7 @@ fn template_body(b: &mut BwWriter, t: Template, sampler: &str, note_transpose: &
         b.str(0x133a, "Tempo");
         b.end();
         b.end();
-        b.reference(0x41f0, entry);
+        b.bare_ref(0x41f0, entry);
         b.end();
         b.end_map();
         b.obj(0x2dc9);
@@ -873,7 +874,7 @@ fn template_body(b: &mut BwWriter, t: Template, sampler: &str, note_transpose: &
         b.list_ref(entry);
         b.end_list();
         b.end();
-        b.reference(0x211, tempo);
+        b.bare_ref(0x211, tempo);
         b.obj(0x212);
         b.begin(0x7f4);
         b.i32(0x1cbe, 0x1000_0024);

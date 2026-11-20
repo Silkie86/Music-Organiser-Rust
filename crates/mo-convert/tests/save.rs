@@ -284,6 +284,8 @@ fn the_fl_songs_time_signature_and_markers_come_across() {
     let bitwig = &mo_formats::arrangement::read(&saved.file).unwrap()[0];
     assert_eq!(bitwig.signature, fl.signature);
     assert_eq!(bitwig.markers, fl.markers, "FL's markers, and not the template's own");
+    // The song starts in 3/4 and never changes, so nothing is said about a change.
+    assert!(!saved.notes.iter().any(|n| n.contains("changes time signature")), "{:?}", saved.notes);
 }
 
 /// A short WAV, as the snare the song plays.

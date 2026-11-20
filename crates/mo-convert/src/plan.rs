@@ -197,10 +197,10 @@ pub struct Plan {
     pub master_effects: Vec<Device>,
     /// One lane per thing moved, in the order they were first met.
     pub lanes: Vec<Lane>,
-    /// The song's time signature. [`from_fl`] says 4/4: the song as it reads there doesn't hold one, so whoever has
-    /// the save sets it (`save::bitwig_from_fl`).
+    /// The song's time signature.
     pub signature: TimeSignature,
-    /// The song's markers, in order: the beat each is at and its name. Set as the signature is.
+    /// The song's markers: the beat each is at and its name. [`from_fl`] leaves them empty: the song as it reads
+    /// there doesn't hold them, so whoever has the save sets them (`save::bitwig_from_fl`).
     pub markers: Vec<(f64, String)>,
     /// What couldn't come across, each said once.
     pub notes: Vec<String>,
@@ -544,7 +544,7 @@ impl Planner<'_> {
                     )),
                     Some(i) if !self.options.steps_until_next_note => {
                         let (seconds, root, pitch) = (i.seconds, c.root_key, c.pitch_cents);
-                        let (tempo, ppq) = (self.tempo, song.ppq);
+                        let (tempo, ppq) = (self.tempo, ticks_a_beat(song));
                         sample_length = Some(Box::new(move |key| {
                             sample_ticks(seconds, key as f64 - root as f64 + pitch as f64 / 100.0, tempo, ppq)
                         }));
@@ -583,7 +583,8 @@ impl Planner<'_> {
         self.insert_effects(c, TrackRef::Track(at), &mut devices, &mut skipped);
         // When all its clips are on muted FL playlist tracks, the track is muted rather than its clips.
         let track_muted = clips::all_on_muted_tracks(&c.clips);
-        let made = clips::of(c, clips::on_muted_tracks(&c.clips, track_muted), song.ppq)
+        let bar = song.signature.bar_ticks(ticks_a_beat(song).into());
+        let made = clips::of(c, clips::on_muted_tracks(&c.clips, track_muted), bar)
             .into_iter()
             .map(|mut clip| {
                 clip.notes = clips::lengthen(std::mem::take(&mut clip.notes), clip.length, sample_length.as_deref());
@@ -647,7 +648,7 @@ impl Planner<'_> {
             let track_muted = clips::all_on_muted_tracks(clips);
             let audio_clips = clips::on_muted_tracks(clips, track_muted)
                 .iter()
-                .map(|x| audio_clip(c, x, info.as_ref(), self.tempo, song.ppq))
+                .map(|x| audio_clip(c, x, info.as_ref(), self.tempo, ticks_a_beat(song)))
                 .collect();
             let on = clips.iter().filter(|x| x.on_muted_track).map(|x| x.track);
             if let Some(n) = notes::on_muted_tracks(&name, on, &song.muted_tracks, track_muted) {
@@ -822,6 +823,12 @@ fn in_song_order(mut points: Vec<LanePoint>) -> Vec<LanePoint> {
         out.push(q);
     }
     out
+}
+
+/// The song's ticks in a beat. A damaged header can say 0, so FL's default stands in, as it does where the song's
+/// markers and preview are read.
+fn ticks_a_beat(song: &FlSong) -> u16 {
+    if song.ppq > 0 { song.ppq } else { 96 }
 }
 
 /// What an FL song becomes. `read_sample` says what's known of a sample file (`None` when it can't be read).
@@ -1205,11 +1212,11 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
     Plan {
         title: song.title.clone(),
         tempo,
-        ppq: song.ppq,
+        ppq: ticks_a_beat(song),
         tracks,
         master_effects,
         lanes,
-        signature: TimeSignature::FOUR_FOUR,
+        signature: song.signature,
         markers: Vec::new(),
         notes,
     }

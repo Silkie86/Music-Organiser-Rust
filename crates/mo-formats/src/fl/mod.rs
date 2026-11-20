@@ -34,8 +34,9 @@ pub const DAW: &str = "FL Studio";
 /// Windows' code page 1252, not Latin-1, counts the patterns named rather than new-pattern events, lists no unplayed
 /// samples in a save cut short, reads damaged FL 3.5 to 8.0 notes at 20 bytes (with a warning), and leaves out notes
 /// above MIDI's top key; 18 reads FL 25 and 26's extended events (event 172 and the real event after it) as one, so
-/// one inside a channel no longer reads as the channel's light or an old-style name.
-pub const VERSION: u32 = 18;
+/// one inside a channel no longer reads as the channel's light or an old-style name; 19 lays the patterns of a song with
+/// nothing in its playlist one after another in the song's own bars (3 beats in 3/4 or 6/8), where every bar was 4.
+pub const VERSION: u32 = 19;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
 /// The Fruity Wrapper (FL's VST host) keeps a VST's details as records: u32 version, then (u32 id, u64 size, data).

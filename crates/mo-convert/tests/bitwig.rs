@@ -125,6 +125,7 @@ fn song() -> FlSong {
         title: "Test".into(),
         ppq: 96,
         tempo: 128.0,
+        signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
         channels: vec![snare, synth],
         inserts: Vec::new(),
         routes: Default::default(),
@@ -538,6 +539,7 @@ fn the_tempo_lane_takes_the_place_of_the_transports_empty_tempo_entry() {
     let state = doc.resolve(states[0].1).unwrap();
     assert_eq!(doc.field_obj(state, 0x4e6), Some(lanes[0]));
     assert_eq!(doc.field_obj(state, 0x41f0), None);
+    assert_eq!(doc.obj(state).get(0x115a), Some(&Value::Bool(1)), "as every saved transport with a lane has it");
     // The tempo itself is still the transport's, and holds the project's tempo.
     let tempo = obj(&doc, transport, &[0x211]);
     assert_eq!(doc.field_obj(obj(&doc, lanes[0], &[0x2a3]), 0x41), Some(tempo));
@@ -546,6 +548,8 @@ fn the_tempo_lane_takes_the_place_of_the_transports_empty_tempo_entry() {
     let (doc, _, _) = convert(&song(), &bitwig_template(saved));
     let transport = obj(&doc, doc.root.unwrap(), &[0x190]);
     assert_eq!(doc.field_list(obj(&doc, transport, &[0x2dc9]), 0x3f83).len(), 1);
+    let Some(Value::Map(states)) = doc.obj(transport).get(0x168) else { panic!("no view state") };
+    assert_eq!(doc.obj(doc.resolve(states[0].1).unwrap()).get(0x115a), Some(&Value::Bool(0)));
 }
 
 /// CN-6: the song's time signature is the Bitwig project's, packed as Bitwig packs it (his 3/4 and 6/8 saves).
@@ -561,6 +565,9 @@ fn the_songs_time_signature_is_set_in_the_project() {
         let setting = doc.field_obj(obj(&doc, doc.root.unwrap(), &[0x190]), 0x212);
         (setting.and_then(|s| doc.obj(s).num(0x1cbe)).map(|n| n as i64 as u32), made.notes)
     };
+    // The plan takes it from the song.
+    let waltz = FlSong { signature: TimeSignature::new(3, 4).unwrap(), ..song() };
+    assert_eq!(from_fl(&waltz, Options::default(), &mut snare).signature, TimeSignature::new(3, 4).unwrap());
     assert_eq!(packed(4, 4, &saved).0, Some(0x1000_0024));
     assert_eq!(packed(3, 4, &saved).0, Some(0x0C00_0024));
     assert_eq!(packed(6, 8, &saved).0, Some(0x1800_0034));
@@ -597,6 +604,9 @@ fn the_songs_markers_take_the_place_of_the_templates() {
     let (found, notes) = markers(&[(4.0, "Verse"), (36.0, "Drop")], &saved);
     assert_eq!(found, [(0x266, 4.0, "Verse".to_owned()), (0x266, 36.0, "Drop".to_owned())]);
     assert!(!notes.iter().any(|n| n.contains("markers")), "{notes:?}");
+    // Bitwig lists them in time order, whatever order FL's file has them in.
+    let (found, _) = markers(&[(36.0, "Drop"), (4.0, "Verse")], &saved);
+    assert_eq!(found, [(0x266, 4.0, "Verse".to_owned()), (0x266, 36.0, "Drop".to_owned())]);
     // A song with none: the template's "Drop" at beat 64 isn't the song's.
     assert_eq!(markers(&[], &saved).0, []);
     // A template with no place for markers: said, when the song has some.

@@ -15,6 +15,7 @@ use super::{
     Rack, UserData, VST_PATH, VST_STATE, VST_VENDOR, WRAPPER, channels as known_channels, saved_nothing,
     wrapper_class_id, wrapper_fields, wrapper_four_cc, wrapper_is_vst3, wrapper_plugin_name, wrapper_text,
 };
+use crate::arrangement::TimeSignature;
 use crate::model::{MidiChannel, MidiClip, NoteEvent};
 use crate::presets::PresetBlob;
 
@@ -246,6 +247,8 @@ pub struct FlSong {
     pub title: String,
     pub ppq: u16,
     pub tempo: f64,
+    /// The song's time signature, as the Songs preview reads it (`arrangement::bars_and_markers`).
+    pub signature: TimeSignature,
     pub channels: Vec<FlChannel>,
     pub inserts: Vec<FlInsert>,
     /// Where each mixer insert sends its sound (event 235), by insert: the inserts it goes to, the master being 0. An
@@ -529,6 +532,7 @@ fn place_clips(
     tracks: &PlaylistTracks,
     known: &HashSet<u32>,
     pattern_names: &HashMap<u32, String>,
+    signature: TimeSignature,
 ) -> (BTreeMap<u32, Vec<FlClip>>, bool) {
     let mut patterns: BTreeMap<u32, Vec<(u32, NoteEvent)>> = BTreeMap::new();
     for &(pattern, e) in raw_notes {
@@ -607,7 +611,8 @@ fn place_clips(
             );
         }
     } else {
-        let bar = 4 * flp.ppq as i64;
+        // The song's own bar (3 beats in 3/4 or 6/8). A damaged header can say 0 ticks a beat: FL's default stands in.
+        let bar = signature.bar_ticks(if flp.ppq > 0 { flp.ppq as i64 } else { 96 });
         let mut at = 0;
         let lengths: Vec<(u32, i64)> = patterns
             .iter()
@@ -995,7 +1000,8 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         })
         .collect();
     let known = seen_channels;
-    let (mut clips, too_many) = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names);
+    let signature = super::arrangement::signature(flp);
+    let (mut clips, too_many) = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names, signature);
     // Only patterns the song plays (all of them where there's no playlist) lose anything: muted placements, and those
     // on a muted track, don't play.
     let placed: HashSet<u32> = items
@@ -1084,6 +1090,7 @@ pub fn read_song_with(flp: &Flp<'_>, sounds: bool) -> FlSong {
         title,
         ppq: flp.ppq,
         tempo: tempo.unwrap_or(140.0),
+        signature,
         channels,
         inserts,
         routes: insert_routes,
@@ -1248,12 +1255,14 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
     let items = playlist.map(playlist_items).unwrap_or_default();
     tracks.count_from(&items, &flp.version);
     let known = seen_channels;
-    let notes: BTreeMap<u32, Vec<NoteEvent>> = place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names)
-        .0
-        .into_iter()
-        .map(|(c, clips)| (c, audible(&clips)))
-        .filter(|(_, notes)| !notes.is_empty())
-        .collect();
+    let signature = super::arrangement::signature(flp);
+    let notes: BTreeMap<u32, Vec<NoteEvent>> =
+        place_clips(flp, &raw_notes, &items, &tracks, &known, &pattern_names, signature)
+            .0
+            .into_iter()
+            .map(|(c, clips)| (c, audible(&clips)))
+            .filter(|(_, notes)| !notes.is_empty())
+            .collect();
     // The rack's order first, then any channel that only shows up in notes.
     let mut channels = order.clone();
     channels.extend(notes.keys().filter(|c| !known.contains(c)));
