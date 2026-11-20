@@ -19,8 +19,36 @@ pub fn connect() {
     if !on_windows::guard_class(on_windows::WINIT_UNSEEN, close) {
         mo_app::log::warning(
             "App",
-            "Couldn't find winit's unseen window: a close asked of a minimised app may not close it",
+            "Couldn't find winit's unseen window: a close asked of a minimised app may not close it, and Windows \
+             shutting down ends the app without its last writes",
         );
+    }
+}
+
+thread_local! {
+    /// What to do when Windows ends the session ([`on_session_end`]).
+    static SESSION_END: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// From now on, when Windows ends the session (sign out, shut down, restart) with the app open, `work` runs on the
+/// window's thread, once: Windows ends the app as soon as it has answered, so `work` writes what is waiting and ends
+/// the app itself. Call it on the window's thread, after [`connect`]. Windows asks every window; it's winit's unseen
+/// one that answers here, as it is there whatever the real window is doing.
+///
+/// A setup closing the app (Windows' Restart Manager) asks the same way, and so does a restart that brings the apps
+/// back: Windows says of both that the app must close, so `work` runs for them too.
+pub fn on_session_end(work: impl FnOnce() + 'static) {
+    SESSION_END.with(|s| *s.borrow_mut() = Some(Box::new(work)));
+}
+
+#[cfg(windows)]
+fn session_end() {
+    // Taken out first, so the work runs with nothing borrowed, and only ever once.
+    let work = SESSION_END.with(|s| s.borrow_mut().take());
+    if let Some(work) = work {
+        // A panic can't pass through Windows' call into the app: it's logged as the crash it is, and Windows ends
+        // the app as it was about to.
+        let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(work));
     }
 }
 
@@ -28,6 +56,7 @@ pub fn connect() {
 fn close() {
     mo_app::log::last(mo_app::log::Level::Info, "App", "Asked to close from outside while out of sight: closing");
     crate::watchdog::stop();
+    crate::one_copy::closing();
     let _ = slint::quit_event_loop();
 }
 
@@ -35,8 +64,11 @@ fn close() {
 #[allow(unsafe_code)]
 mod on_windows {
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy};
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId, WM_CLOSE, WM_NCDESTROY};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, GetWindowThreadProcessId, WM_CLOSE, WM_ENDSESSION, WM_NCDESTROY,
+    };
     use windows::core::{PCWSTR, w};
 
     /// The class of winit's unseen window (winit 0.30, `THREAD_EVENT_TARGET_WINDOW_CLASS`).
@@ -71,8 +103,8 @@ mod on_windows {
         unsafe { SetWindowSubclass(window, Some(asked), OURS, on_close as usize) }.as_bool()
     }
 
-    /// What a guarded window does with each message: a close calls the function kept with it; the rest goes on to the
-    /// window as before.
+    /// What a guarded window does with each message: a close calls the function kept with it, the session's end does
+    /// [`super::on_session_end`]'s work; the rest goes on to the window as before.
     unsafe extern "system" fn asked(
         window: HWND,
         message: u32,
@@ -85,6 +117,17 @@ mod on_windows {
             // SAFETY: `on_close` is the `fn()` [`guard`] put there, and nothing else sets it.
             let on_close = unsafe { std::mem::transmute::<usize, fn()>(on_close) };
             on_close();
+            return LRESULT(0);
+        }
+        // The session is ending (wparam says it really is, after every program was asked).
+        if message == WM_ENDSESSION && wparam.0 != 0 {
+            // If the work takes more than a few seconds, Windows shows these words beside the app's name on its
+            // "preventing shutdown" screen.
+            // SAFETY: this thread's own window, and words that end with a zero.
+            let _ = unsafe { ShutdownBlockReasonCreate(window, w!("Saving your changes")) };
+            super::session_end();
+            // SAFETY: as above. Only reached if the work came back (it ends the app itself when it can).
+            let _ = unsafe { ShutdownBlockReasonDestroy(window) };
             return LRESULT(0);
         }
         if message == WM_NCDESTROY {
@@ -160,6 +203,34 @@ mod on_windows {
 
             // No such window on this thread: said, not guessed.
             assert!(!guard_class(w!("Static"), note));
+        }
+
+        // The 19 November 2026 review's CL-2: nothing answered Windows ending the session, so nothing was written.
+        #[test]
+        fn the_session_ending_runs_its_work_once() {
+            static ENDED: AtomicUsize = AtomicUsize::new(0);
+            fn note() {}
+            let send = |window: HWND, really: usize, why: isize| {
+                // SAFETY: a message to this thread's own window.
+                unsafe { SendMessageW(window, WM_ENDSESSION, Some(WPARAM(really)), Some(LPARAM(why))) };
+            };
+            let guarded = window();
+            assert!(guard(guarded, note));
+            crate::close_ask::on_session_end(|| {
+                ENDED.fetch_add(1, Ordering::SeqCst);
+            });
+            // The session isn't ending after all (another program said no).
+            send(guarded, 0, 0);
+            assert_eq!(ENDED.load(Ordering::SeqCst), 0);
+            // A setup closing the app, or a restart that brings the apps back (`ENDSESSION_CLOSEAPP`): Windows says
+            // the app must close, so the work runs.
+            send(guarded, 1, 0x1);
+            assert_eq!(ENDED.load(Ordering::SeqCst), 1);
+            // Shutting down, asked a second time.
+            send(guarded, 1, 0);
+            assert_eq!(ENDED.load(Ordering::SeqCst), 1, "only once");
+            // SAFETY: this thread's own window.
+            unsafe { DestroyWindow(guarded) }.expect("destroyed");
         }
     }
 }

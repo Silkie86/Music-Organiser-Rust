@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use mix::{FromMixer, Mixer, Place, ToMixer};
+use rtrb::{Consumer, RingBuffer};
 
 use crate::AudioData;
 
@@ -35,6 +36,18 @@ const INBOX: usize = 1024;
 
 /// Orders waiting for the output's thread, which takes them every few milliseconds.
 const MIXER_INBOX: usize = 64;
+
+/// What the output's thread hands back (a sound ended, a sound to free) waiting for the player's thread. The mixer lets
+/// go of at most a sound or two each time it mixes, so this is never near full while the player's thread is alive.
+const FROM_MIXER: usize = 256;
+
+/// How often the player's thread takes what the output's thread handed back, while it may hand something back: the
+/// output's thread wakes no one (the review's MP-3), so an end is noticed this much later at most.
+const MIXER_LOOK: Duration = Duration::from_millis(20);
+
+/// How long after an order the output's thread may still hand something back with no sound playing (a sound stopped
+/// fades out first).
+const MIXER_SETTLES: Duration = Duration::from_secs(1);
 
 /// Where sound is going: what Settings and the audio log show.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -81,7 +94,6 @@ enum Order {
     Choose(Option<String>),
     Check,
     List(Sender<Vec<String>>),
-    Mixer(FromMixer),
     Output { opening: u64, event: Event },
     Quit,
 }
@@ -315,6 +327,8 @@ struct Playing {
 struct Open {
     output: Opened,
     to_mixer: SyncSender<ToMixer>,
+    /// What its mixer hands back, taken by the player's thread ([`Keeper::take_from_mixer`]).
+    from_mixer: Consumer<FromMixer>,
     place: Arc<Place>,
     /// Which opening this is, so word about an older one is ignored.
     opening: u64,
@@ -342,27 +356,61 @@ struct Keeper {
 
 impl Keeper {
     fn run(mut self) {
+        // Until when the output's thread may still hand something back with no sound playing.
+        let mut settles = Instant::now();
         while !self.shared.quit.load(Ordering::Relaxed) {
+            self.take_from_mixer();
             // While a sound waits for an output that wouldn't open, wake up to try again.
             let retry = self.playing.is_some() && self.open.is_none();
-            let order = match self.failed_at.filter(|_| retry) {
-                Some(at) => {
-                    let wait = (at + WAIT_AFTER_FAILING).saturating_duration_since(Instant::now());
-                    match self.inbox.recv_timeout(wait) {
-                        Ok(order) => order,
-                        Err(RecvTimeoutError::Timeout) => {
+            let retry_at = self.failed_at.filter(|_| retry).map(|at| at + WAIT_AFTER_FAILING);
+            // While the output's thread may hand something back, look every few milliseconds.
+            let listening = self.open.is_some() && (self.playing.is_some() || Instant::now() < settles);
+            let look_at = listening.then(|| Instant::now() + MIXER_LOOK);
+            let order = match [retry_at, look_at].into_iter().flatten().min() {
+                Some(at) => match self.inbox.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                    Ok(order) => order,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if retry_at.is_some_and(|r| r <= Instant::now()) {
                             self.retry();
-                            continue;
                         }
-                        Err(RecvTimeoutError::Disconnected) => return,
+                        continue;
                     }
-                }
+                    Err(RecvTimeoutError::Disconnected) => return,
+                },
                 None => match self.inbox.recv() {
                     Ok(order) => order,
                     Err(_) => return,
                 },
             };
+            // What was handed back before the order came goes first: an end, then a move of the sound that ended.
+            self.take_from_mixer();
             self.obey(order);
+            settles = Instant::now() + MIXER_SETTLES;
+        }
+    }
+
+    /// Takes what the open output's mixer handed back: an end is passed on, a sound is freed here.
+    fn take_from_mixer(&mut self) {
+        while let Some(m) = self.open.as_mut().and_then(|o| o.from_mixer.pop().ok()) {
+            self.handed_back(m);
+        }
+    }
+
+    fn handed_back(&mut self, m: FromMixer) {
+        match m {
+            FromMixer::Ended(id) => self.ended(id),
+            // Freed here, off the output's thread.
+            FromMixer::Done(sound) => drop(sound),
+        }
+    }
+
+    /// Lets go of an output no longer used: closed first, so its mixer hands nothing more back, then what it handed
+    /// back is taken (a sound that ended just then is still passed on).
+    fn let_go(&mut self, old: Option<Open>) {
+        let Some(Open { output, mut from_mixer, .. }) = old else { return };
+        drop(output);
+        while let Ok(m) = from_mixer.pop() {
+            self.handed_back(m);
         }
     }
 
@@ -406,9 +454,6 @@ impl Keeper {
             Order::List(reply) => {
                 let _ = reply.send(self.outputs.names());
             }
-            Order::Mixer(FromMixer::Ended(id)) => self.ended(id),
-            // Freed here, off the output's thread.
-            Order::Mixer(FromMixer::Done(sound)) => drop(sound),
             Order::Output { opening, event } => {
                 if !self.open.as_ref().is_some_and(|o| o.opening == opening) {
                     return;
@@ -515,7 +560,8 @@ impl Keeper {
 
     fn close(&mut self, why: Option<String>) {
         self.note_place();
-        self.open = None;
+        let old = self.open.take();
+        self.let_go(old);
         *lock(&self.shared.delay) = None;
         *lock(&self.shared.period) = None;
         *lock(&self.shared.place) = None;
@@ -578,7 +624,8 @@ impl Keeper {
         *lock(&self.shared.delay) = Some(Arc::clone(&open.output.delay));
         *lock(&self.shared.period) = Some(Arc::clone(&open.output.period));
         *lock(&self.shared.place) = Some(Arc::clone(&open.place));
-        self.open = Some(open);
+        let old = self.open.replace(open);
+        self.let_go(old);
         if let Some(p) = &self.playing {
             let from = p.start * f64::from(p.sound.sample_rate);
             self.tell(ToMixer::Play { id: p.id, sound: Arc::clone(&p.sound), from, looping: p.looping });
@@ -591,10 +638,12 @@ impl Keeper {
         let opening = self.openings;
         let (to_mixer, inbox) = sync_channel(MIXER_INBOX);
         let place = Arc::new(Place::default());
-        let to_player = self.orders.clone();
+        // Handed back without a lock or a wake-up on the output's thread: the player's thread takes it when it next
+        // looks ([`MIXER_LOOK`]).
+        let (mut to_player, from_mixer) = RingBuffer::new(FROM_MIXER);
         let tell: mix::Tell = Box::new(move |m| {
-            // When the inbox is full (the player's thread stuck) a finished sound is freed here instead; rare.
-            let _ = to_player.try_send(Order::Mixer(m));
+            // When it's full (the player's thread stuck) a finished sound is freed here instead; rare.
+            let _ = to_player.push(m);
         });
         let mut mixer = Mixer::new(inbox, tell, Arc::clone(&place));
         let render: Render = Box::new(move |out, rate, channels| mixer.render(out, rate, channels));
@@ -603,7 +652,7 @@ impl Keeper {
             let _ = events_to.try_send(Order::Output { opening, event });
         });
         let output = self.outputs.open(name, render, events)?;
-        Ok(Open { output, to_mixer, place, opening, as_default: name.is_none() })
+        Ok(Open { output, to_mixer, from_mixer, place, opening, as_default: name.is_none() })
     }
 }
 

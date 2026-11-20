@@ -14,7 +14,7 @@ use mo_formats::{NoteAttribute, NoteEvent, case, velocity};
 use rusqlite::{Connection, ErrorCode, InterruptHandle, OpenFlags, OptionalExtension, Row};
 
 use crate::chord::PhraseChord;
-use crate::roles::Role;
+use crate::roles::{Role, RoleWhy};
 
 /// What went wrong reading the index.
 #[derive(Debug)]
@@ -148,8 +148,8 @@ pub struct StoredPhrase {
     pub clip: String,
     /// What the C# app guessed it is.
     pub role: Role,
-    /// Why, for the tooltip.
-    pub role_why: String,
+    /// Why, for the card ([`RoleWhy::words`]).
+    pub role_why: RoleWhy,
     /// What you said it is, which wins over the guess.
     pub your_role: Option<Role>,
     pub bars: i32,
@@ -421,7 +421,8 @@ fn phrase_of(r: &Row<'_>, source: Arc<Source>) -> rusqlite::Result<StoredPhrase>
         part: text(2)?,
         clip: text(3)?,
         role: Role::from_name(&text(4)?),
-        role_why: text(5)?,
+        // The C# app stored the words: the same as this app's, or none.
+        role_why: RoleWhy::from_words(&text(5)?),
         your_role: r.get::<_, Option<String>>(6)?.map(|s| Role::from_name(&s)),
         bars: int(7)?.clamp(0, i32::MAX as i64) as i32,
         notes: int(8)?.clamp(0, i32::MAX as i64) as i32,

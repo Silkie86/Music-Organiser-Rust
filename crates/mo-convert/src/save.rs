@@ -5,8 +5,8 @@
 //! Safety (rules 3 and "copy, check, then rename"): the FL project and the template are only read. The new project is
 //! written beside where it goes under a temporary name, flushed to the disk, read back and decoded to check it, and
 //! only then renamed into place. An earlier convert is only replaced when it's this song's own and nothing has changed
-//! it since ([`can_save_over`], asked again just before the rename); one saved in Bitwig, or another song's with the
-//! same name, is kept and the caller picks the next name ([`bitwig_name`]).
+//! it since ([`can_save_over`], asked again as the last thing before the rename); one saved in Bitwig, or another
+//! song's with the same name, is kept and the caller picks the next name ([`bitwig_name`]).
 //!
 //! A sample that can't be read where FL saved it is looked for (rule 13) by the finder the caller passes in (for the
 //! app, mo-library's `SampleLocator`: the project's folders, then the DAW's), and the Bitwig project points at where
@@ -249,14 +249,19 @@ pub fn bitwig_from_fl(
     } else {
         None
     };
-    // Reading the samples can take minutes: the earlier convert may have been saved in Bitwig meanwhile.
-    if !can_save_over(project, &file, written_before) {
+    // Reading the samples can take minutes: the earlier convert may have been saved in Bitwig meanwhile. Asked here,
+    // before the new file is written out and checked, and once more as the last thing before the rename.
+    let still_mine = || can_save_over(project, &file, written_before);
+    if !still_mine() {
         return Err(kept());
     }
-    save_checked(&file, &converted.bytes, |back| match mo_formats::bitwig::decode(back) {
+    let check = |back: &[u8]| match mo_formats::bitwig::decode(back) {
         Ok(doc) => doc.body_error,
         Err(_) => Some("not a Bitwig project".to_owned()),
-    })?;
+    };
+    if !save_checked_while(&file, &converted.bytes, check, still_mine)? {
+        return Err(kept());
+    }
     // This convert's own folder: an older list would be wrong now. The project is saved, so a list that can't be put
     // in place (or removed) is said, and an older one goes rather than stay beside a project it doesn't describe.
     let list_put = match notes {
@@ -273,29 +278,33 @@ pub fn bitwig_from_fl(
 }
 
 /// Writes `bytes` under a temporary name beside `file`, flushes it to the disk, reads it back and checks it (the same
-/// bytes, and `problem` finds nothing wrong), then renames it into place.
-pub(crate) fn save_checked(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>) -> Result<(), String> {
-    save(file, bytes, problem, true).map(|_| ())
+/// bytes, and `problem` finds nothing wrong), then renames it into place, over what's there. `still` is asked once the
+/// new file is written and checked, as the last thing before the rename: false when it says no, and `file` is left as
+/// it was (whole-app review CN-11).
+pub(crate) fn save_checked_while(
+    file: &Path,
+    bytes: &[u8],
+    problem: impl Fn(&[u8]) -> Option<String>,
+    still: impl Fn() -> bool,
+) -> Result<bool, String> {
+    let staged = Staged::checked(file, bytes, problem)?;
+    if !still() {
+        return Ok(false);
+    }
+    staged.put_in_place(file).map(|()| true)
 }
 
-/// [`save_checked`], but never over a file that's there, even one that appears while this saves: false when `file`
-/// is taken, and nothing was written.
+/// Written and checked as [`save_checked_while`] does, but never over a file that's there, even one that appears
+/// while this saves: false when `file` is taken, and nothing was written.
 pub(crate) fn save_checked_new(
     file: &Path,
     bytes: &[u8],
     problem: impl Fn(&[u8]) -> Option<String>,
 ) -> Result<bool, String> {
-    save(file, bytes, problem, false)
-}
-
-fn save(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>, replace: bool) -> Result<bool, String> {
-    if !replace && file.exists() {
+    if file.exists() {
         return Ok(false);
     }
     let staged = Staged::checked(file, bytes, problem)?;
-    if replace {
-        return staged.put_in_place(file).map(|()| true);
-    }
     let saving = |e: std::io::Error| format!("Couldn't save {}: {e}", file.display());
     // A second name for the checked file fails when the name is taken, so nothing is ever replaced. A drive with
     // no second names (FAT) gets the name claimed first instead: an empty file, made only if nothing's there.
@@ -407,6 +416,23 @@ fn clear_left_behind(folder: &Path, target: &str, now: std::time::SystemTime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whole-app review CN-11 (19 Nov 2026): the last question before the rename; a no leaves the file as it was and
+    /// nothing beside it.
+    #[test]
+    fn a_save_asks_once_more_before_it_replaces_the_file() {
+        let dir = std::env::temp_dir().join(format!("mo-convert-save-asks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Song.bwproject");
+        std::fs::write(&file, b"saved in Bitwig").unwrap();
+        assert_eq!(save_checked_while(&file, b"a new convert", |_| None, || false), Ok(false));
+        assert_eq!(std::fs::read(&file).unwrap(), b"saved in Bitwig");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "the checked copy went");
+        assert_eq!(save_checked_while(&file, b"a new convert", |_| None, || true), Ok(true));
+        assert_eq!(std::fs::read(&file).unwrap(), b"a new convert");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn names_are_safe_and_numbered_while_taken() {

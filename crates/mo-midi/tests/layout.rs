@@ -1,4 +1,5 @@
-//! `midi-index.db` brought up to this app's layout (the notes in a table of their own) by copy, check, rename, and the
+//! `midi-index.db` brought up to this app's layout (the notes in a table of their own, a part's reason as a number) by
+//! copy, check, rename, and the
 //! corrections made in the C# app taken in from its `midi.db` once, so it isn't opened again.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
@@ -9,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 use mo_formats::{NoteAttribute, NoteEvent};
 use mo_midi::indexer::{self, Wanted};
 use mo_midi::store::{self, MidiStore, bring_up_to_date};
-use mo_midi::{Role, SourceKind};
+use mo_midi::{Role, RoleWhy, SourceKind};
 use rusqlite::{Connection, OpenFlags, params};
 
 /// The layout the Rust app made before this one (1): the notes in the last column of `notes`.
@@ -33,6 +34,29 @@ const LAYOUT_1: &str = "
     CREATE TABLE your_octaves (hash TEXT PRIMARY KEY, octaves INTEGER) WITHOUT ROWID;
     PRAGMA application_id = 1297042761;
     PRAGMA user_version = 1;";
+
+/// The layout before this one (2): the notes in a table of their own, a part's reason in words in every row.
+const LAYOUT_2: &str = "
+    PRAGMA journal_mode = WAL;
+    CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE COLLATE NOCASE, kind INTEGER NOT NULL,
+        mtime INTEGER NOT NULL, size INTEGER NOT NULL, version INTEGER NOT NULL, error TEXT);
+    CREATE TABLE notes (id INTEGER PRIMARY KEY, sound TEXT NOT NULL UNIQUE, hash TEXT NOT NULL,
+        count INTEGER NOT NULL, bars INTEGER NOT NULL, lowest INTEGER NOT NULL, highest INTEGER NOT NULL,
+        chroma BLOB NOT NULL, features BLOB NOT NULL);
+    CREATE TABLE note_data (notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE, data BLOB NOT NULL);
+    CREATE TABLE parts (id INTEGER PRIMARY KEY, file INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        notes INTEGER NOT NULL REFERENCES notes(id), part TEXT NOT NULL, clip TEXT NOT NULL, role INTEGER NOT NULL,
+        why TEXT NOT NULL, drums INTEGER NOT NULL, program INTEGER, track_name TEXT NOT NULL, members TEXT);
+    CREATE TABLE keys (notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE, version INTEGER NOT NULL,
+        role INTEGER NOT NULL, cut INTEGER NOT NULL, fact BLOB);
+    CREATE TABLE shapes (notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE, shape INTEGER NOT NULL);
+    CREATE TABLE slots (notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE, version INTEGER NOT NULL,
+        data BLOB NOT NULL);
+    CREATE TABLE your_roles (hash TEXT PRIMARY KEY, role INTEGER) WITHOUT ROWID;
+    CREATE TABLE your_octaves (hash TEXT PRIMARY KEY, octaves INTEGER) WITHOUT ROWID;
+    CREATE TABLE about (name TEXT PRIMARY KEY, value) WITHOUT ROWID;
+    PRAGMA application_id = 1297042761;
+    PRAGMA user_version = 2;";
 
 /// The first layout (0): no `keys`, and a `harmony` table that was never filled.
 const LAYOUT_0: &str = "
@@ -97,16 +121,27 @@ fn old_index(dir: &Path, schema: &str, keys: bool) -> PathBuf {
          INSERT INTO files VALUES (3, 'L:\\New Midi\\Broken.mid', 1, 1700000001, 10, 9, 'Not a MIDI file');",
     )
     .unwrap();
-    let note = "INSERT INTO notes VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9)";
+    // Layout 2 keeps the notes themselves in a table of their own.
+    let apart = schema.contains("note_data");
     for (id, sound, hash, list) in [(1, "S1", "HASH1", notes(60, 8)), (2, "S2", "HASH2", notes(36, 3))] {
         let (lowest, highest) = (list[0].key, list[list.len() - 1].key);
         let data = store::encode_notes(&list);
-        db.execute(note, params![id, sound, hash, list.len() as i64, lowest, highest, [7u8; 12], [9u8; 48], data])
+        let facts = params![id, sound, hash, list.len() as i64, lowest, highest, [7u8; 12], [9u8; 48]];
+        if apart {
+            db.execute("INSERT INTO notes VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8)", facts).unwrap();
+            db.execute("INSERT INTO note_data VALUES (?1, ?2)", params![id, data]).unwrap();
+        } else {
+            db.execute(
+                "INSERT INTO notes VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9)",
+                params![id, sound, hash, list.len() as i64, lowest, highest, [7u8; 12], [9u8; 48], data],
+            )
             .unwrap();
+        }
     }
     db.execute_batch(
-        "INSERT INTO parts VALUES (1, 1, 1, 'Up', 'Up', 1, 'Single notes', 0, NULL, 'Keys', NULL);
-         INSERT INTO parts VALUES (2, 2, 1, 'Lead', 'Lead #2', 1, 'Single notes', 0, 81, 'Lead', 'HASH1@0+768');
+        "INSERT INTO parts VALUES (1, 1, 1, 'Up', 'Up', 1, 'Single notes, one after another', 0, NULL, 'Keys', NULL);
+         INSERT INTO parts VALUES (2, 2, 1, 'Lead', 'Lead #2', 1, 'Single notes, one after another, and its name agrees',
+             0, 81, 'Lead', 'HASH1@0+768');
          INSERT INTO parts VALUES (3, 2, 2, 'Bass', 'Bass', 2, 'Low down', 0, 33, 'Bass', NULL);
          INSERT INTO your_roles VALUES ('HASH2', 0);
          INSERT INTO your_octaves VALUES ('HASH1', -1);",
@@ -170,7 +205,7 @@ fn an_index_of_the_older_layout_is_copied_into_this_one_with_every_row_kept() {
     let dir = folder("copied");
     let path = old_index(&dir, LAYOUT_1, true);
     let files = rows(&path, "files", "id,path,kind,mtime,size,version,error");
-    let parts = rows(&path, "parts", "id,file,notes,part,clip,role,why,drums,program,track_name,members");
+    let parts = rows(&path, "parts", "id,file,notes,part,clip,role,drums,program,track_name,members");
     let facts = rows(&path, "notes", "id,sound,hash,count,bars,lowest,highest,chroma,features");
     let data = rows(&path, "notes", "id,data");
     let kept = (rows(&path, "your_roles", "hash,role"), rows(&path, "your_octaves", "hash,octaves"));
@@ -189,7 +224,9 @@ fn an_index_of_the_older_layout_is_copied_into_this_one_with_every_row_kept() {
     assert_eq!(layout(&path), store::LAYOUT);
     assert!(!columns(&path, "notes").contains(&"data".to_owned()), "the notes have a table of their own");
     assert_eq!(rows(&path, "files", "id,path,kind,mtime,size,version,error"), files);
-    assert_eq!(rows(&path, "parts", "id,file,notes,part,clip,role,why,drums,program,track_name,members"), parts);
+    assert_eq!(rows(&path, "parts", "id,file,notes,part,clip,role,drums,program,track_name,members"), parts);
+    // Each part's reason as its number: words this app no longer gives are none.
+    assert_eq!(rows(&path, "parts", "id,why"), why_numbers());
     assert_eq!(rows(&path, "notes", "id,sound,hash,count,bars,lowest,highest,chroma,features"), facts);
     assert_eq!(rows(&path, "note_data", "notes,data"), data);
     assert_eq!((rows(&path, "your_roles", "hash,role"), rows(&path, "your_octaves", "hash,octaves")), kept);
@@ -204,8 +241,10 @@ fn an_index_of_the_older_layout_is_copied_into_this_one_with_every_row_kept() {
     let lead = list.iter().find(|p| p.clip == "Lead #2").unwrap();
     assert_eq!((lead.your_octave, lead.program, lead.members.as_str()), (Some(-1), Some(81), "HASH1@0+768"));
     assert_eq!(page.notes(lead.id, &lead.hash).unwrap(), notes(60, 8), "16-bit velocities and all");
+    assert_eq!(lead.role_why.words(), "Single notes, one after another, and its name agrees");
     let bass = list.iter().find(|p| p.clip == "Bass").unwrap();
     assert_eq!(bass.role(), Role::Chords, "your kind for it");
+    assert_eq!(bass.role_why, RoleWhy::NONE, "words this app no longer gives");
     drop(page);
     // The indexer goes on writing it: the notes with no key read are read.
     let store = MidiStore::open(&path).unwrap();
@@ -227,6 +266,48 @@ fn an_index_of_the_older_layout_is_copied_into_this_one_with_every_row_kept() {
     assert_eq!(store::took_in_old_at(&dir.join("no-index.db")), None);
     assert_eq!(late.done, ["The old app's midi.db has no corrections to take in; it isn't opened again"]);
     assert!(bring_up_to_date(&path).done.is_empty());
+}
+
+/// The parts' reasons as numbers, as [`old_index`]'s words become in this layout.
+fn why_numbers() -> Vec<String> {
+    let (melody, agrees) = (RoleWhy::ONE_AFTER_ANOTHER, RoleWhy::ONE_AFTER_ANOTHER.and_name_agrees());
+    vec![format!("1,{}", melody.code()), format!("2,{}", agrees.code()), "3,0".to_owned()]
+}
+
+#[test]
+fn an_index_of_layout_2_keeps_its_notes_shapes_and_slots_and_its_reasons_become_numbers() {
+    let dir = folder("layout-2");
+    let path = old_index(&dir, LAYOUT_2, true);
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(
+        "INSERT INTO shapes VALUES (1, 77), (2, 78);
+         INSERT INTO slots VALUES (1, 4, x'0102'), (2, 4, x'0304');
+         INSERT INTO about VALUES ('took_in_old_corrections', 1700000000);",
+    )
+    .unwrap();
+    drop(db);
+    let data = rows(&path, "note_data", "notes,data");
+    let parts = rows(&path, "parts", "id,file,notes,part,clip,role,drums,program,track_name,members");
+    // The page reads it as it is until it's copied: the words become reasons as they're read.
+    let page = MidiStore::open_read_only(&path).unwrap();
+    let list = page.all(&HashMap::new(), &HashMap::new()).unwrap();
+    assert_eq!(list.iter().find(|p| p.clip == "Up").unwrap().role_why, RoleWhy::ONE_AFTER_ANOTHER);
+    drop(page);
+
+    let up = bring_up_to_date(&path);
+    assert!(up.later.is_empty(), "{up:?}");
+    assert_eq!(layout(&path), store::LAYOUT);
+    assert_eq!(rows(&path, "note_data", "notes,data"), data);
+    assert_eq!(rows(&path, "parts", "id,file,notes,part,clip,role,drums,program,track_name,members"), parts);
+    assert_eq!(rows(&path, "parts", "id,why"), why_numbers());
+    assert_eq!(rows(&path, "shapes", "notes,shape"), ["1,77", "2,78"], "not made again");
+    assert_eq!(rows(&path, "slots", "notes,version,data"), ["1,4,X'0102'", "2,4,X'0304'"]);
+    assert_eq!(store::took_in_old_at(&path), Some(1_700_000_000), "the C# app's corrections aren't taken in again");
+    let page = MidiStore::open_read_only(&path).unwrap();
+    let list = page.all(&HashMap::new(), &HashMap::new()).unwrap();
+    let up_part = list.iter().find(|p| p.clip == "Up").unwrap();
+    assert_eq!(up_part.role_why.words(), "Single notes, one after another");
+    assert_eq!(page.notes(up_part.id, &up_part.hash).unwrap(), notes(60, 8));
 }
 
 #[test]
