@@ -54,7 +54,7 @@ pub enum NotesFrom {
 
 /// The index as read: every part, and where it came from.
 pub struct Loaded {
-    pub cat: Catalogue,
+    pub cat: Arc<Catalogue>,
     pub notes: NotesFrom,
     /// Worked out with the reading, off the window's thread: the summary and the year strip.
     pub summary: String,
@@ -62,7 +62,7 @@ pub struct Loaded {
     pub hidden: String,
     pub years: Vec<(i32, usize)>,
     /// What Ctrl+K finds: every part.
-    pub found: Arc<mo_app::finder::Lines>,
+    pub found: Arc<mo_app::finder::MidiParts>,
     /// Settings' smallest part as it was when `hidden` and `found` were made.
     smallest: usize,
 }
@@ -72,8 +72,9 @@ const SMALL_INDEX: usize = 1_000;
 
 impl Loaded {
     /// Call it off the window's thread: for a big index it waits for the shared low-priority threads.
-    pub fn new(cat: Catalogue, notes: NotesFrom) -> Loaded {
+    pub fn new(cat: impl Into<Arc<Catalogue>>, notes: NotesFrom) -> Loaded {
         let smallest = SMALLEST.load(Ordering::Relaxed);
+        let cat: Arc<Catalogue> = cat.into();
         // Said with what Settings hides from the first, so the line doesn't change once the list is worked out.
         let hidden = page::hidden_text(&cat, page::line_count(&cat, smallest), smallest);
         let make = || {
@@ -665,17 +666,25 @@ pub fn smallest_part(app: Option<&AppWindow>, notes: usize) {
         pick(app, None);
     }
     relist(app);
-    // Ctrl+K's lines too, off the window's thread: they're a line for every part.
+    make_lines(app, cat, notes);
+}
+
+/// Ctrl+K's lines for the index `cat` with Settings' smallest part at `notes`, made off the window's thread: they're a
+/// line for every part. Handed to Ctrl+K only while both are still the page's own (MP-10): a newer index, or another
+/// change of the setting, has its own lines on the way.
+fn make_lines(app: &AppWindow, cat: Arc<Catalogue>, notes: usize) {
     let weak = app.as_weak();
     let made = background::spawn("MIDI finder lines", move || {
         // On the shared low-priority threads: the lines are made on every core.
-        let lines: Arc<dyn mo_app::finder::Source> =
-            Arc::new(background::on_pool(|| mo_app::finder::midi_parts(&cat, notes)));
+        let lines = background::on_pool(|| mo_app::finder::midi_parts(&cat, notes));
         let _ = slint::invoke_from_event_loop(move || {
-            if let Some(app) = weak.upgrade()
-                && SMALLEST.load(Ordering::Relaxed) == notes
-            {
-                crate::finder::add_source(&app, "midi", lines);
+            let current =
+                SMALLEST.load(Ordering::Relaxed) == notes && PAGE.with(|p| Arc::ptr_eq(&p.borrow().cat, &cat));
+            drop(cat);
+            match weak.upgrade() {
+                Some(app) if current => crate::finder::add_source(&app, "midi", Arc::new(lines)),
+                // Lines not wanted (and perhaps the last hold on an old index) are let go on the freeing thread.
+                _ => background::free_later(lines),
             }
         });
     });
@@ -1379,7 +1388,14 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
             return;
         }
     };
-    crate::finder::add_source(app, "midi", loaded.found.clone());
+    // Ctrl+K's lines, made with Settings' smallest part as it was then: if it changed while they were made, they're
+    // made again once the page holds this index (MP-10).
+    let lines_stale = loaded.smallest != SMALLEST.load(Ordering::Relaxed);
+    if lines_stale {
+        background::free_later(loaded.found);
+    } else {
+        crate::finder::add_source(app, "midi", loaded.found);
+    }
     let summary = loaded.summary;
     let empty = loaded.cat.entries.is_empty();
     log::info("MIDI", &summary);
@@ -1391,7 +1407,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         p.years = loaded.years;
         p.summary = summary.clone();
         // The old index goes on the freeing thread: tens of thousands of parts take a while to let go.
-        background::free_later(std::mem::replace(&mut p.cat, Arc::new(loaded.cat)));
+        background::free_later(std::mem::replace(&mut p.cat, loaded.cat));
         p.notes = Some(loaded.notes);
         // Not one Settings now hides.
         let smallest = SMALLEST.load(Ordering::Relaxed);
@@ -1436,6 +1452,9 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
     show_chips(app);
     show_years(app);
     relist(app);
+    if lines_stale {
+        make_lines(app, PAGE.with(|p| p.borrow().cat.clone()), SMALLEST.load(Ordering::Relaxed));
+    }
     match picked {
         // The index read again shows the same pick: it starts and stops nothing, so a part picked for its menu
         // while another plays isn't played or sent now (MP-1).
@@ -4843,7 +4862,7 @@ mod tests {
 
     #[test]
     fn a_speed_step_starts_from_what_plays_and_never_from_a_made_up_tempo() {
-        let mut p = Page { cat: Arc::new(sample().cat), picked: Some(2), ..Page::default() };
+        let mut p = Page { cat: sample().cat, picked: Some(2), ..Page::default() };
         // Its own tempo not read yet: no number, and no step (MP-5).
         assert_eq!((p.play_bpm(), p.step_from(None)), (None, None));
         p.card_bpm = Some(92.0);
@@ -4954,7 +4973,7 @@ mod tests {
             edges: (48, 72),
             sits: 0.8,
         };
-        let mut p = Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), ..Page::default() };
+        let mut p = Page { cat: sample().cat, notes: Some(sample().notes), ..Page::default() };
         let listed = |p: &mut Page, fits: Option<Vec<Fit>>, song: Option<&SongChoice>| {
             p.fits = fits.map(Arc::new);
             p.fits_song = song.cloned();
@@ -5033,7 +5052,7 @@ mod tests {
         };
         let (chords, lead) = (bars(Wants::Tune, "Keys"), bars(Wants::Chords, "Lead"));
         let mut p =
-            Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), with_song: true, ..Page::default() };
+            Page { cat: sample().cat, notes: Some(sample().notes), with_song: true, ..Page::default() };
         p.fit_song = Some(songs[0].clone());
         let listed = |p: &mut Page, entries: &[usize], with: Option<&Arc<SongBars>>| {
             p.fits = with.map(|_| Arc::new(entries.iter().map(|&entry| fit(entry)).collect()));
@@ -5132,7 +5151,7 @@ mod tests {
             view: mo_formats::bitwig::arrangement::VIEW,
         });
         let mut p =
-            Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), with_song: true, ..Page::default() };
+            Page { cat: sample().cat, notes: Some(sample().notes), with_song: true, ..Page::default() };
         let listed = |p: &mut Page, song: &SongChoice, with: &Arc<SongBars>| {
             p.fit_song = Some(song.clone());
             p.fits = Some(Arc::new(vec![fit(4), fit(2)]));
@@ -5250,7 +5269,7 @@ mod tests {
             bars: 8..12,
             view: mo_formats::bitwig::arrangement::VIEW,
         });
-        let mut p = Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), ..Page::default() };
+        let mut p = Page { cat: sample().cat, notes: Some(sample().notes), ..Page::default() };
         let listed = |p: &mut Page, song: &SongChoice, with: &Arc<SongBars>| {
             p.fit_song = Some(song.clone());
             p.fits = Some(Arc::new(vec![fit(4), fit(2)]));
@@ -5713,7 +5732,7 @@ mod tests {
         let songs = sample_songs();
         // Each line 3 semitones up for the key, and brought down an octave by the app.
         let fit = |entry: usize| Fit { entry, semitones: 3, octaves: -1, yours: None, edges: (48, 72), sits: 0.8 };
-        let mut p = Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), ..Page::default() };
+        let mut p = Page { cat: sample().cat, notes: Some(sample().notes), ..Page::default() };
         p.fit_song = Some(songs[0].clone());
         // As a search's answer is listed: the octaves you chose go over the app's.
         let listed = |p: &mut Page, entries: &[usize]| {
@@ -5950,7 +5969,7 @@ mod tests {
         assert!(from(&song.save) && songs.iter().all(|song| from(&song.save)));
         let ask = FitAsk {
             id: 1,
-            cat: Arc::new(s.cat),
+            cat: s.cat,
             filters: Filters::default(),
             song,
             wanted: None,
@@ -5993,7 +6012,7 @@ mod tests {
         use midi_fits::{Picker, YourPick, YourPicks};
         let s = sample();
         let songs = sample_songs();
-        let (cat, notes) = (Arc::new(s.cat), s.notes);
+        let (cat, notes) = (s.cat, s.notes);
         let mut p = Page { cat: cat.clone(), fit_songs: songs.clone(), ..Page::default() };
         // A search for what the page asks for now, whose picker the page then shows: what it says it's fitted to.
         let search = |p: &mut Page| {
@@ -6171,7 +6190,7 @@ mod tests {
             from: loaded.notes.clone(),
             stop: Arc::default(),
         };
-        let with_index = FitAsk { cat: Arc::new(loaded.cat), ..ask(Some(Wants::Chords)) };
+        let with_index = FitAsk { cat: loaded.cat, ..ask(Some(Wants::Chords)) };
         let mut state = FitKept::default();
         // Chords for its melody: the scale is tried (its slots and its notes come from the index, kept open), and
         // the song's save is read from disk, where its time can be told.
