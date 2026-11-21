@@ -220,11 +220,12 @@ impl MidiTab {
             }
             let slots = Arc::clone(&slots);
             // Its notes are read from the index and written to a file off the window's thread.
+            let asked = slots.ask_drag();
             background("mo-plugin-drag", move || {
                 let started = Instant::now();
                 let file = parts.file(at, &std::env::temp_dir());
                 crate::log::took_if_slow("Drag", "Wrote a MIDI part to drag", started);
-                *lock(&slots.drag) = Some((Carried::Part(at), file));
+                slots.drag_ready(asked, Carried::Part(at), file);
             });
         });
         self.column.show(panel, None, &self.asked.borrow());

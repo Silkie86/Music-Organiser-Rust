@@ -1141,6 +1141,8 @@ final class Link {
      * which call this, so nothing a change does after a wait can reach another project.
      */
     private void carryOn(Job job) {
+        // The refusal's words say "before changing anything" here too, though the change had begun: the app doesn't take
+        // them at their word for a change whose first step already acts (the 19 Nov review's LK-5, as the 10 Nov D-3).
         if (job != null) checkAllowed(job.request(), job.changes());
     }
 
@@ -1975,6 +1977,7 @@ final class Link {
                           && !str(field(request, "path")).toLowerCase(Locale.ROOT).endsWith(".bwpreset");
         String sampleBefore = confirm ? str(cursorDevice.sampleName().get()) : "";
         String trackBefore = confirm ? selectedTrackId() : "";
+        int placeBefore = confirm ? cursorDevice.position().get() : -1;
         long toldBefore = params.tellings;
         switch (kind instanceof String ? (String) kind : "\u0000") {
             case "vst3":
@@ -1996,7 +1999,7 @@ final class Link {
                 throw new LinkError("Can't insert a \"" + Json.js(kind) + "\": use vst3, clap, vst2, bitwig or file.");
         }
         if (confirm) {
-            replaced(given(field(request, "path"), "file"), sampleBefore, trackBefore, toldBefore, finish);
+            replaced(given(field(request, "path"), "file"), sampleBefore, trackBefore, placeBefore, toldBefore, finish);
             return;
         }
         if (chain == null) {
@@ -2054,33 +2057,61 @@ final class Link {
 
     /**
      * Answers a sample put in the selected device's place (extension 3.29) once Bitwig shows it there: the selected
-     * device, still on the same track, with a sample that isn't the one before. A sample of the same name as the one
-     * before can't show that way: for it, Bitwig telling the device's list of parameters again is the sign. `replaced`
-     * is true when the sign came, and with it `device`, `trackId`, `position`, `sample` and `fresh` (the IDs of the
-     * parameters whose values Bitwig has told since the file was put in: only those are the new device's for sure).
-     * When it never came within CHANGE_WAIT: false when the device is as it was (Bitwig ignored the file), and null
-     * when that can't be told: another device or track is selected by now (`moved`: true), or the name is the same.
+     * device, still on the same track and (extension 3.33, the 19 Nov review's LK-7) at the same place in its chain, with
+     * another sample than before. A sample of the same name as the one before can't show that way: for it, Bitwig
+     * telling the device's list of parameters again is the sign. `replaced` is true when the sign came, and with it
+     * `device`, `trackId`, `position`, `sample` (the app checks it names the file, and says which it is when it
+     * doesn't: how Bitwig names a sample isn't known for sure) and `fresh` (the IDs of the parameters whose values
+     * Bitwig has told since the file was put in: only those are the new device's for sure).
+     * When it never came within CHANGE_WAIT: false only while a device at that place still shows the sample from
+     * before and none has listed its parameters since (Bitwig ignored the file); null with `moved`: true when another
+     * place or track is selected by now, or a device listed its parameters since (another one was selected: each pad
+     * of a Drum Machine has its Sampler first in its chain, and two pads may hold the same sample); and plain null
+     * when it can't be told (the same name again, or no sample shown yet). A device that leaves the place, or that
+     * showed the file and stops showing it, while its values settle is `moved` too.
      */
-    private void replaced(String path, String sampleBefore, String trackBefore, long toldBefore, Finish finish) {
+    private void replaced(String path, String sampleBefore, String trackBefore, int placeBefore, long toldBefore, Finish finish) {
         String file = path.substring(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
         String stem = file.contains(".") ? file.substring(0, file.lastIndexOf('.')) : file;
         boolean again = !sampleBefore.isEmpty() && (sampleBefore.equalsIgnoreCase(file) || sampleBefore.equalsIgnoreCase(stem));
-        BooleanSupplier there = () -> cursorDevice.exists().get() && selectedTrackId().equals(trackBefore);
-        waitFor(() -> {
-            if (!there.getAsBoolean()) return false;
+        BooleanSupplier there = () -> cursorDevice.exists().get() && selectedTrackId().equals(trackBefore)
+                                      && cursorDevice.position().get() == placeBefore;
+        BooleanSupplier named = () -> {
             String now = str(cursorDevice.sampleName().get());
-            return again ? params.listedAt > toldBefore : !now.isEmpty() && !now.equals(sampleBefore);
-        }, CHANGE_WAIT, shown -> {
+            return now.equalsIgnoreCase(file) || now.equalsIgnoreCase(stem);
+        };
+        Supplier<Map<String, Object>> moved = () -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("replaced", null);
+            m.put("moved", true);
+            return m;
+        };
+        // Shown once the device at that place holds another sample than before (any name: how Bitwig names a sample
+        // isn't known for sure, and the app is told the name), or, for the same sample again, lists its values anew.
+        BooleanSupplier other = () -> {
+            String now = str(cursorDevice.sampleName().get());
+            return !now.isEmpty() && !now.equals(sampleBefore);
+        };
+        waitFor(() -> there.getAsBoolean() && (again ? params.listedAt > toldBefore : other.getAsBoolean()), CHANGE_WAIT, shown -> {
+            // Whether the device must go on showing the file while its values settle: only one that did.
+            boolean byName = shown && !again && named.getAsBoolean();
             if (!shown) {
-                boolean moved = !there.getAsBoolean();
+                // Not at that place any more, or a device that listed its values since (selecting another device
+                // lists them: another pad's Sampler is first in its chain too, and may hold the same sample).
+                if (!there.getAsBoolean() || (!again && params.listedAt > toldBefore)) {
+                    finish.ok(moved.get());
+                    return;
+                }
+                // The same sample still (ignored), or none shown yet (can't be told), or the same sample again.
+                boolean same = !again && str(cursorDevice.sampleName().get()).equals(sampleBefore);
                 Map<String, Object> m = new LinkedHashMap<>();
-                m.put("replaced", moved || again ? null : Boolean.FALSE);
-                if (moved) m.put("moved", true);
+                m.put("replaced", same ? Boolean.FALSE : null);
                 finish.ok(m);
                 return;
             }
             // Until Bitwig has stopped telling the new device's values.
             settle(() -> {
+                if (!there.getAsBoolean() || (byName && !named.getAsBoolean())) return moved.get();
                 Map<String, Object> seen = new LinkedHashMap<>();
                 boolean exists = cursorDevice.exists().get();
                 seen.put("replaced", true);
@@ -2610,11 +2641,6 @@ final class Link {
         Object given = field(request, "trackId");
         if (!(given instanceof String) || ((String) given).isEmpty()) throw new LinkError("Say which track, by its ID.");
         String id = (String) given;
-        String noted = auditionTracks.remove(id);
-        // Its clips go with it, or stay yours with a track you kept: either way they're not the app's to take out now.
-        auditionClips.keySet().removeIf(k -> k.startsWith(id + "#"));
-        // Nor do a song's bars stay looped for a part that went with its track.
-        if (songLoop != null && songLoop.clip.startsWith(id + "#")) loopLeft();
         int t = indexOf(id);
         if (t >= 0) {
             trackItems[t].stop();
@@ -2623,6 +2649,13 @@ final class Link {
         }
         // The track is stopped at once; only Bitwig's own Stop, and the take-out after it, wait for a start on its way.
         afterStart(request, () -> {
+            // Forgotten only now, after the wait: a take-out stopped during it (another project in front, changes
+            // off) can then be asked again, and still finds the track noted (extension 3.33, the 19 Nov review's LK-9).
+            String noted = auditionTracks.remove(id);
+            // Its clips go with it, or stay yours with a track you kept: either way they're not the app's to take out now.
+            auditionClips.keySet().removeIf(k -> k.startsWith(id + "#"));
+            // Nor do a song's bars stay looped for a part that went with its track.
+            if (songLoop != null && songLoop.clip.startsWith(id + "#")) loopLeft();
             stopIfPlaying(request);
             Map<String, Object> m = new LinkedHashMap<>();
             int now = indexOf(id);

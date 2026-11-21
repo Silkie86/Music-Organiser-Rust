@@ -94,6 +94,45 @@ fn a_copy_named_otherwise_takes_the_library_file_with_the_shortest_name() {
     assert_eq!(key(&copies[0].library_file), key(&s(&library.join("Deep/Down/Here/Bass.multisample"))));
 }
 
+/// Two Library folders hold the same file: the copy points at the first folder's (Settings' Library comes first),
+/// though the other sorts before it by path (the whole-app review of 19 Nov, FS-19). With no name to match, the same.
+#[test]
+fn of_two_libraries_with_the_same_file_the_first_folder_given_wins() {
+    let dir = fixtures("mo-space-bitwig-two-libraries");
+    let (k, c, project) = (dir.join("K Library"), dir.join("C Library"), dir.join("Project"));
+    let kicks = [3u8; 2048];
+    let pad = [4u8; 3072];
+    for library in [&k, &c] {
+        write(library, "Kicks 1 Select.multisample", &kicks);
+        write(library, "Pad.multisample", &pad);
+    }
+    write(&project, "multi-samples/Kicks 1 Select-2.multisample", &kicks);
+    write(&project, "multi-samples/Warm-2.multisample", &pad);
+    let stop = AtomicBool::new(false);
+    let copies = LibraryIndex::new(&[k.clone(), c.clone()], &stop).unwrap().copies_in(&project, &stop).unwrap();
+    let libraries: Vec<String> = copies.iter().map(|c| key(&c.library_file)).collect();
+    assert_eq!(libraries, [key(&s(&k.join("Kicks 1 Select.multisample"))), key(&s(&k.join("Pad.multisample")))]);
+    // Given the other way round, the other folder's.
+    let copies = LibraryIndex::new(&[c.clone(), k], &stop).unwrap().copies_in(&project, &stop).unwrap();
+    assert!(copies.iter().all(|copy| key(&copy.library_file).starts_with(&key(&s(&c)))), "{copies:?}");
+}
+
+/// A multisample in a folder below the project's multi-samples folder isn't one of Bitwig's copies: it's left out,
+/// so it can't make every Fix of the project fail (the whole-app review of 19 Nov, FS-21).
+#[test]
+fn a_multisample_in_a_folder_below_multi_samples_isnt_a_copy() {
+    let dir = fixtures("mo-space-bitwig-below");
+    let (library, project) = (dir.join("Library"), dir.join("Project"));
+    let pad = [5u8; 1024];
+    write(&library, "Pad.multisample", &pad);
+    write(&project, "multi-samples/Pads/Pad-2.multisample", &pad);
+    write(&project, "multi-samples/Pad-2.multisample", &pad);
+    let stop = AtomicBool::new(false);
+    let copies = LibraryIndex::new(std::slice::from_ref(&library), &stop).unwrap().copies_in(&project, &stop).unwrap();
+    assert_eq!(copies.len(), 1);
+    assert_eq!(key(&copies[0].in_project), key(&s(&project.join("multi-samples/Pad-2.multisample"))));
+}
+
 #[test]
 fn a_name_with_its_own_number_is_matched_before_a_shorter_one() {
     let dir = fixtures("mo-space-bitwig-own-number");

@@ -119,8 +119,9 @@ const PART_SECONDS: f64 = 30.0;
 
 /// What reads the waveforms ([`Peaks::read`]), for the store kept between runs (`peaks_store::PeakStore::open`): when
 /// it changes, waveforms read before are read again. They were read from a file's first minute only, up to 15 Nov
-/// (a beta F12 note: a long clip's waveform stopped part way along).
-pub const PEAKS_READER: &str = "mo-audio, the whole file";
+/// (a beta F12 note: a long clip's waveform stopped part way along); and up to 20 Nov a frame the decoder refused was
+/// left out, so all after it came early and the clip's waveform was stretched (the whole-app review of 19 Nov, SN-18).
+pub const PEAKS_READER: &str = "mo-audio, the whole file, refused frames as silence";
 
 impl Peaks {
     /// The waveform of a file `file_seconds` long, `step` seconds to each of its `values`.

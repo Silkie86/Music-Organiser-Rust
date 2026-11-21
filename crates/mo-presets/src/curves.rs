@@ -193,11 +193,19 @@ pub fn at_speed(c: &Curve, speed: f64) -> Curve {
     }
     let words = if speed < 1.0 { "half speed" } else { "double speed" };
     let words = if speed == 0.5 || speed == 2.0 { words.to_owned() } else { format!("{speed}x speed") };
-    let mut h = Sha256::new();
-    h.update(c.id.as_bytes());
-    h.update(speed.to_le_bytes());
-    let id = h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect();
+    let id = id_at_speed(&c.id, speed);
     Curve { id, name: format!("{} ({words})", c.name), length_beats: c.length_beats / speed, ..c.clone() }
+}
+
+/// The id [`at_speed`] gives the curve with id `id` at `speed`: `id` itself at a speed of 1 (or a broken one).
+pub fn id_at_speed(id: &str, speed: f64) -> String {
+    if speed == 1.0 || !speed.is_finite() || speed <= 0.0 {
+        return id.to_owned();
+    }
+    let mut h = Sha256::new();
+    h.update(id.as_bytes());
+    h.update(speed.to_le_bytes());
+    h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
 /// A shape's fingerprint: the points stretched to the same length and height and rounded to three decimals, hashed
@@ -703,7 +711,50 @@ impl CurvesDb {
         }
     }
 
-    /// Opens the database at `path` only to read it, as the CLAP plugin does (it never writes the app's files): nothing
+    /// Opens the database at `path` to keep a curve made in the CLAP plugin's editor ([`CurvesDb::save_made`]), the one
+    /// thing the plugin writes in the app's files (Solomon, 20 Nov 2026: "Yes plugin too"). Nothing is made or moved
+    /// here: an error when the file isn't there yet, is of an older layout or lacks the table for made curves (the app
+    /// makes and moves it when its Curves are opened).
+    pub fn open_to_save_made(path: &Path) -> Result<CurvesDb, CurvesError> {
+        if !is_there(path)? {
+            return Err(CurvesError(format!("{} isn't there yet", path.display())));
+        }
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
+        conn.busy_timeout(Duration::from_secs(2))?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
+        let tables: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('made_curves', 'your_curves')",
+            [],
+            |r| r.get(0),
+        )?;
+        if version_of(&conn)? != VERSION || is_older_layout(&conn)? || tables != 2 {
+            return Err(CurvesError(
+                "it's from an older version of the app: update the app, then open its Curves once".into(),
+            ));
+        }
+        Ok(CurvesDb { conn, notes: Vec::new() })
+    }
+
+    /// The ids of the curves made in an editor (the app's or the plugin's) and whether each is hidden, for a page to
+    /// see one it doesn't list yet, or lists as it was. Only that is read: no names, no points.
+    pub fn made_ids(&self) -> Result<Vec<(String, bool)>, CurvesError> {
+        let tables: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('made_curves', 'your_curves')",
+            [],
+            |r| r.get(0),
+        )?;
+        if tables != 2 {
+            return Ok(Vec::new());
+        }
+        let mut st = self
+            .conn
+            .prepare("SELECT m.id, COALESCE(y.hidden, 0) FROM made_curves m LEFT JOIN your_curves y ON y.id = m.id")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Opens the database at `path` only to read it, as the CLAP plugin's list does: nothing
     /// is made or changed, and an error when it isn't there yet (the app makes it when its Curves are first opened).
     pub fn open_read_only(path: &Path) -> Result<CurvesDb, CurvesError> {
         if !is_there(path)? {
@@ -715,7 +766,7 @@ impl CurvesDb {
         conn.pragma_update(None, "query_only", true)?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
         version_of(&conn)?;
-        // Only the app changes its files: it moves an older layout into this one when its Curves are next read.
+        // Only the app makes and moves its files: it moves an older layout into this one when its Curves are next read.
         if is_older_layout(&conn)? {
             return Err(CurvesError(
                 "it's from an older version of the app: update the app, then open its Curves once".into(),
@@ -980,6 +1031,9 @@ impl CurvesDb {
         }
         let name = Some(name.trim()).filter(|n| !n.is_empty()).unwrap_or("New curve");
         let id = made_id(points, length_beats);
+        // All of it or none of it, with the file held from the first step: the plugin keeps curves too, from another
+        // program, and a write of the app's coming between the steps must not leave a curve kept and called failed.
+        let all = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
         self.conn.execute(
             "INSERT INTO made_curves (id, name, length, points, made) VALUES (?1, ?2, ?3, ?4, ?5) \
              ON CONFLICT(id) DO NOTHING",
@@ -987,7 +1041,10 @@ impl CurvesDb {
         )?;
         // The same shape saved before and hidden since: saving it again shows it again.
         self.conn.execute("UPDATE your_curves SET hidden = 0 WHERE id = ?1", [&id])?;
-        self.get(&id)?.ok_or_else(|| CurvesError("the curve was kept but can't be read back".into()))
+        let kept =
+            self.get(&id)?.ok_or_else(|| CurvesError("the curve can't be read back, so it isn't kept".into()))?;
+        all.commit()?;
+        Ok(kept)
     }
 
     /// Forgets a curve made in the editor (and your name for it); whether there was one. Found curves aren't touched:
@@ -1099,6 +1156,12 @@ pub fn file(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
     let id = c.id.get(..ID_IN_NAME).unwrap_or(&c.id);
     let path = folder.join(format!("{} {id}.{}", names::safe_file_name(&c.name), curve::EXTENSION));
     if holds(&path, c) {
+        // Used again: its time says so, and the start-up sweep (which clears the files here that are a month old)
+        // counts from its last use, never from when it was first made. (Best effort: an old time only means it's
+        // made again one day.)
+        if let Ok(file) = std::fs::File::options().write(true).open(&path) {
+            let _ = file.set_modified(std::time::SystemTime::now());
+        }
         return Ok(path);
     }
     std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the Curves folder: {e}"))?;
@@ -1118,7 +1181,7 @@ pub fn file(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
 const ID_IN_NAME: usize = 16;
 
 /// The plain curve files in the app's Curves folder, by name, each with the curve id's start its name ends with
-/// ("<name> <16 hex>.bwcurve", as [`file`] names them; 8 in the first test builds). Nothing else is listed.
+/// ([`id_in_file_name`]). Nothing else is listed.
 fn curve_files(folder: &Path) -> Vec<(PathBuf, String)> {
     let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
     entries
@@ -1126,12 +1189,26 @@ fn curve_files(folder: &Path) -> Vec<(PathBuf, String)> {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_owned();
-            let stem = name.strip_suffix(&format!(".{}", curve::EXTENSION))?;
-            let (_, id) = stem.rsplit_once(' ')?;
-            let hex = (id.len() == ID_IN_NAME || id.len() == 8) && id.bytes().all(|b| b.is_ascii_hexdigit());
-            hex.then(|| (PathBuf::from(&name), id.to_owned()))
+            let id = id_in_file_name(&name)?.to_owned();
+            Some((PathBuf::from(&name), id))
         })
         .collect()
+}
+
+/// Whether a file's whole name is one [`file`] gives now: "<name> <16 hex>.bwcurve". The start-up sweep clears such
+/// files once they haven't been used for a month (`mo_app::tidy`): [`file`] makes one again when it's asked for.
+/// (Not the 8 digits of the first test builds: eight digits are a date too, and a file named so may be yours.)
+pub fn is_made_file_name(name: &str) -> bool {
+    id_in_file_name(name).is_some_and(|id| id.len() == ID_IN_NAME)
+}
+
+/// The curve id's start that a file's name ends with, when the name is one [`file`] gives: "<name> <16 hex>.bwcurve"
+/// (8 in the first test builds).
+fn id_in_file_name(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(curve::EXTENSION)?.strip_suffix('.')?;
+    let (_, id) = stem.rsplit_once(' ')?;
+    let hex = (id.len() == ID_IN_NAME || id.len() == 8) && id.bytes().all(|b| b.is_ascii_hexdigit());
+    hex.then_some(id)
 }
 
 /// Copies `curve` into Bitwig's curves library (`folder`, such as `K:\Bitwig Studio\Library\Curves`) under its name,
@@ -1344,7 +1421,20 @@ mod tests {
         assert_eq!(read_only.list().unwrap(), db.list().unwrap());
         assert!(db.remove_made(&made.id).unwrap() && !db.remove_made(&made.id).unwrap());
         assert!(!db.has(&made.id).unwrap());
+        // The plugin keeps one too, in a file that's there and whole; it makes and changes nothing else.
+        let plugin = CurvesDb::open_to_save_made(&dir.join(FILE_NAME)).unwrap();
+        let ramp = [p(0.0, 0.0, 0.0), p(1.0, 0.25, 0.0)];
+        let from_plugin = plugin.save_made("From the plugin", &ramp, 2.0, 5).unwrap();
+        assert!(db.made_ids().unwrap().contains(&(from_plugin.id.clone(), false)));
+        assert_eq!(db.get(&from_plugin.id).unwrap().unwrap().name, "From the plugin");
+        drop(plugin);
+        assert!(CurvesDb::open_to_save_made(&dir.join("none.db")).is_err());
+        assert!(!dir.join("none.db").exists(), "nothing is made for the plugin");
         db.conn.execute_batch("DROP TABLE made_curves").unwrap();
+        assert!(
+            CurvesDb::open_to_save_made(&dir.join(FILE_NAME)).is_err(),
+            "no table for made curves: the app's to make"
+        );
         let old = CurvesDb::open_read_only(&dir.join(FILE_NAME)).unwrap();
         assert_eq!(old.list().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&dir);

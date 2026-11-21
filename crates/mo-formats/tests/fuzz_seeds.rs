@@ -64,6 +64,7 @@ fn writes_the_fuzz_seeds() {
             audio_track: false,
             device_power: false,
             master_plugin: true,
+            as_6_1_saves: false,
         }),
     ];
     write("bitwig_decode", &bitwig);

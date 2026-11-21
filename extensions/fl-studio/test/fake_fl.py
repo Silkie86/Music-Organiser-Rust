@@ -140,6 +140,8 @@ class Studio:
             return len(studio.mixer) + 1   # and the "current" track
 
         def getTrackName(index, /):
+            if index in studio.names:
+                return studio.names[index]
             return studio.mixer[index][0] if index < len(studio.mixer) else "Current"
 
         def isTrackPluginValid(index, plugIndex, /):

@@ -226,6 +226,8 @@ export global MidiData {
     // own tempo, and whether a click plays with it. A change is heard at once, from the same beat.
     in property <string> bpm-text;
     in property <bool> bpm-changed;
+    // Whether the speed is known yet (the part's own tempo is read after its notes): the stepper waits till then.
+    in property <bool> bpm-known: true;
     in property <bool> metronome;
     callback bpm-stepped(int);
     callback bpm-reset();
@@ -674,6 +676,9 @@ component PartPanel inherits SidePanel {
             faster-key: MidiData.faster-key;
             bpm-text: MidiData.bpm-text;
             changed: MidiData.bpm-changed;
+            enabled: MidiData.bpm-known || MidiData.bpm-changed;
+            // A click goes back to the song's tempo while the part plays with it (MP-4).
+            reset-tip: MidiData.play-with-song ? "Back to the song's tempo" : "Back to its own tempo";
             stepped(by) => { MidiData.bpm-stepped(by); }
             reset => { MidiData.bpm-reset(); }
         }

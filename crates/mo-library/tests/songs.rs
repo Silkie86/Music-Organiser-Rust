@@ -482,6 +482,27 @@ fn the_save_you_organised_is_the_one_kept() {
     assert_eq!((groups[0].latest.rating, groups[0].copies.len()), (4, 1));
 }
 
+/// Review SS-1: once a change you gave the song went to every copy (so each is as organised as the others), the copy
+/// it was shown from stays, whichever the library found first; noting another copy moves it there.
+#[test]
+fn the_copy_a_song_is_shown_from_stays_once_noted() {
+    let saves = [
+        Save { id: 1, status: "Mixing".into(), ..sized("Didums_3", r"C:\dub", 300, day(2025, 4, 1)) },
+        Save { id: 9, status: "Mixing".into(), rating: 4, ..sized("Didums_3", r"D:\Backup\dub", 300, day(2025, 4, 1)) },
+    ];
+    // Both organised: the one found first, though the other has stars.
+    assert_eq!(group(&saves)[0].latest.id, 1);
+    // Noted as the one shown (any letter case): it stays, with its stars, and the other is its copy.
+    let mut kept = SongChoices::from_rows([("kept", r"d:\backup\DUB\Didums_3.flp", "")]);
+    let groups = grouped(&saves, &kept);
+    assert_eq!(groups.len(), 1);
+    assert_eq!((groups[0].latest.id, groups[0].latest.rating, groups[0].copies[0].id), (9, 4, 1));
+    // Noting the other copy takes the note off this one.
+    kept.keep(r"C:\dub\Didums_3.flp", [r"D:\Backup\dub\Didums_3.flp"]);
+    assert!(!kept.is_kept(r"D:\Backup\dub\Didums_3.flp"));
+    assert_eq!(grouped(&saves, &kept)[0].latest.id, 1);
+}
+
 #[test]
 fn files_that_cant_be_told_apart_never_join() {
     let saves = [

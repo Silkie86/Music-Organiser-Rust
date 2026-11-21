@@ -162,6 +162,10 @@ pub fn watch_window(app: &crate::AppWindow) {
             && let Some(app) = weak.upgrade()
         {
             app.global::<crate::AppKeys>().set_window_active(*active);
+            if *active {
+                // A curve kept from the plugin's editor while the app sat behind the DAW is listed now.
+                crate::presets::came_to_front(&app);
+            }
         }
         let what = match event {
             WindowEvent::Resized(size) if size.width == 0 || size.height == 0 => {

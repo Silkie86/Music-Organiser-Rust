@@ -15,7 +15,7 @@
 
   <groupId>org.musicorganiser</groupId>
   <artifactId>music-organiser-bitwig</artifactId>
-  <version>3.32</version>
+  <version>3.33</version>
   <packaging>jar</packaging>
   <name>DAWmate extension for Bitwig Studio</name>
 

@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use mo_library::scan::{find_projects, plan};
+use mo_library::scan::{find_projects, find_projects_until, plan};
 
 /// The test songs, in a folder of the test's own (tests run at the same time).
 fn folder(name: &str) -> PathBuf {
@@ -71,6 +71,46 @@ fn a_missing_root_keeps_its_saves_and_an_inner_root_is_walked_once() {
         reread: false,
     };
     assert!(plan(&found, &[gone], &[root, unplugged], &|_| false, false).gone.is_empty());
+}
+
+/// Review SS-3: a walk stopped part way (the app closing) counts every folder it didn't look in as unreadable, so the
+/// saves in them aren't taken for gone, wherever it stops. One stopped before it starts finds nothing, and holds every
+/// root.
+#[test]
+fn a_walk_stopped_part_way_takes_nothing_it_didnt_look_at_for_gone() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = folder("mo-library-scan-stopped");
+    let root = dir.to_str().unwrap().to_owned();
+    let roots = std::slice::from_ref(&root);
+    let known: Vec<mo_library::scan::KnownFile> = find_projects_until(roots, &|| false)
+        .files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| mo_library::scan::KnownFile {
+            id: i64::try_from(i).unwrap(),
+            path: f.path.clone(),
+            size: f.size,
+            mtime: f.mtime,
+            missing: false,
+            reread: false,
+        })
+        .collect();
+    assert_eq!(known.len(), 4);
+    // Stopped after each number of looks in turn: at the root, or between the folders in it.
+    let mut part_way = false;
+    for looks in 0..12 {
+        let looked = AtomicUsize::new(0);
+        let found = find_projects_until(roots, &|| looked.fetch_add(1, Ordering::SeqCst) >= looks);
+        let p = plan(&found, &known, roots, &|_| false, false);
+        assert!(p.gone.is_empty(), "stopped after {looks} looks: {:?} taken for gone", p.gone);
+        part_way |= !found.files.is_empty() && found.files.len() < known.len();
+    }
+    assert!(part_way, "some walks stopped between folders");
+    // Stopped before it starts.
+    let found = find_projects_until(roots, &|| true);
+    assert!(found.files.is_empty());
+    assert_eq!(found.unreadable, roots);
 }
 
 #[test]

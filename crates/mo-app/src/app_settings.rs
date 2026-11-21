@@ -97,6 +97,10 @@ pub const FROM_CSHARP: &[&str] = &[
     crate::sounds::VIEW_KEY,
     crate::sounds::AUTOPLAY_KEY,
     crate::sounds::REDISCOVER_COUNT_KEY,
+    // The program each DAW's songs open in, chosen on the C# app's Settings (the 19 Nov review, SS-4).
+    crate::shell::DAW_PROGRAMS[0].1,
+    crate::shell::DAW_PROGRAMS[1].1,
+    crate::shell::DAW_PROGRAMS[2].1,
 ];
 
 /// The settings in use: this app's own changes, over the C# app's choices.

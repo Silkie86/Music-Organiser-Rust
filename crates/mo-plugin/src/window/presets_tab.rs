@@ -238,9 +238,10 @@ impl PresetsTab {
             }
             let slots = Arc::clone(&slots);
             // Checked to be there off the window's thread (a drive may be asleep).
+            let asked = slots.ask_drag();
             background("mo-plugin-drag", move || {
                 let file = presets.to_drag(at, into_bitwig, &std::env::temp_dir());
-                *lock(&slots.drag) = Some((Carried::Preset(at), file));
+                slots.drag_ready(asked, Carried::Preset(at), file);
             });
         });
         self.column.show(panel, None, &self.filters.borrow());

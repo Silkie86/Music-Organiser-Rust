@@ -9,7 +9,8 @@
 //!
 //! It shows in the DAW as the instrument "DAWmate (test)" (its ID is still the one it had as "Music Organiser (test)",
 //! so songs that have it go on loading it). The notes played into it are read for their chords
-//! ([`chordcheck`]) and passed on out with Thru on. It never writes any of the app's files.
+//! ([`chordcheck`]) and passed on out with Thru on. It writes one thing in the app's files: a curve edited in its
+//! Curves tab, kept as a new curve in `curves.db` ([`curves::save_as_new`]; Solomon, 20 Nov 2026).
 //!
 //! A DAW calls a plugin from several threads: the main thread (opening the window, starting and stopping the audio)
 //! and the audio thread ([`Processor`]). What they share lives in [`Instance`].

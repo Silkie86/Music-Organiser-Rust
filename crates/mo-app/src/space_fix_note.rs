@@ -420,6 +420,19 @@ pub fn wrote(file: &Path, fixed: &Path) {
     }
 }
 
+/// Whether the "(fixed)" project `fixed` is on the note in `file` and still as it was noted (its size and when it last
+/// changed): Fix wrote it, or Free the space saw it, and nobody has saved in it since. False when the note or the file
+/// can't be read, or it's a link. Reads the disk: call it away from the window's thread.
+pub fn as_noted(file: &Path, fixed: &Path) -> bool {
+    let Ok(noted) = read(file) else { return false };
+    let Ok(meta) = fs::symlink_metadata(fixed) else { return false };
+    let Some(modified) = meta.modified().ok().and_then(nanos).filter(|_| meta.is_file()) else { return false };
+    noted
+        .by_path
+        .get(&mo_space::key(&fixed.to_string_lossy()))
+        .is_some_and(|&(bytes, was)| bytes == meta.len() && near(modified, was, SAME_TIME))
+}
+
 /// The note as it was when the bin button was pressed.
 #[derive(Clone, Debug)]
 pub struct Noted {

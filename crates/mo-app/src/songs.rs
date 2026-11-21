@@ -348,8 +348,6 @@ pub struct Songs {
     /// The DAWs the songs were last saved in, A to Z, for the DAW chips: worked out once with the list, not each time
     /// the filters change.
     pub daws: Vec<String>,
-    /// The program picked in Settings for each DAW that has one (the C# app's `daw_exe:` settings), for Open.
-    pub daw_exes: HashMap<String, String>,
     /// Songs that may be saves of one, for the Health strip, newest first.
     pub doubts: Vec<Doubt>,
     /// Which dates are real, as of when the list was made ([`RealDates`]): the save each song opens, the list's order,
@@ -432,7 +430,7 @@ impl Songs {
         let copies = rows.iter().map(|r| r.song.copies.len()).sum();
         let daws: BTreeSet<&str> = rows.iter().map(|r| r.song.latest.daw.as_str()).collect();
         let daws = daws.into_iter().map(str::to_owned).collect();
-        Songs { rows, saves, copies, tags, daws, daw_exes: HashMap::new(), doubts, real }
+        Songs { rows, saves, copies, tags, daws, doubts, real }
     }
 
     /// The questions about the song at `row`.
