@@ -13,7 +13,7 @@ pub(crate) type Each<'a> = dyn FnMut(u32, &[Vec<f32>]) -> bool + 'a;
 /// How going through a file's sound ended.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Ended {
-    /// At the end of the file (or of the stretch that matches its start, in a stream that changes part way).
+    /// At the end of the file (or where a stream joined on has no sound in it).
     End,
     /// At a damaged or cut-short stretch, with what came before it kept.
     Damage,
