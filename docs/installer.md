@@ -36,8 +36,12 @@ its place (starting the launcher by hand still does). Three
 minutes after start, then once a day, it asks GitHub's Releases page (through Windows' own `curl.exe`) whether a newer
 version is out. That is all it sends online, and Settings › General › Updates turns it off. A newer setup is fetched into
 the data folder's `updates` folder, checked against the `.sha256` beside it on the release, and the rail then offers
-"Restart to update": the app closes as it always does, and the setup runs silently and opens the new version
-(`/UPDATED=1`). A test version (with a dash) is offered only to a copy that is a test version too. Old setups are
+"Restart to update": the click checks the setup again and starts it, and the app closes as it always does. The setup
+waits for the app to end (`/WAITPID`), puts the new version in without pages and opens it (`/UPDATED=1`); if a file
+can't be replaced it says so with Retry, and if it stops before the files go in it opens the old version again. Its
+log goes beside it (`<setup>.log`), and when the next start is still the old version the app shows a card saying the
+update didn't go in, with the log's last lines in the app's log. Uninstalling asks the app and the helper to close
+first (`music-organiser.exe --close-for-setup`). A test version (with a dash) is offered only to a copy that is a test version too. Old setups are
 removed at the next look.
 
 ## Making a release

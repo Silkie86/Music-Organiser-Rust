@@ -59,6 +59,25 @@ pub fn missing_folder() -> Option<PathBuf> {
     resolved().missing.clone()
 }
 
+/// Whether the first data folder holds anything of the app's (anything but the launchers' own folders and the logs):
+/// when it holds nothing, opening on it while the data folder's drive is missing opens with no data at all, as on a
+/// PC the installer started the data elsewhere (DA-4).
+pub fn first_has_data() -> bool {
+    holds_data(&first_dir())
+}
+
+/// Whether `folder` holds anything but the launchers' own folders and the logs (the helper writes its log there at a
+/// login while the data's drive is missing, and so does a run opened with no data).
+fn holds_data(folder: &Path) -> bool {
+    fs::read_dir(folder).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            let name = e.file_name();
+            let skipped = crate::data_move::LAUNCHER_FOLDERS.iter().any(|l| name.eq_ignore_ascii_case(l));
+            !(skipped || name.eq_ignore_ascii_case("logs"))
+        })
+    })
+}
+
 /// The system's own place for the app's data, where it starts out and where [`POINTER_FILE`] sits beside it.
 pub fn first_dir() -> PathBuf {
     let base = if cfg!(windows) {
@@ -143,6 +162,19 @@ pub fn logs_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_logs_and_the_launchers_folders_are_no_data() {
+        let dir = std::env::temp_dir().join(format!("mo-paths-holds-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("logs")).unwrap();
+        fs::create_dir_all(dir.join("run-latest-rust")).unwrap();
+        assert!(!holds_data(&dir));
+        fs::write(dir.join("rust-settings.json"), "{}").unwrap();
+        assert!(holds_data(&dir));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!holds_data(&dir), "no folder at all");
+    }
 
     #[test]
     fn an_empty_or_relative_folder_counts_as_none() {

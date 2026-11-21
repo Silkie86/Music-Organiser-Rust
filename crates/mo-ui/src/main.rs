@@ -17,6 +17,23 @@ fn main() -> Result<(), slint::PlatformError> {
     if mo_space::admin::run_step(&args) {
         return Ok(());
     }
+    // Started by the uninstaller: the app and the helper running from this program are asked to close, and waited
+    // for, so their files can go (UP-12). No window or setting of its own; a crash still gets its crash file. Ends
+    // with 1 when one is still running, which the uninstaller's log shows.
+    if args.iter().any(|a| a == mo_app::install_choice::CLOSE_FLAG) {
+        log_crashes();
+        let Ok(exe) = std::env::current_exe() else { return Ok(()) };
+        // As long as the app's own close may take, and a little more.
+        let wait = mo_app::one_copy::CLOSE_WAIT + std::time::Duration::from_secs(10);
+        let closed = mo_app::install_choice::close_for_setup(&exe, wait);
+        for line in &closed.lines {
+            eprintln!("{line}");
+        }
+        if !closed.all_ended {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     // Started as the background helper (at login, or by the app): no window at all, only the helper.
     if mo_ui::helper::asked(&args) {
         log_crashes();
@@ -244,8 +261,7 @@ fn main() -> Result<(), slint::PlatformError> {
         mo_ui::close_ask::on_session_end(move || {
             log::last(log::Level::Info, "App", "Windows is ending the session: closing");
             mo_ui::watchdog::stop();
-            // A setup waiting for "Restart to update" isn't started while Windows shuts down: it's offered again.
-            let _ = finish(held.as_deref(), session, None, false);
+            finish(held.as_deref(), session, None);
             end_now(0)
         });
     }
@@ -253,10 +269,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // The window's thread answers no more knocks from here: what it does while closing isn't a freeze. (Said already
     // when the window was asked to close; this is for an end that came another way.)
     mo_ui::watchdog::stop();
-    let setup = finish(held.as_deref(), session, ran.as_ref().err().map(ToString::to_string), true);
-    if let Some(setup) = setup {
-        mo_ui::update::run(&setup);
-    }
+    finish(held.as_deref(), session, ran.as_ref().err().map(ToString::to_string));
     // Off Windows the usual way out stays: the window is taken apart first, which an exit on the spot there
     // wouldn't wait for.
     #[cfg(windows)]
@@ -273,14 +286,8 @@ fn main() -> Result<(), slint::PlatformError> {
 /// The close: everything still waiting is written, what plays in a DAW is stopped, and the log is closed. Run once
 /// the window's loop has ended, or from inside it when Windows ends the session (it ends the app straight after).
 /// `held` is this copy's hold on being the one open copy; `error` is how the window stopped, when it stopped with an
-/// error. With `setup_too`, gives back the setup "Restart to update" asked for, to start now that everything is
-/// written; without, that setup is left for another time and not spoken of.
-fn finish(
-    held: Option<&mo_app::one_copy::OneCopy>,
-    session: &'static log::SessionLog,
-    error: Option<String>,
-    setup_too: bool,
-) -> Option<PathBuf> {
+/// error. A setup "Restart to update" started waits for this app to end before it touches a file.
+fn finish(held: Option<&mo_app::one_copy::OneCopy>, session: &'static log::SessionLog, error: Option<String>) {
     // The window is gone: a copy started from now on waits for this one to end (the port is let go at the very
     // end, once everything below is written) instead of asking it to show.
     if let Some(held) = held {
@@ -322,16 +329,12 @@ fn finish(
     // The sweep's and the frames' last few seconds, before the log closes.
     mo_app::sweep_timing::finish();
     mo_app::frame_timing::finish();
-    // The setup "Restart to update" asked for: started only once everything is written and the log has closed, as it
-    // closes whatever is left of the app.
-    let setup = if setup_too { mo_ui::update::asked() } else { None };
     session.close();
     // Everything is written. The port goes now, not with the process, so the copy started next (by the launcher, or
-    // by the setup below) is never held up by this one taking its time to end.
+    // by the setup) is never held up by this one taking its time to end.
     if let Some(held) = held {
         held.let_go();
     }
-    setup
 }
 
 /// Ends the app on the spot (Windows), once everything is written and the log is closed. Leaving `main` the usual

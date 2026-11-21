@@ -3,7 +3,8 @@
   %LOCALAPPDATA%\MusicOrganiser and puts it back as it was):
 
     1. A new PC, data where it usually goes: the app and its shortcut are in, the Apps list has it, no data note.
-    2. A new PC, data picked elsewhere: the folder starts there (started-here.txt) and the pointer names it.
+    2. A new PC, data picked elsewhere: the folder starts there (started-here.txt) and the pointer names it; an
+       update after it passes the data page by and changes nothing.
     3. A PC with data: it stays where it is, untouched; picking another place only leaves the app the ask to move.
     4. An update over the top keeps the data and its notes; uninstalling takes the app away and leaves the data.
 
@@ -86,6 +87,22 @@ try {
     $started = Join-Path $picked 'MusicOrganiser'
     Check (Test-Path -LiteralPath (Join-Path $started 'started-here.txt')) 'the data folder starts where picked'
     Check ((Test-Path -LiteralPath $pointer) -and ((Get-Content -LiteralPath $pointer -Raw).Trim() -eq $started)) 'the pointer names it'
+    $head = [IO.File]::ReadAllBytes($pointer)
+    Check (-not ($head.Length -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF)) 'the pointer has no byte-order mark'
+    # 2b. An update there (silent, no folder given): the data page is passed by and nothing about the data changes
+    # (UP-1). Run-Setup throws when the setup stops.
+    $pointerBefore = (Get-FileHash -LiteralPath $pointer).Hash
+    $startedBefore = (Get-FileHash -LiteralPath (Join-Path $started 'started-here.txt')).Hash
+    Run-Setup @()
+    Check ((Get-FileHash -LiteralPath $pointer).Hash -eq $pointerBefore) 'an update leaves the pointer as it was'
+    Check ((Get-FileHash -LiteralPath (Join-Path $started 'started-here.txt')).Hash -eq $startedBefore) 'an update leaves started-here.txt as it was'
+    Check (-not (Test-Path -LiteralPath $asked)) 'an update asks for no move'
+    # 2c. A pointer an older setup wrote, with the byte-order mark at the front: still read as the same folder.
+    [IO.File]::WriteAllBytes($pointer, [byte[]](0xEF, 0xBB, 0xBF) + [Text.Encoding]::UTF8.GetBytes($started))
+    $elsewhere = Join-Path $scratch 'elsewhere'
+    Run-Setup @("/DATADIR=`"$elsewhere`"")
+    # Read wrongly, the folder would count as missing, and no ask would be left.
+    Check ((Test-Path -LiteralPath $asked) -and ((Get-Content -LiteralPath $asked -Raw).Trim() -eq (Join-Path $elsewhere 'MusicOrganiser'))) 'a pointer with the mark still names the data folder'
     Uninstall
     Check (Test-Path -LiteralPath (Join-Path $started 'started-here.txt')) 'uninstall leaves the data folder'
     Clear-Data
@@ -111,6 +128,9 @@ try {
     Run-Setup @("/DATADIR=`"$other`"")
     Check (-not (Test-Path -LiteralPath $asked)) 'no ask while the data can''t be found'
     Check ((Get-Content -LiteralPath $pointer -Raw).Trim() -eq $gone) 'the pointer is left as it was'
+    # An update while it can't be found: the data page doesn't stop it.
+    Run-Setup @()
+    Check ((Get-Content -LiteralPath $pointer -Raw).Trim() -eq $gone) 'an update leaves the pointer as it was too'
     Remove-Item -LiteralPath $pointer -Force
 
     # 4. An update over the top, then uninstall: the data stays as it was.
