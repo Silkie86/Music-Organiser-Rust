@@ -490,57 +490,83 @@ pub struct BitwigInstalled {
 }
 
 /// The app's own files of FL Studio's link in its folders (`folders`, as [`fl_script_folders`] gives them): the
-/// script, and the one from before the rename. Only plain files of those names.
+/// script, the one from before the rename, and a part file an install cut off left. Only plain files of those names,
+/// never reached through a link (see [`take_out`]); one file reached two ways is listed once.
 pub fn fl_installed_files(folders: &[PathBuf]) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for folder in folders {
-        for file in [Some(folder.join(FL_SCRIPT_NAME)), first_fl_script(folder)].into_iter().flatten() {
-            if plain_file(&file) && !files.contains(&file) {
-                files.push(file);
-            }
-        }
-    }
-    files
+    let found = folders.iter().flat_map(|folder| {
+        let mine = [folder.join(FL_SCRIPT_NAME), folder.join(format!("{FL_SCRIPT_NAME}.mo-part"))];
+        mine.into_iter().chain(first_fl_script(folder))
+    });
+    own_files(found)
 }
 
 /// The app's own files of Bitwig's link in its folders: in each Extensions folder (`folders`) the extension, the one
-/// from before the rename and that one moved aside; in each user folder (`user_folders`) the older JavaScript script.
-/// Only plain files of those names.
+/// from before the rename, that one moved aside and a part file an install cut off left; in each user folder
+/// (`user_folders`) the older JavaScript script. Only plain files of those names, never reached through a link (see
+/// [`take_out`]); one file reached two ways is listed once.
 pub fn bitwig_installed_files(folders: &[PathBuf], user_folders: &[PathBuf]) -> Vec<PathBuf> {
+    let part = format!("{BITWIG_EXTENSION_NAME}.mo-part");
     let in_extensions = folders.iter().flat_map(|f| {
-        [BITWIG_EXTENSION_NAME, FIRST_BITWIG_EXTENSION_NAME, FIRST_BITWIG_ASIDE].map(|name| f.join(name))
+        [BITWIG_EXTENSION_NAME, FIRST_BITWIG_EXTENSION_NAME, FIRST_BITWIG_ASIDE, part.as_str()].map(|name| f.join(name))
     });
     let scripts =
         user_folders.iter().map(|u| u.join("Controller Scripts").join(BITWIG_SCRIPT_FOLDER).join(BITWIG_SCRIPT_NAME));
-    let mut files = Vec::new();
-    for file in in_extensions.chain(scripts) {
-        if plain_file(&file) && !files.contains(&file) {
-            files.push(file);
+    own_files(in_extensions.chain(scripts).collect::<Vec<_>>())
+}
+
+/// The ones of `files` that [`take_out`] may take out, each once (by its real path).
+fn own_files(files: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for file in files {
+        if !may_take_out(&file) {
+            continue;
+        }
+        let real = fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+        if !out.iter().any(|(_, r)| *r == real) {
+            out.push((file, real));
         }
     }
-    files
+    out.into_iter().map(|(f, _)| f).collect()
+}
+
+/// The app's own file names in the DAWs' folders, and its part files for them.
+const OWN_FILES: [&str; 8] = [
+    FL_SCRIPT_NAME,
+    FIRST_FL_SCRIPT_NAME,
+    BITWIG_EXTENSION_NAME,
+    FIRST_BITWIG_EXTENSION_NAME,
+    FIRST_BITWIG_ASIDE,
+    BITWIG_SCRIPT_NAME,
+    "device_DAWmate.py.mo-part",
+    "DAWmate.bwextension.mo-part",
+];
+
+/// Whether `file` is one [`take_out`] may take out: a plain file of one of the app's own names, in a folder that isn't
+/// a link and isn't in one (two folders up: the app's own folder or a DAW's Extensions, and the one it's in), so
+/// nothing is ever removed through a link (rule 28).
+fn may_take_out(file: &Path) -> bool {
+    let own = file.file_name().is_some_and(|n| OWN_FILES.contains(&&*n.to_string_lossy()));
+    let not_link = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| !m.file_type().is_symlink());
+    own && plain_file(file) && file.ancestors().skip(1).take(2).all(not_link)
 }
 
 /// What taking a DAW's link out did: the files taken out, and those that couldn't be with the system's words.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TakenOut {
+pub struct LinkRemoved {
     pub removed: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, String)>,
 }
 
 /// Takes the app's link out of a DAW: each of `files` (as [`fl_installed_files`] or [`bitwig_installed_files`] found
-/// them) that is still a plain file of one of the app's own names, then its folder when that's left empty and is one
-/// of the app's own (`DAWmate` or `Music Organiser`), never a DAW's own folder such as Extensions. On Windows a DAW
-/// that's open holds its link, so that one stays: close the DAW first.
-pub fn take_out(files: &[PathBuf]) -> TakenOut {
-    const OWN_FILES: [&str; 5] =
-        [FL_SCRIPT_NAME, FIRST_FL_SCRIPT_NAME, BITWIG_EXTENSION_NAME, FIRST_BITWIG_EXTENSION_NAME, FIRST_BITWIG_ASIDE];
+/// them) that is still one [`may_take_out`] allows, then its folder when that's left empty and is one of the app's own
+/// (`DAWmate` or `Music Organiser`), never a DAW's own folder such as Extensions. Removed for good, as Install's own
+/// files are: FL's script takes the user's setting for letting the app make changes with it. On Windows a DAW that's
+/// open holds its link, so that one stays: close the DAW first.
+pub fn take_out(files: &[PathBuf]) -> LinkRemoved {
     const OWN_FOLDERS: [&str; 3] = [FL_FOLDER, FIRST_FL_FOLDER, BITWIG_SCRIPT_FOLDER];
-    let mut done = TakenOut::default();
+    let mut done = LinkRemoved::default();
     for file in files {
-        let own =
-            file.file_name().is_some_and(|n| OWN_FILES.contains(&&*n.to_string_lossy()) || n == BITWIG_SCRIPT_NAME);
-        if !own || !plain_file(file) {
+        if !may_take_out(file) {
             continue;
         }
         match fs::remove_file(file) {

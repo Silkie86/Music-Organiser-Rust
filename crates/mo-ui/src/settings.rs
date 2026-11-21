@@ -79,6 +79,8 @@ struct Page {
     /// Counts the looks for the DAWs' folders, so an older one finishing late is dropped (newest wins).
     scripts_asked: u64,
     daws_installing: bool,
+    /// Whether what runs while `daws_installing` is a Take out (its words on the buttons).
+    daws_taking_out: bool,
     daws_message: String,
     /// Moving the data folder: set while the copy runs (its Stop), and what the last copy did.
     data_moving: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -239,6 +241,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             bw_loaded_from: None,
             scripts_asked: 0,
             daws_installing: false,
+            daws_taking_out: false,
             daws_message: String::new(),
             data_moving: None,
             data_message: String::new(),
@@ -1288,9 +1291,9 @@ fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
     if PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.daws_installing)) {
         PAGE.with(|p| {
             if let Some(p) = p.borrow_mut().as_mut() {
-                p.daws_message =
-                    "Your Bitwig Studio folder wasn't changed: the extension was being installed. Choose it again."
-                        .to_owned();
+                let doing =
+                    if p.daws_taking_out { "a link was being taken out" } else { "the extension was being installed" };
+                p.daws_message = format!("Your Bitwig Studio folder wasn't changed: {doing}. Choose it again.");
             }
         });
         show(app);
@@ -1309,6 +1312,7 @@ fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
             // Looked for again: no Install into the folders found before meanwhile.
             p.bw_state = None;
             p.bw_folders.clear();
+            p.bw_files.clear();
         }
     });
     look_at_scripts(app);
@@ -1530,6 +1534,7 @@ fn take_out(app: &AppWindow, bitwig: bool) {
             return None;
         }
         p.daws_installing = true;
+        p.daws_taking_out = true;
         Some(files)
     });
     app.global::<SettingsData>().set_take_out_asking(SharedString::new());
@@ -1549,6 +1554,7 @@ fn take_out(app: &AppWindow, bitwig: bool) {
             PAGE.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
                     p.daws_installing = false;
+                    p.daws_taking_out = false;
                     p.daws_message = note;
                 }
             });
@@ -1563,6 +1569,7 @@ fn take_out(app: &AppWindow, bitwig: bool) {
         PAGE.with(|p| {
             if let Some(p) = p.borrow_mut().as_mut() {
                 p.daws_installing = false;
+                p.daws_taking_out = false;
             }
         });
         show(app);
@@ -1869,6 +1876,16 @@ fn show(app: &AppWindow) {
         ])));
         data.set_daws_checking(p.daws_checking);
         data.set_daws_installing(p.daws_installing);
+        data.set_daws_taking_out(p.daws_taking_out);
+        // An ask whose DAW has nothing left to take out (looked at again, or another folder chosen) is closed, so it
+        // never comes back by itself; so is one while Install or Take out runs.
+        let asking = data.get_take_out_asking();
+        let still = |files: &[PathBuf]| !files.is_empty() && !p.daws_installing;
+        let open = (asking.as_str() == p.bitwig.daw && still(&p.bw_files))
+            || (asking.as_str() == "FL Studio" && still(&p.fl_files));
+        if !asking.is_empty() && !open {
+            data.set_take_out_asking(SharedString::new());
+        }
         data.set_daws_message(p.daws_message.clone().into());
         data.set_bitwig_chosen(p.settings.get(app_settings::BITWIG_FOLDER_KEY).is_some_and(|f| !f.trim().is_empty()));
         let libraries = app_settings::folder_list(p.settings.get(app_settings::BITWIG_LIBRARIES_KEY).unwrap_or(""));

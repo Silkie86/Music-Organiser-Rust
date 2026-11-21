@@ -360,3 +360,36 @@ fn taking_the_links_out_removes_only_the_apps_own_files_and_folders() {
     let theirs = extensions.join("Another.bwextension");
     assert!(take_out(std::slice::from_ref(&theirs)).removed.is_empty() && theirs.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn taking_out_never_goes_through_a_link() {
+    let root = fixture("take-out-links");
+    // The app's own folder is a link to a folder elsewhere (a development set-up, say).
+    let elsewhere = root.join("repo").join("fl-studio");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join(FL_SCRIPT_NAME), "# the repo's own").unwrap();
+    let hardware = root.join("Settings").join("Hardware");
+    fs::create_dir_all(&hardware).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, hardware.join(FL_FOLDER)).unwrap();
+    let folders = vec![hardware.join(FL_FOLDER)];
+    assert!(fl_installed_files(&folders).is_empty());
+    assert!(take_out(&[hardware.join(FL_FOLDER).join(FL_SCRIPT_NAME)]).removed.is_empty());
+    assert!(elsewhere.join(FL_SCRIPT_NAME).exists());
+    // A file of the app's name that is itself a link stays too, and so does what it leads to.
+    let extensions = root.join("Extensions");
+    fs::create_dir_all(&extensions).unwrap();
+    let real = root.join("kept.bwextension");
+    fs::write(&real, "kept").unwrap();
+    std::os::unix::fs::symlink(&real, extensions.join(BITWIG_EXTENSION_NAME)).unwrap();
+    assert!(bitwig_installed_files(std::slice::from_ref(&extensions), &[]).is_empty());
+    assert!(take_out(&[extensions.join(BITWIG_EXTENSION_NAME)]).removed.is_empty() && real.exists());
+    // A part file an install cut off left goes with the link.
+    let own = root.join("Own").join("Extensions");
+    fs::create_dir_all(&own).unwrap();
+    extension(&own.join(BITWIG_EXTENSION_NAME), "1");
+    fs::write(own.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")), "part").unwrap();
+    let files = bitwig_installed_files(std::slice::from_ref(&own), &[]);
+    assert_eq!(take_out(&files).removed.len(), 2);
+    assert_eq!(fs::read_dir(&own).unwrap().count(), 0);
+}
