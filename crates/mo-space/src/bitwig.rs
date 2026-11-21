@@ -67,8 +67,11 @@ impl LibraryIndex {
     /// never count as Library files, even when a folder given holds projects: a copy would be pointed at another
     /// project's copy, or at itself, and then binned.
     pub fn new(folders: &[PathBuf], stop: &AtomicBool) -> Result<Self, Stopped> {
-        let mut listed: Vec<(u64, PathBuf)> = Vec::new();
-        for folder in folders {
+        // Each file with its folder's place in the list: Settings' Library comes first, so where one file is in more
+        // than one Library, or one file is reached two ways, the first folder's wins (the whole-app review of 19 Nov,
+        // FS-19: sorted by path alone, a Library on C: won over the one on K: Bitwig uses).
+        let mut listed: Vec<(u64, usize, PathBuf)> = Vec::new();
+        for (rank, folder) in folders.iter().enumerate() {
             // A Library folder moved to another drive with a link in its place (as Space's moves leave one) is read
             // where it really is, and its files keep the paths you know, through the link: they stay right if the
             // folder is moved back.
@@ -77,14 +80,14 @@ impl LibraryIndex {
                 if !is_multisample(path) || !meta.is_file() || in_a_project(path) {
                     return None;
                 }
-                Some((meta.len(), folder.join(path.strip_prefix(&real).ok()?)))
+                Some((meta.len(), rank, folder.join(path.strip_prefix(&real).ok()?)))
             })?);
         }
         // Where each really is, worked out once here rather than for every copy.
         listed.par_sort_unstable();
         let found: Vec<(u64, PathBuf, String)> = listed
             .into_par_iter()
-            .filter_map(|(size, path)| {
+            .filter_map(|(size, _, path)| {
                 let real = real_path(&text(&path))?;
                 (!in_a_project(Path::new(&real))).then(|| (size, path, key(&real)))
             })
@@ -140,10 +143,25 @@ impl LibraryIndex {
         if is_link(&folder) || !folder.is_dir() {
             return Ok(Vec::new());
         }
-        let found = walk(&folder, false, stop, |path, meta| {
-            (is_multisample(path) && meta.is_file() && self.by_size.contains_key(&meta.len()))
-                .then(|| (path.to_path_buf(), meta.len()))
-        })?;
+        // Only the folder's own files, as Bitwig keeps its copies: one in a folder below isn't a copy Fix can point
+        // back (the whole-app review of 19 Nov, FS-21: it made every Fix of the project fail).
+        let found: Vec<(PathBuf, u64)> = fs::read_dir(&folder)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| {
+                        // The entry's own type: a link isn't a copy.
+                        let meta = fs::symlink_metadata(e.path()).ok()?;
+                        let path = e.path();
+                        (is_multisample(&path) && meta.is_file() && self.by_size.contains_key(&meta.len()))
+                            .then_some((path, meta.len()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stopped);
+        }
         // First the prints of each file's ends (64 KB at each end): a copy and a Library file whose ends differ aren't
         // the same, and neither is read whole. Each Library file that could match is read once (all at the same
         // time), before any copy is compared.
@@ -388,10 +406,11 @@ pub fn fix_writes_library_files() -> SystemTime {
     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_370_717)
 }
 
-/// When Fix began pointing a project's single sample copies at their originals ([`sample_copies_in`], 15 Nov 2026). A
-/// "(fixed)" project written before then left every sample copy in use.
+/// When Fix began pointing a project's single sample copies at their originals ([`sample_copies_in`]): #642 merged,
+/// 15 Nov 2026 15:33:09 UTC (it was 14:24, before the merge, so a build from that hour counted as the new Fix: the
+/// whole-app review of 19 Nov, FS-20). A "(fixed)" project written before then left every sample copy in use.
 pub fn fix_relinks_samples() -> SystemTime {
-    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_752_643)
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_756_789)
 }
 
 /// Marks the "(fixed)" projects written before [`fix_relinks_samples`] as out of date, for a project with single sample
@@ -748,7 +767,8 @@ fn best<'a>(copy: &Path, same: &[&'a PathBuf]) -> Option<&'a PathBuf> {
             return Some(found);
         }
     }
-    let name_length = |p: &&&PathBuf| (p.file_name().map_or(0, |n| n.to_string_lossy().chars().count()), text(p));
+    // By name length alone: of equal ones, the first, from the earliest Library folder (FS-19).
+    let name_length = |p: &&&PathBuf| p.file_name().map_or(0, |n| n.to_string_lossy().chars().count());
     same.iter().min_by_key(name_length).copied()
 }
 

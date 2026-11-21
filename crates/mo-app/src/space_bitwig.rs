@@ -769,17 +769,31 @@ pub fn free_noted(
 /// left alone. What it wrote goes on the app's note in `note` ([`crate::space_fix_note`]), so the button that sends
 /// every fixed project to the Recycle Bin can tell it from one you've saved in since. Reads and writes the disk, so
 /// call it off the window's thread, inside the low-priority pool (rule 21).
-pub fn fix(job: &ToFix, note: &Path) -> Fixing {
+pub fn fix(job: &ToFix, note: &Path, stop: &AtomicBool) -> Fixing {
     let relinks: Vec<Relink> = job
         .copies
         .iter()
         .map(|c| Relink { copy: PathBuf::from(&c.in_project), library: PathBuf::from(&c.library_file) })
         .collect();
-    match relink::fix_bitwig_project_in(&job.save, &relinks, &job.libraries) {
+    // The app closing stops it before it writes (the whole-app review of 19 Nov, FS-9).
+    match relink::fix_bitwig_project_until(&job.save, &relinks, &job.libraries, stop) {
         Ok(fixed) => {
             crate::space_fix_note::wrote(note, &fixed.file);
             for line in &fixed.found {
                 crate::log::info("Space", &format!("Fix found again in {}: {line}", job.save.display()));
+            }
+            // The copies it left, and why (the whole-app review of 19 Nov, FS-3: never said); the folder's copies this
+            // save doesn't use, only counted (each save of a folder is given them all).
+            let unused = relink::UNUSED;
+            let (not_used, said): (Vec<&String>, Vec<&String>) = fixed.left.iter().partition(|l| l.ends_with(unused));
+            for line in said {
+                crate::log::info("Space", &format!("Fix left in {}: {line}", job.save.display()));
+            }
+            if !not_used.is_empty() {
+                crate::log::info(
+                    "Space",
+                    &format!("Fix left in {}: {} copies this save doesn't use", job.save.display(), not_used.len()),
+                );
             }
             Fixing::Written(fixed.file)
         }

@@ -993,10 +993,14 @@ fn fix_ticked(app: &AppWindow, feed: Feed) {
         return;
     }
     let weak = app.as_weak();
+    // Closing the app stops Fix between saves and waits for the one being written (the whole-app review of 19 Nov,
+    // FS-9: cut off part way, it left a half-written project beside the save).
+    let on_its_way = OnItsWay::new(Arc::new(AtomicBool::new(false)));
     let started = background::spawn("Space fix", move || {
+        let on_its_way = on_its_way;
         // A crash outside a save's own fix (logged as one) still finishes Fix, so the page isn't busy for ever: the
         // saves it didn't get to say so.
-        let _ = catch_crash(AssertUnwindSafe(|| fix_each(&jobs, &feed, &weak)));
+        let _ = catch_crash(AssertUnwindSafe(|| fix_each(&jobs, &feed, &weak, &on_its_way.0)));
         arrive(&weak, Step::FixDone);
     });
     if let Err(e) = started {
@@ -1009,14 +1013,18 @@ fn fix_ticked(app: &AppWindow, feed: Feed) {
 /// Fix's own work, off the window's thread: each save in turn, inside the low-priority pool (rule 21), with an
 /// activity card saying how far it is and how it went, and each save's line told how it went. What it writes goes on
 /// the app's note in the data folder ([`space_fix_note`]).
-fn fix_each(jobs: &[ToFix], feed: &Feed, weak: &slint::Weak<AppWindow>) {
+fn fix_each(jobs: &[ToFix], feed: &Feed, weak: &slint::Weak<AppWindow>, stop: &AtomicBool) {
     let card = feed.start(space_bitwig::FIXING, "");
     let note = space_fix_note::file();
     let (mut written, mut failed) = (0, 0);
     for (n, job) in jobs.iter().enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            log::info("Space", &format!("Fix stopped as the app closed: {} saves not fixed", jobs.len() - n));
+            break;
+        }
         card.progress(n as f32 / jobs.len() as f32, Some(&space_bitwig::fix_progress_words(n, jobs.len())));
         // A crash (logged as one) fails this save only: the rest are still tried.
-        let done = catch_crash(AssertUnwindSafe(|| background::on_pool(|| space_bitwig::fix(job, &note))))
+        let done = catch_crash(AssertUnwindSafe(|| background::on_pool(|| space_bitwig::fix(job, &note, stop))))
             .unwrap_or_else(|_| Fixing::Failed("it stopped with an error, which the log says".to_owned()));
         let save = job.save.display();
         match &done {
@@ -1595,7 +1603,8 @@ pub fn finish_up() {
     log::warning(
         "Space",
         &format!(
-            "The app closed while things were going to the {BIN}: sending stops (what went stays there, for Put back)"
+            "The app closed while things were going to the {BIN} or Fix was writing: sending stops (what went stays \
+             there, for Put back), and Fix stops after the save it's writing"
         ),
     );
     for stop in removes.iter() {
@@ -1608,8 +1617,9 @@ pub fn finish_up() {
             log::warning(
                 "Space",
                 &format!(
-                    "Sending didn't stop in time: what went to the {BIN} was noted as it went, and the Space page keeps \
-                     it the next time it looks"
+                    "Sending or Fix didn't stop in time: what went to the {BIN} was noted as it went, and the Space \
+                     page keeps it the next time it looks; a fixed project Fix was writing is left half-written, and \
+                     cleared the next time that save is fixed"
                 ),
             );
             return;

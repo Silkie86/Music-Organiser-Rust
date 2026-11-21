@@ -580,3 +580,101 @@ fn a_same_named_sample_copy_is_told_from_its_original_in_a_samples_folder() {
     assert_eq!(sample_file_texts(&back, 0), ("Snare.wav".to_owned(), String::new(), full, Vec::new()));
     assert_eq!(sample_file_texts(&back, 1).2, pack_clap, "the pack's own sample is left as it is");
 }
+
+/// Another pack's sample named like a renamed copy ("Clap-2.wav", copied from Pack A's "Clap.wav") keeps its own name
+/// in the sample that holds it (0x4a9's 0x129f): only the copy is pointed at Pack A (the whole-app review of 19 Nov,
+/// FS-22).
+#[test]
+fn another_samples_name_the_same_as_a_renamed_copy_is_left_alone() {
+    let root = folder("relink other clap");
+    let dir = root.join("Projects").join("Night");
+    std::fs::create_dir_all(dir.join("samples")).unwrap();
+    std::fs::write(dir.join("samples").join("Clap-2.wav"), b"RIFF clap a").unwrap();
+    std::fs::write(dir.join("samples").join("Snare.wav"), b"RIFF snare").unwrap();
+    let pack_a = root.join("Pack A");
+    std::fs::create_dir_all(&pack_a).unwrap();
+    std::fs::write(pack_a.join("Clap.wav"), b"RIFF clap a").unwrap();
+    std::fs::write(pack_a.join("Snare.wav"), b"RIFF snare").unwrap();
+    let pack_b = root.join("Pack B");
+    std::fs::create_dir_all(&pack_b).unwrap();
+    let other = pack_b.join("Clap-2.wav").to_string_lossy().into_owned();
+    std::fs::write(&other, b"RIFF clap b").unwrap();
+
+    let mut doc = bitwig::decode(fixtures::bitwig_template(fixtures::Template::default())).unwrap();
+    sample_file(&mut doc, "Clap-2.wav", "samples/Clap-2.wav", r"I:\Old\Night\samples\Clap-2.wav", &[], 10);
+    let held = sample_file(&mut doc, "Clap-2.wav", "", &other, &[], 11);
+    sample_file(&mut doc, "Snare.wav", "samples/Snare.wav", r"I:\Old\Night\samples\Snare.wav", &[], 12);
+    // The sample that holds Pack B's file, with its own name.
+    let mut sample = Object::new(0x4a9);
+    sample.fields.push(Field { id: 0x129e, value: Value::Obj(Slot::Obj(held)) });
+    sample.fields.push(text(0x129f, "Clap-2.wav"));
+    let sample = doc.add(sample);
+    // In a device of its own, as a sampler holds it (not beside the copy's sample file).
+    let mut device = Object::new(0x7f30);
+    device.fields.push(Field { id: 0x7f31, value: Value::Obj(Slot::Obj(sample)) });
+    let device = doc.add(device);
+    doc.objects[sample.0 as usize].parent = Some((device, 0x7f31));
+    let root_id = doc.root.unwrap();
+    doc.objects[device.0 as usize].parent = Some((root_id, 0x7f12));
+    doc.obj_mut(root_id).fields.push(Field { id: 0x7f12, value: Value::Obj(Slot::Obj(device)) });
+    let zip = doc.zip().map(<[u8]>::to_vec);
+    let project = dir.join("Night.bwproject");
+    std::fs::write(&project, bitwig::encode(&doc, zip.as_deref()).unwrap()).unwrap();
+
+    let relinks = [
+        Relink { copy: dir.join("samples").join("Clap-2.wav"), library: pack_a.join("Clap.wav") },
+        Relink { copy: dir.join("samples").join("Snare.wav"), library: pack_a.join("Snare.wav") },
+    ];
+    let fixed = mo_convert::relink::fix_bitwig_project_in(&project, &relinks, &[]).unwrap();
+    // The clap copy stays: Pack B's "Clap-2.wav" still names it, as far as a name can tell (on the safe side).
+    assert_eq!(fixed.changed, relinks[1..], "{:?}", fixed.left);
+    let back = bitwig::decode(std::fs::read(&fixed.file).unwrap()).unwrap();
+    assert_eq!(sample_file_texts(&back, 1).2, other, "Pack B's own sample is left as it is");
+    let names: Vec<String> = back
+        .objects
+        .iter()
+        .filter(|o| o.class == 0x4a9)
+        .filter_map(|o| match o.get(0x129f) {
+            Some(Value::Str(t)) => Some(t.as_str().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert!(names.iter().any(|n| n == "Clap-2.wav") && !names.iter().any(|n| n == "Clap.wav"), "{names:?}");
+}
+
+/// What a Fix cut off by the app closing left half-written, under any "(fixed N)" name of the save, is cleared when
+/// the save is fixed again, once it's old: another save's, or one still being written, is left (the whole-app review
+/// of 19 Nov, FS-9).
+#[test]
+fn a_half_written_fixed_project_left_by_a_close_is_cleared_at_the_next_fix() {
+    let dir = folder("relink left behind");
+    let project = project_with_copy(&dir, COPY);
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60);
+    let old = |name: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, b"half a project").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(hour_ago).unwrap();
+        path
+    };
+    // Another letter case is the same name only where the disk ignores it (Windows).
+    let other_case = old("song (FIXED).bwproject.8812-3.saving");
+    let (gone, kept) = (
+        [old("Song (fixed 2).bwproject.8812-4.saving"), old("Song (fixed).bwproject.8812-8.saving")],
+        [
+            old("Other (fixed).bwproject.8812-5.saving"),
+            old("Song (fixed 2) copy.bwproject.8812-6.saving"),
+            old("Song (fixed 02).bwproject.8812-9.saving"),
+        ],
+    );
+    let fresh = dir.join("Song (fixed 3).bwproject.8812-7.saving");
+    std::fs::write(&fresh, b"still being written").unwrap();
+    let relinks = [relink(&dir, COPY, &library(&dir, "Kicks 1 Select.multisample"))];
+    mo_convert::relink::fix_bitwig_project_in(&project, &relinks, &[]).unwrap();
+    for g in &gone {
+        assert!(!g.exists(), "{}", g.display());
+    }
+    for k in kept.iter().chain([&fresh]) {
+        assert!(k.exists(), "{}", k.display());
+    }
+    assert_eq!(other_case.exists(), !cfg!(windows));
+}

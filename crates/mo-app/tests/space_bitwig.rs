@@ -266,7 +266,7 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
     let jobs = fixes.to_fix(&found);
     assert_eq!(jobs.iter().map(|j| name(&j.save)).collect::<Vec<_>>(), ["Song v2.bwproject"]);
     fixes.start(&jobs);
-    let Fixing::Written(fixed) = fix(&jobs[0], &note) else { panic!("the newest save should be fixed") };
+    let Fixing::Written(fixed) = fix(&jobs[0], &note, &stop) else { panic!("the newest save should be fixed") };
     assert_eq!(fixed, song.join("Song v2 (fixed).bwproject"));
     let back = bitwig::decode(fs::read(&fixed).unwrap()).unwrap();
     assert_eq!(back.body_error, None);
@@ -286,7 +286,7 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
     fixes.ticks.insert(song.join("Song v1.bwproject"), true);
     let jobs = fixes.to_fix(&again);
     assert_eq!(jobs.iter().map(|j| name(&j.save)).collect::<Vec<_>>(), ["Song v1.bwproject"]);
-    assert_eq!(fix(&jobs[0], &note), Fixing::Written(song.join("Song v1 (fixed).bwproject")));
+    assert_eq!(fix(&jobs[0], &note, &stop), Fixing::Written(song.join("Song v1 (fixed).bwproject")));
 
     // Each is on the app's note as Fix left it, so the button that sends every fixed project to the Recycle Bin may
     // send it; one you've saved in since stays (the whole-app review of 14 Nov, FX-5).
@@ -313,7 +313,9 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
         copies: other.copies.clone(),
         libraries: Vec::new(),
     };
-    let Fixing::Failed(why) = fix(&job, &note) else { panic!("a save that uses none of the copies isn't fixed") };
+    let Fixing::Failed(why) = fix(&job, &note, &stop) else {
+        panic!("a save that uses none of the copies isn't fixed")
+    };
     assert!(why.contains("nothing was written"), "{why}");
 }
 
@@ -396,7 +398,7 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     names.sort();
     assert_eq!(names, ["Song remix.bwproject", "Song v2.bwproject"]);
     for job in &jobs {
-        assert!(matches!(fix(job, &note), Fixing::Written(_)));
+        assert!(matches!(fix(job, &note, &stop), Fixing::Written(_)));
     }
     let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
     assert!(fixes.to_fix(&found).is_empty() && fixes.to_free(&found).is_empty(), "nothing is checked out of the box");
@@ -602,7 +604,7 @@ fn a_save_made_while_free_the_space_runs_keeps_the_rest() {
     let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
     let mut fixes = Fixes::default();
     for job in fixes.to_fix(&found) {
-        assert!(matches!(fix(&job, &note), Fixing::Written(_)));
+        assert!(matches!(fix(&job, &note, &stop), Fixing::Written(_)));
     }
     let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
     fixes.set_tick(Some(&found), save.clone(), true);
