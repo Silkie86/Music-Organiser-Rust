@@ -7,8 +7,9 @@ on:
   # Started by hand (Actions, CI, Run workflow) before an ultracode review: checks everything.
   workflow_dispatch:
 
-# One run per PR push; a newer push cancels the run it replaces. Runs on main (a merge, or a full run started by hand)
-# are never cancelled, so each one's result can be read.
+# One run per PR push; a newer push cancels the run it replaces. A run on main (a merge, or a full run started by hand)
+# that has started is never cancelled, so its result can be read; one still waiting for it is replaced by a newer
+# merge's (GitHub keeps one waiting run per group).
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

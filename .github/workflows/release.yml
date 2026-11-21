@@ -68,17 +68,6 @@ jobs:
             at=$(git rev-parse -q --verify "refs/tags/v$version^{commit}" || true)
             [ -z "$at" ] || [ "$at" = "$GITHUB_SHA" ] || { echo "v$version is a tag at $at already, not this commit: raise the version first"; exit 1; }
           fi
-      # main's own CI run for this commit (a PR's run tests only what it changed; main's checks everything) must have
-      # passed. A tag pushed by hand for a commit whose run is still going stops here too: run it again once it's green.
-      - name: main's CI passed for this commit
-        if: github.event_name == 'push' || inputs.release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          ci=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --event push --branch main --limit 1 \
-            --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"')
-          [ "$ci" = "completed success" ] || { echo "main's CI for $GITHUB_SHA isn't green (${ci:-no run}): wait for it, or fix it first"; exit 1; }
       # Publishing a draft made by Run workflow makes its tag, and that tag starts this workflow again: nothing to do.
       # A ticked Run workflow for a version that's out already stops here, before anything is built.
       - name: Whether this version's release is out already
@@ -99,6 +88,24 @@ jobs:
             fi
           elif ! echo "$answer" | grep -q "HTTP 404"; then
             echo "couldn't ask GitHub whether $TAG is out: $answer"; exit 1
+          fi
+      # main's own CI for this commit (a PR's run tests only what it changed; main's checks everything) must have
+      # passed: its push run, or a full run started by hand. A run still going, cancelled by a later merge or failed
+      # stops it here. Not asked once the release is out (the tag a published draft makes starts this again).
+      - name: main's CI passed for this commit
+        if: (github.event_name == 'push' || inputs.release) && steps.published.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          runs=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --branch main --limit 20 \
+            --json status,conclusion,event --jq '[.[] | "\(.event) \(.status) \(.conclusion)"] | join(", ")')
+          if ! gh run list --workflow ci.yml --commit "$GITHUB_SHA" --branch main --limit 20 --json conclusion \
+            --jq '[.[] | select(.conclusion == "success")] | length' | grep -qv '^0$'; then
+            echo "main's CI for $GITHUB_SHA hasn't passed (${runs:-no run at all})."
+            echo "Wait for it, or fix it; if it was cancelled or never ran, start Actions, CI, Run workflow on main (when this"
+            echo "commit is main's newest), and run Release again once that's green."
+            exit 1
           fi
 
   bitwig-extension:
