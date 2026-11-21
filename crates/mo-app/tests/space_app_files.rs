@@ -8,8 +8,8 @@ use std::sync::atomic::AtomicBool;
 
 use mo_app::space::app_databases;
 use mo_space::app_files::{
-    CACHES, CURVES_LIBRARY, DAMAGED_SOUND_LAB, KEPT_SOUND_LAB, NEW_SONG_LIBRARY, OLD_DATABASES, PART_FIXES,
-    SOUND_LAB_BACKUP, measure,
+    CACHES, CURVES_LIBRARY, DAMAGED_SOUND_LAB, DAMAGED_SOUND_LAB_BACKUP, KEPT_SOUND_LAB, NEW_SONG_LIBRARY,
+    OLD_DATABASES, PART_FIXES, SOUND_LAB_BACKUP, measure,
 };
 
 /// The card's parts for the data folder `data` while the app reads the song library `library` there, with their sizes.
@@ -44,6 +44,8 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
     write("sounds-rust.db.damaged-wal", 5);
     write("sounds-rust.db.damaged-kept", 14);
     write("sounds-rust.db.damaged-kept-wal", 1);
+    // Its backup copy set aside, damaged too (the whole-app review of 19 Nov, SN-3).
+    write("sounds-rust.db.backup-damaged", 13);
     // Each cache, one with SQLite's log beside it.
     let caches = [
         "sound-copies.db",
@@ -74,6 +76,7 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             (DAMAGED_SOUND_LAB, 25),
             (CACHES, 19),
             (KEPT_SOUND_LAB, 15),
+            (DAMAGED_SOUND_LAB_BACKUP, 13),
             ("Everything else", 10),
             ("MIDI parts", 8),
         ]
@@ -90,6 +93,7 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             (DAMAGED_SOUND_LAB, 25),
             (CACHES, 19),
             (KEPT_SOUND_LAB, 15),
+            (DAMAGED_SOUND_LAB_BACKUP, 13),
             ("Everything else", 10),
             ("MIDI parts", 8),
         ]
@@ -116,6 +120,7 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             (DAMAGED_SOUND_LAB, 25),
             (CACHES, 21),
             (KEPT_SOUND_LAB, 15),
+            (DAMAGED_SOUND_LAB_BACKUP, 13),
             ("Everything else", 12),
             ("MIDI parts", 12),
         ]

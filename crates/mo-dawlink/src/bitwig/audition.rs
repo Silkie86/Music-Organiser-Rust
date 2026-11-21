@@ -153,6 +153,25 @@ fn new_track_failed(e: Error, name: &str) -> Error {
     }
 }
 
+/// What a part's clip that failed to go in says when another project came to the front: the link's "stopped before
+/// changing anything" can't be taken at its word, as the clip goes in (and, with the song's bars, the loop is set)
+/// before the link waits to see it (the 19 Nov review's LK-5). Any other failure keeps its words.
+pub(super) fn clip_cut_off(e: Error, track: &str, with_bars: bool) -> Error {
+    if !e.is_elsewhere() {
+        return e;
+    }
+    let bars = if with_bars {
+        " The arranger loop and the play start may be left on the song's bars too: those are set back by hand."
+    } else {
+        ""
+    };
+    Error::Bitwig(format!(
+        "Another project came to the front in Bitwig as the part went in, so the link stopped. In the song you had in \
+         front before, the part's clip may be left in \u{201c}{track}\u{201d}'s clip launcher: look there first, and \
+         if it is, Bitwig's undo takes it out.{bars}"
+    ))
+}
+
 /// Whether Bitwig's name for the project it has open is the song's: as written, give or take capitals (a save's name
 /// is the same file on Windows and Mac whichever way it's typed).
 ///
@@ -238,7 +257,9 @@ impl Bitwig {
         // If Bitwig can't say, take it as playing: stopping then leaves Bitwig as it is. With the song's bars the
         // link stops Bitwig first and starts it at the first of them, so stopping the part always stops Bitwig.
         let was_playing = looped.is_none() && link.is_playing().unwrap_or(true);
-        let slot = link.add_audition_clip(&track_id, &shown, looped.map(|song| (song.start, song.length)))?;
+        let slot = link
+            .add_audition_clip(&track_id, &shown, looped.map(|song| (song.start, song.length)))
+            .map_err(|e| clip_cut_off(e, &track, looped.is_some()))?;
         let playing = Playing {
             track,
             with_song,
@@ -370,8 +391,8 @@ impl Bitwig {
             return undo(&mut link, Error::Cancelled, false);
         }
         if let Err(e) = link.add_audition_clip(&track_id, &part, None) {
-            // The clip may have been launched before whatever went wrong.
-            return undo(&mut link, e, true);
+            // The clip may have been launched before whatever went wrong, another project coming to the front too.
+            return undo(&mut link, clip_cut_off(e, name, false), true);
         }
         if !wanted() {
             return undo(&mut link, Error::Cancelled, true);
@@ -433,6 +454,12 @@ mod tests {
         let elsewhere = Error::Bitwig(
             "Bitwig has \"B\" open, not \"A\", so the link stopped before changing anything there.".into(),
         );
+        // A part's clip the same way (the 19 Nov review's LK-5): it may be in the launcher, and the bars may be looped.
+        let said = clip_cut_off(elsewhere.clone(), "Bass", true).to_string();
+        assert!(said.contains("the part's clip may be left in \u{201c}Bass\u{201d}'s clip launcher: look"), "{said}");
+        assert!(said.contains("The arranger loop and the play start may be left"), "{said}");
+        assert!(!clip_cut_off(elsewhere.clone(), "Bass", false).to_string().contains("arranger loop"));
+        assert_eq!(clip_cut_off(Error::ChangesOff, "Bass", true), Error::ChangesOff);
         let said = new_track_failed(elsewhere, "Pad").to_string();
         assert!(said.contains("may be an empty track named Pad"), "the switch can come once the track is made: {said}");
         assert!(!said.contains("before changing anything"), "never says both: {said}");

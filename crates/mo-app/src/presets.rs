@@ -101,11 +101,18 @@ pub fn curve_saves(saves: &[Save], export_root: Option<&Path>) -> Vec<String> {
         .collect()
 }
 
-/// Bitwig's own folders ("…\Bitwig Studio", which holds Projects and Library): the one in Documents where it's there
-/// (`defaults`, from `mo_presets::library::default_folders`), plus any a Bitwig save sits in, so a Bitwig folder on
-/// another drive (Solomon's is on K:) is found without a setting.
-pub fn bitwig_folders(defaults: &[PathBuf], bitwig_saves: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = defaults.iter().filter(|d| is_bitwig_folder(d)).cloned().collect::<Vec<_>>();
+/// Bitwig's own folders ("…\Bitwig Studio", which holds Projects and Library), the one Bitwig uses first: your
+/// Bitwig Studio folder as Settings › DAWs has it (`chosen`), then any a Bitwig save sits in (so a Bitwig folder on
+/// another drive is found without the setting; Solomon's is on K:), and last the one in Documents where it's there
+/// (`defaults`, from `mo_presets::library::default_folders`): Bitwig makes that one when it's installed, and it's
+/// often a leftover beside the real one (the 19 Nov 2026 review's CU-2). Each folder once.
+pub fn bitwig_folders(
+    chosen: Option<&Path>,
+    defaults: &[PathBuf],
+    bitwig_saves: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> =
+        chosen.filter(|c| !c.as_os_str().is_empty()).map(Path::to_path_buf).into_iter().collect();
     for save in bitwig_saves {
         let save = save.as_ref();
         if !save.to_lowercase().ends_with(".bwproject") {
@@ -116,6 +123,11 @@ pub fn bitwig_folders(defaults: &[PathBuf], bitwig_saves: impl IntoIterator<Item
             && !out.iter().any(|o| same_folder(o, found))
         {
             out.push(found.to_path_buf());
+        }
+    }
+    for d in defaults.iter().filter(|d| is_bitwig_folder(d)) {
+        if !out.iter().any(|o| same_folder(o, d)) {
+            out.push(d.clone());
         }
     }
     out
@@ -147,9 +159,12 @@ fn is_inside(inner: &Path, outer: &Path) -> bool {
     mo_library::scan::is_inside(&inner.to_string_lossy(), &outer.to_string_lossy())
 }
 
-/// Where a curve goes in Bitwig's curves library: `<Bitwig Studio>\Library\Curves` in the first Bitwig folder found.
-pub fn bitwig_curves_folder(bitwig: &[PathBuf]) -> Option<PathBuf> {
-    bitwig.first().map(|b| b.join("Library").join("Curves"))
+/// Where a curve goes in Bitwig's curves library: `<Bitwig Studio>\Library\Curves` in the first of `bitwig`
+/// ([`bitwig_folders`]) that has a Library folder (`is_folder` asks the disk: off the window's thread). Bitwig makes
+/// its Library itself, so a folder without one isn't the one it uses (a folder that only holds old projects, a
+/// drive picked by mistake), and none is made there. None when no folder has one.
+pub fn bitwig_curves_folder(bitwig: &[PathBuf], is_folder: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    bitwig.iter().map(|b| b.join("Library")).find(|library| is_folder(library)).map(|library| library.join("Curves"))
 }
 
 /// The curve files (`.bwcurve`) under `roots`, for the Curves section (Bitwig's curves library). Folders starting
@@ -1434,6 +1449,32 @@ pub fn export_plan(items: &[Item], shown: &[usize]) -> (Vec<(String, Vec<String>
     (order.into_iter().map(|s| (by.remove(&s).unwrap_or_default(), s)).map(|(k, s)| (s, k)).collect(), files)
 }
 
+/// The free room an export of the sounds shown leaves on the drive it writes to, as a folder move keeps (PS-3): his C:
+/// is nearly full, and Windows and his DAWs' autosaves need room there too.
+pub const EXPORT_HEADROOM: u64 = 2 << 30;
+
+/// Whether an export of the sounds shown may write its next save, from the free room on the export folder's drive
+/// (`None` when it can't be told, which doesn't stop it). `Err` is the card's line saying why it stopped, or didn't
+/// start, with what was written so far (`done`, saves) when it had begun.
+pub fn export_room(free: Option<u64>, folder: &str, done: usize) -> Result<(), String> {
+    match free {
+        Some(free) if free < EXPORT_HEADROOM => {
+            let so_far = if done == 0 {
+                "Nothing was exported".to_owned()
+            } else {
+                format!("It stopped after {} saves", crate::backup::thousands(done))
+            };
+            Err(format!(
+                "{so_far}: only {} is free on the drive of {folder}, and an export keeps {} free. Make room there, or \
+                 pick an export folder on another drive in Settings.",
+                crate::data_move::size_text(free),
+                crate::data_move::size_text(EXPORT_HEADROOM)
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The card's line about an export: what was written, how many also as Bitwig presets, what failed, and which
 /// plugins could get a Bitwig preset after one save in Bitwig (the C# `ExportSummary`). `without` is those plugins.
 pub fn export_summary(done: &[Exported], without: &[String], failed_saves: &[String]) -> String {
@@ -1496,10 +1537,31 @@ pub fn sent_words(name: &str) -> String {
 
 /// The card's line when a preset couldn't go into Bitwig: why, and that it's shown to drag in instead.
 pub fn send_failed(why: &str) -> String {
+    format!(
+        "Couldn't put it into Bitwig: {}. The Bitwig preset is shown in its folder: drag it onto a track.",
+        said(why)
+    )
+}
+
+/// The card's line when a Bitwig preset made from a plugin's own preset file (in Temp, as `temp_name`) couldn't go
+/// into Bitwig (PS-2). `kept` is the name it was kept under to drag in by hand, when it could be kept: that name
+/// stands in for the Temp one in `why`. When it couldn't, the plugin's own file is no use on a track, so it says so.
+pub fn made_send_failed(why: &str, temp_name: &str, kept: Option<&str>) -> String {
+    match kept {
+        Some(kept) => send_failed(&why.replace(temp_name, kept)),
+        None => format!(
+            "Couldn't put it into Bitwig: {}. No Bitwig preset could be kept to drag in: press Send to Bitwig again \
+             once Bitwig is open.",
+            said(&why.replace(temp_name, "the Bitwig preset"))
+        ),
+    }
+}
+
+/// `why` as the middle of a sentence's words: no full stop, a capital first letter.
+fn said(why: &str) -> String {
     let why = why.trim_end_matches('.');
     let mut c = why.chars();
-    let why: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
-    format!("Couldn't put it into Bitwig: {why}. The Bitwig preset is shown in its folder: drag it onto a track.")
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2523,6 +2585,17 @@ mod tests {
     }
 
     #[test]
+    fn an_export_keeps_room_free() {
+        // PS-3: under the headroom it stops (or never starts), saying how far it got; unknown room doesn't stop it.
+        assert!(export_room(Some(EXPORT_HEADROOM), "C:\\Exports", 0).is_ok());
+        assert!(export_room(None, "C:\\Exports", 0).is_ok());
+        let none = export_room(Some(EXPORT_HEADROOM - 1), "C:\\Exports", 0).unwrap_err();
+        assert!(none.starts_with("Nothing was exported: only "), "{none}");
+        let some = export_room(Some(1 << 20), "C:\\Exports", 12).unwrap_err();
+        assert!(some.starts_with("It stopped after 12 saves: only "), "{some}");
+    }
+
+    #[test]
     fn send_words() {
         assert_eq!(sent_words("Sub"), "Sub is in Bitwig, on a new track.");
         assert_eq!(
@@ -2530,20 +2603,51 @@ mod tests {
             "Couldn't put it into Bitwig: Bitwig isn't open. The Bitwig preset is shown in its folder: drag it onto a \
              track."
         );
+        // PS-2: the Temp name never shows; with nothing kept, it doesn't point at a file Bitwig won't take.
+        assert_eq!(
+            made_send_failed(
+                "bitwig didn't load MO Play 12-3.bwpreset",
+                "MO Play 12-3.bwpreset",
+                Some("Serum Pad.bwpreset")
+            ),
+            "Couldn't put it into Bitwig: Bitwig didn't load Serum Pad.bwpreset. The Bitwig preset is shown in its \
+             folder: drag it onto a track."
+        );
+        let none = made_send_failed("bitwig didn't load MO Play 12-3.bwpreset", "MO Play 12-3.bwpreset", None);
+        assert!(!none.contains("MO Play") && !none.contains("shown in its folder"), "{none}");
     }
 
     #[test]
     fn bitwig_folders_are_found_from_its_saves() {
-        let found = bitwig_folders(&[], [r"K:\Bitwig Studio\Projects\Song\Song.bwproject", "/x/a.flp"]);
+        let found = bitwig_folders(None, &[], [r"K:\Bitwig Studio\Projects\Song\Song.bwproject", "/x/a.flp"]);
         let found: Vec<String> = found.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
         // On Linux the Windows path is one name, so check with forward slashes.
         let unix = bitwig_folders(
+            None,
             &[],
             ["/k/Bitwig Studio/Projects/Song/Song.bwproject", "/k/Bitwig Studio/Projects/B.bwproject"],
         );
         assert_eq!(unix, [PathBuf::from("/k/Bitwig Studio")]);
+        // The folder in Documents is often a leftover beside the real one: the one a save sits in comes before it,
+        // and the one chosen in Settings before both. Curves are saved into the first.
+        let documents = [PathBuf::from("/c/Documents/Bitwig Studio")];
+        let saves = ["/k/Bitwig Studio/Projects/Song/Song.bwproject"];
+        let both = bitwig_folders(None, &documents, saves);
+        assert_eq!(both, [PathBuf::from("/k/Bitwig Studio"), documents[0].clone()]);
+        let chosen = bitwig_folders(Some(Path::new("/m/Music/Bitwig")), &documents, saves);
+        assert_eq!(chosen[0], PathBuf::from("/m/Music/Bitwig"));
+        assert_eq!(chosen.len(), 3);
+        assert_eq!(bitwig_curves_folder(&chosen, |_| true), Some(PathBuf::from("/m/Music/Bitwig/Library/Curves")));
+        // A folder with no Library in it isn't the one Bitwig uses: the next one that has one gets the curve.
+        assert_eq!(
+            bitwig_curves_folder(&chosen, |l| l.starts_with("/c")),
+            Some(PathBuf::from("/c/Documents/Bitwig Studio/Library/Curves"))
+        );
+        assert_eq!(bitwig_folders(Some(Path::new("/k/Bitwig Studio")), &documents, saves), both, "each once");
+        assert_eq!(bitwig_folders(Some(Path::new("")), &documents, [""; 0]), documents);
         assert!(found.len() <= 1);
-        assert_eq!(bitwig_curves_folder(&unix), Some(PathBuf::from("/k/Bitwig Studio/Library/Curves")));
+        assert_eq!(bitwig_curves_folder(&unix, |_| true), Some(PathBuf::from("/k/Bitwig Studio/Library/Curves")));
+        assert_eq!(bitwig_curves_folder(&unix, |_| false), None, "no Library folder is made");
         let folders = preset_folders(&[PathBuf::from("/h/VST3 Presets")], &[PathBuf::from("/k/Bitwig Studio")]);
         assert_eq!(folders.len(), 2);
         // A folder inside one already there isn't walked twice.

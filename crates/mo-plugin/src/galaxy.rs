@@ -194,6 +194,9 @@ pub fn read_from(sounds_db: &std::path::Path, library: &Library) -> Result<Map, 
 /// ([`Sky::packed`]).
 pub struct Pack {
     pub set: u64,
+    /// Which asking this is: one is made each time the stars on show or Light by change, so the newest answer wins
+    /// ([`crate::threads::newer`]).
+    pub asked: u64,
     stars: Stars,
     colours: Arc<Vec<i32>>,
     shown: Arc<Vec<usize>>,
@@ -264,6 +267,8 @@ pub struct Sky {
     pub picked: Option<usize>,
     /// The showing (and Light by) the stars were last asked to be packed for: asked once.
     packing: Option<(u64, LightBy)>,
+    /// How many times the stars have been asked to be packed.
+    packs: u64,
     /// What lights the stars, and how the ones on show are lit (as they were last packed).
     light_by: LightBy,
     lit: Option<Lit>,
@@ -423,8 +428,10 @@ impl Sky {
             return None;
         }
         self.packing = Some((self.set, self.light_by));
+        self.packs += 1;
         Some(Pack {
             set: self.set,
+            asked: self.packs,
             stars: Arc::clone(&map.stars),
             colours: Arc::clone(&map.colours),
             shown: Arc::clone(&self.shown),

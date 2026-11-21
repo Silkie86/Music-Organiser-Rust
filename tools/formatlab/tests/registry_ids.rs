@@ -86,6 +86,9 @@ const NOT_IDS: &[(&str, &str)] = &[
     ("fl/arrangement.rs", "DEFAULT_TRACK_COLOUR"),
     ("fl/arrangement.rs", "DEFAULT_CHANNEL_COLOUR"),
     ("fl/arrangement.rs", "MARKER_SIGNATURE"),
+    // FL: a note's fine pitch and pan where nobody moved them, not events.
+    ("fl/notes.rs", "IN_TUNE"),
+    ("fl/notes.rs", "MIDDLE"),
     // FL: values inside an automation link (event 227), not events.
     ("fl/automation.rs", "TARGET_VOLUME"),
     ("fl/automation.rs", "TARGET_PAN"),

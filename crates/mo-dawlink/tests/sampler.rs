@@ -57,6 +57,7 @@ fn the_sound_goes_in_the_samplers_place_with_its_settings_set_back() {
             unread: vec!["Mod".into()],
             same_sound: false,
             trouble: None,
+            unknown: false,
         }
     );
     let world = bitwig.world();
@@ -182,6 +183,49 @@ fn a_selection_that_moves_after_the_swap_is_told_with_the_sound_in() {
     let swapped = bitwig.bitwig().swap_into_sampler(sample("Kick 4"), &turn()).unwrap();
     assert_eq!(swapped.trouble.as_deref(), Some("another device is selected in Bitwig now."));
     assert_eq!(bitwig.world().tracks[2].devices[0].params[0], FakeParam::new("CONTENTS/GAIN", "Gain", 0.8));
+}
+
+/// The 19 Nov review's LK-5: another project comes to the front once the file has gone in. The link's "stopped before
+/// changing anything" isn't passed on: the sound may be in, without the old settings.
+#[test]
+fn another_project_in_front_during_the_swap_says_the_sound_may_be_in() {
+    let bitwig = with_sampler(|w| w.switch_during = Some(("insert".into(), "Other Song".into())));
+    let said = bitwig.bitwig().swap_into_sampler(sample("Kick 10"), &turn()).unwrap_err().to_string();
+    assert!(said.starts_with("Another project came to the front in Bitwig as the sound went in"), "{said}");
+    assert!(said.contains("may be in the Sampler on \"Bass\""), "{said}");
+    assert!(!said.contains("before changing anything"), "{said}");
+}
+
+/// The 19 Nov review's LK-3: the selection moved before Bitwig showed the swap, so nothing says the sound went in.
+#[test]
+fn a_selection_that_moves_before_the_swap_shows_is_said_as_not_knowable() {
+    let bitwig = with_sampler(|w| w.moves_during_swap = true);
+    let swapped = bitwig.bitwig().swap_into_sampler(sample("Kick 7"), &turn()).unwrap();
+    assert!(swapped.unknown, "{swapped:?}");
+    assert!(swapped.set_back.is_empty() && swapped.carried.is_empty(), "{swapped:?}");
+    let said = swapped.summary();
+    assert!(said.contains("it can't be told whether the sound went in: another device is selected"), "{said}");
+    assert!(!said.contains("0 settings"), "{said}");
+    assert!(!bitwig.world().commands().contains(&"set".to_owned()));
+}
+
+/// The 19 Nov review's LK-7: another pad's Sampler, clicked while Bitwig swapped, sits at the same place on the same
+/// track. Only a Sampler showing the sound that was sent gets the old settings.
+#[test]
+fn a_sampler_showing_another_sample_after_the_swap_gets_no_settings() {
+    let bitwig = with_sampler(|w| w.shows_other_sample = Some("Snare D1.wav".into()));
+    let swapped = bitwig.bitwig().swap_into_sampler(sample("Kick 8"), &turn()).unwrap();
+    assert!(swapped.unknown, "{swapped:?}");
+    assert!(swapped.trouble.as_deref().is_some_and(|t| t.contains("Snare D1.wav")), "{swapped:?}");
+    assert!(!bitwig.world().commands().contains(&"set".to_owned()));
+    // A Bitwig that names the sample without its ending, or in another case, is still the sound sent.
+    for shown in ["kick 9", "KICK 9.WAV"] {
+        let bitwig = with_sampler(|w| w.shows_other_sample = Some(shown.into()));
+        let swapped = bitwig.bitwig().swap_into_sampler(sample("Kick 9"), &turn()).unwrap();
+        assert!(!swapped.unknown, "{shown}: {swapped:?}");
+        assert_eq!(swapped.trouble, None, "{shown}");
+        assert_eq!(swapped.set_back, ["Gain"], "{shown}: its settings are set back");
+    }
 }
 
 /// A sound of the name the Sampler holds already, on a Bitwig that shows no sign of the swap: the report says it

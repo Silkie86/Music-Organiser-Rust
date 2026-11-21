@@ -1,7 +1,8 @@
 //! What a converted project records about a sample file: its size and MD5 (how Bitwig recognises the file), and its
-//! rate, channels and length when the app can tell from the file's header: WAV (PCM, float, A-law and µ-law, RF64
-//! too), AIFF and FLAC. Other files (MP3, OGG, M4A, compressed WAVs) are left for Bitwig to read: Bitwig asks where
-//! they are when the project opens (see `DIFFERENCES.md`).
+//! rate, channels and length. WAV (PCM, float, A-law and µ-law, RF64 too), AIFF and FLAC say those in their header.
+//! Other files (MP3, OGG, M4A, compressed WAVs such as FL Studio's own sounds, which keep Ogg Vorbis inside) are
+//! asked of mo-audio's decoders, which read only the file's start when the file says how long it is. One that can't
+//! be timed for sure is left for Bitwig to read.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -14,10 +15,13 @@ use crate::plan::SampleFile;
 /// after at most some metadata chunks.
 const HEADER: usize = 1 << 20;
 
-/// What's known of a sample, or `None` when the file can't be read. The header is read first; only when it tells the
-/// sample's length is the rest read too, once, to hash it (rule 12). When it can be read but its length can't be told,
-/// the length is 0 and the MD5 is left at zeros (Bitwig then reads the file itself), and the rate and channels say
-/// 44100 and 2, as the C# app's do.
+/// How much of a file is decoded to ask its decoder how long the file says it is ([`decoded`]).
+const PEEK_SECONDS: f64 = 0.25;
+
+/// What's known of a sample, or `None` when the file can't be read. The header is read first; only when the sample's
+/// length can be told is the rest read too, once, to hash it (rule 12). When it can be read but its length can't be
+/// told, the length is 0 and the MD5 is left at zeros (Bitwig then reads the file itself), and the rate and channels
+/// say 44100 and 2, as the C# app's do.
 pub fn read_sample(path: &Path) -> Option<SampleFile> {
     let mut file = std::fs::File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
@@ -29,10 +33,23 @@ pub fn read_sample(path: &Path) -> Option<SampleFile> {
         let mut b = vec![0u8; len];
         read_all(&mut file, &mut b).map(|()| b)
     };
-    let found = wav(&head, size, &mut beyond).or_else(|| aiff(&head)).or_else(|| flac(&head));
+    let chunks = wav_chunks(&head, size, &mut beyond);
+    let ogg_in_wav = chunks.is_some_and(|c| mo_audio::OGG_IN_WAV.contains(&c.tag));
+    // A file whose header should have said its length and didn't (a WAV of plain samples that was never finished, an
+    // AIFF) isn't handed to a decoder: there is nothing more for one to find in it.
+    let plain = match &chunks {
+        Some(c) => c.is_plain(),
+        None => head.starts_with(b"RIFF") || head.starts_with(b"RF64") || head.starts_with(b"FORM"),
+    };
+    let found = chunks
+        .and_then(WavChunks::timed)
+        .or_else(|| aiff(&head))
+        .or_else(|| flac(&head))
+        .filter(|&(_, _, seconds)| seconds > 0.0)
+        .or_else(|| if plain { None } else { decoded(path, &head) });
     // A length of 0 is no use to Bitwig (it reads the file itself), so neither is the MD5: not worked out.
-    let Some((rate, channels, seconds)) = found.filter(|&(_, _, seconds)| seconds > 0.0) else {
-        return Some(SampleFile { bytes: size, md5: [0; 16], rate: 44100, channels: 2, seconds: 0.0 });
+    let Some((rate, channels, seconds)) = found else {
+        return Some(SampleFile { bytes: size, md5: [0; 16], rate: 44100, channels: 2, seconds: 0.0, ogg_in_wav });
     };
     file.seek(SeekFrom::Start(head.len() as u64)).ok()?;
     let mut md5 = Md5::new();
@@ -49,7 +66,72 @@ pub fn read_sample(path: &Path) -> Option<SampleFile> {
         md5.update(buffer.get(..n)?);
         bytes += n as u64;
     }
-    Some(SampleFile { bytes, md5: md5.finalize().into(), rate, channels, seconds })
+    Some(SampleFile { bytes, md5: md5.finalize().into(), rate, channels, seconds, ogg_in_wav })
+}
+
+/// The rate, channels and seconds of a file whose header doesn't say them plainly (MP3, OGG, M4A, a WAV that keeps
+/// Ogg Vorbis inside), from mo-audio's decoder. Where the file itself says how long it is, only its start is decoded;
+/// one that doesn't say is decoded to its end and counted. None when the decoder can't read the file, and for the
+/// files whose length a decoder can only estimate from their first frames and their size (an MP3 with no length
+/// written in it, a bare AAC stream): a wrong length would cut the sample short in Bitwig, so those are left for
+/// Bitwig to read. `head` is the file's start.
+fn decoded(path: &Path, head: &[u8]) -> Option<(u32, u16, f64)> {
+    if !mo_audio::can_decode(path) {
+        return None;
+    }
+    let is = |ext: &str| path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(ext));
+    if is("aac") || (is("mp3") && !mp3_says_its_length(head)) {
+        return None;
+    }
+    let start = mo_audio::read(path, PEEK_SECONDS).ok()?;
+    let channels = u16::try_from(start.channels.len()).ok().filter(|c| *c > 0)?;
+    if start.sample_rate == 0 {
+        return None;
+    }
+    // The file's own word counts when it says more than was decoded, or when the file ended before the peek did.
+    let asked = (PEEK_SECONDS * f64::from(start.sample_rate)) as usize;
+    let seconds = if start.file_seconds > start.seconds() || start.len() < asked {
+        start.file_seconds
+    } else {
+        let mut frames = 0u64;
+        mo_audio::read_parts(path, 1.0, &mut |_, part| {
+            frames += part.first().map_or(0, Vec::len) as u64;
+            true
+        })
+        .ok()?;
+        frames as f64 / f64::from(start.sample_rate)
+    };
+    (seconds > 0.0).then_some((start.sample_rate, channels, seconds))
+}
+
+/// Whether an MP3 has its length written in it: a "Xing" or "Info" header in its first frame (where it sits depends
+/// on the frame's MPEG version and channels), or a "VBRI" one. `head` is the file's start; an ID3v2 tag comes first.
+fn mp3_says_its_length(head: &[u8]) -> bool {
+    let mut at = 0usize;
+    if head.starts_with(b"ID3") {
+        let Some(size) = head.get(6..10) else { return false };
+        // Four bytes of seven bits each, then the tag's own ten-byte header.
+        at = 10 + size.iter().fold(0usize, |n, b| n << 7 | usize::from(b & 0x7f));
+    }
+    // The first frame: eleven set bits. A little room for padding after the tag.
+    let Some(frame) = (at..at.saturating_add(4096))
+        .find(|&i| matches!((head.get(i), head.get(i + 1)), (Some(0xff), Some(b)) if b & 0xe0 == 0xe0))
+    else {
+        return false;
+    };
+    let (Some(version), Some(mode)) = (head.get(frame + 1).map(|b| b >> 3 & 3), head.get(frame + 3).map(|b| b >> 6))
+    else {
+        return false;
+    };
+    let mono = mode == 3;
+    // MPEG 1 (version bits 3) has more side information than MPEG 2 and 2.5.
+    let side = match (version == 3, mono) {
+        (true, false) => 32,
+        (true, true) | (false, false) => 17,
+        (false, true) => 9,
+    };
+    let tag = |offset: usize| head.get(frame + 4 + offset..frame + 8 + offset);
+    matches!(tag(side), Some(b"Xing" | b"Info")) || tag(32) == Some(b"VBRI")
 }
 
 /// Fills `buffer` from the file's start (the file was at least that long when asked).
@@ -86,15 +168,14 @@ fn le64(b: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?))
 }
 
-/// A WAV's (or RF64's) rate, channels and seconds, from its `fmt ` chunk and the size of its `data` chunk, which is
+/// A WAV's (or RF64's) format, from its `fmt ` chunk, and the size of its `data` chunk, which is
 /// never taken as running past the file's end (`size`): a recorder that stopped before finishing the header leaves it
-/// at its largest. Only formats whose blocks hold one frame each are timed (PCM, float, A-law, µ-law); compressed ones
-/// are left for the DAW, as the C# app leaves them.
+/// at its largest.
 /// Its chunks are walked from the head (`head`, the file's start) and past it with `beyond` (bytes at a place in the
 /// file), so a data chunk after a large metadata one is still found. Chunks are padded to an even size, but some
 /// writers leave an odd one (often LIST or bext) unpadded: where the padded place doesn't start a chunk and the
 /// unpadded one does, the walk goes on from there.
-fn wav(head: &[u8], size: u64, beyond: &mut dyn FnMut(u64, usize) -> Option<Vec<u8>>) -> Option<(u32, u16, f64)> {
+fn wav_chunks(head: &[u8], size: u64, beyond: &mut dyn FnMut(u64, usize) -> Option<Vec<u8>>) -> Option<WavChunks> {
     let mut get = |at: u64, len: usize| -> Option<Vec<u8>> {
         let start = usize::try_from(at).ok()?;
         match head.get(start..start.checked_add(len)?) {
@@ -155,11 +236,37 @@ fn wav(head: &[u8], size: u64, beyond: &mut dyn FnMut(u64, usize) -> Option<Vec<
         at = if padded != next && looks(&mut get, next) > looks(&mut get, padded) { next } else { padded };
     }
     let (tag, channels, rate, block) = format?;
-    if !matches!(tag, 1 | 3 | 6 | 7) {
-        return None;
+    Some(WavChunks { tag, channels, rate, block, data: data.unwrap_or(0) })
+}
+
+/// What a WAV's `fmt ` and `data` chunks say ([`wav_chunks`]).
+#[derive(Clone, Copy)]
+struct WavChunks {
+    /// The format: 1 PCM, 3 float, 6 A-law, 7 µ-law, others compressed.
+    tag: u16,
+    channels: u16,
+    rate: u32,
+    /// Bytes in a block: one frame, in the formats that are timed here.
+    block: u16,
+    /// Bytes of audio.
+    data: u64,
+}
+
+impl WavChunks {
+    /// Plain samples, a frame to a block: PCM, float, A-law, µ-law.
+    fn is_plain(self) -> bool {
+        matches!(self.tag, 1 | 3 | 6 | 7)
     }
-    let bytes_per_second = rate as f64 * block as f64;
-    (bytes_per_second > 0.0 && channels > 0).then(|| (rate, channels, data.unwrap_or(0) as f64 / bytes_per_second))
+
+    /// The rate, channels and seconds, for the formats whose blocks hold one frame each.
+    fn timed(self) -> Option<(u32, u16, f64)> {
+        if !self.is_plain() {
+            return None;
+        }
+        let bytes_per_second = self.rate as f64 * self.block as f64;
+        (bytes_per_second > 0.0 && self.channels > 0)
+            .then(|| (self.rate, self.channels, self.data as f64 / bytes_per_second))
+    }
 }
 
 /// How many of a WAV's chunks are looked at before giving up: a real file has a handful.
@@ -210,6 +317,11 @@ fn extended(b: &[u8]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A WAV's rate, channels and seconds, as [`read_sample`] takes them from its header.
+    fn wav(head: &[u8], size: u64, beyond: &mut dyn FnMut(u64, usize) -> Option<Vec<u8>>) -> Option<(u32, u16, f64)> {
+        wav_chunks(head, size, beyond).and_then(WavChunks::timed)
+    }
 
     /// A WAV read from its bytes alone.
     fn wav_of(b: &[u8], size: u64) -> Option<(u32, u16, f64)> {

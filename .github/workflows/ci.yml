@@ -23,6 +23,7 @@ jobs:
   scope:
     name: What changed
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
       test: ${{ steps.scope.outputs.test }}
       check: ${{ steps.scope.outputs.check }}
@@ -59,6 +60,8 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    # A hung test fails within the hour rather than at GitHub's 6 (review TC-1).
+    timeout-minutes: 60
     steps:
       - name: Stop if working out what changed failed
         if: needs.scope.result != 'success'
@@ -113,6 +116,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.galaxy == 'true') }}
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - name: Stop if working out what changed failed
         if: needs.scope.result != 'success'
@@ -141,6 +145,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.installer == 'true') }}
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - name: Stop if working out what changed failed
         if: needs.scope.result != 'success'
@@ -182,6 +187,7 @@ jobs:
   deny:
     name: Libraries
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -194,6 +200,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.ui == 'true') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Stop if working out what changed failed
         if: needs.scope.result != 'success'
@@ -225,6 +232,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.formats == 'true') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Stop if working out what changed failed
         if: needs.scope.result != 'success'
@@ -259,6 +267,7 @@ jobs:
   daw-scripts:
     name: DAW scripts
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -291,6 +300,7 @@ jobs:
   bitwig-extension:
     name: Bitwig extension
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4

@@ -756,8 +756,30 @@ impl Card {
     /// it came from: then it's as it was left.
     pub fn open(&mut self, id: &str, name: &str, points: &[CurvePoint], length_beats: f64) -> bool {
         name.clone_into(&mut self.name);
-        if self.open.as_ref().is_some_and(|(open, _)| open == id) {
-            return false;
+        if let Some((_, editor)) = self.open.as_mut().filter(|(open, _)| open == id) {
+            // The same curve, read again with another height or length (its id is its shape, whatever its height
+            // and length; the list gives those of its newest place): with no edits made on the old picture, the
+            // card shows it as it's found now (the 19 Nov 2026 review's CU-8). With edits it stays: they were made
+            // on what's in sight.
+            // And while something is in hand, highlighted or picked: that isn't taken away under the mouse.
+            let found = Shape::from_curve(points, length_beats);
+            let worked_on = differs(editor, self.origin.as_ref())
+                || editor.dragging()
+                || editor.highlight().is_some()
+                || self.grab.is_some()
+                || !self.picked.is_empty();
+            if worked_on || self.origin.as_ref() == Some(&found) {
+                return false;
+            }
+            let grid = editor.grid;
+            *editor = Editor::new(found.clone());
+            editor.grid = grid;
+            self.view = View::whole(found.length());
+            self.origin = Some(found);
+            self.hands_off();
+            self.shown += 1;
+            self.tone = None;
+            return true;
         }
         self.put_away();
         // Where Undo and Redo go once this curve has no step of its own. Picked anew: back to the curve with edits
@@ -1419,7 +1441,9 @@ impl Card {
         let Some((id, editor)) = s.open.as_mut() else { return SongSwing::Nothing };
         given_up(editor, was, &mut s.lit_whole);
         let edit = Edit::Swing { step, amount };
-        let lit = editor.highlight();
+        // (A highlight of the whole curve is the whole curve, as no highlight is.)
+        let whole = editor.shape().whole();
+        let lit = editor.highlight().filter(|l| !l.same(whole));
         let ours = s.swung.take().filter(|w| {
             w.curve == *id
                 && w.left.points() == editor.shape().points()
@@ -1445,10 +1469,21 @@ impl Card {
             s.swung = Some(w);
             return SongSwing::Already;
         }
+        // Each stretch of time is swung once: parts the new highlight covers or overlaps become one part with it
+        // (swung one after the other, where they overlap the lines moved twice: the 19 Nov 2026 review's CU-4).
         let parts = match (covered, lit) {
             (true, _) => w.parts.clone(),
             (false, None) => vec![None],
-            (false, Some(_)) => w.parts.iter().copied().chain([lit]).collect(),
+            (false, Some(lit)) => {
+                let (mut joined, mut apart) = (lit, w.parts.iter().copied().flatten().collect::<Vec<Span>>());
+                while let Some(at) =
+                    apart.iter().position(|p| p.start < joined.end - 1e-9 && joined.start < p.end - 1e-9)
+                {
+                    let p = apart.remove(at);
+                    joined = Span::new(joined.start.min(p.start), joined.end.max(p.end));
+                }
+                apart.into_iter().chain([joined]).map(Some).collect()
+            }
         };
         let mut swung = w.before.clone();
         let mut any = false;
@@ -1458,7 +1493,7 @@ impl Card {
                 any = true;
             }
         }
-        if !any || !editor.put(swung.with_clips_of(editor.shape()), lit) {
+        if !any || !editor.put(swung.with_clips_of(editor.shape()), editor.highlight()) {
             s.swung = Some(w);
             return if any { SongSwing::Already } else { SongSwing::Nothing };
         }
@@ -1540,7 +1575,10 @@ impl Card {
     /// (to be drawn again). Edited further while the save was on its way, it stays as it is, with its undo steps:
     /// those edits are in neither curve yet.
     pub fn forget(&mut self, id: &str, saved: &(Vec<CurvePoint>, f64)) -> bool {
-        self.kept.retain(|(kept, ..)| kept != id);
+        // (One kept for later too: only while it holds what was saved. The 19 Nov 2026 review's CU-7.)
+        self.kept.retain(|(kept, _, editor, _)| {
+            kept != id || (editor.shape().curve_points(), editor.shape().length()) != *saved
+        });
         let open = self.open.as_ref().is_some_and(|(open, _)| open == id) && self.edited().as_ref() == Some(saved);
         if open {
             self.hands_off();
@@ -2381,6 +2419,45 @@ mod tests {
     }
 
     #[test]
+    fn a_curve_read_again_at_another_length_is_shown_as_found_unless_its_been_worked_on() {
+        let mut card = card();
+        let shown = card.shown();
+        // The same id with the same shape: nothing changes. With another length: the card shows that.
+        assert!(!card.open("a", "Rise", &rise(), 4.0));
+        assert!(card.open("a", "Rise", &rise(), 8.0));
+        assert!((card.length() - 8.0).abs() < 1e-9 && card.shown() != shown && card.edited().is_none());
+        // Worked on, it stays as it is: the edits were made on what's in sight.
+        assert!(card.act(curve_act::FLIP));
+        assert!(!card.open("a", "Rise", &rise(), 4.0));
+        assert!((card.length() - 8.0).abs() < 1e-9);
+        // With every edit undone it shows the old picture and nothing else: as found now again.
+        assert!(card.step_back(true));
+        assert!(card.open("a", "Rise", &rise(), 4.0));
+        // A highlight is kept under the mouse.
+        assert!(card.act(curve_act::HIGHLIGHT_ALL));
+        assert!(!card.open("a", "Rise", &rise(), 8.0));
+    }
+
+    #[test]
+    fn a_curve_kept_with_edits_made_after_the_save_keeps_them_when_the_save_lands() {
+        let mut card = card();
+        assert!(card.act(curve_act::FLIP));
+        let saved = card.edited().expect("edited");
+        // One more edit after the save was asked for, then another curve is picked before the save lands.
+        assert!(card.act(curve_act::NUDGE_RIGHT));
+        let later = card.edited().expect("edited");
+        assert!(card.open("b", "Other", &rise(), 2.0));
+        assert!(!card.forget("a", &saved));
+        assert!(card.open("a", "Rise", &rise(), 4.0));
+        assert_eq!(card.edited().as_ref(), Some(&later), "the later edit is still there");
+        // Kept just as it was saved, it comes back as found.
+        assert!(card.open("b", "Other", &rise(), 2.0));
+        assert!(!card.forget("a", &later));
+        assert!(card.open("a", "Rise", &rise(), 4.0));
+        assert_eq!(card.edited(), None);
+    }
+
+    #[test]
     fn undo_in_the_middle_of_a_drag_takes_back_the_drag_alone() {
         let none = Keys::default();
         let mut card = five();
@@ -2616,6 +2693,20 @@ mod tests {
         assert_ne!(both, first);
         let early = |e: &(Vec<CurvePoint>, f64)| e.0.iter().filter(|p| p.x < 0.55).copied().collect::<Vec<_>>();
         assert_eq!(early(&both), early(&first), "the first part is as it was swung");
+        // A bigger highlight round a part already swung: the same curve as one press on the bigger highlight.
+        let wide = |card: &mut Card| {
+            press_drag(card, (0.6, 0.5), (3.4, 0.5), Keys::default());
+            let (x, y) = at(card, 3.4, 0.5);
+            card.mouse(mouse::LET_GO, x, y, Keys::default());
+            assert_eq!(card.swing_as_song(0.25, 0.2), SongSwing::Done);
+            card.edited().expect("swung")
+        };
+        let mut round = open();
+        press_drag(&mut round, (1.1, 0.5), (1.9, 0.5), Keys::default());
+        let (x, y) = at(&round, 1.9, 0.5);
+        round.mouse(mouse::LET_GO, x, y, Keys::default());
+        assert_eq!(round.swing_as_song(0.25, 0.2), SongSwing::Done);
+        assert_eq!(wide(&mut round), wide(&mut open()), "the part inside isn't swung twice");
         // After an edit of the points, the swing is no longer the button's to replace: the next goes on top.
         assert!(card.escape());
         press_drag(&mut card, (4.0, 1.0), (4.0, 0.5), Keys::default());

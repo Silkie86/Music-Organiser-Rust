@@ -1,5 +1,5 @@
 //! A stand-in for the DAWmate link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
-//! on a free port on this computer, greets each connection as extension 3.31 does, and answers `hello`, `newtrack`,
+//! on a free port on this computer, greets each connection as extension 3.33 does, and answers `hello`, `newtrack`,
 //! `insert`, `pads`, `clip`, `selectedtrack`, `transport`, `watch`, `stoptracks`, `deleteclip` and `deletetrack` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
 //! whichever connection it came on, as the extension makes changes one at a time.
@@ -186,10 +186,19 @@ pub struct World {
     /// Brings another project to the front part way through the next request with this command, as if someone
     /// brought their own to the front just after the change began: (command, the project).
     pub switch_during: Option<(String, String)>,
+    /// Whether a record job cut off by another project drops what it had changed, as an extension before 3.32 did
+    /// (its answer then has no `putBackLater`).
+    pub drops_put_back: bool,
     /// Whether this Bitwig doesn't tell the selected device's sample (`device` answers without `sample`).
     pub no_sample_names: bool,
     /// Whether Bitwig shows no sign of a sample going in when it has the name of the one before: `replaced` is null.
     pub quiet_same_name: bool,
+    /// Whether the selection is gone by the time a swap would show (someone clicked another track): the file goes
+    /// in, and the answer is `replaced` null with `moved`.
+    pub moves_during_swap: bool,
+    /// The sample of another Sampler the swap's answer shows instead of the new one's, as when another pad's Sampler
+    /// was clicked while Bitwig swapped: the answer names this, and the selected device holds it from then on.
+    pub shows_other_sample: Option<String>,
     /// Selects another device when a request with a command comes, as if someone clicked elsewhere in Bitwig while
     /// the change waited its turn.
     pub select_on: Option<SelectOn>,
@@ -312,14 +321,14 @@ pub struct FakeSongLoop {
 }
 
 impl Default for World {
-    /// "Night Drive" open, changes allowed, extension 3.31 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
+    /// "Night Drive" open, changes allowed, extension 3.33 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
     /// Drums (a group), Kick (audio, with EQ+), Bass (an instrument: Serum, then a Compressor, selected) and the
     /// Master (with a Peak Limiter). The arranger's loop is off, over the first 4 bars, and Play starts at the start.
     /// 120 BPM in 4/4, with nothing recorded into the arranger.
     fn default() -> World {
         let hello = json!({
             "link": 3, "product": "Bitwig Studio", "version": "6.1.5", "api": 23, "platform": "WINDOWS",
-            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.31", "loopback": true,
+            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.33", "loopback": true,
             "songLoop": true, "watch": WATCH_SECTIONS,
         });
         let mut serum = FakeDevice::new("Serum", "instrument");
@@ -353,9 +362,12 @@ impl Default for World {
             hang_up_on: Vec::new(),
             late: Vec::new(),
             switch_during: None,
+            drops_put_back: false,
             select_on: None,
             no_sample_names: false,
             quiet_same_name: false,
+            moves_during_swap: false,
+            shows_other_sample: None,
             switch_while_filling: None,
             unnamed_devices: false,
             slow_pads: false,
@@ -1011,6 +1023,9 @@ impl World {
             self.project = project;
             say("decided", "abandoned".into());
             say("after", json!({ "checked": false, "restoreFailed": null }));
+            if !self.drops_put_back {
+                say("putBackLater", true.into());
+            }
             return Ok(answer);
         }
         // The take: all of it, or what played before the clip's playing ended early (a bar less).
@@ -1356,14 +1371,23 @@ impl World {
         // A sample of the name that was there: its name can't show the swap.
         let again = file_name(&device.sample).eq_ignore_ascii_case(file_name(&path));
         *device = sampler;
+        if let Some(other) = &self.shows_other_sample {
+            device.sample = other.clone();
+        }
         let shown = device.described(d);
-        let fresh: Vec<&str> = device.params.iter().map(|p| p.id.as_str()).collect();
+        let fresh: Vec<String> = device.params.iter().map(|p| p.id.clone()).collect();
         self.modified = true;
+        // The link waits to see the swap, and checks the project again as it does.
+        self.next_step("insert", request)?;
         if again && self.quiet_same_name {
             return Ok(json!({ "replaced": null }));
         }
+        if self.moves_during_swap {
+            return Ok(json!({ "replaced": null, "moved": true }));
+        }
+        let sample = self.shows_other_sample.clone().unwrap_or_else(|| file_name(&path).to_owned());
         Ok(json!({
-            "replaced": true, "device": shown, "trackId": track_id, "position": d, "sample": file_name(&path),
+            "replaced": true, "device": shown, "trackId": track_id, "position": d, "sample": sample,
             "fresh": fresh,
         }))
     }

@@ -71,6 +71,20 @@ export struct DawRowInfo {
     facts: [SettingsFact],
 }
 
+// A DAW's line on the DAWs tab's "Opening your songs" card: the program its songs open in, and its buttons.
+export struct DawProgramInfo {
+    daw: string,
+    // The program chosen (its path), or the words for the system's choice.
+    program: string,
+    // Whether one is chosen: its path shows in the numbers' face, and the button back to the system's choice shows.
+    chosen: bool,
+    // Under it, in words: the old app chose it, or it isn't there now.
+    note: string,
+    choose-tip: string,
+    reset: string,
+    reset-tip: string,
+}
+
 export struct FolderGroupInfo {
     title: string,
     // Whether its folders can be added and removed here.
@@ -170,6 +184,15 @@ export global SettingsData {
     callback choose-bitwig-folder();
     callback documents-bitwig();
     in property <bool> bitwig-chosen;
+    // The program each DAW's songs open in (the C# app's choice until one is chosen here): choose one, or go back to
+    // the system's choice. By the DAW's name.
+    in property <string> programs-title;
+    in property <string> programs-intro;
+    in property <[DawProgramInfo]> daw-programs;
+    // What the last choice on the card did, under its lines.
+    in property <string> programs-note;
+    callback choose-daw-program(string);
+    callback reset-daw-program(string);
     // More of Bitwig's Library folders (an old Library on another drive): Space's Bitwig copies and Fix look in them
     // too. Add one, or take one off the list (nothing on disk changes).
     in property <[string]> bitwig-libraries;
@@ -413,6 +436,50 @@ component FactLine inherits HorizontalLayout {
         horizontal-stretch: 0;
         text: root.fact.button;
         clicked => { root.clicked(); }
+    }
+}
+
+// A DAW and the program its songs open in, on a line as a fact is shown, with Choose and the way back to the system's
+// choice.
+component ProgramLine inherits HorizontalLayout {
+    in property <DawProgramInfo> line;
+    spacing: Space.md;
+    Text {
+        width: 140px;
+        text: root.line.daw;
+        color: Theme.muted;
+        font-size: Type.meta;
+        vertical-alignment: center;
+    }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        min-width: 0px;
+        alignment: center;
+        Text {
+            text: root.line.program;
+            color: root.line.chosen ? Theme.text : Theme.muted;
+            font-family: root.line.chosen ? Theme.number-font : Theme.text-font;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if root.line.note != "": Text {
+            text: root.line.note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+    }
+    StudioButton {
+        horizontal-stretch: 0;
+        text: "Choose\u{2026}";
+        tip: root.line.choose-tip;
+        clicked => { SettingsData.choose-daw-program(root.line.daw); }
+    }
+    if root.line.chosen: StudioButton {
+        horizontal-stretch: 0;
+        text: root.line.reset;
+        tip: root.line.reset-tip;
+        clicked => { SettingsData.reset-daw-program(root.line.daw); }
     }
 }
 
@@ -950,6 +1017,19 @@ component DawsTab inherits VerticalLayout {
                 tip: "Pick another of Bitwig's Library folders (the one with Multisamples, Wavetables and Presets in it), an old one on another drive say. Space's Bitwig copies and Fix look in it too.";
                 clicked => { SettingsData.add-bitwig-library(); }
             }
+        }
+    }
+    SettingsCard {
+        title: SettingsData.programs-title;
+        intro: SettingsData.programs-intro;
+        for p in SettingsData.daw-programs: ProgramLine {
+            line: p;
+        }
+        if SettingsData.programs-note != "": Text {
+            text: SettingsData.programs-note;
+            color: Theme.text;
+            font-size: Type.meta;
+            wrap: word-wrap;
         }
     }
     SettingsCard {

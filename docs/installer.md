@@ -30,7 +30,9 @@ built.
 
 ## Updates
 
-Only a copy the setup put in (its `unins000.exe` is beside it) updates itself; the launcher's builds never do. Three
+Only a copy the setup put in (its `unins000.exe` is beside it) updates itself; the launcher's builds never do, and while
+the installed copy is open the launcher's window keeps a new build waiting until it is closed, rather than opening it in
+its place (starting the launcher by hand still does). Three
 minutes after start, then once a day, it asks GitHub's Releases page (through Windows' own `curl.exe`) whether a newer
 version is out. That is all it sends online, and Settings › General › Updates turns it off. A newer setup is fetched into
 the data folder's `updates` folder, checked against the `.sha256` beside it on the release, and the rail then offers

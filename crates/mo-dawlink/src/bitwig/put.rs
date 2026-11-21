@@ -124,7 +124,8 @@ impl Bitwig {
                 now.time_signature.trim()
             )));
         }
-        let slot = link.add_clip_to_record(&track_id, &shown)?;
+        let slot =
+            link.add_clip_to_record(&track_id, &shown).map_err(|e| super::audition::clip_cut_off(e, &track, false))?;
         if !wanted() {
             return Err(if took_out(&mut link, &track_id, slot) {
                 Error::Cancelled
@@ -246,6 +247,20 @@ fn left_in_launcher(why: &str, track: &str) -> Error {
     ))
 }
 
+/// How the words for a put cut off by another project coming to the front begin ([`was_cut_off_by_another_project`]).
+const ABANDONED: &str = "Another project came to the front in Bitwig while the part was being recorded";
+/// Everything the record job sets in the song, for those words.
+const ABANDONED_SET: &str = "the master is muted, arranger record is on, the part's track is armed and your other \
+                             tracks aren't, and the play start, the metronome, the loop, punch in and out, overdub, \
+                             automation write and its mode (touch), the pre-roll (none) and the launch quantize (1 \
+                             bar) are set for it";
+
+/// Whether [`Bitwig::put_in_song`] failed because another project came to the front while it recorded: the song is
+/// left set up for recording then, so the words are worth keeping on screen until they're read.
+pub fn was_cut_off_by_another_project(error: &Error) -> bool {
+    matches!(error, Error::Bitwig(words) if words.starts_with(ABANDONED))
+}
+
 /// What the record job's answer comes to: how much of the part the link saw go in, or why it didn't, in words.
 fn went(recorded: &Recorded) -> Result<Seen, String> {
     let why = recorded.why.trim().trim_end_matches('.');
@@ -272,11 +287,20 @@ fn went(recorded: &Recorded) -> Result<Seen, String> {
              out (it can take a few presses).",
             if why.is_empty() { String::new() } else { format!(" ({why})") }
         )),
-        "abandoned" => Err("Another project came to the front in Bitwig while the part was being recorded, so the \
-                            link stopped and touched nothing more. Back in your song, have a look at what it had \
-                            set for the recording: the master's mute, the play start, and the transport's switches \
-                            (record, loop, metronome)."
-            .to_owned()),
+        "abandoned" if recorded.puts_back_later => Err(format!(
+            "{ABANDONED}, so the link stopped and touched nothing more. Your song is still set up for the \
+             recording: {ABANDONED_SET}. The link puts these back by itself once your song is in front again in \
+             Bitwig, and stops Bitwig if it plays; give it a second or two before you press Play or save. Some of \
+             the part may be in the arranger: undo in Bitwig takes it out."
+        )),
+        // An extension before 3.32 dropped what it had kept.
+        "abandoned" => Err(format!(
+            "{ABANDONED}, so the link stopped and touched nothing more. Your song is still set up for the \
+             recording, and nothing puts it back: {ABANDONED_SET}. Back in your song, turn record off before you \
+             press Play, set these as you had them, and press Return to arrangement on the part's track. Some of \
+             the part may be in the arranger: undo in Bitwig takes it out. (The newest extension, from Settings > \
+             DAWs, puts these back by itself.)"
+        )),
         "failed" if why.is_empty() => Err("The recording failed in Bitwig.".to_owned()),
         "failed" => Err(format!("The recording failed in Bitwig: {why}.")),
         other => Err(format!(
@@ -322,7 +346,7 @@ mod tests {
         aborted.why = "Changes were turned off.".into();
         let said = went(&aborted).unwrap_err();
         assert!(said.starts_with("The recording was stopped part way (Changes were turned off). Some of"), "{said}");
-        assert!(went(&job("abandoned", "", false)).unwrap_err().contains("master's mute"));
+        assert!(went(&job("abandoned", "", false)).unwrap_err().contains("nothing puts it back"));
         let mut failed = job("failed", "", false);
         failed.why = "The track bank wasn't made.".into();
         assert_eq!(went(&failed).unwrap_err(), "The recording failed in Bitwig: The track bank wasn't made.");

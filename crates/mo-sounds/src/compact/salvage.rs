@@ -35,7 +35,9 @@ use crate::db::is_damage;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Salvaged {
     /// Changes made to the new library (the backup copy, or what `sounds.db` gave): rows of the damaged library put in
-    /// where they differed, and rows it no longer had taken out.
+    /// where they differed, and rows it no longer had taken out. Not the app's own notes of it, put in too (since when
+    /// it's been the app's own, the numbers it gave): they aren't yours, and one made a second apart from the new
+    /// library's would say something of yours was kept when nothing was.
     pub kept: usize,
     /// Places where it couldn't be read: a stretch of rows, a whole table, or all of it.
     pub unread: usize,
@@ -427,9 +429,9 @@ impl Pass<'_> {
                 continue;
             }
             let have = mine.query_row([&key], |r| Ok(Cell::of(r.get_ref(0)?))).optional()?;
+            // Not counted in what was kept ([`Salvaged::kept`]): a note is the app's, not yours.
             if have.as_ref() != Some(&value) {
                 put.execute([&key, &value])?;
-                self.out.kept += 1;
             }
         }
         Ok(())

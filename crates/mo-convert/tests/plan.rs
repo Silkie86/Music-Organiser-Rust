@@ -93,6 +93,8 @@ fn song(channels: Vec<FlChannel>, inserts: Vec<FlInsert>, automation: Vec<FlAuto
         title: "Test".into(),
         ppq: 96,
         tempo: 120.0,
+        signature: mo_formats::arrangement::TimeSignature::FOUR_FOUR,
+        fine_notes: Vec::new(),
         channels,
         inserts,
         routes: Default::default(),
@@ -119,7 +121,7 @@ fn automation(name: &str, channel: Option<u32>, control: FlControl, points: &[(f
 }
 
 fn snare(_: &str) -> Option<SampleFile> {
-    Some(SampleFile { bytes: 1000, md5: [7; 16], rate: 44100, channels: 2, seconds: 0.5 })
+    Some(SampleFile { bytes: 1000, md5: [7; 16], rate: 44100, channels: 2, seconds: 0.5, ogg_in_wav: false })
 }
 
 fn plan(song: &FlSong) -> Plan {
@@ -674,4 +676,20 @@ fn edit_events_are_listed_as_not_carried() {
     s.edit_events = (1..=10).map(|i| (i, format!("P{i}"))).collect();
     let p = plan(&s);
     assert!(p.notes.iter().any(|n| n.contains(r#""P8" and 2 more for anything"#)), "{:?}", p.notes);
+}
+
+/// Whole-app review CN-3 and CN-4 (19 Nov 2026): what isn't carried is said.
+#[test]
+fn clip_fades_and_notes_panned_or_finely_pitched_are_listed_as_left_out() {
+    let mut vox = p_channel_with_audio();
+    vox.audio_clips[0].fade_in = 0.112;
+    let mut s = song(vec![vox, channel(1, "Hats", None, "hat.wav", 0)], Vec::new(), Vec::new());
+    s.fine_notes = vec![1];
+    let p = from_fl(&s, Options::default(), &mut |_| None);
+    assert!(p.notes.iter().any(|n| n.starts_with("Vox: its clips' fades aren't carried over yet")), "{:?}", p.notes);
+    assert!(p.notes.iter().any(|n| n.starts_with("Hats: some notes are panned or finely pitched")), "{:?}", p.notes);
+    // Said for nothing else.
+    let plain = song(vec![p_channel_with_audio(), channel(1, "Hats", None, "hat.wav", 0)], Vec::new(), Vec::new());
+    let p = from_fl(&plain, Options::default(), &mut |_| None);
+    assert!(!p.notes.iter().any(|n| n.contains("fades") || n.contains("finely pitched")), "{:?}", p.notes);
 }

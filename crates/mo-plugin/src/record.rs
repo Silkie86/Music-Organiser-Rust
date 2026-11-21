@@ -61,6 +61,17 @@ pub struct Recorder {
     pub said: Mutex<Option<Said>>,
 }
 
+/// Marks a take over when its thread ends, however it ends.
+struct Over<'a>(&'a Recorder);
+
+impl Drop for Over<'_> {
+    fn drop(&mut self) {
+        self.0.daw_on.store(false, Ordering::Release);
+        drop(lock(&self.0.feed).take());
+        self.0.busy.store(false, Ordering::Release);
+    }
+}
+
 /// The words for the DAW's input, as the panel names it.
 pub const DAW_INPUT: &str = "the DAW's input";
 
@@ -83,12 +94,17 @@ impl Recorder {
         }
         self.stop.store(false, Ordering::Release);
         let me = Arc::clone(self);
-        background("mo-plugin-record", move || {
+        let started = background("mo-plugin-record", move || {
+            // The take is over however its thread ends (a panic too), so the plugin never counts as recording for
+            // good, and never waits for one as it goes (the 19 Nov review's PN-4).
+            let _over = Over(&me);
             let said = me.take(card, trim_db);
-            me.daw_on.store(false, Ordering::Release);
             *lock(&me.said) = Some(said);
-            me.busy.store(false, Ordering::Release);
         });
+        if !started {
+            self.busy.store(false, Ordering::Release);
+            return Err("The take couldn't start: the system wouldn't make its thread".into());
+        }
         Ok(())
     }
 
@@ -203,7 +219,7 @@ pub fn folder() -> PathBuf {
 /// Saves the takes whose saving was cut off when the DAW closed or crashed ([`record::mend_parts`]), and logs what
 /// became of each. A part left alone for a minute isn't being written. Writes to the disk: off the DAW's threads.
 pub fn mend_cut_off_takes() {
-    for said in record::mend_parts(&folder(), Duration::from_secs(60)) {
+    for said in record::mend_parts(&folder(), Duration::from_secs(60), mo_app::tidy::is_half_recorded) {
         crate::log::line("Record", &said);
     }
 }
@@ -216,6 +232,21 @@ pub fn inputs() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_take_thread_that_stops_with_an_error_leaves_nothing_recording() {
+        let recorder = Recorder::default();
+        recorder.busy.store(true, Ordering::Release);
+        recorder.daw_on.store(true, Ordering::Release);
+        // The guard the take's thread holds, let go as a panic would let it go.
+        let _ = mo_catch::catch(std::panic::AssertUnwindSafe(|| {
+            let _over = Over(&recorder);
+            panic!("a take that went wrong");
+        }));
+        assert!(!recorder.recording());
+        assert!(!recorder.daw_on.load(Ordering::Acquire));
+        assert!(recorder.finish_before_going(Duration::ZERO));
+    }
 
     #[test]
     fn a_take_under_way_is_ended_and_waited_for_as_the_plugin_goes() {

@@ -407,29 +407,36 @@ fn read_peaks(
         };
         // On the bulk pool, a few at a time: each goes through its whole file, holding half a minute of it in memory
         // at a time, they're usually on one drive, and other pages' jobs aren't held up behind them.
-        let read: Vec<(&PathBuf, Stamp, Arc<Peaks>)> = background::on_bulk_pool(|| {
-            todo.par_iter()
-                .filter_map(|&(file, stamp)| {
-                    if !wanted() {
-                        return None;
-                    }
-                    let between_parts = || {
+        // With nothing to read the pool isn't asked at all: the kept waveforms show at once, whatever it's busy with
+        // (RA-3).
+        let read: Vec<(&PathBuf, Stamp, Arc<Peaks>)> = if todo.is_empty() {
+            Vec::new()
+        } else {
+            background::on_bulk_pool(|| {
+                todo.par_iter()
+                    .filter_map(|&(file, stamp)| {
+                        if !wanted() {
+                            return None;
+                        }
+                        let between_parts = || {
+                            show_due();
+                            wanted()
+                        };
+                        // A sound that trips the reader is drawn without its wave; the others still come.
+                        let p =
+                            mo_catch::catch(AssertUnwindSafe(|| Peaks::read(file, &between_parts))).ok().flatten()?;
+                        let p = Arc::new(p);
+                        if let Some(names) = files.get(file) {
+                            let mut s = so_far.lock().unwrap_or_else(PoisonError::into_inner);
+                            s.peaks.extend(names.iter().map(|n| ((*n).clone(), p.clone())));
+                            s.new = true;
+                        }
                         show_due();
-                        wanted()
-                    };
-                    // A sound that trips the reader is drawn without its wave; the others still come.
-                    let p = mo_catch::catch(AssertUnwindSafe(|| Peaks::read(file, &between_parts))).ok().flatten()?;
-                    let p = Arc::new(p);
-                    if let Some(names) = files.get(file) {
-                        let mut s = so_far.lock().unwrap_or_else(PoisonError::into_inner);
-                        s.peaks.extend(names.iter().map(|n| ((*n).clone(), p.clone())));
-                        s.new = true;
-                    }
-                    show_due();
-                    Some((file, stamp, p))
-                })
-                .collect()
-        });
+                        Some((file, stamp, p))
+                    })
+                    .collect()
+            })
+        };
         let peaks = so_far.into_inner().unwrap_or_else(PoisonError::into_inner).peaks;
         if let Some(store) = store.as_mut() {
             // Kept only for a file that didn't change while it was read.

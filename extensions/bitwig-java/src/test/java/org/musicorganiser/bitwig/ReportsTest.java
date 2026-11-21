@@ -62,6 +62,15 @@ class ReportsTest {
         assertEquals(moved, Reports.dataFolder(first));
         assertEquals(moved.resolve("reports").resolve("bitwig"), Reports.defaultFolder("Windows 11", env, "", "/tmp"));
 
+        // The installer's pointer on a new PC (extension 3.33): a byte-order mark first, and started-here.txt in the
+        // folder it names, where no move ever left moved-in.json.
+        Path started = Files.createDirectories(temp.resolve("picked").resolve("MusicOrganiser"));
+        Files.write(pointer, ("\uFEFF" + started + "\r\n").getBytes(StandardCharsets.UTF_8));
+        assertEquals(first, Reports.dataFolder(first), "a folder the installer didn't start in isn't followed");
+        Files.write(started.resolve(Reports.STARTED_HERE_FILE), new byte[0]);
+        assertEquals(started, Reports.dataFolder(first));
+        assertEquals(started.resolve("reports").resolve("bitwig"), Reports.defaultFolder("Windows 11", env, "", "/tmp"));
+
         Files.write(pointer, "MusicData".getBytes(StandardCharsets.UTF_8));
         assertEquals(first, Reports.dataFolder(first), "not a whole path");
         Files.write(pointer, new byte[0]);

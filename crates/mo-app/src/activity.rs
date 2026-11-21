@@ -48,6 +48,12 @@ impl Card {
         self.state == State::Failed || (self.state == State::Done && self.ended.is_none())
     }
 
+    /// Whether it's a card that never goes by itself: finished, with no end time ([`Feed::told`], [`Feed::notice`],
+    /// [`Job::done_to_read`], [`Job::failed_to_read`]).
+    pub fn stays(&self) -> bool {
+        self.state != State::Running && self.ended.is_none()
+    }
+
     /// Whether it finished long enough ago to go: [`DONE_STAYS`] after it was done, [`FAILED_STAYS`] after it failed.
     fn gone_by(&self, now: Instant) -> bool {
         let stays = if self.state == State::Failed { FAILED_STAYS } else { DONE_STAYS };
@@ -137,7 +143,24 @@ impl Feed {
             started: Instant::now(),
             ended: None,
         });
+        self.one_of_a_kind(id);
         self.changed();
+    }
+
+    /// Takes away the older cards that stay until closed and say the very same as card `id`: said again, it's the
+    /// one card, the newest. Each part sent while Bitwig had another project open, and each scan that found the
+    /// sounds gone, added one more of the same card, with nothing to take them away but their × (the 19 November 2026
+    /// review's RA-5).
+    fn one_of_a_kind(&self, id: u64) {
+        let mut inner = self.lock();
+        let Some(at) = inner.cards.iter().position(|c| c.id == id) else { return };
+        if !inner.cards[at].stays() {
+            return;
+        }
+        // It goes to the end, with the newest: said again it is news again, and the window shows the newest ones.
+        let new = inner.cards.remove(at);
+        inner.cards.retain(|c| !c.stays() || c.state != new.state || c.title != new.title || c.detail != new.detail);
+        inner.cards.push(new);
     }
 
     /// The cards to show now, oldest first: finished ones past their time are left out.
@@ -225,8 +248,17 @@ impl Job {
 
     /// How far it is, 0 to 1, with an optional new detail line. Passed on at most every 250 ms.
     pub fn progress(&self, fraction: f32, detail: Option<&str>) {
+        // The card's new numbers and the mark that they're not shown yet go in under one lock: under two, a redraw
+        // between them took the mark and showed the old numbers, which then stayed until the job's next report (the
+        // 19 November 2026 review's RA-9).
         let due = {
             let mut inner = self.feed.lock();
+            if let Some(c) = inner.cards.iter_mut().find(|c| c.id == self.id) {
+                c.progress = Some(fraction.clamp(0.0, 1.0));
+                if let Some(d) = detail {
+                    c.detail = d.to_owned();
+                }
+            }
             let now = Instant::now();
             let due = now.duration_since(inner.last_progress) >= PROGRESS_EVERY;
             if due {
@@ -236,12 +268,6 @@ impl Job {
             }
             due
         };
-        self.feed.update(self.id, |c| {
-            c.progress = Some(fraction.clamp(0.0, 1.0));
-            if let Some(d) = detail {
-                c.detail = d.to_owned();
-            }
-        });
         if due {
             self.feed.changed();
         }
@@ -268,6 +294,17 @@ impl Job {
         self.retitle(title);
         self.end(State::Done, detail);
         self.feed.update(self.id, |c| c.ended = None);
+        self.feed.one_of_a_kind(self.id);
+        self.feed.changed();
+    }
+
+    /// Failed, leaving something set that needs a look: the card stays until its × takes it away, as
+    /// [`Feed::notice`]'s does, where a failed job's goes after [`FAILED_STAYS`].
+    pub fn failed_to_read(mut self, title: &str, why: &str) {
+        self.retitle(title);
+        self.end(State::Failed, why);
+        self.feed.update(self.id, |c| c.ended = None);
+        self.feed.one_of_a_kind(self.id);
         self.feed.changed();
     }
 
@@ -426,6 +463,40 @@ mod tests {
         assert!(feed.visible(later).is_empty());
     }
 
+    // The 19 November 2026 review's RA-5: the same card said again piled up, one more each time.
+    #[test]
+    fn a_card_that_stays_said_again_is_one_card_the_newest() {
+        let feed = Feed::default();
+        for _ in 0..3 {
+            feed.start("Send to Bitwig", "").done_to_read("Sent", "but its bar isn't marked");
+            feed.notice("Some sounds look gone", "Is a drive unplugged?");
+        }
+        feed.start("Send to Bitwig", "").done_to_read("Sent", "another line");
+        // A failed job's card goes by itself, so two of the same are left to.
+        feed.start("Copy", "").failed("no room");
+        feed.start("Copy", "").failed("no room");
+        let now = feed.visible(Instant::now());
+        let said: Vec<(&str, &str)> = now.iter().map(|c| (c.title.as_str(), c.detail.as_str())).collect();
+        assert_eq!(
+            said,
+            [
+                ("Sent", "but its bar isn't marked"),
+                ("Some sounds look gone", "Is a drive unplugged?"),
+                ("Sent", "another line"),
+                ("Copy", "no room"),
+                ("Copy", "no room")
+            ]
+        );
+        // The ones kept are the newest: the two said last in the loop.
+        assert!(now[0].id > 4 && now[1].id > now[0].id, "{:?}", now.iter().map(|c| c.id).collect::<Vec<_>>());
+        // Said again after other cards, it is the newest card, at the end (the window shows the newest ones).
+        feed.notice("Some sounds look gone", "Is a drive unplugged?");
+        let now = feed.visible(Instant::now());
+        assert_eq!(now.len(), 5);
+        assert_eq!(now[4].title, "Some sounds look gone");
+        assert!(now.iter().all(|c| c.stays() == (c.title != "Copy")));
+    }
+
     // Review finding AP-8: a told card was shown as a line in the rail, which has no ×, so it stayed all session.
     #[test]
     fn only_what_stays_or_failed_is_a_card_to_close() {
@@ -436,11 +507,14 @@ mod tests {
         feed.told("Put the old app's databases away", "In Old databases");
         feed.notice("Using the old copy of your data", "The drive is missing");
         feed.start("Sending Keys", "").done_to_read("Keys is in Bitwig, but its bar isn't marked", "Why");
+        feed.start("Putting Keys in", "").failed_to_read("Keys didn't go in", "Why");
         let cards = feed.visible(Instant::now() + FAILED_STAYS);
-        let kept = cards.iter().find(|c| c.title.starts_with("Keys")).unwrap();
+        let kept = cards.iter().find(|c| c.title.starts_with("Keys is")).unwrap();
         assert_eq!((kept.state, kept.to_close()), (State::Done, true), "done, and it stays to be read");
+        let kept = cards.iter().find(|c| c.title == "Keys didn't go in").unwrap();
+        assert_eq!((kept.state, kept.to_close()), (State::Failed, true), "failed, and it stays to be read");
         let close: Vec<bool> = feed.visible(Instant::now()).iter().map(Card::to_close).collect();
-        assert_eq!(close, [false, false, true, true, true, true]);
+        assert_eq!(close, [false, false, true, true, true, true, true]);
         drop(running);
     }
 }

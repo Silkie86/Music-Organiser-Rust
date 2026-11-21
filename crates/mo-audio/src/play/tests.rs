@@ -365,6 +365,19 @@ fn a_move_just_as_the_sound_ends_still_ends_it() {
 }
 
 #[test]
+fn an_end_is_noticed_with_no_order_to_wake_the_player() {
+    // The output's thread hands the end back without waking the player's thread (MP-3): it looks by itself.
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, ended) = player(&outputs);
+    let short = Arc::new(AudioData { sample_rate: 1000, channels: vec![vec![0.5; 50]], ..AudioData::default() });
+    player.play(short, "a", 0.0);
+    settle(&player);
+    outputs.pull(100);
+    assert_eq!(ended.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("a"));
+    assert_eq!(player.playing(), None);
+}
+
+#[test]
 fn a_chosen_output_thats_listed_but_taken_doesnt_cut_the_sound_on_the_default() {
     let outputs = FakeOutputs::new(&["Speakers", "Focusrite"]);
     lock(&outputs.0).taken.push("Focusrite".into());

@@ -5,12 +5,13 @@
 //! Safety (rules 3 and "copy, check, then rename"): the FL project and the template are only read. The new project is
 //! written beside where it goes under a temporary name, flushed to the disk, read back and decoded to check it, and
 //! only then renamed into place. An earlier convert is only replaced when it's this song's own and nothing has changed
-//! it since ([`can_save_over`], asked again just before the rename); one saved in Bitwig, or another song's with the
-//! same name, is kept and the caller picks the next name ([`bitwig_name`]).
+//! it since ([`can_save_over`], asked again as the last thing before the rename); one saved in Bitwig, or another
+//! song's with the same name, is kept and the caller picks the next name ([`bitwig_name`]).
 //!
 //! A sample that can't be read where FL saved it is looked for (rule 13) by the finder the caller passes in (for the
 //! app, mo-library's `SampleLocator`: the project's folders, then the DAW's), and the Bitwig project points at where
-//! it was found. The convert page, when it's built, passes the locator.
+//! it was found. FL Studio's own sounds ("%FLStudioFactoryData%…") are the finder's to find in FL Studio's own
+//! folder, and nowhere else: a same-named file somewhere else is another sound (`SampleLocator::locate_to_use`).
 //!
 //! Plugin sounds a save lost are taken from the song's older saves first ([`crate::lost`]).
 
@@ -21,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mo_formats::fl::{events, song};
 use mo_formats::paths;
+use mo_library::samples::is_fl_factory_content;
 use rayon::prelude::*;
 
 use crate::plan::{Options, SampleFile, from_fl};
@@ -136,7 +138,8 @@ pub fn can_save_over(project: &Path, file: &Path, written_before: Option<&str>) 
 
 /// Converts an FL project into the export folder as `name` (see [`bitwig_name`]), from `template` (a project Bitwig
 /// saved). `written_before` is what [`Saved::written`] said about this name's earlier convert, if any. `find_sample`
-/// says where a sample that isn't where FL saved it is now, if anywhere. The samples are looked for and read on every
+/// says where a sample that isn't where FL saved it is now, if anywhere; for FL Studio's own sounds
+/// ("%FLStudioFactoryData%…") it must answer only with the file in FL Studio's folder. The samples are looked for and read on every
 /// core, so the app calls this on its low-priority pool, never on the window's thread.
 pub fn bitwig_from_fl(
     project: &Path,
@@ -163,7 +166,7 @@ pub fn bitwig_from_fl(
     let taken = lost::from_older_saves(&mut song, project);
     // Each sample read once, all at the same time (rule 21). One that can't be read where FL saved it is looked for
     // (rule 13), and used where it's found if it reads there. FL's own content ("%FLStudioFactoryData%…") is
-    // FL's to find, never another file with its name.
+    // only ever the file in FL Studio's own folder, never another file with its name: `find_sample` sees to that.
     let wanted: BTreeSet<&str> = song.channels.iter().map(|c| c.sample.as_str()).filter(|p| !p.is_empty()).collect();
     let read: HashMap<String, (Option<String>, Option<SampleFile>)> = wanted
         .into_par_iter()
@@ -175,7 +178,6 @@ pub fn bitwig_from_fl(
             };
             let got = match here {
                 Some(s) => (None, Some(s)),
-                None if p.starts_with('%') => (None, None),
                 None => moved().unwrap_or((None, None)),
             };
             (p.to_owned(), got)
@@ -184,16 +186,30 @@ pub fn bitwig_from_fl(
     let mut found: Vec<String> = Vec::new();
     for c in &mut song.channels {
         if let Some((Some(f), _)) = read.get(&c.sample) {
-            found.push(format!("{}: {} wasn't there, so {f} is used", c.name, c.sample));
+            // FL Studio's own sound, in FL Studio's folder, is where it should be: not one to list.
+            if !is_fl_factory_content(&c.sample) {
+                found.push(format!("{}: {} wasn't there, so {f} is used", c.name, c.sample));
+            }
             c.sample = f.clone();
         }
     }
     let samples: HashMap<String, Option<SampleFile>> =
         read.into_iter().map(|(p, (f, s))| (f.unwrap_or(p), s)).collect();
-    let plan = from_fl(&song, options, &mut |p| match samples.get(p) {
+    let mut plan = from_fl(&song, options, &mut |p| match samples.get(p) {
         Some(s) => s.clone(),
         None => read_sample(Path::new(p)),
     });
+    // The playlist's markers, as the Songs preview reads them.
+    let (_, markers) = mo_formats::fl::arrangement::bars_and_markers(&flp);
+    plan.markers = markers.into_iter().map(|m| (m.beat, m.name)).collect();
+    if mo_formats::fl::arrangement::changes_time_signature(&flp) {
+        plan.notes.push(format!(
+            "The song changes time signature part-way through: the Bitwig project is in {}/{} all the way (the one \
+             it starts in), with a marker where each change was",
+            plan.signature.top(),
+            plan.signature.bottom()
+        ));
+    }
     let mut converted = bitwig::write(&plan, template)?;
     // A damaged save, or one too big to read whole, is converted as far as it goes, and that's said first (rule 9).
     let trouble = mo_formats::fl::notes::trouble(&flp);
@@ -233,14 +249,19 @@ pub fn bitwig_from_fl(
     } else {
         None
     };
-    // Reading the samples can take minutes: the earlier convert may have been saved in Bitwig meanwhile.
-    if !can_save_over(project, &file, written_before) {
+    // Reading the samples can take minutes: the earlier convert may have been saved in Bitwig meanwhile. Asked here,
+    // before the new file is written out and checked, and once more as the last thing before the rename.
+    let still_mine = || can_save_over(project, &file, written_before);
+    if !still_mine() {
         return Err(kept());
     }
-    save_checked(&file, &converted.bytes, |back| match mo_formats::bitwig::decode(back) {
+    let check = |back: &[u8]| match mo_formats::bitwig::decode(back) {
         Ok(doc) => doc.body_error,
         Err(_) => Some("not a Bitwig project".to_owned()),
-    })?;
+    };
+    if !save_checked_while(&file, &converted.bytes, check, still_mine)? {
+        return Err(kept());
+    }
     // This convert's own folder: an older list would be wrong now. The project is saved, so a list that can't be put
     // in place (or removed) is said, and an older one goes rather than stay beside a project it doesn't describe.
     let list_put = match notes {
@@ -257,29 +278,33 @@ pub fn bitwig_from_fl(
 }
 
 /// Writes `bytes` under a temporary name beside `file`, flushes it to the disk, reads it back and checks it (the same
-/// bytes, and `problem` finds nothing wrong), then renames it into place.
-pub(crate) fn save_checked(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>) -> Result<(), String> {
-    save(file, bytes, problem, true).map(|_| ())
+/// bytes, and `problem` finds nothing wrong), then renames it into place, over what's there. `still` is asked once the
+/// new file is written and checked, as the last thing before the rename: false when it says no, and `file` is left as
+/// it was (whole-app review CN-11).
+pub(crate) fn save_checked_while(
+    file: &Path,
+    bytes: &[u8],
+    problem: impl Fn(&[u8]) -> Option<String>,
+    still: impl Fn() -> bool,
+) -> Result<bool, String> {
+    let staged = Staged::checked(file, bytes, problem)?;
+    if !still() {
+        return Ok(false);
+    }
+    staged.put_in_place(file).map(|()| true)
 }
 
-/// [`save_checked`], but never over a file that's there, even one that appears while this saves: false when `file`
-/// is taken, and nothing was written.
+/// Written and checked as [`save_checked_while`] does, but never over a file that's there, even one that appears
+/// while this saves: false when `file` is taken, and nothing was written.
 pub(crate) fn save_checked_new(
     file: &Path,
     bytes: &[u8],
     problem: impl Fn(&[u8]) -> Option<String>,
 ) -> Result<bool, String> {
-    save(file, bytes, problem, false)
-}
-
-fn save(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>, replace: bool) -> Result<bool, String> {
-    if !replace && file.exists() {
+    if file.exists() {
         return Ok(false);
     }
     let staged = Staged::checked(file, bytes, problem)?;
-    if replace {
-        return staged.put_in_place(file).map(|()| true);
-    }
     let saving = |e: std::io::Error| format!("Couldn't save {}: {e}", file.display());
     // A second name for the checked file fails when the name is taken, so nothing is ever replaced. A drive with
     // no second names (FAT) gets the name claimed first instead: an empty file, made only if nothing's there.
@@ -388,9 +413,45 @@ fn clear_left_behind(folder: &Path, target: &str, now: std::time::SystemTime) {
     }
 }
 
+/// Removes from `folder` what a crash or a close part way through a save left of any file whose name `wanted` takes
+/// (the whole-app review of 19 Nov, FS-9: Fix's "(fixed N)" names change, so a leftover of "(fixed)" was never looked
+/// at again once that name was taken). Only plain files whose whole name is one a save gives, and only old ones.
+pub fn clear_left_behind_of(folder: &Path, wanted: impl Fn(&str) -> bool, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    for e in entries.flatten() {
+        let Some(name) = e.file_name().to_str().map(str::to_owned) else { continue };
+        let Some((target, _)) = name.strip_suffix(SAVING).and_then(|n| n.rsplit_once('.')) else { continue };
+        if !wanted(target) || !is_left_behind(&name, target) {
+            continue;
+        }
+        let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
+        let old = m.modified().ok().and_then(|t| now.duration_since(t).ok()).is_some_and(|age| age >= LEFT_BEHIND_AGE);
+        if m.file_type().is_file() && old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whole-app review CN-11 (19 Nov 2026): the last question before the rename; a no leaves the file as it was and
+    /// nothing beside it.
+    #[test]
+    fn a_save_asks_once_more_before_it_replaces_the_file() {
+        let dir = std::env::temp_dir().join(format!("mo-convert-save-asks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Song.bwproject");
+        std::fs::write(&file, b"saved in Bitwig").unwrap();
+        assert_eq!(save_checked_while(&file, b"a new convert", |_| None, || false), Ok(false));
+        assert_eq!(std::fs::read(&file).unwrap(), b"saved in Bitwig");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "the checked copy went");
+        assert_eq!(save_checked_while(&file, b"a new convert", |_| None, || true), Ok(true));
+        assert_eq!(std::fs::read(&file).unwrap(), b"a new convert");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn names_are_safe_and_numbered_while_taken() {

@@ -95,6 +95,8 @@ struct Page {
     /// Every song's newest save the last reading looked at, with its time then.
     looked_at: HashMap<String, i64>,
     exporting: bool,
+    /// Whether the export running is Export these, which its button (or key) stops (PS-3).
+    exporting_shown: bool,
     message: String,
     /// The line being auditioned in Bitwig ([`logic::audition_id`]) and how far it's got.
     hearing: Option<(String, logic::Hearing)>,
@@ -123,6 +125,14 @@ struct Page {
     /// The picked curve, by its id (a rescan may move it in the list).
     curve_picked: Option<String>,
     curves_started: bool,
+    /// The Songs page caught up with saves made while the app was closed, and the sounds were read before it had:
+    /// they're read again when the page is next opened, or now when it isn't on show ([`songs_caught_up`]).
+    sounds_stale: bool,
+    /// The same for the curves, while a read of them was going on: read once more when it ends.
+    curves_again: bool,
+    /// How many times you've changed a curve (a name, hidden, one saved): a read of the curves that one landed in lists
+    /// them again, as its own list was taken before the change.
+    curve_changes: u64,
     curves_reading: Option<(usize, usize)>,
     curves_failed: Option<String>,
     curve_message: String,
@@ -308,7 +318,11 @@ fn finder_opens() {
         // Found by what it is, not where it was: a read again puts the lines in another order (M-1).
         let at = PAGE.with(|p| p.borrow().items.iter().position(|i| logic::has_audition_id(i, &hit.id)));
         let Some(at) = at else { return false };
+        // The page opens on this line, by its place: a read again waiting for the page's next opening
+        // ([`songs_caught_up`]) would empty the list under it, so it waits for the opening after this one.
+        let stale = PAGE.with(|p| std::mem::take(&mut p.borrow_mut().sounds_stale));
         crate::go_to(app, Place::Presets.index() as i32);
+        PAGE.with(|p| p.borrow_mut().sounds_stale = stale);
         show_preset(app, at);
         true
     });
@@ -612,14 +626,48 @@ pub fn shown(app: &AppWindow) {
     if APP.with(|a| a.borrow().is_none()) {
         return;
     }
-    let start = PAGE.with(|p| {
+    let (start, again) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        !std::mem::replace(&mut p.started, true)
+        let start = !std::mem::replace(&mut p.started, true);
+        // Read before the Songs page had caught up: again now, as the page opens ([`songs_caught_up`]).
+        let again = !start && p.reading.is_none() && std::mem::take(&mut p.sounds_stale);
+        (start, again)
     });
     if start {
         read_sounds(app);
+    } else if again {
+        read_again(app);
     }
     show_all(app);
+}
+
+/// The Songs page has caught up with the saves made while the app was closed, and songs.db has them. The sounds and
+/// the curves take their saves from songs.db, and they're read just after the start, before that: a save made as a new
+/// file meanwhile (Save As, FL's next numbered save, a new song) was missing from Presets, Ctrl+K and Curves for the
+/// whole run (the 19 November 2026 review's RA-1). Called once a run, and only when the catch-up found something.
+///
+/// The curves are read again at once (or when their read ends): what's kept shows meanwhile and only changed saves are
+/// read. The sounds too when the page isn't on show; a read of them empties the list while it runs, so with the page
+/// in front of you it waits until the page is next opened (or a song's Presets tab asks, as before).
+pub fn songs_caught_up(app: &AppWindow) {
+    let on_show = crate::on_presets_page(app.get_place());
+    let (sounds, curves) = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let sounds = p.started && p.reading.is_none() && !(on_show && p.section == Section::Sounds);
+        p.sounds_stale = p.started && !sounds;
+        let curves = p.curves_started && p.curves_reading.is_none();
+        p.curves_again = p.curves_started && !curves;
+        (sounds, curves)
+    });
+    if sounds || curves {
+        log::info("Presets", "Songs caught up with saves made while the app was closed: reading them here too");
+    }
+    if sounds {
+        read_again(app);
+    }
+    if curves {
+        read_curves(app);
+    }
 }
 
 /// Opens the page on one song's sounds (a song's Presets tab), by its save's path; `name` is the song's, for its chip.
@@ -912,6 +960,7 @@ fn show_everything(app: &AppWindow) {
         data.set_years_from(from);
         data.set_years_to(to);
         data.set_exporting(p.exporting);
+        data.set_exporting_shown(p.exporting_shown);
 
         // The curves.
         data.set_curve_hidden(p.curve_filters.hidden);
@@ -1071,7 +1120,7 @@ fn show_curve_card(app: &AppWindow) {
         editor.set_facts(facts.into());
         editor.set_found(found.into());
         let edited = editor.get_changed();
-        let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some(), edited);
+        let offers = logic::curve_offers(c, !p.bitwig.is_empty() || bitwig_chosen().is_some(), edited);
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
         editor.set_hear_key(key(curve_act::HEAR));
         editor.set_metronome_key(key(curve_act::METRONOME));
@@ -1245,16 +1294,37 @@ const ADDED: &str = "Added ";
 /// Undo (`back`) or Redo with no step left in the curve on the card: the page picks curve `id`, the one worked on
 /// before (or the one Undo came back from), and says so. False when that curve is no longer among the curves.
 pub(crate) fn curve_gone_back(app: &AppWindow, id: &str, back: bool) -> bool {
-    let name = PAGE.with(|p| p.borrow().curves.iter().find(|c| c.id == id).map(|c| c.name.clone()));
-    let Some(name) = name else { return false };
+    let found = PAGE.with(|p| curve_of_card_id(&p.borrow(), id));
+    let Some((id, name)) = found else { return false };
     // ("Back to", not "as you left it": one that has changed where it came from since comes back afresh.)
     let says = if back {
         format!("Back to {name}. Redo goes to the curve you came from again.")
     } else {
         format!("Forward to {name} again. Undo goes back.")
     };
-    pick_curve_saying(app, Some(id.to_owned()), says);
+    pick_curve_saying(app, Some(id), says);
     true
+}
+
+/// The curve the editor's card knows as `card_id`: its own id and its name. The card has a curve as it's sent, and
+/// a line shown at half or double speed is sent under an id of its own (`curves::at_speed`), so the card's id isn't
+/// always one of the list's. None when no curve would go on the card under that id now: it's gone, or its line
+/// shows it at another speed than when it was left (the 19 Nov 2026 review's CU-3).
+fn curve_of_card_id(p: &Page, card_id: &str) -> Option<(String, String)> {
+    let speed_of = |at: usize| {
+        let row = p.curve_shown.iter().position(|&i| i == at);
+        row.and_then(|row| p.curve_speeds.get(row).copied()).unwrap_or(1.0)
+    };
+    let own = p.curves.iter().position(|c| c.id == card_id).filter(|&at| speed_of(at) == 1.0);
+    // Only the lines at another speed have another id, and few are: each is worked out to see.
+    let at_speed = || {
+        p.curve_shown.iter().zip(&p.curve_speeds).find_map(|(&at, &speed)| {
+            let c = p.curves.get(at)?;
+            (speed != 1.0 && curves::id_at_speed(&c.id, speed) == card_id).then_some(at)
+        })
+    };
+    let c = p.curves.get(own.or_else(at_speed)?)?;
+    Some((c.id.clone(), c.name.clone()))
 }
 
 /// Undo or Redo took a step in the editor: the card no longer says a curve was added.
@@ -1314,21 +1384,43 @@ fn on_window(f: impl FnOnce(&AppWindow) + Send + 'static) {
 struct Where {
     library: PathBuf,
     data_dir: PathBuf,
+    /// Your Bitwig Studio folder as Settings › DAWs has it (the settings live on the window's thread).
+    bitwig: Option<PathBuf>,
+}
+
+impl Where {
+    /// On the window's thread.
+    fn of(p: &Page) -> Where {
+        Where { library: p.library.clone(), data_dir: p.data_dir.clone(), bitwig: bitwig_chosen() }
+    }
+
+    /// The chosen folder, when it is Bitwig's: it has a Library folder in it. (A drive picked by mistake isn't
+    /// walked for presets.) Asks the disk: off the window's thread.
+    fn bitwig(&self) -> Option<&Path> {
+        self.bitwig.as_deref().filter(|c| c.join("Library").is_dir())
+    }
+}
+
+/// Your Bitwig Studio folder as Settings › DAWs has it now. On the window's thread.
+fn bitwig_chosen() -> Option<PathBuf> {
+    crate::settings::value(mo_app::app_settings::BITWIG_FOLDER_KEY).filter(|f| !f.trim().is_empty()).map(PathBuf::from)
 }
 
 fn read_sounds(_app: &AppWindow) {
     let at = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.reading = Some((0, 0));
-        Where { library: p.library.clone(), data_dir: p.data_dir.clone() }
+        Where::of(&p)
     });
     let started = background::spawn("Presets read", move || {
-        let result = read_all(&at);
+        // Guarded: a bug in the read (the log has the crash) still ends it here, so the page says it couldn't read
+        // rather than "reading" for the whole run, at every start (the 19 November 2026 review's RA-8).
+        let result = background::guarded(|| read_all(&at)).and_then(|read| read);
         if let Err(e) = &result {
             log::warning("Presets", e);
         }
         on_window(move |app| {
-            PAGE.with(|p| {
+            let again = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.reading = None;
                 if let Err(e) = &result {
@@ -1336,7 +1428,15 @@ fn read_sounds(_app: &AppWindow) {
                 }
                 take_waiting(&mut p);
                 ask_filter(&mut p, true);
+                // Songs caught up while this read ran: once more, unless the page is in front of you
+                // ([`songs_caught_up`]).
+                let on_show = crate::on_presets_page(app.get_place()) && p.section == Section::Sounds;
+                p.sounds_stale && !on_show && std::mem::take(&mut p.sounds_stale)
             });
+            if again {
+                read_again(app);
+                return;
+            }
             give_finder(app);
             show_all(app);
         });
@@ -1380,7 +1480,8 @@ fn read_all(at: &Where) -> Result<(), String> {
     drop(lib);
     let songs = mo_library::songs::group_songs(&saves, &choices, &mo_formats::dates::RealDates::now());
     let newest = logic::newest_saves(&songs, export_root.as_deref());
-    let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
+    let bitwig_folders =
+        logic::bitwig_folders(at.bitwig(), &plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     // Every song's newest save as it is now, read below or left out: Songs' link reads again only for another (U-2).
     let looked_at: HashMap<String, i64> = songs.iter().map(|s| (s.latest.path.clone(), s.latest.mtime)).collect();
     drop(songs);
@@ -1767,6 +1868,7 @@ fn set_exporting(on: bool, message: Option<String>) {
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
             p.exporting = on;
+            p.exporting_shown &= on;
             if let Some(m) = message {
                 p.message = m;
             }
@@ -1813,7 +1915,7 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
                     (text, went) = match &bwpreset {
                         Some(p) => match send_to_bitwig(p, &stem_of(p)) {
                             Ok(words) => (words, true),
-                            Err(words) => (words, false),
+                            Err(why) => (logic::send_failed(&why), false),
                         },
                         None => (no_bitwig_preset(&item), false),
                     };
@@ -1875,9 +1977,20 @@ fn without_template(items: &[&Item], templates: &Templates) -> Vec<String> {
     out
 }
 
+/// Asks the Export these running to stop after the save it's on (its button, or its key, while it runs: PS-3).
+static EXPORT_STOP: AtomicBool = AtomicBool::new(false);
+
 /// Export these: every sound shown, save by save, into the export folder. Preset files are left (they're files).
+/// While it runs, the same button (or key) stops it after the save it's on. Before each save it checks the free room
+/// on the export folder's drive, and stops while [`logic::EXPORT_HEADROOM`] is still free (PS-3).
 fn export_shown(app: &AppWindow) -> bool {
-    // A key still reaches here while an export runs (the button is off): it says so rather than anything else (H-11).
+    if PAGE.with(|p| p.borrow().exporting_shown) {
+        EXPORT_STOP.store(true, Ordering::SeqCst);
+        set_message(app, "Stopping the export after the save it's on.");
+        return true;
+    }
+    // A key still reaches here while another export runs (the button is off): it says so rather than anything else
+    // (H-11).
     if PAGE.with(|p| p.borrow().exporting) {
         set_message(app, "An export is running: wait for it to finish, then try again.");
         return false;
@@ -1896,7 +2009,12 @@ fn export_shown(app: &AppWindow) -> bool {
         return false;
     }
     let (library, templates, bitwig_folders, feed) = export_setup();
-    PAGE.with(|p| p.borrow_mut().exporting = true);
+    EXPORT_STOP.store(false, Ordering::SeqCst);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.exporting = true;
+        p.exporting_shown = true;
+    });
     show_all(app);
     let job = feed.start("Exporting presets", &format!("{} sounds", logic::thousands(shown.len() - files)));
     let started = background::spawn("Preset export", move || {
@@ -1922,7 +2040,21 @@ fn export_shown(app: &AppWindow) -> bool {
         let none = HashMap::new();
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         let total = plan.len();
+        let folder_text = root.to_string_lossy().into_owned();
+        let mut stopped = None;
         for (n, (save, keys)) in plan.iter().enumerate() {
+            if EXPORT_STOP.swap(false, Ordering::SeqCst) {
+                stopped = Some(format!(
+                    "You stopped the export after {} of {} saves.",
+                    logic::thousands(n),
+                    logic::thousands(total)
+                ));
+                break;
+            }
+            if let Err(why) = logic::export_room(mo_app::data_move::free_room(&root), &folder_text, n) {
+                stopped = Some(why);
+                break;
+            }
             match background::on_pool(|| {
                 let kinds = kinds.get(save).unwrap_or(&none);
                 export::export_from_save(save, Choice::default(), Some(keys), kinds, &root, Some(&templates))
@@ -1933,21 +2065,32 @@ fn export_shown(app: &AppWindow) -> bool {
             job.progress((n + 1) as f32 / total as f32, Some(&format!("{} of {}", n + 1, total)));
         }
         let mut text = logic::export_summary(&done, &without, &failed);
+        if let Some(stopped) = &stopped {
+            text = if done.is_empty() { stopped.clone() } else { format!("{stopped} {text}") };
+        }
         if files > 0 {
             text += &format!(
                 " The {} preset files shown are files already, so they were left as they are.",
                 logic::thousands(files)
             );
         }
-        job.done(&text);
-        let folder = if done.len() == 1 { done[0].folder.clone() } else { root.clone() };
-        let folder = folder.to_string_lossy().into_owned();
-        crate::files::reveal(&feed, &folder, &folder);
+        if stopped.is_some() && done.is_empty() {
+            job.failed(&text);
+        } else {
+            job.done(&text);
+            let folder = if done.len() == 1 { done[0].folder.clone() } else { root.clone() };
+            let folder = folder.to_string_lossy().into_owned();
+            crate::files::reveal(&feed, &folder, &folder);
+        }
         set_exporting(false, Some(text));
     });
     if let Err(e) = started {
         log::error("Presets", &format!("Couldn't start the export: {e}"));
-        PAGE.with(|p| p.borrow_mut().exporting = false);
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.exporting = false;
+            p.exporting_shown = false;
+        });
     }
     true
 }
@@ -1970,9 +2113,9 @@ fn send_file(path: String) {
         let name = Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let text = match send_to_bitwig(Path::new(&path), &name) {
             Ok(words) => words,
-            Err(words) => {
+            Err(why) => {
                 crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
-                words
+                logic::send_failed(&why)
             }
         };
         set_exporting(false, Some(text));
@@ -1983,21 +2126,30 @@ fn send_file(path: String) {
 }
 
 /// A plugin's own preset file (.fxp, .fxb, .vstpreset) sent into Bitwig as a Bitwig preset made from it, in Temp
-/// under a name the sweep knows, removed once Bitwig has it (PR-3, rule 28). The file itself is only read.
+/// under a name the sweep knows, removed once Bitwig has it (PR-3, rule 28). The file itself is only read. When it
+/// can't go, the made preset is kept as a drag file under the file's own name and shown, to drag onto a track by
+/// hand (PS-2): the plugin's own file is no use there. The sweep clears drag files a day later (rule 28).
 fn send_made_from_file(item: Item) {
     let (_, templates, bitwig_folders, feed) = export_setup();
     PAGE.with(|p| p.borrow_mut().exporting = true);
     on_window(show_all);
     let started = background::spawn("Send to Bitwig", move || {
         let text = match made_from_file(&item, templates, &bitwig_folders) {
-            Ok((made, name)) => {
-                let sent = send_to_bitwig(&made.0, &name);
-                drop(made);
-                sent.unwrap_or_else(|words| {
-                    crate::files::reveal(&feed, item.path(), mo_app::shell::folder_of(item.path()));
-                    words
-                })
-            }
+            Ok((made, name)) => send_to_bitwig(&made.0, &name).unwrap_or_else(|why| {
+                let temp_name = made.0.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let file = format!("{name}.bwpreset");
+                match keep_to_drag(&made.0, &file) {
+                    Ok(kept) => {
+                        let kept = kept.to_string_lossy().into_owned();
+                        crate::files::reveal(&feed, &kept, mo_app::shell::folder_of(&kept));
+                        logic::made_send_failed(&why, &temp_name, Some(&file))
+                    }
+                    Err(e) => {
+                        log::warning("Presets", &format!("Couldn't keep the Bitwig preset made of {name}: {e}"));
+                        logic::made_send_failed(&why, &temp_name, None)
+                    }
+                }
+            }),
             Err(words) => words,
         };
         set_exporting(false, Some(text));
@@ -2006,6 +2158,16 @@ fn send_made_from_file(item: Item) {
         log::error("Presets", &format!("Couldn't start sending to Bitwig: {e}"));
         PAGE.with(|p| p.borrow_mut().exporting = false);
     }
+}
+
+/// A copy of the made Bitwig preset at `made`, as a drag file named `name` in a drag folder of its own in Temp, which
+/// the sweep clears later (rule 28, [`mo_app::drag_out::write_drag_files`]). Gives where it is.
+fn keep_to_drag(made: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let bytes = std::fs::read(made)?;
+    let file = mo_app::drag_out::MadeFile { name: name.to_owned(), bytes };
+    mo_app::drag_out::write_drag_files(&std::env::temp_dir(), &[file])?
+        .pop()
+        .ok_or_else(|| std::io::Error::other("no file was written"))
 }
 
 /// A Bitwig preset made from a plugin's own preset file, in Temp (removed when the [`Gone`] goes), and its name (the
@@ -2031,8 +2193,8 @@ fn made_from_file(
 
 /// Sends a Bitwig preset into the project open in Bitwig, through the Bitwig link (`mo-dawlink`): a new track named
 /// after the preset, with the preset loaded on it, as if it were dropped there. Waits for Bitwig, so only ever on a
-/// thread away from the window. `Ok` says what happened in Bitwig; `Err` says why it didn't go, and the caller shows
-/// the file in its folder instead, to drag onto a track.
+/// thread away from the window. `Ok` says what happened in Bitwig; `Err` says why it didn't go (the caller puts it in
+/// its words, [`logic::send_failed`]), and the caller shows a Bitwig preset in its folder instead, to drag in.
 fn send_to_bitwig(preset: &Path, name: &str) -> Result<String, String> {
     let name = name.to_owned();
     // The link's own send: it waits its turn behind sounds and kits sent from the Sounds page, checks the file is
@@ -2040,9 +2202,9 @@ fn send_to_bitwig(preset: &Path, name: &str) -> Result<String, String> {
     match mo_dawlink::bitwig::send_preset(preset, &name) {
         Ok(sent) => match sent.problem {
             None => Ok(logic::sent_words(&name)),
-            Some(problem) => Err(logic::send_failed(&problem)),
+            Some(problem) => Err(problem),
         },
-        Err(e) => Err(logic::send_failed(&e.to_string())),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -2602,25 +2764,34 @@ pub fn finish_up() {
 // The curves
 
 fn read_curves(_app: &AppWindow) {
-    let at = PAGE.with(|p| {
+    let (at, changes_before) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.curves_reading = Some((0, 0));
-        Where { library: p.library.clone(), data_dir: p.data_dir.clone() }
+        (Where::of(&p), p.curve_changes)
     });
     let started = background::spawn("Curves read", move || {
-        let result = scan_curves(&at);
+        // Guarded, as the sounds' read is (RA-8).
+        let result = background::guarded(|| scan_curves(&at)).and_then(|read| read);
         on_window(move |app| {
-            PAGE.with(|p| {
+            let again = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.curves_reading = None;
+                // A curve you changed while this ran isn't in its list as you left it: listed once more instead.
+                let changed_meanwhile = p.curve_changes != changes_before;
                 match result {
+                    Ok(_) if changed_meanwhile => p.curves_again = true,
                     Ok((list, keys)) => set_curves(&mut p, list, keys),
                     Err(e) => {
                         log::warning("Curves", &e);
                         p.curves_failed = Some(e);
                     }
                 }
+                // Songs caught up while this read ran: once more, for the saves it found ([`songs_caught_up`]).
+                std::mem::take(&mut p.curves_again)
             });
+            if again {
+                read_curves(app);
+            }
             show_all(app);
         });
     });
@@ -2673,7 +2844,8 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
     let export_root = bitwig::export_left_out(&lib).ok().flatten();
     drop(lib);
     let mut paths = logic::curve_saves(&saves, export_root.as_deref());
-    let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
+    let bitwig_folders =
+        logic::bitwig_folders(at.bitwig(), &plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     drop(saves);
     let library_roots: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).collect();
     // Bitwig's curves library and the plugins' LFO shapes (Serum, LFOTool, Vital, Duck), looked through side by side.
@@ -2718,8 +2890,16 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
             }
         });
     }
+    // The progress thread ends with the scan, however the scan ends (a panic in it too: RA-8).
+    struct Ends(Arc<AtomicBool>);
+    impl Drop for Ends {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let ends = Ends(finished);
     let scanned = background::on_pool(|| db.scan(&paths, &progress));
-    finished.store(true, Ordering::Relaxed);
+    drop(ends);
     match scanned {
         Ok(n) => log::info("Curves", &format!("Read {n} saves for their curves")),
         Err(e) => log::warning("Curves", &format!("Couldn't read every save for its curves: {}", e.0)),
@@ -2737,7 +2917,7 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
     let Some((curve, sent)) = curve else { return false };
     // These send the curve as it was found: with edits not saved they'd send the old shape (the keys and the finder
     // get here too, not only the card's greyed button).
-    if matches!(id, curve_act::TO_BITWIG | curve_act::REVEAL) && curves_edits_wait(app, &curve.id) {
+    if matches!(id, curve_act::TO_BITWIG | curve_act::REVEAL) && curves_edits_wait(app, &sent.id) {
         return true;
     }
     match id {
@@ -2806,11 +2986,27 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             }
         }
         curve_act::TO_BITWIG => {
-            let Some(folder) = logic::bitwig_curves_folder(&bitwig_folders) else { return false };
-            let started = background::spawn("Curve to Bitwig", move || match curves::save_to_bitwig(&sent, &folder) {
+            // The folder chosen in Settings as it is now (it may have been chosen since the curves were read), then
+            // the ones found then. Which has a Library folder is asked off the window's thread.
+            let folders: Vec<PathBuf> = bitwig_chosen().into_iter().chain(bitwig_folders).collect();
+            if folders.is_empty() {
+                return false;
+            }
+            let save = move || {
+                let folder = logic::bitwig_curves_folder(&folders, |library| library.is_dir()).ok_or_else(|| {
+                    "Couldn't find Bitwig's Library folder. Choose your Bitwig Studio folder in Settings › DAWs."
+                        .to_owned()
+                })?;
+                curves::save_to_bitwig(&sent, &folder)
+            };
+            let started = background::spawn("Curve to Bitwig", move || match save() {
                 Ok(path) => {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    let text = format!("Saved {name} in Bitwig's curves. It shows in Bitwig's browser under Curves.");
+                    // The folder by name: one that isn't the Library Bitwig uses is seen at once.
+                    let text = format!(
+                        "Saved {name} in {}. It shows in Bitwig's browser under Curves.",
+                        path.parent().unwrap_or(&path).display()
+                    );
                     feed.start("Saved a curve to Bitwig", "").done(&name);
                     curve_message(text);
                 }
@@ -2902,6 +3098,7 @@ fn save_as_new(from: String, name: String, points: Vec<mo_formats::bitwig::curve
                     crate::curve_editor::forget(app, &from, &(points, length));
                     PAGE.with(|p| {
                         let mut p = p.borrow_mut();
+                        p.curve_changes += 1;
                         match p.curves.iter().position(|o| o.id == c.id) {
                             // The same shape was saved before: it's that curve.
                             Some(at) => {
@@ -2930,6 +3127,91 @@ fn save_as_new(from: String, name: String, points: Vec<mo_formats::bitwig::curve
     });
     if let Err(e) = started {
         log::error("Curves", &format!("Couldn't start saving the curve: {e}"));
+    }
+}
+
+/// The app's window came to the front. A curve kept as new from the plugin's editor meanwhile (it adds it to
+/// `curves.db` itself; Solomon, 20 Nov 2026) is put in the list, and one it saved again that was hidden shows again:
+/// looked for off the window's thread, and only the curves the list doesn't have as they are now are read.
+pub fn came_to_front(_app: &AppWindow) {
+    let db = PAGE.with(|p| {
+        let p = p.borrow();
+        (p.curves_started && p.curves_reading.is_none()).then(|| p.data_dir.join(curves::FILE_NAME))
+    });
+    let Some(db) = db else { return };
+    let started = background::spawn("Curves made in the plugin", move || {
+        let Ok(made) = CurvesDb::open_read_only(&db).and_then(|db| db.made_ids()) else { return };
+        if made.is_empty() {
+            return;
+        }
+        on_window(move |_| {
+            let new = PAGE.with(|p| {
+                let p = p.borrow();
+                // Each made curve and whether it's hidden; those the list has that way already are taken away.
+                let mut new: HashMap<&str, bool> = made.iter().map(|(id, hidden)| (id.as_str(), *hidden)).collect();
+                p.curves.iter().for_each(|c| {
+                    if new.get(c.id.as_str()) == Some(&c.hidden) {
+                        new.remove(c.id.as_str());
+                    }
+                });
+                // (A read on its way lists them itself.)
+                if p.curves_reading.is_some() { Vec::new() } else { new.into_keys().map(str::to_owned).collect() }
+            });
+            if new.is_empty() {
+                return;
+            }
+            let started = background::spawn("Curves made in the plugin", move || {
+                let Ok(db) = CurvesDb::open_read_only(&db) else { return };
+                let found: Vec<(Curve, logic::CurveKey)> = new
+                    .iter()
+                    .filter_map(|id| db.get(id).ok().flatten())
+                    .map(|c| {
+                        let key = logic::CurveKey::of(&c);
+                        (c, key)
+                    })
+                    .collect();
+                on_window(move |app| {
+                    let added = PAGE.with(|p| {
+                        let mut p = p.borrow_mut();
+                        let mut added = 0;
+                        for (c, key) in found {
+                            match p.curves.iter().position(|o| o.id == c.id) {
+                                // Listed as it is now meanwhile (the app changed it itself): left alone.
+                                Some(at) if p.curves[at].hidden == c.hidden => continue,
+                                Some(at) => {
+                                    p.curve_keys[at] = key;
+                                    p.curves[at] = c;
+                                }
+                                None => {
+                                    p.curve_keys.push(key);
+                                    p.curves.push(c);
+                                }
+                            }
+                            added += 1;
+                        }
+                        if added > 0 {
+                            p.curve_changes += 1;
+                            p.curve_found_of = None;
+                            reshow_curves(&mut p);
+                        }
+                        added
+                    });
+                    if added > 0 {
+                        log::info(
+                            "Curves",
+                            &format!("{added} curves saved in the plugin's editor are in the list as they are now"),
+                        );
+                        show_all(app);
+                    }
+                });
+            });
+            if let Err(e) = started {
+                log::error("Curves", &format!("Couldn't start reading the plugin's new curves: {e}"));
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Curves", &format!("Couldn't start looking for the plugin's new curves: {e}"));
     }
 }
 
@@ -2970,6 +3252,7 @@ fn curve_db_change(
                 on_window(move |app| {
                     PAGE.with(|p| {
                         let mut p = p.borrow_mut();
+                        p.curve_changes += 1;
                         if let Some(at) = p.curves.iter().position(|o| o.id == c.id) {
                             p.curve_keys[at] = key;
                             p.curve_found_of = None;
@@ -3336,6 +3619,34 @@ fn sample_curves() -> Vec<Curve> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cards_id_of_a_curve_shown_at_another_speed_leads_back_to_its_line() {
+        let point = |x: f64, y: f64| mo_formats::bitwig::curve::CurvePoint { x, y, bend: 0.0 };
+        let curve = |id: &str| Curve {
+            id: id.into(),
+            name: format!("Curve {id}"),
+            points: vec![point(0.0, 0.0), point(1.0, 1.0)],
+            length_beats: 4.0,
+            hidden: false,
+            sources: Vec::new(),
+        };
+        let mut p = Page { curves: vec![curve("a"), curve("b"), curve("c")], ..Page::default() };
+        // "a" at its own speed, "b" at half speed; "c" isn't shown (filtered out).
+        p.curve_shown = vec![0, 1];
+        p.curve_speeds = vec![1.0, 0.5];
+        p.curve_picked = Some("b".into());
+        // The card has "b" as it's sent: under another id than the list's. That's the id its edits are known by
+        // (what the guard on Show curve file and Save to Bitwig's curves must be asked with).
+        let sent = picked_curve_as_sent(&p).expect("picked");
+        assert_ne!(sent.id, "b");
+        assert_eq!(curve_of_card_id(&p, &sent.id), Some(("b".into(), "Curve b".into())));
+        assert_eq!(curve_of_card_id(&p, "a"), Some(("a".into(), "Curve a".into())));
+        assert_eq!(curve_of_card_id(&p, "c"), Some(("c".into(), "Curve c".into())), "not shown: sent at its own speed");
+        // Left at its own speed and shown at half speed now, "b" wouldn't come back as it was left; nor one that's gone.
+        assert_eq!(curve_of_card_id(&p, "b"), None);
+        assert_eq!(curve_of_card_id(&p, "gone"), None);
+    }
 
     #[test]
     fn lines_read_while_a_filtering_holds_the_list_wait_and_are_never_copied_in() {

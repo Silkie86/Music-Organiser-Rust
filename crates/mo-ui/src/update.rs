@@ -74,7 +74,9 @@ pub fn connect(app: &AppWindow, feed: Feed, live: bool) {
             let _ = slint::invoke_from_event_loop(move || match outcome {
                 Ok(()) => {
                     log::info("Update", &format!("Started {}: it waits for the app to close", setup.display()));
-                    // Closes as the window's own close does, so everything waiting is written first.
+                    // Closes as the window's own close does, so everything waiting is written first. A copy started
+                    // meanwhile waits for this one to end.
+                    crate::one_copy::closing();
                     let _ = slint::quit_event_loop();
                 }
                 Err(why) => {

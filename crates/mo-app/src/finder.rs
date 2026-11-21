@@ -739,7 +739,7 @@ impl Source for Presets {
 /// Every MIDI part the MIDI page lists, found by its title, then where it's from. Its id is its notes' fingerprint, so
 /// the page finds it again after the index is read again. Parts under `smallest` notes are left out, as the page hides
 /// them (Settings' smallest part).
-pub fn midi_parts(cat: &mo_midi::Catalogue, smallest: usize) -> Lines {
+pub fn midi_parts(cat: &Arc<mo_midi::Catalogue>, smallest: usize) -> MidiParts {
     // A line each, as the MIDI page lists them: the same loop in other keys once, found by those files' names too, as
     // the page's own search finds them ("Pad Loop F#m" when "Pad Loop Am" heads the group).
     let mut others: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
@@ -752,36 +752,75 @@ pub fn midi_parts(cat: &mo_midi::Catalogue, smallest: usize) -> Lines {
             }
         }
     }
-    // The lines themselves on every core of the pool it's called in: a line for each of 160,000 parts.
+    // The lines themselves on every core of the pool it's called in: a line for each of 160,000 parts. Only what it's
+    // found by is kept (the name and the words under it must be lent); the line under the name and the id are made
+    // from the index it shares with the page when they're shown (MP-9, rule 24).
     let lines = cat
         .entries
         .par_iter()
         .enumerate()
         .filter(|(at, e)| cat.is_line(*at) && crate::midi::big_enough(e, smallest))
         .map(|(at, e)| {
-            let mut from = crate::midi::from_text(e);
-            let details = crate::midi::details(e);
-            Found {
-                name: crate::midi::title(e),
-                detail: [details.as_str(), from.as_str()]
-                    .into_iter()
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-                also: {
-                    if let Some(words) = others.get(&at) {
-                        from.push_str(words);
-                    }
-                    from
-                },
-                key: String::new(),
-                id: e.phrase.hash.clone(),
-                // Notes found in many files first among equals.
-                weight: ((e.copies() as f32 - 1.0) / 10.0).clamp(0.0, 1.0),
+            let mut also = crate::midi::from_text(e);
+            if let Some(words) = others.get(&at) {
+                also.push_str(words);
+            }
+            MidiLine {
+                at: u32::try_from(at).unwrap_or(u32::MAX),
+                name: crate::midi::title(e).into_boxed_str(),
+                also: also.into_boxed_str(),
             }
         })
         .collect();
-    Lines { kind: Some(Kind::MidiPart), lines, ..Lines::default() }
+    MidiParts { cat: Arc::clone(cat), lines }
+}
+
+/// What Ctrl+K finds MIDI parts by: the page's index, shared with it rather than copied, and a line for each part
+/// it lists ([`midi_parts`]).
+#[derive(Default)]
+pub struct MidiParts {
+    cat: Arc<mo_midi::Catalogue>,
+    lines: Vec<MidiLine>,
+}
+
+/// One part's line: its place in the index, and what it's found by.
+struct MidiLine {
+    at: u32,
+    name: Box<str>,
+    also: Box<str>,
+}
+
+impl MidiParts {
+    fn entry(&self, at: usize) -> Option<&mo_midi::Entry> {
+        self.lines.get(at).and_then(|l| self.cat.entries.get(l.at as usize))
+    }
+}
+
+impl Source for MidiParts {
+    fn kind(&self) -> Kind {
+        Kind::MidiPart
+    }
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+    fn name(&self, at: usize) -> &str {
+        self.lines.get(at).map_or("", |l| &l.name)
+    }
+    fn also(&self, at: usize) -> &str {
+        self.lines.get(at).map_or("", |l| &l.also)
+    }
+    fn weight(&self, at: usize) -> f32 {
+        // Notes found in many files first among equals.
+        self.entry(at).map_or(0.0, |e| ((e.copies() as f32 - 1.0) / 10.0).clamp(0.0, 1.0))
+    }
+    fn detail(&self, at: usize) -> String {
+        let Some(e) = self.entry(at) else { return String::new() };
+        let (details, from) = (crate::midi::details(e), crate::midi::from_text(e));
+        [details.as_str(), from.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
+    }
+    fn id(&self, at: usize) -> String {
+        self.entry(at).map(|e| e.phrase.hash.clone()).unwrap_or_default()
+    }
 }
 
 /// The Settings page's tabs, each found by what's on it too ("theme" finds General). The id is the tab's name.

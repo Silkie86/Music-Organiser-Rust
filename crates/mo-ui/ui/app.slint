@@ -27,7 +27,7 @@ export { Heights, Space }
 import { SpacePage, SpaceData, DriveCard, RoomLine, CardPart } from "pages/space.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
 import { Finder, FinderData, FinderLine } from "finder.slint";
-import { SettingsPage, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo, BetaLineInfo } from "pages/settings.slint";
+import { SettingsPage, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo, DawProgramInfo, BetaLineInfo } from "pages/settings.slint";
 // std-widgets' colours follow the theme (light or dark), for its scroll bars and the About part's Slint logo.
 import { Palette } from "std-widgets.slint";
 
@@ -49,7 +49,7 @@ import "../fonts/SpaceMono-700.ttf";
 export { PresetsData, PresetLine, PresetFact, PartChip, PresetCard, CurveLineInfo, CurveEditorData, RulerMark, EditorDot, ClipTile }
 export { MidiData, MidiLine, RollLabel, RollRoom, MidiFact, PickedPart }
 export { FinderData, FinderLine }
-export { Palette, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo, BetaLineInfo }
+export { Palette, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo, DawProgramInfo, BetaLineInfo }
 export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, FilterChoice, FilterView, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook, BackupData, BackupFolderLine, LeftOutLine, SpaceData, DriveCard, RoomLine, CardPart, PluginsData, PluginListLine, NeededCard, RoomBar, RoomFolder, UseRow, CopyRow, CleanRow, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
 
 export struct PlaceInfo {
@@ -109,6 +109,8 @@ export component AppWindow inherits Window {
     in property <[CardInfo]> jobs;
     in property <int> more-jobs;
     in property <[CardInfo]> cards;
+    // How many more cards wait behind the ones on show.
+    in property <int> more-cards;
     callback dismiss-card(int);
     // Settings' "Try an activity card", until real jobs exist.
     callback try-job();
@@ -430,6 +432,7 @@ export component AppWindow inherits Window {
             y: parent.height - self.height - 20px;
             height: self.preferred-height;
             cards: root.cards;
+            more: root.more-cards;
             dismiss(id) => { root.dismiss-card(id); }
         }
 

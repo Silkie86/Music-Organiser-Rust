@@ -24,7 +24,7 @@ mod wma;
 mod write;
 
 pub use other::OTHER_EXTENSIONS;
-pub use read::{MAX_SECONDS, can_read_from, read, read_from, read_parts, reads_exactly};
+pub use read::{MAX_SECONDS, OGG_IN_WAV, can_read_from, read, read_from, read_parts, reads_exactly};
 pub use wma::WMA_EXTENSIONS;
 pub use write::write_wav;
 
@@ -32,8 +32,10 @@ pub use write::write_wav;
 /// before (a new kind, or a fix that turns an error into sound). The sound library notes the number its unread
 /// sounds were last tried with, and tries just those again when this one is higher: files read fine before are left.
 ///
-/// 1: up to November 2026. 2: WAV files that keep Ogg Vorbis inside (FL Studio's own sounds).
-pub const READS: i64 = 2;
+/// 1: up to November 2026. 2: WAV files that keep Ogg Vorbis inside (FL Studio's own sounds). 3: chained Ogg files
+/// (streams joined one after another), and AAC files with a frame damaged into something the decoder doesn't do (the
+/// whole-app review of 19 Nov, SN-11 and SN-18).
+pub const READS: i64 = 3;
 
 /// Whether this computer can decode this sound file (by its extension, ignoring case): WAV, AIFF, MP3, FLAC, M4A,
 /// OGG and AAC everywhere, WMA on Windows only. A sound it can't decode can be listed but not played or analysed.

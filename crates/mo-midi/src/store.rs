@@ -39,6 +39,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -51,9 +52,10 @@ use crate::extract::Found;
 use crate::fit;
 use crate::index::{MidiError, MidiIndex, Source, SourceKind, StoredPhrase};
 use crate::keys;
+use crate::made::made;
 use crate::member::PhraseMember;
-use crate::roles::Role;
-use mo_harmony::KeyFact;
+use crate::roles::{Role, RoleWhy};
+use mo_harmony::{KeyFact, Slot};
 
 mod slots;
 
@@ -98,7 +100,7 @@ const TABLES: &str = "
         part TEXT NOT NULL,
         clip TEXT NOT NULL,
         role INTEGER NOT NULL,          -- Role::code
-        why TEXT NOT NULL,
+        why INTEGER NOT NULL,           -- RoleWhy::code: which of the analyser's few reasons, made into words on show
         drums INTEGER NOT NULL,
         program INTEGER,
         track_name TEXT NOT NULL,
@@ -140,9 +142,10 @@ const INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS ix_slots_version ON slots(version);
 ";
 
-/// The tables' layout this app makes (`PRAGMA user_version`). 2: the notes in `note_data`, a table of their own (1 kept
-/// them in the last column of `notes`, and 0 had no `keys`).
-pub const LAYOUT: i64 = 2;
+/// The tables' layout this app makes (`PRAGMA user_version`). 3: a part's reason for its kind as a number
+/// (`RoleWhy::code`; 2 kept its words in every row). 2: the notes in `note_data`, a table of their own (1 kept them in
+/// the last column of `notes`, and 0 had no `keys`).
+pub const LAYOUT: i64 = 3;
 
 /// `about`'s row saying when the C# app's corrections were taken in (Unix seconds).
 const TOOK_IN_OLD: &str = "took_in_old_corrections";
@@ -276,16 +279,23 @@ fn fill_copy(part: &Path, old: &str) -> Result<Option<(i64, i64)>, String> {
 
 /// Copies every row of the index (`old`) into the copy's tables, each keeping its id, in the order of its ids.
 fn copy_rows(conn: &Connection, has: &dyn Fn(&str) -> bool) -> rusqlite::Result<()> {
-    conn.execute_batch(
+    // The notes themselves: in `note_data` from layout 2, in the last column of `notes` before.
+    let note_data = if has("note_data") {
+        "INSERT INTO main.note_data (notes, data) SELECT notes, data FROM old.note_data ORDER BY notes;"
+    } else {
+        "INSERT INTO main.note_data (notes, data) SELECT id, data FROM old.notes ORDER BY id;"
+    };
+    conn.execute_batch(&format!(
         "INSERT INTO main.files (id, path, kind, mtime, size, version, error)
              SELECT id, path, kind, mtime, size, version, error FROM old.files ORDER BY id;
          INSERT INTO main.notes (id, sound, hash, count, bars, lowest, highest, chroma, features)
              SELECT id, sound, hash, count, bars, lowest, highest, chroma, features FROM old.notes ORDER BY id;
-         INSERT INTO main.note_data (notes, data) SELECT id, data FROM old.notes ORDER BY id;
+         {note_data}
          INSERT INTO main.parts (id, file, notes, part, clip, role, why, drums, program, track_name, members)
-             SELECT id, file, notes, part, clip, role, why, drums, program, track_name, members
+             SELECT id, file, notes, part, clip, role, {why}, drums, program, track_name, members
              FROM old.parts ORDER BY id;",
-    )?;
+        why = why_code_of("why"),
+    ))?;
     if has("keys") {
         conn.execute_batch(
             "INSERT INTO main.keys (notes, version, role, cut, fact)
@@ -297,22 +307,67 @@ fn copy_rows(conn: &Connection, has: &dyn Fn(&str) -> bool) -> rusqlite::Result<
         "INSERT OR IGNORE INTO main.keys (notes, version, role, cut, fact) SELECT id, 0, ?1, 0, NULL FROM main.notes",
         [Role::Other.code()],
     )?;
-    for (table, column) in [("your_roles", "role"), ("your_octaves", "octaves")] {
+    // What's made from the notes comes too, so 360,000 parts' shapes and slots aren't made again after the copy; and
+    // what the index says of itself (when the C# app's corrections were taken in).
+    for (table, columns) in [
+        ("your_roles", "hash, role"),
+        ("your_octaves", "hash, octaves"),
+        ("shapes", "notes, shape"),
+        ("slots", "notes, version, data"),
+        ("about", "name, value"),
+    ] {
         if has(table) {
-            conn.execute_batch(&format!(
-                "INSERT INTO main.{table} (hash, {column}) SELECT hash, {column} FROM old.{table};"
-            ))?;
+            conn.execute_batch(&format!("INSERT INTO main.{table} ({columns}) SELECT {columns} FROM old.{table};"))?;
         }
     }
     Ok(())
+}
+
+/// SQL that turns the words an older layout stored for a part's reason (in `column`) into its [`RoleWhy`] number:
+/// words this app doesn't give any more are 0, no reason.
+fn why_code_of(column: &str) -> String {
+    let mut sql = format!("CASE {column}");
+    for why in RoleWhy::all() {
+        sql.push_str(&format!(" WHEN '{}' THEN {}", why.words().replace('\'', "''"), why.code()));
+    }
+    sql.push_str(" ELSE 0 END");
+    sql
+}
+
+/// A part's reason as the index holds it: a number from layout 3, its words before (an older index the page reads as
+/// it is, until it's copied into this layout).
+fn role_why(stored: rusqlite::types::ValueRef<'_>) -> RoleWhy {
+    match stored {
+        rusqlite::types::ValueRef::Integer(code) => RoleWhy::from_code(code),
+        rusqlite::types::ValueRef::Text(words) => std::str::from_utf8(words).map_or(RoleWhy::NONE, RoleWhy::from_words),
+        _ => RoleWhy::NONE,
+    }
 }
 
 /// Whether the copy holds every row of the index (`old`) as it was, and nothing else: how many sets of notes and parts
 /// it holds when it does, else what differs.
 fn check_rows(conn: &Connection, has: &dyn Fn(&str) -> bool) -> rusqlite::Result<Result<(i64, i64), String>> {
     let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0));
+    // The notes themselves, where the index keeps them ([`copy_rows`]).
+    let (old_data, data_join) =
+        if has("note_data") { ("od.data", "JOIN old.note_data od ON od.notes = o.id") } else { ("o.data", "") };
+    let notes_same = format!(
+        "SELECT COUNT(*) FROM old.notes o JOIN main.notes m ON m.id = o.id JOIN main.note_data d ON d.notes = o.id
+         {data_join}
+         WHERE m.sound IS o.sound AND m.hash IS o.hash AND m.count IS o.count AND m.bars IS o.bars
+             AND m.lowest IS o.lowest AND m.highest IS o.highest AND m.chroma IS o.chroma
+             AND m.features IS o.features AND d.data IS {old_data}"
+    );
+    let parts_same = format!(
+        "SELECT COUNT(*) FROM old.parts o JOIN main.parts m ON m.id = o.id
+         WHERE m.file IS o.file AND m.notes IS o.notes AND m.part IS o.part AND m.clip IS o.clip
+             AND m.role IS o.role AND m.why IS ({why}) AND m.drums IS o.drums AND m.program IS o.program
+             AND m.track_name IS o.track_name AND m.members IS o.members",
+        why = why_code_of("o.why")
+    );
     // Each table: the index's rows, the copy's, and how many of the index's are in the copy as they were. Paths are
     // compared letter for letter, not as the column's letter case rule would.
+    let mut extra: Vec<(&str, String, String, String)> = Vec::new();
     let mut tables = vec![
         (
             "files",
@@ -322,30 +377,14 @@ fn check_rows(conn: &Connection, has: &dyn Fn(&str) -> bool) -> rusqlite::Result
              WHERE m.path = o.path COLLATE BINARY AND m.kind IS o.kind AND m.mtime IS o.mtime AND m.size IS o.size
                  AND m.version IS o.version AND m.error IS o.error",
         ),
-        (
-            "notes",
-            "SELECT COUNT(*) FROM old.notes",
-            "SELECT COUNT(*) FROM main.notes",
-            "SELECT COUNT(*) FROM old.notes o JOIN main.notes m ON m.id = o.id JOIN main.note_data d ON d.notes = o.id
-             WHERE m.sound IS o.sound AND m.hash IS o.hash AND m.count IS o.count AND m.bars IS o.bars
-                 AND m.lowest IS o.lowest AND m.highest IS o.highest AND m.chroma IS o.chroma
-                 AND m.features IS o.features AND d.data IS o.data",
-        ),
+        ("notes", "SELECT COUNT(*) FROM old.notes", "SELECT COUNT(*) FROM main.notes", &notes_same),
         (
             "note_data",
             "SELECT COUNT(*) FROM old.notes",
             "SELECT COUNT(*) FROM main.note_data",
             "SELECT COUNT(*) FROM main.note_data d JOIN main.notes n ON n.id = d.notes",
         ),
-        (
-            "parts",
-            "SELECT COUNT(*) FROM old.parts",
-            "SELECT COUNT(*) FROM main.parts",
-            "SELECT COUNT(*) FROM old.parts o JOIN main.parts m ON m.id = o.id
-             WHERE m.file IS o.file AND m.notes IS o.notes AND m.part IS o.part AND m.clip IS o.clip
-                 AND m.role IS o.role AND m.why IS o.why AND m.drums IS o.drums AND m.program IS o.program
-                 AND m.track_name IS o.track_name AND m.members IS o.members",
-        ),
+        ("parts", "SELECT COUNT(*) FROM old.parts", "SELECT COUNT(*) FROM main.parts", &parts_same),
         // Every set of notes has its key row: the index's own, or "not read yet".
         (
             "keys",
@@ -380,7 +419,23 @@ fn check_rows(conn: &Connection, has: &dyn Fn(&str) -> bool) -> rusqlite::Result
              WHERE m.octaves IS o.octaves",
         ));
     }
-    for (what, old, new, same) in tables {
+    for (table, same) in [
+        ("shapes", "m.shape IS o.shape"),
+        ("slots", "m.version IS o.version AND m.data IS o.data"),
+        ("about", "m.value IS o.value"),
+    ] {
+        if has(table) {
+            let key = if table == "about" { "name" } else { "notes" };
+            extra.push((
+                table,
+                format!("SELECT COUNT(*) FROM old.{table}"),
+                format!("SELECT COUNT(*) FROM main.{table}"),
+                format!("SELECT COUNT(*) FROM old.{table} o JOIN main.{table} m ON m.{key} = o.{key} WHERE {same}"),
+            ));
+        }
+    }
+    let extra = extra.iter().map(|(what, old, new, same)| (*what, old.as_str(), new.as_str(), same.as_str()));
+    for (what, old, new, same) in tables.into_iter().chain(extra) {
         let (old, new, same) = (count(old)?, count(new)?, count(same)?);
         if old != new || same != old {
             return Ok(Err(format!(
@@ -655,6 +710,16 @@ pub struct MidiStore {
     has_shapes: bool,
     /// Its layout ([`LAYOUT`] once the indexer has opened it; the page reads an older one as it is).
     layout: i64,
+    /// Whether what [`MidiStore::save`] makes from a newly read part's notes has tripped since the index was opened.
+    tripped: Tripped,
+}
+
+/// Whether making a newly read part's shape, and its slots, has tripped yet ([`MidiStore::save`]): the first of each
+/// is logged as the crash it is, those after it a line each ([`made`]).
+#[derive(Debug, Default)]
+struct Tripped {
+    shape: AtomicBool,
+    slots: AtomicBool,
 }
 
 /// Opens the index at `path` for writing, making it (and its tables) when it isn't there yet, and copying it into this
@@ -717,7 +782,9 @@ fn open_for_writing(path: &Path) -> Result<(MidiStore, Option<(i64, i64)>), Midi
             // A new index: of this layout from the start.
             .and_then(|()| if layout == LAYOUT { Ok(()) } else { conn.pragma_update(None, "user_version", LAYOUT) })
             .map_err(|e| open_error(e.to_string()))?;
-        let store = MidiStore { conn, path: path.to_owned(), has_keys: true, has_shapes: true, layout: LAYOUT };
+        let tripped = Tripped::default();
+        let store =
+            MidiStore { conn, path: path.to_owned(), has_keys: true, has_shapes: true, layout: LAYOUT, tripped };
         return Ok((store, copied));
     }
 }
@@ -767,7 +834,7 @@ impl MidiStore {
         let has_keys = has_table("keys")?;
         // One made before shapes were kept (until the indexer next opens it): listed with no loop in other keys.
         let has_shapes = has_table("shapes")?;
-        Ok(MidiStore { conn, path: path.to_owned(), has_keys, has_shapes, layout })
+        Ok(MidiStore { conn, path: path.to_owned(), has_keys, has_shapes, layout, tripped: Tripped::default() })
     }
 
     pub fn path(&self) -> &Path {
@@ -802,10 +869,35 @@ impl MidiStore {
     }
 
     /// Saves what was read from some files, each replacing what was there before, in one go.
+    ///
+    /// Each part's shape and slots are made here, from its notes. Notes that trip what makes either (a bug) are
+    /// saved without it, so one new loop never ends the whole reading: the steps after the reading ask for it again,
+    /// in this run and every later one ([`MidiStore::unshaped`], [`MidiStore::without_slots`]), until the build that
+    /// puts the bug right gives them theirs. (The 19 November 2026 review's MP-11: nothing caught these two here, so
+    /// the reading stopped at that loop's file with the batch unsaved, and again at every start, as the file came
+    /// up first each time.)
     pub fn save(&mut self, batch: &[FileRead]) -> Result<(), MidiError> {
+        self.save_making(batch, analyser::shape_of, fit::slots_of)
+    }
+
+    /// Whether making a newly read part's shape, and its slots, has tripped since the index was opened
+    /// ([`MidiStore::save`]): the bug is in the log in full then.
+    pub(crate) fn tripped(&self) -> (bool, bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.tripped.shape.load(Relaxed), self.tripped.slots.load(Relaxed))
+    }
+
+    /// [`MidiStore::save`], with what makes a part's shape and its slots handed in (a test hands in ones that trip).
+    pub(crate) fn save_making(
+        &mut self,
+        batch: &[FileRead],
+        shape_of: impl Fn(&[NoteEvent]) -> Option<i64>,
+        slots_of: impl Fn(&[NoteEvent]) -> Vec<Slot>,
+    ) -> Result<(), MidiError> {
         if batch.is_empty() {
             return Ok(());
         }
+        let tripped = &self.tripped;
         let tx = self.conn.transaction()?;
         {
             let mut upsert = tx.prepare_cached(
@@ -882,13 +974,16 @@ impl MidiStore {
                                 |r| r.get(0),
                             )?;
                             data.execute(params![notes, encoded])?;
-                            if let Some(s) = analyser::shape_of(&p.notes) {
+                            // Notes that trip the shape are saved with none, and asked for again after the reading.
+                            if let Some(Some(s)) = made(&tripped.shape, || shape_of(&p.notes)) {
                                 shape.execute(params![notes, s])?;
                             }
                             // Made here, a few microseconds a part, like the shape above: a part is in a search
-                            // as soon as it's saved.
-                            let slots = slots::encode(&fit::slots_of(&p.notes));
-                            slot.execute(params![notes, fit::SLOTS_VERSION, slots])?;
+                            // as soon as it's saved. Notes that trip the slots keep the ones they had, if any (an
+                            // older version's are made again after the reading), or none.
+                            if let Some(slots) = made(&tripped.slots, || slots::encode(&slots_of(&p.notes))) {
+                                slot.execute(params![notes, fit::SLOTS_VERSION, slots])?;
+                            }
                             key.execute(params![
                                 notes,
                                 keys::VERSION,
@@ -903,7 +998,7 @@ impl MidiStore {
                                 p.part,
                                 p.clip,
                                 a.role.code(),
-                                a.role_why,
+                                a.role_why.code(),
                                 p.drums,
                                 p.program,
                                 p.track_name,
@@ -980,8 +1075,8 @@ impl MidiStore {
         Ok(())
     }
 
-    /// How many sets of notes have no shape yet (saved before the `shapes` table was there): two counts, each read
-    /// from a small index, so it's quick when there are none.
+    /// How many sets of notes have no shape yet (saved before the `shapes` table was there, or saved without as
+    /// theirs tripped): two counts, each read from a small index, so it's quick when there are none.
     pub fn unshaped_count(&self) -> Result<usize, MidiError> {
         let n: i64 =
             self.conn
@@ -1296,7 +1391,7 @@ fn parts_between(
             part: r.get(2)?,
             clip: r.get(3)?,
             role: Role::from_code(r.get(4)?),
-            role_why: r.get(5)?,
+            role_why: role_why(r.get_ref(5)?),
             your_role,
             bars: r.get::<_, i64>(9)?.clamp(0, i64::from(i32::MAX)) as i32,
             notes: r.get::<_, i64>(8)?.clamp(0, i64::from(i32::MAX)) as i32,

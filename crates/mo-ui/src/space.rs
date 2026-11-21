@@ -13,8 +13,10 @@
 //! library and the sound library are only read.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
@@ -212,6 +214,9 @@ enum Step {
     /// The fixed projects went to the Recycle Bin: the list of what the app put there with them now (none when keeping
     /// it stopped with an error, which is logged).
     FixedRemoved(Option<Kept>),
+    /// What Free the space found of the checked saves' fixed projects: those that still use copies a later look found
+    /// (`space_bitwig::fixed_still_using`), and every save it checked.
+    StillUses(Vec<(PathBuf, PathBuf, usize)>, Vec<PathBuf>),
     Kept(Kept),
     /// Remove has finished: when it ran (as the list of what the app put in the Recycle Bin keeps it), what went and
     /// what stayed, and that list with it now (none when keeping it stopped with an error, which is logged).
@@ -291,6 +296,8 @@ struct Page {
     /// Whether it's Free the space that sends them (`fixed_removing` is on then too, so nothing else starts): only its
     /// own button says so.
     freeing: bool,
+    /// While Free the space runs: what stops it (its card's Stop; the whole-app review of 19 Nov, FS-11).
+    bitwig_stop: Option<Arc<AtomicBool>>,
     /// The look for old copies, what the last one found (it stays on show while the next one looks), and whether one
     /// is on; and how many of the Plugins page's moves had finished when the newest one was asked for: once another
     /// has, it looks again ([`plugin_moved`]).
@@ -355,8 +362,11 @@ struct Page {
     /// The picked line's id, or "" when none is.
     picked: String,
     /// The parts on the card on show, for its ticks and links (they say which part by its place). The card's rows
-    /// are only made again when these change.
+    /// are only changed where these change ([`set_rows`]).
     card_parts: Vec<Part>,
+    /// The card's rows, as the window has them: one model, changed in place, so a tick or a save Fix finishes makes
+    /// only its own row again, not all 400-odd (the whole-app review of 19 Nov, FS-4). None until the first card.
+    card_rows: Option<Rc<VecModel<CardPart>>>,
 }
 
 /// Which looks start again once something has gone to the Recycle Bin or come back.
@@ -440,8 +450,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
                     }
                 }
             }
-            // The tick box ticked itself, which undoes its tie to the card's rows: made again, they tie it again.
-            p.card_parts.clear();
+            // The tick box only asks (it doesn't tick itself), so it stays tied to its row: the row that changes is set.
         });
         show_card(&app);
     });
@@ -682,6 +691,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
                 _ => false,
             },
             STOP => match p.picked.as_str() {
+                BITWIG_COPIES => enabled(bitwig_stop_button(&p)),
                 OLD_COPIES => enabled(old_stop_button(&p)),
                 COMPACT => enabled(songs_stop_button(&p)),
                 _ => false,
@@ -786,6 +796,12 @@ fn songs_stop_button(p: &Page) -> Option<(String, bool)> {
     stop_button(matches!(p.songs_removing.stage(), space_songs::Stage::Sending(_)), p.songs_stop.as_ref())
 }
 
+/// The Bitwig card's Stop, while Free the space runs: the copies not yet checked stay, and the marks are kept for
+/// what went.
+fn bitwig_stop_button(p: &Page) -> Option<(String, bool)> {
+    stop_button(p.freeing, p.bitwig_stop.as_ref())
+}
+
 /// A card's Stop while its Remove is on (`sending`), and `stop` what stops it: pressed, it says it's stopping.
 fn stop_button(sending: bool, stop: Option<&Arc<AtomicBool>>) -> Option<(String, bool)> {
     if !sending {
@@ -820,20 +836,29 @@ fn chosen(app: &AppWindow, id: &str) {
                 let spare = !p.spare_looking && !held.spare;
                 let old = !p.old_looking && !held.old;
                 let songs = !p.songs_looking && !held.songs;
-                if spare && p.removing.shows_result() {
-                    p.spare = None;
+                if spare
+                    && p.removing.shows_result()
+                    && let Some(old) = p.spare.take()
+                {
+                    background::free_later(old);
                 }
                 if spare {
                     p.removing.again();
                 }
-                if old && p.old_removing.shows_result() {
-                    p.old = None;
+                if old
+                    && p.old_removing.shows_result()
+                    && let Some(old) = p.old.take()
+                {
+                    background::free_later(old);
                 }
                 if old {
                     p.old_removing.again();
                 }
-                if songs && p.songs_removing.shows_result() {
-                    p.songs = None;
+                if songs
+                    && p.songs_removing.shows_result()
+                    && let Some(old) = p.songs.take()
+                {
+                    background::free_later(old);
                 }
                 if songs {
                     p.songs_removing.again();
@@ -865,10 +890,11 @@ fn chosen(app: &AppWindow, id: &str) {
         (REMOVE_FIXED, Some(feed)) => remove_fixed(app, feed),
         (FREE_BITWIG, Some(feed)) => free_bitwig(app, feed),
         (STOP, _) => {
-            // The card on show's: old copies or your songs' things.
+            // The card on show's: Bitwig's copies, old copies or your songs' things.
             PAGE.with(|p| {
                 let p = p.borrow();
                 let (stop, what) = match p.picked.as_str() {
+                    BITWIG_COPIES => (&p.bitwig_stop, "Bitwig copies"),
                     OLD_COPIES => (&p.old_stop, "old copies"),
                     COMPACT => (&p.songs_stop, "old autosaves and caches"),
                     _ => return,
@@ -982,10 +1008,14 @@ fn fix_ticked(app: &AppWindow, feed: Feed) {
         return;
     }
     let weak = app.as_weak();
+    // Closing the app stops Fix between saves and waits for the one being written (the whole-app review of 19 Nov,
+    // FS-9: cut off part way, it left a half-written project beside the save).
+    let on_its_way = OnItsWay::new(Arc::new(AtomicBool::new(false)));
     let started = background::spawn("Space fix", move || {
+        let on_its_way = on_its_way;
         // A crash outside a save's own fix (logged as one) still finishes Fix, so the page isn't busy for ever: the
         // saves it didn't get to say so.
-        let _ = catch_crash(AssertUnwindSafe(|| fix_each(&jobs, &feed, &weak)));
+        let _ = catch_crash(AssertUnwindSafe(|| fix_each(&jobs, &feed, &weak, &on_its_way.0)));
         arrive(&weak, Step::FixDone);
     });
     if let Err(e) = started {
@@ -998,14 +1028,18 @@ fn fix_ticked(app: &AppWindow, feed: Feed) {
 /// Fix's own work, off the window's thread: each save in turn, inside the low-priority pool (rule 21), with an
 /// activity card saying how far it is and how it went, and each save's line told how it went. What it writes goes on
 /// the app's note in the data folder ([`space_fix_note`]).
-fn fix_each(jobs: &[ToFix], feed: &Feed, weak: &slint::Weak<AppWindow>) {
+fn fix_each(jobs: &[ToFix], feed: &Feed, weak: &slint::Weak<AppWindow>, stop: &AtomicBool) {
     let card = feed.start(space_bitwig::FIXING, "");
     let note = space_fix_note::file();
     let (mut written, mut failed) = (0, 0);
     for (n, job) in jobs.iter().enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            log::info("Space", &format!("Fix stopped as the app closed: {} saves not fixed", jobs.len() - n));
+            break;
+        }
         card.progress(n as f32 / jobs.len() as f32, Some(&space_bitwig::fix_progress_words(n, jobs.len())));
         // A crash (logged as one) fails this save only: the rest are still tried.
-        let done = catch_crash(AssertUnwindSafe(|| background::on_pool(|| space_bitwig::fix(job, &note))))
+        let done = catch_crash(AssertUnwindSafe(|| background::on_pool(|| space_bitwig::fix(job, &note, stop))))
             .unwrap_or_else(|_| Fixing::Failed("it stopped with an error, which the log says".to_owned()));
         let save = job.save.display();
         match &done {
@@ -1117,13 +1151,14 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
         let jobs = p.fixes.to_free(p.bitwig.as_ref()?);
         p.fixed_removing = true;
         p.freeing = true;
-        Some((jobs, p.library.clone()))
+        let stop = Arc::new(AtomicBool::new(false));
+        p.bitwig_stop = Some(stop.clone());
+        Some((jobs, p.library.clone(), stop))
     });
-    let Some((mut jobs, library)) = jobs else { return };
+    let Some((mut jobs, library, stop)) = jobs else { return };
     let weak = app.as_weak();
     let data = paths::data_dir();
     let when = binned::now();
-    let stop = Arc::new(AtomicBool::new(false));
     let on_its_way = OnItsWay::new(stop);
     let started = background::spawn("Space free Bitwig copies", move || {
         let on_its_way = on_its_way;
@@ -1136,17 +1171,32 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
             // here off the window's thread. Unread, nothing goes.
             let lib = open_library(&library);
             let choices = lib.as_ref().map(|l| l.song_choices().map_err(|e| e.to_string()));
+            // The library's samples are read once for every project, not once each (the whole-app review of 19 Nov,
+            // FS-12); each project then gets the rows that name one of its own copies.
+            let using = match (&lib, &choices) {
+                (Some(lib), Some(Ok(_))) => {
+                    let all: Vec<String> = jobs.iter().flat_map(|j| j.copy_paths()).collect();
+                    Some(lib.saves_using(&all).map_err(|e| e.to_string()))
+                }
+                _ => None,
+            };
+            drop(lib);
             for job in &mut jobs {
                 match &choices {
                     Some(Ok(c)) => job.choices = c.clone(),
                     Some(Err(e)) => job.elsewhere = Err(e.clone()),
                     None => job.elsewhere = Err("it couldn't be opened".to_owned()),
                 }
-                if let (Some(lib), Some(Ok(_))) = (&lib, &choices) {
-                    job.elsewhere = lib.saves_using(&job.copy_paths()).map_err(|e| e.to_string());
+                if let Some(using) = &using {
+                    job.elsewhere = using.as_ref().map(|rows| space_bitwig::rows_for(job, rows)).map_err(Clone::clone);
                 }
             }
-            drop(lib);
+            let reread = mo_library::song_writes::bitwig_reread(&library);
+            for job in &mut jobs {
+                job.reread = reread;
+                // The song's older fixed projects still as Fix wrote them: left behind with it (FS-3).
+                job.older_fixed = space_bitwig::older_fixed(job, &space_fix_note::file());
+            }
             let of: usize = jobs.iter().map(|j| j.project.copies.len()).sum();
             let tally = Mutex::new(Tally::new(SystemBin.admin().can_ask()));
             let hear = |_: &Path, sent: &Result<(), String>| {
@@ -1171,11 +1221,26 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
                         behind.iter().map(|b| b.display().to_string()).collect::<Vec<_>>().join(", ")
                     ),
                 );
-                let one = background::on_bulk_pool(|| space_bitwig::free(job, &bin, stop));
-                if !one.removed.is_empty()
-                    && let Err(why) = space_bitwig::note_freed(job, &space_fix_note::file())
-                {
-                    log::warning("Space", &why);
+                let one = background::on_bulk_pool(|| {
+                    space_bitwig::free_noted(job, &bin, stop, &space_fix_note::file(), when)
+                });
+                // A copy that stayed may be one the song's own fixed project still uses: one a look found after Fix
+                // ran. Fix is then offered again for that song (the whole-app review of 19 Nov, FS-3).
+                if !one.problems.is_empty() && !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let still = background::on_pool(|| space_bitwig::fixed_still_using(job));
+                    for (save, fixed, n) in &still {
+                        log::info(
+                            "Space",
+                            &format!(
+                                "{} still uses {n} of the copies of {} that can use their originals now: Fix is \
+                                 offered again for it.",
+                                fixed.display(),
+                                save.display()
+                            ),
+                        );
+                    }
+                    let checked = job.checked.iter().map(|(save, _)| save.clone()).collect();
+                    arrive(&weak, Step::StillUses(still, checked));
                 }
                 done.removed.extend(one.removed);
                 done.problems.extend(one.problems);
@@ -1184,9 +1249,17 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
             {
                 if warning { log::warning("Space", &line) } else { log::info("Space", &line) }
             }
-            let (kept, _) = binned::record(&data, &SystemBin, space_bitwig::BITWIG_COPIES_FREED, when, &done);
+            let (kept, kept_at) = binned::record(&data, &SystemBin, space_bitwig::BITWIG_COPIES_FREED, when, &done);
+            // Its marks go with the time its line is kept under: Put back knows it by that.
+            space_fix_note::moved(&space_fix_note::file(), when, kept_at);
             note.finish(kept.noted);
-            (space_bitwig::freed_words(&done), kept)
+            // Stopped by its Stop (not the app closing, which shows no card): it says so, not what was checked.
+            let words = if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                Ok(space_bitwig::stopped_words(&done))
+            } else {
+                space_bitwig::freed_words(&done)
+            };
+            (words, kept)
         }));
         let kept = match ran {
             Ok((words, kept)) => {
@@ -1214,15 +1287,11 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
     show_wins(app);
 }
 
-/// Opens a fixed project in Bitwig: the program picked for it in Settings (shared with the C# app), else whatever opens
-/// Bitwig projects. Off the window's thread, with an activity card saying how it went.
+/// Opens a fixed project in Bitwig: the program chosen for it on Settings › DAWs (as it stands at the click), else
+/// whatever opens Bitwig projects. Off the window's thread, with an activity card saying how it went.
 fn open_in_bitwig(file: PathBuf) {
-    let Some((feed, library)) = PAGE.with(|p| {
-        let p = p.borrow();
-        Some((p.feed.clone()?, p.library.clone()))
-    }) else {
-        return;
-    };
+    let Some(feed) = PAGE.with(|p| p.borrow().feed.clone()) else { return };
+    let chosen = crate::settings::value(&shell::daw_exe_key(BITWIG));
     let started = background::spawn("Open", move || {
         let path = file.to_string_lossy().into_owned();
         let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
@@ -1231,12 +1300,10 @@ fn open_in_bitwig(file: PathBuf) {
                 .failed("It has moved or been deleted since. Measure again to see what's there now.");
             return;
         }
-        let exe = open_library(&library)
-            .and_then(|lib| lib.setting(&shell::daw_exe_key(BITWIG)).ok().flatten())
-            .filter(|e| shell::usable_exe(e));
+        let exe = chosen.as_deref().filter(|e| shell::usable_exe(e));
         let card = feed.start(&format!("Opening {name}"), "");
-        match shell::run(&shell::open(&path, exe.as_deref(), shell::Os::THIS)) {
-            Ok(()) => card.done("Sent to Bitwig. It opens there in a moment."),
+        match shell::run(&shell::open(&path, exe, shell::Os::THIS)) {
+            Ok(()) => card.done(&shell::sent_to("Bitwig", chosen.as_deref(), exe.is_some(), shell::Os::THIS)),
             Err(e) => {
                 log::warning("Open", &format!("{path}: {e}"));
                 card.failed(&format!("Couldn't open it in Bitwig: {e}"));
@@ -1571,7 +1638,8 @@ pub fn finish_up() {
     log::warning(
         "Space",
         &format!(
-            "The app closed while things were going to the {BIN}: sending stops (what went stays there, for Put back)"
+            "The app closed while things were going to the {BIN} or Fix was writing: sending stops (what went stays \
+             there, for Put back), and Fix stops after the save it's writing"
         ),
     );
     for stop in removes.iter() {
@@ -1584,8 +1652,9 @@ pub fn finish_up() {
             log::warning(
                 "Space",
                 &format!(
-                    "Sending didn't stop in time: what went to the {BIN} was noted as it went, and the Space page keeps \
-                     it the next time it looks"
+                    "Sending or Fix didn't stop in time: what went to the {BIN} was noted as it went, and the Space \
+                     page keeps it the next time it looks; a fixed project Fix was writing is left half-written, and \
+                     cleared the next time that save is fixed"
                 ),
             );
             return;
@@ -1692,11 +1761,12 @@ fn put_back(app: &AppWindow, feed: Feed, kind: String, when: i64, done: Done) {
         for problem in &problems {
             log::warning("Space", &format!("Couldn't put back {}: {}", problem.path, problem.why));
         }
-        // Copies Free the space sent that all came back: their songs' fixed projects are like any other again.
+        // Copies this Free the space sent that all came back: its marks come off their songs' fixed projects (another
+        // Free's stay until that one comes back too: the whole-app review of 19 Nov, FS-1).
         if kind == space_bitwig::BITWIG_COPIES_FREED {
             let back: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
             let missed: Vec<&str> = problems.iter().map(|p| p.path.as_str()).collect();
-            space_fix_note::put_back(&space_fix_note::file(), &back, &missed);
+            space_fix_note::put_back(&space_fix_note::file(), when, &back, &missed);
         }
         match space_bin::put_back_words(done.removed.len(), &problems) {
             Ok(words) => card.done(&words),
@@ -2162,10 +2232,14 @@ fn look_for_sound_copies(app: &AppWindow, sounds: Known) {
         p.copies_of = Arc::downgrade(&list);
         p.copies_hiding = hiding;
         let state = sounds_page::copies_found();
-        if list.copies().is_none() || matches!(state, CopiesFound::Looking { .. } | CopiesFound::NotLooked) {
+        if list.copies().is_none()
+            || list.copies_carried()
+            || matches!(state, CopiesFound::Looking { .. } | CopiesFound::NotLooked)
+        {
             // Not all found for this list yet: measuring while the Sounds page looks (what's on show stays), and a
             // look of this page's still on its way is for an older list, so it's dropped. Nothing new to show if the
-            // Sounds page's look failed.
+            // Sounds page's look failed. Copies the list before it found, carried over while they're looked for again
+            // (review SN-5), aren't counted as this list's.
             let _ = p.copies_look.next();
             p.copies_looking = !matches!(state, CopiesFound::Failed);
             return None;
@@ -2339,7 +2413,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 }
                 Step::Bitwig(id, copies) if id == p.bitwig_look.asked => {
                     p.fixes.looked();
-                    p.bitwig = Some(copies);
+                    if let Some(old) = p.bitwig.replace(copies) {
+                        // Freed off the window's thread: a big result took tens of ms to free here (FS-14).
+                        background::free_later(old);
+                    }
                     p.bitwig_looking = None;
                     Changed::Wins
                 }
@@ -2349,7 +2426,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Wins
                 }
                 Step::Old(id, found) if id == p.old_look.asked => {
-                    p.old = Some(found);
+                    if let Some(old) = p.old.replace(found) {
+                        // Freed off the window's thread: a big result took tens of ms to free here (FS-14).
+                        background::free_later(old);
+                    }
                     p.old_looking = false;
                     Changed::Wins
                 }
@@ -2359,7 +2439,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Wins
                 }
                 Step::Spare(id, found) if id == p.spare_look.asked => {
-                    p.spare = Some(found);
+                    if let Some(old) = p.spare.replace(found) {
+                        // Freed off the window's thread: a big result took tens of ms to free here (FS-14).
+                        background::free_later(old);
+                    }
                     p.spare_looking = false;
                     Changed::Wins
                 }
@@ -2369,7 +2452,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Wins
                 }
                 Step::Songs(id, shown) if id == p.songs_look.asked => {
-                    p.songs = Some(*shown);
+                    if let Some(old) = p.songs.replace(*shown) {
+                        // Freed off the window's thread: a big result took tens of ms to free here (FS-14).
+                        background::free_later(old);
+                    }
                     p.songs_looking = false;
                     Changed::Wins
                 }
@@ -2411,7 +2497,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     }
                 }
                 Step::Copies(id, found) if id == p.copies_look.asked => {
-                    p.copies = Some(*found);
+                    if let Some(old) = p.copies.replace(*found) {
+                        // Freed off the window's thread: a big result took tens of ms to free here (FS-14).
+                        background::free_later(old);
+                    }
                     p.copies_looking = false;
                     Changed::Also
                 }
@@ -2434,7 +2523,12 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     keep(&mut p, kept);
                     p.fixed_removing = false;
                     p.freeing = false;
+                    p.bitwig_stop = None;
                     Changed::LookAgain
+                }
+                Step::StillUses(still, checked) => {
+                    p.fixes.still_uses(still, &checked);
+                    Changed::Nothing
                 }
                 Step::Kept(kept) => {
                     if keep(&mut p, Some(kept)) {
@@ -2464,6 +2558,34 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Bin { spare, old, songs, bitwig: false }
                 }
                 Step::PutBack(kind, when, problems, kept) => {
+                    // Copies that came back wait for a new check of their songs before they can go again (the
+                    // whole-app review of 19 Nov, FS-8): the saves in their folders lose their heard ticks. Read from
+                    // the list the page had, which still holds that line.
+                    if kind == space_bitwig::BITWIG_COPIES_FREED {
+                        let folders: HashSet<String> = p
+                            .kept
+                            .as_ref()
+                            .and_then(|k| k.list.iter().find(|b| b.kind == kind && b.when == when))
+                            .map(|b| {
+                                b.done
+                                    .removed
+                                    .iter()
+                                    .filter_map(|r| {
+                                        Path::new(&r.path)
+                                            .parent()?
+                                            .parent()
+                                            .map(|f| mo_space::key(&f.to_string_lossy()))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // Not known which: every song waits for a new check.
+                        let came_back = |save: &Path| {
+                            folders.is_empty()
+                                || save.parent().is_some_and(|f| folders.contains(&mo_space::key(&f.to_string_lossy())))
+                        };
+                        p.fixes.heard.retain(|save, _| !came_back(save));
+                    }
                     let plugins = kind == space_bin::PLUGIN_CLEAN || kind == space_bin::PLUGIN_UNINSTALL;
                     let list = kept.as_ref().filter(|_| plugins).and_then(plugins_page::trusted_binned);
                     // A list older than the one the page has may not hold what the Plugins page kept since.
@@ -2714,8 +2836,9 @@ fn show_card(app: &AppWindow) {
                 let remove = remove_fixed_button(&p).map(|(words, enabled)| Button::new(REMOVE_FIXED, words, enabled));
                 let free =
                     free_bitwig_button(&p).map(|(words, enabled)| Button::new(FREE_BITWIG, words, enabled).main());
+                let stop = bitwig_stop_button(&p).map(|(words, enabled)| Button::new(STOP, words, enabled));
                 let card = space_bitwig::card(p.bitwig.as_ref(), p.bitwig_looking, &p.fixes);
-                (card, free.into_iter().chain(fix).chain(remove).chain([measure_button(&p)]).collect())
+                (card, free.into_iter().chain(stop).chain(fix).chain(remove).chain([measure_button(&p)]).collect())
             }
             // Send to the Recycle Bin first (the main button, as Plugins' clean-up is), or once it has run, Put back (the
             // main button then) and the Recycle Bin; Measure again waits while a look is on (which it shows) or something
@@ -2825,10 +2948,17 @@ fn show_card(app: &AppWindow) {
         data.set_card_big_note(card.big_note.into());
         data.set_card_lead(card.lead.into());
         data.set_card_ticks(card.ticks);
-        // Made again only when they change, so how far a look or Fix is doesn't make every row again.
+        // Changed only where they change, so how far a look or Fix is, or one tick, doesn't make every row again.
         if card.parts != p.card_parts {
-            let parts: Vec<CardPart> = card.parts.iter().map(card_part).collect();
-            data.set_card_parts(ModelRc::new(VecModel::from(parts)));
+            let rows = p
+                .card_rows
+                .get_or_insert_with(|| {
+                    let rows = Rc::new(VecModel::default());
+                    data.set_card_parts(ModelRc::from(rows.clone()));
+                    rows
+                })
+                .clone();
+            set_rows(&rows, &p.card_parts, &card.parts);
             p.card_parts = card.parts;
         }
         data.set_card_note(card.note.into());
@@ -2857,6 +2987,32 @@ fn set_line_menu(data: &SpaceData, buttons: &[Button]) {
     let now = data.get_line_menu();
     if now.row_count() != items.len() || now.iter().zip(&items).any(|(was, item)| was != *item) {
         data.set_line_menu(ModelRc::new(VecModel::from(items)));
+    }
+}
+
+/// Changes the card's rows from `old` to `new` in place (the whole-app review of 19 Nov, FS-4): a row that differs is
+/// set, and rows shown or hidden between the same ones (Show its other saves) are put in or taken out. Another card
+/// altogether, sharing no first or last row, replaces them all at once. The tick boxes only ask to be ticked
+/// (`asks`), so a row set in place still shows its row's tick.
+fn set_rows(rows: &VecModel<CardPart>, old: &[Part], new: &[Part]) {
+    let front = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let back = old[front..].iter().rev().zip(new[front..].iter().rev()).take_while(|(a, b)| a == b).count();
+    if rows.row_count() != old.len() || (front == 0 && back == 0) {
+        rows.set_vec(new.iter().map(card_part).collect::<Vec<_>>());
+        return;
+    }
+    let (old_mid, new_mid) = (old.len() - front - back, new.len() - front - back);
+    let both = old_mid.min(new_mid);
+    for at in front..front + both {
+        if old[at] != new[at] {
+            rows.set_row_data(at, card_part(&new[at]));
+        }
+    }
+    for _ in new_mid..old_mid {
+        rows.remove(front + both);
+    }
+    for (at, part) in new.iter().enumerate().skip(front + both).take(new_mid - both) {
+        rows.insert(at, card_part(part));
     }
 }
 
@@ -2951,6 +3107,35 @@ mod tests {
         let keys = mo_app::shortcuts::Shortcuts::default();
         assert_eq!(keys.page_action_for("F5", mo_app::shortcuts::SPACE_ACTIONS), Some(MEASURE));
         assert_eq!(keys.page_action_for("Ctrl+Shift+E", mo_app::shortcuts::SPACE_ACTIONS), Some(REVEAL));
+    }
+
+    #[test]
+    fn the_cards_rows_change_in_place_to_what_the_card_says() {
+        let part = |name: &str| Part { name: name.into(), ..Part::default() };
+        let parts = |names: &[&str]| names.iter().map(|n| part(n)).collect::<Vec<_>>();
+        let rows = VecModel::default();
+        let shown = |rows: &VecModel<CardPart>| rows.iter().map(|r| r.name.to_string()).collect::<Vec<_>>();
+        let mut old: Vec<Part> = Vec::new();
+        for new in [
+            parts(&["a", "b", "c"]),
+            // Show its other saves: put in between.
+            parts(&["a", "b", "b1", "b2", "c"]),
+            // One line's words change (a tick, or a save Fix finished).
+            parts(&["a", "B", "b1", "b2", "c"]),
+            // Hide them again.
+            parts(&["a", "B", "c"]),
+            // At the ends.
+            parts(&["z", "a", "B", "c", "d"]),
+            parts(&["a", "B"]),
+            // Another card altogether.
+            parts(&["x", "y"]),
+            Vec::new(),
+        ] {
+            set_rows(&rows, &old, &new);
+            assert_eq!(shown(&rows), new.iter().map(|p| p.name.clone()).collect::<Vec<_>>());
+            assert!(rows.iter().zip(&new).all(|(r, p)| r == card_part(p)));
+            old = new;
+        }
     }
 
     #[test]

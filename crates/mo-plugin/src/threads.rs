@@ -20,13 +20,16 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Runs `work` on a thread of its own at low priority (never the DAW's threads). A panic in it is written to the crash
-/// note and ends only that work.
-pub fn background(name: &str, work: impl FnOnce() + Send + 'static) {
+/// note and ends only that work. Whether the thread started (the system can refuse one): `work` never runs if not.
+pub fn background(name: &str, work: impl FnOnce() + Send + 'static) -> bool {
     note_crashes();
-    let _ = std::thread::Builder::new().name(name.into()).spawn(move || {
-        let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
-        let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(work));
-    });
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
+            let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(work));
+        })
+        .is_ok()
 }
 
 /// Work handed to a [`OneAtATime`].
@@ -62,7 +65,9 @@ impl OneAtATime {
         }
         match worker.as_ref() {
             Some(worker) => worker.ask(Box::new(job)),
-            None => background(self.name, job),
+            None => {
+                background(self.name, job);
+            }
         }
     }
 }
@@ -171,13 +176,15 @@ mod tests {
         let lister = OneAtATime::default();
         let ran = Arc::new(Mutex::new(Vec::new()));
         let (hold, held) = std::sync::mpsc::channel::<()>();
+        let (under_way, started) = std::sync::mpsc::channel::<()>();
         let first = Arc::clone(&ran);
         lister.ask(move || {
+            let _ = under_way.send(());
             let _ = held.recv_timeout(Duration::from_secs(10));
             lock(&first).push(0);
         });
-        // While the first runs, 50 more come: only the last is done after it.
-        std::thread::sleep(Duration::from_millis(50));
+        // While the first runs, 50 more come: only the last is done after it (TC-7: waited for, not guessed at).
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
         for n in 1..=50 {
             let ran = Arc::clone(&ran);
             lister.ask(move || lock(&ran).push(n));
@@ -202,8 +209,11 @@ mod tests {
         let sleeper = Arc::clone(&nap);
         let started = Instant::now();
         let slept = std::thread::spawn(move || sleeper.sleep(Duration::from_secs(30)));
-        std::thread::sleep(Duration::from_millis(50));
-        nap.wake();
+        // Woken until it has finished: a wake before it was asleep is missed, and it may be slow to get going (TC-7).
+        while !slept.is_finished() && started.elapsed() < Duration::from_secs(10) {
+            nap.wake();
+            std::thread::sleep(Duration::from_millis(10));
+        }
         slept.join().unwrap();
         assert!(started.elapsed() < Duration::from_secs(10), "woken, not slept out");
         // Unwoken, it sleeps its time.

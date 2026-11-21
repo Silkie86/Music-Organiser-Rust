@@ -53,7 +53,8 @@ pub fn move_asked() -> Option<PathBuf> {
     move_asked_in(&crate::paths::first_dir(), &crate::paths::data_dir())
 }
 
-/// Takes the installer's ask away, as the move it asked for starts.
+/// Takes the installer's ask away, once the copy it asked for has ended (done, stopped or failed): a copy cut short
+/// by closing the app keeps it, so the next start goes on with it (DA-3).
 pub fn take_move_ask() {
     let _ = fs::remove_file(move_asked_file(&crate::paths::first_dir()));
 }

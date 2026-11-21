@@ -80,7 +80,8 @@ pub fn read() -> Read {
     let stamp = crate::kept::Stamp::of(&files);
     let library = library_facts(&mo_library::songs_db::to_read(&data));
     let defaults = plib::default_folders();
-    let bitwig = page::bitwig_folders(&defaults, library.saves.iter().map(|s| s.path.as_str()));
+    let bitwig =
+        page::bitwig_folders(chosen(&data).as_deref(), &defaults, library.saves.iter().map(|s| s.path.as_str()));
     let roots = page::preset_folders(&defaults, &bitwig);
     // On the app's low-priority threads, as the app reads them: never at the DAW's own priority.
     let read = mo_app::background::on_pool(|| {
@@ -102,8 +103,18 @@ pub fn read() -> Read {
 pub fn folders() -> Vec<PathBuf> {
     let defaults = plib::default_folders();
     let data = mo_app::paths::data_dir();
-    let bitwig = page::bitwig_folders(&defaults, bitwig_saves(&mo_library::songs_db::to_read(&data)));
+    let bitwig =
+        page::bitwig_folders(chosen(&data).as_deref(), &defaults, bitwig_saves(&mo_library::songs_db::to_read(&data)));
     page::preset_folders(&defaults, &bitwig)
+}
+
+/// Your Bitwig Studio folder as the app's Settings › DAWs has it, when it is Bitwig's (it has a Library folder in
+/// it): the app's Presets page looks there first, so the plugin does too. Reads the settings file and asks the disk.
+fn chosen(data: &Path) -> Option<PathBuf> {
+    crate::midi::setting(data, mo_app::app_settings::BITWIG_FOLDER_KEY)
+        .filter(|f| !f.trim().is_empty())
+        .map(PathBuf::from)
+        .filter(|c| c.join("Library").is_dir())
 }
 
 /// The library's saves' paths (opened read-only, read and let go): the Bitwig folders are found from them. None when

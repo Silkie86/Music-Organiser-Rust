@@ -49,8 +49,9 @@ export component ListView inherits SlintListView {
     property <bool> laid-out: abs(self.content-height - self.rows * self.row-height) < self.row-height / 2;
     property <bool> turn-now: self.show-ask != self.show-done && self.laid-out;
     // Whether it has come back to `kept-y` since it was made. Until then where it's turned to isn't kept: it's at its
-    // top as it's made, and its lines can move it as they come.
-    property <bool> back: false;
+    // top as it's made, and its lines can move it as they come. Until then where it was kept is where it is, for a
+    // page that keeps lines in sight from there (Sounds' tiles, as their count of tiles a row changes).
+    out property <bool> back: false;
     property <bool> back-now: !self.back && self.laid-out && self.rows > 0;
     // Only once it has come back: a list just made comes back to where it was kept instead.
     property <bool> place-now: self.place-ask != self.place-done && self.laid-out && self.back;

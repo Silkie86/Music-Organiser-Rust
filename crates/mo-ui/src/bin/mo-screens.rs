@@ -98,7 +98,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::settings::connect(
         &app,
         mo_ui::settings::Setup {
-            settings: mo_app::app_settings::AppSettings::default(),
+            // Made up: only the C# app's choice of program for Studio One's songs, which Settings › DAWs shows as
+            // chosen in the old app (nothing else here reads it).
+            settings: mo_app::app_settings::AppSettings::from_parts(
+                None,
+                [(
+                    mo_app::shell::daw_exe_key("Studio One"),
+                    r"C:\Program Files\PreSonus\Studio One 6\Studio One.exe".to_owned(),
+                )]
+                .into(),
+            )
+            .unwrap_or_default(),
             folder: out.join("no settings"),
             library: out.join("no library.db"),
             running_pace: mo_app::background::Pace::Fast,
@@ -791,6 +801,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     feed.start("Copying Bitwig template", "").failed("The template folder isn't there any more");
     mo_ui::cards::refresh(&app, &feed);
     shots.push(("cards.png".into(), capture(&window)));
+    // More cards that stay than fit: the newest show, and a line above counts the ones waiting behind them. The same
+    // card said twice is one card.
+    for part in ["Bass", "Keys", "Lead", "Pad", "Pluck"] {
+        feed.told(&format!("{part} sent to Bitwig"), "Bitwig has another project open, so its bar isn't marked.");
+    }
+    feed.told("Pluck sent to Bitwig", "Bitwig has another project open, so its bar isn't marked.");
+    mo_ui::cards::refresh(&app, &feed);
+    shots.push(("cards-more.png".into(), capture(&window)));
     // Gone from the feed itself, not only from the window: the rail's timer reads the feed again once the done one's
     // time is up, and would put them back in whichever shot comes a few seconds later.
     going.done("");
@@ -864,6 +882,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     keys_come_back_checks(&app, &window)?;
     short_swept_card(&app, &window, &out)?;
     swept_card_checks(&app, &window)?;
+    rediscover_without_fingerprints(&app, &window, &out)?;
+    Ok(())
+}
+
+/// Rediscover when the sounds' fingerprints couldn't be read: it says why, isn't left busy (it said "Picking sounds…"
+/// and "Shuffling…" for the rest of the run: the whole-app review of 19 Nov, SN-6), and offers no Shuffle that can't
+/// shuffle (the code review of that fix). The fingerprints come back after, and it digs sounds out again.
+fn rediscover_without_fingerprints(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+) -> Result<(), String> {
+    let data = app.global::<mo_ui::SoundsData>();
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    start_on(app, Place::Sounds);
+    data.invoke_pick_view(4);
+    capture(window);
+    let why = "made up for the screenshots";
+    mo_ui::sounds::index_failed_for_screens(app, why);
+    let pixels = capture(window);
+    let path = out.join("sounds-rediscover-cant-dig.png");
+    image::save_buffer(&path, &pixels, WIDTH, HEIGHT, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
+    println!("{}", path.display());
+    let failed = (data.get_re_busy(), data.get_re_cant_dig(), data.get_re_empty_title(), data.get_re_empty_text());
+    data.invoke_re_shuffle();
+    capture(window);
+    let shuffled = (data.get_re_busy(), data.get_re_empty_title());
+    mo_ui::sounds::index_known(app, std::sync::Arc::new(sample_fingerprints()));
+    capture(window);
+    let back = (data.get_re_busy(), data.get_re_cant_dig(), data.get_re_empty_title());
+    data.invoke_pick_view(0);
+    capture(window);
+    let (busy, cant_dig, title, text) = failed;
+    if busy || !cant_dig || title != "Can't dig sounds out" || !text.contains(why) {
+        return Err(format!(
+            "rediscover: with no fingerprints it said {title:?}, {text:?}, busy {busy}, Shuffle offered {}",
+            !cant_dig
+        ));
+    }
+    if shuffled.0 || shuffled.1 != title {
+        return Err(format!(
+            "rediscover: Shuffle pressed with no fingerprints left it busy {}, saying {:?}",
+            shuffled.0, shuffled.1
+        ));
+    }
+    if back.1 || back.2 == title {
+        return Err(format!(
+            "rediscover: once the fingerprints came back it still said {:?} (busy {})",
+            back.2, back.0
+        ));
+    }
     Ok(())
 }
 
@@ -902,6 +971,54 @@ fn swept_card_checks(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> 
     capture(window);
     if data.get_galaxy_swept().row_count() == 0 {
         return Err("swept card: the sweep across the galaxy left no Swept card".into());
+    }
+    // Down a line on the card: the map glides to its star, and every frame of the glide moves the trail with the map.
+    // The card's lines stay the lines they were: one made again under a mouse that isn't moving lost its shade and
+    // its tooltip (the whole-app review of 19 Nov, SN-10).
+    let lines = data.get_galaxy_swept();
+    data.invoke_galaxy_swept_step(1);
+    // Its first frame moves the current line; the rest of the glide changes none, so a line under a resting mouse keeps
+    // its shade (lines changed on every frame lost it as lines made again did: the code review of the SN-10 fix).
+    std::thread::sleep(Duration::from_millis(16));
+    capture(window);
+    let changed = mo_ui::sounds::swept_lines_changed();
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(16));
+        capture(window);
+    }
+    if data.get_galaxy_swept() != lines {
+        return Err("swept card: the glide to a line's star made the card's lines again".into());
+    }
+    let more = mo_ui::sounds::swept_lines_changed() - changed;
+    if more > 0 {
+        return Err(format!("swept card: the glide to a line's star changed the card's lines {more} times"));
+    }
+    // The tip of a line the mouse rests on, then the view changed under the mouse (as a forgotten folder's click
+    // does): the tip goes with the view, as it does with a page. It stayed over the next view, and the card's lines
+    // staying put let it come up. Looked for over the List, drawn the same both times.
+    hover(window, -1.0, -1.0);
+    data.invoke_pick_view(1);
+    let without = capture(window);
+    data.invoke_pick_view(2);
+    capture(window);
+    let (x, y) = SWEPT_LINE;
+    hover(window, x, y);
+    let resting = capture(window);
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(16));
+        capture(window);
+    }
+    let tipped = capture(window);
+    data.invoke_pick_view(1);
+    let after = capture(window);
+    hover(window, -1.0, -1.0);
+    data.invoke_pick_view(2);
+    capture(window);
+    if !changed_within(&resting, &tipped, SWEPT_TIP) {
+        return Err(format!("swept card: no tip came up with the mouse resting on the line at {x}, {y}"));
+    }
+    if changed_within(&without, &after, SWEPT_TIP) {
+        return Err("swept card: a line's tip stayed over the List once the Galaxy went from under the mouse".into());
     }
     // The wheel turned up over the card (a positive turn), then time for a zoom to fly in: the map left of the card
     // stays as it was. Up, as down would show nothing: the whole map can't go further out.
@@ -2492,6 +2609,8 @@ fn sounds_shots(
     // A line on the Swept card clicked, then Down: the card has the arrow keys and goes to the next sound on it.
     let (cx, cy) = SWEPT_LINE;
     click(window, cx, cy);
+    // Away again, as the line's tip would come up over the next line under a mouse resting there.
+    hover(window, -1.0, -1.0);
     data.invoke_step(2, false);
 
     capture(window);
@@ -2697,6 +2816,50 @@ fn tiles_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow
             back.1, back.0
         ));
     }
+    // Another view drawn before the window changes: the tiles are gone then, so only the tiles made again see the new
+    // width. Changed while they're still there, it's their own resize that keeps them in sight, not the tiles made
+    // again, and taking the fixes below out changed nothing (the check passed without them).
+    let away_from_tiles = |view: i32| {
+        data.invoke_pick_view(view);
+        for _ in 0..2 {
+            capture_sized(window, (WIDTH, HEIGHT), Duration::ZERO);
+        }
+        settle((NARROW, HEIGHT));
+    };
+    // The window made narrower while the List is on show: back on Tiles, with fewer a row, the same tiles are in
+    // sight. They turned to their top (the whole-app review of 19 Nov, SN-9), as the tiles made again said they were
+    // turned to their top; so would closing the card on the List, which widens the tiles.
+    away_from_tiles(1);
+    data.invoke_pick_view(0);
+    for _ in 0..4 {
+        capture_sized(window, (NARROW, HEIGHT), Duration::ZERO);
+    }
+    let (away, in_sight) = (data.get_tiles_y(), first_row());
+    settle((WIDTH, HEIGHT));
+    if !in_sight.contains(&first) {
+        return Err(format!(
+            "sounds tiles: the first in sight was {first}; narrowed on the List and back on Tiles, the first row in \
+             sight held {in_sight:?}, turned {away} px"
+        ));
+    }
+    // The same from the Galaxy, which makes no list: the tiles are made again for the view they were made for last.
+    // From their first frame back: they came back where they were kept with the new count, which showed other tiles,
+    // and turned only a turn later (the code review of the SN-9 fix).
+    away_from_tiles(2);
+    data.invoke_pick_view(0);
+    capture_sized(window, (NARROW, HEIGHT), Duration::ZERO);
+    let (at_once, first_frame) = (data.get_tiles_y(), first_row());
+    for _ in 0..3 {
+        capture_sized(window, (NARROW, HEIGHT), Duration::ZERO);
+    }
+    let (away, in_sight) = (data.get_tiles_y(), first_row());
+    settle((WIDTH, HEIGHT));
+    if !in_sight.contains(&first) || !first_frame.contains(&first) {
+        return Err(format!(
+            "sounds tiles: the first in sight was {first}; narrowed on the Galaxy and back on Tiles, the first row in \
+             sight held {first_frame:?} turned {at_once} px at first, then {in_sight:?} turned {away} px"
+        ));
+    }
     Ok(())
 }
 
@@ -2745,7 +2908,7 @@ fn sample_app_files() -> Vec<mo_space::app_files::AppFilesPart> {
     const MB: u64 = 1 << 20;
     let part = |(name, what): (&'static str, &'static str), bytes: u64| AppFilesPart { name, what, bytes };
     let named = |db: &AppDatabase| (db.name, db.what);
-    let backup = sound_lab_copies(PathBuf::new(), PathBuf::new(), PathBuf::new());
+    let backup = sound_lab_copies(PathBuf::new(), PathBuf::new(), PathBuf::new(), PathBuf::new());
     let cache = caches([PathBuf::new()]);
     vec![
         AppFilesPart { name: "Your library", what: "Projects, plugins, samples, tags and ratings", bytes: 6250 * MB },
@@ -3827,6 +3990,8 @@ const SPACE_EMPTY: (f32, f32) = (1000.0, 60.0);
 const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 /// The second line on the galaxy's Swept card, after the sweep and an arrow key.
 const SWEPT_LINE: (f32, f32) = (760.0, 301.0);
+/// Where the tip of the line at `SWEPT_LINE` comes up, over the line below it, in pixels (x, y, width, height).
+const SWEPT_TIP: (u32, u32, u32, u32) = (740, 319, 200, 42);
 /// On the galaxy's Swept card, after the sweep: on its first line, where the wheel turns.
 const SWEPT_CARD_WHEEL: (f32, f32) = (800.0, 260.0);
 /// The galaxy left of the Swept card, in pixels (x, y, width, height): its stars move when the map zooms.
@@ -3973,6 +4138,8 @@ fn settings_shots(
         "3.19",
         vec![std::path::PathBuf::from(r"K:\Bitwig Studio\Extensions")],
     );
+    let fl_program = mo_app::shell::daw_exe_key("FL Studio");
+    mo_ui::settings::remember(&fl_program, r"C:\Program Files\Image-Line\FL Studio 2025\FL64.exe");
     mo_ui::settings::show_fl(
         app,
         mo_dawlink::scripts::ScriptState::Outdated,
@@ -3980,6 +4147,12 @@ fn settings_shots(
     );
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));
+    // Further down, the program each DAW's songs open in: FL Studio's chosen here (an invented path, set before
+    // show_fl showed the tab), Studio One's chosen in the old app, Bitwig's Windows' choice.
+    scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
+    shots.push(("settings-daws-programs.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, 4.0 * PAGE_DOWN);
+    mo_ui::settings::remember(&fl_program, "");
     // No Bitwig Studio folder in Documents and none chosen: the card says to choose it (the 10 Nov review's X3-5).
     mo_ui::settings::remember(mo_app::app_settings::BITWIG_FOLDER_KEY, "");
     mo_ui::settings::remember(mo_app::app_settings::BITWIG_LIBRARIES_KEY, "");

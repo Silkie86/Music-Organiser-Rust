@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, CutText, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, CutText, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, TipState, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -189,6 +189,8 @@ export global SoundsData {
     callback re-toggle-rarely();
     callback re-shuffle();
     in property <bool> re-busy;
+    // There's nothing to dig sounds out by (the fingerprints couldn't be read): Shuffle can't shuffle.
+    in property <bool> re-cant-dig;
     // What it learned your taste from, over the list; and instead of the list when there's nothing.
     in property <string> re-intro;
     in property <string> re-empty-title;
@@ -359,6 +361,7 @@ export global SoundsData {
     // ("+3 like each"), and the slider let go at a place (0 to 1).
     in-out property <float> like-favourites;
     in property <string> like-favourites-words;
+    in property <string> like-favourites-note;
     callback like-favourites-set(float);
     // Hide duplicates: on, and its words with how many copies it hides (or how far finding them has got).
     in property <bool> hide-copies;
@@ -1511,6 +1514,12 @@ export component SoundsPage inherits Rectangle {
             keys.focus();
         }
     }
+    // A tooltip put up in the view that went would stay over the next one, as one from a page that went would (the
+    // app's `changed place`): a forgotten folder's path, clicked on Rediscover with its tip on show, stayed over the
+    // List. The Swept card's lines stay put now (the whole-app review of 19 Nov, SN-10), so a mouse resting on one
+    // gets its tip too, and that stayed when the view changed under it.
+    property <int> view-shown: SoundsData.view;
+    changed view-shown => { TipState.hide(); }
 
     VerticalLayout {
         padding: Space.xl;
@@ -1579,6 +1588,7 @@ export component SoundsPage inherits Rectangle {
                 StudioButton {
                     text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
                     tip: "Dig out a new set";
+                    enabled: !SoundsData.re-cant-dig;
                     clicked => { SoundsData.re-shuffle(); }
                 }
             }
@@ -1703,7 +1713,7 @@ export component SoundsPage inherits Rectangle {
                             text: SoundsData.empty-title != "" ? SoundsData.empty-text
                                 : SoundsData.view == 4 ? SoundsData.re-empty-text : "Try fewer filters or other words.";
                             action: SoundsData.empty-title != "" ? ""
-                                : SoundsData.view == 4 ? (SoundsData.re-busy ? "" : "Shuffle")
+                                : SoundsData.view == 4 ? (SoundsData.re-busy || SoundsData.re-cant-dig ? "" : "Shuffle")
                                 : SoundsData.any-filter ? "Clear the filters" : "";
                             act => {
                                 if (SoundsData.view == 4) {
@@ -1785,16 +1795,21 @@ export component SoundsPage inherits Rectangle {
                                 place-y: SoundsData.tiles-place-y;
                                 place-ask: SoundsData.tiles-place-ask;
                                 place-done <=> SoundsData.tiles-place-done;
+                                // Where the tiles are turned to, for the ones in sight to stay in sight: until they
+                                // have come back to where they were kept (made again for this view, they start at
+                                // their top), that's where they were kept. Back from the List with another count a row,
+                                // they turned to their top (the whole-app review of 19 Nov, SN-9).
+                                property <length> turned: self.back ? -self.content-y : -SoundsData.tiles-y;
                                 // Said before the rows are made again for the new count, so where the list was
                                 // turned to is still the old rows'.
                                 changed columns => {
-                                    SoundsData.columns-changed(self.columns, -self.content-y, self.visible-height, self.row-height);
+                                    SoundsData.columns-changed(self.columns, self.turned, self.visible-height, self.row-height);
                                 }
                                 // `list-made` first: tiles made again don't turn to the picked sound while their
                                 // count of columns settles (sounds.rs `columns_before`).
                                 init => {
                                     SoundsData.list-made();
-                                    SoundsData.columns-changed(self.columns, -self.content-y, self.visible-height, self.row-height);
+                                    SoundsData.columns-changed(self.columns, self.turned, self.visible-height, self.row-height);
                                 }
                                 for r in SoundsData.tile-rows: HorizontalLayout {
                                     // Every row this height: the list counts on it.
@@ -2312,6 +2327,7 @@ export component SoundsPage inherits Rectangle {
                         if SoundsData.favourites: LikeFavourites {
                             value <=> SoundsData.like-favourites;
                             words: SoundsData.like-favourites-words;
+                            note: SoundsData.like-favourites-note;
                             released(v) => { SoundsData.like-favourites-set(v); }
                         }
                         if SoundsData.knows-use: TickLine {

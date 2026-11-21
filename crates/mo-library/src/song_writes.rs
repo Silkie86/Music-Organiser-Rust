@@ -54,11 +54,15 @@ pub struct Batch {
     /// With `mended`: those of them that couldn't be read this time (in a folder that couldn't be read, a drive
     /// that's away), noted with it so [`to_mend`] gives them, and only them, at the next start.
     pub owed: Vec<i64>,
+    /// Notes that a song is shown from a save ([`crate::song_fields::KeepCopy`], review SS-1) to move with the save:
+    /// (the path the note is under, the save's path now), for saves that moved before the library had them. One the
+    /// library has moves its note with its row ([`Put::known_as`]).
+    pub moved_notes: Vec<(String, String)>,
 }
 
 impl Batch {
     pub fn is_empty(&self) -> bool {
-        self.put.is_empty() && self.missing.is_empty() && !self.mended
+        self.put.is_empty() && self.missing.is_empty() && !self.mended && self.moved_notes.is_empty()
     }
 }
 
@@ -68,6 +72,10 @@ const MENDED_KEY: &str = "muted_marks_mended";
 /// The note in `songs_info` of the saves still to be read again when the rest were ([`Batch::owed`]), by id, with a
 /// comma between each.
 const OWED_KEY: &str = "muted_marks_owed";
+
+/// The note in `songs_info` that every Bitwig save was read again once for the multisamples it finds outside its folder
+/// by their full path (the whole-app review of 19 Nov, FS-5: the reader didn't list them before), with when.
+const BITWIG_MENDED_KEY: &str = "bitwig_outside_multisamples_mended";
 
 /// When `library.db` has gone: how long before the library became the app's own a save the app kept since may have
 /// last changed (the C# app kept the library up to date until about then).
@@ -92,11 +100,110 @@ const MEND_SINCE: i64 = 30 * 24 * 60 * 60;
 /// whole-app review of 14 Nov, SG-10): without `library.db` there's nothing to compare with, so it would mean reading
 /// again every FL Studio save with no muted sample, nearly all of them; and muted marks only count with the "not
 /// muted in the newest save" setting, which is off unless it's turned on.
+///
+/// With them, once: every Bitwig save, for the multisamples it finds outside its folder by their full path
+/// ([`bitwig_reread`]); then only those of them that couldn't be read.
 pub fn to_mend(songs_db: &Path) -> Result<Option<Vec<i64>>, LibraryError> {
     let Some(own_since) = crate::songs_db::own_since(songs_db) else {
         return Ok(None);
     };
     let conn = open_read_only(songs_db)?;
+    let fl = fl_to_mend(&conn, songs_db, own_since)?;
+    let bitwig = bitwig_to_mend(&conn)?;
+    Ok(match (fl, bitwig) {
+        (None, None) => None,
+        (a, b) => Some(a.into_iter().chain(b).flatten().collect()),
+    })
+}
+
+/// The Bitwig saves still to read again for the multisamples they find outside their folder: all of them (whose file
+/// isn't missing) until that's noted, then the Bitwig saves on [`OWED_KEY`]'s list (written with the note, and shared
+/// with the FL Studio saves': each fact stored once). None when there are none.
+fn bitwig_to_mend(conn: &rusqlite::Connection) -> Result<Option<Vec<i64>>, LibraryError> {
+    let noted: Option<rusqlite::types::Value> =
+        conn.query_row("SELECT value FROM songs_info WHERE key = ?1", [BITWIG_MENDED_KEY], |r| r.get(0)).optional()?;
+    let all = "SELECT id FROM projects WHERE daw = 'Bitwig Studio' AND COALESCE(file_missing, 0) = 0";
+    if noted.is_none() {
+        let mut st = conn.prepare(all)?;
+        let ids: Vec<i64> = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        return Ok(Some(ids));
+    }
+    let owed: Option<String> =
+        conn.query_row("SELECT value FROM songs_info WHERE key = ?1", [OWED_KEY], |r| r.get(0)).optional()?;
+    let owed: Vec<i64> = owed.iter().flat_map(|o| o.split(',')).filter_map(|id| id.trim().parse().ok()).collect();
+    if owed.is_empty() {
+        return Ok(None);
+    }
+    let mut st = conn.prepare(&format!("{all} AND id = ?1"))?;
+    let mut still = Vec::with_capacity(owed.len());
+    for id in owed {
+        if st.exists([id])? {
+            still.push(id);
+        }
+    }
+    Ok((!still.is_empty()).then_some(still))
+}
+
+/// How far the library at `songs_db` is with reading every Bitwig save again for the multisamples it finds outside its
+/// folder by their full path ([`to_mend`]). Until it's [`BitwigReread::Done`], which saves use another project's
+/// multisample copy isn't known, so Space's Free the space keeps every multisample copy (the whole-app review of
+/// 19 Nov, FS-5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitwigReread {
+    /// Every Bitwig save has been read again (or none needed it).
+    Done,
+    /// Not yet: it's read again with the next walk of the project folders.
+    Waiting,
+    /// Read again but for these many, which couldn't be (a drive that's away, say): tried again at each start.
+    Owed(usize),
+    /// The library isn't the app's own, so it's never read again here.
+    NotOwn,
+    /// The library couldn't be read just now (busy with a big write, say): try again in a moment.
+    Unknown,
+}
+
+/// [`BitwigReread`] for the library at `songs_db`.
+pub fn bitwig_reread(songs_db: &Path) -> BitwigReread {
+    if crate::songs_db::own_since(songs_db).is_none() {
+        return BitwigReread::NotOwn;
+    }
+    let state = open_read_only(songs_db).and_then(|conn| {
+        let noted: bool =
+            conn.query_row("SELECT COUNT(*) > 0 FROM songs_info WHERE key = ?1", [BITWIG_MENDED_KEY], |r| r.get(0))?;
+        Ok(match bitwig_to_mend(&conn)? {
+            None => BitwigReread::Done,
+            Some(_) if !noted => BitwigReread::Waiting,
+            Some(owed) => BitwigReread::Owed(owed.len()),
+        })
+    });
+    state.unwrap_or(BitwigReread::Unknown)
+}
+
+/// Adds saves to the list of those still to read again ([`to_mend`]) once the rest were noted read: a save read again
+/// that the library then wouldn't take, in the same batch as the note (`mo_app::live`). Each id once.
+pub fn owe(songs_db: &Path, ids: &[i64]) -> Result<(), LibraryError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let sql = |e| write_failed(songs_db, e);
+    let mut conn = open_to_write(songs_db)?;
+    let tx = begin_own(&mut conn, songs_db)?;
+    let owed: Option<String> = tx
+        .query_row("SELECT value FROM songs_info WHERE key = ?1", [OWED_KEY], |r| r.get(0))
+        .optional()
+        .map_err(sql)?;
+    let mut all: Vec<i64> = owed.iter().flat_map(|o| o.split(',')).filter_map(|id| id.trim().parse().ok()).collect();
+    all.extend(ids);
+    all.sort_unstable();
+    all.dedup();
+    let all: Vec<String> = all.iter().map(i64::to_string).collect();
+    tx.execute("INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)", params![OWED_KEY, all.join(",")])
+        .map_err(sql)?;
+    tx.commit().map_err(sql)
+}
+
+/// The FL Studio part of [`to_mend`].
+fn fl_to_mend(conn: &rusqlite::Connection, songs_db: &Path, own_since: i64) -> Result<Option<Vec<i64>>, LibraryError> {
     let noted: Option<rusqlite::types::Value> =
         conn.query_row("SELECT value FROM songs_info WHERE key = ?1", [MENDED_KEY], |r| r.get(0)).optional()?;
     if noted.is_some() {
@@ -115,13 +222,14 @@ pub fn to_mend(songs_db: &Path) -> Result<Option<Vec<i64>>, LibraryError> {
                 still.push(id);
             }
         }
-        return Ok(Some(still));
+        // The owed list is shared with the Bitwig saves' (it may hold only theirs): none of these left is nothing to do.
+        return Ok((!still.is_empty()).then_some(still));
     }
     let library_db = songs_db.with_file_name(crate::songs_db::OLD_FILE_NAME);
     let before = library_db.is_file().then(|| before(&library_db).ok()).flatten();
     // Muted marks are compared only where the C# app kept them.
     let samples_now = match &before {
-        Some(b) => samples_of(&conn, b.muted)?,
+        Some(b) => samples_of(conn, b.muted)?,
         None => HashMap::new(),
     };
     let mut st = conn.prepare(
@@ -295,6 +403,9 @@ pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
             .execute("UPDATE projects SET file_missing = 1 WHERE id = ?1 AND path = ?2", params![m.id, m.path])
             .map_err(sql)?;
     }
+    for (from, to) in &batch.moved_notes {
+        crate::song_fields::move_kept(&tx, from, to).map_err(sql)?;
+    }
     if batch.mended {
         tx.execute(
             "INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)",
@@ -311,6 +422,11 @@ pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
             )
             .map_err(sql)?;
         }
+        tx.execute(
+            "INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)",
+            params![BITWIG_MENDED_KEY, Local::now().timestamp()],
+        )
+        .map_err(sql)?;
         written.mended = true;
     }
     check(&tx, &kept, batch).map_err(|e| match e {
@@ -356,6 +472,10 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<(i64, bool)> {
         None if !id_taken()? => (insert(tx, Some(save.id), put)?, true),
         None => (insert(tx, None, put)?, true),
     };
+    // Moved: if its song is shown from it (of the same file in several places), it still is (review SS-1).
+    if let Some(known) = put.known_as.as_deref().filter(|k| !mo_formats::case::eq_ignore_case(k, &save.path)) {
+        crate::song_fields::move_kept(tx, known, &save.path)?;
+    }
     for table in ["plugins", "samples"] {
         tx.execute(&format!("DELETE FROM {table} WHERE project_id = ?1"), [id])?;
     }

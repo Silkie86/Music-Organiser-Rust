@@ -143,6 +143,8 @@ fn markers_colours_and_the_time_signature() {
     let [playlist, bitwig] = read(&bytes);
     assert_eq!((playlist.tempo, playlist.signature.beats()), (90.0, 3.0));
     assert_eq!(playlist.markers, [PreviewMarker { beat: 3.0, name: "Drop".into() }]);
+    // A convert makes them the Bitwig project's cue markers, so the Bitwig view has them too.
+    assert_eq!(bitwig.markers, playlist.markers);
     // The same two facts alone, for a reader that needs no more of the playlist.
     let flp = events::load(&bytes).expect("an FL project");
     assert_eq!(arrangement::bars_and_markers(&flp), (playlist.signature, playlist.markers.clone()));
@@ -324,6 +326,9 @@ fn a_patterns_own_markers_stay_off_the_songs_ruler_and_a_marker_keeps_its_place_
         markers,
         [PreviewMarker { beat: 2.0, name: "Loop".into() }, PreviewMarker { beat: 4.0, name: "6/8".into() }]
     );
+    // A change after the start isn't followed, and whoever carries the song on can say so.
+    assert!(arrangement::changes_time_signature(&events::load(&bytes).expect("an FL project")));
+    assert!(!arrangement::changes_time_signature(&events::load(&fl_studio_project()).expect("an FL project")));
     // A change further on isn't followed: the song is read by the signature it starts with.
     assert_eq!((signature.top(), signature.bottom()), (4, 4));
 
@@ -357,4 +362,55 @@ fn a_save_from_before_arrangements_keeps_every_marker_as_the_songs() {
         .build();
     let (_, markers) = arrangement::bars_and_markers(&events::load(&bytes).expect("an FL project"));
     assert_eq!(markers, [PreviewMarker { beat: 2.0, name: "Drop".into() }]);
+}
+
+/// Whole-app review CN-7 (19 Nov 2026): with nothing in the playlist, patterns follow each other in the song's own
+/// bars, not bars of 4 beats.
+#[test]
+fn patterns_with_no_playlist_follow_each_other_in_the_songs_own_bars() {
+    let song = |top: u8| {
+        let bytes = Flp::new()
+            .ascii(199, "24.1.1.4234")
+            .byte(17, top)
+            .word(64, 0)
+            .byte(21, 2)
+            .text(201, "3x Osc")
+            .text(203, "Bass")
+            .word(65, 1)
+            .data(224, &note(0, 0, 96, 48, 100))
+            .word(65, 2)
+            .data(224, &note(0, 0, 96, 50, 100))
+            .build();
+        let song = mo_formats::fl::song::read_song(&events::load(&bytes).expect("an FL project"));
+        let clips: Vec<(i64, i64)> = song.channels[0].clips.iter().map(|c| (c.start, c.length)).collect();
+        (song.signature.top(), clips)
+    };
+    assert_eq!(song(4), (4, vec![(0, 384), (384, 384)]));
+    assert_eq!(song(3), (3, vec![(0, 288), (288, 288)]));
+}
+
+/// Whole-app review CN-4 (19 Nov 2026): a channel is only said to have notes panned or finely pitched when a pattern
+/// the song plays holds one.
+#[test]
+fn a_channel_with_a_panned_note_is_found_only_when_the_song_plays_it() {
+    let song = |placed: u16| {
+        let mut panned = note(0, 0, 96, 50, 100);
+        panned[20] = 0;
+        let bytes = Flp::new()
+            .ascii(199, "25.2.5.5319")
+            .word(64, 0)
+            .byte(21, 2)
+            .text(201, "3x Osc")
+            .text(203, "Bass")
+            .word(65, 1)
+            .data(224, &note(0, 0, 96, 48, 100))
+            .word(65, 2)
+            .data(224, &panned)
+            .word(99, 0)
+            .data(233, &playlist_item_25_on(0, 20480 + placed, 384, 499, false))
+            .build();
+        mo_formats::fl::song::read_song(&events::load(&bytes).expect("an FL project")).fine_notes
+    };
+    assert_eq!(song(2), [0]);
+    assert_eq!(song(1), [0u32; 0]);
 }

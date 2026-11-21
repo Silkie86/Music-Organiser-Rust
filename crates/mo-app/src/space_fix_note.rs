@@ -98,6 +98,16 @@ pub struct Written {
     /// whatever else is true of it.
     #[serde(default)]
     pub freed: bool,
+    /// Put on the note by Free the space, not by Fix (one Fix wrote before the note began, or whose note was lost): it
+    /// comes off the note again once all its copies are back, so it's judged as one the note doesn't have, as before
+    /// (the whole-app review of 19 Nov, FS-7).
+    #[serde(default)]
+    pub by_free: bool,
+    /// Each Free the space that marked it, by the time the app's list of what it put in the Recycle Bin keeps it under:
+    /// the mark comes off only once each of them has been put back (the whole-app review of 19 Nov, FS-1). Empty on a
+    /// mark from before then, which stays.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub freed_by: Vec<i64>,
 }
 
 /// The file in the app's data folder.
@@ -114,69 +124,152 @@ struct Waiting {
     written: Vec<(PathBuf, Written)>,
 }
 
-/// Notes that Free the space sent away the copies the save of the "(fixed)" project `fixed` used, in `file`: the
-/// button for every fixed project leaves it then. One that isn't on the note yet is put on as it is now. A note that
-/// can't be saved keeps the mark while the app runs, as Fix's own do; what can't be noted is said in the log and
-/// returned.
-pub fn freed(file: &Path, fixed: &Path) -> Result<(), String> {
-    mark(file, &[fixed.to_path_buf()], true)
+/// Notes that the Free the space that ran at `when` (the time the app's list of what it put in the Recycle Bin keeps
+/// it under) sends away copies the save of the "(fixed)" project `fixed` used, in `file`: the button for every fixed
+/// project leaves it while any Free that marked it hasn't been put back. One that isn't on the note yet is put on as
+/// it is now. A note that can't be saved keeps the mark while the app runs, as Fix's own do (said in the log). Err when
+/// the note or the fixed project can't be read, and nothing is marked then: nothing should go.
+pub fn freed(file: &Path, fixed: &Path, when: i64) -> Result<(), String> {
+    change(file, &[fixed.to_path_buf()], |w| {
+        if !w.freed_by.contains(&when) {
+            w.freed_by.push(when);
+        }
+        w.freed = true;
+    })
 }
 
-/// Takes Free the space's mark off the fixed projects in the folders whose copies all came back with Put back
-/// (`copies`, their paths in the project's `multi-samples` or `samples` folder; `missed`, those that couldn't be put
-/// back): with their copies there again, they're fixed projects like any other. A folder where any copy stayed in the
-/// Recycle Bin keeps the mark. What can't be noted is said in the log.
-pub fn put_back(file: &Path, copies: &[&str], missed: &[&str]) {
+/// Whether Free the space's mark is on the fixed project `fixed` in `file` now, without changing the note. Err when
+/// the note can't be read.
+pub fn is_freed(file: &Path, fixed: &Path) -> Result<bool, String> {
+    let waiting = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
+    let text = fixed.to_string_lossy();
+    let waits = waiting.written.iter().rev().find(|(f, w)| f == file && same(&w.path, &text)).map(|(_, w)| w.freed);
+    if let Some(freed) = waits {
+        return Ok(freed);
+    }
+    Ok(match load(file)? {
+        Loaded::Note(note) => note.written.iter().any(|w| w.freed && same(&w.path, &text)),
+        Loaded::Missing | Loaded::Damaged => false,
+    })
+}
+
+/// Takes the mark of the Free the space that ran at `when` off these fixed projects again: nothing of theirs went
+/// after all (Free marks them before the first copy goes, so a crash, a power cut or a kill part way through leaves
+/// the mark on: the whole-app review of 19 Nov, FS-23), or all its copies came back. Once no Free's mark is left, the
+/// fixed project is like any other again, and one only Free put on the note comes off it (FS-7). A mark from before
+/// the app kept which Free set it stays. What can't be noted keeps the mark (said in the log).
+pub fn unfreed(file: &Path, fixed: &[PathBuf], when: i64) {
+    if let Err(why) = unmark(file, |w| fixed.iter().any(|f| same(&w.path, &f.to_string_lossy())), when) {
+        crate::log::warning("Space", &why);
+    }
+}
+
+/// Takes the mark of the Free the space that ran at `when` off the fixed projects in the folders whose copies all came
+/// back with its Put back (`copies`, their paths in the project's `multi-samples` or `samples` folder; `missed`, those
+/// that couldn't be put back, or have gone from the Recycle Bin). Another Free's mark stays until that one is put
+/// back too (the whole-app review of 19 Nov, FS-1). What can't be noted is said in the log, and keeps the mark.
+pub fn put_back(file: &Path, when: i64, copies: &[&str], missed: &[&str]) {
     let folder_of = |c: &str| Path::new(c).parent().and_then(Path::parent).map(|f| mo_space::key(&f.to_string_lossy()));
     let lost: HashSet<String> = missed.iter().filter_map(|c| folder_of(c)).collect();
     let back: HashSet<String> = copies.iter().filter_map(|c| folder_of(c)).filter(|f| !lost.contains(f)).collect();
     if back.is_empty() {
         return;
     }
-    let fixed: Vec<PathBuf> = {
-        let mut waiting = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
-        let Ok(note) = load_or_begin(file, &mut waiting) else { return };
-        note.written
-            .iter()
-            .filter(|w| w.freed)
-            .map(|w| PathBuf::from(&w.path))
-            .filter(|w| w.parent().is_some_and(|f| back.contains(&mo_space::key(&f.to_string_lossy()))))
-            .collect()
-    };
-    if !fixed.is_empty()
-        && let Err(why) = mark(file, &fixed, false)
-    {
+    let in_back =
+        |w: &Written| Path::new(&w.path).parent().is_some_and(|f| back.contains(&mo_space::key(&f.to_string_lossy())));
+    if let Err(why) = unmark(file, in_back, when) {
         crate::log::warning("Space", &why);
     }
 }
 
-/// Sets Free the space's mark on these fixed projects to `freed`, through what waits to be put on the note.
-fn mark(file: &Path, fixed: &[PathBuf], freed: bool) -> Result<(), String> {
+/// Puts the marks of the Free the space that ran at `from` under `to` instead: the time the app's list of what it put
+/// in the Recycle Bin keeps it under, when that isn't the time it began with (another kept at the same second).
+pub fn moved(file: &Path, from: i64, to: i64) {
+    if from == to {
+        return;
+    }
+    let mut waiting = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
+    let Ok(note) = load_or_begin(file, &mut waiting) else { return };
+    for mut w in note.written.into_iter().filter(|w| w.freed_by.contains(&from)) {
+        for t in &mut w.freed_by {
+            if *t == from {
+                *t = to;
+            }
+        }
+        waiting.written.retain(|(f, n)| !(f == file && same(&n.path, &w.path)));
+        waiting.written.push((file.to_owned(), w));
+    }
+    if let Err(why) = load_or_begin(file, &mut waiting) {
+        crate::log::warning("Space", &why);
+    }
+}
+
+/// Takes the mark of the Free that ran at `when` off the fixed projects `which` picks: one with no Free's mark left
+/// isn't freed any more, and one only Free put on the note comes off it. The note is saved straight away; when it
+/// can't be, nothing changes (the marks stay: the safe side) and why is returned.
+fn unmark(file: &Path, which: impl Fn(&Written) -> bool, when: i64) -> Result<(), String> {
+    let mut waiting = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut note = load_or_begin(file, &mut waiting)?;
+    let before = note.clone();
+    for w in note.written.iter_mut().filter(|w| which(w) && w.freed_by.contains(&when)) {
+        w.freed_by.retain(|&t| t != when);
+        w.freed = !w.freed_by.is_empty();
+    }
+    note.written.retain(|w| w.freed || !w.by_free);
+    if note == before {
+        return Ok(());
+    }
+    serde_json::to_string(&note)
+        .map_err(std::io::Error::other)
+        .and_then(|text| crate::backup::write_whole(file, &text))
+        .map_err(|e| format!("Couldn't take Free the space's mark off in {} ({e}), so it stays", file.display()))?;
+    // The note saved holds what waited for it too.
+    waiting.written.retain(|(f, _)| f != file);
+    Ok(())
+}
+
+/// Changes these fixed projects' entries with `how`, through what waits to be put on the note: one that isn't on it
+/// yet is put on as it is now (marked as put on by Free). Err when the note or a fixed project can't be read; a note
+/// that can't be saved keeps the change while the app runs (said in the log).
+fn change(file: &Path, fixed: &[PathBuf], how: impl Fn(&mut Written)) -> Result<(), String> {
     let mut waiting = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
     let note = load_or_begin(file, &mut waiting)?;
+    let mut changed = Vec::new();
     for one in fixed {
         let text = one.to_string_lossy();
         let waits = waiting.written.iter().find(|(f, w)| f == file && same(&w.path, &text)).map(|(_, w)| w.clone());
         let mut written = match waits.or_else(|| note.written.iter().find(|w| same(&w.path, &text)).cloned()) {
             Some(w) => w,
-            None if !freed => continue,
             None => {
                 let meta = fs::symlink_metadata(one)
-                    .map_err(|e| format!("Couldn't note that {}'s copies went ({e})", one.display()))?;
+                    .map_err(|e| format!("Couldn't note that {}'s copies go ({e})", one.display()))?;
                 let modified = meta.modified().ok().and_then(nanos).unwrap_or(0);
-                Written { path: text.into_owned(), bytes: meta.len(), modified, freed }
+                Written {
+                    path: text.into_owned(),
+                    bytes: meta.len(),
+                    modified,
+                    freed: false,
+                    by_free: true,
+                    freed_by: Vec::new(),
+                }
             }
         };
-        written.freed = freed;
+        how(&mut written);
+        changed.push(written);
+    }
+    for written in changed {
         waiting.written.retain(|(f, w)| !(f == file && same(&w.path, &written.path)));
         waiting.written.push((file.to_owned(), written));
     }
     load_or_begin(file, &mut waiting)?;
     if waiting.written.iter().any(|(f, _)| f == file) {
-        return Err(format!(
-            "The note of what Free the space did couldn't be saved in {}: kept while the app runs",
-            file.display()
-        ));
+        crate::log::warning(
+            "Space",
+            &format!(
+                "The note of what Free the space did couldn't be saved in {}: kept while the app runs",
+                file.display()
+            ),
+        );
     }
     Ok(())
 }
@@ -303,7 +396,14 @@ pub fn wrote(file: &Path, fixed: &Path) {
         .and_then(|m| Ok((m.len(), m.modified().map_err(|e| e.to_string())?)))
         .and_then(|(bytes, modified)| {
             let modified = nanos(modified).ok_or("its modified time is out of range")?;
-            Ok(Written { path: fixed.to_string_lossy().into_owned(), bytes, modified, freed: false })
+            Ok(Written {
+                path: fixed.to_string_lossy().into_owned(),
+                bytes,
+                modified,
+                freed: false,
+                by_free: false,
+                freed_by: Vec::new(),
+            })
         });
     let written = match written {
         Ok(written) => written,
@@ -318,6 +418,19 @@ pub fn wrote(file: &Path, fixed: &Path) {
     if let Err(why) = load_or_begin(file, &mut waiting) {
         crate::log::warning("Space", &format!("Couldn't note what Fix wrote, {}: {why}", fixed.display()));
     }
+}
+
+/// Whether the "(fixed)" project `fixed` is on the note in `file` and still as it was noted (its size and when it last
+/// changed): Fix wrote it, or Free the space saw it, and nobody has saved in it since. False when the note or the file
+/// can't be read, or it's a link. Reads the disk: call it away from the window's thread.
+pub fn as_noted(file: &Path, fixed: &Path) -> bool {
+    let Ok(noted) = read(file) else { return false };
+    let Ok(meta) = fs::symlink_metadata(fixed) else { return false };
+    let Some(modified) = meta.modified().ok().and_then(nanos).filter(|_| meta.is_file()) else { return false };
+    noted
+        .by_path
+        .get(&mo_space::key(&fixed.to_string_lossy()))
+        .is_some_and(|&(bytes, was)| bytes == meta.len() && near(modified, was, SAME_TIME))
 }
 
 /// The note as it was when the bin button was pressed.
@@ -445,6 +558,8 @@ mod tests {
                 bytes,
                 modified: secs * 1_000_000_000,
                 freed: false,
+                by_free: false,
+                freed_by: Vec::new(),
             })
             .collect();
         Noted::from(&Note { since: since as i64, written })
@@ -594,6 +709,66 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// One Free the space put on the note (Fix wrote it before the note began) comes off it again once each Free that
+    /// marked it is put back, so it's judged as before: you'd saved in it, so it stays (FS-1, FS-7).
+    #[test]
+    fn a_mark_comes_off_once_each_free_that_set_it_is_put_back() {
+        let d = folder("by-free");
+        let file = d.join(FILE_NAME);
+        let fixed = d.join("Song/Song (fixed).bwproject");
+        fs::create_dir_all(fixed.parent().unwrap()).unwrap();
+        // The note begins first, so the fixed project (saved in after) is one it can't vouch for.
+        begin(&file);
+        fs::write(&fixed, b"BtWg saved in").unwrap();
+        assert_eq!(is_freed(&file, &fixed), Ok(false));
+        assert_eq!(freed(&file, &fixed, 100), Ok(()));
+        assert_eq!(freed(&file, &fixed, 200), Ok(()));
+        assert_eq!(is_freed(&file, &fixed), Ok(true));
+        assert!(loaded(&file).written.iter().any(|w| w.by_free && w.freed && w.freed_by == [100, 200]));
+        let copy = d.join("Song/multi-samples/Kicks-2.multisample").to_string_lossy().into_owned();
+        // A Put back with a copy of this folder missed keeps its mark.
+        put_back(&file, 100, &[&copy], &[&copy]);
+        assert_eq!(is_freed(&file, &fixed), Ok(true));
+        // All of the first Free's back: the second's mark stays (FS-1).
+        put_back(&file, 100, &[&copy], &[]);
+        assert_eq!(is_freed(&file, &fixed), Ok(true));
+        // The first Free kept under another time: its mark moves with it.
+        moved(&file, 200, 300);
+        put_back(&file, 200, &[&copy], &[]);
+        assert_eq!(is_freed(&file, &fixed), Ok(true));
+        put_back(&file, 300, &[&copy], &[]);
+        assert_eq!(is_freed(&file, &fixed), Ok(false));
+        assert!(loaded(&file).written.is_empty(), "off the note, not left on it as Fix's own");
+        let meta = fs::metadata(&fixed).unwrap();
+        assert_eq!(Check::new(&file).as_fix_left(&fixed, &meta), Err(Stays::NotNoted.why().to_owned()));
+        // Marked and nothing went: off again.
+        assert_eq!(freed(&file, &fixed, 400), Ok(()));
+        unfreed(&file, std::slice::from_ref(&fixed), 400);
+        assert!(is_freed(&file, &fixed) == Ok(false) && loaded(&file).written.is_empty());
+        // A mark from before the app kept which Free set it stays.
+        let old = Note {
+            since: 0,
+            written: vec![Written {
+                path: fixed.to_string_lossy().into_owned(),
+                bytes: 1,
+                modified: 1,
+                freed: true,
+                by_free: false,
+                freed_by: Vec::new(),
+            }],
+        };
+        crate::backup::write_whole(&file, &serde_json::to_string(&old).unwrap()).unwrap();
+        put_back(&file, 100, &[&copy], &[]);
+        assert_eq!(is_freed(&file, &fixed), Ok(true));
+        // A note that can't be read says so, and nothing is marked.
+        fs::write(&file, b"").unwrap();
+        let _ = fs::remove_file(&file);
+        fs::create_dir_all(&file).unwrap();
+        assert!(is_freed(&file, &fixed).is_err());
+        assert!(freed(&file, &fixed, 500).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn the_note_keeps_the_newest_it_may() {
         let d = folder("keep");
@@ -604,6 +779,8 @@ mod tests {
                 bytes: 1,
                 modified: n as u64,
                 freed: false,
+                by_free: false,
+                freed_by: Vec::new(),
             })
             .collect();
         let since = BEGAN as i64;

@@ -76,7 +76,9 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     mo_ui::one_copy::log_claim(&one_copy);
     // While this copy runs, another started meanwhile never switches folders under it.
-    mo_app::data_move::hold_open_lock();
+    if let Err(why) = mo_app::data_move::hold_open_lock() {
+        log::warning("Data folder", &why);
+    }
     // Programs the app opens (DAWs, folders) start at the window's priority, not a background thread's.
     mo_app::shell::get_ready();
     mo_ui::startup::step("log");
@@ -151,6 +153,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // graphics apart inside the event loop, which took over a second on 15 Nov 2026 and was logged as one).
     app.window().on_close_requested(|| {
         mo_ui::watchdog::stop();
+        // A copy started from this moment waits for this one to end, rather than being told this window will show.
+        mo_ui::one_copy::closing();
         slint::CloseRequestResponse::HideWindow
     });
     // Dragging sounds and clips out to a DAW says here when it can't.
@@ -245,16 +249,51 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         log::warning("Freeze", "Couldn't start the freeze watchdog");
     }
+    let held = match &one_copy {
+        mo_app::one_copy::Claim::Ours { held, .. } => Some(held.clone()),
+        _ => None,
+    };
+    // Signing out, shutting down or restarting Windows with the app open: Windows ends the app as soon as it has
+    // answered, so everything waiting is written there and then (the 19 November 2026 review's CL-2).
+    #[cfg(windows)]
+    {
+        let held = held.clone();
+        mo_ui::close_ask::on_session_end(move || {
+            log::last(log::Level::Info, "App", "Windows is ending the session: closing");
+            mo_ui::watchdog::stop();
+            finish(held.as_deref(), session, None);
+            end_now(0)
+        });
+    }
     let ran = app.run();
     // The window's thread answers no more knocks from here: what it does while closing isn't a freeze. (Said already
     // when the window was asked to close; this is for an end that came another way.)
     mo_ui::watchdog::stop();
+    finish(held.as_deref(), session, ran.as_ref().err().map(ToString::to_string));
+    // Off Windows the usual way out stays: the window is taken apart first, which an exit on the spot there
+    // wouldn't wait for.
+    #[cfg(windows)]
+    {
+        if let Err(e) = &ran {
+            eprintln!("Error: {e}");
+        }
+        end_now(u32::from(ran.is_err()))
+    }
+    #[cfg(not(windows))]
+    ran
+}
+
+/// The close: everything still waiting is written, what plays in a DAW is stopped, and the log is closed. Run once
+/// the window's loop has ended, or from inside it when Windows ends the session (it ends the app straight after).
+/// `held` is this copy's hold on being the one open copy; `error` is how the window stopped, when it stopped with an
+/// error. A setup "Restart to update" started waits for this app to end before it touches a file.
+fn finish(held: Option<&mo_app::one_copy::OneCopy>, session: &'static log::SessionLog, error: Option<String>) {
     // The window is gone: a copy started from now on waits for this one to end (the port is let go at the very
     // end, once everything below is written) instead of asking it to show.
-    if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
+    if let Some(held) = held {
         held.closing();
     }
-    if let Err(e) = &ran {
+    if let Some(e) = &error {
         // A line of how the run ends: it shows even once the log is full.
         log::last(log::Level::Error, "App", &format!("The window stopped with an error: {e}"));
     }
@@ -278,7 +317,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::note::finish_up();
     // The MIDI files this run's drags wrote, once the DAW has long read them (rule 28).
     mo_ui::drag::finish_up();
-    // The last plays, drags and sends, and a galaxy map being kept, go into the sound library.
+    // The last plays, drags and sends, hearts, types and tags, and a galaxy map being kept, go into the sound library:
+    // waited for up to 10 seconds, only while some are waiting.
     mo_ui::sounds::finish_up();
     // A part playing in Bitwig or FL stops with the app.
     mo_ui::midi::finish_up();
@@ -292,20 +332,9 @@ fn main() -> Result<(), slint::PlatformError> {
     session.close();
     // Everything is written. The port goes now, not with the process, so the copy started next (by the launcher, or
     // by the setup) is never held up by this one taking its time to end.
-    if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
+    if let Some(held) = held {
         held.let_go();
     }
-    // Off Windows the usual way out stays: the window is taken apart first, which an exit on the spot there
-    // wouldn't wait for.
-    #[cfg(windows)]
-    {
-        if let Err(e) = &ran {
-            eprintln!("Error: {e}");
-        }
-        end_now(u32::from(ran.is_err()))
-    }
-    #[cfg(not(windows))]
-    ran
 }
 
 /// Ends the app on the spot (Windows), once everything is written and the log is closed. Leaving `main` the usual
