@@ -3130,6 +3130,91 @@ fn save_as_new(from: String, name: String, points: Vec<mo_formats::bitwig::curve
     }
 }
 
+/// The app's window came to the front. A curve kept as new from the plugin's editor meanwhile (it adds it to
+/// `curves.db` itself; Solomon, 20 Nov 2026) is put in the list, and one it saved again that was hidden shows again:
+/// looked for off the window's thread, and only the curves the list doesn't have as they are now are read.
+pub fn came_to_front(_app: &AppWindow) {
+    let db = PAGE.with(|p| {
+        let p = p.borrow();
+        (p.curves_started && p.curves_reading.is_none()).then(|| p.data_dir.join(curves::FILE_NAME))
+    });
+    let Some(db) = db else { return };
+    let started = background::spawn("Curves made in the plugin", move || {
+        let Ok(made) = CurvesDb::open_read_only(&db).and_then(|db| db.made_ids()) else { return };
+        if made.is_empty() {
+            return;
+        }
+        on_window(move |_| {
+            let new = PAGE.with(|p| {
+                let p = p.borrow();
+                // Each made curve and whether it's hidden; those the list has that way already are taken away.
+                let mut new: HashMap<&str, bool> = made.iter().map(|(id, hidden)| (id.as_str(), *hidden)).collect();
+                p.curves.iter().for_each(|c| {
+                    if new.get(c.id.as_str()) == Some(&c.hidden) {
+                        new.remove(c.id.as_str());
+                    }
+                });
+                // (A read on its way lists them itself.)
+                if p.curves_reading.is_some() { Vec::new() } else { new.into_keys().map(str::to_owned).collect() }
+            });
+            if new.is_empty() {
+                return;
+            }
+            let started = background::spawn("Curves made in the plugin", move || {
+                let Ok(db) = CurvesDb::open_read_only(&db) else { return };
+                let found: Vec<(Curve, logic::CurveKey)> = new
+                    .iter()
+                    .filter_map(|id| db.get(id).ok().flatten())
+                    .map(|c| {
+                        let key = logic::CurveKey::of(&c);
+                        (c, key)
+                    })
+                    .collect();
+                on_window(move |app| {
+                    let added = PAGE.with(|p| {
+                        let mut p = p.borrow_mut();
+                        let mut added = 0;
+                        for (c, key) in found {
+                            match p.curves.iter().position(|o| o.id == c.id) {
+                                // Listed as it is now meanwhile (the app changed it itself): left alone.
+                                Some(at) if p.curves[at].hidden == c.hidden => continue,
+                                Some(at) => {
+                                    p.curve_keys[at] = key;
+                                    p.curves[at] = c;
+                                }
+                                None => {
+                                    p.curve_keys.push(key);
+                                    p.curves.push(c);
+                                }
+                            }
+                            added += 1;
+                        }
+                        if added > 0 {
+                            p.curve_changes += 1;
+                            p.curve_found_of = None;
+                            reshow_curves(&mut p);
+                        }
+                        added
+                    });
+                    if added > 0 {
+                        log::info(
+                            "Curves",
+                            &format!("{added} curves saved in the plugin's editor are in the list as they are now"),
+                        );
+                        show_all(app);
+                    }
+                });
+            });
+            if let Err(e) = started {
+                log::error("Curves", &format!("Couldn't start reading the plugin's new curves: {e}"));
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Curves", &format!("Couldn't start looking for the plugin's new curves: {e}"));
+    }
+}
+
 /// Opens the Songs page on the song a save belongs to (X3-10, as Plugins' Show in Songs does).
 fn show_in_songs(app: &AppWindow, save: &str) {
     crate::go_to(app, Place::Songs.index() as i32);

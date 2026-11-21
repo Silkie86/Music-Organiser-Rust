@@ -470,6 +470,7 @@ export component Panel inherits Window {
     // it can't (a click then says the same below: a greyed button would show no tip).
     in property <string> curve-groove-says;
     callback curve-groove();
+    callback curve-save-as-new();
 
     title: "DAWmate";
     preferred-width: 760px;
@@ -1575,6 +1576,12 @@ export component Panel inherits Window {
                 }
                 Rectangle {
                     horizontal-stretch: 1;
+                }
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Save as new";
+                    tip: "Save as new curve: keeps the curve as it is now as a new curve, here and in the app's Curves list";
+                    clicked => { root.curve-save-as-new(); }
                 }
                 ToggleChip {
                     text: "Metronome";
