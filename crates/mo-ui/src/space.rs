@@ -16,6 +16,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
@@ -361,8 +362,14 @@ struct Page {
     /// The picked line's id, or "" when none is.
     picked: String,
     /// The parts on the card on show, for its ticks and links (they say which part by its place). The card's rows
-    /// are only made again when these change.
+    /// are only changed where these change ([`set_rows`]).
     card_parts: Vec<Part>,
+    /// The card's rows, as the window has them: one model, changed in place, so a tick or a save Fix finishes makes
+    /// only its own row again, not all 400-odd (the whole-app review of 19 Nov, FS-4). None until the first card.
+    card_rows: Option<Rc<VecModel<CardPart>>>,
+    /// The row whose tick box was clicked: made again at the next show, even unchanged, since the box ticked itself
+    /// and that undid its tie to the row.
+    card_redo: Option<usize>,
 }
 
 /// Which looks start again once something has gone to the Recycle Bin or come back.
@@ -446,8 +453,8 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
                     }
                 }
             }
-            // The tick box ticked itself, which undoes its tie to the card's rows: made again, they tie it again.
-            p.card_parts.clear();
+            // The tick box ticked itself, which undoes its tie to its row: that row is made again, which ties it again.
+            p.card_redo = usize::try_from(at).ok();
         });
         show_card(&app);
     });
@@ -2397,7 +2404,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 }
                 Step::Bitwig(id, copies) if id == p.bitwig_look.asked => {
                     p.fixes.looked();
-                    p.bitwig = Some(copies);
+                    if let Some(old) = p.bitwig.replace(copies) {
+                        // Freed off the window's thread: a big result took tens of ms to free here (FS-14).
+                        background::free_later(old);
+                    }
                     p.bitwig_looking = None;
                     Changed::Wins
                 }
@@ -2407,7 +2417,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Wins
                 }
                 Step::Old(id, found) if id == p.old_look.asked => {
-                    p.old = Some(found);
+                    if let Some(old) = p.old.replace(found) {
+                        // Freed off the window's thread: a big result took tens of ms to free here (FS-14).
+                        background::free_later(old);
+                    }
                     p.old_looking = false;
                     Changed::Wins
                 }
@@ -2417,7 +2430,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Wins
                 }
                 Step::Spare(id, found) if id == p.spare_look.asked => {
-                    p.spare = Some(found);
+                    if let Some(old) = p.spare.replace(found) {
+                        // Freed off the window's thread: a big result took tens of ms to free here (FS-14).
+                        background::free_later(old);
+                    }
                     p.spare_looking = false;
                     Changed::Wins
                 }
@@ -2427,7 +2443,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Wins
                 }
                 Step::Songs(id, shown) if id == p.songs_look.asked => {
-                    p.songs = Some(*shown);
+                    if let Some(old) = p.songs.replace(*shown) {
+                        // Freed off the window's thread: a big result took tens of ms to free here (FS-14).
+                        background::free_later(old);
+                    }
                     p.songs_looking = false;
                     Changed::Wins
                 }
@@ -2469,7 +2488,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     }
                 }
                 Step::Copies(id, found) if id == p.copies_look.asked => {
-                    p.copies = Some(*found);
+                    if let Some(old) = p.copies.replace(*found) {
+                        // Freed off the window's thread: a big result took tens of ms to free here (FS-14).
+                        background::free_later(old);
+                    }
                     p.copies_looking = false;
                     Changed::Also
                 }
@@ -2917,10 +2939,18 @@ fn show_card(app: &AppWindow) {
         data.set_card_big_note(card.big_note.into());
         data.set_card_lead(card.lead.into());
         data.set_card_ticks(card.ticks);
-        // Made again only when they change, so how far a look or Fix is doesn't make every row again.
-        if card.parts != p.card_parts {
-            let parts: Vec<CardPart> = card.parts.iter().map(card_part).collect();
-            data.set_card_parts(ModelRc::new(VecModel::from(parts)));
+        // Changed only where they change, so how far a look or Fix is, or one tick, doesn't make every row again.
+        let redo = p.card_redo.take();
+        if card.parts != p.card_parts || redo.is_some() {
+            let rows = p
+                .card_rows
+                .get_or_insert_with(|| {
+                    let rows = Rc::new(VecModel::default());
+                    data.set_card_parts(ModelRc::from(rows.clone()));
+                    rows
+                })
+                .clone();
+            set_rows(&rows, &p.card_parts, &card.parts, redo);
             p.card_parts = card.parts;
         }
         data.set_card_note(card.note.into());
@@ -2949,6 +2979,36 @@ fn set_line_menu(data: &SpaceData, buttons: &[Button]) {
     let now = data.get_line_menu();
     if now.row_count() != items.len() || now.iter().zip(&items).any(|(was, item)| was != *item) {
         data.set_line_menu(ModelRc::new(VecModel::from(items)));
+    }
+}
+
+/// Changes the card's rows from `old` to `new` in place (the whole-app review of 19 Nov, FS-4): a row that differs is
+/// set, rows shown or hidden between the same ones (Show its other saves) are put in or taken out, and the row `redo`
+/// is made again even when it's the same (its tick box was clicked). Another card altogether, sharing no first or last
+/// row, replaces them all at once.
+fn set_rows(rows: &VecModel<CardPart>, old: &[Part], new: &[Part], redo: Option<usize>) {
+    let front = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let back = old[front..].iter().rev().zip(new[front..].iter().rev()).take_while(|(a, b)| a == b).count();
+    if rows.row_count() != old.len() || (front == 0 && back == 0) {
+        rows.set_vec(new.iter().map(card_part).collect::<Vec<_>>());
+        return;
+    }
+    let (old_mid, new_mid) = (old.len() - front - back, new.len() - front - back);
+    let both = old_mid.min(new_mid);
+    for at in front..front + both {
+        if old[at] != new[at] {
+            rows.set_row_data(at, card_part(&new[at]));
+        }
+    }
+    for _ in new_mid..old_mid {
+        rows.remove(front + both);
+    }
+    for (at, part) in new.iter().enumerate().skip(front + both).take(new_mid - both) {
+        rows.insert(at, card_part(part));
+    }
+    if let Some(at) = redo.filter(|&at| at < new.len()) {
+        rows.remove(at);
+        rows.insert(at, card_part(&new[at]));
     }
 }
 
@@ -3043,6 +3103,35 @@ mod tests {
         let keys = mo_app::shortcuts::Shortcuts::default();
         assert_eq!(keys.page_action_for("F5", mo_app::shortcuts::SPACE_ACTIONS), Some(MEASURE));
         assert_eq!(keys.page_action_for("Ctrl+Shift+E", mo_app::shortcuts::SPACE_ACTIONS), Some(REVEAL));
+    }
+
+    #[test]
+    fn the_cards_rows_change_in_place_to_what_the_card_says() {
+        let part = |name: &str| Part { name: name.into(), ..Part::default() };
+        let parts = |names: &[&str]| names.iter().map(|n| part(n)).collect::<Vec<_>>();
+        let rows = VecModel::default();
+        let shown = |rows: &VecModel<CardPart>| rows.iter().map(|r| r.name.to_string()).collect::<Vec<_>>();
+        let mut old: Vec<Part> = Vec::new();
+        for (new, redo) in [
+            (parts(&["a", "b", "c"]), None),
+            // Show its other saves: put in between.
+            (parts(&["a", "b", "b1", "b2", "c"]), None),
+            // One line's words change, and a tick box was clicked.
+            (parts(&["a", "B", "b1", "b2", "c"]), Some(3)),
+            // Hide them again.
+            (parts(&["a", "B", "c"]), None),
+            // At the ends.
+            (parts(&["z", "a", "B", "c", "d"]), None),
+            (parts(&["a", "B"]), None),
+            // Another card altogether.
+            (parts(&["x", "y"]), None),
+            (Vec::new(), None),
+        ] {
+            set_rows(&rows, &old, &new, redo);
+            assert_eq!(shown(&rows), new.iter().map(|p| p.name.clone()).collect::<Vec<_>>());
+            assert!(rows.iter().zip(&new).all(|(r, p)| r == card_part(p)));
+            old = new;
+        }
     }
 
     #[test]
