@@ -33,8 +33,9 @@
 //! - `Trimmed sounds\` in the export folder: a trimmed copy Trim silence was still making
 //!   (`<copy>.<number>.wav` or `.wav.part`, [`crate::trim_copy::is_half_made`]), an hour old. Never the copies: DAW
 //!   projects use them.
-//! - `updates\`: a fetched setup (`DAWmate-Setup-<version>.exe`, and its `.sha256`) once that version or a newer one
-//!   runs, and a fetch cut short (`… .exe.mo-part`), an hour old.
+//! - `updates\`: a fetched setup (`DAWmate-Setup-<version>.exe`, its `.sha256` and its `.log`) once that version or a
+//!   newer one runs, only when the installed copy runs (a launcher's build leaves the installed copy's update be), and
+//!   a fetch cut short (`… .exe.mo-part`), an hour old.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
 //! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old;
 //!   and the Play in Bitwig files (`MO Play <n>-<n>.mid`, and `.bwpreset` for an audition, removed once Bitwig has
@@ -251,6 +252,9 @@ pub struct Places {
     /// The sample folders, whose "From Bitwig" folder Favourites from Bitwig saves samples into
     /// ([`crate::bitwig_favourites::save_missing`]).
     pub sample_folders: Vec<PathBuf>,
+    /// Whether the running app is the installed copy: only it removes fetched setups (a launcher's build is another
+    /// version, and leaves the installed copy's update be, UP-11).
+    pub installed: bool,
 }
 
 impl Places {
@@ -267,7 +271,8 @@ impl Places {
             })
             .filter(|e| e.is_absolute());
         let sample_folders = crate::bitwig_favourites::sample_folders(library);
-        Places { data: paths::data_dir(), temp: std::env::temp_dir(), beside_first, exports, sample_folders }
+        let installed = std::env::current_exe().is_ok_and(|e| crate::update::installed(&e));
+        Places { data: paths::data_dir(), temp: std::env::temp_dir(), beside_first, exports, sample_folders, installed }
     }
 }
 
@@ -346,10 +351,14 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     if let Some(takes) = real_folder(&places.data, &[crate::chord_check::FOLDER]) {
         done.add(remove_older(&takes, crate::chord_check::is_half_written, WRITING, now, false));
     }
-    // Fetched setups once their version is in (or older), and a fetch cut short (its own name, only while it's written).
+    // Fetched setups once their version is in (or older), and a fetch cut short (its own name, only while it's
+    // written). A launcher's build is another version than the installed copy: it leaves the installed copy's setups be
+    // and removes only a fetch cut short (UP-11).
     if let Some(updates) = real_folder(&places.data, &[crate::update::FOLDER]) {
         let current = env!("CARGO_PKG_VERSION");
-        done.add(remove_older(&updates, |n| crate::update::is_spent(n, current), WRITING, now, false));
+        let spent =
+            |n: &str| if places.installed { crate::update::is_spent(n, current) } else { crate::update::is_part(n) };
+        done.add(remove_older(&updates, spent, WRITING, now, false));
     }
     if let Some(twin) = real_folder(&places.data, &["twin", "cs"]) {
         done.add(remove_older(&twin, is_library_copy, DAY, now, false));
@@ -1091,7 +1100,29 @@ mod tests {
             beside_first: None,
             exports: None,
             sample_folders: Vec::new(),
+            installed: true,
         }
+    }
+
+    #[test]
+    fn a_launchers_build_leaves_the_installed_copys_setups_be() {
+        let dir = test_folder("setups");
+        let updates = dir.join("data").join(crate::update::FOLDER);
+        // Two hours on: a file's age runs from when it was made, which can't be set back.
+        let later = SystemTime::now() + Duration::from_secs(2 * 3600);
+        let current = env!("CARGO_PKG_VERSION");
+        let spent = format!("{}{current}.exe", crate::update::setup_prefix());
+        let waiting = format!("{}99.0.0.exe", crate::update::setup_prefix());
+        let cut_short = format!("{}99.0.0.exe.mo-part", crate::update::setup_prefix());
+        for name in [&spent, &waiting, &cut_short] {
+            fresh(&updates.join(name));
+        }
+        let launcher = Places { installed: false, ..test_places(&dir) };
+        sweep(&launcher, later, &TestBin(dir.join("bin")));
+        assert_eq!(names(&updates), [spent.clone(), waiting.clone()], "only the fetch cut short goes");
+        sweep(&test_places(&dir), later, &TestBin(dir.join("bin")));
+        assert_eq!(names(&updates), [waiting], "the installed copy removes its spent setup");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
