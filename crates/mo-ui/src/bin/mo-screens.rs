@@ -882,14 +882,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     keys_come_back_checks(&app, &window)?;
     short_swept_card(&app, &window, &out)?;
     swept_card_checks(&app, &window)?;
-    rediscover_without_fingerprints(&app, &window)?;
+    rediscover_without_fingerprints(&app, &window, &out)?;
     Ok(())
 }
 
 /// Rediscover when the sounds' fingerprints couldn't be read: it says why, isn't left busy (it said "Picking sounds…"
 /// and "Shuffling…" for the rest of the run: the whole-app review of 19 Nov, SN-6), and offers no Shuffle that can't
 /// shuffle (the code review of that fix). The fingerprints come back after, and it digs sounds out again.
-fn rediscover_without_fingerprints(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+fn rediscover_without_fingerprints(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+) -> Result<(), String> {
     let data = app.global::<mo_ui::SoundsData>();
     window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     start_on(app, Place::Sounds);
@@ -897,7 +901,10 @@ fn rediscover_without_fingerprints(app: &mo_ui::AppWindow, window: &MinimalSoftw
     capture(window);
     let why = "made up for the screenshots";
     mo_ui::sounds::index_failed_for_screens(app, why);
-    capture(window);
+    let pixels = capture(window);
+    let path = out.join("sounds-rediscover-cant-dig.png");
+    image::save_buffer(&path, &pixels, WIDTH, HEIGHT, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
+    println!("{}", path.display());
     let failed = (data.get_re_busy(), data.get_re_cant_dig(), data.get_re_empty_title(), data.get_re_empty_text());
     data.invoke_re_shuffle();
     capture(window);
