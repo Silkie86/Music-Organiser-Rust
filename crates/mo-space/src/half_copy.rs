@@ -4,8 +4,9 @@
 //! inside it, [`MARKER`], saying what it's a copy of. Just before the copy goes into use (the swap for its link, or
 //! pointing the links at it) the marker says so too, and once it's in use the marker comes out. So a copy that still
 //! holds one was cut off part way (Solomon, 3 Nov 2026: yes to "should the move leave a marker so the app can clear
-//! it?"). The app clears it then: the next try at the same move does that first, and the Space page finds the others
-//! in the places moves go to ([`half_copies`]) and clears them ([`clear`]).
+//! it?"). The app clears it then: the next try at the same move does that first, and the Plugins page finds the
+//! others in the places moves go to ([`half_copies`]) and clears them ([`clear`]). What the marker says for whoever
+//! opens it changes once the copy is going into use: it may be the copy in use then, not one to delete.
 //!
 //! Cleared means removed for good, as a move removes its copy when you press Stop: a half copy only ever holds copies
 //! the move made. And only while all of this holds, looked at again just before:
@@ -66,8 +67,17 @@ pub const MARKER: &str = "Music Organiser - copy not finished.txt";
 /// What the marker says first, for anyone who opens it.
 const EXPLAINED: &str = "Music Organiser is copying a folder into this one. If this file is still here once the app \
                          has finished, the copy was cut off part way (the app or the computer stopped), so this folder \
-                         is a half copy: the app clears it the next time it moves the folder, or from the Space page. \
-                         The folder it copies from wasn't changed.";
+                         is a half copy: the app clears it the next time it moves the folder, or from its Plugins \
+                         page. The folder it copies from wasn't changed.";
+
+/// What the marker says first once the copy is going into use ([`going_into_use`]): it may be the copy in use if the
+/// app stopped then. The whole-app review of 19 Nov, PM-3: it said the same as [`EXPLAINED`], so it called the copy in
+/// use a half copy of an unchanged folder, and sent you to the Space page, which doesn't look for half copies. It
+/// promises nothing of a page: a move back and a move of the moved folders' home mark their copies too, and no page
+/// looks at those afterwards.
+const IN_USE: &str = "Music Organiser copied a folder into this one, and was putting this copy into use when it \
+                      stopped, so this may be the copy in use now (a link, or the folder's own name, may lead here): \
+                      don't delete this folder. Only this file can go.";
 
 /// The biggest marker read: anything bigger isn't one the app wrote.
 const MARKER_MOST: u64 = 64 << 10;
@@ -75,7 +85,7 @@ const MARKER_MOST: u64 = 64 << 10;
 /// What's said of a copy this app is making or clearing now.
 const BUSY: &str = "The app is making or clearing a copy here now, so it stays.";
 
-/// What a marker holds, after [`EXPLAINED`]: one line of JSON.
+/// What a marker holds, after its words ([`EXPLAINED`] or [`IN_USE`]): one line of JSON.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Marker {
@@ -214,10 +224,11 @@ pub(crate) fn mark(tree: &Tree) -> io::Result<()> {
     written
 }
 
-/// Writes a marker into its file, through to the disk.
+/// Writes a marker into its file, through to the disk: its words for whoever opens it, then what it holds.
 fn write_marker(file: &mut fs::File, marker: &Marker) -> io::Result<()> {
     let json = serde_json::to_string(marker).map_err(io::Error::other)?;
-    file.write_all(format!("{EXPLAINED}\n\n{json}\n").as_bytes())?;
+    let said = if marker.in_use { IN_USE } else { EXPLAINED };
+    file.write_all(format!("{said}\n\n{json}\n").as_bytes())?;
     file.sync_all()
 }
 
@@ -959,7 +970,44 @@ mod tests {
     use std::fs;
     use std::sync::atomic::AtomicBool;
 
-    use super::{MARKER, NotRemoved, finish, remove_entry, remove_marked};
+    use super::{
+        EXPLAINED, IN_USE, MARKER, Marker, NotRemoved, finish, going_into_use, not_in_use, read_marker, remove_entry,
+        remove_marked, write_marker,
+    };
+
+    /// The whole-app review of 19 Nov, PM-3: the marker sends whoever opens it to the Plugins page, where half copies
+    /// are looked for and cleared; once the copy is going into use, it says the copy may be the one in use, and not to
+    /// delete it, rather than calling it a half copy of a folder that wasn't changed.
+    #[test]
+    fn the_markers_words_say_where_to_look_and_that_a_copy_going_into_use_may_be_in_use() {
+        let dir = std::env::temp_dir().join(format!("mo-space-unit-marker-words-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let copy = dir.join("D").join("Presets");
+        fs::create_dir_all(&copy).unwrap();
+        let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let marker = Marker {
+            from: path(&dir.join("C").join("Presets")),
+            to: path(&copy),
+            real: String::new(),
+            settled: path(&copy),
+            started: "2026-11-03T14:03:12.1234567+00:00".into(),
+            in_use: false,
+        };
+        let mut file = fs::File::create(copy.join(MARKER)).unwrap();
+        write_marker(&mut file, &marker).unwrap();
+        drop(file);
+        let said = |n: &str| fs::read_to_string(copy.join(MARKER)).unwrap().contains(n);
+        assert!(said(EXPLAINED) && said("Plugins page") && !said("Space page"));
+        // Going into use, its words change, and what it holds says so.
+        assert!(going_into_use(&copy));
+        assert!(said(IN_USE) && !said(EXPLAINED) && said("don't delete this folder") && !said("page"));
+        assert!(read_marker(&copy).is_some_and(|m| m.in_use && m.from == marker.from));
+        // Not going into use after all (its swap didn't happen): a half copy again.
+        not_in_use(&copy);
+        assert!(said(EXPLAINED) && !said(IN_USE));
+        assert_eq!(read_marker(&copy), Some(marker));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_folder_goes_last_with_a_file_finder_wrote_but_not_with_one_of_yours() {

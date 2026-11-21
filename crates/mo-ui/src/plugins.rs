@@ -93,6 +93,8 @@ struct Page {
     finder_asked: bool,
     /// The half copies moves cut off part way left (a close or a crash), with Clear (review E2-3).
     half_copies: Vec<mo_space::half_copy::HalfCopy>,
+    /// The moves cut off after their swap that the last look kept (review PM-4), for the page to say so.
+    kept_cut_off: Vec<mo_space::folder_move::MovedFolder>,
     clearing_half_copies: bool,
     /// The half copies were looked for once this run (then again only after a move or a clear).
     looked_for_half_copies: bool,

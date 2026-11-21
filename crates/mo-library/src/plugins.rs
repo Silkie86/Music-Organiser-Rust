@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::PluginKind;
 use crate::db::{Library, LibraryError, int, local, plugin_kind, text};
+use crate::folders::FolderList;
 use crate::read::name_key;
 
 /// One plugin in one save, as the library stores it (a row of `plugins` with its save's DAW and date).
@@ -143,11 +144,15 @@ impl Library {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Your own folders, which Clean up never touches (nor a folder holding one, nor one inside): the project folders
-    /// and the sample folders, as the C# app's `ProtectedRoots`.
+    /// Your own folders, which the Plugins page's Clean up, Move and measure never touch (nor a folder holding one, nor
+    /// one inside): the project folders, the sample folders and the MIDI folders. The C# app's `ProtectedRoots` had no
+    /// MIDI folders, so each reader here added them itself, and Move's check just before it starts didn't (the
+    /// whole-app review of 19 Nov, PM-7). A folder list that can't be read is an error, never no folders.
     pub fn protected_roots(&self) -> Result<Vec<String>, LibraryError> {
         let mut out = self.roots()?;
-        out.extend(self.strict_list_setting("sample_folders")?);
+        for key in [FolderList::Samples, FolderList::Midi].iter().filter_map(|l| l.setting_key()) {
+            out.extend(self.strict_list_setting(key)?);
+        }
         let mut seen = HashSet::new();
         out.retain(|p| !p.trim().is_empty() && seen.insert(crate::scan::path_key(p)));
         Ok(out)

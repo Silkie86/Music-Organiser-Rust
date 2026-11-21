@@ -71,9 +71,10 @@ fn registry() -> Vec<Uninstaller> {
 /// The uninstallers that look like this plugin's, best first: the program's name holds the plugin's (without its
 /// version or format), and the maker's name counts in its favour. "Serum" finds "Xfer Serum 2"; a name of three letters
 /// or fewer only matches a program named just that, and a family shorter than two ("M1") none, so neither can pick a
-/// stranger. The same version
-/// ("Serum 2" for Serum 2) comes before another, and another version's ("iZotope Ozone 11" for Ozone 9) comes last
-/// (see [`is_other_version`]). `installed` is the installed plugins' names, which tell another version from this one's.
+/// stranger. The same version ("Serum 2" for Serum 2) comes before another, and another version's ("iZotope Ozone 11"
+/// for Ozone 9), or another plugin's whose name holds this one's ("Native Instruments Massive X" for Massive), comes
+/// last (see [`is_other_version`]). `installed` is the installed plugins' names, which tell another version from this
+/// one's.
 pub fn for_plugin(plugin: &str, vendor: &str, all: &[Uninstaller], installed: &[String]) -> Vec<Uninstaller> {
     let fam = family(plugin);
     if fam.chars().count() < 2 {
@@ -91,7 +92,8 @@ pub fn for_plugin(plugin: &str, vendor: &str, all: &[Uninstaller], installed: &[
     found.into_iter().map(|(.., u)| u.clone()).collect()
 }
 
-/// Whether the program's name gives another version than the plugin's: "iZotope Ozone 11" for Ozone 9. Running it
+/// Whether the program's name gives another version than the plugin's ("iZotope Ozone 11" for Ozone 9), or is another
+/// plugin's whose name holds this one's ("Native Instruments Massive X" for Massive: [`another_plugins`]). Running it
 /// would remove a plugin you may still use, so it's never picked for you. A program whose name gives no version isn't
 /// another one. Nor is one for a plugin whose own name gives none, as it could be any version (Kontakt 6 installs as
 /// "Kontakt", under "Native Instruments Kontakt 6"), unless that version is installed too: "Xfer Serum 2" is Serum 2's
@@ -100,6 +102,9 @@ pub fn is_other_version(plugin: &str, u: &Uninstaller, installed: &[String]) -> 
     let fam = family(plugin);
     if fam.chars().count() < 2 {
         return false;
+    }
+    if another_plugins(&u.name, &fam) {
+        return true;
     }
     let Some(theirs) = major_after(&u.name, &fam) else { return false };
     if let Some(mine) = major_after(plugin, &fam) {
@@ -112,26 +117,109 @@ pub fn is_other_version(plugin: &str, u: &Uninstaller, installed: &[String]) -> 
 /// 2, "Diva v1.4.5": 1), or `None` when none follows it. `family` is as [`crate::plugins::family`] gives it (small
 /// letters and digits only), so a name with spaces or dashes ("Guitar Rig 7", "Pro-Q 3") is found too.
 pub fn major_after(name: &str, family: &str) -> Option<u32> {
-    // Each letter or digit of the name in small letters, with where it ends, so the family is found the way names are
-    // compared.
-    let mut kept = String::new();
-    let mut ends = Vec::new();
-    for (at, c) in name.char_indices() {
-        let small = case::lower(c);
-        if small.is_alphabetic() || small.is_numeric() {
-            kept.push(small);
-            ends.push(at + c.len_utf8());
-        }
-    }
-    let start = kept.find(family)?;
-    let last = kept[..start].chars().count() + family.chars().count().checked_sub(1)?;
-    let mut rest = name.get(*ends.get(last)?..)?;
-    rest = rest.trim_start_matches([' ', '-', '_', '.']);
+    let (_, rest) = *places(name, family).first()?;
+    let mut rest = rest.trim_start_matches([' ', '-', '_', '.']);
     if let Some(after_v) = rest.strip_prefix(['v', 'V']).filter(|r| r.starts_with(|c: char| c.is_ascii_digit())) {
         rest = after_v;
     }
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
+}
+
+/// Words that may follow a plugin's name in its own uninstaller's: a format, a build, or the uninstaller itself
+/// ("Serum x64", "Diva VST3", "Arcade Uninstaller"). "v" is a version ("Analog Lab V"), as [`family`] takes it.
+const NOT_ANOTHER: [&str; 20] = [
+    "v",
+    "x64",
+    "x86",
+    "x32",
+    "64bit",
+    "32bit",
+    "win",
+    "win64",
+    "win32",
+    "vst",
+    "vst2",
+    "vst3",
+    "aax",
+    "au",
+    "clap",
+    "plugin",
+    "plugins",
+    "uninstall",
+    "uninstaller",
+    "remove",
+];
+
+/// Words that may follow a plugin's version in its own uninstaller's name: its edition ("Ozone 9 Advanced").
+const EDITIONS: [&str; 10] =
+    ["advanced", "standard", "elements", "pro", "essentials", "intro", "lite", "le", "se", "edition"];
+
+/// Whether a program's name holds the plugin's family only as part of another plugin's name: inside a longer word
+/// ("ValhallaSupermassive" for Massive), or with a word straight after it ("Native Instruments Massive X", "iZotope
+/// Ozone Imager" for Ozone), or after its version ("Battery 4 Factory Library" for Battery 4). A version after it alone
+/// or with an edition ("Ozone 9 Advanced", "Diva v1.4.5"), "mk II", a word of [`NOT_ANOTHER`], or what's in brackets
+/// ("Serum (64-bit)") isn't another plugin's; nor is a name that holds the family again on its own (a maker named as
+/// the plugin is: "Vital Audio Vital"). The whole-app review of 19 Nov, PM-6: Uninstall picked Massive X's uninstaller
+/// for Massive, without a word, when Massive had none of its own.
+fn another_plugins(name: &str, family: &str) -> bool {
+    let places = places(name, family);
+    !places.is_empty() && places.iter().all(|&(before, after)| another_plugins_at(name, before, after))
+}
+
+/// Whether the plugin's family, found in a program's name between `before` and `after` ([`places`]), is part of
+/// another plugin's name there ([`another_plugins`]).
+fn another_plugins_at(name: &str, before: &str, after: &str) -> bool {
+    // Inside a longer word: a letter or digit straight before it, with no change from small letters to a capital or
+    // between letters and digits ("XferSerum" starts a word at its S).
+    if let (Some(prev), Some(first)) = (before.chars().next_back(), name[before.len()..].chars().next())
+        && prev.is_alphanumeric()
+        && !(prev.is_lowercase() && first.is_uppercase())
+        && prev.is_numeric() == first.is_numeric()
+    {
+        return true;
+    }
+    const BETWEEN: [char; 4] = [' ', '-', '_', '.'];
+    let first_word = |text: &str| -> String {
+        text.chars().take_while(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+    };
+    let after = after.trim_start_matches(BETWEEN);
+    let word = first_word(after);
+    let version = |w: &str| w.starts_with(|c: char| c.is_ascii_digit());
+    let mark = |w: &str| {
+        w.strip_prefix("mk").is_some_and(|r| r.chars().all(|c| matches!(c, 'i' | 'v' | 'x') || c.is_ascii_digit()))
+    };
+    let this_plugins = |w: &str| w.is_empty() || mark(w) || NOT_ANOTHER.contains(&w);
+    if version(&word) || word.strip_prefix('v').is_some_and(version) {
+        // The word after the version ("9", "v1.4.5"): only an edition or one of NOT_ANOTHER's is this plugin's.
+        let past = after.trim_start_matches(['v', 'V']).trim_start_matches(|c: char| c.is_ascii_digit() || c == '.');
+        let next = first_word(past.trim_start_matches(BETWEEN));
+        return !(this_plugins(&next) || EDITIONS.contains(&next.as_str()));
+    }
+    !this_plugins(&word)
+}
+
+/// Each place the plugin's family is in a program's name, first to last, found the way names are compared (small
+/// letters and digits only): the name's own text before it and after it (`"Native Instruments "` and `" X"` in "Native
+/// Instruments Massive X"). None when it isn't in the name.
+fn places<'a>(name: &'a str, family: &str) -> Vec<(&'a str, &'a str)> {
+    // Each letter or digit of the name in small letters, with where it starts and ends in the name.
+    let mut kept = String::new();
+    let mut spans = Vec::new();
+    for (at, c) in name.char_indices() {
+        let small = case::lower(c);
+        if small.is_alphabetic() || small.is_numeric() {
+            kept.push(small);
+            spans.push((at, at + c.len_utf8()));
+        }
+    }
+    let Some(more) = family.chars().count().checked_sub(1) else { return Vec::new() };
+    kept.match_indices(family)
+        .filter_map(|(start, _)| {
+            let first = kept[..start].chars().count();
+            Some((name.get(..spans.get(first)?.0)?, name.get(spans.get(first + more)?.1..)?))
+        })
+        .collect()
 }
 
 /// How well an uninstaller's name fits the plugin: 0 not at all.

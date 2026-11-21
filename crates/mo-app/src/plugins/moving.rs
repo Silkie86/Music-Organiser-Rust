@@ -92,7 +92,8 @@ pub fn moved_text(moved: &MovedFolder, noted: &Result<(), String>) -> String {
         Ok(()) => head,
         Err(why) => format!(
             "{head} But the move couldn't be added to the library's moved folders ({why}), so Space and this page \
-             don't know of it yet: tell Claude, or note where it went."
+             don't know of it yet. Its note stays, so this page tries again straight away, and each time the app \
+             starts, until it's added."
         ),
     }
 }

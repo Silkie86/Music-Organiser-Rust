@@ -74,8 +74,7 @@ pub(super) fn add(app: &AppWindow) {
             let card = feed.start(&format!("Adding a folder to {}", room.name), "Measuring it");
             let found = mo_app::background::guarded(|| -> Result<FolderFix, String> {
                 let lib = Library::open_read_only(&library).map_err(|e| e.to_string())?;
-                let mut protected = lib.protected_roots().map_err(|e| e.to_string())?;
-                protected.extend(lib.strict_list_setting("midi_folders").map_err(|e| e.to_string())?);
+                let protected = lib.protected_roots().map_err(|e| e.to_string())?;
                 let mut plugin_roots = lib.strict_list_setting("plugin_folders").map_err(|e| e.to_string())?;
                 if plugin_roots.is_empty() {
                     let defaults = mo_space::plugins::default_folders();

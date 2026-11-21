@@ -1,7 +1,8 @@
 //! The Plugins page's Uninstall, on the side card's On disk tab, in Clean up's place ([`super::clean`]): the plugin's
-//! own uninstaller, picked for you unless it looks like another version's, then a wait for the plugin's files to go
-//! and Clean up offered for what it left behind. Without one, its plugin files to the Recycle Bin instead, with Put
-//! back. The rules are `mo_app::plugins::uninstall`'s; the looking, the running and the waiting are on workers.
+//! own uninstaller, picked for you unless it looks like another version's or another plugin's, then a wait for the
+//! plugin's files to go and Clean up offered for what it left behind. Without one, its plugin files to the Recycle Bin
+//! instead, with Put back; and so are the plugin files an uninstaller left. The rules are
+//! `mo_app::plugins::uninstall`'s; the looking, the running and the waiting are on workers.
 
 use mo_app::space_bin::BIN;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use mo_app::log;
 use mo_app::plugins::uninstall::{self, Plan, Waited};
 use mo_space::Stopped;
-use mo_space::plugin_files;
+use mo_space::plugin_files::{self, FileLine};
 use mo_space::uninstallers;
 use slint::ComponentHandle;
 
@@ -103,33 +104,56 @@ pub(super) fn confirm(app: &AppWindow) {
     let run = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let feed = p.feed.clone();
+        // The plugin as the page knows it, for the plugin files its uninstaller may leave.
+        let ask = p.clean.as_ref().and_then(|c| {
+            let pl = p.plugins.as_ref()?;
+            pl.uninstall_ask(pl.row_of(&c.row_key)?)
+        });
         let c = p.clean.as_mut()?;
         let Stage::Pick { found, files, picked: Some(at), .. } = &c.stage else { return None };
         let u = found.get(*at)?.clone();
         let files = files.clone();
         c.stage = Stage::Waiting;
         let card = feed.start(&format!("Uninstalling {}", u.name), "Its uninstaller is open in its own window.");
-        Some((u, files, c.id, c.stop.clone(), c.row_key.clone(), c.name.clone(), card))
+        Some((u, files, ask, c.id, c.stop.clone(), c.row_key.clone(), c.name.clone(), card))
     });
-    if let Some((u, files, id, stop, row_key, name, card)) = run {
+    if let Some((u, files, ask, id, stop, row_key, name, card)) = run {
         fill(app);
         log::info("Plugins", &format!("Uninstall {name}: running {} ({})", u.name, u.command));
         let weak = app.as_weak();
         let spawned = mo_app::background::spawn("Plugins uninstaller", move || {
             // The files there before it runs: one already gone says nothing about how it went.
             let watched = uninstall::there_now(&files);
-            let until = std::time::Instant::now() + uninstall::WAIT;
+            let started = std::time::Instant::now();
+            let until = started + uninstall::WAIT;
             let ran = mo_app::background::guarded(|| uninstallers::run_until(&u, &stop, Some(until)))
                 .unwrap_or_else(uninstallers::Ran::Unclear);
-            let waited = uninstall::after_run(&ran, &watched, uninstall::GRACE, uninstall::POLL, &stop);
-            let head = uninstall::ran_text(&name, &ran, waited);
+            let watch = uninstall::Watch::after(&ran, started.elapsed(), until);
+            let waited = uninstall::after_run(&ran, &watched, watch, &stop);
+            let gone = uninstall::gone_now(&watched);
+            // The plugin files it left, offered for the Recycle Bin as when there's no uninstaller (review PM-1).
+            let left = match (waited, &ask) {
+                (Waited::Partly { maybe_running, .. }, Some(ask)) => {
+                    let left = uninstall::there_now(&watched);
+                    match mo_app::background::guarded(|| ask.left_lines(&left, &stop)) {
+                        Ok(Ok(lines)) => Some((ask.left_intro(maybe_running), lines)),
+                        Ok(Err(Stopped)) => None,
+                        Err(why) => {
+                            log::warning("Plugins", &format!("Uninstall {name}: couldn't look at what it left: {why}"));
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            // Said once what's left is known: the card offers only the files that can go.
+            let head = uninstall::ran_text(&name, &ran, waited, left.as_ref().map(|(_, lines)| lines.as_slice()));
             if waited == Waited::Gone {
                 card.done(&head)
             } else {
                 card.failed(&head)
             }
-            let gone = uninstall::gone_now(&watched);
-            back(&weak, move |app| ran_done(app, id, row_key, head, gone, waited == Waited::Gone));
+            back(&weak, move |app| ran_done(app, id, row_key, head, gone, waited, left));
         });
         if let Err(e) = spawned {
             log::error("Plugins", &format!("Couldn't start the uninstaller: {e}"));
@@ -193,7 +217,18 @@ fn remove_files(app: &AppWindow) {
     }
 }
 
-fn ran_done(app: &AppWindow, id: u64, row_key: (String, String), head: String, gone: Vec<String>, uninstalled: bool) {
+/// The uninstaller is done (`waited`): the plugin files that went are off the page, and Clean up is offered once
+/// they all went. The ones it left (`left`: the card's words over them, and their lines) are offered for the Recycle
+/// Bin instead, as when there's no uninstaller.
+fn ran_done(
+    app: &AppWindow,
+    id: u64,
+    row_key: (String, String),
+    head: String,
+    gone: Vec<String>,
+    waited: Waited,
+    left: Option<(String, Vec<FileLine>)>,
+) {
     log::info("Plugins", &format!("Uninstall: {head}"));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -201,10 +236,16 @@ fn ran_done(app: &AppWindow, id: u64, row_key: (String, String), head: String, g
             pl.forget_paths(&gone);
         }
         p.uninstalled.extend(gone);
-        let offer =
-            uninstalled && p.plugins.as_ref().is_some_and(|pl| pl.row_of(&row_key).is_some_and(|r| pl.can_clean(r)));
+        let offer = waited == Waited::Gone
+            && p.plugins.as_ref().is_some_and(|pl| pl.row_of(&row_key).is_some_and(|r| pl.can_clean(r)));
         if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
-            c.stage = Stage::Done { head, problems: Vec::new(), offer_clean: offer };
+            c.stage = match left {
+                Some((intro, lines)) if lines.iter().any(|l| l.stays.is_none()) => {
+                    let ticks = lines.iter().map(|l| l.stays.is_none()).collect();
+                    Stage::Files { intro, lines, ticks }
+                }
+                _ => Stage::Done { head, problems: Vec::new(), offer_clean: offer },
+            };
         }
     });
     refresh(app);

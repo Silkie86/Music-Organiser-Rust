@@ -5,10 +5,12 @@
 //!
 //! The moves and folders left behind come from the app's records. An old copy no move was kept for (the app stopped
 //! between swapping the folder for its link and keeping the move, say) is found too, beside its link, in the folders
-//! the app hands in: it's taken in as a move, but it stays until the app keeps that move, as once it's gone nothing
-//! would show the link was a move's. Each one that can go says what's only in it (by sizes and times), so the page can
-//! show that list before anything goes. [`remove`] sends the ones you pick, together, each checked again first;
-//! [`crate::folder_move::remove_old_copy`] and [`crate::after_move::remove_old_home`] send one.
+//! the app hands in: it's taken in as a move, but it stays until that move is kept, as once it's gone nothing would
+//! show the link was a move's. The Plugins page keeps such a move at its next look, from the note the move left of
+//! where it went (the whole-app review of 19 Nov, PM-4); one that left no note (cut off before 21 Nov 2026, when the
+//! note went first) stays for you to delete yourself. Each one that can go says what's only in it (by sizes and
+//! times), so the page can show that list before anything goes. [`remove`] sends the ones you pick, together, each
+//! checked again first; [`crate::folder_move::remove_old_copy`] and [`crate::after_move::remove_old_home`] send one.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -393,7 +395,8 @@ fn found_again<'a>(
     };
     match &l.what {
         Left::OldCopy(at) => then.0.get(*at).and_then(move_now).ok_or_else(|| MOVE_GONE.to_owned()).and_then(old_copy),
-        // Kept since (by the C# app, say), it's a move like any other.
+        // Kept since (the Plugins page keeps a move cut off after its swap at its next look), it's a move like any
+        // other.
         Left::NotKept(m) => move_now(m).ok_or_else(|| not_kept_stays(&m.from)).and_then(old_copy),
         Left::Behind(at) => {
             then.1.get(*at).and_then(|h| home_now(&h.path)).map(Going::Home).ok_or_else(|| HOME_GONE.to_owned())

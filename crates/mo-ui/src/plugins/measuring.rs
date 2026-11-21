@@ -90,7 +90,7 @@ fn start(app: &AppWindow, whatever: bool) {
         let own = mo_library::songs_db::own_since(&library).is_some();
         NOT_OWN.store(!own, Ordering::Relaxed);
         let asked = folder_fixes::take_measure_asked();
-        let kept = if !own || (!whatever && !asked && !is_due(&library)) {
+        let kept = if !own || (!whatever && !asked.owed && !is_due(&library)) {
             false
         } else {
             let card = feed.start("Measuring your plugins", "Looking through your plugin folders");
@@ -107,10 +107,12 @@ fn start(app: &AppWindow, whatever: bool) {
             }
             found.is_ok()
         };
-        // Kept: it measured every folder you added that was there, so a read's ask is answered, this measure's or
-        // one made while it ran. Not kept (it failed, stopped or couldn't run): still owed, tried at the hourly look.
+        // Kept: it measured every folder you added that was there as it walked, so the reads' asks made before it
+        // started are answered. One made while it ran (a drive that came back after it walked past that folder's
+        // place) asks for another measure at once (the whole-app review of 19 Nov, PM-8). Not kept (it failed,
+        // stopped or couldn't run): still owed, tried at the hourly look.
         if kept {
-            folder_fixes::measure_answered();
+            folder_fixes::measure_answered(asked);
         }
         RUNNING.store(false, Ordering::Relaxed);
         back(&weak, move |app| {

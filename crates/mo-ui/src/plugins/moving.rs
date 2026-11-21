@@ -135,7 +135,9 @@ fn chosen_none(app: &AppWindow, id: u64) {
     fill(app);
 }
 
-/// Reads your folders and the moves made already, as the library keeps them now. Each error is a whole sentence.
+/// Reads your folders (project, sample and MIDI folders) and the moves made already, as the library keeps them now:
+/// one added since the page measured is checked too (the whole-app review of 19 Nov, PM-7). Each error is a whole
+/// sentence.
 fn library_now(library: &Path) -> Result<(Vec<String>, Vec<mo_space::folder_move::MovedFolder>), String> {
     let sentence = |e: mo_library::LibraryError| {
         let t = e.to_string();
@@ -238,8 +240,14 @@ fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, bytes: u64, destination: String
             // As the library is now: a move made meanwhile counts.
             let (protected, moved) = library_now(&library).map_err(CantMove::Failed)?;
             // Noted before anything is copied, so a half copy a close or a crash leaves is found next time (review
-            // E2-3).
-            if let Err(e) = moves_under_way::start(&moves_under_way::file(), &folder.path, &destination) {
+            // E2-3), with whose folder it is, so a move cut off after its swap can still be kept then (review PM-4).
+            let whose = moves_under_way::Whose {
+                key: ask.key.clone(),
+                kind: folder.kind,
+                shared_with: folder.shared_with.clone(),
+                bytes,
+            };
+            if let Err(e) = moves_under_way::start(&moves_under_way::file(), &folder.path, &destination, whose) {
                 log::warning("Plugins", &format!("Move: the move under way couldn't be noted: {e}"));
             }
             // Heard for every file, from several threads: the card hears about every half percent (16 MB at least).
@@ -272,23 +280,38 @@ fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, bytes: u64, destination: String
             })
         }));
         let gone = matches!(moved, Ok(Ok(_))).then(|| folder.path.clone());
-        // Done: its copy is in use now. A move that stopped or failed cleared its copy, or left a half copy for the next
-        // look to find; that look drops the note when there's nothing.
-        if gone.is_some()
-            && let Err(e) = moves_under_way::finished(&moves_under_way::file(), &folder.path, &destination)
-        {
-            log::warning("Plugins", &format!("Move: the move under way's note couldn't be taken out: {e}"));
-        }
+        // A move that stopped or failed cleared its copy, or left a half copy for the next look to find; that look
+        // drops the note when there's nothing.
         let head = match moved {
             Ok(Ok(moved)) => {
                 let noted = moving::moved_entry(&moved).and_then(|entry| note(&library, &entry));
-                if let Err(why) = &noted {
-                    // In full, so it can be added by hand.
-                    let entry = moving::moved_entry(&moved).unwrap_or_default();
-                    log::error(
-                        "Plugins",
-                        &format!("Move: {} wasn't added to the moved folders: {why}. {entry}", moved.from),
-                    );
+                match &noted {
+                    // Done, and kept: its note goes, once its copy holds no marker ([`moves_under_way::settled`]).
+                    // Taken out before the move was kept, a stop between the two left the move kept nowhere (the
+                    // whole-app review of 19 Nov, PM-4); not kept, it stays, and the next look keeps it
+                    // ([`moves_under_way::keep_swapped`]).
+                    Ok(()) => {
+                        let file = moves_under_way::file();
+                        match moves_under_way::settled(&file, &folder.path, &destination, &moved.to) {
+                            Ok(true) => {}
+                            Ok(false) => log::warning(
+                                "Plugins",
+                                &format!("Move: the marker in {} stays, so its note does, for the next look", moved.to),
+                            ),
+                            Err(e) => log::warning(
+                                "Plugins",
+                                &format!("Move: the move under way's note couldn't be taken out: {e}"),
+                            ),
+                        }
+                    }
+                    Err(why) => {
+                        // In full, so it can be added by hand.
+                        let entry = moving::moved_entry(&moved).unwrap_or_default();
+                        log::error(
+                            "Plugins",
+                            &format!("Move: {} wasn't added to the moved folders: {why}. {entry}", moved.from),
+                        );
+                    }
                 }
                 let head = moving::moved_text(&moved, &noted);
                 card.done(&head);
@@ -419,6 +442,7 @@ static LOOKS: AtomicU64 = AtomicU64::new(0);
 
 /// Looks, on a worker, for the half copies moves cut off part way left ([`moves_under_way::cut_off`]), and shows them:
 /// at the page's first read, and after each move and each clear (not at every read: a half copy is read in full).
+/// First, a move cut off after its swap, before the library kept it, is kept ([`moves_under_way::keep_swapped`]).
 pub(super) fn look_for_half_copies(app: &AppWindow) {
     let look = LOOKS.fetch_add(1, Ordering::Relaxed) + 1;
     let file = moves_under_way::file();
@@ -427,25 +451,57 @@ pub(super) fn look_for_half_copies(app: &AppWindow) {
     let spawned = mo_app::background::spawn("Plugins half copies", move || {
         let found = mo_app::background::guarded(|| -> Result<_, String> {
             if moves_under_way::under_way(&file).is_empty() {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), Vec::new()));
             }
-            let (_, moved) = library_now(&library)?;
+            let (_, mut moved) = library_now(&library)?;
             let running: Vec<String> =
                 RUNNING.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|(f, _)| f.clone()).collect();
+            let keep = |record: &mo_space::folder_move::MovedFolder| {
+                moving::moved_entry(record).and_then(|entry| note(&library, &entry))
+            };
+            let kept = moves_under_way::keep_swapped(&file, &mut moved, &running, &keep);
             let never = AtomicBool::new(false);
             mo_app::background::on_bulk_pool(|| {
                 moves_under_way::cut_off(&file, &moved, &running, &SystemDrives, &never)
             })
+            .map(|found| (found, kept))
             .map_err(|_| "Stopped.".to_owned())
         })
         .and_then(|r| r);
         match found {
-            Ok(found) => back(&weak, move |app| {
-                if LOOKS.load(Ordering::Relaxed) != look {
-                    return;
+            Ok((found, kept)) => back(&weak, move |app| {
+                let current = LOOKS.load(Ordering::Relaxed) == look;
+                // Taken in whatever the look (a later one doesn't find them again): their folders are links now, as
+                // a move's are once it's done.
+                let any_kept = !kept.is_empty();
+                if any_kept {
+                    PAGE.with(|p| {
+                        let mut p = p.borrow_mut();
+                        // Space looks for old copies again when it next shows, as after a move here.
+                        p.moves += 1;
+                        let froms: Vec<String> = kept.iter().map(|m| m.from.clone()).collect();
+                        if let Some(pl) = p.plugins.as_mut() {
+                            pl.forget_paths(&froms);
+                        }
+                        p.moved.extend(froms);
+                        // Said for the rest of the run.
+                        for m in kept {
+                            if !p.kept_cut_off.iter().any(|k| k.from == m.from) {
+                                p.kept_cut_off.push(m);
+                            }
+                        }
+                    });
+                    refresh(app);
+                    fill_panel(app);
+                    // Space shows the old copies they left.
+                    crate::space::plugin_moved(app);
                 }
-                PAGE.with(|p| p.borrow_mut().half_copies = found);
-                fill_half_copies(app);
+                if current {
+                    PAGE.with(|p| p.borrow_mut().half_copies = found);
+                }
+                if current || any_kept {
+                    fill_half_copies(app);
+                }
             }),
             Err(why) => log::warning("Plugins", &format!("Couldn't look for half copies: {why}")),
         }
@@ -462,7 +518,7 @@ pub(super) fn fill_half_copies(app: &AppWindow) {
         let text = if p.clearing_half_copies {
             "Clearing what cut-off moves left…".to_owned()
         } else {
-            moves_under_way::found_text(&p.half_copies)
+            moves_under_way::found_text(&p.half_copies, &p.kept_cut_off)
         };
         (text, !p.clearing_half_copies && moves_under_way::can_clear(&p.half_copies))
     });
