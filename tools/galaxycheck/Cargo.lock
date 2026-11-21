@@ -2936,6 +2936,7 @@ dependencies = [
  "mo-formats",
  "mo-space",
  "rayon",
+ "rustix 1.1.6",
  "sha2",
  "winapi-util",
  "zip",
