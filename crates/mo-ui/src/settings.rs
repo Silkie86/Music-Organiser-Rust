@@ -73,6 +73,9 @@ struct Page {
     bw_folders: Vec<PathBuf>,
     bw_users: Vec<PathBuf>,
     bw_loaded_from: Option<String>,
+    /// The app's own files of each link found in the DAWs' folders, for Take out (FL Studio's, Bitwig's).
+    fl_files: Vec<PathBuf>,
+    bw_files: Vec<PathBuf>,
     /// Counts the looks for the DAWs' folders, so an older one finishing late is dropped (newest wins).
     scripts_asked: u64,
     daws_installing: bool,
@@ -231,6 +234,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             bw_state: None,
             bw_folders: Vec::new(),
             bw_users: Vec::new(),
+            fl_files: Vec::new(),
+            bw_files: Vec::new(),
             bw_loaded_from: None,
             scripts_asked: 0,
             daws_installing: false,
@@ -417,6 +422,12 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             } else {
                 install_fl(&app);
             }
+        }
+    });
+    let weak = app.as_weak();
+    data.on_take_out_daw(move |bitwig| {
+        if let Some(app) = weak.upgrade() {
+            take_out(&app, bitwig);
         }
     });
     let weak = app.as_weak();
@@ -1234,6 +1245,8 @@ fn look_at_scripts(app: &AppWindow) {
         let source = std::env::current_exe().ok().and_then(|exe| scripts::bitwig_extension_source(&exe));
         let bw_version = source.as_deref().and_then(scripts::extension_version);
         let bw_state = source.as_deref().map_or(ScriptState::NotInstalled, |s| scripts::bitwig_state(s, &bw_folders));
+        let fl_files = scripts::fl_installed_files(&folders);
+        let bw_files = scripts::bitwig_installed_files(&bw_folders, &users);
         let _ = slint::invoke_from_event_loop(move || {
             let newest = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
@@ -1245,6 +1258,8 @@ fn look_at_scripts(app: &AppWindow) {
                 p.bw_state = Some(bw_state);
                 p.bw_folders = bw_folders;
                 p.bw_users = users;
+                p.fl_files = fl_files;
+                p.bw_files = bw_files;
                 true
             });
             if newest && let Some(app) = weak.upgrade() {
@@ -1505,12 +1520,66 @@ fn install_bitwig(app: &AppWindow) {
     }
 }
 
+/// Takes the app's link out of a DAW (Take out, once asked): the files found there, away from the window.
+fn take_out(app: &AppWindow, bitwig: bool) {
+    let files = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live && !p.daws_installing)?;
+        let files = if bitwig { p.bw_files.clone() } else { p.fl_files.clone() };
+        if files.is_empty() {
+            return None;
+        }
+        p.daws_installing = true;
+        Some(files)
+    });
+    app.global::<SettingsData>().set_take_out_asking(SharedString::new());
+    let Some(files) = files else { return };
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Settings take out", move || {
+        let done = scripts::take_out(&files);
+        for f in &done.removed {
+            log::info("Settings", &format!("Took the DAW link out: {}", f.display()));
+        }
+        for (f, why) in &done.failed {
+            log::warning("Settings", &format!("Couldn't take the DAW link out: {}: {why}", f.display()));
+        }
+        let note = page::taken_out_note(bitwig, &done);
+        let _ = slint::invoke_from_event_loop(move || {
+            PAGE.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.daws_installing = false;
+                    p.daws_message = note;
+                }
+            });
+            if let Some(app) = weak.upgrade() {
+                look_at_scripts(&app);
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start taking the DAW link out: {e}"));
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.daws_installing = false;
+            }
+        });
+        show(app);
+    }
+}
+
 /// Shows Bitwig's extension as found, for the screenshots.
 pub fn show_bitwig_extension(app: &AppWindow, state: ScriptState, version: &str, folders: Vec<PathBuf>) {
     PAGE.with(|p| {
         if let Some(p) = p.borrow_mut().as_mut() {
             p.bw_source = Some(PathBuf::from(scripts::BITWIG_EXTENSION_NAME));
             p.bw_version = Some(version.to_owned());
+            p.bw_files = if state == ScriptState::NotInstalled {
+                Vec::new()
+            } else {
+                folders.iter().map(|f| f.join(scripts::BITWIG_EXTENSION_NAME)).collect()
+            };
             p.bw_state = Some(state);
             p.bw_folders = folders;
         }
@@ -1522,6 +1591,11 @@ pub fn show_bitwig_extension(app: &AppWindow, state: ScriptState, version: &str,
 pub fn show_fl(app: &AppWindow, state: ScriptState, folders: Vec<PathBuf>) {
     PAGE.with(|p| {
         if let Some(p) = p.borrow_mut().as_mut() {
+            p.fl_files = if state == ScriptState::NotInstalled {
+                Vec::new()
+            } else {
+                folders.iter().map(|f| f.join(scripts::FL_SCRIPT_NAME)).collect()
+            };
             p.fl_state = Some(state);
             p.fl_folders = folders;
         }
@@ -1775,8 +1849,9 @@ fn show(app: &AppWindow) {
             Some(ScriptState::Installed) => "Install again",
             _ => "",
         };
-        let row = |d: page::DawStatus, install: &str| DawRowInfo {
+        let row = |d: page::DawStatus, install: &str, files: &[PathBuf]| DawRowInfo {
             install: install.into(),
+            take_out_ask: page::take_out_ask(d.daw == p.bitwig.daw, files).into(),
             bitwig: d.daw == p.bitwig.daw,
             daw: d.daw.into(),
             state: d.state.into(),
@@ -1788,7 +1863,10 @@ fn show(app: &AppWindow) {
                     .collect::<Vec<_>>(),
             )),
         };
-        data.set_daws(ModelRc::new(VecModel::from(vec![row(bitwig, bw_install), row(fl, fl_install)])));
+        data.set_daws(ModelRc::new(VecModel::from(vec![
+            row(bitwig, bw_install, &p.bw_files),
+            row(fl, fl_install, &p.fl_files),
+        ])));
         data.set_daws_checking(p.daws_checking);
         data.set_daws_installing(p.daws_installing);
         data.set_daws_message(p.daws_message.clone().into());

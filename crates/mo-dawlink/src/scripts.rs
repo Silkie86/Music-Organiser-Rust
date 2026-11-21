@@ -248,6 +248,9 @@ const FIRST_BITWIG_ASIDE: &str = "MusicOrganiser.bwextension.mo-old";
 /// The older JavaScript script's file name, which the extension replaces.
 pub const BITWIG_SCRIPT_NAME: &str = "MusicOrganiser.control.js";
 
+/// The older script's folder in Bitwig's `Controller Scripts`.
+const BITWIG_SCRIPT_FOLDER: &str = "Music Organiser";
+
 /// The built extension the app installs: next to the app in `extensions` (where the launcher puts it), or, when the
 /// app runs from a build in a copy of the repo, the one Maven built there (`extensions/bitwig-java/target`).
 pub fn bitwig_extension_source(app: &Path) -> Option<PathBuf> {
@@ -441,7 +444,7 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
         if !done.installed.went.iter().any(|f| f.parent() == Some(user.as_path())) {
             continue;
         }
-        let script_folder = user.join("Controller Scripts").join("Music Organiser");
+        let script_folder = user.join("Controller Scripts").join(BITWIG_SCRIPT_FOLDER);
         let old = script_folder.join(BITWIG_SCRIPT_NAME);
         if !old.is_file() {
             continue;
@@ -484,4 +487,76 @@ fn plain_file(path: &Path) -> bool {
 pub struct BitwigInstalled {
     pub installed: Installed,
     pub removed: Vec<PathBuf>,
+}
+
+/// The app's own files of FL Studio's link in its folders (`folders`, as [`fl_script_folders`] gives them): the
+/// script, and the one from before the rename. Only plain files of those names.
+pub fn fl_installed_files(folders: &[PathBuf]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for folder in folders {
+        for file in [Some(folder.join(FL_SCRIPT_NAME)), first_fl_script(folder)].into_iter().flatten() {
+            if plain_file(&file) && !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+/// The app's own files of Bitwig's link in its folders: in each Extensions folder (`folders`) the extension, the one
+/// from before the rename and that one moved aside; in each user folder (`user_folders`) the older JavaScript script.
+/// Only plain files of those names.
+pub fn bitwig_installed_files(folders: &[PathBuf], user_folders: &[PathBuf]) -> Vec<PathBuf> {
+    let in_extensions = folders.iter().flat_map(|f| {
+        [BITWIG_EXTENSION_NAME, FIRST_BITWIG_EXTENSION_NAME, FIRST_BITWIG_ASIDE].map(|name| f.join(name))
+    });
+    let scripts =
+        user_folders.iter().map(|u| u.join("Controller Scripts").join(BITWIG_SCRIPT_FOLDER).join(BITWIG_SCRIPT_NAME));
+    let mut files = Vec::new();
+    for file in in_extensions.chain(scripts) {
+        if plain_file(&file) && !files.contains(&file) {
+            files.push(file);
+        }
+    }
+    files
+}
+
+/// What taking a DAW's link out did: the files taken out, and those that couldn't be with the system's words.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TakenOut {
+    pub removed: Vec<PathBuf>,
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+/// Takes the app's link out of a DAW: each of `files` (as [`fl_installed_files`] or [`bitwig_installed_files`] found
+/// them) that is still a plain file of one of the app's own names, then its folder when that's left empty and is one
+/// of the app's own (`DAWmate` or `Music Organiser`), never a DAW's own folder such as Extensions. On Windows a DAW
+/// that's open holds its link, so that one stays: close the DAW first.
+pub fn take_out(files: &[PathBuf]) -> TakenOut {
+    const OWN_FILES: [&str; 5] =
+        [FL_SCRIPT_NAME, FIRST_FL_SCRIPT_NAME, BITWIG_EXTENSION_NAME, FIRST_BITWIG_EXTENSION_NAME, FIRST_BITWIG_ASIDE];
+    const OWN_FOLDERS: [&str; 3] = [FL_FOLDER, FIRST_FL_FOLDER, BITWIG_SCRIPT_FOLDER];
+    let mut done = TakenOut::default();
+    for file in files {
+        let own =
+            file.file_name().is_some_and(|n| OWN_FILES.contains(&&*n.to_string_lossy()) || n == BITWIG_SCRIPT_NAME);
+        if !own || !plain_file(file) {
+            continue;
+        }
+        match fs::remove_file(file) {
+            Ok(()) => done.removed.push(file.clone()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                done.failed.push((file.clone(), e.to_string()));
+                continue;
+            }
+        }
+        if let Some(folder) = file.parent()
+            && folder.file_name().is_some_and(|n| OWN_FOLDERS.contains(&&*n.to_string_lossy()))
+            && fs::read_dir(folder).is_ok_and(|mut d| d.next().is_none())
+        {
+            let _ = fs::remove_dir(folder);
+        }
+    }
+    done
 }

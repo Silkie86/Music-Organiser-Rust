@@ -311,3 +311,52 @@ fn a_folder_listed_twice_through_a_link_is_done_once() {
     let names: Vec<_> = fs::read_dir(&k).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert_eq!(names, [BITWIG_EXTENSION_NAME]);
 }
+
+#[test]
+fn taking_the_links_out_removes_only_the_apps_own_files_and_folders() {
+    let root = fixture("take-out");
+    // FL: the script in its own folder, and the one from before the rename beside a file of the user's.
+    user_data(&root);
+    let fl_folders = fl_script_folders(std::slice::from_ref(&root));
+    install_fl(&fl_folders);
+    let hardware = root.join("Settings").join("Hardware");
+    let first = hardware.join(FIRST_FL_FOLDER);
+    fs::create_dir_all(&first).unwrap();
+    fs::write(first.join(FIRST_FL_SCRIPT_NAME), "# old\n").unwrap();
+    fs::write(first.join("notes.txt"), "mine").unwrap();
+    let fl = fl_installed_files(&fl_folders);
+    assert_eq!(fl, [fl_folders[0].join(FL_SCRIPT_NAME), first.join(FIRST_FL_SCRIPT_NAME)]);
+    let done = take_out(&fl);
+    assert_eq!(done.removed, fl);
+    assert!(done.failed.is_empty());
+    assert!(!fl_folders[0].exists(), "the app's own folder, left empty, goes");
+    assert!(first.join("notes.txt").exists(), "the user's file, and so its folder, stay");
+    assert_eq!(fl_state(&fl_folders), ScriptState::NotInstalled);
+    assert!(fl_installed_files(&fl_folders).is_empty());
+
+    // Bitwig: the extension, the old one, the old one moved aside, and the old script; nothing else of Bitwig's.
+    let user = root.join("Bitwig Studio");
+    let extensions = user.join("Extensions");
+    fs::create_dir_all(&extensions).unwrap();
+    for name in [BITWIG_EXTENSION_NAME, FIRST_BITWIG_EXTENSION_NAME, "Another.bwextension"] {
+        extension(&extensions.join(name), "1");
+    }
+    fs::write(extensions.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old")), "old").unwrap();
+    let scripts = user.join("Controller Scripts").join("Music Organiser");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join(BITWIG_SCRIPT_NAME), "// old").unwrap();
+    let folders = vec![extensions.clone()];
+    let users = vec![user.clone()];
+    let bw = bitwig_installed_files(&folders, &users);
+    assert_eq!(bw.len(), 4);
+    let done = take_out(&bw);
+    assert_eq!(done.removed.len(), 4);
+    let names: Vec<_> = fs::read_dir(&extensions).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, ["Another.bwextension"], "Bitwig's own folder and other extensions stay");
+    assert!(!scripts.exists() && user.join("Controller Scripts").exists());
+    assert!(bitwig_installed_files(&folders, &users).is_empty());
+
+    // Only the app's own names, whatever list it's given.
+    let theirs = extensions.join("Another.bwextension");
+    assert!(take_out(std::slice::from_ref(&theirs)).removed.is_empty() && theirs.exists());
+}

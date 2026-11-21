@@ -3980,6 +3980,11 @@ fn settings_shots(
     );
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));
+    // Take out on FL Studio's row, asking first and naming the file that goes.
+    data.set_take_out_asking("FL Studio".into());
+    capture(window);
+    shots.push(("settings-daws-take-out.png".into(), capture(window)));
+    data.set_take_out_asking("".into());
     // No Bitwig Studio folder in Documents and none chosen: the card says to choose it (the 10 Nov review's X3-5).
     mo_ui::settings::remember(mo_app::app_settings::BITWIG_FOLDER_KEY, "");
     mo_ui::settings::remember(mo_app::app_settings::BITWIG_LIBRARIES_KEY, "");

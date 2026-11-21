@@ -839,6 +839,49 @@ pub fn installed_note(done: &Installed) -> String {
     out
 }
 
+/// What Take out asks before it takes the app's link out of a DAW (`bitwig`, else FL Studio): the files that go, by
+/// their full paths. "" when there's nothing to take out (no Take out button then).
+pub fn take_out_ask(bitwig: bool, files: &[PathBuf]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let (daw, after) = if bitwig {
+        ("Bitwig", "Close Bitwig first. Bitwig stops listing DAWmate the next time it starts.")
+    } else {
+        ("FL Studio", "Close FL Studio first. Its MIDI settings stop offering DAWmate the next time it starts.")
+    };
+    let listed = files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ");
+    format!(
+        "Take the DAWmate link out of {daw}? Only the app's own files go: {listed}. Nothing else in {daw}'s folders \
+         changes, and Install puts the link back. {after}"
+    )
+}
+
+/// What Take out did, in words.
+pub fn taken_out_note(bitwig: bool, done: &mo_dawlink::scripts::TakenOut) -> String {
+    let daw = if bitwig { "Bitwig" } else { "FL Studio" };
+    let mut out = String::new();
+    if !done.removed.is_empty() {
+        out = format!(
+            "Took the DAWmate link out of {daw}: {}.",
+            done.removed.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    for (file, why) in &done.failed {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("Couldn't take out {}: {why}", file.display()));
+    }
+    if !done.failed.is_empty() {
+        out.push_str(&format!(" If {daw} is open, close it, then press Take out again."));
+    }
+    if out.is_empty() {
+        out = format!("There was nothing of the app's to take out of {daw}.");
+    }
+    out
+}
+
 /// Under the DAW rows: where the scripts are installed from for now.
 pub const DAWS_NOTE: &str = "The scripts that let the app talk to Bitwig and FL Studio. Checking Bitwig only \
     reads. Install puts the app's own copy in the DAW's folders: on FL Studio's row its script (keeping your setting \
@@ -1170,6 +1213,20 @@ mod tests {
             removed: vec![],
         };
         assert!(bitwig_installed_note(&done).ends_with("If Bitwig is open, close it, then press Install again."));
+        // Take out asks first, naming every file that goes, and says what it did.
+        assert_eq!(take_out_ask(true, &[]), "");
+        let ext = PathBuf::from("K/Extensions/DAWmate.bwextension");
+        let ask = take_out_ask(true, std::slice::from_ref(&ext));
+        assert!(
+            ask.starts_with("Take the DAWmate link out of Bitwig?") && ask.contains("K/Extensions/DAWmate.bwextension")
+        );
+        let gone = mo_dawlink::scripts::TakenOut { removed: vec![ext.clone()], failed: vec![] };
+        assert_eq!(
+            taken_out_note(true, &gone),
+            "Took the DAWmate link out of Bitwig: K/Extensions/DAWmate.bwextension."
+        );
+        let held = mo_dawlink::scripts::TakenOut { removed: vec![], failed: vec![(ext, "in use".into())] };
+        assert!(taken_out_note(false, &held).ends_with("If FL Studio is open, close it, then press Take out again."));
         // None found: the card's Choose folder… is the way, never the retired app.
         let (facts, button) = bitwig_extension_facts(Some(ScriptState::NotInstalled), Some(None), &[]);
         assert_eq!(button, "");
