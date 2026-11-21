@@ -413,6 +413,25 @@ fn clear_left_behind(folder: &Path, target: &str, now: std::time::SystemTime) {
     }
 }
 
+/// Removes from `folder` what a crash or a close part way through a save left of any file whose name `wanted` takes
+/// (the whole-app review of 19 Nov, FS-9: Fix's "(fixed N)" names change, so a leftover of "(fixed)" was never looked
+/// at again once that name was taken). Only plain files whose whole name is one a save gives, and only old ones.
+pub fn clear_left_behind_of(folder: &Path, wanted: impl Fn(&str) -> bool, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    for e in entries.flatten() {
+        let Some(name) = e.file_name().to_str().map(str::to_owned) else { continue };
+        let Some((target, _)) = name.strip_suffix(SAVING).and_then(|n| n.rsplit_once('.')) else { continue };
+        if !wanted(target) || !is_left_behind(&name, target) {
+            continue;
+        }
+        let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
+        let old = m.modified().ok().and_then(|t| now.duration_since(t).ok()).is_some_and(|age| age >= LEFT_BEHIND_AGE);
+        if m.file_type().is_file() && old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
