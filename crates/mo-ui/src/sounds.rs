@@ -117,9 +117,11 @@ struct Page {
     made_tiles: Option<bool>,
     /// While tiles made again are being laid out (from `list-made` until a turn later), how many columns they had
     /// before. They first count their columns from a page that isn't laid out yet (1 or 2 for a moment), then their
-    /// own. Each count is taken at once, so the rows always fit the tiles' widths, but none of them turns the list to
-    /// the picked sound: that lost where the tiles were kept. A turn later, the picked sound is brought into view only
-    /// if the count is a new one (the window or the card changed width while the tiles were away).
+    /// own. Each count is taken at once, so the rows always fit the tiles' widths. With a sound picked, none of them
+    /// turns the list to it (that lost where the tiles were kept): a turn later, it's brought into view only if the
+    /// count is a new one (the window or the card changed width while the tiles were away). With none picked, each
+    /// count keeps the tiles that were in sight where they were kept in sight ([`hold_in_sight`]), as a resize on
+    /// Tiles does (the whole-app review of 19 Nov, SN-9).
     columns_before: Option<usize>,
     /// What the last resize that changed `columns` kept in sight ([`TilesHeld`]).
     tiles_held: Option<TilesHeld>,
@@ -2373,6 +2375,9 @@ fn take_refreshed(p: &mut Page, library: Library, moved: Option<&[Option<usize>]
     // When the files were made and opened goes on showing (by sound id) while it's read again for these sounds.
     let mut list = (*library.list).clone();
     list.keep_file_dates_of(&p.list);
+    // Hide duplicates' copies and the sounds like your favourites go on showing, moved with their sounds, while they're
+    // looked for again for these sounds (review SN-5).
+    list.keep_found_of(&p.list, moved);
     p.list = Arc::new(list);
     p.places = library.places;
     p.types = library.types;
@@ -2892,7 +2897,9 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
             other
         });
         // A turn later, once the new list is laid out: an ask made while it's still being made is the one its
-        // `changed show-ask` starts from, so it wouldn't scroll.
+        // `changed show-ask` starts from, so it wouldn't scroll. Tiles made again with another count a row (the window
+        // or the card changed width while they were away) bring the picked sound into view; with none picked, the
+        // count kept the tiles in sight as it came (`on_columns_changed`).
         let weak = weak.clone();
         Timer::single_shot(Duration::ZERO, move || {
             let Some(app) = weak.upgrade() else { return };
@@ -2919,8 +2926,12 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         let (changed, held) = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             let was = std::mem::replace(&mut p.columns, n);
-            // Tiles being made again come back where they were kept instead (`on_list_made`).
-            if was == n || p.columns_before.is_some() {
+            // Tiles being made again with a sound picked bring it into view a turn later instead (`on_list_made`).
+            // With none picked, they keep the tiles that were in sight where they were kept (`turned` says where that
+            // is until they're back there) at once: kept a turn later, they came back there with the new count
+            // first, which showed other tiles for a moment (the code review of the SN-9 fix). A count from a page
+            // not laid out yet (1 or 2 for a moment) holds the same tile as the count after it (`waiting`).
+            if was == n || (p.columns_before.is_some() && p.picked.is_some()) {
                 return (was != n, None);
             }
             let picked = p.picked.and_then(|at| p.row_of(at));
@@ -3165,19 +3176,24 @@ fn rediscover_now(app: &AppWindow) {
         Some((ask, p.list.len()))
     });
     let Some((ask, total)) = ask else { return };
+    let Some(ask) = ask else {
+        let shows = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            let shows = re_without_index(p.no_index.as_deref());
+            p.re_busy = shows.busy;
+            shows
+        });
+        data.set_re_busy(shows.busy);
+        data.set_re_cant_dig(shows.cant_dig);
+        data.set_re_empty_title(shows.title.into());
+        data.set_re_empty_text(shows.text.into());
+        data.set_re_intro(shows.intro.into());
+        return;
+    };
+    data.set_re_cant_dig(false);
     data.set_re_busy(true);
     data.set_re_empty_title("Picking sounds…".into());
     data.set_re_empty_text("".into());
-    let Some(ask) = ask else {
-        let intro = match PAGE.with(|p| p.borrow().no_index.clone()) {
-            Some(why) => no_index_note("there's nothing to dig sounds out by", &why),
-            None => "Listening to your sounds first: their fingerprints are still being read, and the list fills in \
-                     by itself."
-                .to_owned(),
-        };
-        data.set_re_intro(intro.into());
-        return;
-    };
     data.set_re_intro(format!("Looking through {} sounds…", thousands(total)).into());
     if HERE.with(|h| *h.borrow()) {
         let answer = ask.answer();
@@ -3205,6 +3221,45 @@ fn rediscover_now(app: &AppWindow) {
             worker.ask(ask);
         }
     });
+}
+
+/// What Rediscover shows with no fingerprints to dig sounds out by ([`re_without_index`]).
+#[derive(Debug, PartialEq)]
+struct ReShows {
+    /// Whether it's waiting (its buttons say so, and it can't be asked again meanwhile).
+    busy: bool,
+    /// Whether it can't dig sounds out at all: Shuffle can't shuffle, so it isn't offered (the code review of the SN-6
+    /// fix: it was, and did nothing).
+    cant_dig: bool,
+    /// The empty list's title and words.
+    title: &'static str,
+    text: String,
+    /// The line under its choices.
+    intro: String,
+}
+
+/// What Rediscover shows with no fingerprints to dig sounds out by: while they're read, that it waits for them; when
+/// they couldn't be read (`no_index`: why), that it can't, and it isn't busy. It said "Picking sounds…" and
+/// "Shuffling…" for the rest of the run then (the whole-app review of 19 Nov, SN-6).
+fn re_without_index(no_index: Option<&str>) -> ReShows {
+    match no_index {
+        Some(why) => ReShows {
+            busy: false,
+            cant_dig: true,
+            title: "Can't dig sounds out",
+            text: no_index_note("there's nothing to dig sounds out by", why),
+            intro: String::new(),
+        },
+        None => ReShows {
+            busy: true,
+            cant_dig: false,
+            title: "Picking sounds…",
+            text: String::new(),
+            intro: "Listening to your sounds first: their fingerprints are still being read, and the list fills in by \
+                    itself."
+                .to_owned(),
+        },
+    }
 }
 
 /// Rediscover's answer arrived: shows it, unless a newer one has been asked for since.
@@ -3612,6 +3667,18 @@ pub fn copies_found() -> list::CopiesFound {
 /// For the screenshots: the copies Hide duplicates hides, as if they'd been found (`None`: none, not looked for).
 pub fn show_copies_for_screens(app: &AppWindow, same: Option<&mo_sounds::copies::SameAudio>) {
     copies::show_for_screens(app, same);
+}
+
+/// For the screenshots: the fingerprints couldn't be read (`why`), as if the page had none yet; [`index_known`] puts
+/// them back. Never reads a file.
+pub fn index_failed_for_screens(app: &AppWindow, why: &str) {
+    PAGE.with(|p| p.borrow_mut().index = None);
+    index_failed(app, why.to_owned());
+}
+
+/// For the screenshots: how many times the galaxy's Swept card's lines were made again or changed, so far.
+pub fn swept_lines_changed() -> u64 {
+    galaxy::swept_lines_changed()
 }
 
 /// What the screenshots show on Favourites from Bitwig's card ([`show_bitwig_for_screens`]).
@@ -5860,6 +5927,19 @@ mod tests {
             take_refreshed(&mut p, library(&[9, 1, 2, 3]), Some(&new_first), false),
             After { picked: Some(2), ..After::default() }
         );
+        // The copies Hide duplicates found go on being hidden, moved with their sounds, while they're looked for
+        // again (review SN-5).
+        let mut was = (*library(&[1, 2, 3]).list).clone();
+        was.set_copies(&mo_sounds::copies::SameAudio { groups: vec![vec![2, 3]], ..Default::default() });
+        let mut p = Page { list: Arc::new(was), ..Page::default() };
+        take_refreshed(&mut p, library(&[9, 1, 2, 3]), Some(&new_first), false);
+        let groups = p.list.copy_groups();
+        let ids: Vec<Vec<i64>> = groups
+            .iter()
+            .map(|g| g.sounds.iter().filter_map(|&(at, _)| p.list.sound(at).map(|s| s.id)).collect())
+            .collect();
+        assert_eq!(ids.len(), 1);
+        assert!(ids[0] == [2, 3] || ids[0] == [3, 2], "{ids:?}");
     }
 
     #[test]
@@ -5997,6 +6077,29 @@ mod tests {
         assert_eq!(used.used_in(0), Some(0));
         assert_eq!(used.used_in(1), Some(3));
         assert_eq!(used.liked_share(1), Some(1.0));
+    }
+
+    #[test]
+    fn rediscover_without_fingerprints_says_why_and_isnt_left_busy() {
+        // They couldn't be read: why, and its buttons work (it said "Picking sounds…" and "Shuffling…" for good).
+        assert_eq!(
+            re_without_index(Some("the table is damaged")),
+            ReShows {
+                busy: false,
+                cant_dig: true,
+                title: "Can't dig sounds out",
+                text:
+                    "The sounds' fingerprints couldn't be read, so there's nothing to dig sounds out by (the table is \
+                       damaged)."
+                        .to_owned(),
+                intro: String::new(),
+            }
+        );
+        // Still being read: it waits for them, and says so.
+        let waits = re_without_index(None);
+        assert!(waits.busy && !waits.cant_dig && waits.text.is_empty(), "{waits:?}");
+        assert_eq!(waits.title, "Picking sounds…");
+        assert!(waits.intro.starts_with("Listening to your sounds first"), "{waits:?}");
     }
 
     #[test]

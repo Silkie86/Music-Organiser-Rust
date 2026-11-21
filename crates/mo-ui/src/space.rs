@@ -2187,10 +2187,14 @@ fn look_for_sound_copies(app: &AppWindow, sounds: Known) {
         p.copies_of = Arc::downgrade(&list);
         p.copies_hiding = hiding;
         let state = sounds_page::copies_found();
-        if list.copies().is_none() || matches!(state, CopiesFound::Looking { .. } | CopiesFound::NotLooked) {
+        if list.copies().is_none()
+            || list.copies_carried()
+            || matches!(state, CopiesFound::Looking { .. } | CopiesFound::NotLooked)
+        {
             // Not all found for this list yet: measuring while the Sounds page looks (what's on show stays), and a
             // look of this page's still on its way is for an older list, so it's dropped. Nothing new to show if the
-            // Sounds page's look failed.
+            // Sounds page's look failed. Copies the list before it found, carried over while they're looked for again
+            // (review SN-5), aren't counted as this list's.
             let _ = p.copies_look.next();
             p.copies_looking = !matches!(state, CopiesFound::Failed);
             return None;
