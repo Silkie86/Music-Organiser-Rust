@@ -76,9 +76,14 @@ struct Page {
     bw_folders: Vec<PathBuf>,
     bw_users: Vec<PathBuf>,
     bw_loaded_from: Option<String>,
+    /// The app's own files of each link found in the DAWs' folders, for Take out (FL Studio's, Bitwig's).
+    fl_files: Vec<PathBuf>,
+    bw_files: Vec<PathBuf>,
     /// Counts the looks for the DAWs' folders, so an older one finishing late is dropped (newest wins).
     scripts_asked: u64,
     daws_installing: bool,
+    /// Whether what runs while `daws_installing` is a Take out (its words on the buttons).
+    daws_taking_out: bool,
     daws_message: String,
     /// What the last choice on the "Opening your songs" card did, said under its lines.
     programs_message: String,
@@ -241,9 +246,12 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             bw_state: None,
             bw_folders: Vec::new(),
             bw_users: Vec::new(),
+            fl_files: Vec::new(),
+            bw_files: Vec::new(),
             bw_loaded_from: None,
             scripts_asked: 0,
             daws_installing: false,
+            daws_taking_out: false,
             daws_message: String::new(),
             programs_message: String::new(),
             programs_missing: HashSet::new(),
@@ -459,6 +467,12 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             } else {
                 install_fl(&app);
             }
+        }
+    });
+    let weak = app.as_weak();
+    data.on_take_out_daw(move |bitwig| {
+        if let Some(app) = weak.upgrade() {
+            take_out(&app, bitwig);
         }
     });
     let weak = app.as_weak();
@@ -1375,6 +1389,8 @@ fn look_at_scripts(app: &AppWindow) {
         let source = std::env::current_exe().ok().and_then(|exe| scripts::bitwig_extension_source(&exe));
         let bw_version = source.as_deref().and_then(scripts::extension_version);
         let bw_state = source.as_deref().map_or(ScriptState::NotInstalled, |s| scripts::bitwig_state(s, &bw_folders));
+        let fl_files = scripts::fl_installed_files(&folders);
+        let bw_files = scripts::bitwig_installed_files(&bw_folders, &users);
         let missing: HashSet<String> = programs.into_iter().filter(|exe| !shell::usable_exe(exe)).collect();
         let _ = slint::invoke_from_event_loop(move || {
             let newest = PAGE.with(|p| {
@@ -1388,6 +1404,8 @@ fn look_at_scripts(app: &AppWindow) {
                 p.bw_state = Some(bw_state);
                 p.bw_folders = bw_folders;
                 p.bw_users = users;
+                p.fl_files = fl_files;
+                p.bw_files = bw_files;
                 true
             });
             if newest && let Some(app) = weak.upgrade() {
@@ -1416,9 +1434,9 @@ fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
     if PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.daws_installing)) {
         PAGE.with(|p| {
             if let Some(p) = p.borrow_mut().as_mut() {
-                p.daws_message =
-                    "Your Bitwig Studio folder wasn't changed: the extension was being installed. Choose it again."
-                        .to_owned();
+                let doing =
+                    if p.daws_taking_out { "a link was being taken out" } else { "the extension was being installed" };
+                p.daws_message = format!("Your Bitwig Studio folder wasn't changed: {doing}. Choose it again.");
             }
         });
         show(app);
@@ -1437,6 +1455,7 @@ fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
             // Looked for again: no Install into the folders found before meanwhile.
             p.bw_state = None;
             p.bw_folders.clear();
+            p.bw_files.clear();
         }
     });
     look_at_scripts(app);
@@ -1500,6 +1519,12 @@ fn install_fl(app: &AppWindow) {
         }
         for (f, why) in &done.failed {
             log::warning("Settings", &format!("Couldn't install the FL Studio script in {}: {why}", f.display()));
+        }
+        for f in &done.removed {
+            log::info("Settings", &format!("Took out the FL Studio script from before the rename, {}", f.display()));
+        }
+        for (f, why) in &done.left {
+            log::warning("Settings", &format!("Couldn't take out the older FL Studio script {}: {why}", f.display()));
         }
         let note = page::installed_note(&done);
         let _ = slint::invoke_from_event_loop(move || {
@@ -1637,7 +1662,11 @@ fn install_bitwig(app: &AppWindow) {
             log::info("Settings", &format!("Installed the Bitwig extension in {}", f.display()));
         }
         for f in &done.removed {
-            log::info("Settings", &format!("Took out the older Bitwig script {}", f.display()));
+            let what = if f.extension().is_some_and(|e| e == "bwextension") { "extension" } else { "script" };
+            log::info("Settings", &format!("Took out the older Bitwig {what} {}", f.display()));
+        }
+        for (f, why) in &done.installed.left {
+            log::warning("Settings", &format!("Couldn't take out the older Bitwig copy {}: {why}", f.display()));
         }
         for (f, why) in &done.installed.failed {
             log::warning("Settings", &format!("Couldn't install the Bitwig extension in {}: {why}", f.display()));
@@ -1667,12 +1696,69 @@ fn install_bitwig(app: &AppWindow) {
     }
 }
 
+/// Takes the app's link out of a DAW (Take out, once asked): the files found there, away from the window.
+fn take_out(app: &AppWindow, bitwig: bool) {
+    let files = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live && !p.daws_installing)?;
+        let files = if bitwig { p.bw_files.clone() } else { p.fl_files.clone() };
+        if files.is_empty() {
+            return None;
+        }
+        p.daws_installing = true;
+        p.daws_taking_out = true;
+        Some(files)
+    });
+    app.global::<SettingsData>().set_take_out_asking(SharedString::new());
+    let Some(files) = files else { return };
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Settings take out", move || {
+        let done = scripts::take_out(&files);
+        for f in &done.removed {
+            log::info("Settings", &format!("Took the DAW link out: {}", f.display()));
+        }
+        for (f, why) in &done.failed {
+            log::warning("Settings", &format!("Couldn't take the DAW link out: {}: {why}", f.display()));
+        }
+        let note = page::taken_out_note(bitwig, &done);
+        let _ = slint::invoke_from_event_loop(move || {
+            PAGE.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.daws_installing = false;
+                    p.daws_taking_out = false;
+                    p.daws_message = note;
+                }
+            });
+            if let Some(app) = weak.upgrade() {
+                look_at_scripts(&app);
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start taking the DAW link out: {e}"));
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.daws_installing = false;
+                p.daws_taking_out = false;
+            }
+        });
+        show(app);
+    }
+}
+
 /// Shows Bitwig's extension as found, for the screenshots.
 pub fn show_bitwig_extension(app: &AppWindow, state: ScriptState, version: &str, folders: Vec<PathBuf>) {
     PAGE.with(|p| {
         if let Some(p) = p.borrow_mut().as_mut() {
             p.bw_source = Some(PathBuf::from(scripts::BITWIG_EXTENSION_NAME));
             p.bw_version = Some(version.to_owned());
+            p.bw_files = if state == ScriptState::NotInstalled {
+                Vec::new()
+            } else {
+                folders.iter().map(|f| f.join(scripts::BITWIG_EXTENSION_NAME)).collect()
+            };
             p.bw_state = Some(state);
             p.bw_folders = folders;
         }
@@ -1684,6 +1770,11 @@ pub fn show_bitwig_extension(app: &AppWindow, state: ScriptState, version: &str,
 pub fn show_fl(app: &AppWindow, state: ScriptState, folders: Vec<PathBuf>) {
     PAGE.with(|p| {
         if let Some(p) = p.borrow_mut().as_mut() {
+            p.fl_files = if state == ScriptState::NotInstalled {
+                Vec::new()
+            } else {
+                folders.iter().map(|f| f.join(scripts::FL_SCRIPT_NAME)).collect()
+            };
             p.fl_state = Some(state);
             p.fl_folders = folders;
         }
@@ -1937,8 +2028,9 @@ fn show(app: &AppWindow) {
             Some(ScriptState::Installed) => "Install again",
             _ => "",
         };
-        let row = |d: page::DawStatus, install: &str| DawRowInfo {
+        let row = |d: page::DawStatus, install: &str, files: &[PathBuf]| DawRowInfo {
             install: install.into(),
+            take_out_ask: page::take_out_ask(d.daw == p.bitwig.daw, files).into(),
             bitwig: d.daw == p.bitwig.daw,
             daw: d.daw.into(),
             state: d.state.into(),
@@ -1950,9 +2042,22 @@ fn show(app: &AppWindow) {
                     .collect::<Vec<_>>(),
             )),
         };
-        data.set_daws(ModelRc::new(VecModel::from(vec![row(bitwig, bw_install), row(fl, fl_install)])));
+        data.set_daws(ModelRc::new(VecModel::from(vec![
+            row(bitwig, bw_install, &p.bw_files),
+            row(fl, fl_install, &p.fl_files),
+        ])));
         data.set_daws_checking(p.daws_checking);
         data.set_daws_installing(p.daws_installing);
+        data.set_daws_taking_out(p.daws_taking_out);
+        // An ask whose DAW has nothing left to take out (looked at again, or another folder chosen) is closed, so it
+        // never comes back by itself; so is one while Install or Take out runs.
+        let asking = data.get_take_out_asking();
+        let still = |files: &[PathBuf]| !files.is_empty() && !p.daws_installing;
+        let open = (asking.as_str() == p.bitwig.daw && still(&p.bw_files))
+            || (asking.as_str() == "FL Studio" && still(&p.fl_files));
+        if !asking.is_empty() && !open {
+            data.set_take_out_asking(SharedString::new());
+        }
         data.set_daws_message(p.daws_message.clone().into());
         data.set_bitwig_chosen(p.settings.get(app_settings::BITWIG_FOLDER_KEY).is_some_and(|f| !f.trim().is_empty()));
         let libraries = app_settings::folder_list(p.settings.get(app_settings::BITWIG_LIBRARIES_KEY).unwrap_or(""));

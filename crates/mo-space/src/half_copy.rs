@@ -62,10 +62,26 @@ use crate::size::{self, DEEPEST, Stopped, is_link};
 use crate::{in_places, is_dir, key, not_there, parent_of, real_folder, real_path, text};
 
 /// The marker's name, at the top of a copy a move is making.
-pub const MARKER: &str = "Music Organiser - copy not finished.txt";
+pub const MARKER: &str = "DAWmate - copy not finished.txt";
+
+/// The marker's name before the app was called DAWmate (15 Nov 2026): a copy cut off before then still has it, so
+/// it's still known for the half copy it is. A new marker is always [`MARKER`]; an old one is updated where it is.
+pub const FIRST_MARKER: &str = "Music Organiser - copy not finished.txt";
+
+/// Whether a name at the top of a copy is a marker's, either name.
+pub fn is_marker(name: &OsStr) -> bool {
+    name == OsStr::new(MARKER) || name == OsStr::new(FIRST_MARKER)
+}
+
+/// The marker file in `folder`: the one there (the new name first), else where a new one goes.
+fn marker_in(folder: &Path) -> PathBuf {
+    let first = folder.join(FIRST_MARKER);
+    let new = folder.join(MARKER);
+    if fs::symlink_metadata(&new).is_err() && fs::symlink_metadata(&first).is_ok() { first } else { new }
+}
 
 /// What the marker says first, for anyone who opens it.
-const EXPLAINED: &str = "Music Organiser is copying a folder into this one. If this file is still here once the app \
+const EXPLAINED: &str = "DAWmate is copying a folder into this one. If this file is still here once the app \
                          has finished, the copy was cut off part way (the app or the computer stopped), so this folder \
                          is a half copy: the app clears it the next time it moves the folder, or from its Plugins \
                          page. The folder it copies from wasn't changed.";
@@ -254,7 +270,7 @@ fn note_in_use(folder: &Path, in_use: bool) -> io::Result<()> {
     }
     marker.in_use = in_use;
     // Written over, not beside: a marker cut off part way can't be read, and a folder with none is never cleared.
-    let mut file = OpenOptions::new().write(true).truncate(true).open(folder.join(MARKER))?;
+    let mut file = OpenOptions::new().write(true).truncate(true).open(marker_in(folder))?;
     write_marker(&mut file, &marker)
 }
 
@@ -267,7 +283,7 @@ fn read_marker(folder: &Path) -> Option<Marker> {
 
 /// What the marker file in a folder holds, if it's a plain file no bigger than a marker the app writes.
 fn marker_bytes(folder: &Path) -> Option<Vec<u8>> {
-    let path = folder.join(MARKER);
+    let path = marker_in(folder);
     let meta = fs::symlink_metadata(&path).ok()?;
     if !meta.is_file() || meta.len() > MARKER_MOST {
         return None;
@@ -276,16 +292,22 @@ fn marker_bytes(folder: &Path) -> Option<Vec<u8>> {
 }
 
 /// Takes the marker out of a copy that's in use now, trying again for a few seconds while something (a virus checker)
-/// has it open. Only ever a plain file of the marker's name. Says whether it's gone.
+/// has it open. Only ever a plain file of the marker's name (either name: both go). Says whether it's gone.
 pub(crate) fn unmark(folder: &Path) -> bool {
-    let path = folder.join(MARKER);
+    let new = unmark_named(&folder.join(MARKER));
+    let first = unmark_named(&folder.join(FIRST_MARKER));
+    new && first
+}
+
+/// Takes out one marker file, as [`unmark`] does.
+fn unmark_named(path: &Path) -> bool {
     for _ in 0..20 {
-        match fs::symlink_metadata(&path) {
+        match fs::symlink_metadata(path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return true,
             Ok(m) if !m.is_file() => return false,
             _ => {}
         }
-        match fs::remove_file(&path) {
+        match fs::remove_file(path) {
             Ok(()) => return true,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return true,
             Err(_) => thread::sleep(Duration::from_millis(250)),
@@ -327,7 +349,7 @@ pub fn half_copies(
     let mut found: Vec<HalfCopy> = Vec::new();
     for entry in in_places(places, stop)? {
         let path = entry.path();
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) || not_there(&path.join(MARKER)) || busy(&path, None) {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) || not_there(&marker_in(&path)) || busy(&path, None) {
             continue;
         }
         if let Some(half) = find(&path, moved, drives, stop)?
@@ -745,7 +767,7 @@ fn compare(copy: &Path, dir: &Path, twin_dir: Option<&Path>, top: bool, stop: &A
             continue;
         };
         if kind.is_file() {
-            if (top && name == OsStr::new(MARKER)) || made_by_the_system(&name.to_string_lossy()) {
+            if (top && is_marker(&name)) || made_by_the_system(&name.to_string_lossy()) {
                 continue;
             }
             // A file the copy was writing over an older one when it stopped, named after a file still in `from`.
@@ -815,7 +837,7 @@ pub(crate) fn remove_marked(folder: &Path, stop: &AtomicBool) -> Result<(), NotR
         if stop.load(Ordering::Relaxed) {
             return Err(NotRemoved::Stopped);
         }
-        if entry.file_name() == OsStr::new(MARKER) {
+        if is_marker(&entry.file_name()) {
             continue;
         }
         remove_entry(&entry.path(), stop)?;
@@ -878,7 +900,7 @@ fn finish(folder: &Path) -> Result<(), NotRemoved> {
 fn put_in(folder: &Path) -> Option<String> {
     fs::read_dir(folder).ok()?.flatten().find_map(|entry| {
         let name = entry.file_name();
-        let theirs = name == OsStr::new(MARKER) || system_file(&entry);
+        let theirs = is_marker(&name) || system_file(&entry);
         (!theirs).then(|| name.to_string_lossy().into_owned())
     })
 }

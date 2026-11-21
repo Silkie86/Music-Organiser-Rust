@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason};
 use crate::clean::{Bin, Done, on_network};
 use crate::half_copy::{
-    self, Claim, MARKER, busy_now, claim, clear_own, going_into_use, not_in_use, own_room, remove_marked, unmark,
+    self, Claim, busy_now, claim, clear_own, going_into_use, is_marker, not_in_use, own_room, remove_marked, unmark,
 };
 use crate::plugin_clean::system_folder_in;
 use crate::plugin_space::SpaceKind;
@@ -1337,7 +1337,7 @@ fn differences(
             let path = entry.path();
             let name = entry.file_name();
             // A half copy's marker (left at the top when moving back couldn't take it out) is the app's, not yours.
-            if skip.contains(&key(&path.to_string_lossy())) || top && name == MARKER {
+            if skip.contains(&key(&path.to_string_lossy())) || top && is_marker(&name) {
                 continue;
             }
             let there = copy_dir.join(&name);
@@ -2052,7 +2052,7 @@ pub(crate) fn copy_tree(
             let source = entry.path();
             let name = entry.file_name();
             // A half copy's marker, left in a copy that's in use now, is never copied on (into the old copy, say).
-            if tree.leave_out.contains(&key(&source.to_string_lossy())) || top && name == MARKER {
+            if tree.leave_out.contains(&key(&source.to_string_lossy())) || top && is_marker(&name) {
                 continue;
             }
             let kind = match entry.file_type() {

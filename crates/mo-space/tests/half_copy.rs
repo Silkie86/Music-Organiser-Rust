@@ -16,7 +16,7 @@ use mo_space::after_move::move_home;
 use mo_space::folder_move::{
     CantMove, Drives, HEADROOM, MovedFolder, move_back, move_folder, only_in_old_copy, problem,
 };
-use mo_space::half_copy::{Cleared, MARKER, State, clear, find, half_copies};
+use mo_space::half_copy::{Cleared, FIRST_MARKER, MARKER, State, clear, find, half_copies};
 use mo_space::plugin_space::SpaceKind;
 
 mod common;
@@ -176,7 +176,7 @@ fn a_move_the_computer_stopped_leaves_a_marked_half_copy_that_the_next_try_clear
     let half = d.join("STEAM");
     assert!(!is_link(&steam) && !c.join("Spectrasonics/STEAM (old copy)").exists());
     let said = fs::read_to_string(half.join(MARKER)).unwrap();
-    assert!(said.starts_with("Music Organiser is copying a folder into this one."), "{said}");
+    assert!(said.starts_with("DAWmate is copying a folder into this one."), "{said}");
     let found = find(&half, &[], &ROOMY, &stop).unwrap().unwrap();
     assert_eq!(found.state, State::CutOff);
     assert_eq!((found.path.as_str(), found.from.as_str()), (s(&half).as_str(), from.as_str()));
@@ -274,6 +274,29 @@ fn a_half_copy_holding_what_isnt_in_the_folder_stays_and_says_what() {
     assert_eq!(clear(&half, &[], &ROOMY, &stop), Ok(Cleared::Copy(bytes)));
     assert!(!half.exists());
     assert_eq!(fs::read_dir(presets.join("Sounds")).unwrap().count(), 6);
+}
+
+#[test]
+fn a_half_copy_from_before_the_rename_is_still_known_and_cleared() {
+    let dir = fixtures("mo-space-half-first-marker");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let presets = c.join("Presets");
+    library(&presets);
+    fs::create_dir_all(&d).unwrap();
+    let from = s(&presets);
+    let stop = AtomicBool::new(false);
+    stopped_part_way(10, |progress| move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], &[], progress, &stop));
+    // As a copy cut off before the app was called DAWmate has it: the marker under its first name.
+    let half = d.join("Presets");
+    fs::rename(half.join(MARKER), half.join(FIRST_MARKER)).unwrap();
+    let found = find(&half, &[], &ROOMY, &stop).unwrap().unwrap();
+    assert_eq!(found.state, State::CutOff);
+    assert_eq!(half_copies(&[], &[s(&d)], &ROOMY, &stop).unwrap(), std::slice::from_ref(&found));
+    assert_eq!(clear(&half, &[], &ROOMY, &stop), Ok(Cleared::Copy(found.bytes)));
+    assert!(!half.exists());
+    // The next move goes through, writing the new name only.
+    move_folder(&from, &s(&d), 35, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
+    assert!(is_link(&presets) && !half.join(FIRST_MARKER).exists() && !half.join(MARKER).exists());
 }
 
 #[test]

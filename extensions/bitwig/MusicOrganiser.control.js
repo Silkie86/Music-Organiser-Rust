@@ -7,8 +7,8 @@
 // Drum Machine's pads, and run an action such as Save. That's how the app sends an FL Studio channel
 // or a kit into Bitwig, and how it learns Bitwig's file format: change one thing, save, and compare.
 //
-// Installing: Settings in the app copies this file into Bitwig's Controller Scripts folder. Then in
-// Bitwig: Settings > Controllers > Add controller > DAWmate > DAW link.
+// Installing: this script is the first link, kept for its tests. The app now installs the Java extension
+// (extensions/bitwig-java) and takes this script out of Bitwig's Controller Scripts folder when it does.
 //
 // The app connects to port 19791 on this computer and sends JSON requests, one per message; each
 // message has a 4-byte big-endian length in front (Bitwig's remote connections work that way).

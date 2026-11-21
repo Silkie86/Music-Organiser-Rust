@@ -233,3 +233,194 @@ fn the_bitwig_extension_from_before_the_rename_comes_out() {
     let seen = elsewhere.join(FIRST_BITWIG_EXTENSION_NAME).display().to_string();
     assert_eq!(bitwig_extension_folders(std::slice::from_ref(&user), Some(&seen)), [extensions, elsewhere]);
 }
+
+#[test]
+fn an_older_bitwig_copy_that_cant_be_moved_aside_stops_the_update_in_every_folder() {
+    let root = fixture("bitwig-all-or-nothing");
+    let (a, b) = (root.join("A").join("Extensions"), root.join("B").join("Extensions"));
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    for folder in [&a, &b] {
+        fs::create_dir_all(folder).unwrap();
+        extension(&folder.join(FIRST_BITWIG_EXTENSION_NAME), "3.30");
+    }
+    // In B something is in the way where the older copy would be moved aside (as Bitwig holding it open would be).
+    let blocked = b.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old"));
+    fs::create_dir_all(blocked.join("in the way")).unwrap();
+    let folders = vec![a.clone(), b.clone()];
+    let done = install_bitwig(&source, &folders, &[]);
+    assert!(done.installed.went.is_empty() && done.removed.is_empty(), "{done:?}");
+    assert_eq!(done.installed.failed.len(), 2);
+    // Neither folder has the new copy, and each still has its older one, so Bitwig never has two.
+    for folder in [&a, &b] {
+        assert!(folder.join(FIRST_BITWIG_EXTENSION_NAME).is_file() && !folder.join(BITWIG_EXTENSION_NAME).exists());
+    }
+    assert!(!a.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old")).exists());
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Outdated);
+
+    // Once out of the way, it goes through.
+    fs::remove_dir_all(&blocked).unwrap();
+    let done = install_bitwig(&source, &folders, &[]);
+    assert_eq!(done.installed.went, folders);
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Installed);
+}
+
+#[test]
+fn an_older_bitwig_copy_left_aside_is_taken_out_by_the_next_install() {
+    let root = fixture("bitwig-left-aside");
+    let extensions = root.join("Extensions");
+    fs::create_dir_all(&extensions).unwrap();
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    let folders = vec![extensions.clone()];
+    install_bitwig(&source, &folders, &[]);
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Installed);
+    // An earlier install couldn't delete the copy it had moved aside.
+    let aside = extensions.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old"));
+    extension(&aside, "3.30");
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Outdated, "so the row offers Update");
+    let done = install_bitwig(&source, &folders, &[]);
+    assert!(done.installed.failed.is_empty() && done.installed.left.is_empty());
+    let names: Vec<_> = fs::read_dir(&extensions).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, [BITWIG_EXTENSION_NAME]);
+    assert_eq!(bitwig_state(&source, &folders), ScriptState::Installed);
+}
+
+#[test]
+fn a_new_copy_one_folder_cant_take_stops_the_update_everywhere() {
+    let root = fixture("bitwig-write-blocked");
+    let (a, b) = (root.join("A").join("Extensions"), root.join("B").join("Extensions"));
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    for folder in [&a, &b] {
+        fs::create_dir_all(folder).unwrap();
+        extension(&folder.join(FIRST_BITWIG_EXTENSION_NAME), "3.30");
+    }
+    // B can't take the new copy: something is in the way of the file it's first written as.
+    fs::create_dir_all(b.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")).join("in the way")).unwrap();
+    let folders = vec![a.clone(), b.clone()];
+    let done = install_bitwig(&source, &folders, &[]);
+    assert!(done.installed.went.is_empty() && done.removed.is_empty() && done.installed.failed.len() == 2);
+    for folder in [&a, &b] {
+        assert!(folder.join(FIRST_BITWIG_EXTENSION_NAME).is_file() && !folder.join(BITWIG_EXTENSION_NAME).exists());
+    }
+    assert!(!a.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")).exists(), "no part file stays");
+}
+
+#[test]
+fn an_older_copy_left_aside_by_a_cut_off_install_goes_back_if_this_one_stops() {
+    let root = fixture("bitwig-cut-off");
+    let extensions = root.join("Extensions");
+    fs::create_dir_all(&extensions).unwrap();
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    let aside = extensions.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old"));
+    extension(&aside, "3.30");
+    fs::create_dir_all(extensions.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")).join("in the way")).unwrap();
+    let folders = vec![extensions.clone()];
+    let done = install_bitwig(&source, &folders, &[]);
+    assert_eq!(done.installed.failed.len(), 1);
+    assert!(extensions.join(FIRST_BITWIG_EXTENSION_NAME).is_file() && !aside.exists(), "Bitwig keeps its link");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_listed_twice_through_a_link_is_done_once() {
+    let root = fixture("bitwig-twice");
+    let k = root.join("K").join("Extensions");
+    fs::create_dir_all(&k).unwrap();
+    std::os::unix::fs::symlink(root.join("K"), root.join("Docs")).unwrap();
+    let docs = root.join("Docs").join("Extensions");
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    extension(&k.join(FIRST_BITWIG_EXTENSION_NAME), "3.30");
+    let folders = vec![k.clone(), docs];
+    let done = install_bitwig(&source, &folders, &[]);
+    assert_eq!(done.installed.went, folders);
+    assert!(done.installed.failed.is_empty() && done.installed.left.is_empty(), "{done:?}");
+    assert_eq!(done.removed, [k.join(FIRST_BITWIG_EXTENSION_NAME)]);
+    let names: Vec<_> = fs::read_dir(&k).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, [BITWIG_EXTENSION_NAME]);
+}
+
+#[test]
+fn taking_the_links_out_removes_only_the_apps_own_files_and_folders() {
+    let root = fixture("take-out");
+    // FL: the script in its own folder, and the one from before the rename beside a file of the user's.
+    user_data(&root);
+    let fl_folders = fl_script_folders(std::slice::from_ref(&root));
+    install_fl(&fl_folders);
+    let hardware = root.join("Settings").join("Hardware");
+    let first = hardware.join(FIRST_FL_FOLDER);
+    fs::create_dir_all(&first).unwrap();
+    fs::write(first.join(FIRST_FL_SCRIPT_NAME), "# old\n").unwrap();
+    fs::write(first.join("notes.txt"), "mine").unwrap();
+    let fl = fl_installed_files(&fl_folders);
+    assert_eq!(fl, [fl_folders[0].join(FL_SCRIPT_NAME), first.join(FIRST_FL_SCRIPT_NAME)]);
+    let done = take_out(&fl);
+    assert_eq!(done.removed, fl);
+    assert!(done.failed.is_empty());
+    assert!(!fl_folders[0].exists(), "the app's own folder, left empty, goes");
+    assert!(first.join("notes.txt").exists(), "the user's file, and so its folder, stay");
+    assert_eq!(fl_state(&fl_folders), ScriptState::NotInstalled);
+    assert!(fl_installed_files(&fl_folders).is_empty());
+
+    // Bitwig: the extension, the old one, the old one moved aside, and the old script; nothing else of Bitwig's.
+    let user = root.join("Bitwig Studio");
+    let extensions = user.join("Extensions");
+    fs::create_dir_all(&extensions).unwrap();
+    for name in [BITWIG_EXTENSION_NAME, FIRST_BITWIG_EXTENSION_NAME, "Another.bwextension"] {
+        extension(&extensions.join(name), "1");
+    }
+    fs::write(extensions.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old")), "old").unwrap();
+    let scripts = user.join("Controller Scripts").join("Music Organiser");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join(BITWIG_SCRIPT_NAME), "// old").unwrap();
+    let folders = vec![extensions.clone()];
+    let users = vec![user.clone()];
+    let bw = bitwig_installed_files(&folders, &users);
+    assert_eq!(bw.len(), 4);
+    let done = take_out(&bw);
+    assert_eq!(done.removed.len(), 4);
+    let names: Vec<_> = fs::read_dir(&extensions).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, ["Another.bwextension"], "Bitwig's own folder and other extensions stay");
+    assert!(!scripts.exists() && user.join("Controller Scripts").exists());
+    assert!(bitwig_installed_files(&folders, &users).is_empty());
+
+    // Only the app's own names, whatever list it's given.
+    let theirs = extensions.join("Another.bwextension");
+    assert!(take_out(std::slice::from_ref(&theirs)).removed.is_empty() && theirs.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn taking_out_never_goes_through_a_link() {
+    let root = fixture("take-out-links");
+    // The app's own folder is a link to a folder elsewhere (a development set-up, say).
+    let elsewhere = root.join("repo").join("fl-studio");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join(FL_SCRIPT_NAME), "# the repo's own").unwrap();
+    let hardware = root.join("Settings").join("Hardware");
+    fs::create_dir_all(&hardware).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, hardware.join(FL_FOLDER)).unwrap();
+    let folders = vec![hardware.join(FL_FOLDER)];
+    assert!(fl_installed_files(&folders).is_empty());
+    assert!(take_out(&[hardware.join(FL_FOLDER).join(FL_SCRIPT_NAME)]).removed.is_empty());
+    assert!(elsewhere.join(FL_SCRIPT_NAME).exists());
+    // A file of the app's name that is itself a link stays too, and so does what it leads to.
+    let extensions = root.join("Extensions");
+    fs::create_dir_all(&extensions).unwrap();
+    let real = root.join("kept.bwextension");
+    fs::write(&real, "kept").unwrap();
+    std::os::unix::fs::symlink(&real, extensions.join(BITWIG_EXTENSION_NAME)).unwrap();
+    assert!(bitwig_installed_files(std::slice::from_ref(&extensions), &[]).is_empty());
+    assert!(take_out(&[extensions.join(BITWIG_EXTENSION_NAME)]).removed.is_empty() && real.exists());
+    // A part file an install cut off left goes with the link.
+    let own = root.join("Own").join("Extensions");
+    fs::create_dir_all(&own).unwrap();
+    extension(&own.join(BITWIG_EXTENSION_NAME), "1");
+    fs::write(own.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")), "part").unwrap();
+    let files = bitwig_installed_files(std::slice::from_ref(&own), &[]);
+    assert_eq!(take_out(&files).removed.len(), 2);
+    assert_eq!(fs::read_dir(&own).unwrap().count(), 0);
+}

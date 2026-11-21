@@ -1124,14 +1124,16 @@ fn parse_points(text: &str) -> Option<Vec<curve::CurvePoint>> {
         .collect()
 }
 
-/// The curve file's bytes for `c`.
+/// Who a curve file says made it, as Bitwig's browser shows it: the app's name.
+pub const CREATOR: &str = "DAWmate";
+
 /// `c` as a Bitwig curve file's bytes (`.bwcurve`), as [`file`] writes it: what a drag out of the plugin carries.
 pub fn curve_bytes(c: &Curve) -> Result<Vec<u8>, String> {
     let periodic =
         c.sources.iter().all(|s| !s.kind.is_song()) && c.points.first().map(|p| p.y) == c.points.last().map(|p| p.y);
     curve::write(&curve::Curve {
         name: c.name.clone(),
-        creator: "Music Organiser".into(),
+        creator: CREATOR.into(),
         comment: String::new(),
         category: if periodic { "Periodic" } else { "Sequence" }.into(),
         tags: String::new(),
@@ -1141,12 +1143,13 @@ pub fn curve_bytes(c: &Curve) -> Result<Vec<u8>, String> {
     .ok_or_else(|| "This curve has no points".to_owned())
 }
 
-/// Whether a curve file already holds this curve as it is now (its points and length).
-fn holds(path: &Path, c: &Curve) -> bool {
-    std::fs::read(path)
-        .ok()
-        .and_then(curve::read)
-        .is_some_and(|back| back.points == c.points && back.beat_length == Some(c.length_beats).filter(|l| *l > 0.0))
+/// Whether a curve file already holds this curve as it is now: `Some(true)` with the app's name as its creator,
+/// `Some(false)` with an older name (written before the rename: written again, but still good to use), `None` when it
+/// doesn't hold it (or isn't there).
+fn holds(path: &Path, c: &Curve) -> Option<bool> {
+    let back = std::fs::read(path).ok().and_then(curve::read)?;
+    (back.points == c.points && back.beat_length == Some(c.length_beats).filter(|l| *l > 0.0))
+        .then(|| back.creator == CREATOR)
 }
 
 /// The curve file for `curve` in the app's own `Curves` folder (`folder`): written the first time it's asked for, and
@@ -1155,7 +1158,8 @@ fn holds(path: &Path, c: &Curve) -> bool {
 pub fn file(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
     let id = c.id.get(..ID_IN_NAME).unwrap_or(&c.id);
     let path = folder.join(format!("{} {id}.{}", names::safe_file_name(&c.name), curve::EXTENSION));
-    if holds(&path, c) {
+    let held = holds(&path, c);
+    if held == Some(true) {
         // Used again: its time says so, and the start-up sweep (which clears the files here that are a month old)
         // counts from its last use, never from when it was first made. (Best effort: an old time only means it's
         // made again one day.)
@@ -1164,8 +1168,16 @@ pub fn file(c: &Curve, folder: &Path) -> Result<PathBuf, String> {
         }
         return Ok(path);
     }
-    std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make the Curves folder: {e}"))?;
-    export::write_checked(&path, &curve_bytes(c)?).map_err(|e| format!("Couldn't write the curve: {e}"))?;
+    let written = std::fs::create_dir_all(folder)
+        .map_err(|e| format!("Couldn't make the Curves folder: {e}"))
+        .and_then(|()| curve_bytes(c))
+        .and_then(|bytes| export::write_checked(&path, &bytes).map_err(|e| format!("Couldn't write the curve: {e}")));
+    match written {
+        Ok(()) => {}
+        // Only its maker's name is older: the file there still holds the curve (something has it open, say).
+        Err(_) if held == Some(false) => return Ok(path),
+        Err(e) => return Err(e),
+    }
     // The folder is a cache (rule 28): this curve's file under an older name (before it was renamed) goes. Names
     // that differ only in letter case are one file on Windows and a Mac, so that one stays.
     let own = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
@@ -1496,6 +1508,13 @@ mod tests {
         let written = file(&rise, &curves).unwrap();
         assert_eq!(file(&rise, &curves).unwrap(), written);
         assert_eq!(curve::read(std::fs::read(&written).unwrap()).unwrap().points, rise.points);
+        // Written before the app was called DAWmate, it's written again with the app's name as its maker.
+        let mut old = curve::read(std::fs::read(&written).unwrap()).unwrap();
+        assert_eq!(old.creator, CREATOR);
+        old.creator = "Music Organiser".into();
+        std::fs::write(&written, curve::write(&old).unwrap()).unwrap();
+        assert_eq!(file(&rise, &curves).unwrap(), written);
+        assert_eq!(curve::read(std::fs::read(&written).unwrap()).unwrap().creator, CREATOR);
         let library = dir.join("Library").join("Curves");
         let first = save_to_bitwig(&rise, &library).unwrap();
         let second = save_to_bitwig(&rise, &library).unwrap();

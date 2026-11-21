@@ -68,6 +68,8 @@ export struct DawRowInfo {
     bitwig: bool,
     // Its Install button's words, or empty for none.
     install: string,
+    // What Take out asks before it takes the app's link out of this DAW, or empty for no Take out (nothing there).
+    take-out-ask: string,
     facts: [SettingsFact],
 }
 
@@ -178,8 +180,13 @@ export global SettingsData {
     // What the last Install did; whether one is running now.
     in property <string> daws-message;
     in property <bool> daws-installing;
+    // Whether what runs while daws-installing is a Take out.
+    in property <bool> daws-taking-out;
     // Install on a row: Bitwig's extension (true) or FL Studio's script.
     callback install-daw(bool);
+    // Take out on a DAW's row: which DAW's is being asked about (its name, or empty), then taking it out (Bitwig's?).
+    in-out property <string> take-out-asking;
+    callback take-out-daw(bool);
     // Your Bitwig Studio folder: pick one, or go back to the one in Documents; whether one is chosen (not Documents').
     callback choose-bitwig-folder();
     callback documents-bitwig();
@@ -974,10 +981,38 @@ component DawsTab inherits VerticalLayout {
             }
             if d.install != "": StudioButton {
                 horizontal-stretch: 0;
-                text: SettingsData.daws-installing ? "Installing\u{2026}" : d.install;
+                text: SettingsData.daws-installing ? (SettingsData.daws-taking-out ? "Taking out\u{2026}" : "Installing\u{2026}") : d.install;
                 tip: d.bitwig ? "Puts the app's extension in Bitwig's folders and takes out the older script. Close Bitwig first." : "Puts the app's script in FL Studio's folders, keeping your setting for letting the app make changes";
                 enabled: !SettingsData.daws-installing;
                 clicked => { SettingsData.install-daw(d.bitwig); }
+            }
+            if d.take-out-ask != "" && SettingsData.take-out-asking != d.daw: StudioButton {
+                horizontal-stretch: 0;
+                text: "Take out\u{2026}";
+                tip: d.bitwig ? "Takes the app's extension (and its older copies) out of Bitwig's folders, after asking" : "Takes the app's script (and its older copy) out of FL Studio's folders, after asking";
+                enabled: !SettingsData.daws-installing;
+                clicked => { SettingsData.take-out-asking = d.daw; }
+            }
+        }
+        // Take out asks first, naming every file that goes.
+        if SettingsData.take-out-asking == d.daw && d.take-out-ask != "": Text {
+            text: d.take-out-ask;
+            color: Theme.text;
+            font-size: Type.body;
+            wrap: word-wrap;
+        }
+        if SettingsData.take-out-asking == d.daw && d.take-out-ask != "": HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            StudioButton {
+                text: "Take it out";
+                danger: true;
+                enabled: !SettingsData.daws-installing;
+                clicked => { SettingsData.take-out-daw(d.bitwig); }
+            }
+            StudioButton {
+                text: "Cancel";
+                clicked => { SettingsData.take-out-asking = ""; }
             }
         }
         for f in d.facts: FactLine {

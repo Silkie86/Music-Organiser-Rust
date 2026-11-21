@@ -181,7 +181,7 @@ fn nothing_can_write_to_the_library_and_a_missing_one_isnt_made() {
     let _ = std::fs::remove_file(&not_a_library);
     Connection::open(&not_a_library).unwrap().execute_batch("CREATE TABLE x (y)").unwrap();
     let err = Library::open_read_only(&not_a_library).err().unwrap().to_string();
-    assert!(err.contains("isn't a Music Organiser library"), "{err}");
+    assert!(err.contains("isn't a DAWmate library"), "{err}");
 }
 
 #[test]

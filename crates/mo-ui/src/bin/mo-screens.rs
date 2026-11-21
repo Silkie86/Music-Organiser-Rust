@@ -4185,6 +4185,11 @@ fn settings_shots(
     );
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));
+    // Take out on FL Studio's row, asking first and naming the file that goes.
+    data.set_take_out_asking("FL Studio".into());
+    capture(window);
+    shots.push(("settings-daws-take-out.png".into(), capture(window)));
+    data.set_take_out_asking("".into());
     // Further down, the program each DAW's songs open in: FL Studio's chosen here (an invented path, set before
     // show_fl showed the tab), Studio One's chosen in the old app, Bitwig's Windows' choice.
     scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
