@@ -352,11 +352,18 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
             return done;
         }
     };
+    // Each folder's place in `unique`, worked out once, before anything is made (a folder made later would have a
+    // real path then that it hadn't before).
     let mut unique: Vec<(&PathBuf, PathBuf)> = Vec::new();
+    let mut place_of: Vec<usize> = Vec::with_capacity(folders.len());
     for folder in folders {
         let real = fs::canonicalize(folder).unwrap_or_else(|_| folder.clone());
-        if !unique.iter().any(|(_, r)| *r == real) {
-            unique.push((folder, real));
+        match unique.iter().position(|(_, r)| *r == real) {
+            Some(at) => place_of.push(at),
+            None => {
+                place_of.push(unique.len());
+                unique.push((folder, real));
+            }
         }
     }
     let fail_all = |why: String, at: &Path| -> Vec<(PathBuf, String)> {
@@ -407,8 +414,8 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
             }
         }
     }
-    let mut went: Vec<&PathBuf> = Vec::new();
-    for (((folder, _), part), older) in unique.iter().zip(&parts).zip(&olders) {
+    let mut went: Vec<bool> = vec![false; unique.len()];
+    for (at, (((folder, _), part), older)) in unique.iter().zip(&parts).zip(&olders).enumerate() {
         if let Err(e) = fs::rename(part, folder.join(BITWIG_EXTENSION_NAME)) {
             // The copy there now (an earlier DAWmate one Bitwig has open) stays. The older copy goes back only where
             // there's no DAWmate copy beside it, so the folder never has two.
@@ -423,20 +430,13 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
             done.installed.failed.push(((*folder).clone(), e.to_string()));
             continue;
         }
-        went.push(folder);
+        went[at] = true;
         if let Some(o) = older {
             take_out_aside(o, &mut done);
         }
     }
     // A folder listed twice went (or didn't) as its first listing did.
-    done.installed.went = folders
-        .iter()
-        .filter(|f| {
-            let real = fs::canonicalize(f).unwrap_or_else(|_| (*f).clone());
-            unique.iter().any(|(u, r)| *r == real && went.contains(u))
-        })
-        .cloned()
-        .collect();
+    done.installed.went = folders.iter().zip(&place_of).filter(|(_, at)| went[**at]).map(|(f, _)| f.clone()).collect();
     for user in user_folders {
         if !done.installed.went.iter().any(|f| f.parent() == Some(user.as_path())) {
             continue;
