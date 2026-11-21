@@ -4,7 +4,7 @@
 //! only to the Recycle Bin, and a link is only ever changed, never a real folder.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_formats::paths::file_name;
@@ -16,14 +16,14 @@ use crate::clean::{Bin, Done, Problem};
 use crate::folder_move::{
     CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, UNCHECKED, check_rename, check_rename_or_ask,
     clear_failed_link, copy_fresh, copy_tree, denied, destination_problem, failed, fresh_name, inside_moved, leads_to,
-    link, link_reaches, listed, not_noted, only_in, part_way, remove_link, rest_after, room_for, shown, swap_or_ask,
-    target, write_through,
+    link, link_reaches, listed, not_noted, only_in, part_way, protected_folder, remove_link, rest_after, room_for,
+    shown, swap_or_ask, target, write_through,
 };
-use crate::half_copy::{busy_now, claim, clear_own, going_into_use, unmark};
+use crate::half_copy::{MARKER, busy_now, claim, clear_own, going_into_use, unmark};
 use crate::old_copies::{Going, send_one};
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
-use crate::{is_dir, key, not_there, real_folder, text};
+use crate::{is_dir, key, not_there, real_folder, real_path, text};
 
 /// The folder a plugin update made where the link was, once it's set aside and the link is back.
 pub const UPDATE_SUFFIX: &str = " (after update)";
@@ -98,6 +98,72 @@ pub fn home_of(moved: &MovedFolder) -> String {
 /// at the new place, before the folder went there). Pointing the links at where the copies are puts it right.
 pub fn lost(moved: &[MovedFolder]) -> Vec<&MovedFolder> {
     moved.iter().filter(|m| is_link(Path::new(&m.from)) && !link_reaches(m)).collect()
+}
+
+/// Where a lost moved folder's copy may be now: a folder of the same name at the same place on another drive
+/// ([`found_on_another_drive`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Elsewhere {
+    /// Where the drive the copy was on starts (`E:\`), and the one it's on now (`F:\`): [`repoint`] points links from
+    /// the one to the other.
+    pub was_on: String,
+    pub now_on: String,
+    /// Where the copy is now.
+    pub to: String,
+}
+
+/// Where a lost moved folder's copy may be now, when its drive came back under another letter (another USB stick took
+/// its letter, say): a folder of the same name at the same place on another of `drives` ([`local_drives`]), the first
+/// found. Only a real folder with no link on the way to it, and none the app knows as something else: not where a
+/// moved folder is or was or its old copy is (`all`), a folder left behind (`homes`) or one of your project, sample or
+/// MIDI folders (`yours`), nor around or inside one of them; not a half copy. Nothing says it's the same drive, so it
+/// may still be another folder of the same name: the page says so, and only you press Link again.
+pub fn found_on_another_drive(
+    moved: &MovedFolder,
+    all: &[MovedFolder],
+    homes: &[OldHome],
+    yours: &[String],
+    drives: &[String],
+) -> Option<Elsewhere> {
+    let was_on = drive_start(&moved.to)?;
+    let rest = rest_after(&moved.to, &was_on).filter(|rest| !rest.as_os_str().is_empty())?;
+    drives.iter().filter(|d| key(d) != key(&was_on)).find_map(|d| {
+        let to = text(&Path::new(d).join(&rest));
+        // The whole way there from the drive's start is real: a folder link on the way could lead anywhere (a network
+        // drive, say).
+        let direct = real_path(d)
+            .zip(real_path(&to))
+            .is_some_and(|(drive, real)| key(&real) == key(&text(&Path::new(&drive).join(&rest))));
+        (direct && could_be_copy(&to, all, homes, yours)).then(|| Elsewhere {
+            was_on: was_on.clone(),
+            now_on: d.clone(),
+            to,
+        })
+    })
+}
+
+/// Whether a folder at a lost copy's place on another drive could be that copy ([`found_on_another_drive`]).
+fn could_be_copy(to: &str, all: &[MovedFolder], homes: &[OldHome], yours: &[String]) -> bool {
+    let meets = |other: &str| !other.trim().is_empty() && (is_inside(to, other) || is_inside(other, to));
+    real_folder(to)
+        && !all.iter().any(|m| meets(&m.from) || meets(&m.to) || meets(&m.old_copy))
+        && !homes.iter().any(|h| meets(&h.path))
+        && !protected_folder(to, yours)
+        && fs::symlink_metadata(Path::new(to).join(MARKER)).is_err()
+}
+
+/// Where the drive a path is on starts: `E:\`, `\\server\share\`, or `/`.
+pub fn drive_start(path: &str) -> Option<String> {
+    let start: PathBuf =
+        Path::new(path).components().take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir)).collect();
+    (!start.as_os_str().is_empty()).then(|| text(&start))
+}
+
+/// The computer's own drives, by where each starts (`E:\`), for [`found_on_another_drive`]: Windows' list of them (the
+/// drives in the computer, USB sticks and memory cards; not network drives, CDs or DVDs). None on a Mac or Linux,
+/// which name a drive after itself, not by a letter another drive can take.
+pub fn local_drives() -> Vec<String> {
+    crate::clean::local_drives()
 }
 
 /// The moved folders a plugin update put a real folder back in place of (some installers delete the folder and make it
@@ -518,8 +584,10 @@ fn outer_first(links: &[(usize, PathBuf)], moved: &[MovedFolder]) -> Vec<usize> 
 
 /// The folders left behind that were in `old_home`, at their place in `new_home` when they're there.
 fn follow_homes(old_home: &str, new_home: &str, homes: &[OldHome]) -> Vec<OldHome> {
+    // One that doesn't say where its files went (an empty path) has nothing to follow.
     let moved_to = |path: &str| {
         rest_after(path, old_home)
+            .filter(|_| !path.is_empty())
             .map(|rest| text(&Path::new(new_home).join(rest)))
             .filter(|p| fs::symlink_metadata(p).is_ok())
     };

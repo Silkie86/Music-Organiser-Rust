@@ -1433,6 +1433,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 
 pub mod clean;
 pub mod folder_fixes;
+pub mod links;
 pub mod measure;
 pub mod moves_under_way;
 pub mod moving;

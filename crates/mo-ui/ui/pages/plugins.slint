@@ -118,6 +118,13 @@ export global PluginsData {
     in property <string> half-copy-text;
     in property <bool> can-clear-half-copies;
     callback clear-half-copies();
+    // The moved folders whose link doesn't work (lost, or a real folder back where it was), with Link again, and Stop
+    // while it runs (the whole-app review of 19 Nov, PM-2).
+    in property <string> link-text;
+    in property <bool> can-link-again;
+    in property <bool> linking;
+    callback link-again();
+    callback stop-linking();
     // When the plugins were last measured (or that a measure is running), and Measure again (review X1-2).
     in property <string> measure-text;
     in property <bool> can-measure: true;
@@ -839,6 +846,32 @@ export component PluginsPage inherits Rectangle {
                     text: "Clear it";
                     font-size: Type.meta;
                     clicked => { PluginsData.clear-half-copies(); }
+                }
+            }
+        }
+        if PluginsData.link-text != "": HorizontalLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            Text {
+                text: PluginsData.link-text;
+                color: Theme.warning;
+                font-size: Type.meta;
+                wrap: word-wrap;
+                min-width: 0px;
+                horizontal-stretch: 1;
+            }
+            if PluginsData.can-link-again || PluginsData.linking: VerticalLayout {
+                alignment: center;
+                LinkText {
+                    text: PluginsData.linking ? "Stop" : "Link again";
+                    font-size: Type.meta;
+                    clicked => {
+                        if (PluginsData.linking) {
+                            PluginsData.stop-linking();
+                        } else {
+                            PluginsData.link-again();
+                        }
+                    }
                 }
             }
         }

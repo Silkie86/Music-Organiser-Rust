@@ -381,9 +381,10 @@ fn moved_done(app: &AppWindow, id: u64, head: String, gone: Option<String>) {
     });
     refresh(app);
     fill_panel(app);
-    // The old copy it left shows on Space; what a move cut short left shows here.
+    // The old copy it left shows on Space; what a move cut short left shows here, and so does a link it broke.
     crate::space::plugin_moved(app);
     look_for_half_copies(app);
+    super::links::look(app);
 }
 
 /// The folders being moved in this run, with their Stop, from any thread: a move's note isn't dropped while it runs, and
@@ -391,11 +392,11 @@ fn moved_done(app: &AppWindow, id: u64, head: String, gone: Option<String>) {
 static RUNNING: Mutex<Vec<(String, Arc<AtomicBool>)>> = Mutex::new(Vec::new());
 static ENDED: Condvar = Condvar::new();
 
-/// One move in [`RUNNING`], taken out when dropped (however the move ends).
-struct Running(String);
+/// One move (or Link again, [`super::links`]) in [`RUNNING`], taken out when dropped (however it ends).
+pub(super) struct Running(String);
 
 impl Running {
-    fn start(from: &str, stop: &Arc<AtomicBool>) -> Running {
+    pub(super) fn start(from: &str, stop: &Arc<AtomicBool>) -> Running {
         RUNNING.lock().unwrap_or_else(PoisonError::into_inner).push((from.to_owned(), stop.clone()));
         Running(from.to_owned())
     }
