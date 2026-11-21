@@ -402,6 +402,9 @@ pub struct ToFix {
     /// Bitwig's Library folders, as the look found them (Settings' first): where a file whose folder moved is looked
     /// for.
     pub libraries: Vec<PathBuf>,
+    /// The save's own fixed project, when Fix writes the next one from it: it still uses copies a later look found
+    /// ([`Fixes::still_uses`]). None writes from the save.
+    pub from: Option<PathBuf>,
 }
 
 /// A project whose copies may go, once you've heard its fixed saves play.
@@ -444,7 +447,7 @@ pub fn rows_for(job: &ToFree, rows: &[(String, String)]) -> Vec<(String, String)
 
 /// The saves whose copies stop being found when a project's copies go (Solomon, 17 Nov 2026: he chose that they go
 /// once each song using them is fixed and checked): every save of each checked song (the save itself and its older
-/// ones) and Bitwig's backups. Every other Bitwig file in the folder (another song's saves, a fixed project, a template
+/// ones, and its older fixed projects) and Bitwig's backups. Every other Bitwig file in the folder (another song's saves, a fixed project, a template
 /// or clip) still keeps a copy it names. Newest first.
 pub fn left_behind(job: &ToFree) -> Vec<PathBuf> {
     let checked: HashSet<&Path> = job.checked.iter().map(|(save, _)| save.as_path()).collect();
@@ -478,6 +481,26 @@ pub fn left_behind(job: &ToFree) -> Vec<PathBuf> {
             })
             .map(|s| s.path.clone()),
     );
+    // A checked save's older fixed projects beside it ("X (fixed)" once "X (fixed 2)" is the one you heard): an older
+    // save of the song too. Fix writes the next one from the one that still uses copies a later look found (FS-3), and
+    // the one before would keep them for ever.
+    for (save, fixed) in &job.checked {
+        let (Some(dir), name) = (save.parent(), paths::stem(&save.to_string_lossy()).to_owned()) else { continue };
+        let Ok(listing) = std::fs::read_dir(dir) else { continue };
+        for entry in listing.flatten() {
+            let path = entry.path();
+            let project = path.extension().is_some_and(|x| x.eq_ignore_ascii_case("bwproject"));
+            let of_it = bitwig::fixed_from(paths::stem(&path.to_string_lossy()))
+                .is_some_and(|from| from.eq_ignore_ascii_case(&name));
+            if project
+                && of_it
+                && entry.file_type().is_ok_and(|t| t.is_file())
+                && key(&path.to_string_lossy()) != key(&fixed.to_string_lossy())
+            {
+                out.push(path);
+            }
+        }
+    }
     out
 }
 
@@ -648,12 +671,13 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
     // before Windows asks to send what it guards, so a save made meanwhile is still seen.
     let ask = || -> (Result<relink::FilesNow, String>, HashMap<String, Option<String>>) {
         let files = relink::bitwig_files_now(original);
-        // And each checked song's fixed project must use the file the copy is the same as now (FS-2).
+        // And each checked song's fixed project must use the file the copy is the same as now (FS-2). A file that still
+        // names the copy says so first: when that's the fixed project itself, Fix is offered again from it (FS-3).
         let uses = relink::fixed_use_originals(&job.checked, &relinks);
         let why = relinks
             .iter()
             .map(|r| key(&r.copy.to_string_lossy()))
-            .zip(relink::still_named_except(original, &relinks, &left_out).into_iter().zip(uses).map(|(n, u)| u.or(n)))
+            .zip(relink::still_named_except(original, &relinks, &left_out).into_iter().zip(uses).map(|(n, u)| n.or(u)))
             .collect();
         (files, why)
     };
@@ -686,6 +710,27 @@ pub fn free(job: &ToFree, bin: &dyn mo_space::clean::Bin, stop: &AtomicBool) -> 
         still_named: &still_named,
     };
     bitwig::remove_copies(&fixed, bin, stop)
+}
+
+/// Each checked save whose fixed project still uses some of the project's copies that Fix could point at their
+/// originals now, with that fixed project and how many: copies a look found after Fix ran (a sample the Sounds library
+/// learned since, a Library folder added in Settings). Free the space keeps them while the fixed project names them,
+/// so Fix is offered again ([`Fixes::still_uses`]), writing from that fixed project (the whole-app review of 19 Nov,
+/// FS-3). Reads each checked fixed project once, so call it off the window's thread.
+pub fn fixed_still_using(job: &ToFree) -> Vec<(PathBuf, PathBuf, usize)> {
+    let relinks: Vec<Relink> = job
+        .project
+        .copies
+        .iter()
+        .map(|c| Relink { copy: PathBuf::from(&c.in_project), library: PathBuf::from(&c.library_file) })
+        .collect();
+    job.checked
+        .iter()
+        .filter_map(|(save, fixed)| {
+            let n = relink::could_point(fixed, &relinks);
+            (n > 0).then(|| (save.clone(), fixed.clone(), n))
+        })
+        .collect()
 }
 
 /// Whether the drive a path is on isn't here now (unplugged, or another letter now): on Windows its drive's root isn't
@@ -776,7 +821,11 @@ pub fn fix(job: &ToFix, note: &Path, stop: &AtomicBool) -> Fixing {
         .map(|c| Relink { copy: PathBuf::from(&c.in_project), library: PathBuf::from(&c.library_file) })
         .collect();
     // The app closing stops it before it writes (the whole-app review of 19 Nov, FS-9).
-    match relink::fix_bitwig_project_until(&job.save, &relinks, &job.libraries, stop) {
+    let fixed = match &job.from {
+        Some(from) => relink::fix_bitwig_project_from(&job.save, from, &relinks, &job.libraries, stop),
+        None => relink::fix_bitwig_project_until(&job.save, &relinks, &job.libraries, stop),
+    };
+    match fixed {
         Ok(fixed) => {
             crate::space_fix_note::wrote(note, &fixed.file);
             for line in &fixed.found {
@@ -815,6 +864,11 @@ pub struct Fixes {
     /// The fixed saves you've ticked as heard playing, by the save's path, with the fixed project you heard: the tick
     /// counts only while that's still its fixed project.
     pub heard: HashMap<PathBuf, PathBuf>,
+    /// The fixed saves whose fixed project still uses copies a later look found (a sample the Sounds library learned
+    /// after Fix, a Library folder added since), as Free the space found them: by the save's path, that fixed project
+    /// and how many it could point at their originals. Each counts only while it's still the save's fixed project; Fix
+    /// can then write the next one from it (the whole-app review of 19 Nov, FS-3).
+    still_uses: HashMap<PathBuf, (PathBuf, usize)>,
     /// From the moment Fix starts until it has finished, as planned or not.
     running: bool,
 }
@@ -824,6 +878,9 @@ enum State<'a> {
     Writing,
     /// Its fixed project, as new as it or newer.
     Fixed(&'a Path),
+    /// Its fixed project, as new as it, still uses this many copies a later look found: Fix writes the next one from
+    /// it.
+    StillUses(&'a Path, usize),
     Failed(&'a str),
     /// Its fixed project was written before it was saved again.
     Outdated(&'a Path),
@@ -848,7 +905,7 @@ impl Fixes {
 
     fn state<'a>(&'a self, save: &'a Save) -> State<'a> {
         let fixing = self.fixing.get(&save.path);
-        match (fixing, &save.fixed) {
+        let state = match (fixing, &save.fixed) {
             (Some(Fixing::Writing), _) => State::Writing,
             // Written this time: fixed, unless a look has found that very file older than the save (saved again
             // since). A look that found no fixed project, or an older one, started before Fix wrote.
@@ -858,6 +915,10 @@ impl Fixes {
             (Some(Fixing::Failed(why)), _) => State::Failed(why),
             (_, Some((file, false))) => State::Outdated(file),
             _ => State::Open,
+        };
+        match (state, self.still_uses.get(&save.path)) {
+            (State::Fixed(file), Some((still, n))) if still == file => State::StillUses(file, *n),
+            (state, _) => state,
         }
     }
 
@@ -874,7 +935,7 @@ impl Fixes {
             // Only a song's newest save frees its copies; while Fix writes, nothing can be ticked.
             return (newest && !save.below && !self.running).then(|| self.heard.get(&save.path) == Some(&file.into()));
         }
-        if save.below || !matches!(state, State::Failed(_) | State::Outdated(_) | State::Open) {
+        if save.below || !matches!(state, State::Failed(_) | State::Outdated(_) | State::StillUses(..) | State::Open) {
             return None;
         }
         let out_of_the_box = newest && !matches!(state, State::Failed(_));
@@ -887,6 +948,7 @@ impl Fixes {
         if matches!(fixing, Fixing::Failed(_) | Fixing::Written(_)) {
             self.ticks.remove(&save);
             self.heard.remove(&save);
+            self.still_uses.remove(&save);
         }
         self.fixing.insert(save, fixing);
     }
@@ -917,9 +979,24 @@ impl Fixes {
         project.saves.iter().map(|s| (s, self.tick(newest.contains(s.path.as_path()), s))).collect()
     }
 
-    /// Whether Fix can write for a save now (not fixed, or its fixed project is out of date, or Fix failed on it).
+    /// Whether Fix can write for a save now (not fixed, or its fixed project is out of date or still uses copies a
+    /// later look found, or Fix failed on it).
     fn fixable(&self, save: &Save) -> bool {
-        matches!(self.state(save), State::Failed(_) | State::Outdated(_) | State::Open)
+        matches!(self.state(save), State::Failed(_) | State::Outdated(_) | State::StillUses(..) | State::Open)
+    }
+
+    /// What Free the space found ([`fixed_still_using`]): each checked save whose fixed project still uses copies a later
+    /// look found, with that fixed project and how many. Fix is offered for them again, ticked; a save not in the
+    /// list loses an earlier one.
+    pub fn still_uses(&mut self, found: Vec<(PathBuf, PathBuf, usize)>, checked: &[PathBuf]) {
+        for save in checked {
+            self.still_uses.remove(save);
+        }
+        for (save, fixed, n) in found {
+            self.heard.remove(&save);
+            self.ticks.remove(&save);
+            self.still_uses.insert(save, (fixed, n));
+        }
     }
 
     /// The ticked saves Fix can write for, project by project, each with its project's copies.
@@ -933,6 +1010,10 @@ impl Fixes {
                     save: s.path.clone(),
                     copies: p.copies.clone(),
                     libraries: found.library.clone(),
+                    from: match self.state(s) {
+                        State::StillUses(f, _) => Some(f.to_path_buf()),
+                        _ => None,
+                    },
                 })
             })
             .collect()
@@ -1060,6 +1141,15 @@ fn state_words(project: &Project, save: &Save, state: &State<'_>, speaks: Speaks
             }
             (format!("Not fixed: {why}"), true)
         }
+        State::StillUses(f, n) => (
+            format!(
+                "\"{}\" still uses {} found since it was fixed, which can use their originals now: Fix writes a new \
+                 fixed project from it.",
+                file(f),
+                copies_words(*n)
+            ),
+            false,
+        ),
         State::Outdated(f) => {
             (format!("\"{}\" is older than this save or than the newest Fix: fix it again.", file(f)), false)
         }
@@ -1120,7 +1210,10 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
                 tick: tick_of(save),
                 status,
                 problem,
-                open: if let State::Fixed(f) = state { Some((Opens::InBitwig, f.to_path_buf())) } else { None },
+                open: match state {
+                    State::Fixed(f) | State::StillUses(f, _) => Some((Opens::InBitwig, f.to_path_buf())),
+                    _ => None,
+                },
                 ..Part::default()
             }
         };
@@ -1130,7 +1223,7 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
                 let state = fixes.state(one.newest);
                 (line.status, line.problem) = state_words(p, one.newest, &state, Speaks::Project(others));
                 line.tick = tick_of(one.newest);
-                if let State::Fixed(f) = state {
+                if let State::Fixed(f) | State::StillUses(f, _) = state {
                     line.open = Some((Opens::InBitwig, f.to_path_buf()));
                 }
             }
@@ -1677,6 +1770,53 @@ mod tests {
                 .0
                 .ends_with("… (the log has it all)")
         );
+    }
+
+    #[test]
+    fn a_fixed_save_whose_fixed_project_still_uses_copies_found_later_is_fixed_again_from_it() {
+        // The whole-app review of 19 Nov, FS-3.
+        let mut p = with_saves();
+        let newest = p.saves[0].path.clone();
+        let folder = r"K:\Bitwig Studio\Projects\GARAGE FOR BW 1";
+        let fixed = PathBuf::from(format!(r"{folder}\GARAGE FOR BW 1 (fixed).bwproject"));
+        p.saves[0].fixed = Some((fixed.clone(), true));
+        let found = Copies { library: Vec::new(), folders: 1, projects: vec![p.clone()] };
+        let mut fixes = Fixes::default();
+        fixes.set_tick(Some(&found), newest.clone(), true);
+        assert_eq!(fixes.to_free(&found).len(), 1, "heard, so its copies may go");
+        assert!(fixes.to_fix(&found).is_empty());
+
+        // Free the space found its fixed project still uses 2 copies: Fix is offered again, ticked, from that fixed
+        // project; it isn't heard any more.
+        fixes.still_uses(vec![(newest.clone(), fixed.clone(), 2)], std::slice::from_ref(&newest));
+        let line = super::card(Some(&found), None, &fixes).parts.remove(0);
+        assert_eq!(
+            line.status,
+            "\"GARAGE FOR BW 1 (fixed).bwproject\" still uses 2 copies found since it was fixed, which can use their \
+             originals now: Fix writes a new fixed project from it."
+        );
+        assert_eq!(line.tick, Some((vec![newest.clone()], true)));
+        assert_eq!(line.open, Some((Opens::InBitwig, fixed.clone())));
+        assert!(fixes.to_free(&found).is_empty());
+        let jobs = fixes.to_fix(&found);
+        assert_eq!(jobs.iter().map(|j| (&j.save, &j.from)).collect::<Vec<_>>(), [(&newest, &Some(fixed.clone()))]);
+
+        // A look that finds another fixed project for it: that one hasn't been asked about.
+        let mut later = p.clone();
+        later.saves[0].fixed = Some((PathBuf::from(format!(r"{folder}\GARAGE FOR BW 1 (fixed 2).bwproject")), true));
+        let other = Copies { library: Vec::new(), folders: 1, projects: vec![later] };
+        assert!(fixes.to_fix(&other).is_empty());
+
+        // Fix wrote the next one: it's fixed, as any.
+        fixes.start(&jobs);
+        fixes.done(newest.clone(), Fixing::Written(fixed.with_file_name("GARAGE FOR BW 1 (fixed 2).bwproject")));
+        fixes.finished();
+        assert!(fixes.still_uses.is_empty());
+
+        // A later Free that finds none for a save it checked takes an earlier finding off.
+        fixes.still_uses(vec![(newest.clone(), fixed.clone(), 1)], &[]);
+        fixes.still_uses(Vec::new(), std::slice::from_ref(&newest));
+        assert!(fixes.still_uses.is_empty());
     }
 
     #[test]
