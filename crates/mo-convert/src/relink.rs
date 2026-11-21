@@ -792,6 +792,15 @@ pub fn fix_bitwig_project_from(
     if from.parent() != project.parent() {
         return Err(format!("{} isn't beside {}, so nothing was written", from.display(), project.display()));
     }
+    // One of this save's own fixed projects, by the names Fix gives them: never another song's.
+    let named = |p: &Path| p.file_name().map(|n| key(&n.to_string_lossy()));
+    if !fixed_names(project).any(|f| named(&f) == named(from)) {
+        return Err(format!(
+            "{} isn't a fixed project of {}, so nothing was written",
+            from.display(),
+            project.display()
+        ));
+    }
     fix(project, from, relinks, libraries, false, stop)
 }
 
@@ -800,13 +809,24 @@ pub fn fix_bitwig_project_from(
 /// copy it names only where Fix doesn't change it (a plugin's own settings) isn't counted. 0 when it can't be read.
 pub fn could_point(fixed: &Path, relinks: &[Relink]) -> usize {
     let Some(dir) = fixed.parent() else { return 0 };
-    let listed: Vec<Listed> = relinks.iter().filter_map(|r| listed_one(dir, r).ok()).collect();
-    if listed.is_empty() {
+    let Ok(raw) = std::fs::read(fixed) else { return 0 };
+    if raw.is_empty() {
         return 0;
     }
-    let Ok(raw) = std::fs::read(fixed) else { return 0 };
-    // Most fixed projects name none: their bytes are looked through before anything is decoded.
-    if raw.is_empty() || !named_in(&raw, &listed).contains(&true) {
+    // Most fixed projects name none: their bytes are looked through before anything is decoded or compared. Then only
+    // copies Fix would point count: in a copy folder, with their original there and still the same as it.
+    let (relinks, listed): (Vec<&Relink>, Vec<Listed>) =
+        relinks.iter().filter_map(|r| listed_one(dir, r).ok().map(|l| (r, l))).unzip();
+    let named = named_in(&raw, &listed);
+    let never = AtomicBool::new(false);
+    let listed: Vec<Listed> = listed
+        .into_iter()
+        .zip(relinks)
+        .zip(named)
+        .filter(|((_, r), named)| *named && same_file_once(&r.copy, &r.library, &never))
+        .map(|((l, _), _)| l)
+        .collect();
+    if listed.is_empty() {
         return 0;
     }
     let Ok(Relinked { bytes, changed, .. }) = relink_listed(&raw, dir, &listed, &[]) else { return 0 };

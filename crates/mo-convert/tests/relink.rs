@@ -731,4 +731,9 @@ fn a_fixed_project_that_still_uses_a_copy_found_later_is_fixed_again_from_itself
     std::fs::copy(&first.file, &elsewhere).unwrap();
     let err = mo_convert::relink::fix_bitwig_project_from(&project, &elsewhere, &both, &[], &stop).unwrap_err();
     assert!(err.contains("isn't beside"), "{err}");
+    // And only from one of this save's own fixed projects, never another song's.
+    let other = dir.join("remix (fixed).bwproject");
+    std::fs::copy(&first.file, &other).unwrap();
+    let err = mo_convert::relink::fix_bitwig_project_from(&project, &other, &both, &[], &stop).unwrap_err();
+    assert!(err.contains("isn't a fixed project of"), "{err}");
 }

@@ -1182,6 +1182,8 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
             let reread = mo_library::song_writes::bitwig_reread(&library);
             for job in &mut jobs {
                 job.reread = reread;
+                // The song's older fixed projects still as Fix wrote them: left behind with it (FS-3).
+                job.older_fixed = space_bitwig::older_fixed(job, &space_fix_note::file());
             }
             let of: usize = jobs.iter().map(|j| j.project.copies.len()).sum();
             let tally = Mutex::new(Tally::new(SystemBin.admin().can_ask()));

@@ -644,7 +644,7 @@ fn a_save_made_while_free_the_space_runs_keeps_the_rest() {
 fn a_fixed_project_that_still_uses_a_copy_found_later_is_fixed_again_and_its_copies_go() {
     // The whole-app review of 19 Nov, FS-3: Fix ran before the Library had the snare; once it has, Free the space
     // finds the song's fixed project still uses that copy, and Fix writes the next one from it.
-    use mo_app::space_bitwig::{fixed_still_using, free, left_behind};
+    use mo_app::space_bitwig::{fixed_still_using, free, left_behind, older_fixed};
     let dir = fixtures("mo-app-space-bitwig-fixed-again");
     let studio = dir.join("Bitwig Studio");
     let (kicks, snare) = (b"<multisample kicks/>", b"<multisample snare/>");
@@ -665,8 +665,6 @@ fn a_fixed_project_that_still_uses_a_copy_found_later_is_fixed_again_and_its_cop
     assert_eq!(jobs[0].copies.len(), 1, "only the kicks are a copy so far");
     let Fixing::Written(first) = fix(&jobs[0], &note, &stop) else { panic!("it's fixed") };
     assert_eq!(name(&first), "Song (fixed).bwproject");
-    let an_hour_ago = SystemTime::now() - Duration::from_secs(3600);
-    fs::File::options().write(true).open(&first).unwrap().set_modified(an_hour_ago).unwrap();
 
     // The Library gets the snare: the look lists both copies, and the song is still fixed.
     write(&studio, "Library/Multisamples/Snare.multisample", snare);
@@ -707,6 +705,8 @@ fn a_fixed_project_that_still_uses_a_copy_found_later_is_fixed_again_and_its_cop
     assert_eq!(jobs[0].checked, [(save.clone(), second.clone())]);
     jobs[0].elsewhere = Ok(Vec::new());
     jobs[0].reread = mo_library::song_writes::BitwigReread::Done;
+    jobs[0].older_fixed = older_fixed(&jobs[0], &note);
+    assert_eq!(jobs[0].older_fixed.iter().map(|(f, _)| name(f)).collect::<Vec<_>>(), ["Song (fixed).bwproject"]);
     let behind: Vec<String> = left_behind(&jobs[0]).iter().map(|p| name(p)).collect();
     assert_eq!(behind, ["Song.bwproject", "Song (fixed).bwproject"]);
     let done = free(&jobs[0], &bin, &stop);
@@ -716,4 +716,13 @@ fn a_fixed_project_that_still_uses_a_copy_found_later_is_fixed_again_and_its_cop
     for kept in [&save, &first, &second] {
         assert!(kept.is_file(), "every project stays");
     }
+    // An older fixed project you've saved in since Fix wrote it is yours: it isn't left behind, so it keeps its copies.
+    fs::write(&first, [fs::read(&first).unwrap(), b"saved".to_vec()].concat()).unwrap();
+    assert!(older_fixed(&jobs[0], &note).is_empty());
+    // And one saved in while Free runs stops it.
+    let mut saved_meanwhile = jobs[0].clone();
+    saved_meanwhile.older_fixed = vec![(first.clone(), Some(SystemTime::UNIX_EPOCH))];
+    let done = free(&saved_meanwhile, &bin, &stop);
+    assert!(!done.problems.is_empty(), "the copy it names is asked about");
+    assert!(done.problems.iter().all(|p| p.why.contains("was saved again")), "{:?}", done.problems);
 }
