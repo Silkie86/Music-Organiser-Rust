@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use mo_backup::folders::{Folder, Mode, from_text, gather, to_text};
+use mo_space::size::{Walked, walked};
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -111,6 +112,117 @@ fn the_backup_is_left_out_when_a_listed_link_leads_into_it() {
     let got = gather(&list, &real.join("Backup"), &AtomicBool::new(false)).unwrap();
     let paths: Vec<&Path> = got.files.iter().map(|f| f.path.as_path()).collect();
     assert_eq!(paths, vec![linked.join("Song.flp")]);
+}
+
+/// What a walk of a song's folder would find comes from the walk that gathered the files, named as the folder is (the
+/// whole-app review of 19 Nov, SB-3: the backup's plan walked every song's folder again), and nothing comes when that
+/// walk can't speak for the folder.
+#[test]
+fn a_folders_files_come_from_the_walk_that_gathered_them() {
+    let root = fixtures("backup-in-folders");
+    let music = root.join("Music");
+    let song = music.join("Song A");
+    fs::create_dir_all(song.join("samples")).unwrap();
+    fs::create_dir_all(song.join("auto-backups")).unwrap();
+    fs::write(song.join("Song A.bwproject"), b"song").unwrap();
+    fs::write(song.join("samples").join("Kick.wav"), b"kick").unwrap();
+    fs::write(song.join("auto-backups").join("Song A-1.bwproject"), b"older").unwrap();
+    // Beside it, a folder whose name starts the same.
+    fs::create_dir_all(music.join("Song A 2")).unwrap();
+    fs::write(music.join("Song A 2").join("Other.wav"), b"other").unwrap();
+    fs::create_dir_all(music.join("Empty")).unwrap();
+    let bounces = music.join("Bounces");
+    fs::create_dir_all(&bounces).unwrap();
+    fs::write(bounces.join("Mix.wav"), b"mix").unwrap();
+    let elsewhere = root.join("Elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("Far.wav"), b"far").unwrap();
+    folder_link(&elsewhere, &music.join("Linked"));
+    // The same folder reached through a link.
+    let through = root.join("Music link");
+    folder_link(&music, &through);
+    let list =
+        vec![Folder { path: music.clone(), mode: Mode::Slimmed }, Folder { path: bounces.clone(), mode: Mode::Whole }];
+    let stop = AtomicBool::new(false);
+    let got = gather(&list, &root.join("Backup"), &stop).unwrap();
+    let in_folders = got.in_folders();
+    let sorted = |mut w: Walked| {
+        w.files.sort_by(|a, b| a.path.cmp(&b.path));
+        w.online_only.sort();
+        w
+    };
+    let all = |_: &Path| false;
+    let from_gather = |folder: &Path| in_folders.walked(&folder.to_string_lossy(), &all).map(sorted);
+    for folder in [&song, &song.join("samples"), &music.join("Song A 2"), &bounces, &through.join("Song A")] {
+        assert_eq!(from_gather(folder), Some(sorted(walked(folder, &stop).unwrap())), "{}", folder.display());
+    }
+    assert_eq!(from_gather(&song).unwrap().files.len(), 3);
+    // Nothing for a folder another listed folder is inside, nor one where nothing was found, nor one outside the list
+    // (a link to it too), nor one that isn't there.
+    for folder in [&music, &root, &music.join("Empty"), &elsewhere, &music.join("Linked"), &music.join("Gone")] {
+        assert_eq!(from_gather(folder), None, "{}", folder.display());
+    }
+    // What's given stops at the first file the test says ends it, that file too, as a walk of the folder would (its
+    // own files first, then those in its folders by name: the song's save, then its autosave, then its sample).
+    let ends_at = |p: &Path| p.ends_with("Song A-1.bwproject");
+    let till = in_folders.walked(&song.to_string_lossy(), &ends_at).unwrap();
+    let paths: Vec<PathBuf> = till.files.into_iter().map(|f| f.path).collect();
+    assert_eq!(paths, [song.join("Song A.bwproject"), song.join("auto-backups").join("Song A-1.bwproject")]);
+    // The same place listed twice: the second spelling is spoken for too, named as it's asked for.
+    let twice = vec![
+        Folder { path: music.clone(), mode: Mode::Slimmed },
+        Folder { path: through.clone(), mode: Mode::Slimmed },
+    ];
+    let got = gather(&twice, &root.join("Backup"), &stop).unwrap();
+    let in_folders = got.in_folders();
+    for folder in [&song, &through.join("Song A")] {
+        let given = in_folders.walked(&folder.to_string_lossy(), &all).map(sorted);
+        assert_eq!(given, Some(sorted(walked(folder, &stop).unwrap())), "{}", folder.display());
+    }
+    // The backup in a song's folder: what was in it is left out, so that folder isn't spoken for; the others are.
+    let got = gather(&list, &song.join("auto-backups"), &stop).unwrap();
+    let in_folders = got.in_folders();
+    assert_eq!(in_folders.walked(&song.to_string_lossy(), &all), None);
+    assert_eq!(in_folders.walked(&music.join("Song A 2").to_string_lossy(), &all).map(|w| w.files.len()), Some(1));
+    // A folder in the list reached through a link in a song's folder (one Space moved, listed by its old place): its
+    // files are named as if they were in the song's folder, but a walk of that folder doesn't go through the link.
+    let stems = song.join("Stems");
+    folder_link(&elsewhere, &stems);
+    let list =
+        vec![Folder { path: music.clone(), mode: Mode::Slimmed }, Folder { path: stems.clone(), mode: Mode::Whole }];
+    let got = gather(&list, &root.join("Backup"), &stop).unwrap();
+    assert!(got.files.iter().any(|f| f.path == stems.join("Far.wav")), "{:?}", got.files);
+    let in_folders = got.in_folders();
+    assert_eq!(in_folders.walked(&song.to_string_lossy(), &all), None);
+    assert!(in_folders.walked(&music.join("Song A 2").to_string_lossy(), &all).is_some());
+}
+
+/// In a folder FL Studio songs share, another song's save beside the song's own ends what's given before the sounds in
+/// its folders are gone through, as a walk of it would end (the review of the SB-3 fix: by name alone, a big "Audio"
+/// folder came first, for every song in the folder).
+#[test]
+fn a_folders_own_files_come_before_those_in_its_folders() {
+    let root = fixtures("backup-in-folders-shared");
+    let music = root.join("Music");
+    let shared = music.join("FL shared");
+    fs::create_dir_all(shared.join("Audio")).unwrap();
+    for name in ["Audio/a.wav", "Audio/b.wav", "Beat.flp", "Other.flp"] {
+        fs::write(shared.join(name), name).unwrap();
+    }
+    let list = vec![Folder { path: music.clone(), mode: Mode::Slimmed }];
+    let got = gather(&list, &root.join("Backup"), &AtomicBool::new(false)).unwrap();
+    let in_folders = got.in_folders();
+    let paths = |w: Walked| -> Vec<PathBuf> { w.files.into_iter().map(|f| f.path).collect() };
+    let other = |p: &Path| p.ends_with("Other.flp");
+    let till = in_folders.walked(&shared.to_string_lossy(), &other).unwrap();
+    assert_eq!(paths(till), [shared.join("Beat.flp"), shared.join("Other.flp")]);
+    // Nothing ends it: everything, its own files first.
+    let all = in_folders.walked(&shared.to_string_lossy(), &|_: &Path| false).unwrap();
+    let audio = shared.join("Audio");
+    assert_eq!(
+        paths(all),
+        [shared.join("Beat.flp"), shared.join("Other.flp"), audio.join("a.wav"), audio.join("b.wav")]
+    );
 }
 
 #[test]

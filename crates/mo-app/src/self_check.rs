@@ -32,19 +32,31 @@ const KEPT: usize = 20;
 pub struct LogFacts {
     /// The app's runs (session logs) looked at.
     pub runs: usize,
-    /// Crash logs' names.
+    /// The newest crash logs' names (at most [`KEPT`]), and how many there were in all.
     pub crash_files: Vec<String>,
-    /// Each freeze: how long (ms) and its line.
-    pub freezes: Vec<(u64, String)>,
-    /// Each run's time to the first frame, in seconds, and its line.
+    pub crash_count: usize,
+    /// Each freeze: how long (ms), its line, and whether it was in a Debug build's run.
+    pub freezes: Vec<(u64, String, bool)>,
+    /// Each Release run's time to the first frame, in seconds, and its line.
     pub starts: Vec<(f64, String)>,
+    /// The same for Debug runs (the launcher's, slower on the window's thread): judged only when there's no Release
+    /// start to go on (the 19 Nov review, BT-21).
+    pub debug_starts: Vec<(f64, String)>,
     /// The newest error lines (with the log's name in front), and how many in all. Crash and freeze lines aren't
     /// counted: they have steps of their own.
     pub errors: VecDeque<String>,
     pub error_count: usize,
     /// Logs that couldn't be read.
     pub unread: Vec<String>,
+    /// Runs whose log wasn't read to its end: it couldn't be opened, a read failed part way, or it filled up and
+    /// stopped writing freeze and error lines. Their freezes and errors may be missing (the 19 Nov review, BT-19).
+    pub cut_short: usize,
 }
+
+/// The day moves on when a line's time of day goes back more than this from the line before: past midnight it goes
+/// back by anything up to a day (less after a quiet night: 20:00, then 09:00), a line from another thread that landed
+/// a moment late only milliseconds, the clock going back in autumn an hour (the 19 Nov review, BT-20).
+const PAST_MIDNIGHT: chrono::Duration = chrono::Duration::minutes(90);
 
 /// Reads the logs in `dir` from `since` on, this run's too: by each line's own time (a log's name has the day it
 /// started, its lines the time of day), so a run that started before `since` counts only its later lines.
@@ -77,10 +89,14 @@ pub fn read_logs(dir: &Path, since: SystemTime) -> io::Result<LogFacts> {
             facts.runs += 1;
             match File::open(dir.join(&name)) {
                 Ok(f) => read_one(&name, BufReader::new(f), from, &mut facts),
-                Err(e) => facts.unread.push(format!("{name}: {e}")),
+                Err(e) => {
+                    facts.unread.push(format!("{name}: {e}"));
+                    facts.cut_short += 1;
+                }
             }
         }
     }
+    facts.crash_count = facts.crash_files.len();
     let skip = facts.crash_files.len().saturating_sub(KEPT);
     facts.crash_files.drain(..skip);
     Ok(facts)
@@ -99,14 +115,29 @@ fn read_one(name: &str, lines: impl BufRead, from: chrono::NaiveDateTime, facts:
     // A "still stuck" freeze waits for its "was stuck" line, which says how long it really was: only when none follows
     // (the app was closed while stuck) does it count by itself.
     let mut stuck: Option<(u64, String)> = None;
+    // The header's "Build: Debug" line: the launcher's unoptimised build.
+    let mut debug = false;
+    let mut short = false;
     for line in lines.split(b'\n') {
-        let Ok(line) = line else { break };
+        let Ok(line) = line else {
+            short = true;
+            break;
+        };
         let line = String::from_utf8_lossy(&line);
         let line = line.trim_end();
+        if let Some(build) = line.trim_start().strip_prefix("Build:") {
+            debug = build.trim() == "Debug";
+            continue;
+        }
+        // From here the log writes only crashes and how the run ended.
+        if line.contains("(this log is full") {
+            short = true;
+            continue;
+        }
         let Some((time, level, area, message)) = split_line(line) else { continue };
         // The day moves on when the time of day goes back past midnight.
         if let (Some(d), Some(t)) = (day.as_mut(), chrono::NaiveTime::parse_from_str(time, "%H:%M:%S%.3f").ok()) {
-            if last_time.is_some_and(|l| t < l) {
+            if last_time.is_some_and(|l| l - t > PAST_MIDNIGHT) {
                 *d += chrono::Duration::days(1);
             }
             last_time = Some(t);
@@ -118,7 +149,7 @@ fn read_one(name: &str, lines: impl BufRead, from: chrono::NaiveDateTime, facts:
         match area {
             "Start" => {
                 if let Some(secs) = start_secs(message) {
-                    facts.starts.push((secs, kept()));
+                    if debug { &mut facts.debug_starts } else { &mut facts.starts }.push((secs, kept()));
                 }
             }
             "Freeze" => {
@@ -128,7 +159,7 @@ fn read_one(name: &str, lines: impl BufRead, from: chrono::NaiveDateTime, facts:
                     }
                 } else if let Some(ms) = freeze_ms(message) {
                     stuck = None;
-                    facts.freezes.push((ms, kept()));
+                    facts.freezes.push((ms, kept(), debug));
                 }
             }
             _ => {}
@@ -142,8 +173,11 @@ fn read_one(name: &str, lines: impl BufRead, from: chrono::NaiveDateTime, facts:
             }
         }
     }
-    if let Some(s) = stuck {
-        facts.freezes.push(s);
+    if let Some((ms, line)) = stuck {
+        facts.freezes.push((ms, line, debug));
+    }
+    if short {
+        facts.cut_short += 1;
     }
 }
 
@@ -189,68 +223,88 @@ pub fn findings(facts: &LogFacts, data: &Path, windows: bool) -> Vec<Found> {
     let days = format!("the last {DAYS} days");
     let runs = facts.runs;
     let found = |id, mark, note: String, lines: Vec<String>| Found { id, mark, note, lines };
+    // Said after a freezes or errors note: logs that weren't read to the end may hide some.
+    let short = match facts.cut_short {
+        0 => String::new(),
+        1 if runs == 1 => ". The run's log couldn't be read to its end, so some may be missing".to_owned(),
+        n => format!(". {n} of the {runs} runs' logs couldn't be read to their end, so some may be missing"),
+    };
 
-    if runs > 0 || !facts.crash_files.is_empty() {
-        out.push(if facts.crash_files.is_empty() {
+    if runs > 0 || facts.crash_count > 0 {
+        out.push(if facts.crash_count == 0 {
             found("auto.crashes", Mark::Works, format!("No crashes in {runs} runs in {days}"), Vec::new())
         } else {
             found(
                 "auto.crashes",
                 Mark::Problem,
-                format!("{} crash logs in {days} ({runs} runs)", facts.crash_files.len()),
+                format!("{} crash logs in {days} ({runs} runs)", facts.crash_count),
                 facts.crash_files.clone(),
             )
         });
     }
     if runs > 0 {
-        let long: Vec<&(u64, String)> = facts.freezes.iter().filter(|(ms, _)| *ms >= FREEZE_MS).collect();
-        let longest = facts.freezes.iter().map(|(ms, _)| *ms).max();
+        let long: Vec<&(u64, String, bool)> = facts.freezes.iter().filter(|(ms, ..)| *ms >= FREEZE_MS).collect();
+        let longest = facts.freezes.iter().map(|(ms, ..)| *ms).max();
         out.push(if long.is_empty() {
             let note = match longest {
-                Some(ms) => format!("No freeze of a second or more in {runs} runs; the longest was {ms} ms"),
-                None => format!("No freezes in {runs} runs"),
+                Some(ms) => format!("No freeze of a second or more in {runs} runs; the longest was {ms} ms{short}"),
+                None => format!("No freezes in {runs} runs{short}"),
             };
             found("auto.freezes", Mark::Works, note, Vec::new())
         } else {
-            let paged = long.iter().filter(|(_, l)| l.contains(MOVED_TO_DISK)).count();
-            let paged = match paged {
-                0 => String::new(),
-                n if n == long.len() => format!(" (all {n} while Windows had moved the app's memory to disk)"),
-                n => format!(" ({n} of them while Windows had moved the app's memory to disk)"),
-            };
+            let mut why = Vec::new();
+            let paged = long.iter().filter(|(_, l, _)| l.contains(MOVED_TO_DISK)).count();
+            match paged {
+                0 => {}
+                n if n == long.len() => why.push(format!("all {n} while Windows had moved the app's memory to disk")),
+                n => why.push(format!("{n} of them while Windows had moved the app's memory to disk")),
+            }
+            match long.iter().filter(|(.., debug)| *debug).count() {
+                0 => {}
+                n if n == long.len() => why.push(format!("all {n} in Debug runs")),
+                n => why.push(format!("{n} of them in Debug runs")),
+            }
+            let why = if why.is_empty() { String::new() } else { format!(" ({})", why.join("; ")) };
             found(
                 "auto.freezes",
                 Mark::Problem,
                 format!(
-                    "{} freezes of a second or more in {runs} runs; the longest was {} ms{paged}",
+                    "{} freezes of a second or more in {runs} runs; the longest was {} ms{why}{short}",
                     long.len(),
                     longest.unwrap_or(0)
                 ),
-                long.iter().rev().take(KEPT).map(|(_, l)| l.clone()).collect(),
+                long.iter().rev().take(KEPT).map(|(_, l, _)| l.clone()).collect(),
             )
         });
         out.push(if facts.error_count == 0 {
-            found("auto.errors", Mark::Works, format!("No errors in {runs} runs in {days}"), Vec::new())
+            found("auto.errors", Mark::Works, format!("No errors in {runs} runs in {days}{short}"), Vec::new())
         } else {
             found(
                 "auto.errors",
                 Mark::Problem,
-                format!("{} error lines in {runs} runs in {days}", facts.error_count),
+                format!("{} error lines in {runs} runs in {days}{short}", facts.error_count),
                 facts.errors.iter().cloned().collect(),
             )
         });
     }
-    if !facts.starts.is_empty() {
-        let mut s: Vec<f64> = facts.starts.iter().map(|(secs, _)| *secs).collect();
+    // Release starts, when there are any: the launcher's Debug runs start slower and aren't what Solomon gives out.
+    let (starts, which) = if facts.starts.is_empty() {
+        (&facts.debug_starts, " (Debug runs only)")
+    } else if facts.debug_starts.is_empty() {
+        (&facts.starts, "")
+    } else {
+        (&facts.starts, " (Release runs; Debug runs left out)")
+    };
+    if !starts.is_empty() {
+        let mut s: Vec<f64> = starts.iter().map(|(secs, _)| *secs).collect();
         s.sort_by(f64::total_cmp);
         let middle = s[s.len() / 2];
         let slowest = s[s.len() - 1];
         let note = format!(
-            "{} starts: usually {middle:.1} s to the window, the slowest {slowest:.1} s (a Problem from {SLOW_START_SECS:.0} s)",
+            "{} starts{which}: usually {middle:.1} s to the window, the slowest {slowest:.1} s (a Problem from {SLOW_START_SECS:.0} s)",
             s.len()
         );
-        let slow: Vec<String> = facts
-            .starts
+        let slow: Vec<String> = starts
             .iter()
             .rev()
             .filter(|(secs, _)| *secs > SLOW_START_SECS)
@@ -343,7 +397,8 @@ mod tests {
         let c = findings(&LogFacts::default(), Path::new("C:\\Users\\x\\AppData\\Local\\MusicOrganiser"), true);
         assert_eq!(c.len(), 1, "nothing to go on but the folder");
         assert_eq!(c[0].mark, Mark::Problem);
-        let crashed = LogFacts { runs: 1, crash_files: vec!["crash-1.log".into()], ..LogFacts::default() };
+        let crashed =
+            LogFacts { runs: 1, crash_files: vec!["crash-1.log".into()], crash_count: 1, ..LogFacts::default() };
         assert_eq!(findings(&crashed, Path::new("/d"), false)[0].mark, Mark::Problem);
     }
 
@@ -365,6 +420,92 @@ mod tests {
         read_one(name, text.as_bytes(), from, &mut facts);
         assert_eq!(facts.error_count, 1);
         assert!(facts.errors[0].contains("new"));
+    }
+
+    #[test]
+    fn a_line_a_moment_late_does_not_move_the_day_on() {
+        let name = "rust-session-2026-11-01_10-00-00.log";
+        // A thread's line landed a millisecond behind another's, then an error: still 1 Nov, inside the window.
+        let text = "10:00:00.002 Info    [A] one\n10:00:00.001 Info    [B] late\n10:00:01.000 Error   [A] same day\n";
+        let from = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).and_then(|d| d.and_hms_opt(0, 0, 0)).expect("a date");
+        let to = chrono::NaiveDate::from_ymd_opt(2026, 11, 2).and_then(|d| d.and_hms_opt(0, 0, 0)).expect("a date");
+        let mut facts = LogFacts::default();
+        read_one(name, text.as_bytes(), from, &mut facts);
+        assert_eq!(facts.error_count, 1);
+        // Had the day moved on, the line would count from 2 Nov on too.
+        let mut later = LogFacts::default();
+        read_one(name, text.as_bytes(), to, &mut later);
+        assert_eq!(later.error_count, 0, "{later:?}");
+    }
+
+    #[test]
+    fn a_quiet_night_still_moves_the_day_on() {
+        let name = "rust-session-2026-11-01_10-00-00.log";
+        // Nothing between 20:00 and 09:00: the 09:00 line is 2 Nov.
+        let text = "20:00:00.000 Error   [A] evening\n09:00:00.000 Error   [A] next morning\n";
+        let from = chrono::NaiveDate::from_ymd_opt(2026, 11, 2).and_then(|d| d.and_hms_opt(0, 0, 0)).expect("a date");
+        let mut facts = LogFacts::default();
+        read_one(name, text.as_bytes(), from, &mut facts);
+        assert_eq!(facts.error_count, 1, "{facts:?}");
+        assert!(facts.errors[0].contains("next morning"));
+    }
+
+    #[test]
+    fn debug_runs_are_said_and_their_starts_left_out() {
+        let release =
+            "  Build:      Release\n10:00:02.000 Info    [Start] Window drawn 2.00 s after the app started: x\n";
+        let debug = "  Build:      Debug\n10:00:09.000 Info    [Start] Window drawn 9.00 s after the app started: x\n\
+10:01:00.000 Warning [Freeze] The window was stuck for 1500 ms (page Sounds; no jobs running; busy)\n";
+        let mut facts = LogFacts { runs: 2, ..LogFacts::default() };
+        read_one("a.log", release.as_bytes(), long_ago(), &mut facts);
+        read_one("b.log", debug.as_bytes(), long_ago(), &mut facts);
+        let f = findings(&facts, Path::new("/d"), false);
+        let by = |id: &str| f.iter().find(|x| x.id == id).expect("there").clone();
+        let start = by("auto.start");
+        assert_eq!(start.mark, Mark::Works, "{}", start.note);
+        assert!(start.note.starts_with("1 starts (Release runs; Debug runs left out)"), "{}", start.note);
+        let freezes = by("auto.freezes");
+        assert!(freezes.note.contains("(all 1 in Debug runs)"), "{}", freezes.note);
+        // Only Debug runs: judged on those, and said.
+        let mut only = LogFacts { runs: 1, ..LogFacts::default() };
+        read_one("b.log", debug.as_bytes(), long_ago(), &mut only);
+        let start = findings(&only, Path::new("/d"), false).into_iter().find(|x| x.id == "auto.start").expect("there");
+        assert_eq!(start.mark, Mark::Problem);
+        assert!(start.note.contains("(Debug runs only)"), "{}", start.note);
+    }
+
+    #[test]
+    fn a_log_not_read_to_its_end_is_said() {
+        let full =
+            "10:00:00.000 Info    [A] one\n(this log is full: a run writes up to 5 MB, and the next line didn't fit)\n";
+        let mut facts = LogFacts { runs: 2, ..LogFacts::default() };
+        read_one("a.log", full.as_bytes(), long_ago(), &mut facts);
+        read_one("b.log", "10:00:00.000 Info    [A] one\n".as_bytes(), long_ago(), &mut facts);
+        assert_eq!(facts.cut_short, 1);
+        let f = findings(&facts, Path::new("/d"), false);
+        for id in ["auto.freezes", "auto.errors"] {
+            let x = f.iter().find(|x| x.id == id).expect("there");
+            assert!(
+                x.note.ends_with("1 of the 2 runs' logs couldn't be read to their end, so some may be missing"),
+                "{}",
+                x.note
+            );
+        }
+    }
+
+    #[test]
+    fn every_crash_is_counted_though_only_the_newest_are_named() {
+        let dir = std::env::temp_dir().join(format!("mo-self-check-crashes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("made");
+        for i in 0..25 {
+            fs::write(dir.join(format!("crash-{}.log", 1_763_200_000 + i)), "boom").expect("crash");
+        }
+        let facts = read_logs(&dir, since(SystemTime::now())).expect("read");
+        assert_eq!((facts.crash_count, facts.crash_files.len()), (25, KEPT));
+        let f = findings(&facts, Path::new("/d"), false);
+        assert!(f[0].note.starts_with("25 crash logs"), "{}", f[0].note);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

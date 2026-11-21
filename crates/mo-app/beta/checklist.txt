@@ -9,12 +9,12 @@
 == Start
 start.release | Start the app from the launcher's Release shortcut, then close it and start it again | It opens in a few seconds both times; Settings > Developer says Build: Release
 start.maximised | Start the app from the launcher | It opens filling the screen, with its title bar and the taskbar showing (maximised), on your widest screen too
-start.full-screen | Press F11, minimise the app and bring it back, close it and start it again; then F11 again | Full screen stays after a minimise and the next start opens full screen; after the second F11 it opens maximised again
+start.full-screen | Press F11, minimise the app and bring it back, close it and start it again; then F11 again | Full screen stays after a minimise and the next start opens full screen; the second F11 leaves the window filling the screen (maximised), and the start after that opens maximised
 start.close-clean | Use the app for a while, then close it (Alt+F4, or F11 out of full screen and the window's X) | It closes at once; no new crash-....log in the logs folder
 
 == Install
 install.setup | From the Releases page on GitHub, download the DAWmate setup and run it (Windows may ask: More info, then Run anyway). Keep your data folder where it is | No administrator question; DAWmate is in the Start menu and opens with your songs and sounds as before
-install.update | Once a newer test version is out, leave the app open a day (or start it the next day) | The rail says a new version is ready; Restart to update closes the app and opens the new version, with everything kept
+install.update | Once a newer test version is out, leave the installed DAWmate open a day (or start it the next day). The launcher's window can stay open: its new builds wait while the installed DAWmate is open | The rail says a new version is ready; Restart to update closes the app and opens the new version, with everything kept
 
 == Songs
 songs.list | Open the Songs page, search for a song, pick a few chips | The list fills at once and the search and chips narrow it
@@ -22,7 +22,7 @@ songs.open-each-daw | Open one FL song, one Bitwig song and one Studio One song 
 songs.preview | Pick ten songs of different ages, from all three DAWs | Each song's arrangement preview shows its clips, with bars of the right length
 songs.preview-old | Pick a Bitwig song made before Bitwig 6, and a Studio One song with takes or layers | The preview isn't empty
 songs.time-signature | Pick a song in 3/4 or 6/8 if you have one | The bars in the preview are the right length
-songs.fix | On a song with missing samples, use Fix, then open the "(fixed)" copy in its DAW | The original is untouched; the fixed copy opens and plays with nothing missing
+songs.fix | On Space's Bitwig copies card, tick one song and use Fix, then open its "(fixed)" project in Bitwig (Songs has no Fix of its own yet) | The original is untouched; the fixed project opens and plays with nothing missing
 songs.to-bitwig | On an FL song, use Open in Bitwig | A Bitwig project opens with the same tracks, clips and tempo
 songs.to-bitwig-automation | In that converted song, look at tempo, volume, pan and on/off automation | It moves the same way as in FL
 
@@ -31,11 +31,11 @@ sounds.browse | Open Sounds, scroll fast, pick and play sounds, resize the windo
 sounds.filters | Use the type, key and year filters and the search together | The list narrows the way the chips say
 sounds.year-strip | Switch the year strip between Made, Changed, Opened and First used | The years look believable for your sounds
 sounds.hide-duplicates | Switch Hide duplicates on and off | Only real copies of a sound hide; nothing else goes
-sounds.like-favourites | Move the Sounds like my favourites slider | Similar sounds show within a second or two, and they sound alike
-sounds.bitwig-favourites | Open the Favourites from Bitwig card | Most of your Bitwig favourites are found; Save as sounds puts them in "From Bitwig"
+sounds.like-favourites | Tick Favourites under SHOW ONLY, then move its Sounds like them slider | Similar sounds show within a second or two, and they sound alike
+sounds.bitwig-favourites | Open the Favourites from Bitwig card, tick your multisamples and press Mark as favourites | Most of your Bitwig favourites are found; Save as sounds puts them in "From Bitwig"
 sounds.drag-bitwig | Drag a sound from the app onto a Bitwig track | The sound lands on the track and plays
 sounds.drag-fl | Drag a sound from the app into FL's playlist or a channel | The sound lands and plays
-sounds.trim-silence | Drag a sound with Trim silence on | A trimmed copy is made in your export folder (not on C:), and that's what lands in the DAW
+sounds.trim-silence | With an export folder on another drive set in Settings, drag a sound with Trim silence on | A trimmed copy is made in that export folder (not on C:), and that's what lands in the DAW
 sounds.send-bitwig | Send a sound, and a kit onto Drum Machine pads, to Bitwig | They arrive on the right track and pads
 sounds.galaxy | Open the Galaxy: zoom, pan, use the arrow keys, sweep over stars | 60 frames a second, sounds play as you sweep, grey dust for filtered-out stars isn't too faint
 
@@ -43,33 +43,34 @@ sounds.galaxy | Open the Galaxy: zoom, pan, use the arrow keys, sweep over stars
 midi.page | Open the MIDI page and pick a few MIDI files | It opens without a stall; the piano roll draws at once
 midi.play | Play a part, change the speed with the BPM stepper and switch the Metronome on | It plays in time and the changes are heard straight away
 midi.play-fl | Play a part into FL Studio over the MIDI port | The selected FL channel plays it
-midi.fits | On one of your songs, open Fits my song | A list of parts that fit comes up within a few seconds
+midi.fits | On one of your songs, open Fits my song (for the two Bitwig steps below, pick your MO Live Test Bitwig project here, saved with its parts in the arranger) | A list of parts that fit comes up within a few seconds
 midi.fits-play | Play with the song in the app, and try Octave up and down | It sounds in key and in time with the song
 midi.fits-by-hand | Pick the song's parts and bars by hand, close and reopen the song | Your pick is remembered
-midi.fits-bitwig | In an "MO Live Test" Bitwig project, use Play in Bitwig | Bitwig loops the song's bars with the part playing
-midi.fits-put-in-song | In an "MO Live Test" Bitwig project, use Put in the song, then Undo in Bitwig | The part is recorded at the right bars; Undo takes it out
+midi.fits-bitwig | With Fits my song fitted to your MO Live Test project, open that project in Bitwig, select an instrument track, then use Play in Bitwig | Bitwig loops the song's bars with the part playing
+midi.fits-put-in-song | The same way (fitted to your MO Live Test project, open in Bitwig, an instrument track selected), use Put in the song, then Undo in Bitwig | The part is recorded at the right bars; Undo takes it out
 midi.bar-line | Drag a MIDI part into Bitwig and FL and loop it | It loops cleanly with no extra bar at the end
 
 == Presets
 presets.list | Open Presets and use its filters | Synths only lists instruments, not a song's effects
 presets.drag-keyscape | Drag Keyscape and another synth preset from a Bitwig song, and from a preset file | An instrument track with the right sound, not the default and no error
 presets.no-template | Send a preset that Bitwig never saved (Hive, say) to Bitwig | It loads with its sound
-presets.audition | Audition a preset in Bitwig, then Stop, then Keep | It plays on a new track; Stop never moves Bitwig's play start; Keep leaves the track
+presets.audition | Audition a preset in Bitwig and Stop it; then audition another and Keep it | Each plays on a new track; Stop takes its track out and never moves Bitwig's play start; Keep leaves the track
 
 == Plugins
 plugins.list | Open Plugins and look through your plugins | Every plugin you have is listed, with its size
-plugins.move | Move one plugin you can spare to another drive | It still loads in your DAW (a link is left behind)
+plugins.move | Move one plugin's sound or preset folder (a big library) to another drive | The plugin still loads in your DAW with its sounds (a link is left behind)
 plugins.clean | Try Clean up or Uninstall on one plugin you don't use | Only that plugin goes, and the DAW still opens
 
 == Space
 space.look | Open the Space page | The cards fill and the sizes look right
-space.remove-put-back | Remove one small thing (an old autosave or a spare copy), then Put back | It goes to the Recycle Bin, and Put back brings it back where it was
+space.remove-put-back | On Spare copies, tick one copy and untick the rest (or on Your songs, untick all but one song's line), send it to the Recycle Bin, then Put back | Only what was ticked goes to the Recycle Bin, and Put back brings it back where it was
 space.old-copies | Look at the "(old copy)" reminder | It shows with its size
 space.fixed-to-bin | Use "Send every fixed Bitwig project to the Recycle Bin" | Only "(fixed)" projects go, to the Recycle Bin
+space.free-bitwig | After songs.fix, tick that song as checked on the Bitwig copies card, press Free the space, then Put back on its Recycle Bin line | Only that song's copies go to the Recycle Bin; its "(fixed)" project still plays; after Put back the original project finds them again
 
 == Backup
 backup.first | Make a first backup of a few songs to a spare drive | It finishes and the songs open from the backup
-backup.older | Change a song, back up again, and open Older versions | The old version is kept and can be removed
+backup.older | Backing up as plain folders, change a small song (an FL save, or any save under 5 MB), back up again, and open Older versions | The old version is kept and can be removed (a bigger save keeps its old copy only when the new one is under half its size)
 backup.gone | Delete a test file from your music, back up again | The backup keeps it, with a warning
 
 == Curves
@@ -81,17 +82,16 @@ curves.drag | Drag a curve into Bitwig, and Hear it on a tone | Bitwig takes it 
 settings.data-folder | Look at Settings > Developer's data and logs folders | Both are on I:, and new reports land there, not on C:
 settings.helper | Switch on Keep the helper running, sign out and back in | The helper starts once; clicking its icon doesn't open a second app
 settings.keys | Change a shortcut on the Shortcuts tab, use it, then Default | The new key works everywhere and Default puts it back
-settings.f12 | Press F12, write a note with a picture, close the app halfway, reopen and press F12 | Your draft is still there; the saved note is in the notes folder
+settings.f12 | Press F12, write a note, close the app with the note open, reopen and press F12; then Save | Your words are still there (with a new picture); the saved note and its picture are in the notes folder
 
 == Bitwig
-bitwig.install | Install the Bitwig extension from Settings > DAWs | DAWs says it's connected, version 3.29
-bitwig.watch | Play a Bitwig song with the app open | The app follows the tracks, selection and play position without lag
-bitwig.sampler | Use Try in Sampler on a sound | The sound goes in Bitwig's Sampler on the right device, and its name is right
+bitwig.install | Install the Bitwig extension from Settings > DAWs, with Bitwig open | DAWs says Linked, and its Answering line names the DAWmate extension with the same version as its Extension line
+bitwig.watch | Open a song in Bitwig and play it with the app open (and the helper on, Settings > General) | The rail's In your DAWs names the song within about 5 seconds; the helper's tray dot is green; Bitwig plays without stutter
 bitwig.stop | Press Stop in the app while Bitwig is stopped | Bitwig's play start doesn't jump to bar 1
 
 == FL Studio
 fl.install | Install the FL script from Settings > DAWs | DAWs says it's installed
-fl.live-test | In an empty "MO Live Test automation" FL project, run the script's measure | It finishes; Claude reads the saved project afterwards
+fl.live-test | Only when Claude asks for a new measure (it was done on 1 Nov). In FL, make a new project, set its Project info title (F11) to exactly MO Live Test automation and save it; in the installed script (FL's Settings\Hardware\DAWmate\device_DAWmate.py) set MEASURE_IN_LIVE_TEST = True; restart FL with that project open | FL's script output says the measure finished and saved; Claude reads the saved project afterwards
 
 == Test plugin
 plugin.install | Install the latest test plugin (DAWs closed), open it in Bitwig and in FL | It opens in both, with every tab
@@ -102,9 +102,10 @@ plugin.listen | Send a track into the plugin's Track in | It names the notes it 
 plugin.record | Record a take, then close the DAW straight away | The take is kept
 plugin.chord-check | Play chords into the Chord check tab and label a few takes | The takes are kept in the data folder's Chord check
 plugin.unload | In FL, remove the plugin from a channel, then close the project | FL doesn't crash
+bitwig.sampler | In Bitwig, select a Sampler that has a sample in it; in the test plugin's Sounds tab pick a sound and press In Bitwig's Sampler | The sound goes in that Sampler with its settings kept, and its name is right
 
 == Files
-files.real-check | Run "Real files check.cmd" from the tools folder | It ends with no panics; Claude reads the summary
+files.real-check | Run the launcher on main first, then run "Real files check.cmd" from its tools folder (%LOCALAPPDATA%\MusicOrganiser\run-latest-rust\app\tools\dev) | It ends with no panics; the summary's first line names the branch and commit that read the files; Claude reads the summary
 
 == Self-check
 # Marked by the app itself (mo_app::self_check), once a day and from Run the self-check; never by hand.

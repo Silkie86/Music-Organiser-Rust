@@ -12,7 +12,10 @@ use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeDelta};
 use mo_formats::dates::RealDates;
 use mo_space::key;
 use mo_space::prints::Prints;
-use mo_space::song::{BackupFolders, CompactKind, CompactSettings, Compare, Elsewhere, SongSave, measure, thin};
+use mo_space::size::{self, FileEntry, Walked};
+use mo_space::song::{
+    BackupFolders, CompactKind, CompactSettings, Compare, Elsewhere, SongSave, WalkedAlready, measure, thin,
+};
 
 mod common;
 
@@ -111,6 +114,91 @@ fn a_song_with_its_own_folder_lists_copies_old_autosaves_and_unused_audio() {
     assert!(copy.ticked_at_first() && !report.items[3].ticked_at_first());
 }
 
+/// A song's folder walked already (the backup's plan walks every folder in the backup first: the whole-app review of
+/// 19 Nov, SB-3) is measured from that walk, by the same rules: the same as from a walk of its own, and another song's
+/// save in it, even one that's only online, still makes it not the song's own. A folder that walk can't speak for is
+/// walked.
+#[test]
+fn a_folder_walked_already_is_measured_from_that_walk() {
+    let root = fixtures("mo-space-walked-already");
+    let song = root.join("Glass Harbor");
+    let v1 = write(&song, "Glass Harbor v1.bwproject", b"same notes", 0);
+    let v2 = write(&song, "Glass Harbor v2.bwproject", b"new notes!!", 1);
+    write(&song, "auto-backups/Glass Harbor 0.bwproject", b"auto", 0);
+    write(&song, "Samples/Kick.wav", &[0; 10], 0);
+    write(&song, "Bounce.wav", &[0; 100], 0);
+    let saves = [save(&v1, 0), save(&v2, 1)];
+    let stop = AtomicBool::new(false);
+    let none = |_: &[String]| HashSet::new();
+    let shared = HashSet::new();
+    let folders = BackupFolders::default();
+    let with = |walked: Option<WalkedAlready<'_>>| {
+        let elsewhere = Elsewhere {
+            sample_folders: &[],
+            used_by_any: &none,
+            shared_names: &shared,
+            backup_folders: &folders,
+            compare: Compare::Afresh,
+            walked,
+        };
+        measure(&saves, &[s(&root)], &[], CompactSettings::default(), Some(&elsewhere), &stop).unwrap()
+    };
+    let walk = |folder: &str| size::walked(Path::new(folder), &stop).unwrap();
+    let own = with(None);
+    assert!(own.own_folder && own.audio == 110 && own.backups == 4, "{own:?}");
+    let walked_now = |folder: &str, _: &dyn Fn(&Path) -> bool| Some(walk(folder));
+    assert_eq!(with(Some(&walked_now)), own);
+    // What the walk made already found is what's measured: a file only it met counts.
+    let more = |folder: &str, _: &dyn Fn(&Path) -> bool| {
+        let mut w = walk(folder);
+        w.files.push(FileEntry { path: song.join("Stem.wav"), size: 7, modified: day() });
+        Some(w)
+    };
+    assert_eq!(with(Some(&more)).audio, own.audio + 7);
+    // Another song's save, only online: the folder isn't the song's own.
+    let anothers = |folder: &str, _: &dyn Fn(&Path) -> bool| {
+        let mut w = walk(folder);
+        w.online_only.push(song.join("Other Song.bwproject"));
+        Some(w)
+    };
+    let not_own = with(Some(&anothers));
+    assert!(!not_own.own_folder && not_own.audio == 0, "{not_own:?}");
+    // An autosave the DAW made, only online, is the song's.
+    let autosave = |folder: &str, _: &dyn Fn(&Path) -> bool| {
+        let mut w = walk(folder);
+        w.online_only.push(song.join("auto-backups").join("Glass Harbor 1.bwproject"));
+        Some(w)
+    };
+    assert_eq!(with(Some(&autosave)), own);
+    // Nothing from that walk: the folder is walked.
+    let nothing = |_: &str, _: &dyn Fn(&Path) -> bool| -> Option<Walked> { None };
+    assert_eq!(with(Some(&nothing)), own);
+    // The test it's given says where a walk of the folder stops: at another song's save, never at the song's own
+    // saves, its DAW's autosaves or anything else.
+    let asked = std::sync::Mutex::new(Vec::new());
+    let asking = |folder: &str, ends: &dyn Fn(&Path) -> bool| {
+        for name in [
+            "Other Song.bwproject",
+            "Glass Harbor v1.bwproject",
+            "auto-backups/Glass Harbor 7.bwproject",
+            "Samples/Kick.wav",
+        ] {
+            asked.lock().unwrap().push((name, ends(&song.join(name))));
+        }
+        Some(walk(folder))
+    };
+    assert_eq!(with(Some(&asking)), own);
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [
+            ("Other Song.bwproject", true),
+            ("Glass Harbor v1.bwproject", false),
+            ("auto-backups/Glass Harbor 7.bwproject", false),
+            ("Samples/Kick.wav", false)
+        ]
+    );
+}
+
 #[test]
 fn audio_another_project_uses_or_in_a_sample_folder_is_never_offered() {
     let root = fixtures("mo-space-elsewhere");
@@ -132,6 +220,7 @@ fn audio_another_project_uses_or_in_a_sample_folder_is_never_offered() {
         shared_names: &shared,
         backup_folders: &BackupFolders::default(),
         compare: Compare::Afresh,
+        walked: None,
     };
     let report = measure(
         &[save(&v, 0)],
@@ -192,6 +281,7 @@ fn fl_songs_sharing_a_folder_count_only_their_saves_and_their_autosaves() {
         shared_names: &shared,
         backup_folders: &BackupFolders::default(),
         compare: Compare::Afresh,
+        walked: None,
     };
     let report = measure(&saves, &roots, &[], settings, Some(&elsewhere), &stop).unwrap();
     assert_eq!(report.items.len(), 1);
@@ -215,6 +305,7 @@ fn songs_measured_together_list_fl_studios_backup_folder_once() {
         shared_names: &shared,
         backup_folders: &backup_folders,
         compare: Compare::Afresh,
+        walked: None,
     };
     let settings = CompactSettings { keep_backups: 0, sitting_hours: 0, ..CompactSettings::default() };
     let roots = [s(&projects)];
@@ -543,6 +634,7 @@ fn identical_saves_read_before_are_not_read_again_until_they_change() {
             shared_names: &shared,
             backup_folders: &BackupFolders::default(),
             compare,
+            walked: None,
         };
         let report = measure(&saves, &[s(&root)], &[], settings, Some(&elsewhere), &stop).unwrap();
         // The end of a measure of every song, as a look's or a plan's.
@@ -602,6 +694,7 @@ fn a_save_read_again_is_compared_with_saves_read_again_too() {
             shared_names: &shared,
             backup_folders: &BackupFolders::default(),
             compare,
+            walked: None,
         };
         let report = measure(&saves, &[s(&root)], &[], settings, Some(&elsewhere), &stop).unwrap();
         prints.keep(false).unwrap();

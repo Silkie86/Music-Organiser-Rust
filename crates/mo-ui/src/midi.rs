@@ -54,7 +54,7 @@ pub enum NotesFrom {
 
 /// The index as read: every part, and where it came from.
 pub struct Loaded {
-    pub cat: Catalogue,
+    pub cat: Arc<Catalogue>,
     pub notes: NotesFrom,
     /// Worked out with the reading, off the window's thread: the summary and the year strip.
     pub summary: String,
@@ -62,7 +62,7 @@ pub struct Loaded {
     pub hidden: String,
     pub years: Vec<(i32, usize)>,
     /// What Ctrl+K finds: every part.
-    pub found: Arc<mo_app::finder::Lines>,
+    pub found: Arc<mo_app::finder::MidiParts>,
     /// Settings' smallest part as it was when `hidden` and `found` were made.
     smallest: usize,
 }
@@ -72,8 +72,9 @@ const SMALL_INDEX: usize = 1_000;
 
 impl Loaded {
     /// Call it off the window's thread: for a big index it waits for the shared low-priority threads.
-    pub fn new(cat: Catalogue, notes: NotesFrom) -> Loaded {
+    pub fn new(cat: impl Into<Arc<Catalogue>>, notes: NotesFrom) -> Loaded {
         let smallest = SMALLEST.load(Ordering::Relaxed);
+        let cat: Arc<Catalogue> = cat.into();
         // Said with what Settings hides from the first, so the line doesn't change once the list is worked out.
         let hidden = page::hidden_text(&cat, page::line_count(&cat, smallest), smallest);
         let make = || {
@@ -122,6 +123,9 @@ struct Page {
     reading: Option<Arc<AtomicBool>>,
     /// The index has been read once since the app opened (reading again is the Read MIDI again button's).
     read_once: bool,
+    /// The Songs page caught up with saves made while the app was closed during a reading that had taken its saves
+    /// before: your MIDI is read once more when that reading ends ([`songs_caught_up`]).
+    read_after: bool,
     library: PathBuf,
     feed: Option<Feed>,
     shortcuts: Shortcuts,
@@ -133,7 +137,9 @@ struct Page {
     ahead_read: bool,
     /// That read, kept until the page first shows, so the page has its list at once (nothing writes the index before
     /// then: only the page's own reading of your MIDI and your own changes on it do, so it can't be stale).
-    ahead_loaded: Option<Result<Loaded, String>>,
+    ahead_loaded: Option<Loaded>,
+    /// The read ahead of the page failed: left to the page's first visit, not tried again at each Ctrl+K.
+    ahead_failed: bool,
     /// The page first showed while that read was still going: it's handed to the page when it ends.
     ahead_for_page: bool,
     /// The summary of the whole index, before what Settings' smallest part hides is said after it.
@@ -173,7 +179,10 @@ struct Page {
     daw_move: i32,
     /// The song's bars the part in Bitwig was started with ([`BitwigSong::given`]), so [`fit_follows`] starts it
     /// again when they change (MI-3); none for a part alone, or in FL.
-    daw_song: Option<BitwigGiven>,
+    daw_song: BitwigGiven,
+    /// The part in a DAW (with `in_daw`, its phrase, which says the entry is still that part), so [`fit_follows`]
+    /// follows it while another part is picked for a right-click's menu (MP-1).
+    daw_at: Option<usize>,
     /// What the picked part's card says and offers about its fit now ([`show_card_fit`]).
     card_fit: CardFit,
     /// While a part is being put in its song in Bitwig ([`put_in_song`]; one at a time): set to have it stopped
@@ -211,14 +220,15 @@ struct BitwigSong {
     with: Arc<SongBars>,
 }
 
-/// What of a [`BitwigSong`] Bitwig and the card's Bitwig line are given: the arranger's loop (or why there's none)
-/// and the song's bars. Not the song's notes: Bitwig plays its own arrangement, so an edit to them (a save while it
-/// plays, a parts chip that keeps the bars) has it play on as it is.
-type BitwigGiven = (Result<mo_dawlink::bitwig::SongLoop, String>, std::ops::Range<i64>);
+/// What of a [`BitwigSong`] Bitwig is given: the arranger's loop, or none when the song has no bars Bitwig can go
+/// round (not a Bitwig project, or read from its clip launcher), and the part plays there alone, so other bars of
+/// that song change nothing it hears (MP-2). Not the song's notes: Bitwig plays its own arrangement, so an edit to
+/// them (a save while it plays, a parts chip that keeps the bars) has it play on as it is.
+type BitwigGiven = Option<mo_dawlink::bitwig::SongLoop>;
 
 impl BitwigSong {
     fn given(&self) -> BitwigGiven {
-        (self.bars.clone(), self.with.bars.clone())
+        self.bars.as_ref().ok().cloned()
     }
 }
 
@@ -471,7 +481,7 @@ impl Page {
     /// another song).
     fn daw_follows(&self, at: usize, now: i32, bitwig: bool) -> bool {
         let there = self.in_daw.is_some() && self.in_daw == self.cat.entry(at).map(|e| e.phrase.id);
-        let song = || self.bitwig_song(at).map(|song| song.given());
+        let song = || self.bitwig_song(at).and_then(|song| song.given());
         there && (now != self.daw_move || (bitwig && song() != self.daw_song))
     }
 
@@ -496,9 +506,17 @@ impl Page {
 
     /// The speed Play loop plays the picked part at: yours, else the song's when it plays with the song, else its own
     /// (once read).
-    fn play_bpm(&self) -> f64 {
+    fn play_bpm(&self) -> Option<f64> {
         let own = self.card_with.as_ref().map(|with| with.bpm()).or(self.card_bpm);
-        self.speed.or(own).unwrap_or(page::PLAY_TEMPO)
+        self.speed.or(own)
+    }
+
+    /// The speed a step of the stepper (or Alt+Up and Alt+Down) starts from: your speed; else, while a loop plays
+    /// another part than the one picked (picked for a right-click's menu), the tempo that loop was made at, as the key
+    /// steps the loop (MP-1); else the picked part's (none until its tempo is read: MP-5, no step from a made-up 120).
+    fn step_from(&self, loop_bpm: Option<f64>) -> Option<f64> {
+        let other = self.looping.is_some() && self.looping != self.picked;
+        self.speed.or(loop_bpm.filter(|_| other)).or_else(|| self.play_bpm())
     }
 
     /// The card's sound line for the picked part `at`, as it plays now: what of the song it plays with
@@ -635,10 +653,8 @@ pub fn smallest_part(app: Option<&AppWindow>, notes: usize) {
     let Some(app) = app else { return };
     // The index was read ahead and the page hasn't taken it yet: what that read says is hidden, and its Ctrl+K lines,
     // are made again.
-    match PAGE.with(|p| p.borrow_mut().ahead_loaded.take()) {
-        Some(Ok(kept)) => return remake_ahead(app, kept),
-        kept @ Some(Err(_)) => PAGE.with(|p| p.borrow_mut().ahead_loaded = kept),
-        None => {}
+    if let Some(kept) = PAGE.with(|p| p.borrow_mut().ahead_loaded.take()) {
+        return remake_ahead(app, kept);
     }
     let (cat, hidden_pick) = PAGE.with(|p| {
         let p = p.borrow();
@@ -653,17 +669,25 @@ pub fn smallest_part(app: Option<&AppWindow>, notes: usize) {
         pick(app, None);
     }
     relist(app);
-    // Ctrl+K's lines too, off the window's thread: they're a line for every part.
+    make_lines(app, cat, notes);
+}
+
+/// Ctrl+K's lines for the index `cat` with Settings' smallest part at `notes`, made off the window's thread: they're a
+/// line for every part. Handed to Ctrl+K only while both are still the page's own (MP-10): a newer index, or another
+/// change of the setting, has its own lines on the way.
+fn make_lines(app: &AppWindow, cat: Arc<Catalogue>, notes: usize) {
     let weak = app.as_weak();
     let made = background::spawn("MIDI finder lines", move || {
         // On the shared low-priority threads: the lines are made on every core.
-        let lines: Arc<dyn mo_app::finder::Source> =
-            Arc::new(background::on_pool(|| mo_app::finder::midi_parts(&cat, notes)));
+        let lines = background::on_pool(|| mo_app::finder::midi_parts(&cat, notes));
         let _ = slint::invoke_from_event_loop(move || {
-            if let Some(app) = weak.upgrade()
-                && SMALLEST.load(Ordering::Relaxed) == notes
-            {
-                crate::finder::add_source(&app, "midi", lines);
+            let current =
+                SMALLEST.load(Ordering::Relaxed) == notes && PAGE.with(|p| Arc::ptr_eq(&p.borrow().cat, &cat));
+            drop(cat);
+            match weak.upgrade() {
+                Some(app) if current => crate::finder::add_source(&app, "midi", Arc::new(lines)),
+                // Lines not wanted (and perhaps the last hold on an old index) are let go on the freeing thread.
+                _ => background::free_later(lines),
             }
         });
     });
@@ -814,7 +838,7 @@ impl Model for Lines {
 }
 
 fn why_text(p: &StoredPhrase) -> String {
-    if p.your_role.is_some() { "You said so".to_owned() } else { p.role_why.clone() }
+    if p.your_role.is_some() { "You said so".to_owned() } else { p.role_why.words() }
 }
 
 /// Wires the page up; the index is read a little after the start ([`read_before_shown`]), or when the page is
@@ -861,7 +885,12 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
 fn read_before_shown(app: &AppWindow) {
     let library = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let first = !p.started && !p.library.as_os_str().is_empty() && !std::mem::replace(&mut p.ahead_read, true);
+        // One that failed isn't tried again here (every Ctrl+K would read the whole index and fail again): the
+        // page's first visit reads it.
+        let first = !p.started
+            && !p.ahead_failed
+            && !p.library.as_os_str().is_empty()
+            && !std::mem::replace(&mut p.ahead_read, true);
         first.then(|| p.library.clone())
     });
     let Some(library) = library else { return };
@@ -893,10 +922,26 @@ fn ahead_arrived(app: &AppWindow, loaded: Result<Loaded, String>) {
         show(app, loaded);
         return;
     }
-    if let Ok(l) = &loaded {
-        crate::finder::add_source(app, "midi", l.found.clone());
+    match loaded {
+        Ok(l) => {
+            crate::finder::add_source(app, "midi", l.found.clone());
+            PAGE.with(|p| p.borrow_mut().ahead_loaded = Some(l));
+        }
+        // A read that failed isn't kept: shown at a first visit hours later it would be an old failure, and the page
+        // only reads the index again when a reading changes something (the 19 November 2026 review's RA-6). The
+        // first visit, or Ctrl+K, reads it afresh.
+        Err(e) => {
+            log::warning(
+                "MIDI",
+                &format!("The MIDI index couldn't be read ahead of the page ({e}): read at its first visit"),
+            );
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.ahead_read = false;
+                p.ahead_failed = true;
+            });
+        }
     }
-    PAGE.with(|p| p.borrow_mut().ahead_loaded = Some(loaded));
 }
 
 /// Settings' smallest part changed since `kept` was read ahead: what it says is hidden and its Ctrl+K lines are made
@@ -904,10 +949,12 @@ fn ahead_arrived(app: &AppWindow, loaded: Result<Loaded, String>) {
 fn remake_ahead(app: &AppWindow, kept: Loaded) {
     let weak = app.as_weak();
     let started = background::spawn("MIDI index, ahead", move || {
-        let loaded = Loaded::new(kept.cat, kept.notes);
+        // Guarded, as the read itself is: a bug in making the lines still hands the page an answer, so it never
+        // waits for one that isn't coming (the 19 November 2026 review's RA-7).
+        let loaded = background::guarded(|| Loaded::new(kept.cat, kept.notes));
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
-                ahead_arrived(&app, Ok(loaded));
+                ahead_arrived(&app, loaded);
             }
         });
     });
@@ -1205,7 +1252,7 @@ fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_bpm_stepped(move |by| {
         if let Some(app) = weak.upgrade() {
-            change_speed(&app, |p| Some(page::step_bpm(p.play_bpm(), by)));
+            step_speed(&app, by);
         }
     });
     let weak = app.as_weak();
@@ -1263,7 +1310,7 @@ pub fn shown(app: &AppWindow) {
     // The index was read ahead already: the page takes that read, or waits for it if it's still going. The read goes in a
     // Box: on Windows, where a PathBuf is bigger, it's over clippy's size limit for one arm of an enum.
     enum Kept {
-        Read(Box<Result<Loaded, String>>),
+        Read(Box<Loaded>),
         Coming,
         None,
     }
@@ -1279,7 +1326,7 @@ pub fn shown(app: &AppWindow) {
         }
     });
     match kept {
-        Kept::Read(read) => return show(app, *read),
+        Kept::Read(read) => return show(app, Ok(*read)),
         Kept::Coming => return,
         Kept::None => {}
     }
@@ -1367,7 +1414,14 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
             return;
         }
     };
-    crate::finder::add_source(app, "midi", loaded.found.clone());
+    // Ctrl+K's lines, made with Settings' smallest part as it was then: if it changed while they were made, they're
+    // made again once the page holds this index (MP-10).
+    let lines_stale = loaded.smallest != SMALLEST.load(Ordering::Relaxed);
+    if lines_stale {
+        background::free_later(loaded.found);
+    } else {
+        crate::finder::add_source(app, "midi", loaded.found);
+    }
     let summary = loaded.summary;
     let empty = loaded.cat.entries.is_empty();
     log::info("MIDI", &summary);
@@ -1379,7 +1433,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         p.years = loaded.years;
         p.summary = summary.clone();
         // The old index goes on the freeing thread: tens of thousands of parts take a while to let go.
-        background::free_later(std::mem::replace(&mut p.cat, Arc::new(loaded.cat)));
+        background::free_later(std::mem::replace(&mut p.cat, loaded.cat));
         p.notes = Some(loaded.notes);
         // Not one Settings now hides.
         let smallest = SMALLEST.load(Ordering::Relaxed);
@@ -1424,14 +1478,40 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
     show_chips(app);
     show_years(app);
     relist(app);
+    if lines_stale {
+        make_lines(app, PAGE.with(|p| p.borrow().cat.clone()), SMALLEST.load(Ordering::Relaxed));
+    }
     match picked {
-        Some(at) => pick(app, Some((at, None))),
+        // The index read again shows the same pick: it starts and stops nothing, so a part picked for its menu
+        // while another plays isn't played or sent now (MP-1).
+        Some(at) => pick_as(app, Some((at, None)), false),
         None => data.set_panel_shown(false),
     }
     if let Some(hash) = PAGE.with(|p| p.borrow_mut().wanted.take()) {
         show_part(app, &hash);
     }
     if read_now {
+        read_midi(app, false);
+    }
+}
+
+/// The Songs page has caught up with the saves made while the app was closed, and songs.db has them. A reading takes
+/// its saves from songs.db with the date and size it has for each, so one that began before this missed the new saves
+/// and took a save written over as read already, for the whole run (the 19 November 2026 review's RA-2): your MIDI is
+/// read once more, now or when the reading going on ends. Only saves whose date or size changed are read; the folders
+/// of MIDI files are walked again. Nothing when no reading has begun: the first one takes the saves as they are now.
+/// Called once a run, and only when the catch-up found something (never for each save a DAW makes).
+pub fn songs_caught_up(app: &AppWindow) {
+    let read_now = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if !p.read_once || HERE.with(|h| *h.borrow()) {
+            return false;
+        }
+        p.read_after = p.reading.is_some();
+        !p.read_after
+    });
+    if read_now {
+        log::info("MIDI", "Songs caught up with saves made while the app was closed: reading your MIDI once more");
         read_midi(app, false);
     }
 }
@@ -1513,10 +1593,18 @@ pub fn read_midi(app: &AppWindow, retry: bool) {
         let loaded = changed.then(|| guarded_load(&library));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
-            PAGE.with(|p| p.borrow_mut().reading = None);
+            let read_after = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.reading = None;
+                std::mem::take(&mut p.read_after)
+            });
             let data = app.global::<MidiData>();
             data.set_reading(false);
             data.set_busy("".into());
+            // This reading took its saves before the Songs page had caught up: once more, for those ([`songs_caught_up`]).
+            if read_after {
+                read_midi(&app, false);
+            }
             if let Some(loaded) = loaded {
                 show(&app, loaded);
             } else if slots_made {
@@ -1557,8 +1645,8 @@ fn read_into_index(
     // Only a full path can be an unplugged drive; anything else in the list is never found and so never counted as away.
     let (folders, away): (Vec<String>, Vec<String>) =
         listed.into_iter().filter(|f| mo_formats::paths::is_absolute(f)).partition(|f| Path::new(f).is_dir());
-    // The folder walk and the reading run on the bulk pool: a few threads keep one drive (L:, holding every pack) busy,
-    // where one per core made it jump between files, and the pages' quick jobs on the main pool aren't held up.
+    // The folder walk runs on the bulk pool: a few threads keep one drive (L:, holding every pack) busy, where one per
+    // core made it jump between files, and the pages' quick jobs on the main pool aren't held up.
     let found = background::on_bulk_pool(|| {
         mo_library::scan::find_files(
             &folders,
@@ -1577,7 +1665,10 @@ fn read_into_index(
         &format!("{} files wanted, {} to read, {} to forget", wanted.len(), plan.todo.len(), plan.forget.len()),
     );
     let own;
-    let pool = match background::bulk_pool() {
+    // The readers on a pool of their own: they hold every thread they're given until the list is read, and the bulk
+    // pool's other jobs (a song's waveforms) would wait for all of it (RA-3). The folder walk above gives its threads
+    // back as it goes.
+    let pool = match background::midi_read_pool() {
         Some(pool) => pool,
         None => {
             own = rayon::ThreadPoolBuilder::new()
@@ -1599,7 +1690,10 @@ fn read_into_index(
 /// Stops the reading at the next file; what's been read is kept, and the next reading carries on from there.
 fn stop_reading() {
     PAGE.with(|p| {
-        if let Some(stop) = p.borrow().reading.as_ref() {
+        let mut p = p.borrow_mut();
+        // Stopped is stopped: the reading Songs' catch-up asked for after this one isn't started either.
+        p.read_after = false;
+        if let Some(stop) = p.reading.as_ref() {
             stop.store(true, Ordering::Relaxed);
         }
     });
@@ -2173,7 +2267,9 @@ fn show_sound(data: &MidiData, p: &mut Page) {
         data.set_sound_line(line.into());
     }
     data.set_play_with_song(p.card_with.is_some());
-    data.set_bpm_text(page::bpm_text(p.play_bpm()).into());
+    // Until the part's own tempo is read, no number rather than a made-up one (MP-5).
+    data.set_bpm_text(p.play_bpm().map_or_else(|| "\u{2026} BPM".to_owned(), page::bpm_text).into());
+    data.set_bpm_known(p.play_bpm().is_some());
     data.set_bpm_changed(p.speed.is_some());
     data.set_metronome(p.metronome);
     // Play in Bitwig's tip only promises the song's bars where Bitwig has some to go round.
@@ -2188,7 +2284,7 @@ fn show_sound(data: &MidiData, p: &mut Page) {
 /// they were (a filter, a word typed, the song saved with the same chords) touches nothing that plays.
 fn fit_follows(app: &AppWindow) {
     let data = app.global::<MidiData>();
-    let Some((at, ask, again)) = PAGE.with(|p| {
+    let Some((ask, again)) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let at = p.picked?;
         let now = p.fit_move(at);
@@ -2198,11 +2294,17 @@ fn fit_follows(app: &AppWindow) {
         if !same_bars(&with, &p.card_with) {
             show_sound(&data, &mut p);
         }
-        let looping = p.looping == Some(at) && (now != p.loop_move || !same_bars(&with, &p.loop_with));
+        // What plays follows: the picked part, or the part still playing while another is picked for a
+        // right-click's menu (MP-1), while its line is in the list (or the list isn't a song's any more). One that's
+        // left a list of the same song plays on as it was, as the picked part does (`fit_picked`).
+        let follows = |p: &Page, l: usize| p.picked == Some(l) || p.fit_of(l).is_some() || p.fits_song.is_none();
+        let looping = p.looping.filter(|&l| {
+            follows(&p, l) && (p.fit_move(l) != p.loop_move || !same_bars(&p.heard_with(l), &p.loop_with))
+        });
         let bitwig = data.get_daw_playing() == Daw::Bitwig.id() || data.get_daw_starting() == Daw::Bitwig.id();
-        let in_daw = p.daw_follows(at, now, bitwig);
+        let in_daw = p.daw_at.filter(|&l| follows(&p, l) && p.daw_follows(l, p.fit_move(l), bitwig));
         show_card_fit(&data, &mut p);
-        Some((at, ask, (looping, in_daw)))
+        Some((ask, (looping, in_daw)))
     }) else {
         return;
     };
@@ -2210,13 +2312,13 @@ fn fit_follows(app: &AppWindow) {
         ask_notes(app, ask);
     }
     let (looping, in_daw) = again;
-    if looping && data.get_playing() {
-        replay(app, at);
+    if let Some(l) = looping.filter(|_| data.get_playing()) {
+        replay(app, l);
     }
     let daw_now = if data.get_daw_starting() != "" { data.get_daw_starting() } else { data.get_daw_playing() };
-    if let Some(daw) = Daw::from_id(&daw_now).filter(|_| in_daw) {
+    if let (Some(daw), Some(l)) = (Daw::from_id(&daw_now), in_daw) {
         stop_daw(app);
-        start_daw(app, daw, at);
+        start_daw(app, daw, l);
     }
 }
 
@@ -2386,6 +2488,14 @@ fn step(app: &AppWindow, by: i32) {
 /// Picks part `picked` (none closes the card). `row` is its line when that's known; when it isn't (the index was just
 /// read again) the list finds it once it has been worked out.
 fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
+    // A line right-clicked is picked for its menu only: that pick starts and stops nothing (MI-2, as on Sounds); the
+    // card then offers to play it, and the menu's play lines play it.
+    let follow = !app.global::<crate::AppKeys>().get_picking_for_menu();
+    pick_as(app, picked, follow);
+}
+
+/// [`pick`], saying whether what plays (the loop, a DAW part) follows the pick.
+fn pick_as(app: &AppWindow, picked: Option<(usize, Option<usize>)>, follow: bool) {
     let row = picked.and_then(|(_, row)| row);
     let before = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -2445,9 +2555,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     });
     data.set_panel_shown(true);
     show_soundfont(app);
-    // A line right-clicked is picked for its menu only: that pick starts and stops nothing (MI-2, as on Sounds); the
-    // card then offers to play it, and the menu's play lines play it.
-    if app.global::<crate::AppKeys>().get_picking_for_menu() {
+    if !follow {
         show_picked_plays(app);
         if let Some(ask) = ask {
             ask_notes(app, ask);
@@ -2856,7 +2964,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         }
         ("midi.faster", _) | ("midi.slower", _) => {
             let by = if id == "midi.faster" { 1 } else { -1 };
-            change_speed(app, |p| Some(page::step_bpm(p.play_bpm(), by)));
+            step_speed(app, by);
             true
         }
         ("midi.playBitwig", _) => toggle_daw(app, Daw::Bitwig),
@@ -3512,7 +3620,15 @@ pub fn sample() -> Loaded {
             part: part.to_owned(),
             clip: clip.to_owned(),
             role,
-            role_why: format!("Its notes play like {}", page::role_label(role).to_lowercase()),
+            // The reason the analyser gives a part of each kind from its notes.
+            role_why: match role {
+                Role::Chords => mo_midi::RoleWhy::MOSTLY_CHORDS,
+                Role::Bass => mo_midi::RoleWhy::SINGLE_LOW,
+                Role::Arp => mo_midi::RoleWhy::FAST_EVEN,
+                Role::Drums => mo_midi::RoleWhy::GM_DRUMS,
+                Role::Melody => mo_midi::RoleWhy::ONE_AFTER_ANOTHER,
+                Role::Other => mo_midi::RoleWhy::ONE_NOTE,
+            },
             your_role: None,
             bars,
             notes: keys.len() as i32,
@@ -3684,6 +3800,13 @@ fn toggle_metronome(app: &AppWindow) {
         p.metronome = !p.metronome;
     });
     played_differently(app);
+}
+
+/// A step of the stepper or its keys: from [`Page::step_from`]; none while that isn't known yet.
+fn step_speed(app: &AppWindow, by: i32) {
+    let playing = loop_playing().then(|| f64::from_bits(LOOP_BPM.load(std::sync::atomic::Ordering::SeqCst)));
+    let Some(from) = PAGE.with(|p| p.borrow().step_from(playing.filter(|bpm| *bpm > 0.0))) else { return };
+    change_speed(app, |_| Some(page::step_bpm(from, by)));
 }
 
 /// Sets Play loop's speed (`speed` of the page as it is: yours, or none for each part's own tempo).
@@ -4353,7 +4476,8 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
         let mut p = p.borrow_mut();
         p.in_daw = Some(phrase_id);
         p.daw_move = part.semitones;
-        p.daw_song = song.as_ref().map(BitwigSong::given);
+        p.daw_song = song.as_ref().and_then(BitwigSong::given);
+        p.daw_at = Some(at);
     });
     show_picked_plays(app);
     data.set_daw_starting(daw.id().into());
@@ -4814,6 +4938,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_speed_step_starts_from_what_plays_and_never_from_a_made_up_tempo() {
+        let mut p = Page { cat: sample().cat, picked: Some(2), ..Page::default() };
+        // Its own tempo not read yet: no number, and no step (MP-5).
+        assert_eq!((p.play_bpm(), p.step_from(None)), (None, None));
+        p.card_bpm = Some(92.0);
+        assert_eq!(p.step_from(None), Some(92.0));
+        // Another part picked for a right-click's menu while part 4 loops at 90: the step is the loop's (MP-1).
+        p.looping = Some(4);
+        assert_eq!(p.step_from(Some(90.0)), Some(90.0));
+        // The picked part looping, or a speed of yours: those.
+        p.looping = Some(2);
+        assert_eq!(p.step_from(Some(90.0)), Some(92.0));
+        p.speed = Some(100.0);
+        p.looping = Some(4);
+        assert_eq!(p.step_from(Some(90.0)), Some(100.0));
+    }
+
+    #[test]
     fn a_loop_made_again_goes_on_from_the_beat_the_page_s_loop_is_on_as_it_goes_in() {
         LOOP_BPM.store(120.0f64.to_bits(), std::sync::atomic::Ordering::SeqCst);
         let ours = format!("{PLAY_KEY}7");
@@ -4908,7 +5050,7 @@ mod tests {
             edges: (48, 72),
             sits: 0.8,
         };
-        let mut p = Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), ..Page::default() };
+        let mut p = Page { cat: sample().cat, notes: Some(sample().notes), ..Page::default() };
         let listed = |p: &mut Page, fits: Option<Vec<Fit>>, song: Option<&SongChoice>| {
             p.fits = fits.map(Arc::new);
             p.fits_song = song.cloned();
@@ -4986,8 +5128,7 @@ mod tests {
             })
         };
         let (chords, lead) = (bars(Wants::Tune, "Keys"), bars(Wants::Chords, "Lead"));
-        let mut p =
-            Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), with_song: true, ..Page::default() };
+        let mut p = Page { cat: sample().cat, notes: Some(sample().notes), with_song: true, ..Page::default() };
         p.fit_song = Some(songs[0].clone());
         let listed = |p: &mut Page, entries: &[usize], with: Option<&Arc<SongBars>>| {
             p.fits = with.map(|_| Arc::new(entries.iter().map(|&entry| fit(entry)).collect()));
@@ -5085,8 +5226,7 @@ mod tests {
             bars: 8..12,
             view: mo_formats::bitwig::arrangement::VIEW,
         });
-        let mut p =
-            Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), with_song: true, ..Page::default() };
+        let mut p = Page { cat: sample().cat, notes: Some(sample().notes), with_song: true, ..Page::default() };
         let listed = |p: &mut Page, song: &SongChoice, with: &Arc<SongBars>| {
             p.fit_song = Some(song.clone());
             p.fits = Some(Arc::new(vec![fit(4), fit(2)]));
@@ -5122,7 +5262,7 @@ mod tests {
         p.with_song = true;
         listed(&mut p, &glass, &arranger);
         p.in_daw = p.cat.entry(4).map(|e| e.phrase.id);
-        p.daw_song = p.bitwig_song(4).map(|song| song.given());
+        p.daw_song = p.bitwig_song(4).and_then(|song| song.given());
         p.daw_move = 0;
         assert!(!p.daw_follows(4, 0, true));
         assert!(p.daw_follows(4, 2, false), "its move");
@@ -5139,6 +5279,16 @@ mod tests {
         p.with_song = false;
         assert!(p.daw_follows(4, 0, true), "the chip off");
         assert!(!p.daw_follows(2, 0, true), "another part");
+        // A song with no bars Bitwig can go round (an FL Studio song): the part plays there alone, so other bars of
+        // it, or the chip, change nothing it hears, and it isn't started again (MP-2).
+        p.with_song = true;
+        listed(&mut p, &night, &arranger);
+        p.daw_song = p.bitwig_song(4).and_then(|song| song.given());
+        assert_eq!(p.daw_song, None);
+        listed(&mut p, &night, &later);
+        assert!(!p.daw_follows(4, 0, true), "other bars of an FL Studio song");
+        p.with_song = false;
+        assert!(!p.daw_follows(4, 0, true), "the chip off for an FL Studio song");
         p.with_song = false;
         p.in_daw = None;
 
@@ -5194,7 +5344,7 @@ mod tests {
             bars: 8..12,
             view: mo_formats::bitwig::arrangement::VIEW,
         });
-        let mut p = Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), ..Page::default() };
+        let mut p = Page { cat: sample().cat, notes: Some(sample().notes), ..Page::default() };
         let listed = |p: &mut Page, song: &SongChoice, with: &Arc<SongBars>| {
             p.fit_song = Some(song.clone());
             p.fits = Some(Arc::new(vec![fit(4), fit(2)]));
@@ -5657,7 +5807,7 @@ mod tests {
         let songs = sample_songs();
         // Each line 3 semitones up for the key, and brought down an octave by the app.
         let fit = |entry: usize| Fit { entry, semitones: 3, octaves: -1, yours: None, edges: (48, 72), sits: 0.8 };
-        let mut p = Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), ..Page::default() };
+        let mut p = Page { cat: sample().cat, notes: Some(sample().notes), ..Page::default() };
         p.fit_song = Some(songs[0].clone());
         // As a search's answer is listed: the octaves you chose go over the app's.
         let listed = |p: &mut Page, entries: &[usize]| {
@@ -5894,7 +6044,7 @@ mod tests {
         assert!(from(&song.save) && songs.iter().all(|song| from(&song.save)));
         let ask = FitAsk {
             id: 1,
-            cat: Arc::new(s.cat),
+            cat: s.cat,
             filters: Filters::default(),
             song,
             wanted: None,
@@ -5937,7 +6087,7 @@ mod tests {
         use midi_fits::{Picker, YourPick, YourPicks};
         let s = sample();
         let songs = sample_songs();
-        let (cat, notes) = (Arc::new(s.cat), s.notes);
+        let (cat, notes) = (s.cat, s.notes);
         let mut p = Page { cat: cat.clone(), fit_songs: songs.clone(), ..Page::default() };
         // A search for what the page asks for now, whose picker the page then shows: what it says it's fitted to.
         let search = |p: &mut Page| {
@@ -6115,7 +6265,7 @@ mod tests {
             from: loaded.notes.clone(),
             stop: Arc::default(),
         };
-        let with_index = FitAsk { cat: Arc::new(loaded.cat), ..ask(Some(Wants::Chords)) };
+        let with_index = FitAsk { cat: loaded.cat, ..ask(Some(Wants::Chords)) };
         let mut state = FitKept::default();
         // Chords for its melody: the scale is tried (its slots and its notes come from the index, kept open), and
         // the song's save is read from disk, where its time can be told.

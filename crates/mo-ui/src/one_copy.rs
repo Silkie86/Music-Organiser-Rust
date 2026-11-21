@@ -1,7 +1,7 @@
 //! One copy of the app at a time, the window's side ([`mo_app::one_copy`], the 14 Nov review's DF-1): the claim made
 //! at start, and what the window does when another copy or the helper's icon asks it to show or to close.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use mo_app::log;
 use mo_app::one_copy::{self, Asked, CLOSE_WAIT, Claim, OneCopy, PORT};
@@ -40,9 +40,23 @@ pub fn log_claim(claim: &Claim) {
     }
 }
 
+/// The claim this copy holds, for [`closing`].
+static HELD: OnceLock<Arc<OneCopy>> = OnceLock::new();
+
+/// The app was just asked to close (the window's own close, a close from outside, Restart to update): from this
+/// moment a copy that starts waits for this one to end and then opens, instead of asking it to show. The window
+/// hides at once but the app takes a second or more to end, and a start in that gap was told "showing" by a window
+/// that was already out of sight, so nothing opened (the 19 Nov review's CL-7). Does nothing before [`connect`].
+pub fn closing() {
+    if let Some(held) = HELD.get() {
+        held.closing();
+    }
+}
+
 /// From now on the window comes to the front when asked to show, and closes when asked to close (the event loop
 /// ends, so everything waiting to be written goes out as when the window is closed by hand).
 pub fn connect(app: &crate::AppWindow, held: &Arc<OneCopy>) {
+    let _ = HELD.set(held.clone());
     let weak = app.as_weak();
     held.on_asked(move |asked| {
         let weak = weak.clone();
@@ -53,7 +67,7 @@ pub fn connect(app: &crate::AppWindow, held: &Arc<OneCopy>) {
                 }
             }
             Asked::Close => {
-                log::last(log::Level::Info, "One copy", "Closing for a copy from another build");
+                log::last(log::Level::Info, "One copy", "Closing, as asked");
                 crate::watchdog::stop();
                 let _ = slint::quit_event_loop();
             }

@@ -4,6 +4,7 @@
 //! window's thread (rules 12 and 21); a change shows at once and is written in the background, newest first.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use mo_app::activity::Feed;
@@ -13,6 +14,7 @@ use mo_app::log;
 use mo_app::midi::{SMALLEST_PART_CHOICES, SMALLEST_PART_KEY};
 use mo_app::places::Place;
 use mo_app::settings::{self as page, Outputs, Tab};
+use mo_app::shell::{self, Os};
 use mo_app::themes::{
     ACCENT_KEY, FONT_KEY, FONTS, Look, SIZE_KEY, SIZES, THEME_KEY, THEMES, size_from_setting, theme_named,
 };
@@ -23,7 +25,8 @@ use slint::platform::WindowEvent;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::{
-    AccentInfo, AppWindow, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact, ThemeCardInfo,
+    AccentInfo, AppWindow, DawProgramInfo, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact,
+    ThemeCardInfo,
 };
 
 /// What the page knows, on the window's thread.
@@ -82,6 +85,10 @@ struct Page {
     /// Whether what runs while `daws_installing` is a Take out (its words on the buttons).
     daws_taking_out: bool,
     daws_message: String,
+    /// What the last choice on the "Opening your songs" card did, said under its lines.
+    programs_message: String,
+    /// The programs chosen for the DAWs that weren't there when the tab last looked ([`look_at_scripts`]).
+    programs_missing: HashSet<String>,
     /// Moving the data folder: set while the copy runs (its Stop), and what the last copy did.
     data_moving: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     data_message: String,
@@ -144,6 +151,9 @@ pub fn load(folder: &Path, library: &Path) -> (AppSettings, bool) {
     for p in &loaded.problems {
         log::warning("Settings", p);
     }
+    // Which program each DAW's songs open in, and whether the C# app chose it (the 19 Nov review, SS-4).
+    let s = &loaded.settings;
+    log::info("Settings", &page::programs_line(|k| s.get(k).map(str::to_owned), |k| s.changed_here(k), Os::THIS));
     EARLY.with(|e| *e.borrow_mut() = Some(loaded.settings.clone()));
     (loaded.settings, loaded.writable)
 }
@@ -243,6 +253,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             daws_installing: false,
             daws_taking_out: false,
             daws_message: String::new(),
+            programs_message: String::new(),
+            programs_missing: HashSet::new(),
             data_moving: None,
             data_message: String::new(),
             data_pending: mo_app::data_move::pending(),
@@ -263,13 +275,14 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             // Not if the move was called off (Don't switch) or changed meanwhile.
             let still = mo_app::data_move::pending().is_some_and(|p| p == to);
             if let (true, Some(app)) = (still, weak.upgrade()) {
-                move_data(&app, to);
+                move_data(&app, to, None, false);
             }
         });
     }
     // The installer was asked to put the data somewhere else while there was data already (mo_app::install_choice):
-    // the app's own checked move does it, once, after start-up loading as above. The ask goes as the move starts, so
-    // it's never acted on twice; a move under way already (or called off) wins and the ask just goes.
+    // the app's own checked move does it, once, after start-up loading as above. The ask goes once the copy has ended
+    // (done, stopped or failed), so a copy cut short by closing the app goes on at the next start (DA-3); a move under
+    // way already (or called off) wins and the ask just goes.
     else if let Some(to) = mo_app::install_choice::move_asked().filter(|_| setup_live) {
         let weak = app.as_weak();
         slint::Timer::single_shot(std::time::Duration::from_secs(30), move || {
@@ -289,9 +302,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             }
             let Some(app) = weak.upgrade() else { return };
             log::info("Data folder", &format!("The installer asked for the data to go to {}", to.display()));
-            if move_data(&app, to) {
-                mo_app::install_choice::take_move_ask();
-            } else {
+            if !move_data(&app, to, None, true) {
                 log::info("Data folder", "The installer's ask waits for the next start: a copy is going already");
             }
         });
@@ -409,6 +420,37 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             && PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live))
         {
             choose_bitwig_folder(&app, None);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_choose_daw_program(move |daw| {
+        // Not for the screenshots: nothing would be kept, and they never look at real files.
+        if !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live)) {
+            return;
+        }
+        let weak = weak.clone();
+        let (title, kinds) = page::program_pick(&daw, Os::THIS);
+        let asked = slint::spawn_local(async move {
+            let mut picker = rfd::AsyncFileDialog::new().set_title(&title);
+            if !kinds.is_empty() {
+                picker = picker.add_filter("Programs", kinds);
+            }
+            if let Some(exe) = picker.pick_file().await
+                && let Some(app) = weak.upgrade()
+            {
+                choose_program(&app, &daw, Some(exe.path()));
+            }
+        });
+        if let Err(e) = asked {
+            log::error("Settings", &format!("Couldn't open the program picker: {e}"));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_reset_daw_program(move |daw| {
+        if let Some(app) = weak.upgrade()
+            && PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live))
+        {
+            choose_program(&app, &daw, None);
         }
     });
     let weak = app.as_weak();
@@ -578,8 +620,40 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.on_move_data(move || {
         let weak = weak.clone();
         crate::backup::pick_folder("Pick the drive or folder the app's data goes to", move |picked| {
-            if let Some(app) = weak.upgrade() {
-                move_data(&app, mo_app::data_move::target_in(&picked));
+            let Some(app) = weak.upgrade() else { return };
+            let to = mo_app::data_move::target_in(&picked);
+            // The folder the data moved to can't be found, so this run is on the old copy: copying that leaves the
+            // real data behind, so ask first (DA-2).
+            let missing = mo_app::paths::missing_folder().filter(|m| !mo_app::data_move::paths_match(m, &to));
+            let Some(missing) = missing else {
+                move_data(&app, to, None, false);
+                return;
+            };
+            let weak = app.as_weak();
+            let asked = slint::spawn_local(async move {
+                let answer = rfd::AsyncMessageDialog::new()
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_title("Copy the old copy of your data?")
+                    .set_description(format!(
+                        "Your data folder {} can't be found, so this copies the old copy in {}, from before the \
+                         move, not your data there. Once it switches, the app stops looking for {}; nothing in it is \
+                         removed.\n\nTo move your real data, plug its drive in and start the app again.\n\nCopy \
+                         the old copy anyway?",
+                        missing.display(),
+                        mo_app::paths::data_dir().display(),
+                        missing.display()
+                    ))
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show()
+                    .await;
+                if answer == rfd::MessageDialogResult::Yes
+                    && let Some(app) = weak.upgrade()
+                {
+                    move_data(&app, to, Some(missing), false);
+                }
+            });
+            if let Err(e) = asked {
+                log::error("Data folder", &format!("Couldn't ask about copying the old copy: {e}"));
             }
         });
     });
@@ -732,9 +806,9 @@ pub fn sweep_hold(settings: &AppSettings) -> bool {
     settings.get(SWEEP_HOLD_KEY) == Some("1")
 }
 
-/// Whether the window should be full screen: set at the start from the setting, and changed only by F11. Windows
-/// drops full screen when a minimised window comes back (Solomon's F12 note of 17 Nov: "clicking on the space tab took
-/// the app out of full screen", just after a restore), so [`restored`] puts it back from this.
+/// Whether the window should be full screen: set at the start from the setting, and changed only by F11. When the
+/// window comes back from the taskbar, [`restored`] checks it still is (Solomon's F12 note of 17 Nov: "clicking on the
+/// space tab took the app out of full screen", just after a restore).
 static FULL_SCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The window opens full screen (or not), as the setting says.
@@ -748,44 +822,106 @@ pub fn full_screen_changed(on: bool) {
     change(app_settings::FULL_SCREEN_KEY, if on { "1" } else { "0" });
 }
 
-/// Once the window is up: full screen if F11 left it so, else maximised; then a line in the log with what it is, so a
-/// start that opened small shows there.
-pub fn fill_the_screen(app: &AppWindow) {
-    let window = app.window();
-    if FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed) {
-        window.set_fullscreen(true);
-    } else if !window.is_maximized() {
-        window.set_maximized(true);
-    }
-    let weak = app.as_weak();
-    slint::Timer::single_shot(std::time::Duration::from_millis(500), move || {
-        let Some(app) = weak.upgrade() else { return };
-        let window = app.window();
-        let size = window.size();
-        let state = if window.is_fullscreen() {
+/// What winit says about the window: its inside size, the width of the screen it is on, full screen, maximised.
+struct WindowLook {
+    width: u32,
+    height: u32,
+    screen: Option<u32>,
+    full_screen: bool,
+    maximised: bool,
+}
+
+impl WindowLook {
+    fn words(&self) -> String {
+        let state = if self.full_screen {
             "full screen"
-        } else if window.is_maximized() {
+        } else if self.maximised {
             "maximised"
         } else {
             "neither maximised nor full screen"
         };
-        log::info("Window", &format!("The window is {} x {}, {state}", size.width, size.height));
+        let screen = self.screen.map_or_else(|| " (screen not known)".to_owned(), |s| format!(" on a screen {s} wide"));
+        format!("{} x {}{screen}, {state}", self.width, self.height)
+    }
+
+    /// Narrower than its screen: a maximised or full-screen window this small didn't really fill it.
+    fn smaller_than_screen(&self) -> bool {
+        self.screen.is_some_and(|s| app_settings::smaller_than_screen(self.width, s))
+    }
+}
+
+fn look_at(window: &slint::winit_030::winit::window::Window) -> WindowLook {
+    let size = window.inner_size();
+    WindowLook {
+        width: size.width,
+        height: size.height,
+        screen: window.current_monitor().map(|m| m.size().width),
+        full_screen: window.fullscreen().is_some(),
+        maximised: window.is_maximized(),
+    }
+}
+
+/// Once the window is up: full screen if F11 left it so (turned on only now, so F11 later goes back to maximised),
+/// else maximised. Half a second later a line in the log says what it is, and a window that says it is maximised but
+/// is narrower than its screen is maximised again through winit itself: Slint and winit pass a maximise on only when
+/// they think it changes something, and Windows ignores one for a window it already counts as maximised (the 19 Nov
+/// review, CL-1).
+pub fn fill_the_screen(app: &AppWindow) {
+    let window = app.window();
+    if FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed) {
+        window.set_fullscreen(true);
+    } else {
+        window.set_maximized(true);
+    }
+    let weak = app.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(500), move || {
+        use slint::winit_030::WinitWindowAccessor;
+        let Some(app) = weak.upgrade() else { return };
+        let full = FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed);
+        let seen = app.window().with_winit_window(|w| {
+            let look = look_at(w);
+            let mend = !full && !look.full_screen && look.maximised && look.smaller_than_screen();
+            if mend {
+                w.set_maximized(false);
+                w.set_maximized(true);
+            }
+            (look, mend)
+        });
+        match seen {
+            Some((look, true)) => log::info(
+                "Window",
+                &format!("The window is {}: smaller than the screen, so it was maximised again", look.words()),
+            ),
+            Some((look, false)) => log::info("Window", &format!("The window is {}", look.words())),
+            None => log::info("Window", "The window's size couldn't be read"),
+        }
     });
 }
 
-/// The window came back from the taskbar: full screen again if it was full screen (only F11 takes it out). Done a
-/// moment later, on the event loop, so it isn't changed in the middle of the restore's own resize.
+/// The window came back from the taskbar: a line in the log with what winit says it is, and full screen put back
+/// through winit itself when F11 left it on and the window lost it (narrower than its screen, or no longer full
+/// screen). Slint's own is_fullscreen() can't tell: it still says full screen after a restore (the 19 Nov review,
+/// CL-6). Done a moment later, on the event loop, so it isn't changed in the middle of the restore's own resize.
 pub fn restored(app: &AppWindow) {
-    if !FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
     let weak = app.as_weak();
     slint::Timer::single_shot(std::time::Duration::from_millis(0), move || {
-        if let Some(app) = weak.upgrade()
-            && !app.window().is_fullscreen()
-        {
-            app.window().set_fullscreen(true);
-            log::info("Window", "Full screen again after the window came back");
+        use slint::winit_030::WinitWindowAccessor;
+        use slint::winit_030::winit::window::Fullscreen;
+        let Some(app) = weak.upgrade() else { return };
+        let full = FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed);
+        let seen = app.window().with_winit_window(|w| {
+            let look = look_at(w);
+            let mend = full && (!look.full_screen || look.smaller_than_screen());
+            if mend {
+                w.set_fullscreen(None);
+                w.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            }
+            (look, mend)
+        });
+        // Only with full screen on: the watchdog already logs each restore.
+        if let Some((look, mend)) = seen.filter(|_| full) {
+            let after = if mend { ": full screen had gone, so it was put back" } else { "" };
+            log::info("Window", &format!("Back from the taskbar, the window is {}{after}", look.words()));
         }
     });
 }
@@ -1228,9 +1364,14 @@ fn look_at_scripts(app: &AppWindow) {
         p.scripts_asked += 1;
         // Your Bitwig Studio folder as the card chose it, else as the C# app had it.
         let chosen = p.settings.get(app_settings::BITWIG_FOLDER_KEY).map(str::to_owned);
-        Some((p.library.clone(), p.bw_loaded_from.clone(), chosen, p.scripts_asked))
+        // The programs chosen for the DAWs, to see they're still there (a version uninstalled since).
+        let programs: Vec<String> = shell::DAW_PROGRAMS
+            .iter()
+            .filter_map(|(_, key, _)| p.settings.get(key).map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned))
+            .collect();
+        Some((p.library.clone(), p.bw_loaded_from.clone(), chosen, programs, p.scripts_asked))
     });
-    let Some((library, loaded_from, chosen, asked)) = asked else { return };
+    let Some((library, loaded_from, chosen, programs, asked)) = asked else { return };
     let weak = app.as_weak();
     let started = background::spawn("Settings DAW scripts", move || {
         let roots = match Library::open_read_only(&library) {
@@ -1250,10 +1391,12 @@ fn look_at_scripts(app: &AppWindow) {
         let bw_state = source.as_deref().map_or(ScriptState::NotInstalled, |s| scripts::bitwig_state(s, &bw_folders));
         let fl_files = scripts::fl_installed_files(&folders);
         let bw_files = scripts::bitwig_installed_files(&bw_folders, &users);
+        let missing: HashSet<String> = programs.into_iter().filter(|exe| !shell::usable_exe(exe)).collect();
         let _ = slint::invoke_from_event_loop(move || {
             let newest = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 let Some(p) = p.as_mut().filter(|p| p.scripts_asked == asked) else { return false };
+                p.programs_missing = missing;
                 p.fl_state = Some(state);
                 p.fl_folders = folders;
                 p.bw_source = source;
@@ -1316,6 +1459,28 @@ fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
         }
     });
     look_at_scripts(app);
+    show(app);
+}
+
+/// Keeps the program `daw`'s songs open in (`None`: the system's choice, kept as "" so the C# app's choice no longer
+/// counts) in the app's own settings file. Open reads it at each click, so it counts from the next one.
+fn choose_program(app: &AppWindow, daw: &str, exe: Option<&Path>) {
+    let key = shell::daw_exe_key(daw);
+    let value = exe.map(|e| e.display().to_string()).unwrap_or_default();
+    // The one in use already (the C# app's, say): nothing changes, and the card says so.
+    let already = exe.is_some() && self::value(&key).is_some_and(|v| v.trim() == value);
+    let kept = remember(&key, &value);
+    match exe {
+        Some(e) => log::info("Settings", &format!("{daw} songs open in {} from now on", e.display())),
+        None => log::info("Settings", &format!("{daw} songs open in the system's choice from now on")),
+    }
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.programs_message = page::program_note(daw, exe.map(|_| value.as_str()), already, kept, Os::THIS);
+            // Just picked, so it's there.
+            p.programs_missing.remove(&value);
+        }
+    });
     show(app);
 }
 
@@ -1389,8 +1554,11 @@ fn install_fl(app: &AppWindow) {
 /// Copies the app's data folder to `to` and checks it, away from the window, with a card that shows how far it is.
 /// The switch is made at the next start (`mo_app::data_move`).
 ///
+/// `leaving`: the missing folder an earlier move went to, which you said yes to leaving behind (DA-2). `asked`: the
+/// installer asked for this move, so its ask goes once the copy has ended, not as it starts (DA-3).
+///
 /// Whether the copy started: not while one is going already, or before the page is built.
-fn move_data(app: &AppWindow, to: PathBuf) -> bool {
+fn move_data(app: &AppWindow, to: PathBuf, leaving: Option<PathBuf>, asked: bool) -> bool {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let feed = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -1409,11 +1577,15 @@ fn move_data(app: &AppWindow, to: PathBuf) -> bool {
         // Gigabytes over the disk: low in the system's memory too, as all bulk disk work is (F-7). On this thread
         // itself, not a bulk pool, where an hour's copy would hold up the other jobs behind it.
         background::lower_memory_priority();
-        let done = mo_app::data_move::copy(&from, &to, &stop, &mut |done, total| {
+        let done = mo_app::data_move::copy_leaving(&from, &to, leaving.as_deref(), &stop, &mut |done, total| {
             let fraction = if total == 0 { 1.0 } else { done as f32 / total as f32 };
             let detail = format!("{} of {}", mo_app::data_move::size_text(done), mo_app::data_move::size_text(total));
             job.progress(fraction, Some(&detail));
         });
+        // The installer's ask is done with once its copy has ended, however it ended: the card and Settings say how.
+        if asked {
+            mo_app::install_choice::take_move_ask();
+        }
         let message = match &done {
             Ok(c) => {
                 let mut line = format!(
@@ -1890,12 +2062,41 @@ fn show(app: &AppWindow) {
         data.set_bitwig_chosen(p.settings.get(app_settings::BITWIG_FOLDER_KEY).is_some_and(|f| !f.trim().is_empty()));
         let libraries = app_settings::folder_list(p.settings.get(app_settings::BITWIG_LIBRARIES_KEY).unwrap_or(""));
         data.set_bitwig_libraries(strings(libraries.iter().map(|f| f.display().to_string())));
+        // The screenshots show the words as on Windows, where the app is used.
+        let os = if p.live { Os::THIS } else { Os::Windows };
+        let programs: Vec<DawProgramInfo> = page::daw_programs(
+            |k| p.settings.get(k).map(str::to_owned),
+            |k| p.settings.changed_here(k),
+            |exe| p.programs_missing.contains(exe),
+            os,
+        )
+        .into_iter()
+        .map(|l| DawProgramInfo {
+            daw: l.daw.into(),
+            program: l.program.into(),
+            chosen: l.chosen,
+            note: l.note.into(),
+            choose_tip: l.choose_tip.into(),
+            reset: l.reset.into(),
+            reset_tip: l.reset_tip.into(),
+        })
+        .collect();
+        data.set_programs_title(page::PROGRAMS_TITLE.into());
+        data.set_programs_intro(page::programs_intro(os).into());
+        data.set_daw_programs(ModelRc::new(VecModel::from(programs)));
+        data.set_programs_note(p.programs_message.clone().into());
         data.set_folders_busy(p.folders_busy);
         data.set_folders_message(p.folders_message.clone().into());
 
         let pending = p.data_pending.clone();
-        let problems: Vec<String> =
+        let mut problems: Vec<String> =
             [mo_app::paths::problem(), mo_app::data_move::start_problem()].into_iter().flatten().collect();
+        if let Some(left) = mo_app::paths::moved_leaving() {
+            problems.push(format!(
+                "The app no longer uses {left}: it couldn't be found when this move was made, and its data there is \
+                 untouched."
+            ));
+        }
         let mut note = mo_app::data_move::status_note(
             pending.as_deref(),
             mo_app::paths::moved_from().as_deref(),

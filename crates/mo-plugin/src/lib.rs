@@ -9,7 +9,8 @@
 //!
 //! It shows in the DAW as the instrument "DAWmate (test)" (its ID is still the one it had as "Music Organiser (test)",
 //! so songs that have it go on loading it). The notes played into it are read for their chords
-//! ([`chordcheck`]) and passed on out with Thru on. It never writes any of the app's files.
+//! ([`chordcheck`]) and passed on out with Thru on. It writes one thing in the app's files: a curve edited in its
+//! Curves tab, kept as a new curve in `curves.db` ([`curves::save_as_new`]; Solomon, 20 Nov 2026).
 //!
 //! A DAW calls a plugin from several threads: the main thread (opening the window, starting and stopping the audio)
 //! and the audio thread ([`Processor`]). What they share lives in [`Instance`].
@@ -147,7 +148,7 @@ impl DefaultPluginFactory for MoPlugin {
             log::start(&format!("DAWmate test plugin {} in {}", env!("CARGO_PKG_VERSION"), check::host_line(&info)));
             // It keeps one data folder for as long as the DAW runs and saves takes there: the app's start mustn't
             // move the data folder from under it (DF-3).
-            mo_app::data_move::hold_open_lock();
+            hold_data_folder();
             // A take cut off last time (the DAW closed or crashed as it was saved) is saved now.
             threads::background("mo-plugin-mend", record::mend_cut_off_takes);
         }
@@ -719,6 +720,51 @@ impl PluginGuiImpl for MainThread<'_> {
 }
 
 clack_export_entry!(entry::MoEntry);
+
+/// Holds the data folder's open lock for as long as the DAW runs (DF-3), once per DAW process. A start of the app may
+/// hold it alone for a moment as it switches folders: then this keeps trying in the background, and says in the
+/// plugin's own log when the switch left this DAW on the old folder, where takes go until the DAW restarts (DA-6).
+fn hold_data_folder() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let say_if_moved = || {
+            if let Some(now) = mo_app::data_move::folder_moved_since() {
+                log::line(
+                    "Data folder",
+                    &format!(
+                        "The app now keeps its data in {}, but this DAW started on {}: takes saved here go there \
+                         until the DAW is restarted",
+                        now.display(),
+                        mo_app::paths::data_dir().display()
+                    ),
+                );
+            }
+        };
+        match mo_app::data_move::hold_open_lock() {
+            Ok(()) => say_if_moved(),
+            Err(why) => {
+                log::line("Data folder", &format!("{why}; trying again in the background"));
+                threads::background("mo-plugin-data-lock", move || {
+                    for _ in 0..HOLD_TRIES {
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        if mo_app::data_move::hold_open_lock().is_ok() {
+                            say_if_moved();
+                            return;
+                        }
+                    }
+                    log::line(
+                        "Data folder",
+                        "Gave up holding the data folder's lock: a switch could leave this DAW behind",
+                    );
+                });
+            }
+        }
+    });
+}
+
+/// How many times, 5 s apart, the plugin tries the data folder's lock again: 2 minutes, longer than a switch (at most
+/// 90 s), and short, as a DAW on a Mac may unload the plugin under a sleeping thread.
+const HOLD_TRIES: u32 = 24;
 
 #[cfg(test)]
 mod tests {

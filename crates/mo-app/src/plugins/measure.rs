@@ -66,8 +66,7 @@ fn places(lib: &Library, roots: &Roots) -> Result<Places, String> {
         ));
     }
     let plugin_roots = crate::space_spare::plugin_folders(&chosen, roots.standard.clone(), roots.aax.clone());
-    let mut protected = lib.protected_roots().map_err(|e| e.to_string())?;
-    protected.extend(lib.strict_list_setting("midi_folders").map_err(|e| e.to_string())?);
+    let protected = lib.protected_roots().map_err(|e| e.to_string())?;
     let vendors = lib.scanned_vendors().map_err(|e| e.to_string())?;
     Ok(Places { plugin_roots, protected, vendors })
 }

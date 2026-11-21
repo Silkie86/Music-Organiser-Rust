@@ -17,6 +17,23 @@ fn main() -> Result<(), slint::PlatformError> {
     if mo_space::admin::run_step(&args) {
         return Ok(());
     }
+    // Started by the uninstaller: the app and the helper running from this program are asked to close, and waited
+    // for, so their files can go (UP-12). No window or setting of its own; a crash still gets its crash file. Ends
+    // with 1 when one is still running, which the uninstaller's log shows.
+    if args.iter().any(|a| a == mo_app::install_choice::CLOSE_FLAG) {
+        log_crashes();
+        let Ok(exe) = std::env::current_exe() else { return Ok(()) };
+        // As long as the app's own close may take, and a little more.
+        let wait = mo_app::one_copy::CLOSE_WAIT + std::time::Duration::from_secs(10);
+        let closed = mo_app::install_choice::close_for_setup(&exe, wait);
+        for line in &closed.lines {
+            eprintln!("{line}");
+        }
+        if !closed.all_ended {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     // Started as the background helper (at login, or by the app): no window at all, only the helper.
     if mo_ui::helper::asked(&args) {
         log_crashes();
@@ -59,7 +76,9 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     mo_ui::one_copy::log_claim(&one_copy);
     // While this copy runs, another started meanwhile never switches folders under it.
-    mo_app::data_move::hold_open_lock();
+    if let Err(why) = mo_app::data_move::hold_open_lock() {
+        log::warning("Data folder", &why);
+    }
     // Programs the app opens (DAWs, folders) start at the window's priority, not a background thread's.
     mo_app::shell::get_ready();
     mo_ui::startup::step("log");
@@ -134,6 +153,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // graphics apart inside the event loop, which took over a second on 15 Nov 2026 and was logged as one).
     app.window().on_close_requested(|| {
         mo_ui::watchdog::stop();
+        // A copy started from this moment waits for this one to end, rather than being told this window will show.
+        mo_ui::one_copy::closing();
         slint::CloseRequestResponse::HideWindow
     });
     // Dragging sounds and clips out to a DAW says here when it can't.
@@ -183,12 +204,15 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::daws::connect(&app);
     // A while after start, once a day: whether a newer version is out (an installed copy only; Settings turns it off).
     mo_ui::update::connect(&app, feed.clone(), true);
-    // Maximised under full screen, so F11 out of full screen leaves the window filling the screen beside the taskbar.
+    // The window opens maximised. Its size is given first: without one, Slint shrinks the window winit has just
+    // maximised back to its preferred size on the first show, and Windows still counts that small window as
+    // maximised, so it stayed small in the corner (the 19 Nov review, CL-1). 1440 x 900 is then only the size
+    // Restore gives. Full screen, when F11 left it on, is turned on once the window is up (fill_the_screen), so the
+    // place winit keeps for F11 is the maximised one and F11 out of full screen leaves the window filling the
+    // screen (CL-5).
+    app.window().set_size(slint::LogicalSize::new(1440.0, 900.0));
     app.window().set_maximized(true);
     mo_ui::settings::full_screen_at_start(full_screen);
-    if full_screen {
-        app.window().set_fullscreen(true);
-    }
     // A little after start, a card if the app's drive or the temp folder's is almost full.
     mo_app::drive_room::watch(data.clone(), feed.clone());
     // A little after start, the MIDI files older drags left in Temp (rule 28).
@@ -218,8 +242,8 @@ fn main() -> Result<(), slint::PlatformError> {
         // The size of everything, once the window knows the screen's own scale.
         if let Some(app) = sized.upgrade() {
             mo_ui::settings::apply_size(&app);
-            // Maximised again now the window is up: set before it was made, Windows can lose it to the window's size
-            // limits and open a small window in the corner (Solomon, 19 Nov, on his 3440-wide screen).
+            // Maximised (or full screen) again now the window is up, and checked half a second later against the
+            // screen's width (Solomon, 19 Nov: a small window in the corner of his 3440-wide screen).
             mo_ui::settings::fill_the_screen(&app);
         }
         mo_ui::watchdog::start(watched);
@@ -228,16 +252,51 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         log::warning("Freeze", "Couldn't start the freeze watchdog");
     }
+    let held = match &one_copy {
+        mo_app::one_copy::Claim::Ours { held, .. } => Some(held.clone()),
+        _ => None,
+    };
+    // Signing out, shutting down or restarting Windows with the app open: Windows ends the app as soon as it has
+    // answered, so everything waiting is written there and then (the 19 November 2026 review's CL-2).
+    #[cfg(windows)]
+    {
+        let held = held.clone();
+        mo_ui::close_ask::on_session_end(move || {
+            log::last(log::Level::Info, "App", "Windows is ending the session: closing");
+            mo_ui::watchdog::stop();
+            finish(held.as_deref(), session, None);
+            end_now(0)
+        });
+    }
     let ran = app.run();
     // The window's thread answers no more knocks from here: what it does while closing isn't a freeze. (Said already
     // when the window was asked to close; this is for an end that came another way.)
     mo_ui::watchdog::stop();
+    finish(held.as_deref(), session, ran.as_ref().err().map(ToString::to_string));
+    // Off Windows the usual way out stays: the window is taken apart first, which an exit on the spot there
+    // wouldn't wait for.
+    #[cfg(windows)]
+    {
+        if let Err(e) = &ran {
+            eprintln!("Error: {e}");
+        }
+        end_now(u32::from(ran.is_err()))
+    }
+    #[cfg(not(windows))]
+    ran
+}
+
+/// The close: everything still waiting is written, what plays in a DAW is stopped, and the log is closed. Run once
+/// the window's loop has ended, or from inside it when Windows ends the session (it ends the app straight after).
+/// `held` is this copy's hold on being the one open copy; `error` is how the window stopped, when it stopped with an
+/// error. A setup "Restart to update" started waits for this app to end before it touches a file.
+fn finish(held: Option<&mo_app::one_copy::OneCopy>, session: &'static log::SessionLog, error: Option<String>) {
     // The window is gone: a copy started from now on waits for this one to end (the port is let go at the very
     // end, once everything below is written) instead of asking it to show.
-    if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
+    if let Some(held) = held {
         held.closing();
     }
-    if let Err(e) = &ran {
+    if let Some(e) = &error {
         // A line of how the run ends: it shows even once the log is full.
         log::last(log::Level::Error, "App", &format!("The window stopped with an error: {e}"));
     }
@@ -261,7 +320,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::note::finish_up();
     // The MIDI files this run's drags wrote, once the DAW has long read them (rule 28).
     mo_ui::drag::finish_up();
-    // The last plays, drags and sends, and a galaxy map being kept, go into the sound library.
+    // The last plays, drags and sends, hearts, types and tags, and a galaxy map being kept, go into the sound library:
+    // waited for up to 10 seconds, only while some are waiting.
     mo_ui::sounds::finish_up();
     // A part playing in Bitwig or FL stops with the app.
     mo_ui::midi::finish_up();
@@ -272,29 +332,12 @@ fn main() -> Result<(), slint::PlatformError> {
     // The sweep's and the frames' last few seconds, before the log closes.
     mo_app::sweep_timing::finish();
     mo_app::frame_timing::finish();
-    // The setup "Restart to update" asked for: started only once everything is written and the log has closed, as it
-    // closes whatever is left of the app.
-    let setup = mo_ui::update::asked();
     session.close();
     // Everything is written. The port goes now, not with the process, so the copy started next (by the launcher, or
-    // by the setup below) is never held up by this one taking its time to end.
-    if let mo_app::one_copy::Claim::Ours { held, .. } = &one_copy {
+    // by the setup) is never held up by this one taking its time to end.
+    if let Some(held) = held {
         held.let_go();
     }
-    if let Some(setup) = setup {
-        mo_ui::update::run(&setup);
-    }
-    // Off Windows the usual way out stays: the window is taken apart first, which an exit on the spot there
-    // wouldn't wait for.
-    #[cfg(windows)]
-    {
-        if let Err(e) = &ran {
-            eprintln!("Error: {e}");
-        }
-        end_now(u32::from(ran.is_err()))
-    }
-    #[cfg(not(windows))]
-    ran
 }
 
 /// Ends the app on the spot (Windows), once everything is written and the log is closed. Leaving `main` the usual

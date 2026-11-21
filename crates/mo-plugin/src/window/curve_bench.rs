@@ -5,6 +5,7 @@
 
 use super::{Carried, Slots};
 use crate::audition::{MadeLoop, Played, Player};
+use crate::curves::Saved;
 use crate::threads::{background, lock};
 use crate::{ClipTile, CurveEditorData, EditorDot, MenuItem, Panel, RulerMark, Theme};
 use mo_app::background::Newest;
@@ -86,6 +87,28 @@ fn colour(c: slint::Color) -> Colour {
     Colour { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() }
 }
 
+/// Where a Save as new curve's answer goes. Let go with no answer given (the work stopped part way, or never ran), it
+/// answers that the save failed, so the button isn't left waiting.
+struct Answer {
+    to: Arc<Mutex<Option<Result<Saved, String>>>>,
+    given: bool,
+}
+
+impl Answer {
+    fn give(mut self, how: Result<Saved, String>) {
+        *lock(&self.to) = Some(how);
+        self.given = true;
+    }
+}
+
+impl Drop for Answer {
+    fn drop(&mut self) {
+        if !self.given {
+            *lock(&self.to) = Some(Err("Couldn't save the curve: the save stopped part way.".into()));
+        }
+    }
+}
+
 pub(super) struct Bench {
     card: RefCell<Card>,
     /// The curve open in the editor: its place in the list as read, and the curve as found.
@@ -108,6 +131,9 @@ pub(super) struct Bench {
     seen: RefCell<Option<(State, bool, Option<Groove>)>>,
     unwatched: Cell<Option<Instant>>,
     groove: Cell<Option<Swing>>,
+    /// Save as new curve: how it went, once that's known; and whether one is on its way (not asked again meanwhile).
+    saved: Arc<Mutex<Option<Result<Saved, String>>>>,
+    saving: Cell<bool>,
 }
 
 impl Bench {
@@ -128,6 +154,8 @@ impl Bench {
             seen: RefCell::new(None),
             unwatched: Cell::new(None),
             groove: Cell::new(None),
+            saved: Arc::default(),
+            saving: Cell::new(false),
         })
     }
 
@@ -167,9 +195,23 @@ impl Bench {
         });
         let strip = then(|c, (kind, x, _, keys)| c.strip(kind, x, keys));
         data.on_strip(move |kind, x, shift, alt, ctrl| strip((kind, f64::from(x), 0.0, Keys { shift, alt, ctrl })));
-        let wheel = then(|c, (along, x, by, _)| c.wheel(x, by, along != 0));
+        // What's in sight changed, not the curve: the picture is drawn again, and the part buttons stay as they are
+        // (working them out on every wheel notch held the DAW's thread on big curves: the 19 Nov 2026 review's CU-6).
+        let seen = |what: fn(&mut Card, (i32, f64, f64, Keys)) -> bool| {
+            let (me, weak) = (Rc::clone(self), panel.as_weak());
+            move |told: (i32, f64, f64, Keys)| {
+                let drawn = what(&mut me.card.borrow_mut(), told);
+                if let Some(panel) = weak.upgrade() {
+                    if drawn {
+                        me.redraw(&panel);
+                    }
+                    me.show(&panel, false);
+                }
+            }
+        };
+        let wheel = seen(|c, (along, x, by, _)| c.wheel(x, by, along != 0));
         data.on_wheel(move |x, by, along| wheel((i32::from(along), f64::from(x), f64::from(by), Keys::default())));
-        let laid_out = then(|c, (_, width, height, _)| {
+        let laid_out = seen(|c, (_, width, height, _)| {
             c.laid_out(width, height);
             true
         });
@@ -240,6 +282,35 @@ impl Bench {
             panel.set_curve_editing(false);
             panel.set_curve_said(SharedString::new());
         });
+        let (me, weak) = (Rc::clone(self), panel.as_weak());
+        panel.on_curve_save_as_new(move || {
+            let Some(panel) = weak.upgrade() else { return };
+            let Some((_, found)) = me.open.borrow().clone() else { return };
+            let Some(shape) = me.card.borrow().edited() else {
+                panel.set_curve_said("Nothing to save: the curve is as it was found.".into());
+                return;
+            };
+            if me.saving.replace(true) {
+                return;
+            }
+            panel.set_curve_said(SharedString::new());
+            // Answered however the work ends: a save that stopped part way (the crash note has why) says so, and the
+            // button works again.
+            let answer = Answer { to: Arc::clone(&me.saved), given: false };
+            let started = background("mo-plugin-curve-save", move || {
+                let path = mo_app::paths::data_dir().join(mo_presets::curves::FILE_NAME);
+                let how = crate::curves::save_as_new(&path, found.id, &found.name, shape);
+                answer.give(how);
+            });
+            if !started {
+                // (The answer went with the work that never ran: taken back, these words are the ones said.)
+                lock(&me.saved).take();
+                me.saving.set(false);
+                panel.set_curve_said(
+                    "Couldn't save the curve: the system gave no thread to do it on. Try again.".into(),
+                );
+            }
+        });
         let (me, weak, slots) = (Rc::clone(self), panel.as_weak(), Arc::clone(slots));
         panel.on_curve_edit_drag_out(move || {
             let Some((at, found)) = me.open.borrow().clone() else { return };
@@ -252,9 +323,10 @@ impl Bench {
                 None => found,
             };
             let slots = Arc::clone(&slots);
+            let asked = slots.ask_drag();
             background("mo-plugin-drag", move || {
                 let file = crate::curves::drag_file(&curve, &std::env::temp_dir());
-                *lock(&slots.drag) = Some((Carried::Curve(at), file));
+                slots.drag_ready(asked, Carried::Curve(at), file);
             });
         });
         let drawn = Arc::clone(&self.drawn);
@@ -282,6 +354,28 @@ impl Bench {
         self.show(panel, true);
     }
 
+    /// Whether the editor is open on the curve with this id.
+    pub(super) fn is_open_on(&self, id: &str) -> bool {
+        self.open.borrow().as_ref().is_some_and(|(_, c)| c.id == id)
+    }
+
+    /// A curve just kept by Save as new curve, for the list to take in (then [`Bench::open`] shows it): the curve the
+    /// edits were made on is as it was found again, as in the app. A save that failed says why.
+    pub(super) fn take_saved(&self, panel: &Panel) -> Option<Saved> {
+        let how = lock(&self.saved).take()?;
+        self.saving.set(false);
+        match how {
+            Ok(saved) => {
+                self.card.borrow_mut().forget(&saved.from, &saved.shape);
+                Some(saved)
+            }
+            Err(why) => {
+                panel.set_curve_said(why.into());
+                None
+            }
+        }
+    }
+
     /// Which key does what, as the app's Settings have it now.
     pub(super) fn set_keys(&self, map: mo_app::curve_keys::KeyMap) {
         self.card.borrow_mut().set_keys(map);
@@ -295,9 +389,18 @@ impl Bench {
             // As it's found now: its name may be new.
             Some((at, now)) => {
                 panel.global::<CurveEditorData>().set_name(now.name.as_str().into());
-                self.card.borrow_mut().open(&now.id, &now.name, &now.points, now.length_beats);
+                // (Found at another height or length, and not worked on: the card shows it as it's found now.)
+                let anew = self.card.borrow_mut().open(&now.id, &now.name, &now.points, now.length_beats);
                 *self.open.borrow_mut() = Some((at, now.clone()));
-                self.show(panel, false);
+                if anew {
+                    self.stop(panel);
+                    let data = panel.global::<CurveEditorData>();
+                    data.set_picture(Image::default());
+                    data.set_ruler(ModelRc::default());
+                    data.set_end_x(-1.0);
+                    self.redraw(panel);
+                }
+                self.show(panel, anew);
             }
             None => {
                 self.stop(panel);

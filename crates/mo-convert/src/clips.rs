@@ -5,13 +5,14 @@ use mo_formats::fl::song::{FlAudioClip, FlChannel, FlClip};
 
 /// A channel's clips, in order, as one track can hold them: clips that overlap in FL (on different playlist tracks)
 /// become one, where notes from a muted clip are muted and a note both play is there once. A channel with notes but no
-/// clips gets one from the start of the song holding its notes, in whole bars.
-pub fn of(channel: &FlChannel, clips: Vec<FlClip>, ppq: u16) -> Vec<FlClip> {
+/// clips gets one from the start of the song holding its notes, in whole bars of `bar` ticks (the song's own: 3 beats
+/// in 3/4 or 6/8).
+pub fn of(channel: &FlChannel, clips: Vec<FlClip>, bar: i64) -> Vec<FlClip> {
     if clips.is_empty() {
         let Some(end) = channel.notes.iter().map(|n| n.start.saturating_add(n.length)).max() else {
             return Vec::new();
         };
-        let bar = 4 * ppq.max(1) as i64;
+        let bar = bar.max(1);
         let length = bar.max(end.saturating_add(bar - 1) / bar * bar);
         return vec![FlClip {
             name: channel.name.clone(),
@@ -148,8 +149,10 @@ mod tests {
     #[test]
     fn a_channel_without_clips_gets_one_in_whole_bars() {
         let c = channel();
-        let made = of(&c, Vec::new(), 96);
+        let made = of(&c, Vec::new(), 384);
         assert_eq!((made.len(), made[0].start, made[0].length, made[0].notes.len()), (1, 0, 768, 2));
+        // In 3/4 a bar is 3 beats: the same notes take two of those.
+        assert_eq!(of(&c, Vec::new(), 288)[0].length, 576);
     }
 
     #[test]
@@ -159,7 +162,7 @@ mod tests {
         quiet.muted = true;
         // Starts at 192, so its note at 0 lands on the first clip's note at 192.
         let b = clip(192, 384, vec![quiet, note(96, 96, 64)], true);
-        let made = of(&channel(), vec![b, a], 96);
+        let made = of(&channel(), vec![b, a], 384);
         assert_eq!(made.len(), 1);
         assert_eq!((made[0].start, made[0].length, made[0].muted), (0, 576, false));
         let got: Vec<_> = made[0].notes.iter().map(|n| (n.start, n.key, n.muted)).collect();
@@ -169,7 +172,7 @@ mod tests {
 
     #[test]
     fn clips_that_only_touch_stay_apart() {
-        let made = of(&channel(), vec![clip(0, 384, vec![], false), clip(384, 384, vec![], true)], 96);
+        let made = of(&channel(), vec![clip(0, 384, vec![], false), clip(384, 384, vec![], true)], 384);
         assert_eq!(made.iter().map(|c| (c.start, c.muted)).collect::<Vec<_>>(), [(0, false), (384, true)]);
     }
 
@@ -212,7 +215,7 @@ mod tests {
         let mut short = note(0, 0, 60);
         short.step = true;
         let made =
-            of(&channel(), vec![clip(0, 384, vec![short], false), clip(0, 384, vec![note(0, 192, 60)], false)], 96);
+            of(&channel(), vec![clip(0, 384, vec![short], false), clip(0, 384, vec![note(0, 192, 60)], false)], 384);
         assert_eq!(made[0].notes.len(), 1);
         assert_eq!(made[0].notes[0].length, 192);
     }

@@ -64,8 +64,11 @@ The extension writes to the app's data folder, next to MO Probe's reports:
 That's where the data folder starts out. When the app's Settings moved it to another drive, the reports go to
 `reports/bitwig` in the new folder (from 3.26): the extension reads `MusicOrganiser-folder.txt` beside the first
 folder, as the app does, and follows it only to a folder the move finished in (one with the app's `moved-in.json`).
-It looks when Bitwig starts the extension, and (from 3.30) again each time the app or a plugin connects, so a move
-made with Bitwig open is followed without restarting Bitwig. Reports already written in the first folder stay there.
+From 3.33 it also follows the pointer to a folder the installer started the data in on a new PC (one with
+`started-here.txt`), and reads a pointer that starts with a byte-order mark, as the installer writes it.
+It looks when Bitwig starts the extension, and (from 3.30) again when the app or a plugin connects, at most once a
+minute (the first minute after Bitwig starts the extension counts as looked), so a move made with Bitwig open is
+followed without restarting Bitwig. Reports already written in the first folder stay there.
 
 - **`<date>-link.jsonl`** (UTC date): one line for each command the app sent (but a `hello` that went well: the
   app says hello every couple of seconds), with `time`, `cmd`, `ms` (how long
@@ -270,6 +273,15 @@ hears of it. `hello` says `loopback`:
 whether the link's own MIDI has come back, from the message it sends itself as Bitwig starts it and each time
 the app connects.
 
+New in 3.33: four small things from the 19 Nov review. The reports find the data folder the installer started on a
+new PC (LK-2, see Reports above). A swap (`insert` at `replace` with a file) only counts the device still at the same
+place in its chain, showing another sample than before, as the new Sampler (the app checks the sample's name against
+the file): another place selected meanwhile, or a device that listed its parameters without the sample changing
+(another pad's Sampler, say), answers `replaced: null` with `moved: true`, and `false` is only said while the sample
+from before still shows there and no device has listed its parameters since (LK-7). `deletetrack` forgets its note of the track only after its wait for
+a start on its way, so a take-out stopped during that wait can be asked again (LK-9). And the docs say when the
+reports folder is looked up (LK-4).
+
 New in 3.32: a recording cut off by another project is put back (the 19 Nov review's LK-1). When another project
 comes to the front while `record` runs, the job still touches nothing more and answers `abandoned`, but it now keeps
 what it had changed, and the answer says `putBackLater: true`. Twice a second the link looks whether the job's
@@ -287,7 +299,7 @@ Bitwig" as well as "DAWmate Bitwig" (Bitwig is offered both). Installing it from
 `MusicOrganiser.bwextension`, so Bitwig doesn't load the same controller twice.
 
 New in 3.30: two small things. The reports follow the app's data folder when Settings moves it while Bitwig is open:
-the folder is looked up again each time the app or a plugin connects, not only when Bitwig starts (before, they went
+the folder is looked up again when the app or a plugin connects (at most once a minute), not only when Bitwig starts (before, they went
 on in the old folder until Bitwig restarted, and made it again after you had removed it). And an error about a part
 of Bitwig the link couldn't use no longer ends "A selftest says why", which the app has no button for: it points at
 the self-check file the extension writes each time Bitwig starts, in the app's data folder under `reports\bitwig`.
@@ -298,6 +310,9 @@ the old Sampler for the new one and say the sound went in when Bitwig had ignore
 whatever was selected when its turn came, which could be another device than the one it was asked for. Now the answer
 waits (5 s at most) until the selected device shows another sample than before and says `replaced`, with `fresh`:
 the parameters whose values Bitwig has told since, so the app never takes the old Sampler's values for the new one's.
+`replaced` is `true` when the swap showed, `false` when the device is as it was (Bitwig ignored the file), and `null`
+when it can't be told: the sample has the name of the one before and Bitwig gave no other sign, or another device or
+track is selected by then, which the answer says with `moved: true`.
 `expect` names the device meant (its track's ID, its place in the chain, its name, its sample), and a replace that
 finds another one selected is refused with nothing changed; `set` takes `expect` too, so a setting never lands on
 another device. `device` tells those too: `trackId`, `position` and `sample`. The self-check's "cursor device's

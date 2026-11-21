@@ -4,6 +4,8 @@
 //! every read applies it over the stored measure ([`saved`], [`Plugins::apply_folder_fixes`]), so it lasts past a
 //! restart; this session's changes are shown over each read too.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use chrono::NaiveDateTime;
 use mo_library::plugins::{StoredSpace, added_folders_key, ruled_out_key};
 use mo_library::scan::is_inside;
@@ -65,9 +67,7 @@ pub fn saved(lib: &mo_library::Library, spaces: &[StoredSpace]) -> Result<Vec<Fo
             continue;
         }
         if protected.is_none() {
-            let mut roots = lib.protected_roots()?;
-            roots.extend(lib.strict_list_setting(crate::midi::FOLDERS_KEY)?);
-            protected = Some(roots);
+            protected = Some(lib.protected_roots()?);
         }
         let yours = mo_space::plugin_space::Yours::new(protected.as_deref().unwrap_or_default());
         for path in missing {
@@ -98,15 +98,57 @@ static SIZES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<Str
 /// that still leaves one out isn't asked for again and again.
 static ASKED_BY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-/// Whether a read asked for a measure of the plugins: a folder you added that the last measure hasn't got is a real
-/// folder now ([`known`]). [`NOT_ASKED`], [`ASKED`] or [`OWED`].
-static MEASURE_ASKED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(NOT_ASKED);
-const NOT_ASKED: u8 = 0;
-/// Asked, and no measure has tried yet: one starts as soon as the app looks ([`measure_asked`]).
-const ASKED: u8 = 1;
-/// A measure tried and didn't keep what it found (or couldn't run): still owed, but the next try waits for the hourly
-/// look, so a measure that fails isn't started again at every read.
-const OWED: u8 = 2;
+/// The reads' asks for a measure of the plugins: a folder you added that the last measure hasn't got is a real folder
+/// now ([`known`]).
+static ASKS: Asks = Asks::new();
+
+/// Asks for a measure of the plugins, counted: a measure answers only the asks made before it started, so one made
+/// while it runs (a drive that came back part way through, after the measure walked past that folder's place) asks
+/// for another (the whole-app review of 19 Nov, PM-8: a flag the measure cleared as it ended left that folder
+/// unmeasured for a day).
+struct Asks {
+    /// How many there have been.
+    made: AtomicU64,
+    /// How many a measure has started with: those are owed, if it didn't keep what it found, but the next try waits for
+    /// the hourly look, so a measure that fails isn't started again at every read.
+    tried: AtomicU64,
+    /// How many a measure that kept what it found had started with: those are answered.
+    answered: AtomicU64,
+}
+
+/// What a measure starting took of the asks ([`take_measure_asked`]), to give back to [`measure_answered`] once it
+/// keeps what it found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Taken {
+    /// The asks made before it started.
+    made: u64,
+    /// Some of them are asked for or still owed: the plugins are to be measured now, whenever the last measure was.
+    pub owed: bool,
+}
+
+impl Asks {
+    const fn new() -> Asks {
+        Asks { made: AtomicU64::new(0), tried: AtomicU64::new(0), answered: AtomicU64::new(0) }
+    }
+
+    fn ask(&self) {
+        self.made.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn asked(&self) -> bool {
+        self.made.load(Ordering::Relaxed) > self.tried.load(Ordering::Relaxed)
+    }
+
+    fn take(&self) -> Taken {
+        let made = self.made.load(Ordering::Relaxed);
+        self.tried.fetch_max(made, Ordering::Relaxed);
+        Taken { made, owed: made > self.answered.load(Ordering::Relaxed) }
+    }
+
+    fn answered(&self, taken: Taken) {
+        self.answered.fetch_max(taken.made, Ordering::Relaxed);
+    }
+}
 
 /// A folder you added, as measured when you added it this run, or `None`. A real folder there now that wasn't
 /// measured this run asks for a measure of the plugins ([`measure_asked`]), once a run.
@@ -120,31 +162,29 @@ fn known(path: &str) -> Option<Measured> {
         let mut asked = ASKED_BY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !asked.contains(&key) {
             asked.push(key);
-            MEASURE_ASKED.store(ASKED, std::sync::atomic::Ordering::Relaxed);
+            ASKS.ask();
         }
     }
     None
 }
 
 /// Whether a read found a folder you added that the last measure hasn't got, a real folder now ([`saved`]), and no
-/// measure has tried since: the plugins are to be measured now, whenever the last measure was.
+/// measure has started since: the plugins are to be measured now, whenever the last measure was.
 pub fn measure_asked() -> bool {
-    MEASURE_ASKED.load(std::sync::atomic::Ordering::Relaxed) == ASKED
+    ASKS.asked()
 }
 
 /// For a measure starting: whether one is asked for, or still owed after one that didn't keep what it found
-/// ([`measure_asked`]). It stays owed until a measure keeps what it found ([`measure_answered`]), but isn't asked for
-/// at once again.
-pub fn take_measure_asked() -> bool {
-    use std::sync::atomic::Ordering::Relaxed;
-    let (Ok(was) | Err(was)) = MEASURE_ASKED.try_update(Relaxed, Relaxed, |s| (s == ASKED).then_some(OWED));
-    was != NOT_ASKED
+/// ([`measure_asked`]). What's asked stays owed until a measure that started after it keeps what it found
+/// ([`measure_answered`]), but isn't asked for at once again.
+pub fn take_measure_asked() -> Taken {
+    ASKS.take()
 }
 
-/// A measure kept what it found: it measured every folder you added that was there then, so what a read asked for is
-/// answered.
-pub fn measure_answered() {
-    MEASURE_ASKED.store(NOT_ASKED, std::sync::atomic::Ordering::Relaxed);
+/// A measure kept what it found: it measured every folder you added that was there as it walked, so the asks made
+/// before it started (`taken`) are answered. One made since asks for another measure.
+pub fn measure_answered(taken: Taken) {
+    ASKS.answered(taken);
 }
 
 /// Keeps a folder's fresh measure (taken when you add it) for [`saved`], over one taken before.
@@ -504,6 +544,34 @@ mod tests {
         mo_library::Library::open_read_only(&path).unwrap()
     }
 
+    /// The whole-app review of 19 Nov, PM-8: an ask made while a measure runs (a drive that came back part way through,
+    /// after the measure walked past that folder's place) isn't answered when that measure keeps what it found: it
+    /// asks for another at once. One made before it started is answered.
+    #[test]
+    fn an_ask_made_while_a_measure_runs_asks_for_another() {
+        let asks = Asks::new();
+        assert!(!asks.asked() && !asks.take().owed, "nothing asked");
+        asks.ask();
+        assert!(asks.asked());
+        let running = asks.take();
+        assert!(running.owed && !asks.asked(), "taken by the measure that starts");
+        // The drive comes back, and a read asks while it runs (its start found the measure running, so took nothing).
+        asks.ask();
+        asks.answered(running);
+        assert!(asks.asked(), "asked for at once again");
+        let next = asks.take();
+        assert!(next.owed);
+        asks.answered(next);
+        assert!(!asks.asked() && !asks.take().owed, "answered");
+        // A measure that didn't keep what it found leaves it owed, for the hourly look, but not asked for at once.
+        asks.ask();
+        let failed = asks.take();
+        assert!(failed.owed && !asks.asked() && asks.take().owed);
+        // An older measure ending late answers only what it started with.
+        asks.answered(running);
+        assert!(asks.take().owed);
+    }
+
     /// Review E2-1: your say on a plugin's folders is read back from the library after a restart: a folder ruled out,
     /// one taken off your list (stored as added), and one added since the measure. That one isn't walked inside the
     /// read (the whole-app review of 14 Nov, AP-12): it asks for a measure of the plugins, once, and shows with what
@@ -530,12 +598,13 @@ mod tests {
         assert!(measure_asked(), "it asks for a measure, at once");
         // A measure that starts takes it, and it's owed until one keeps what it found, but not asked at once again: a
         // measure that fails isn't started at every read.
-        assert!(take_measure_asked());
-        assert!(!measure_asked() && take_measure_asked(), "owed");
-        measure_answered();
-        assert!(!take_measure_asked(), "answered");
+        assert!(take_measure_asked().owed);
+        let taken = take_measure_asked();
+        assert!(!measure_asked() && taken.owed, "owed");
+        measure_answered(taken);
+        assert!(!take_measure_asked().owed, "answered");
         assert_eq!(saved(&lib, &spaces).unwrap(), removed);
-        assert!(!measure_asked() && !take_measure_asked(), "once a run");
+        assert!(!measure_asked() && !take_measure_asked().owed, "once a run");
         // As adding it does.
         remember_measure(&new_s, mo_space::size::measure(&new, &std::sync::atomic::AtomicBool::new(false)).unwrap());
         let fixes = saved(&lib, &spaces).unwrap();

@@ -29,7 +29,8 @@ import java.util.function.Supplier;
  *
  * When the app's Settings moved the data folder to another drive, the reports go there too (extension 3.26):
  * {@code MusicOrganiser-folder.txt} beside the first folder names the new one, as the app reads it
- * (crates/mo-app/src/paths.rs). The folder is chosen once, when Bitwig starts the extension.
+ * (crates/mo-app/src/paths.rs). The folder is looked up when Bitwig starts the extension, and again when the app or a
+ * plugin connects, at most once a minute ({@link #refresh}; the first minute after the start counts as looked).
  *
  * {@code <date>-link.jsonl} has a line for each command the app sent (time, cmd, ms, ok, error) and for
  * connections coming and going; {@code <time>-selfcheck.json} is a self-check of the API features the link
@@ -49,6 +50,12 @@ final class Reports {
     static final String POINTER_FILE = "MusicOrganiser-folder.txt";
     /** In a folder a move finished in (the app's paths::MOVED_IN_FILE): a pointer to a folder without it isn't followed. */
     static final String MOVED_IN_FILE = "moved-in.json";
+    /**
+     * In a folder the installer started the data in on a new PC (the app's install_choice::STARTED_HERE_FILE,
+     * crates/mo-app/src/install_choice.rs): a pointer to a folder with it is followed too, as the app does
+     * (extension 3.33, the 19 Nov review's LK-2).
+     */
+    static final String STARTED_HERE_FILE = "started-here.txt";
     /** A pointer file is one path: anything bigger isn't one, and isn't read. */
     private static final long POINTER_MOST_BYTES = 64 * 1024;
 
@@ -138,19 +145,24 @@ final class Reports {
     }
 
     /**
-     * The app's data folder, given the one it starts out with: the folder the app's Settings moved it to, when the
-     * pointer file beside {@code first} names one and the move there finished (the app leaves {@link #MOVED_IN_FILE}
-     * in it); else {@code first}. The same rule as the app's own (crates/mo-app/src/paths.rs), so the reports never
+     * The app's data folder, given the one it starts out with: the folder the app's Settings moved it to, or the
+     * installer started it in, when the pointer file beside {@code first} names one and the move there finished (the
+     * app leaves {@link #MOVED_IN_FILE} in it) or the installer began there ({@link #STARTED_HERE_FILE}); else
+     * {@code first}. The installer writes the pointer with a byte-order mark, which is skipped. The same rule as the app's own (crates/mo-app/src/paths.rs), so the reports never
      * go to a folder the app isn't using: with the new drive missing, both use the first folder.
      */
     static Path dataFolder(Path first) {
         try {
             Path pointer = first.resolveSibling(POINTER_FILE);
             if (!Files.isRegularFile(pointer) || Files.size(pointer) > POINTER_MOST_BYTES) return first;
-            String text = new String(Files.readAllBytes(pointer), StandardCharsets.UTF_8).trim();
+            String text = new String(Files.readAllBytes(pointer), StandardCharsets.UTF_8);
+            // String.trim() keeps a byte-order mark, and a path can't start with one.
+            if (text.startsWith("\uFEFF")) text = text.substring(1);
+            text = text.trim();
             if (text.isEmpty()) return first;
             Path named = Paths.get(text);
-            return named.isAbsolute() && Files.isRegularFile(named.resolve(MOVED_IN_FILE)) ? named : first;
+            boolean theirs = Files.isRegularFile(named.resolve(MOVED_IN_FILE)) || Files.isRegularFile(named.resolve(STARTED_HERE_FILE));
+            return named.isAbsolute() && theirs ? named : first;
         } catch (IOException | RuntimeException e) {
             // A pointer that can't be read or names no path: the app falls back to the first folder too.
             return first;

@@ -128,6 +128,19 @@ pub struct Marks {
     /// When the self-check last ran, in seconds since 1970 (0 for never), so it runs once a day.
     #[serde(default)]
     pub self_checked: u64,
+    /// Notes on steps with no mark (kept with Enter before marking, or left when a mark was taken off), so they're
+    /// saved too (the 19 Nov review, BT-2). A mark takes its step's note from here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notes: BTreeMap<String, String>,
+}
+
+/// A step's words as a mark keeps them: "what -> expect".
+pub fn step_words(step: &Step) -> String {
+    if step.expect.is_empty() { step.what.to_owned() } else { format!("{} -> {}", step.what, step.expect) }
+}
+
+fn cut(note: &str) -> String {
+    note.trim().chars().take(NOTE_MAX).collect()
 }
 
 /// Whether a step is one the self-check marks ([`crate::self_check`]), not Solomon.
@@ -159,13 +172,19 @@ impl Marks {
         self.steps.get(id)
     }
 
-    /// Marks `step`: `None` takes its mark off. The note is kept (cut to [`NOTE_MAX`]).
+    /// Marks `step`: `None` takes its mark off. The note is kept (cut to [`NOTE_MAX`]), also when the mark goes.
     pub fn set(&mut self, step: &Step, mark: Option<Mark>, note: &str, at: Moment<'_>) {
+        let note = cut(note);
         let Some(mark) = mark else {
             self.steps.remove(step.id);
+            if note.is_empty() {
+                self.notes.remove(step.id);
+            } else {
+                self.notes.insert(step.id.to_owned(), note);
+            }
             return;
         };
-        let note: String = note.trim().chars().take(NOTE_MAX).collect();
+        self.notes.remove(step.id);
         let (log, log_file) = if mark == Mark::Problem {
             let skip = at.recent.len().saturating_sub(KEPT_LOG_LINES);
             (
@@ -175,25 +194,36 @@ impl Marks {
         } else {
             (Vec::new(), String::new())
         };
-        let step_words =
-            if step.expect.is_empty() { step.what.to_owned() } else { format!("{} -> {}", step.what, step.expect) };
         self.steps.insert(
             step.id.to_owned(),
-            Marked { mark, note, when: at.when, version: at.version.to_owned(), step: step_words, log, log_file },
+            Marked { mark, note, when: at.when, version: at.version.to_owned(), step: step_words(step), log, log_file },
         );
     }
 
-    /// Changes only the note of a marked step (a note on an unmarked one waits for its mark).
+    /// Changes only a step's note, marked or not; whether it changed.
     pub fn set_note(&mut self, id: &str, note: &str) -> bool {
-        match self.steps.get_mut(id) {
-            Some(m) => {
-                let note: String = note.trim().chars().take(NOTE_MAX).collect();
-                let changed = m.note != note;
-                m.note = note;
-                changed
-            }
-            None => false,
+        let note = cut(note);
+        if let Some(m) = self.steps.get_mut(id) {
+            let changed = m.note != note;
+            m.note = note;
+            return changed;
         }
+        if note.is_empty() {
+            self.notes.remove(id).is_some()
+        } else {
+            self.notes.insert(id.to_owned(), note.clone()).as_ref() != Some(&note)
+        }
+    }
+
+    /// A step's note, marked or not.
+    pub fn note(&self, id: &str) -> &str {
+        self.steps.get(id).map(|m| m.note.as_str()).or_else(|| self.notes.get(id).map(String::as_str)).unwrap_or("")
+    }
+
+    /// The step's mark as it stands: none when the step's words changed since it was marked (a step is reworded
+    /// under its own name, so its old mark doesn't say the new part works: the 19 Nov review, BT-3).
+    pub fn current(&self, step: &Step) -> Option<&Marked> {
+        self.steps.get(step.id).filter(|m| m.step.is_empty() || m.step == step_words(step))
     }
 
     pub fn to_json(&self) -> String {
@@ -211,7 +241,7 @@ impl Marks {
 
 /// The line under the card's title: how far through it is.
 pub fn progress(steps: &[Step], marks: &Marks) -> String {
-    let count = |m: Mark| steps.iter().filter(|s| marks.get(s.id).is_some_and(|x| x.mark == m)).count();
+    let count = |m: Mark| steps.iter().filter(|s| marks.current(s).is_some_and(|x| x.mark == m)).count();
     let (works, problems, skipped) = (count(Mark::Works), count(Mark::Problem), count(Mark::Skipped));
     let left = steps.len() - works - problems - skipped;
     let mut out = format!("{works} of {} work", steps.len());
@@ -251,12 +281,13 @@ pub struct Line {
 }
 
 /// The card's lines, each area under its heading; with `to_try`, only the steps not yet marked Works or Skipped
-/// (a problem stays, to try again).
+/// (a problem stays, to try again). A step whose words changed since its mark shows unmarked, with the old mark said.
 pub fn lines(steps: &[Step], marks: &Marks, to_try: bool) -> Vec<Line> {
     let mut out = Vec::new();
     let mut last = None;
     for s in steps {
-        let m = marks.get(s.id);
+        let m = marks.current(s);
+        let old = if m.is_none() { marks.get(s.id) } else { None };
         if to_try && m.is_some_and(|m| m.mark != Mark::Problem) {
             continue;
         }
@@ -279,9 +310,15 @@ pub fn lines(steps: &[Step], marks: &Marks, to_try: bool) -> Vec<Line> {
             what: s.what,
             expect: s.expect,
             mark: m.map(|m| m.mark),
-            note: m.map(|m| m.note.clone()).unwrap_or_default(),
+            note: marks.note(s.id).to_owned(),
             auto: is_self_check(s.id),
-            said: m.map(|m| format!("{} on {}, {}", m.mark.name(), m.version, m.when)).unwrap_or_default(),
+            said: match (m, old) {
+                (Some(m), _) => format!("{} on {}, {}", m.mark.name(), m.version, m.when),
+                (None, Some(o)) => {
+                    format!("{} on {}, {}, before this step changed: try it again", o.mark.name(), o.version, o.when)
+                }
+                (None, None) => String::new(),
+            },
         });
     }
     out
@@ -373,7 +410,55 @@ mod tests {
             ["A", "a.2", "B", "b.1"]
         );
         assert!(m.set_note("b.1", "again"));
-        assert!(!m.set_note("a.2", "not marked"));
         assert!(log_line(&steps[2], Some(Mark::Problem), "again").contains("Problem"));
+    }
+
+    #[test]
+    fn a_note_on_an_unmarked_step_is_kept_and_goes_with_its_mark() {
+        let step = Step { id: "a.b", area: "A", what: "Do it", expect: "It works" };
+        let mut m = Marks::default();
+        assert!(m.set_note("a.b", "  try after the update "));
+        assert!(!m.set_note("a.b", "try after the update"), "the same note again isn't a change");
+        assert_eq!(m.note("a.b"), "try after the update");
+        // Saved in the file too.
+        let back: Marks = serde_json::from_str(&m.to_json()).expect("read back");
+        assert_eq!(back.note("a.b"), "try after the update");
+        // A mark takes it along.
+        m.set(&step, Some(Mark::Problem), "try after the update", at(0));
+        assert!(m.notes.is_empty());
+        assert_eq!(m.get("a.b").expect("marked").note, "try after the update");
+        // Taking the mark off keeps the note.
+        m.set(&step, None, "try after the update", at(0));
+        assert!(m.get("a.b").is_none());
+        assert_eq!(m.note("a.b"), "try after the update");
+        assert_eq!(lines(std::slice::from_ref(&step), &m, false)[1].note, "try after the update");
+        // An emptied box takes it off.
+        assert!(m.set_note("a.b", " "));
+        assert!(m.notes.is_empty());
+        // An old file with no notes reads.
+        let old: Marks = serde_json::from_str(r#"{"steps":{},"self_checked":0}"#).expect("old file");
+        assert!(old.notes.is_empty());
+    }
+
+    #[test]
+    fn a_reworded_step_is_to_try_again() {
+        let before = Step { id: "a.b", area: "A", what: "Do it", expect: "It works" };
+        let after = Step { id: "a.b", area: "A", what: "Do it, then minimise", expect: "It still works" };
+        let mut m = Marks::default();
+        m.set(&before, Some(Mark::Works), "fine", at(0));
+        assert_eq!(progress(std::slice::from_ref(&before), &m), "1 of 1 work, 0 to try");
+        assert!(lines(std::slice::from_ref(&before), &m, true).is_empty());
+        let shown = lines(std::slice::from_ref(&after), &m, true);
+        assert_eq!(shown.len(), 2, "back in Only to try");
+        assert_eq!(shown[1].mark, None);
+        assert_eq!(shown[1].note, "fine");
+        assert!(
+            shown[1].said.starts_with("Works on 0.1.0 (abc)") && shown[1].said.contains("before this step changed")
+        );
+        assert_eq!(progress(std::slice::from_ref(&after), &m), "0 of 1 work, 1 to try");
+        // The old mark stays in the file until it's marked again.
+        assert!(m.get("a.b").is_some());
+        m.set(&after, Some(Mark::Works), "fine", at(0));
+        assert!(lines(std::slice::from_ref(&after), &m, true).is_empty());
     }
 }

@@ -541,6 +541,16 @@ pub const BACK_NEEDS_ADMIN: &str =
 /// went, and the file or folder the bin keeps for it now. `Err` says why it stays in the bin.
 pub type Check<'a> = dyn Fn(&Removed, &Path) -> Result<(), String> + 'a;
 
+/// Why a bin couldn't say what it holds ([`Bin::look_in`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotLooked {
+    /// It never can: a Mac's Trash can't be looked in by a program (nor, by default, a bin of the tests' own).
+    Never,
+    /// Looking failed just now, and why (Windows couldn't describe one thing in the bin, say): the next look may well
+    /// work, so nothing should be taken for gone from the bin.
+    Failed(String),
+}
+
 /// Where removed things go. The app uses [`SystemBin`]; tests use a folder of their own.
 pub trait Bin {
     /// Puts a file or folder in the bin, or says what stopped it ([`NEEDS_ADMIN`] when Windows wants administrator
@@ -559,6 +569,12 @@ pub trait Bin {
     /// `None` when the bin can't be looked in. By default it can't.
     fn holds(&self, _removed: &[Removed]) -> Option<Vec<bool>> {
         None
+    }
+    /// What [`holds`](Self::holds) says, or, when it can't say, whether it never can ([`NotLooked::Never`]) or looking
+    /// failed just now ([`NotLooked::Failed`]: then nothing should be taken for gone from the bin, the whole-app review
+    /// of 19 Nov, SB-4). By default as `holds` says: a bin that can't be looked in never can.
+    fn look_in(&self, removed: &[Removed]) -> Result<Vec<bool>, NotLooked> {
+        self.holds(removed).ok_or(NotLooked::Never)
     }
     /// The administrator step's Put back: puts back from the bin, one by one, those of `removed` that `check` lets
     /// through, each looked at where the bin keeps it (the file or folder itself) just before it comes back, and tells
@@ -642,6 +658,9 @@ impl Bin for Heard<'_> {
     }
     fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
         self.bin.holds(removed)
+    }
+    fn look_in(&self, removed: &[Removed]) -> Result<Vec<bool>, NotLooked> {
+        self.bin.look_in(removed)
     }
     fn put_back_checked(&self, removed: &[Removed], check: &Check<'_>, each: &mut dyn FnMut(usize, Option<String>)) {
         self.bin.put_back_checked(removed, check, each);
@@ -1077,6 +1096,10 @@ impl Bin for SystemBin {
     }
 
     fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
+        held_in_system_bin(removed).ok()
+    }
+
+    fn look_in(&self, removed: &[Removed]) -> Result<Vec<bool>, NotLooked> {
         held_in_system_bin(removed)
     }
 
@@ -1671,9 +1694,18 @@ fn same_name(item: &trash::TrashItem, real: &Path) -> bool {
 
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn bin_items() -> Option<Vec<trash::TrashItem>> {
+    read_bin().ok()
+}
+
+/// What's in the bin, or why it couldn't be read: one thing in it the library can't describe fails the whole read
+/// (Windows' list stops at the first), and one it trips over (a deletion date before 1970) is a failed read too, not
+/// a crash.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn read_bin() -> Result<Vec<trash::TrashItem>, String> {
     match mo_catch::catch(trash::os_limited::list) {
-        Ok(Ok(items)) => Some(items),
-        _ => None,
+        Ok(Ok(items)) => Ok(items),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("reading what's in it tripped up".to_owned()),
     }
 }
 
@@ -1834,10 +1866,10 @@ fn find_in_system_bin(_removed: &mut [Removed]) -> Vec<Problem> {
     Vec::new()
 }
 
-/// Which of these are in the bin now ([`matched`]). `None` when the bin can't be read.
+/// Which of these are in the bin now ([`matched`]), or why the bin couldn't be read just now.
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
-fn held_in_system_bin(removed: &[Removed]) -> Option<Vec<bool>> {
-    bin_items().map(|items| held_among(&items, removed))
+fn held_in_system_bin(removed: &[Removed]) -> Result<Vec<bool>, NotLooked> {
+    read_bin().map(|items| held_among(&items, removed)).map_err(NotLooked::Failed)
 }
 
 /// Which of `removed` are among the bin's `items` ([`matched`]).
@@ -1886,10 +1918,10 @@ fn matched<'a>(items: &'a [trash::TrashItem], removed: &[Removed]) -> Vec<Option
     found
 }
 
-/// A Mac's Trash can't be read by a program: what's in it can't be told.
+/// A Mac's Trash can't be read by a program: what's in it can't be told, ever.
 #[cfg(not(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
-fn held_in_system_bin(_removed: &[Removed]) -> Option<Vec<bool>> {
-    None
+fn held_in_system_bin(_removed: &[Removed]) -> Result<Vec<bool>, NotLooked> {
+    Err(NotLooked::Never)
 }
 
 /// A Mac's Trash can't be asked to put things back by a program: Finder's Put Back does it.
@@ -1918,7 +1950,7 @@ mod tests {
 
     #[test]
     fn a_heard_bin_tells_each_send_and_passes_every_way_on() {
-        use super::{Admin, Check, Heard, Problem, Removed, What};
+        use super::{Admin, Check, Heard, NotLooked, Problem, Removed, What};
         use crate::plugin_space::SpaceKind;
         use std::path::Path;
         use std::sync::Mutex;
@@ -1961,6 +1993,10 @@ mod tests {
             fn holds(&self, _: &[Removed]) -> Option<Vec<bool>> {
                 self.note("holds");
                 Some(vec![true])
+            }
+            fn look_in(&self, _: &[Removed]) -> Result<Vec<bool>, NotLooked> {
+                self.note("look_in");
+                Err(NotLooked::Failed("look in".to_owned()))
             }
             fn put_back_checked(&self, _: &[Removed], _: &Check<'_>, each: &mut dyn FnMut(usize, Option<String>)) {
                 self.note("put_back_checked");
@@ -2014,6 +2050,7 @@ mod tests {
         assert_eq!(found[0].bin_id.as_deref(), Some("1"));
         assert_eq!(bin.put_back(std::slice::from_ref(&one))[0].why, "put back");
         assert_eq!(bin.holds(std::slice::from_ref(&one)), Some(vec![true]));
+        assert_eq!(bin.look_in(std::slice::from_ref(&one)), Err(NotLooked::Failed("look in".to_owned())));
         let mut back = Vec::new();
         bin.put_back_checked(std::slice::from_ref(&one), &|_, _| Ok(()), &mut |n, why| back.push((n, why)));
         assert_eq!(back, [(0, None)]);
@@ -2033,6 +2070,7 @@ mod tests {
                 "find",
                 "put_back",
                 "holds",
+                "look_in",
                 "put_back_checked",
                 "can_look_for",
                 "refuses_quietly",

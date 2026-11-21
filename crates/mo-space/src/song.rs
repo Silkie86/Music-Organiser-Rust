@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::key;
 use crate::prints::Prints;
-use crate::size::{self, FileEntry, Stopped, add, total};
+use crate::size::{self, FileEntry, Stopped, Walked, add, total};
 
 /// What a song's space can be freed from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -171,7 +171,15 @@ pub struct Elsewhere<'a> {
     pub backup_folders: &'a BackupFolders,
     /// How saves of the same size are compared to find the copies.
     pub compare: Compare<'a>,
+    /// What's in a song's folder, when the caller has walked it already (the backup's plan walks every folder in the
+    /// backup first: the whole-app review of 19 Nov, SB-3).
+    pub walked: Option<WalkedAlready<'a>>,
 }
+
+/// What a walk of a song's folder (named as [`measure`] names it) made already found there, named as the folder is,
+/// stopping at the first file the test it's given says ends it (given too), as a walk of the folder would. Nothing
+/// when it can't say: the folder is walked then.
+pub type WalkedAlready<'a> = &'a (dyn Fn(&str, &dyn Fn(&Path) -> bool) -> Option<Walked> + Sync);
 
 /// How [`measure`] compares a song's saves of the same size in a folder, to find the ones that are copies of another.
 #[derive(Clone, Copy, Default)]
@@ -259,8 +267,9 @@ pub fn measure(
     let folder = parent(&newest.path);
     let save_keys: HashSet<String> = saves.iter().map(|s| key(&s.path)).collect();
     // One walk of the folder says both whether it's the song's own and what's in it (the whole-app review of 6 Nov,
-    // X2-1: it was walked twice).
-    let own_files = own_folder_files(&folder, &save_keys, roots, stop)?;
+    // X2-1: it was walked twice), or none when the caller walked it already.
+    let walked = elsewhere.and_then(|e| e.walked);
+    let own_files = own_folder_files(&folder, &save_keys, roots, walked, stop)?;
     let own = own_files.is_some();
 
     let mut report = SongSpaceReport { own_folder: own, folder: folder.clone(), ..SongSpaceReport::default() };
@@ -471,11 +480,14 @@ pub fn thin<'a>(saves: &'a [SongSave], sitting_hours: u32, real: &RealDates) -> 
 /// song's saves), nor a folder that can't be read.
 ///
 /// The walk stops at the first project file that isn't the song's, so a folder of many songs isn't walked to its end
-/// for each of them, and what the walk meets after that file isn't kept.
+/// for each of them, and what the walk meets after that file isn't kept. What `walked` gives for the folder (a walk
+/// the caller made already, stopping at the same file) is used instead of a walk when it gives anything, by the same
+/// rules.
 fn own_folder_files(
     folder: &str,
     save_keys: &HashSet<String>,
     roots: &[String],
+    walked: Option<WalkedAlready<'_>>,
     stop: &AtomicBool,
 ) -> Result<Option<Vec<FileEntry>>, Stopped> {
     let real_folder = fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
@@ -487,6 +499,23 @@ fn own_folder_files(
         return Ok(None);
     }
     let dir = Path::new(folder);
+    // A project file that isn't the song's: another song's save, or yours in a "Backups" folder.
+    let anothers = |path: &Path| {
+        let p = path.to_string_lossy();
+        is_project_file(&p)
+            && !save_keys.contains(&key(&p))
+            && !relative_parts(dir, path).split_last().is_some_and(|(name, folders)| is_daws_autosave(folders, name))
+    };
+    if let Some(walked) = walked.and_then(|w| w(folder, &anothers)) {
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stopped);
+        }
+        // Another song's save that's only online takes no room here, but it's still there.
+        let mut met =
+            walked.files.iter().map(|f| f.path.as_path()).chain(walked.online_only.iter().map(PathBuf::as_path));
+        let shared = met.any(anothers);
+        return Ok((!shared).then_some(walked.files));
+    }
     // Ends the walk: set by the first project file that isn't the song's, or by `stop`.
     let enough = AtomicBool::new(false);
     let files = size::walk(dir, true, &enough, |path, meta| {
@@ -495,13 +524,9 @@ fn own_folder_files(
             enough.store(true, Ordering::Relaxed);
             return None;
         }
-        let p = path.to_string_lossy();
-        if is_project_file(&p) && !save_keys.contains(&key(&p)) {
-            let rel = relative_parts(dir, path);
-            if !rel.split_last().is_some_and(|(name, folders)| is_daws_autosave(folders, name)) {
-                enough.store(true, Ordering::Relaxed);
-                return None;
-            }
+        if anothers(path) {
+            enough.store(true, Ordering::Relaxed);
+            return None;
         }
         // What takes room here: a OneDrive file that's only online takes none.
         (!size::is_online_only(meta)).then(|| FileEntry {

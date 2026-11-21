@@ -283,7 +283,7 @@ fn compare(p: &StoredPhrase, notes: &[NoteEvent], folders: &[String]) -> Vec<Dif
     }
     check(&mut diffs, "role", p.role.name().to_owned(), a.role.name().to_owned());
     if p.role == a.role {
-        check(&mut diffs, "role reason", p.role_why.clone(), a.role_why.to_owned());
+        check(&mut diffs, "role reason", p.role_why.words(), a.role_why.words());
     }
     diffs
 }

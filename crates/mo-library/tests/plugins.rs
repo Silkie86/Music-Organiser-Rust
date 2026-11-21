@@ -111,10 +111,12 @@ fn clean_up_refuses_sample_folders_it_cannot_read() {
         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE roots (path TEXT);
         INSERT INTO roots VALUES ('C:\\Beats');
-        INSERT INTO settings VALUES ('sample_folders', '[\"D:\\\\Samples\", \"c:\\\\beats\", \"\"]');";
+        INSERT INTO settings VALUES ('sample_folders', '[\"D:\\\\Samples\", \"c:\\\\beats\", \"\"]');
+        INSERT INTO settings VALUES ('midi_folders', '[\"E:\\\\MIDI\", \"d:\\\\samples\"]');";
     let lib = Library::open_read_only(&make("roots.db", good)).unwrap();
-    // The project folder written twice counts once; an empty line is left out.
-    assert_eq!(lib.protected_roots().unwrap(), [r"C:\Beats", r"D:\Samples"]);
+    // The project folder written twice counts once; an empty line is left out. The MIDI folders are yours too (the
+    // whole-app review of 19 Nov, PM-7: Move's check just before it starts left them out).
+    assert_eq!(lib.protected_roots().unwrap(), [r"C:\Beats", r"D:\Samples", r"E:\MIDI"]);
 
     let bad = "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, name TEXT, daw TEXT);
         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
@@ -122,6 +124,10 @@ fn clean_up_refuses_sample_folders_it_cannot_read() {
     let lib = Library::open_read_only(&make("bad-roots.db", bad)).unwrap();
     // Read as no sample folders it could let yours go, so it's an error.
     assert!(lib.protected_roots().is_err());
+    let bad_midi = "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, name TEXT, daw TEXT);
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO settings VALUES ('midi_folders', 'E:\\MIDI');";
+    assert!(Library::open_read_only(&make("bad-midi-roots.db", bad_midi)).unwrap().protected_roots().is_err());
     // A setting that's NULL or missing is no folders.
     let none = "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, name TEXT, daw TEXT);
         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);

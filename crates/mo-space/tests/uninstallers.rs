@@ -94,3 +94,53 @@ fn another_versions_uninstaller_is_never_the_one_picked() {
     // No number: can't tell.
     assert!(!is_other_version("Ozone 9", &u("Ozone", "iZotope", "o.exe"), &[]));
 }
+
+/// The whole-app review of 19 Nov, PM-6: another plugin whose name holds this one's ("Massive X" for Massive) is never
+/// picked for you either, as Uninstall takes "pick it yourself" from the first one found.
+#[test]
+fn another_plugins_uninstaller_is_never_the_one_picked() {
+    let massive = u("Native Instruments Massive", "Native Instruments", "m.exe");
+    let massive_x = u("Native Instruments Massive X", "Native Instruments", "mx.exe");
+    let supermassive = u("ValhallaSupermassive", "Valhalla DSP, LLC", "v.exe");
+    assert!(is_other_version("Massive", &massive_x, &[]));
+    assert!(is_other_version("Massive", &supermassive, &[]));
+    assert!(!is_other_version("Massive", &massive, &[]));
+    assert!(!is_other_version("Massive X", &massive_x, &[]));
+    // Massive's own comes first; without it, every one found is another's.
+    let both = [massive_x.clone(), massive.clone()];
+    assert_eq!(for_plugin("Massive", "Native Instruments", &both, &[])[0], massive);
+    let found = for_plugin("Massive", "Native Instruments", &[massive_x, supermassive], &[]);
+    assert_eq!(found.len(), 2);
+    assert!(found.iter().all(|u| is_other_version("Massive", u, &[])), "{found:?}");
+    // Another plugin's: a word straight after its name.
+    assert!(is_other_version("Ozone", &u("iZotope Ozone Imager", "iZotope, Inc.", "i.exe"), &[]));
+    assert!(is_other_version("Serum", &u("SerumFX", "Xfer Records", "f.exe"), &[]));
+    assert!(is_other_version("Kontakt", &u("Kontakt Factory Library 2", "Native Instruments", "k.exe"), &[]));
+    // Not another plugin's: a format, a build, the uninstaller itself, what's in brackets, or a version after it.
+    let serums = [
+        "Xfer Serum x64",
+        "Serum_x64",
+        "Serum (64-bit)",
+        "Serum VST3",
+        "Serum Uninstaller",
+        "XferSerum",
+        "Xfer Serum 2",
+        "Serum mk II",
+    ];
+    for name in serums {
+        assert!(!is_other_version("Serum", &u(name, "Xfer Records", "s.exe"), &[]), "{name}");
+    }
+    assert!(!is_other_version("Analog Lab V", &u("Arturia Analog Lab V", "Arturia", "a.exe"), &[]));
+    assert!(!is_other_version("Ozone 9", &u("iZotope Ozone 9 Advanced", "iZotope, Inc.", "o.exe"), &[]));
+    assert!(!is_other_version("TAL-U-NO-LX", &u("TAL-U-NO-LX-V2", "TAL Software", "t.exe"), &[]));
+    assert!(!is_other_version("Pro-Q 3", &u("FabFilter Pro-Q 3 x64 3.24", "FabFilter", "q.exe"), &[]));
+    // After a version, only an edition or a format is this plugin's: another word is another product's.
+    let library = u("Native Instruments Battery 4 Factory Library", "Native Instruments", "l.exe");
+    assert!(is_other_version("Battery 4", &library, &[]));
+    assert!(!is_other_version("Battery 4", &u("Native Instruments Battery 4", "Native Instruments", "b.exe"), &[]));
+    assert!(!is_other_version("Ozone 9", &u("iZotope Ozone 9 Standard Edition", "iZotope, Inc.", "o.exe"), &[]));
+    assert!(!is_other_version("Serum 2", &u("Serum 2 (64-bit)", "Xfer Records", "s.exe"), &[]));
+    // A maker named as the plugin is: its name on its own is there too.
+    assert!(!is_other_version("Vital", &u("Vital Audio Vital", "Vital Audio", "v.exe"), &[]));
+    assert!(is_other_version("Vital", &u("Vital Audio VitalFX", "Vital Audio", "v.exe"), &[]));
+}

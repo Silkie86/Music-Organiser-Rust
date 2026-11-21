@@ -212,29 +212,36 @@ fn a_stop_stops_it_and_the_next_look_starts_again() {
 /// Bitwig does (its name, its place in the project and where the project was saved), as the converter's own tests make
 /// them.
 fn project(path: &Path, copy: &str, minutes: u64) {
+    project_with(path, &[copy], minutes);
+}
+
+/// [`project`], naming each of these copies.
+fn project_with(path: &Path, copies: &[&str], minutes: u64) {
     let text = |id: u32, t: &str| Field { id, value: Value::Str(Text::new(t)) };
     let mut doc = bitwig::decode(bitwig_fixtures::bitwig_template(bitwig_fixtures::Template::default())).unwrap();
-    let mut file = Object::new(0x7f00);
-    file.fields.push(text(0x7f03, copy));
-    file.fields.push(text(0x7f04, &format!("multi-samples/{copy}")));
-    file.fields.push(text(0x7f05, &format!(r"I:\Bitwig Studio\Projects\Song\multi-samples\{copy}")));
-    let file = doc.add(file);
-    let root = doc.root.unwrap();
-    doc.objects[file.0 as usize].parent = Some((root, 0x7f10));
-    doc.obj_mut(root).fields.push(Field { id: 0x7f10, value: Value::Obj(Slot::Obj(file)) });
-    // And a sample file as Bitwig keeps one (0x4a6): its name, its place in the project, and its file reference (0x2a,
-    // the path in 0x3b) where it was when the project was saved.
-    let mut reference = Object::new(0x2a);
-    reference.fields.push(text(0x3b, &format!(r"I:\Bitwig Studio\Projects\Song\multi-samples\{copy}")));
-    let reference = doc.add(reference);
-    let mut sample = Object::new(0x4a6);
-    sample.fields.push(text(0x512, copy));
-    sample.fields.push(text(0xd3a, &format!("multi-samples/{copy}")));
-    sample.fields.push(Field { id: 0xd3b, value: Value::Obj(Slot::Obj(reference)) });
-    let sample = doc.add(sample);
-    doc.objects[reference.0 as usize].parent = Some((sample, 0xd3b));
-    doc.objects[sample.0 as usize].parent = Some((root, 0x7f11));
-    doc.obj_mut(root).fields.push(Field { id: 0x7f11, value: Value::Obj(Slot::Obj(sample)) });
+    for copy in copies {
+        let mut file = Object::new(0x7f00);
+        file.fields.push(text(0x7f03, copy));
+        file.fields.push(text(0x7f04, &format!("multi-samples/{copy}")));
+        file.fields.push(text(0x7f05, &format!(r"I:\Bitwig Studio\Projects\Song\multi-samples\{copy}")));
+        let file = doc.add(file);
+        let root = doc.root.unwrap();
+        doc.objects[file.0 as usize].parent = Some((root, 0x7f10));
+        doc.obj_mut(root).fields.push(Field { id: 0x7f10, value: Value::Obj(Slot::Obj(file)) });
+        // And a sample file as Bitwig keeps one (0x4a6): its name, its place in the project, and its file reference (0x2a,
+        // the path in 0x3b) where it was when the project was saved.
+        let mut reference = Object::new(0x2a);
+        reference.fields.push(text(0x3b, &format!(r"I:\Bitwig Studio\Projects\Song\multi-samples\{copy}")));
+        let reference = doc.add(reference);
+        let mut sample = Object::new(0x4a6);
+        sample.fields.push(text(0x512, copy));
+        sample.fields.push(text(0xd3a, &format!("multi-samples/{copy}")));
+        sample.fields.push(Field { id: 0xd3b, value: Value::Obj(Slot::Obj(reference)) });
+        let sample = doc.add(sample);
+        doc.objects[reference.0 as usize].parent = Some((sample, 0xd3b));
+        doc.objects[sample.0 as usize].parent = Some((root, 0x7f11));
+        doc.obj_mut(root).fields.push(Field { id: 0x7f11, value: Value::Obj(Slot::Obj(sample)) });
+    }
     let zip = doc.zip().map(<[u8]>::to_vec);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, bitwig::encode(&doc, zip.as_deref()).unwrap()).unwrap();
@@ -266,7 +273,7 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
     let jobs = fixes.to_fix(&found);
     assert_eq!(jobs.iter().map(|j| name(&j.save)).collect::<Vec<_>>(), ["Song v2.bwproject"]);
     fixes.start(&jobs);
-    let Fixing::Written(fixed) = fix(&jobs[0], &note) else { panic!("the newest save should be fixed") };
+    let Fixing::Written(fixed) = fix(&jobs[0], &note, &stop) else { panic!("the newest save should be fixed") };
     assert_eq!(fixed, song.join("Song v2 (fixed).bwproject"));
     let back = bitwig::decode(fs::read(&fixed).unwrap()).unwrap();
     assert_eq!(back.body_error, None);
@@ -286,7 +293,7 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
     fixes.ticks.insert(song.join("Song v1.bwproject"), true);
     let jobs = fixes.to_fix(&again);
     assert_eq!(jobs.iter().map(|j| name(&j.save)).collect::<Vec<_>>(), ["Song v1.bwproject"]);
-    assert_eq!(fix(&jobs[0], &note), Fixing::Written(song.join("Song v1 (fixed).bwproject")));
+    assert_eq!(fix(&jobs[0], &note, &stop), Fixing::Written(song.join("Song v1 (fixed).bwproject")));
 
     // Each is on the app's note as Fix left it, so the button that sends every fixed project to the Recycle Bin may
     // send it; one you've saved in since stays (the whole-app review of 14 Nov, FX-5).
@@ -312,8 +319,11 @@ fn fix_writes_a_fixed_project_beside_the_ticked_saves_and_the_next_look_sees_it(
         save: other.saves[0].path.clone(),
         copies: other.copies.clone(),
         libraries: Vec::new(),
+        from: None,
     };
-    let Fixing::Failed(why) = fix(&job, &note) else { panic!("a save that uses none of the copies isn't fixed") };
+    let Fixing::Failed(why) = fix(&job, &note, &stop) else {
+        panic!("a save that uses none of the copies isn't fixed")
+    };
     assert!(why.contains("nothing was written"), "{why}");
 }
 
@@ -368,6 +378,7 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     let asked = |mut jobs: Vec<ToFree>| {
         for job in &mut jobs {
             job.elsewhere = Ok(Vec::new());
+            job.reread = mo_library::song_writes::BitwigReread::Done;
         }
         jobs
     };
@@ -395,7 +406,7 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     names.sort();
     assert_eq!(names, ["Song remix.bwproject", "Song v2.bwproject"]);
     for job in &jobs {
-        assert!(matches!(fix(job, &note), Fixing::Written(_)));
+        assert!(matches!(fix(job, &note, &stop), Fixing::Written(_)));
     }
     let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
     assert!(fixes.to_fix(&found).is_empty() && fixes.to_free(&found).is_empty(), "nothing is checked out of the box");
@@ -416,6 +427,20 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     let behind: Vec<String> = left_behind(&jobs[0]).iter().map(|p| name(p)).collect();
     assert_eq!(behind, ["Song v2.bwproject", "Song v1.bwproject", "Song v2-1.bwproject"]);
     let bin = FolderBin { dir: dir.join("bin"), held: Default::default() };
+    // Until the library has read every Bitwig save again for multisamples outside their folders, a multisample copy
+    // stays (FS-5).
+    let mut not_read = jobs[0].clone();
+    not_read.reread = mo_library::song_writes::BitwigReread::Waiting;
+    let done = free(&not_read, &bin, &stop);
+    assert!(done.removed.is_empty() && !done.problems.is_empty(), "{:?}", done.problems);
+    assert!(done.problems.iter().all(|p| p.why.contains("still reading")), "{:?}", done.problems);
+    not_read.reread = mo_library::song_writes::BitwigReread::Owed(2);
+    let done = free(&not_read, &bin, &stop);
+    assert!(
+        done.problems.iter().any(|p| p.why.contains("2 Bitwig saves couldn't be read again")),
+        "{:?}",
+        done.problems
+    );
     // Until the library has been asked who else uses them, nothing goes; and as nothing went, the fixed project's mark
     // (put on before the first copy would go: FS-23) comes off again.
     let done = free_noted(&unasked[0], &bin, &stop, &note, 100);
@@ -479,15 +504,45 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
         "{:?}",
         done.problems
     );
+    // The card gives that one reason, not the general one (FS-15).
+    let words = mo_app::space_bitwig::freed_words(&done).unwrap_err();
+    assert!(words.starts_with("None went") && words.contains("saved again"), "{words}");
     fs::File::options()
         .write(true)
         .open(&remix)
         .unwrap()
         .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + 30 * 60))
         .unwrap();
-    // A save the library knows in this folder is the folder's own check's to judge: it doesn't keep the copy.
+    // An FL Studio save in this folder that uses the copy keeps it: the folder's own check reads only Bitwig files
+    // (FS-17).
     let copy = song.join("multi-samples/Kicks-2.multisample").to_string_lossy().into_owned();
-    used.elsewhere = Ok(vec![(copy, song.join("Song v1.bwproject").to_string_lossy().into_owned())]);
+    let flp = song.join("Song.flp");
+    fs::write(&flp, b"an FL Studio save").unwrap();
+    used.elsewhere = Ok(vec![(copy.clone(), flp.to_string_lossy().into_owned())]);
+    let done = free(&used, &bin, &stop);
+    assert!(done.removed.is_empty(), "{:?}", done.problems);
+    assert!(done.problems.iter().any(|p| p.why.contains("Song.flp uses")), "{:?}", done.problems);
+    fs::remove_file(&flp).unwrap();
+    // So does a save on a drive that's away now (its folder can't be opened).
+    let away = if cfg!(windows) {
+        r"B:\Projects\Away\Away.bwproject"
+    } else {
+        "/no-such-drive-mo-test/Projects/Away/Away.bwproject"
+    };
+    let away = away.to_owned();
+    used.elsewhere = Ok(vec![(copy.clone(), away)]);
+    let done = free(&used, &bin, &stop);
+    assert!(done.removed.is_empty(), "{:?}", done.problems);
+    assert!(done.problems.iter().any(|p| p.why.contains("can't be opened now")), "{:?}", done.problems);
+    // A save the library knows in this folder is the folder's own check's to judge, one gone from a folder that's
+    // there is gone, and so is one whose whole folder went from a drive that's here: none keeps the copy.
+    let gone = studio.join("Projects/Elsewhere/Gone.bwproject").to_string_lossy().into_owned();
+    let folder_gone = studio.join("Projects/Deleted/Deleted.bwproject").to_string_lossy().into_owned();
+    used.elsewhere = Ok(vec![
+        (copy.clone(), song.join("Song v1.bwproject").to_string_lossy().into_owned()),
+        (copy.clone(), gone),
+        (copy, folder_gone),
+    ]);
     let done = free_noted(&used, &bin, &stop, &note, 200);
     assert_eq!(done.removed.len(), 1, "{:?}", done.problems);
     assert!(!song.join("multi-samples/Kicks-2.multisample").exists());
@@ -516,4 +571,158 @@ fn free_the_space_sends_a_copy_once_every_song_using_it_is_fixed_and_checked() {
     for f in [&fixed, &remix_fixed] {
         assert_eq!(judged(f), Ok(()), "{}", f.display());
     }
+}
+
+/// A Recycle Bin that, as the first copy goes, has the song saved again in Bitwig (one Ctrl+S while Free runs).
+struct SavedMeanwhile<'a> {
+    bin: FolderBin,
+    save: &'a Path,
+}
+
+impl mo_space::clean::Bin for SavedMeanwhile<'_> {
+    fn send(&self, path: &Path) -> Result<(), String> {
+        self.bin.send(path)?;
+        fs::File::options().write(true).open(self.save).unwrap().set_modified(SystemTime::now()).unwrap();
+        Ok(())
+    }
+    fn find(&self, removed: &mut [mo_space::clean::Removed]) -> Vec<mo_space::clean::Problem> {
+        self.bin.find(removed)
+    }
+    fn put_back(&self, removed: &[mo_space::clean::Removed]) -> Vec<mo_space::clean::Problem> {
+        self.bin.put_back(removed)
+    }
+}
+
+/// The song saved again while Free the space runs: the copies not gone yet stay (the whole-app review of 19 Nov, FS-18).
+#[test]
+fn a_save_made_while_free_the_space_runs_keeps_the_rest() {
+    let dir = fixtures("mo-app-space-bitwig-free-meanwhile");
+    let studio = dir.join("Bitwig Studio");
+    write(&studio, "Library/Multisamples/Kicks.multisample", b"<multisample kicks/>");
+    write(&studio, "Library/Multisamples/Snare.multisample", b"<multisample snare/>");
+    let song = studio.join("Projects/Song");
+    write(&song, "multi-samples/Kicks-2.multisample", b"<multisample kicks/>");
+    write(&song, "multi-samples/Snare-2.multisample", b"<multisample snare/>");
+    let save = song.join("Song.bwproject");
+    project(&save, "Kicks-2.multisample", 10);
+    let note = dir.join(space_fix_note::FILE_NAME);
+    let roots = [studio.join("Projects")];
+    let stop = AtomicBool::new(false);
+    let mut index = None;
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+    let mut fixes = Fixes::default();
+    for job in fixes.to_fix(&found) {
+        assert!(matches!(fix(&job, &note, &stop), Fixing::Written(_)));
+    }
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+    fixes.set_tick(Some(&found), save.clone(), true);
+    let mut jobs = fixes.to_free(&found);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].project.copies.len(), 2);
+    // The library's rows for every project at once: each project keeps the ones that name its own copies, in any
+    // letter case or drive (FS-12).
+    let kicks = song.join("multi-samples/Kicks-2.multisample").to_string_lossy().replace('/', "\\").to_uppercase();
+    let rows = [
+        (kicks, "Other.bwproject".to_owned()),
+        ("Q:/Elsewhere/multi-samples/Kicks-2.multisample".to_owned(), "Elsewhere.bwproject".to_owned()),
+    ];
+    let mine = mo_app::space_bitwig::rows_for(&jobs[0], &rows);
+    assert_eq!(mine.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(), ["Other.bwproject"]);
+    jobs[0].elsewhere = Ok(Vec::new());
+    jobs[0].reread = mo_library::song_writes::BitwigReread::Done;
+    let bin = SavedMeanwhile { bin: FolderBin { dir: dir.join("bin"), held: Default::default() }, save: &save };
+    let done = mo_app::space_bitwig::free(&jobs[0], &bin, &stop);
+    assert_eq!(done.removed.len(), 1, "{:?}", done.problems);
+    assert!(done.problems.iter().any(|p| p.why.contains("saved again")), "{:?}", done.problems);
+    assert_eq!(
+        ["Kicks-2", "Snare-2"].map(|c| song.join(format!("multi-samples/{c}.multisample")).is_file()),
+        [false, true]
+    );
+}
+
+#[test]
+fn a_fixed_project_that_still_uses_a_copy_found_later_is_fixed_again_and_its_copies_go() {
+    // The whole-app review of 19 Nov, FS-3: Fix ran before the Library had the snare; once it has, Free the space
+    // finds the song's fixed project still uses that copy, and Fix writes the next one from it.
+    use mo_app::space_bitwig::{fixed_still_using, free, left_behind, older_fixed};
+    let dir = fixtures("mo-app-space-bitwig-fixed-again");
+    let studio = dir.join("Bitwig Studio");
+    let (kicks, snare) = (b"<multisample kicks/>", b"<multisample snare/>");
+    write(&studio, "Library/Multisamples/Kicks.multisample", kicks);
+    let song = studio.join("Projects/Song");
+    let note = dir.join(space_fix_note::FILE_NAME);
+    write(&song, "multi-samples/Kicks-2.multisample", kicks);
+    write(&song, "multi-samples/Snare-2.multisample", snare);
+    let save = song.join("Song.bwproject");
+    project_with(&save, &["Kicks-2.multisample", "Snare-2.multisample"], 10);
+    let roots = [studio.join("Projects")];
+    let stop = AtomicBool::new(false);
+    let mut index = None;
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+    let mut fixes = Fixes::default();
+    let jobs = fixes.to_fix(&found);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].copies.len(), 1, "only the kicks are a copy so far");
+    let Fixing::Written(first) = fix(&jobs[0], &note, &stop) else { panic!("it's fixed") };
+    assert_eq!(name(&first), "Song (fixed).bwproject");
+
+    // The Library gets the snare: the look lists both copies, and the song is still fixed.
+    write(&studio, "Library/Multisamples/Snare.multisample", snare);
+    index = None;
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+    assert_eq!(found.projects[0].copies.len(), 2);
+    assert!(fixes.to_fix(&found).is_empty());
+    fixes.set_tick(Some(&found), save.clone(), true);
+    let mut jobs = fixes.to_free(&found);
+    jobs[0].elsewhere = Ok(Vec::new());
+    jobs[0].reread = mo_library::song_writes::BitwigReread::Done;
+    let bin = FolderBin { dir: dir.join("bin"), held: Default::default() };
+    let done = free(&jobs[0], &bin, &stop);
+    let gone: Vec<String> = done.removed.iter().map(|r| name(Path::new(&r.path))).collect();
+    assert_eq!(gone, ["Kicks-2.multisample"]);
+    assert!(done.problems.iter().any(|p| p.why.contains("Song (fixed).bwproject still uses")), "{:?}", done.problems);
+    let still = fixed_still_using(&jobs[0]);
+    assert_eq!(still, [(save.clone(), first.clone(), 1)]);
+
+    // Fix is offered again, from the fixed project: the next one points the snare at the Library too.
+    fixes.still_uses(still, std::slice::from_ref(&save));
+    index = None;
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+    let jobs = fixes.to_fix(&found);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].from.as_deref(), Some(first.as_path()));
+    let Fixing::Written(second) = fix(&jobs[0], &note, &stop) else { panic!("it's fixed again") };
+    assert_eq!(name(&second), "Song (fixed 2).bwproject");
+    fixes.start(&jobs);
+    fixes.done(save.clone(), Fixing::Written(second.clone()));
+    fixes.finished();
+
+    // Heard, the snare goes too: the first fixed project is an older one of the song, so it's left behind with it.
+    let found = look(&roots, &[], &[], &mut index, None, None, &stop, |_, _| {}).unwrap();
+    fixes.looked();
+    fixes.set_tick(Some(&found), save.clone(), true);
+    let mut jobs = fixes.to_free(&found);
+    assert_eq!(jobs[0].checked, [(save.clone(), second.clone())]);
+    jobs[0].elsewhere = Ok(Vec::new());
+    jobs[0].reread = mo_library::song_writes::BitwigReread::Done;
+    jobs[0].older_fixed = older_fixed(&jobs[0], &note);
+    assert_eq!(jobs[0].older_fixed.iter().map(|(f, _)| name(f)).collect::<Vec<_>>(), ["Song (fixed).bwproject"]);
+    let behind: Vec<String> = left_behind(&jobs[0]).iter().map(|p| name(p)).collect();
+    assert_eq!(behind, ["Song.bwproject", "Song (fixed).bwproject"]);
+    let done = free(&jobs[0], &bin, &stop);
+    let gone: Vec<String> = done.removed.iter().map(|r| name(Path::new(&r.path))).collect();
+    assert_eq!(gone, ["Snare-2.multisample"], "{:?}", done.problems);
+    assert!(fixed_still_using(&jobs[0]).is_empty());
+    for kept in [&save, &first, &second] {
+        assert!(kept.is_file(), "every project stays");
+    }
+    // An older fixed project you've saved in since Fix wrote it is yours: it isn't left behind, so it keeps its copies.
+    fs::write(&first, [fs::read(&first).unwrap(), b"saved".to_vec()].concat()).unwrap();
+    assert!(older_fixed(&jobs[0], &note).is_empty());
+    // And one saved in while Free runs stops it.
+    let mut saved_meanwhile = jobs[0].clone();
+    saved_meanwhile.older_fixed = vec![(first.clone(), Some(SystemTime::UNIX_EPOCH))];
+    let done = free(&saved_meanwhile, &bin, &stop);
+    assert!(!done.problems.is_empty(), "the copy it names is asked about");
+    assert!(done.problems.iter().all(|p| p.why.contains("was saved again")), "{:?}", done.problems);
 }

@@ -97,6 +97,10 @@ pub const FROM_CSHARP: &[&str] = &[
     crate::sounds::VIEW_KEY,
     crate::sounds::AUTOPLAY_KEY,
     crate::sounds::REDISCOVER_COUNT_KEY,
+    // The program each DAW's songs open in, chosen on the C# app's Settings (the 19 Nov review, SS-4).
+    crate::shell::DAW_PROGRAMS[0].1,
+    crate::shell::DAW_PROGRAMS[1].1,
+    crate::shell::DAW_PROGRAMS[2].1,
 ];
 
 /// The settings in use: this app's own changes, over the C# app's choices.
@@ -266,6 +270,12 @@ pub fn opens_full_screen(settings: &AppSettings) -> bool {
     settings.get(FULL_SCREEN_KEY) == Some("1")
 }
 
+/// Whether a window this wide (in pixels) is clearly narrower than its screen: under nine tenths of it. A maximised
+/// window loses only its frame, a full-screen one nothing, so either one this narrow didn't fill the screen.
+pub fn smaller_than_screen(window: u32, screen: u32) -> bool {
+    u64::from(window) * 10 < u64::from(screen) * 9
+}
+
 /// The place the app opens on, from the settings.
 pub fn start_place(settings: &AppSettings) -> places::Place {
     places::Place::start_place(settings.get(START_PAGE_KEY), settings.get(LAST_PAGE_KEY))
@@ -283,6 +293,18 @@ mod tests {
         assert!(!opens_full_screen(&settings));
         settings.set(FULL_SCREEN_KEY, "1");
         assert!(opens_full_screen(&settings));
+    }
+
+    #[test]
+    fn a_window_much_narrower_than_its_screen_did_not_fill_it() {
+        // Solomon's ultrawide, 19 Nov: maximised but 1440 wide on a 3440 screen.
+        assert!(smaller_than_screen(1440, 3440));
+        // Maximised loses only the frame; full screen nothing.
+        assert!(!smaller_than_screen(3440, 3440));
+        assert!(!smaller_than_screen(3424, 3440));
+        assert!(!smaller_than_screen(1920, 1920));
+        assert!(smaller_than_screen(0, 1920));
+        assert!(!smaller_than_screen(0, 0));
     }
 
     #[test]

@@ -101,14 +101,44 @@ fn thousands(n: u64) -> String {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows_memory {
-    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
+    };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
+    /// `in_ram` is the app's own memory in RAM (its private working set), so it counts the same memory as `held`
+    /// (its private commit): the whole working set also counts the program file, Windows' and the graphics driver's
+    /// shared pages, which `held` leaves out (the 19 Nov review, BT-6). Windows before 11 / Server 2022 doesn't fill
+    /// the private part in; then the whole working set is used, as before.
     pub fn memory_now() -> Option<super::Memory> {
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX2 {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: the documented call, with a counters struct of the size it's told (the EX2 struct starts with the
+        // plain one's fields, as the call expects); GetCurrentProcess is a pseudo handle that needs no closing.
+        let ok = unsafe {
+            K32GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                (&raw mut counters).cast::<PROCESS_MEMORY_COUNTERS>(),
+                counters.cb,
+            )
+        };
+        if ok != 0 {
+            let in_ram = if counters.PrivateWorkingSetSize > 0 {
+                counters.PrivateWorkingSetSize
+            } else {
+                counters.WorkingSetSize
+            };
+            return Some(super::Memory {
+                page_faults: u64::from(counters.PageFaultCount),
+                in_ram: in_ram as u64,
+                held: counters.PagefileUsage as u64,
+            });
+        }
         let mut counters =
             PROCESS_MEMORY_COUNTERS { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
-        // SAFETY: the documented call, with a counters struct of the size it's told; GetCurrentProcess is a
-        // pseudo handle that needs no closing.
+        // SAFETY: as above, with the plain struct.
         let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
         (ok != 0).then(|| super::Memory {
             page_faults: u64::from(counters.PageFaultCount),

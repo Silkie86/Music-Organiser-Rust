@@ -11,6 +11,52 @@ pub fn daw_exe_key(daw: &str) -> String {
     format!("daw_exe:{daw}")
 }
 
+/// The DAWs whose program can be chosen on Settings › DAWs, by the names their saves carry in the library: each with
+/// its setting ([`daw_exe_key`]) and the ending of its projects, which say which program the system opens them with
+/// when none is chosen.
+pub const DAW_PROGRAMS: [(&str, &str, &str); 3] = [
+    (mo_formats::bitwig::reader::DAW, "daw_exe:Bitwig Studio", ".bwproject"),
+    (mo_formats::fl::DAW, "daw_exe:FL Studio", ".flp"),
+    (mo_formats::studio_one::DAW, "daw_exe:Studio One", ".song"),
+];
+
+/// A program as a card names it: its folder and its file ("FL Studio 2025\FL64.exe"), or a Mac's .app on its own.
+pub fn program_name(exe: &str) -> String {
+    let exe = exe.trim().trim_end_matches(['\\', '/']);
+    let file = mo_formats::paths::file_name(exe);
+    let folder = mo_formats::paths::file_name(folder_of(exe).trim_end_matches(['\\', '/']));
+    let slash = exe.get(..exe.len() - file.len()).and_then(|f| f.chars().next_back()).unwrap_or('\\');
+    if is_app(exe) || folder.is_empty() || folder.ends_with(':') {
+        file.to_owned()
+    } else {
+        format!("{folder}{slash}{file}")
+    }
+}
+
+/// What a card says once a save is sent to its DAW: `chosen`, the program picked for it on Settings › DAWs (as kept:
+/// "" is none); `used`, whether that one was there to open it.
+pub fn sent_to(daw: &str, chosen: Option<&str>, used: bool, os: Os) -> String {
+    match chosen.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(exe) if used => format!("Sent to {daw} ({}). It opens there in a moment.", program_name(exe)),
+        Some(exe) => format!("Sent to {daw}. {}", not_there(exe, os)),
+        None => format!("Sent to {daw}. It opens there in a moment."),
+    }
+}
+
+/// What a card adds about the program a file went to, when one is picked on Settings › DAWs (see [`sent_to`]).
+pub fn sent_with(chosen: Option<&str>, used: bool, os: Os) -> Option<String> {
+    let exe = chosen.map(str::trim).filter(|c| !c.is_empty())?;
+    Some(if used { format!("Sent to {}.", program_name(exe)) } else { not_there(exe, os) })
+}
+
+fn not_there(exe: &str, os: Os) -> String {
+    format!(
+        "The program chosen for it on Settings \u{203a} DAWs ({}) isn't there now, so {} picked one.",
+        program_name(exe),
+        os.name()
+    )
+}
+
 /// The systems the app runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Os {
@@ -27,6 +73,15 @@ impl Os {
     } else {
         Os::Linux
     };
+
+    /// The system as words say it opens a file: "Windows", "your Mac", "your computer".
+    pub fn name(self) -> &'static str {
+        match self {
+            Os::Windows => "Windows",
+            Os::Mac => "your Mac",
+            Os::Linux => "your computer",
+        }
+    }
 }
 
 /// A program to start and what to give it.
@@ -34,6 +89,10 @@ impl Os {
 pub struct Launch {
     pub program: String,
     pub args: Vec<String>,
+    /// Whether `args` go on the program's command line just as they are, with the quotes the app put in (Windows
+    /// only). Explorer reads its command line its own way: a comma outside quotes ends a word, and Rust only quotes a
+    /// word with a space in it (the 19 Nov review, DA-7).
+    pub raw: bool,
     /// How to tell it worked: by its exit code, or not at all.
     pub check: Check,
 }
@@ -50,7 +109,20 @@ pub enum Check {
 }
 
 fn launch(program: &str, args: &[&str], check: Check) -> Launch {
-    Launch { program: program.to_owned(), args: args.iter().map(|a| (*a).to_owned()).collect(), check }
+    Launch { program: program.to_owned(), args: args.iter().map(|a| (*a).to_owned()).collect(), raw: false, check }
+}
+
+/// Explorer, given `arg` just as it is (see [`Launch::raw`]).
+fn explorer(arg: String) -> Launch {
+    Launch { program: "explorer.exe".to_owned(), args: vec![arg], raw: true, check: Check::Ends }
+}
+
+/// A path (or a web address) as Explorer's command line takes it: in quotes, so a comma in it can't end the word (a
+/// Windows path can't hold a quote, so this is always safe), without a slash at its end, which would sit against the
+/// closing quote. A drive's own folder ("C:\") keeps its slash and needs no quotes.
+fn for_explorer(path: &str) -> String {
+    let trimmed = path.trim_end_matches('\\');
+    if trimmed.is_empty() || trimmed.ends_with(':') { path.to_owned() } else { format!("\"{trimmed}\"") }
 }
 
 /// The program picked in Settings, written as [`open`] reads it, when it's there: an .exe (any file), or a Mac's
@@ -71,7 +143,7 @@ pub fn open(path: &str, exe: Option<&str>, os: Os) -> Launch {
     match (os, exe) {
         (Os::Mac, Some(app)) if is_app(app) => launch("open", &["-a", app, path], Check::ExitCode),
         (_, Some(exe)) => launch(exe, &[path], Check::Started),
-        (Os::Windows, None) => launch("explorer.exe", &[path], Check::Ends),
+        (Os::Windows, None) => explorer(for_explorer(path)),
         (Os::Mac, None) => launch("open", &[path], Check::ExitCode),
         (Os::Linux, None) => launch("xdg-open", &[path], Check::ExitCode),
     }
@@ -84,8 +156,9 @@ pub fn reveal(path: &str, folder: &str, exists: bool, os: Os) -> Launch {
         return open(folder, None, os);
     }
     match os {
-        // Explorer wants "/select," and the path as two words, as the C# app passes them.
-        Os::Windows => launch("explorer.exe", &["/select,", path], Check::Ends),
+        // One word, "/select," and the path in quotes: Explorer splits its command line at a comma outside quotes,
+        // so a path with a comma and no space (which Rust wouldn't quote) picked nothing.
+        Os::Windows => explorer(format!("/select,{}", for_explorer(path))),
         Os::Mac => launch("open", &["-R", path], Check::ExitCode),
         // Not every Linux file manager can pick a file; they all open a folder.
         Os::Linux => open(folder, None, os),
@@ -152,7 +225,8 @@ pub fn path_tails(path: &str) -> Vec<String> {
 /// waited for, so call this from a background thread; a DAW is left running.
 pub fn run(l: &Launch) -> io::Result<()> {
     let mut command = Command::new(&l.program);
-    command.args(&l.args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    add_args(&mut command, l);
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let mut child = detached(command)?;
     match l.check {
         Check::Started => {
@@ -169,7 +243,26 @@ pub fn run(l: &Launch) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn detached(mut command: Command) -> io::Result<std::process::Child> {
+fn add_args(command: &mut Command, l: &Launch) {
+    use std::os::windows::process::CommandExt;
+    if l.raw {
+        for arg in &l.args {
+            command.raw_arg(arg);
+        }
+    } else {
+        command.args(&l.args);
+    }
+}
+
+/// Anywhere but Windows a program gets its words one by one, never as a command line to read: there's nothing to
+/// quote.
+#[cfg(not(windows))]
+fn add_args(command: &mut Command, l: &Launch) {
+    command.args(&l.args);
+}
+
+#[cfg(windows)]
+pub(crate) fn detached(mut command: Command) -> io::Result<std::process::Child> {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x8;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
@@ -210,7 +303,7 @@ pub fn get_ready() {
 }
 
 #[cfg(unix)]
-fn detached(command: Command) -> io::Result<std::process::Child> {
+pub(crate) fn detached(command: Command) -> io::Result<std::process::Child> {
     let Some(starter) = STARTER.get() else { return spawn_detached(command) };
     let (back, answer) = std::sync::mpsc::channel();
     match starter.send((command, back)) {
@@ -228,7 +321,7 @@ fn spawn_detached(mut command: Command) -> io::Result<std::process::Child> {
 }
 
 #[cfg(not(any(windows, unix)))]
-fn detached(mut command: Command) -> io::Result<std::process::Child> {
+pub(crate) fn detached(mut command: Command) -> io::Result<std::process::Child> {
     command.spawn()
 }
 
@@ -247,8 +340,9 @@ mod tests {
     fn opens_with_the_daw_from_settings_or_the_system() {
         let fl = r"C:\Program Files\Image-Line\FL Studio 2024\FL64.exe";
         assert_eq!(open(SONG, Some(fl), Os::Windows), launch(fl, &[SONG], Check::Started));
-        assert_eq!(open(SONG, Some("  "), Os::Windows), launch("explorer.exe", &[SONG], Check::Ends));
-        assert_eq!(open(SONG, None, Os::Windows), launch("explorer.exe", &[SONG], Check::Ends));
+        let through_explorer = explorer(format!("\"{SONG}\""));
+        assert_eq!(open(SONG, Some("  "), Os::Windows), through_explorer);
+        assert_eq!(open(SONG, None, Os::Windows), through_explorer);
         let bitwig = open("/m/a.bwproject", Some("/Applications/Bitwig Studio.APP/"), Os::Mac);
         assert_eq!((bitwig.args[0].as_str(), bitwig.check), ("-a", Check::ExitCode));
         assert_eq!(open("/m/a.bwproject", None, Os::Mac), launch("open", &["/m/a.bwproject"], Check::ExitCode));
@@ -259,12 +353,69 @@ mod tests {
     }
 
     #[test]
+    fn each_daw_s_program_is_kept_under_the_c_sharp_app_s_name() {
+        for (daw, key, ending) in DAW_PROGRAMS {
+            assert_eq!(key, daw_exe_key(daw));
+            assert!(ending.starts_with('.'));
+        }
+        assert_eq!(DAW_PROGRAMS.map(|(daw, ..)| daw), ["Bitwig Studio", "FL Studio", "Studio One"]);
+    }
+
+    #[test]
+    fn a_card_names_the_program_a_save_went_to() {
+        let fl = r"C:\Program Files\Image-Line\FL Studio 2025\FL64.exe";
+        assert_eq!(program_name(fl), r"FL Studio 2025\FL64.exe");
+        assert_eq!(program_name(r"C:\FL64.exe"), "FL64.exe");
+        assert_eq!(program_name("/Applications/Bitwig Studio.app/"), "Bitwig Studio.app");
+        assert_eq!(program_name("/opt/bitwig-studio/bitwig-studio"), "bitwig-studio/bitwig-studio");
+        assert_eq!(
+            sent_to("FL Studio", Some(fl), true, Os::Windows),
+            r"Sent to FL Studio (FL Studio 2025\FL64.exe). It opens there in a moment."
+        );
+        assert_eq!(
+            sent_to("FL Studio", Some(""), false, Os::Windows),
+            "Sent to FL Studio. It opens there in a moment."
+        );
+        assert_eq!(sent_to("FL Studio", None, false, Os::Windows), "Sent to FL Studio. It opens there in a moment.");
+        assert_eq!(sent_with(Some(fl), true, Os::Windows).as_deref(), Some(r"Sent to FL Studio 2025\FL64.exe."));
+        assert_eq!(sent_with(Some(" "), true, Os::Windows), None);
+        assert!(sent_with(Some(fl), false, Os::Mac).is_some_and(|s| s.ends_with("so your Mac picked one.")));
+        assert_eq!(
+            sent_to("FL Studio", Some(fl), false, Os::Windows),
+            "Sent to FL Studio. The program chosen for it on Settings \u{203a} DAWs (FL Studio 2025\\FL64.exe) isn't \
+             there now, so Windows picked one."
+        );
+    }
+
+    #[test]
     fn reveal_picks_the_file_or_opens_its_folder() {
         let folder = r"C:\Music\Night Drive";
-        assert_eq!(reveal(SONG, folder, true, Os::Windows), launch("explorer.exe", &["/select,", SONG], Check::Ends));
-        assert_eq!(reveal(SONG, folder, false, Os::Windows), launch("explorer.exe", &[folder], Check::Ends));
+        assert_eq!(reveal(SONG, folder, true, Os::Windows), explorer(format!("/select,\"{SONG}\"")));
+        assert_eq!(reveal(SONG, folder, false, Os::Windows), explorer(format!("\"{folder}\"")));
         assert_eq!(reveal("/m/s/a.flp", "/m/s", true, Os::Mac), launch("open", &["-R", "/m/s/a.flp"], Check::ExitCode));
         assert_eq!(reveal("/m/s/a.flp", "/m/s", true, Os::Linux), launch("xdg-open", &["/m/s"], Check::ExitCode));
+    }
+
+    #[test]
+    fn explorer_gets_a_path_with_a_comma_whole() {
+        // A comma and no space: Rust wouldn't quote it, and Explorer would split it at the comma (DA-7).
+        let kick = r"I:\Samples\Kick,Snare\kick01.wav";
+        let shown = reveal(kick, r"I:\Samples\Kick,Snare", true, Os::Windows);
+        assert_eq!(shown.args, [r#"/select,"I:\Samples\Kick,Snare\kick01.wav""#]);
+        assert!(shown.raw);
+        assert_eq!(open(r"I:\Projects\Beat,v2.flp", None, Os::Windows).args, [r#""I:\Projects\Beat,v2.flp""#]);
+        // A folder's last slash would sit against the quote; a drive's own folder keeps it, with no quotes.
+        assert_eq!(open(r"I:\Samples\Kick,Snare\", None, Os::Windows).args, [r#""I:\Samples\Kick,Snare""#]);
+        assert_eq!(reveal(r"C:\song.flp", r"C:\", false, Os::Windows).args, [r"C:\"]);
+        assert_eq!(open(r"\\nas\share\", None, Os::Windows).args, [r#""\\nas\share""#]);
+        // A web address goes in quotes too.
+        let url = "https://www.google.com/search?q=Xfer%20Serum";
+        assert_eq!(open(url, None, Os::Windows).args, [format!("\"{url}\"")]);
+        // A DAW, a Mac and Linux get the path as a word of its own, with nothing added.
+        let fl = r"C:\Program Files\Image-Line\FL Studio 2025\FL64.exe";
+        let to_fl = open(r"I:\Projects\Beat,v2.flp", Some(fl), Os::Windows);
+        assert_eq!((to_fl.args, to_fl.raw), (vec![r"I:\Projects\Beat,v2.flp".to_owned()], false));
+        assert!(!reveal("/m/Kick,Snare/a.wav", "/m/Kick,Snare", true, Os::Mac).raw);
     }
 
     #[test]
@@ -316,6 +467,7 @@ mod starter_tests {
         let l = Launch {
             program: "sh".to_owned(),
             args: vec!["-c".to_owned(), format!("cut -d' ' -f19 /proc/self/stat > '{}'", out.display())],
+            raw: false,
             check: Check::ExitCode,
         };
         run(&l).ok()?;

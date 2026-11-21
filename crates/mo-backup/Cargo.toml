@@ -14,7 +14,7 @@ mo-formats = { path = "../mo-formats" }
 # Sizes, folder walks that leave links alone, and the song Compact list the lean rules come from.
 mo-space = { path = "../mo-space" }
 rayon.workspace = true
-# Each copy is read back and its SHA-256 checked against what was read from your folder.
+# Each copy is read back from the drive and its SHA-256 checked against what was read from your folder.
 sha2 = "0.10"
 # A song zip's check numbers, to see a file whose time moved is still the same bytes.
 crc32fast = "1.5"
@@ -25,6 +25,11 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # system without unsafe code here. Already in the build for folder walks.
 [target.'cfg(windows)'.dependencies]
 winapi-util = "0.1.11"
+
+# Reading a copy back from the drive itself: Linux is told to let go of what it holds of the copy, a Mac to keep
+# none of it. Already in the build for mo-space.
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 
 # Folder links in the tests, made the way Windows has them (a junction: no administrator rights needed).
 [target.'cfg(windows)'.dev-dependencies]

@@ -4,8 +4,8 @@
 
 use std::path::PathBuf;
 
-use mo_library::song_fields::{self, Change, Kept, SaveRow};
-use mo_library::song_writes::{self, Batch, Missing, Put};
+use mo_library::song_fields::{self, Change, KeepCopy, Kept, SaveRow};
+use mo_library::song_writes::{self, Batch, BitwigReread, Missing, Put};
 use mo_library::songs_db::{self, State};
 use mo_library::{Library, PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail};
 use rusqlite::Connection;
@@ -309,25 +309,40 @@ fn the_fl_studio_saves_the_app_kept_are_read_again_once_for_their_muted_samples(
         .map(|(detail, known_as)| Put { detail, known_as: known_as.map(str::to_owned) })
         .collect();
     song_writes::write(&songs, &Batch { put, ..Batch::default() }).unwrap();
-    // The FL Studio ones that aren't in library.db as they are, whenever they changed.
+    // The FL Studio ones that aren't in library.db as they are, whenever they changed; and every Bitwig save, once,
+    // for the multisamples it finds outside its folder (FS-5).
     let mut ids = song_writes::to_mend(&songs).unwrap().unwrap();
     ids.sort_unstable();
-    assert_eq!(ids, [1, 2, 3]);
+    assert_eq!(ids, [1, 2, 3, 4]);
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Waiting);
     // With library.db gone: a guess, those changed since a month before the library became the app's own.
     std::fs::rename(dir.join("library.db"), dir.join("library.db.away")).unwrap();
-    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2, 4]));
     // Read again but for two that couldn't be: noted with them, and only those still FL Studio saves there are
-    // given after that (one since gone missing, one no longer in the library).
+    // given after that (one since gone missing, one no longer in the library); the Bitwig one was read.
     assert!(!song_writes::mend_noted(&songs), "library.db is still wanted for the mend");
     let noted = song_writes::write(&songs, &Batch { mended: true, owed: vec![2, 5, 99], ..Batch::default() }).unwrap();
     assert!(noted.mended);
     assert!(song_writes::mend_noted(&songs), "from here on library.db isn't looked at");
     assert!(!song_writes::mend_noted(&dir.join("no-songs.db")));
     assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Done);
+    // A Bitwig save owed keeps Free the space waiting till it's read.
+    song_writes::write(&songs, &Batch { mended: true, owed: vec![4], ..Batch::default() }).unwrap();
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Owed(1));
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![4]));
     // Once they're read again, a batch notes it (on its own too): none after that.
     let noted = song_writes::write(&songs, &Batch { mended: true, ..Batch::default() }).unwrap();
     assert!(noted.mended);
     assert_eq!(song_writes::to_mend(&songs).unwrap(), None);
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Done);
+    // One read again in the batch that noted the rest that the library then wouldn't take: owed after all, once.
+    song_writes::owe(&songs, &[4, 2, 4]).unwrap();
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2, 4]));
+    assert_eq!(song_writes::bitwig_reread(&songs), BitwigReread::Owed(1));
+    song_writes::write(&songs, &Batch { mended: true, ..Batch::default() }).unwrap();
+    // Not the app's own library: never read again here.
+    assert_eq!(song_writes::bitwig_reread(&not_own), BitwigReread::NotOwn);
 }
 
 /// The path the tests' second save is at.
@@ -422,6 +437,51 @@ fn several_changes_are_kept_together_or_not_at_all() {
     let undone = [Change::AddTag("vocal".into()), Change::RemoveTag("Vocal".into())];
     song_fields::set_all(&songs, &both, &undone).unwrap();
     assert_eq!(yours(&songs, 1).3, tags(&["dark", "live"]));
+}
+
+/// Review SS-1: the copy a song is shown from, of the same file in several places, noted with a change given to it;
+/// noting another copy of the file takes the first one's note off; and the note moves with its save.
+#[test]
+fn the_copy_a_song_is_shown_from_is_noted_with_a_change_and_moves_with_its_save() {
+    let songs = library("kept");
+    song_writes::write(&songs, &put(read(2, TWO), None)).unwrap();
+    let both = rows(&[(1, ONE), (2, TWO)]);
+    let noted = || -> Vec<String> {
+        let c = Connection::open(&songs).unwrap();
+        let mut st = c.prepare("SELECT a FROM song_choices WHERE kind = 'kept' ORDER BY a").unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+    };
+    let keep = |shown: &str, copy: &str| [KeepCopy { shown: shown.to_owned(), copies: vec![copy.to_owned()] }];
+    let mixing = [Change::Status("Mixing".into())];
+    song_fields::set_all_keeping(&songs, &both, &mixing, &keep(ONE, TWO)).unwrap();
+    assert_eq!(noted(), [ONE.to_lowercase()]);
+    assert_eq!(yours(&songs, 2).0, "Mixing", "the change is kept with it");
+    // Noted the other way round: only the new one stays noted.
+    song_fields::set_all_keeping(&songs, &both, &[Change::Rating(2)], &keep(TWO, ONE)).unwrap();
+    assert_eq!(noted(), [TWO.to_lowercase()]);
+    // Moved to another folder, as the folder watch keeps it: the note goes with it.
+    let moved = "D:\\Music\\Night_12.flp";
+    song_writes::write(&songs, &put(read(2, moved), Some(TWO))).unwrap();
+    assert_eq!(noted(), [moved.to_lowercase()]);
+    // Read again where it is: nothing moves.
+    song_writes::write(&songs, &put(read(2, moved), Some(moved))).unwrap();
+    assert_eq!(noted(), [moved.to_lowercase()]);
+    // A save the library didn't have yet when it moved: its note goes with the batch.
+    let again = "E:\\Music\\Night_12.flp";
+    let notes = Batch { moved_notes: vec![(moved.to_owned(), again.to_owned())], ..Batch::default() };
+    assert!(!notes.is_empty());
+    song_writes::write(&songs, &notes).unwrap();
+    assert_eq!(noted(), [again.to_lowercase()]);
+    // A library without song_choices keeps the change alone, and no table is made for the note.
+    Connection::open(&songs).unwrap().execute_batch("DROP TABLE song_choices;").unwrap();
+    song_fields::set_all_keeping(&songs, &both, &[Change::Rating(5)], &keep(ONE, TWO)).unwrap();
+    assert_eq!(yours(&songs, 1).1, 5);
+    let tables: i64 = Connection::open(&songs)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'song_choices'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(tables, 0);
+    song_writes::write(&songs, &put(read(2, TWO), Some(moved))).unwrap();
 }
 
 #[test]

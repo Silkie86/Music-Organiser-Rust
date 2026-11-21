@@ -121,6 +121,11 @@ pub struct Record {
     /// Each file copied, by its path in the folder (`/` between folders), as it was when copied.
     #[serde(default)]
     pub files: BTreeMap<String, Stamp>,
+    /// The data folder an earlier move went to, which couldn't be found when this copy was made (so it's a copy of
+    /// the old copy in use instead), when you said yes to leaving it behind. Without that yes, such a copy never
+    /// switches while the folder is missing (DA-2). Kept in the finished move's record too, for Settings and the note.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub leaves: String,
 }
 
 /// The finished move's record in `folder`, if the data moved into it.
@@ -540,13 +545,27 @@ pub struct Copied {
 /// each pass. Stops (with `Err("Stopped")`) when `stop` is set; the copy so far stays, and a later call goes on from
 /// there.
 pub fn copy(from: &Path, to: &Path, stop: &AtomicBool, progress: &mut dyn FnMut(u64, u64)) -> Result<Copied, String> {
-    let copied = copy_with(from, to, &paths::first_dir(), stop, progress);
+    copy_leaving(from, to, None, stop, progress)
+}
+
+/// [`copy`], saying yes to leaving `leaving` behind: the folder an earlier move went to, which can't be found now, so
+/// `from` is the old copy in use instead ([`paths::missing_folder_now`], DA-2). `None` keeps what a copy going on
+/// from an earlier one said.
+pub fn copy_leaving(
+    from: &Path,
+    to: &Path,
+    leaving: Option<&Path>,
+    stop: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<Copied, String> {
+    let copied = copy_in(from, to, &paths::first_dir(), leaving, stop, progress);
     if copied.is_ok() {
         set_start_note(None);
     }
     copied
 }
 
+#[cfg(test)]
 fn copy_with(
     from: &Path,
     to: &Path,
@@ -554,7 +573,21 @@ fn copy_with(
     stop: &AtomicBool,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<Copied, String> {
+    copy_in(from, to, first, None, stop, progress)
+}
+
+fn copy_in(
+    from: &Path,
+    to: &Path,
+    first: &Path,
+    leaving: Option<&Path>,
+    stop: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<Copied, String> {
     let mut record = check_folder(from, to)?;
+    if let Some(leaving) = leaving {
+        record.leaves = leaving.display().to_string();
+    }
     let fail = |e: io::Error| if is_stopped(&e) { "Stopped".to_owned() } else { e.to_string() };
     let mut notes = Vec::new();
     let all = walk(from, &[from, to], &mut notes, stop).map_err(fail)?;
@@ -700,6 +733,21 @@ fn finish_in(first: &Path) -> Option<AtStart> {
         }
         return call_off(format!("it's a copy of {}, but the app now uses {}", record.from, from.display()));
     }
+    // The folder an earlier move went to can't be found, so this is a copy of the old copy in use instead: switching
+    // would leave the real data behind for good. Only when you said yes to that (DA-2); once the folder is back, the
+    // check above calls this copy off.
+    if let Some(missing) = &in_use.missing
+        && (record.leaves.is_empty() || !paths_match(Path::new(&record.leaves), missing))
+    {
+        return not_yet(format!(
+            "the data folder {} can't be found, and this is a copy of the old copy in {}. Plug its drive in and start \
+             the app again, or move again and say yes to leaving it behind",
+            missing.display(),
+            from.display()
+        ));
+    }
+    // Kept in moving-in.json for a later start if this one doesn't switch; carried on only while it still applies.
+    let leaves = if in_use.missing.is_some() { record.leaves.clone() } else { String::new() };
     // No other copy of the app may be open on the old folder while it's caught up and left.
     let Ok(lock) = File::options().create(true).truncate(false).write(true).open(from.join(OPEN_LOCK_FILE)) else {
         return not_yet(format!("{OPEN_LOCK_FILE} couldn't be opened"));
@@ -764,7 +812,7 @@ fn finish_in(first: &Path) -> Option<AtStart> {
         return not_yet(format!("{} kept changing: {}", plural(pass.busy.len(), "file"), first_few(&pass.busy)));
     }
     // Every file is there and checked: the new folder is marked a finished move, then the pointer names it.
-    let moved = Record { files: BTreeMap::new(), switched: now_text(), ..record };
+    let moved = Record { files: BTreeMap::new(), switched: now_text(), leaves, ..record };
     let marked = serde_json::to_string_pretty(&moved)
         .map_err(io::Error::other)
         .and_then(|json| crate::backup::write_whole(&to.join(MOVED_IN_FILE), &json));
@@ -776,16 +824,14 @@ fn finish_in(first: &Path) -> Option<AtStart> {
     }
     let _ = fs::remove_file(to.join(MOVING_IN_FILE));
     let _ = fs::remove_file(&pending_file);
-    let _ = fs::write(from.join(MOVED_OUT_FILE), moved_out_note(&from, first, &to, &to, &moved.switched));
+    let _ =
+        fs::write(from.join(MOVED_OUT_FILE), moved_out_note(&from, first, &to, &to, &moved.switched, &moved.leaves));
     let _ = lock.unlock();
-    Some(AtStart::Switched {
-        from,
-        to,
-        copied: pass.copied,
-        bytes: pass.bytes,
-        took: started.elapsed(),
-        notes: pass.notes,
-    })
+    let mut notes = pass.notes;
+    if !moved.leaves.is_empty() {
+        notes.push(format!("{} is left behind, as asked; its data there is untouched", moved.leaves));
+    }
+    Some(AtStart::Switched { from, to, copied: pass.copied, bytes: pass.bytes, took: started.elapsed(), notes })
 }
 
 /// Waits (at most [`SWITCH_WAIT`]) until no other copy of the app holds `lock` alone, as one does only while it
@@ -813,7 +859,7 @@ const SWITCH_WAIT: Duration = Duration::from_secs(90);
 /// The note left in the folder the data moved out of, `from` (to `to`, at `when`). What to keep there: the launcher
 /// and the pointer only when it's the system's own folder `first` (a second move, out of a folder a move went to,
 /// has neither), and the old files the copy left behind for the archive step, as there are any.
-fn moved_out_note(from: &Path, first: &Path, to: &Path, data: &Path, when: &str) -> String {
+fn moved_out_note(from: &Path, first: &Path, to: &Path, data: &Path, when: &str, leaves: &str) -> String {
     let mut keep = Vec::new();
     let is_first = paths_match(from, first);
     if is_first {
@@ -837,6 +883,12 @@ fn moved_out_note(from: &Path, first: &Path, to: &Path, data: &Path, when: &str)
         crate::product::NAME,
         to.display()
     );
+    if !leaves.is_empty() {
+        note.push_str(&format!(
+            "\r\nIt copied this folder, the old copy, because the data folder it used then, {leaves}, couldn't be \
+             found. The app no longer uses that folder; what's in it is untouched.\r\n"
+        ));
+    }
     if !keep.is_empty() {
         note.push_str("\r\nKeep in this folder:\r\n");
         for k in &keep {
@@ -878,12 +930,12 @@ pub fn renew_moved_out_note(moved_into: &Path, data: &Path, first: &Path) -> boo
         return false;
     }
     let Ok(now) = fs::read_to_string(&file) else { return false };
-    let note = moved_out_note(&from, first, moved_into, data, &moved.switched);
+    let note = moved_out_note(&from, first, moved_into, data, &moved.switched, &moved.leaves);
     note != now && fs::write(&file, note).is_ok()
 }
 
 /// Whether two folder paths name the same folder as written (Windows and a Mac ignore case).
-pub(crate) fn paths_match(a: &Path, b: &Path) -> bool {
+pub fn paths_match(a: &Path, b: &Path) -> bool {
     mo_backup::folders::within(a, b) && mo_backup::folders::within(b, a)
 }
 
@@ -891,8 +943,14 @@ pub(crate) fn paths_match(a: &Path, b: &Path) -> bool {
 /// meanwhile never switches folders under this one. Call once, after [`finish_at_start`]. The test plugin calls it
 /// too, as it loads in a DAW: it learns its data folder once and saves takes there, so while a DAW has it open the
 /// switch waits for a start with the DAW closed (DF-3).
-pub fn hold_open_lock() {
+///
+/// Whether it's held (now or by an earlier call); when not, why, for the caller's own log (the plugin's isn't the
+/// app's, DA-6).
+pub fn hold_open_lock() -> Result<(), String> {
     static HELD: OnceLock<File> = OnceLock::new();
+    if HELD.get().is_some() {
+        return Ok(());
+    }
     let path = paths::data_dir().join(OPEN_LOCK_FILE);
     let held = File::options()
         .create(true)
@@ -901,17 +959,18 @@ pub fn hold_open_lock() {
         .open(&path)
         .map_err(|e| format!("couldn't open it ({e})"))
         .and_then(|file| file.try_lock_shared().map(|()| file).map_err(|e| e.to_string()));
-    match held {
-        Ok(file) => {
-            let _ = HELD.set(file);
-        }
-        Err(e) => crate::log::warning(
-            "Data folder",
-            &format!(
-                "Couldn't hold {OPEN_LOCK_FILE} ({e}): another copy started now could switch folders under this one"
-            ),
-        ),
-    }
+    let file = held.map_err(|e| {
+        format!("Couldn't hold {OPEN_LOCK_FILE} ({e}): another copy started now could switch folders under this one")
+    })?;
+    let _ = HELD.set(file);
+    Ok(())
+}
+
+/// The data folder in use now, when it isn't this run's own ([`paths::data_dir`], fixed at its first ask): a start of
+/// the app switched folders since (a DAW's plugin loaded while it did, DA-6). `None` when they're the same.
+pub fn folder_moved_since() -> Option<PathBuf> {
+    let now = paths::resolve_in(&paths::first_dir()).folder;
+    (!paths_match(&now, &paths::data_dir())).then_some(now)
 }
 
 fn first_few(list: &[String]) -> String {
@@ -1170,6 +1229,43 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_of_the_old_copy_switches_only_when_leaving_the_missing_folder_was_said_yes_to() {
+        // An earlier move went to `gone`, whose drive is missing: the app runs on the old copy in the first folder.
+        let missing_drive = |name: &str| {
+            let s = Setup::new(name);
+            let gone = s.root.join("gone").join("MusicOrganiser");
+            fs::write(paths::pointer_file(&s.first), gone.display().to_string()).unwrap();
+            (s, gone)
+        };
+        let (s, gone) = missing_drive("leaves-no");
+        s.copy().unwrap();
+        assert!(matches!(finish_in(&s.first), Some(AtStart::NotYet { why, .. }) if why.contains("old copy")));
+        assert_eq!(pending_in(&s.first), Some(s.to.clone()), "it waits");
+        assert_eq!(paths::folder_in_use(&s.first), s.first);
+        // The folder is back: the copy of the old copy is called off.
+        fs::create_dir_all(&gone).unwrap();
+        fs::write(gone.join(MOVED_IN_FILE), "{}").unwrap();
+        assert!(matches!(finish_in(&s.first), Some(AtStart::Dropped { .. })));
+        assert_eq!(paths::folder_in_use(&s.first), gone);
+
+        let (s, gone) = missing_drive("leaves-yes");
+        copy_in(&s.first, &s.to, &s.first, Some(&gone), &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+        // A start that gets past the last pass but can't switch keeps the yes for the next one.
+        fs::create_dir_all(s.to.join(MOVED_IN_FILE)).unwrap();
+        assert!(matches!(finish_in(&s.first), Some(AtStart::NotYet { .. })));
+        let record: Record = serde_json::from_str(&fs::read_to_string(s.to.join(MOVING_IN_FILE)).unwrap()).unwrap();
+        assert_eq!(record.leaves, gone.display().to_string());
+        fs::remove_dir(s.to.join(MOVED_IN_FILE)).unwrap();
+        assert!(
+            matches!(finish_in(&s.first), Some(AtStart::Switched { notes, .. }) if notes.iter().any(|n| n.contains("left behind")))
+        );
+        assert_eq!(paths::folder_in_use(&s.first), s.to);
+        assert_eq!(moved_in(&s.to).unwrap().leaves, gone.display().to_string());
+        let note = fs::read_to_string(s.first.join(MOVED_OUT_FILE)).unwrap();
+        assert!(note.contains(&gone.display().to_string()));
+    }
+
+    #[test]
     fn a_copy_that_differs_is_caught_up() {
         let s = Setup::new("differs");
         s.copy().unwrap();
@@ -1283,12 +1379,12 @@ mod tests {
         fs::write(s.first.join("sounds.db"), b"old").unwrap();
         fs::write(s.first.join(mo_sounds::compact::FILE_NAME), b"new").unwrap();
         fs::create_dir_all(s.first.join(RECORDINGS_FOLDER)).unwrap();
-        let note = moved_out_note(&s.first, &s.first, &s.to, &s.to, "now");
+        let note = moved_out_note(&s.first, &s.first, &s.to, &s.to, "now", "");
         assert!(note.contains("Recordings:"), "takes DAW projects play from here are kept");
         assert!(note.contains("run-latest-rust:") && note.contains(paths::POINTER_FILE));
         assert!(note.contains("sounds.db:") && !note.contains("sounds.db-wal"));
         // A second move, out of a folder a move went to: no launcher or pointer there.
-        let note = moved_out_note(&s.to, &s.first, &s.root.join("G"), &s.root.join("G"), "now");
+        let note = moved_out_note(&s.to, &s.first, &s.root.join("G"), &s.root.join("G"), "now", "");
         assert!(!note.contains("run-latest") && !note.contains(paths::POINTER_FILE) && !note.contains("Keep in"));
     }
 }

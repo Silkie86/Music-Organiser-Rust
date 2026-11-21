@@ -376,8 +376,8 @@ pub struct Choices<'a> {
 }
 
 /// Measures the installed plugins. `plugin_roots` are the plugin folders (never data, so the plugin files aren't
-/// counted twice); `protected_roots` are your project and sample folders, never counted as a plugin's. Every plugin's
-/// folders are guessed, so the shared ones are known, but only `only`'s are measured when it's given.
+/// counted twice); `protected_roots` are your project, sample and MIDI folders, never counted as a plugin's. Every
+/// plugin's folders are guessed, so the shared ones are known, but only `only`'s are measured when it's given.
 pub fn measure(
     plugins: &[Installed],
     data_roots: &[PathBuf],
@@ -403,8 +403,9 @@ pub fn measure(
     // Folders you added are the plugin's as well as its guessed ones. One another plugin's guess takes too, or another
     // plugin has added too (Kontakt 7 and Kontakt 8 using one library), is shared, so it stays on one's clean-up card
     // while the other is used; rule it out for the other to make it this one's alone. The ones you ruled out are left
-    // out of every guess for it. One that is, holds or is inside a project or sample folder of yours is left out too,
-    // as the guesses leave them out: it would be offered for a move, and its old copy for the Recycle Bin (rule 2).
+    // out of every guess for it. One that is, holds or is inside a project, sample or MIDI folder of yours is left out
+    // too, as the guesses leave them out: it would be offered for a move, and its old copy for the Recycle Bin
+    // (rule 2).
     let protected = Yours::new(protected_roots);
     let yours = |a: &str| protected.has(a);
     let added: HashMap<&str, Vec<String>> = plugins

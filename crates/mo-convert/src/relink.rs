@@ -28,6 +28,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use memchr::memmem;
 use mo_formats::bitwig::{self, Document, ObjId, Text, Value};
@@ -40,6 +41,9 @@ use crate::save::save_checked_new;
 /// project's folder ("" when it isn't in it), 0xd3b its file reference (0x2a, the path in 0x3b) that Bitwig finds it
 /// by when it isn't inside, 0x15 the files it was found at before (0xc5b, a list of file references), 0x17 its size.
 const SAMPLE_FILE: u32 = 0x4a6;
+/// A sample a device plays (0x4a9): its sample file in 0x129e, its own name in 0x129f.
+const SAMPLE: u32 = 0x4a9;
+const F_SAMPLE_FILE: u32 = 0x129e;
 const F_NAME: u32 = 0x512;
 const F_IN_PROJECT: u32 = 0xd3a;
 const F_FILE: u32 = 0xd3b;
@@ -50,7 +54,7 @@ const F_SIZE: u32 = 0x17;
 const F_PATH: u32 = 0x3b;
 
 /// The Bitwig files that can name a multisample.
-const BITWIG_FILES: [&str; 3] = ["bwproject", "bwclip", "bwpreset"];
+pub const BITWIG_FILES: [&str; 3] = ["bwproject", "bwclip", "bwpreset"];
 
 /// The most of one zip entry that's looked through (as mo-formats' readers allow): a damaged zip can say a small
 /// file unpacks to gigabytes. One that's bigger can't be looked through, so it counts as naming every copy.
@@ -322,9 +326,21 @@ fn relink_listed(
         changed[c] = true;
         held.push((id, vec![c]));
     }
+    // The objects that hold one of those sample files (a sample, 0x4a9, holds its file in 0x129e and its own name in
+    // 0x129f): their texts are that other file's, so a name the same as a copy's there is left too (the whole-app
+    // review of 19 Nov, FS-22: another pack's "Clap-2.wav" sampler was renamed to the copy's original's name).
+    let holders: HashSet<ObjId> = doc
+        .objects
+        .iter()
+        .enumerate()
+        .filter(|(i, o)| {
+            o.class == SAMPLE && doc.field_obj(ObjId(*i as u32), F_SAMPLE_FILE).is_some_and(|f| others.contains(&f))
+        })
+        .map(|(i, _)| ObjId(i as u32))
+        .collect();
     // Any other text that names a copy (a layout not known here), and which copies each object held.
     for (i, o) in doc.objects.iter_mut().enumerate() {
-        if others.contains(&ObjId(i as u32)) {
+        if others.contains(&ObjId(i as u32)) || holders.contains(&ObjId(i as u32)) {
             continue;
         }
         let mut here = Vec::new();
@@ -601,8 +617,15 @@ fn named_in(raw: &[u8], listed: &[Listed]) -> Vec<bool> {
     scan(raw, listed, names_copy).unwrap_or_else(|| vec![true; listed.len()])
 }
 
-/// For each copy, whether a Bitwig file's bytes (and its zip's entries) hold what `names` looks for. None when it isn't
-/// a Bitwig file, or its zip can't be read.
+/// How far the zlib streams in a Bitwig file are looked through for a copy's name: every one, and what one cut short
+/// gave; smaller than the reader's, as several files are looked through at once.
+const PACKED: bitwig::BlobLimits =
+    bitwig::BlobLimits { attempts: usize::MAX, each: 64_000_000, all: 256_000_000, thorough: true };
+
+/// For each copy, whether a Bitwig file's bytes, the zlib streams in them (some Bitwig versions keep parts of a project
+/// packed: the whole-app review of 19 Nov, FS-24) and its zip's entries hold what `names` looks for. None when it
+/// isn't a Bitwig file, its zip can't be read, or its packed parts are too big to look through ([`PACKED`]). Bytes
+/// that only look like a zlib header are common in a big file: each is tried, and what doesn't unpack names nothing.
 fn scan(raw: &[u8], listed: &[Listed], names: fn(&[u8], &Listed) -> bool) -> Option<Vec<bool>> {
     let mut named = vec![false; listed.len()];
     let mut look = |bytes: &[u8]| {
@@ -614,7 +637,10 @@ fn scan(raw: &[u8], listed: &[Listed], names: fn(&[u8], &Listed) -> bool) -> Opt
     if !bitwig::is_bitwig(raw) {
         return None;
     }
-    look(raw);
+    // Every stream, and what one cut short gave; one too big to look through whole counts as naming every copy.
+    if !bitwig::each_blob_within(raw, PACKED, &mut look) {
+        return None;
+    }
     let Some(start) = zip_start(raw) else { return Some(named) };
     let mut archive = zip::ZipArchive::new(Cursor::new(raw.get(start..)?)).ok()?;
     for i in 0..archive.len() {
@@ -646,25 +672,65 @@ fn names_copy(lower: &[u8], copy: &Listed) -> bool {
     })
 }
 
-/// Whether two files hold the same bytes, read a piece at a time.
-fn same_file(a: &Path, b: &Path) -> bool {
-    let (Ok(fa), Ok(fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else { return false };
-    let same_size = match (fa.metadata(), fb.metadata()) {
-        (Ok(ma), Ok(mb)) => ma.len() == mb.len(),
-        _ => false,
+/// A file as [`same_file_once`] knows it: its path, size and time.
+type Stamp = (PathBuf, u64, Option<std::time::SystemTime>);
+
+/// The most answers [`same_file_once`] keeps: about a folder's worth of copies several times over; past that it starts
+/// again (rule 28).
+const SAME_KEPT: usize = 20_000;
+
+/// [`same_file`], with the answer kept while neither file's size or time changes: each ticked save of a folder is
+/// fixed with all of the folder's copies, and they were read in full again for each (the whole-app review of 19 Nov,
+/// FS-6). Asked again only for a file that changed.
+fn same_file_once(a: &Path, b: &Path, stop: &AtomicBool) -> bool {
+    static KNOWN: std::sync::Mutex<Option<HashMap<(Stamp, Stamp), bool>>> = std::sync::Mutex::new(None);
+    let stamp = |p: &Path| -> Option<Stamp> {
+        let m = std::fs::metadata(p).ok()?;
+        Some((p.to_path_buf(), m.len(), m.modified().ok()))
     };
-    if !same_size {
-        return false;
+    let (Some(sa), Some(sb)) = (stamp(a), stamp(b)) else { return false };
+    // Without a time, a change can't be seen: asked each time.
+    if sa.2.is_none() || sb.2.is_none() {
+        return same_file(a, b, stop) == Some(true);
+    }
+    let asked = (sa, sb);
+    if let Some(&same) =
+        KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_or_insert_default().get(&asked)
+    {
+        return same;
+    }
+    // A file that couldn't be read (held by a virus scanner, a drive waking up) or a stop isn't an answer to keep.
+    let Some(same) = same_file(a, b, stop) else { return false };
+    let mut known = KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let known = known.get_or_insert_default();
+    if known.len() >= SAME_KEPT {
+        known.clear();
+    }
+    known.insert(asked, same);
+    same
+}
+
+/// Whether two files hold the same bytes, read a piece at a time. None when one couldn't be read, or `stop` stopped it.
+fn same_file(a: &Path, b: &Path, stop: &AtomicBool) -> Option<bool> {
+    let (fa, fb) = (std::fs::File::open(a).ok()?, std::fs::File::open(b).ok()?);
+    if fa.metadata().ok()?.len() != fb.metadata().ok()?.len() {
+        return Some(false);
     }
     let (mut ra, mut rb) = (std::io::BufReader::new(fa), std::io::BufReader::new(fb));
     let (mut ba, mut bb) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
     loop {
-        let Ok(n) = ra.read(&mut ba) else { return false };
-        if n == 0 {
-            return rb.read(&mut bb[..1]).is_ok_and(|m| m == 0);
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
         }
-        if rb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
-            return false;
+        let n = ra.read(&mut ba).ok()?;
+        if n == 0 {
+            return Some(rb.read(&mut bb[..1]).ok()? == 0);
+        }
+        match rb.read_exact(&mut bb[..n]) {
+            Ok(()) if ba[..n] == bb[..n] => {}
+            Ok(()) => return Some(false),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Some(false),
+            Err(_) => return None,
         }
     }
 }
@@ -687,7 +753,7 @@ fn fixed_names(project: &Path) -> impl Iterator<Item = PathBuf> + '_ {
 /// which copies nothing uses any more but the original: every other Bitwig file in the project's folder and below it
 /// is read to see (a folder that can't be listed keeps them all).
 pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, String> {
-    fix(project, relinks, &[], true)
+    fix(project, project, relinks, &[], true, &AtomicBool::new(false))
 }
 
 /// Writes the fixed project as [`fix_bitwig_project`] does, with Bitwig's Library folders as you have them (your
@@ -697,14 +763,107 @@ pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, S
 /// slow), so [`Fixed::changed`] only says which copies the fixed project no longer names. Before a copy goes to the
 /// Recycle Bin, [`still_named`] asks again of every Bitwig file there.
 pub fn fix_bitwig_project_in(project: &Path, relinks: &[Relink], libraries: &[PathBuf]) -> Result<Fixed, String> {
-    fix(project, relinks, libraries, false)
+    fix(project, project, relinks, libraries, false, &AtomicBool::new(false))
 }
 
-fn fix(project: &Path, relinks: &[Relink], libraries: &[PathBuf], look_around: bool) -> Result<Fixed, String> {
+/// [`fix_bitwig_project_in`], stopped by `stop` (the app closing) at any point before the fixed project is written:
+/// nothing is written then. Once the write has begun it finishes.
+pub fn fix_bitwig_project_until(
+    project: &Path,
+    relinks: &[Relink],
+    libraries: &[PathBuf],
+    stop: &AtomicBool,
+) -> Result<Fixed, String> {
+    fix(project, project, relinks, libraries, false, stop)
+}
+
+/// [`fix_bitwig_project_until`], written from `from`, the save's own "(fixed)" project beside it, and named from the
+/// save (the next "<save> (fixed N)"): a later look listed copies that fixed project still uses (a sample the Sounds
+/// library learned after Fix, or a Library folder added since; the whole-app review of 19 Nov, FS-3). It already uses
+/// the Library for the copies that went, so only the ones it still names are pointed. `from` must be in the save's
+/// folder.
+pub fn fix_bitwig_project_from(
+    project: &Path,
+    from: &Path,
+    relinks: &[Relink],
+    libraries: &[PathBuf],
+    stop: &AtomicBool,
+) -> Result<Fixed, String> {
+    if from.parent() != project.parent() {
+        return Err(format!("{} isn't beside {}, so nothing was written", from.display(), project.display()));
+    }
+    // One of this save's own fixed projects, by the names Fix gives them: never another song's.
+    let named = |p: &Path| p.file_name().map(|n| key(&n.to_string_lossy()));
+    if !fixed_names(project).any(|f| named(&f) == named(from)) {
+        return Err(format!(
+            "{} isn't a fixed project of {}, so nothing was written",
+            from.display(),
+            project.display()
+        ));
+    }
+    fix(project, from, relinks, libraries, false, stop)
+}
+
+/// How many of these copies the fixed project `fixed` still names that a Fix from it would point at their Library
+/// files ([`fix_bitwig_project_from`]): copies a look found after Fix ran (the whole-app review of 19 Nov, FS-3). A
+/// copy it names only where Fix doesn't change it (a plugin's own settings) isn't counted. 0 when it can't be read.
+pub fn could_point(fixed: &Path, relinks: &[Relink]) -> usize {
+    let Some(dir) = fixed.parent() else { return 0 };
+    let Ok(raw) = std::fs::read(fixed) else { return 0 };
+    if raw.is_empty() {
+        return 0;
+    }
+    // Most fixed projects name none: their bytes are looked through before anything is decoded or compared. Then only
+    // copies Fix would point count: in a copy folder, with their original there and still the same as it.
+    let (relinks, listed): (Vec<&Relink>, Vec<Listed>) =
+        relinks.iter().filter_map(|r| listed_one(dir, r).ok().map(|l| (r, l))).unzip();
+    let named = named_in(&raw, &listed);
+    let never = AtomicBool::new(false);
+    let listed: Vec<Listed> = listed
+        .into_iter()
+        .zip(relinks)
+        .zip(named)
+        .filter(|((_, r), named)| *named && same_file_once(&r.copy, &r.library, &never))
+        .map(|((l, _), _)| l)
+        .collect();
+    if listed.is_empty() {
+        return 0;
+    }
+    let Ok(Relinked { bytes, changed, .. }) = relink_listed(&raw, dir, &listed, &[]) else { return 0 };
+    changed.iter().zip(named_in(&bytes, &listed)).filter(|(c, still)| **c && !still).count()
+}
+
+/// How a line of [`Fixed::left`] ends for a copy the project doesn't use.
+pub const UNUSED: &str = ": this project doesn't use it, so it's left alone";
+
+/// What a Fix stopped by the app closing says.
+const STOPPED: &str = "the app closed before it was written";
+
+/// Writes `project`'s next fixed project from the bytes of `from` (the project itself, or its own fixed project).
+fn fix(
+    project: &Path,
+    from: &Path,
+    relinks: &[Relink],
+    libraries: &[PathBuf],
+    look_around: bool,
+    stop: &AtomicBool,
+) -> Result<Fixed, String> {
+    let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
     let dir = match project.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
     };
+    // What an earlier Fix of this save left half-written when the app closed under it, under any "(fixed N)" name.
+    // Only the whole names Fix gives (rule 28), in any letter case only where the disk ignores it (Windows).
+    let names: HashSet<String> = fixed_names(project)
+        .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .map(|n| if cfg!(windows) { n.to_lowercase() } else { n })
+        .collect();
+    crate::save::clear_left_behind_of(
+        &dir,
+        |target| names.contains(&if cfg!(windows) { target.to_lowercase() } else { target.to_owned() }),
+        std::time::SystemTime::now(),
+    );
     // One whose original is gone now (a drive unplugged, say) is left alone; the others are still fixed.
     let mut left = Vec::new();
     let relinks: Vec<Relink> = relinks
@@ -725,7 +884,10 @@ fn fix(project: &Path, relinks: &[Relink], libraries: &[PathBuf], look_around: b
     let relinks = relinks.as_slice();
     let listed = listed(&dir, relinks)?;
     // A copy that's no longer the same as its Library file (edited in Bitwig since) is left alone.
-    let same: Vec<bool> = relinks.par_iter().map(|r| same_file(&r.copy, &r.library)).collect();
+    let same: Vec<bool> = relinks.par_iter().map(|r| !stopped() && same_file_once(&r.copy, &r.library, stop)).collect();
+    if stopped() {
+        return Err(STOPPED.to_owned());
+    }
     let mut keep = Vec::new();
     let mut kept_relinks = Vec::new();
     for ((r, l), same) in relinks.iter().zip(listed).zip(same) {
@@ -740,7 +902,7 @@ fn fix(project: &Path, relinks: &[Relink], libraries: &[PathBuf], look_around: b
     if listed.is_empty() {
         return Err(format!("no copy is the same as its Library file, so nothing was written: {}", left.join("; ")));
     }
-    let raw = std::fs::read(project).map_err(|e| format!("Couldn't read {}: {e}", project.display()))?;
+    let raw = std::fs::read(from).map_err(|e| format!("Couldn't read {}: {e}", from.display()))?;
     let Relinked { bytes, mut changed, found } = relink_listed(&raw, &dir, &listed, libraries)?;
     if !changed.contains(&true) {
         left.push("the project uses none of the other copies".to_owned());
@@ -757,7 +919,7 @@ fn fix(project: &Path, relinks: &[Relink], libraries: &[PathBuf], look_around: b
             left.push(format!("{}: the project {was}, so it's kept", listed[c].shown));
             changed[c] = false;
         } else if !changed[c] {
-            left.push(format!("{}: this project doesn't use it, so it's left alone", listed[c].shown));
+            left.push(format!("{}{UNUSED}", listed[c].shown));
         }
     }
     if !changed.contains(&true) {
@@ -801,6 +963,9 @@ fn fix(project: &Path, relinks: &[Relink], libraries: &[PathBuf], look_around: b
         Ok(doc) => doc.body_error,
         Err(_) => Some("not a Bitwig project".to_owned()),
     };
+    if stopped() {
+        return Err(STOPPED.to_owned());
+    }
     let mut file = None;
     for name in fixed_names(project) {
         if save_checked_new(&name, &bytes, problem)? {

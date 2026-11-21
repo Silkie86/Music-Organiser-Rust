@@ -12,6 +12,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// In a data folder the installer started: the pointer may name it though no move went there.
 pub const STARTED_HERE_FILE: &str = "started-here.txt";
@@ -52,9 +53,82 @@ pub fn move_asked() -> Option<PathBuf> {
     move_asked_in(&crate::paths::first_dir(), &crate::paths::data_dir())
 }
 
-/// Takes the installer's ask away, as the move it asked for starts.
+/// Takes the installer's ask away, once the copy it asked for has ended (done, stopped or failed): a copy cut short
+/// by closing the app keeps it, so the next start goes on with it (DA-3).
 pub fn take_move_ask() {
     let _ = fs::remove_file(move_asked_file(&crate::paths::first_dir()));
+}
+
+/// The uninstaller starts the app with this (installer/setup.iss, at the uninstall step, once it's been confirmed)
+/// before it removes the files: the app and the background helper running from the same program are asked to close,
+/// as Windows won't remove a program that runs (UP-12). The app first, so it can't start the helper again.
+pub const CLOSE_FLAG: &str = "--close-for-setup";
+
+/// What [`close_for_setup`] did: a line for each it asked, and whether each has ended.
+pub struct Closed {
+    pub lines: Vec<String>,
+    pub all_ended: bool,
+}
+
+/// Asks the open app and the helper to close, when they run from `exe` (never a launcher's build or another
+/// install), and waits up to `wait` for each process to end: not only its port, as the app lets go of its port
+/// before its last moments.
+pub fn close_for_setup(exe: &Path, wait: Duration) -> Closed {
+    let exe = exe.display().to_string();
+    let mut closed = Closed { lines: Vec::new(), all_ended: true };
+    let ours = |other: &str| crate::one_copy::same_program(other, &exe) && !other.is_empty();
+    let mut went = |what: &str, port: u16, pid: u32| {
+        let ended = wait_for(port, pid, wait);
+        closed.all_ended &= ended;
+        closed.lines.push(format!("{what} (process {pid}): {}", if ended { "ended" } else { "still running" }));
+    };
+    if let Some(app) = crate::one_copy::hello(crate::one_copy::PORT).filter(|h| ours(&h.exe))
+        && crate::one_copy::ask_to_close_for(crate::one_copy::PORT, "the uninstaller")
+    {
+        went("The app was asked to close", crate::one_copy::PORT, app.pid);
+    }
+    if let Some(helper) = crate::helper::hello(crate::helper::PORT).filter(|h| ours(&h.exe))
+        && crate::helper::ask_to_quit(crate::helper::PORT)
+    {
+        went("The helper was asked to quit", crate::helper::PORT, helper.pid);
+    }
+    closed
+}
+
+/// Waits up to `wait` for `port` to be free and process `pid` to have ended: whether both happened.
+fn wait_for(port: u16, pid: u32, wait: Duration) -> bool {
+    let until = Instant::now() + wait;
+    while crate::one_copy::taken(port) {
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    process_ended(pid, until.saturating_duration_since(Instant::now()))
+}
+
+/// Waits up to `wait` for process `pid` to end (Windows); elsewhere the free port is taken as the end.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn process_ended(pid: u32, wait: Duration) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    // SAFETY: a handle opened here is waited on and closed here, and nothing else uses it.
+    unsafe {
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        // It can't be opened: it has ended already.
+        if handle.is_null() {
+            return true;
+        }
+        let waited = WaitForSingleObject(handle, u32::try_from(wait.as_millis()).unwrap_or(u32::MAX));
+        CloseHandle(handle);
+        waited != WAIT_TIMEOUT
+    }
+}
+
+#[cfg(not(windows))]
+fn process_ended(_pid: u32, _wait: Duration) -> bool {
+    true
 }
 
 #[cfg(test)]

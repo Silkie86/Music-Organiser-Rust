@@ -30,6 +30,12 @@ fn of_lines(lines: &[mo_backup::copy::Line], name: &str) -> Outcome {
     lines.iter().find(|l| l.source.ends_with(name)).unwrap().outcome.clone()
 }
 
+/// What this program has fetched from storage so far, as Linux counts it (`/proc/self/io`): nothing on other systems.
+fn fetched() -> Option<u64> {
+    let io = fs::read_to_string("/proc/self/io").ok()?;
+    io.lines().find_map(|l| l.strip_prefix("read_bytes:"))?.trim().parse().ok()
+}
+
 fn tree(dir: &Path) -> Vec<String> {
     let mut all: Vec<String> = files(dir, &AtomicBool::new(false))
         .unwrap()
@@ -96,6 +102,35 @@ fn copies_checks_and_keeps_small_older_versions() {
 
     // The music folder is only read.
     assert_eq!(tree(&music), ["Song/Big.wav", "Song/Song.flp"]);
+}
+
+/// Each new copy is read back from the backup drive itself to check it, not from the system's memory of what it just
+/// wrote (the whole-app review of 19 Nov, SB-2): where Linux counts what this program fetched from storage, the count
+/// grows by at least the copy's size, though the file and its copy were both only just written.
+#[test]
+fn a_new_copy_is_checked_from_the_drive_itself() {
+    let root = fixtures("backup-copy-from-drive");
+    let music = root.join("music");
+    let backup = root.join("backup");
+    let size: usize = 8 << 20;
+    let sound: Vec<u8> = (0..size).map(|i| (i * 7 % 251) as u8).collect();
+    write(&music.join("Song/Big.wav"), &sound, 100);
+    fs::create_dir_all(&backup).unwrap();
+    let stop = AtomicBool::new(false);
+    let options = Options { keep_older_below: 0, stamp: "2026-11-21 10.00".into() };
+    let list = files(&music, &stop).unwrap();
+    let before = fetched();
+    let report = run(&list, &backup, &options, &stop).unwrap();
+    let after = fetched();
+    assert_eq!(of_lines(&report.lines, "Big.wav"), Outcome::New);
+    assert_eq!(fs::read(place_on_backup(&backup, &music.join("Song/Big.wav")).unwrap()).unwrap(), sound);
+    // Windows, Linux and a Mac all read past their memory of a file on an ordinary drive.
+    let past_memory = cfg!(any(windows, target_os = "linux", target_vendor = "apple"));
+    assert_eq!(report.checked_from_memory, !past_memory);
+    if let (Some(before), Some(after)) = (before, after) {
+        let from_drive = after - before;
+        assert!(from_drive >= size as u64, "fetched {from_drive} bytes from the drive, not the copy's {size}");
+    }
 }
 
 #[test]
