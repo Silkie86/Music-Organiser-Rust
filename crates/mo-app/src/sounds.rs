@@ -399,6 +399,10 @@ pub struct LikeFavourites {
     /// The reach of each sound placed by the analyser's fingerprints though deep listening is on
     /// ([`mo_sounds::near::Reach`]), smallest first.
     by_analyser: Vec<u32>,
+    /// Worked out for the list on show before this one was read again, and moved to this one's places
+    /// ([`SoundList::keep_found_of`]): shown while it's worked out again, never taken as this list's own
+    /// ([`SoundList::like_favourites_for`]), even when the two lists' keys are the same.
+    carried: bool,
 }
 
 impl LikeFavourites {
@@ -408,6 +412,28 @@ impl LikeFavourites {
         let per = per_favourite(step);
         self.by_analyser.partition_point(|&r| r < per)
     }
+
+    /// This closeness for a list `len` long holding the same sounds at the places `moved` gives ([`moved_to`]): a sound
+    /// new since is like none of your favourites, and wasn't one, until it's worked out again for that list, which it
+    /// always is ([`LikeFavourites::carried`]).
+    fn moved(&self, moved: &[Option<usize>], len: usize) -> LikeFavourites {
+        let mut reach = vec![u32::MAX; len];
+        let mut was_favourite = vec![false; len];
+        for (old, new) in moved.iter().enumerate() {
+            if let Some(new) = *new
+                && let (Some(&r), Some(&was), Some(to_reach), Some(to_was)) =
+                    (self.reach.get(old), self.was_favourite.get(old), reach.get_mut(new), was_favourite.get_mut(new))
+            {
+                (*to_reach, *to_was) = (r, was);
+            }
+        }
+        LikeFavourites { reach, was_favourite, key: self.key, by_analyser: self.by_analyser.clone(), carried: true }
+    }
+}
+
+/// Where a sound of a list is in a list read again, by `moved` (each old place's new one, None for a sound gone).
+fn moved_to(moved: &[Option<usize>], old: usize) -> Option<usize> {
+    moved.get(old).copied().flatten()
 }
 
 /// Your say about a sound since it was read: what you changed, over what the sound says.
@@ -472,7 +498,7 @@ impl<'a> Now<'a> {
 
 /// The sounds whose audio is exactly the same as another's, by their places in a list ([`SoundList::copies_in`]): the
 /// same for every list sharing its sounds.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Copies {
     /// Each such sound's group, by place.
     group_of: HashMap<usize, u32>,
@@ -482,6 +508,9 @@ pub struct Copies {
     groups: Vec<Vec<usize>>,
     /// Each grouped sound's file size in bytes, by place, when known.
     sizes: HashMap<usize, u64>,
+    /// Found for the list on show before this one was read again, and moved to this one's places
+    /// ([`SoundList::keep_found_of`]): shown while they're looked for again, not as found for this list.
+    carried: bool,
 }
 
 /// What told a sound to keep from its copy ([`SoundList::why_kept`]): the first of these that does, in this order.
@@ -513,6 +542,29 @@ impl CopyGroup {
 }
 
 impl Copies {
+    /// These copies at the places `moved` gives ([`moved_to`]): a group left with one sound is none.
+    fn moved(&self, moved: &[Option<usize>]) -> Copies {
+        let (mut group_of, mut groups, mut sizes, mut copies) = (HashMap::new(), Vec::new(), HashMap::new(), 0);
+        for group in &self.groups {
+            let here: Vec<usize> = group.iter().filter_map(|&old| moved_to(moved, old)).collect();
+            if here.len() < 2 {
+                continue;
+            }
+            copies += here.len() - 1;
+            let n = groups.len() as u32;
+            for &old in group {
+                if let Some(new) = moved_to(moved, old) {
+                    group_of.insert(new, n);
+                    if let Some(&size) = self.sizes.get(&old) {
+                        sizes.insert(new, size);
+                    }
+                }
+            }
+            groups.push(here);
+        }
+        Copies { group_of, copies, groups, sizes, carried: true }
+    }
+
     /// How many sounds are copies of another: what Hide duplicates leaves out.
     pub fn count(&self) -> usize {
         self.copies
@@ -683,7 +735,7 @@ impl SoundList {
             }
             groups.push(here);
         }
-        Arc::new(Copies { group_of, copies, groups, sizes })
+        Arc::new(Copies { group_of, copies, groups, sizes, carried: false })
     }
 
     /// This list with `copies` (from [`SoundList::copies_in`] on a list sharing its sounds). What it holds is shared,
@@ -732,6 +784,23 @@ impl SoundList {
         self.copies.as_ref().map(|c| c.copies)
     }
 
+    /// Whether the copies this list knows were found for the list on show before it was read again, and are only shown
+    /// while they're looked for again ([`SoundList::keep_found_of`]).
+    pub fn copies_carried(&self) -> bool {
+        self.copies.as_ref().is_some_and(|c| c.carried)
+    }
+
+    /// This list without the copies [`SoundList::keep_found_of`] carried over, for when looking for its own failed:
+    /// they're not left hidden then, as a file a scan rewrote may not be a copy any more (the code review of the SN-5
+    /// fix). Copies it found itself stay.
+    pub fn without_carried_copies(&self) -> SoundList {
+        let mut list = self.clone();
+        if list.copies_carried() {
+            list.copies = None;
+        }
+        list
+    }
+
     /// This list with your say about its sounds since they were read (`say`, by sound id), over what each says: for
     /// the filters, the chips' counts, the orders and [`SoundList::now`]. What it holds is shared, not copied.
     pub fn with_say(&self, say: Arc<HashMap<i64, YourSay>>) -> SoundList {
@@ -771,7 +840,7 @@ impl SoundList {
         let near = mo_sounds::near::reach(index, &sounds);
         let mut by_analyser: Vec<u32> = near.by_analyser.iter().map(|&i| near.each[i]).collect();
         by_analyser.sort_unstable();
-        Arc::new(LikeFavourites { reach: near.each, was_favourite, key: self.like_key(), by_analyser })
+        Arc::new(LikeFavourites { reach: near.each, was_favourite, key: self.like_key(), by_analyser, carried: false })
     }
 
     /// What how close the sounds are to your favourites is worked out from, as a number: which are favourites, each
@@ -796,7 +865,7 @@ impl SoundList {
     /// The closeness this list holds, when it was worked out from what `key` says ([`SoundList::like_key`]): a list
     /// made again with nothing in it changed (a tag, the use counts) needs it worked out no more.
     pub fn like_favourites_for(&self, key: u64) -> Option<Arc<LikeFavourites>> {
-        self.like.clone().filter(|l| l.key == key)
+        self.like.clone().filter(|l| l.key == key && !l.carried)
     }
 
     /// The closeness `other` knows, when it shares this list's sounds and this list knows none yet (a list with the
@@ -804,6 +873,36 @@ impl SoundList {
     pub fn keep_like_favourites_of(&mut self, other: &SoundList) {
         if self.like.is_none() && self.shares_with(other) {
             self.like = other.like.clone();
+        }
+    }
+
+    /// What `other` (the list on show) knows that takes long to find again, moved to this list's places, when this list
+    /// doesn't know it yet: which sounds are copies of each other, and how close each is to your favourites. `moved`:
+    /// each of `other`'s places' place here (None for a sound gone); None for the same sounds in the same places. So
+    /// a list read again (after a scan) goes on hiding the copies, and showing the sounds like your favourites, that
+    /// were shown while they're looked for again for it, rather than every copy and only your favourites for a while
+    /// (the whole-app review of 19 Nov, SN-5). A sound new since is in no group of copies, and like none of your
+    /// favourites, until then. What's kept is only shown meanwhile: a look for the copies that fails doesn't leave
+    /// them hidden ([`SoundList::without_carried_copies`]), Space doesn't take them as found
+    /// ([`SoundList::copies_carried`]), and the closeness is always worked out again. A few lists as long as the
+    /// library, no lookups: fine on the window's thread.
+    pub fn keep_found_of(&mut self, other: &SoundList, moved: Option<&[Option<usize>]>) {
+        match moved {
+            None if self.len() == other.len() => {
+                if self.copies.is_none() {
+                    self.copies = other.copies.as_deref().map(|c| Arc::new(Copies { carried: true, ..c.clone() }));
+                }
+                self.like = self.like.take().or_else(|| other.like.clone());
+            }
+            None => {}
+            Some(moved) => {
+                if self.copies.is_none() {
+                    self.copies = other.copies.as_deref().map(|c| Arc::new(c.moved(moved)));
+                }
+                if self.like.is_none() {
+                    self.like = other.like.as_deref().map(|l| Arc::new(l.moved(moved, self.len())));
+                }
+            }
         }
     }
 
@@ -2596,6 +2695,74 @@ mod tests {
         assert!(busy.hide_copies && !busy.any());
         busy.toggle(HIDE_COPIES);
         assert!(!busy.hide_copies);
+    }
+
+    /// The whole-app review of 19 Nov, SN-5: a list read again after a scan knew no copies and no closeness to your
+    /// favourites until they were looked for again, so Hide duplicates showed every copy, and Favourites only your
+    /// favourites, for a while. What the list on show knew goes on showing, moved with its sounds.
+    #[test]
+    fn a_list_read_again_keeps_the_copies_and_the_sounds_like_your_favourites_moved_with_them() {
+        use mo_sounds::index::VectorIndex;
+        let kick = |id: i64, favourite: bool| {
+            let mut s = sound(id, &format!(r"I:\Kicks\{id}.wav"), "Kick", analysed(false, None, None));
+            s.favourite = favourite;
+            s
+        };
+        // 1 the favourite, 2 most like it, then 3; 4 and 5 the same audio, as are 3 and 6.
+        let mut was = SoundList::new((1..=6).map(|id| kick(id, id == 1)).collect());
+        was.set_copies(&SameAudio { groups: vec![vec![4, 5], vec![3, 6]], sizes: HashMap::from([(4, 40), (5, 50)]) });
+        let vectors = [(1, [1.0, 0.0]), (2, [0.95, 0.05]), (3, [0.6, 0.4]), (4, [0.0, 1.0]), (5, [0.0, 1.0])];
+        let vectors = vectors.iter().chain(&[(6, [0.6, 0.4])]).map(|(id, v)| (*id, v.to_vec())).collect();
+        let index = SoundIndex { features: VectorIndex::clap(&vectors), clap: None, deep: false };
+        let was = was.with_like_favourites(was.like_favourites_in(&index));
+        // Read again with 6 gone and 9 new at the front.
+        let moved = [Some(1), Some(2), Some(3), Some(4), Some(5), None];
+        let read_again = || SoundList::new([9, 1, 2, 3, 4, 5].map(|id| kick(id, id == 1)).into());
+        let mut now = read_again();
+        now.keep_found_of(&was, Some(&moved));
+        // Hide duplicates: 4 and 5 still count as one; 3 has no copy left.
+        let on = Filters { hide_copies: true, ..Filters::default() };
+        let shown = ids(&now, &now.view(&on, Order::Name, 0));
+        assert!(shown.len() == 5 && shown.contains(&3) && shown.contains(&4) != shown.contains(&5), "{shown:?}");
+        let groups = now.copy_groups();
+        assert_eq!(groups.len(), 1);
+        let mut sizes =
+            groups[0].sounds.iter().map(|&(at, size)| (now.sound(at).map(|s| s.id), size)).collect::<Vec<_>>();
+        sizes.sort_unstable();
+        assert_eq!(sizes, [(Some(4), 40), (Some(5), 50)]);
+        // Favourites as far as 2 is: the same sounds as before, never the new one.
+        let like = Filters { favourites: true, like_favourites: 1, ..Filters::default() };
+        assert_eq!(ids(&was, &was.view(&like, Order::Name, 0)), [1, 2]);
+        assert_eq!(ids(&now, &now.view(&like, Order::Name, 0)), [1, 2]);
+        assert!(now.knows_like_favourites());
+        // Only shown while they're looked for again (the code review of this fix): the copies aren't found for this
+        // list, and go if looking for its own fails; the closeness is never taken as this list's own.
+        assert!(now.copies_carried() && !was.copies_carried());
+        let failed = now.without_carried_copies();
+        assert_eq!((failed.copies(), failed.copies_carried()), (None, false));
+        assert_eq!(ids(&failed, &failed.view(&on, Order::Name, 0)).len(), 6);
+        assert!(was.like_favourites_for(was.like_key()).is_some());
+        assert!(now.like_favourites_for(now.like_key()).is_none());
+        // Not even when the list read again gives the same key: as many sounds, the same favourites and types at each
+        // place, and no copies known.
+        let plain = |at: [i64; 3]| SoundList::new(at.map(|id| kick(id, id == 1)).into());
+        let was3 = plain([1, 2, 3]);
+        let was3 = was3.with_like_favourites(was3.like_favourites_in(&index));
+        let mut now3 = plain([1, 2, 7]);
+        now3.keep_found_of(&was3, Some(&[Some(0), Some(1), None]));
+        assert_eq!(now3.like_key(), was3.like_key());
+        assert!(now3.knows_like_favourites() && now3.like_favourites_for(now3.like_key()).is_none());
+        // What it knows itself already, it keeps.
+        let mut known = read_again();
+        known.set_copies(&SameAudio { groups: vec![vec![2, 3]], ..SameAudio::default() });
+        known.keep_found_of(&was, Some(&moved));
+        assert_eq!((known.copies(), known.copies_carried()), (Some(1), false));
+        assert_eq!(ids(&known, &known.view(&on, Order::Name, 0)).len(), 5);
+        // The same sounds in the same places: taken as they are.
+        let mut same = SoundList::new((1..=6).map(|id| kick(id, id == 1)).collect());
+        same.keep_found_of(&was, None);
+        assert_eq!((same.copies(), same.copies_carried()), (Some(2), true));
+        assert_eq!(ids(&same, &same.view(&like, Order::Name, 0)), [1, 2]);
     }
 
     #[test]

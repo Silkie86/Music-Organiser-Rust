@@ -225,7 +225,22 @@ fn heard(app: &AppWindow, look: u64, word: Word) {
                 // again when the switch is turned off and on, or the sounds are read again.
                 l.stop = None;
             });
-            super::show_chips(app);
+            // The copies the list before this one found, carried over to show while these were looked for (review
+            // SN-5), aren't left hidden as if found: a file the scan rewrote may not be a copy any more (the code
+            // review of that fix). Copies this look found before it failed stay, as they did.
+            let dropped = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                let carried = p.list.copies_carried() && LOOK.with(|l| looks_at(&l.borrow(), &p.list));
+                if carried {
+                    p.list = Arc::new(p.list.without_carried_copies());
+                }
+                carried
+            });
+            if dropped && PAGE.with(|p| p.borrow().filters.hide_copies) {
+                super::refresh(app);
+            } else {
+                super::show_chips(app);
+            }
             crate::space::sounds_changed(app);
         }
     }

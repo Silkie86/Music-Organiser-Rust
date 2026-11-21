@@ -1806,6 +1806,44 @@ fn spoil_first_page(db: &Path) {
     f.write_all(&[0xEE; 100]).unwrap();
 }
 
+/// The app's own notes kept from a damaged library (since when it's been the app's own, here a while before the new
+/// one was made) are put in the new one, but aren't counted as yours kept: a damaged library with nothing of yours
+/// readable in it says it was made again, however long ago it was made (a test that said otherwise once in a while on
+/// Windows, 20 Nov 2026, when the two were made in different seconds).
+#[test]
+fn the_apps_own_notes_kept_from_a_damaged_library_arent_counted_as_yours() {
+    let dir = folder("salvage-notes");
+    let old = library(&dir, 0);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    // Nothing of yours in it but its list of sounds, which is damaged below: its settings, tags, plays and the rest
+    // are taken out.
+    let c = Connection::open(&copy).unwrap();
+    let tables: Vec<String> = {
+        let mut st = c
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT IN ('copy_info', 'sounds')")
+            .unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    };
+    assert!(tables.len() > 5, "{tables:?}");
+    for t in &tables {
+        c.execute(&format!("DELETE FROM \"{t}\""), []).unwrap();
+    }
+    let long_ago = unix(2026, 1, 1);
+    c.execute("UPDATE copy_info SET value = ?1 WHERE key = 'own_since'", [long_ago]).unwrap();
+    drop(c);
+    remove_db(&old);
+    damage(&copy, "sounds");
+    let (everything, made) = compact::mend_reading(&old, &copy, now()).unwrap();
+    let made = made.unwrap();
+    assert!(made.made && made.kept_alone && made.from_backup.is_none(), "{made:?}");
+    assert_eq!(made.salvaged, Some(compact::Salvaged { kept: 0, unread: 1 }), "{made:?}");
+    assert!(everything.sounds.is_empty());
+    assert_eq!(compact::own_since(&copy), Some(long_ago));
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+}
+
 /// A library so damaged nothing can be read from it (its first page), with no backup copy, is set aside as it was and
 /// made again from sounds.db, on the page's read and on any pass over sounds.db: never removed for the new one (the
 /// whole-app review of 14 Nov, SO-2). With sounds.db gone too, a new library of the app's own is made in its place,

@@ -9,6 +9,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -279,6 +280,10 @@ struct OnCard {
 }
 
 thread_local! {
+    /// The Swept card's lines: one model, its lines changed only where they changed ([`show_trail`]).
+    static SWEPT: Rc<VecModel<SweptLine>> = Rc::new(VecModel::default());
+    /// How many times they were made again or changed, for the screenshots' check that a glide leaves them be.
+    static SWEPT_CHANGED: Cell<u64> = const { Cell::new(0) };
     static DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
     static PACKING: RefCell<Option<Newest<SetAsk>>> = const { RefCell::new(None) };
     static MINI_DRAWING: RefCell<Option<Newest<Picture>>> = const { RefCell::new(None) };
@@ -443,6 +448,7 @@ fn show_choices(app: &AppWindow) {
 /// Wires the galaxy's choices and the mouse on the map.
 pub(super) fn wire(app: &AppWindow) {
     let data = app.global::<SoundsData>();
+    data.set_galaxy_swept(ModelRc::from(SWEPT.with(Rc::clone) as Rc<dyn Model<Data = SweptLine>>));
     show_choices(app);
     // The choice already picked stays picked, and the map stays as it is.
     let weak = app.as_weak();
@@ -1101,7 +1107,28 @@ pub(super) fn show_trail(app: &AppWindow) {
     data.set_galaxy_trail_dots(ModelRc::new(VecModel::from(dots)));
     let at = lines.iter().position(|line| line.current).unwrap_or(0);
     data.set_galaxy_swept_at(i32::try_from(at).unwrap_or(0));
-    data.set_galaxy_swept(ModelRc::new(VecModel::from(lines)));
+    // Only the lines that changed. This runs on every frame of a glide or a drag (the path and dots move with the
+    // map), and a line made again under a mouse that isn't moving loses its shade and its tooltip, as Slint only finds
+    // out what's under the mouse when it moves (the whole-app review of 19 Nov, SN-10). The lines are worked out with
+    // the path, 16 at most, so a type you give a sound shows on its line at once.
+    SWEPT.with(|m| {
+        if m.row_count() != lines.len() {
+            m.set_vec(lines);
+            SWEPT_CHANGED.with(|c| c.set(c.get() + 1));
+            return;
+        }
+        for (i, line) in lines.into_iter().enumerate() {
+            if m.row_data(i).as_ref() != Some(&line) {
+                m.set_row_data(i, line);
+                SWEPT_CHANGED.with(|c| c.set(c.get() + 1));
+            }
+        }
+    });
+}
+
+/// How many times the Swept card's lines were made again or changed so far ([`show_trail`]), for the screenshots.
+pub(super) fn swept_lines_changed() -> u64 {
+    SWEPT_CHANGED.with(Cell::get)
 }
 
 /// The names over the map where the view is now; the neighbourhoods are found again (on the pool) when the stars on
