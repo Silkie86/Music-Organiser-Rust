@@ -463,7 +463,7 @@ pub fn saves_in(folder: &Path, stop: &AtomicBool) -> Result<Vec<Save>, Stopped> 
 
 /// The name of the save a "(fixed)" project was written from, as the converter names them: "Song v2" for
 /// "Song v2 (fixed)" and "Song v2 (fixed 3)". None for any other name.
-fn fixed_from(stem: &str) -> Option<&str> {
+pub fn fixed_from(stem: &str) -> Option<&str> {
     // Lower case keeps every byte where it was, so `at` is a place in `stem` too.
     let at = stem.to_ascii_lowercase().rfind(" (fixed")?;
     let tail = stem[at + " (fixed".len()..].strip_suffix(')')?;

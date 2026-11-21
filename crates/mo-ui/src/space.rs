@@ -213,6 +213,9 @@ enum Step {
     /// The fixed projects went to the Recycle Bin: the list of what the app put there with them now (none when keeping
     /// it stopped with an error, which is logged).
     FixedRemoved(Option<Kept>),
+    /// What Free the space found of the checked saves' fixed projects: those that still use copies a later look found
+    /// (`space_bitwig::fixed_still_using`), and every save it checked.
+    StillUses(Vec<(PathBuf, PathBuf, usize)>, Vec<PathBuf>),
     Kept(Kept),
     /// Remove has finished: when it ran (as the list of what the app put in the Recycle Bin keeps it), what went and
     /// what stayed, and that list with it now (none when keeping it stopped with an error, which is logged).
@@ -1179,6 +1182,8 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
             let reread = mo_library::song_writes::bitwig_reread(&library);
             for job in &mut jobs {
                 job.reread = reread;
+                // The song's older fixed projects still as Fix wrote them: left behind with it (FS-3).
+                job.older_fixed = space_bitwig::older_fixed(job, &space_fix_note::file());
             }
             let of: usize = jobs.iter().map(|j| j.project.copies.len()).sum();
             let tally = Mutex::new(Tally::new(SystemBin.admin().can_ask()));
@@ -1207,6 +1212,24 @@ fn free_bitwig(app: &AppWindow, feed: Feed) {
                 let one = background::on_bulk_pool(|| {
                     space_bitwig::free_noted(job, &bin, stop, &space_fix_note::file(), when)
                 });
+                // A copy that stayed may be one the song's own fixed project still uses: one a look found after Fix
+                // ran. Fix is then offered again for that song (the whole-app review of 19 Nov, FS-3).
+                if !one.problems.is_empty() && !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let still = background::on_pool(|| space_bitwig::fixed_still_using(job));
+                    for (save, fixed, n) in &still {
+                        log::info(
+                            "Space",
+                            &format!(
+                                "{} still uses {n} of the copies of {} that can use their originals now: Fix is \
+                                 offered again for it.",
+                                fixed.display(),
+                                save.display()
+                            ),
+                        );
+                    }
+                    let checked = job.checked.iter().map(|(save, _)| save.clone()).collect();
+                    arrive(&weak, Step::StillUses(still, checked));
+                }
                 done.removed.extend(one.removed);
                 done.problems.extend(one.problems);
             }
@@ -2471,6 +2494,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     p.freeing = false;
                     p.bitwig_stop = None;
                     Changed::LookAgain
+                }
+                Step::StillUses(still, checked) => {
+                    p.fixes.still_uses(still, &checked);
+                    Changed::Nothing
                 }
                 Step::Kept(kept) => {
                     if keep(&mut p, Some(kept)) {

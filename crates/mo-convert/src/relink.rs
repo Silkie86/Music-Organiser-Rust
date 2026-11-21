@@ -753,7 +753,7 @@ fn fixed_names(project: &Path) -> impl Iterator<Item = PathBuf> + '_ {
 /// which copies nothing uses any more but the original: every other Bitwig file in the project's folder and below it
 /// is read to see (a folder that can't be listed keeps them all).
 pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, String> {
-    fix(project, relinks, &[], true, &AtomicBool::new(false))
+    fix(project, project, relinks, &[], true, &AtomicBool::new(false))
 }
 
 /// Writes the fixed project as [`fix_bitwig_project`] does, with Bitwig's Library folders as you have them (your
@@ -763,7 +763,7 @@ pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, S
 /// slow), so [`Fixed::changed`] only says which copies the fixed project no longer names. Before a copy goes to the
 /// Recycle Bin, [`still_named`] asks again of every Bitwig file there.
 pub fn fix_bitwig_project_in(project: &Path, relinks: &[Relink], libraries: &[PathBuf]) -> Result<Fixed, String> {
-    fix(project, relinks, libraries, false, &AtomicBool::new(false))
+    fix(project, project, relinks, libraries, false, &AtomicBool::new(false))
 }
 
 /// [`fix_bitwig_project_in`], stopped by `stop` (the app closing) at any point before the fixed project is written:
@@ -774,7 +774,63 @@ pub fn fix_bitwig_project_until(
     libraries: &[PathBuf],
     stop: &AtomicBool,
 ) -> Result<Fixed, String> {
-    fix(project, relinks, libraries, false, stop)
+    fix(project, project, relinks, libraries, false, stop)
+}
+
+/// [`fix_bitwig_project_until`], written from `from`, the save's own "(fixed)" project beside it, and named from the
+/// save (the next "<save> (fixed N)"): a later look listed copies that fixed project still uses (a sample the Sounds
+/// library learned after Fix, or a Library folder added since; the whole-app review of 19 Nov, FS-3). It already uses
+/// the Library for the copies that went, so only the ones it still names are pointed. `from` must be in the save's
+/// folder.
+pub fn fix_bitwig_project_from(
+    project: &Path,
+    from: &Path,
+    relinks: &[Relink],
+    libraries: &[PathBuf],
+    stop: &AtomicBool,
+) -> Result<Fixed, String> {
+    if from.parent() != project.parent() {
+        return Err(format!("{} isn't beside {}, so nothing was written", from.display(), project.display()));
+    }
+    // One of this save's own fixed projects, by the names Fix gives them: never another song's.
+    let named = |p: &Path| p.file_name().map(|n| key(&n.to_string_lossy()));
+    if !fixed_names(project).any(|f| named(&f) == named(from)) {
+        return Err(format!(
+            "{} isn't a fixed project of {}, so nothing was written",
+            from.display(),
+            project.display()
+        ));
+    }
+    fix(project, from, relinks, libraries, false, stop)
+}
+
+/// How many of these copies the fixed project `fixed` still names that a Fix from it would point at their Library
+/// files ([`fix_bitwig_project_from`]): copies a look found after Fix ran (the whole-app review of 19 Nov, FS-3). A
+/// copy it names only where Fix doesn't change it (a plugin's own settings) isn't counted. 0 when it can't be read.
+pub fn could_point(fixed: &Path, relinks: &[Relink]) -> usize {
+    let Some(dir) = fixed.parent() else { return 0 };
+    let Ok(raw) = std::fs::read(fixed) else { return 0 };
+    if raw.is_empty() {
+        return 0;
+    }
+    // Most fixed projects name none: their bytes are looked through before anything is decoded or compared. Then only
+    // copies Fix would point count: in a copy folder, with their original there and still the same as it.
+    let (relinks, listed): (Vec<&Relink>, Vec<Listed>) =
+        relinks.iter().filter_map(|r| listed_one(dir, r).ok().map(|l| (r, l))).unzip();
+    let named = named_in(&raw, &listed);
+    let never = AtomicBool::new(false);
+    let listed: Vec<Listed> = listed
+        .into_iter()
+        .zip(relinks)
+        .zip(named)
+        .filter(|((_, r), named)| *named && same_file_once(&r.copy, &r.library, &never))
+        .map(|((l, _), _)| l)
+        .collect();
+    if listed.is_empty() {
+        return 0;
+    }
+    let Ok(Relinked { bytes, changed, .. }) = relink_listed(&raw, dir, &listed, &[]) else { return 0 };
+    changed.iter().zip(named_in(&bytes, &listed)).filter(|(c, still)| **c && !still).count()
 }
 
 /// How a line of [`Fixed::left`] ends for a copy the project doesn't use.
@@ -783,8 +839,10 @@ pub const UNUSED: &str = ": this project doesn't use it, so it's left alone";
 /// What a Fix stopped by the app closing says.
 const STOPPED: &str = "the app closed before it was written";
 
+/// Writes `project`'s next fixed project from the bytes of `from` (the project itself, or its own fixed project).
 fn fix(
     project: &Path,
+    from: &Path,
     relinks: &[Relink],
     libraries: &[PathBuf],
     look_around: bool,
@@ -844,7 +902,7 @@ fn fix(
     if listed.is_empty() {
         return Err(format!("no copy is the same as its Library file, so nothing was written: {}", left.join("; ")));
     }
-    let raw = std::fs::read(project).map_err(|e| format!("Couldn't read {}: {e}", project.display()))?;
+    let raw = std::fs::read(from).map_err(|e| format!("Couldn't read {}: {e}", from.display()))?;
     let Relinked { bytes, mut changed, found } = relink_listed(&raw, &dir, &listed, libraries)?;
     if !changed.contains(&true) {
         left.push("the project uses none of the other copies".to_owned());
