@@ -299,8 +299,8 @@ fn finish(held: Option<&mo_app::one_copy::OneCopy>, session: &'static log::Sessi
     }
     // The rail's DAW watch stops asking Bitwig.
     mo_ui::daws::finish_up();
-    // An update's fetch going stops with the app: curl isn't left fetching with nothing open (UP-4).
-    mo_app::update::stop_fetches();
+    // An update's fetch going stops with the app, waited for: curl isn't left fetching with nothing open (UP-4).
+    mo_app::update::stop_fetches_and_wait(std::time::Duration::from_secs(2));
     // A plugin move still copying is told to stop, its copy cleared, rather than leave a half copy on the other drive.
     mo_ui::plugins::stop_moves();
     // Bars picked on the MIDI page's slider a moment ago, not yet in the settings, go into them first.

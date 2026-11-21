@@ -1,5 +1,6 @@
-//! Updates from inside the app (the installer plan, step 4; docs/installer.md). Once a day, a while after start and on
-//! a low-priority thread, an installed copy asks GitHub's Releases page whether a newer version is out. That one
+//! Updates from inside the app (the installer plan, step 4; docs/installer.md). A while after each start, then once a
+//! day while it stays open, on a low-priority thread, an installed copy asks GitHub's Releases page whether a newer
+//! version is out. That one
 //! question is all the app sends online, and Settings › General turns it off (rule 1: the app works fully offline).
 //! A newer setup is fetched in the background into the data folder's `updates` folder, checked against the SHA-256
 //! the release lists, and only then offered: "Restart to update". On a click the setup is checked and started, and
@@ -9,7 +10,8 @@
 //! Only a copy the installer put in place updates itself: one built by the launcher, or run from a build folder, never
 //! does ([`installed`]). Talking to GitHub goes through Windows' own `curl.exe` (System32), so no web library is built
 //! in and Windows' own certificates are used. A proxy set only in Windows' settings is not (curl.exe reads only the
-//! `HTTPS_PROXY` and `ALL_PROXY` environment variables), so behind one the look fails and says so in the log (UP-8).
+//! `HTTPS_PROXY` and `ALL_PROXY` environment variables), so behind one the look fails, and the log has curl's error
+//! (UP-8).
 //! Tests use a stand-in server on this computer, never GitHub.
 //!
 //! Rule 28: a setup is removed once its version is the one running (or older), and a half-fetched one
@@ -22,7 +24,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering as Atomic};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as Atomic};
 use std::time::Duration;
 
 /// The setting that turns the daily look off ("0"). On unless turned off.
@@ -109,13 +111,53 @@ pub fn clear_unlisted(folder: &Path, current: &str, listed: Option<&str>) {
 /// Bumped to stop every fetch going ([`stop_fetches`]).
 static STOPS: AtomicU64 = AtomicU64::new(0);
 
-/// What a stopped fetch says.
-pub const STOPPED: &str = "stopped";
+/// How many curls are running.
+static RUNNING: AtomicUsize = AtomicUsize::new(0);
 
-/// Stops every fetch going (curl is ended, and a setup cut short removed by its fetch): the look was turned off, or
-/// the app is closing, so nothing goes on fetching once it's said no (UP-4).
+/// Taken when a look starts and passed to each of its fetches: a stop at any time after it, even between two
+/// fetches, stops them all.
+pub fn stop_mark() -> u64 {
+    STOPS.load(Atomic::Relaxed)
+}
+
+fn stopped(since: u64) -> bool {
+    STOPS.load(Atomic::Relaxed) != since
+}
+
+/// Stops every look and fetch going (curl is ended, and a setup cut short removed by its fetch): the look was
+/// turned off, so nothing goes on fetching once it's said no (UP-4).
 pub fn stop_fetches() {
     STOPS.fetch_add(1, Atomic::Relaxed);
+}
+
+/// As [`stop_fetches`], and waits up to `wait` for every curl to have ended: the app is closing, and curl mustn't
+/// go on fetching with nothing open.
+pub fn stop_fetches_and_wait(wait: Duration) {
+    stop_fetches();
+    let until = std::time::Instant::now() + wait;
+    while RUNNING.load(Atomic::Relaxed) > 0 && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Why a fetch didn't bring what it was for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failed {
+    /// The look was turned off, or the app is closing.
+    Stopped,
+    /// No answer, or the connection dropped: worth trying again soon. curl's own words.
+    Connection(String),
+    /// Anything else (a setup that isn't the one the release lists, a full disk): trying again soon won't help.
+    Other(String),
+}
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failed::Stopped => f.write_str("stopped"),
+            Failed::Connection(why) | Failed::Other(why) => f.write_str(why),
+        }
+    }
 }
 
 /// The setup's own log for `setup` (its name with `.log` after it, beside it): the app names it, so the next start
@@ -357,8 +399,11 @@ fn protocols(url: &str) -> &'static str {
 }
 
 /// Fetches `url`: into `to` when given (and nothing back), else its words back. A page that isn't there or doesn't
-/// answer in time is an error.
-pub fn fetch(url: &str, to: Option<&Path>, seconds: u32) -> Result<String, String> {
+/// answer in time is a [`Failed::Connection`]; a stop since `since` ([`stop_mark`]) ends it at once.
+pub fn fetch(url: &str, to: Option<&Path>, seconds: u32, since: u64) -> Result<String, Failed> {
+    if stopped(since) {
+        return Err(Failed::Stopped);
+    }
     let mut command = Command::new(curl());
     command
         .args([
@@ -387,11 +432,26 @@ pub fn fetch(url: &str, to: Option<&Path>, seconds: u32) -> Result<String, Strin
         // No console window flashing up.
         command.creation_flags(0x0800_0000);
     }
-    let stops = STOPS.load(Atomic::Relaxed);
-    let mut child = command.spawn().map_err(|e| format!("couldn't start curl: {e}"))?;
+    RUNNING.fetch_add(1, Atomic::Relaxed);
+    let ran = run_curl(command, since);
+    RUNNING.fetch_sub(1, Atomic::Relaxed);
+    let (status, out, err) = ran?;
+    if !status.success() {
+        return Err(Failed::Connection(String::from_utf8_lossy(&err).trim().to_owned()));
+    }
+    String::from_utf8(out).map_err(|_| Failed::Other("the answer wasn't text".to_owned()))
+}
+
+/// Runs curl to its end, or ends it on a stop: its exit, and what it wrote and said.
+fn run_curl(mut command: Command, since: u64) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), Failed> {
+    let mut child = command.spawn().map_err(|e| Failed::Other(format!("couldn't start curl: {e}")))?;
+    let end = |child: &mut std::process::Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+    };
     // Read as it comes, on threads of their own, so a long answer never fills the pipe while this waits.
     let reader = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
+        crate::background::spawn("Update read", move || {
             let mut bytes = Vec::new();
             if let Some(mut pipe) = pipe {
                 let _ = pipe.read_to_end(&mut bytes);
@@ -399,69 +459,85 @@ pub fn fetch(url: &str, to: Option<&Path>, seconds: u32) -> Result<String, Strin
             bytes
         })
     };
-    let out = reader(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let err = reader(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let readers = reader(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>))
+        .and_then(|out| Ok((out, reader(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>))?)));
+    let (out, err) = match readers {
+        Ok(both) => both,
+        Err(e) => {
+            end(&mut child);
+            return Err(Failed::Other(format!("couldn't read curl's answer: {e}")));
+        }
+    };
     let status = loop {
-        if STOPS.load(Atomic::Relaxed) != stops {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(STOPPED.to_owned());
+        if stopped(since) {
+            end(&mut child);
+            return Err(Failed::Stopped);
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => return Err(format!("couldn't wait for curl: {e}")),
+            Err(e) => {
+                end(&mut child);
+                return Err(Failed::Other(format!("couldn't wait for curl: {e}")));
+            }
         }
     };
-    let out = out.join().unwrap_or_default();
-    let err = err.join().unwrap_or_default();
-    if !status.success() {
-        return Err(String::from_utf8_lossy(&err).trim().to_owned());
-    }
-    String::from_utf8(out).map_err(|_| "the answer wasn't text".to_owned())
+    Ok((status, out.join().unwrap_or_default(), err.join().unwrap_or_default()))
 }
 
 /// Asks `api` (GitHub's, or a test's stand-in) for the releases and picks what's newer than `current`.
-pub fn look(api: &str, current: &str) -> Result<Option<Offer>, String> {
-    let json = fetch(&format!("{api}/repos/{REPO}/releases?per_page=20"), None, 30)?;
-    newest(&json, current)
+pub fn look(api: &str, current: &str, since: u64) -> Result<Option<Offer>, Failed> {
+    let json = fetch(&format!("{api}/repos/{REPO}/releases?per_page=20"), None, 30, since)?;
+    newest(&json, current).map_err(Failed::Other)
 }
 
-/// Fetches the offer's setup into `folder` (written as `.mo-part`, checked against its SHA-256, then named, with the
-/// SHA-256 kept beside it for [`ready_in`]), and gives its path. One there already and whole is kept, not fetched
-/// again.
-pub fn fetch_setup(offer: &Offer, folder: &Path) -> Result<PathBuf, String> {
+/// The SHA-256 the release lists for the offer's setup, asked for every time, so a setup replaced on the release is
+/// fetched again.
+pub fn release_sha(offer: &Offer, since: u64) -> Result<String, Failed> {
+    sha_in(&fetch(&offer.sha_url, None, 30, since)?)
+        .ok_or_else(|| Failed::Other("the release's SHA-256 can't be read".to_owned()))
+}
+
+/// The offer's setup fetched before, when it's still the one the release lists (`want`, [`release_sha`]): no need to
+/// fetch it again. Its SHA-256 is kept beside it again, for [`ready_in`].
+pub fn kept(offer: &Offer, folder: &Path, want: &str) -> Option<PathBuf> {
+    setup_version(&offer.setup_name)?;
+    let file = folder.join(&offer.setup_name);
+    (file.is_file() && sha_of(&file).is_ok_and(|h| h == want) && keep_sha(offer, folder, want).is_ok()).then_some(file)
+}
+
+fn keep_sha(offer: &Offer, folder: &Path, want: &str) -> Result<(), Failed> {
+    fs::write(folder.join(format!("{}.sha256", offer.setup_name)), format!("{want}  {}", offer.setup_name))
+        .map_err(|e| Failed::Other(format!("couldn't keep the setup's SHA-256: {e}")))
+}
+
+/// Fetches the offer's setup into `folder` (written as `.mo-part`, checked against `want`, the SHA-256 the release
+/// lists, then named, with the SHA-256 kept beside it for [`ready_in`]), and gives its path. A stop since `since`
+/// leaves nothing behind, even one that comes once the download is done.
+pub fn fetch_setup(offer: &Offer, folder: &Path, want: &str, since: u64) -> Result<PathBuf, Failed> {
     // Only the app's own name for this version: nothing in the name can lead out of the folder.
     if setup_version(&offer.setup_name).is_none_or(|v| Some(v) != Version::parse(&offer.version)) {
-        return Err(format!("the setup's name {} isn't the one the app gives it", offer.setup_name));
+        return Err(Failed::Other(format!("the setup's name {} isn't the one the app gives it", offer.setup_name)));
     }
     let file = folder.join(&offer.setup_name);
-    let sha_file = folder.join(format!("{}.sha256", offer.setup_name));
-    let want = sha_in(&fetch(&offer.sha_url, None, 30)?).ok_or("the release's SHA-256 can't be read")?;
-    let keep_sha = || {
-        fs::write(&sha_file, format!("{want}  {}", offer.setup_name))
-            .map_err(|e| format!("couldn't keep the setup's SHA-256: {e}"))
-    };
-    if file.is_file() && sha_of(&file).is_ok_and(|h| h == want) {
-        keep_sha()?;
-        return Ok(file);
-    }
-    fs::create_dir_all(folder).map_err(|e| format!("couldn't make {}: {e}", folder.display()))?;
+    fs::create_dir_all(folder).map_err(|e| Failed::Other(format!("couldn't make {}: {e}", folder.display())))?;
     let part = folder.join(format!("{}.mo-part", offer.setup_name));
-    let fetched = fetch(&offer.setup_url, Some(&part), 900).and_then(|_| {
-        let got = sha_of(&part).map_err(|e| format!("couldn't read the fetched setup: {e}"))?;
-        if got == want {
+    let fetched = fetch(&offer.setup_url, Some(&part), 900, since).and_then(|_| {
+        let got = sha_of(&part).map_err(|e| Failed::Other(format!("couldn't read the fetched setup: {e}")))?;
+        if stopped(since) {
+            Err(Failed::Stopped)
+        } else if got == want {
             Ok(())
         } else {
-            Err("the fetched setup isn't the one the release lists (its SHA-256 differs)".to_owned())
+            Err(Failed::Other("the fetched setup isn't the one the release lists (its SHA-256 differs)".to_owned()))
         }
     });
     if let Err(e) = fetched {
         let _ = fs::remove_file(&part);
         return Err(e);
     }
-    fs::rename(&part, &file).map_err(|e| format!("couldn't name the fetched setup: {e}"))?;
-    keep_sha()?;
+    fs::rename(&part, &file).map_err(|e| Failed::Other(format!("couldn't name the fetched setup: {e}")))?;
+    keep_sha(offer, folder, want)?;
     Ok(file)
 }
 
@@ -635,7 +711,8 @@ mod tests {
             sha_url: String::new(),
             page_url: String::new(),
         };
-        assert!(fetch_setup(&offer, Path::new("unused")).unwrap_err().contains("isn't the one"));
+        let named = fetch_setup(&offer, Path::new("unused"), "", stop_mark()).unwrap_err();
+        assert!(named.to_string().contains("isn't the one"), "{named}");
     }
 
     fn test_folder(name: &str) -> PathBuf {
@@ -750,14 +827,23 @@ mod tests {
         // A fetch that would take a while (nothing answers on this port, so curl waits for its connection): stopped.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}/slow", listener.local_addr().unwrap().port());
-        let stopper = std::thread::spawn(|| {
-            std::thread::sleep(Duration::from_millis(300));
-            stop_fetches();
-        });
+        // Stopped until the fetch ends, so a slow start of the fetch can't miss it.
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopper = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                while !done.load(Atomic::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(100));
+                    stop_fetches();
+                }
+            })
+        };
         let started = std::time::Instant::now();
-        assert_eq!(fetch(&url, None, 30), Err(STOPPED.to_owned()));
+        assert_eq!(fetch(&url, None, 30, stop_mark()), Err(Failed::Stopped));
+        done.store(true, Atomic::Relaxed);
         assert!(started.elapsed() < Duration::from_secs(10));
         stopper.join().unwrap();
+        assert_eq!(RUNNING.load(Atomic::Relaxed), 0, "curl ended");
         drop(listener);
     }
 
@@ -853,11 +939,15 @@ mod tests {
         );
         let api = stand_in(vec![(format!("/repos/{REPO}/releases?per_page=20"), list.into_bytes())]);
 
-        let offer = look(&api, "1.0.0").unwrap().unwrap();
+        let offer = look(&api, "1.0.0", stop_mark()).unwrap().unwrap();
         assert_eq!(offer.version, "1.0.1");
         let dir = test_folder("fetch");
-        let got = fetch_setup(&offer, &dir).unwrap();
+        let want = release_sha(&offer, stop_mark()).unwrap();
+        assert_eq!(kept(&offer, &dir, &want), None, "nothing fetched yet");
+        let got = fetch_setup(&offer, &dir, &want, stop_mark()).unwrap();
         assert_eq!(fs::read(&got).unwrap(), setup);
+        assert_eq!(kept(&offer, &dir, &want), Some(got.clone()), "fetched once, kept");
+        assert_eq!(kept(&offer, &dir, &"0".repeat(64)), None, "replaced on the release: fetched again");
         assert!(!dir.join("DAWmate-Setup-1.0.1.exe.mo-part").exists());
         assert_eq!(ready_in(&dir, "1.0.0").map(|r| r.0).as_deref(), Some("1.0.1"));
 
@@ -865,11 +955,18 @@ mod tests {
         fs::remove_file(&got).unwrap();
         fs::remove_file(dir.join("DAWmate-Setup-1.0.1.exe.sha256")).unwrap();
         let wrong = Offer { sha_url: format!("{files}/bad.sha256"), ..offer.clone() };
-        assert!(fetch_setup(&wrong, &dir).unwrap_err().contains("SHA-256"));
+        let want = release_sha(&wrong, stop_mark()).unwrap();
+        assert!(
+            matches!(fetch_setup(&wrong, &dir, &want, stop_mark()), Err(Failed::Other(e)) if e.contains("SHA-256"))
+        );
         assert!(fs::read_dir(&dir).unwrap().next().is_none(), "nothing left behind");
 
         // GitHub not answering is an error, not an offer.
-        assert!(look(&format!("{files}/nowhere"), "1.0.0").is_err());
+        assert!(matches!(look(&format!("{files}/nowhere"), "1.0.0", stop_mark()), Err(Failed::Connection(_))));
+        // A stop between two fetches of one look still stops the second.
+        let since = stop_mark();
+        stop_fetches();
+        assert_eq!(fetch_setup(&offer, &dir, &hex, since), Err(Failed::Stopped));
         let _ = fs::remove_dir_all(&dir);
     }
 }

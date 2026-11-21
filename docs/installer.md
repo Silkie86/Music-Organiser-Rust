@@ -35,8 +35,9 @@ the installed copy is open the launcher's window keeps a new build waiting until
 its place (starting the launcher by hand still does). Three minutes after every start, then once a day while it stays
 open, it asks GitHub's Releases page (through Windows' own `curl.exe`) whether a newer version is out. That is all it
 sends online, and Settings › General › Updates turns it off (a fetch going stops, and the fetched setups go). curl.exe
-doesn't use a proxy set only in Windows' settings (only the `HTTPS_PROXY` environment variable), so behind such a proxy
-the look fails and the log says so. A failed fetch is tried again within the hour. A newer setup is fetched into the
+doesn't use a proxy set only in Windows' settings (only the `HTTPS_PROXY` or `ALL_PROXY` environment variables), so
+behind such a proxy the look fails, and the log has curl's error. A fetch whose connection dropped is tried again
+within the hour, twice at most; any other failure waits for the next day's look. A newer setup is fetched into the
 data folder's `updates` folder, checked against the `.sha256` beside it on the release, and the rail then offers
 "Restart to update": the click checks the setup again and starts it, and the app closes as it always does. The setup
 waits for the app to end (`/WAITPID`), puts the new version in without pages and opens it (`/UPDATED=1`); if a file

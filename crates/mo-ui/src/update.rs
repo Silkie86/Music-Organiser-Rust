@@ -1,4 +1,5 @@
-//! The window's side of updates (`mo_app::update`): the daily look a while after start, the fetch as a job card, the
+//! The window's side of updates (`mo_app::update`): the look a while after each start and then daily (hourly while
+//! GitHub can't be reached, or after a dropped fetch, twice), the fetch as a job card, the
 //! rail's "Restart to update" line, and Settings › General's switch. The click checks the setup and starts it, and
 //! the app then closes as it always does: the setup waits for it to end before it touches a file (`/WAITPID`), so a
 //! setup that can't start is told on the spot, and the app stays open (UP-1).
@@ -20,10 +21,15 @@ const FIRST_LOOK_AFTER: Duration = Duration::from_secs(180);
 /// Then every hour it looks whether a day has gone by, for an app left open for days.
 const LOOK_EVERY: Duration = Duration::from_secs(3600);
 
+/// How many times a dropped fetch is tried again within the hour.
+const RETRY_SOON: u32 = 2;
+
 thread_local! {
     static TIMER: slint::Timer = slint::Timer::default();
     /// A look or fetch is going.
     static BUSY: RefCell<bool> = const { RefCell::new(false) };
+    /// Fetches tried again within the hour since the last that worked: twice at most, then the daily look (UP-10).
+    static RETRIES: RefCell<u32> = const { RefCell::new(0) };
 }
 
 /// Sets up the switch and the rail's line, and the daily look for an installed copy. `live` is false for the
@@ -166,18 +172,27 @@ fn look_if_due(app: &AppWindow, feed: &Feed, first: bool) {
     let current = env!("CARGO_PKG_VERSION").to_owned();
     let feed = feed.clone();
     let answer = Answer { found: None, reached: false, again_soon: false, window: app.as_weak() };
+    let retry_soon = RETRIES.with(|r| *r.borrow()) < RETRY_SOON;
+    let showing = app.get_update_ready().to_string();
+    let window = app.as_weak();
     let started = mo_app::background::spawn("Update look", move || {
         // Tells the window when it's dropped, so a panic in here still frees the next look.
         let mut answer = answer;
+        // Turned off (or the app closing) from here on stops every fetch of this look, even between two.
+        let since = update::stop_mark();
         update::clear_old(&folder, &current);
         if !due {
             answer.found = update::ready_in(&folder, &current);
             return;
         }
-        let offer = match update::look(update::GITHUB_API, &current) {
+        let offer = match update::look(update::GITHUB_API, &current, since) {
             Ok(offer) => offer,
+            Err(update::Failed::Stopped) => {
+                log::info("Update", "Stopped asking GitHub");
+                return;
+            }
             // Offline, or GitHub not answering: a setup fetched before still is offered, and GitHub is asked again
-            // tomorrow (or at the next start).
+            // within the hour (the look counts only once GitHub has answered).
             Err(e) => {
                 log::info("Update", &format!("Couldn't ask GitHub for new versions: {e}"));
                 answer.found = update::ready_in(&folder, &current);
@@ -185,38 +200,51 @@ fn look_if_due(app: &AppWindow, feed: &Feed, first: bool) {
             }
         };
         answer.reached = true;
+        // An offer showing that GitHub no longer lists goes from the rail before its setup goes from the disk.
+        let listed = offer.as_ref().map(|o| o.version.clone()).unwrap_or_default();
+        if !showing.is_empty() && showing != listed {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = window.upgrade().filter(|a| a.get_update_ready() == showing.as_str()) {
+                    app.set_update_ready("".into());
+                    app.set_update_setup("".into());
+                }
+            });
+        }
         update::clear_unlisted(&folder, &current, offer.as_ref().map(|o| o.version.as_str()));
         let Some(offer) = offer else {
             // Nothing newer listed: a setup fetched earlier and since taken off the Releases page is gone.
             log::info("Update", &format!("No newer version than {current}"));
             return;
         };
-        // Fetched already (an earlier day, or the offer showing now): offered again with no card.
-        if let Some(ready) = update::ready_in(&folder, &current).filter(|(v, _)| *v == offer.version) {
-            answer.found = Some(ready);
-            return;
-        }
         let name = mo_app::product::NAME;
-        let job = feed.start(&format!("Getting {name} {}", offer.version), "Fetching the setup");
-        match update::fetch_setup(&offer, &folder) {
-            Ok(setup) => {
+        let fetched = update::release_sha(&offer, since).and_then(|want| {
+            // Fetched already (an earlier day, or the offer showing now), and still what the release lists: offered
+            // again with no card.
+            if let Some(setup) = update::kept(&offer, &folder, &want) {
+                return Ok((setup, None));
+            }
+            let job = feed.start(&format!("Getting {name} {}", offer.version), "Fetching the setup");
+            match update::fetch_setup(&offer, &folder, &want, since) {
+                Ok(setup) => Ok((setup, Some(job))),
+                Err(e) => {
+                    tell(job, &e, &format!("Couldn't fetch {name} {}", offer.version), retry_soon);
+                    Err(e)
+                }
+            }
+        });
+        match fetched {
+            Ok((setup, job)) => {
                 log::info("Update", &format!("{} is ready: {}", offer.version, setup.display()));
-                job.done_as(&format!("{name} {} is ready", offer.version), "Restart to update");
+                if let Some(job) = job {
+                    job.done_as(&format!("{name} {} is ready", offer.version), "Restart to update");
+                }
                 answer.found = Some((offer.version, setup));
             }
-            Err(e) if e == update::STOPPED => {
-                log::info("Update", &format!("Stopped fetching {}", offer.version));
-                job.done("Stopped");
-            }
-            // curl's own words for the log; plain words and what happens next on the card (UP-10).
+            Err(update::Failed::Stopped) => log::info("Update", &format!("Stopped fetching {}", offer.version)),
             Err(e) => {
+                // curl's own words for the log; plain words and what happens next on the card (UP-10).
                 log::warning("Update", &format!("Couldn't fetch {}: {e}", offer.version));
-                answer.again_soon = true;
-                job.failed_as(
-                    &format!("Couldn't fetch {name} {}", offer.version),
-                    "The connection dropped, or the download didn't arrive whole. Nothing has changed: the app tries \
-                     again within the hour.",
-                );
+                answer.again_soon = matches!(e, update::Failed::Connection(_)) && retry_soon;
             }
         }
     });
@@ -225,12 +253,32 @@ fn look_if_due(app: &AppWindow, feed: &Feed, first: bool) {
     }
 }
 
+/// The fetch's card when it didn't bring the setup: plain words and what happens next (UP-10).
+fn tell(job: mo_app::activity::Job, why: &update::Failed, title: &str, retry_soon: bool) {
+    match why {
+        update::Failed::Stopped => job.done("Stopped"),
+        update::Failed::Connection(_) if retry_soon => job.failed_as(
+            title,
+            "The connection dropped, or GitHub didn't answer. Nothing has changed: the app tries again within the hour.",
+        ),
+        update::Failed::Connection(_) => job.failed_as(
+            title,
+            "The connection dropped again, or GitHub didn't answer. Nothing has changed: the app tries again tomorrow.",
+        ),
+        update::Failed::Other(_) => job.failed_as(
+            title,
+            "The download didn't match the release, or couldn't be saved in the data folder. Nothing has changed: the \
+             app tries again tomorrow, and its log says more.",
+        ),
+    }
+}
+
 /// What a look found, given to the window when the look ends, however it ends.
 struct Answer {
     found: Option<(String, PathBuf)>,
     /// GitHub answered: the look counts, and an offer it no longer lists goes.
     reached: bool,
-    /// The fetch failed: the next hourly tick tries again.
+    /// The fetch's connection dropped, with a retry left: the next hourly tick tries again.
     again_soon: bool,
     window: slint::Weak<AppWindow>,
 }
@@ -245,9 +293,13 @@ impl Drop for Answer {
             // Only a look that reached GitHub counts as the day's look (UP-9); a failed fetch is tried again soon
             // (UP-10).
             if again_soon {
+                RETRIES.with(|r| *r.borrow_mut() += 1);
                 crate::settings::remember(CHECKED_KEY, "");
             } else if reached {
                 crate::settings::remember(CHECKED_KEY, &now_secs().to_string());
+            }
+            if found.is_some() {
+                RETRIES.with(|r| *r.borrow_mut() = 0);
             }
             let Some(app) = window.upgrade() else { return };
             // Turned off while it looked: nothing offered.

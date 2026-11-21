@@ -252,6 +252,9 @@ pub struct Places {
     /// The sample folders, whose "From Bitwig" folder Favourites from Bitwig saves samples into
     /// ([`crate::bitwig_favourites::save_missing`]).
     pub sample_folders: Vec<PathBuf>,
+    /// Whether the running app is the installed copy: only it removes fetched setups (a launcher's build is another
+    /// version, and leaves the installed copy's update be, UP-11).
+    pub installed: bool,
 }
 
 impl Places {
@@ -268,7 +271,8 @@ impl Places {
             })
             .filter(|e| e.is_absolute());
         let sample_folders = crate::bitwig_favourites::sample_folders(library);
-        Places { data: paths::data_dir(), temp: std::env::temp_dir(), beside_first, exports, sample_folders }
+        let installed = std::env::current_exe().is_ok_and(|e| crate::update::installed(&e));
+        Places { data: paths::data_dir(), temp: std::env::temp_dir(), beside_first, exports, sample_folders, installed }
     }
 }
 
@@ -352,8 +356,8 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     // and removes only a fetch cut short (UP-11).
     if let Some(updates) = real_folder(&places.data, &[crate::update::FOLDER]) {
         let current = env!("CARGO_PKG_VERSION");
-        let installed = std::env::current_exe().is_ok_and(|e| crate::update::installed(&e));
-        let spent = |n: &str| if installed { crate::update::is_spent(n, current) } else { crate::update::is_part(n) };
+        let spent =
+            |n: &str| if places.installed { crate::update::is_spent(n, current) } else { crate::update::is_part(n) };
         done.add(remove_older(&updates, spent, WRITING, now, false));
     }
     if let Some(twin) = real_folder(&places.data, &["twin", "cs"]) {
@@ -1096,7 +1100,29 @@ mod tests {
             beside_first: None,
             exports: None,
             sample_folders: Vec::new(),
+            installed: true,
         }
+    }
+
+    #[test]
+    fn a_launchers_build_leaves_the_installed_copys_setups_be() {
+        let dir = test_folder("setups");
+        let updates = dir.join("data").join(crate::update::FOLDER);
+        // Two hours on: a file's age runs from when it was made, which can't be set back.
+        let later = SystemTime::now() + Duration::from_secs(2 * 3600);
+        let current = env!("CARGO_PKG_VERSION");
+        let spent = format!("{}{current}.exe", crate::update::setup_prefix());
+        let waiting = format!("{}99.0.0.exe", crate::update::setup_prefix());
+        let cut_short = format!("{}99.0.0.exe.mo-part", crate::update::setup_prefix());
+        for name in [&spent, &waiting, &cut_short] {
+            fresh(&updates.join(name));
+        }
+        let launcher = Places { installed: false, ..test_places(&dir) };
+        sweep(&launcher, later, &TestBin(dir.join("bin")));
+        assert_eq!(names(&updates), [spent.clone(), waiting.clone()], "only the fetch cut short goes");
+        sweep(&test_places(&dir), later, &TestBin(dir.join("bin")));
+        assert_eq!(names(&updates), [waiting], "the installed copy removes its spent setup");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
