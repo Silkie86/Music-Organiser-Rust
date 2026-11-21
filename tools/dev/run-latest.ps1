@@ -14,8 +14,8 @@
      app stays open, then closes the app and opens the new build. A build that fails leaves the app as it was.
      An open F12 note is never closed: new code waits until it's saved or cancelled.
 
-  Press Ctrl+C in its window, or close the window, to stop. Closing just the app leaves it waiting: the next change
-  from GitHub opens it again.
+  Press Ctrl+C in its window, or close the window, to stop. Closing just the app leaves it waiting: Enter in its
+  window opens it again, and so does the next change from GitHub.
 
   Options:  -Branch <name>    run that branch without asking
             -PullEvery <s>    seconds between checks for new pushes (0 turns checking off)
@@ -257,7 +257,8 @@ try { $gotLock = $LauncherLock.WaitOne(0) }
 catch [System.Threading.AbandonedMutexException] { $gotLock = $true }   # the last holder closed without letting go
 if (-not $gotLock) {
     Stop-WithMessage ("Another Music Organiser Rust launcher window is already running (it may be behind other windows). " +
-        "If you closed the app, press Enter in that window to open it again. Or close that window first, then start this one.")
+        "If you closed the app, press Enter in that window to open it again (it keeps its own build and version). " +
+        "Or close that window first, then start this one.")
 }
 
 if (-not (Test-Path (Join-Path $Repo '.git'))) {
@@ -847,7 +848,7 @@ if (-not $NoWatch) {
     Say 'Leave this window open: changes pushed to GitHub show up in the app by themselves.' 'Cyan'
 }
 Say 'In the app, F12 saves a note (and a picture) for Claude.' 'Cyan'
-Say 'Press Ctrl+C here, or close this window, to stop. (Close just the app and the next change opens it again.)' 'Cyan'
+Say 'Press Ctrl+C here, or close this window, to stop. (Close just the app, and Enter here or the next change opens it again.)' 'Cyan'
 Say ''
 
 # Once the builds go to another drive (-BuildDir), the launcher's own old builds beside the code (often many GB on C:)
@@ -910,15 +911,30 @@ try {
         }
         if ($app -and $app.HasExited -and -not $saidClosed) {
             $saidClosed = $true
+            $null = Test-EnterPressed   # an Enter pressed while the app was open doesn't count: only one after this line
             if ($app.ExitCode -eq 0) { Say 'The app was closed. Press Enter here to open it again (the next change from GitHub opens it too).' 'DarkGray' }
             else { Say "The app stopped with exit code $($app.ExitCode). Its log is in $(Get-AppData)\logs. Press Enter here to open it again (the next change opens it too)." 'Yellow' }
         }
         # Enter in this window opens the same build again, once the app is closed (review TC-5: a second launcher
         # window from the shortcut stops, as this one holds the lock).
-        if ($app -and $app.HasExited -and $current -and (Test-EnterPressed)) {
-            $app = Start-App $current
-            $saidClosed = $false
-            Say "$(Get-Date -Format 'HH:mm:ss')  The app is open again." 'Green'
+        # A build waiting for the installed DAWmate to close is the one opened, and none while that copy is open
+        # (a launcher build never takes its place, CL-4).
+        if ($app -and $app.HasExited -and $saidClosed -and $current -and (Test-EnterPressed)) {
+            if ((Get-InstalledOpen) -or (Test-SetupRunning)) {
+                if ($waiting) { Say "$(Get-Date -Format 'HH:mm:ss')  DAWmate (installed) is open: close it first, then the new build opens by itself." 'Yellow' }
+                else { Say "$(Get-Date -Format 'HH:mm:ss')  DAWmate (installed) is open: close it first, then press Enter here again." 'Yellow' }
+            }
+            else {
+                if ($waiting) {
+                    $current = $waiting
+                    $waiting = $null
+                    $freeLooks = 0
+                    Remove-OldBuilds $current
+                }
+                $app = Start-App $current
+                $saidClosed = $false
+                Say "$(Get-Date -Format 'HH:mm:ss')  The app is open again." 'Green'
+            }
         }
         if ((Get-Date) -lt $next) { continue }
         $next = (Get-Date).AddSeconds($PullEvery)

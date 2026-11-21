@@ -6,7 +6,7 @@ set "DATA=%LOCALAPPDATA%\MusicOrganiser"
 set "APP=%DATA%\run-latest-rust\app"
 rem The data may have moved to another drive (Settings), or the installer started it there: MusicOrganiser-folder.txt
 rem beside the first folder names it. Read by PowerShell, which skips the byte-order mark an older setup wrote.
-if exist "%LOCALAPPDATA%\MusicOrganiser-folder.txt" for /f "usebackq delims=" %%d in (`powershell -NoProfile -Command "(Get-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'MusicOrganiser-folder.txt') -Raw -Encoding UTF8).Trim()"`) do (
+if exist "%LOCALAPPDATA%\MusicOrganiser-folder.txt" for /f "usebackq delims=" %%d in (`powershell -NoProfile -Command "((Get-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'MusicOrganiser-folder.txt') -Raw -Encoding UTF8) + '').Trim()"`) do (
   if exist "%%d\moved-in.json" set "DATA=%%d"
   if exist "%%d\started-here.txt" set "DATA=%%d"
 )
