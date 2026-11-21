@@ -2,8 +2,9 @@
 //!
 //! Solomon's rules (25 Oct 2026): a plugin's sound library only goes when no project uses the plugin at all; its
 //! presets may go once no project has used it for a while (the "unused" years you pick); everything under Program
-//! Files is left to the plugin's own uninstaller. Nothing that holds your project or sample folders, a sample any
-//! project uses, a plugin file, or a OneDrive file that's only online (the Recycle Bin can't keep those) ever goes.
+//! Files is left to the plugin's own uninstaller. Nothing that holds your project, sample or MIDI folders, a sample
+//! any project uses, a plugin file, or a OneDrive file that's only online (the Recycle Bin can't keep those) ever
+//! goes.
 //!
 //! [`lines`] says, for each of a plugin's folders, whether it may go and why not; nothing changes. [`apply`] checks
 //! each picked folder again just before it goes and sends it to the Recycle Bin, as [`crate::clean`] does for songs.
@@ -41,9 +42,9 @@ pub struct PluginUse {
 pub enum Stays {
     /// It's under Program Files: Uninstall removes it.
     InstallFolder,
-    /// It's inside one of your project or sample folders.
+    /// It's inside one of your project, sample or MIDI folders.
     InYourFolder(String),
-    /// It holds one of your project or sample folders.
+    /// It holds one of your project, sample or MIDI folders.
     HoldsYourFolder(String),
     /// A project uses a sample in it (one of its files' names).
     SampleInUse(String),
@@ -184,7 +185,7 @@ pub fn freed(picked: &[CleanLine]) -> u64 {
 
 /// What the library knows that Clean up must respect.
 pub struct Library<'a> {
-    /// Your project and sample folders.
+    /// Your project, sample and MIDI folders.
     pub protected_roots: &'a [String],
     /// More folders that never go, nor any folder holding one, besides the computer's own (always kept).
     pub kept_folders: &'a [String],
@@ -385,7 +386,7 @@ struct Read {
 struct Checker<'a> {
     library: &'a Library<'a>,
     all: &'a [PluginSpace],
-    /// Your project and sample folders, as written and as they really are.
+    /// Your project, sample and MIDI folders, as written and as they really are.
     protected: Vec<(String, String)>,
     /// The computer's own folders, as written and as they really are.
     system: Vec<(String, String)>,

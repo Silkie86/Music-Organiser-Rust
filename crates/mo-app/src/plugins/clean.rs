@@ -42,7 +42,7 @@ pub struct Ask {
 #[derive(Clone, Debug)]
 pub struct Inputs {
     pub ask: Ask,
-    /// Your project and sample folders.
+    /// Your project, sample and MIDI folders.
     pub protected: Vec<String>,
     /// More folders that never go (the app's own, your MIDI and plugin folders).
     pub kept: Vec<String>,
@@ -50,14 +50,11 @@ pub struct Inputs {
 }
 
 impl Ask {
-    /// Reads what the library knows that Clean up must respect: your folders and every sample a project uses. Slow
-    /// on a big library: call it away from the window's thread. Your MIDI folders are yours as your project and
-    /// sample folders are: nothing inside one goes either. A folder setting that can't be read is an error, never
-    /// read as no folders.
+    /// Reads what the library knows that Clean up must respect: your folders (project, sample and MIDI folders:
+    /// nothing inside one goes) and every sample a project uses. Slow on a big library: call it away from the window's
+    /// thread. A folder setting that can't be read is an error, never read as no folders.
     pub fn read(self, lib: &Library, kept: Vec<String>) -> Result<Inputs, LibraryError> {
-        let mut protected = lib.protected_roots()?;
-        protected.extend(lib.strict_list_setting("midi_folders")?);
-        protected.retain(|k| !k.trim().is_empty());
+        let protected = lib.protected_roots()?;
         let mut kept = kept;
         kept.extend(lib.strict_list_setting("plugin_folders")?);
         kept.retain(|k| !k.trim().is_empty());

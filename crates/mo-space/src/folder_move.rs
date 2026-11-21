@@ -286,7 +286,7 @@ pub fn inside_moved<'a>(path: &str, moved: &'a [MovedFolder]) -> Option<&'a str>
 pub enum CantMove {
     /// It isn't there any more.
     Gone,
-    /// It's one of your project or sample folders, holds one, or is inside one: those never move (rule 2).
+    /// It's one of your project, sample or MIDI folders, holds one, or is inside one: those never move (rule 2).
     Protected,
     /// It's one of the computer's own folders (home, Documents, AppData, ProgramData…), or holds one (that one): moving
     /// it behind a link would break other programs (review E2-9).
@@ -340,8 +340,8 @@ impl CantMove {
     pub fn text(&self) -> String {
         match self {
             CantMove::Gone => "The folder isn't there any more.".to_owned(),
-            CantMove::Protected => "It's one of your project or sample folders, holds one, or is inside one, and \
-                                    those are never moved. Nothing was moved."
+            CantMove::Protected => "It's one of your project, sample or MIDI folders, holds one, or is inside one, \
+                                    and those are never moved. Nothing was moved."
                 .to_owned(),
             CantMove::SystemFolder { holds: None } => {
                 "It's one of the computer's own folders, and other programs keep \
@@ -417,8 +417,8 @@ impl CantMove {
 }
 
 /// Why the folder can't move to `destination`, or `None` when it can. `bytes` is its size; `moved` is the folders moved
-/// already; `protected`, your project and sample folders (rule 2: nothing in them moves). Reads the folder to look for
-/// OneDrive files that are only online: call it away from the window's thread.
+/// already; `protected`, your project, sample and MIDI folders (rule 2: nothing in them moves). Reads the folder to
+/// look for OneDrive files that are only online: call it away from the window's thread.
 pub fn problem(
     from: &str,
     destination: &str,
@@ -431,8 +431,8 @@ pub fn problem(
     problem_with(from, destination, bytes, drives, (moved, protected), None, stop)
 }
 
-/// Whether a folder is one of your project or sample folders, holds one, or is inside one, as written or where it
-/// really is: then it never moves (its old copy would be offered for the Recycle Bin afterwards).
+/// Whether a folder is one of your project, sample or MIDI folders, holds one, or is inside one, as written or where
+/// it really is: then it never moves (its old copy would be offered for the Recycle Bin afterwards).
 fn protected_folder(from: &str, protected: &[String]) -> bool {
     let real_from = real_path(from).unwrap_or_else(|| from.to_owned());
     protected.iter().filter(|p| !p.trim().is_empty()).any(|p| {
@@ -648,6 +648,36 @@ pub fn move_folder(
         old_copy: aside,
         bytes,
         moved: csharp_time(chrono::Local::now()),
+        key: key_of.to_owned(),
+        kind: kind_number(kind),
+        shared_with: shared_with.to_vec(),
+    })
+}
+
+/// The record [`move_folder`] gives, for a move of `from` into `destination` that swapped the folder for its link but
+/// was never kept: the app or the computer stopped between the swap and keeping the move, or the swap's administrator
+/// step finished after the app had gone (the whole-app review of 19 Nov, PM-4: nothing kept such a move, so Space
+/// never offered its old copy, and the folder couldn't move again). Only while that's what's there: `from` is a link
+/// leading to its copy where the move went, a real folder, and its old copy is a real folder beside it. `started` is
+/// when the move started (the record's time); the rest as [`move_folder`] takes them. `None` otherwise. Looks at the
+/// disk: call it away from the window's thread.
+pub fn swapped_unkept(
+    from: &str,
+    destination: &str,
+    bytes: u64,
+    (key_of, kind, shared_with): (&str, SpaceKind, &[String]),
+    started: chrono::DateTime<chrono::Local>,
+) -> Option<MovedFolder> {
+    let from = from.trim_end_matches(['/', '\\']);
+    let to = target(from, destination);
+    let aside = format!("{from}{OLD_SUFFIX}");
+    let swapped = is_link(Path::new(from)) && leads_to(from, &to) && real_folder(&text(&to)) && real_folder(&aside);
+    swapped.then(|| MovedFolder {
+        from: from.to_owned(),
+        to: text(&to),
+        old_copy: aside,
+        bytes,
+        moved: csharp_time(started),
         key: key_of.to_owned(),
         kind: kind_number(kind),
         shared_with: shared_with.to_vec(),
