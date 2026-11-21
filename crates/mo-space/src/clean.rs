@@ -251,6 +251,21 @@ pub(crate) fn volume_of(real: &str) -> Option<Volume> {
     volumes.iter().filter(|v| is_inside(real, &v.at)).max_by_key(|v| v.at.len()).cloned()
 }
 
+/// Where each drive in Windows' list of drives starts (`C:\`, `E:\`): the drives in the computer, and USB sticks or
+/// memory cards, as for [`volume_of`]. None when the list can't be read.
+#[cfg(windows)]
+pub(crate) fn local_drives() -> Vec<String> {
+    let disks = sysinfo::Disks::new_with_refreshed_list_specifics(sysinfo::DiskRefreshKind::nothing());
+    disks.map_or_else(|_| Vec::new(), |d| d.iter().map(|d| text(d.mount_point())).collect())
+}
+
+/// A Mac or Linux names a drive after itself, not by a letter another drive can take: see
+/// [`crate::after_move::local_drives`].
+#[cfg(not(windows))]
+pub(crate) fn local_drives() -> Vec<String> {
+    Vec::new()
+}
+
 /// A Mac and Linux keep a Trash on each drive, a USB stick too.
 #[cfg(not(windows))]
 pub(crate) fn on_removable(_real: &str) -> bool {

@@ -433,7 +433,7 @@ pub fn problem(
 
 /// Whether a folder is one of your project, sample or MIDI folders, holds one, or is inside one, as written or where
 /// it really is: then it never moves (its old copy would be offered for the Recycle Bin afterwards).
-fn protected_folder(from: &str, protected: &[String]) -> bool {
+pub(crate) fn protected_folder(from: &str, protected: &[String]) -> bool {
     let real_from = real_path(from).unwrap_or_else(|| from.to_owned());
     protected.iter().filter(|p| !p.trim().is_empty()).any(|p| {
         let real_p = real_path(p).unwrap_or_else(|| p.clone());

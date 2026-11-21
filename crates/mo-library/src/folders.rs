@@ -1,9 +1,10 @@
 //! Adding and removing the folders the app looks in (Settings › Folders), in the C# app's `library.db`: the project
 //! folders (`roots`) and the sample, MIDI and plugin folders (JSON lists in `settings`); and the folder exports go
-//! into ([`set_export_folder`]). This, [`crate::moves`] (a folder moved to another drive) and
-//! [`crate::plugin_folders`] (your say on a plugin's folders), both from the Plugins page, are the only places the Rust
-//! app writes to `library.db` (Solomon's OK: folders 2026-11-03, moves and the Plugins page's folder fixes 2026-11-05,
-//! the export folder 2026-11-05); everything else opens it read-only. Once the app's own `songs.db` is the library,
+//! into ([`set_export_folder`]). This, [`crate::moves`] (a folder moved to another drive, and the folders Link again
+//! sets aside) and [`crate::plugin_folders`] (your say on a plugin's folders), both from the Plugins page, are the only
+//! places the Rust app writes to `library.db` (Solomon's OK: folders 2026-11-03, moves and the Plugins page's folder
+//! fixes 2026-11-05, the export folder 2026-11-05, the folders Link again sets aside 2026-11-21); everything else opens
+//! it read-only. Once the app's own `songs.db` is the library,
 //! these write that instead, and so does
 //! [`crate::song_writes`] (what the app reads of your saves); `library.db` is then never written.
 //!

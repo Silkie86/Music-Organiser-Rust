@@ -11,11 +11,13 @@ use std::time::{Duration, SystemTime};
 
 use mo_space::admin::NoAdmin;
 use mo_space::after_move::{
-    KEPT_BEFORE_SUFFIX, OldHome, doubled, find_sharers, home_of, kept_beside, link_again, lost, move_home,
-    old_home_can_go, old_homes_json, only_in_old_home, parse_old_homes, real_place, remove_old_home, replaced, repoint,
+    Elsewhere, KEPT_BEFORE_SUFFIX, OldHome, doubled, drive_start, find_sharers, found_on_another_drive, home_of,
+    kept_beside, link_again, lost, move_home, old_home_can_go, old_homes_json, only_in_old_home, parse_old_homes,
+    real_place, remove_old_home, replaced, repoint,
 };
 use mo_space::clean::{Bin, Problem, Removed};
 use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_back, move_folder, only_in_old_copy, remove_old_copy};
+use mo_space::half_copy::MARKER;
 use mo_space::key;
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
 
@@ -307,6 +309,83 @@ fn a_lost_link_and_a_home_moved_by_hand_are_found_and_pointed_again() {
     let again = repoint(&s(&by_hand), &s(&data), &now.moved, &now.old_homes, &NoAdmin);
     assert_eq!(again.problems.len(), 2);
     assert_eq!(again.moved, now.moved);
+}
+
+/// The whole-app review of 19 Nov, PM-2: a moved folder's drive comes back under another letter (another USB stick took
+/// its letter), so its link leads nowhere. A folder of the same name at the same place on the drive it's on now is
+/// found, and the link is pointed there. A link there isn't taken for it, nor a folder the app knows as something else
+/// (another moved folder, its old copy, a folder left behind, one of your folders, a half copy), nor one reached
+/// through a link on the way.
+#[test]
+fn a_copy_whose_drive_came_back_under_another_letter_is_found_there_and_linked_again() {
+    let dir = fixtures("mo-space-after-letter");
+    let (c, e, f) = (dir.join("C"), dir.join("E"), dir.join("F"));
+    write(&c, "Arcade/Pad.db", "pad");
+    let data = e.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&f).unwrap();
+    let arcade = move_it(&c.join("Arcade"), &data, &[]);
+    let all = std::slice::from_ref(&arcade);
+    let on_f = [s(&f)];
+    let find = |all: &[MovedFolder], homes: &[OldHome], yours: &[String]| {
+        found_on_another_drive(&arcade, all, homes, yours, &on_f)
+    };
+    assert!(find(all, &[], &[]).is_none());
+    // Where the copy is on its drive, as it would be on the other one.
+    let start = drive_start(&arcade.to).unwrap();
+    let rest = Path::new(&arcade.to).strip_prefix(&start).unwrap().to_path_buf();
+    let there = f.join(&rest);
+    let around_there = there.parent().unwrap().to_path_buf();
+
+    // The drive is away, and comes back as F: nothing there yet is the same folder.
+    fs::rename(&e, dir.join("E away")).unwrap();
+    assert_eq!(lost(all), [&arcade]);
+    assert!(find(all, &[], &[]).is_none());
+    // A link there isn't it.
+    fs::create_dir_all(dir.join("Elsewhere")).unwrap();
+    fs::create_dir_all(&around_there).unwrap();
+    folder_link(&dir.join("Elsewhere"), &there);
+    assert!(find(all, &[], &[]).is_none());
+    unlink(&there);
+    copy_all(&dir.join("E away").join(Path::new(&arcade.to).strip_prefix(&e).unwrap()), &there);
+    // The drive it was on isn't looked at again.
+    assert!(found_on_another_drive(&arcade, all, &[], &[], std::slice::from_ref(&start)).is_none());
+
+    // Nor a folder the app knows as something else: another moved folder's copy there, or around it, or its link...
+    let other = MovedFolder { from: s(&c.join("Other")), to: s(&there), old_copy: String::new(), ..arcade.clone() };
+    assert!(find(&[arcade.clone(), other.clone()], &[], &[]).is_none());
+    let around = MovedFolder { to: s(&around_there), ..other.clone() };
+    assert!(find(&[arcade.clone(), around], &[], &[]).is_none());
+    let its_link = MovedFolder { from: s(&there.join("Kits")), to: s(&dir.join("G").join("Kits")), ..other.clone() };
+    assert!(find(&[arcade.clone(), its_link], &[], &[]).is_none());
+    // ...an old copy, a folder left behind, one of your folders, a half copy...
+    let old_copy = MovedFolder { to: s(&dir.join("G").join("Other")), old_copy: s(&there), ..other.clone() };
+    assert!(find(&[arcade.clone(), old_copy], &[], &[]).is_none());
+    let left = OldHome { path: s(&there), bytes: 0, note: "its old place".into(), copy: String::new(), kind: 2 };
+    assert!(find(all, std::slice::from_ref(&left), &[]).is_none());
+    assert!(find(all, &[], &[s(&around_there)]).is_none());
+    fs::write(there.join(MARKER), "a half copy").unwrap();
+    assert!(find(all, &[], &[]).is_none());
+    fs::remove_file(there.join(MARKER)).unwrap();
+    // ...or one reached through a link on the way (it could lead anywhere).
+    let real_around = dir.join("Real around");
+    fs::rename(&around_there, &real_around).unwrap();
+    folder_link(&real_around, &around_there);
+    assert!(there.join("Pad.db").is_file());
+    assert!(find(all, &[], &[]).is_none());
+    unlink(&around_there);
+    fs::rename(&real_around, &around_there).unwrap();
+
+    let found = found_on_another_drive(&arcade, all, &[], &[], &[start.clone(), s(&f)]).unwrap();
+    assert_eq!(found, Elsewhere { was_on: start.clone(), now_on: s(&f), to: s(&there) });
+
+    // Pointing the links from the one drive to the other puts it right.
+    let now = repoint(&found.was_on, &found.now_on, all, &[], &NoAdmin);
+    assert!(now.problems.is_empty(), "{:?}", now.problems);
+    assert_eq!(now.moved[0].to, found.to);
+    assert!(lost(&now.moved).is_empty());
+    assert_eq!(read(&c.join("Arcade/Pad.db")), "pad");
+    assert!(drive_start("relative/path").is_none());
 }
 
 /// A link the plugin points elsewhere just before a move's swap (after the last pass made it again) leads there only

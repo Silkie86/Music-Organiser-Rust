@@ -477,11 +477,13 @@ pub(super) fn tick(app: &AppWindow, at: usize, on: bool) {
     // Only the words under the lines: the lines stay as they are, so the box clicked keeps its place.
     let data = app.global::<PluginsData>();
     PAGE.with(|p| {
-        if let Some(c) = p.borrow().clean.as_ref()
+        let p = p.borrow();
+        if let Some(c) = p.clean.as_ref()
             && let Some((freed, can_go)) = go_state(&c.stage)
         {
             data.set_clean_freed(freed.into());
-            data.set_clean_can_go(can_go);
+            // One at a time: not while Link again runs.
+            data.set_clean_can_go(can_go && !super::links::running(&p));
         }
     });
 }
@@ -513,6 +515,11 @@ fn go_state(stage: &Stage) -> Option<(String, bool)> {
 /// folders, the samples your projects use) and takes how the page sees the plugins now (the years you picked, a
 /// new read), so each folder is checked against things as they are when it goes, not when the card opened.
 pub(super) fn confirm(app: &AppWindow) {
+    // One at a time: nothing on the card starts while Link again runs (its button waits then too; the branch's own
+    // review of PM-2).
+    if PAGE.with(|p| super::links::holds(&p.borrow())) {
+        return;
+    }
     let (uninstalling, moving) = PAGE.with(|p| {
         let p = p.borrow();
         let stage = p.clean.as_ref().map(|c| &c.stage);
@@ -612,6 +619,9 @@ fn pick_one(picked: &mut Option<usize>, at: usize, on: bool, len: usize) -> bool
 /// Whether a card that's working (sending, putting back, waiting for an uninstaller) holds the page: then nothing new
 /// starts, and an activity card says why.
 pub(super) fn held(p: &super::Page) -> bool {
+    if super::links::holds(p) {
+        return true;
+    }
     let Some(c) = p.clean.as_ref().filter(|c| c.busy()) else { return false };
     p.feed.start(&format!("{} is still under way", c.title.trim_end_matches('?')), "").failed(
         "One clean-up, uninstall or move at a time: this starts once it's done (or once you press Stop on it).",
@@ -959,9 +969,12 @@ pub(super) fn fill(app: &AppWindow) {
         }
         if let Some((freed, can_go)) = go_state(&c.stage) {
             data.set_clean_freed(freed.into());
-            data.set_clean_can_go(can_go);
+            // One at a time: not while Link again runs.
+            data.set_clean_can_go(can_go && !super::links::running(&p));
         }
     });
+    // Link again waits while the card is busy, and shows again once it isn't.
+    super::links::fill(app);
 }
 
 #[cfg(test)]

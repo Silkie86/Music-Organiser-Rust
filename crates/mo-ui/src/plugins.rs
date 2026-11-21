@@ -6,12 +6,15 @@
 //! What the page changes, all on workers: Clean up and Uninstall send what you tick to the Recycle Bin and keep it in
 //! the app's list of what's there (`mo_app::binned`, shared with Space); Uninstall runs the plugin's own uninstaller;
 //! Move copies a folder to another drive and leaves a link (`moving`, noting each move under way so a cut-off one's
-//! half copy is found); and two writes to library.db, Solomon's OK of 5 Nov 2026: the moved folders
-//! (`mo_library::moves`) and your say on a plugin's folders (`mo_library::plugin_folders`). Your picks of the years
-//! and the cards go in the app's own settings.
+//! half copy is found); Link again puts right a moved folder's link that stopped working (`links`); and three writes to
+//! library.db: the moved folders (`mo_library::moves`) and your say on a plugin's folders
+//! (`mo_library::plugin_folders`), Solomon's OK of 5 Nov 2026, and the folders Link again sets aside
+//! (`mo_library::moves::keep_old_homes`), his OK of 21 Nov 2026. Your picks of the years and the cards go in the app's
+//! own settings.
 
 mod clean;
 mod folder_fixes;
+mod links;
 mod measuring;
 mod moving;
 mod uninstall;
@@ -98,6 +101,10 @@ struct Page {
     clearing_half_copies: bool,
     /// The half copies were looked for once this run (then again only after a move or a clear).
     looked_for_half_copies: bool,
+    /// The moved folders whose link doesn't work, as the last look found them (the whole-app review of 19 Nov, PM-2).
+    broken: Vec<mo_app::plugins::links::Broken>,
+    /// Link again's Stop while it runs.
+    linking: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// What another page can ask this one to show.
@@ -372,6 +379,18 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         }
     });
     let weak = app.as_weak();
+    data.on_link_again(move || {
+        if let Some(app) = weak.upgrade() {
+            links::link_again(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_stop_linking(move || {
+        if let Some(app) = weak.upgrade() {
+            links::stop(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_put_back(move || {
         if let Some(app) = weak.upgrade() {
             clean::put_back(&app);
@@ -459,7 +478,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     }
     // The app may start on this page, before its reader was there to ask.
     if app.get_place() == mo_app::places::Place::Plugins.index() as i32 {
-        shown();
+        shown(app);
     } else {
         // Otherwise the library is read a little after the start, so the first visit finds the list there rather
         // than an empty page for a second or two.
@@ -475,7 +494,8 @@ fn read_before_shown() {
         p.plugins.is_none() && !std::mem::replace(&mut p.finder_asked, true)
     });
     if first {
-        shown();
+        // The read's arrival looks at the moved folders' links too.
+        ask_read(false);
     }
 }
 
@@ -485,9 +505,11 @@ pub fn folder_fixes_this_session() -> Vec<mo_app::plugins::folder_fixes::FolderF
     PAGE.with(|p| p.borrow().folder_fixes.clone())
 }
 
-/// The page came into view: its library is read again, unless nothing was written to it since the last read.
-pub fn shown() {
+/// The page came into view: its library is read again, unless nothing was written to it since the last read, and the
+/// moved folders' links are looked at again (a drive plugged in changes nothing in the library).
+pub fn shown(app: &AppWindow) {
     ask_read(false);
+    links::look(app);
 }
 
 /// The library is read again even if it hasn't changed (Put back: what came back shows again).
@@ -618,6 +640,9 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>, in_bin: Vec<String>)
             });
             fresh.forget_gone();
             clean::forget_binned(&mut fresh);
+            // A moved folder's link may have stopped working since the last read (its drive came back under another
+            // letter, an update put a real folder back): looked at each read, as it's quick (review PM-2).
+            links::look(app);
             // A move a close or a crash cut off part way may have left a half copy (review E2-3): looked for once.
             if !PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().looked_for_half_copies, true)) {
                 moving::look_for_half_copies(app);
@@ -1200,6 +1225,11 @@ pub fn show_sample(app: &AppWindow, plugins: Plugins, row: Option<usize>, tab: i
     app.global::<PluginsData>().set_tab(tab);
     let asked = PAGE.with(|p| p.borrow().copies_asked);
     copies_arrived(app, asked, copies);
+}
+
+/// For the screenshots: the line naming the moved folders whose link doesn't work, for these.
+pub fn show_links_sample(app: &AppWindow, broken: Vec<mo_app::plugins::links::Broken>) {
+    links::show_sample(app, broken);
 }
 
 /// For the screenshots: the picked plugin's Clean up list as it would show, from made-up lines (path, kind, size, why

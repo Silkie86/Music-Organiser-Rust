@@ -392,7 +392,7 @@ pub(crate) fn go_to(app: &AppWindow, index: i32) {
         backup::shown();
     }
     if place == Place::Plugins {
-        plugins::shown();
+        plugins::shown(app);
     }
     if place == Place::Midi {
         midi::shown(app);

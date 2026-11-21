@@ -460,6 +460,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::plugins::show_sample(&app, plugins, massive, 0, &[]);
     capture(&window);
     shots.push(("plugins-missing.png".into(), capture(&window)));
+    // Two moved folders whose link stopped working (the whole-app review of 19 Nov, PM-2): one whose drive came back
+    // under another letter, and one an update put a real folder back in place of, with Link again.
+    mo_ui::plugins::show_links_sample(&app, sample_broken_links());
+    capture(&window);
+    shots.push(("plugins-links.png".into(), capture(&window)));
+    mo_ui::plugins::show_links_sample(&app, Vec::new());
     // Kontakt 7's Clean up list: its sound library ticked, its presets waiting for a tick, one library kept.
     mo_ui::plugins::show_sample(&app, sample_plugins().0, kontakt, 1, &[]);
     mo_ui::plugins::show_clean_sample(
@@ -3803,6 +3809,38 @@ fn sample_detail() -> mo_library::SaveDetail {
 /// the page's layout moves them, the tooltip and menu shots come out the same as the plain panel, and mo-screens stops
 /// with an error.
 const SHOW_BUTTON: (f32, f32) = (925.0, 381.0);
+
+/// Made-up moved folders whose link doesn't work, as the Plugins page names them: one whose drive may have come back
+/// under another letter, and one an update put a real folder back in place of.
+fn sample_broken_links() -> Vec<mo_app::plugins::links::Broken> {
+    use mo_app::plugins::links::{Broken, Trouble};
+    let moved = |from: &str, to: &str| mo_space::folder_move::MovedFolder {
+        from: from.to_owned(),
+        to: to.to_owned(),
+        old_copy: String::new(),
+        bytes: 0,
+        moved: String::new(),
+        key: String::new(),
+        kind: 2,
+        shared_with: Vec::new(),
+    };
+    let elsewhere = mo_space::after_move::Elsewhere {
+        was_on: r"E:\".to_owned(),
+        now_on: r"F:\".to_owned(),
+        to: r"F:\Plugin Data\Arcade".to_owned(),
+    };
+    vec![
+        Broken {
+            moved: moved(r"C:\Users\you\Documents\Output\Arcade", r"E:\Plugin Data\Arcade"),
+            trouble: Trouble::OnAnotherDrive(elsewhere),
+        },
+        Broken {
+            moved: moved(r"C:\ProgramData\Spectrasonics\STEAM", r"E:\Plugin Data\STEAM"),
+            trouble: Trouble::Replaced,
+        },
+    ]
+}
+
 /// Made-up songs and plugins for the Plugins page: some missing, some unused for years, one measured library.
 fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::ScannedPlugin>) {
     use mo_app::plugins::{Plugins, Read, SaveBrief, SongBrief};
