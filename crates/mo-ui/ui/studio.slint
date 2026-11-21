@@ -2213,6 +2213,8 @@ export component WordBox inherits Rectangle {
     // Whether the keys are in it: a page gives them back to its list when it goes (it's on a card that can close).
     out property <bool> has-keys: input.has-focus;
     callback accepted(string);
+    // Each change typed, for a page that keeps words not yet kept with Enter.
+    callback edited(string);
     forward-focus: input;
     height: 28px;
     border-radius: 14px;
@@ -2245,9 +2247,11 @@ export component WordBox inherits Rectangle {
             single-line: true;
             selection-background-color: Theme.accent.transparentize(60%);
             accepted => { root.accepted(self.text); }
+            edited => { root.edited(self.text); }
             key-pressed(event) => {
                 if (event.text == Key.Escape && self.text != "") {
                     self.text = "";
+                    root.edited("");
                     return accept;
                 }
                 reject
