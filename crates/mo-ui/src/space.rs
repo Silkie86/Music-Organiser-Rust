@@ -367,9 +367,6 @@ struct Page {
     /// The card's rows, as the window has them: one model, changed in place, so a tick or a save Fix finishes makes
     /// only its own row again, not all 400-odd (the whole-app review of 19 Nov, FS-4). None until the first card.
     card_rows: Option<Rc<VecModel<CardPart>>>,
-    /// The row whose tick box was clicked: made again at the next show, even unchanged, since the box ticked itself
-    /// and that undid its tie to the row.
-    card_redo: Option<usize>,
 }
 
 /// Which looks start again once something has gone to the Recycle Bin or come back.
@@ -453,8 +450,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
                     }
                 }
             }
-            // The tick box ticked itself, which undoes its tie to its row: that row is made again, which ties it again.
-            p.card_redo = usize::try_from(at).ok();
+            // The tick box only asks (it doesn't tick itself), so it stays tied to its row: the row that changes is set.
         });
         show_card(&app);
     });
@@ -840,20 +836,29 @@ fn chosen(app: &AppWindow, id: &str) {
                 let spare = !p.spare_looking && !held.spare;
                 let old = !p.old_looking && !held.old;
                 let songs = !p.songs_looking && !held.songs;
-                if spare && p.removing.shows_result() {
-                    p.spare = None;
+                if spare
+                    && p.removing.shows_result()
+                    && let Some(old) = p.spare.take()
+                {
+                    background::free_later(old);
                 }
                 if spare {
                     p.removing.again();
                 }
-                if old && p.old_removing.shows_result() {
-                    p.old = None;
+                if old
+                    && p.old_removing.shows_result()
+                    && let Some(old) = p.old.take()
+                {
+                    background::free_later(old);
                 }
                 if old {
                     p.old_removing.again();
                 }
-                if songs && p.songs_removing.shows_result() {
-                    p.songs = None;
+                if songs
+                    && p.songs_removing.shows_result()
+                    && let Some(old) = p.songs.take()
+                {
+                    background::free_later(old);
                 }
                 if songs {
                     p.songs_removing.again();
@@ -2940,8 +2945,7 @@ fn show_card(app: &AppWindow) {
         data.set_card_lead(card.lead.into());
         data.set_card_ticks(card.ticks);
         // Changed only where they change, so how far a look or Fix is, or one tick, doesn't make every row again.
-        let redo = p.card_redo.take();
-        if card.parts != p.card_parts || redo.is_some() {
+        if card.parts != p.card_parts {
             let rows = p
                 .card_rows
                 .get_or_insert_with(|| {
@@ -2950,7 +2954,7 @@ fn show_card(app: &AppWindow) {
                     rows
                 })
                 .clone();
-            set_rows(&rows, &p.card_parts, &card.parts, redo);
+            set_rows(&rows, &p.card_parts, &card.parts);
             p.card_parts = card.parts;
         }
         data.set_card_note(card.note.into());
@@ -2983,10 +2987,10 @@ fn set_line_menu(data: &SpaceData, buttons: &[Button]) {
 }
 
 /// Changes the card's rows from `old` to `new` in place (the whole-app review of 19 Nov, FS-4): a row that differs is
-/// set, rows shown or hidden between the same ones (Show its other saves) are put in or taken out, and the row `redo`
-/// is made again even when it's the same (its tick box was clicked). Another card altogether, sharing no first or last
-/// row, replaces them all at once.
-fn set_rows(rows: &VecModel<CardPart>, old: &[Part], new: &[Part], redo: Option<usize>) {
+/// set, and rows shown or hidden between the same ones (Show its other saves) are put in or taken out. Another card
+/// altogether, sharing no first or last row, replaces them all at once. The tick boxes only ask to be ticked
+/// (`asks`), so a row set in place still shows its row's tick.
+fn set_rows(rows: &VecModel<CardPart>, old: &[Part], new: &[Part]) {
     let front = old.iter().zip(new).take_while(|(a, b)| a == b).count();
     let back = old[front..].iter().rev().zip(new[front..].iter().rev()).take_while(|(a, b)| a == b).count();
     if rows.row_count() != old.len() || (front == 0 && back == 0) {
@@ -3005,10 +3009,6 @@ fn set_rows(rows: &VecModel<CardPart>, old: &[Part], new: &[Part], redo: Option<
     }
     for (at, part) in new.iter().enumerate().skip(front + both).take(new_mid - both) {
         rows.insert(at, card_part(part));
-    }
-    if let Some(at) = redo.filter(|&at| at < new.len()) {
-        rows.remove(at);
-        rows.insert(at, card_part(&new[at]));
     }
 }
 
@@ -3112,22 +3112,22 @@ mod tests {
         let rows = VecModel::default();
         let shown = |rows: &VecModel<CardPart>| rows.iter().map(|r| r.name.to_string()).collect::<Vec<_>>();
         let mut old: Vec<Part> = Vec::new();
-        for (new, redo) in [
-            (parts(&["a", "b", "c"]), None),
+        for new in [
+            parts(&["a", "b", "c"]),
             // Show its other saves: put in between.
-            (parts(&["a", "b", "b1", "b2", "c"]), None),
-            // One line's words change, and a tick box was clicked.
-            (parts(&["a", "B", "b1", "b2", "c"]), Some(3)),
+            parts(&["a", "b", "b1", "b2", "c"]),
+            // One line's words change (a tick, or a save Fix finished).
+            parts(&["a", "B", "b1", "b2", "c"]),
             // Hide them again.
-            (parts(&["a", "B", "c"]), None),
+            parts(&["a", "B", "c"]),
             // At the ends.
-            (parts(&["z", "a", "B", "c", "d"]), None),
-            (parts(&["a", "B"]), None),
+            parts(&["z", "a", "B", "c", "d"]),
+            parts(&["a", "B"]),
             // Another card altogether.
-            (parts(&["x", "y"]), None),
-            (Vec::new(), None),
+            parts(&["x", "y"]),
+            Vec::new(),
         ] {
-            set_rows(&rows, &old, &new, redo);
+            set_rows(&rows, &old, &new);
             assert_eq!(shown(&rows), new.iter().map(|p| p.name.clone()).collect::<Vec<_>>());
             assert!(rows.iter().zip(&new).all(|(r, p)| r == card_part(p)));
             old = new;

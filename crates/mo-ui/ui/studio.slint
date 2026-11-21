@@ -733,6 +733,10 @@ export component TickBox inherits Rectangle {
     // Some of what it's for are ticked, but not all (a format whose copies you've ticked some of): a dash instead of
     // the tick. Clicking it ticks them all.
     in property <bool> partly;
+    // A click only asks (`toggled`) and leaves `checked` tied to what it's given: set in place, the box still follows
+    // it (a box that ticks itself loses that tie). Space's card rows (the whole-app review of 19 Nov, FS-4).
+    in property <bool> asks;
+    callback toggled(bool);
     width: label.preferred-width + 26px;
     Rectangle {
         x: 0;
@@ -770,7 +774,13 @@ export component TickBox inherits Rectangle {
         vertical-alignment: center;
     }
     TouchArea {
-        clicked => { root.checked = !root.checked; }
+        clicked => {
+            if root.asks {
+                root.toggled(!root.checked);
+            } else {
+                root.checked = !root.checked;
+            }
+        }
     }
 }
 
