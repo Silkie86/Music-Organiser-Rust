@@ -1035,7 +1035,12 @@ impl Fixes {
 
     /// Each save of a project with its tick ([`tick`](Self::tick)), in the order of its saves.
     fn ticks<'a>(&self, project: &'a Project) -> Vec<(&'a Save, Option<bool>)> {
-        let newest: HashSet<&Path> = project.songs().iter().map(|s| s.newest.path.as_path()).collect();
+        self.ticks_with(project, &project.songs())
+    }
+
+    /// [`ticks`](Self::ticks), with the project's songs already worked out (the card works them out once: FS-13).
+    fn ticks_with<'a>(&self, project: &'a Project, songs: &[SongSaves<'_>]) -> Vec<(&'a Save, Option<bool>)> {
+        let newest: HashSet<&Path> = songs.iter().map(|s| s.newest.path.as_path()).collect();
         project.saves.iter().map(|s| (s, self.tick(newest.contains(s.path.as_path()), s))).collect()
     }
 
@@ -1141,8 +1146,14 @@ impl Fixes {
             return Some(("Fixing…".to_owned(), false));
         }
         let found = found?;
-        let any = found.projects.iter().any(|p| self.ticks(p).iter().any(|(s, t)| t.is_some() && self.fixable(s)));
-        let ticked = self.to_fix(found).len();
+        // Counted in one pass, without building what Fix would be given (the whole-app review of 19 Nov, FS-13).
+        let (mut any, mut ticked) = (false, 0);
+        for (s, t) in found.projects.iter().flat_map(|p| self.ticks(p)) {
+            if t.is_some() && self.fixable(s) {
+                any = true;
+                ticked += usize::from(t == Some(true));
+            }
+        }
         any.then(|| {
             if ticked == 0 { ("Fix".to_owned(), false) } else { (format!("Fix {}", plural(ticked, "save")), true) }
         })
@@ -1271,7 +1282,7 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
         let backups: Vec<&Save> = p.backups().collect();
         let others = songs.iter().map(|s| s.older.len()).sum::<usize>() + backups.len();
         let ticks: HashMap<&Path, Option<bool>> =
-            fixes.ticks(p).into_iter().map(|(s, t)| (s.path.as_path(), t)).collect();
+            fixes.ticks_with(p, &songs).into_iter().map(|(s, t)| (s.path.as_path(), t)).collect();
         let tick_of =
             |save: &Save| ticks.get(save.path.as_path()).copied().flatten().map(|t| (vec![save.path.clone()], t));
         let save_line = |save: &Save, speaks: Speaks<'_>| {

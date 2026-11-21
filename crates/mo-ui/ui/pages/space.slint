@@ -272,7 +272,8 @@ component SpaceCard inherits SidePanel {
             // too, and make the box a gap taller than its parts.
             padding-top: i == 0 ? 0px : Space.md;
             padding-left: part.under ? Space.xl : 0px;
-            // Room for a tick, ticked or not, so the names line up. Ticking re-lists the parts from mo-app.
+            // Room for a tick, ticked or not, so the names line up. A click only asks: mo-app says what's ticked, and
+            // only the rows that change are set again (FS-4).
             if SpaceData.card-ticks: VerticalLayout {
                 alignment: start;
                 width: 26px;
@@ -280,7 +281,8 @@ component SpaceCard inherits SidePanel {
                     height: 20px;
                     checked: part.ticked;
                     partly: part.partly;
-                    changed checked => { SpaceData.tick-part(i, self.checked); }
+                    asks: true;
+                    toggled(ticked) => { SpaceData.tick-part(i, ticked); }
                 }
             }
             VerticalLayout {
