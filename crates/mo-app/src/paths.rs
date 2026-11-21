@@ -21,9 +21,9 @@ pub const MOVED_IN_FILE: &str = "moved-in.json";
 pub(crate) struct Resolved {
     pub(crate) folder: PathBuf,
     pub(crate) problem: Option<String>,
-    /// The problem is that the folder a finished move went to isn't there now (its drive is missing, say), rather
-    /// than a pointer that can't be read.
-    pub(crate) missing: bool,
+    /// The folder a finished move went to, when the problem is that it isn't there now (its drive is missing, say),
+    /// rather than a pointer that can't be read.
+    pub(crate) missing: Option<PathBuf>,
 }
 
 static RESOLVED: OnceLock<Resolved> = OnceLock::new();
@@ -49,7 +49,14 @@ pub fn problem() -> Option<String> {
 /// a pointer that can't be read (that's logged, through [`problem`]: no plugging in fixes it).
 pub fn missing_now() -> Option<String> {
     let now = resolve_in(&first_dir());
-    now.problem.filter(|_| now.missing)
+    now.problem.filter(|_| now.missing.is_some())
+}
+
+/// The folder the data moved to that couldn't be found as this run started, so the run is on the old copy: the real
+/// data, which a copy made this run would leave behind (DA-2). This run's, not read again (no wait on a drive), as
+/// the copy is of this run's folder. `None` when it was there, or there was no move.
+pub fn missing_folder() -> Option<PathBuf> {
+    resolved().missing.clone()
 }
 
 /// The system's own place for the app's data, where it starts out and where [`POINTER_FILE`] sits beside it.
@@ -72,7 +79,7 @@ pub fn pointer_file(first: &Path) -> PathBuf {
 /// The folder in use for the first data folder `first`: the pointer's, when it names a folder a move finished in,
 /// else `first`. Never cached: [`crate::data_move`] asks before and after a switch.
 pub(crate) fn resolve_in(first: &Path) -> Resolved {
-    let fallback = |problem: Option<String>| Resolved { folder: first.to_path_buf(), problem, missing: false };
+    let fallback = |problem: Option<String>| Resolved { folder: first.to_path_buf(), problem, missing: None };
     let text = match fs::read_to_string(pointer_file(first)) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return fallback(None),
@@ -84,10 +91,10 @@ pub(crate) fn resolve_in(first: &Path) -> Resolved {
     };
     // A finished move, or a folder the installer started the data in (crate::install_choice).
     if named.join(MOVED_IN_FILE).is_file() || named.join(crate::install_choice::STARTED_HERE_FILE).is_file() {
-        Resolved { folder: named, problem: None, missing: false }
+        Resolved { folder: named, problem: None, missing: None }
     } else {
         Resolved {
-            missing: true,
+            missing: Some(named.clone()),
             ..fallback(Some(format!(
                 "The data folder {} can't be found (is its drive there?). Until it's back, the app uses {}, and \
                  changes made meanwhile stay there",
@@ -109,6 +116,13 @@ pub(crate) fn folder_in_use(first: &Path) -> PathBuf {
 pub fn moved_from() -> Option<PathBuf> {
     static FROM: OnceLock<Option<PathBuf>> = OnceLock::new();
     FROM.get_or_init(|| crate::data_move::moved_in(&data_dir()).map(|m| PathBuf::from(m.from))).clone()
+}
+
+/// The folder an earlier move went to that the move to the folder in use left behind, as you said yes to (it couldn't
+/// be found then, so the old copy was moved instead: [`crate::data_move::Record::leaves`]). For Settings.
+pub fn moved_leaving() -> Option<String> {
+    static LEAVES: OnceLock<Option<String>> = OnceLock::new();
+    LEAVES.get_or_init(|| crate::data_move::moved_in(&data_dir()).map(|m| m.leaves).filter(|l| !l.is_empty())).clone()
 }
 
 /// A folder the system names in `var`. An empty or relative one counts as none (as the XDG rules say), so the app
@@ -159,7 +173,7 @@ mod tests {
         fs::write(pointer_file(&first), format!("{}\r\n", moved.display())).unwrap();
         let r = resolve_in(&first);
         assert_eq!(r.folder, first);
-        assert!(r.missing);
+        assert_eq!(r.missing.as_deref(), Some(moved.as_path()));
         assert!(r.problem.unwrap().contains("can't be found"));
 
         // There, but no move finished in it: still the first folder.
@@ -184,7 +198,7 @@ mod tests {
         let r = resolve_in(&first);
         assert_eq!(r.folder, first);
         assert!(r.problem.is_some());
-        assert!(!r.missing, "a pointer no drive fixes isn't asked about at start");
+        assert!(r.missing.is_none(), "a pointer no drive fixes isn't asked about at start");
         let _ = fs::remove_dir_all(&root);
     }
 }
