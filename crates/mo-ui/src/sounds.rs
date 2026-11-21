@@ -3669,11 +3669,20 @@ pub fn show_copies_for_screens(app: &AppWindow, same: Option<&mo_sounds::copies:
     copies::show_for_screens(app, same);
 }
 
-/// For the screenshots: the fingerprints couldn't be read (`why`), as if the page had none yet; [`index_known`] puts
-/// them back. Never reads a file.
+/// For the screenshots: the fingerprints couldn't be read (`why`), as at a start where the page had none yet, so
+/// Rediscover has dug nothing out (no sounds, folders or years shown); [`index_known`] puts the fingerprints back and
+/// it digs sounds out again. Never reads a file.
 pub fn index_failed_for_screens(app: &AppWindow, why: &str) {
-    PAGE.with(|p| p.borrow_mut().index = None);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.index = None;
+        p.rediscover.clear();
+        p.re_years.clear();
+    });
+    app.global::<SoundsData>().set_folders(ModelRc::default());
+    show_re_years(app);
     index_failed(app, why.to_owned());
+    show_lists(app);
 }
 
 /// For the screenshots: how many times the galaxy's Swept card's lines were made again or changed, so far.
