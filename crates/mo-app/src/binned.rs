@@ -4,7 +4,8 @@
 //! the app never empties it itself, and tells you what's there instead (Solomon, 3 Nov 2026: "leave it to me with a
 //! warning"). The file only keeps what may still be in the bin (rule 28): each look in the bin drops what it no longer
 //! holds, but for what was on a drive that isn't plugged in (its bin can't be looked in until it's back); and of the
-//! clean-ups the bin can't vouch for (a Mac's Trash can't be looked in at all), at most [`KEEP`].
+//! clean-ups the bin can't vouch for (a Mac's Trash can't be looked in at all), at most [`KEEP`]. A look that failed
+//! just now keeps them all for the next one, up to [`MOST`].
 //!
 //! A clean-up can take minutes (thousands of autosaves), so what it sends is noted as it goes, a line each, in a file
 //! of its own beside the list ([`Going`]). Once the clean-up is kept in the list its note goes; a note left by a close
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mo_space::clean::{Bin, Done, Removed, What};
+use mo_space::clean::{Bin, Done, NotLooked, Removed, What};
 use mo_space::in_bin::{self, InBin};
 use mo_space::key;
 use serde::{Deserialize, Serialize};
@@ -31,9 +32,15 @@ use crate::space_bin::{BIN, when_words};
 /// The file, in the app's folder.
 pub const FILE: &str = "space-binned.json";
 
-/// Of the clean-ups the bin can't vouch for (it can't be looked in, or their drive isn't plugged in), at most this many
-/// are kept: the oldest go first. What the bin still holds is always kept.
+/// Of the clean-ups the bin can't vouch for (it can never be looked in, or their drive isn't plugged in), at most this
+/// many are kept: the oldest go first. What the bin still holds is always kept, and so is every clean-up when looking
+/// in it failed just now (up to [`MOST`]).
 pub const KEEP: usize = 50;
+
+/// The most clean-ups kept while looking in the bin fails (one thing in Windows' Recycle Bin it can't describe makes
+/// every look fail until that's gone): far more than [`KEEP`], so a look that fails now and then loses none, while a
+/// bin that can't be looked in for a long time doesn't let the file grow for ever (rule 28).
+pub const MOST: usize = 10 * KEEP;
 
 /// How a running clean-up's note is named, beside [`FILE`]: this, its kind, `-`, when it ran, `-`, the number Windows
 /// gave this run of the app (so two copies of the app running at once, or a run whose clock was put back, never write
@@ -482,7 +489,7 @@ fn free_time(list: &[Binned], kind: &str, mut when: i64) -> i64 {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Looked {
     /// What to keep in the file: what the bin still holds, and what was on a drive that isn't plugged in; of the
-    /// clean-ups the bin can't vouch for, at most [`KEEP`].
+    /// clean-ups the bin can't vouch for, at most [`KEEP`] (all of them, up to [`MOST`], when looking failed just now).
     pub keep: Vec<Binned>,
     /// What the bin holds now (all that's kept, where it can't be looked in): what the page shows and puts back.
     pub shown: Vec<Binned>,
@@ -492,17 +499,31 @@ pub struct Looked {
 
 /// Looks in the bin for the clean-ups in `list` (oldest first): each keeps only what the bin still holds (not once
 /// you've emptied the bin, or put it back), but for what was on a drive that isn't plugged in, which stays in the file
-/// for when it's back; one with nothing left goes. When the bin can't be looked in (a Mac's Trash), everything stays.
-/// Looks in the bin once, and not at all for an empty list: call it away from the window's thread.
+/// for when it's back; one with nothing left goes. When the bin can never be looked in (a Mac's Trash), the newest
+/// [`KEEP`] stay; when looking in it failed just now, every one stays as it was, for the next look (the whole-app
+/// review of 19 Nov, SB-4: one thing in Windows' Recycle Bin it couldn't describe cut the list to the newest [`KEEP`],
+/// for good). Looks in the bin once, and not at all for an empty list: call it away from the window's thread.
 pub fn look(list: Vec<Binned>, bin: &dyn Bin) -> Looked {
     if list.is_empty() {
         return Looked::default();
     }
     let removed: Vec<Removed> = list.iter().flat_map(|b| b.done.removed.iter().cloned()).collect();
-    let Some(held) = bin.holds(&removed) else {
-        let keep = trim(list.into_iter().map(|b| (b, false)).collect());
-        let in_bin = in_bin::remind_held(keep.iter().flat_map(|b| &b.done.removed), None);
-        return Looked { shown: keep.clone(), keep, in_bin };
+    let held = match bin.look_in(&removed) {
+        Ok(held) => {
+            readable();
+            held
+        }
+        Err(not) => {
+            let keep = match not {
+                NotLooked::Never => trim(list.into_iter().map(|b| (b, false)).collect(), KEEP),
+                NotLooked::Failed(why) => {
+                    unreadable(&why);
+                    trim(list.into_iter().map(|b| (b, false)).collect(), MOST)
+                }
+            };
+            let in_bin = in_bin::remind_held(keep.iter().flat_map(|b| &b.done.removed), None);
+            return Looked { shown: keep.clone(), keep, in_bin };
+        }
     };
     let in_bin = in_bin::remind_held(&removed, Some(&held));
     let (mut keep, mut shown, mut at) = (Vec::new(), Vec::new(), 0);
@@ -521,14 +542,36 @@ pub fn look(list: Vec<Binned>, bin: &dyn Bin) -> Looked {
             keep.push((binned.only(&kept), vouched));
         }
     }
-    Looked { keep: trim(keep), shown, in_bin }
+    Looked { keep: trim(keep, KEEP), shown, in_bin }
+}
+
+/// Why the bin couldn't be looked in, as last said in the log, until it can be again.
+static UNREADABLE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Says in the log that the bin couldn't be looked in just now: once, and again only when the reason isn't the one said
+/// last or the bin was looked in since (it's looked in often).
+fn unreadable(why: &str) {
+    let mut said = UNREADABLE.lock().unwrap_or_else(PoisonError::into_inner);
+    if said.as_deref() != Some(why) {
+        log::warning(
+            "Space",
+            &format!("The {BIN} couldn't be looked in just now ({why}): what the app put in it is kept as it was"),
+        );
+        *said = Some(why.to_owned());
+    }
+}
+
+/// The bin was looked in: should looking fail again, that's said again, for the same reason too.
+fn readable() {
+    UNREADABLE.lock().unwrap_or_else(PoisonError::into_inner).take();
 }
 
 /// The clean-ups to keep, of `list` (oldest first, each with whether the bin vouches for it: it holds some of what it
-/// sent): every one it vouches for, and of the others, the newest while there are more than [`KEEP`] in all. Each one
-/// that goes is said in the log.
-fn trim(list: Vec<(Binned, bool)>) -> Vec<Binned> {
-    let mut over = list.len().saturating_sub(KEEP);
+/// sent): every one it vouches for, and of the others, the newest `most` (the whole-app review of 19 Nov, SB-1: it
+/// counted the ones vouched for too, so with [`KEEP`] of those kept, every other went, a drive's not plugged in too).
+/// Each one that goes is said in the log.
+fn trim(list: Vec<(Binned, bool)>, most: usize) -> Vec<Binned> {
+    let mut over = list.iter().filter(|(_, vouched)| !vouched).count().saturating_sub(most);
     let mut out = Vec::with_capacity(list.len());
     for (binned, vouched) in list {
         if over > 0 && !vouched {
@@ -537,7 +580,7 @@ fn trim(list: Vec<(Binned, bool)>) -> Vec<Binned> {
                 "Space",
                 &format!(
                     "Stopped keeping track of the clean-up of {} ({} things): the {BIN} can't say if they're still in \
-                     it, and only {KEEP} such clean-ups are kept.",
+                     it, and only {most} such clean-ups are kept.",
                     when_words(binned.when),
                     binned.done.removed.len()
                 ),
@@ -667,6 +710,8 @@ mod tests {
         held: Option<Vec<&'static str>>,
         away: Vec<&'static str>,
         looks: RefCell<usize>,
+        /// Looking in it fails (as Windows' Recycle Bin's can, just now), rather than never being possible.
+        fails: bool,
     }
 
     impl Bin for Holding {
@@ -684,13 +729,20 @@ mod tests {
             let held = self.held.as_ref()?;
             Some(removed.iter().map(|r| held.contains(&r.path.as_str())).collect())
         }
+        fn look_in(&self, removed: &[Removed]) -> Result<Vec<bool>, NotLooked> {
+            if self.fails {
+                *self.looks.borrow_mut() += 1;
+                return Err(NotLooked::Failed("one thing in it couldn't be described".to_owned()));
+            }
+            self.holds(removed).ok_or(NotLooked::Never)
+        }
         fn can_look_for(&self, removed: &Removed) -> bool {
             !self.away.contains(&removed.path.as_str())
         }
     }
 
     fn holding(held: Option<Vec<&'static str>>) -> Holding {
-        Holding { held, away: Vec::new(), looks: RefCell::new(0) }
+        Holding { held, away: Vec::new(), looks: RefCell::new(0), fails: false }
     }
 
     fn whens(list: &[Binned]) -> Vec<i64> {
@@ -796,12 +848,56 @@ mod tests {
         assert_eq!((mac.keep.len(), whens(&mac.keep).first().copied()), (KEEP, Some(5)));
         assert_eq!(mac.shown, mac.keep);
         // On a drive that isn't plugged in, only the first is still known to be in the bin: it stays, and of the
-        // others, the newest.
-        let unplugged = Holding { held: Some(vec!["C:/first.dll"]), away: vec!["C:/a.dll"], looks: RefCell::new(0) };
-        let found = look(list, &unplugged);
-        assert_eq!(found.keep.len(), KEEP);
-        assert_eq!(whens(&found.keep)[..2], [0, 6]);
+        // others, the newest KEEP (review SB-1: the first counted among them, so one more went).
+        let unplugged = Holding { held: Some(vec!["C:/first.dll"]), away: vec!["C:/a.dll"], ..holding(None) };
+        let found = look(list.clone(), &unplugged);
+        assert_eq!(found.keep.len(), KEEP + 1);
+        assert_eq!(whens(&found.keep)[..2], [0, 5]);
         assert_eq!(whens(&found.shown), [0]);
+        // However many the bin vouches for: a clean-up on a drive that isn't plugged in still stays (review SB-1).
+        let mut many = Vec::new();
+        for n in 0..KEEP as i64 + 5 {
+            add(&mut many, "spare-copies", n, &done(&[if n == 3 { "E:/away.dll" } else { "C:/a.dll" }]));
+        }
+        let away = Holding { held: Some(vec!["C:/a.dll"]), away: vec!["E:/away.dll"], ..holding(None) };
+        let found = look(many, &away);
+        assert_eq!(found.keep.len(), KEEP + 5);
+        assert_eq!(whens(&found.shown).len(), KEEP + 4);
+    }
+
+    /// The whole-app review of 19 Nov, SB-4: a look in the bin that failed just now (one thing in Windows' Recycle Bin
+    /// it couldn't describe) keeps every clean-up as it was, for the next look; only a bin that can never be looked
+    /// in (a Mac's Trash) keeps the newest KEEP.
+    #[test]
+    fn a_look_that_failed_just_now_keeps_everything() {
+        let dir = folder("mo-app-binned-failed-look");
+        let mut list = Vec::new();
+        for n in 0..KEEP as i64 + 10 {
+            add(&mut list, "spare-copies", n, &done(&["C:/a.dll"]));
+        }
+        write(&dir, &list).unwrap();
+        let failing = Holding { fails: true, ..holding(None) };
+        let looked = look(list.clone(), &failing);
+        assert_eq!((looked.keep.len(), looked.shown.len()), (KEEP + 10, KEEP + 10));
+        assert!(!looked.in_bin.looked);
+        // Nothing is written over: the file still holds them all, and a look that works next keeps them all.
+        let now = refresh(&dir, &failing);
+        assert_eq!(now.list.len(), KEEP + 10);
+        assert_eq!(read(&dir).unwrap(), list);
+        let now = refresh(&dir, &holding(Some(vec!["C:/a.dll"])));
+        assert_eq!((now.list.len(), read(&dir).unwrap().len()), (KEEP + 10, KEEP + 10));
+        // What a clean-up adds while it fails is kept with them.
+        let (kept, _) = record(&dir, &failing, "spare-copies", 100, &done(&["C:/b.dll"]));
+        assert_eq!((kept.list.len(), read(&dir).unwrap().len()), (KEEP + 11, KEEP + 11));
+        // A bin that can never be looked in: the newest KEEP.
+        assert_eq!(look(list, &holding(None)).keep.len(), KEEP);
+        // Looks that keep failing don't let the list grow for ever: the newest MOST stay (rule 28).
+        let mut long = Vec::new();
+        for n in 0..MOST as i64 + 3 {
+            add(&mut long, "spare-copies", n, &done(&["C:/a.dll"]));
+        }
+        let looked = look(long, &failing);
+        assert_eq!((looked.keep.len(), whens(&looked.keep).first().copied()), (MOST, Some(3)));
     }
 
     #[test]
@@ -834,7 +930,7 @@ mod tests {
         add(&mut list, "spare-copies", 1, &done(&["C:/a.dll", "I:/b.dll"]));
         add(&mut list, "spare-copies", 2, &done(&["I:/c.dll"]));
         // I: isn't plugged in: its bin isn't listed, though b.dll and c.dll may still be in it.
-        let bin = Holding { held: Some(vec!["C:/a.dll"]), away: vec!["I:/b.dll", "I:/c.dll"], looks: RefCell::new(0) };
+        let bin = Holding { held: Some(vec!["C:/a.dll"]), away: vec!["I:/b.dll", "I:/c.dll"], ..holding(None) };
         let found = look(list.clone(), &bin);
         assert_eq!(found.keep, list);
         // The page shows, and puts back, what's in the bin now.

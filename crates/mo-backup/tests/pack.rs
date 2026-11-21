@@ -65,6 +65,8 @@ fn a_song_packs_once_and_again_only_when_it_changes() {
 
     let name = &pack_names(&[("Song", 1)], &HashMap::new())[0];
     assert!(matches!(packer.pack_song(&files, name, 1, &stop).unwrap(), Packed::Written { .. }));
+    // Read back from the drive itself (the whole-app review of 19 Nov, SB-2): Windows, Linux and a Mac all can.
+    assert_eq!(packer.checked_from_memory(), !cfg!(any(windows, target_os = "linux", target_vendor = "apple")));
     let zip_path = backup.join(SONGS).join(name);
     let names = names_in(&zip_path);
     assert_eq!(names.len(), 4, "three files and the list");

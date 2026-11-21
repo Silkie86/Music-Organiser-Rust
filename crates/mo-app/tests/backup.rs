@@ -75,6 +75,9 @@ fn a_song_goes_with_the_sample_it_uses_from_outside_the_folders() {
         ..Settings::default()
     };
     let prepared = prepare(&lib, &settings, None, &stop).unwrap();
+    // The song's folder is measured from the walk of the folders, not walked again (the whole-app review of 19 Nov,
+    // SB-3).
+    assert_eq!(prepared.from_walk, 1);
     let going: Vec<&Path> = prepared.plan.copy.iter().map(|f| f.path.as_path()).collect();
     assert!(going.contains(&kick.as_path()), "the sample the song uses goes, though its folder isn't on the list");
     assert!(going.contains(&save1.as_path()) && going.contains(&save2.as_path()));

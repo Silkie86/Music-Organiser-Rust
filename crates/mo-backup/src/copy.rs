@@ -1,5 +1,6 @@
-//! Copying the backup list to the backup drive: each file goes in under a temporary name, is read back and checked
-//! against what was read from your folder, and only then takes its real name. Your music folders are only ever read.
+//! Copying the backup list to the backup drive: each file goes in under a temporary name, is read back from the drive
+//! itself (not from the system's memory of what it just wrote: [`FromDrive`]) and checked against what was read from
+//! your folder, and only then takes its real name. Your music folders are only ever read.
 //!
 //! A file is left as it is when the backup's [record](crate::record) says both it and its copy are unchanged since it
 //! was copied, or when the copy has the same size and time (within a drive's clock steps), or the same bytes. A new
@@ -16,7 +17,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File, Metadata};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -25,6 +26,7 @@ use std::time::{Duration, SystemTime};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
+use crate::from_drive::FromDrive;
 use crate::parts::Parts;
 use crate::plan::{DEFAULT_BIG_SAVE, place_on_backup};
 use crate::record::{self, Entry, Record};
@@ -107,6 +109,10 @@ pub struct Report {
     pub gone: bool,
     /// The backup's record of what it holds couldn't be written (the next run reads the files again instead).
     pub record_not_saved: Option<String>,
+    /// A new copy couldn't be read back from the drive itself (the drive or share wouldn't: see
+    /// [`crate::from_drive`]), so it was checked against the system's memory of what was written, which a drive that
+    /// spoils what it's sent can pass.
+    pub checked_from_memory: bool,
 }
 
 /// Bigger than a FAT32 drive can hold in one file: a "drive full" for such a file doesn't mean the drive is full.
@@ -169,6 +175,7 @@ pub fn run(files: &[FileEntry], backup: &Path, options: &Options, stop: &AtomicB
     let record = Mutex::new(record);
     let cant_share = AtomicBool::new(false);
     let can_link = OnceLock::new();
+    let from_memory = AtomicBool::new(false);
     let ctx = Ctx {
         backup,
         options,
@@ -179,6 +186,7 @@ pub fn run(files: &[FileEntry], backup: &Path, options: &Options, stop: &AtomicB
         cant_share: &cant_share,
         can_link: &can_link,
         parts: &parts,
+        from_memory: &from_memory,
     };
     let do_one = |(i, f, place): &Work<'_>| -> (usize, Line) {
         let (outcome, written, shared) =
@@ -233,6 +241,7 @@ pub fn run(files: &[FileEntry], backup: &Path, options: &Options, stop: &AtomicB
         full,
         gone,
         record_not_saved,
+        checked_from_memory: from_memory.load(Ordering::Relaxed),
     })
 }
 
@@ -287,6 +296,8 @@ struct Ctx<'a> {
     can_link: &'a OnceLock<bool>,
     /// This run's half-done files, cleared by a later run if this one is cut off.
     parts: &'a Parts,
+    /// A new copy was checked against the system's memory: it wouldn't read it back from the drive itself.
+    from_memory: &'a AtomicBool,
 }
 
 impl Ctx<'_> {
@@ -434,7 +445,7 @@ fn finish(
     let (written, hash, shared) = match shared {
         Some(hash) => (0, hash, true),
         None => {
-            let (written, hash) = copy_checked(source, part, ctx.stop)?;
+            let (written, hash) = copy_checked(source, part, ctx)?;
             (written, hash, false)
         }
     };
@@ -475,9 +486,9 @@ const SHARE_TRIES: usize = 8;
 
 /// When the backup already holds these bytes, makes `part` a second name for them instead of copying: no room taken.
 /// The record only says where files of this size are; each is compared with the source byte for byte (stopping at the
-/// first difference, so a different file costs little), and after sharing, what `part` now holds is read back and
-/// checked. Gives the bytes' hash, or `None` when they have to be copied (nothing the same, or a drive that can't share,
-/// like exFAT).
+/// first difference, so a different file costs little), and after sharing, `part` is checked to be the very file that
+/// was compared. Gives the bytes' hash, or `None` when they have to be copied (nothing the same, or a drive that can't
+/// share, like exFAT).
 fn share(source: &Source<'_>, part: &Path, key: &str, ctx: &Ctx<'_>) -> io::Result<Option<[u8; 32]>> {
     // Tiny files aren't worth comparing.
     if source.size < SHARE_FROM || ctx.cant_share.load(Ordering::Relaxed) {
@@ -675,11 +686,13 @@ fn claim_free_name(path: &Path, noting: impl Fn(&Path)) -> io::Result<PathBuf> {
     Err(io::Error::other("Too many older versions of this file in one run"))
 }
 
-/// Copies the source to `to`, reading it once, then reads `to` back and checks both read the same (after the copy is
-/// flushed to the drive; the read-back may still come from the system's memory cache, so a "Check backup" re-reads
-/// later). Also checks the source wasn't saved again while it was copied (its size and time), and gives `to` the
-/// source's time, so the next backup sees it as up to date. Gives the bytes written and their SHA-256.
-fn copy_checked(source: &Source<'_>, to: &Path, stop: &AtomicBool) -> io::Result<(u64, [u8; 32])> {
+/// Copies the source to `to`, reading it once, flushes the copy to the drive, then reads it back from the drive itself
+/// ([`FromDrive`]: not from the system's memory of what it just wrote, which would hide a drive that spoils what it's
+/// sent) and checks both read the same. Also checks the source wasn't saved again while it was copied (its size and
+/// time), and gives `to` the source's time, so the next backup sees it as up to date. Gives the bytes written and their
+/// SHA-256.
+fn copy_checked(source: &Source<'_>, to: &Path, ctx: &Ctx<'_>) -> io::Result<(u64, [u8; 32])> {
+    let stop = ctx.stop;
     let mut src = File::open(source.path)?;
     // A new file only: should `to` still be there (a temporary copy that couldn't be cleared away, perhaps a second
     // name of another file on the backup), writing into it could change that file.
@@ -700,7 +713,11 @@ fn copy_checked(source: &Source<'_>, to: &Path, stop: &AtomicBool) -> io::Result
         return Err(io::Error::other("It changed while it was being copied (saved again?): it goes next time"));
     }
     let wrote: [u8; 32] = hash.finalize().into();
-    if hash_file(to, stop)? != wrote {
+    let (read_back, past_memory) = hash_from_drive(to, stop)?;
+    if !past_memory {
+        ctx.from_memory.store(true, Ordering::Relaxed);
+    }
+    if read_back != wrote {
         return Err(io::Error::other("The copy read back differently: the backup drive may be failing"));
     }
     // Only a help: a drive that won't take the time (FAT before 1980 or after 2107) still has a good copy. The record
@@ -720,6 +737,24 @@ fn hash_file(path: &Path, stop: &AtomicBool) -> io::Result<[u8; 32]> {
         hash.update(&buf[..n]);
     }
     Ok(hash.finalize().into())
+}
+
+/// A copy's SHA-256, read back from the drive itself ([`FromDrive`]), and whether it was (the system may refuse).
+fn hash_from_drive(path: &Path, stop: &AtomicBool) -> io::Result<([u8; 32], bool)> {
+    let mut file = FromDrive::open(path)?;
+    let mut hash = Sha256::new();
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(crate::stopped());
+        }
+        let piece = file.fill_buf()?;
+        if piece.is_empty() {
+            return Ok((hash.finalize().into(), file.past_memory()));
+        }
+        hash.update(piece);
+        let n = piece.len();
+        file.consume(n);
+    }
 }
 
 /// A buffer as big as the file, up to [`BUFFER`]: a small preset doesn't need a whole megabyte.

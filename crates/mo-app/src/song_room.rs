@@ -17,7 +17,9 @@ use mo_library::songs::Song;
 use mo_space::key;
 use mo_space::prints::Prints;
 use mo_space::size::Stopped;
-use mo_space::song::{BackupFolders, CompactSettings, Compare, Elsewhere, SongSave, SongSpaceReport, measure};
+use mo_space::song::{
+    BackupFolders, CompactSettings, Compare, Elsewhere, SongSave, SongSpaceReport, WalkedAlready, measure,
+};
 
 /// The store of the Space page's song look's save fingerprints, in the app's data folder.
 pub const SPACE_PRINTS: &str = "space-song-prints.db";
@@ -87,7 +89,8 @@ impl Others {
     /// song's saves name. `opens` is the save the song opens (its highest-numbered one, as the Songs page has it): it's
     /// never on the list, even when by time alone it's from the middle of a sitting or a copy of a newer save (a copied
     /// folder gives every save a new time). `compare` says how the saves of the same size are compared ([`Compare`]).
-    /// Reads the song's folder: call it away from the window's thread.
+    /// `walked` gives what's in the song's folder when that's been walked already ([`Elsewhere::walked`]). Reads the
+    /// song's folder otherwise: call it away from the window's thread.
     #[allow(clippy::too_many_arguments)]
     pub fn measure(
         &self,
@@ -97,6 +100,7 @@ impl Others {
         used: &[String],
         settings: CompactSettings,
         compare: Compare<'_>,
+        walked: Option<WalkedAlready<'_>>,
         stop: &AtomicBool,
     ) -> Result<SongSpaceReport, Stopped> {
         let used_by_any = |names: &[String]| -> HashSet<String> {
@@ -108,6 +112,7 @@ impl Others {
             shared_names: &self.shared_names,
             backup_folders: &self.backup_folders,
             compare,
+            walked,
         };
         let mut report = measure(saves, roots, used, settings, Some(&elsewhere), stop)?;
         if let Some(opens) = opens.map(key) {
