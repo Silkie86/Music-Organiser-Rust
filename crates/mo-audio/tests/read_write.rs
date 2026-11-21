@@ -377,8 +377,9 @@ fn ogg_changed(ogg: &[u8], change: impl Fn(&mut [u8], usize)) -> Vec<u8> {
 
 /// The whole-app review of 19 Nov, SN-11: a chained Ogg file (two joined into one, a radio recording) got no waveform
 /// at all, as the read stopped with an error where the second stream begins, and was decoded again at every pick. It's
-/// read on into the next stream, as players do, while its sound matches the first one's; one that doesn't match ends
-/// with the first.
+/// read on into the next stream, as players do. One whose sound doesn't match the first one's is silence as long as it
+/// is (its code review: it ended the read, so a copy made from it would have been the first stream alone). A read
+/// stopped part way gives the whole file's length: the first stream says only its own.
 #[test]
 fn a_chained_ogg_is_read_on_into_the_stream_joined_on() {
     let ogg = std::fs::read(tone("tone.ogg")).unwrap();
@@ -403,12 +404,139 @@ fn a_chained_ogg_is_read_on_into_the_stream_joined_on() {
     assert_eq!(both.file_seconds, 2.0 * one.len() as f64 / 22050.0);
     // A part at a time, as a waveform reads it: the same, and the whole length.
     let InParts { all, seconds, .. } = in_parts(&chained, 0.1).unwrap();
-    assert_eq!((all, seconds), (both.channels, both.file_seconds));
-    // Joined on at another sample rate: the first stream alone.
+    assert_eq!((all, seconds), (both.channels.clone(), both.file_seconds));
+    // Joined on at twice the sample rate: the first stream, then silence as long as the second (half as many frames
+    // at the first one's rate).
     let other_rate = fixture("chained other rate.ogg", &[ogg.clone(), second(44100)].concat());
-    assert_eq!(read(&other_rate, f64::INFINITY).unwrap().channels, one.channels);
+    let other = read(&other_rate, f64::INFINITY).unwrap();
+    assert_eq!((other.sample_rate, other.len()), (22050, one.len() + one.len() / 2));
+    for (b, o) in other.channels.iter().zip(&one.channels) {
+        assert_eq!(&b[..o.len()], &o[..], "the first stream");
+        assert!(b[o.len()..].iter().all(|&s| s == 0.0), "the second stream as silence");
+    }
+    assert_eq!(other.file_seconds, other.len() as f64 / 22050.0);
     let InParts { all, seconds, .. } = in_parts(&other_rate, 0.1).unwrap();
-    assert_eq!((all, seconds), (one.channels.clone(), one.len() as f64 / 22050.0));
+    assert_eq!((all, seconds), (other.channels.clone(), other.file_seconds));
+    // A third stream after it, at the first one's rate again: the silence for the second is as long as the second at
+    // its own rate, made before the third begins (its code review: what was owed was made silence at the third one's
+    // rate), and the third is the tone where it was.
+    let third = ogg_changed(&ogg, |page, _| page[14..18].copy_from_slice(&0x7E1A_0B00u32.to_le_bytes()));
+    let three = fixture("chained three.ogg", &[ogg.clone(), second(44100), third].concat());
+    let three = read(&three, f64::INFINITY).unwrap();
+    assert_eq!(three.len(), other.len() + one.len());
+    for (b, o) in three.channels.iter().zip(&one.channels) {
+        assert_eq!((&b[..o.len()], &b[other.len()..]), (&o[..], &o[..]), "the first and third streams");
+        assert!(b[o.len()..other.len()].iter().all(|&s| s == 0.0), "the second as silence");
+    }
+    // Read only so far (as a sound's analysis reads a long file): the whole file's length all the same, the rest
+    // counted from its packets.
+    for (path, whole) in [(&chained, &both), (&other_rate, &other)] {
+        let start = read(path, 0.1).unwrap();
+        assert_eq!((start.len(), start.file_seconds), (2205, whole.file_seconds), "{}", path.display());
+    }
+}
+
+/// Where each FLAC frame starts and its block size (each has it, the last's shorter), from the file's STREAMINFO: after
+/// the metadata blocks, at each sync code whose header's checksum (CRC-8) holds.
+fn flac_frames(flac: &[u8]) -> (Vec<usize>, usize) {
+    assert_eq!(&flac[..4], b"fLaC");
+    let block = usize::from(u16::from_be_bytes([flac[8], flac[9]]));
+    let mut at = 4;
+    loop {
+        let last = flac[at] & 0x80 != 0;
+        at += 4 + (usize::from(flac[at + 1]) << 16 | usize::from(flac[at + 2]) << 8 | usize::from(flac[at + 3]));
+        if last {
+            break;
+        }
+    }
+    let crc8 = |bytes: &[u8]| {
+        bytes.iter().fold(0u8, |mut crc, &b| {
+            crc ^= b;
+            for _ in 0..8 {
+                crc = if crc & 0x80 != 0 { crc << 1 ^ 0x07 } else { crc << 1 };
+            }
+            crc
+        })
+    };
+    // The tone's headers: sync, block size and rate, channels and sample size, the frame's number in one byte (fewer
+    // than 128 frames), maybe the block size in 8 or 16 bits, then the CRC-8.
+    let frames = (at..flac.len().saturating_sub(8))
+        .filter(|&i| flac[i] == 0xFF && flac[i + 1] == 0xF8)
+        .filter(|&i| {
+            let extra = match flac[i + 2] >> 4 {
+                6 => 1,
+                7 => 2,
+                _ => 0,
+            };
+            let end = i + 5 + extra;
+            crc8(&flac[i..end]) == flac[end]
+        })
+        .collect();
+    (frames, block)
+}
+
+/// The code review of SN-18's fix: a FLAC frame whose checksum fails never comes as a packet (the reader passes over
+/// it), so everything after it came early, as a refused frame's did. The jump in the packets' times is silence now.
+#[test]
+fn a_flac_frame_lost_to_damage_is_silence_and_what_follows_stays_in_place() {
+    let flac = std::fs::read(tone("tone.flac")).unwrap();
+    let whole = read(&tone("tone.flac"), f64::INFINITY).unwrap();
+    let (frames, block) = flac_frames(&flac);
+    assert!(frames.len() >= 3 && frames[0] < frames[1], "{frames:?}");
+    // A byte in the second frame's samples changed: its checksum fails.
+    let mut damaged = flac.clone();
+    damaged[(frames[1] + frames[2]) / 2] ^= 0x5A;
+    let a = read(&fixture("damaged frame.flac", &damaged), f64::INFINITY).unwrap();
+    assert_eq!((a.sample_rate, a.len(), a.file_seconds), (22050, whole.len(), whole.file_seconds));
+    for (x, y) in a.channels.iter().zip(&whole.channels) {
+        assert_eq!(&x[..block], &y[..block], "the first frame");
+        assert!(x[block..2 * block].iter().all(|&s| s == 0.0), "the lost one as silence");
+        assert_eq!(&x[2 * block..], &y[2 * block..], "the rest, where it was");
+    }
+    let InParts { all, seconds, .. } = in_parts(&fixture("damaged frame.flac", &damaged), 0.1).unwrap();
+    assert_eq!((all, seconds), (a.channels, whole.file_seconds));
+}
+
+/// Where each ADTS frame of a bare AAC file starts, and how long its header is (7 bytes, or 9 with a checksum).
+fn adts_frames(aac: &[u8]) -> Vec<(usize, usize)> {
+    let (mut frames, mut at) = (Vec::new(), 0);
+    while at + 7 <= aac.len() {
+        assert_eq!((aac[at], aac[at + 1] & 0xF0), (0xFF, 0xF0), "frame header at {at}");
+        let header = if aac[at + 1] & 1 != 0 { 7 } else { 9 };
+        frames.push((at, header));
+        at += usize::from(aac[at + 3] & 3) << 11 | usize::from(aac[at + 4]) << 3 | usize::from(aac[at + 5] >> 5);
+    }
+    frames
+}
+
+/// The code review of SN-18's fix: damage in an AAC frame can read as something its decoder doesn't do (a coupling
+/// channel, say), which fails as "not supported" rather than as damage, and that ended the whole read: no waveform and
+/// no analysis for a file with one bad frame. Once the sound has come, that's a refused frame too, silence of its length.
+#[test]
+fn an_aac_frame_damaged_into_something_unsupported_is_silence() {
+    let aac = std::fs::read(tone("tone.aac")).unwrap();
+    let whole = read(&tone("tone.aac"), f64::INFINITY).unwrap();
+    let frames = adts_frames(&aac);
+    let k = frames.len() / 2;
+    // The frame's first element says it's a coupling channel (element 2), which the decoder can't decode.
+    let mut damaged = aac.clone();
+    let (at, header) = frames[k];
+    damaged[at + header] = damaged[at + header] & 0x1F | 2 << 5;
+    let a = read(&fixture("damaged frame.aac", &damaged), f64::INFINITY).unwrap();
+    assert_eq!((a.sample_rate, a.len(), a.file_seconds), (22050, whole.len(), whole.file_seconds));
+    let silent = a.mono().windows(1024).any(|w| w.iter().all(|&s| s == 0.0));
+    assert!(silent, "the refused frame is silence");
+    // Two frames on (the decoder overlaps each frame with the one before), the tone is where it was, to within a
+    // thousandth.
+    let from = (k + 2) * 1024;
+    let close = a.channels.iter().zip(&whole.channels).all(|(x, y)| {
+        x.get(from..)
+            .unwrap_or_default()
+            .iter()
+            .zip(y.get(from..).unwrap_or_default())
+            .all(|(x, y)| (x - y).abs() < 1e-3)
+    });
+    assert!(close, "the tone after it where it was");
 }
 
 /// Where each MP3 frame starts, after the ID3v2 tag: the tone's frames are MPEG-2 layer III at 22,050 a second, 64k.
