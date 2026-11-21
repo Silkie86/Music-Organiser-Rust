@@ -2816,11 +2816,20 @@ fn tiles_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow
             back.1, back.0
         ));
     }
+    // Another view drawn before the window changes: the tiles are gone then, so only the tiles made again see the new
+    // width. Changed while they're still there, it's their own resize that keeps them in sight, not the tiles made
+    // again, and taking the fixes below out changed nothing (the check passed without them).
+    let away_from_tiles = |view: i32| {
+        data.invoke_pick_view(view);
+        for _ in 0..2 {
+            capture_sized(window, (WIDTH, HEIGHT), Duration::ZERO);
+        }
+        settle((NARROW, HEIGHT));
+    };
     // The window made narrower while the List is on show: back on Tiles, with fewer a row, the same tiles are in
     // sight. They turned to their top (the whole-app review of 19 Nov, SN-9), as the tiles made again said they were
     // turned to their top; so would closing the card on the List, which widens the tiles.
-    data.invoke_pick_view(1);
-    settle((NARROW, HEIGHT));
+    away_from_tiles(1);
     data.invoke_pick_view(0);
     for _ in 0..4 {
         capture_sized(window, (NARROW, HEIGHT), Duration::ZERO);
@@ -2836,8 +2845,7 @@ fn tiles_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow
     // The same from the Galaxy, which makes no list: the tiles are made again for the view they were made for last.
     // From their first frame back: they came back where they were kept with the new count, which showed other tiles,
     // and turned only a turn later (the code review of the SN-9 fix).
-    data.invoke_pick_view(2);
-    settle((NARROW, HEIGHT));
+    away_from_tiles(2);
     data.invoke_pick_view(0);
     capture_sized(window, (NARROW, HEIGHT), Duration::ZERO);
     let (at_once, first_frame) = (data.get_tiles_y(), first_row());
