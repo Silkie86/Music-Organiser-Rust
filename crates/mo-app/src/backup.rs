@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{Local, NaiveDateTime};
 use mo_backup::copy::{self, Outcome};
@@ -378,6 +378,9 @@ pub struct Prepared {
     pub made_for: (Vec<Folder>, Level),
     /// Each song's id and newest save (its place and time), for the song panel's "Backed up" line.
     pub newest: Vec<(u64, PathBuf, NaiveDateTime)>,
+    /// How many songs' folders were measured from the walk of the folders on the list, not walked again (the whole-app
+    /// review of 19 Nov, SB-3).
+    pub from_walk: usize,
 }
 
 /// A sample path as a project stores it, made whole: a full path as it is, a relative one from the save's folder.
@@ -450,8 +453,7 @@ pub fn prepare(
             }
         }
     }
-    let mut files = gathered.files;
-    let have: HashSet<String> = files.iter().map(|f| case::key(&f.path.to_string_lossy())).collect();
+    let have: HashSet<String> = gathered.files.iter().map(|f| case::key(&f.path.to_string_lossy())).collect();
     let compact = CompactSettings {
         // Essentials leaves every autosave out: all of them go on the Compact list.
         keep_backups: if settings.level == Level::Essentials { 0 } else { DEFAULT_KEEP_BACKUPS },
@@ -466,6 +468,18 @@ pub fn prepare(
         .into_iter()
         .filter(|s| s.saves().chain(&s.copies).any(|v| have.contains(&case::key(&v.path))))
         .collect();
+
+    // What's in each song's folder, from the walk just made: it was walked again for each song (the whole-app review
+    // of 19 Nov, SB-3). A folder that walk can't speak for is walked as before.
+    let in_folders = gathered.in_folders();
+    let from_walk = AtomicUsize::new(0);
+    let in_folder = |folder: &str, ends: &dyn Fn(&Path) -> bool| {
+        let given = in_folders.walked(folder, ends);
+        if given.is_some() {
+            from_walk.fetch_add(1, Ordering::Relaxed);
+        }
+        given
+    };
 
     struct Measured {
         saves: Vec<SongSave>,
@@ -493,7 +507,9 @@ pub fn prepare(
                     }
                 }
             }
-            let report = others.measure(&saves, opens, &roots, &used_text, compact, compare, stop).map_err(|_| ())?;
+            let report = others
+                .measure(&saves, opens, &roots, &used_text, compact, compare, Some(&in_folder), stop)
+                .map_err(|_| ())?;
             // Saves you mark as milestones by their name always go, and so do saves where the song changed a lot, and
             // the save the song opens (its highest-numbered one: the newest by time, which always goes, can be another).
             let mut milestones: Vec<String> =
@@ -505,6 +521,7 @@ pub fn prepare(
         .collect::<Result<_, ()>>();
     keep_prints(prints, measured.is_ok(), "Backup");
     let mut measured: Vec<Measured> = measured.map_err(|()| "Stopped".to_owned())?;
+    let mut files = gathered.files;
 
     // The samples the songs use, wherever they are: one outside the folders is added, so a song's backup is whole.
     // Each is looked up once (a sample on a drive that isn't there is asked about once, not once per save that names
@@ -641,6 +658,7 @@ pub fn prepare(
         folder_bytes,
         made_for: (settings.folders.clone(), settings.level),
         newest,
+        from_walk: from_walk.into_inner(),
     })
 }
 
@@ -666,7 +684,7 @@ impl Progress {
             Progress::Looking => "Looking through your folders and songs…".to_owned(),
             Progress::Copying { files, bytes } => {
                 format!(
-                    "Backing up {} files ({}), each checked · you can keep working",
+                    "Backing up {} files ({}) · each new copy is read back from the drive · you can keep working",
                     thousands(*files),
                     size_text(*bytes)
                 )
@@ -748,7 +766,15 @@ fn run_on(
             )
         }
     };
-    let mut tally = Tally { there, kept_older, checked: 0, new_or_changed: 0, problems: Vec::new(), record_note: None };
+    let mut tally = Tally {
+        there,
+        kept_older,
+        checked: 0,
+        new_or_changed: 0,
+        problems: Vec::new(),
+        record_note: None,
+        from_memory: false,
+    };
     // Files gone from your folders that are damaged in a song's zip.
     let mut damaged = 0usize;
     let mut plain_songs = 0usize;
@@ -834,6 +860,7 @@ fn run_on(
                 }
             }
         }
+        tally.from_memory |= packer.checked_from_memory();
         if !unzipped.is_empty() {
             // Each file of theirs still in your folders, as the plan has it; one renamed or deleted since the plan
             // was made can't go, and says so.
@@ -857,7 +884,18 @@ fn run_on(
             }
         }
     }
-    let Tally { checked, new_or_changed, problems, record_note, .. } = tally;
+    let Tally { checked, new_or_changed, problems, record_note, from_memory, .. } = tally;
+    if from_memory {
+        // Still checked, but only against what the computer remembers writing (see mo_backup::from_drive).
+        crate::log::warning(
+            "Backup",
+            &format!(
+                "{} wouldn't let new copies be read back from the drive itself, so they were checked against the \
+                 computer's memory of what it wrote: a fault in the drive or its lead might not show",
+                backup.display()
+            ),
+        );
+    }
     let mut line = format!("{} checked · {} new or changed", thousands(checked), thousands(new_or_changed));
     if plain_songs > 0 {
         line.push_str(&format!(
@@ -904,6 +942,8 @@ struct Tally<'a> {
     problems: Vec<String>,
     /// Why the backup's record couldn't be saved.
     record_note: Option<String>,
+    /// A new copy or zip was checked against the computer's memory of it: the drive wouldn't be read past it.
+    from_memory: bool,
 }
 
 impl Tally<'_> {
@@ -922,6 +962,7 @@ impl Tally<'_> {
         let Ok(report) = copy::run(list, backup, options, stop) else {
             return Some("The backup drive isn't there".to_owned());
         };
+        self.from_memory |= report.checked_from_memory;
         for l in &report.lines {
             if l.outcome == (Outcome::Updated { kept_older: true }) {
                 *self.kept_older += 1;

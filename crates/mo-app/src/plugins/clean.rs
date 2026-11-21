@@ -436,6 +436,9 @@ impl Bin for Watched<'_> {
     fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
         self.bin.holds(removed)
     }
+    fn look_in(&self, removed: &[Removed]) -> Result<Vec<bool>, mo_space::clean::NotLooked> {
+        self.bin.look_in(removed)
+    }
     fn put_back_checked(
         &self,
         removed: &[Removed],

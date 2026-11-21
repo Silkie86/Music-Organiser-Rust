@@ -199,7 +199,7 @@ fn measure_song(
     let used: Vec<String> =
         song.saves().chain(&song.copies).flat_map(|v| from.samples.get(&v.id).into_iter().flatten().cloned()).collect();
     let saves = song_saves(present.iter().copied());
-    let report = others.measure(&saves, Some(&opens.path), &from.roots, &used, settings, compare, stop)?;
+    let report = others.measure(&saves, Some(&opens.path), &from.roots, &used, settings, compare, None, stop)?;
     Ok((!report.items.is_empty()).then(|| SongRoom {
         name: song.name.clone(),
         opens: opens.path.clone(),

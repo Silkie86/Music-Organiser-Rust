@@ -15,11 +15,14 @@
 //! - [`record`]: the backup's own record of what it holds, kept on the backup drive.
 //! - [`gone`]: the files it keeps that are gone from your folders (deleted or moved), which it keeps, with a warning.
 //! - `parts`: clearing away the half-done files a run that was cut off left.
+//! - [`from_drive`]: reading a new copy back from the drive itself, not from the system's memory of what it just
+//!   wrote, so the check finds what the drive keeps.
 //! - [`pack`]: the other format, one zip per song.
 //! - [`folders`]: backing up a list of folders in one go, each whole or slimmed.
 
 pub mod copy;
 pub mod folders;
+pub mod from_drive;
 pub mod gone;
 pub mod older;
 pub mod pack;

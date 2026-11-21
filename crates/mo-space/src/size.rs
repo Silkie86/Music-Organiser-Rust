@@ -245,6 +245,31 @@ pub fn files(folder: &Path, stop: &AtomicBool) -> Result<Vec<FileEntry>, Stopped
     })
 }
 
+/// What a walk of a folder and its folders met: the files that take room here, as [`files`] finds them, and the
+/// OneDrive files that are only online (they take none, but they're there).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Walked {
+    pub files: Vec<FileEntry>,
+    pub online_only: Vec<PathBuf>,
+}
+
+/// Every file in a folder and its folders, in one walk ([`Walked`]): those that take room here, and those only online.
+pub fn walked(folder: &Path, stop: &AtomicBool) -> Result<Walked, Stopped> {
+    let met = walk(folder, true, stop, |path, meta| {
+        let entry = FileEntry { path: path.to_path_buf(), size: meta.len(), modified: modified_of(meta) };
+        Some((entry, is_online_only(meta)))
+    })?;
+    let mut out = Walked::default();
+    for (entry, online_only) in met {
+        if online_only {
+            out.online_only.push(entry.path);
+        } else {
+            out.files.push(entry);
+        }
+    }
+    Ok(out)
+}
+
 /// Every file in a folder and its folders, for what's in it rather than the room it takes: OneDrive files that are
 /// only online count too.
 pub fn all_files(folder: &Path, stop: &AtomicBool) -> Result<Vec<PathBuf>, Stopped> {

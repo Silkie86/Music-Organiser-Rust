@@ -7,8 +7,9 @@
 //! says which song the zip belongs to and lists what went in (size, time, place), so a song whose files haven't
 //! changed isn't packed again, and two songs can never take turns writing over one zip.
 //!
-//! A zip is written under a temporary name, then every entry is read back (the zip's own check of each file's bytes),
-//! and only then does it take its real name. Your music folders are only ever read.
+//! A zip is written under a temporary name, then every entry is read back from the drive itself (the zip's own check
+//! of each file's bytes; [`FromDrive`]: not from the system's memory of what it just wrote), and only then does it take
+//! its real name. Your music folders are only ever read.
 //!
 //! A zip holds one version of each file it lists: a save you break by mistake replaces the good one in the zip on the
 //! next run. The song's milestones (the last save of each day, big changes, saves you mark) are separate saves, so
@@ -38,6 +39,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 use crate::copy::{BUFFER, CantStart, Drive, FAT32_LARGEST, PART, put_in_place, read_some, remove_part};
+use crate::from_drive::FromDrive;
 use crate::gone::{Places, Stamp, stamp};
 use crate::parts::Parts;
 use crate::plan::{from_backup, place_on_backup};
@@ -163,6 +165,8 @@ pub struct Packer<'a> {
     places: Places,
     /// This run's half-done zips, cleared by a later run if this one is cut off.
     parts: Parts,
+    /// A zip was checked against the system's memory: it wouldn't read it back from the drive itself.
+    from_memory: AtomicBool,
 }
 
 impl<'a> Packer<'a> {
@@ -171,7 +175,21 @@ impl<'a> Packer<'a> {
         let drive = Drive::find(backup).ok_or_else(|| CantStart::NoBackupFolder(backup.to_path_buf()))?;
         // Names inside a zip come from your computer, so they're told apart the computer's way.
         let ignores_case = cfg!(any(windows, target_os = "macos"));
-        Ok(Packer { backup, drive, ignores_case, places: Places::default(), parts: Parts::start(backup) })
+        Ok(Packer {
+            backup,
+            drive,
+            ignores_case,
+            places: Places::default(),
+            parts: Parts::start(backup),
+            from_memory: AtomicBool::new(false),
+        })
+    }
+
+    /// Whether a zip packed so far couldn't be read back from the drive itself (the drive or share wouldn't: see
+    /// [`crate::from_drive`]), so it was checked against the system's memory of what was written, which a drive that
+    /// spoils what it's sent can pass.
+    pub fn checked_from_memory(&self) -> bool {
+        self.from_memory.load(Ordering::Relaxed)
     }
 
     fn drive_there(&self) -> io::Result<()> {
@@ -313,7 +331,10 @@ impl<'a> Packer<'a> {
         }
         self.parts.part(&part);
         write_zip(items, song, dest, &part, stop)
-            .and_then(|missing| check_zip(&part, items, dest, &missing, stop).map(|(bytes, bad)| (bytes, missing, bad)))
+            .and_then(|missing| {
+                check_zip(&part, items, dest, &missing, &self.from_memory, stop)
+                    .map(|(bytes, bad)| (bytes, missing, bad))
+            })
             .and_then(|done| self.drive_there().map(|()| done))
             .and_then(|done| put_in_place(&part, dest).map(|()| done))
             // Reading the zip before notices Stop as some other error.
@@ -674,18 +695,20 @@ fn copy_file(
     Ok(())
 }
 
-/// Reads every entry of the new zip back to the end (the zip checks each one's bytes against the check number it
-/// stored) and checks each is the size it should be. A kept file that doesn't read back right is only let through when
-/// its bytes are exactly those in the zip before (`old`): it was damaged there already, and is kept as it was. Gives the
-/// zip's size and those files' places. `missing` is the kept files left out because the zip before doesn't have them.
+/// Reads every entry of the new zip back to the end from the drive itself ([`FromDrive`]; the zip checks each one's
+/// bytes against the check number it stored) and checks each is the size it should be. A kept file that doesn't read
+/// back right is only let through when its bytes are exactly those in the zip before (`old`): it was damaged there
+/// already, and is kept as it was. Gives the zip's size and those files' places. `missing` is the kept files left out
+/// because the zip before doesn't have them. `from_memory` is set when the system wouldn't read past its memory.
 fn check_zip(
     part: &Path,
     items: &[Item],
     old: &Path,
     missing: &[String],
+    from_memory: &AtomicBool,
     stop: &AtomicBool,
 ) -> io::Result<(u64, Vec<String>)> {
-    let mut archive = ZipArchive::new(File::open(part)?)?;
+    let mut archive = ZipArchive::new(FromDrive::open(part)?)?;
     let items: Vec<&Item> = items.iter().filter(|i| !missing.contains(&i.inside)).collect();
     if archive.len() != items.len() + 1 {
         return Err(io::Error::other("The zip read back with the wrong number of files"));
@@ -715,11 +738,14 @@ fn check_zip(
             item.inside
         )));
     }
+    if !archive.into_inner().past_memory() {
+        from_memory.store(true, Ordering::Relaxed);
+    }
     Ok((fs::metadata(part)?.len(), damaged))
 }
 
 /// Reads one entry of a zip to the end, which checks its bytes against its check number, and checks its size.
-fn read_back(archive: &mut ZipArchive<File>, item: &Item, buf: &mut [u8], stop: &AtomicBool) -> io::Result<()> {
+fn read_back(archive: &mut ZipArchive<FromDrive>, item: &Item, buf: &mut [u8], stop: &AtomicBool) -> io::Result<()> {
     let mut entry = archive.by_name(&item.inside)?;
     let mut total: u64 = 0;
     loop {
@@ -740,8 +766,8 @@ fn read_back(archive: &mut ZipArchive<File>, item: &Item, buf: &mut [u8], stop: 
 }
 
 /// The SHA-256 of an entry's bytes as they're stored in a zip (not unpacked), and how many there are.
-fn raw_bytes_sum(
-    archive: &mut ZipArchive<File>,
+fn raw_bytes_sum<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
     inside: &str,
     buf: &mut [u8],
     stop: &AtomicBool,

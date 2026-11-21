@@ -18,7 +18,7 @@ use mo_app::plugins::{Plugins, Read, SaveBrief, SongBrief};
 use mo_library::PluginKind;
 use mo_library::plugins::{PluginUse, SampleIndex, ScanCounts, StoredFolder, StoredSpace};
 use mo_space::admin::Admin;
-use mo_space::clean::{Bin, BinRoom, Check, NOT_IN_BIN, Problem, Removed, Room, undo};
+use mo_space::clean::{Bin, BinRoom, Check, NOT_IN_BIN, NotLooked, Problem, Removed, Room, undo};
 use mo_space::key;
 use mo_space::plugin_clean::{apply, lines};
 use mo_space::size::size_text;
@@ -331,6 +331,10 @@ fn watched_passes_each_way_on_to_its_bin() {
             self.note("holds");
             Some(vec![true])
         }
+        fn look_in(&self, _: &[Removed]) -> Result<Vec<bool>, NotLooked> {
+            self.note("look_in");
+            Err(NotLooked::Failed("look in".to_owned()))
+        }
         fn put_back_checked(&self, _: &[Removed], _: &Check<'_>, each: &mut dyn FnMut(usize, Option<String>)) {
             self.note("put_back_checked");
             each(0, None);
@@ -370,6 +374,8 @@ fn watched_passes_each_way_on_to_its_bin() {
     assert_eq!(bin.find(&mut [one.clone()])[0].why, "find");
     assert_eq!(bin.put_back(std::slice::from_ref(&one))[0].why, "put back");
     assert_eq!(bin.holds(std::slice::from_ref(&one)), Some(vec![true]));
+    // A look that failed just now stays one (the whole-app review of 19 Nov, SB-4), not "can never look".
+    assert_eq!(bin.look_in(std::slice::from_ref(&one)), Err(NotLooked::Failed("look in".to_owned())));
     let mut back = Vec::new();
     bin.put_back_checked(std::slice::from_ref(&one), &|_, _| Ok(()), &mut |n, why| back.push((n, why)));
     assert_eq!(back, [(0, None)]);
@@ -386,6 +392,7 @@ fn watched_passes_each_way_on_to_its_bin() {
             "find",
             "put_back",
             "holds",
+            "look_in",
             "put_back_checked",
             "can_look_for",
             "refuses_quietly",
