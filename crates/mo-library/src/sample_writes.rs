@@ -35,16 +35,18 @@ pub struct SamplesRechecked {
     pub stopped: bool,
 }
 
-/// Looks again for every sample the app's own `songs_db` has marked missing, by `found(sample, project)` (the sample
-/// locator's rule: the project's and its DAW's folders, then the Sounds library), and marks the ones found now. Only
-/// when `stamp` (what the Sounds library holds, in short) differs from the last look's, noted in the library, so a
-/// start with nothing new looks at nothing. `found` is asked once for each sample and project, on the rayon pool the
-/// caller runs this on, so it may read the disk: never call this on the window's thread. Once `stop` says so (the app
-/// closing), nothing more is looked for, and the look isn't noted, so the next one looks again.
-pub fn recheck_found(
+/// Looks again for every sample the app's own `songs_db` has marked missing, by `found(sample, project)` (asked of
+/// the Sounds library: only it has changed since), and marks the ones found now. Only when `stamp` (what the Sounds
+/// library holds, in short) differs from the last look's, noted in the library, so a start with nothing new looks at
+/// nothing; `judge` gives `found` only then, and only when something is marked missing, so the Sounds library is read
+/// only when it's needed. A `judge` that can't (the Sounds library couldn't be read whole just now) is an error, and
+/// the look isn't noted. `found` is asked once for each sample and project, on the rayon pool the caller runs this on,
+/// so it may ask the disk: never call this on the window's thread. Once `stop` says so (the app closing), nothing more
+/// is looked for, and the look isn't noted, so the next one looks again.
+pub fn recheck_found<F: Fn(&str, &str) -> bool + Sync>(
     songs_db: &Path,
     stamp: &str,
-    found: impl Fn(&str, &str) -> bool + Sync,
+    judge: impl FnOnce() -> Result<F, String>,
     stop: impl Fn() -> bool + Sync,
 ) -> Result<SamplesRechecked, LibraryError> {
     let (mut conn, sql) = open_own(songs_db)?;
@@ -66,6 +68,12 @@ pub fn recheck_found(
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(&sql)?;
         rows.collect::<rusqlite::Result<_>>().map_err(&sql)?
     };
+    let found = if rows.is_empty() {
+        None
+    } else {
+        Some(judge().map_err(|why| LibraryError::Write { path: songs_db.to_owned(), why })?)
+    };
+    let found = |s: &str, p: &str| found.as_ref().is_some_and(|f| f(s, p));
     // Each sample of each save judged once (a save may name one twice), spread over the pool.
     let mut asks: Vec<(&str, &str)> = rows.iter().map(|(_, _, s, p)| (s.as_str(), p.as_str())).collect();
     asks.sort_unstable();

@@ -677,8 +677,10 @@ impl Live {
 
     /// Looks again for the samples marked missing, when the Sounds library has changed since the last look
     /// ([`sample_writes::recheck_found`]): a sample folder added in Settings and scanned may hold them, and a save is
-    /// only read again when its file changes. Shows the new counts; says how many saves changed. A look that fails is
-    /// tried again a minute later, or at the next start.
+    /// only read again when its file changes. Only the Sounds library is asked (it's all that changed since each
+    /// sample was looked for), read only when there's a change and something missing. Shows the new counts; says how
+    /// many saves changed. A look that fails (a library busy just then) is tried again a minute later, or at the next
+    /// start.
     fn recheck_samples(&mut self) -> usize {
         // Taken before the look, so a scan that ends meanwhile is looked at next time.
         let seen = crate::sound_scan::sounds_changed();
@@ -686,69 +688,90 @@ impl Live {
             self.sounds_seen = seen;
             return 0;
         };
-        // Only the app's own sound library says what it holds in short; the old app's file has nothing to add.
-        let Some(stamp) = mo_sounds::compact::grow::sounds_stamp(&mo_sounds::compact::copy_of(&sounds_db)) else {
-            self.sounds_seen = seen;
-            return 0;
+        // The app's own sound library, whichever file the list was given when it loaded (the old app's, before the
+        // app's own was made): its stamp and its sounds come from the same file.
+        let own = mo_sounds::compact::copy_of(&sounds_db);
+        let own = if sounds_db.file_name() == own.file_name() { sounds_db } else { own };
+        let refused = |this: &mut Live, why: String| {
+            crate::log::warning("Songs", &format!("{why}; the missing samples are looked for again in a minute"));
+            this.samples_after = Some(Instant::now() + REFUSED_AGAIN_AFTER);
+            0
         };
-        let began = Instant::now();
-        // Read now, not the read kept for a minute: the scan may have just kept the sounds.
-        let locator = SampleLocator::default().with_library(crate::sound_library::read_now(&sounds_db));
-        let stop = self.stop.clone();
-        let r = on_bulk_pool(|| {
-            sample_writes::recheck_found(
-                &songs_db,
-                &stamp,
-                |sample, project| locator.found(sample, project),
-                || stop.load(Ordering::Relaxed),
-            )
-        });
-        let r = match r {
-            Ok(r) => {
+        let stamp = match mo_sounds::compact::grow::sounds_stamp(&own) {
+            Ok(Some(stamp)) => stamp,
+            // No sound library of the app's own: the old app's has nothing new to add.
+            Ok(None) => {
                 self.sounds_seen = seen;
-                self.samples_after = None;
-                r
-            }
-            Err(e) => {
-                crate::log::warning("Songs", &format!("{e}; the missing samples are looked for again in a minute"));
-                self.samples_after = Some(Instant::now() + REFUSED_AGAIN_AFTER);
                 return 0;
             }
+            Err(e) => return refused(self, format!("Couldn't read the Sounds library: {e}")),
         };
+        let began = Instant::now();
+        let stop = self.stop.clone();
+        // Read only when it's needed, and fresh: the read [`crate::sound_library::shared`] keeps for a minute may be
+        // from before the scan. One that couldn't read every sound isn't taken as the answer.
+        let judge = || {
+            let library = crate::sound_library::read_now(&own);
+            if library.is_complete() {
+                Ok(move |sample: &str, _project: &str| library.has_sample(sample))
+            } else {
+                Err("the Sounds library couldn't be read whole just now".to_owned())
+            }
+        };
+        let r =
+            on_bulk_pool(|| sample_writes::recheck_found(&songs_db, &stamp, judge, || stop.load(Ordering::Relaxed)));
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => return refused(self, e.to_string()),
+        };
+        self.sounds_seen = seen;
+        self.samples_after = None;
+        if !r.looked {
+            return 0;
+        }
         // The locator read before has the Sounds library as it was: the next save read takes a new one.
         self.samples = None;
-        if r.looked {
-            crate::log::info(
-                "Songs",
-                &format!(
-                    "Looked again for {} samples marked missing, as the Sounds library changed: {} found now, in {}                      saves, in {:.1} s{}",
-                    r.looked_for,
-                    r.found,
-                    r.missing.len(),
-                    began.elapsed().as_secs_f32(),
-                    if r.stopped { "; stopped as the app closed, so it looks again next time" } else { "" }
-                ),
-            );
-        }
+        crate::log::info(
+            "Songs",
+            &format!(
+                "Looked again for {} samples marked missing, as the Sounds library changed: {} found now, in {} saves, \
+                 in {:.1} s{}",
+                r.looked_for,
+                r.found,
+                r.missing.len(),
+                began.elapsed().as_secs_f32(),
+                if r.stopped { "; stopped as the app closed, so it looks again next time" } else { "" }
+            ),
+        );
         let mut missing: HashMap<i64, u32> = r.missing.into_iter().collect();
-        if r.looked {
-            // Saves read but not kept yet were read against the Sounds library as it was: looked at again too, so
-            // keeping them doesn't put the old marks back.
-            let mut held = self.details.lock().unwrap_or_else(PoisonError::into_inner);
-            for d in held.values_mut() {
-                let at = d.save.path.clone();
-                let mut changed = false;
-                for s in d.samples.iter_mut().filter(|s| !s.found) {
-                    if locator.found(&s.path, &at) {
+        // Saves read but not kept yet hold samples of their own (songs.db may have older ones for them), read against
+        // the Sounds library as it was: looked at again too, so keeping them doesn't put the old marks back, and their
+        // own count is the one shown. Judged away from the lock the song panel's reader shares.
+        let held: Vec<(i64, Vec<String>)> = {
+            let held = self.details.lock().unwrap_or_else(PoisonError::into_inner);
+            held.values()
+                .map(|d| (d.save.id, d.samples.iter().filter(|s| !s.found).map(|s| s.path.clone()).collect()))
+                .collect()
+        };
+        if !held.is_empty() {
+            let library = crate::sound_library::shared(&own);
+            let found: HashMap<i64, HashSet<String>> = on_bulk_pool(|| {
+                held.into_par_iter()
+                    .map(|(id, samples)| (id, samples.into_iter().filter(|s| library.has_sample(s)).collect()))
+                    .collect()
+            });
+            let mut details = self.details.lock().unwrap_or_else(PoisonError::into_inner);
+            for d in details.values_mut() {
+                if let Some(now) = found.get(&d.save.id).filter(|f| !f.is_empty()) {
+                    for s in d.samples.iter_mut().filter(|s| now.contains(&s.path)) {
                         s.found = true;
-                        changed = true;
                     }
+                    // Missing ones first, then by path, as a save's read sorts them.
+                    d.samples.sort_by_cached_key(|s| (s.found, case::to_lower(&s.path)));
                 }
-                if changed {
-                    let now = u32::try_from(d.samples.iter().filter(|s| !s.found).count()).unwrap_or(u32::MAX);
-                    d.save.missing_samples = now;
-                    missing.insert(d.save.id, now);
-                }
+                let now = u32::try_from(d.samples.iter().filter(|s| !s.found).count()).unwrap_or(u32::MAX);
+                d.save.missing_samples = now;
+                missing.insert(d.save.id, now);
             }
         }
         let mut changed = 0;

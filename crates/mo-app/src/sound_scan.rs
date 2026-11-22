@@ -95,7 +95,7 @@ pub fn scan(sounds_db: &Path, folders: &[String], progress: &dyn Fn(usize, usize
     let ScanPlan { mut listen, moves, forget } = scan::plan(&found, &known, folders);
     let mut scanned = Scanned { found: found.files.len(), ..Scanned::default() };
     let again = try_again(&copy, &mut listen, &found, &moves, folders);
-    told.found(&found, &listen);
+    told.found(&found, &listen, again.as_ref().map(|a| &a.added));
     let forget = if forget.len() > FEW_GONE && forget.len() as f64 > known.len() as f64 * MOST_GONE {
         scanned.not_forgotten = forget.len();
         Vec::new()
@@ -159,6 +159,8 @@ pub struct ScanState {
     pub running: bool,
     /// It's still looking for sound files: [`ScanState::folders`] is empty until it's done.
     pub looking: bool,
+    /// The folders it scans, as the list had them when it started.
+    pub scanning: Vec<String>,
     /// Each sample folder it scans.
     pub folders: Vec<FolderScan>,
     /// When it started, and when it ended.
@@ -169,6 +171,11 @@ pub struct ScanState {
 }
 
 impl ScanState {
+    /// Whether this scan takes in `folder` (by the list's spelling): not one added after it started.
+    pub fn scans(&self, folder: &str) -> bool {
+        self.scanning.iter().any(|f| f == folder)
+    }
+
     /// This folder's part of it, by the list's spelling.
     pub fn folder(&self, folder: &str) -> Option<&FolderScan> {
         self.folders.iter().find(|f| f.folder == folder)
@@ -209,6 +216,9 @@ pub fn show_state(sounds_db: &Path, state: ScanState) {
 struct Told {
     sounds_db: PathBuf,
     folders: Vec<String>,
+    /// The sounds that couldn't be read before, tried again as the reader learnt more ([`scan::Again::added`]): not
+    /// new, and known to be unreadable already, so the rows leave them out, as [`Scanned::unreadable`] does.
+    again: HashSet<String>,
     /// Whether it was told the scan ended: if it's let go before (a scan that tripped up), it says so itself.
     ended: bool,
 }
@@ -224,9 +234,11 @@ impl Drop for Told {
 impl Told {
     /// A scan of `folders` started: looking for sound files.
     fn new(sounds_db: &Path, folders: &[String]) -> Told {
-        let told = Told { sounds_db: sounds_db.to_path_buf(), folders: folders.to_vec(), ended: false };
+        let told =
+            Told { sounds_db: sounds_db.to_path_buf(), folders: folders.to_vec(), again: HashSet::new(), ended: false };
         let started = Local::now().naive_local();
-        told.change(|s| *s = ScanState { running: true, looking: true, started, ..ScanState::default() });
+        let scanning = folders.to_vec();
+        told.change(|s| *s = ScanState { running: true, looking: true, scanning, started, ..ScanState::default() });
         told
     }
 
@@ -248,7 +260,15 @@ impl Told {
 
     /// The sound files are found, and `listen` are the ones to listen to: counted for each folder (a file in a folder
     /// inside another listed one counts in both).
-    fn found(&self, found: &Found, listen: &[FoundFile]) {
+    fn found(&mut self, found: &Found, listen: &[FoundFile], again: Option<&HashSet<String>>) {
+        self.again = again.cloned().unwrap_or_default();
+        let new: Vec<FoundFile>;
+        let listen = if self.again.is_empty() {
+            listen
+        } else {
+            new = listen.iter().filter(|f| !self.again.contains(&f.path.to_ascii_lowercase())).cloned().collect();
+            &new
+        };
         let (files, to_listen) = background::on_bulk_pool(|| {
             (count_inside(&found.files, &self.folders), count_inside(listen, &self.folders))
         });
@@ -275,7 +295,7 @@ impl Told {
         self.change(|s| {
             for f in &mut s.folders {
                 for (file, heard) in files.iter().zip(listened) {
-                    if is_inside(&file.path, &f.folder) {
+                    if is_inside(&file.path, &f.folder) && !self.again.contains(&file.path.to_ascii_lowercase()) {
                         f.listened += 1;
                         f.unreadable += usize::from(heard.analysed.is_err());
                     }

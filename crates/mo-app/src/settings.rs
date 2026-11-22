@@ -346,6 +346,13 @@ pub fn sample_folder_state(folder: &str, state: Option<&ScanState>, today: Naive
     let Some(state) = state else {
         return "Not scanned yet".to_owned();
     };
+    // Added after this scan started: not in it, whatever it's doing.
+    if !state.looking && state.folder(folder).is_none() || state.looking && !state.scans(folder) {
+        return match (&state.stopped, state.running) {
+            (Some(_), false) if state.folders.is_empty() => "Scan stopped: the log says why".to_owned(),
+            _ => "Waiting to be scanned".to_owned(),
+        };
+    }
     if state.looking {
         return "Looking for sounds\u{2026}".to_owned();
     }
@@ -353,11 +360,7 @@ pub fn sample_folder_state(folder: &str, state: Option<&ScanState>, today: Naive
         if at.date() == today { at.format("%H:%M").to_string() } else { at.format("%-d %b %H:%M").to_string() }
     };
     let Some(f) = state.folder(folder) else {
-        // Added since this scan started, or a scan that stopped before it found the files.
-        return match (&state.stopped, state.running) {
-            (Some(_), false) if state.folders.is_empty() => "Scan stopped: the log says why".to_owned(),
-            _ => "Waiting to be scanned".to_owned(),
-        };
+        return "Waiting to be scanned".to_owned();
     };
     if f.away {
         return match state.ended {
@@ -1070,7 +1073,10 @@ mod tests {
         let line = |state: Option<&ScanState>| sample_folder_state(r"I:\Old Samples", state, day);
         assert_eq!(line(None), "Not scanned yet");
         let looking = ScanState { running: true, looking: true, started: at(22, 15, 40), ..ScanState::default() };
+        let looking = ScanState { scanning: vec![r"I:\Old Samples".into()], ..looking };
         assert_eq!(line(Some(&looking)), "Looking for sounds\u{2026}");
+        // One added while it looks isn't in this scan.
+        assert_eq!(sample_folder_state(r"K:\New", Some(&looking), day), "Waiting to be scanned");
         let folder =
             FolderScan { folder: r"I:\Old Samples".into(), files: 1_234, to_listen: 900, ..FolderScan::default() };
         let listening = ScanState {

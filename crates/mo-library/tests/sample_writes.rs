@@ -58,7 +58,7 @@ fn samples_marked_missing_are_looked_for_again_when_the_sounds_library_changes()
         sample.ends_with("kick.wav")
     };
 
-    let r = recheck_found(&path, "1:5", found, never).unwrap();
+    let r = recheck_found(&path, "1:5", || Ok(found), never).unwrap();
     assert!(r.looked);
     assert_eq!((r.looked_for, r.found), (3, 2));
     // Each sample of each save asked once; the one found before isn't asked.
@@ -70,12 +70,12 @@ fn samples_marked_missing_are_looked_for_again_when_the_sounds_library_changes()
 
     // The Sounds library hasn't changed since: nothing is looked at.
     asked.store(0, Ordering::Relaxed);
-    let again = recheck_found(&path, "1:5", found, never).unwrap();
+    let again = recheck_found(&path, "1:5", || Ok(found), never).unwrap();
     assert_eq!(again, Default::default());
     assert_eq!(asked.load(Ordering::Relaxed), 0);
 
     // It has: only what's still missing is looked for, and a sample found is never marked missing here.
-    let later = recheck_found(&path, "1:6", |_: &str, _: &str| false, never).unwrap();
+    let later = recheck_found(&path, "1:6", || Ok(|_: &str, _: &str| false), never).unwrap();
     assert!(later.looked);
     assert_eq!((later.looked_for, later.found), (1, 0));
     assert!(later.missing.is_empty());
@@ -94,9 +94,11 @@ fn a_look_stopped_part_way_is_looked_at_again() {
         )
         .unwrap();
     // The app closing: nothing is looked for, and the look isn't noted.
-    let stopped = recheck_found(&path, "1:5", |_: &str, _: &str| true, || true).unwrap();
+    let stopped = recheck_found(&path, "1:5", || Ok(|_: &str, _: &str| true), || true).unwrap();
     assert!(stopped.stopped && stopped.found == 0);
-    let again = recheck_found(&path, "1:5", |_: &str, _: &str| true, never).unwrap();
+    // The Sounds library couldn't be read whole: an error, and not noted either.
+    assert!(recheck_found(&path, "1:5", || Err::<fn(&str, &str) -> bool, _>("busy".to_owned()), never).is_err());
+    let again = recheck_found(&path, "1:5", || Ok(|_: &str, _: &str| true), never).unwrap();
     assert!(again.looked && !again.stopped);
     assert_eq!((again.found, again.missing.clone()), (1, vec![(7, 0)]));
 }
@@ -104,5 +106,5 @@ fn a_look_stopped_part_way_is_looked_at_again() {
 #[test]
 fn samples_are_not_looked_at_in_a_library_not_the_apps_own() {
     let path = library("recheck-not-own", false);
-    assert!(recheck_found(&path, "1:1", |_: &str, _: &str| true, never).is_err());
+    assert!(recheck_found(&path, "1:1", || Ok(|_: &str, _: &str| true), never).is_err());
 }

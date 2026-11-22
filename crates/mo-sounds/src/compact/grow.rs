@@ -82,14 +82,19 @@ pub fn new_since(copy: &Path) -> Option<i64> {
 /// Which sounds the app's own library at `copy` holds, in short: since when it's the app's own and how many counted
 /// changes it has had ([`CHANGES`]: a scan's new, changed, moved and gone sounds; never plays or your say about
 /// sounds). It's the same until a sound joins, moves or goes, so the Songs list knows when to look again for the
-/// samples it has marked missing. `None` when it isn't the app's own library, or can't be read just now.
-pub fn sounds_stamp(copy: &Path) -> Option<String> {
-    let conn =
-        Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()?;
-    conn.busy_timeout(WAIT).ok()?;
-    let own = info_value(&conn, OWN_SINCE).ok().flatten()?;
-    let changes = info_value(&conn, CHANGES).ok().flatten().unwrap_or(0);
-    Some(format!("{own}:{changes}"))
+/// samples it has marked missing. `Ok(None)` when there's no library at `copy`, or it isn't the app's own; an error
+/// when it can't be read just now (busy), which isn't the same.
+pub fn sounds_stamp(copy: &Path) -> Result<Option<String>, SoundsError> {
+    if !copy.exists() {
+        return Ok(None);
+    }
+    let conn = Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    conn.busy_timeout(WAIT)?;
+    let Some(own) = info_value(&conn, OWN_SINCE)? else {
+        return Ok(None);
+    };
+    let changes = info_value(&conn, CHANGES)?.unwrap_or(0);
+    Ok(Some(format!("{own}:{changes}")))
 }
 
 /// One sound file a scan listened to: where it is, its size and time as the folder listing gave them, and what

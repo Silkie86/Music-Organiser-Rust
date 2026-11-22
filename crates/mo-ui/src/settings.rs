@@ -133,6 +133,8 @@ thread_local! {
     static SAMPLE_ROWS: RefCell<Option<SampleRows>> = const { RefCell::new(None) };
     /// The scan state the sample folders' rows show ([`mo_app::sound_scan::state_turn`]).
     static SCAN_TURN: Cell<u64> = const { Cell::new(u64::MAX) };
+    /// The day the rows were last worded on.
+    static SCAN_DAY: Cell<Option<chrono::NaiveDate>> = const { Cell::new(None) };
 }
 
 /// The sample folders on show, and the model of what each one's row says.
@@ -143,12 +145,14 @@ type SampleRows = (Vec<String>, std::rc::Rc<VecModel<SharedString>>);
 /// state in memory as it goes.
 fn show_scan_states(force: bool) {
     let turn = mo_app::sound_scan::state_turn();
-    if !force && SCAN_TURN.get() == turn {
+    // A scan from yesterday says its date, not just its time, once the day turns.
+    let today = chrono::Local::now().date_naive();
+    if !force && SCAN_TURN.get() == turn && SCAN_DAY.get() == Some(today) {
         return;
     }
     SCAN_TURN.set(turn);
+    SCAN_DAY.set(Some(today));
     let state = mo_app::sound_scan::latest_state();
-    let today = chrono::Local::now().date_naive();
     SAMPLE_ROWS.with(|rows| {
         if let Some((folders, model)) = rows.borrow().as_ref() {
             for (i, folder) in folders.iter().enumerate() {
