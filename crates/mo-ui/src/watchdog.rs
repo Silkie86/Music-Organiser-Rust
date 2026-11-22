@@ -191,6 +191,11 @@ pub fn watch_window(app: &crate::AppWindow) {
         {
             crate::settings::restored(&app);
         }
+        if what == "resized"
+            && let Some(app) = weak.upgrade()
+        {
+            crate::settings::resized(&app);
+        }
         EventResult::Propagate
     });
 }
