@@ -4126,17 +4126,41 @@ fn settings_shots(
         kind: 2,
         shared_with: Vec::new(),
     };
-    mo_ui::settings::show_folders(
-        app,
-        Ok(mo_app::settings::folder_groups(
+    // A scan going: one folder done, a folder just added being listened to, one on a drive that's unplugged.
+    let samples: Vec<String> =
+        vec!["I:\\Samples".into(), "I:\\Fl Studio Backup\\Old Samples".into(), "G:\\Splice".into()];
+    let at = |h: u32, m: u32| chrono::Local::now().date_naive().and_hms_opt(h, m, 0).unwrap_or_default();
+    let scanning = mo_app::sound_scan::ScanState {
+        running: true,
+        started: at(15, 40),
+        folders: vec![
+            mo_app::sound_scan::FolderScan { folder: samples[0].clone(), files: 453_741, ..Default::default() },
+            mo_app::sound_scan::FolderScan {
+                folder: samples[1].clone(),
+                files: 3_906,
+                to_listen: 3_906,
+                listened: 1_280,
+                unreadable: 2,
+                ..Default::default()
+            },
+            mo_app::sound_scan::FolderScan { folder: samples[2].clone(), away: true, ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    // Only the key the scan state is kept under: no file is made.
+    let screens_sounds = PathBuf::from("screens-sounds.db");
+    mo_app::sound_scan::show_state(&screens_sounds, scanning.clone());
+    let folder_groups = |samples: Vec<String>, moved: &mo_space::folder_move::MovedFolder| {
+        mo_app::settings::folder_groups(
             vec!["I:\\Fl Studio Data\\FL Studio\\Projects".into(), "K:\\Bitwig Studio\\Projects".into()],
-            vec!["I:\\Samples".into(), "G:\\Splice".into()],
+            samples,
             vec!["L:\\New Midi".into()],
             vec![],
             vec!["C:\\Program Files\\Common Files\\VST3".into(), "C:\\Program Files\\Common Files\\CLAP".into()],
-            &[moved],
-        )),
-    );
+            std::slice::from_ref(moved),
+        )
+    };
+    mo_ui::settings::show_folders(app, Ok(folder_groups(samples.clone(), &moved)));
     // Exports go into a folder chosen on another drive (an invented one).
     let exports = r"I:\DAWmate Exports";
     mo_ui::settings::show_exports(
@@ -4146,6 +4170,14 @@ fn settings_shots(
     data.invoke_tab_picked(1);
     capture(window);
     shots.push(("settings-folders.png".into(), capture(window)));
+    // The scan done: each folder says what it found and when.
+    let mut scanned = scanning;
+    scanned.running = false;
+    scanned.ended = Some(at(15, 47));
+    scanned.folders[1].listened = 3_906;
+    mo_app::sound_scan::show_state(&screens_sounds, scanned);
+    mo_ui::settings::show_folders(app, Ok(folder_groups(samples, &moved)));
+    shots.push(("settings-folders-scanned.png".into(), capture(window)));
     // The Exports card, at the bottom of the tab.
     scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
     shots.push(("settings-folders-exports.png".into(), capture(window)));

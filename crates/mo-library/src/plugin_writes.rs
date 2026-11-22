@@ -117,24 +117,26 @@ pub fn write(songs_db: &Path, measure: &Measure) -> Result<(), LibraryError> {
     Ok(())
 }
 
-fn write_error(songs_db: &Path, why: String) -> LibraryError {
+pub(crate) fn write_error(songs_db: &Path, why: String) -> LibraryError {
     LibraryError::Write { path: songs_db.to_owned(), why }
 }
 
 /// An SQLite error writing `songs_db`: busy when another copy of the app holds it.
-fn sql_error(songs_db: &Path, e: rusqlite::Error) -> LibraryError {
+pub(crate) fn sql_error(songs_db: &Path, e: rusqlite::Error) -> LibraryError {
     match e.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: songs_db.to_owned() },
         _ => write_error(songs_db, e.to_string()),
     }
 }
 
-fn not_own(songs_db: &Path) -> LibraryError {
+pub(crate) fn not_own(songs_db: &Path) -> LibraryError {
     write_error(songs_db, "it isn't the app's own song library (yet), so it isn't written".to_owned())
 }
 
 /// Opens `songs_db` to write, when it's there and made by the app; with how its SQLite errors are told.
-fn open_own(songs_db: &Path) -> Result<(Connection, impl Fn(rusqlite::Error) -> LibraryError + '_), LibraryError> {
+pub(crate) fn open_own(
+    songs_db: &Path,
+) -> Result<(Connection, impl Fn(rusqlite::Error) -> LibraryError + '_), LibraryError> {
     let sql = move |e| sql_error(songs_db, e);
     if !songs_db.is_file() {
         return Err(write_error(songs_db, "it isn't there".to_owned()));
@@ -151,7 +153,7 @@ fn open_own(songs_db: &Path) -> Result<(Connection, impl Fn(rusqlite::Error) -> 
 }
 
 /// Looked at under the write lock: only the app's own library is written.
-fn own_under_lock(songs_db: &Path, tx: &Transaction<'_>) -> Result<(), LibraryError> {
+pub(crate) fn own_under_lock(songs_db: &Path, tx: &Transaction<'_>) -> Result<(), LibraryError> {
     let own: Option<rusqlite::types::Value> = tx
         .query_row("SELECT value FROM songs_info WHERE key = 'own_since'", [], |r| r.get(0))
         .optional()

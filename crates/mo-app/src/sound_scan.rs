@@ -11,10 +11,13 @@
 //! to read more ([`mo_audio::READS`]): then the next scan tries just those again, once, and notes it in the library.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use mo_library::scan::{Found, FoundFile};
+use chrono::{Local, NaiveDateTime};
+use mo_library::scan::{Found, FoundFile, count_inside, is_inside};
 use mo_sounds::compact::{self, grow};
 use mo_sounds::scan::{self, ScanPlan};
 use mo_sounds::{KnownSound, SoundsDb, analyse};
@@ -79,11 +82,20 @@ pub fn scan(sounds_db: &Path, folders: &[String], progress: &dyn Fn(usize, usize
     if folders.is_empty() || compact::own_since(&copy).is_none() {
         return Ok(None);
     }
+    // Settings shows how far it is, folder by folder, whatever happens to it ([`state`]).
+    let mut told = Told::new(sounds_db, folders);
     let found = background::on_bulk_pool(|| scan::find_sounds(folders));
-    let known = SoundsDb::open_read_only(&copy).and_then(|db| db.known_files()).map_err(|e| e.to_string())?;
+    let known = match SoundsDb::open_read_only(&copy).and_then(|db| db.known_files()) {
+        Ok(known) => known,
+        Err(e) => {
+            told.ended(Some(e.to_string()));
+            return Err(e.to_string());
+        }
+    };
     let ScanPlan { mut listen, moves, forget } = scan::plan(&found, &known, folders);
     let mut scanned = Scanned { found: found.files.len(), ..Scanned::default() };
     let again = try_again(&copy, &mut listen, &found, &moves, folders);
+    told.found(&found, &listen);
     let forget = if forget.len() > FEW_GONE && forget.len() as f64 > known.len() as f64 * MOST_GONE {
         scanned.not_forgotten = forget.len();
         Vec::new()
@@ -91,7 +103,11 @@ pub fn scan(sounds_db: &Path, folders: &[String], progress: &dyn Fn(usize, usize
         forget
     };
     let to_do = ToDo { listen: &listen, moves: &moves, forget: &forget, again: again.as_ref().map(|a| &a.added) };
-    match keep_all(sounds_db, &known, &to_do, &mut scanned, progress) {
+    let progress = |done: usize, of: usize, files: &[FoundFile], listened: &[grow::Listened]| {
+        told.listened(files, listened);
+        progress(done, of);
+    };
+    match keep_all(sounds_db, &known, &to_do, &mut scanned, &progress) {
         // Noted only once every one was tried: a scan stopped part way, or one with an unread sound on an unplugged
         // drive, tries them again at the next. A note that can't be written costs only that.
         Ok(()) => {
@@ -102,7 +118,183 @@ pub fn scan(sounds_db: &Path, folders: &[String], progress: &dyn Fn(usize, usize
         Err(why) => scanned.stopped = Some(why),
     }
     scanned.took = began.elapsed();
+    told.ended(scanned.stopped.clone());
+    // Sounds joined, moved or went: the Songs list looks again for the samples it has marked missing.
+    if scanned.kept.any() {
+        SOUNDS_CHANGED.fetch_add(1, Ordering::Relaxed);
+    }
     Ok(Some(scanned))
+}
+
+/// How many scans in this run have changed the sound library ([`sounds_changed`]).
+static SOUNDS_CHANGED: AtomicU64 = AtomicU64::new(0);
+
+/// How many scans in this run have kept new, changed, moved or gone sounds: when it goes up, the Songs list looks
+/// again for the samples it has marked missing (a sample folder added in Settings may hold them).
+pub fn sounds_changed() -> u64 {
+    SOUNDS_CHANGED.load(Ordering::Relaxed)
+}
+
+/// Where scanning one sample folder is, or was at the last scan, for Settings' folder rows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FolderScan {
+    /// The folder, as the list has it.
+    pub folder: String,
+    /// How many sound files are in it (and the folders in it).
+    pub files: usize,
+    /// Of those, how many are new or changed, to listen to this scan.
+    pub to_listen: usize,
+    /// Of those, how many have been listened to so far.
+    pub listened: usize,
+    /// Of those, how many couldn't be.
+    pub unreadable: usize,
+    /// It couldn't be read (a drive unplugged, a folder gone): its sounds were kept as they were.
+    pub away: bool,
+}
+
+/// Where scanning the sample folders is: the scan going now, or the last one this run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScanState {
+    /// The scan hasn't ended yet.
+    pub running: bool,
+    /// It's still looking for sound files: [`ScanState::folders`] is empty until it's done.
+    pub looking: bool,
+    /// Each sample folder it scans.
+    pub folders: Vec<FolderScan>,
+    /// When it started, and when it ended.
+    pub started: NaiveDateTime,
+    pub ended: Option<NaiveDateTime>,
+    /// Why it stopped part way, or couldn't be done, when it did.
+    pub stopped: Option<String>,
+}
+
+impl ScanState {
+    /// This folder's part of it, by the list's spelling.
+    pub fn folder(&self, folder: &str) -> Option<&FolderScan> {
+        self.folders.iter().find(|f| f.folder == folder)
+    }
+}
+
+/// The scan state of each sound library scanned this run (the app has one; tests make many), newest last.
+static STATES: Mutex<Vec<(PathBuf, ScanState)>> = Mutex::new(Vec::new());
+
+/// Counts every change to [`STATES`], so a page can tell when to show it again ([`state_turn`]).
+static STATE_TURN: AtomicU64 = AtomicU64::new(0);
+
+/// Where scanning the sample folders into the library beside `sounds_db` is: `None` before its first scan this run.
+pub fn state(sounds_db: &Path) -> Option<ScanState> {
+    let states = STATES.lock().unwrap_or_else(PoisonError::into_inner);
+    states.iter().find(|(db, _)| db == sounds_db).map(|(_, s)| s.clone())
+}
+
+/// [`state`] of the library scanned last this run, whichever it is: the app only ever scans its own.
+pub fn latest_state() -> Option<ScanState> {
+    STATES.lock().unwrap_or_else(PoisonError::into_inner).last().map(|(_, s)| s.clone())
+}
+
+/// Goes up each time a scan's state changes: a page showing it reads it again only then.
+pub fn state_turn() -> u64 {
+    STATE_TURN.load(Ordering::Relaxed)
+}
+
+/// Puts `state` in for the library beside `sounds_db`, as a scan would: for the screenshots, which scan nothing.
+pub fn show_state(sounds_db: &Path, state: ScanState) {
+    let mut states = STATES.lock().unwrap_or_else(PoisonError::into_inner);
+    states.retain(|(db, _)| db != sounds_db);
+    states.push((sounds_db.to_path_buf(), state));
+    STATE_TURN.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Tells [`STATES`] how a scan is going, folder by folder.
+struct Told {
+    sounds_db: PathBuf,
+    folders: Vec<String>,
+    /// Whether it was told the scan ended: if it's let go before (a scan that tripped up), it says so itself.
+    ended: bool,
+}
+
+impl Drop for Told {
+    fn drop(&mut self) {
+        if !self.ended {
+            self.ended(Some("It stopped on something the app didn't expect (the log says what).".to_owned()));
+        }
+    }
+}
+
+impl Told {
+    /// A scan of `folders` started: looking for sound files.
+    fn new(sounds_db: &Path, folders: &[String]) -> Told {
+        let told = Told { sounds_db: sounds_db.to_path_buf(), folders: folders.to_vec(), ended: false };
+        let started = Local::now().naive_local();
+        told.change(|s| *s = ScanState { running: true, looking: true, started, ..ScanState::default() });
+        told
+    }
+
+    fn change(&self, change: impl FnOnce(&mut ScanState)) {
+        let mut states = STATES.lock().unwrap_or_else(PoisonError::into_inner);
+        let at = match states.iter().position(|(db, _)| *db == self.sounds_db) {
+            Some(at) => at,
+            None => {
+                states.push((self.sounds_db.clone(), ScanState::default()));
+                states.len() - 1
+            }
+        };
+        // Newest last, for [`latest_state`].
+        let mut this = states.remove(at);
+        change(&mut this.1);
+        states.push(this);
+        STATE_TURN.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The sound files are found, and `listen` are the ones to listen to: counted for each folder (a file in a folder
+    /// inside another listed one counts in both).
+    fn found(&self, found: &Found, listen: &[FoundFile]) {
+        let (files, to_listen) = background::on_bulk_pool(|| {
+            (count_inside(&found.files, &self.folders), count_inside(listen, &self.folders))
+        });
+        let folders: Vec<FolderScan> = self
+            .folders
+            .iter()
+            .zip(files.into_iter().zip(to_listen))
+            .map(|(folder, (files, to_listen))| FolderScan {
+                folder: folder.clone(),
+                files,
+                to_listen,
+                away: found.unreadable.iter().any(|u| is_inside(folder, u)),
+                ..FolderScan::default()
+            })
+            .collect();
+        self.change(|s| {
+            s.looking = false;
+            s.folders = folders;
+        });
+    }
+
+    /// These `files` were listened to, with what was heard.
+    fn listened(&self, files: &[FoundFile], listened: &[grow::Listened]) {
+        self.change(|s| {
+            for f in &mut s.folders {
+                for (file, heard) in files.iter().zip(listened) {
+                    if is_inside(&file.path, &f.folder) {
+                        f.listened += 1;
+                        f.unreadable += usize::from(heard.analysed.is_err());
+                    }
+                }
+            }
+        });
+    }
+
+    /// The scan ended, done or stopped part way (`stopped`).
+    fn ended(&mut self, stopped: Option<String>) {
+        self.ended = true;
+        let ended = Local::now().naive_local();
+        self.change(|s| {
+            s.running = false;
+            s.looking = false;
+            s.ended = Some(ended);
+            s.stopped = stopped;
+        });
+    }
 }
 
 /// When the reader has learnt to read more since the sounds that couldn't be listened to were last tried
@@ -143,7 +335,7 @@ fn keep_all(
     known: &[KnownSound],
     to_do: &ToDo<'_>,
     scanned: &mut Scanned,
-    progress: &dyn Fn(usize, usize),
+    progress: &Progress<'_>,
 ) -> Result<(), String> {
     let ToDo { listen, moves, forget, again } = *to_do;
     let again = again.filter(|a| !a.is_empty());
@@ -155,7 +347,7 @@ fn keep_all(
     if listen.is_empty() {
         return Ok(());
     }
-    progress(0, listen.len());
+    progress(0, listen.len(), &[], &[]);
     // The paths the library knows (letter case aside, as SQLite compares them), to tell a new file that couldn't be
     // listened to from a changed one: gathered only once there's one.
     let mut known_paths: Option<HashSet<String>> = None;
@@ -189,10 +381,14 @@ fn keep_all(
             }
         }
         done += files.len();
-        progress(done, listen.len());
+        progress(done, listen.len(), files, &listened);
     }
     Ok(())
 }
+
+/// What [`keep_all`] tells as it goes: how many files have been listened to, of how many, and the few just listened to
+/// with what was heard.
+type Progress<'a> = dyn Fn(usize, usize, &[FoundFile], &[grow::Listened]) + 'a;
 
 /// Listens to one sound file. A file that can't be read, or that trips the reader up (a damaged file), is kept with
 /// why, as the C# app kept it: it isn't listened to again until it changes.
