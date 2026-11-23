@@ -267,6 +267,22 @@ pub fn shows_silent() -> bool {
     setting.as_deref() == Some("off")
 }
 
+/// Whether the app's Sounds page hides duplicates, as its settings file says: read without changing it; off when it
+/// can't be read, as the app starts. Reads a file: off the panel's thread.
+pub fn hides_copies() -> bool {
+    let setting = crate::midi::setting(&mo_app::paths::data_dir(), mo_app::sounds::HIDE_COPIES_KEY);
+    setting.as_deref() == Some("on")
+}
+
+/// The Hide duplicates line's words: with how many it leaves out, or that the app hasn't looked for them yet.
+pub fn hide_copies_words(copies: Option<usize>) -> String {
+    match copies {
+        None => "Hide duplicates (the app finds them)".to_owned(),
+        Some(0) => "Hide duplicates".to_owned(),
+        Some(n) => format!("Hide duplicates \u{b7} {}", mo_app::sounds::short_count(n)),
+    }
+}
+
 /// The app's own sound library beside `sounds_db` (its copy: the plugin never reads the old file).
 pub fn read_from(sounds_db: &Path) -> Read {
     let copy = mo_sounds::compact::copy_of(sounds_db);
@@ -282,7 +298,12 @@ pub fn read_from(sounds_db: &Path) -> Read {
     match db.all(chrono::Local::now().naive_local()) {
         Ok(sounds) => {
             let analysed = mo_sounds::count_clap_could_hear(&sounds, mo_sounds::compact::grow::new_since(&copy));
+            // The copies the app's Hide duplicates found, read as they are (the plugin never looks for more).
+            let same = mo_sounds::copies::known(&sounds, &sounds_db.with_file_name(mo_sounds::copies::FILE_NAME));
             let mut library = Library::new(sounds);
+            if let Some(same) = &same {
+                library.list.set_copies(same);
+            }
             library.from = Some((sounds_db.to_path_buf(), analysed));
             Read::Ready(Arc::new(library))
         }
