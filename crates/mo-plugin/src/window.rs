@@ -51,11 +51,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// The panel's size, in logical pixels (before the screen's scaling).
-pub const WIDTH: f64 = 760.0;
-pub const HEIGHT: f64 = 560.0;
-/// The smallest the window can be dragged: the filter column still fits its lines, and the list a few words.
-pub const LEAST_WIDTH: f64 = 620.0;
+/// The size the panel opens at the first time, in logical pixels (before the screen's scaling): room for every
+/// button with the list beside the filters (760 x 560 cut some off, Solomon 23 Nov 2026).
+pub const WIDTH: f64 = 960.0;
+pub const HEIGHT: f64 = 640.0;
+/// The smallest the window can be dragged: the filter column, and beside it the Sounds tab's widest row of buttons
+/// (the playing row, with Match tempo and In Bitwig's Sampler showing).
+pub const LEAST_WIDTH: f64 = 720.0;
 pub const LEAST_HEIGHT: f64 = 560.0;
 /// The biggest: more than any screen today, so a DAW that asks for a silly size doesn't get a picture that big.
 pub const MOST_WIDTH: f64 = 7680.0;
