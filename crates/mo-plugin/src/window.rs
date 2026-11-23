@@ -2401,6 +2401,27 @@ fn make_part(parts: Arc<crate::midi::Parts>, at: usize, tempo: Option<f64>, midi
     }
 }
 
+/// The word for a shuffled list, first among each list's orders, as on the Sounds tab (Solomon, 23 Nov 2026: "a
+/// shuffle on all lists").
+const SHUFFLED: &str = "Shuffled";
+
+/// Puts `list` in a random order that `seed` decides (the same seed, the same order).
+fn shuffle(list: &mut [usize], seed: u64) {
+    let mut state = seed;
+    // splitmix64: a small, sure maker of numbers from the seed.
+    let mut next = move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    for i in (1..list.len()).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        list.swap(i, j);
+    }
+}
+
 /// What's being heard: a list line's sound (by its id) or a star (by its sound's place in the list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Heard {
@@ -2573,6 +2594,21 @@ mod tests {
         assert!(tempo_moved(Some(120.0), 90.0));
         // Made at its file's tempo before the DAW said one: made again at the DAW's.
         assert!(tempo_moved(None, 120.0));
+    }
+
+    #[test]
+    fn a_shuffle_keeps_every_line_and_the_same_seed_gives_the_same_order() {
+        let mut a: Vec<usize> = (0..50).collect();
+        let mut b = a.clone();
+        shuffle(&mut a, 7);
+        shuffle(&mut b, 7);
+        assert_eq!(a, b);
+        assert_ne!(a, (0..50).collect::<Vec<_>>());
+        a.sort_unstable();
+        assert_eq!(a, (0..50).collect::<Vec<_>>());
+        let mut c: Vec<usize> = (0..50).collect();
+        shuffle(&mut c, 8);
+        assert_ne!(b, c);
     }
 
     #[test]
