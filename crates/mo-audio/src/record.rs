@@ -256,7 +256,7 @@ fn mend(part: &Path, len: u64) -> std::io::Result<()> {
 /// ends the take.
 #[cfg(feature = "record")]
 pub mod card {
-    use super::{Feed, Recording, recording};
+    use super::{Recording, recording};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
     /// The sound card inputs this computer has, by name, the system's default first.
@@ -288,6 +288,46 @@ pub mod card {
 
     /// Opens the input called `name` (the default for none) in shared mode, and starts a take from it.
     pub fn open(name: Option<&str>) -> Result<(Input, Recording), String> {
+        let (device, supported) = device(name)?;
+        let channels = supported.channels();
+        let (mut feed, take) = recording(supported.sample_rate(), usize::from(channels).min(2));
+        let input =
+            start(&device, &supported, name, move |samples, channels| feed.push_interleaved(samples, channels))?;
+        Ok((input, take))
+    }
+
+    /// How loud an input has been since it was last asked: the loudest sample's size (0 to 1, more when it clips),
+    /// kept by the input's own thread and taken by whoever shows it.
+    #[derive(Debug, Default)]
+    pub struct Level(std::sync::atomic::AtomicU32);
+
+    impl Level {
+        /// The loudest since the last time it was taken, and starts again from quiet.
+        pub fn take(&self) -> f32 {
+            f32::from_bits(self.0.swap(0, std::sync::atomic::Ordering::AcqRel))
+        }
+
+        /// `peak` was heard: kept if it's the loudest yet. (A peak is never negative, so its bits sort as it does.)
+        pub fn note(&self, peak: f32) {
+            if peak.is_finite() && peak > 0.0 {
+                self.0.fetch_max(peak.to_bits(), std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+    }
+
+    /// Opens the input called `name` in shared mode only to show how loud it is: nothing is recorded or kept.
+    pub fn meter(name: &str) -> Result<(Input, std::sync::Arc<Level>), String> {
+        let (device, supported) = device(Some(name))?;
+        let level = std::sync::Arc::new(Level::default());
+        let heard = std::sync::Arc::clone(&level);
+        let input = start(&device, &supported, Some(name), move |samples, _| {
+            heard.note(samples.iter().fold(0.0f32, |m, s| m.max(s.abs())));
+        })?;
+        Ok((input, level))
+    }
+
+    /// The input called `name` (the default for none), and how it gives its samples.
+    fn device(name: Option<&str>) -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
         let host = cpal::default_host();
         let device = match name {
             Some(wanted) => {
@@ -300,26 +340,39 @@ pub mod card {
             None => "There's no sound card input".to_owned(),
         })?;
         let supported = device.default_input_config().map_err(|e| format!("Couldn't open the input: {e}"))?;
+        Ok((device, supported))
+    }
+
+    /// Starts `device`'s input, handing its samples (as f32, interleaved, with how many channels) to `sink`.
+    fn start(
+        device: &cpal::Device,
+        supported: &cpal::SupportedStreamConfig,
+        name: Option<&str>,
+        sink: impl FnMut(&[f32], usize) + Send + 'static,
+    ) -> Result<Input, String> {
         let rate = supported.sample_rate();
         let channels = supported.channels();
         let config = supported.config();
-        let (feed, take) = recording(rate, usize::from(channels).min(2));
         let stream = match supported.sample_format() {
-            cpal::SampleFormat::F32 => stream::<f32>(&device, &config, feed),
-            cpal::SampleFormat::F64 => stream::<f64>(&device, &config, feed),
-            cpal::SampleFormat::I16 => stream::<i16>(&device, &config, feed),
-            cpal::SampleFormat::I24 => stream::<cpal::I24>(&device, &config, feed),
-            cpal::SampleFormat::I32 => stream::<i32>(&device, &config, feed),
-            cpal::SampleFormat::U16 => stream::<u16>(&device, &config, feed),
+            cpal::SampleFormat::F32 => stream::<f32>(device, &config, sink),
+            cpal::SampleFormat::F64 => stream::<f64>(device, &config, sink),
+            cpal::SampleFormat::I16 => stream::<i16>(device, &config, sink),
+            cpal::SampleFormat::I24 => stream::<cpal::I24>(device, &config, sink),
+            cpal::SampleFormat::I32 => stream::<i32>(device, &config, sink),
+            cpal::SampleFormat::U16 => stream::<u16>(device, &config, sink),
             other => Err(format!("The input gives {other} samples, which can't be recorded")),
         }?;
         stream.play().map_err(|e| format!("Couldn't start the input: {e}"))?;
-        let name = name_of(&device).unwrap_or_else(|| name.unwrap_or("The default input").to_owned());
-        Ok((Input { _stream: stream, name, rate, channels }, take))
+        let name = name_of(device).unwrap_or_else(|| name.unwrap_or("The default input").to_owned());
+        Ok(Input { _stream: stream, name, rate, channels })
     }
 
-    /// A stream handing the input's samples, as f32, to `feed`.
-    fn stream<T>(device: &cpal::Device, config: &cpal::StreamConfig, mut feed: Feed) -> Result<cpal::Stream, String>
+    /// A stream handing the input's samples, as f32, to `sink`.
+    fn stream<T>(
+        device: &cpal::Device,
+        config: &cpal::StreamConfig,
+        mut sink: impl FnMut(&[f32], usize) + Send + 'static,
+    ) -> Result<cpal::Stream, String>
     where
         T: cpal::SizedSample,
         f32: cpal::FromSample<T>,
@@ -338,7 +391,7 @@ pub mod card {
                     for (o, s) in out.iter_mut().zip(data) {
                         *o = s.to_sample::<f32>();
                     }
-                    feed.push_interleaved(out, channels);
+                    sink(out, channels);
                 },
                 |_| {},
                 None,

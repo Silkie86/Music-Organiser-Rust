@@ -4,7 +4,7 @@
 // Chords (Chord check: the chord the notes played in make, as the app's chord reader names it) and DAW check (every
 // CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card, TipLayer, TipState, CutText, Icons } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card, TipLayer, TipState, CutText, Icons, MenuCard } from "../../mo-ui/ui/studio.slint";
 import { CurveBench, GridStrip, CurveEditorData, EditorDot, ClipTile, RulerMark } from "../../mo-ui/ui/pages/curve_editor.slint";
 export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem }
 import { ListView } from "../../mo-ui/ui/list.slint";
@@ -101,6 +101,35 @@ export struct ExtensionLine {
 
 // A neighbourhood's name over the Galaxy's map: which one, where the middle of its bottom edge is, its type's colour
 // and how strongly it shows.
+// A line of the Record from menu: the DAW's input, a sound card (opens the inputs on it), an input on the card
+// open, or the line back to the cards. `key` is the input's whole name ("" for the DAW's input); `level` is how loud
+// it is as a part of its meter (0 to 1).
+export struct InputLine {
+    text: string,
+    key: string,
+    level: float,
+    card: bool,
+    back: bool,
+    picked: bool,
+}
+
+// How loud an input is: a short bar filled to its level (0 to 1, its decibels from -60 to 0), turning to the warning
+// colour near the top and to red where it clips.
+component LevelBar inherits Rectangle {
+    in property <float> share;
+    width: 64px;
+    height: 6px;
+    border-radius: 3px;
+    background: Theme.well;
+    Rectangle {
+        x: 0;
+        width: parent.width * clamp(root.share, 0, 1);
+        height: parent.height;
+        border-radius: 3px;
+        background: root.share > 0.97 ? Theme.missing : root.share > 0.85 ? Theme.warning : Theme.accent;
+    }
+}
+
 export struct SkyName {
     region: int,
     name: string,
@@ -292,8 +321,10 @@ export component Panel inherits Window {
     callback stop();
     // Record: what comes in, from the DAW's input to the plugin (its sidechain) or straight from a sound card, saved
     // as a WAV that drags out like a sound. `record-from` is the card's name, "" for the DAW's input.
-    in property <[string]> record-from-choices;
     in property <string> record-from;
+    // The Record from menu's lines, and how loud what's picked is (the overall input level, 0 to 1).
+    in property <[InputLine]> record-menu;
+    in property <float> record-level;
     in property <bool> recording;
     in property <string> record-said;
     // Listen: what the plugin hears at its input (the notes the track plays most, the hits' tempo), in words.
@@ -301,7 +332,11 @@ export component Panel inherits Window {
     // The last take saved, by its file name ("" for none), dragged out like a sound; `recorded-carried` while it is.
     in property <string> recorded-name;
     in property <bool> recorded-carried;
-    callback record-from-picked(string);
+    // The Record from menu was opened; it's still open (said every moment while it is, so its inputs are measured
+    // only then); a line of it was clicked.
+    callback record-menu-opened();
+    callback record-menu-alive();
+    callback record-menu-clicked(int);
     callback record();
     callback record-stop();
     callback recorded-play();
@@ -727,13 +762,67 @@ export component Panel inherits Window {
                 }
                 HorizontalLayout {
                     spacing: Space.sm;
-                    PickButton {
+                    record-from-button := StudioButton {
                         horizontal-stretch: 0;
-                        name: "Record from";
-                        value: root.record-from;
-                        none-text: "The DAW's input to the plugin";
-                        choices: root.record-from-choices;
-                        picked(t) => { root.record-from-picked(t); }
+                        text: "Record from: " + (root.record-from == "" ? "the DAW's input" : root.record-from);
+                        menu: true;
+                        tip: "Pick a sound card, then the input on it: each shows how loud it is";
+                        clicked => {
+                            root.record-menu-opened();
+                            record-menu.show();
+                        }
+                        record-menu := PopupWindow {
+                            x: 0;
+                            y: parent.height + Space.xs;
+                            width: max(parent.width, 320px);
+                            close-policy: close-on-click-outside;
+                            Timer {
+                                interval: 150ms;
+                                running: true;
+                                triggered => { root.record-menu-alive(); }
+                            }
+                            MenuCard {
+                                for line[i] in root.record-menu: Rectangle {
+                                    height: 32px;
+                                    border-radius: Theme.radius;
+                                    background: line.picked
+                                        ? Theme.accent.transparentize(line-touch.has-hover ? 70% : 78%)
+                                        : line-touch.has-hover ? Theme.hover : transparent;
+                                    HorizontalLayout {
+                                        padding-left: Space.md;
+                                        padding-right: Space.md;
+                                        spacing: Space.md;
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            vertical-alignment: center;
+                                            text: (line.back ? "\u{2039}  " : "") + line.text;
+                                            color: line.back ? Theme.muted : Theme.text;
+                                            font-size: Type.body;
+                                            font-weight: line.picked ? 600 : 400;
+                                            overflow: elide;
+                                        }
+                                        if !line.back: VerticalLayout {
+                                            alignment: center;
+                                            LevelBar { share: line.level; }
+                                        }
+                                        if line.card: Text {
+                                            vertical-alignment: center;
+                                            text: "\u{203a}";
+                                            color: Theme.muted;
+                                            font-size: Type.body;
+                                        }
+                                    }
+                                    line-touch := TouchArea {
+                                        clicked => {
+                                            if !line.card && !line.back {
+                                                record-menu.close();
+                                            }
+                                            root.record-menu-clicked(i);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     StudioButton {
                         horizontal-stretch: 0;
@@ -747,6 +836,11 @@ export component Panel inherits Window {
                                 root.record();
                             }
                         }
+                    }
+                    // The overall input level: how loud what Record would take is, now.
+                    VerticalLayout {
+                        alignment: center;
+                        LevelBar { share: root.record-level; }
                     }
                     CutText {
                         own-mouse: true;

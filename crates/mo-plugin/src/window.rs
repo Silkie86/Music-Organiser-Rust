@@ -24,8 +24,8 @@ use crate::takes::Label;
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
 use crate::{
-    ChordBox, ExtensionLine, FilterChoice, FilterView, Instance, LabelLine, Panel, SkyName, SoundLine, SweptLine,
-    TakeLine, TrailDot, YearBar,
+    ChordBox, ExtensionLine, FilterChoice, FilterView, InputLine, Instance, LabelLine, Panel, SkyName, SoundLine,
+    SweptLine, TakeLine, TrailDot, YearBar,
 };
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
@@ -648,6 +648,8 @@ struct Shown {
     carried: Cell<Option<Carried>>,
     /// The last take Record saved, shown as a line to hear and drag out.
     recorded: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// The Record from menu: its lines, and how loud each input is.
+    record_menu: Rc<RecordMenu>,
     /// The number of the newest chord Chord check read that the panel shows ([`crate::chordcheck::Checker::newest`]).
     chords_seen: Cell<u64>,
     /// The number of Chord check's list of takes the panel shows (a pick or a label sets it to none, so it's shown
@@ -729,6 +731,7 @@ impl Shown {
             presets: presets_tab::PresetsTab::new(),
             carried: Cell::new(None),
             recorded: Rc::default(),
+            record_menu: Rc::default(),
             chords_seen: Cell::new(u64::MAX),
             takes_seen: Rc::new(Cell::new(u64::MAX)),
             take_picked: Rc::default(),
@@ -1206,6 +1209,27 @@ impl Shown {
         panel.set_chord_strip(ModelRc::new(VecModel::from(strip)));
     }
 
+    /// How loud the inputs are: every input while the Record from menu is open, and what's picked while the Sounds
+    /// tab shows (the overall input level beside Record). Inputs are opened to be measured only then.
+    fn record_levels(&self) {
+        let menu = &self.record_menu;
+        let open = menu.alive.get().is_some_and(|at| at.elapsed() < MENU_GONE);
+        let picked = self.panel.get_record_from().to_string();
+        let asked = if open {
+            menu.inputs.borrow().clone()
+        } else if !picked.is_empty() && self.panel.get_view() == 0 {
+            vec![picked.clone()]
+        } else {
+            Vec::new()
+        };
+        menu.meters.ask(asked);
+        menu.heard(self.instance.recorder.daw_level.take(), menu.meters.take());
+        self.panel.set_record_level(crate::record::meter_share(menu.level(&picked)));
+        if open {
+            menu.show(&picked);
+        }
+    }
+
     /// Record: what it records from, its button, and the last take as a line to hear and drag into the project.
     fn fill_in_record(&self) {
         let panel = &self.panel;
@@ -1214,11 +1238,34 @@ impl Shown {
         // The sound cards are asked for off the window's thread: the system can take a while to answer.
         let slots = Arc::clone(&self.slots);
         background("mo-plugin-inputs", move || *lock(&slots.inputs) = Some(crate::record::inputs()));
-        let weak = panel.as_weak();
-        panel.on_record_from_picked(move |picked| {
+        panel.set_record_menu(ModelRc::from(Rc::clone(&self.record_menu.lines) as Rc<dyn Model<Data = InputLine>>));
+        let (menu, weak) = (Rc::clone(&self.record_menu), panel.as_weak());
+        panel.on_record_menu_opened(move || {
+            // It opens on the sound cards, showing where what's picked is.
+            *menu.card.borrow_mut() = None;
+            menu.alive.set(Some(Instant::now()));
             if let Some(panel) = weak.upgrade() {
-                panel.set_record_from(picked);
+                menu.show(&panel.get_record_from());
             }
+        });
+        let menu = Rc::clone(&self.record_menu);
+        panel.on_record_menu_alive(move || menu.alive.set(Some(Instant::now())));
+        let (menu, weak) = (Rc::clone(&self.record_menu), panel.as_weak());
+        panel.on_record_menu_clicked(move |row| {
+            let (Some(panel), Some(line)) =
+                (weak.upgrade(), usize::try_from(row).ok().and_then(|r| menu.lines.row_data(r)))
+            else {
+                return;
+            };
+            if line.back {
+                *menu.card.borrow_mut() = None;
+            } else if line.card {
+                *menu.card.borrow_mut() = Some(line.key.to_string());
+            } else {
+                panel.set_record_from(line.key);
+                *menu.card.borrow_mut() = None;
+            }
+            menu.show(&panel.get_record_from());
         });
         let (recorder, player, weak) = (Arc::clone(recorder), Arc::clone(&self.instance.player), panel.as_weak());
         panel.on_record(move || {
@@ -1265,9 +1312,9 @@ impl Shown {
     /// What Record has to tell (how the take is going, or what became of it), and what Listen hears.
     fn record_said(&self) {
         if let Some(inputs) = take(&self.slots.inputs) {
-            let names: Vec<SharedString> = inputs.into_iter().map(SharedString::from).collect();
-            self.panel.set_record_from_choices(ModelRc::new(VecModel::from(names)));
+            *self.record_menu.inputs.borrow_mut() = inputs;
         }
+        self.record_levels();
         if let Some(hears) = lock(&self.instance.listener.hears).take() {
             self.panel.set_hears(hears.words().into());
         }
@@ -2422,6 +2469,124 @@ fn shuffle(list: &mut [usize], seed: u64) {
     }
 }
 
+/// How long after the Record from menu last said it's open it counts as closed (it says so every 150 ms).
+const MENU_GONE: Duration = Duration::from_millis(400);
+
+/// How much of a meter's level is kept from one tick to the next as it falls back (about 25 dB a second).
+const LEVEL_FALLS: f32 = 0.93;
+
+/// The Record from menu: the sound cards, then the inputs on the one opened, each with how loud it is.
+#[derive(Default)]
+struct RecordMenu {
+    /// Every input, by its whole name, as the system lists them.
+    inputs: RefCell<Vec<String>>,
+    /// The card whose inputs show; none for the list of cards.
+    card: RefCell<Option<String>>,
+    lines: Rc<VecModel<InputLine>>,
+    /// When the menu last said it's open.
+    alive: Cell<Option<Instant>>,
+    /// How loud each input measured is, as shown (falling back slowly from its peaks), by name.
+    levels: RefCell<Vec<(String, f32)>>,
+    /// The same for the DAW's input to the plugin.
+    daw: Cell<f32>,
+    meters: Arc<crate::record::Meters>,
+}
+
+impl RecordMenu {
+    /// New peaks heard: the DAW's input's, and the inputs measured (none for one that couldn't be opened).
+    fn heard(&self, daw: f32, measured: Vec<(String, Option<f32>)>) {
+        self.daw.set(daw.max(self.daw.get() * LEVEL_FALLS));
+        let mut levels = self.levels.borrow_mut();
+        for (_, level) in levels.iter_mut() {
+            *level *= LEVEL_FALLS;
+        }
+        for (name, peak) in measured {
+            let peak = peak.unwrap_or(0.0);
+            match levels.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, level)) => *level = level.max(peak),
+                None => levels.push((name, peak)),
+            }
+        }
+    }
+
+    /// How loud the input called `name` is ("" for the DAW's input).
+    fn level(&self, name: &str) -> f32 {
+        if name.is_empty() {
+            return self.daw.get();
+        }
+        self.levels.borrow().iter().find(|(n, _)| n == name).map_or(0.0, |(_, l)| *l)
+    }
+
+    /// The menu's lines as they are now, `picked` being what's picked: changed in place where only the levels
+    /// moved, so the menu doesn't flicker.
+    fn show(&self, picked: &str) {
+        let lines = record_menu_lines(&self.inputs.borrow(), self.card.borrow().as_deref(), picked, |n| self.level(n));
+        let same = self.lines.row_count() == lines.len()
+            && lines.iter().enumerate().all(|(i, l)| {
+                self.lines.row_data(i).is_some_and(|o| o.key == l.key && o.text == l.text && o.picked == l.picked)
+            });
+        if same {
+            for (i, line) in lines.into_iter().enumerate() {
+                if self.lines.row_data(i).is_some_and(|o| (o.level - line.level).abs() > 0.002) {
+                    self.lines.set_row_data(i, line);
+                }
+            }
+        } else {
+            self.lines.set_vec(lines);
+        }
+    }
+}
+
+/// The Record from menu's lines for `inputs` (whole names), with the card `card` open (none: the list of cards),
+/// `picked` picked, and each input as loud as `level` says. A card with one input is that input's own line.
+fn record_menu_lines(
+    inputs: &[String],
+    card: Option<&str>,
+    picked: &str,
+    level: impl Fn(&str) -> f32,
+) -> Vec<InputLine> {
+    use crate::record::{card_and_input, meter_share};
+    let line = |text: &str, key: &str, card: bool, back: bool, picked: bool, level: f32| InputLine {
+        text: text.into(),
+        key: key.into(),
+        level: meter_share(level),
+        card,
+        back,
+        picked,
+    };
+    match card {
+        Some(c) => std::iter::once(line("All sound cards", "", false, true, false, 0.0))
+            .chain(on_card(inputs, c).map(|n| line(card_and_input(n).1, n, false, false, n == picked, level(n))))
+            .collect(),
+        None => {
+            let mut cards: Vec<&str> = Vec::new();
+            for n in inputs {
+                let c = card_and_input(n).0;
+                if !cards.contains(&c) {
+                    cards.push(c);
+                }
+            }
+            let mut lines = vec![line("The DAW's input to the plugin", "", false, false, picked.is_empty(), level(""))];
+            for c in cards {
+                let names: Vec<&String> = on_card(inputs, c).collect();
+                match names.as_slice() {
+                    [only] => lines.push(line(only, only, false, false, *only == picked, level(only))),
+                    _ => {
+                        let loudest = names.iter().map(|n| level(n)).fold(0.0, f32::max);
+                        lines.push(line(c, c, true, false, names.iter().any(|n| *n == picked), loudest));
+                    }
+                }
+            }
+            lines
+        }
+    }
+}
+
+/// The inputs in `inputs` on the card `card`.
+fn on_card<'a>(inputs: &'a [String], card: &'a str) -> impl Iterator<Item = &'a String> + 'a {
+    inputs.iter().filter(move |n| crate::record::card_and_input(n).0 == card)
+}
+
 /// What's being heard: a list line's sound (by its id) or a star (by its sound's place in the list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Heard {
@@ -2609,6 +2774,25 @@ mod tests {
         let mut c: Vec<usize> = (0..50).collect();
         shuffle(&mut c, 8);
         assert_ne!(b, c);
+    }
+
+    #[test]
+    fn the_record_menu_lists_cards_then_the_inputs_on_the_one_opened() {
+        let inputs: Vec<String> =
+            ["Microphone (Blue Snowball)", "Input 1/2 (Bitwig Connect)", "Loopback 5/6 (Bitwig Connect)"]
+                .map(String::from)
+                .to_vec();
+        let loud = |n: &str| if n.starts_with("Loopback") { 1.0 } else { 0.0 };
+        let top = record_menu_lines(&inputs, None, "Loopback 5/6 (Bitwig Connect)", loud);
+        let texts: Vec<&str> = top.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["The DAW's input to the plugin", "Microphone (Blue Snowball)", "Bitwig Connect"]);
+        // The one-input card is its input; the other opens, showing it holds what's picked and its loudest input.
+        assert!(!top[1].card && top[1].key == "Microphone (Blue Snowball)");
+        assert!(top[2].card && top[2].picked && top[2].level == 1.0);
+        let card = record_menu_lines(&inputs, Some("Bitwig Connect"), "", loud);
+        let texts: Vec<&str> = card.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["All sound cards", "Input 1/2", "Loopback 5/6"]);
+        assert!(card[0].back && card[2].key == "Loopback 5/6 (Bitwig Connect)");
     }
 
     #[test]
