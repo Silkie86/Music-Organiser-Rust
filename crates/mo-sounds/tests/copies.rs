@@ -227,3 +227,28 @@ fn a_file_marked_as_ours_without_its_table_is_made_afresh() {
     let (same, _) = find(&sounds, &kept);
     assert_eq!(same.groups, vec![vec![7, 8]]);
 }
+
+#[test]
+fn what_is_known_reads_the_file_without_changing_it_and_leaves_out_what_changed() {
+    let dir = folder("mo-sounds-copies-known");
+    let kept = dir.join(copies::FILE_NAME);
+    let left = tone(4410, 0.05);
+    let a = dir.join("Kick.wav");
+    mo_audio::write_wav(&a, &[left.clone(), left.clone()], 44_100, 16).unwrap();
+    let b = dir.join("Kick copy.wav");
+    let c = dir.join("Kick again.wav");
+    fs::copy(&a, &b).unwrap();
+    fs::copy(&a, &c).unwrap();
+    let sounds = [sound(1, &a, 0.1, 44_100, -6.02), sound(2, &b, 0.1, 44_100, -6.02), sound(3, &c, 0.1, 44_100, -6.02)];
+    // Nothing looked for yet: nothing known, and no file made.
+    assert_eq!(copies::known(&sounds, &kept), None);
+    assert!(!kept.exists());
+    let (same, _) = find(&sounds, &kept);
+    assert_eq!(same.groups, vec![vec![1, 2, 3]]);
+    let before = fs::read(&kept).unwrap();
+    assert_eq!(copies::known(&sounds, &kept), Some(same));
+    assert_eq!(fs::read(&kept).unwrap(), before, "read, never written");
+    // A file changed since it was looked at isn't taken for a copy until it's looked at again.
+    mo_audio::write_wav(&c, &[tone(4410, 0.07), tone(4410, 0.07)], 44_100, 16).unwrap();
+    assert_eq!(copies::known(&sounds, &kept).unwrap().groups, vec![vec![1, 2]]);
+}

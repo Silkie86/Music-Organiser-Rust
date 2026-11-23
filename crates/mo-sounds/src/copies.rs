@@ -375,6 +375,38 @@ fn with_end(path: &Path, end: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The copies among `sounds` that `sound-copies.db` at `kept_at` already knows (each file unchanged since it was
+/// read), without reading any sound or changing the file: for a reader that must never write the app's files (the
+/// plugin). A sound the app hasn't looked at yet isn't taken for a copy. None when there's no such file of this layout
+/// (the app hasn't looked for copies yet), or it can't be read now. Looks at each candidate's file on disk: off the
+/// window's and the DAW's threads.
+pub fn known(sounds: &[Sound], kept_at: &Path) -> Option<SameAudio> {
+    if !kept_at.is_file() {
+        return None;
+    }
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(kept_at, flags).ok()?;
+    conn.busy_timeout(std::time::Duration::from_secs(2)).ok()?;
+    let id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0)).ok()?;
+    let layout: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).ok()?;
+    if id != APP_ID || layout != LAYOUT {
+        return None;
+    }
+    let known = Kept { conn }.known().ok()?;
+    let candidates = candidates(sounds);
+    let found: Vec<(i64, Print, u64)> = candidates
+        .par_iter()
+        .filter_map(|&i| {
+            let s = &sounds[i];
+            let (was, print) = known.get(s.path.as_str())?;
+            let now = stamp_of(Path::new(&s.path))?;
+            (now == *was).then(|| (s.id, *print, u64::try_from(now.size).unwrap_or(0)))
+        })
+        .collect();
+    let sizes: HashMap<i64, u64> = found.iter().map(|&(id, _, size)| (id, size)).collect();
+    Some(SameAudio::of(found.into_iter().map(|(id, print, _)| (id, print)), &sizes))
+}
+
 /// How far a [`find`] has got.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Finding {

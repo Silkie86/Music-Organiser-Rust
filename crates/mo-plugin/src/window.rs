@@ -161,6 +161,8 @@ struct Slots {
     like_shown: AtomicBool,
     /// The app's Sounds page shows silent sounds (its Hide silent sounds is off), as read with the library.
     shows_silent: AtomicBool,
+    /// The app's Sounds page hides duplicates: so does the list, until it's turned off here.
+    hides_copies: AtomicBool,
     /// The sound types the track's name names ("Kick" on a Kick track), worked out with the library: the list's
     /// first filter.
     track_types: Mutex<Vec<String>>,
@@ -1023,6 +1025,7 @@ impl Shown {
         background("mo-plugin-library", move || {
             // As the app's Sounds page left Hide silent sounds, before the list's first view.
             slots.shows_silent.store(library::shows_silent(), Ordering::Release);
+            slots.hides_copies.store(library::hides_copies(), Ordering::Release);
             let read = library::read();
             // The types the track's name names, among the library's (it goes over every sound: not on the panel's
             // thread).
@@ -1845,6 +1848,7 @@ impl Shown {
                     self.lines.show(Some(Arc::clone(&library)), Arc::default());
                     self.panel.set_status("Getting the list ready".into());
                     self.asked.borrow_mut().filters.show_silent = self.slots.shows_silent.load(Ordering::Acquire);
+                    self.asked.borrow_mut().filters.hide_copies = self.slots.hides_copies.load(Ordering::Acquire);
                     // On a track named for a kind of sound, the list opens on it ("Kick": kicks).
                     for t in std::mem::take(&mut *lock(&self.slots.track_types)) {
                         self.asked.borrow_mut().filters.toggle_type(&t);
@@ -2348,6 +2352,8 @@ impl Column {
         panel.set_mix_well(asked.filters.mix_well);
         panel.set_favourites(asked.filters.favourites);
         panel.set_hide_silent(!asked.filters.show_silent);
+        panel.set_hide_copies(asked.filters.hide_copies);
+        panel.set_hide_copies_words(library::hide_copies_words(library.and_then(|l| l.list.copies())).into());
         panel.set_hide_silent_words(mo_app::sounds::hide_silent_text(library.map(|l| l.list.silent())).into());
         let step = asked.filters.like_favourites;
         panel.set_like_favourites(mo_app::sounds::like_favourites_share(step));
