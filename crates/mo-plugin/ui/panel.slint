@@ -4,7 +4,7 @@
 // Chords (Chord check: the chord the notes played in make, as the app's chord reader names it) and DAW check (every
 // CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card, TipLayer, TipState, CutText } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card, TipLayer, TipState, CutText, Icons } from "../../mo-ui/ui/studio.slint";
 import { CurveBench, GridStrip, CurveEditorData, EditorDot, ClipTile, RulerMark } from "../../mo-ui/ui/pages/curve_editor.slint";
 export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem }
 import { ListView } from "../../mo-ui/ui/list.slint";
@@ -473,8 +473,8 @@ export component Panel inherits Window {
     callback curve-save-as-new();
 
     title: "DAWmate";
-    preferred-width: 760px;
-    preferred-height: 560px;
+    preferred-width: 960px;
+    preferred-height: 640px;
     background: Theme.background;
     default-font-family: Theme.text-font;
     default-font-size: Type.body;
@@ -652,6 +652,7 @@ export component Panel inherits Window {
                     spacing: Space.sm;
                     SearchBox {
                         horizontal-stretch: 1;
+                        min-width: 160px;
                         hint: "Search sounds";
                         text <=> root.search-text;
                         edited(text) => { root.search(text); }
@@ -671,6 +672,12 @@ export component Panel inherits Window {
                         choices: root.trim-choices;
                         picked(t) => { root.pick-trim(t); }
                     }
+                }
+                // Playing: its own row, so the search box keeps its room in a narrow window (Solomon, 23 Nov 2026: the
+                // window opened with some of it cut off).
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    alignment: start;
                     StudioButton {
                         horizontal-stretch: 0;
                         text: "In time";
@@ -683,7 +690,9 @@ export component Panel inherits Window {
                     }
                     StudioButton {
                         horizontal-stretch: 0;
-                        text: "Loop";
+                        // A sign, not a word: told apart at a glance from the Loops length filter beside the list (Solomon,
+                        // 23 Nov 2026).
+                        icon: Icons.loop;
                         main: root.loop-on;
                         tip: root.loop-on ? "Looping: a sound plays round until you stop it" : "Play sounds round and round until you stop them";
                         clicked => {
