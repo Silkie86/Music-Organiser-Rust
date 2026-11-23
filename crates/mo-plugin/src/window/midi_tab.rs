@@ -114,8 +114,12 @@ impl PartColumn {
         let (from, to) = mo_app::year_strip::picked_places(years, asked.filters.years).unwrap_or((-1, -1));
         panel.set_midi_years_from(from);
         panel.set_midi_years_to(to);
-        let order = ORDERS.iter().position(|&o| o == asked.order).and_then(|i| i32::try_from(i).ok());
-        panel.set_midi_order(order.unwrap_or(0));
+        // Shuffled is first, before the list's own orders.
+        let order = match asked.shuffle {
+            Some(_) => Some(0),
+            None => ORDERS.iter().position(|&o| o == asked.order).and_then(|i| i32::try_from(i + 1).ok()),
+        };
+        panel.set_midi_order(order.unwrap_or(1));
     }
 }
 
@@ -159,7 +163,9 @@ impl MidiTab {
         panel.set_parts(ModelRc::from(Rc::clone(&self.lines) as Rc<dyn Model<Data = PartLine>>));
         panel.set_midi_status("Reading your MIDI".into());
         panel.set_midi_orders(ModelRc::new(VecModel::from(
-            ORDERS.iter().map(|o| SharedString::from(order_words(*o))).collect::<Vec<_>>(),
+            std::iter::once(SharedString::from(super::SHUFFLED))
+                .chain(ORDERS.iter().map(|o| SharedString::from(order_words(*o))))
+                .collect::<Vec<_>>(),
         )));
         let changed = {
             let lines = Rc::clone(&self.lines);
@@ -196,8 +202,18 @@ impl MidiTab {
         panel.on_midi_years_cleared(move || change(&|asked, _| asked.filters.years = None));
         let change = changed;
         panel.on_midi_pick_order(move |i| {
-            let Some(&order) = usize::try_from(i).ok().and_then(|i| ORDERS.get(i)) else { return };
-            change(&|a, _| a.order = order);
+            match usize::try_from(i) {
+                // Shuffled: a new order each time it's picked.
+                Ok(0) => {
+                    let seed = super::seed();
+                    change(&|a, _| a.shuffle = Some(seed));
+                }
+                Ok(i) => {
+                    let Some(&order) = ORDERS.get(i - 1) else { return };
+                    change(&|a, _| (a.order, a.shuffle) = (order, None));
+                }
+                Err(_) => {}
+            }
         });
         // Following the playing turned on or off: the roll is drawn again for it.
         let slots = Arc::clone(&self.slots);

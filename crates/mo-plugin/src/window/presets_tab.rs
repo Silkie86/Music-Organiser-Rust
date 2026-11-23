@@ -97,6 +97,8 @@ struct PresetColumn {
     /// The year strip's years for the list last worked out (with every filter but the years on, as the app's page
     /// counts them), newest first, with how many each.
     years: RefCell<Vec<(i32, usize)>>,
+    /// Shuffled, in the order this number decides, instead of the filters' order.
+    shuffle: Cell<Option<u64>>,
 }
 
 impl PresetColumn {
@@ -127,8 +129,12 @@ impl PresetColumn {
         let (from, to) = mo_app::year_strip::picked_places(&self.years.borrow(), filters.years).unwrap_or((-1, -1));
         panel.set_preset_years_from(from);
         panel.set_preset_years_to(to);
-        let order = ORDERS.iter().position(|&(o, _)| o == filters.order).and_then(|i| i32::try_from(i).ok());
-        panel.set_preset_order(order.unwrap_or(0));
+        // Shuffled is first, before the list's own orders.
+        let order = match self.shuffle.get() {
+            Some(_) => Some(0),
+            None => ORDERS.iter().position(|&(o, _)| o == filters.order).and_then(|i| i32::try_from(i + 1).ok()),
+        };
+        panel.set_preset_order(order.unwrap_or(1));
     }
 }
 
@@ -165,7 +171,9 @@ impl PresetsTab {
         panel.set_presets(ModelRc::from(Rc::clone(&self.lines) as Rc<dyn Model<Data = PresetLine>>));
         panel.set_preset_status("Looking for your presets".into());
         panel.set_preset_orders(ModelRc::new(VecModel::from(
-            ORDERS.iter().map(|(_, words)| SharedString::from(*words)).collect::<Vec<_>>(),
+            std::iter::once(SharedString::from(super::SHUFFLED))
+                .chain(ORDERS.iter().map(|(_, words)| SharedString::from(*words)))
+                .collect::<Vec<_>>(),
         )));
         let changed = {
             let lines = Rc::clone(&self.lines);
@@ -181,7 +189,7 @@ impl PresetsTab {
                     column.show(&panel, presets.as_deref(), &filters);
                 }
                 if let Some(presets) = presets {
-                    view(presets, filters, Arc::clone(&slots));
+                    view(presets, filters, column.shuffle.get(), Arc::clone(&slots));
                 }
             })
         };
@@ -203,12 +211,21 @@ impl PresetsTab {
         panel.on_preset_years_cleared(move || change(&|f, _| f.years = None));
         let change = changed;
         panel.on_preset_pick_order(move |i| {
-            let Some(&(order, _)) = usize::try_from(i).ok().and_then(|i| ORDERS.get(i)) else { return };
+            // Shuffled: a new order each time it's picked.
+            if i == 0 {
+                let seed = super::seed();
+                change(&|_, column| column.shuffle.set(Some(seed)));
+                return;
+            }
+            let Some(&(order, _)) = usize::try_from(i - 1).ok().and_then(|i| ORDERS.get(i)) else { return };
             // As the app's page picks a column's order: a second pick turns it round, a third goes back to the list
             // by folder.
-            change(&|f, _| match order {
-                Order::Found => (f.order, f.reversed) = (Order::Found, false),
-                _ => f.order_by(order),
+            change(&|f, column| {
+                column.shuffle.set(None);
+                match order {
+                    Order::Found => (f.order, f.reversed) = (Order::Found, false),
+                    _ => f.order_by(order),
+                }
             });
         });
         // Bitwig takes only its own presets on a drop: the others are made into one there.
@@ -266,7 +283,7 @@ impl PresetsTab {
                     self.lines.show(Some(Arc::clone(&presets)), Arc::default());
                     panel.set_preset_status("Getting the list ready".into());
                     self.column.show(panel, Some(&presets), &self.filters.borrow());
-                    view(presets, self.filters.borrow().clone(), Arc::clone(&self.slots));
+                    view(presets, self.filters.borrow().clone(), self.column.shuffle.get(), Arc::clone(&self.slots));
                 }
                 Read::Not(why) => {
                     panel.set_preset_status(why.into());
@@ -296,7 +313,7 @@ impl PresetsTab {
 
 /// Works out what `filters` show of `presets` on a background thread; it lands in `slots.found` with this asking's
 /// number, and only the newest asking's answer is shown.
-fn view(presets: Arc<Presets>, filters: Filters, slots: Arc<PresetSlots>) {
+fn view(presets: Arc<Presets>, filters: Filters, shuffle: Option<u64>, slots: Arc<PresetSlots>) {
     let number = slots.searches.fetch_add(1, Ordering::AcqRel) + 1;
     let theirs = Arc::clone(&slots);
     slots.lister.ask(move || {
@@ -305,7 +322,10 @@ fn view(presets: Arc<Presets>, filters: Filters, slots: Arc<PresetSlots>) {
             return;
         }
         let started = Instant::now();
-        let found = presets.view(&filters);
+        let mut found = presets.view(&filters);
+        if let Some(seed) = shuffle {
+            super::shuffle(&mut found.shown, seed);
+        }
         crate::log::took_if_slow("Presets", &format!("Worked out a list of {} presets", found.shown.len()), started);
         crate::threads::newer(&slots.found, number, found);
     });

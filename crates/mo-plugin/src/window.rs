@@ -52,9 +52,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The size the panel opens at the first time, in logical pixels (before the screen's scaling): room for every
-/// button with the list beside the filters (760 x 560 cut some off, Solomon 23 Nov 2026).
-pub const WIDTH: f64 = 960.0;
-pub const HEIGHT: f64 = 640.0;
+/// button with the list beside the filters, and a list long enough to look through (760 x 560 cut some off, and 960 x
+/// 640 was still small on his 3440 x 1440 screen: Solomon 23 Nov 2026). Still fits a 1920 x 1080 screen.
+pub const WIDTH: f64 = 1280.0;
+pub const HEIGHT: f64 = 800.0;
 /// The smallest the window can be dragged: the filter column, and beside it the Sounds tab's widest row of buttons
 /// (the playing row, with Match tempo and In Bitwig's Sampler showing).
 pub const LEAST_WIDTH: f64 = 720.0;
@@ -673,6 +674,10 @@ struct Shown {
     keys_told: Cell<[bool; 3]>,
     /// What was last clicked to be heard, and whether it has started playing: a click on it again stops it.
     heard: Rc<Cell<Option<(Heard, bool)>>>,
+    /// The MIDI part last asked to play, and the DAW's tempo it was made at: made again when the DAW's tempo moves.
+    part: Rc<RefCell<Option<PartPlayed>>>,
+    /// The DAW's tempo as last seen, and since when: a part is made again once a new tempo has stayed a moment.
+    tempo_seen: Cell<Option<(f64, Instant)>>,
     /// The Galaxy: its map, its view and which picture is on show.
     sky: Rc<RefCell<Sky>>,
     /// The names last put over the Galaxy's map.
@@ -736,6 +741,8 @@ impl Shown {
             right_now: Rc::default(),
             keys_told: Cell::new([false; 3]),
             heard: Rc::default(),
+            part: Rc::default(),
+            tempo_seen: Cell::new(None),
             sky: Rc::default(),
             sky_names: RefCell::default(),
             sky_trail: RefCell::default(),
@@ -1287,6 +1294,7 @@ impl Shown {
         let roll = self.midi.roll_drawer(&self.panel);
         let scale = Rc::clone(&self.scale);
         let (instance, weak) = (Arc::clone(&self.instance), self.panel.as_weak());
+        let part = Rc::clone(&self.part);
         self.panel.on_midi_play(move |row| {
             let Some((parts, at)) = usize::try_from(row).ok().and_then(&midi) else { return };
             if let (Some(panel), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
@@ -1305,14 +1313,8 @@ impl Shown {
             // No sound's line shows where this plays.
             *last_played.borrow_mut() = None;
             let tempo = player.tempo();
-            let make: crate::audition::Made = if player.midi_out() {
-                Box::new(move || parts.notes_out(at, tempo))
-            } else {
-                Box::new(move || {
-                    let (audio, beats) = parts.sound(at, crate::midi::soundfont().as_deref(), tempo)?;
-                    Ok((crate::audition::MadeLoop::Sound(audio), beats))
-                })
-            };
+            let make = make_part(Arc::clone(&parts), at, tempo, player.midi_out());
+            *part.borrow_mut() = Some(PartPlayed { parts, at, name: name.clone(), made_at: tempo });
             let slots = Arc::clone(&slots);
             player.play_made(name, make, move |played| *lock(&slots.played) = Some(played));
         });
@@ -1787,6 +1789,7 @@ impl Shown {
     /// Takes in what background threads found, frees sounds done playing, and runs Slint's timers.
     fn tick(&self) {
         self.instance.view.store(self.panel.get_view(), Ordering::Relaxed);
+        self.follow_tempo();
         self.knobs();
         if let Some(read) = take(&self.slots.library) {
             match read {
@@ -2071,6 +2074,35 @@ impl Shown {
         }
     }
 
+    /// The DAW's tempo moved while a MIDI part plays: the part is made again at the new tempo and goes on from the
+    /// same place in it, once the new tempo has stayed a moment (not at every step of a tempo being dragged). A part
+    /// played again later is made at the tempo then (Solomon, 23 Nov 2026: a part kept its old tempo).
+    fn follow_tempo(&self) {
+        let player = &self.instance.player;
+        let Some(now) = player.tempo() else { return };
+        match self.tempo_seen.get() {
+            Some((seen, since)) if seen == now => {
+                if since.elapsed() < TEMPO_SETTLES {
+                    return;
+                }
+            }
+            _ => {
+                self.tempo_seen.set(Some((now, Instant::now())));
+                return;
+            }
+        }
+        let Some((Heard::Part(at), _)) = self.heard.get() else { return };
+        let mut part = self.part.borrow_mut();
+        let Some(p) = part.as_mut().filter(|p| p.at == at) else { return };
+        if !tempo_moved(p.made_at, now) {
+            return;
+        }
+        p.made_at = Some(now);
+        let make = make_part(Arc::clone(&p.parts), at, Some(now), player.midi_out());
+        let slots = Arc::clone(&self.slots);
+        player.swap_made(p.name.clone(), make, move |played| *lock(&slots.played) = Some(played));
+    }
+
     /// Stops what's playing, from wherever in the panel it's asked.
     fn stopper(&self) -> Rc<dyn Fn()> {
         let (player, heard) = (Arc::clone(&self.instance.player), Rc::clone(&self.heard));
@@ -2339,6 +2371,57 @@ fn seed() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
 }
 
+/// How long the DAW's tempo stays at a new value before a playing MIDI part is made again at it.
+const TEMPO_SETTLES: Duration = Duration::from_millis(250);
+
+/// A MIDI part asked to play: where it is, its name, and the DAW's tempo it was made at (none when the DAW hadn't
+/// said one: it was made at its file's).
+struct PartPlayed {
+    parts: Arc<crate::midi::Parts>,
+    at: usize,
+    name: String,
+    made_at: Option<f64>,
+}
+
+/// Whether a part made at `made_at` is to be made again at the DAW's tempo `now`: it moved by more than the drift
+/// the player puts right on its own (0.2%), or the part wasn't made at the DAW's tempo at all.
+fn tempo_moved(made_at: Option<f64>, now: f64) -> bool {
+    made_at.is_none_or(|m| (now / m - 1.0).abs() > 0.002)
+}
+
+/// What makes the MIDI part at `at` to play at `tempo`: its notes sent out (Send MIDI on) or its sound.
+fn make_part(parts: Arc<crate::midi::Parts>, at: usize, tempo: Option<f64>, midi_out: bool) -> crate::audition::Made {
+    if midi_out {
+        Box::new(move || parts.notes_out(at, tempo))
+    } else {
+        Box::new(move || {
+            let (audio, beats) = parts.sound(at, crate::midi::soundfont().as_deref(), tempo)?;
+            Ok((crate::audition::MadeLoop::Sound(audio), beats))
+        })
+    }
+}
+
+/// The word for a shuffled list, first among each list's orders, as on the Sounds tab (Solomon, 23 Nov 2026: "a
+/// shuffle on all lists").
+const SHUFFLED: &str = "Shuffled";
+
+/// Puts `list` in a random order that `seed` decides (the same seed, the same order).
+fn shuffle(list: &mut [usize], seed: u64) {
+    let mut state = seed;
+    // splitmix64: a small, sure maker of numbers from the seed.
+    let mut next = move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    for i in (1..list.len()).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        list.swap(i, j);
+    }
+}
+
 /// What's being heard: a list line's sound (by its id) or a star (by its sound's place in the list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Heard {
@@ -2501,6 +2584,31 @@ mod tests {
         assert_eq!(line_click(true, true, -1.0), Click::Nothing);
         assert_eq!(line_click(false, true, 0.7), Click::Nothing);
         assert_eq!(line_click(false, true, -1.0), Click::Nothing);
+    }
+
+    #[test]
+    fn a_part_is_made_again_once_the_tempo_moves_past_the_drift_the_player_mends() {
+        assert!(!tempo_moved(Some(120.0), 120.0));
+        assert!(!tempo_moved(Some(120.0), 120.2));
+        assert!(tempo_moved(Some(120.0), 125.0));
+        assert!(tempo_moved(Some(120.0), 90.0));
+        // Made at its file's tempo before the DAW said one: made again at the DAW's.
+        assert!(tempo_moved(None, 120.0));
+    }
+
+    #[test]
+    fn a_shuffle_keeps_every_line_and_the_same_seed_gives_the_same_order() {
+        let mut a: Vec<usize> = (0..50).collect();
+        let mut b = a.clone();
+        shuffle(&mut a, 7);
+        shuffle(&mut b, 7);
+        assert_eq!(a, b);
+        assert_ne!(a, (0..50).collect::<Vec<_>>());
+        a.sort_unstable();
+        assert_eq!(a, (0..50).collect::<Vec<_>>());
+        let mut c: Vec<usize> = (0..50).collect();
+        shuffle(&mut c, 8);
+        assert_ne!(b, c);
     }
 
     #[test]

@@ -453,6 +453,9 @@ export component Panel inherits Window {
     in property <string> curve-said;
     in-out property <string> curve-search-text;
     callback curve-search(string);
+    // The curves shuffled (a new order each time Shuffled is picked) or newest found first.
+    in property <bool> curve-shuffled;
+    callback curve-shuffle(bool);
     callback curve-pick(string);
     callback curve-clear();
     callback curve-hidden-toggled(bool);
@@ -473,8 +476,8 @@ export component Panel inherits Window {
     callback curve-save-as-new();
 
     title: "DAWmate";
-    preferred-width: 960px;
-    preferred-height: 640px;
+    preferred-width: 1280px;
+    preferred-height: 800px;
     background: Theme.background;
     default-font-family: Theme.text-font;
     default-font-size: Type.body;
@@ -1696,12 +1699,24 @@ export component Panel inherits Window {
                     text <=> root.curve-search-text;
                     edited(text) => { root.curve-search(text); }
                 }
-                CutText {
-                    own-mouse: true;
-                    text: root.curve-status;
-                    color: Theme.muted;
-                    font-size: Type.meta;
-                    overflow: elide;
+                HorizontalLayout {
+                    spacing: Space.md;
+                    CutText {
+                        own-mouse: true;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        text: root.curve-status;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        overflow: elide;
+                    }
+                    Segmented {
+                        horizontal-stretch: 0;
+                        choices: ["Shuffled", "Newest first"];
+                        current: root.curve-shuffled ? 0 : 1;
+                        pad: Space.md;
+                        picked(i) => { root.curve-shuffle(i == 0); }
+                    }
                 }
                 Rectangle {
                     vertical-stretch: 1;
