@@ -52,9 +52,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The size the panel opens at the first time, in logical pixels (before the screen's scaling): room for every
-/// button with the list beside the filters (760 x 560 cut some off, Solomon 23 Nov 2026).
-pub const WIDTH: f64 = 960.0;
-pub const HEIGHT: f64 = 640.0;
+/// button with the list beside the filters, and a list long enough to look through (760 x 560 cut some off, and 960 x
+/// 640 was still small on his 3440 x 1440 screen: Solomon 23 Nov 2026). Still fits a 1920 x 1080 screen.
+pub const WIDTH: f64 = 1280.0;
+pub const HEIGHT: f64 = 800.0;
 /// The smallest the window can be dragged: the filter column, and beside it the Sounds tab's widest row of buttons
 /// (the playing row, with Match tempo and In Bitwig's Sampler showing).
 pub const LEAST_WIDTH: f64 = 720.0;
