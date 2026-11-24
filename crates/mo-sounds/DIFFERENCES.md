@@ -66,6 +66,7 @@ back; nothing is saved to `sounds.db` yet.
 | What | C# | Rust | Judged |
 |---|---|---|---|
 | A project that names one sound by two paths (a Bitwig copy and a relative path) | Counted twice. | Counted once (2026-11-05): the Sounds card lists which projects use a sound, and the count matches that list. How many were saved lately is capped at the count. The twin tool's uses, which don't say which projects, still add up. | Better |
+| What a sound is used in | Projects: each save of a song is one ("used in 44 projects" for 44 saves of one song). | Songs, as the Songs page groups saves (2026-11-24, Solomon's F12 note of 23 Nov: "they basically the same project"): a song's saves count once on the card, the tiles and list, Rediscover, kits, Most liked, the galaxy and Ctrl+K; the card lists each song by its newest save that uses it, or with Every save each save. A song counts as saved lately when a save of it that uses the sound was. Only the saves the Songs page lists count: not an FL backup copy, a Fix copy waiting for Keep or Open in Bitwig's copy. The twin tool's uses don't say which projects, so each is a song and its numbers are the same. | Better |
 
 ## Sounds like this
 
@@ -96,6 +97,7 @@ save a made-up library to a new sounds.db, which the Rust app reads, and both an
 | No sounds of the chosen type in the index yet (deep listening hasn't heard them) | Says every one is used already. | Says they haven't been listened to closely enough to suggest; with Any type picked, that the old app did that and this version can't yet (not "pick Any type"). | Better |
 | Folders on Windows spelt with `/` and `\` | One folder. | One folder too (`/` turned into `\`), spelt with `\`. | Same |
 | Types to dig in (the whole-app review of 6 Nov, X3-23) | One type, from a Type menu; a sound is of it only when spelt exactly the same, for the sounds suggested, each type's taste and the "Sounds like" reason. | Any number of types, picked on chips as on the Type filter (each click picks one more); a type matches in any case ("kick" is Kick), for all three. | Better (the twin asks one type at most, spelt as the library has it, and refuses a question with more) |
+| What a sound is used in, in its reason and in why there's none | "Used in 3 projects", "which is in 5 of your projects", "used in a project already. Tick \"Include rarely used\"…" | Songs ("Used in 3 songs", "of your songs", "used in a song already"), and the chip as the page names it ("Sounds used once too"): see Use in your projects. | Better (the twin reads C#'s words as songs: its uses don't say which projects, so the numbers are the same) |
 | Years to dig in (Solomon, 2026-11-05: "years should use same system as other pages") | One year, from a Year menu; when none are dated it: "Pick another year, or Any year." | A span of years on the year strip; "Pick other years on the strip, or clear it." Years after this one and undated files are left off the strip. | Better (the twin asks one-year spans) |
 
 ## Kits

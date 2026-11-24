@@ -654,7 +654,7 @@ impl Source for Sounds {
             parts.push(format!("in {}", s.folder()));
         }
         if let Some(n) = self.0.used_in(at).filter(|n| *n > 0) {
-            parts.push(format!("used in {}", plural(n as usize, "project")));
+            parts.push(format!("used in {}", plural(n as usize, "song")));
         }
         parts.join(" · ")
     }

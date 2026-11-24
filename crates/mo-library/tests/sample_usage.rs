@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use chrono::NaiveDate;
-use mo_library::{Library, ProjectFile, SampleUse, UsageRules};
+use mo_library::{Library, SampleUse, UsageRules};
 use rusqlite::Connection;
 
 fn make(name: &str, unplayed: bool) -> PathBuf {
@@ -84,18 +84,46 @@ fn a_sample_muted_in_a_songs_newest_save_doesnt_count_for_that_song() {
 #[test]
 fn the_projects_counted_come_with_their_files() {
     let lib = Library::open_read_only(&make("projects.db", true)).unwrap();
-    let got = lib.sample_usage_with_projects(since(), UsageRules::default()).unwrap();
+    let got = lib.sample_usage_with_projects(since(), UsageRules::default(), &|_| true).unwrap();
     assert_eq!(got.uses, lib.sample_usage(since(), UsageRules::default()).unwrap());
     // Gone's file has gone, so it isn't counted, and isn't here either.
     let mut ids: Vec<i64> = got.projects.keys().copied().collect();
     ids.sort_unstable();
     assert_eq!(ids, [1, 2, 3]);
-    assert_eq!(got.projects[&3], ProjectFile { id: 3, path: r"C:\beats\Other.flp".into(), mtime: 1_717_200_000 });
+    let other = &got.projects[&3];
+    assert_eq!(
+        (other.id, other.path.as_str(), other.mtime, &*other.song_name, other.recent),
+        (3, r"C:\beats\Other.flp", 1_717_200_000, "Other", true)
+    );
+    // Each says which song it's a save of, as the Songs page groups them: Song and Song_2 are one song, Other another.
+    assert_eq!(got.projects[&1].song, got.projects[&2].song);
+    assert_ne!(got.projects[&1].song, got.projects[&3].song);
+    assert_eq!((&*got.projects[&1].song_name, &*got.projects[&2].song_name), ("Song", "Song"));
+    // Saved since the date asked about: Song_2 (2025) and Other (2024), not Song (2020).
+    assert_eq!([1, 2, 3].map(|id| got.projects[&id].recent), [false, true, true]);
     // Each sample says which projects use it.
     let kick = got.uses.iter().find(|u| u.path.to_lowercase().ends_with("kick.wav")).unwrap();
     assert_eq!(kick.project_ids, [1, 2, 3]);
     let pad = got.uses.iter().find(|u| u.path.to_lowercase().ends_with("pad.wav")).unwrap();
     assert_eq!(pad.project_ids, [1, 3]);
+}
+
+#[test]
+fn the_saves_the_songs_page_leaves_out_dont_count() {
+    let lib = Library::open_read_only(&make("listed.db", true)).unwrap();
+    // As an FL backup copy or a Fix copy waiting for Keep is left out: Song_2 isn't listed.
+    let listed = |path: &str| !path.ends_with("Song_2.flp");
+    let rules = UsageRules { not_muted_in_newest: true, ..UsageRules::default() };
+    let got = lib.sample_usage_with_projects(since(), rules, &listed).unwrap();
+    let mut ids: Vec<i64> = got.projects.keys().copied().collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 3]);
+    // Song is a song of its own now, and its newest save, so the kick muted in Song_2 counts for it again.
+    assert_eq!(by_name(&got.uses, "kick.wav"), (2, 1, vec![2020, 2024]));
+    assert_ne!(got.projects[&1].song, got.projects[&3].song);
+    assert_eq!(&*got.projects[&1].song_name, "Song");
+    // The snare was only in Song_2.
+    assert!(got.uses.iter().all(|u| !u.path.ends_with("snare.wav")));
 }
 
 #[test]

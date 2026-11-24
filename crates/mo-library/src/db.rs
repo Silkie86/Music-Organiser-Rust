@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Datelike, Local, NaiveDateTime};
@@ -562,18 +563,21 @@ impl Library {
     /// the years they were saved in, as the C# app's `SampleUsageByAge` (for the Sounds page's "Used in" and Most
     /// liked). One entry per path, ignoring case (all of a path's letters, where SQLite's own grouping only knew A to
     /// Z); projects whose file has gone don't count. `rules` leave out saves that hold a sample without playing it
-    /// (Settings, Sounds).
+    /// (Settings, Sounds). Every save the library keeps counts, as in the C# app.
     pub fn sample_usage(&self, recent_since: NaiveDateTime, rules: UsageRules) -> Result<Vec<SampleUse>, LibraryError> {
-        Ok(self.sample_usage_with_projects(recent_since, rules)?.uses)
+        Ok(self.sample_usage_with_projects(recent_since, rules, &|_| true)?.uses)
     }
 
     /// [`Library::sample_usage`], with the file of each project counted and when it was last saved, read in the same
-    /// pass (its path is beside the date the count reads already): the Sounds card names the projects a sound is
-    /// used in.
+    /// pass (its path is beside the date the count reads already), and the song it's a save of, as the Songs page
+    /// groups saves: the Sounds page counts the songs a sound is used in, and its card names them. Only the saves
+    /// `listed` says the Songs page lists (by path) count and are grouped, so a sound in an FL backup copy or a Fix
+    /// copy waiting for Keep isn't in a song the Songs page doesn't show (`mo_app::live::Listed`).
     pub fn sample_usage_with_projects(
         &self,
         recent_since: NaiveDateTime,
         rules: UsageRules,
+        listed: &dyn Fn(&str) -> bool,
     ) -> Result<SampleUsage, LibraryError> {
         if !self.has("samples") {
             return Ok(SampleUsage::default());
@@ -596,9 +600,24 @@ impl Library {
         // them elsewhere) are left out too.
         let real = RealDates::now();
         let leave_muted_out = rules.not_muted_in_newest && has_unplayed;
-        // The saves as songs, read once: for the songs' newest saves, and to date each sample's first use by.
-        let songs = crate::songs::group_songs(&self.saves()?, &self.song_choices()?, &real);
+        // The saves as songs, read once: for the songs' newest saves, and to date each sample's first use by. The
+        // saves the Songs page doesn't list don't count at all.
+        let (saves, unlisted): (Vec<Save>, Vec<Save>) = self.saves()?.into_iter().partition(|s| listed(&s.path));
+        let mut hidden: HashSet<i64> = unlisted.iter().map(|s| s.id).collect();
+        let songs = crate::songs::group_songs(&saves, &self.song_choices()?, &real);
         let first_uses = crate::first_use::FirstUses::new(&songs, &real);
+        // Each save's song (its place in `songs`) and the song's name, for the projects counted to say which song
+        // they're a save of (Solomon's F12 note of 23 Nov 2026: a sound "used in 44 projects" was in 44 saves of one).
+        let mut song_of: HashMap<i64, (u32, Arc<str>)> = HashMap::new();
+        for (at, song) in songs.iter().enumerate() {
+            let (at, name) = (u32::try_from(at).unwrap_or(u32::MAX), Arc::<str>::from(song.name.as_str()));
+            for save in song.saves().chain(&song.copies) {
+                song_of.insert(save.id, (at, name.clone()));
+            }
+        }
+        // A project the saves didn't list (it can't be grouped) is a song of its own, numbered after the rest, unless
+        // `listed` hides it.
+        let mut alone = u32::try_from(songs.len()).unwrap_or(u32::MAX);
         let mut newest: HashMap<i64, i64> = HashMap::new();
         let mut muted: HashSet<(i64, String)> = HashSet::new();
         if leave_muted_out {
@@ -635,11 +654,33 @@ impl Library {
         let mut projects: HashMap<i64, ProjectFile> = HashMap::new();
         while let Some(r) = rows.next()? {
             let (path, project, mtime) = (text(r, "path"), int(r, "project_id").unwrap_or(0), int(r, "mtime"));
+            if hidden.contains(&project) {
+                continue;
+            }
             if !muted.is_empty() {
                 let save = *newest.get(&project).unwrap_or(&project);
                 if muted.contains(&(save, case::to_lower(&path))) {
                     continue;
                 }
+            }
+            // The project's file, the first time it's met.
+            if let std::collections::hash_map::Entry::Vacant(e) = projects.entry(project) {
+                let path = text(r, "project_path");
+                let (song, song_name) = match song_of.get(&project) {
+                    Some(song) => song.clone(),
+                    None if !listed(&path) => {
+                        hidden.insert(project);
+                        continue;
+                    }
+                    None => {
+                        let song = alone;
+                        alone = alone.saturating_add(1);
+                        let name = crate::songs::split(mo_formats::paths::stem(mo_formats::paths::file_name(&path))).0;
+                        (song, Arc::from(name.as_str()))
+                    }
+                };
+                let recent = mtime.is_some_and(|m| m >= since);
+                e.insert(ProjectFile { id: project, path, mtime: mtime.unwrap_or(0), song, song_name, recent });
             }
             let key = case::key(&path);
             let group = match groups.entry(key) {
@@ -657,12 +698,6 @@ impl Library {
                     group.years.push(t.year());
                 }
             }
-            // The project's file, the first time it's met.
-            projects.entry(project).or_insert_with(|| ProjectFile {
-                id: project,
-                path: text(r, "project_path"),
-                mtime: mtime.unwrap_or(0),
-            });
         }
         let uses = order
             .into_iter()
@@ -704,6 +739,13 @@ pub struct ProjectFile {
     pub path: String,
     /// When it was last saved, as the scan saw it: Unix seconds.
     pub mtime: i64,
+    /// Which song it's a save of, as the Songs page groups saves: the same number for every save of one song, within
+    /// one read.
+    pub song: u32,
+    /// That song's name, as the Songs page shows it ("bass junkie_50k" for "bass junkie_50k_26"), shared by its saves.
+    pub song_name: Arc<str>,
+    /// Whether it was saved since the date the counts were asked for (as [`SampleUse::recent`] counts).
+    pub recent: bool,
 }
 
 /// Which saves count as using a sample (Settings, Sounds), for the DAWs whose reader can tell (FL Studio so far).

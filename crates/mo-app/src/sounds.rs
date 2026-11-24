@@ -374,7 +374,7 @@ struct Shared {
 #[derive(Clone, Default)]
 pub struct SoundList {
     shared: Arc<Shared>,
-    /// How your projects use each sound, by sound id, once known (sounds no project uses are left out).
+    /// How your songs use each sound, by sound id, once known (sounds no song uses are left out).
     used: Option<Arc<HashMap<i64, Usage>>>,
     /// Each project's file, by id, once known: the projects a sound is used in are named from it. Shared by a clone.
     projects: Option<Arc<HashMap<i64, ProjectFile>>>,
@@ -527,7 +527,7 @@ pub struct Copies {
 /// What told a sound to keep from its copy ([`SoundList::why_kept`]): the first of these that does, in this order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeptFor {
-    /// Your projects use it more.
+    /// More of your songs use it (or, in as many songs, more of their saves).
     Used,
     Favourite,
     Plays,
@@ -690,7 +690,7 @@ impl SoundList {
             || (self.len() == other.len() && self.sounds().iter().zip(other.sounds()).all(|(a, b)| a.id == b.id))
     }
 
-    /// How your projects use each sound (by id, as [`mo_sounds::usage::usage`] gives it), for the Used chips and
+    /// How your songs use each sound (by id, as [`mo_sounds::usage::usage`] gives it), for the Used chips and
     /// column.
     pub fn set_used(&mut self, used: HashMap<i64, Usage>) {
         self.used = Some(Arc::new(used));
@@ -992,9 +992,10 @@ impl SoundList {
         self.copies.as_deref().filter(|c| filters.hide_copies && !c.group_of.is_empty())
     }
 
-    /// Of two copies of the same sound, the one to keep showing first: the one your projects use most, then a
-    /// favourite, more plays, more tags, the older file (the first, most likely), and then by path. Not stars: the
-    /// heart is the one way to like a sound (Solomon's pick, 10 Nov 2026), so stars given in the old app don't pick it.
+    /// Of two copies of the same sound, the one to keep showing first: the one in most of your songs (then saves),
+    /// then a favourite, more plays, more tags, the older file (the first, most likely), and then by path. Not stars:
+    /// the heart is the one way to like a sound (Solomon's pick, 10 Nov 2026), so stars given in the old app don't pick
+    /// it.
     fn keep_first(&self, a: usize, b: usize) -> std::cmp::Ordering {
         self.keep_by(a, b).0
     }
@@ -1004,7 +1005,7 @@ impl SoundList {
     fn keep_by(&self, a: usize, b: usize) -> (std::cmp::Ordering, KeptFor) {
         let (na, nb) = (self.now_at(a), self.now_at(b));
         let (sa, sb) = (na.sound, nb.sound);
-        let used = |s: &Sound| self.used.as_ref().and_then(|u| u.get(&s.id)).map_or(0, |u| u.projects);
+        let used = |s: &Sound| self.used.as_ref().and_then(|u| u.get(&s.id)).map_or((0, 0), |u| (u.songs, u.projects));
         let real = |s: &Sound| self.shared.dates.local(s.added);
         let rules = [
             (KeptFor::Used, used(sb).cmp(&used(sa))),
@@ -1067,12 +1068,12 @@ impl SoundList {
         &self.shared.dates
     }
 
-    /// How your projects use every sound (by id; ones no project uses are left out), if that's known yet.
+    /// How your songs use every sound (by id; ones no song uses are left out), if that's known yet.
     pub fn usage_map(&self) -> Option<&HashMap<i64, Usage>> {
         self.used.as_deref()
     }
 
-    /// How your projects use the sound at `i`, if that's known yet (`None` too when none do).
+    /// How your songs use the sound at `i`, if that's known yet (`None` too when none do).
     pub fn usage(&self, i: usize) -> Option<&Usage> {
         self.used.as_ref()?.get(&self.shared.sounds.get(i)?.id)
     }
@@ -1086,10 +1087,12 @@ impl SoundList {
         self.shared.sounds.iter().position(|s| s.id == id)
     }
 
-    /// How many projects use a sound, if that's known yet.
+    /// How many songs use a sound, if that's known yet: a song's saves count once, as the Songs page groups them
+    /// ([`Usage::songs`]; Solomon's F12 note of 23 Nov 2026: "used in 44 projects but they basically the same
+    /// project").
     pub fn used_in(&self, i: usize) -> Option<u32> {
         let used = self.used.as_ref()?;
-        Some(self.shared.sounds.get(i).and_then(|s| used.get(&s.id)).map_or(0, |u| u.projects))
+        Some(self.shared.sounds.get(i).and_then(|s| used.get(&s.id)).map_or(0, |u| u.songs))
     }
 
     /// The Most liked score, from 0 to 1 against the best liked, if scores are known yet.
@@ -1189,14 +1192,14 @@ impl SoundList {
     }
 
     /// How many of the sounds at `near` (those every filter but the folder tree lets through) are right in each
-    /// folder, and how many of them your projects use (once that's known). With Hide duplicates on (`copies`), a
+    /// folder, and how many of them your songs use (once that's known). With Hide duplicates on (`copies`), a
     /// sound's copies in one folder count once there, as picking it shows one of them.
     fn folder_counts(&self, near: &[usize], copies: Option<&Copies>) -> FolderCounts {
         let folders = &self.shared.folders;
         let mut sounds = vec![0u32; folders.len()];
         let mut used = self.used.as_ref().map(|_| vec![0u32; folders.len()]);
         let is_used = |i: usize| {
-            self.used.as_ref().is_some_and(|map| map.get(&self.shared.sounds[i].id).is_some_and(|u| u.projects > 0))
+            self.used.as_ref().is_some_and(|map| map.get(&self.shared.sounds[i].id).is_some_and(|u| u.songs > 0))
         };
         // Each group of copies in a folder, and whether any of them is used: the one the list keeps is a used one when
         // there is one ([`KeptFor::Used`]).
@@ -1346,7 +1349,7 @@ impl SoundList {
             return false;
         }
         if let Some(used) = &self.used {
-            let n = used.get(&s.id).map_or(0, |u| u.projects);
+            let n = used.get(&s.id).map_or(0, |u| u.songs);
             if (t.unused && n > 0) || (t.used && n == 0) {
                 return false;
             }
@@ -1940,20 +1943,34 @@ pub fn facts_line_now(now: &Now) -> String {
     parts.join(" · ")
 }
 
-/// The card's "Used in" list shows at most this many projects, the newest: a kick can be in a thousand.
+/// The card's "Used in" list shows at most this many lines, the newest: a kick can be in a thousand songs.
 pub const PROJECTS_SHOWN: usize = 50;
 
-/// What the card's "Used in" side shows for a sound: its words on the card's switch ("Used in 4"), a word above the
-/// list, and the projects, newest first.
+/// What the card's "Used in" side shows for a sound: its words on the card's switch ("Used in 4"), and the songs that
+/// use it, newest first, each once by its newest save that uses the sound (as the Plugins card lists a plugin's songs);
+/// or, with Every save, each of those saves. Words go above a list only when it needs them (whose songs they are,
+/// that only the newest are listed); the rest is in the Every save chip's tip (Solomon, 24 Nov 2026: explanations
+/// in tips, not on screen).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProjectsCard {
     pub title: String,
+    /// The words above the songs, or "".
     pub note: String,
+    /// Each song once, by its newest save that uses the sound.
     pub lines: Vec<ProjectLine>,
+    /// The words above every save, or "".
+    pub every_note: String,
+    /// Every save that uses it, newest first.
+    pub every_lines: Vec<ProjectLine>,
+    /// Whether a song has more than one save that uses it, so Every save lists more than the songs do.
+    pub more_saves: bool,
+    /// The Every save chip's tip: what it lists instead, and how many.
+    pub every_tip: String,
 }
 
-/// One project on the card: its save's id (the Songs page opens it by that), its name, its DAW and the day it was
-/// last saved ("" when that isn't known).
+/// One song (or save) on the card: the save's id (the Songs page opens it by that), the song's name (or the save's),
+/// its DAW, the day the save was last saved ("" when that isn't known), and how many of the song's saves use the
+/// sound ("16 saves", or "" for one).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectLine {
     pub id: i64,
@@ -1961,73 +1978,129 @@ pub struct ProjectLine {
     /// As the library names it ("FL Studio"), or "" for a file no reader knows.
     pub daw: String,
     pub saved: String,
+    pub saves: String,
 }
 
-/// The card's "Used in" side: `own`, the projects that use the sound, newest first (None while that isn't known
-/// yet); `like`, for a sound Rediscover dug out, the sound its line says it sounds like, by name, with that one's
-/// projects, which are listed when none use this one. Each line's day goes by `dates`, the list's
-/// ([`SoundList::dates`]), as the projects' order did.
+/// The card's "Used in" side: `own`, the saves that use the sound, newest first (None while that isn't known yet);
+/// `like`, for a sound Rediscover dug out, the sound its line says it sounds like, by name, with that one's saves,
+/// which are listed when none use this one. The saves of one song, as the Songs page groups them, are one song (each
+/// save says which: [`ProjectFile::song`]). Each line's day goes by `dates`, the list's ([`SoundList::dates`]), as the
+/// saves' order did.
 pub fn projects_card(
     dates: &RealDates,
     own: Option<&[&ProjectFile]>,
     like: Option<(&str, &[&ProjectFile])>,
 ) -> ProjectsCard {
     let Some(own) = own else {
-        return ProjectsCard {
-            title: "Used in".to_owned(),
-            note: "Your projects haven't been counted yet.".to_owned(),
-            lines: Vec::new(),
-        };
+        let note = "Your songs haven't been counted yet.".to_owned();
+        return ProjectsCard { title: "Used in".to_owned(), every_note: note.clone(), note, ..ProjectsCard::default() };
     };
-    let title = format!("Used in {}", crate::songs::thousands(own.len()));
+    let songs = by_song(own);
+    let title = format!("Used in {}", crate::songs::thousands(songs.len()));
     if !own.is_empty() {
-        let note = if own.len() > PROJECTS_SHOWN { format!("The newest {PROJECTS_SHOWN}:") } else { String::new() };
-        return ProjectsCard { title, note, lines: project_lines(dates, own) };
+        return ProjectsCard { title, ..listed(dates, own, &songs, String::new(), "it") };
     }
     match like {
         Some((name, theirs)) if !theirs.is_empty() => {
-            let newest = if theirs.len() > PROJECTS_SHOWN {
-                format!(" (the newest {PROJECTS_SHOWN} here)")
-            } else {
-                String::new()
-            };
-            let note = format!(
-                "No project of yours uses it yet. {name}, which it sounds like, is in {}{newest}:",
-                crate::songs::plural(theirs.len(), "project")
+            let songs = by_song(theirs);
+            let lead = format!(
+                "No song of yours uses it yet. {name}, which it sounds like, is in {}.",
+                crate::songs::plural(songs.len(), "song")
             );
-            ProjectsCard { title, note, lines: project_lines(dates, theirs) }
+            ProjectsCard { title, ..listed(dates, theirs, &songs, lead, name) }
         }
-        _ => ProjectsCard { title, note: "No project of yours uses it yet.".to_owned(), lines: Vec::new() },
+        _ => {
+            let note = "No song of yours uses it yet.".to_owned();
+            ProjectsCard { title, every_note: note.clone(), note, ..ProjectsCard::default() }
+        }
     }
 }
 
-/// The card's lines for `projects`, newest first: the newest [`PROJECTS_SHOWN`].
-fn project_lines(dates: &RealDates, projects: &[&ProjectFile]) -> Vec<ProjectLine> {
-    projects
-        .iter()
-        .take(PROJECTS_SHOWN)
-        .map(|f| ProjectLine {
-            id: f.id,
-            name: mo_formats::paths::stem(mo_formats::paths::file_name(&f.path)).to_owned(),
-            daw: mo_library::scan::daw_of(&f.path).unwrap_or_default().to_owned(),
-            // A save the scan didn't date (0) shows none, rather than 1 Jan 1970.
-            saved: crate::midi::date_text(dates, f.mtime),
-        })
-        .collect()
+/// `saves` (newest first) as songs, newest first: each song once, by its newest save there, with how many of them
+/// are its.
+fn by_song<'a>(saves: &[&'a ProjectFile]) -> Vec<(&'a ProjectFile, usize)> {
+    let mut at: HashMap<u32, usize> = HashMap::new();
+    let mut songs: Vec<(&ProjectFile, usize)> = Vec::new();
+    for &save in saves {
+        match at.get(&save.song) {
+            Some(&i) => songs[i].1 += 1,
+            None => {
+                at.insert(save.song, songs.len());
+                songs.push((save, 1));
+            }
+        }
+    }
+    songs
 }
 
-/// "Never", "1 project", "12 projects", or "" when the counts aren't known yet.
+/// The card's two lists for `saves` (newest first) of the sound called `what` ("it", or the one it sounds like), the
+/// saves of `songs` ([`by_song`]): the newest [`PROJECTS_SHOWN`] of each, under `lead` (a sentence, or nothing). Its
+/// title is left to say.
+fn listed(
+    dates: &RealDates,
+    saves: &[&ProjectFile],
+    songs: &[(&ProjectFile, usize)],
+    lead: String,
+    what: &str,
+) -> ProjectsCard {
+    let more_saves = saves.len() > songs.len();
+    // Only when the list is cut short: "The newest 50 of 1,200 songs."
+    let newest = |n: usize, of: &str| {
+        (n > PROJECTS_SHOWN).then(|| format!("The newest {PROJECTS_SHOWN} of {} {of}.", crate::songs::thousands(n)))
+    };
+    let words = |cut: Option<String>| {
+        [Some(lead.clone()), cut].into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ")
+    };
+    let every_tip = if more_saves {
+        let all = crate::songs::thousands(saves.len());
+        format!("Each save that uses {what} ({all}), newest first, rather than each song once")
+    } else {
+        String::new()
+    };
+    ProjectsCard {
+        title: String::new(),
+        note: words(newest(songs.len(), "songs")),
+        lines: songs
+            .iter()
+            .take(PROJECTS_SHOWN)
+            .map(|&(save, n)| project_line(dates, save, &save.song_name, n))
+            .collect(),
+        every_note: words(newest(saves.len(), "saves")),
+        every_lines: saves
+            .iter()
+            .take(PROJECTS_SHOWN)
+            .map(|save| project_line(dates, save, mo_formats::paths::stem(mo_formats::paths::file_name(&save.path)), 1))
+            .collect(),
+        more_saves,
+        every_tip,
+    }
+}
+
+/// The card's line for `save`, named `name`: one of `saves` of its song that use the sound.
+fn project_line(dates: &RealDates, save: &ProjectFile, name: &str, saves: usize) -> ProjectLine {
+    ProjectLine {
+        id: save.id,
+        name: name.to_owned(),
+        daw: mo_library::scan::daw_of(&save.path).unwrap_or_default().to_owned(),
+        // A save the scan didn't date (0) shows none, rather than 1 Jan 1970.
+        saved: crate::midi::date_text(dates, save.mtime),
+        saves: if saves > 1 { format!("{} saves", crate::songs::thousands(saves)) } else { String::new() },
+    }
+}
+
+/// "Never", "1 song", "12 songs", or "" when the counts aren't known yet: the songs a sound is used in
+/// ([`SoundList::used_in`]).
 pub fn used_text(used: Option<u32>) -> String {
     match used {
         None => String::new(),
         Some(0) => "Never".into(),
-        Some(1) => "1 project".into(),
-        Some(n) => format!("{n} projects"),
+        Some(1) => "1 song".into(),
+        Some(n) => format!("{n} songs"),
     }
 }
 
 /// [`used_text`] in words that make sense without the Used column's name over them, for a line of their own in a
-/// narrow list: "never used", "used in 1 project", "used in 12 projects", or "" when the counts aren't known yet.
+/// narrow list: "never used", "used in 1 song", "used in 12 songs", or "" when the counts aren't known yet.
 pub fn used_words(used: Option<u32>) -> String {
     match used {
         None => String::new(),
@@ -2726,6 +2799,7 @@ mod tests {
         assert!(list.year_counts(DateBy::FirstUsed).is_empty());
         let used = |years: Vec<i32>| Usage {
             projects: years.len() as u32,
+            songs: 1,
             first_used: years.first().map(|&y| year(y)),
             years,
             ..Usage::default()
@@ -3154,11 +3228,12 @@ mod tests {
         let mut list = library();
         let f = Filters { unused: true, ..Filters::default() };
         assert_eq!(list.view(&f, Order::Name, 0).len(), 4);
-        let used = |projects| Usage { projects, recent: 0, years: vec![2026], ..Usage::default() };
-        list.set_used(HashMap::from([(1, used(3)), (2, used(1))]));
+        let used = |projects, songs| Usage { projects, songs, recent: 0, years: vec![2026], ..Usage::default() };
+        list.set_used(HashMap::from([(1, used(9, 3)), (2, used(1, 1))]));
         assert_eq!(ids(&list, &list.view(&f, Order::Name, 0)), vec![4, 3]);
         let f = Filters { used: true, ..Filters::default() };
         assert_eq!(ids(&list, &list.view(&f, Order::Name, 0)), vec![1, 2]);
+        // In 3 songs, though in 9 saves: a song's saves count once.
         assert_eq!(list.used_in(list.find(1).unwrap_or(99)), Some(3));
     }
 
@@ -3276,11 +3351,11 @@ mod tests {
         assert_eq!(bpm_text(92.5), "92.5 BPM");
         assert_eq!(used_text(None), "");
         assert_eq!(used_text(Some(0)), "Never");
-        assert_eq!(used_text(Some(1)), "1 project");
+        assert_eq!(used_text(Some(1)), "1 song");
         assert_eq!(used_words(None), "");
         assert_eq!(used_words(Some(0)), "never used");
-        assert_eq!(used_words(Some(1)), "used in 1 project");
-        assert_eq!(used_words(Some(12)), "used in 12 projects");
+        assert_eq!(used_words(Some(1)), "used in 1 song");
+        assert_eq!(used_words(Some(12)), "used in 12 songs");
         assert_eq!(short_count(812), "812");
         assert_eq!(short_count(6_140), "6.1k");
         assert_eq!(short_count(357_412), "357k");
@@ -3553,46 +3628,101 @@ mod tests {
         assert!(!SoundList::new(Vec::new()).shares_with(&list));
     }
 
+    /// A save that's a song of its own, named as its file.
     fn project(id: i64, path: &str, mtime: i64) -> ProjectFile {
-        ProjectFile { id, path: path.to_owned(), mtime }
+        let name = mo_formats::paths::stem(mo_formats::paths::file_name(path));
+        save_of(u32::try_from(id).unwrap_or(u32::MAX), name, id, path, mtime)
+    }
+
+    /// A save of song number `song`, called `name`.
+    fn save_of(song: u32, name: &str, id: i64, path: &str, mtime: i64) -> ProjectFile {
+        ProjectFile { id, path: path.to_owned(), mtime, song, song_name: name.into(), recent: false }
     }
 
     #[test]
-    fn the_card_lists_the_projects_that_use_a_sound_newest_first() {
+    fn the_card_lists_the_songs_that_use_a_sound_newest_first() {
         let a = project(7, r"K:\Projects\Didums_77.flp", 1_760_000_000);
         let b = project(3, r"K:\Projects\Old one.bwproject", 1_600_000_000);
         // Not known yet.
         let d = RealDates::now();
         let card = projects_card(&d, None, None);
         assert_eq!((card.title.as_str(), card.lines.len()), ("Used in", 0));
-        // Its own, newest first, by name without the ending, with its DAW and the day each was saved.
+        assert_eq!(card.note, "Your songs haven't been counted yet.");
+        // Its own, newest first, by name, with its DAW and the day each was saved.
         let card = projects_card(&d, Some(&[&a, &b][..]), None);
         assert_eq!(card.title, "Used in 2");
         assert_eq!(card.note, "");
-        let names: Vec<(i64, &str, &str)> =
-            card.lines.iter().map(|l| (l.id, l.name.as_str(), l.daw.as_str())).collect();
-        assert_eq!(names, [(7, "Didums_77", "FL Studio"), (3, "Old one", "Bitwig Studio")]);
+        let names: Vec<(i64, &str, &str, &str)> =
+            card.lines.iter().map(|l| (l.id, l.name.as_str(), l.daw.as_str(), l.saves.as_str())).collect();
+        assert_eq!(names, [(7, "Didums_77", "FL Studio", ""), (3, "Old one", "Bitwig Studio", "")]);
         assert_eq!(card.lines[0].saved, crate::midi::date_text(&d, 1_760_000_000));
+        // Each song has one save that uses it: Every save would list the same.
+        assert!(!card.more_saves);
         // A save the scan didn't date shows no day, rather than 1 Jan 1970.
         let undated = project(9, r"K:\Projects\Undated.flp", 0);
         assert_eq!(projects_card(&d, Some(&[&undated][..]), None).lines[0].saved, "");
         // None of its own: the sound it sounds like has some.
         let card = projects_card(&d, Some(&[][..]), Some(("VEH1 FX - 37", &[&a][..])));
         assert_eq!(card.title, "Used in 0");
-        assert_eq!(card.note, "No project of yours uses it yet. VEH1 FX - 37, which it sounds like, is in 1 project:");
+        assert_eq!(card.note, "No song of yours uses it yet. VEH1 FX - 37, which it sounds like, is in 1 song.");
         assert_eq!(card.lines.len(), 1);
         // Neither has any.
         let card = projects_card(&d, Some(&[][..]), Some(("VEH1 FX - 37", &[][..])));
-        assert_eq!((card.note.as_str(), card.lines.len()), ("No project of yours uses it yet.", 0));
-        // A sound in more projects than the card lists: the newest.
+        assert_eq!((card.note.as_str(), card.lines.len()), ("No song of yours uses it yet.", 0));
+        // A sound in more songs than the card lists: the newest.
         let many: Vec<ProjectFile> =
             (0..1_200).map(|n| project(n, &format!("K:\\P\\{n}.flp"), 1_700_000_000 - n)).collect();
         let many: Vec<&ProjectFile> = many.iter().collect();
         let card = projects_card(&d, Some(many.as_slice()), None);
-        assert_eq!((card.title.as_str(), card.note.as_str()), ("Used in 1,200", "The newest 50:"));
+        assert_eq!((card.title.as_str(), card.note.as_str()), ("Used in 1,200", "The newest 50 of 1,200 songs."));
         assert_eq!(card.lines.len(), PROJECTS_SHOWN);
         let card = projects_card(&d, Some(&[][..]), Some(("VEH1 FX - 37", many.as_slice())));
-        assert!(card.note.ends_with("is in 1,200 projects (the newest 50 here):"), "{}", card.note);
+        assert!(card.note.ends_with("is in 1,200 songs. The newest 50 of 1,200 songs."), "{}", card.note);
+    }
+
+    #[test]
+    fn the_saves_of_one_song_are_one_line_on_the_card() {
+        // Solomon's note of 23 Nov 2026: a cymbal "used in 44 projects", all saves of one song, bass junkie_50k.
+        let d = RealDates::now();
+        let mut saves: Vec<ProjectFile> = (1..=44)
+            .map(|n| save_of(0, "bass junkie_50k", n, &format!(r"K:\FL\bass junkie_50k_{n}.flp"), 1_270_000_000 + n))
+            .collect();
+        saves.push(save_of(1, "Other", 90, r"K:\Bitwig\Other\Other.bwproject", 1_700_000_000));
+        let mut newest_first: Vec<&ProjectFile> = saves.iter().collect();
+        newest_first.sort_by_key(|s| std::cmp::Reverse(s.mtime));
+        let card = projects_card(&d, Some(&newest_first), None);
+        assert_eq!(card.title, "Used in 2");
+        let lines: Vec<(i64, &str, &str)> =
+            card.lines.iter().map(|l| (l.id, l.name.as_str(), l.saves.as_str())).collect();
+        // Each song by its newest save that uses the sound (that's the one a click opens), with how many there are.
+        assert_eq!(lines, [(90, "Other", ""), (44, "bass junkie_50k", "44 saves")]);
+        assert_eq!(card.lines[1].saved, crate::midi::date_text(&d, 1_270_000_044));
+        // The card says nothing more: the tip of Every save does.
+        assert_eq!((card.note.as_str(), card.every_note.as_str()), ("", ""));
+        // Every save: each one, by its own name.
+        assert!(card.more_saves);
+        assert_eq!(card.every_tip, "Each save that uses it (45), newest first, rather than each song once");
+        assert_eq!(card.every_lines.len(), 45);
+        assert_eq!(
+            (card.every_lines[1].id, card.every_lines[1].name.as_str(), card.every_lines[1].saves.as_str()),
+            (44, "bass junkie_50k_44", "")
+        );
+        // More saves than the card lists: the newest.
+        let more: Vec<ProjectFile> =
+            (1..=60).map(|n| save_of(0, "Song", n, &format!(r"K:\FL\Song_{n}.flp"), 1_700_000_000 - n)).collect();
+        let more: Vec<&ProjectFile> = more.iter().collect();
+        let card = projects_card(&d, Some(&more), None);
+        assert_eq!((card.title.as_str(), card.lines.len(), card.lines[0].saves.as_str()), ("Used in 1", 1, "60 saves"));
+        assert_eq!((card.note.as_str(), card.every_note.as_str()), ("", "The newest 50 of 60 saves."));
+        assert_eq!(card.every_lines.len(), PROJECTS_SHOWN);
+        // Another sound's songs, for one Rediscover dug out: the tip names that one.
+        let card = projects_card(&d, Some(&[][..]), Some(("Boom Kick", &more[..])));
+        assert_eq!(
+            card.every_note,
+            "No song of yours uses it yet. Boom Kick, which it sounds like, is in 1 song. The \
+                                     newest 50 of 60 saves."
+        );
+        assert!(card.every_tip.starts_with("Each save that uses Boom Kick (60)"), "{}", card.every_tip);
     }
 
     #[test]

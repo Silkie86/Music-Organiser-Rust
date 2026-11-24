@@ -10,7 +10,6 @@ use std::collections::{HashMap, HashSet};
 
 use mo_formats::{case, paths};
 
-use crate::rediscover::used_in;
 use crate::usage::Usage;
 use crate::{Sound, SoundMatch, SoundsDb, SoundsError};
 
@@ -421,6 +420,12 @@ pub fn groups<'a>(
 /// The loudest point, to the whole dB (-99 when not analysed).
 fn peak(s: &Sound) -> f64 {
     round(s.analysis.as_ref().map_or(-99.0, |a| a.peak_db), 0)
+}
+
+/// How many projects use a sound, each save one, as the C# app counted them for its duplicates (the twin test checks
+/// these against it; the Sounds page counts songs).
+fn used_in(usage: &HashMap<i64, Usage>, id: i64) -> u32 {
+    usage.get(&id).map_or(0, |u| u.projects)
 }
 
 fn keep_reason(keep: &Sound, all: &[&Sound], usage: &HashMap<i64, Usage>) -> String {

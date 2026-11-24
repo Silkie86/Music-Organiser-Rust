@@ -232,6 +232,33 @@ fn in_export(path: &str, export: Option<&str>) -> bool {
     export.is_some_and(|e| scan::is_inside(path, e))
 }
 
+/// Which of the saves the library keeps the Songs page lists: not Fix's copies still waiting for Keep (until Keep, a
+/// song opens its original), not a DAW's autosave copies the C# app's scan let in ("sly_17 (autosaved at 4h10).flp")
+/// or saves in a folder the scan leaves out (a project folder inside one was taken off, FL's Backup), and not Open in
+/// Bitwig's copies in the export folder. The Sounds page counts the songs a sound is used in from the same saves.
+pub struct Listed {
+    pending: mo_library::PathSet,
+    roots: Vec<String>,
+    export: Option<String>,
+}
+
+impl Listed {
+    /// Reads what decides it. Reads `library`, so never on the window's thread.
+    pub fn read(library: &Library) -> Result<Listed, LibraryError> {
+        let pending = library.pending_fixes()?;
+        let roots = library.roots()?;
+        let export = crate::bitwig_convert::export_left_out(library)?.map(|e| e.display().to_string());
+        Ok(Listed { pending, roots, export })
+    }
+
+    /// Whether the Songs page lists the save at `path`.
+    pub fn has(&self, path: &str) -> bool {
+        (self.pending.is_empty() || !self.pending.contains(path))
+            && !scan::is_ignored(path, &self.roots)
+            && !in_export(path, self.export.as_deref())
+    }
+}
+
 /// What a change given to a song goes to ([`Live::given_to`]).
 struct Given {
     /// The saves, by id: the song's, its copies too.
@@ -282,18 +309,13 @@ impl Live {
     /// song opens its original. Runs of saves split at the gap picked in Settings (`version_gap_months`, shared with
     /// the C# app), or at `gap_months` when none is picked.
     pub fn load(library: &Library, gap_months: u32, details: LiveDetails) -> Result<Live, LibraryError> {
-        let pending = library.pending_fixes()?;
+        let listed = Listed::read(library)?;
         let (mut saves, source) = library.saves_and_source()?;
         // After every row of the library, Fix's copies left out below included, so no two saves share an id.
         let next_id = saves.iter().map(|s| s.id).max().unwrap_or(0) + 1;
-        if !pending.is_empty() {
-            saves.retain(|s| !pending.contains(&s.path));
-        }
-        // A DAW's autosave copies the C# app's scan let in ("sly_17 (autosaved at 4h10).flp") stay hidden, as do saves
-        // in a folder the scan leaves out (a project folder inside one was taken off): the library keeps them.
-        let roots = library.roots()?;
-        let export = crate::bitwig_convert::export_left_out(library)?.map(|e| e.display().to_string());
-        saves.retain(|s| !scan::is_ignored(&s.path, &roots) && !in_export(&s.path, export.as_deref()));
+        // The saves the list leaves out stay in the library.
+        saves.retain(|s| listed.has(&s.path));
+        let Listed { roots, export, .. } = listed;
         // As the C# app: asked unless Settings turned it off; across folders only when turned on.
         let asking = (library.setting(ASK_DOUBTS)?.as_deref() != Some("0"))
             .then(|| library.setting(DOUBTS_ACROSS_FOLDERS).map(|v| v.as_deref() == Some("1")))
@@ -1487,6 +1509,35 @@ mod tests {
             moved_notes: Vec::new(),
             stop: Arc::default(),
         }
+    }
+
+    #[test]
+    fn the_list_leaves_out_fix_copies_autosaves_skipped_folders_and_exports() {
+        let dir = std::env::temp_dir().join(format!("mo-live-listed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.db");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE roots (path TEXT PRIMARY KEY);
+                 CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, name TEXT, daw TEXT);
+                 INSERT INTO roots VALUES ('C:\\Music');
+                 INSERT INTO settings VALUES ('fix_check:1', 'C:\\Music\\Night_2 (fixed).flp'),
+                     ('{}', 'D:\\Exports');",
+                crate::bitwig_convert::EXPORT_FOLDER_KEY
+            ))
+            .unwrap();
+        let listed = Listed::read(&Library::open_read_only(&path).unwrap()).unwrap();
+        assert!(listed.has(r"C:\Music\Night_2.flp"));
+        // Fix's copy waiting for Keep (whatever the letters' case), an FL backup copy, a save in FL's Backup folder,
+        // and Open in Bitwig's copy in the export folder.
+        assert!(!listed.has(r"c:\music\night_2 (FIXED).flp"));
+        assert!(!listed.has(r"C:\Music\Night_2 (overwritten at 4h10).flp"));
+        assert!(!listed.has(r"C:\Music\Backup\Night_2.flp"));
+        assert!(!listed.has(r"D:\Exports\Night (Bitwig)\Night.bwproject"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
