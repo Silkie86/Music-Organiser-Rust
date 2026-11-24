@@ -3851,7 +3851,7 @@ fn sample_detail() -> mo_library::SaveDetail {
 /// Where the song panel's Show in folder and Older saves buttons are in the shots, beside the filter column. If
 /// the page's layout moves them, the tooltip and menu shots come out the same as the plain panel, and mo-screens stops
 /// with an error.
-const SHOW_BUTTON: (f32, f32) = (925.0, 381.0);
+const SHOW_BUTTON: (f32, f32) = (1296.0, 342.0);
 
 /// Made-up moved folders whose link doesn't work, as the Plugins page names them: one whose drive may have come back
 /// under another letter, and one an update put a real folder back in place of.

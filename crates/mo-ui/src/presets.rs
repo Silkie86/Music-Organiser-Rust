@@ -1058,6 +1058,7 @@ fn show_card(app: &AppWindow) {
                     main: o.id == act::AUDITION,
                     danger: false,
                     quiet: mo_app::themes::quiet_button(o.text.as_str()),
+                    icon: mo_app::themes::button_icon(o.text.as_str()).into(),
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -1170,6 +1171,7 @@ fn show_curve_card(app: &AppWindow) {
                     main: false,
                     danger: false,
                     quiet: mo_app::themes::quiet_button(o.text.as_str()),
+                    icon: mo_app::themes::button_icon(o.text.as_str()).into(),
                 })
                 .collect::<Vec<_>>(),
         )));

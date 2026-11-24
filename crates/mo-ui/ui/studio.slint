@@ -569,6 +569,8 @@ export component StudioButton inherits Rectangle {
         commands: root.icon;
         stroke: label.color;
         stroke-width: 1.5px;
+        // Play and stop are solid, as on any transport.
+        fill: root.icon == Icons.play || root.icon == Icons.stop ? label.color : transparent;
     }
     if root.menu: Path {
         x: label.x + label.width + 6px;
@@ -1081,8 +1083,13 @@ export component ToggleChip inherits Rectangle {
     // A choice that would show nothing ("Arranging 0"): its words are faint, so the useful choices stand out (the UX
     // review of 10 Nov, B8). It can still be clicked.
     in property <bool> dim;
+    // A drawn sign instead of words (one of the `Icons`), for an on/off chip whose sign is clear (Lock); `text` then
+    // goes in its tooltip, with `tip` after it if given.
+    in property <string> icon;
+    in property <string> tip;
+    in property <string> key;
     callback clicked;
-    width: label.preferred-width + 24px;
+    width: root.icon != "" ? 40px : label.preferred-width + 24px;
     height: 28px;
     border-top-left-radius: joined-left ? 0 : 14px;
     border-bottom-left-radius: joined-left ? 0 : 14px;
@@ -1093,13 +1100,31 @@ export component ToggleChip inherits Rectangle {
     background: on ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
     animate background, border-color { duration: Motion.tap; }
     label := Text {
+        visible: root.icon == "";
         text: root.text;
         color: root.on ? Theme.text : root.dim ? Theme.faint : Theme.muted;
         font-size: Type.meta;
         font-weight: 500;
     }
+    if root.icon != "": Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: root.icon;
+        stroke: root.on ? Theme.accent : label.color;
+        stroke-width: 1.5px;
+    }
     touch := TouchArea {
         clicked => { root.clicked(); }
+    }
+    if root.icon != "": Tip {
+        text: root.tip == "" ? root.text : root.text + ": " + root.tip;
+        key: root.key;
+        hovering: root.hovered;
+        at-y: root.height + Space.xs;
     }
 }
 
@@ -2381,29 +2406,38 @@ export component LinkText inherits Rectangle {
     }
 }
 
-// A longer explanation, folded to a line that opens it (the UX review of 10 Nov, C7: a card or a Settings tab opened
-// with a paragraph or two before its first button). What must be known before a button is pressed stays in sight
-// beside the button; this is for how the thing works.
-export component HowItWorks inherits VerticalLayout {
+// An explanation of how a thing works, behind a small "i": its words show as the tooltip while the mouse rests on it
+// (Solomon, 24 Nov 2026: explanations go in tooltips, so nothing on the page is over-explained). It was a "How this
+// works" line that opened a paragraph (the UX review of 10 Nov, C7). What must be known before a button is pressed
+// stays in sight beside the button; this is for how the thing works. Put it beside the heading it explains.
+export component InfoTip inherits Rectangle {
     in property <string> text;
-    in-out property <bool> open;
-    spacing: Space.xs;
-    HorizontalLayout {
-        alignment: start;
-        LinkText {
-            text: root.open ? "Hide how this works" : "How this works";
-            tint: Theme.muted;
-            font-size: Type.meta;
-            clicked => { root.open = !root.open; }
-        }
+    width: 20px;
+    height: 20px;
+    sense := TouchArea { }
+    Path {
+        x: 2px;
+        y: 2px;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: Icons.info;
+        stroke: sense.has-hover ? Theme.text : Theme.muted;
+        stroke-width: 1.5px;
     }
-    if root.open: Text {
+    Tip {
         text: root.text;
-        color: Theme.muted;
-        font-size: Type.meta;
-        wrap: word-wrap;
-        min-width: 0px;
+        hovering: sense.has-hover && !sense.pressed;
+        at-y: root.height + Space.xs;
     }
+}
+
+// A line with an explanation behind its "i" (`InfoTip`) at its left: for a tab or card whose heading is its own.
+export component HowItWorks inherits HorizontalLayout {
+    in property <string> text;
+    alignment: start;
+    InfoTip { text: root.text; }
 }
 
 // The mouse on a drawn view (arrangement, piano roll, galaxy): where it moves, a left press and its letting go, a
@@ -2496,6 +2530,53 @@ export global Icons {
     out property <string> loop: "M 2.5 9 A 5.5 5.5 0 0 1 12.2 4.5 M 13.5 7 A 5.5 5.5 0 0 1 3.8 11.5 M 9.5 4.5 L 12.2 4.5 L 12.2 1.8 M 6.5 11.5 L 3.8 11.5 L 3.8 14.2";
     // Two sliders: the page's own options.
     out property <string> options: "M 2 5 L 14 5 M 2 11 L 14 11 M 5.5 3 L 5.5 7 M 10.5 9 L 10.5 13";
+    // Transport and the small jobs every page shares (Solomon, 24 Nov 2026: "where an icon would be clear always
+    // favour that"): a button with one of these shows the sign and says its words in its tooltip.
+    // A triangle pointing right: play.
+    out property <string> play: "M 4.5 2.5 L 13 8 L 4.5 13.5 Z";
+    // A square: stop.
+    out property <string> stop: "M 3.5 3.5 L 12.5 3.5 L 12.5 12.5 L 3.5 12.5 Z";
+    // A folder: show it in its folder.
+    out property <string> folder: "M 1.5 3.5 L 6 3.5 L 7.5 5.5 L 14.5 5.5 L 14.5 13 L 1.5 13 Z";
+    // Two sheets, one over the other: copy.
+    out property <string> copy: "M 5.5 5.5 L 14 5.5 L 14 14 L 5.5 14 Z M 10.5 5.5 L 10.5 2 L 2 2 L 2 10.5 L 5.5 10.5";
+    // Two crossing arrows: shuffle.
+    out property <string> shuffle: "M 1.5 4.5 L 4.5 4.5 L 10.5 11.5 L 14 11.5 M 1.5 11.5 L 4.5 11.5 L 10.5 4.5 L 14 4.5 M 12 2.5 L 14 4.5 L 12 6.5 M 12 9.5 L 14 11.5 L 12 13.5";
+    // A die: roll something new at random.
+    out property <string> dice: "M 2.5 2.5 L 13.5 2.5 L 13.5 13.5 L 2.5 13.5 Z M 4.75 5.5 A 0.75 0.75 0 1 0 6.25 5.5 A 0.75 0.75 0 1 0 4.75 5.5 M 7.25 8 A 0.75 0.75 0 1 0 8.75 8 A 0.75 0.75 0 1 0 7.25 8 M 9.75 10.5 A 0.75 0.75 0 1 0 11.25 10.5 A 0.75 0.75 0 1 0 9.75 10.5";
+    // An arrow going round: do it again (look, read or check again).
+    out property <string> again: "M 13.5 8 A 5.5 5.5 0 1 1 11.9 4.1 M 12.2 1.2 L 12.2 4.4 L 9 4.4";
+    // A padlock: keep this as it is.
+    out property <string> lock: "M 3.5 7.5 L 12.5 7.5 L 12.5 14 L 3.5 14 Z M 5.5 7.5 L 5.5 5 A 2.5 2.5 0 0 1 10.5 5 L 10.5 7.5";
+    // Arrows to the left and right: the one before, the one after.
+    out property <string> back: "M 10 3 L 5 8 L 10 13";
+    out property <string> next: "M 6 3 L 11 8 L 6 13";
+    // Four corners: see the whole of it.
+    out property <string> whole: "M 2 6 L 2 2 L 6 2 M 10 2 L 14 2 L 14 6 M 14 10 L 14 14 L 10 14 M 6 14 L 2 14 L 2 10";
+    // A metronome: a click on every beat.
+    out property <string> metronome: "M 4.5 14.5 L 6.5 1.5 L 9.5 1.5 L 11.5 14.5 Z M 8 10.5 L 13 3.5 M 5 11.5 L 11 11.5";
+    // A cross: clear it, take it away.
+    out property <string> clear: "M 4 4 L 12 12 M 12 4 L 4 12";
+    // An i in a ring: how this works (its words in the tooltip).
+    out property <string> info: "M 14.5 8 A 6.5 6.5 0 1 1 1.5 8 A 6.5 6.5 0 1 1 14.5 8 M 8 7 L 8 11.5 M 8 4.4 L 8 4.6";
+    // A sign by its name, for a button whose sign comes from Rust (`CardAction.icon`, mo-app's
+    // `themes::button_icon`): "" for none, and for a name it doesn't know.
+    public pure function named(name: string) -> string {
+        if (name == "play") { return play; }
+        if (name == "stop") { return stop; }
+        if (name == "folder") { return folder; }
+        if (name == "copy") { return copy; }
+        if (name == "shuffle") { return shuffle; }
+        if (name == "dice") { return dice; }
+        if (name == "again") { return again; }
+        if (name == "lock") { return lock; }
+        if (name == "back") { return back; }
+        if (name == "next") { return next; }
+        if (name == "whole") { return whole; }
+        if (name == "metronome") { return metronome; }
+        if (name == "clear") { return clear; }
+        return "";
+    }
     // The rail's places, one each.
     // Songs: two joined notes.
     out property <string> songs: "M 6 12 L 6 3 L 13 2 L 13 11 M 6 12 A 2 2 0 1 1 2 12 A 2 2 0 1 1 6 12 M 13 11 A 2 2 0 1 1 9 11 A 2 2 0 1 1 13 11";
@@ -3335,6 +3416,9 @@ export struct CardAction {
     danger: bool,
     // It only shows or copies where the thing is: a flat button (mo-app's `themes::quiet_button` says which).
     quiet: bool,
+    // A sign's name (`Icons.named`) for a button whose sign is clear (Show in folder, Copy path): a small square
+    // button with its words in the tooltip. mo-app's `themes::button_icon` says which; "" for words.
+    icon: string,
 }
 
 // A side card's buttons: everything you can do with what's picked, in sight rather than behind a "more" menu
@@ -3360,19 +3444,22 @@ export component CardActions inherits FlexboxLayout {
     @children
     for a in root.room > 0 ? root.none : root.actions: StudioButton {
         text: a.text;
-        tip: a.tip;
         key: a.key;
         enabled: a.enabled;
         main: a.main;
         danger: a.danger;
         quiet: a.quiet;
+        icon: Icons.named(a.icon);
+        tip: a.icon == "" ? a.tip : a.tip == "" ? a.text : a.text + ": " + a.tip;
         clicked => { root.chosen(a.id); }
     }
+    // A button with a sign is a small square (32 px), so the ones with words keep their even columns.
     for a in root.room > 0 ? root.actions : root.none: StudioButton {
-        width: self.min-width > root.cell ? root.room : root.cell;
-        fold-width: root.room;
+        width: a.icon != "" ? Heights.button : self.min-width > root.cell ? root.room : root.cell;
+        fold-width: a.icon != "" ? 0px : root.room;
+        icon: Icons.named(a.icon);
         text: a.text;
-        tip: a.tip;
+        tip: a.icon == "" ? a.tip : a.tip == "" ? a.text : a.text + ": " + a.tip;
         key: a.key;
         enabled: a.enabled;
         main: a.main;

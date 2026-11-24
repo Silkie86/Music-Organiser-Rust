@@ -641,9 +641,10 @@ export component PresetsPage inherits Rectangle {
                 alignment: center;
                 StudioButton {
                     horizontal-stretch: 0;
+                    icon: Icons.dice;
                     text: "Randomise";
                     enabled: PresetsData.random-can;
-                    tip: "Make a new curve from parts of the curves shown; with a highlight, roll only that part again";
+                    tip: "Randomise: make a new curve from parts of the curves shown; with a highlight, roll only that part again";
                     key: PresetsData.randomise-key;
                     clicked => { PresetsData.randomise(); }
                 }
@@ -864,9 +865,6 @@ export component PresetsPage inherits Rectangle {
                     EmptyState {
                         vertical-stretch: 1;
                         title: PresetsData.section == 0 ? "Pick a sound" : "Pick a curve";
-                        text: PresetsData.section == 0
-                            ? "Where it's from, its part and what it can do show here."
-                            : "Its shape, where it was found and what it can do show here.";
                     }
                 }
                 menu := RightClickMenu {

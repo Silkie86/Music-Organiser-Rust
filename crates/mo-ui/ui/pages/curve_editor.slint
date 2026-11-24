@@ -4,7 +4,7 @@
 // buttons. The picture's still layers (grid, fill, curve) are one picture drawn off the window's thread
 // (mo_app::curve_picture, mo-ui/src/curve_editor.rs); what moves with the mouse or the sound is laid over it here.
 // Only shared parts from studio.slint.
-import { Theme, CutText, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, TempoStepper, FilterName, Tip, CardAction, CardActions, SidePanel, MouseField, MenuArrow } from "../studio.slint";
+import { Theme, CutText, Motion, MenuItem, RightClickMenu, AppKeys, Type, Space, Well, SearchBox, ToggleChip, DragHandle, StudioButton, TempoStepper, FilterName, Tip, CardAction, CardActions, SidePanel, MouseField, MenuArrow, Icons } from "../studio.slint";
 
 // One of the ruler's marks: where (from the picture's left) and its bar and beat ("1", "1.2"; none when the marks are
 // too close to number each).
@@ -886,16 +886,13 @@ export component CurveEditor inherits SidePanel {
             horizontal-stretch: 1;
         }
         // How Hear plays it: the metronome and the speed, at the line's right end.
-        metronome := ToggleChip {
+        ToggleChip {
             text: "Metronome";
+            icon: Icons.metronome;
+            tip: "a click on each beat while the curve is heard";
+            key: CurveEditorData.metronome-key;
             on: CurveEditorData.metronome;
             clicked => { CurveEditorData.metronome-toggled(); }
-            Tip {
-                text: "A click on each beat while the curve is heard";
-                key: CurveEditorData.metronome-key;
-                hovering: metronome.hovered;
-                at-y: metronome.height + Space.xs;
-            }
         }
         TempoStepper {
             slower-key: CurveEditorData.slower-key;
@@ -924,6 +921,7 @@ export component CurveEditor inherits SidePanel {
         spacing: Space.md;
         StudioButton {
             horizontal-stretch: 0;
+            icon: CurveEditorData.playing ? Icons.stop : Icons.play;
             text: CurveEditorData.playing ? "Stop" : "Hear";
             main: CurveEditorData.playing;
             tip: CurveEditorData.playing ? "Stop the tone" : "Hear the curve as the volume of a tone, round and round";

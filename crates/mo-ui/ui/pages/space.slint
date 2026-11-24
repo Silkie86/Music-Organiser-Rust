@@ -5,7 +5,7 @@
 // (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
 // them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, Caps, Well, Panel, PageHeader, ListLine, CutText, SidePanel, PanelDivider, EmptyState, HowItWorks, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, Panel, PageHeader, ListLine, CutText, SidePanel, PanelDivider, EmptyState, InfoTip, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
 
 // One drive across the top.
 export struct DriveCard {
@@ -208,10 +208,19 @@ component SpaceCard inherits SidePanel {
     property <string> picked: SpaceData.picked;
     changed picked => {
         self.to-top();
-        how.open = false;
     }
     close => { SpaceData.close-card(); }
-    Caps { text: SpaceData.card-kind; }
+    // What kind of line it is, and how it works behind the "i" beside it (Solomon, 24 Nov 2026: explanations in
+    // tooltips).
+    HorizontalLayout {
+        spacing: Space.xs;
+        Caps {
+            text: SpaceData.card-kind;
+            vertical-alignment: center;
+        }
+        if SpaceData.card-lead != "": InfoTip { text: SpaceData.card-lead; }
+        Rectangle { }
+    }
     Text {
         text: SpaceData.card-title;
         color: Theme.text;
@@ -254,8 +263,6 @@ component SpaceCard inherits SidePanel {
         actions: SpaceData.card-actions;
         chosen(id) => { SpaceData.chosen(id); }
     }
-    // How the line works, folded: the size, what the button does and the button come first (review C7).
-    how := HowItWorks { text: SpaceData.card-lead; }
     // The parts are measured as if none of their lines wrapped (Slint measures what's in a `for` so), but each is laid
     // out at its real height: so the box is at least as tall as where the last one ends, or the card's own height (and
     // what follows the parts) fell short of it, and a long card's last parts couldn't be scrolled to. `alignment:
@@ -478,7 +485,6 @@ export component SpacePage inherits Rectangle {
         EmptyState {
             vertical-stretch: 1;
             title: "Pick a line";
-            text: "What it holds and what you can do about it show here.";
         }
     }
     // A line's right-click menu: its card's buttons, each with its key (rule 15), as on Songs.

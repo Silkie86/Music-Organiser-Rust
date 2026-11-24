@@ -2645,6 +2645,7 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
             main: false,
             danger: false,
             quiet: mo_app::themes::quiet_button(text),
+            icon: mo_app::themes::button_icon(text).into(),
         });
     }
     data.set_menu(ModelRc::new(VecModel::from(menu)));
