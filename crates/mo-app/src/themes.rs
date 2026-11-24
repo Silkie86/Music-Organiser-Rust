@@ -31,12 +31,13 @@ pub fn quiet_button(words: &str) -> bool {
 }
 
 /// The sign a side card's button shows instead of its words, from its words: only where the sign is clear on its own
-/// (Solomon, 24 Nov 2026: "where an icon would be clear always favour that"). A folder for "Show in folder", two
+/// (Solomon, 24 Nov 2026: "where an icon would be clear always favour that"). A folder for "Show in folder" (and
+/// Space's "Open folder"), two
 /// sheets for "Copy path"; the words go in the button's tooltip. "" keeps the words. A name `Icons.named` knows
 /// (studio.slint). By its words, as [`quiet_button`] is, so every page agrees without a list of ids.
 pub fn button_icon(words: &str) -> &'static str {
     match words {
-        "Show in folder" => "folder",
+        "Show in folder" | "Open folder" => "folder",
         "Copy path" => "copy",
         _ => "",
     }

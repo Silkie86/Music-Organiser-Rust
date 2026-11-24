@@ -623,7 +623,7 @@ component GeneralTab inherits VerticalLayout {
                 picked(c) => { SettingsData.output-picked(c); }
             }
             StudioButton {
-                icon: SettingsData.output-busy ? "" : Icons.again;
+                icon: Icons.again;
                 text: SettingsData.output-busy ? "Looking…" : "Look again";
                 enabled: !SettingsData.output-busy;
                 tip: "Look again: list the outputs there are now, for one just plugged in";
@@ -993,7 +993,7 @@ component DawsTab inherits VerticalLayout {
             }
             if d.bitwig: StudioButton {
                 horizontal-stretch: 0;
-                icon: SettingsData.daws-checking ? "" : Icons.again;
+                icon: Icons.again;
                 text: SettingsData.daws-checking ? "Checking\u{2026}" : "Check again";
                 tip: "Check again: asks the link in Bitwig how it stands. Only reads: nothing goes into the project.";
                 enabled: !SettingsData.daws-checking;
@@ -1300,8 +1300,14 @@ export component SettingsPage inherits Rectangle {
             vertical-stretch: 1;
             content-width: self.width;
             // Coming back to the Developer tab from a shorter tab, the page's height is still the other tab's for a
-            // few frames, too short to be turned to where it was: it's at least tall enough for that place.
-            content-height: max(shown.preferred-height, SettingsData.tab == 4 ? self.height - SettingsData.developer-scroll : 0px);
+            // few frames, too short to be turned to where it was: until the Developer tab's own height comes, it's at
+            // least tall enough for that place.
+            content-height: max(shown.preferred-height, self.restoring ? self.height - SettingsData.developer-scroll : 0px);
+            property <bool> restoring;
+            property <length> natural: shown.preferred-height;
+            changed natural => {
+                self.restoring = false;
+            }
             // The Developer tab opens where it was left.
             property <int> tab: SettingsData.tab;
             init => {
@@ -1309,14 +1315,16 @@ export component SettingsPage inherits Rectangle {
                     self.content-y = SettingsData.developer-scroll;
                 }
             }
-            // Its place is kept only when you turn it (`flicked`: the wheel, a drag or the scroll bar), never when
-            // the page cuts it short.
+            // Its place is kept only when you turn it (`flicked`: the wheel or a drag), never when the page cuts it
+            // short.
             flicked => {
+                self.restoring = false;
                 if (SettingsData.tab == 4) {
                     SettingsData.developer-scroll = self.content-y;
                 }
             }
             changed tab => {
+                self.restoring = self.tab == 4;
                 self.content-y = self.tab == 4 ? SettingsData.developer-scroll : 0;
             }
             shown := VerticalLayout {

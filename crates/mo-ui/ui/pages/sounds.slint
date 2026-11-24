@@ -1612,8 +1612,7 @@ export component SoundsPage inherits Rectangle {
             if SoundsData.view == 4: VerticalLayout {
                 alignment: center;
                 StudioButton {
-                    // Its words while it works, so the wait shows.
-                    icon: SoundsData.re-busy ? "" : Icons.shuffle;
+                    icon: Icons.shuffle;
                     text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
                     tip: "Shuffle: dig out a new set";
                     enabled: !SoundsData.re-cant-dig;

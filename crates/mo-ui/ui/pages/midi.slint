@@ -632,8 +632,9 @@ component PartPanel inherits SidePanel {
             main: true;
             width: max(self.min-width, buttons.cell);
             enabled: !MidiData.soundfont-missing || MidiData.playing;
-            // Play and stop as signs, as on any transport; what it plays is in the tooltip.
-            icon: MidiData.playing && MidiData.loop-picked ? Icons.stop : Icons.play;
+            // Play and stop as signs, as on any transport; "Play with the song" keeps its words, as they say what
+            // it will play.
+            icon: MidiData.playing && MidiData.loop-picked ? Icons.stop : MidiData.play-with-song ? "" : Icons.play;
             text: MidiData.playing && MidiData.loop-picked ? "Stop" : MidiData.play-with-song ? "Play with the song" : "Play loop";
             tip: MidiData.playing && MidiData.loop-picked ? "Stop the loop"
                 : MidiData.play-with-song ? "Play the part round and round with the parts of your song it fits, at the song's tempo, or the speed you set"

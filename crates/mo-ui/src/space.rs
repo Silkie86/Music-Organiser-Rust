@@ -974,7 +974,7 @@ fn actions(buttons: Vec<Button>) -> ModelRc<CardAction> {
             danger: false,
         })
         .collect();
-    ModelRc::new(VecModel::from(actions))
+    ModelRc::new(VecModel::from(crate::icons_last(actions)))
 }
 
 /// Measure again, which waits while the drives and the app's files are being measured.

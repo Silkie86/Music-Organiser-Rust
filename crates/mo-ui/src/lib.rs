@@ -289,6 +289,14 @@ fn finder_actions(app: &AppWindow, shortcuts: &Shortcuts, place: Place) {
 }
 
 /// The keys in use now.
+/// A card's buttons with the small square ones (a sign instead of words, `CardAction.icon`) after the rest, in the
+/// order they came: the buttons with words keep their even columns (the UX review of 10 Nov, B2), and the squares
+/// line up after them.
+pub(crate) fn icons_last(mut actions: Vec<CardAction>) -> Vec<CardAction> {
+    actions.sort_by_key(|a| !a.icon.is_empty());
+    actions
+}
+
 pub fn shortcuts() -> Shortcuts {
     KEYS.with(|k| k.borrow().as_deref().cloned()).unwrap_or_default()
 }

@@ -2649,7 +2649,7 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
         });
     }
     data.set_menu(ModelRc::new(VecModel::from(menu)));
-    data.set_actions(ModelRc::new(VecModel::from(actions)));
+    data.set_actions(ModelRc::new(VecModel::from(crate::icons_last(actions))));
     data.set_play_tip(
         "Play or stop the picked sound. A click on the sound playing stops it too, and so does a right click on its \
          waveform."

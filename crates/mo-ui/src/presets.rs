@@ -1046,7 +1046,7 @@ fn show_card(app: &AppWindow) {
         )));
         let offers = logic::offers(item, p.exporting, hearing_of(&p, item));
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
-        data.set_actions(ModelRc::new(VecModel::from(
+        data.set_actions(ModelRc::new(VecModel::from(crate::icons_last(
             offers
                 .iter()
                 .map(|o| CardAction {
@@ -1061,7 +1061,7 @@ fn show_card(app: &AppWindow) {
                     icon: mo_app::themes::button_icon(o.text.as_str()).into(),
                 })
                 .collect::<Vec<_>>(),
-        )));
+        ))));
         let parts = logic::part_offers(item);
         let shown_role = item.role();
         data.set_parts(ModelRc::new(VecModel::from(
@@ -1153,7 +1153,7 @@ fn show_curve_card(app: &AppWindow) {
             data.set_curve_found_menu(ModelRc::new(VecModel::from(found_menu)));
         }
         // Hear has a button of its own on the card (and stays in the right-click menu).
-        data.set_curve_actions(ModelRc::new(VecModel::from(
+        data.set_curve_actions(ModelRc::new(VecModel::from(crate::icons_last(
             offers
                 .iter()
                 .filter(|o| o.id != curve_act::HEAR)
@@ -1174,7 +1174,7 @@ fn show_curve_card(app: &AppWindow) {
                     icon: mo_app::themes::button_icon(o.text.as_str()).into(),
                 })
                 .collect::<Vec<_>>(),
-        )));
+        ))));
         data.set_curve_menu(ModelRc::new(VecModel::from(
             offers
                 .iter()
