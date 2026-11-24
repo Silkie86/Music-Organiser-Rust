@@ -282,34 +282,58 @@ export component FolderTree inherits Rectangle {
                 right-clicked(x, y) => { root.right-clicked(l.path, x, y); }
             }
         }
-        // Under the lines, not above them: a tick that adds a chip never moves the line under the mouse (Solomon,
-        // 24 Nov 2026: ticking a folder pushed the tree down a row).
-        if root.picks.length > 0: FlexboxLayout {
-            spacing: Space.xs;
-            for p in root.picks: TagChip {
-                text: p.hidden ? "Hidden: " + p.text : p.text;
-                on: !p.hidden;
-                remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
-                clicked => { root.taken-off(p.path, p.hidden); }
-                removed => { root.taken-off(p.path, p.hidden); }
-            }
-        }
+        // Under the lines, at one height whatever is picked: a tick that adds (or takes off) a chip never moves a line
+        // or what's under the mouse (Solomon, 24 Nov 2026: ticking a folder pushed the tree down a row). More chips
+        // than fit scroll sideways in their row; Clear stays at its end.
         HorizontalLayout {
+            height: Heights.button;
             spacing: Space.sm;
-            padding-bottom: Space.xs;
-            Text {
-                text: root.note;
-                color: Theme.faint;
-                font-size: Type.meta;
-                vertical-alignment: center;
-                wrap: word-wrap;
+            Rectangle {
                 horizontal-stretch: 1;
+                if root.picks.length == 0: Text {
+                    width: parent.width;
+                    text: "No folders picked";
+                    color: Theme.faint;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if root.picks.length > 0: Flickable {
+                    width: parent.width;
+                    height: parent.height;
+                    content-width: chips.preferred-width;
+                    interactive: self.content-width > self.width;
+                    chips := HorizontalLayout {
+                        height: parent.height;
+                        spacing: Space.xs;
+                        alignment: start;
+                        for p in root.picks: VerticalLayout {
+                            alignment: center;
+                            TagChip {
+                                text: p.hidden ? "Hidden: " + p.text : p.text;
+                                on: !p.hidden;
+                                remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
+                                clicked => { root.taken-off(p.path, p.hidden); }
+                                removed => { root.taken-off(p.path, p.hidden); }
+                            }
+                        }
+                    }
+                }
             }
             if root.any-picked: StudioButton {
+                horizontal-stretch: 0;
                 text: "Clear";
                 tip: "Take every folder pick off";
                 clicked => { root.cleared(); }
             }
+        }
+        Text {
+            height: Heights.tick-line;
+            text: root.note;
+            color: Theme.faint;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            overflow: elide;
         }
     }
 }

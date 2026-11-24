@@ -335,7 +335,7 @@ pub fn scanning_tops(state: Option<&crate::sound_scan::ScanState>) -> HashSet<St
     state
         .scanning
         .iter()
-        .filter(|f| state.looking || state.folder(f).is_none_or(|s| !s.away && s.listened + s.unreadable < s.to_listen))
+        .filter(|f| state.looking || state.folder(f).is_none_or(|s| !s.away && s.listened < s.to_listen))
         .map(|f| key(f))
         .collect()
 }
@@ -491,6 +491,7 @@ impl<I: Fn(usize) -> It, It: Iterator<Item = u32>> Walk<'_, I, It> {
             chain.iter().map(|&c| f.nodes[c].name.as_str()).collect::<Vec<_>>().join(CHAIN)
         };
         let hidden = self.hidden.contains(&(last as u32)) || chain.iter().any(|c| self.hidden.contains(&(*c as u32)));
+        let away = top && self.ask.away.contains(&key(&f.nodes[i].path));
         let pick = self.pick_of.get(&(last as u32)).copied();
         let mut kids: Vec<(String, usize)> = (self.inside)(last)
             .filter(|&c| self.all[c as usize] > 0)
@@ -530,9 +531,11 @@ impl<I: Fn(usize) -> It, It: Iterator<Item = u32>> Walk<'_, I, It> {
             open,
             picked,
             hidden: hidden || hidden_above,
-            away: top && self.ask.away.contains(&key(&f.nodes[i].path)),
+            away,
             // Any folder the line takes in: a sample folder may sit inside a chain ("D:" › "Samples").
-            scanning: !self.ask.scanning.is_empty()
+            // A drive away isn't being scanned, whatever the scan took in.
+            scanning: !away
+                && !self.ask.scanning.is_empty()
                 && chain.iter().any(|&c| self.ask.scanning.contains(&key(&f.nodes[c].path))),
             empty,
         };
@@ -877,7 +880,9 @@ mod tests {
             away,
             ..FolderScan::default()
         };
-        state.folders = vec![folder(r"G:\Kicks", 10, 10, false), folder(r"H:\Pads", 10, 3, false)];
+        state.folders = vec![folder(r"G:\Kicks", 10, 10, false), folder(r"H:\Pads", 10, 6, false)];
+        // Files that couldn't be read are among those listened to: 4 of the 6 don't end it early.
+        state.folders[1].unreadable = 4;
         assert_eq!(scanning_tops(Some(&state)), HashSet::from([key(r"H:\Pads")]));
         state.folders[1].away = true;
         assert!(scanning_tops(Some(&state)).is_empty(), "a folder away isn't being scanned");

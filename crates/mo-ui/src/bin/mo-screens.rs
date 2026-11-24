@@ -2439,7 +2439,9 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     data.set_tree_search("".into());
     data.invoke_tree_search_edited("".into());
     // A scan going through the sample folder: its line says so until the scan has listened to its new sounds.
+    // Its own library name, and the screens library's state put back after: later shots read the newest scan state.
     let scan_db = std::path::Path::new("folder-tree-shot");
+    let before = mo_app::sound_scan::latest_state();
     let scanning = mo_app::sound_scan::ScanState {
         running: true,
         looking: true,
@@ -2451,6 +2453,9 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     capture(window);
     shots.push(("sounds-folders-scanning.png".into(), capture(window)));
     mo_app::sound_scan::show_state(scan_db, mo_app::sound_scan::ScanState::default());
+    if let Some(before) = before {
+        mo_app::sound_scan::show_state(std::path::Path::new("screens-sounds.db"), before);
+    }
     data.invoke_tree_search_edited("".into());
     data.invoke_tree_fold();
     capture(window);

@@ -31,6 +31,8 @@ struct Tree {
     app: Option<slint::Weak<AppWindow>>,
     /// Looks once a second whether the folders being scanned changed, for their lines' "scanning" tag.
     watch: Option<slint::Timer>,
+    /// The folders being scanned as the tree last showed them, by [`tree::key`].
+    scanning: HashSet<String>,
 }
 
 /// How many open branches are kept as a setting at most, of those still folders.
@@ -158,6 +160,7 @@ pub(super) fn show(app: &AppWindow, p: &Page) {
             data.set_tree_search(t.search.as_str().into());
         }
     });
+    TREE.with(|t| t.borrow_mut().scanning = scanning);
     let mut picks: Vec<TreePick> = p
         .filters
         .folders
@@ -234,18 +237,18 @@ pub(super) fn wire(app: &AppWindow) {
     TREE.with(|t| t.borrow_mut().app = Some(app.as_weak()));
     // The "scanning" tags follow the scan: the scan's state is in memory, looked at only when it changed.
     let watch = slint::Timer::default();
-    let (weak, turn, shown) = (app.as_weak(), std::cell::Cell::new(0), RefCell::new(HashSet::new()));
+    let (weak, turn) = (app.as_weak(), std::cell::Cell::new(0));
     watch.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(1), move || {
         let now = mo_app::sound_scan::state_turn();
         if turn.replace(now) == now {
             return;
         }
         let scanning = tree::scanning_tops(mo_app::sound_scan::latest_state().as_ref());
-        if *shown.borrow() != scanning {
-            *shown.borrow_mut() = scanning;
-            if let Some(app) = weak.upgrade() {
-                show_now(&app);
-            }
+        // Against what the tree shows, however it was last shown (not only by this timer).
+        if TREE.with(|t| t.borrow().scanning != scanning)
+            && let Some(app) = weak.upgrade()
+        {
+            show_now(&app);
         }
     });
     TREE.with(|t| t.borrow_mut().watch = Some(watch));
