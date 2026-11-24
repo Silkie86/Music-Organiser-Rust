@@ -405,7 +405,7 @@ export global SoundsData {
     in property <[MenuItem]> tree-menu;
     callback tree-toggled(string);
     callback tree-opened(string);
-    callback tree-taken-off(string);
+    callback tree-taken-off(string, bool);
     callback tree-search-edited(string);
     callback tree-cleared();
     callback tree-fold();
@@ -2245,13 +2245,14 @@ export component SoundsPage inherits Rectangle {
                 picks: SoundsData.tree-picks;
                 picked-words: SoundsData.tree-picked;
                 note: SoundsData.tree-note;
-                folded: SoundsData.tree-folded || split.width < 1100px;
+                folded: SoundsData.tree-folded;
+                narrow: split.width < 1100px;
                 any-picked: SoundsData.tree-any;
                 search <=> SoundsData.tree-search;
                 kept-y <=> SoundsData.tree-kept-y;
                 toggled(path) => { SoundsData.tree-toggled(path); }
                 opened(path) => { SoundsData.tree-opened(path); }
-                taken-off(path) => { SoundsData.tree-taken-off(path); }
+                taken-off(path, hidden) => { SoundsData.tree-taken-off(path, hidden); }
                 search-edited(words) => { SoundsData.tree-search-edited(words); }
                 cleared => { SoundsData.tree-cleared(); }
                 fold => { SoundsData.tree-fold(); }

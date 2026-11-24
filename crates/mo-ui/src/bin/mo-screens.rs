@@ -2402,8 +2402,6 @@ fn opened_in_sight(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Re
     if wrong.is_empty() { Ok(()) } else { Err(format!("Ctrl+K, opened low down a list: {}", wrong.join("; "))) }
 }
 
-/// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
-/// a light theme.
 /// The folder tree beside the filters (Solomon, 24 Nov 2026): open with two folders picked and one hidden, a folder
 /// found by its search box, a folder picked alone, and folded away to its tab with picks on.
 fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
@@ -2439,10 +2437,12 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     shots.push(("sounds-folders-folded.png".into(), capture(window)));
     // Back as the other shots expect: nothing picked or hidden, folded away.
     data.invoke_tree_cleared();
-    data.invoke_tree_taken_off(r"D:\Samples\FX".into());
+    data.invoke_tree_taken_off(r"D:\Samples\FX".into(), true);
     mo_ui::sounds::fold_folders_for_screens(app, true);
 }
 
+/// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
+/// a light theme.
 fn sounds_shots(
     app: &mo_ui::AppWindow,
     window: &MinimalSoftwareWindow,

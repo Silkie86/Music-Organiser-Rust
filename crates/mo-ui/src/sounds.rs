@@ -1304,7 +1304,7 @@ fn scan_for_sounds(
     }
     let copy = compact::copy_of(sounds_db);
     // No song library, no sample folders: nothing to say.
-    if on_show.source != copy || !library_db.exists() {
+    if !library_db.exists() {
         return false;
     }
     let folders = match mo_library::Library::open_read_only(library_db).and_then(|l| l.list_setting("sample_folders")) {
@@ -1314,7 +1314,11 @@ fn scan_for_sounds(
             return false;
         }
     };
+    // The folder tree starts at them, whichever library is on show.
     tree::tops_read(&folders);
+    if on_show.source != copy {
+        return false;
+    }
     let job: RefCell<Option<Job>> = RefCell::new(None);
     let scanned = mo_app::sound_scan::scan(sounds_db, &folders, &|done, of| {
         let mut job = job.borrow_mut();
@@ -3276,7 +3280,12 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         }
         p.re_likes = a.likes;
         p.re_busy = false;
-        p.rediscover = a.found;
+        // Nothing from a folder you hid on the folder tree.
+        let mut found = a.found;
+        if let Some(hidden) = p.list.hidden_by_folders(&p.filters) {
+            found.retain(|&(at, _)| !hidden(at));
+        }
+        p.rediscover = found;
         p.re_years = a.years;
         Some((p.rediscover.len(), p.list.knows_use()))
     });
@@ -3293,6 +3302,7 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
     let folders: Vec<FolderLine> = a
         .folders
         .iter()
+        .filter(|f| PAGE.with(|p| !p.borrow().list.folder_hidden(&p.borrow().filters, &f.folder)))
         .map(|f| FolderLine {
             folder: f.folder.clone().into(),
             name: f.folder.rsplit(['\\', '/']).find(|s| !s.is_empty()).unwrap_or(&f.folder).into(),
@@ -3618,6 +3628,7 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
     if current {
         // The counts beside the filters' choices, for the filters as they are now.
         show_chips(app);
+        PAGE.with(|p| tree::show(app, &p.borrow()));
         show_years(app);
         show_lists(app);
         // Once the sounds are read, the list (or "No sounds match") takes the place of the word saying so. A library
@@ -3674,15 +3685,15 @@ pub fn show_copies_for_screens(app: &AppWindow, same: Option<&mo_sounds::copies:
     copies::show_for_screens(app, same);
 }
 
-/// For the screenshots: the fingerprints couldn't be read (`why`), as at a start where the page had none yet, so
-/// Rediscover has dug nothing out (no sounds, folders or years shown); [`index_known`] puts the fingerprints back and
-/// it digs sounds out again. Never reads a file.
 /// Folds the folder tree away or opens it, for the screenshots: the older shots are taken with it folded, as their
 /// fixed points were placed without it.
 pub fn fold_folders_for_screens(app: &AppWindow, folded: bool) {
     tree::set_folded(app, folded);
 }
 
+/// For the screenshots: the fingerprints couldn't be read (`why`), as at a start where the page had none yet, so
+/// Rediscover has dug nothing out (no sounds, folders or years shown); [`index_known`] puts the fingerprints back and
+/// it digs sounds out again. Never reads a file.
 pub fn index_failed_for_screens(app: &AppWindow, why: &str) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -3772,6 +3783,13 @@ fn show_sound(app: &AppWindow, at: usize) {
         let hide_copies = p.filters.hide_copies && !p.list.has_copies(at);
         let show_silent = p.filters.show_silent || p.list.sound(at).is_some_and(|s| s.is_silent());
         p.filters = Filters { hide_copies, show_silent, ..p.filters.cleared() };
+        // A hidden folder that holds it is shown again: it's the sound you asked for.
+        let tops = p.filters.folder_tops.clone();
+        let list = p.list.clone();
+        p.filters.hidden_folders.retain(|h| {
+            let one = Filters { hidden_folders: vec![h.clone()], folder_tops: tops.clone(), ..Filters::default() };
+            !list.hidden_by_folders(&one).is_some_and(|hidden| hidden(at))
+        });
         p.to_pick = Some(at);
     });
     app.global::<SoundsData>().set_search(SharedString::new());
@@ -3921,7 +3939,6 @@ fn show_chips(app: &AppWindow) {
         data.set_hide_copies_text(list::hide_copies_text(copies::found()).into());
         data.set_hide_silent(!f.show_silent);
         data.set_hide_silent_text(list::hide_silent_text(p.partial.is_none().then(|| p.list.silent())).into());
-        tree::show(app, &p);
         data.set_any_filter(f.any());
         // The box holds the words the list goes by: Clear filters takes them off too.
         if data.get_search().as_str() != f.search {

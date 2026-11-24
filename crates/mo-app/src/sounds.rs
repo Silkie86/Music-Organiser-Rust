@@ -212,6 +212,9 @@ pub struct Filters {
     /// The folders you hid on the folder tree: their sounds never show. Not a filter Clear filters takes off: it stays
     /// as you set it.
     pub hidden_folders: Vec<String>,
+    /// Your sample folders: the folder tree's tops ([`crate::sound_folders::Folders::mask`]). Not a filter: Clear
+    /// filters leaves them.
+    pub folder_tops: Vec<String>,
     /// Only sounds from these years, first to last, by the date `date_by` says.
     pub years: Option<(i32, i32)>,
     /// Which of a sound's dates the year strip goes by (Solomon, 13 Nov 2026). Not a filter the Clear chip takes off:
@@ -334,6 +337,7 @@ impl Filters {
             like_favourites: self.like_favourites,
             date_by: self.date_by,
             hidden_folders: self.hidden_folders.clone(),
+            folder_tops: self.folder_tops.clone(),
             ..Filters::default()
         }
     }
@@ -1134,12 +1138,15 @@ impl SoundList {
                     let fails = ok.iter().filter(|&&o| !o).count();
                     // The chips first, as they're quick: a sound two of them leave out is neither shown nor counted,
                     // so the search (the slow part) isn't tried on it.
-                    if fails <= 1 && self.passes_others_but_folders(i, &now, &test) {
+                    let folder_ok = self.folder_ok(i, &test);
+                    // One the folder tree and a chip both leave out is neither shown nor counted: the search isn't
+                    // tried on it.
+                    if fails <= 1 && (folder_ok || fails == 0) && self.passes_others_but_folders(i, &now, &test) {
                         // Every filter but the folder tree lets it through: it counts beside its folder.
                         if fails == 0 {
                             near.push(i);
                         }
-                        if !self.folder_ok(i, &test) {
+                        if !folder_ok {
                             // Counted beside its folder only.
                         } else if copies.is_some_and(|c| c.group_of.contains_key(&i)) {
                             // Counted with its copies, below.
@@ -1188,25 +1195,37 @@ impl SoundList {
         let folders = &self.shared.folders;
         let mut sounds = vec![0u32; folders.len()];
         let mut used = self.used.as_ref().map(|_| vec![0u32; folders.len()]);
-        let mut once = std::collections::HashSet::new();
+        let is_used = |i: usize| {
+            self.used.as_ref().is_some_and(|map| map.get(&self.shared.sounds[i].id).is_some_and(|u| u.projects > 0))
+        };
+        // Each group of copies in a folder, and whether any of them is used: the one the list keeps is a used one when
+        // there is one ([`KeptFor::Used`]).
+        let mut groups: HashMap<(u32, u32), bool> = HashMap::new();
         for &i in near {
             let at = folders.of_sound(i);
             if at == crate::sound_folders::NONE {
                 continue;
             }
-            if let Some(g) = copies.and_then(|c| c.group_of.get(&i))
-                && !once.insert((*g, at))
-            {
+            if let Some(&g) = copies.and_then(|c| c.group_of.get(&i)) {
+                *groups.entry((g, at)).or_default() |= is_used(i);
                 continue;
             }
             sounds[at as usize] += 1;
-            if let (Some(used), Some(map)) = (used.as_mut(), self.used.as_ref())
-                && map.get(&self.shared.sounds[i].id).is_some_and(|u| u.projects > 0)
+            if let Some(used) = used.as_mut()
+                && is_used(i)
             {
                 used[at as usize] += 1;
             }
         }
-        FolderCounts { sounds, used }
+        for ((_, at), any_used) in groups {
+            sounds[at as usize] += 1;
+            if let Some(used) = used.as_mut()
+                && any_used
+            {
+                used[at as usize] += 1;
+            }
+        }
+        FolderCounts { of: folders.stamp(), sounds, used }
     }
 
     /// `shown` in `order`.
@@ -1270,8 +1289,23 @@ impl SoundList {
     /// The test of `filters`, with the folder tree's picks as this list's folders have them.
     fn test<'a>(&self, filters: &'a Filters) -> Test<'a> {
         let mut t = Test::new(filters);
-        t.folders = self.shared.folders.mask(&filters.folders, &filters.hidden_folders);
+        t.folders = self.shared.folders.mask(&filters.folders, &filters.hidden_folders, &filters.folder_tops);
         t
+    }
+
+    /// Which sounds the folder tree's hidden folders keep out of every list (Rediscover's too), by place: none when no
+    /// folder is hidden.
+    pub fn hidden_by_folders(&self, filters: &Filters) -> Option<impl Fn(usize) -> bool + '_> {
+        let mask = self.shared.folders.mask(&[], &filters.hidden_folders, &filters.folder_tops)?;
+        Some(move |i: usize| !mask.allows(self.shared.folders.of_sound(i)))
+    }
+
+    /// Whether the folder at `path` is hidden by the folder tree, or inside a folder that is.
+    pub fn folder_hidden(&self, filters: &Filters, path: &str) -> bool {
+        let folders = &self.shared.folders;
+        folders
+            .mask(&[], &filters.hidden_folders, &filters.folder_tops)
+            .is_some_and(|m| folders.find(path).is_some_and(|at| !m.allows(at)))
     }
 
     /// The folder tree's picks and hidden folders let the sound at `i` through.

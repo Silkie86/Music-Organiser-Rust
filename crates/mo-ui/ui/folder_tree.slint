@@ -1,7 +1,7 @@
 // The folder tree beside a list of sounds (Solomon, 24 Nov 2026): only the folders that hold sounds the other filters
 // let through, each with how many, ticked to narrow the list to them (as many as you like). The lines, picks and
 // words are made by mo_app::sound_folders; this only shows them and says what was clicked.
-import { Theme, Type, Space, Heights, Caps, SearchBox, CutText, ListLine, StudioButton, TagChip, CloseButton } from "studio.slint";
+import { AppKeys, Theme, Type, Space, Heights, Caps, SearchBox, CutText, ListLine, StudioButton, TagChip, CloseButton } from "studio.slint";
 import { ListView } from "list.slint";
 
 // One line of the tree. `picked`: 0 not, 1 picked with the folders inside it, 2 picked alone ("just this folder"),
@@ -87,7 +87,18 @@ component TreeLineView inherits ListLine {
     property <length> indent: root.line.depth * 14px;
     height: Heights.tick-line;
     tip: root.line.path;
-    clicked => { root.toggled(); }
+    // A right click picks the line for its menu first: that isn't a pick of the folder.
+    clicked => {
+        if !AppKeys.picking-for-menu {
+            root.toggled();
+        }
+    }
+    // Its two clicks pick and unpick it again; it opens, as a tree's folder does.
+    double-clicked => {
+        if root.line.has-children {
+            root.opened();
+        }
+    }
     HorizontalLayout {
         padding-left: Space.xs + root.indent;
         padding-right: Space.sm;
@@ -173,26 +184,40 @@ export component FolderTree inherits Rectangle {
     // What the line under the tree says: how many sounds the picks show, or what to do.
     in property <string> note;
     in property <bool> folded;
+    // In a narrow window it's folded to its tab whatever `folded` says, and a click opens it over the list for a
+    // while (as the filter column does), without changing how it's kept for a wider window.
+    in property <bool> narrow;
+    property <bool> open-narrow;
+    property <bool> shut: root.narrow ? !root.open-narrow : root.folded;
     in property <bool> any-picked;
     in-out property <string> search;
     // Where the list is turned to, kept by the page so a tree made again comes back there.
     in-out property <length> kept-y;
-    out property <length> room: root.folded ? 28px + Space.sm : 280px + Space.lg;
+    out property <length> room: root.narrow || root.folded ? 28px + Space.sm : 280px + Space.lg;
     callback toggled(string);
     callback opened(string);
-    callback taken-off(string);
+    // A chip's ×: a pick taken off, or a hidden folder shown again (`hidden`).
+    callback taken-off(string, bool);
     callback right-clicked(string, length, length);
     callback search-edited(string);
     callback cleared();
     callback fold();
-    width: root.folded ? 28px : 280px;
+    function fold-or-open() {
+        if root.narrow {
+            root.open-narrow = !root.open-narrow;
+        } else {
+            root.fold();
+        }
+    }
+    width: root.shut ? 28px : 280px;
     clip: true;
+    background: root.narrow && !root.shut ? Theme.background : transparent;
     Rectangle {
         x: parent.width - 1px;
         width: 1px;
         background: Theme.edge;
     }
-    if root.folded: Rectangle {
+    if root.shut: Rectangle {
         width: 27px;
         border-radius: Theme.radius;
         background: Theme.surface;
@@ -206,10 +231,10 @@ export component FolderTree inherits Rectangle {
             }
         }
         tab := TouchArea {
-            clicked => { root.fold(); }
+            clicked => { root.fold-or-open(); }
         }
     }
-    if !root.folded: VerticalLayout {
+    if !root.shut: VerticalLayout {
         width: parent.width - Space.md;
         spacing: Space.sm;
         HorizontalLayout {
@@ -229,7 +254,7 @@ export component FolderTree inherits Rectangle {
             // Folds the tree away to its tab.
             CloseButton {
                 tip: "Fold the folders away";
-                clicked => { root.fold(); }
+                clicked => { root.fold-or-open(); }
             }
         }
         SearchBox {
@@ -243,8 +268,8 @@ export component FolderTree inherits Rectangle {
                 text: p.hidden ? "Hidden: " + p.text : p.text;
                 on: !p.hidden;
                 remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
-                clicked => { root.taken-off(p.path); }
-                removed => { root.taken-off(p.path); }
+                clicked => { root.taken-off(p.path, p.hidden); }
+                removed => { root.taken-off(p.path, p.hidden); }
             }
         }
         tree := ListView {

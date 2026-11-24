@@ -24,7 +24,15 @@ struct Tree {
     menu_for: String,
     /// The settings were read (once, as the sounds first show).
     read: bool,
+    /// The picks and hidden folders as last kept as settings: kept again whenever they change, however they changed
+    /// (the tree, Clear filters, Ctrl+K).
+    kept: (String, String),
+    /// The window, for the tree shown again once the sample folders are read ([`tops_read`]).
+    app: Option<slint::Weak<AppWindow>>,
 }
+
+/// How many open branches are kept as a setting at most, of those still folders.
+const OPEN_KEPT: usize = 500;
 
 thread_local! {
     static TREE: RefCell<Tree> = RefCell::default();
@@ -34,12 +42,25 @@ thread_local! {
 /// [`tree::key`]): set by the thread that scans them ([`tops_read`]).
 static TOPS: Mutex<(Vec<String>, Vec<String>)> = Mutex::new((Vec::new(), Vec::new()));
 
-/// The sample folders were read for a scan, off the window's thread: each one's drive is looked at there too.
+/// The sample folders were read for a scan, off the window's thread: each one's drive is looked at there too. The
+/// page then takes them as the tree's tops, and the tree shows again.
 pub(super) fn tops_read(folders: &[String]) {
     let away: Vec<String> =
         folders.iter().filter(|f| !std::path::Path::new(f.as_str()).exists()).map(|f| tree::key(f)).collect();
-    let mut tops = TOPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    *tops = (folders.to_vec(), away);
+    *TOPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (folders.to_vec(), away);
+    let _ = slint::invoke_from_event_loop(|| {
+        let Some(app) = TREE.with(|t| t.borrow().app.as_ref().and_then(slint::Weak::upgrade)) else { return };
+        let tops = TOPS.lock().map(|t| t.0.clone()).unwrap_or_default();
+        let changed = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            (p.filters.folder_tops != tops).then(|| p.filters.folder_tops = tops).is_some()
+        });
+        // New tops change what a pick or a hide reaches: the list again. Else only the drives' state changed.
+        if changed {
+            refresh(&app);
+        }
+        show_now(&app);
+    });
 }
 
 /// The picks, hidden folders, open branches and fold as you left them, the first time the sounds show.
@@ -53,20 +74,43 @@ pub(super) fn as_left(p: &mut Page) {
         let value = |k: &str| crate::settings::value(k).unwrap_or_default();
         p.filters.folders = tree::decode_picks(&value(tree::PICKS_KEY));
         p.filters.hidden_folders = tree::decode_paths(&value(tree::HIDDEN_KEY));
+        p.filters.folder_tops = TOPS.lock().map(|t| t.0.clone()).unwrap_or_default();
+        t.kept = (value(tree::PICKS_KEY), value(tree::HIDDEN_KEY));
         t.open = tree::decode_paths(&value(tree::OPEN_KEY)).iter().map(|o| tree::key(o)).collect();
         t.folded = value(tree::FOLDED_KEY) == "on";
     });
 }
 
-/// Keeps the picks and hidden folders for the next start.
+/// Keeps the picks and hidden folders for the next start, when they changed since they were last kept (only once
+/// the kept ones were read: before that they'd be written over with none).
 fn keep(p: &Page) {
-    crate::settings::remember(tree::PICKS_KEY, &tree::encode_picks(&p.filters.folders));
-    crate::settings::remember(tree::HIDDEN_KEY, &tree::encode_paths(&p.filters.hidden_folders));
+    TREE.with(|t| {
+        let mut t = t.borrow_mut();
+        if !t.read {
+            return;
+        }
+        let now = (tree::encode_picks(&p.filters.folders), tree::encode_paths(&p.filters.hidden_folders));
+        if now.0 != t.kept.0 {
+            crate::settings::remember(tree::PICKS_KEY, &now.0);
+        }
+        if now.1 != t.kept.1 {
+            crate::settings::remember(tree::HIDDEN_KEY, &now.1);
+        }
+        t.kept = now;
+    });
+}
+
+/// Keeps the open branches: those still folders, [`OPEN_KEPT`] at most.
+fn keep_open(t: &Tree, p: &Page) {
+    let folders = p.list.folders();
+    let open: Vec<&String> = t.open.iter().filter(|k| folders.find(k).is_some()).take(OPEN_KEPT).collect();
+    crate::settings::remember(tree::OPEN_KEY, &tree::encode_paths(open));
 }
 
 /// The tree's lines, chips and words as the page is now: from the newest counts (none yet: every folder, no
 /// numbers).
 pub(super) fn show(app: &AppWindow, p: &Page) {
+    keep(p);
     let data = app.global::<SoundsData>();
     let (tops, away) = TOPS.lock().map(|t| t.clone()).unwrap_or_default();
     let away: HashSet<String> = away.into_iter().collect();
@@ -136,12 +180,12 @@ fn show_now(app: &AppWindow) {
     PAGE.with(|p| show(app, &p.borrow()));
 }
 
-/// A change to the picks or hidden folders: kept, and the list asked for again.
+/// A change to the picks or hidden folders: shown at once (and kept), and the list asked for again.
 fn change(app: &AppWindow, f: impl FnOnce(&mut Page)) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         f(&mut p);
-        keep(&p);
+        show(app, &p);
     });
     refresh(app);
 }
@@ -180,6 +224,7 @@ fn menu_for(p: &Page, path: &str) -> Vec<MenuItem> {
 }
 
 pub(super) fn wire(app: &AppWindow) {
+    TREE.with(|t| t.borrow_mut().app = Some(app.as_weak()));
     let data = app.global::<SoundsData>();
     let weak = app.as_weak();
     data.on_tree_toggled(move |path| {
@@ -201,16 +246,16 @@ pub(super) fn wire(app: &AppWindow) {
             if !t.open.remove(&k) {
                 t.open.insert(k);
             }
-            crate::settings::remember(tree::OPEN_KEY, &tree::encode_paths(&t.open));
+            PAGE.with(|p| keep_open(&t, &p.borrow()));
         });
         show_now(&app);
     });
     let weak = app.as_weak();
-    data.on_tree_taken_off(move |path| {
+    data.on_tree_taken_off(move |path, hidden| {
         let Some(app) = weak.upgrade() else { return };
         change(&app, |p| {
             let k = tree::key(&path);
-            if p.filters.hidden_folders.iter().any(|h| tree::key(h) == k) {
+            if hidden {
                 p.filters.hidden_folders.retain(|h| tree::key(h) != k);
             } else {
                 p.filters.folders.retain(|f| tree::key(&f.path) != k);
@@ -275,9 +320,9 @@ pub(super) fn wire(app: &AppWindow) {
                         let inside = folders.inside(at);
                         TREE.with(|t| {
                             let mut t = t.borrow_mut();
-                            t.open.extend(inside.into_iter().map(|n| tree::key(folders.path(n))));
                             t.open.insert(tree::key(&path));
-                            crate::settings::remember(tree::OPEN_KEY, &tree::encode_paths(&t.open));
+                            t.open.extend(inside.into_iter().map(|n| tree::key(folders.path(n))));
+                            keep_open(&t, &p);
                         });
                     }
                 });
@@ -294,8 +339,7 @@ pub(super) fn set_folded(app: &AppWindow, folded: bool) {
     show_now(app);
 }
 
-/// Rediscover's forgotten folder clicked: that folder alone is picked.
+/// Rediscover's forgotten folder clicked: that folder alone is picked (kept as the tree shows next).
 pub(super) fn pick_alone(p: &mut Page, folder: &str) {
     p.filters.folders = vec![FolderPick { path: folder.to_owned(), just_this: true }];
-    keep(p);
 }
