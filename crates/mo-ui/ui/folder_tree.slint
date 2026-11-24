@@ -17,6 +17,7 @@ export struct TreeLine {
     picked: int,
     hidden: bool,
     away: bool,
+    scanning: bool,
     empty: bool,
 }
 
@@ -62,7 +63,7 @@ component TreeTick inherits Rectangle {
     }
 }
 
-// A small word on a line that says something about it: "just this folder", "drive away".
+// A small word on a line that says something about it: "just this folder", "drive away", "scanning".
 component LineTag inherits Rectangle {
     in property <string> text;
     in property <color> ink: Theme.faint;
@@ -151,6 +152,13 @@ component TreeLineView inherits ListLine {
             alignment: center;
             LineTag { text: "drive away"; }
         }
+        if root.line.scanning: VerticalLayout {
+            alignment: center;
+            LineTag {
+                text: "scanning";
+                ink: Theme.accent;
+            }
+        }
         if root.line.hidden: VerticalLayout {
             alignment: center;
             LineTag { text: "hidden"; }
@@ -174,8 +182,8 @@ component TreeLineView inherits ListLine {
     // The tick box and the words lie under the line's own click; the arrow has its own (above).
 }
 
-// The tree: its name, a box to find a folder, the picks and hidden folders as chips, the lines, and what the picks
-// show. Folded, it's a slim tab that says FOLDERS, lit while anything is picked, and a click opens it again.
+// The tree: its name, a box to find a folder, the lines, the picks and hidden folders as chips under them, and what
+// the picks show. Folded, it's a slim tab that says FOLDERS, lit while anything is picked, and a click opens it again.
 export component FolderTree inherits Rectangle {
     in property <[TreeLine]> lines;
     in property <[TreePick]> picks;
@@ -262,16 +270,6 @@ export component FolderTree inherits Rectangle {
             text <=> root.search;
             edited(words) => { root.search-edited(words); }
         }
-        if root.picks.length > 0: FlexboxLayout {
-            spacing: Space.xs;
-            for p in root.picks: TagChip {
-                text: p.hidden ? "Hidden: " + p.text : p.text;
-                on: !p.hidden;
-                remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
-                clicked => { root.taken-off(p.path, p.hidden); }
-                removed => { root.taken-off(p.path, p.hidden); }
-            }
-        }
         tree := ListView {
             vertical-stretch: 1;
             row-height: Heights.tick-line;
@@ -282,6 +280,18 @@ export component FolderTree inherits Rectangle {
                 toggled => { root.toggled(l.path); }
                 opened => { root.opened(l.path); }
                 right-clicked(x, y) => { root.right-clicked(l.path, x, y); }
+            }
+        }
+        // Under the lines, not above them: a tick that adds a chip never moves the line under the mouse (Solomon,
+        // 24 Nov 2026: ticking a folder pushed the tree down a row).
+        if root.picks.length > 0: FlexboxLayout {
+            spacing: Space.xs;
+            for p in root.picks: TagChip {
+                text: p.hidden ? "Hidden: " + p.text : p.text;
+                on: !p.hidden;
+                remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
+                clicked => { root.taken-off(p.path, p.hidden); }
+                removed => { root.taken-off(p.path, p.hidden); }
             }
         }
         HorizontalLayout {

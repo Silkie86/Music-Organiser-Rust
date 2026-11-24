@@ -67,6 +67,8 @@ pub fn show(
                 search: &state.search,
                 tops: &f.folder_tops,
                 away: &state.away,
+                // The app scans its sample folders, not the plugin: it can't say here.
+                scanning: &HashSet::new(),
             };
             tree::rows(library.list.folders(), counts.map(|c| &c.folders), ask)
                 .into_iter()
@@ -87,6 +89,7 @@ pub fn show(
                     },
                     hidden: r.hidden,
                     away: r.away,
+                    scanning: r.scanning,
                     empty: r.empty,
                 })
                 .collect()

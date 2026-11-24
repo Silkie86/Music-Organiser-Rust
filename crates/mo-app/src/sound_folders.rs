@@ -294,6 +294,8 @@ pub struct FolderRow {
     pub hidden: bool,
     /// Its drive isn't there just now (a top line).
     pub away: bool,
+    /// It is a sample folder being scanned just now: its sounds may still change.
+    pub scanning: bool,
     /// No sound in it is let through by the other filters: it shows only as it's picked, hidden or holds a folder
     /// that is.
     pub empty: bool,
@@ -311,7 +313,7 @@ pub struct FolderCounts {
 }
 
 /// What the tree shows besides the folders: your picks, hidden folders, the branches open, the search box's words,
-/// your sample folders (the tops it starts at) and the drives away.
+/// your sample folders (the tops it starts at), the drives away and the folders being scanned.
 #[derive(Clone, Copy)]
 pub struct TreeAsk<'a> {
     pub picks: &'a [FolderPick],
@@ -322,6 +324,20 @@ pub struct TreeAsk<'a> {
     pub tops: &'a [String],
     /// The tops whose drive isn't there, by [`key`].
     pub away: &'a HashSet<String>,
+    /// The tops being scanned just now, by [`key`] ([`scanning_tops`]).
+    pub scanning: &'a HashSet<String>,
+}
+
+/// The sample folders a scan is going through just now, by [`key`]: each one the running scan takes in while it's
+/// still looking for sound files, then each one with sounds left to listen to. None once it has ended.
+pub fn scanning_tops(state: Option<&crate::sound_scan::ScanState>) -> HashSet<String> {
+    let Some(state) = state.filter(|s| s.running) else { return HashSet::new() };
+    state
+        .scanning
+        .iter()
+        .filter(|f| state.looking || state.folder(f).is_none_or(|s| !s.away && s.listened + s.unreadable < s.to_listen))
+        .map(|f| key(f))
+        .collect()
 }
 
 /// The tree's lines, in the order they show: each top line, then the open folders inside it, by name. Only folders
@@ -515,6 +531,9 @@ impl<I: Fn(usize) -> It, It: Iterator<Item = u32>> Walk<'_, I, It> {
             picked,
             hidden: hidden || hidden_above,
             away: top && self.ask.away.contains(&key(&f.nodes[i].path)),
+            // Any folder the line takes in: a sample folder may sit inside a chain ("D:" › "Samples").
+            scanning: !self.ask.scanning.is_empty()
+                && chain.iter().any(|&c| self.ask.scanning.contains(&key(&f.nodes[c].path))),
             empty,
         };
         let at = out.len();
@@ -657,7 +676,15 @@ mod tests {
         open: &'a HashSet<String>,
         tops: &'a [String],
     ) -> TreeAsk<'a> {
-        TreeAsk { picks, hidden, open, search: "", tops, away: Box::leak(Box::default()) }
+        TreeAsk {
+            picks,
+            hidden,
+            open,
+            search: "",
+            tops,
+            away: Box::leak(Box::default()),
+            scanning: Box::leak(Box::default()),
+        }
     }
 
     fn labels(rows: &[FolderRow]) -> Vec<String> {
@@ -829,5 +856,45 @@ mod tests {
         assert_eq!(shown_words(1), "1 sound in the picked folders");
         assert_eq!(shown_words(1204), "1,204 sounds in the picked folders");
         assert_eq!(last_name(r"I:\Samples\Kicks\"), "Kicks");
+    }
+
+    #[test]
+    fn scanning_tops_follow_the_scan() {
+        use crate::sound_scan::{FolderScan, ScanState};
+        assert!(scanning_tops(None).is_empty());
+        let mut state = ScanState {
+            running: true,
+            looking: true,
+            scanning: vec![r"G:\Kicks".into(), r"H:\Pads".into()],
+            ..ScanState::default()
+        };
+        assert_eq!(scanning_tops(Some(&state)).len(), 2, "looking: every folder it takes in");
+        state.looking = false;
+        let folder = |f: &str, to_listen, listened, away| FolderScan {
+            folder: f.into(),
+            to_listen,
+            listened,
+            away,
+            ..FolderScan::default()
+        };
+        state.folders = vec![folder(r"G:\Kicks", 10, 10, false), folder(r"H:\Pads", 10, 3, false)];
+        assert_eq!(scanning_tops(Some(&state)), HashSet::from([key(r"H:\Pads")]));
+        state.folders[1].away = true;
+        assert!(scanning_tops(Some(&state)).is_empty(), "a folder away isn't being scanned");
+        state.folders[1].away = false;
+        state.running = false;
+        assert!(scanning_tops(Some(&state)).is_empty(), "ended");
+    }
+
+    #[test]
+    fn a_top_being_scanned_says_so() {
+        let f = folders(&[r"G:\Kicks\a.wav", r"G:\Kicks\Deep\b.wav", r"H:\Pads\c.wav"]);
+        let tops = vec![r"G:\Kicks".to_owned(), r"H:\Pads".to_owned()];
+        let open = HashSet::from([key(r"G:\Kicks")]);
+        let scanning = HashSet::from([key(r"G:\Kicks")]);
+        let ask = TreeAsk { scanning: &scanning, ..ask(&[], &[], &open, &tops) };
+        let rows = rows(&f, None, ask);
+        let tagged: Vec<&str> = rows.iter().filter(|r| r.scanning).map(|r| r.path.as_str()).collect();
+        assert_eq!(tagged, [r"G:\Kicks"]);
     }
 }

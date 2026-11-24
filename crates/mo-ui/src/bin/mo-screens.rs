@@ -2411,7 +2411,12 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     data.invoke_pick_view(0);
     mo_ui::sounds::fold_folders_for_screens(app, false);
     data.invoke_tree_opened(r"D:\Samples".into());
+    // Before and after a tick: no line moves (its chip goes under the lines), so the box stays under the mouse.
+    capture(window);
+    shots.push(("sounds-folders-before-tick.png".into(), capture(window)));
     data.invoke_tree_toggled(r"D:\Samples\Drums".into());
+    capture(window);
+    shots.push(("sounds-folders-after-tick.png".into(), capture(window)));
     data.invoke_tree_toggled(r"D:\Samples\Loops".into());
     data.invoke_tree_menu_asked(r"D:\Samples\FX".into());
     data.invoke_tree_menu_chosen("hide".into());
@@ -2432,6 +2437,20 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     capture(window);
     shots.push(("sounds-folders-search.png".into(), capture(window)));
     data.set_tree_search("".into());
+    data.invoke_tree_search_edited("".into());
+    // A scan going through the sample folder: its line says so until the scan has listened to its new sounds.
+    let scan_db = std::path::Path::new("folder-tree-shot");
+    let scanning = mo_app::sound_scan::ScanState {
+        running: true,
+        looking: true,
+        scanning: vec![r"D:\Samples".into()],
+        ..Default::default()
+    };
+    mo_app::sound_scan::show_state(scan_db, scanning);
+    data.invoke_tree_search_edited("".into());
+    capture(window);
+    shots.push(("sounds-folders-scanning.png".into(), capture(window)));
+    mo_app::sound_scan::show_state(scan_db, mo_app::sound_scan::ScanState::default());
     data.invoke_tree_search_edited("".into());
     data.invoke_tree_fold();
     capture(window);

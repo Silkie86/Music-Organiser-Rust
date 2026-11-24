@@ -29,6 +29,8 @@ struct Tree {
     kept: (String, String),
     /// The window, for the tree shown again once the sample folders are read ([`tops_read`]).
     app: Option<slint::Weak<AppWindow>>,
+    /// Looks once a second whether the folders being scanned changed, for their lines' "scanning" tag.
+    watch: Option<slint::Timer>,
 }
 
 /// How many open branches are kept as a setting at most, of those still folders.
@@ -114,6 +116,7 @@ pub(super) fn show(app: &AppWindow, p: &Page) {
     let data = app.global::<SoundsData>();
     let (tops, away) = TOPS.lock().map(|t| t.clone()).unwrap_or_default();
     let away: HashSet<String> = away.into_iter().collect();
+    let scanning = tree::scanning_tops(mo_app::sound_scan::latest_state().as_ref());
     TREE.with(|t| {
         let t = t.borrow();
         let ask = TreeAsk {
@@ -123,6 +126,7 @@ pub(super) fn show(app: &AppWindow, p: &Page) {
             search: &t.search,
             tops: &tops,
             away: &away,
+            scanning: &scanning,
         };
         let rows = tree::rows(p.list.folders(), p.counts.as_ref().map(|c| &c.folders), ask);
         let lines: Vec<TreeLine> = rows
@@ -144,6 +148,7 @@ pub(super) fn show(app: &AppWindow, p: &Page) {
                 },
                 hidden: r.hidden,
                 away: r.away,
+                scanning: r.scanning,
                 empty: r.empty,
             })
             .collect();
@@ -227,6 +232,23 @@ fn menu_for(p: &Page, path: &str) -> Vec<MenuItem> {
 
 pub(super) fn wire(app: &AppWindow) {
     TREE.with(|t| t.borrow_mut().app = Some(app.as_weak()));
+    // The "scanning" tags follow the scan: the scan's state is in memory, looked at only when it changed.
+    let watch = slint::Timer::default();
+    let (weak, turn, shown) = (app.as_weak(), std::cell::Cell::new(0), RefCell::new(HashSet::new()));
+    watch.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(1), move || {
+        let now = mo_app::sound_scan::state_turn();
+        if turn.replace(now) == now {
+            return;
+        }
+        let scanning = tree::scanning_tops(mo_app::sound_scan::latest_state().as_ref());
+        if *shown.borrow() != scanning {
+            *shown.borrow_mut() = scanning;
+            if let Some(app) = weak.upgrade() {
+                show_now(&app);
+            }
+        }
+    });
+    TREE.with(|t| t.borrow_mut().watch = Some(watch));
     let data = app.global::<SoundsData>();
     let weak = app.as_weak();
     data.on_tree_toggled(move |path| {
