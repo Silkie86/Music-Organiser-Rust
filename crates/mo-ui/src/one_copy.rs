@@ -82,6 +82,7 @@ pub fn connect(app: &crate::AppWindow, held: &Arc<OneCopy>) {
 fn show(app: &crate::AppWindow) {
     use slint::winit_030::WinitWindowAccessor;
     log::info("One copy", "Asked to show the window");
+    i_slint_backend_winit::mo_probe::note_from_app("set_minimized(false) and focus, another copy asked to show it");
     app.window().set_minimized(false);
     app.window().with_winit_window(|window| window.focus_window());
 }

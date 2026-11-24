@@ -918,6 +918,7 @@ pub fn fill_the_screen(app: &AppWindow) {
             let look = look_at(w);
             let mend = !full && !look.full_screen && look.maximised && look.smaller_than_screen();
             if mend {
+                i_slint_backend_winit::mo_probe::note_from_app("set_maximized(false) then (true), the start-up mend");
                 w.set_maximized(false);
                 w.set_maximized(true);
             }
@@ -940,17 +941,53 @@ pub fn fill_the_screen(app: &AppWindow) {
 /// Whether the window was last seen maximised (or full screen), from half a second after the start on.
 static MAXIMISED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The window's size changed: a line in the log when it stopped being maximised, by whatever did it (the user's
-/// Restore, or the app itself: a page's size limits did on 22 Nov, with nothing in the log).
-pub fn resized(app: &AppWindow) {
+/// The window's size changed: when it stopped being maximised (or full screen), a line in the log says so, whether
+/// the user may have done it (see `watchdog::Hands`), and what Slint asked of the window in the 30 s before, from the
+/// notes its patched copy keeps (vendor/i-slint-backend-winit/PATCHED.md). On 24 Nov it left maximised by itself 10 s
+/// after coming back from the taskbar, on Songs with no page change; these lines are to name what did it.
+pub fn resized(app: &AppWindow, by_user: bool) {
+    // A moment later, on the event loop: the app hears of the resize before Slint does, and Slint's own note that
+    // winit says maximised changed comes as it handles it.
+    let weak = app.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(0), move || {
+        if let Some(app) = weak.upgrade() {
+            log_unmaximised(&app, by_user);
+        }
+    });
+}
+
+fn log_unmaximised(app: &AppWindow, by_user: bool) {
     use slint::winit_030::WinitWindowAccessor;
-    let Some(look) = app.window().with_winit_window(look_at) else { return };
+    let Some((look, winit_scale)) = app.window().with_winit_window(|w| (look_at(w), w.scale_factor())) else {
+        return;
+    };
     let now = look.maximised || look.full_screen;
     let was = MAXIMISED.swap(now, std::sync::atomic::Ordering::Relaxed);
-    if was && !now {
-        let place = usize::try_from(app.get_place()).ok().and_then(Place::from_index).map_or("?", Place::name);
-        log::info("Window", &format!("The window stopped being maximised (page {place}): it is {}", look.words()));
+    if !was || now {
+        return;
     }
+    let place = usize::try_from(app.get_place()).ok().and_then(Place::from_index).map_or("?", Place::name);
+    let who = if by_user {
+        "perhaps by the user: the pointer was on the title bar or an edge, or the Windows key or Alt+Space was pressed"
+    } else {
+        "not by the user: the pointer was inside the window (or not seen since it came to the front), or the app \
+         wasn't in front; no Windows key or Alt+Space"
+    };
+    let asked = i_slint_backend_winit::mo_probe::since(std::time::Duration::from_secs(30));
+    let asked = if asked.is_empty() {
+        "Slint asked nothing of the window in the 30 s before".to_owned()
+    } else {
+        format!("what Slint asked of the window in the 30 s before:\n  {}", asked.join("\n  "))
+    };
+    log::info(
+        "Window",
+        &format!(
+            "The window stopped being maximised (page {place}): it is {}; {who}. Slint draws at scale {}, winit's \
+             scale is {winit_scale}; {asked}",
+            look.words(),
+            app.window().scale_factor(),
+        ),
+    );
 }
 
 /// The window came back from the taskbar: a line in the log with what winit says it is, and full screen put back
@@ -968,6 +1005,9 @@ pub fn restored(app: &AppWindow) {
             let look = look_at(w);
             let mend = full && (!look.full_screen || look.smaller_than_screen());
             if mend {
+                i_slint_backend_winit::mo_probe::note_from_app(
+                    "set_fullscreen(None) then (Borderless), back from the taskbar",
+                );
                 w.set_fullscreen(None);
                 w.set_fullscreen(Some(Fullscreen::Borderless(None)));
             }
