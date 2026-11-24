@@ -2455,6 +2455,7 @@ fn sounds_shots(
     // Autoplay is on, so picking a sound plays it.
     pick_sound(app, 6);
     data.set_played(0.35);
+    data.set_tile_played(0.35);
     shots.push(("sounds-panel.png".into(), capture(window)));
     // A sound deep in a pack, with folder names too long for a line, and six tags: its card wraps them, at the usual
     // width and as narrow as it goes, with nothing cut off on the right. Found by name, as the shuffled order changes

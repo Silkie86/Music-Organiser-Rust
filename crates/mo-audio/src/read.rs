@@ -82,15 +82,31 @@ pub fn read_parts(
     part_seconds: f64,
     each: &mut dyn FnMut(u32, &[Vec<f32>]) -> bool,
 ) -> Result<f64, AudioError> {
+    read_parts_from(path, 0.0, part_seconds, each)
+}
+
+/// [`read_parts`] from `from_seconds` into the file on (where a long sound plays from): the first part handed on starts
+/// at frame [`frame_at`]`(from_seconds, rate)`, and nothing is handed on past the end. A WAV or AIFF is read from there
+/// straight away; the other kinds are decoded from the start, and what comes before it isn't handed on: on the way
+/// there `each` is handed parts with no channels instead, only to say whether to go on.
+pub fn read_parts_from(
+    path: &Path,
+    from_seconds: f64,
+    part_seconds: f64,
+    each: &mut dyn FnMut(u32, &[Vec<f32>]) -> bool,
+) -> Result<f64, AudioError> {
     no_sound_if_empty(path)?;
+    let mut skipping = Skipping { from_seconds, left: None, each };
     if can_read_from(path) {
         // A WAV that keeps Ogg Vorbis (FL Studio's own sounds) is decoded once, as an OGG file is: a place part way
         // into it can only be reached by decoding all before it.
         if let Some(stream) = ogg_in_wav(path)? {
-            return crate::other::read_ogg_bytes_parts(stream, part_seconds, each);
+            return crate::other::read_ogg_bytes_parts(stream, part_seconds, &mut |r, p| skipping.give(r, p));
         }
         let mut seconds = part_seconds;
-        let mut at = 0u64;
+        // The file's rate, from its header alone, says which frame to start at.
+        let mut at = if from_seconds > 0.0 { frame_at(from_seconds, read_from(path, 0.0, 0)?.sample_rate) } else { 0 };
+        let each = skipping.each;
         loop {
             // Each part opens the file again and goes straight to its place. It ends at a part with nothing in it, as
             // the file's length in frames isn't told (an AIFF's rate is rounded in what it says).
@@ -111,13 +127,46 @@ pub fn read_parts(
         }
     }
     if crate::wma::is_wma(path) {
-        return crate::wma::read_wma_parts(path, part_seconds, each);
+        return crate::wma::read_wma_parts(path, part_seconds, &mut |r, p| skipping.give(r, p));
     }
     if crate::other::is_other(path) {
-        return crate::other::read_other_parts(path, part_seconds, each);
+        return crate::other::read_other_parts(path, part_seconds, &mut |r, p| skipping.give(r, p));
     }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     Err(AudioError::NotSupported(format!("No decoder for .{ext} files")))
+}
+
+/// The frame `seconds` into a sound at `rate` frames a second (the first for anything below zero, or NaN).
+pub fn frame_at(seconds: f64, rate: u32) -> u64 {
+    let frame = (seconds * f64::from(rate)).round();
+    if frame > 0.0 { frame as u64 } else { 0 }
+}
+
+/// What [`read_parts_from`] hands a sound decoded from its start to: only what comes from `from_seconds` on.
+struct Skipping<'a> {
+    from_seconds: f64,
+    /// Frames still to leave out, once the rate is known.
+    left: Option<u64>,
+    each: &'a mut dyn FnMut(u32, &[Vec<f32>]) -> bool,
+}
+
+impl Skipping<'_> {
+    fn give(&mut self, rate: u32, part: &[Vec<f32>]) -> bool {
+        let left = self.left.get_or_insert_with(|| frame_at(self.from_seconds, rate));
+        if *left == 0 {
+            return (self.each)(rate, part);
+        }
+        let len = part.first().map_or(0, Vec::len) as u64;
+        if *left >= len {
+            *left -= len;
+            // Nothing to hand on yet: only whether to go on.
+            return (self.each)(rate, &[]);
+        }
+        let from = usize::try_from(*left).unwrap_or(usize::MAX);
+        *left = 0;
+        let rest: Vec<Vec<f32>> = part.iter().map(|c| c.get(from..).unwrap_or_default().to_vec()).collect();
+        (self.each)(rate, &rest)
+    }
 }
 
 /// Whether [`read_from`] gives this WAV or AIFF file's samples exactly as the file holds them, and its sample rate as

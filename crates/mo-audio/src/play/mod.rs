@@ -3,19 +3,21 @@
 //! Sound goes to the output chosen in Settings while it's there, otherwise the computer's default, following it when
 //! it changes. When the output goes (unplugged, or a DAW takes the audio interface for itself) the player opens it
 //! again and the sound carries on from where it was. Opening and reopening happen on the player's own thread, so the
-//! window never waits for them; the output's thread only mixes.
+//! window never waits for them; the output's thread only mixes. A long sound plays as it's read ([`Stream`]).
 
 mod mix;
 mod output;
+mod stream;
 
 pub use output::{Event, Events, Opened, Outputs, Render, SystemOutputs};
+pub use stream::Stream;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use mix::{FromMixer, Mixer, Place, ToMixer};
+use mix::{Flow, FromMixer, Mixer, Place, ToMixer};
 use rtrb::{Consumer, RingBuffer};
 
 use crate::AudioData;
@@ -89,6 +91,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 enum Order {
     Play { id: u64, sound: Arc<AudioData>, start: f64, looping: bool },
+    Stream { id: u64, stream: Stream },
     Seek { id: u64, new_id: u64, seconds: f64 },
     Stop,
     Choose(Option<String>),
@@ -225,6 +228,22 @@ impl Player {
         Ok(())
     }
 
+    /// [`Player::play_if`] for a sound read as it plays ([`Stream`]): from where the stream starts to the end of its
+    /// file, however long. A move ([`Player::seek`]), or the output opened again, reads the file again from there.
+    pub fn play_stream_if<E>(
+        &self,
+        stream: Stream,
+        key: impl Into<String>,
+        wanted: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut now = lock(&self.shared.now);
+        wanted()?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        *now = Some(Now { id, key: key.into(), start: stream.start_seconds() });
+        self.send(Order::Stream { id, stream });
+        Ok(())
+    }
+
     /// Puts `sound` in the place of the loop playing under `key`, going on from where `from` says, given where the
     /// loop is now (both in seconds); `from` can say no (`None`), and is asked with nothing able to start or stop
     /// meanwhile. Only while that loop is the one playing: a stop, or another sound started meanwhile, isn't undone
@@ -319,9 +338,22 @@ impl Drop for Player {
 /// The sound playing, as the player's thread keeps it to start again after the output is reopened.
 struct Playing {
     id: u64,
+    /// The sound, or for one read as it plays, its first part.
     sound: Arc<AudioData>,
+    /// Where it was told to start, or had got to, in seconds.
     start: f64,
     looping: bool,
+    /// For a sound read as it plays: the file, to read it again from another place (none for one made in memory)…
+    source: Option<stream::Source>,
+    /// …and the rest of what was read, until it goes to the output's mixer.
+    flow: Option<Box<Flow>>,
+}
+
+impl Playing {
+    /// Whether it's read as it plays.
+    fn streams(&self) -> bool {
+        self.source.is_some() || self.flow.is_some()
+    }
 }
 
 struct Open {
@@ -401,6 +433,8 @@ impl Keeper {
             FromMixer::Ended(id) => self.ended(id),
             // Freed here, off the output's thread.
             FromMixer::Done(sound) => drop(sound),
+            // Its channel let go, which stops its reader.
+            FromMixer::DoneFlow(flow) => drop(flow),
         }
     }
 
@@ -418,26 +452,36 @@ impl Keeper {
         match order {
             Order::Play { id, sound, start, looping } => {
                 self.reopens = 0;
-                self.playing = Some(Playing { id, sound: Arc::clone(&sound), start, looping });
-                if self.open.is_some() {
-                    self.tell(ToMixer::Play { id, from: start * f64::from(sound.sample_rate), sound, looping });
-                    // After it has started, so a look that finds nothing to do (or can't move) doesn't hold it up.
-                    self.look(false);
-                } else if !self.waiting() {
-                    self.open_fresh();
-                }
+                self.playing = Some(Playing { id, sound, start, looping, source: None, flow: None });
+                self.start_now();
             }
-            Order::Seek { id, new_id, seconds } => {
-                if let Some(p) = self.playing.as_mut().filter(|p| p.id == id) {
+            Order::Stream { id, stream } => {
+                self.reopens = 0;
+                let start = stream.start_seconds();
+                let Stream { source, first, more, start: frame } = stream;
+                let flow = Some(Box::new(Flow::new(frame, more)));
+                self.playing = Some(Playing { id, sound: first, start, looping: false, source, flow });
+                self.start_now();
+            }
+            Order::Seek { id, new_id, seconds } => match self.playing.as_mut().filter(|p| p.id == id) {
+                // Read as it plays: what was read is for where it was, so it's read again from there.
+                Some(p) if p.streams() => {
+                    p.id = new_id;
+                    p.start = seconds;
+                    p.flow = None;
+                    if self.open.is_some() {
+                        self.start_playing();
+                    }
+                }
+                Some(p) => {
                     p.id = new_id;
                     p.start = seconds;
                     let from = seconds * f64::from(p.sound.sample_rate);
                     self.tell(ToMixer::Seek { id, new_id, from });
-                } else {
-                    // It ended just before the move came.
-                    self.ended(new_id);
                 }
-            }
+                // It ended just before the move came.
+                None => self.ended(new_id),
+            },
             Order::Stop => {
                 self.playing = None;
                 self.tell(ToMixer::Stop);
@@ -478,6 +522,43 @@ impl Keeper {
             }
             Order::Quit => {}
         }
+    }
+
+    /// Starts the sound just asked for: on the open output, or by opening one.
+    fn start_now(&mut self) {
+        if self.open.is_some() {
+            self.start_playing();
+            // After it has started, so a look that finds nothing to do (or can't move) doesn't hold it up.
+            self.look(false);
+        } else if !self.waiting() {
+            self.open_fresh();
+        }
+    }
+
+    /// Starts the sound playing on the open output from where it was: a sound read as it plays with what was read of
+    /// it, or once that has gone to a mixer, read again from where it was. One that can't be read again ends.
+    fn start_playing(&mut self) {
+        let Some(p) = self.playing.as_mut() else { return };
+        let order = if !p.streams() {
+            let from = p.start * f64::from(p.sound.sample_rate);
+            ToMixer::Play { id: p.id, sound: Arc::clone(&p.sound), from, looping: p.looping, flow: None }
+        } else if let Some(flow) = p.flow.take() {
+            ToMixer::Play { id: p.id, sound: Arc::clone(&p.sound), from: 0.0, looping: false, flow: Some(flow) }
+        } else {
+            match p.source.as_ref().map(|s| s.read_from(p.start)) {
+                Some(Ok((sound, flow))) => {
+                    ToMixer::Play { id: p.id, sound, from: 0.0, looping: false, flow: Some(flow) }
+                }
+                // It can't be read again: what was playing of it (before a move) stops too.
+                _ => {
+                    let id = p.id;
+                    self.tell(ToMixer::Stop);
+                    self.ended(id);
+                    return;
+                }
+            }
+        };
+        self.tell(order);
     }
 
     /// The sound `id` stopped by itself: if it's still the one playing, it's no longer, and the app is told.
@@ -626,10 +707,7 @@ impl Keeper {
         *lock(&self.shared.place) = Some(Arc::clone(&open.place));
         let old = self.open.replace(open);
         self.let_go(old);
-        if let Some(p) = &self.playing {
-            let from = p.start * f64::from(p.sound.sample_rate);
-            self.tell(ToMixer::Play { id: p.id, sound: Arc::clone(&p.sound), from, looping: p.looping });
-        }
+        self.start_playing();
     }
 
     /// Opens one output (`None`: the default) with a mixer of its own.

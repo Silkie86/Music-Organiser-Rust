@@ -498,6 +498,9 @@ export global SoundsData {
     in property <bool> playing;
     // How much of the picked sound has played, from 0 to 1.
     in property <float> played;
+    // The same for its tile, whose waveform is the sound's first minute only (all the library keeps of it): a longer
+    // sound's tile has played through at a minute in.
+    in property <float> tile-played;
     in-out property <length> panel-width: 400px;
     callback panel-resized(length);
     callback play();
@@ -672,7 +675,7 @@ component SoundTileView inherits Rectangle {
             points: root.tile.points;
             tint: Theme.sound-type(root.tile.colour);
             playing: root.tile.playing;
-            played: root.tile.playing ? SoundsData.played : 1;
+            played: root.tile.playing ? SoundsData.tile-played : 1;
         }
     }
 }

@@ -17,6 +17,7 @@ mod like;
 mod peaks;
 mod sky;
 mod tree;
+mod whole_wave;
 mod yours;
 
 use std::cell::{Cell, RefCell};
@@ -577,25 +578,66 @@ fn points(s: &Sound) -> i32 {
     peaks::with(s, |w| w.len() as i32).unwrap_or(0)
 }
 
+/// The card's waveform for the picked sound `s`, and how many lines across it is: the whole sound, as its play head
+/// and a click on it go. The library keeps the waveform of a sound's first minute, so for a longer one the whole
+/// waveform is read from its file ([`whole_wave`]); until it's back, the first minute shows in its share of the width,
+/// as many lines across as the whole one will be.
+fn card_wave(s: &Sound) -> (String, i32) {
+    let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds);
+    if seconds <= mo_audio::MAX_SECONDS {
+        // Nothing to read for this one: a longer sound's read for the card before it stops.
+        whole_wave::let_go();
+        return (wave(s), points(s));
+    }
+    if let Some(whole) = whole_wave::kept(s) {
+        whole_wave::let_go();
+        return (list::wave_path_of(whole.iter().copied()), whole.len() as i32);
+    }
+    whole_wave::ask(s);
+    let all = whole_wave::POINTS;
+    let first = ((all as f64 * mo_audio::MAX_SECONDS / seconds).round() as usize).clamp(1, all);
+    peaks::with(s, |w| {
+        let rest = std::iter::repeat_n(0.0, all - first);
+        (list::wave_path_of(whole_wave::lines(&w.to_vec(), first).into_iter().chain(rest)), all as i32)
+    })
+    .unwrap_or_default()
+}
+
 /// The waveforms of the sounds on show with these ids are back ([`peaks`]): the tiles show them, and so does the
 /// picked sound's card when it's one of them.
 fn waves_arrived(app: &AppWindow, ids: &[i64]) {
     let (tiles, card) = PAGE.with(|p| {
         let p = p.borrow();
         let s = p.picked.and_then(|at| p.list.sound(at)).filter(|s| ids.contains(&s.id));
-        (p.view == TILES, s.map(|s| (wave(s), points(s))))
+        (p.view == TILES, s.map(card_wave))
     });
     if tiles {
         TILE_ROWS.with(|m| m.notify.reset());
         grid::changed();
     }
-    if let Some((wave, points)) = card {
-        let data = app.global::<SoundsData>();
-        let mut picked = data.get_picked();
-        picked.wave = wave.into();
-        picked.points = points;
-        data.set_picked(picked);
+    if let Some(card) = card {
+        show_card_wave(app, card);
     }
+}
+
+/// A long sound's whole waveform is back ([`whole_wave`]): its card shows it, while it's the sound picked.
+fn whole_wave_arrived(app: &AppWindow, id: i64) {
+    let card = PAGE.with(|p| {
+        let p = p.borrow();
+        p.picked.and_then(|at| p.list.sound(at)).filter(|s| s.id == id).map(card_wave)
+    });
+    if let Some(card) = card {
+        show_card_wave(app, card);
+    }
+}
+
+/// Puts a waveform and its count of lines ([`card_wave`]) on the picked sound's card.
+fn show_card_wave(app: &AppWindow, (wave, points): (String, i32)) {
+    let data = app.global::<SoundsData>();
+    let mut picked = data.get_picked();
+    picked.wave = wave.into();
+    picked.points = points;
+    data.set_picked(picked);
 }
 
 pub(crate) fn new_seed() -> u64 {
@@ -645,6 +687,7 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     let cards = feed.clone();
     wire(app, feed, shortcuts);
     peaks::connect(app);
+    whole_wave::connect(app);
     crate::finder::on_open(Kind::Sound, |app, hit, how| {
         let Ok(id) = hit.id.parse::<i64>() else { return false };
         match how {
@@ -4184,6 +4227,7 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         "model" => "· guessed from how it sounds",
         _ => "",
     };
+    let (wave_shape, wave_points) = card_wave(s);
     PickedSound {
         name: s.name().into(),
         sound_type: now.sound_type.into(),
@@ -4193,9 +4237,9 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         path_tails: ModelRc::new(VecModel::from(
             mo_app::shell::path_tails(&s.path).into_iter().map(SharedString::from).collect::<Vec<_>>(),
         )),
-        wave: wave(s).into(),
-        points: points(s),
-        seconds: a.map_or(0.0, |a| a.seconds.min(mo_audio::MAX_SECONDS)) as f32,
+        wave: wave_shape.into(),
+        points: wave_points,
+        seconds: a.map_or(0.0, |a| a.seconds) as f32,
         facts: ModelRc::new(VecModel::from(facts)),
         favourite: now.favourite,
         own_type: now.own_type.unwrap_or_default().into(),
@@ -4288,16 +4332,19 @@ fn play_picked(app: &AppWindow, from: f64) {
 
 /// Plays the sound at `at` in the list from `from` (0 to 1 of the way through), whether it's picked or not (the
 /// galaxy's sweep plays the stars it passes without picking them), reading at most `most` seconds of it: a sweep only
-/// needs its start, which reads far quicker than a whole loop.
+/// needs its start, which reads far quicker than a whole loop. A sound longer than a minute (or not analysed yet) is
+/// played as it's read instead, to its end however long it is (Solomon's F12 note of 24 Nov 2026: a 5:11 song stopped
+/// a minute in); a sweep still reads only its start.
 fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     let Some((at, path, seconds, trim)) = PAGE.with(|p| {
         let p = p.borrow();
         let s = p.list.sound(at)?;
-        let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds).min(mo_audio::MAX_SECONDS);
+        let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds);
         Some((at, s.path.clone(), seconds, p.trim.then(|| mo_audio::trim::level_of_db(p.trim_db))))
     }) else {
         return;
     };
+    let streams = most >= mo_audio::MAX_SECONDS && !(seconds > 0.0 && seconds <= mo_audio::MAX_SECONDS);
     // A MIDI loop playing, or one still being made, would play over it (or start on top of it later).
     crate::midi::stop_for_another(app);
     crate::curve_editor::call_off_tone();
@@ -4310,14 +4357,15 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         let mut p = p.borrow_mut();
         p.playing = Some((at, seconds.max(0.001)));
         p.play = ask;
-        p.play_reads = most;
-        p.play_trimmed = trim.is_some();
+        // Played as it's read, a click anywhere moves it: the player reads the file again from there.
+        p.play_reads = if streams { f64::INFINITY } else { most };
+        p.play_trimmed = trim.is_some() && !streams;
     });
     playing_changed(app);
     if here {
         return;
     }
-    let job = PlayJob { ask, path, from, seconds, most, trim, window: app.as_weak(), held: Arc::default() };
+    let job = PlayJob { ask, path, from, seconds, most, streams, trim, window: app.as_weak(), held: Arc::default() };
     ask_reader(job);
 }
 
@@ -4367,6 +4415,8 @@ struct PlayJob {
     from: f64,
     seconds: f64,
     most: f64,
+    /// Played as it's read ([`mo_audio::play::Stream`]), to its end, rather than read first.
+    streams: bool,
     /// Trim silence was on when it was asked for, with the level it counts as silence: it starts past the silence at
     /// its start and stops at the end of the sound, not the end of the file.
     trim: Option<f32>,
@@ -4386,7 +4436,7 @@ impl Drop for PlayJob {
 /// (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output, overtaken by a newer sound
 /// or dropped, by this play's number; for a sound the sweep didn't ask for they count nothing.
 fn read_and_play(job: PlayJob) {
-    let PlayJob { ask, ref path, from, seconds, most, trim, ref window, .. } = job;
+    let PlayJob { ask, ref path, from, seconds, most, streams, trim, ref window, .. } = job;
     let (path, window) = (path.clone(), window.clone());
     // Still the newest play, with no stop since.
     let wanted = || {
@@ -4406,10 +4456,19 @@ fn read_and_play(job: PlayJob) {
     sweep_timing::opening(&path, ask);
     // Trimmed, a sweep's short read is read on past the silence at the start, so it still hears `most` of the sound.
     let reads = if trim.is_some() && most < mo_audio::MAX_SECONDS { most + TRIM_LEAD_ROOM } else { most };
-    let went = match mo_audio::read(Path::new(&path), reads) {
-        // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since
-        // wins, rather than this sound starting after it and playing on while the page shows another or none.
-        Ok(mut audio) => {
+    // A long sound plays as it's read, as soon as its first part is (from its start with Trim silence on, past the
+    // silence there); any other is read first, as far as it plays.
+    let read = if streams {
+        let quiet = trim.filter(|_| from == 0.0);
+        mo_audio::play::Stream::open(Path::new(&path), from * seconds, quiet, &|| wanted().is_ok()).map(ToPlay::Stream)
+    } else {
+        mo_audio::read(Path::new(&path), reads).map(ToPlay::Whole)
+    };
+    // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since wins,
+    // rather than this sound starting after it and playing on while the page shows another or none.
+    let went = match read {
+        Ok(ToPlay::Stream(stream)) => player().play_stream_if(stream, ask.to_string(), wanted),
+        Ok(ToPlay::Whole(mut audio)) => {
             let start = match trim {
                 Some(level) => trimmed(&mut audio, from * seconds, most, level),
                 None => from * seconds,
@@ -4441,6 +4500,12 @@ fn read_and_play(job: PlayJob) {
         Err(Unwanted::Overtaken) => sweep_timing::overtaken(&path, ask),
         Err(Unwanted::Stopped) => sweep_timing::dropped(&path, ask),
     }
+}
+
+/// A sound read to play: as it plays, or whole first ([`read_and_play`]).
+enum ToPlay {
+    Stream(mo_audio::play::Stream),
+    Whole(mo_audio::AudioData),
 }
 
 /// How much further a sweep's read goes with Trim silence on, for the silence at the start it skips.
@@ -4608,6 +4673,7 @@ fn ended(key: &str) {
             let data = app.global::<SoundsData>();
             data.set_playing(false);
             data.set_played(1.0);
+            data.set_tile_played(1.0);
         }
     });
 }
@@ -4627,6 +4693,7 @@ fn playing_changed(app: &AppWindow) {
     });
     data.set_playing(picked_plays);
     data.set_played(0.0);
+    data.set_tile_played(0.0);
     redraw();
     // Nothing really plays for the screenshots, so nothing moves the waveform along there.
     if !any || HERE.with(|h| *h.borrow()) {
@@ -4639,7 +4706,10 @@ fn playing_changed(app: &AppWindow) {
             let Some(app) = weak.upgrade() else { return };
             let Some(seconds) = PAGE.with(|p| p.borrow().playing.map(|(_, s)| s)) else { return };
             let at = PLAYER.get().and_then(Player::position).unwrap_or(0.0);
-            app.global::<SoundsData>().set_played((at / seconds).clamp(0.0, 1.0) as f32);
+            let data = app.global::<SoundsData>();
+            data.set_played((at / seconds).clamp(0.0, 1.0) as f32);
+            // A tile's waveform is the sound's first minute: a longer sound's tile has played through by then.
+            data.set_tile_played((at / seconds.min(mo_audio::MAX_SECONDS)).clamp(0.0, 1.0) as f32);
         });
     });
 }
@@ -6048,6 +6118,36 @@ mod tests {
         assert!(!seeks(&p, Some("6"), 15.0));
         assert!(!seeks(&p, None, 2.0));
         assert!(!seeks(&p, Some("5"), 2.0));
+        // A long sound played as it's read: a click anywhere in it moves it, as the player reads it again from there.
+        let streamed = Page { playing: Some((4, 311.0)), play: 6, play_reads: f64::INFINITY, ..Page::default() };
+        assert!(seeks(&streamed, Some("6"), 250.0));
+    }
+
+    #[test]
+    fn a_long_sounds_card_shows_the_whole_of_it() {
+        // The library keeps the waveform of its first minute: 160 lines.
+        let first_minute: Vec<f32> = (0..160).map(|i| 0.1 + i as f32 / 200.0).collect();
+        let analysed = |seconds| mo_sounds::SoundAnalysis {
+            seconds,
+            waveform: first_minute.clone().into(),
+            ..mo_sounds::SoundAnalysis::default()
+        };
+        let mut song = sound(7, r"D:\Songs\06 the future.wma");
+        song.analysis = Some(analysed(300.0));
+        // Five minutes: until the whole of it is read, the first minute fills its fifth of the card, then a flat line,
+        // as many lines across as the whole of it will be (each the loudest of its share).
+        let fifth: Vec<f32> = first_minute.chunks(2).map(|two| two[1]).collect();
+        let rest = std::iter::repeat_n(0.0, whole_wave::POINTS - fifth.len());
+        let wanted = (list::wave_path_of(fifth.iter().copied().chain(rest)), whole_wave::POINTS as i32);
+        assert_eq!((fifth.len(), card_wave(&song)), (whole_wave::POINTS / 5, wanted));
+        // Read: the whole of it.
+        let whole: Vec<f32> = (0..whole_wave::POINTS).map(|i| (i % 7) as f32 / 7.0).collect();
+        whole_wave::keep((7, song.added), whole.clone().into());
+        assert_eq!(card_wave(&song), (list::wave_path_of(whole.into_iter()), whole_wave::POINTS as i32));
+        // A minute or less: the library's waveform is the whole of it.
+        let mut kick = sound(8, r"D:\Samples\Kick.wav");
+        kick.analysis = Some(analysed(0.5));
+        assert_eq!(card_wave(&kick), (list::wave_path_of(first_minute.iter().copied()), 160));
     }
 
     #[test]
