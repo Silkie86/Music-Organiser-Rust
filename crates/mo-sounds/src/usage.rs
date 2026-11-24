@@ -265,7 +265,15 @@ mod tests {
 
     /// A project's file: `song` is which song it's a save of.
     fn file(id: i64, song: u32, recent: bool) -> ProjectFile {
-        ProjectFile { id, path: format!("C:\\Songs\\{id}.flp"), mtime: 0, song, song_name: "Song".into(), recent }
+        ProjectFile {
+            id,
+            path: format!("C:\\Songs\\{id}.flp"),
+            mtime: 0,
+            song,
+            song_name: "Song".into(),
+            recent,
+            copy: false,
+        }
     }
 
     #[test]

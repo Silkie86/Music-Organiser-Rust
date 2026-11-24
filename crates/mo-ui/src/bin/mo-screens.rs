@@ -3779,6 +3779,7 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                 song: song_of(id),
                 song_name: song.into(),
                 recent: id < 6,
+                copy: false,
             };
             (id, file)
         })

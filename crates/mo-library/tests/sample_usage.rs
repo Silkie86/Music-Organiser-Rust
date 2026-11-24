@@ -127,6 +127,38 @@ fn the_saves_the_songs_page_leaves_out_dont_count() {
 }
 
 #[test]
+fn a_copy_of_a_save_in_another_folder_says_so() {
+    // Night drive, and the same file copied to a backup folder later: the Songs page shows the song once, from the one
+    // found first, and hides the copy.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library-usage");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("copies.db");
+    for end in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{end}", path.display()));
+    }
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        "CREATE TABLE song_choices (kind TEXT, a TEXT, b TEXT, PRIMARY KEY (kind, a));
+         CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE, name TEXT NOT NULL,
+             daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, file_missing INTEGER DEFAULT 0,
+             note_count INTEGER, track_count INTEGER);
+         CREATE TABLE samples (project_id INTEGER, path TEXT, found INTEGER);
+         INSERT INTO projects (id, path, name, daw, folder, size, mtime, note_count, track_count) VALUES
+             (1, 'C:\\beats\\Night drive.flp', 'Night drive', 'FL Studio', 'C:\\beats', 52000, 1717200000, 120, 8),
+             (2, 'E:\\Backup\\beats\\Night drive.flp', 'Night drive', 'FL Studio', 'E:\\Backup\\beats', 52000,
+              1748736000, 120, 8);
+         INSERT INTO samples (project_id, path, found) VALUES (1, 'C:\\s\\kick.wav', 1), (2, 'C:\\s\\kick.wav', 1);",
+    )
+    .unwrap();
+    drop(c);
+    let lib = Library::open_read_only(&path).unwrap();
+    let got = lib.sample_usage_with_projects(since(), UsageRules::default(), &|_| true).unwrap();
+    let (save, copy) = (&got.projects[&1], &got.projects[&2]);
+    assert_eq!((save.song, &*save.song_name, save.copy), (copy.song, "Night drive", false));
+    assert!(copy.copy);
+}
+
+#[test]
 fn an_older_library_without_unplayed_counts_everything() {
     let lib = Library::open_read_only(&make("older.db", false)).unwrap();
     for rules in [UsageRules::default(), UsageRules { needs_notes: true, not_muted_in_newest: true }] {

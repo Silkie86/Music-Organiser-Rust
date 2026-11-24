@@ -6350,6 +6350,7 @@ mod tests {
             song: 0,
             song_name: "Night drive".into(),
             recent: false,
+            copy: false,
         };
         let lib = Library::new(sounds, Vec::new(), &LikedWeights::default()).with_usage(
             HashMap::from([(1, Usage { projects: 1, songs: 1, project_ids: vec![5], ..Usage::default() })]),

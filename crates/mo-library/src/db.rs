@@ -582,6 +582,9 @@ impl Library {
         if !self.has("samples") {
             return Ok(SampleUsage::default());
         }
+        // One read for all of it, so a scan writing to the library meanwhile can't add a save whose samples are counted
+        // here but which isn't among the saves grouped into songs (it would count as a song of its own).
+        let _read = self.conn.unchecked_transaction()?;
         // A time the clocks skipped (the hour lost in spring) is read as the hour after; one they went through twice,
         // as the first.
         let since = recent_since
@@ -608,11 +611,15 @@ impl Library {
         let first_uses = crate::first_use::FirstUses::new(&songs, &real);
         // Each save's song (its place in `songs`) and the song's name, for the projects counted to say which song
         // they're a save of (Solomon's F12 note of 23 Nov 2026: a sound "used in 44 projects" was in 44 saves of one).
-        let mut song_of: HashMap<i64, (u32, Arc<str>)> = HashMap::new();
+        // A copy (the same file as one of the song's saves, in another folder) says so: the Songs page hides it.
+        let mut song_of: HashMap<i64, (u32, Arc<str>, bool)> = HashMap::new();
         for (at, song) in songs.iter().enumerate() {
             let (at, name) = (u32::try_from(at).unwrap_or(u32::MAX), Arc::<str>::from(song.name.as_str()));
-            for save in song.saves().chain(&song.copies) {
-                song_of.insert(save.id, (at, name.clone()));
+            for save in song.saves() {
+                song_of.insert(save.id, (at, name.clone(), false));
+            }
+            for copy in &song.copies {
+                song_of.insert(copy.id, (at, name.clone(), true));
             }
         }
         // A project the saves didn't list (it can't be grouped) is a song of its own, numbered after the rest, unless
@@ -666,7 +673,7 @@ impl Library {
             // The project's file, the first time it's met.
             if let std::collections::hash_map::Entry::Vacant(e) = projects.entry(project) {
                 let path = text(r, "project_path");
-                let (song, song_name) = match song_of.get(&project) {
+                let (song, song_name, copy) = match song_of.get(&project) {
                     Some(song) => song.clone(),
                     None if !listed(&path) => {
                         hidden.insert(project);
@@ -676,11 +683,11 @@ impl Library {
                         let song = alone;
                         alone = alone.saturating_add(1);
                         let name = crate::songs::split(mo_formats::paths::stem(mo_formats::paths::file_name(&path))).0;
-                        (song, Arc::from(name.as_str()))
+                        (song, Arc::from(name.as_str()), false)
                     }
                 };
                 let recent = mtime.is_some_and(|m| m >= since);
-                e.insert(ProjectFile { id: project, path, mtime: mtime.unwrap_or(0), song, song_name, recent });
+                e.insert(ProjectFile { id: project, path, mtime: mtime.unwrap_or(0), song, song_name, recent, copy });
             }
             let key = case::key(&path);
             let group = match groups.entry(key) {
@@ -746,6 +753,9 @@ pub struct ProjectFile {
     pub song_name: Arc<str>,
     /// Whether it was saved since the date the counts were asked for (as [`SampleUse::recent`] counts).
     pub recent: bool,
+    /// The same file as one of its song's saves, found in another folder ([`crate::songs::Song::copies`]): the Songs
+    /// page hides it, and doesn't count it as a save.
+    pub copy: bool,
 }
 
 /// Which saves count as using a sample (Settings, Sounds), for the DAWs whose reader can tell (FL Studio so far).

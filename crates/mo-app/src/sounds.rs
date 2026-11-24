@@ -3,7 +3,7 @@
 //! sound's search words are lower-cased once when the list is made, and filtering and sorting spread over every core
 //! (rule 21). Call [`SoundList::view`] off the window's thread; it takes well under a second for 357,000 sounds.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDateTime};
@@ -1995,19 +1995,19 @@ pub fn projects_card(
         let note = "Your songs haven't been counted yet.".to_owned();
         return ProjectsCard { title: "Used in".to_owned(), every_note: note.clone(), note, ..ProjectsCard::default() };
     };
-    let songs = by_song(own);
+    let (songs, own) = by_song(own);
     let title = format!("Used in {}", crate::songs::thousands(songs.len()));
     if !own.is_empty() {
-        return ProjectsCard { title, ..listed(dates, own, &songs, String::new(), "it") };
+        return ProjectsCard { title, ..listed(dates, &own, &songs, String::new(), "it") };
     }
     match like {
         Some((name, theirs)) if !theirs.is_empty() => {
-            let songs = by_song(theirs);
+            let (songs, theirs) = by_song(theirs);
             let lead = format!(
                 "No song of yours uses it yet. {name}, which it sounds like, is in {}.",
                 crate::songs::plural(songs.len(), "song")
             );
-            ProjectsCard { title, ..listed(dates, theirs, &songs, lead, name) }
+            ProjectsCard { title, ..listed(dates, &theirs, &songs, lead, name) }
         }
         _ => {
             let note = "No song of yours uses it yet.".to_owned();
@@ -2017,11 +2017,14 @@ pub fn projects_card(
 }
 
 /// `saves` (newest first) as songs, newest first: each song once, by its newest save there, with how many of them
-/// are its.
-fn by_song<'a>(saves: &[&'a ProjectFile]) -> Vec<(&'a ProjectFile, usize)> {
+/// are its; and the saves that count, in their order. A copy (the same file as one of its song's saves, in another
+/// folder, which the Songs page hides) counts only for a song with none of its own saves there.
+fn by_song<'a>(saves: &[&'a ProjectFile]) -> (Vec<(&'a ProjectFile, usize)>, Vec<&'a ProjectFile>) {
+    let own: HashSet<u32> = saves.iter().filter(|s| !s.copy).map(|s| s.song).collect();
+    let counted: Vec<&ProjectFile> = saves.iter().copied().filter(|s| !s.copy || !own.contains(&s.song)).collect();
     let mut at: HashMap<u32, usize> = HashMap::new();
     let mut songs: Vec<(&ProjectFile, usize)> = Vec::new();
-    for &save in saves {
+    for &save in &counted {
         match at.get(&save.song) {
             Some(&i) => songs[i].1 += 1,
             None => {
@@ -2030,7 +2033,7 @@ fn by_song<'a>(saves: &[&'a ProjectFile]) -> Vec<(&'a ProjectFile, usize)> {
             }
         }
     }
-    songs
+    (songs, counted)
 }
 
 /// The card's two lists for `saves` (newest first) of the sound called `what` ("it", or the one it sounds like), the
@@ -3636,7 +3639,7 @@ mod tests {
 
     /// A save of song number `song`, called `name`.
     fn save_of(song: u32, name: &str, id: i64, path: &str, mtime: i64) -> ProjectFile {
-        ProjectFile { id, path: path.to_owned(), mtime, song, song_name: name.into(), recent: false }
+        ProjectFile { id, path: path.to_owned(), mtime, song, song_name: name.into(), recent: false, copy: false }
     }
 
     #[test]
@@ -3723,6 +3726,29 @@ mod tests {
                                      newest 50 of 60 saves."
         );
         assert!(card.every_tip.starts_with("Each save that uses Boom Kick (60)"), "{}", card.every_tip);
+    }
+
+    #[test]
+    fn a_copy_of_a_save_in_another_folder_isnt_a_save_of_its_own() {
+        // The same file as one of its song's saves, copied to a backup folder later: the Songs page hides it.
+        let d = RealDates::now();
+        let save = save_of(0, "Night drive", 1, r"K:\FL\Night drive.flp", 1_700_000_000);
+        let copy =
+            ProjectFile { copy: true, ..save_of(0, "Night drive", 2, r"E:\Backup\Night drive.flp", 1_700_000_100) };
+        let card = projects_card(&d, Some(&[&copy, &save][..]), None);
+        assert_eq!(card.title, "Used in 1");
+        let lines: Vec<(i64, &str)> = card.lines.iter().map(|l| (l.id, l.saves.as_str())).collect();
+        assert_eq!(lines, [(1, "")]);
+        // Every save would list the same: one save.
+        assert!(!card.more_saves);
+        assert_eq!(card.every_lines.iter().map(|l| l.id).collect::<Vec<_>>(), [1]);
+        // A song whose only save that uses the sound is a copy still uses it: listed by the copy.
+        let card = projects_card(&d, Some(&[&copy][..]), None);
+        assert_eq!((card.title.as_str(), card.lines[0].id), ("Used in 1", 2));
+        // The sound it sounds like, the same.
+        let card = projects_card(&d, Some(&[][..]), Some(("Boom Kick", &[&copy, &save][..])));
+        assert_eq!((card.lines.len(), card.every_lines.len()), (1, 1));
+        assert!(card.note.ends_with("is in 1 song."), "{}", card.note);
     }
 
     #[test]
