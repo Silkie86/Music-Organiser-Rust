@@ -300,8 +300,8 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     // Ctrl+K finds your presets before this page is first shown: they're read once, in the background.
     crate::finder::when_opening(read_before_shown);
     // And a little after the start, each in its turn, so the first visit has its lists at once.
-    crate::ahead::after(app, crate::ahead::PRESETS, read_before_shown);
-    crate::ahead::after(app, crate::ahead::CURVES, read_curves_before_shown);
+    crate::ahead::after(app, crate::ahead::Page::Presets, read_before_shown);
+    crate::ahead::after(app, crate::ahead::Page::Curves, read_curves_before_shown);
     // The app may start on this page: it was shown before the page knew where the library is.
     if crate::on_presets_page(app.get_place()) {
         // On Curves, the curves are read now: the place was noted before the page could read them.
@@ -1420,6 +1420,7 @@ fn read_sounds(_app: &AppWindow) {
             log::warning("Presets", e);
         }
         on_window(move |app| {
+            crate::ahead::done(app, crate::ahead::Page::Presets);
             let again = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.reading = None;
@@ -2773,6 +2774,7 @@ fn read_curves(_app: &AppWindow) {
         // Guarded, as the sounds' read is (RA-8).
         let result = background::guarded(|| scan_curves(&at)).and_then(|read| read);
         on_window(move |app| {
+            crate::ahead::done(app, crate::ahead::Page::Curves);
             let again = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.curves_reading = None;

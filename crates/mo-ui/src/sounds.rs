@@ -728,7 +728,7 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
         wanted();
     } else {
         // Nothing has asked for the sounds yet: they're read a little after the start all the same.
-        crate::ahead::after(app, crate::ahead::SOUNDS, |_| wanted());
+        crate::ahead::after(app, crate::ahead::Page::Sounds, |_| wanted());
     }
 }
 
@@ -2476,6 +2476,7 @@ fn none_to_show(app: &AppWindow, title: &str, text: String) {
 
 fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
     let _doing = crate::watchdog::doing("Sounds: the sounds were read");
+    crate::ahead::done(app, crate::ahead::Page::Sounds);
     let read = match read {
         Ok(read) => *read,
         Err(why) => {

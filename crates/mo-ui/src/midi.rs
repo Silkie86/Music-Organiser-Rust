@@ -873,12 +873,12 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         shown(app);
     } else {
         // The index is read a little after the start, so the first visit has its list at once.
-        crate::ahead::after(app, crate::ahead::MIDI, read_before_shown);
+        crate::ahead::after(app, crate::ahead::Page::Midi, read_before_shown);
     }
 }
 
 /// Reads the index once, in the background, for a page that hasn't been shown yet: a little after the start
-/// ([`crate::ahead::MIDI`]) or when Ctrl+K opens, whichever is first. Ctrl+K gets its list of your parts, and the
+/// ([`crate::ahead::Page::Midi`]) or when Ctrl+K opens, whichever is first. Ctrl+K gets its list of your parts, and the
 /// read is kept for the page, which shows it at once on its first visit. Without the reading of your MIDI the page
 /// itself starts then. (It was once let go after two minutes unused, to hold less memory, review M-3; Solomon chose
 /// no wait on the page over that, 19 Nov 2026.)
@@ -912,6 +912,7 @@ fn read_before_shown(app: &AppWindow) {
 
 /// The read made ahead of the page is here: the page takes it if it showed meanwhile, else it's kept for it.
 fn ahead_arrived(app: &AppWindow, loaded: Result<Loaded, String>) {
+    crate::ahead::done(app, crate::ahead::Page::Midi);
     let loaded = match loaded {
         // Settings' smallest part changed while it was read.
         Ok(l) if l.smallest != SMALLEST.load(Ordering::Relaxed) => return remake_ahead(app, l),
@@ -1393,6 +1394,7 @@ fn guarded_load(library: &Path) -> Result<Loaded, String> {
 
 /// The index has been read: the page shows it.
 pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
+    crate::ahead::done(app, crate::ahead::Page::Midi);
     let data = app.global::<MidiData>();
     let loaded = match loaded {
         Ok(l) => l,
