@@ -889,6 +889,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     stopping_by_click(&app, &window)?;
     keys_come_back_checks(&app, &window)?;
     developer_keeps_its_place(&app, &window)?;
+    developer_checklist_end(&app, &window, &out)?;
     short_swept_card(&app, &window, &out)?;
     swept_card_checks(&app, &window)?;
     rediscover_without_fingerprints(&app, &window, &out)?;
@@ -4399,6 +4400,29 @@ fn developer_keeps_its_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWin
     if other != kept || !same_in(&again, &down, LIST) {
         return Err("Developer: after the General tab the checklist was no longer where it was left".into());
     }
+    Ok(())
+}
+
+/// Settings › Developer turned to the end of the beta checklist: its last steps (the Self-check ones) end inside its
+/// card, above the This build card (Solomon's F12 note of 24 Nov: "this build is covering the test results", the
+/// wrapped How lines measured at one line's height). Shot as settings-developer-end.png.
+fn developer_checklist_end(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = app.global::<mo_ui::SettingsData>();
+    start_on(app, Place::Settings);
+    data.invoke_tab_picked(4);
+    capture(window);
+    // To the page's end: the checklist's last steps, This build and Activity cards.
+    scroll(window, 900.0, 500.0, -60.0 * PAGE_DOWN);
+    capture(window);
+    let pixels = capture(window);
+    image::save_buffer(out.join("settings-developer-end.png"), &pixels, WIDTH, HEIGHT, image::ExtendedColorType::Rgb8)?;
+    scroll(window, 900.0, 500.0, 80.0 * PAGE_DOWN);
+    data.invoke_tab_picked(0);
+    capture(window);
     Ok(())
 }
 
