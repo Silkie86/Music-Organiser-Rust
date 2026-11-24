@@ -57,14 +57,14 @@ use std::time::{Duration, Instant};
 pub const WIDTH: f64 = 1280.0;
 pub const HEIGHT: f64 = 800.0;
 /// The smallest the window can be dragged: the filter column, and beside it the Sounds tab's widest row of buttons
-/// (the playing row, with Match tempo and In Bitwig's Sampler showing).
-pub const LEAST_WIDTH: f64 = 720.0;
-/// Below this many points wide the folder tree folds to its tab, and opens over the list for a while when clicked.
-const TREE_NARROW: f32 = 1150.0;
+/// (the playing row, with Match tempo and In Bitwig's Sampler showing), with the folder tree's tab between them.
+pub const LEAST_WIDTH: f64 = 764.0;
 pub const LEAST_HEIGHT: f64 = 560.0;
 /// The biggest: more than any screen today, so a DAW that asks for a silly size doesn't get a picture that big.
 pub const MOST_WIDTH: f64 = 7680.0;
 pub const MOST_HEIGHT: f64 = 4320.0;
+/// Below this many points wide the folder tree folds to its tab, and opens over the list for a while when clicked.
+const TREE_NARROW: f32 = 1150.0;
 
 /// How often the window's timer runs: Slint's timers and animations, and what background threads found.
 const TICK: Duration = Duration::from_millis(16);
@@ -1027,11 +1027,13 @@ impl Shown {
         self.fill_in_chords();
         let slots = Arc::clone(&self.slots);
         let track = lock(&self.instance.track).clone();
+        // The app's sample folders and hidden folders: on their own thread, as a sleeping drive may keep it waiting.
+        let folders = Arc::clone(&self.slots);
+        background("mo-plugin-folders", move || *lock(&folders.folders) = Some(crate::folders::read()));
         background("mo-plugin-library", move || {
             // As the app's Sounds page left Hide silent sounds, before the list's first view.
             slots.shows_silent.store(library::shows_silent(), Ordering::Release);
             slots.hides_copies.store(library::hides_copies(), Ordering::Release);
-            *lock(&slots.folders) = Some(crate::folders::read());
             let read = library::read();
             // The types the track's name names, among the library's (it goes over every sound: not on the panel's
             // thread).
@@ -1239,7 +1241,6 @@ impl Shown {
         }
     }
 
-    /// Record: what it records from, its button, and the last take as a line to hear and drag into the project.
     /// The folder tree beside the filter column ([`crate::folders`]): a tick narrows the list to the folder's sounds,
     /// the arrow, its search and folding it only change how it's shown.
     fn fill_in_tree<C: Fn(&dyn Fn(&mut Asked, Option<&Library>)) + 'static>(&self, changed: &Rc<C>) {
@@ -1258,27 +1259,9 @@ impl Shown {
             })
         };
         let change = Rc::clone(changed);
-        panel.on_tree_toggled(move |path| {
-            change(&|a, _| {
-                // A hidden folder's line isn't picked: it's shown again from its chip or menu.
-                let k = mo_app::sound_folders::key(&path);
-                if !a.filters.hidden_folders.iter().any(|h| mo_app::sound_folders::key(h) == k) {
-                    mo_app::sound_folders::toggle_pick(&mut a.filters.folders, &path);
-                }
-            });
-        });
+        panel.on_tree_toggled(move |path| change(&|a, library| crate::folders::ticked(&path, a, library)));
         let change = Rc::clone(changed);
-        panel.on_tree_taken_off(move |path, hidden| {
-            change(&|a, _| {
-                let f = &mut a.filters;
-                if hidden {
-                    let k = mo_app::sound_folders::key(&path);
-                    f.hidden_folders.retain(|h| mo_app::sound_folders::key(h) != k);
-                } else {
-                    mo_app::sound_folders::toggle_pick(&mut f.folders, &path);
-                }
-            });
-        });
+        panel.on_tree_taken_off(move |path, hidden| change(&|a, _| crate::folders::taken_off(&path, hidden, a)));
         let change = Rc::clone(changed);
         panel.on_tree_cleared(move || change(&|a, _| a.filters.folders.clear()));
         let (column, again) = (Rc::clone(&self.column), Rc::clone(&shown));
@@ -1306,26 +1289,32 @@ impl Shown {
             again();
         });
         let (column, asked, weak) = (Rc::clone(&self.column), Rc::clone(&self.asked), panel.as_weak());
+        let lines = Rc::clone(&self.lines);
         panel.on_tree_menu_asked(move |path| {
             column.tree.borrow_mut().menu_for = path.to_string();
             if let Some(panel) = weak.upgrade() {
-                let lines = crate::folders::menu(&asked.borrow(), &path);
+                let library = lines.library.borrow().clone();
+                let lines = crate::folders::menu(&asked.borrow(), library.as_deref(), &path);
                 panel.set_tree_menu(ModelRc::new(VecModel::from(lines)));
             }
         });
         let (column, lines, change) = (Rc::clone(&self.column), Rc::clone(&self.lines), Rc::clone(changed));
         panel.on_tree_menu_chosen(move |id| {
             let path = column.tree.borrow().menu_for.clone();
+            if path.is_empty() {
+                return;
+            }
             if id == "open-all" {
                 let library = lines.library.borrow().clone();
                 crate::folders::opened_inside(&path, library.as_deref(), &column.tree);
                 shown();
             } else {
-                change(&|a, _| crate::folders::chosen(&id, &path, a));
+                change(&|a, library| crate::folders::chosen(&id, &path, a, library));
             }
         });
     }
 
+    /// Record: what it records from, its button, and the last take as a line to hear and drag into the project.
     fn fill_in_record(&self) {
         let panel = &self.panel;
         let recorder = &self.instance.recorder;
@@ -1947,18 +1936,27 @@ impl Shown {
                     for t in std::mem::take(&mut *lock(&self.slots.track_types)) {
                         self.asked.borrow_mut().filters.toggle_type(&t);
                     }
-                    // The folders the app hides are hidden here too, below the app's sample folders.
-                    if let Some(settings) = take(&self.slots.folders) {
-                        let mut asked = self.asked.borrow_mut();
-                        asked.filters.hidden_folders = settings.hidden;
-                        asked.filters.folder_tops = settings.tops;
-                        self.column.tree.borrow_mut().away = settings.away.into_iter().collect();
-                    }
                     self.column.show(&self.panel, Some(&library), &self.asked.borrow());
                     like_wanted(&library, &self.asked.borrow(), &self.slots);
                     view(library, self.asked.borrow().clone(), Arc::clone(&self.slots));
                 }
                 Read::Not(why) => self.panel.set_status(why.into()),
+            }
+        }
+        // The folders the app hides are hidden here too, below the app's sample folders: the list again once it's
+        // there (before it is, the first view takes them).
+        if let Some(settings) = take(&self.slots.folders) {
+            {
+                let mut asked = self.asked.borrow_mut();
+                asked.filters.hidden_folders = settings.hidden;
+                asked.filters.folder_tops = settings.tops;
+            }
+            self.column.tree.borrow_mut().away = settings.away.into_iter().collect();
+            let library = self.lines.library.borrow().clone();
+            let asked = self.asked.borrow().clone();
+            self.column.show(&self.panel, library.as_deref(), &asked);
+            if let Some(library) = library {
+                view(library, asked, Arc::clone(&self.slots));
             }
         }
         // The sounds like your favourites became known (whichever panel asked for them): the list again, once.
@@ -1981,7 +1979,9 @@ impl Shown {
                 let asked = self.asked.borrow();
                 !asked.filters.show_silent && library.as_ref().is_some_and(|l| l.list.silent() > 0)
             };
-            let narrowed = self.asked.borrow().any() || hiding_silent;
+            // So do folders hidden (kept through Clear, as the app keeps them).
+            let narrowed =
+                self.asked.borrow().any() || hiding_silent || !self.asked.borrow().filters.hidden_folders.is_empty();
             self.panel.set_status(count_line(total, narrowed.then_some(found.len())).into());
             self.panel.set_picked(-1);
             *self.column.counts.borrow_mut() = Some(counts);

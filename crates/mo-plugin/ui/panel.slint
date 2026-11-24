@@ -718,26 +718,32 @@ export component Panel inherits Window {
                 }
             }
             // The folder tree, as on the app's Sounds page: only the folders that hold sounds the other filters let
-            // through, each with how many. Folded to its tab in a narrow window.
-            FolderTree {
-                lines: root.tree-lines;
-                picks: root.tree-picks;
-                picked-words: root.tree-picked;
-                note: root.tree-note;
-                folded: root.tree-folded;
-                narrow: root.tree-narrow;
-                any-picked: root.tree-any;
-                search <=> root.tree-search;
-                kept-y <=> root.tree-kept-y;
-                toggled(path) => { root.tree-toggled(path); }
-                opened(path) => { root.tree-opened(path); }
-                taken-off(path, hidden) => { root.tree-taken-off(path, hidden); }
-                search-edited(words) => { root.tree-search-edited(words); }
-                cleared => { root.tree-cleared(); }
-                fold => { root.tree-fold(); }
-                right-clicked(path, x, y) => {
-                    root.tree-menu-asked(path);
-                    tree-menu.open-at(x, y);
+            // through, each with how many. Folded to its tab in a narrow window, where a click on the tab opens it
+            // over the list (its room in the row stays the tab's: above the list, not beside it).
+            Rectangle {
+                width: tree.room - Space.lg;
+                z: 1;
+                tree := FolderTree {
+                    height: parent.height;
+                    lines: root.tree-lines;
+                    picks: root.tree-picks;
+                    picked-words: root.tree-picked;
+                    note: root.tree-note;
+                    folded: root.tree-folded;
+                    narrow: root.tree-narrow;
+                    any-picked: root.tree-any;
+                    search <=> root.tree-search;
+                    kept-y <=> root.tree-kept-y;
+                    toggled(path) => { root.tree-toggled(path); }
+                    opened(path) => { root.tree-opened(path); }
+                    taken-off(path, hidden) => { root.tree-taken-off(path, hidden); }
+                    search-edited(words) => { root.tree-search-edited(words); }
+                    cleared => { root.tree-cleared(); }
+                    fold => { root.tree-fold(); }
+                    right-clicked(path, x, y) => {
+                        root.tree-menu-asked(path);
+                        tree-menu.open-at(x, y);
+                    }
                 }
             }
             VerticalLayout {

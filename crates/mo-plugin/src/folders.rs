@@ -24,10 +24,11 @@ pub struct FolderSettings {
 }
 
 /// Reads them: the sample folders from the app's song library, the hidden folders from its settings file, and each
-/// sample folder's drive. Reads files: off the panel's thread.
+/// sample folder's drive. Reads files and asks drives that may be asleep: on a thread of its own, so the list never
+/// waits for it.
 pub fn read() -> FolderSettings {
     let data = mo_app::paths::data_dir();
-    let tops = mo_library::Library::open_read_only(&data.join("library.db"))
+    let tops = mo_library::Library::open_read_only(&mo_library::songs_db::to_read(&data))
         .and_then(|l| l.list_setting("sample_folders"))
         .unwrap_or_default();
     let away = tops.iter().filter(|t| !std::path::Path::new(t.as_str()).exists()).map(|t| tree::key(t)).collect();
@@ -119,11 +120,13 @@ pub fn show(
 
 /// The right-click menu of the line at `path`: pick it (with its folders, or alone), hide it on this panel or show it
 /// again, and open every folder inside it. No line has a key: each is for the line clicked.
-pub fn menu(asked: &Asked, path: &str) -> Vec<MenuItem> {
+pub fn menu(asked: &Asked, library: Option<&Library>, path: &str) -> Vec<MenuItem> {
     let k = tree::key(path);
     let f = &asked.filters;
     let pick = f.folders.iter().find(|p| tree::key(&p.path) == k);
     let hidden = f.hidden_folders.iter().any(|h| tree::key(h) == k);
+    // Hidden itself or inside a hidden folder: it can't be picked (it would show nothing).
+    let hidden_at = hidden || hidden_within(asked, library, path);
     let line = |what: &str, id: &str, enabled: bool| MenuItem {
         what: what.into(),
         key: SharedString::new(),
@@ -131,7 +134,7 @@ pub fn menu(asked: &Asked, path: &str) -> Vec<MenuItem> {
         enabled,
     };
     vec![
-        line(if pick.is_some() { "Take this folder off" } else { "Pick this folder" }, "pick", !hidden),
+        line(if pick.is_some() { "Take this folder off" } else { "Pick this folder" }, "pick", !hidden_at),
         line(
             if pick.is_some_and(|p| p.just_this) {
                 "With the folders inside it"
@@ -139,7 +142,7 @@ pub fn menu(asked: &Asked, path: &str) -> Vec<MenuItem> {
                 "Just this folder (not the ones inside)"
             },
             "just",
-            !hidden,
+            !hidden_at,
         ),
         line(if hidden { "Show this folder again here" } else { "Hide this folder here" }, "hide", true),
         MenuItem { enabled: true, ..MenuItem::default() },
@@ -147,13 +150,44 @@ pub fn menu(asked: &Asked, path: &str) -> Vec<MenuItem> {
     ]
 }
 
+/// The folder at `path` is hidden on this panel, itself or as a folder inside one hidden.
+pub fn hidden_within(asked: &Asked, library: Option<&Library>, path: &str) -> bool {
+    let k = tree::key(path);
+    asked.filters.hidden_folders.iter().any(|h| tree::key(h) == k)
+        || library.is_some_and(|l| l.list.folder_hidden(&asked.filters, path))
+}
+
+/// A tick on the line at `path`: picks it, or takes its pick off. A hidden folder's line (or one inside it) isn't
+/// picked: it's shown again from its chip or menu.
+pub fn ticked(path: &str, asked: &mut Asked, library: Option<&Library>) {
+    if !hidden_within(asked, library, path) {
+        tree::toggle_pick(&mut asked.filters.folders, path);
+    }
+}
+
+/// A chip's ×: its pick taken off, or its hidden folder shown again (`hidden`). Only ever takes off, so a chip
+/// clicked after its pick went another way changes nothing.
+pub fn taken_off(path: &str, hidden: bool, asked: &mut Asked) {
+    let k = tree::key(path);
+    let f = &mut asked.filters;
+    if hidden {
+        f.hidden_folders.retain(|h| tree::key(h) != k);
+    } else {
+        f.folders.retain(|p| tree::key(&p.path) != k);
+    }
+}
+
 /// What a chosen menu line (`id`) changes in `asked`, for the line at `path`: picks it, picks it alone or with its
 /// folders, or hides it here (or shows it again).
-pub fn chosen(id: &str, path: &str, asked: &mut Asked) {
+pub fn chosen(id: &str, path: &str, asked: &mut Asked, library: Option<&Library>) {
+    if path.is_empty() {
+        return;
+    }
+    let within = hidden_within(asked, library, path);
     let f = &mut asked.filters;
     match id {
-        "pick" => tree::toggle_pick(&mut f.folders, path),
-        "just" => tree::toggle_just_this(&mut f.folders, path),
+        "pick" if !within => tree::toggle_pick(&mut f.folders, path),
+        "just" if !within => tree::toggle_just_this(&mut f.folders, path),
         "hide" => tree::toggle_hidden(&mut f.hidden_folders, &mut f.folders, path),
         _ => {}
     }
@@ -178,21 +212,31 @@ mod tests {
     fn menu_lines_pick_alone_and_hide() {
         let mut asked = Asked::default();
         let path = r"G:\Samples\Kicks";
-        assert_eq!(menu(&asked, path)[0].what, "Pick this folder");
-        chosen("pick", path, &mut asked);
+        assert_eq!(menu(&asked, None, path)[0].what, "Pick this folder");
+        chosen("pick", path, &mut asked, None);
         assert_eq!(asked.filters.folders.len(), 1);
-        assert_eq!(menu(&asked, path)[0].what, "Take this folder off");
-        chosen("just", path, &mut asked);
+        assert_eq!(menu(&asked, None, path)[0].what, "Take this folder off");
+        chosen("just", path, &mut asked, None);
         assert!(asked.filters.folders[0].just_this);
-        assert_eq!(menu(&asked, path)[1].what, "With the folders inside it");
+        assert_eq!(menu(&asked, None, path)[1].what, "With the folders inside it");
         // Hiding it takes its pick off, and its pick lines can't be chosen until it's shown again.
-        chosen("hide", path, &mut asked);
+        chosen("hide", path, &mut asked, None);
         assert!(asked.filters.folders.is_empty());
         assert_eq!(asked.filters.hidden_folders.len(), 1);
-        let lines = menu(&asked, path);
+        let lines = menu(&asked, None, path);
         assert!(!lines[0].enabled && !lines[1].enabled);
         assert_eq!(lines[2].what, "Show this folder again here");
-        chosen("hide", path, &mut asked);
+        chosen("pick", path, &mut asked, None);
+        ticked(path, &mut asked, None);
+        assert!(asked.filters.folders.is_empty(), "a hidden folder isn't picked");
+        chosen("hide", path, &mut asked, None);
         assert!(asked.filters.hidden_folders.is_empty());
+        // A chip's × only takes off: clicked again, it doesn't pick the folder back.
+        ticked(path, &mut asked, None);
+        taken_off(path, false, &mut asked);
+        taken_off(path, false, &mut asked);
+        assert!(asked.filters.folders.is_empty());
+        chosen("pick", "", &mut asked, None);
+        assert!(asked.filters.folders.is_empty(), "no line, no pick");
     }
 }

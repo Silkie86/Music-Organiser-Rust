@@ -197,6 +197,8 @@ fn menu_for(p: &Page, path: &str) -> Vec<MenuItem> {
     let k = tree::key(path);
     let pick = p.filters.folders.iter().find(|f| tree::key(&f.path) == k);
     let hidden = p.filters.hidden_folders.iter().any(|h| tree::key(h) == k);
+    // Hidden itself or inside a hidden folder: it can't be picked (it would show nothing).
+    let hidden_at = hidden || p.list.folder_hidden(&p.filters, path);
     let line = |what: &str, id: &str, enabled: bool| MenuItem {
         what: what.into(),
         key: SharedString::new(),
@@ -204,7 +206,7 @@ fn menu_for(p: &Page, path: &str) -> Vec<MenuItem> {
         enabled,
     };
     vec![
-        line(if pick.is_some() { "Take this folder off" } else { "Pick this folder" }, "pick", !hidden),
+        line(if pick.is_some() { "Take this folder off" } else { "Pick this folder" }, "pick", !hidden_at),
         line(
             if pick.is_some_and(|f| f.just_this) {
                 "With the folders inside it"
@@ -212,7 +214,7 @@ fn menu_for(p: &Page, path: &str) -> Vec<MenuItem> {
                 "Just this folder (not the ones inside)"
             },
             "just",
-            !hidden,
+            !hidden_at,
         ),
         line(if hidden { "Show this folder again" } else { "Hide this folder" }, "hide", true),
         MenuItem { enabled: true, ..MenuItem::default() },
@@ -231,8 +233,8 @@ pub(super) fn wire(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         // A hidden folder's line isn't picked: it's shown again from its chip or menu.
         change(&app, |p| {
-            let k = tree::key(&path);
-            if !p.filters.hidden_folders.iter().any(|h| tree::key(h) == k) {
+            // Nor one inside a hidden folder: a pick there would show nothing.
+            if !p.list.folder_hidden(&p.filters, &path) {
                 tree::toggle_pick(&mut p.filters.folders, &path);
             }
         });
