@@ -300,8 +300,8 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     // Ctrl+K finds your presets before this page is first shown: they're read once, in the background.
     crate::finder::when_opening(read_before_shown);
     // And a little after the start, each in its turn, so the first visit has its lists at once.
-    crate::ahead::after(app, crate::ahead::PRESETS, read_before_shown);
-    crate::ahead::after(app, crate::ahead::CURVES, read_curves_before_shown);
+    crate::ahead::after(app, crate::ahead::Page::Presets, read_before_shown);
+    crate::ahead::after(app, crate::ahead::Page::Curves, read_curves_before_shown);
     // The app may start on this page: it was shown before the page knew where the library is.
     if crate::on_presets_page(app.get_place()) {
         // On Curves, the curves are read now: the place was noted before the page could read them.
@@ -1406,7 +1406,7 @@ fn bitwig_chosen() -> Option<PathBuf> {
     crate::settings::value(mo_app::app_settings::BITWIG_FOLDER_KEY).filter(|f| !f.trim().is_empty()).map(PathBuf::from)
 }
 
-fn read_sounds(_app: &AppWindow) {
+fn read_sounds(app: &AppWindow) {
     let at = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.reading = Some((0, 0));
@@ -1437,12 +1437,14 @@ fn read_sounds(_app: &AppWindow) {
                 read_again(app);
                 return;
             }
+            crate::ahead::done(app, crate::ahead::Page::Presets);
             give_finder(app);
             show_all(app);
         });
     });
     if let Err(e) = started {
         log::error("Presets", &format!("Couldn't start reading the sounds: {e}"));
+        crate::ahead::done(app, crate::ahead::Page::Presets);
     }
 }
 
@@ -2763,7 +2765,7 @@ pub fn finish_up() {
 // ---------------------------------------------------------------------------------------------------------------------
 // The curves
 
-fn read_curves(_app: &AppWindow) {
+fn read_curves(app: &AppWindow) {
     let (at, changes_before) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.curves_reading = Some((0, 0));
@@ -2791,12 +2793,15 @@ fn read_curves(_app: &AppWindow) {
             });
             if again {
                 read_curves(app);
+            } else {
+                crate::ahead::done(app, crate::ahead::Page::Curves);
             }
             show_all(app);
         });
     });
     if let Err(e) = started {
         log::error("Curves", &format!("Couldn't start reading the curves: {e}"));
+        crate::ahead::done(app, crate::ahead::Page::Curves);
     }
 }
 

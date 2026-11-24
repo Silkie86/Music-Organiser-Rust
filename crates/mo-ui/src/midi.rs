@@ -873,12 +873,12 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         shown(app);
     } else {
         // The index is read a little after the start, so the first visit has its list at once.
-        crate::ahead::after(app, crate::ahead::MIDI, read_before_shown);
+        crate::ahead::after(app, crate::ahead::Page::Midi, read_before_shown);
     }
 }
 
 /// Reads the index once, in the background, for a page that hasn't been shown yet: a little after the start
-/// ([`crate::ahead::MIDI`]) or when Ctrl+K opens, whichever is first. Ctrl+K gets its list of your parts, and the
+/// ([`crate::ahead::Page::Midi`]) or when Ctrl+K opens, whichever is first. Ctrl+K gets its list of your parts, and the
 /// read is kept for the page, which shows it at once on its first visit. Without the reading of your MIDI the page
 /// itself starts then. (It was once let go after two minutes unused, to hold less memory, review M-3; Solomon chose
 /// no wait on the page over that, 19 Nov 2026.)
@@ -907,6 +907,7 @@ fn read_before_shown(app: &AppWindow) {
         log::error("MIDI", &format!("Couldn't start reading the index ahead of the page: {e}"));
         // Nothing is coming, so the page reads it itself.
         PAGE.with(|p| p.borrow_mut().ahead_read = false);
+        crate::ahead::done(app, crate::ahead::Page::Midi);
     }
 }
 
@@ -917,6 +918,7 @@ fn ahead_arrived(app: &AppWindow, loaded: Result<Loaded, String>) {
         Ok(l) if l.smallest != SMALLEST.load(Ordering::Relaxed) => return remake_ahead(app, l),
         other => other,
     };
+    crate::ahead::done(app, crate::ahead::Page::Midi);
     // The page showed meanwhile and is waiting for this read: it takes it (and hands Ctrl+K its list).
     if PAGE.with(|p| std::mem::take(&mut p.borrow_mut().ahead_for_page)) {
         show(app, loaded);
@@ -1393,6 +1395,7 @@ fn guarded_load(library: &Path) -> Result<Loaded, String> {
 
 /// The index has been read: the page shows it.
 pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
+    crate::ahead::done(app, crate::ahead::Page::Midi);
     let data = app.global::<MidiData>();
     let loaded = match loaded {
         Ok(l) => l,
