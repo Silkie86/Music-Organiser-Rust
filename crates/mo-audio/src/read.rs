@@ -23,6 +23,18 @@ pub fn can_read_from(path: &Path) -> bool {
     has_extension(path, &["wav", "aif", "aiff", "aifc"])
 }
 
+/// What a reader says of a file of 0 bytes, whatever its name: a copy that never finished (an old sample CD has a few).
+pub const EMPTY_FILE: &str = "The file is empty (0 bytes): there's no sound in it";
+
+/// An error saying the file is empty when it holds 0 bytes, so it isn't taken for a damaged or unknown kind of file.
+/// A file whose size can't be read is left to the reader, which says why.
+fn no_sound_if_empty(path: &Path) -> Result<(), AudioError> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() && m.len() == 0 => Err(AudioError::Format(EMPTY_FILE.into())),
+        _ => Ok(()),
+    }
+}
+
 /// Up to `max_seconds` of a sound file from its start.
 pub fn read(path: &Path, max_seconds: f64) -> Result<AudioData, AudioError> {
     read_from(path, max_seconds, 0)
@@ -31,6 +43,7 @@ pub fn read(path: &Path, max_seconds: f64) -> Result<AudioData, AudioError> {
 /// Up to `max_seconds` of a sound file starting `from_frame` frames in, so a long file can be gone through a part at a
 /// time.
 pub fn read_from(path: &Path, max_seconds: f64, from_frame: u64) -> Result<AudioData, AudioError> {
+    no_sound_if_empty(path)?;
     if !can_read_from(path) {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
         let wma = crate::wma::is_wma(path);
@@ -69,6 +82,7 @@ pub fn read_parts(
     part_seconds: f64,
     each: &mut dyn FnMut(u32, &[Vec<f32>]) -> bool,
 ) -> Result<f64, AudioError> {
+    no_sound_if_empty(path)?;
     if can_read_from(path) {
         // A WAV that keeps Ogg Vorbis (FL Studio's own sounds) is decoded once, as an OGG file is: a place part way
         // into it can only be reached by decoding all before it.

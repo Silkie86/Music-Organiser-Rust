@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mo_audio::{AudioError, read, read_from, read_parts, write_wav};
+use mo_audio::{AudioError, EMPTY_FILE, read, read_from, read_parts, write_wav};
 
 fn fixture(name: &str, bytes: &[u8]) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-audio");
@@ -175,7 +175,14 @@ fn says_what_it_cannot_read() {
     assert!(matches!(e("x.opus", b"0&"), AudioError::NotSupported(_)));
     assert!(!e("x.mp3", b"not an mp3 at all").to_string().is_empty());
     assert!(e("text.wav", b"hello there").to_string().contains("Not a WAV or AIFF"));
-    assert!(e("empty.wav", b"").to_string().contains("Not a WAV or AIFF"));
+    assert!(e("short.wav", b"RI").to_string().contains("Not a WAV or AIFF"));
+    // A file of 0 bytes says so, whatever its name, read whole or a part at a time (Solomon's note of 23 Nov: two
+    // empty .wav files on an old sample CD were said not to be WAV files).
+    for name in ["empty.wav", "empty.aif", "empty.mp3", "empty.flac", "empty.wma"] {
+        assert_eq!(e(name, b"").to_string(), EMPTY_FILE, "{name}");
+        let parts = read_parts(&fixture(name, b""), 1.0, &mut |_, _| true).unwrap_err();
+        assert_eq!(parts.to_string(), EMPTY_FILE, "{name}");
+    }
     assert!(e("no-data.wav", &riff(&[fmt(1, 1, 10, 16)])).to_string().contains("no audio data"));
     assert!(
         e("mp3-in-wav.wav", &riff(&[fmt(85, 1, 10, 16), chunk(b"data", &[0; 4], false)]))

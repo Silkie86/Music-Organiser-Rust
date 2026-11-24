@@ -39,6 +39,7 @@ fn finds_sounds_leaving_out_shadows_hidden_folders_and_other_files() {
             ("Docs/readme.txt", 1),
             ("Old/Song.opus", 1),
             ("Old/Tune.wma", 3),
+            ("Kicks/Empty.wav", 0),
         ],
     );
     let root = dir.to_str().unwrap().to_owned();
@@ -57,7 +58,14 @@ fn finds_sounds_leaving_out_shadows_hidden_folders_and_other_files() {
 fn plans_what_to_listen_to_follow_and_forget() {
     let dir = folder(
         "mo-sounds-plan",
-        &[("Pack 2/Kick.wav", 4), ("Pack 2/Pad 90bpm.wav", 5), ("New.wav", 6), ("Same.wav", 7), ("Song.opus", 8)],
+        &[
+            ("Pack 2/Kick.wav", 4),
+            ("Pack 2/Pad 90bpm.wav", 5),
+            ("New.wav", 6),
+            ("Same.wav", 7),
+            ("Song.opus", 8),
+            ("Empty.wav", 0),
+        ],
     );
     let root = dir.to_str().unwrap().to_owned();
     let found = find_sounds(std::slice::from_ref(&root));
@@ -74,6 +82,8 @@ fn plans_what_to_listen_to_follow_and_forget() {
         known(at("Same.wav"), stamp("Same.wav")),
         // Gone for good.
         known(at("Gone.wav"), (1, 1)),
+        // Still there but empty now (0 bytes): forgotten, so the list never shows it.
+        known(at("Empty.wav"), (0, 1)),
         // A file the app can't read, still there: kept.
         known(at("Song.opus"), (8, 1)),
         // On a drive that isn't plugged in: kept.
@@ -88,7 +98,7 @@ fn plans_what_to_listen_to_follow_and_forget() {
     assert_eq!(moves.len(), 2);
     assert!(moves.contains(&("Pack/Kick.wav".into(), "Pack 2/Kick.wav".into())));
     assert!(moves.contains(&("Pack/Pad.wav".into(), "Pack 2/Pad 90bpm.wav".into())));
-    assert_eq!(p.forget, [at("Gone.wav")]);
+    assert_eq!(p.forget, [at("Gone.wav"), at("Empty.wav")]);
 }
 
 /// A sample folder that holds a user's temp folder (his whole user folder, say): the files programs leave there, as FL

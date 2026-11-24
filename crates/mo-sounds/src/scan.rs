@@ -99,9 +99,13 @@ fn names(path: &str) -> impl Iterator<Item = &str> {
 /// Every sound file in `folders`, with the size and modified time the folder listing gave, walked on every core of the
 /// current rayon pool (the caller runs it on the low-priority pool). Folders that couldn't be read this time are listed
 /// in `unreadable`, so their sounds aren't taken for gone. The files in a temp folder aren't sounds ([`is_sound_file`]),
-/// so one an older scan took in is taken for gone, and forgotten.
+/// so one an older scan took in is taken for gone, and forgotten. Nor is an empty file (0 bytes: a copy that never
+/// finished, with no sound in it): the Sounds list never shows one (Solomon, 24 Nov 2026: "don't show anything empty"),
+/// and one an older scan took in is forgotten. Once it fills, the next scan finds it as a new sound.
 pub fn find_sounds(folders: &[String]) -> Found {
-    find_files(folders, &is_sound_file, &|name, _parent| is_hidden_folder(name))
+    let mut found = find_files(folders, &is_sound_file, &|name, _parent| is_hidden_folder(name));
+    found.files.retain(|f| f.size > 0);
+    found
 }
 
 /// What a scan has to do.
