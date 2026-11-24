@@ -156,8 +156,10 @@ pub fn watch_window(app: &crate::AppWindow) {
     use slint::winit_030::winit::event::WindowEvent;
     use slint::winit_030::{EventResult, WinitWindowAccessor};
     let mut minimised = false;
+    let mut hands = Hands::default();
     let weak = app.as_weak();
     app.window().on_winit_window_event(move |_, event| {
+        hands.see(event);
         if let WindowEvent::Focused(active) = event
             && let Some(app) = weak.upgrade()
         {
@@ -194,10 +196,47 @@ pub fn watch_window(app: &crate::AppWindow) {
         if what == "resized"
             && let Some(app) = weak.upgrade()
         {
-            crate::settings::resized(&app);
+            crate::settings::resized(&app, hands.on_the_frame());
         }
         EventResult::Propagate
     });
+}
+
+/// What the user's hands were last doing with the window, to tell their own Restore from one the app didn't ask for
+/// (Solomon's log of 24 Nov: the window left maximised on its own 10 s after a restore, with no page change). Windows
+/// gives the app no word of a click on its title bar, so it goes by what it can see: the pointer is off the window's
+/// inside (on the title bar or an edge, which is where Restore, a double-click and a drag happen) while the window is
+/// in front, or the Windows key or Alt was pressed a moment ago (Win+Down, Alt+Space).
+#[derive(Default)]
+struct Hands {
+    pointer_inside: bool,
+    in_front: bool,
+    key_at: Option<Instant>,
+}
+
+impl Hands {
+    fn see(&mut self, event: &slint::winit_030::winit::event::WindowEvent) {
+        use slint::winit_030::winit::event::{ElementState, WindowEvent};
+        use slint::winit_030::winit::keyboard::{Key, NamedKey};
+        match event {
+            WindowEvent::CursorEntered { .. } | WindowEvent::CursorMoved { .. } => self.pointer_inside = true,
+            WindowEvent::CursorLeft { .. } => self.pointer_inside = false,
+            WindowEvent::Focused(active) => self.in_front = *active,
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && matches!(event.logical_key, Key::Named(NamedKey::Super | NamedKey::Alt)) =>
+            {
+                self.key_at = Some(Instant::now());
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the user may have changed the window's size themselves just now.
+    fn on_the_frame(&self) -> bool {
+        let key = self.key_at.is_some_and(|at| at.elapsed() < Duration::from_secs(5));
+        key || (self.in_front && !self.pointer_inside)
+    }
 }
 
 /// The window's last event before `stuck_at`, for a freeze line: "last window event: resized 40 ms before".
