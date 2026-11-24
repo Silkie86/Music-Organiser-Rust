@@ -4,7 +4,7 @@
 // (mo_app::backup), mo-ui/src/backup.rs fills it.
 import { ListView } from "std-widgets.slint";
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, StudioButton, ActionKey, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Panel, Groove, ProgressLine, EmptyState, NoticeStrip, ListLine, CutText } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, ActionKey, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Panel, Groove, ProgressLine, EmptyState, NoticeStrip, ListLine, CutText, Icons, InfoTip } from "../studio.slint";
 
 export struct BackupFolderLine {
     path: string,
@@ -167,6 +167,7 @@ export component BackupPage inherits Rectangle {
                                 clicked => { BackupData.run(); }
                             }
                             if BackupData.busy != "": StudioButton {
+                                icon: Icons.stop;
                                 text: "Stop";
                                 tip: BackupData.stop-key.what;
                                 key: BackupData.stop-key.key;
@@ -279,15 +280,14 @@ export component BackupPage inherits Rectangle {
                     VerticalLayout {
                         spacing: Space.xs;
                         HorizontalLayout {
-                            spacing: Space.md;
+                            spacing: Space.xs;
                             Caps { text: "FOLDERS"; vertical-alignment: center; }
-                            CutText {
-                                own-mouse: true;
-                                text: "All backed up together. Whole: everything goes. Slimmed: How much decides.";
-                                color: Theme.muted;
-                                font-size: Type.meta;
-                                horizontal-stretch: 1;
+                            // How the folders go, behind its "i" (Solomon, 24 Nov 2026: explanations in tooltips).
+                            VerticalLayout {
+                                alignment: center;
+                                InfoTip { text: "All backed up together. Whole: everything goes. Slimmed: How much decides."; }
                             }
+                            Rectangle { horizontal-stretch: 1; }
                         }
                         Panel {
                             VerticalLayout {

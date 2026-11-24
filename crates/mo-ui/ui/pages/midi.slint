@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, Tip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, Tip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, Icons } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -632,6 +632,9 @@ component PartPanel inherits SidePanel {
             main: true;
             width: max(self.min-width, buttons.cell);
             enabled: !MidiData.soundfont-missing || MidiData.playing;
+            // Play and stop as signs, as on any transport; "Play with the song" keeps its words, as they say what
+            // it will play.
+            icon: MidiData.playing && MidiData.loop-picked ? Icons.stop : MidiData.play-with-song ? "" : Icons.play;
             text: MidiData.playing && MidiData.loop-picked ? "Stop" : MidiData.play-with-song ? "Play with the song" : "Play loop";
             tip: MidiData.playing && MidiData.loop-picked ? "Stop the loop"
                 : MidiData.play-with-song ? "Play the part round and round with the parts of your song it fits, at the song's tempo, or the speed you set"
@@ -660,16 +663,13 @@ component PartPanel inherits SidePanel {
     HorizontalLayout {
         alignment: start;
         spacing: Space.sm;
-        metronome := ToggleChip {
+        ToggleChip {
             text: "Metronome";
+            icon: Icons.metronome;
+            tip: "a click on each beat while the loop plays";
+            key: MidiData.metronome-key;
             on: MidiData.metronome;
             clicked => { MidiData.metronome-toggled(); }
-            Tip {
-                text: "A click on each beat while the loop plays";
-                key: MidiData.metronome-key;
-                hovering: metronome.hovered;
-                at-y: metronome.height + Space.xs;
-            }
         }
         TempoStepper {
             slower-key: MidiData.slower-key;
@@ -946,8 +946,9 @@ export component MidiPage inherits Rectangle {
                 alignment: center;
                 StudioButton {
                     horizontal-stretch: 0;
+                    icon: Icons.shuffle;
                     text: "Shuffle";
-                    tip: "A random order: press again for another";
+                    tip: "Shuffle: a random order, press again for another";
                     clicked => { MidiData.shuffle(); }
                 }
             }
@@ -956,9 +957,10 @@ export component MidiPage inherits Rectangle {
                 alignment: center;
                 StudioButton {
                     horizontal-stretch: 0;
+                    icon: MidiData.reading ? Icons.stop : Icons.again;
                     text: MidiData.reading ? "Stop" : "Read MIDI again";
                     tip: MidiData.reading ? "Stop reading: it carries on from there next time"
-                        : "Look for new and changed projects and MIDI files, and try the ones that failed again. Only those are read.";
+                        : "Read MIDI again: look for new and changed projects and MIDI files, and try the ones that failed again. Only those are read.";
                     key: MidiData.read-again-key;
                     clicked => {
                         if (MidiData.reading) {
@@ -1166,7 +1168,6 @@ export component MidiPage inherits Rectangle {
                     EmptyState {
                         vertical-stretch: 1;
                         title: "Pick a part";
-                        text: "Its notes, its key and what it can do show here.";
                     }
                 }
                 menu := RightClickMenu {

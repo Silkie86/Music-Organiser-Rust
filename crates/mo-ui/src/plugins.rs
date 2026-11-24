@@ -1062,7 +1062,7 @@ fn fill_actions(app: &AppWindow) {
     // review of 10 Nov, E6).
     let changes_files = |id: &str| matches!(id, "plugins.cleanUp" | "plugins.uninstall" | "plugins.move");
     let buttons = |files: bool| -> Vec<CardAction> {
-        PLUGINS_ACTIONS
+        let actions = PLUGINS_ACTIONS
             .iter()
             .filter(|a| a.id != MEASURE && changes_files(a.id) == files)
             .map(|a| CardAction {
@@ -1074,8 +1074,10 @@ fn fill_actions(app: &AppWindow) {
                 main: false,
                 danger: a.id == "plugins.uninstall",
                 quiet: mo_app::themes::quiet_button(action_words(a.id)),
+                icon: mo_app::themes::button_icon(action_words(a.id)).into(),
             })
-            .collect()
+            .collect();
+        crate::icons_last(actions)
     };
     data.set_actions(ModelRc::new(VecModel::from(buttons(false))));
     data.set_file_actions(ModelRc::new(VecModel::from(buttons(true))));

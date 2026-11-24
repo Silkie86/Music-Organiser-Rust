@@ -964,6 +964,7 @@ fn actions(buttons: Vec<Button>) -> ModelRc<CardAction> {
         .into_iter()
         .map(|b| CardAction {
             quiet: mo_app::themes::quiet_button(&b.text),
+            icon: mo_app::themes::button_icon(&b.text).into(),
             text: b.text.into(),
             tip: what_of(b.id).into(),
             key: keys.key_of(b.id).into(),
@@ -973,7 +974,7 @@ fn actions(buttons: Vec<Button>) -> ModelRc<CardAction> {
             danger: false,
         })
         .collect();
-    ModelRc::new(VecModel::from(actions))
+    ModelRc::new(VecModel::from(crate::icons_last(actions)))
 }
 
 /// Measure again, which waits while the drives and the app's files are being measured.

@@ -812,7 +812,8 @@ export component Panel inherits Window {
                     }
                     StudioButton {
                         horizontal-stretch: 0;
-                        text: "Stop";
+                        icon: Icons.stop;
+                        tip: "Stop";
                         clicked => { root.stop(); }
                     }
                     if root.in-bitwig && root.picked >= 0: StudioButton {
@@ -963,7 +964,8 @@ export component Panel inherits Window {
                     }
                     if root.galaxy: StudioButton {
                         horizontal-stretch: 0;
-                        text: "Whole galaxy";
+                        icon: Icons.whole;
+                        tip: "Whole galaxy: zoom out to see every star";
                         clicked => { root.sky-home(); }
                     }
                 }
@@ -1152,7 +1154,7 @@ export component Panel inherits Window {
                                         horizontal-stretch: 1;
                                     }
                                     StudioButton {
-                                        text: "Back";
+                                        icon: Icons.back;
                                         tip: "The sound swept before this one";
                                         clicked => {
                                             sky-keys.focus();
@@ -1161,7 +1163,7 @@ export component Panel inherits Window {
                                         }
                                     }
                                     StudioButton {
-                                        text: "Next";
+                                        icon: Icons.next;
                                         tip: "The sound swept after this one";
                                         clicked => {
                                             sky-keys.focus();
@@ -1377,7 +1379,8 @@ export component Panel inherits Window {
                     }
                     StudioButton {
                         horizontal-stretch: 0;
-                        text: "Stop";
+                        icon: Icons.stop;
+                        tip: "Stop";
                         clicked => { root.stop(); }
                     }
                 }

@@ -4,7 +4,7 @@
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { FolderTree, TreeLine, TreePick } from "../folder_tree.slint";
-import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, CutText, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, TipState, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, CutText, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, TipState, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar, Icons, InfoTip } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -1010,6 +1010,8 @@ component PadLineView inherits ListLine {
             alignment: center;
             ToggleChip {
                 text: "Lock";
+                icon: Icons.lock;
+                tip: "keep this pad's sound when the kit is rolled again";
                 on: root.pad.locked;
                 clicked => { SoundsData.pad-lock(root.place); }
             }
@@ -1019,8 +1021,9 @@ component PadLineView inherits ListLine {
             horizontal-stretch: 0;
             StudioButton {
                 horizontal-stretch: 0;
+                icon: Icons.dice;
                 text: "Re-roll";
-                tip: "A new sound for just this pad";
+                tip: "Re-roll: a new sound for just this pad";
                 clicked => { SoundsData.pad-roll(root.place); }
             }
         }
@@ -1038,12 +1041,14 @@ component FoldersCard inherits Panel {
     VerticalLayout {
         padding: Space.lg;
         spacing: Space.sm;
-        Caps { text: "FORGOTTEN FOLDERS"; }
-        Text {
-            text: "Sample folders by how little of them your songs use. Click one to list its sounds.";
-            color: Theme.muted;
-            font-size: Type.meta;
-            wrap: word-wrap;
+        HorizontalLayout {
+            spacing: Space.xs;
+            Caps {
+                text: "FORGOTTEN FOLDERS";
+                vertical-alignment: center;
+            }
+            InfoTip { text: "Sample folders by how little of them your songs use. Click one to list its sounds."; }
+            Rectangle { }
         }
         ListView {
             vertical-stretch: 1;
@@ -1086,17 +1091,14 @@ component BitwigCard inherits Panel {
             spacing: Space.sm;
             Caps {
                 text: "FAVOURITES FROM BITWIG";
-                horizontal-stretch: 1;
+                vertical-alignment: center;
             }
+            // How it works, behind its "i" (Solomon, 24 Nov 2026: explanations in tooltips).
+            InfoTip { text: "Tick the multisamples that hold your favourite sounds. Every sound in your library that is one of their samples (the very same file or audio, never one that only sounds alike) becomes a favourite. Your Bitwig files stay as they are."; }
+            Rectangle { horizontal-stretch: 1; }
             CloseButton {
                 clicked => { SoundsData.bitwig-toggle(); }
             }
-        }
-        Text {
-            text: "Tick the multisamples that hold your favourite sounds. Every sound in your library that is one of their samples (the very same file or audio, never one that only sounds alike) becomes a favourite. Your Bitwig files stay as they are.";
-            color: Theme.muted;
-            font-size: Type.meta;
-            wrap: word-wrap;
         }
         if !SoundsData.bitwig-listed: Text {
             text: "Looking in your Bitwig Library…";
@@ -1319,6 +1321,7 @@ component SoundPanel inherits SidePanel {
         chosen(id) => { SoundsData.menu-chosen(id); }
         StudioButton {
             width: max(self.min-width, buttons.cell);
+            icon: SoundsData.playing ? Icons.stop : Icons.play;
             text: SoundsData.playing ? "Stop" : "Play";
             main: true;
             tip: SoundsData.play-tip;
@@ -1636,8 +1639,9 @@ export component SoundsPage inherits Rectangle {
             if SoundsData.view < 2: VerticalLayout {
                 alignment: center;
                 StudioButton {
+                    icon: Icons.shuffle;
                     text: "Shuffle";
-                    tip: "A new order";
+                    tip: "Shuffle: a new order";
                     clicked => { SoundsData.shuffle(); }
                 }
             }
@@ -1646,8 +1650,9 @@ export component SoundsPage inherits Rectangle {
             if SoundsData.view == 4: VerticalLayout {
                 alignment: center;
                 StudioButton {
+                    icon: Icons.shuffle;
                     text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
-                    tip: "Dig out a new set";
+                    tip: "Shuffle: dig out a new set";
                     enabled: !SoundsData.re-cant-dig;
                     clicked => { SoundsData.re-shuffle(); }
                 }
@@ -2073,6 +2078,7 @@ export component SoundsPage inherits Rectangle {
                                             horizontal-stretch: 1;
                                         }
                                         StudioButton {
+                                            icon: Icons.back;
                                             text: "Back";
                                             tip: "The sound swept before this one";
                                             clicked => {
@@ -2082,6 +2088,7 @@ export component SoundsPage inherits Rectangle {
                                             }
                                         }
                                         StudioButton {
+                                            icon: Icons.next;
                                             text: "Next";
                                             tip: "The sound swept after this one";
                                             clicked => {
@@ -2193,13 +2200,15 @@ export component SoundsPage inherits Rectangle {
                                     picked(text) => { SoundsData.galaxy-sweep-plays(text); }
                                 }
                                 StudioButton {
+                                    icon: Icons.again;
                                     text: "Lay out again";
-                                    tip: "Work the map out afresh from every sound's fingerprint";
+                                    tip: "Lay out again: work the map out afresh from every sound's fingerprint";
                                     clicked => { SoundsData.galaxy-lay-out(); }
                                 }
                                 StudioButton {
+                                    icon: Icons.whole;
                                     text: "Whole map";
-                                    tip: "Zoom out to see every star";
+                                    tip: "Whole map: zoom out to see every star";
                                     clicked => { SoundsData.galaxy-reset(); }
                                 }
                             }
@@ -2264,7 +2273,6 @@ export component SoundsPage inherits Rectangle {
                     EmptyState {
                         vertical-stretch: 1;
                         title: "Pick a sound";
-                        text: "Its waveform, its facts and what you can do with it show here.";
                     }
                 }
                 menu := RightClickMenu {
@@ -2594,7 +2602,10 @@ export component SoundsPage inherits Rectangle {
                     HorizontalLayout {
                         alignment: start;
                         MenuButton {
+                            icon: Icons.add;
+                            menu: false;
                             text: "Add a pad";
+                            tip: "Add a pad";
                             items: SoundsData.kit-types;
                             chosen(id) => { SoundsData.kit-add(id); }
                         }

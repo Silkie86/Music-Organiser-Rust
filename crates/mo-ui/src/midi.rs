@@ -2859,6 +2859,7 @@ fn actions(
         main: false,
         danger: false,
         quiet: mo_app::themes::quiet_button(text),
+        icon: mo_app::themes::button_icon(text).into(),
     };
     // Into your DAW first, by the drag handle above them; then finding more.
     let mut list: Vec<(&str, &str, bool)> = vec![("midi.toBitwig", "Send to Bitwig", true)];
@@ -2876,7 +2877,7 @@ fn actions(
     }
     list.push(("midi.source", "Show in folder", true));
     list.push(("midi.copyPath", "Copy path", true));
-    let card = list.iter().map(button).collect();
+    let card = crate::icons_last(list.iter().map(button).collect());
     // The right-click menu starts with playing it, as Sounds' does: the card has those in its play row.
     let play = [
         ("app.play", "Play or stop the loop", true),

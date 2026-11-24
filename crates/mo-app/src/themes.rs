@@ -30,6 +30,19 @@ pub fn quiet_button(words: &str) -> bool {
     (words.starts_with("Show ") && words != "Show again") || words.starts_with("Copy ")
 }
 
+/// The sign a side card's button shows instead of its words, from its words: only where the sign is clear on its own
+/// (Solomon, 24 Nov 2026: "where an icon would be clear always favour that"). A folder for a button that shows a
+/// file in its folder ("Show in folder", "Show the song's file"), two sheets for one that copies its path; the words
+/// go in the button's tooltip. "" keeps the words. A name `Icons.named` knows (studio.slint). By its words, as
+/// [`quiet_button`] is, so every page agrees without a list of ids.
+pub fn button_icon(words: &str) -> &'static str {
+    match words {
+        "Show in folder" | "Open folder" | "Show the song's file" | "Show curve file" => "folder",
+        "Copy path" | "Copy the song's path" => "copy",
+        _ => "",
+    }
+}
+
 /// The font a [`FONTS`] name stands for, or `None` for the theme's own (and for anything unknown).
 pub fn font_named(name: &str) -> Option<ThemeFont> {
     match name {
@@ -299,7 +312,13 @@ mod tests {
             ["Send to Bitwig", "Play in Bitwig", "Export", "Rename", "Hide", "Show again", "Showcase", "Uninstall..."]
         {
             assert!(!quiet_button(words), "{words}");
+            assert_eq!(button_icon(words), "", "{words}");
         }
+        assert_eq!(button_icon("Show in folder"), "folder");
+        assert_eq!(button_icon("Copy path"), "copy");
+        assert_eq!(button_icon("Show the song's file"), "folder");
+        assert_eq!(button_icon("Copy the song's path"), "copy");
+        assert_eq!(button_icon("Show in Songs"), "");
     }
 
     #[test]

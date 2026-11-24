@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, NoticeStrip, SearchBox, ToggleChip, TickBox, FilterPicks, FilterList, FilterColumn, FilterView, ListLine, CutText, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, NoticeStrip, SearchBox, ToggleChip, TickBox, FilterPicks, FilterList, FilterColumn, FilterView, ListLine, CutText, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar, Icons } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -320,7 +320,6 @@ component PluginPanel inherits SidePanel {
     if !PluginsData.has-pick: EmptyState {
         vertical-stretch: 1;
         title: "Pick a plugin";
-        text: "The songs using it show here, newest first, with its room on disk and its installed copies.";
     }
     if PluginsData.has-pick: HorizontalLayout {
         spacing: Space.sm;
@@ -550,7 +549,9 @@ component PluginPanel inherits SidePanel {
                 vertical-alignment: center;
             }
             if PluginsData.clean-can-stop: StudioButton {
+                icon: Icons.stop;
                 text: "Stop";
+                tip: "Stop";
                 clicked => { PluginsData.clean-stop(); }
             }
         }
@@ -970,8 +971,9 @@ export component PluginsPage inherits Rectangle {
                     if PluginsData.can-measure: VerticalLayout {
                         alignment: center;
                         StudioButton {
+                            icon: Icons.again;
                             text: "Measure again";
-                            tip: PluginsData.measure-tip;
+                            tip: "Measure again: " + PluginsData.measure-tip;
                             key: PluginsData.measure-key;
                             clicked => { PluginsData.measure-plugins(); }
                         }

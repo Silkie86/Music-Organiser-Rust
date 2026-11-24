@@ -4,7 +4,7 @@
 import { AboutSlint } from "std-widgets.slint";
 import { Product } from "@product";
 import { Fit } from "../list.slint";
-import { Theme, CutText, AppKeys, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow, WordBox } from "../studio.slint";
+import { Theme, CutText, AppKeys, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, InfoTip, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow, WordBox, Icons } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -279,20 +279,33 @@ export global SettingsData {
 // A card on a tab: its title, a line on what it's for, and its parts.
 component SettingsCard inherits Panel {
     in property <string> title;
+    // How the card's setting works: behind the "i" beside its title, in the tooltip (Solomon, 24 Nov 2026:
+    // explanations in tooltips, nothing over-explained on the page).
     in property <string> intro;
+    // Words that are the card's content, not an explanation (About's credit): under the title, in sight.
+    in property <string> note;
     VerticalLayout {
         padding: Space.lg;
         spacing: Space.md;
         // Every card's title in the title face and sentence case (the UX review of 10 Nov, B12).
-        Text {
-            text: root.title;
-            color: Theme.text;
-            font-family: Theme.title-font;
-            font-size: Type.row-title;
-            font-weight: 600;
+        HorizontalLayout {
+            spacing: Space.sm;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-family: Theme.title-font;
+                font-size: Type.row-title;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            if root.intro != "": VerticalLayout {
+                alignment: center;
+                InfoTip { text: root.intro; }
+            }
+            Rectangle { }
         }
-        if root.intro != "": Text {
-            text: root.intro;
+        if root.note != "": Text {
+            text: root.note;
             color: Theme.muted;
             font-size: Type.meta;
             wrap: word-wrap;
@@ -612,9 +625,10 @@ component GeneralTab inherits VerticalLayout {
                 picked(c) => { SettingsData.output-picked(c); }
             }
             StudioButton {
+                icon: Icons.again;
                 text: SettingsData.output-busy ? "Looking…" : "Look again";
                 enabled: !SettingsData.output-busy;
-                tip: "List the outputs there are now, for one just plugged in";
+                tip: "Look again: list the outputs there are now, for one just plugged in";
                 clicked => { SettingsData.refresh-outputs(); }
             }
         }
@@ -705,7 +719,7 @@ component GeneralTab inherits VerticalLayout {
     }
     SettingsCard {
         title: "About";
-        intro: SettingsData.credit;
+        note: SettingsData.credit;
         HorizontalLayout {
             spacing: Space.xl;
             alignment: start;
@@ -982,8 +996,9 @@ component DawsTab inherits VerticalLayout {
             }
             if d.bitwig: StudioButton {
                 horizontal-stretch: 0;
+                icon: Icons.again;
                 text: SettingsData.daws-checking ? "Checking\u{2026}" : "Check again";
-                tip: "Asks the link in Bitwig how it stands. Only reads: nothing goes into the project.";
+                tip: "Check again: asks the link in Bitwig how it stands. Only reads: nothing goes into the project.";
                 enabled: !SettingsData.daws-checking;
                 clicked => { SettingsData.check-daws(); }
             }
@@ -1301,23 +1316,32 @@ export component SettingsPage inherits Rectangle {
         list := Flickable {
             vertical-stretch: 1;
             content-width: self.width;
-            content-height: shown.preferred-height;
-            // The Developer tab opens where it was left; changed handlers can run as the page is made, so its place
-            // is only kept once it has been put back.
-            property <bool> placed;
+            // Coming back to the Developer tab from a shorter tab, the page's height is still the other tab's for a
+            // few frames, too short to be turned to where it was: until the Developer tab's own height comes, it's at
+            // least tall enough for that place.
+            content-height: max(shown.preferred-height, self.restoring ? self.height - SettingsData.developer-scroll : 0px);
+            property <bool> restoring;
+            property <length> natural: shown.preferred-height;
+            changed natural => {
+                self.restoring = false;
+            }
+            // The Developer tab opens where it was left.
             property <int> tab: SettingsData.tab;
             init => {
                 if (SettingsData.tab == 4) {
                     self.content-y = SettingsData.developer-scroll;
                 }
-                self.placed = true;
             }
-            changed content-y => {
-                if (self.placed && SettingsData.tab == 4) {
+            // Its place is kept only when you turn it (`flicked`: the wheel or a drag), never when the page cuts it
+            // short.
+            flicked => {
+                self.restoring = false;
+                if (SettingsData.tab == 4) {
                     SettingsData.developer-scroll = self.content-y;
                 }
             }
             changed tab => {
+                self.restoring = self.tab == 4;
                 self.content-y = self.tab == 4 ? SettingsData.developer-scroll : 0;
             }
             shown := VerticalLayout {
