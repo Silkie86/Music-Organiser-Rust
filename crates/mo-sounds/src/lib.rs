@@ -12,7 +12,7 @@
 //! - [`classify`]: the sound type classifier, learned from your own library (reads the C# app's saved model).
 //! - [`index`]: sounds that sound alike ("Sounds like this").
 //! - [`learn`]: each sound's type when its name doesn't say, disagreements, and suggested tags.
-//! - [`usage`] and [`liking`]: how many of your projects use each sound, and Most liked.
+//! - [`usage`] and [`liking`]: how many of your songs (and saves) use each sound, and Most liked.
 //! - [`types`]: the sound type a sample's name or folder gives ("Kick", "Pad"…), and loop, tempo and key from names.
 //! - [`music`]: note and key names, and Camelot codes.
 //! - [`copies`]: sounds whose audio is exactly the same, for the Sounds page's Hide duplicates.

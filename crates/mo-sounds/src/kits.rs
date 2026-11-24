@@ -545,7 +545,7 @@ mod tests {
         // A starred, five-star kick, never used: the clear best.
         sounds[1].favourite = true;
         sounds[1].rating = 5;
-        let usage = HashMap::from([(1, Usage { projects: 4, ..Usage::default() })]);
+        let usage = HashMap::from([(1, Usage { projects: 4, songs: 4, ..Usage::default() })]);
         for seed in 1..20 {
             let mut kit = default_drum_kit();
             roll(

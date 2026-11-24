@@ -2473,16 +2473,27 @@ fn sounds_shots(
         return Err(format!("sounds-path-tip.png: no tip came up at {CARD_PATH:?}; has the card's path moved?"));
     }
     shots.push(("sounds-path-tip.png".into(), after));
-    // The same card's switch on its other side: the projects that use the sound, newest first. They show with no
-    // turning, as the card's path keeps to one line.
+    // The same card's switch on its other side: the songs that use the sound, newest first, each once by its newest
+    // save that uses it. They show with no turning, as the card's path keeps to one line. Then Every save: each save.
     data.set_card_list(1);
     capture(window);
     shots.push(("sounds-panel-used-in.png".into(), capture(window)));
+    data.set_every_save(true);
+    capture(window);
+    shots.push(("sounds-panel-every-save.png".into(), capture(window)));
+    data.set_every_save(false);
     data.set_card_list(0);
     let wide = data.get_panel_width();
     data.set_panel_width(320.0);
     capture(window);
     shots.push(("sounds-panel-narrow.png".into(), capture(window)));
+    // As narrow, the songs with Every save on: its chip has a line of its own, so the card doesn't cut it off.
+    data.set_card_list(1);
+    data.set_every_save(true);
+    capture(window);
+    shots.push(("sounds-panel-narrow-every-save.png".into(), capture(window)));
+    data.set_every_save(false);
+    data.set_card_list(0);
     data.set_panel_width(wide);
     data.set_search("".into());
     data.invoke_search_edited("".into());
@@ -3069,7 +3080,7 @@ fn sample_sound_copies() -> mo_app::space_sounds::Found {
         groups.push(group);
     }
     let mut list = SoundList::new(sounds);
-    list.set_used(HashMap::from([(1, Usage { projects: 4, ..Usage::default() })]));
+    list.set_used(HashMap::from([(1, Usage { projects: 4, songs: 3, ..Usage::default() })]));
     list.set_copies(&SameAudio { groups, sizes });
     look(&list, true)
 }
@@ -3703,14 +3714,40 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         })
         .collect();
     let played = vec![(7, day(31, 22)), (13, day(31, 21)), (2, day(30, 18)), (11, day(28, 9)), (20, day(20, 14))];
+    // Twelve made-up saves of seven songs for the card's Used in list, saved a week or so apart, newest first (names
+    // invented here, none of Solomon's: rule 4). Boom Kick, the card's sound, is in saves 6 to 8: two of Static bloom's
+    // and Late bus, so its card lists two songs, and Every save the three saves.
+    let saves: [(&str, &str, bool); 12] = [
+        ("Night drive_4", "Night drive", false),
+        ("Sunday loop", "Sunday loop", false),
+        ("Glass rooms", "Glass rooms", true),
+        ("Night drive_3", "Night drive", false),
+        ("Low tide_2", "Low tide", true),
+        ("Paper planes", "Paper planes", false),
+        ("Static bloom_3", "Static bloom", true),
+        ("Late bus", "Late bus", false),
+        ("Static bloom_2", "Static bloom", true),
+        ("Night drive_2", "Night drive", false),
+        ("Low tide", "Low tide", true),
+        ("Static bloom", "Static bloom", true),
+    ];
+    let song_of = |id: i64| {
+        let name = saves.get(usize::try_from(id).unwrap_or(usize::MAX)).map_or("", |s| s.1);
+        saves.iter().position(|s| s.1 == name).map_or(u32::MAX, |at| at as u32)
+    };
     // A few made-up songs using some of them, for the Used column and Most liked.
     let usage = (1..=29)
         .filter(|id| id % 3 != 0)
         .map(|id: i64| {
             let projects = (id * 7 % 11) as u32;
-            // Which of the made-up projects below: each a different one.
+            // Which of the made-up saves above: each a different one.
             let mut project_ids: Vec<i64> = (0..i64::from(projects)).map(|n| (id * 3 + n) % 12).collect();
             project_ids.sort_unstable();
+            // A song's saves count once.
+            let mut songs: Vec<u32> = project_ids.iter().map(|&p| song_of(p)).collect();
+            songs.sort_unstable();
+            songs.dedup();
+            let songs = songs.len() as u32;
             // First used a year or so apart, back to 2019.
             let first_used =
                 chrono::NaiveDate::from_ymd_opt(2019 + (id % 8) as i32, 3, 1).and_then(|d| d.and_hms_opt(12, 0, 0));
@@ -3719,6 +3756,8 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                 mo_sounds::usage::Usage {
                     projects,
                     recent: projects / 2,
+                    songs,
+                    recent_songs: songs / 2,
                     years: vec![2025, 2026],
                     project_ids,
                     first_used,
@@ -3727,29 +3766,22 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         })
         .filter(|(_, u)| u.projects > 0)
         .collect();
-    // Twelve made-up projects for the card's Used in list, saved a week or so apart (names invented here, none of
-    // Solomon's: rule 4).
-    let names = [
-        "Night drive",
-        "Sunday loop",
-        "Glass rooms",
-        "Low tide",
-        "Paper planes",
-        "Static bloom",
-        "Late bus",
-        "Copper sky",
-        "Slow motion",
-        "Bright side",
-        "Field notes",
-        "Neon rain",
-    ];
     let now = chrono::Local::now().timestamp();
     let projects = (0i64..)
-        .zip(names)
-        .map(|(id, name)| {
-            let (daw, ending) = if id % 3 == 2 { ("Bitwig Studio", "bwproject") } else { ("FL Studio", "flp") };
+        .zip(saves)
+        .map(|(id, (name, song, bitwig))| {
+            let (daw, ending) = if bitwig { ("Bitwig Studio", "bwproject") } else { ("FL Studio", "flp") };
             let path = format!(r"C:\Music\{daw}\{name}.{ending}");
-            (id, mo_library::ProjectFile { id, path, mtime: now - id * 9 * 86_400 })
+            let file = mo_library::ProjectFile {
+                id,
+                path,
+                mtime: now - id * 9 * 86_400,
+                song: song_of(id),
+                song_name: song.into(),
+                recent: id < 6,
+                copy: false,
+            };
+            (id, file)
         })
         .collect();
     let weights = mo_sounds::liking::LikedWeights::default();

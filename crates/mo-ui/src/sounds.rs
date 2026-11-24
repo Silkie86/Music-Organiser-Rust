@@ -1109,7 +1109,7 @@ fn read_all(
     let counted = lib.and_then(|lib| {
         let counted = background::guarded(|| {
             let (uses, projects) = uses_in(&lib, now, settings.rules)?;
-            let counted = with_usage(&list, usage_of(&list, &uses), &projects, &settings.weights);
+            let counted = with_usage(&list, usage_of(&list, &uses, &projects), &projects, &settings.weights);
             Some((Arc::new(counted), (uses, projects)))
         });
         counted.unwrap_or_else(|why| {
@@ -1487,10 +1487,12 @@ const FEW: usize = 10;
 /// How your songs use samples, and the file of each project counted.
 type Uses = (Vec<mo_library::SampleUse>, Arc<HashMap<i64, ProjectFile>>);
 
-/// How your songs in `lib` use samples, by `rules`, with what was saved in the year to `now` counted as recent.
+/// How your songs in `lib` use samples, by `rules`, with what was saved in the year to `now` counted as recent. Only
+/// the saves the Songs page lists count, grouped into songs as it groups them.
 fn uses_in(lib: &mo_library::Library, now: NaiveDateTime, rules: UsageRules) -> Option<Uses> {
     let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
-    lib.sample_usage_with_projects(year_ago, rules)
+    mo_app::live::Listed::read(lib)
+        .and_then(|listed| lib.sample_usage_with_projects(year_ago, rules, &|path| listed.has(path)))
         .map(|u| (u.uses, Arc::new(u.projects)))
         .map_err(|e| log::warning("Sounds", &format!("Couldn't count how your songs use sounds: {e}")))
         .ok()
@@ -1548,7 +1550,7 @@ fn take_again(
     // How your songs use each sound, as counted for this list; or when they couldn't be counted again, as the list on
     // show has them (a sound new since then has none yet), so the Used chips and Most liked don't lose them.
     let usage = match &on_show.uses {
-        Some((uses, projects)) => Some((usage_of(&library.list, uses), projects.clone())),
+        Some((uses, projects)) => Some((usage_of(&library.list, uses, projects), projects.clone())),
         None => on_show.list.usage_map().cloned().zip(on_show.list.project_files().cloned()),
     };
     if let Some((usage, projects)) = usage {
@@ -2077,9 +2079,14 @@ fn bring_up_to_date(sounds_db: &Path, copy: &Path, cards: Option<&Feed>) -> Opti
     }
 }
 
-/// How your songs use each sound in `list` (by sound id), from how they use samples (`uses`).
-fn usage_of(list: &SoundList, uses: &[mo_library::SampleUse]) -> HashMap<i64, Usage> {
-    background::on_pool(|| usage::usage(list.sounds(), uses))
+/// How your songs use each sound in `list` (by sound id), from how they use samples (`uses`) and the files of the
+/// projects counted (`projects`), which say which song each is a save of.
+fn usage_of(
+    list: &SoundList,
+    uses: &[mo_library::SampleUse],
+    projects: &HashMap<i64, ProjectFile>,
+) -> HashMap<i64, Usage> {
+    background::on_pool(|| usage::usage(list.sounds(), uses, projects))
 }
 
 /// How many sounds Sounds like this shows.
@@ -3136,7 +3143,7 @@ struct RediscoverAnswer {
     why: String,
     folders: Vec<FolderUse>,
     years: YearCounts,
-    /// How many sounds your projects use: what your taste was learned from.
+    /// How many sounds your songs use: what your taste was learned from.
     learned_from: usize,
 }
 
@@ -3162,7 +3169,7 @@ impl RediscoverAsk {
                 why,
                 folders,
                 years: year_strip::strip(rediscover::years(sounds)),
-                learned_from: usage.values().filter(|u| u.projects > 0).count(),
+                learned_from: usage.values().filter(|u| u.songs > 0).count(),
             }
         })
     }
@@ -3323,15 +3330,15 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         data.set_re_intro("".into());
     } else {
         let intro = if !knows_use {
-            "Your projects haven't been counted yet, so these are a varied pick. They fit your taste once they are."
+            "Your songs haven't been counted yet, so these are a varied pick. They fit your taste once they are."
                 .to_owned()
         } else if a.learned_from == 0 {
-            "None of your sounds show up in your projects yet, so these are a varied pick. They fit your taste once \
+            "None of your sounds show up in your songs yet, so these are a varied pick. They fit your taste once \
              your songs use some of them."
                 .to_owned()
         } else {
             format!(
-                "Learned from the {} sounds your projects use, plus your favourites and plays.",
+                "Learned from the {} sounds your songs use, plus your favourites and plays.",
                 thousands(a.learned_from)
             )
         };
@@ -4157,16 +4164,19 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         })
         .collect();
     let used = used_in(p, at);
-    let projects: Vec<UsedInLine> = used
-        .lines
-        .iter()
-        .map(|l| UsedInLine {
-            id: i32::try_from(l.id).unwrap_or(-1),
-            name: l.name.as_str().into(),
-            daw: l.daw.as_str().into(),
-            saved: l.saved.as_str().into(),
-        })
-        .collect();
+    let lines = |lines: &[list::ProjectLine]| -> ModelRc<UsedInLine> {
+        let lines: Vec<UsedInLine> = lines
+            .iter()
+            .map(|l| UsedInLine {
+                id: i32::try_from(l.id).unwrap_or(-1),
+                name: l.name.as_str().into(),
+                daw: l.daw.as_str().into(),
+                saved: l.saved.as_str().into(),
+                saves: l.saves.as_str().into(),
+            })
+            .collect();
+        ModelRc::new(VecModel::from(lines))
+    };
     let type_from = match now.type_source {
         "you" => "· you set this",
         "name" => "· from its name",
@@ -4190,14 +4200,18 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         favourite: now.favourite,
         own_type: now.own_type.unwrap_or_default().into(),
         character: a.map(|a| a.character.join(", ")).unwrap_or_default().into(),
-        projects: ModelRc::new(VecModel::from(projects)),
+        projects: lines(&used.lines),
         projects_title: used.title.into(),
         projects_note: used.note.into(),
+        every_save: lines(&used.every_lines),
+        every_save_note: used.every_note.into(),
+        every_save_tip: used.every_tip.into(),
+        more_saves: used.more_saves,
     }
 }
 
-/// The picked sound's Used in list: the projects that use it; or, for one Rediscover dug out that none use, those of
-/// the sound its line says it sounds like.
+/// The picked sound's Used in list: the songs that use it (and each save, for Every save); or, for one Rediscover dug
+/// out that none use, those of the sound its line says it sounds like.
 fn used_in(p: &Page, at: usize) -> list::ProjectsCard {
     let own = p.list.projects_of(at);
     let like = p
@@ -6081,13 +6095,17 @@ mod tests {
             let path = song_library(name, settings);
             let Ok(lib) = mo_library::Library::open_read_only(&path) else { panic!("couldn't read {name}") };
             let s = Settings::read(&lib);
-            let used = lib.sample_usage(since, s.rules).map(|uses| usage_of(&list, &uses)).unwrap_or_default();
+            let used = lib
+                .sample_usage_with_projects(since, s.rules, &|_| true)
+                .map(|u| usage_of(&list, &u.uses, &u.projects))
+                .unwrap_or_default();
             (s, used)
         };
         // With nothing set: every song listing a sound uses it; autoplay is off and the weights are the C# app's.
         let (s, used) = read("plain.db", &[]);
-        assert_eq!(used.get(&1).map(|u| u.projects), Some(2));
-        assert_eq!(used.get(&2).map(|u| (u.projects, u.recent)), Some((2, 1)));
+        // In two songs (each a save of its own), one of them saved since 2023.
+        assert_eq!(used.get(&1).map(|u| (u.projects, u.songs)), Some((2, 2)));
+        assert_eq!(used.get(&2).map(|u| (u.projects, u.recent, u.songs, u.recent_songs)), Some((2, 1, 2, 1)));
         assert!(!used.contains_key(&3));
         assert_eq!(s.weights, LikedWeights::default());
         // "Only where it has notes": the pad isn't played in Song. And the page's own settings come through.
@@ -6114,7 +6132,10 @@ mod tests {
     fn use_counts_change_most_liked_but_not_the_order() {
         let list = SoundList::new(vec![sound(1, "a.wav"), sound(2, "b.wav")]);
         let w = LikedWeights::default();
-        let usage = HashMap::from([(2, Usage { projects: 3, recent: 3, years: vec![2026], ..Usage::default() })]);
+        let usage = HashMap::from([(
+            2,
+            Usage { projects: 5, recent: 5, songs: 3, recent_songs: 3, years: vec![2026], ..Usage::default() },
+        )]);
         let used = with_usage(&list, usage, &Arc::default(), &w);
         assert_eq!(used.sounds().iter().map(|s| s.id).collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(used.used_in(0), Some(0));
@@ -6152,7 +6173,7 @@ mod tests {
             s.analysis = Some(mo_sounds::SoundAnalysis { seconds: 0.5, ..Default::default() });
         }
         let lib = Library::new(sounds, Vec::new(), &LikedWeights::default()).with_usage(
-            HashMap::from([(2, Usage { projects: 3, recent: 1, years: vec![2026], ..Usage::default() })]),
+            HashMap::from([(2, Usage { projects: 3, recent: 1, songs: 1, years: vec![2026], ..Usage::default() })]),
             HashMap::new(),
             &LikedWeights::default(),
         );
@@ -6176,7 +6197,7 @@ mod tests {
             assert!(!reason.is_empty());
         }
         assert_eq!(a.folders.first().map(|f| (f.sounds, f.used)), Some((6, 1)));
-        // The one a line says it sounds like is the sound your projects use.
+        // The one a line says it sounds like is the sound your songs use.
         assert!(a.likes.values().all(|&like| like == 2), "{:?}", a.likes);
     }
 
@@ -6328,29 +6349,38 @@ mod tests {
     #[test]
     fn a_card_lists_its_projects_or_those_of_the_sound_rediscover_says_it_sounds_like() {
         let sounds = vec![sound(1, "Pack/Boom kick.wav"), sound(2, "Pack/New kick.wav")];
-        let file = ProjectFile { id: 5, path: r"K:\Projects\Night drive.flp".into(), mtime: 1_700_000_000 };
+        let file = ProjectFile {
+            id: 5,
+            path: r"K:\Projects\Night drive_3.flp".into(),
+            mtime: 1_700_000_000,
+            song: 0,
+            song_name: "Night drive".into(),
+            recent: false,
+            copy: false,
+        };
         let lib = Library::new(sounds, Vec::new(), &LikedWeights::default()).with_usage(
-            HashMap::from([(1, Usage { projects: 1, project_ids: vec![5], ..Usage::default() })]),
+            HashMap::from([(1, Usage { projects: 1, songs: 1, project_ids: vec![5], ..Usage::default() })]),
             HashMap::from([(5, file)]),
             &LikedWeights::default(),
         );
         let mut p = Page { list: lib.list.clone(), places: lib.places.clone(), ..Page::default() };
-        // The first sound's own project, which opens on the Songs page by its save's id.
+        // The first sound's own song, which opens on the Songs page by its save's id; Every save names the save.
         let card = picked_sound(&p, 0);
         assert_eq!(card.projects_title, "Used in 1");
         let line = card.projects.row_data(0).unwrap_or_default();
         assert_eq!((line.id, line.name.as_str(), line.daw.as_str()), (5, "Night drive", "FL Studio"));
+        let save = card.every_save.row_data(0).unwrap_or_default();
+        assert_eq!((save.id, save.name.as_str(), card.more_saves), (5, "Night drive_3", false));
+        let facts: Vec<(String, String)> =
+            card.facts.iter().map(|f| (f.name.to_string(), f.value.to_string())).collect();
+        assert!(facts.contains(&("Used".to_owned(), "1 song".to_owned())), "{facts:?}");
         // The second, which no project uses: none, until Rediscover says it sounds like the first.
         let card = picked_sound(&p, 1);
         assert_eq!((card.projects_title.as_str(), card.projects.row_count()), ("Used in 0", 0));
         p.re_likes = HashMap::from([(2, 1)]);
         let card = picked_sound(&p, 1);
         assert_eq!(card.projects_title, "Used in 0");
-        assert!(
-            card.projects_note.contains("Boom kick, which it sounds like, is in 1 project"),
-            "{}",
-            card.projects_note
-        );
+        assert!(card.projects_note.contains("Boom kick, which it sounds like, is in 1 song"), "{}", card.projects_note);
         assert_eq!(card.projects.row_count(), 1);
     }
 
