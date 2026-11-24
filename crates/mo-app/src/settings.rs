@@ -12,9 +12,13 @@ use mo_dawlink::scripts::{BitwigInstalled, Installed, ScriptState};
 
 use mo_space::folder_move::MovedFolder;
 
+use chrono::{NaiveDate, NaiveDateTime};
+
 use crate::background::Pace;
+use crate::backup::thousands;
 use crate::places::{LAST_PAGE_CHOICE, Place};
 use crate::shell::{self, Os};
+use crate::sound_scan::ScanState;
 use crate::themes::{ACCENTS, FONTS, SIZES, THEMES, Theme, font_named, parse_hex, size_from_setting};
 use mo_library::folders::FolderList;
 
@@ -301,7 +305,9 @@ pub fn folder_groups(
         FolderGroup {
             title: "Samples",
             list: Some(FolderList::Samples),
-            note: "Your sample libraries: what Sounds shows, and where missing samples are looked for.",
+            note: "Your sample libraries: what Sounds shows, and where missing samples are looked for. Each folder says \
+                   what the last scan found in it, and how far one going now is; once a scan finds new sounds, the \
+                   samples your songs miss are looked for again.",
             folders: samples,
             empty: "No sample folders yet.",
         },
@@ -331,6 +337,55 @@ pub fn folder_groups(
             empty: "Nothing moved yet.",
         },
     ]
+}
+
+/// What a sample folder's row says of scanning it ([`crate::sound_scan::state`]), short enough for the row's right
+/// side: how many sounds it has and when it was last scanned, or how far the scan going now is. `today` is the date
+/// now, so a scan from today shows its time alone.
+pub fn sample_folder_state(folder: &str, state: Option<&ScanState>, today: NaiveDate) -> String {
+    let Some(state) = state else {
+        return "Not scanned yet".to_owned();
+    };
+    // Added after this scan started: not in it, whatever it's doing.
+    if !state.looking && state.folder(folder).is_none() || state.looking && !state.scans(folder) {
+        return match (&state.stopped, state.running) {
+            (Some(_), false) if state.folders.is_empty() => "Scan stopped: the log says why".to_owned(),
+            _ => "Waiting to be scanned".to_owned(),
+        };
+    }
+    if state.looking {
+        return "Looking for sounds\u{2026}".to_owned();
+    }
+    let when = |at: NaiveDateTime| {
+        if at.date() == today { at.format("%H:%M").to_string() } else { at.format("%-d %b %H:%M").to_string() }
+    };
+    let Some(f) = state.folder(folder) else {
+        return "Waiting to be scanned".to_owned();
+    };
+    if f.away {
+        return match state.ended {
+            Some(at) => format!("Couldn't be read at {}", when(at)),
+            None => "Couldn't be read".to_owned(),
+        };
+    }
+    if state.running && f.listened < f.to_listen {
+        return format!("Listening: {} of {} new", thousands(f.listened), thousands(f.to_listen));
+    }
+    let mut line = match f.files {
+        0 => "No sounds".to_owned(),
+        1 => "1 sound".to_owned(),
+        n => format!("{} sounds", thousands(n)),
+    };
+    if f.listened < f.to_listen {
+        line.push_str(&format!(", {} not listened to yet", thousands(f.to_listen - f.listened)));
+    }
+    if f.unreadable > 0 {
+        line.push_str(&format!(", {} unreadable", thousands(f.unreadable)));
+    }
+    match state.ended {
+        Some(at) => format!("{line} \u{b7} scanned {}", when(at)),
+        None => format!("{line} \u{b7} up to date"),
+    }
 }
 
 /// The line under the Folders tab's title.
@@ -363,7 +418,7 @@ pub fn folder_change_note(
     match done {
         Ok(true) => Some(match (added, songs) {
             (true, false) if list == FolderList::Samples && scanning => {
-                format!("Added {folder}. Sounds is looking through it for new sounds.")
+                format!("Added {folder}. Sounds is looking through it for new sounds: its row says how far it is.")
             }
             (true, false) => format!("Added {folder}."),
             (true, true) => format!("Added {folder}. Songs lists the saves in it from the next start."),
@@ -1011,6 +1066,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_sample_folder_says_how_its_scan_went() {
+        use crate::sound_scan::FolderScan;
+        let day = NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+        let at = |d: u32, h: u32, m: u32| NaiveDate::from_ymd_opt(2026, 11, d).unwrap().and_hms_opt(h, m, 0).unwrap();
+        let line = |state: Option<&ScanState>| sample_folder_state(r"I:\Old Samples", state, day);
+        assert_eq!(line(None), "Not scanned yet");
+        let looking = ScanState { running: true, looking: true, started: at(22, 15, 40), ..ScanState::default() };
+        let looking = ScanState { scanning: vec![r"I:\Old Samples".into()], ..looking };
+        assert_eq!(line(Some(&looking)), "Looking for sounds\u{2026}");
+        // One added while it looks isn't in this scan.
+        assert_eq!(sample_folder_state(r"K:\New", Some(&looking), day), "Waiting to be scanned");
+        let folder =
+            FolderScan { folder: r"I:\Old Samples".into(), files: 1_234, to_listen: 900, ..FolderScan::default() };
+        let listening = ScanState {
+            looking: false,
+            folders: vec![FolderScan { listened: 128, ..folder.clone() }],
+            ..looking.clone()
+        };
+        assert_eq!(line(Some(&listening)), "Listening: 128 of 900 new");
+        // Another folder of the same scan, done already.
+        assert_eq!(
+            sample_folder_state(
+                r"I:\Other",
+                Some(&ScanState {
+                    folders: vec![FolderScan { folder: r"I:\Other".into(), files: 3, ..FolderScan::default() }],
+                    ..listening.clone()
+                }),
+                day
+            ),
+            "3 sounds \u{b7} up to date"
+        );
+        let done = ScanState {
+            running: false,
+            ended: Some(at(22, 15, 42)),
+            folders: vec![FolderScan { listened: 900, unreadable: 3, ..folder.clone() }],
+            ..listening.clone()
+        };
+        assert_eq!(line(Some(&done)), "1,234 sounds, 3 unreadable \u{b7} scanned 15:42");
+        let yesterday = ScanState {
+            ended: Some(at(21, 9, 5)),
+            folders: vec![FolderScan { listened: 900, ..folder.clone() }],
+            ..done.clone()
+        };
+        assert_eq!(line(Some(&yesterday)), "1,234 sounds \u{b7} scanned 21 Nov 09:05");
+        let stopped = ScanState {
+            stopped: Some("There isn't room on the disk.".into()),
+            folders: vec![FolderScan { listened: 64, ..folder.clone() }],
+            ..done.clone()
+        };
+        assert_eq!(line(Some(&stopped)), "1,234 sounds, 836 not listened to yet \u{b7} scanned 15:42");
+        let away = ScanState { folders: vec![FolderScan { away: true, ..folder.clone() }], ..done.clone() };
+        assert_eq!(line(Some(&away)), "Couldn't be read at 15:42");
+        // Added after the scan.
+        assert_eq!(sample_folder_state(r"K:\New", Some(&done), day), "Waiting to be scanned");
+        let failed = ScanState { folders: Vec::new(), stopped: Some("busy".into()), ..done.clone() };
+        assert_eq!(line(Some(&failed)), "Scan stopped: the log says why");
+        let empty = ScanState { folders: vec![FolderScan { files: 0, to_listen: 0, ..folder }], ..done };
+        assert_eq!(line(Some(&empty)), "No sounds \u{b7} scanned 15:42");
+    }
+
+    #[test]
     fn a_folder_inside_a_bitwig_library_picked_keeps_the_library() {
         let lib = Path::new("/K/Old/Library");
         assert_eq!(bitwig_library_from_pick(&lib.join("multisamples")), lib);
@@ -1245,7 +1361,7 @@ mod tests {
         // A sample folder says Sounds looks through it now, when it does (review X2-4); a MIDI folder says no more.
         assert_eq!(
             folder_change_note(samples, true, r"E:\Songs", Ok(true), true).as_deref(),
-            Some(r"Added E:\Songs. Sounds is looking through it for new sounds.")
+            Some(r"Added E:\Songs. Sounds is looking through it for new sounds: its row says how far it is.")
         );
         assert_eq!(
             folder_change_note(samples, true, r"E:\Songs", Ok(true), false).as_deref(),

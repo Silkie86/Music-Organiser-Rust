@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 
 use mo_formats::dates::RealDates;
 use mo_formats::{PluginRef, case, paths};
-use mo_library::plugin_writes;
 use mo_library::read::{Installed, read_save};
 use mo_library::samples::SampleLocator;
 use mo_library::scan::{self, KnownFile};
@@ -28,6 +27,7 @@ use mo_library::song_writes::{self, Batch, Missing, Put, Written};
 use mo_library::songs;
 use mo_library::watch::Changes;
 use mo_library::{Library, LibraryError, Save, SaveDetail, SongChoices};
+use mo_library::{plugin_writes, sample_writes};
 use rayon::prelude::*;
 
 use crate::background::{on_bulk_pool, on_pool};
@@ -88,6 +88,10 @@ pub struct Live {
     measures_seen: u64,
     /// When a look again at which plugins are installed that failed may be tried again ([`REFUSED_AGAIN_AFTER`]).
     recheck_after: Option<Instant>,
+    /// How many scans had changed the Sounds library when the samples marked missing were last looked for
+    /// ([`crate::sound_scan::sounds_changed`]), and when a look that failed may be tried again.
+    sounds_seen: u64,
+    samples_after: Option<Instant>,
     /// When the note that the muted samples are mended, refused, may be tried again ([`REFUSED_AGAIN_AFTER`]).
     note_after: Option<Instant>,
     /// Folders found away as saves in them waited to be read again, by key, and when ([`AWAY_AGAIN_AFTER`]).
@@ -318,6 +322,8 @@ impl Live {
             mend: Mend::NotLooked,
             measures_seen: plugin_writes::measures_kept(),
             recheck_after: None,
+            sounds_seen: 0,
+            samples_after: None,
             note_after: None,
             away: HashMap::new(),
             said_renumbered: false,
@@ -501,8 +507,17 @@ impl Live {
     /// [`Live::update`] looks again at which are installed while no project file changes (review G-3).
     pub fn retries(&mut self) -> Option<Changes> {
         let files: Vec<String> = self.retry.keys().cloned().collect();
-        (!files.is_empty() || (self.measures_seen != plugin_writes::measures_kept() && !self.recheck_waits()))
-            .then_some(Changes { files, ..Changes::default() })
+        (!files.is_empty()
+            || (self.measures_seen != plugin_writes::measures_kept() && !self.recheck_waits())
+            || self.samples_due())
+        .then_some(Changes { files, ..Changes::default() })
+    }
+
+    /// Whether a Sounds scan changed the library since the samples marked missing were last looked for, and a look
+    /// that failed isn't waiting.
+    fn samples_due(&self) -> bool {
+        self.sounds_seen != crate::sound_scan::sounds_changed()
+            && self.samples_after.is_none_or(|at| Instant::now() >= at)
     }
 
     /// Whether a look again at which plugins are installed failed a moment ago, so it waits a while.
@@ -539,7 +554,7 @@ impl Live {
         let roots = self.roots.clone();
         if roots.is_empty() {
             self.mend = Mend::Done;
-            return Updated { rechecked, ..Updated::default() };
+            return Updated { rechecked: rechecked + self.recheck_samples(), ..Updated::default() };
         }
         let mut done = self.update(&Changes { overflowed: roots, ..Changes::default() });
         done.rechecked += rechecked;
@@ -547,6 +562,9 @@ impl Live {
         if done.stopped {
             return done;
         }
+        // Samples marked missing, looked for again when the Sounds library changed since the last look (a folder
+        // added and scanned, in this run or an earlier one): after the walk, so new and changed saves list first.
+        done.rechecked += self.recheck_samples();
         // One the walk didn't find (gone, so marked missing, or outside the project folders now) can't be read again
         // now: owed (one marked missing is left off the owed list at the next start, `song_writes::to_mend`). Only
         // those waiting to be tried again are still to come. One in a folder that couldn't be read is owed already
@@ -651,6 +669,117 @@ impl Live {
         for s in &mut self.saves {
             if let Some(&n) = missing.get(&s.id) {
                 s.missing_plugins = n;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// Looks again for the samples marked missing, when the Sounds library has changed since the last look
+    /// ([`sample_writes::recheck_found`]): a sample folder added in Settings and scanned may hold them, and a save is
+    /// only read again when its file changes. Only the Sounds library is asked (it's all that changed since each
+    /// sample was looked for), read only when there's a change and something missing. Shows the new counts; says how
+    /// many saves changed. A look that fails (a library busy just then) is tried again a minute later, or at the next
+    /// start.
+    fn recheck_samples(&mut self) -> usize {
+        // Taken before the look, so a scan that ends meanwhile is looked at next time.
+        let seen = crate::sound_scan::sounds_changed();
+        let (Some(songs_db), Some(sounds_db)) = (self.writes.clone(), self.sounds_db.clone()) else {
+            self.sounds_seen = seen;
+            return 0;
+        };
+        // The app's own sound library, whichever file the list was given when it loaded (the old app's, before the
+        // app's own was made): its stamp and its sounds come from the same file.
+        let own = mo_sounds::compact::copy_of(&sounds_db);
+        let own = if sounds_db.file_name() == own.file_name() { sounds_db } else { own };
+        let refused = |this: &mut Live, why: String| {
+            crate::log::warning("Songs", &format!("{why}; the missing samples are looked for again in a minute"));
+            this.samples_after = Some(Instant::now() + REFUSED_AGAIN_AFTER);
+            0
+        };
+        let stamp = match mo_sounds::compact::grow::sounds_stamp(&own) {
+            Ok(Some(stamp)) => stamp,
+            // No sound library of the app's own: the old app's has nothing new to add.
+            Ok(None) => {
+                self.sounds_seen = seen;
+                return 0;
+            }
+            Err(e) => return refused(self, format!("Couldn't read the Sounds library: {e}")),
+        };
+        let began = Instant::now();
+        let stop = self.stop.clone();
+        // Read only when it's needed, and fresh: the read [`crate::sound_library::shared`] keeps for a minute may be
+        // from before the scan. One that couldn't read every sound isn't taken as the answer.
+        let judge = || {
+            let library = crate::sound_library::read_now(&own);
+            if library.is_complete() {
+                Ok(move |sample: &str, _project: &str| library.has_sample(sample))
+            } else {
+                Err("the Sounds library couldn't be read whole just now".to_owned())
+            }
+        };
+        let r =
+            on_bulk_pool(|| sample_writes::recheck_found(&songs_db, &stamp, judge, || stop.load(Ordering::Relaxed)));
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => return refused(self, e.to_string()),
+        };
+        self.sounds_seen = seen;
+        self.samples_after = None;
+        if !r.looked {
+            return 0;
+        }
+        // The locator read before has the Sounds library as it was: the next save read takes a new one.
+        self.samples = None;
+        crate::log::info(
+            "Songs",
+            &format!(
+                "Looked again for {} samples marked missing, as the Sounds library changed: {} found now, in {} saves, \
+                 in {:.1} s{}",
+                r.looked_for,
+                r.found,
+                r.missing.len(),
+                began.elapsed().as_secs_f32(),
+                if r.stopped { "; stopped as the app closed, so it looks again next time" } else { "" }
+            ),
+        );
+        let mut missing: HashMap<i64, u32> = r.missing.into_iter().collect();
+        // Saves read but not kept yet hold samples of their own (songs.db may have older ones for them), read against
+        // the Sounds library as it was: looked at again too, so keeping them doesn't put the old marks back, and their
+        // own count is the one shown. Judged away from the lock the song panel's reader shares.
+        let held: Vec<(i64, Vec<String>)> = {
+            let held = self.details.lock().unwrap_or_else(PoisonError::into_inner);
+            held.values()
+                .map(|d| (d.save.id, d.samples.iter().filter(|s| !s.found).map(|s| s.path.clone()).collect()))
+                .collect()
+        };
+        if !held.is_empty() {
+            let library = crate::sound_library::shared(&own);
+            let found: HashMap<i64, HashSet<String>> = on_bulk_pool(|| {
+                held.into_par_iter()
+                    .map(|(id, samples)| (id, samples.into_iter().filter(|s| library.has_sample(s)).collect()))
+                    .collect()
+            });
+            let mut details = self.details.lock().unwrap_or_else(PoisonError::into_inner);
+            for d in details.values_mut() {
+                if let Some(now) = found.get(&d.save.id).filter(|f| !f.is_empty()) {
+                    for s in d.samples.iter_mut().filter(|s| now.contains(&s.path)) {
+                        s.found = true;
+                    }
+                    // Missing ones first, then by path, as a save's read sorts them.
+                    d.samples.sort_by_cached_key(|s| (s.found, case::to_lower(&s.path)));
+                }
+                let now = u32::try_from(d.samples.iter().filter(|s| !s.found).count()).unwrap_or(u32::MAX);
+                d.save.missing_samples = now;
+                missing.insert(d.save.id, now);
+            }
+        }
+        let mut changed = 0;
+        for s in &mut self.saves {
+            if let Some(&n) = missing.get(&s.id)
+                && s.missing_samples != n
+            {
+                s.missing_samples = n;
                 changed += 1;
             }
         }
@@ -868,6 +997,10 @@ impl Live {
         // The Plugins page measured your plugins since: saves are judged against what it found from now on (review G-3).
         if self.measures_seen != plugin_writes::measures_kept() {
             done.rechecked += self.recheck_installed();
+        }
+        // A Sounds scan kept new sounds (a sample folder added, say): samples marked missing may be found now.
+        if self.samples_due() {
+            done.rechecked += self.recheck_samples();
         }
         let mut paths: Vec<String> = changes.files.clone();
         // Saves naming a plugin that isn't found now are read again, changed or not (review P-2). One in a folder
@@ -1344,6 +1477,8 @@ mod tests {
             mend: Mend::NotLooked,
             measures_seen: plugin_writes::measures_kept(),
             recheck_after: None,
+            sounds_seen: 0,
+            samples_after: None,
             note_after: None,
             away: HashMap::new(),
             said_renumbered: false,

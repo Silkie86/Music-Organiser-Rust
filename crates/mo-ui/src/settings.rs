@@ -22,7 +22,7 @@ use mo_dawlink::scripts::{self, ScriptState};
 use mo_library::Library;
 use mo_library::folders::{self, FolderList};
 use slint::platform::WindowEvent;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::{
     AccentInfo, AppWindow, DawProgramInfo, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact,
@@ -129,6 +129,40 @@ thread_local! {
     static SYSTEM: Cell<f32> = const { Cell::new(0.0) };
     /// Checks the size of everything is still on, every second.
     static SIZE_CHECK: slint::Timer = slint::Timer::default();
+    /// The sample folders on show, and what each one's row says of scanning it ([`show_scan_states`]).
+    static SAMPLE_ROWS: RefCell<Option<SampleRows>> = const { RefCell::new(None) };
+    /// The scan state the sample folders' rows show ([`mo_app::sound_scan::state_turn`]).
+    static SCAN_TURN: Cell<u64> = const { Cell::new(u64::MAX) };
+    /// The day the rows were last worded on.
+    static SCAN_DAY: Cell<Option<chrono::NaiveDate>> = const { Cell::new(None) };
+}
+
+/// The sample folders on show, and the model of what each one's row says.
+type SampleRows = (Vec<String>, std::rc::Rc<VecModel<SharedString>>);
+
+/// What each sample folder's row says of scanning it ([`page::sample_folder_state`]), from the last scan's state:
+/// looked at once a second while the app runs, and made again only when it changed. Reads no file: the scan keeps its
+/// state in memory as it goes.
+fn show_scan_states(force: bool) {
+    let turn = mo_app::sound_scan::state_turn();
+    // A scan from yesterday says its date, not just its time, once the day turns.
+    let today = chrono::Local::now().date_naive();
+    if !force && SCAN_TURN.get() == turn && SCAN_DAY.get() == Some(today) {
+        return;
+    }
+    SCAN_TURN.set(turn);
+    SCAN_DAY.set(Some(today));
+    let state = mo_app::sound_scan::latest_state();
+    SAMPLE_ROWS.with(|rows| {
+        if let Some((folders, model)) = rows.borrow().as_ref() {
+            for (i, folder) in folders.iter().enumerate() {
+                let line: SharedString = page::sample_folder_state(folder, state.as_ref(), today).into();
+                if model.row_data(i).as_ref() != Some(&line) {
+                    model.set_row_data(i, line);
+                }
+            }
+        }
+    });
 }
 
 /// Reads the settings before the window opens: this app's file in `folder` and the C# app's choices from `library`,
@@ -759,6 +793,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
                 if let Some(app) = weak.upgrade() {
                     apply_size(&app);
                 }
+                // How a scan of the sample folders is going, on their rows.
+                show_scan_states(false);
             })
         });
     }
@@ -1844,15 +1880,27 @@ pub fn show_folders(app: &AppWindow, groups: Result<Vec<page::FolderGroup>, Stri
             });
             let lines: Vec<FolderGroupInfo> = groups
                 .into_iter()
-                .map(|g| FolderGroupInfo {
-                    title: g.title.into(),
-                    editable: g.list.is_some(),
-                    note: g.note.into(),
-                    folders: strings(g.folders),
-                    empty: g.empty.into(),
+                .map(|g| {
+                    // The sample folders say how scanning each one went, kept up to date as a scan goes.
+                    let states = if g.list == Some(FolderList::Samples) {
+                        let model = std::rc::Rc::new(VecModel::from(vec![SharedString::new(); g.folders.len()]));
+                        SAMPLE_ROWS.with(|rows| *rows.borrow_mut() = Some((g.folders.clone(), model.clone())));
+                        ModelRc::from(model)
+                    } else {
+                        ModelRc::default()
+                    };
+                    FolderGroupInfo {
+                        title: g.title.into(),
+                        editable: g.list.is_some(),
+                        note: g.note.into(),
+                        folders: strings(g.folders),
+                        states,
+                        empty: g.empty.into(),
+                    }
                 })
                 .collect();
             data.set_folder_groups(ModelRc::new(VecModel::from(lines)));
+            show_scan_states(true);
             data.set_folders_note(page::FOLDERS_NOTE.into());
         }
         Err(e) => {

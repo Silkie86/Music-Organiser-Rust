@@ -95,6 +95,8 @@ export struct FolderGroupInfo {
     editable: bool,
     note: string,
     folders: [string],
+    // What each folder's row says on its right, by its place in `folders` (the sample folders: how scanning it went).
+    states: [string],
     empty: string,
 }
 
@@ -752,8 +754,9 @@ component FoldersTab inherits VerticalLayout {
         }
         // The shared folder row, as on Backup (the whole-app review of 6 Nov, X3-18): its × takes the folder off this
         // list, and nothing on disk changes.
-        for f in g.folders: FolderRow {
+        for f[fi] in g.folders: FolderRow {
             path: f;
+            size: fi < g.states.length ? g.states[fi] : "";
             removable: g.editable;
             enabled: !SettingsData.folders-busy;
             remove => { SettingsData.remove-folder(gi, f); }

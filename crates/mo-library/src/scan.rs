@@ -88,6 +88,25 @@ pub fn is_inside(path: &str, folder: &str) -> bool {
     key_inside(&path_key(path), &path_key(folder))
 }
 
+/// For each of `folders`, how many of `files` are it or inside it, as [`is_inside`] says: one inside
+/// two of them counts in both. Each path is made into a key once, on every core of the current rayon pool.
+pub fn count_inside(files: &[FoundFile], folders: &[String]) -> Vec<usize> {
+    let keys: Vec<String> = folders.iter().map(|f| path_key(f)).collect();
+    files
+        .par_iter()
+        .fold(
+            || vec![0; keys.len()],
+            |mut counts, file| {
+                let key = path_key(&file.path);
+                for (count, folder) in counts.iter_mut().zip(&keys) {
+                    *count += usize::from(key_inside(&key, folder));
+                }
+                counts
+            },
+        )
+        .reduce(|| vec![0; keys.len()], |a, b| a.iter().zip(&b).map(|(x, y)| x + y).collect())
+}
+
 /// Some folders, ready to ask of many paths whether each is one of them or inside one ([`Inside::holds`]), as
 /// [`is_inside`] says of each pair: each folder is made into a key once, and a path is looked up by itself and each
 /// folder it's in, so it takes as long for thousands of folders as for one.
