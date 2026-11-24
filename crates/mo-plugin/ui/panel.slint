@@ -8,6 +8,8 @@ import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickL
 import { CurveBench, GridStrip, CurveEditorData, EditorDot, ClipTile, RulerMark } from "../../mo-ui/ui/pages/curve_editor.slint";
 export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem }
 import { ListView } from "../../mo-ui/ui/list.slint";
+import { FolderTree, TreeLine, TreePick } from "../../mo-ui/ui/folder_tree.slint";
+import { RightClickMenu } from "../../mo-ui/ui/studio.slint";
 
 import "../../mo-ui/fonts/IBMPlexSans-400.ttf";
 import "../../mo-ui/fonts/IBMPlexSans-600.ttf";
@@ -184,6 +186,29 @@ export component Panel inherits Window {
     in property <string> hide-silent-words: "Hide silent sounds";
     in property <bool> hide-copies;
     in property <string> hide-copies-words: "Hide duplicates";
+    // The folder tree beside the filter column, as on the app's Sounds page (mo_app::sound_folders): its lines, its
+    // picks and hidden folders as chips, how many are picked, the line under it, whether it's folded away, the words
+    // in its search box, where its list is turned to, and the right-click menu of the line clicked.
+    in property <[TreeLine]> tree-lines;
+    in property <[TreePick]> tree-picks;
+    in property <string> tree-picked;
+    in property <string> tree-note;
+    in property <bool> tree-folded;
+    // The window is too narrow to keep the tree open beside the list (set from the window's size: a binding on
+    // the panel's own width would loop through its layout).
+    in property <bool> tree-narrow;
+    in property <bool> tree-any;
+    in-out property <string> tree-search;
+    in-out property <length> tree-kept-y;
+    in property <[MenuItem]> tree-menu;
+    callback tree-toggled(string);
+    callback tree-opened(string);
+    callback tree-taken-off(string, bool);
+    callback tree-search-edited(string);
+    callback tree-cleared();
+    callback tree-fold();
+    callback tree-menu-asked(string);
+    callback tree-menu-chosen(string);
     // With Favourites on: how far the sounds like them reach (0 only them, 1 the most adventurous), the words by it,
     // and the slider let go at a place (0 to 1).
     in-out property <float> like-favourites;
@@ -689,6 +714,35 @@ export component Panel inherits Window {
                             on: root.hide-copies;
                             clicked => { root.toggle("hide-copies"); }
                         }
+                    }
+                }
+            }
+            // The folder tree, as on the app's Sounds page: only the folders that hold sounds the other filters let
+            // through, each with how many. Folded to its tab in a narrow window, where a click on the tab opens it
+            // over the list (its room in the row stays the tab's: above the list, not beside it).
+            Rectangle {
+                width: tree.room - Space.lg;
+                z: 1;
+                tree := FolderTree {
+                    height: parent.height;
+                    lines: root.tree-lines;
+                    picks: root.tree-picks;
+                    picked-words: root.tree-picked;
+                    note: root.tree-note;
+                    folded: root.tree-folded;
+                    narrow: root.tree-narrow;
+                    any-picked: root.tree-any;
+                    search <=> root.tree-search;
+                    kept-y <=> root.tree-kept-y;
+                    toggled(path) => { root.tree-toggled(path); }
+                    opened(path) => { root.tree-opened(path); }
+                    taken-off(path, hidden) => { root.tree-taken-off(path, hidden); }
+                    search-edited(words) => { root.tree-search-edited(words); }
+                    cleared => { root.tree-cleared(); }
+                    fold => { root.tree-fold(); }
+                    right-clicked(path, x, y) => {
+                        root.tree-menu-asked(path);
+                        tree-menu.open-at(x, y);
                     }
                 }
             }
@@ -2231,5 +2285,10 @@ export component Panel inherits Window {
     TipLayer {
         width: 100%;
         height: 100%;
+    }
+    // The folder tree's right-click menu, over everything.
+    tree-menu := RightClickMenu {
+        items: root.tree-menu;
+        chosen(id) => { root.tree-menu-chosen(id); }
     }
 }

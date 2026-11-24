@@ -1,7 +1,7 @@
 //! "Most liked": how much each sign that you like a sound counts, as the C# app's `LikedWeights` (Solomon's starting
-//! values; adjustable in Settings, kept in `library.db`'s settings under [`LIKED_WEIGHTS_KEY`]): each project using
-//! it, each drag out of the app or send into a DAW, each deliberate play, and being a favourite. Anything older than
-//! a year counts [`LikedWeights::older_share`] as much.
+//! values; adjustable in Settings, kept in `library.db`'s settings under [`LIKED_WEIGHTS_KEY`]): each song using it
+//! (its saves count once, as the page counts them), each drag out of the app or send into a DAW, each deliberate play,
+//! and being a favourite. Anything older than a year counts [`LikedWeights::older_share`] as much.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,11 +39,12 @@ impl LikedWeights {
         serde_json::to_string(self).unwrap_or_default()
     }
 
-    /// The sound's score: higher is more liked. `usage` is its use in your projects (see [`crate::usage`]).
+    /// The sound's score: higher is more liked. `usage` is its use in your songs (see [`crate::usage`]): `project` is
+    /// for each song using it, and a song saved lately counts as recent.
     pub fn score(&self, s: &Sound, usage: Option<&Usage>) -> f64 {
         let a = &s.activity;
         let both = |recent: i32, older: i32| f64::from(recent) + f64::from(older) * self.older_share;
-        let (all, recent) = usage.map_or((0, 0), |u| (u.projects as i32, u.recent as i32));
+        let (all, recent) = usage.map_or((0, 0), |u| (u.songs as i32, u.recent_songs as i32));
         self.project * both(recent, (all - recent).max(0))
             + self.drag * both(a.drags, a.older_drags)
             + self.send * both(a.sends, a.older_sends)
@@ -74,8 +75,9 @@ mod tests {
         let mut s = sound(1, "x.wav");
         s.favourite = true;
         s.activity = SoundActivity { plays: 2, older_plays: 4, drags: 1, older_drags: 0, sends: 0, older_sends: 2 };
-        let u = Usage { projects: 3, recent: 1, ..Usage::default() };
-        // Projects 5 * (1 + 2 * 0.5) + drags 3 * 1 + sends 3 * (2 * 0.5) + plays 1 * (2 + 4 * 0.5) + favourite 10.
+        let u = Usage { projects: 9, recent: 4, songs: 3, recent_songs: 1, ..Usage::default() };
+        // Songs (not saves) 5 * (1 + 2 * 0.5) + drags 3 * 1 + sends 3 * (2 * 0.5) + plays 1 * (2 + 4 * 0.5)
+        // + favourite 10.
         assert_eq!(LikedWeights::default().score(&s, Some(&u)), 10.0 + 3.0 + 3.0 + 4.0 + 10.0);
         let plain = sound(2, "y.wav");
         assert_eq!(LikedWeights::default().score(&plain, None), 0.0);

@@ -2411,7 +2411,12 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     data.invoke_pick_view(0);
     mo_ui::sounds::fold_folders_for_screens(app, false);
     data.invoke_tree_opened(r"D:\Samples".into());
+    // Before and after a tick: no line moves (its chip goes under the lines), so the box stays under the mouse.
+    capture(window);
+    shots.push(("sounds-folders-before-tick.png".into(), capture(window)));
     data.invoke_tree_toggled(r"D:\Samples\Drums".into());
+    capture(window);
+    shots.push(("sounds-folders-after-tick.png".into(), capture(window)));
     data.invoke_tree_toggled(r"D:\Samples\Loops".into());
     data.invoke_tree_menu_asked(r"D:\Samples\FX".into());
     data.invoke_tree_menu_chosen("hide".into());
@@ -2432,6 +2437,25 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     capture(window);
     shots.push(("sounds-folders-search.png".into(), capture(window)));
     data.set_tree_search("".into());
+    data.invoke_tree_search_edited("".into());
+    // A scan going through the sample folder: its line says so until the scan has listened to its new sounds.
+    // Its own library name, and the screens library's state put back after: later shots read the newest scan state.
+    let scan_db = std::path::Path::new("folder-tree-shot");
+    let before = mo_app::sound_scan::latest_state();
+    let scanning = mo_app::sound_scan::ScanState {
+        running: true,
+        looking: true,
+        scanning: vec![r"D:\Samples".into()],
+        ..Default::default()
+    };
+    mo_app::sound_scan::show_state(scan_db, scanning);
+    data.invoke_tree_search_edited("".into());
+    capture(window);
+    shots.push(("sounds-folders-scanning.png".into(), capture(window)));
+    mo_app::sound_scan::show_state(scan_db, mo_app::sound_scan::ScanState::default());
+    if let Some(before) = before {
+        mo_app::sound_scan::show_state(std::path::Path::new("screens-sounds.db"), before);
+    }
     data.invoke_tree_search_edited("".into());
     data.invoke_tree_fold();
     capture(window);
@@ -2455,6 +2479,7 @@ fn sounds_shots(
     // Autoplay is on, so picking a sound plays it.
     pick_sound(app, 6);
     data.set_played(0.35);
+    data.set_tile_played(0.35);
     shots.push(("sounds-panel.png".into(), capture(window)));
     // A sound deep in a pack, with folder names too long for a line, and six tags: its card wraps them, at the usual
     // width and as narrow as it goes, with nothing cut off on the right. Found by name, as the shuffled order changes
@@ -2473,16 +2498,27 @@ fn sounds_shots(
         return Err(format!("sounds-path-tip.png: no tip came up at {CARD_PATH:?}; has the card's path moved?"));
     }
     shots.push(("sounds-path-tip.png".into(), after));
-    // The same card's switch on its other side: the projects that use the sound, newest first. They show with no
-    // turning, as the card's path keeps to one line.
+    // The same card's switch on its other side: the songs that use the sound, newest first, each once by its newest
+    // save that uses it. They show with no turning, as the card's path keeps to one line. Then Every save: each save.
     data.set_card_list(1);
     capture(window);
     shots.push(("sounds-panel-used-in.png".into(), capture(window)));
+    data.set_every_save(true);
+    capture(window);
+    shots.push(("sounds-panel-every-save.png".into(), capture(window)));
+    data.set_every_save(false);
     data.set_card_list(0);
     let wide = data.get_panel_width();
     data.set_panel_width(320.0);
     capture(window);
     shots.push(("sounds-panel-narrow.png".into(), capture(window)));
+    // As narrow, the songs with Every save on: its chip has a line of its own, so the card doesn't cut it off.
+    data.set_card_list(1);
+    data.set_every_save(true);
+    capture(window);
+    shots.push(("sounds-panel-narrow-every-save.png".into(), capture(window)));
+    data.set_every_save(false);
+    data.set_card_list(0);
     data.set_panel_width(wide);
     data.set_search("".into());
     data.invoke_search_edited("".into());
@@ -3069,7 +3105,7 @@ fn sample_sound_copies() -> mo_app::space_sounds::Found {
         groups.push(group);
     }
     let mut list = SoundList::new(sounds);
-    list.set_used(HashMap::from([(1, Usage { projects: 4, ..Usage::default() })]));
+    list.set_used(HashMap::from([(1, Usage { projects: 4, songs: 3, ..Usage::default() })]));
     list.set_copies(&SameAudio { groups, sizes });
     look(&list, true)
 }
@@ -3703,14 +3739,40 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         })
         .collect();
     let played = vec![(7, day(31, 22)), (13, day(31, 21)), (2, day(30, 18)), (11, day(28, 9)), (20, day(20, 14))];
+    // Twelve made-up saves of seven songs for the card's Used in list, saved a week or so apart, newest first (names
+    // invented here, none of Solomon's: rule 4). Boom Kick, the card's sound, is in saves 6 to 8: two of Static bloom's
+    // and Late bus, so its card lists two songs, and Every save the three saves.
+    let saves: [(&str, &str, bool); 12] = [
+        ("Night drive_4", "Night drive", false),
+        ("Sunday loop", "Sunday loop", false),
+        ("Glass rooms", "Glass rooms", true),
+        ("Night drive_3", "Night drive", false),
+        ("Low tide_2", "Low tide", true),
+        ("Paper planes", "Paper planes", false),
+        ("Static bloom_3", "Static bloom", true),
+        ("Late bus", "Late bus", false),
+        ("Static bloom_2", "Static bloom", true),
+        ("Night drive_2", "Night drive", false),
+        ("Low tide", "Low tide", true),
+        ("Static bloom", "Static bloom", true),
+    ];
+    let song_of = |id: i64| {
+        let name = saves.get(usize::try_from(id).unwrap_or(usize::MAX)).map_or("", |s| s.1);
+        saves.iter().position(|s| s.1 == name).map_or(u32::MAX, |at| at as u32)
+    };
     // A few made-up songs using some of them, for the Used column and Most liked.
     let usage = (1..=29)
         .filter(|id| id % 3 != 0)
         .map(|id: i64| {
             let projects = (id * 7 % 11) as u32;
-            // Which of the made-up projects below: each a different one.
+            // Which of the made-up saves above: each a different one.
             let mut project_ids: Vec<i64> = (0..i64::from(projects)).map(|n| (id * 3 + n) % 12).collect();
             project_ids.sort_unstable();
+            // A song's saves count once.
+            let mut songs: Vec<u32> = project_ids.iter().map(|&p| song_of(p)).collect();
+            songs.sort_unstable();
+            songs.dedup();
+            let songs = songs.len() as u32;
             // First used a year or so apart, back to 2019.
             let first_used =
                 chrono::NaiveDate::from_ymd_opt(2019 + (id % 8) as i32, 3, 1).and_then(|d| d.and_hms_opt(12, 0, 0));
@@ -3719,6 +3781,8 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                 mo_sounds::usage::Usage {
                     projects,
                     recent: projects / 2,
+                    songs,
+                    recent_songs: songs / 2,
                     years: vec![2025, 2026],
                     project_ids,
                     first_used,
@@ -3727,29 +3791,22 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         })
         .filter(|(_, u)| u.projects > 0)
         .collect();
-    // Twelve made-up projects for the card's Used in list, saved a week or so apart (names invented here, none of
-    // Solomon's: rule 4).
-    let names = [
-        "Night drive",
-        "Sunday loop",
-        "Glass rooms",
-        "Low tide",
-        "Paper planes",
-        "Static bloom",
-        "Late bus",
-        "Copper sky",
-        "Slow motion",
-        "Bright side",
-        "Field notes",
-        "Neon rain",
-    ];
     let now = chrono::Local::now().timestamp();
     let projects = (0i64..)
-        .zip(names)
-        .map(|(id, name)| {
-            let (daw, ending) = if id % 3 == 2 { ("Bitwig Studio", "bwproject") } else { ("FL Studio", "flp") };
+        .zip(saves)
+        .map(|(id, (name, song, bitwig))| {
+            let (daw, ending) = if bitwig { ("Bitwig Studio", "bwproject") } else { ("FL Studio", "flp") };
             let path = format!(r"C:\Music\{daw}\{name}.{ending}");
-            (id, mo_library::ProjectFile { id, path, mtime: now - id * 9 * 86_400 })
+            let file = mo_library::ProjectFile {
+                id,
+                path,
+                mtime: now - id * 9 * 86_400,
+                song: song_of(id),
+                song_name: song.into(),
+                recent: id < 6,
+                copy: false,
+            };
+            (id, file)
         })
         .collect();
     let weights = mo_sounds::liking::LikedWeights::default();
@@ -4169,17 +4226,41 @@ fn settings_shots(
         kind: 2,
         shared_with: Vec::new(),
     };
-    mo_ui::settings::show_folders(
-        app,
-        Ok(mo_app::settings::folder_groups(
+    // A scan going: one folder done, a folder just added being listened to, one on a drive that's unplugged.
+    let samples: Vec<String> =
+        vec!["I:\\Samples".into(), "I:\\Fl Studio Backup\\Old Samples".into(), "G:\\Splice".into()];
+    let at = |h: u32, m: u32| chrono::Local::now().date_naive().and_hms_opt(h, m, 0).unwrap_or_default();
+    let scanning = mo_app::sound_scan::ScanState {
+        running: true,
+        started: at(15, 40),
+        folders: vec![
+            mo_app::sound_scan::FolderScan { folder: samples[0].clone(), files: 453_741, ..Default::default() },
+            mo_app::sound_scan::FolderScan {
+                folder: samples[1].clone(),
+                files: 3_906,
+                to_listen: 3_906,
+                listened: 1_280,
+                unreadable: 2,
+                ..Default::default()
+            },
+            mo_app::sound_scan::FolderScan { folder: samples[2].clone(), away: true, ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    // Only the key the scan state is kept under: no file is made.
+    let screens_sounds = PathBuf::from("screens-sounds.db");
+    mo_app::sound_scan::show_state(&screens_sounds, scanning.clone());
+    let folder_groups = |samples: Vec<String>, moved: &mo_space::folder_move::MovedFolder| {
+        mo_app::settings::folder_groups(
             vec!["I:\\Fl Studio Data\\FL Studio\\Projects".into(), "K:\\Bitwig Studio\\Projects".into()],
-            vec!["I:\\Samples".into(), "G:\\Splice".into()],
+            samples,
             vec!["L:\\New Midi".into()],
             vec![],
             vec!["C:\\Program Files\\Common Files\\VST3".into(), "C:\\Program Files\\Common Files\\CLAP".into()],
-            &[moved],
-        )),
-    );
+            std::slice::from_ref(moved),
+        )
+    };
+    mo_ui::settings::show_folders(app, Ok(folder_groups(samples.clone(), &moved)));
     // Exports go into a folder chosen on another drive (an invented one).
     let exports = r"I:\DAWmate Exports";
     mo_ui::settings::show_exports(
@@ -4189,6 +4270,14 @@ fn settings_shots(
     data.invoke_tab_picked(1);
     capture(window);
     shots.push(("settings-folders.png".into(), capture(window)));
+    // The scan done: each folder says what it found and when.
+    let mut scanned = scanning;
+    scanned.running = false;
+    scanned.ended = Some(at(15, 47));
+    scanned.folders[1].listened = 3_906;
+    mo_app::sound_scan::show_state(&screens_sounds, scanned);
+    mo_ui::settings::show_folders(app, Ok(folder_groups(samples, &moved)));
+    shots.push(("settings-folders-scanned.png".into(), capture(window)));
     // The Exports card, at the bottom of the tab.
     scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
     shots.push(("settings-folders-exports.png".into(), capture(window)));

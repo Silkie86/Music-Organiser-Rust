@@ -27,6 +27,7 @@ pub mod curves;
 pub mod drag;
 pub mod entry;
 pub mod favourites;
+mod folders;
 pub mod galaxy;
 mod gpu;
 mod kept;

@@ -22,7 +22,7 @@ use mo_dawlink::scripts::{self, ScriptState};
 use mo_library::Library;
 use mo_library::folders::{self, FolderList};
 use slint::platform::WindowEvent;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::{
     AccentInfo, AppWindow, DawProgramInfo, DawRowInfo, FolderGroupInfo, KeyLineInfo, SettingsData, SettingsFact,
@@ -129,6 +129,40 @@ thread_local! {
     static SYSTEM: Cell<f32> = const { Cell::new(0.0) };
     /// Checks the size of everything is still on, every second.
     static SIZE_CHECK: slint::Timer = slint::Timer::default();
+    /// The sample folders on show, and what each one's row says of scanning it ([`show_scan_states`]).
+    static SAMPLE_ROWS: RefCell<Option<SampleRows>> = const { RefCell::new(None) };
+    /// The scan state the sample folders' rows show ([`mo_app::sound_scan::state_turn`]).
+    static SCAN_TURN: Cell<u64> = const { Cell::new(u64::MAX) };
+    /// The day the rows were last worded on.
+    static SCAN_DAY: Cell<Option<chrono::NaiveDate>> = const { Cell::new(None) };
+}
+
+/// The sample folders on show, and the model of what each one's row says.
+type SampleRows = (Vec<String>, std::rc::Rc<VecModel<SharedString>>);
+
+/// What each sample folder's row says of scanning it ([`page::sample_folder_state`]), from the last scan's state:
+/// looked at once a second while the app runs, and made again only when it changed. Reads no file: the scan keeps its
+/// state in memory as it goes.
+fn show_scan_states(force: bool) {
+    let turn = mo_app::sound_scan::state_turn();
+    // A scan from yesterday says its date, not just its time, once the day turns.
+    let today = chrono::Local::now().date_naive();
+    if !force && SCAN_TURN.get() == turn && SCAN_DAY.get() == Some(today) {
+        return;
+    }
+    SCAN_TURN.set(turn);
+    SCAN_DAY.set(Some(today));
+    let state = mo_app::sound_scan::latest_state();
+    SAMPLE_ROWS.with(|rows| {
+        if let Some((folders, model)) = rows.borrow().as_ref() {
+            for (i, folder) in folders.iter().enumerate() {
+                let line: SharedString = page::sample_folder_state(folder, state.as_ref(), today).into();
+                if model.row_data(i).as_ref() != Some(&line) {
+                    model.set_row_data(i, line);
+                }
+            }
+        }
+    });
 }
 
 /// Reads the settings before the window opens: this app's file in `folder` and the C# app's choices from `library`,
@@ -759,6 +793,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
                 if let Some(app) = weak.upgrade() {
                     apply_size(&app);
                 }
+                // How a scan of the sample folders is going, on their rows.
+                show_scan_states(false);
             })
         });
     }
@@ -882,6 +918,7 @@ pub fn fill_the_screen(app: &AppWindow) {
             let look = look_at(w);
             let mend = !full && !look.full_screen && look.maximised && look.smaller_than_screen();
             if mend {
+                i_slint_backend_winit::mo_probe::note_from_app("set_maximized(false) then (true), the start-up mend");
                 w.set_maximized(false);
                 w.set_maximized(true);
             }
@@ -904,17 +941,53 @@ pub fn fill_the_screen(app: &AppWindow) {
 /// Whether the window was last seen maximised (or full screen), from half a second after the start on.
 static MAXIMISED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The window's size changed: a line in the log when it stopped being maximised, by whatever did it (the user's
-/// Restore, or the app itself: a page's size limits did on 22 Nov, with nothing in the log).
-pub fn resized(app: &AppWindow) {
+/// The window's size changed: when it stopped being maximised (or full screen), a line in the log says so, whether
+/// the user may have done it (see `watchdog::Hands`), and what Slint asked of the window in the 30 s before, from the
+/// notes its patched copy keeps (vendor/i-slint-backend-winit/PATCHED.md). On 24 Nov it left maximised by itself 10 s
+/// after coming back from the taskbar, on Songs with no page change; these lines are to name what did it.
+pub fn resized(app: &AppWindow, by_user: bool) {
+    // A moment later, on the event loop: the app hears of the resize before Slint does, and Slint's own note that
+    // winit says maximised changed comes as it handles it.
+    let weak = app.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(0), move || {
+        if let Some(app) = weak.upgrade() {
+            log_unmaximised(&app, by_user);
+        }
+    });
+}
+
+fn log_unmaximised(app: &AppWindow, by_user: bool) {
     use slint::winit_030::WinitWindowAccessor;
-    let Some(look) = app.window().with_winit_window(look_at) else { return };
+    let Some((look, winit_scale)) = app.window().with_winit_window(|w| (look_at(w), w.scale_factor())) else {
+        return;
+    };
     let now = look.maximised || look.full_screen;
     let was = MAXIMISED.swap(now, std::sync::atomic::Ordering::Relaxed);
-    if was && !now {
-        let place = usize::try_from(app.get_place()).ok().and_then(Place::from_index).map_or("?", Place::name);
-        log::info("Window", &format!("The window stopped being maximised (page {place}): it is {}", look.words()));
+    if !was || now {
+        return;
     }
+    let place = usize::try_from(app.get_place()).ok().and_then(Place::from_index).map_or("?", Place::name);
+    let who = if by_user {
+        "perhaps by the user: the pointer was on the title bar or an edge, or the Windows key or Alt+Space was pressed"
+    } else {
+        "not by the user: the pointer was inside the window (or not seen since it came to the front), or the app \
+         wasn't in front; no Windows key or Alt+Space"
+    };
+    let asked = i_slint_backend_winit::mo_probe::since(std::time::Duration::from_secs(30));
+    let asked = if asked.is_empty() {
+        "Slint asked nothing of the window in the 30 s before".to_owned()
+    } else {
+        format!("what Slint asked of the window in the 30 s before:\n  {}", asked.join("\n  "))
+    };
+    log::info(
+        "Window",
+        &format!(
+            "The window stopped being maximised (page {place}): it is {}; {who}. Slint draws at scale {}, winit's \
+             scale is {winit_scale}; {asked}",
+            look.words(),
+            app.window().scale_factor(),
+        ),
+    );
 }
 
 /// The window came back from the taskbar: a line in the log with what winit says it is, and full screen put back
@@ -932,6 +1005,9 @@ pub fn restored(app: &AppWindow) {
             let look = look_at(w);
             let mend = full && (!look.full_screen || look.smaller_than_screen());
             if mend {
+                i_slint_backend_winit::mo_probe::note_from_app(
+                    "set_fullscreen(None) then (Borderless), back from the taskbar",
+                );
                 w.set_fullscreen(None);
                 w.set_fullscreen(Some(Fullscreen::Borderless(None)));
             }
@@ -1844,15 +1920,27 @@ pub fn show_folders(app: &AppWindow, groups: Result<Vec<page::FolderGroup>, Stri
             });
             let lines: Vec<FolderGroupInfo> = groups
                 .into_iter()
-                .map(|g| FolderGroupInfo {
-                    title: g.title.into(),
-                    editable: g.list.is_some(),
-                    note: g.note.into(),
-                    folders: strings(g.folders),
-                    empty: g.empty.into(),
+                .map(|g| {
+                    // The sample folders say how scanning each one went, kept up to date as a scan goes.
+                    let states = if g.list == Some(FolderList::Samples) {
+                        let model = std::rc::Rc::new(VecModel::from(vec![SharedString::new(); g.folders.len()]));
+                        SAMPLE_ROWS.with(|rows| *rows.borrow_mut() = Some((g.folders.clone(), model.clone())));
+                        ModelRc::from(model)
+                    } else {
+                        ModelRc::default()
+                    };
+                    FolderGroupInfo {
+                        title: g.title.into(),
+                        editable: g.list.is_some(),
+                        note: g.note.into(),
+                        folders: strings(g.folders),
+                        states,
+                        empty: g.empty.into(),
+                    }
                 })
                 .collect();
             data.set_folder_groups(ModelRc::new(VecModel::from(lines)));
+            show_scan_states(true);
             data.set_folders_note(page::FOLDERS_NOTE.into());
         }
         Err(e) => {

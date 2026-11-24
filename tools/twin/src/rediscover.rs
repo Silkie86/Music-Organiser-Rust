@@ -5,6 +5,7 @@
 //! must fill the same pads with the same sounds. (A described vibe needs deep listening's model, so it isn't checked.) Run as part of `twin sounds`, in its own
 //! folder: the sounds.db is made there and removed with it.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::Local;
@@ -219,7 +220,8 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
             first_used: None,
         })
         .collect();
-    let usage = usage(&sounds, &uses);
+    // The uses don't say which projects, so each is a song of its own: the counts are the same either way.
+    let usage = usage(&sounds, &uses, &HashMap::new());
     let answers: Vec<Value> = queries()
         .iter()
         .map(|o| {
@@ -289,7 +291,7 @@ fn same_suggestions(cs: &Value, rust: &Value, names: &Value) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(x, y)| {
             x["Id"] == y["Id"]
-                && (x["Reason"] == y["Reason"] || like_itself(x))
+                && (song_words(&x["Reason"]) == y["Reason"] || like_itself(x))
                 && (x["Score"].as_f64().unwrap_or(f64::NAN) - y["Score"].as_f64().unwrap_or(0.0)).abs() < 0.0011
         })
 }
@@ -298,8 +300,27 @@ fn same_suggestions(cs: &Value, rust: &Value, names: &Value) -> bool {
 /// year strip, so it says to pick others there.
 fn year_words(why: &Value) -> Value {
     match why.as_str() {
-        Some(w) => json!(w.replace("Pick another year, or Any year.", "Pick other years on the strip, or clear it.")),
+        Some(w) => song_words(&json!(
+            w.replace("Pick another year, or Any year.", "Pick other years on the strip, or clear it.")
+        )),
         None => why.clone(),
+    }
+}
+
+/// C#'s words for what a sound is used in, as the Rust app says them (DIFFERENCES.md): the Rust app counts songs, a
+/// song's saves once, and names the chip that takes in sounds used once as the page shows it. The twin's uses don't say
+/// which projects, so each is a song and the numbers stay the same.
+fn song_words(said: &Value) -> Value {
+    match said.as_str() {
+        Some(w) => json!(
+            w.replace(
+                "Tick \"Include rarely used\" to see ones used once.",
+                "Tick \"Sounds used once too\" to see ones used in one song."
+            )
+            .replace(" projects", " songs")
+            .replace(" project", " song")
+        ),
+        None => said.clone(),
     }
 }
 
@@ -373,7 +394,9 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
                     short(&b["Suggestions"])
                 ));
             }
-            if !same(&a["WhyNothing"], &b["WhyNothing"]) && !same(&year_words(&a["WhyNothing"]), &b["WhyNothing"]) {
+            if !same(&song_words(&a["WhyNothing"]), &b["WhyNothing"])
+                && !same(&year_words(&a["WhyNothing"]), &b["WhyNothing"])
+            {
                 differences.push(format!(
                     "Rediscover, {name}, question {q}: C# says {}, Rust {}",
                     a["WhyNothing"], b["WhyNothing"]

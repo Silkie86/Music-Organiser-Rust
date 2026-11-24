@@ -182,7 +182,7 @@ fn unused_words(y: u32) -> String {
 }
 
 /// Wires the page. The library at `library` is read when the page is first shown, when Ctrl+K first opens, or a
-/// little after the start ([`crate::ahead::PLUGINS`]), whichever comes first.
+/// little after the start ([`crate::ahead::Page::Plugins`]), whichever comes first.
 pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -436,6 +436,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
                 if let Some(found) = found {
                     crate::finder::add_source(&app, "plugins", found);
                 }
+                crate::ahead::done(&app, crate::ahead::Page::Plugins);
                 arrived(&app, built, in_bin);
             }
         });
@@ -482,7 +483,13 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     } else {
         // Otherwise the library is read a little after the start, so the first visit finds the list there rather
         // than an empty page for a second or two.
-        crate::ahead::after(app, crate::ahead::PLUGINS, |_| read_before_shown());
+        crate::ahead::after(app, crate::ahead::Page::Plugins, |app| {
+            read_before_shown();
+            // Without its reader (it couldn't start) nothing is coming: the next page isn't kept waiting.
+            if READER.with(|r| r.borrow().is_none()) {
+                crate::ahead::done(app, crate::ahead::Page::Plugins);
+            }
+        });
     }
 }
 

@@ -91,6 +91,7 @@ fn the_sample_folders_are_scanned_into_the_apps_own_library() {
     let folders = vec![samples.to_str().unwrap().to_owned()];
     // Nothing to scan: no folders, or a library that isn't the app's own.
     assert_eq!(scan(&db, &[], &|_, _| {}).unwrap(), None);
+    assert_eq!(mo_app::sound_scan::state(&db), None, "nothing scanned, nothing to show");
     // A new pack; one renamed; one deleted; and a file that isn't a sound file at all.
     tone(&samples.join("New Pack").join("Bass 01.wav"), 0.5, 55.0);
     tone(&samples.join("New Pack").join("Pad 01.wav"), 1.0, 440.0);
@@ -107,6 +108,16 @@ fn the_sample_folders_are_scanned_into_the_apps_own_library() {
     assert_eq!(mo_app::sound_scan::scanned_card(&s).0, "Found 2 new sounds");
     assert_eq!(said.first(), Some(&(0, 3)));
     assert_eq!(said.last(), Some(&(3, 3)));
+    // Settings shows how it went, folder by folder; an unplugged drive's folder says it couldn't be read.
+    let state = mo_app::sound_scan::state(&db).unwrap();
+    assert!(!state.running && !state.looking && state.ended.is_some() && state.stopped.is_none());
+    let f = state.folder(&folders[0]).unwrap();
+    assert_eq!((f.files, f.to_listen, f.listened, f.unreadable, f.away), (5, 3, 3, 1, false));
+    let away = dir.join("Unplugged").to_str().unwrap().to_owned();
+    let _ = scanned(&db, &[folders[0].clone(), away.clone()]);
+    let state = mo_app::sound_scan::state(&db).unwrap();
+    assert!(state.folder(&away).unwrap().away);
+    assert_eq!(state.folder(&folders[0]).unwrap().to_listen, 0);
     let db_now = SoundsDb::open_read_only(&copy).unwrap();
     let sounds = db_now.all(chrono::Local::now().naive_local()).unwrap();
     let by_name = |name: &str| sounds.iter().find(|s| s.path.ends_with(name)).cloned();

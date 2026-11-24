@@ -1,4 +1,4 @@
-//! "Sounds you haven't used much": learns your taste from the sounds your projects use (plus favourites, ratings and
+//! "Sounds you haven't used much": learns your taste from the sounds your songs use (plus favourites, ratings and
 //! what you play), then digs out unused sounds close to that taste, kept varied so the list isn't ten copies of one
 //! kick. A port of the C# app's `Rediscover`, checked by the sounds twin test.
 //!
@@ -30,7 +30,7 @@ pub struct Options {
     pub adventure: f64,
     /// The same seed gives the same list; 0 gives a new list each time (Shuffle).
     pub seed: i32,
-    /// Sounds used in up to this many projects count as unused (0, or 1 for "Include rarely used").
+    /// Sounds used in up to this many songs count as unused (0, or 1 for "Sounds used once too").
     pub max_uses: u32,
     /// Only sounds whose file is dated in these years, first to last (when the pack was made, or when you got it):
     /// the span picked on the year strip.
@@ -53,7 +53,7 @@ pub struct Suggestion {
     pub score: f64,
 }
 
-/// A sample folder and how much of it your projects use.
+/// A sample folder and how much of it your songs use.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FolderUse {
     pub folder: String,
@@ -63,9 +63,9 @@ pub struct FolderUse {
     pub share: f64,
 }
 
-/// How many projects use a sound.
+/// How many songs use a sound (a song's saves count once, as the page counts them: [`Usage::songs`]).
 pub(crate) fn used_in(usage: &HashMap<i64, Usage>, id: i64) -> u32 {
-    usage.get(&id).map_or(0, |u| u.projects)
+    usage.get(&id).map_or(0, |u| u.songs)
 }
 
 /// The years the sounds' files are dated, newest first, each with how many sounds, for the page's year strip (which
@@ -255,14 +255,14 @@ fn reason(
     let own = if used == 0 {
         "Never used".to_owned()
     } else {
-        format!("Used in {used} project{}", if used == 1 { "" } else { "s" })
+        format!("Used in {used} song{}", if used == 1 { "" } else { "s" })
     };
     if let Some((n, sim)) = nearest
         && sim > 0.5
     {
         let n_used = used_in(usage, n.id);
         let why = if n_used > 0 {
-            format!("which is in {n_used} of your projects")
+            format!("which is in {n_used} of your songs")
         } else if n.favourite {
             "a favourite".to_owned()
         } else {
@@ -318,13 +318,15 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
         }
     }
     if o.max_uses == 0 {
-        format!("Every {kind}sound is used in a project already. Tick \"Include rarely used\" to see ones used once.")
+        format!(
+            "Every {kind}sound is used in a song already. Tick \"Sounds used once too\" to see ones used in one song."
+        )
     } else {
-        format!("Every {kind}sound is used in more than one project already.")
+        format!("Every {kind}sound is used in more than one song already.")
     }
 }
 
-/// Your sample folders by how little of them your projects use, then the biggest first: find forgotten packs.
+/// Your sample folders by how little of them your songs use, then the biggest first: find forgotten packs.
 /// Hidden copies and silent sounds are left out. A folder spelt two ways (by case) counts once, under the first
 /// spelling met.
 /// As in C#, a project's use of a hidden copy isn't credited to the copy that's shown.
@@ -377,7 +379,7 @@ mod tests {
         s
     }
 
-    /// Kicks near (1, 0), hats near (0, 1); sound 1 (a kick) is used in 5 projects.
+    /// Kicks near (1, 0), hats near (0, 1); sound 1 (a kick) is used in 5 songs.
     fn library() -> (Vec<Sound>, HashMap<i64, Usage>, SoundIndex) {
         let mut sounds = Vec::new();
         let mut v = Vectors::new();
@@ -391,7 +393,7 @@ mod tests {
             let a = id as f32 * 0.01;
             v.insert(id, if kick { vec![1.0, a] } else { vec![a, 1.0] });
         }
-        let usage = HashMap::from([(1, Usage { projects: 5, ..Usage::default() })]);
+        let usage = HashMap::from([(1, Usage { projects: 7, songs: 5, ..Usage::default() })]);
         let index = SoundIndex { features: VectorIndex::clap(&v), clap: None, deep: false };
         (sounds, usage, index)
     }
@@ -403,11 +405,7 @@ mod tests {
         let s = suggest(&sounds, &usage, &index, &o);
         assert_eq!(s.len(), 3);
         assert!(s.iter().all(|x| x.id != 1 && x.id <= 10), "{s:?}");
-        assert!(
-            s[0].reason.starts_with("Never used. Sounds like 1, which is in 5 of your projects"),
-            "{}",
-            s[0].reason
-        );
+        assert!(s[0].reason.starts_with("Never used. Sounds like 1, which is in 5 of your songs"), "{}", s[0].reason);
         // The one it names, for the card to list its projects.
         assert_eq!(s[0].like, Some(1));
         // The same seed gives the same list.
@@ -426,7 +424,7 @@ mod tests {
         // Nor are they counted in their folder, nor in why there's none: the kick that isn't silent is used.
         let kicks = folders(&sounds, &usage).into_iter().find(|f| f.folder.ends_with("Kicks")).unwrap();
         assert_eq!((kicks.sounds, kicks.used), (1, 1));
-        assert!(why_nothing(&sounds, &index, &o).starts_with("Every Kick sound is used in a project already"));
+        assert!(why_nothing(&sounds, &index, &o).starts_with("Every Kick sound is used in a song already"));
         let mut all_silent = sounds.clone();
         all_silent[0].analysis = Some(SoundAnalysis { peak_db: -120.0, ..SoundAnalysis::default() });
         assert_eq!(
@@ -495,9 +493,9 @@ mod tests {
         );
         let o = Options { sound_types: vec!["Kick".into(), "Hat".into()], ..Options::default() };
         let mut every_one_used = usage.clone();
-        every_one_used.extend((2..=20).map(|id| (id, Usage { projects: 1, ..Usage::default() })));
+        every_one_used.extend((2..=20).map(|id| (id, Usage { projects: 3, songs: 1, ..Usage::default() })));
         assert!(suggest(&sounds, &every_one_used, &index, &o).is_empty());
-        assert!(why_nothing(&sounds, &index, &o).starts_with("Every Kick or Hat sound is used in a project already"));
+        assert!(why_nothing(&sounds, &index, &o).starts_with("Every Kick or Hat sound is used in a song already"));
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub mod plugin_folders;
 pub mod plugin_writes;
 pub mod plugins;
 pub mod read;
+pub mod sample_writes;
 pub mod samples;
 pub mod scan;
 mod setting_list;

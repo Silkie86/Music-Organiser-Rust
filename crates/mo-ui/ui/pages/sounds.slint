@@ -28,7 +28,7 @@ export struct AlikeLine {
     likeness: string,
 }
 
-// One sample folder on Rediscover, with how much of it your projects use: "12 of 340 used".
+// One sample folder on Rediscover, with how much of it your songs use: "12 of 340 used".
 export struct FolderLine {
     folder: string,
     name: string,
@@ -62,7 +62,7 @@ export struct SoundLine {
     bpm: string,
     length: string,
     used: string,
-    // The same, in words that make sense without the Used column's name over them: "used in 12 projects".
+    // The same, in words that make sense without the Used column's name over them: "used in 12 songs".
     used-words: string,
     folder: string,
     // When it was played, on History.
@@ -108,13 +108,15 @@ export struct TrailDot {
     fade: float,
 }
 
-// A project on the picked sound's card: its save's id (to open it on the Songs page), name, DAW and the day it was
-// last saved.
+// A song on the picked sound's card, by its newest save that uses the sound (or, with Every save, a save): the save's
+// id (to open it on the Songs page), the song's name (or the save's), its DAW, the day it was last saved, and how many
+// of the song's saves use the sound ("16 saves", or "" for one).
 export struct UsedInLine {
     id: int,
     name: string,
     daw: string,
     saved: string,
+    saves: string,
 }
 
 export struct PickedSound {
@@ -137,21 +139,29 @@ export struct PickedSound {
     own-type: string,
     // What the analysis says it sounds like ("punchy, bright").
     character: string,
-    // The projects that use it, newest first (or, for a sound Rediscover dug out that none use, those of the sound it
-    // sounds like), with the words on the card's switch ("Used in 4") and above the list.
+    // The songs that use it, newest first, each by its newest save that uses it (or, for a sound Rediscover dug out
+    // that none use, those of the sound it sounds like), with the words on the card's switch ("Used in 4") and any
+    // above the list; and each of those saves, for Every save, with its own words and its chip's tip. A song's saves
+    // count once (Solomon's F12 note of 23 Nov 2026: "used in 44 projects but they basically the same project").
     projects: [UsedInLine],
     projects-title: string,
     projects-note: string,
+    every-save: [UsedInLine],
+    every-save-note: string,
+    every-save-tip: string,
+    // Whether a song has more than one save that uses it: only then does Every save list more than the songs.
+    more-saves: bool,
 }
 
 export global SoundsData {
     // Sounds like the picked one, most alike first, and a word while there are none to show.
     in property <[AlikeLine]> alike;
     in property <string> alike-note;
-    // Which list the card shows under its switch: 0 the sounds like it, 1 the projects that use it. It stays as
-    // picked from sound to sound.
+    // Which list the card shows under its switch: 0 the sounds like it, 1 the songs that use it. It stays as picked
+    // from sound to sound, and so does Every save (each save that uses it, rather than each song once).
     in-out property <int> card-list;
-    // A project on the card's Used in list was clicked: it opens on the Songs page.
+    in-out property <bool> every-save;
+    // A song (or save) on the card's Used in list was clicked: it opens on the Songs page.
     callback open-project(int);
     callback pick-alike(int);
     callback play-alike(int);
@@ -196,7 +206,7 @@ export global SoundsData {
     in property <string> re-intro;
     in property <string> re-empty-title;
     in property <string> re-empty-text;
-    // Sample folders by how little of them your projects use; a click lists that folder's sounds.
+    // Sample folders by how little of them your songs use; a click lists that folder's sounds.
     in property <[FolderLine]> folders;
     callback pick-folder(string);
 
@@ -488,6 +498,9 @@ export global SoundsData {
     in property <bool> playing;
     // How much of the picked sound has played, from 0 to 1.
     in property <float> played;
+    // The same for its tile, whose waveform is the sound's first minute only (all the library keeps of it): a longer
+    // sound's tile has played through at a minute in.
+    in property <float> tile-played;
     in-out property <length> panel-width: 400px;
     callback panel-resized(length);
     callback play();
@@ -662,7 +675,7 @@ component SoundTileView inherits Rectangle {
             points: root.tile.points;
             tint: Theme.sound-type(root.tile.colour);
             playing: root.tile.playing;
-            played: root.tile.playing ? SoundsData.played : 1;
+            played: root.tile.playing ? SoundsData.tile-played : 1;
         }
     }
 }
@@ -1034,7 +1047,7 @@ component FoldersCard inherits Panel {
                 text: "FORGOTTEN FOLDERS";
                 vertical-alignment: center;
             }
-            InfoTip { text: "Sample folders by how little of them your projects use. Click one to list its sounds."; }
+            InfoTip { text: "Sample folders by how little of them your songs use. Click one to list its sounds."; }
             Rectangle { }
         }
         ListView {
@@ -1390,6 +1403,10 @@ component SoundPanel inherits SidePanel {
             }
         }
     }
+    // Every save is on, and changes the list: each save that uses it, rather than each song once.
+    property <bool> every-save: SoundsData.every-save && SoundsData.picked.more-saves;
+    property <string> used-note: root.every-save ? SoundsData.picked.every-save-note : SoundsData.picked.projects-note;
+    property <[UsedInLine]> used-lines: root.every-save ? SoundsData.picked.every-save : SoundsData.picked.projects;
     property <int> tag-asked: SoundsData.tag-asked;
     changed tag-asked => { tag-box.focus-all(); }
     // The tag box keeps the keys when the tags added push it down the card, out of sight (they wrap onto another line,
@@ -1406,7 +1423,7 @@ component SoundPanel inherits SidePanel {
     }
     VerticalLayout {
         spacing: Space.xs;
-        // The sounds like it, or the projects that use it: one switch, as the card has room for one list (Solomon's
+        // The sounds like it, or the songs that use it: one switch, as the card has room for one list (Solomon's
         // F12 note, 5 Nov 2026: "a list of projects used in ... on the card somewhere you can switch to see").
         HorizontalLayout {
             alignment: start;
@@ -1414,6 +1431,21 @@ component SoundPanel inherits SidePanel {
                 choices: ["Sounds like this", SoundsData.picked.projects-title];
                 current: SoundsData.card-list;
                 picked(i) => { SoundsData.card-list = i; }
+            }
+        }
+        // Each save that uses it, rather than each song once, as on the Plugins card; only when a song has more than
+        // one, as it changes nothing otherwise. On a line of its own: beside the switch, a narrow card cut it off.
+        if SoundsData.card-list == 1 && SoundsData.picked.more-saves: HorizontalLayout {
+            alignment: start;
+            every := ToggleChip {
+                text: "Every save";
+                on: SoundsData.every-save;
+                clicked => { SoundsData.every-save = !SoundsData.every-save; }
+                Tip {
+                    text: SoundsData.picked.every-save-tip;
+                    hovering: every.hovered;
+                    at-y: every.height + Space.xs;
+                }
             }
         }
         if SoundsData.card-list == 0 && SoundsData.alike-note != "": Text {
@@ -1473,16 +1505,16 @@ component SoundPanel inherits SidePanel {
                 }
             }
         }
-        if SoundsData.card-list == 1 && SoundsData.picked.projects-note != "": Text {
+        if SoundsData.card-list == 1 && root.used-note != "": Text {
             width: root.inside;
-            text: SoundsData.picked.projects-note;
+            text: root.used-note;
             color: Theme.muted;
             font-size: Type.meta;
             wrap: word-wrap;
         }
         if SoundsData.card-list == 1: VerticalLayout {
             spacing: Space.xs;
-            for u in SoundsData.picked.projects: song-line := ListLine {
+            for u in root.used-lines: song-line := ListLine {
                 height: 28px;
                 tip: "Open it on the Songs page";
                 clicked => { SoundsData.open-project(u.id); }
@@ -1505,6 +1537,12 @@ component SoundPanel inherits SidePanel {
                         text: u.name;
                         color: Theme.text;
                         font-size: Type.meta;
+                        vertical-alignment: center;
+                    }
+                    if u.saves != "": Text {
+                        text: u.saves;
+                        color: Theme.faint;
+                        font-size: Type.small;
                         vertical-alignment: center;
                     }
                     Text {
@@ -2392,7 +2430,7 @@ export component SoundsPage inherits Rectangle {
                             released(v) => { SoundsData.like-favourites-set(v); }
                         }
                         if SoundsData.knows-use: TickLine {
-                            text: "In my projects";
+                            text: "In my songs";
                             on: SoundsData.used;
                             clicked => { SoundsData.toggle("used"); }
                         }

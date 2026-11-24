@@ -41,6 +41,9 @@ slint = { workspace = true, features = [
     "renderer-femtovg-wgpu",
     "raw-window-handle-06",
 ] }
+# Slint's window backend, only for the notes its patched copy keeps (vendor/i-slint-backend-winit/PATCHED.md): what it
+# last asked of the window, logged when the window leaves maximised. Same version as Slint's, so nothing new is built.
+i-slint-backend-winit = { version = "=1.18.1", default-features = false }
 image.workspace = true
 chrono.workspace = true
 # The clipboard, for Copy path. Slint already brings it in for its text boxes.

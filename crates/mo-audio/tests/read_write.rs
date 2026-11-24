@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mo_audio::{AudioError, read, read_from, read_parts, write_wav};
+use mo_audio::{AudioError, EMPTY_FILE, frame_at, read, read_from, read_parts, read_parts_from, write_wav};
 
 fn fixture(name: &str, bytes: &[u8]) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-audio");
@@ -175,7 +175,14 @@ fn says_what_it_cannot_read() {
     assert!(matches!(e("x.opus", b"0&"), AudioError::NotSupported(_)));
     assert!(!e("x.mp3", b"not an mp3 at all").to_string().is_empty());
     assert!(e("text.wav", b"hello there").to_string().contains("Not a WAV or AIFF"));
-    assert!(e("empty.wav", b"").to_string().contains("Not a WAV or AIFF"));
+    assert!(e("short.wav", b"RI").to_string().contains("Not a WAV or AIFF"));
+    // A file of 0 bytes says so, whatever its name, read whole or a part at a time (Solomon's note of 23 Nov: two
+    // empty .wav files on an old sample CD were said not to be WAV files).
+    for name in ["empty.wav", "empty.aif", "empty.mp3", "empty.flac", "empty.wma"] {
+        assert_eq!(e(name, b"").to_string(), EMPTY_FILE, "{name}");
+        let parts = read_parts(&fixture(name, b""), 1.0, &mut |_, _| true).unwrap_err();
+        assert_eq!(parts.to_string(), EMPTY_FILE, "{name}");
+    }
     assert!(e("no-data.wav", &riff(&[fmt(1, 1, 10, 16)])).to_string().contains("no audio data"));
     assert!(
         e("mp3-in-wav.wav", &riff(&[fmt(85, 1, 10, 16), chunk(b"data", &[0; 4], false)]))
@@ -274,6 +281,64 @@ fn decodes_mp3_flac_m4a_ogg_and_aac() {
     assert_eq!(a.len(), 2205);
     assert_eq!(a.file_seconds, 0.5);
     assert!(read_from(&tone("tone.mp3"), 60.0, 10).unwrap_err().to_string().contains("only read from the start"));
+}
+
+/// Every part `read_parts_from` hands on from `from` seconds into `path`, a tenth of a second each, one after another;
+/// and how many times it was asked whether to go on with nothing to hand on yet.
+fn parts_from(path: &Path, from: f64) -> (u32, Vec<Vec<f32>>, u32) {
+    let (mut rate, mut got, mut probes) = (0, Vec::<Vec<f32>>::new(), 0);
+    read_parts_from(path, from, 0.1, &mut |r, part| {
+        rate = r;
+        if part.is_empty() {
+            probes += 1;
+        }
+        got.resize(part.len().max(got.len()), Vec::new());
+        for (all, more) in got.iter_mut().zip(part) {
+            all.extend_from_slice(more);
+        }
+        true
+    })
+    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    (rate, got, probes)
+}
+
+#[test]
+fn reads_from_part_way_into_every_kind_of_file() {
+    // Where a long song plays from after a click on its waveform: what's handed on is the same as the whole file read
+    // from there, for a WAV (read from there straight away) and the kinds decoded from their start.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-audio");
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("from-part-way.wav");
+    let ramp: Vec<f32> = (0..11_025).map(|i| i as f32 / 11_025.0 - 0.5).collect();
+    write_wav(&wav, &[ramp.clone(), ramp], 22050, 24).unwrap();
+    let mut files = vec![wav];
+    files.extend(["tone.flac", "tone.mp3", "tone.m4a", "tone.ogg", "tone.aac"].map(tone));
+    // Windows decodes WMA itself (Solomon's 5:11 song is one).
+    if cfg!(windows) {
+        files.push(tone("tone.wma"));
+    }
+    for path in &files {
+        let whole = read(path, 60.0).unwrap();
+        let (rate, from_start, _) = parts_from(path, 0.0);
+        assert_eq!((rate, &from_start), (whole.sample_rate, &whole.channels), "{}", path.display());
+        let at = usize::try_from(frame_at(0.2, whole.sample_rate)).unwrap();
+        let (rate, got, probes) = parts_from(path, 0.2);
+        assert_eq!(rate, whole.sample_rate, "{}", path.display());
+        let want: Vec<Vec<f32>> = whole.channels.iter().map(|c| c[at..].to_vec()).collect();
+        assert_eq!(got, want, "{}", path.display());
+        // A WAV goes straight there; the others are asked whether to go on as they're decoded on the way.
+        assert_eq!(probes > 0, path.extension().is_some_and(|e| e != "wav"), "{}", path.display());
+        // Past its end: nothing.
+        assert_eq!(parts_from(path, 5.0).1, Vec::<Vec<f32>>::new(), "{}", path.display());
+    }
+    // Told to stop on the way there, it stops: nothing is handed on.
+    let mut handed = 0;
+    read_parts_from(&tone("tone.flac"), 0.4, 0.1, &mut |_, part| {
+        handed += usize::from(!part.is_empty());
+        false
+    })
+    .unwrap();
+    assert_eq!(handed, 0);
 }
 
 /// A WAV as FL Studio keeps its own sounds: format 0x674F ("Og"), a whole Ogg Vorbis stream in the data chunk.

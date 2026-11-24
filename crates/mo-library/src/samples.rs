@@ -471,6 +471,17 @@ impl SoundLibrary {
         self.by_name.is_empty()
     }
 
+    /// Whether this library has `sample` (a path as a project saves it), by the rule the locator ends with
+    /// ([`SampleLocator::locate`]'s last step): a sound of its name in a folder of its folder's name, or anywhere when
+    /// every sound of its name is a copy of one sound; one that's still there. Asks the disk only about the sounds of
+    /// its name.
+    pub fn has_sample(&self, sample: &str) -> bool {
+        let (_, parts) = split(sample);
+        let Some(name) = parts.last() else { return false };
+        let folder = parts.len().checked_sub(2).and_then(|i| parts.get(i)).copied();
+        self.find(name, folder).is_some()
+    }
+
     /// A sound called `name` that's still there: in a folder called `folder` first, or else anywhere when every
     /// sound of that name is the same size, so they're copies of one sound and not different sounds sharing a name.
     fn find(&self, name: &str, folder: Option<&str>) -> Option<String> {

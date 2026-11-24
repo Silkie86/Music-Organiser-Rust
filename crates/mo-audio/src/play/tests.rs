@@ -466,3 +466,81 @@ fn how_often_the_output_mixes_comes_from_its_buffers_length() {
     assert_eq!(period_us(512, 0, 48_000), Some(10_666));
     assert_eq!(period_us(480, 1, 0), None);
 }
+
+/// A sound read as it plays, made in memory: `samples` (mono, 1000 frames a second) in parts of `part` frames, starting
+/// `start` frames into its file.
+fn stream_of(samples: &[f32], part: usize, start: u64) -> Stream {
+    let parts = samples
+        .chunks(part)
+        .map(|p| Arc::new(AudioData { sample_rate: 1000, channels: vec![p.to_vec()], ..AudioData::default() }))
+        .collect();
+    Stream::of_parts(parts, start)
+}
+
+#[test]
+fn a_sound_read_as_it_plays_plays_every_part_and_says_where_it_is_in_its_file() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, ended) = player(&outputs);
+    let samples: Vec<f32> = (0..300).map(|i| 0.5 + i as f32 / 1000.0).collect();
+    // From 5 s into its file.
+    assert_eq!(player.play_stream_if(stream_of(&samples, 100, 5_000), "long", || Ok::<(), ()>(())), Ok(()));
+    assert_eq!(player.playing().as_deref(), Some("long"));
+    assert_eq!(player.position(), Some(5.0));
+    settle(&player);
+    let heard = outputs.pull(150);
+    // It fades in over 3 ms (3 frames here), as it starts part way into its file, then plays sample for sample, on
+    // through the joins between its parts.
+    assert!(heard[0] > 0.0 && heard[0] < samples[0], "{}", heard[0]);
+    assert_eq!(&heard[3..], &samples[3..150]);
+    assert_eq!(player.position(), Some(5.15));
+    let heard = outputs.pull(200);
+    assert_eq!(&heard[..150], &samples[150..]);
+    assert!(heard[150..].iter().all(|s| *s == 0.0));
+    assert_eq!(ended.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("long"));
+    assert_eq!(player.playing(), None);
+}
+
+#[test]
+fn a_sound_read_as_it_plays_isnt_started_when_no_longer_wanted() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, _ended) = player(&outputs);
+    player.play(ramp(), "1", 2.0);
+    let samples = vec![0.9; 100];
+    assert_eq!(player.play_stream_if(stream_of(&samples, 50, 0), "2", || Err("overtaken")), Err("overtaken"));
+    assert_eq!(player.playing().as_deref(), Some("1"));
+    settle(&player);
+    let heard = outputs.pull(200);
+    assert!((heard[100] - 0.21).abs() < 1e-4, "{}", heard[100]);
+}
+
+#[test]
+fn a_sound_read_as_it_plays_is_stopped_and_replaced_like_any_other() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, ended) = player(&outputs);
+    let samples = vec![0.9; 1000];
+    player.play_stream_if(stream_of(&samples, 100, 0), "a", || Ok::<(), ()>(())).unwrap();
+    settle(&player);
+    outputs.pull(100);
+    player.play(ramp(), "b", 0.0);
+    settle(&player);
+    let heard = outputs.pull(100);
+    // Faded out over 3 ms, then only the ramp.
+    assert!((heard[50] - 0.005).abs() < 1e-4, "{}", heard[50]);
+    player.stop();
+    settle(&player);
+    outputs.pull(100);
+    settle(&player);
+    assert!(ended.try_recv().is_err());
+    assert_eq!(player.playing(), None);
+}
+
+#[test]
+fn a_sound_read_as_it_plays_with_nothing_to_play_ends_at_once() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, ended) = player(&outputs);
+    // Asked to play past its file's end: nothing came.
+    player.play_stream_if(stream_of(&[], 100, 0), "past", || Ok::<(), ()>(())).unwrap();
+    settle(&player);
+    assert!(outputs.pull(10).iter().all(|s| *s == 0.0));
+    assert_eq!(ended.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("past"));
+}

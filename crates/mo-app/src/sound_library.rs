@@ -52,6 +52,18 @@ pub fn shared(sounds_db: &Path) -> Arc<SoundLibrary> {
     library
 }
 
+/// The sounds in `sounds_db`, read now whatever was read before, and kept for [`shared`]: for looking again at samples
+/// marked missing just after a scan kept new sounds, which [`shared`] could still be keeping the read from before for
+/// up to a minute. Reads the disk, so never on the window's thread.
+pub fn read_now(sounds_db: &Path) -> Arc<SoundLibrary> {
+    let stamp = SoundsDb::stamp(sounds_db);
+    let library = Arc::new(SoundLibrary::read(sounds_db));
+    if let Ok(mut slot) = SHARED.lock() {
+        *slot = Some(Kept { db: sounds_db.to_path_buf(), stamp, at: Instant::now(), library: library.clone() });
+    }
+    library
+}
+
 /// The Sounds library's database beside `file` (another of the app's files, in its data folder): the app's own,
 /// `sounds-rust.db`, once the Sounds page has made it; before that (the first start with a C# app's library), the C#
 /// app's `sounds.db` it's made from, read-only. The C# app is retired, so `sounds.db` is never read once the app's own

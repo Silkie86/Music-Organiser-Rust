@@ -17,6 +17,7 @@ mod like;
 mod peaks;
 mod sky;
 mod tree;
+mod whole_wave;
 mod yours;
 
 use std::cell::{Cell, RefCell};
@@ -577,25 +578,66 @@ fn points(s: &Sound) -> i32 {
     peaks::with(s, |w| w.len() as i32).unwrap_or(0)
 }
 
+/// The card's waveform for the picked sound `s`, and how many lines across it is: the whole sound, as its play head
+/// and a click on it go. The library keeps the waveform of a sound's first minute, so for a longer one the whole
+/// waveform is read from its file ([`whole_wave`]); until it's back, the first minute shows in its share of the width,
+/// as many lines across as the whole one will be.
+fn card_wave(s: &Sound) -> (String, i32) {
+    let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds);
+    if seconds <= mo_audio::MAX_SECONDS {
+        // Nothing to read for this one: a longer sound's read for the card before it stops.
+        whole_wave::let_go();
+        return (wave(s), points(s));
+    }
+    if let Some(whole) = whole_wave::kept(s) {
+        whole_wave::let_go();
+        return (list::wave_path_of(whole.iter().copied()), whole.len() as i32);
+    }
+    whole_wave::ask(s);
+    let all = whole_wave::POINTS;
+    let first = ((all as f64 * mo_audio::MAX_SECONDS / seconds).round() as usize).clamp(1, all);
+    peaks::with(s, |w| {
+        let rest = std::iter::repeat_n(0.0, all - first);
+        (list::wave_path_of(whole_wave::lines(&w.to_vec(), first).into_iter().chain(rest)), all as i32)
+    })
+    .unwrap_or_default()
+}
+
 /// The waveforms of the sounds on show with these ids are back ([`peaks`]): the tiles show them, and so does the
 /// picked sound's card when it's one of them.
 fn waves_arrived(app: &AppWindow, ids: &[i64]) {
     let (tiles, card) = PAGE.with(|p| {
         let p = p.borrow();
         let s = p.picked.and_then(|at| p.list.sound(at)).filter(|s| ids.contains(&s.id));
-        (p.view == TILES, s.map(|s| (wave(s), points(s))))
+        (p.view == TILES, s.map(card_wave))
     });
     if tiles {
         TILE_ROWS.with(|m| m.notify.reset());
         grid::changed();
     }
-    if let Some((wave, points)) = card {
-        let data = app.global::<SoundsData>();
-        let mut picked = data.get_picked();
-        picked.wave = wave.into();
-        picked.points = points;
-        data.set_picked(picked);
+    if let Some(card) = card {
+        show_card_wave(app, card);
     }
+}
+
+/// A long sound's whole waveform is back ([`whole_wave`]): its card shows it, while it's the sound picked.
+fn whole_wave_arrived(app: &AppWindow, id: i64) {
+    let card = PAGE.with(|p| {
+        let p = p.borrow();
+        p.picked.and_then(|at| p.list.sound(at)).filter(|s| s.id == id).map(card_wave)
+    });
+    if let Some(card) = card {
+        show_card_wave(app, card);
+    }
+}
+
+/// Puts a waveform and its count of lines ([`card_wave`]) on the picked sound's card.
+fn show_card_wave(app: &AppWindow, (wave, points): (String, i32)) {
+    let data = app.global::<SoundsData>();
+    let mut picked = data.get_picked();
+    picked.wave = wave.into();
+    picked.points = points;
+    data.set_picked(picked);
 }
 
 pub(crate) fn new_seed() -> u64 {
@@ -645,6 +687,7 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     let cards = feed.clone();
     wire(app, feed, shortcuts);
     peaks::connect(app);
+    whole_wave::connect(app);
     crate::finder::on_open(Kind::Sound, |app, hit, how| {
         let Ok(id) = hit.id.parse::<i64>() else { return false };
         match how {
@@ -728,7 +771,7 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
         wanted();
     } else {
         // Nothing has asked for the sounds yet: they're read a little after the start all the same.
-        crate::ahead::after(app, crate::ahead::SOUNDS, |_| wanted());
+        crate::ahead::after(app, crate::ahead::Page::Sounds, |_| wanted());
     }
 }
 
@@ -1109,7 +1152,7 @@ fn read_all(
     let counted = lib.and_then(|lib| {
         let counted = background::guarded(|| {
             let (uses, projects) = uses_in(&lib, now, settings.rules)?;
-            let counted = with_usage(&list, usage_of(&list, &uses), &projects, &settings.weights);
+            let counted = with_usage(&list, usage_of(&list, &uses, &projects), &projects, &settings.weights);
             Some((Arc::new(counted), (uses, projects)))
         });
         counted.unwrap_or_else(|why| {
@@ -1487,10 +1530,12 @@ const FEW: usize = 10;
 /// How your songs use samples, and the file of each project counted.
 type Uses = (Vec<mo_library::SampleUse>, Arc<HashMap<i64, ProjectFile>>);
 
-/// How your songs in `lib` use samples, by `rules`, with what was saved in the year to `now` counted as recent.
+/// How your songs in `lib` use samples, by `rules`, with what was saved in the year to `now` counted as recent. Only
+/// the saves the Songs page lists count, grouped into songs as it groups them.
 fn uses_in(lib: &mo_library::Library, now: NaiveDateTime, rules: UsageRules) -> Option<Uses> {
     let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
-    lib.sample_usage_with_projects(year_ago, rules)
+    mo_app::live::Listed::read(lib)
+        .and_then(|listed| lib.sample_usage_with_projects(year_ago, rules, &|path| listed.has(path)))
         .map(|u| (u.uses, Arc::new(u.projects)))
         .map_err(|e| log::warning("Sounds", &format!("Couldn't count how your songs use sounds: {e}")))
         .ok()
@@ -1548,7 +1593,7 @@ fn take_again(
     // How your songs use each sound, as counted for this list; or when they couldn't be counted again, as the list on
     // show has them (a sound new since then has none yet), so the Used chips and Most liked don't lose them.
     let usage = match &on_show.uses {
-        Some((uses, projects)) => Some((usage_of(&library.list, uses), projects.clone())),
+        Some((uses, projects)) => Some((usage_of(&library.list, uses, projects), projects.clone())),
         None => on_show.list.usage_map().cloned().zip(on_show.list.project_files().cloned()),
     };
     if let Some((usage, projects)) = usage {
@@ -2077,9 +2122,14 @@ fn bring_up_to_date(sounds_db: &Path, copy: &Path, cards: Option<&Feed>) -> Opti
     }
 }
 
-/// How your songs use each sound in `list` (by sound id), from how they use samples (`uses`).
-fn usage_of(list: &SoundList, uses: &[mo_library::SampleUse]) -> HashMap<i64, Usage> {
-    background::on_pool(|| usage::usage(list.sounds(), uses))
+/// How your songs use each sound in `list` (by sound id), from how they use samples (`uses`) and the files of the
+/// projects counted (`projects`), which say which song each is a save of.
+fn usage_of(
+    list: &SoundList,
+    uses: &[mo_library::SampleUse],
+    projects: &HashMap<i64, ProjectFile>,
+) -> HashMap<i64, Usage> {
+    background::on_pool(|| usage::usage(list.sounds(), uses, projects))
 }
 
 /// How many sounds Sounds like this shows.
@@ -2440,6 +2490,7 @@ fn move_places(p: &mut Page, moved: &[Option<usize>]) -> Gone {
 /// that this version can't make one (it can, and the old app is retired: the whole-app review of 19 Nov, SN-8).
 fn no_library(app: &AppWindow, why: Option<String>) {
     let _doing = crate::watchdog::doing("Sounds: there's no library");
+    crate::ahead::done(app, crate::ahead::Page::Sounds);
     let (title, text) = list::no_library(why.as_deref());
     none_to_show(app, title, text);
 }
@@ -2476,6 +2527,10 @@ fn none_to_show(app: &AppWindow, title: &str, text: String) {
 
 fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
     let _doing = crate::watchdog::doing("Sounds: the sounds were read");
+    // The first few of a list still being read aren't the read's end: the rest's arrival is ([`rest_arrived`]).
+    if !read.as_ref().is_ok_and(|r| r.partial.is_some()) {
+        crate::ahead::done(app, crate::ahead::Page::Sounds);
+    }
     let read = match read {
         Ok(read) => *read,
         Err(why) => {
@@ -2507,6 +2562,7 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
 
 /// All the sounds have arrived after the first few: they take those's place, which keep theirs on show.
 fn rest_arrived(app: &AppWindow, rest: Refreshed) {
+    crate::ahead::done(app, crate::ahead::Page::Sounds);
     // Only in place of the first few ([`brought_up_to_date`] checks the same): nothing else gives the page other
     // sounds meanwhile.
     let first = PAGE.with(|p| {
@@ -3131,7 +3187,7 @@ struct RediscoverAnswer {
     why: String,
     folders: Vec<FolderUse>,
     years: YearCounts,
-    /// How many sounds your projects use: what your taste was learned from.
+    /// How many sounds your songs use: what your taste was learned from.
     learned_from: usize,
 }
 
@@ -3157,7 +3213,7 @@ impl RediscoverAsk {
                 why,
                 folders,
                 years: year_strip::strip(rediscover::years(sounds)),
-                learned_from: usage.values().filter(|u| u.projects > 0).count(),
+                learned_from: usage.values().filter(|u| u.songs > 0).count(),
             }
         })
     }
@@ -3318,15 +3374,15 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         data.set_re_intro("".into());
     } else {
         let intro = if !knows_use {
-            "Your projects haven't been counted yet, so these are a varied pick. They fit your taste once they are."
+            "Your songs haven't been counted yet, so these are a varied pick. They fit your taste once they are."
                 .to_owned()
         } else if a.learned_from == 0 {
-            "None of your sounds show up in your projects yet, so these are a varied pick. They fit your taste once \
+            "None of your sounds show up in your songs yet, so these are a varied pick. They fit your taste once \
              your songs use some of them."
                 .to_owned()
         } else {
             format!(
-                "Learned from the {} sounds your projects use, plus your favourites and plays.",
+                "Learned from the {} sounds your songs use, plus your favourites and plays.",
                 thousands(a.learned_from)
             )
         };
@@ -4152,16 +4208,19 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         })
         .collect();
     let used = used_in(p, at);
-    let projects: Vec<UsedInLine> = used
-        .lines
-        .iter()
-        .map(|l| UsedInLine {
-            id: i32::try_from(l.id).unwrap_or(-1),
-            name: l.name.as_str().into(),
-            daw: l.daw.as_str().into(),
-            saved: l.saved.as_str().into(),
-        })
-        .collect();
+    let lines = |lines: &[list::ProjectLine]| -> ModelRc<UsedInLine> {
+        let lines: Vec<UsedInLine> = lines
+            .iter()
+            .map(|l| UsedInLine {
+                id: i32::try_from(l.id).unwrap_or(-1),
+                name: l.name.as_str().into(),
+                daw: l.daw.as_str().into(),
+                saved: l.saved.as_str().into(),
+                saves: l.saves.as_str().into(),
+            })
+            .collect();
+        ModelRc::new(VecModel::from(lines))
+    };
     let type_from = match now.type_source {
         "you" => "· you set this",
         "name" => "· from its name",
@@ -4169,6 +4228,7 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         "model" => "· guessed from how it sounds",
         _ => "",
     };
+    let (wave_shape, wave_points) = card_wave(s);
     PickedSound {
         name: s.name().into(),
         sound_type: now.sound_type.into(),
@@ -4178,21 +4238,25 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         path_tails: ModelRc::new(VecModel::from(
             mo_app::shell::path_tails(&s.path).into_iter().map(SharedString::from).collect::<Vec<_>>(),
         )),
-        wave: wave(s).into(),
-        points: points(s),
-        seconds: a.map_or(0.0, |a| a.seconds.min(mo_audio::MAX_SECONDS)) as f32,
+        wave: wave_shape.into(),
+        points: wave_points,
+        seconds: a.map_or(0.0, |a| a.seconds) as f32,
         facts: ModelRc::new(VecModel::from(facts)),
         favourite: now.favourite,
         own_type: now.own_type.unwrap_or_default().into(),
         character: a.map(|a| a.character.join(", ")).unwrap_or_default().into(),
-        projects: ModelRc::new(VecModel::from(projects)),
+        projects: lines(&used.lines),
         projects_title: used.title.into(),
         projects_note: used.note.into(),
+        every_save: lines(&used.every_lines),
+        every_save_note: used.every_note.into(),
+        every_save_tip: used.every_tip.into(),
+        more_saves: used.more_saves,
     }
 }
 
-/// The picked sound's Used in list: the projects that use it; or, for one Rediscover dug out that none use, those of
-/// the sound its line says it sounds like.
+/// The picked sound's Used in list: the songs that use it (and each save, for Every save); or, for one Rediscover dug
+/// out that none use, those of the sound its line says it sounds like.
 fn used_in(p: &Page, at: usize) -> list::ProjectsCard {
     let own = p.list.projects_of(at);
     let like = p
@@ -4269,16 +4333,19 @@ fn play_picked(app: &AppWindow, from: f64) {
 
 /// Plays the sound at `at` in the list from `from` (0 to 1 of the way through), whether it's picked or not (the
 /// galaxy's sweep plays the stars it passes without picking them), reading at most `most` seconds of it: a sweep only
-/// needs its start, which reads far quicker than a whole loop.
+/// needs its start, which reads far quicker than a whole loop. A sound longer than a minute (or not analysed yet) is
+/// played as it's read instead, to its end however long it is (Solomon's F12 note of 24 Nov 2026: a 5:11 song stopped
+/// a minute in); a sweep still reads only its start.
 fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     let Some((at, path, seconds, trim)) = PAGE.with(|p| {
         let p = p.borrow();
         let s = p.list.sound(at)?;
-        let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds).min(mo_audio::MAX_SECONDS);
+        let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds);
         Some((at, s.path.clone(), seconds, p.trim.then(|| mo_audio::trim::level_of_db(p.trim_db))))
     }) else {
         return;
     };
+    let streams = most >= mo_audio::MAX_SECONDS && !(seconds > 0.0 && seconds <= mo_audio::MAX_SECONDS);
     // A MIDI loop playing, or one still being made, would play over it (or start on top of it later).
     crate::midi::stop_for_another(app);
     crate::curve_editor::call_off_tone();
@@ -4291,14 +4358,15 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         let mut p = p.borrow_mut();
         p.playing = Some((at, seconds.max(0.001)));
         p.play = ask;
-        p.play_reads = most;
-        p.play_trimmed = trim.is_some();
+        // Played as it's read, a click anywhere moves it: the player reads the file again from there.
+        p.play_reads = if streams { f64::INFINITY } else { most };
+        p.play_trimmed = trim.is_some() && !streams;
     });
     playing_changed(app);
     if here {
         return;
     }
-    let job = PlayJob { ask, path, from, seconds, most, trim, window: app.as_weak(), held: Arc::default() };
+    let job = PlayJob { ask, path, from, seconds, most, streams, trim, window: app.as_weak(), held: Arc::default() };
     ask_reader(job);
 }
 
@@ -4348,6 +4416,8 @@ struct PlayJob {
     from: f64,
     seconds: f64,
     most: f64,
+    /// Played as it's read ([`mo_audio::play::Stream`]), to its end, rather than read first.
+    streams: bool,
     /// Trim silence was on when it was asked for, with the level it counts as silence: it starts past the silence at
     /// its start and stops at the end of the sound, not the end of the file.
     trim: Option<f32>,
@@ -4367,7 +4437,7 @@ impl Drop for PlayJob {
 /// (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output, overtaken by a newer sound
 /// or dropped, by this play's number; for a sound the sweep didn't ask for they count nothing.
 fn read_and_play(job: PlayJob) {
-    let PlayJob { ask, ref path, from, seconds, most, trim, ref window, .. } = job;
+    let PlayJob { ask, ref path, from, seconds, most, streams, trim, ref window, .. } = job;
     let (path, window) = (path.clone(), window.clone());
     // Still the newest play, with no stop since.
     let wanted = || {
@@ -4387,10 +4457,19 @@ fn read_and_play(job: PlayJob) {
     sweep_timing::opening(&path, ask);
     // Trimmed, a sweep's short read is read on past the silence at the start, so it still hears `most` of the sound.
     let reads = if trim.is_some() && most < mo_audio::MAX_SECONDS { most + TRIM_LEAD_ROOM } else { most };
-    let went = match mo_audio::read(Path::new(&path), reads) {
-        // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since
-        // wins, rather than this sound starting after it and playing on while the page shows another or none.
-        Ok(mut audio) => {
+    // A long sound plays as it's read, as soon as its first part is (from its start with Trim silence on, past the
+    // silence there); any other is read first, as far as it plays.
+    let read = if streams {
+        let quiet = trim.filter(|_| from == 0.0);
+        mo_audio::play::Stream::open(Path::new(&path), from * seconds, quiet, &|| wanted().is_ok()).map(ToPlay::Stream)
+    } else {
+        mo_audio::read(Path::new(&path), reads).map(ToPlay::Whole)
+    };
+    // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since wins,
+    // rather than this sound starting after it and playing on while the page shows another or none.
+    let went = match read {
+        Ok(ToPlay::Stream(stream)) => player().play_stream_if(stream, ask.to_string(), wanted),
+        Ok(ToPlay::Whole(mut audio)) => {
             let start = match trim {
                 Some(level) => trimmed(&mut audio, from * seconds, most, level),
                 None => from * seconds,
@@ -4422,6 +4501,12 @@ fn read_and_play(job: PlayJob) {
         Err(Unwanted::Overtaken) => sweep_timing::overtaken(&path, ask),
         Err(Unwanted::Stopped) => sweep_timing::dropped(&path, ask),
     }
+}
+
+/// A sound read to play: as it plays, or whole first ([`read_and_play`]).
+enum ToPlay {
+    Stream(mo_audio::play::Stream),
+    Whole(mo_audio::AudioData),
 }
 
 /// How much further a sweep's read goes with Trim silence on, for the silence at the start it skips.
@@ -4589,6 +4674,7 @@ fn ended(key: &str) {
             let data = app.global::<SoundsData>();
             data.set_playing(false);
             data.set_played(1.0);
+            data.set_tile_played(1.0);
         }
     });
 }
@@ -4608,6 +4694,7 @@ fn playing_changed(app: &AppWindow) {
     });
     data.set_playing(picked_plays);
     data.set_played(0.0);
+    data.set_tile_played(0.0);
     redraw();
     // Nothing really plays for the screenshots, so nothing moves the waveform along there.
     if !any || HERE.with(|h| *h.borrow()) {
@@ -4620,7 +4707,10 @@ fn playing_changed(app: &AppWindow) {
             let Some(app) = weak.upgrade() else { return };
             let Some(seconds) = PAGE.with(|p| p.borrow().playing.map(|(_, s)| s)) else { return };
             let at = PLAYER.get().and_then(Player::position).unwrap_or(0.0);
-            app.global::<SoundsData>().set_played((at / seconds).clamp(0.0, 1.0) as f32);
+            let data = app.global::<SoundsData>();
+            data.set_played((at / seconds).clamp(0.0, 1.0) as f32);
+            // A tile's waveform is the sound's first minute: a longer sound's tile has played through by then.
+            data.set_tile_played((at / seconds.min(mo_audio::MAX_SECONDS)).clamp(0.0, 1.0) as f32);
         });
     });
 }
@@ -6029,6 +6119,36 @@ mod tests {
         assert!(!seeks(&p, Some("6"), 15.0));
         assert!(!seeks(&p, None, 2.0));
         assert!(!seeks(&p, Some("5"), 2.0));
+        // A long sound played as it's read: a click anywhere in it moves it, as the player reads it again from there.
+        let streamed = Page { playing: Some((4, 311.0)), play: 6, play_reads: f64::INFINITY, ..Page::default() };
+        assert!(seeks(&streamed, Some("6"), 250.0));
+    }
+
+    #[test]
+    fn a_long_sounds_card_shows_the_whole_of_it() {
+        // The library keeps the waveform of its first minute: 160 lines.
+        let first_minute: Vec<f32> = (0..160).map(|i| 0.1 + i as f32 / 200.0).collect();
+        let analysed = |seconds| mo_sounds::SoundAnalysis {
+            seconds,
+            waveform: first_minute.clone().into(),
+            ..mo_sounds::SoundAnalysis::default()
+        };
+        let mut song = sound(7, r"D:\Songs\06 the future.wma");
+        song.analysis = Some(analysed(300.0));
+        // Five minutes: until the whole of it is read, the first minute fills its fifth of the card, then a flat line,
+        // as many lines across as the whole of it will be (each the loudest of its share).
+        let fifth: Vec<f32> = first_minute.chunks(2).map(|two| two[1]).collect();
+        let rest = std::iter::repeat_n(0.0, whole_wave::POINTS - fifth.len());
+        let wanted = (list::wave_path_of(fifth.iter().copied().chain(rest)), whole_wave::POINTS as i32);
+        assert_eq!((fifth.len(), card_wave(&song)), (whole_wave::POINTS / 5, wanted));
+        // Read: the whole of it.
+        let whole: Vec<f32> = (0..whole_wave::POINTS).map(|i| (i % 7) as f32 / 7.0).collect();
+        whole_wave::keep((7, song.added), whole.clone().into());
+        assert_eq!(card_wave(&song), (list::wave_path_of(whole.into_iter()), whole_wave::POINTS as i32));
+        // A minute or less: the library's waveform is the whole of it.
+        let mut kick = sound(8, r"D:\Samples\Kick.wav");
+        kick.analysis = Some(analysed(0.5));
+        assert_eq!(card_wave(&kick), (list::wave_path_of(first_minute.iter().copied()), 160));
     }
 
     #[test]
@@ -6076,13 +6196,17 @@ mod tests {
             let path = song_library(name, settings);
             let Ok(lib) = mo_library::Library::open_read_only(&path) else { panic!("couldn't read {name}") };
             let s = Settings::read(&lib);
-            let used = lib.sample_usage(since, s.rules).map(|uses| usage_of(&list, &uses)).unwrap_or_default();
+            let used = lib
+                .sample_usage_with_projects(since, s.rules, &|_| true)
+                .map(|u| usage_of(&list, &u.uses, &u.projects))
+                .unwrap_or_default();
             (s, used)
         };
         // With nothing set: every song listing a sound uses it; autoplay is off and the weights are the C# app's.
         let (s, used) = read("plain.db", &[]);
-        assert_eq!(used.get(&1).map(|u| u.projects), Some(2));
-        assert_eq!(used.get(&2).map(|u| (u.projects, u.recent)), Some((2, 1)));
+        // In two songs (each a save of its own), one of them saved since 2023.
+        assert_eq!(used.get(&1).map(|u| (u.projects, u.songs)), Some((2, 2)));
+        assert_eq!(used.get(&2).map(|u| (u.projects, u.recent, u.songs, u.recent_songs)), Some((2, 1, 2, 1)));
         assert!(!used.contains_key(&3));
         assert_eq!(s.weights, LikedWeights::default());
         // "Only where it has notes": the pad isn't played in Song. And the page's own settings come through.
@@ -6109,7 +6233,10 @@ mod tests {
     fn use_counts_change_most_liked_but_not_the_order() {
         let list = SoundList::new(vec![sound(1, "a.wav"), sound(2, "b.wav")]);
         let w = LikedWeights::default();
-        let usage = HashMap::from([(2, Usage { projects: 3, recent: 3, years: vec![2026], ..Usage::default() })]);
+        let usage = HashMap::from([(
+            2,
+            Usage { projects: 5, recent: 5, songs: 3, recent_songs: 3, years: vec![2026], ..Usage::default() },
+        )]);
         let used = with_usage(&list, usage, &Arc::default(), &w);
         assert_eq!(used.sounds().iter().map(|s| s.id).collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(used.used_in(0), Some(0));
@@ -6147,7 +6274,7 @@ mod tests {
             s.analysis = Some(mo_sounds::SoundAnalysis { seconds: 0.5, ..Default::default() });
         }
         let lib = Library::new(sounds, Vec::new(), &LikedWeights::default()).with_usage(
-            HashMap::from([(2, Usage { projects: 3, recent: 1, years: vec![2026], ..Usage::default() })]),
+            HashMap::from([(2, Usage { projects: 3, recent: 1, songs: 1, years: vec![2026], ..Usage::default() })]),
             HashMap::new(),
             &LikedWeights::default(),
         );
@@ -6171,7 +6298,7 @@ mod tests {
             assert!(!reason.is_empty());
         }
         assert_eq!(a.folders.first().map(|f| (f.sounds, f.used)), Some((6, 1)));
-        // The one a line says it sounds like is the sound your projects use.
+        // The one a line says it sounds like is the sound your songs use.
         assert!(a.likes.values().all(|&like| like == 2), "{:?}", a.likes);
     }
 
@@ -6323,29 +6450,38 @@ mod tests {
     #[test]
     fn a_card_lists_its_projects_or_those_of_the_sound_rediscover_says_it_sounds_like() {
         let sounds = vec![sound(1, "Pack/Boom kick.wav"), sound(2, "Pack/New kick.wav")];
-        let file = ProjectFile { id: 5, path: r"K:\Projects\Night drive.flp".into(), mtime: 1_700_000_000 };
+        let file = ProjectFile {
+            id: 5,
+            path: r"K:\Projects\Night drive_3.flp".into(),
+            mtime: 1_700_000_000,
+            song: 0,
+            song_name: "Night drive".into(),
+            recent: false,
+            copy: false,
+        };
         let lib = Library::new(sounds, Vec::new(), &LikedWeights::default()).with_usage(
-            HashMap::from([(1, Usage { projects: 1, project_ids: vec![5], ..Usage::default() })]),
+            HashMap::from([(1, Usage { projects: 1, songs: 1, project_ids: vec![5], ..Usage::default() })]),
             HashMap::from([(5, file)]),
             &LikedWeights::default(),
         );
         let mut p = Page { list: lib.list.clone(), places: lib.places.clone(), ..Page::default() };
-        // The first sound's own project, which opens on the Songs page by its save's id.
+        // The first sound's own song, which opens on the Songs page by its save's id; Every save names the save.
         let card = picked_sound(&p, 0);
         assert_eq!(card.projects_title, "Used in 1");
         let line = card.projects.row_data(0).unwrap_or_default();
         assert_eq!((line.id, line.name.as_str(), line.daw.as_str()), (5, "Night drive", "FL Studio"));
+        let save = card.every_save.row_data(0).unwrap_or_default();
+        assert_eq!((save.id, save.name.as_str(), card.more_saves), (5, "Night drive_3", false));
+        let facts: Vec<(String, String)> =
+            card.facts.iter().map(|f| (f.name.to_string(), f.value.to_string())).collect();
+        assert!(facts.contains(&("Used".to_owned(), "1 song".to_owned())), "{facts:?}");
         // The second, which no project uses: none, until Rediscover says it sounds like the first.
         let card = picked_sound(&p, 1);
         assert_eq!((card.projects_title.as_str(), card.projects.row_count()), ("Used in 0", 0));
         p.re_likes = HashMap::from([(2, 1)]);
         let card = picked_sound(&p, 1);
         assert_eq!(card.projects_title, "Used in 0");
-        assert!(
-            card.projects_note.contains("Boom kick, which it sounds like, is in 1 project"),
-            "{}",
-            card.projects_note
-        );
+        assert!(card.projects_note.contains("Boom kick, which it sounds like, is in 1 song"), "{}", card.projects_note);
         assert_eq!(card.projects.row_count(), 1);
     }
 

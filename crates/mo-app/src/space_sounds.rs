@@ -38,8 +38,8 @@ const WHAT_THEY_ARE: &str = "Sounds your sample folders hold more than once: the
 
 /// What the card says of how copies are found, which one is kept, and that nothing goes from here.
 pub const NOTE: &str = "Only sounds whose audio is exactly the same count, as the Sounds page's Hide duplicates finds \
-    them: sounds that only sound alike never do. The one to keep is the one that page shows: the one your projects \
-    use most, then a favourite, more plays. Nothing goes from here: your samples stay where they are.";
+    them: sounds that only sound alike never do. The one to keep is the one that page shows: the one in most of your \
+    songs, then a favourite, more plays. Nothing goes from here: your samples stay where they are.";
 
 /// What a copy's line says while Hide duplicates is on.
 pub const HIDDEN: &str = "Hidden by Hide duplicates";
@@ -129,7 +129,15 @@ fn copied(list: &SoundList, g: &CopyGroup, hiding: bool) -> Copied {
 fn keep_why(list: &SoundList, g: &CopyGroup) -> String {
     let (Some(&(a, _)), Some(&(b, _))) = (g.sounds.first(), g.sounds.get(1)) else { return String::new() };
     let reason = match list.why_kept(a, b) {
-        KeptFor::Used => format!("used in {}", count_of(list.used_in(a).unwrap_or(0) as usize, "project", "projects")),
+        KeptFor::Used => {
+            // In songs, as the Sounds page counts them; the saves too when a song has more than one that uses it.
+            let (songs, saves) = list.usage(a).map_or((0, 0), |u| (u.songs as usize, u.projects as usize));
+            let mut said = format!("used in {}", count_of(songs, "song", "songs"));
+            if saves > songs {
+                said.push_str(&format!(" ({} saves)", thousands(saves)));
+            }
+            said
+        }
         KeptFor::Favourite => "a favourite".to_owned(),
         KeptFor::Plays => "played more".to_owned(),
         KeptFor::Tags => "more tags".to_owned(),
@@ -266,7 +274,7 @@ mod tests {
             Sound::new(6, r"D:\Samples\Hat.wav"),
         ];
         let mut list = SoundList::new(sounds);
-        list.set_used(HashMap::from([(2, Usage { projects: 3, ..Usage::default() })]));
+        list.set_used(HashMap::from([(2, Usage { projects: 3, songs: 2, ..Usage::default() })]));
         list.set_copies(&SameAudio {
             groups: vec![vec![1, 2, 3], vec![4, 5]],
             sizes: HashMap::from([(1, 1_000_000), (2, 1_000_000), (3, 1_000_000), (4, 200_000), (5, 200_000)]),
@@ -286,7 +294,7 @@ mod tests {
         assert_eq!(
             files,
             [
-                (r"D:\Packs\Drums\Kick copy.wav", false, "Best to keep: used in 3 projects"),
+                (r"D:\Packs\Drums\Kick copy.wav", false, "Best to keep: used in 2 songs (3 saves)"),
                 (r"D:\Samples\Kicks\Kick.wav", false, SAME),
                 (r"E:\Backup\Kick (2).wav", false, SAME),
             ]

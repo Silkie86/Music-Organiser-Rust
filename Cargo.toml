@@ -3,8 +3,8 @@ resolver = "3"
 members = ["crates/*", "tools/formatlab", "tools/miditwin", "tools/theorybench", "tools/twin"]
 # The galaxy check is a workspace of its own, so its wgpu never gets mixed into the app's build.
 # The fuzzer (fuzz/) is one too: it's built with nightly Rust by cargo-fuzz.
-# vendor/femtovg is a patched copy of a library (below), not one of the app's own crates.
-exclude = ["tools/galaxycheck", "fuzz", "vendor/femtovg"]
+# vendor/femtovg and vendor/i-slint-backend-winit are patched copies of libraries (below), not the app's own crates.
+exclude = ["tools/galaxycheck", "fuzz", "vendor/femtovg", "vendor/i-slint-backend-winit"]
 
 [workspace.package]
 version = "0.9.0-beta.1"
@@ -27,6 +27,8 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std", "si
 # (vendor/femtovg/PATCHED.md says what and when to remove it).
 [patch.crates-io]
 femtovg = { path = "vendor/femtovg" }
+# For now only: notes what Slint asks of the window, to find what un-maximises it (vendor/i-slint-backend-winit/PATCHED.md).
+i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
 
 [workspace.lints.rust]
 # Deny, not forbid: the code Slint generates allows it locally.
