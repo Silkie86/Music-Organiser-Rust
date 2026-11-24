@@ -886,6 +886,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tag_box_checks(&app, &window)?;
     stopping_by_click(&app, &window)?;
     keys_come_back_checks(&app, &window)?;
+    developer_keeps_its_place(&app, &window)?;
     short_swept_card(&app, &window, &out)?;
     swept_card_checks(&app, &window)?;
     rediscover_without_fingerprints(&app, &window, &out)?;
@@ -4226,6 +4227,48 @@ fn settings_shots(
     data.invoke_beta_mark("start.release".into(), 0, "".into());
     data.invoke_beta_mark("start.close-clean".into(), 1, "".into());
     data.invoke_tab_picked(0);
+}
+
+/// Settings › Developer turned down the beta checklist, then another page and back: the checklist is where it was
+/// (Solomon, 24 Nov: "it goes back to the top when I leave the page"). Another tab starts at its top.
+fn developer_keeps_its_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let data = app.global::<mo_ui::SettingsData>();
+    start_on(app, Place::Settings);
+    data.invoke_tab_picked(4);
+    capture(window);
+    let top = capture(window);
+    scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
+    let down = capture(window);
+    let kept = data.get_developer_scroll();
+    start_on(app, Place::Songs);
+    capture(window);
+    start_on(app, Place::Settings);
+    capture(window);
+    let back = capture(window);
+    let other = {
+        data.invoke_tab_picked(0);
+        capture(window);
+        data.get_developer_scroll()
+    };
+    data.invoke_tab_picked(4);
+    capture(window);
+    let again = capture(window);
+    // Back to its top for whatever follows.
+    scroll(window, 900.0, 500.0, 40.0 * PAGE_DOWN);
+    data.invoke_tab_picked(0);
+    capture(window);
+    // The checklist's part of the page, clear of the activity cards bottom right, which move on their own.
+    const LIST: (u32, u32, u32, u32) = (300, 150, 1000, 550);
+    if same_in(&down, &top, LIST) || kept >= 0.0 {
+        return Err(format!("Developer: the wheel didn't turn the checklist down (kept {kept})"));
+    }
+    if !same_in(&back, &down, LIST) {
+        return Err("Developer: after another page the checklist was no longer where it was left".into());
+    }
+    if other != kept || !same_in(&again, &down, LIST) {
+        return Err("Developer: after the General tab the checklist was no longer where it was left".into());
+    }
+    Ok(())
 }
 
 /// The mouse wheel turned over a point: a negative `dy` moves the page up, to show what's below.

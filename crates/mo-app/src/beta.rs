@@ -41,10 +41,14 @@ pub struct Step {
     pub what: &'static str,
     /// What you should see.
     pub expect: &'static str,
+    /// How to do it, step by step, for a step that needs more than its one line (Solomon, 24 Nov: "explained in more
+    /// detail so I'm not confused what it's asking me to do"). Not part of the step's words a mark keeps
+    /// ([`step_words`]), so adding or changing it never asks for the step to be tried again.
+    pub how: &'static str,
 }
 
-/// Reads [`LIST`]: a line `== Area` starts an area; a line `id | what to do | what you should see` is a step in it;
-/// empty lines and lines starting `#` are left out.
+/// Reads [`LIST`]: a line `== Area` starts an area; a line `id | what to do | what you should see` is a step in it,
+/// with `| how, step by step` after it if it needs one; empty lines and lines starting `#` are left out.
 pub fn steps() -> Vec<Step> {
     parse(LIST)
 }
@@ -55,7 +59,7 @@ pub fn bad_lines(text: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("=="))
         .filter(|l| {
-            let parts: Vec<&str> = l.splitn(3, '|').map(str::trim).collect();
+            let parts: Vec<&str> = l.splitn(4, '|').map(str::trim).collect();
             parts.len() < 3 || parts.iter().any(|p| p.is_empty())
         })
         .collect()
@@ -72,9 +76,10 @@ fn parse(text: &'static str) -> Vec<Step> {
             area = a.trim();
             continue;
         }
-        let mut parts = line.splitn(3, '|').map(str::trim);
+        let mut parts = line.splitn(4, '|').map(str::trim);
         let (Some(id), Some(what)) = (parts.next(), parts.next()) else { continue };
-        out.push(Step { id, area, what, expect: parts.next().unwrap_or("") });
+        let expect = parts.next().unwrap_or("");
+        out.push(Step { id, area, what, expect, how: parts.next().unwrap_or("") });
     }
     out
 }
@@ -272,6 +277,7 @@ pub struct Line {
     pub id: &'static str,
     pub what: &'static str,
     pub expect: &'static str,
+    pub how: &'static str,
     pub mark: Option<Mark>,
     pub note: String,
     /// Marked by the self-check, not by hand.
@@ -297,6 +303,7 @@ pub fn lines(steps: &[Step], marks: &Marks, to_try: bool) -> Vec<Line> {
                 id: "",
                 what: "",
                 expect: "",
+                how: "",
                 mark: None,
                 note: String::new(),
                 auto: false,
@@ -309,6 +316,7 @@ pub fn lines(steps: &[Step], marks: &Marks, to_try: bool) -> Vec<Line> {
             id: s.id,
             what: s.what,
             expect: s.expect,
+            how: s.how,
             mark: m.map(|m| m.mark),
             note: marks.note(s.id).to_owned(),
             auto: is_self_check(s.id),
@@ -359,13 +367,17 @@ mod tests {
     fn layout_of_the_list() {
         let s = parse("# a note\n== Songs\nsongs.open | Open one | It opens\n\n== Sounds\nsounds.play | Play one\n");
         assert_eq!(s.len(), 2);
-        assert_eq!(s[0], Step { id: "songs.open", area: "Songs", what: "Open one", expect: "It opens" });
+        assert_eq!(s[0], Step { id: "songs.open", area: "Songs", what: "Open one", expect: "It opens", how: "" });
         assert_eq!((s[1].area, s[1].expect), ("Sounds", ""));
+        let h = parse("== A\na.1 | Do it | It works | Open A, then press B\n");
+        assert_eq!((h[0].expect, h[0].how), ("It works", "Open A, then press B"));
+        // The how isn't part of what a mark keeps, so adding one leaves the step's marks as they are.
+        assert_eq!(step_words(&h[0]), "Do it -> It works");
     }
 
     #[test]
     fn a_problem_keeps_the_last_log_lines_and_others_none() {
-        let step = Step { id: "a.b", area: "A", what: "Do it", expect: "It works" };
+        let step = Step { id: "a.b", area: "A", what: "Do it", expect: "It works", how: "" };
         let mut m = Marks::default();
         m.set(&step, Some(Mark::Problem), "  it froze  ", at(100));
         let got = m.get("a.b").expect("marked");
@@ -385,7 +397,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mo-beta-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(Marks::load(&dir).expect("none yet"), Marks::default());
-        let step = Step { id: "a.b", area: "A", what: "Do it", expect: "It works" };
+        let step = Step { id: "a.b", area: "A", what: "Do it", expect: "It works", how: "" };
         let mut m = Marks::default();
         m.set(&step, Some(Mark::Problem), "slow", at(3));
         Marks::save(&dir, &m.to_json()).expect("saved");
@@ -415,7 +427,7 @@ mod tests {
 
     #[test]
     fn a_note_on_an_unmarked_step_is_kept_and_goes_with_its_mark() {
-        let step = Step { id: "a.b", area: "A", what: "Do it", expect: "It works" };
+        let step = Step { id: "a.b", area: "A", what: "Do it", expect: "It works", how: "" };
         let mut m = Marks::default();
         assert!(m.set_note("a.b", "  try after the update "));
         assert!(!m.set_note("a.b", "try after the update"), "the same note again isn't a change");
@@ -442,8 +454,8 @@ mod tests {
 
     #[test]
     fn a_reworded_step_is_to_try_again() {
-        let before = Step { id: "a.b", area: "A", what: "Do it", expect: "It works" };
-        let after = Step { id: "a.b", area: "A", what: "Do it, then minimise", expect: "It still works" };
+        let before = Step { id: "a.b", area: "A", what: "Do it", expect: "It works", how: "" };
+        let after = Step { id: "a.b", area: "A", what: "Do it, then minimise", expect: "It still works", how: "" };
         let mut m = Marks::default();
         m.set(&before, Some(Mark::Works), "fine", at(0));
         assert_eq!(progress(std::slice::from_ref(&before), &m), "1 of 1 work, 0 to try");
