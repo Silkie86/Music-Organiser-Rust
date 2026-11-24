@@ -483,7 +483,13 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     } else {
         // Otherwise the library is read a little after the start, so the first visit finds the list there rather
         // than an empty page for a second or two.
-        crate::ahead::after(app, crate::ahead::Page::Plugins, |_| read_before_shown());
+        crate::ahead::after(app, crate::ahead::Page::Plugins, |app| {
+            read_before_shown();
+            // Without its reader (it couldn't start) nothing is coming: the next page isn't kept waiting.
+            if READER.with(|r| r.borrow().is_none()) {
+                crate::ahead::done(app, crate::ahead::Page::Plugins);
+            }
+        });
     }
 }
 

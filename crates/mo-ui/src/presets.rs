@@ -1406,7 +1406,7 @@ fn bitwig_chosen() -> Option<PathBuf> {
     crate::settings::value(mo_app::app_settings::BITWIG_FOLDER_KEY).filter(|f| !f.trim().is_empty()).map(PathBuf::from)
 }
 
-fn read_sounds(_app: &AppWindow) {
+fn read_sounds(app: &AppWindow) {
     let at = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.reading = Some((0, 0));
@@ -1420,7 +1420,6 @@ fn read_sounds(_app: &AppWindow) {
             log::warning("Presets", e);
         }
         on_window(move |app| {
-            crate::ahead::done(app, crate::ahead::Page::Presets);
             let again = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.reading = None;
@@ -1438,12 +1437,14 @@ fn read_sounds(_app: &AppWindow) {
                 read_again(app);
                 return;
             }
+            crate::ahead::done(app, crate::ahead::Page::Presets);
             give_finder(app);
             show_all(app);
         });
     });
     if let Err(e) = started {
         log::error("Presets", &format!("Couldn't start reading the sounds: {e}"));
+        crate::ahead::done(app, crate::ahead::Page::Presets);
     }
 }
 
@@ -2764,7 +2765,7 @@ pub fn finish_up() {
 // ---------------------------------------------------------------------------------------------------------------------
 // The curves
 
-fn read_curves(_app: &AppWindow) {
+fn read_curves(app: &AppWindow) {
     let (at, changes_before) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.curves_reading = Some((0, 0));
@@ -2774,7 +2775,6 @@ fn read_curves(_app: &AppWindow) {
         // Guarded, as the sounds' read is (RA-8).
         let result = background::guarded(|| scan_curves(&at)).and_then(|read| read);
         on_window(move |app| {
-            crate::ahead::done(app, crate::ahead::Page::Curves);
             let again = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.curves_reading = None;
@@ -2793,12 +2793,15 @@ fn read_curves(_app: &AppWindow) {
             });
             if again {
                 read_curves(app);
+            } else {
+                crate::ahead::done(app, crate::ahead::Page::Curves);
             }
             show_all(app);
         });
     });
     if let Err(e) = started {
         log::error("Curves", &format!("Couldn't start reading the curves: {e}"));
+        crate::ahead::done(app, crate::ahead::Page::Curves);
     }
 }
 

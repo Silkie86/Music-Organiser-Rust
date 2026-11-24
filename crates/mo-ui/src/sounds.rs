@@ -2440,6 +2440,7 @@ fn move_places(p: &mut Page, moved: &[Option<usize>]) -> Gone {
 /// that this version can't make one (it can, and the old app is retired: the whole-app review of 19 Nov, SN-8).
 fn no_library(app: &AppWindow, why: Option<String>) {
     let _doing = crate::watchdog::doing("Sounds: there's no library");
+    crate::ahead::done(app, crate::ahead::Page::Sounds);
     let (title, text) = list::no_library(why.as_deref());
     none_to_show(app, title, text);
 }
@@ -2476,7 +2477,10 @@ fn none_to_show(app: &AppWindow, title: &str, text: String) {
 
 fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
     let _doing = crate::watchdog::doing("Sounds: the sounds were read");
-    crate::ahead::done(app, crate::ahead::Page::Sounds);
+    // The first few of a list still being read aren't the read's end: the rest's arrival is ([`rest_arrived`]).
+    if !read.as_ref().is_ok_and(|r| r.partial.is_some()) {
+        crate::ahead::done(app, crate::ahead::Page::Sounds);
+    }
     let read = match read {
         Ok(read) => *read,
         Err(why) => {
@@ -2508,6 +2512,7 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
 
 /// All the sounds have arrived after the first few: they take those's place, which keep theirs on show.
 fn rest_arrived(app: &AppWindow, rest: Refreshed) {
+    crate::ahead::done(app, crate::ahead::Page::Sounds);
     // Only in place of the first few ([`brought_up_to_date`] checks the same): nothing else gives the page other
     // sounds meanwhile.
     let first = PAGE.with(|p| {

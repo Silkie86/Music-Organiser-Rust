@@ -56,12 +56,18 @@ type Read = Box<dyn FnOnce(&AppWindow)>;
 thread_local! {
     /// Each page's read, until its turn (the window's thread).
     static READS: RefCell<[Option<Read>; PAGES]> = const { RefCell::new([None, None, None, None, None]) };
-    /// Whose turn it is: a place in [`Page`]'s order, `PAGES` once all have had theirs. `None` before the first.
+    /// Whose turn it is: a place in [`Page`]'s order, `PAGES` once all have had theirs. `None` until the first
+    /// begins, [`FIRST`] after the pages are wired up: a read that ends before then starts nothing.
     static TURN: Cell<Option<usize>> = const { Cell::new(None) };
     /// Which pages' reads have ended, however they were started.
     static DONE: Cell<[bool; PAGES]> = const { Cell::new([false; PAGES]) };
     /// What the app held when the read whose turn it is began.
     static HELD_BEFORE: Cell<Option<u64>> = const { Cell::new(None) };
+    /// The first page has asked, so the clock for them all is running.
+    static CLOCK: Cell<bool> = const { Cell::new(false) };
+    /// A read ran out of its turn this run (its page was opened, Ctrl+K asked, or it was waited for no more): what
+    /// the app holds can't be put down to one read any more, so no more `[Memory]` lines.
+    static MIXED: Cell<bool> = const { Cell::new(false) };
 }
 
 static OFF: AtomicBool = AtomicBool::new(false);
@@ -84,8 +90,7 @@ pub fn after(app: &AppWindow, page: Page, read: impl FnOnce(&AppWindow) + 'stati
     }
     READS.with(|r| r.borrow_mut()[page as usize] = Some(Box::new(read)));
     // The first page to ask starts the clock for them all.
-    if TURN.get().is_none() {
-        TURN.set(Some(0));
+    if !CLOCK.replace(true) {
         let weak = app.as_weak();
         slint::Timer::single_shot(FIRST, move || start_turn(&weak, 0));
     }
@@ -100,6 +105,9 @@ pub fn done(app: &AppWindow, page: Page) {
     }
     DONE.set(done);
     if TURN.get() != Some(page as usize) {
+        // Read before its turn, or after it was given up on. (One begun before its turn and ended in it can't be
+        // told from one read in its turn: its line then counts what was read beside it.)
+        MIXED.set(true);
         return;
     }
     if let Some(line) = memory_after(page, HELD_BEFORE.take(), crate::stuck::memory_now().map(|m| m.held)) {
@@ -135,14 +143,19 @@ fn start_turn(weak: &slint::Weak<AppWindow>, from: usize) {
         return;
     };
     TURN.set(Some(turn));
-    HELD_BEFORE.set(crate::stuck::memory_now().map(|m| m.held));
     // Without a read of its own here, the page is on show and reading by itself: waited for all the same.
-    if let Some(read) = READS.with(|r| r.borrow_mut()[turn].take()) {
+    let read = READS.with(|r| r.borrow_mut()[turn].take());
+    if read.is_none() {
+        MIXED.set(true);
+    }
+    HELD_BEFORE.set(if MIXED.get() { None } else { crate::stuck::memory_now().map(|m| m.held) });
+    if let Some(read) = read {
         read(&app);
     }
     let weak = weak.clone();
     slint::Timer::single_shot(TURN_WAIT, move || {
         if TURN.get() == Some(turn) {
+            MIXED.set(true);
             HELD_BEFORE.set(None);
             start_turn(&weak, turn + 1);
         }

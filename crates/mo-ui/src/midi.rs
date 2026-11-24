@@ -907,17 +907,18 @@ fn read_before_shown(app: &AppWindow) {
         log::error("MIDI", &format!("Couldn't start reading the index ahead of the page: {e}"));
         // Nothing is coming, so the page reads it itself.
         PAGE.with(|p| p.borrow_mut().ahead_read = false);
+        crate::ahead::done(app, crate::ahead::Page::Midi);
     }
 }
 
 /// The read made ahead of the page is here: the page takes it if it showed meanwhile, else it's kept for it.
 fn ahead_arrived(app: &AppWindow, loaded: Result<Loaded, String>) {
-    crate::ahead::done(app, crate::ahead::Page::Midi);
     let loaded = match loaded {
         // Settings' smallest part changed while it was read.
         Ok(l) if l.smallest != SMALLEST.load(Ordering::Relaxed) => return remake_ahead(app, l),
         other => other,
     };
+    crate::ahead::done(app, crate::ahead::Page::Midi);
     // The page showed meanwhile and is waiting for this read: it takes it (and hands Ctrl+K its list).
     if PAGE.with(|p| std::mem::take(&mut p.borrow_mut().ahead_for_page)) {
         show(app, loaded);
