@@ -24,8 +24,8 @@ use crate::takes::Label;
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
 use crate::{
-    ChordBox, ExtensionLine, FilterChoice, FilterView, Instance, LabelLine, Panel, SkyName, SoundLine, SweptLine,
-    TakeLine, TrailDot, YearBar,
+    ChordBox, ExtensionLine, FilterChoice, FilterView, InputLine, Instance, LabelLine, Panel, SkyName, SoundLine,
+    SweptLine, TakeLine, TrailDot, YearBar,
 };
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
@@ -51,11 +51,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// The panel's size, in logical pixels (before the screen's scaling).
-pub const WIDTH: f64 = 760.0;
-pub const HEIGHT: f64 = 560.0;
-/// The smallest the window can be dragged: the filter column still fits its lines, and the list a few words.
-pub const LEAST_WIDTH: f64 = 620.0;
+/// The size the panel opens at the first time, in logical pixels (before the screen's scaling): room for every
+/// button with the list beside the filters, and a list long enough to look through (760 x 560 cut some off, and 960 x
+/// 640 was still small on his 3440 x 1440 screen: Solomon 23 Nov 2026). Still fits a 1920 x 1080 screen.
+pub const WIDTH: f64 = 1280.0;
+pub const HEIGHT: f64 = 800.0;
+/// The smallest the window can be dragged: the filter column, and beside it the Sounds tab's widest row of buttons
+/// (the playing row, with Match tempo and In Bitwig's Sampler showing).
+pub const LEAST_WIDTH: f64 = 720.0;
 pub const LEAST_HEIGHT: f64 = 560.0;
 /// The biggest: more than any screen today, so a DAW that asks for a silly size doesn't get a picture that big.
 pub const MOST_WIDTH: f64 = 7680.0;
@@ -158,6 +161,8 @@ struct Slots {
     like_shown: AtomicBool,
     /// The app's Sounds page shows silent sounds (its Hide silent sounds is off), as read with the library.
     shows_silent: AtomicBool,
+    /// The app's Sounds page hides duplicates: so does the list, until it's turned off here.
+    hides_copies: AtomicBool,
     /// The sound types the track's name names ("Kick" on a Kick track), worked out with the library: the list's
     /// first filter.
     track_types: Mutex<Vec<String>>,
@@ -645,6 +650,8 @@ struct Shown {
     carried: Cell<Option<Carried>>,
     /// The last take Record saved, shown as a line to hear and drag out.
     recorded: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// The Record from menu: its lines, and how loud each input is.
+    record_menu: Rc<RecordMenu>,
     /// The number of the newest chord Chord check read that the panel shows ([`crate::chordcheck::Checker::newest`]).
     chords_seen: Cell<u64>,
     /// The number of Chord check's list of takes the panel shows (a pick or a label sets it to none, so it's shown
@@ -671,6 +678,10 @@ struct Shown {
     keys_told: Cell<[bool; 3]>,
     /// What was last clicked to be heard, and whether it has started playing: a click on it again stops it.
     heard: Rc<Cell<Option<(Heard, bool)>>>,
+    /// The MIDI part last asked to play, and the DAW's tempo it was made at: made again when the DAW's tempo moves.
+    part: Rc<RefCell<Option<PartPlayed>>>,
+    /// The DAW's tempo as last seen, and since when: a part is made again once a new tempo has stayed a moment.
+    tempo_seen: Cell<Option<(f64, Instant)>>,
     /// The Galaxy: its map, its view and which picture is on show.
     sky: Rc<RefCell<Sky>>,
     /// The names last put over the Galaxy's map.
@@ -722,6 +733,7 @@ impl Shown {
             presets: presets_tab::PresetsTab::new(),
             carried: Cell::new(None),
             recorded: Rc::default(),
+            record_menu: Rc::default(),
             chords_seen: Cell::new(u64::MAX),
             takes_seen: Rc::new(Cell::new(u64::MAX)),
             take_picked: Rc::default(),
@@ -734,6 +746,8 @@ impl Shown {
             right_now: Rc::default(),
             keys_told: Cell::new([false; 3]),
             heard: Rc::default(),
+            part: Rc::default(),
+            tempo_seen: Cell::new(None),
             sky: Rc::default(),
             sky_names: RefCell::default(),
             sky_trail: RefCell::default(),
@@ -1011,6 +1025,7 @@ impl Shown {
         background("mo-plugin-library", move || {
             // As the app's Sounds page left Hide silent sounds, before the list's first view.
             slots.shows_silent.store(library::shows_silent(), Ordering::Release);
+            slots.hides_copies.store(library::hides_copies(), Ordering::Release);
             let read = library::read();
             // The types the track's name names, among the library's (it goes over every sound: not on the panel's
             // thread).
@@ -1197,6 +1212,27 @@ impl Shown {
         panel.set_chord_strip(ModelRc::new(VecModel::from(strip)));
     }
 
+    /// How loud the inputs are: every input while the Record from menu is open, and what's picked while the Sounds
+    /// tab shows (the overall input level beside Record). Inputs are opened to be measured only then.
+    fn record_levels(&self) {
+        let menu = &self.record_menu;
+        let open = menu.alive.get().is_some_and(|at| at.elapsed() < MENU_GONE);
+        let picked = self.panel.get_record_from().to_string();
+        let asked = if open {
+            menu.inputs.borrow().clone()
+        } else if !picked.is_empty() && self.panel.get_view() == 0 {
+            vec![picked.clone()]
+        } else {
+            Vec::new()
+        };
+        menu.meters.ask(asked);
+        menu.heard(self.instance.recorder.daw_level.take(), menu.meters.take());
+        self.panel.set_record_level(crate::record::meter_share(menu.level(&picked)));
+        if open {
+            menu.show(&picked);
+        }
+    }
+
     /// Record: what it records from, its button, and the last take as a line to hear and drag into the project.
     fn fill_in_record(&self) {
         let panel = &self.panel;
@@ -1205,11 +1241,34 @@ impl Shown {
         // The sound cards are asked for off the window's thread: the system can take a while to answer.
         let slots = Arc::clone(&self.slots);
         background("mo-plugin-inputs", move || *lock(&slots.inputs) = Some(crate::record::inputs()));
-        let weak = panel.as_weak();
-        panel.on_record_from_picked(move |picked| {
+        panel.set_record_menu(ModelRc::from(Rc::clone(&self.record_menu.lines) as Rc<dyn Model<Data = InputLine>>));
+        let (menu, weak) = (Rc::clone(&self.record_menu), panel.as_weak());
+        panel.on_record_menu_opened(move || {
+            // It opens on the sound cards, showing where what's picked is.
+            *menu.card.borrow_mut() = None;
+            menu.alive.set(Some(Instant::now()));
             if let Some(panel) = weak.upgrade() {
-                panel.set_record_from(picked);
+                menu.show(&panel.get_record_from());
             }
+        });
+        let menu = Rc::clone(&self.record_menu);
+        panel.on_record_menu_alive(move || menu.alive.set(Some(Instant::now())));
+        let (menu, weak) = (Rc::clone(&self.record_menu), panel.as_weak());
+        panel.on_record_menu_clicked(move |row| {
+            let (Some(panel), Some(line)) =
+                (weak.upgrade(), usize::try_from(row).ok().and_then(|r| menu.lines.row_data(r)))
+            else {
+                return;
+            };
+            if line.back {
+                *menu.card.borrow_mut() = None;
+            } else if line.card {
+                *menu.card.borrow_mut() = Some(line.key.to_string());
+            } else {
+                panel.set_record_from(line.key);
+                *menu.card.borrow_mut() = None;
+            }
+            menu.show(&panel.get_record_from());
         });
         let (recorder, player, weak) = (Arc::clone(recorder), Arc::clone(&self.instance.player), panel.as_weak());
         panel.on_record(move || {
@@ -1256,9 +1315,9 @@ impl Shown {
     /// What Record has to tell (how the take is going, or what became of it), and what Listen hears.
     fn record_said(&self) {
         if let Some(inputs) = take(&self.slots.inputs) {
-            let names: Vec<SharedString> = inputs.into_iter().map(SharedString::from).collect();
-            self.panel.set_record_from_choices(ModelRc::new(VecModel::from(names)));
+            *self.record_menu.inputs.borrow_mut() = inputs;
         }
+        self.record_levels();
         if let Some(hears) = lock(&self.instance.listener.hears).take() {
             self.panel.set_hears(hears.words().into());
         }
@@ -1285,6 +1344,7 @@ impl Shown {
         let roll = self.midi.roll_drawer(&self.panel);
         let scale = Rc::clone(&self.scale);
         let (instance, weak) = (Arc::clone(&self.instance), self.panel.as_weak());
+        let part = Rc::clone(&self.part);
         self.panel.on_midi_play(move |row| {
             let Some((parts, at)) = usize::try_from(row).ok().and_then(&midi) else { return };
             if let (Some(panel), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
@@ -1303,14 +1363,8 @@ impl Shown {
             // No sound's line shows where this plays.
             *last_played.borrow_mut() = None;
             let tempo = player.tempo();
-            let make: crate::audition::Made = if player.midi_out() {
-                Box::new(move || parts.notes_out(at, tempo))
-            } else {
-                Box::new(move || {
-                    let (audio, beats) = parts.sound(at, crate::midi::soundfont().as_deref(), tempo)?;
-                    Ok((crate::audition::MadeLoop::Sound(audio), beats))
-                })
-            };
+            let make = make_part(Arc::clone(&parts), at, tempo, player.midi_out());
+            *part.borrow_mut() = Some(PartPlayed { parts, at, name: name.clone(), made_at: tempo });
             let slots = Arc::clone(&slots);
             player.play_made(name, make, move |played| *lock(&slots.played) = Some(played));
         });
@@ -1785,6 +1839,7 @@ impl Shown {
     /// Takes in what background threads found, frees sounds done playing, and runs Slint's timers.
     fn tick(&self) {
         self.instance.view.store(self.panel.get_view(), Ordering::Relaxed);
+        self.follow_tempo();
         self.knobs();
         if let Some(read) = take(&self.slots.library) {
             match read {
@@ -1793,6 +1848,7 @@ impl Shown {
                     self.lines.show(Some(Arc::clone(&library)), Arc::default());
                     self.panel.set_status("Getting the list ready".into());
                     self.asked.borrow_mut().filters.show_silent = self.slots.shows_silent.load(Ordering::Acquire);
+                    self.asked.borrow_mut().filters.hide_copies = self.slots.hides_copies.load(Ordering::Acquire);
                     // On a track named for a kind of sound, the list opens on it ("Kick": kicks).
                     for t in std::mem::take(&mut *lock(&self.slots.track_types)) {
                         self.asked.borrow_mut().filters.toggle_type(&t);
@@ -2069,6 +2125,35 @@ impl Shown {
         }
     }
 
+    /// The DAW's tempo moved while a MIDI part plays: the part is made again at the new tempo and goes on from the
+    /// same place in it, once the new tempo has stayed a moment (not at every step of a tempo being dragged). A part
+    /// played again later is made at the tempo then (Solomon, 23 Nov 2026: a part kept its old tempo).
+    fn follow_tempo(&self) {
+        let player = &self.instance.player;
+        let Some(now) = player.tempo() else { return };
+        match self.tempo_seen.get() {
+            Some((seen, since)) if seen == now => {
+                if since.elapsed() < TEMPO_SETTLES {
+                    return;
+                }
+            }
+            _ => {
+                self.tempo_seen.set(Some((now, Instant::now())));
+                return;
+            }
+        }
+        let Some((Heard::Part(at), _)) = self.heard.get() else { return };
+        let mut part = self.part.borrow_mut();
+        let Some(p) = part.as_mut().filter(|p| p.at == at) else { return };
+        if !tempo_moved(p.made_at, now) {
+            return;
+        }
+        p.made_at = Some(now);
+        let make = make_part(Arc::clone(&p.parts), at, Some(now), player.midi_out());
+        let slots = Arc::clone(&self.slots);
+        player.swap_made(p.name.clone(), make, move |played| *lock(&slots.played) = Some(played));
+    }
+
     /// Stops what's playing, from wherever in the panel it's asked.
     fn stopper(&self) -> Rc<dyn Fn()> {
         let (player, heard) = (Arc::clone(&self.instance.player), Rc::clone(&self.heard));
@@ -2267,6 +2352,8 @@ impl Column {
         panel.set_mix_well(asked.filters.mix_well);
         panel.set_favourites(asked.filters.favourites);
         panel.set_hide_silent(!asked.filters.show_silent);
+        panel.set_hide_copies(asked.filters.hide_copies);
+        panel.set_hide_copies_words(library::hide_copies_words(library.and_then(|l| l.list.copies())).into());
         panel.set_hide_silent_words(mo_app::sounds::hide_silent_text(library.map(|l| l.list.silent())).into());
         let step = asked.filters.like_favourites;
         panel.set_like_favourites(mo_app::sounds::like_favourites_share(step));
@@ -2335,6 +2422,175 @@ fn same_lines(model: &VecModel<FilterChoice>, list: &[Choice]) {
 /// A new shuffled order: the clock's nanoseconds.
 fn seed() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+}
+
+/// How long the DAW's tempo stays at a new value before a playing MIDI part is made again at it.
+const TEMPO_SETTLES: Duration = Duration::from_millis(250);
+
+/// A MIDI part asked to play: where it is, its name, and the DAW's tempo it was made at (none when the DAW hadn't
+/// said one: it was made at its file's).
+struct PartPlayed {
+    parts: Arc<crate::midi::Parts>,
+    at: usize,
+    name: String,
+    made_at: Option<f64>,
+}
+
+/// Whether a part made at `made_at` is to be made again at the DAW's tempo `now`: it moved by more than the drift
+/// the player puts right on its own (0.2%), or the part wasn't made at the DAW's tempo at all.
+fn tempo_moved(made_at: Option<f64>, now: f64) -> bool {
+    made_at.is_none_or(|m| (now / m - 1.0).abs() > 0.002)
+}
+
+/// What makes the MIDI part at `at` to play at `tempo`: its notes sent out (Send MIDI on) or its sound.
+fn make_part(parts: Arc<crate::midi::Parts>, at: usize, tempo: Option<f64>, midi_out: bool) -> crate::audition::Made {
+    if midi_out {
+        Box::new(move || parts.notes_out(at, tempo))
+    } else {
+        Box::new(move || {
+            let (audio, beats) = parts.sound(at, crate::midi::soundfont().as_deref(), tempo)?;
+            Ok((crate::audition::MadeLoop::Sound(audio), beats))
+        })
+    }
+}
+
+/// The word for a shuffled list, first among each list's orders, as on the Sounds tab (Solomon, 23 Nov 2026: "a
+/// shuffle on all lists").
+const SHUFFLED: &str = "Shuffled";
+
+/// Puts `list` in a random order that `seed` decides (the same seed, the same order).
+fn shuffle(list: &mut [usize], seed: u64) {
+    let mut state = seed;
+    // splitmix64: a small, sure maker of numbers from the seed.
+    let mut next = move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    for i in (1..list.len()).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        list.swap(i, j);
+    }
+}
+
+/// How long after the Record from menu last said it's open it counts as closed (it says so every 150 ms).
+const MENU_GONE: Duration = Duration::from_millis(400);
+
+/// How much of a meter's level is kept from one tick to the next as it falls back (about 25 dB a second).
+const LEVEL_FALLS: f32 = 0.93;
+
+/// The Record from menu: the sound cards, then the inputs on the one opened, each with how loud it is.
+#[derive(Default)]
+struct RecordMenu {
+    /// Every input, by its whole name, as the system lists them.
+    inputs: RefCell<Vec<String>>,
+    /// The card whose inputs show; none for the list of cards.
+    card: RefCell<Option<String>>,
+    lines: Rc<VecModel<InputLine>>,
+    /// When the menu last said it's open.
+    alive: Cell<Option<Instant>>,
+    /// How loud each input measured is, as shown (falling back slowly from its peaks), by name.
+    levels: RefCell<Vec<(String, f32)>>,
+    /// The same for the DAW's input to the plugin.
+    daw: Cell<f32>,
+    meters: Arc<crate::record::Meters>,
+}
+
+impl RecordMenu {
+    /// New peaks heard: the DAW's input's, and the inputs measured (none for one that couldn't be opened).
+    fn heard(&self, daw: f32, measured: Vec<(String, Option<f32>)>) {
+        self.daw.set(daw.max(self.daw.get() * LEVEL_FALLS));
+        let mut levels = self.levels.borrow_mut();
+        for (_, level) in levels.iter_mut() {
+            *level *= LEVEL_FALLS;
+        }
+        for (name, peak) in measured {
+            let peak = peak.unwrap_or(0.0);
+            match levels.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, level)) => *level = level.max(peak),
+                None => levels.push((name, peak)),
+            }
+        }
+    }
+
+    /// How loud the input called `name` is ("" for the DAW's input).
+    fn level(&self, name: &str) -> f32 {
+        if name.is_empty() {
+            return self.daw.get();
+        }
+        self.levels.borrow().iter().find(|(n, _)| n == name).map_or(0.0, |(_, l)| *l)
+    }
+
+    /// The menu's lines as they are now, `picked` being what's picked: changed in place where only the levels
+    /// moved, so the menu doesn't flicker.
+    fn show(&self, picked: &str) {
+        let lines = record_menu_lines(&self.inputs.borrow(), self.card.borrow().as_deref(), picked, |n| self.level(n));
+        let same = self.lines.row_count() == lines.len()
+            && lines.iter().enumerate().all(|(i, l)| {
+                self.lines.row_data(i).is_some_and(|o| o.key == l.key && o.text == l.text && o.picked == l.picked)
+            });
+        if same {
+            for (i, line) in lines.into_iter().enumerate() {
+                if self.lines.row_data(i).is_some_and(|o| (o.level - line.level).abs() > 0.002) {
+                    self.lines.set_row_data(i, line);
+                }
+            }
+        } else {
+            self.lines.set_vec(lines);
+        }
+    }
+}
+
+/// The Record from menu's lines for `inputs` (whole names), with the card `card` open (none: the list of cards),
+/// `picked` picked, and each input as loud as `level` says. A card with one input is that input's own line.
+fn record_menu_lines(
+    inputs: &[String],
+    card: Option<&str>,
+    picked: &str,
+    level: impl Fn(&str) -> f32,
+) -> Vec<InputLine> {
+    use crate::record::{card_and_input, meter_share};
+    let line = |text: &str, key: &str, card: bool, back: bool, picked: bool, level: f32| InputLine {
+        text: text.into(),
+        key: key.into(),
+        level: meter_share(level),
+        card,
+        back,
+        picked,
+    };
+    match card {
+        Some(c) => std::iter::once(line("All sound cards", "", false, true, false, 0.0))
+            .chain(on_card(inputs, c).map(|n| line(card_and_input(n).1, n, false, false, n == picked, level(n))))
+            .collect(),
+        None => {
+            let mut cards: Vec<&str> = Vec::new();
+            for n in inputs {
+                let c = card_and_input(n).0;
+                if !cards.contains(&c) {
+                    cards.push(c);
+                }
+            }
+            let mut lines = vec![line("The DAW's input to the plugin", "", false, false, picked.is_empty(), level(""))];
+            for c in cards {
+                let names: Vec<&String> = on_card(inputs, c).collect();
+                match names.as_slice() {
+                    [only] => lines.push(line(only, only, false, false, *only == picked, level(only))),
+                    _ => {
+                        let loudest = names.iter().map(|n| level(n)).fold(0.0, f32::max);
+                        lines.push(line(c, c, true, false, names.iter().any(|n| *n == picked), loudest));
+                    }
+                }
+            }
+            lines
+        }
+    }
+}
+
+/// The inputs in `inputs` on the card `card`.
+fn on_card<'a>(inputs: &'a [String], card: &'a str) -> impl Iterator<Item = &'a String> + 'a {
+    inputs.iter().filter(move |n| crate::record::card_and_input(n).0 == card)
 }
 
 /// What's being heard: a list line's sound (by its id) or a star (by its sound's place in the list).
@@ -2499,6 +2755,50 @@ mod tests {
         assert_eq!(line_click(true, true, -1.0), Click::Nothing);
         assert_eq!(line_click(false, true, 0.7), Click::Nothing);
         assert_eq!(line_click(false, true, -1.0), Click::Nothing);
+    }
+
+    #[test]
+    fn a_part_is_made_again_once_the_tempo_moves_past_the_drift_the_player_mends() {
+        assert!(!tempo_moved(Some(120.0), 120.0));
+        assert!(!tempo_moved(Some(120.0), 120.2));
+        assert!(tempo_moved(Some(120.0), 125.0));
+        assert!(tempo_moved(Some(120.0), 90.0));
+        // Made at its file's tempo before the DAW said one: made again at the DAW's.
+        assert!(tempo_moved(None, 120.0));
+    }
+
+    #[test]
+    fn a_shuffle_keeps_every_line_and_the_same_seed_gives_the_same_order() {
+        let mut a: Vec<usize> = (0..50).collect();
+        let mut b = a.clone();
+        shuffle(&mut a, 7);
+        shuffle(&mut b, 7);
+        assert_eq!(a, b);
+        assert_ne!(a, (0..50).collect::<Vec<_>>());
+        a.sort_unstable();
+        assert_eq!(a, (0..50).collect::<Vec<_>>());
+        let mut c: Vec<usize> = (0..50).collect();
+        shuffle(&mut c, 8);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn the_record_menu_lists_cards_then_the_inputs_on_the_one_opened() {
+        let inputs: Vec<String> =
+            ["Microphone (Blue Snowball)", "Input 1/2 (Bitwig Connect)", "Loopback 5/6 (Bitwig Connect)"]
+                .map(String::from)
+                .to_vec();
+        let loud = |n: &str| if n.starts_with("Loopback") { 1.0 } else { 0.0 };
+        let top = record_menu_lines(&inputs, None, "Loopback 5/6 (Bitwig Connect)", loud);
+        let texts: Vec<&str> = top.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["The DAW's input to the plugin", "Microphone (Blue Snowball)", "Bitwig Connect"]);
+        // The one-input card is its input; the other opens, showing it holds what's picked and its loudest input.
+        assert!(!top[1].card && top[1].key == "Microphone (Blue Snowball)");
+        assert!(top[2].card && top[2].picked && top[2].level == 1.0);
+        let card = record_menu_lines(&inputs, Some("Bitwig Connect"), "", loud);
+        let texts: Vec<&str> = card.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["All sound cards", "Input 1/2", "Loopback 5/6"]);
+        assert!(card[0].back && card[2].key == "Loopback 5/6 (Bitwig Connect)");
     }
 
     #[test]

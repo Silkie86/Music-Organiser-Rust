@@ -50,9 +50,9 @@ mod ui {
     slint::include_modules!();
 }
 pub use ui::{
-    ChordBox, ClipTile, CurveEditorData, CurveLine, EditorDot, ExtensionLine, FilterChoice, FilterView, LabelLine,
-    MenuItem, Panel, PartLine, PresetLine, RulerMark, SkyName, SoundLine, SweptLine, TakeLine, Theme, TrailDot,
-    YearBar,
+    ChordBox, ClipTile, CurveEditorData, CurveLine, EditorDot, ExtensionLine, FilterChoice, FilterView, InputLine,
+    LabelLine, MenuItem, Panel, PartLine, PresetLine, RulerMark, SkyName, SoundLine, SweptLine, TakeLine, Theme,
+    TrailDot, YearBar,
 };
 
 use audition::{Player, Playing};
@@ -472,6 +472,9 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
             let first = channels.channel(0).unwrap_or(&[]);
             let second = channels.channel(1).unwrap_or(first);
             frames = first.len().max(second.len());
+            // How loud it is, for the Record from menu's meter (a plain store: nothing here waits).
+            let peak = first.iter().chain(second).fold(0.0f32, |m, s| m.max(s.abs()));
+            self.instance.recorder.daw_level.note(peak);
             self.tap.push(&[first, second]);
             if let Some(feed) = &mut self.feed {
                 feed.push(&[first, second]);
