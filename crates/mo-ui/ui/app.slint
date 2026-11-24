@@ -68,6 +68,11 @@ export component AppWindow inherits Window {
     preferred-height: 900px;
     min-width: 900px;
     min-height: 600px;
+    // Set here, so no page can bring its own: a page's columns with a widest size (Backup's, at 1280 px) made the whole
+    // window's widest size smaller than the screen, and Slint then shrank a maximised window to it, out of maximised
+    // (Solomon's F12 note of 22 Nov). With every limit set here, the window's limits never change with the page.
+    max-width: 100000px;
+    max-height: 100000px;
     background: Theme.background;
     default-font-family: Theme.text-font;
 

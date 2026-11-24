@@ -86,6 +86,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Tiles picked before the sounds arrive: the page keeps a view picked while they're read.
     app.global::<mo_ui::SoundsData>().invoke_pick_view(0);
     mo_ui::sounds::show(&app, sample_sounds(), None, Some("1"));
+    // The folder tree folded away for the shots whose fixed points were placed before it; its own shots open it.
+    mo_ui::sounds::fold_folders_for_screens(&app, true);
     mo_ui::sounds::index_known(&app, std::sync::Arc::new(sample_fingerprints()));
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
@@ -886,6 +888,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tag_box_checks(&app, &window)?;
     stopping_by_click(&app, &window)?;
     keys_come_back_checks(&app, &window)?;
+    developer_keeps_its_place(&app, &window)?;
     short_swept_card(&app, &window, &out)?;
     swept_card_checks(&app, &window)?;
     rediscover_without_fingerprints(&app, &window, &out)?;
@@ -2400,6 +2403,45 @@ fn opened_in_sight(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Re
     if wrong.is_empty() { Ok(()) } else { Err(format!("Ctrl+K, opened low down a list: {}", wrong.join("; "))) }
 }
 
+/// The folder tree beside the filters (Solomon, 24 Nov 2026): open with two folders picked and one hidden, a folder
+/// found by its search box, a folder picked alone, and folded away to its tab with picks on.
+fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+    let data = app.global::<mo_ui::SoundsData>();
+    data.invoke_close_panel();
+    data.invoke_pick_view(0);
+    mo_ui::sounds::fold_folders_for_screens(app, false);
+    data.invoke_tree_opened(r"D:\Samples".into());
+    data.invoke_tree_toggled(r"D:\Samples\Drums".into());
+    data.invoke_tree_toggled(r"D:\Samples\Loops".into());
+    data.invoke_tree_menu_asked(r"D:\Samples\FX".into());
+    data.invoke_tree_menu_chosen("hide".into());
+    capture(window);
+    shots.push(("sounds-folders.png".into(), capture(window)));
+    // A type picked too: the tree keeps only the folders with kicks, each counting its kicks.
+    data.invoke_toggle_choice("type".into(), "Kick".into());
+    capture(window);
+    shots.push(("sounds-folders-kicks.png".into(), capture(window)));
+    data.invoke_toggle_choice("type".into(), "Kick".into());
+    // Found by its search box: the deep pack folder, a chain of folders that each hold only the next one.
+    data.set_tree_search("processed".into());
+    data.invoke_tree_search_edited("processed".into());
+    data.invoke_tree_menu_asked(
+        r"D:\Samples\Packs\Vintage_Drum_Machines_Collection_Vol_2\Kicks_And_Bass_Drums\Processed".into(),
+    );
+    data.invoke_tree_menu_chosen("just".into());
+    capture(window);
+    shots.push(("sounds-folders-search.png".into(), capture(window)));
+    data.set_tree_search("".into());
+    data.invoke_tree_search_edited("".into());
+    data.invoke_tree_fold();
+    capture(window);
+    shots.push(("sounds-folders-folded.png".into(), capture(window)));
+    // Back as the other shots expect: nothing picked or hidden, folded away.
+    data.invoke_tree_cleared();
+    data.invoke_tree_taken_off(r"D:\Samples\FX".into(), true);
+    mo_ui::sounds::fold_folders_for_screens(app, true);
+}
+
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
 /// a light theme.
 fn sounds_shots(
@@ -2722,6 +2764,7 @@ fn sounds_shots(
     shots.push(("sounds-tag-tip.png".into(), after));
     data.set_search("".into());
     data.invoke_search_edited("".into());
+    folder_shots(app, window, shots);
     app.set_place(Place::Songs.index() as i32);
     Ok(())
 }
@@ -4258,6 +4301,48 @@ fn settings_shots(
     data.invoke_beta_mark("start.release".into(), 0, "".into());
     data.invoke_beta_mark("start.close-clean".into(), 1, "".into());
     data.invoke_tab_picked(0);
+}
+
+/// Settings › Developer turned down the beta checklist, then another page and back: the checklist is where it was
+/// (Solomon, 24 Nov: "it goes back to the top when I leave the page"). Another tab starts at its top.
+fn developer_keeps_its_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let data = app.global::<mo_ui::SettingsData>();
+    start_on(app, Place::Settings);
+    data.invoke_tab_picked(4);
+    capture(window);
+    let top = capture(window);
+    scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
+    let down = capture(window);
+    let kept = data.get_developer_scroll();
+    start_on(app, Place::Songs);
+    capture(window);
+    start_on(app, Place::Settings);
+    capture(window);
+    let back = capture(window);
+    let other = {
+        data.invoke_tab_picked(0);
+        capture(window);
+        data.get_developer_scroll()
+    };
+    data.invoke_tab_picked(4);
+    capture(window);
+    let again = capture(window);
+    // Back to its top for whatever follows.
+    scroll(window, 900.0, 500.0, 40.0 * PAGE_DOWN);
+    data.invoke_tab_picked(0);
+    capture(window);
+    // The checklist's part of the page, clear of the activity cards bottom right, which move on their own.
+    const LIST: (u32, u32, u32, u32) = (300, 150, 1000, 550);
+    if same_in(&down, &top, LIST) || kept >= 0.0 {
+        return Err(format!("Developer: the wheel didn't turn the checklist down (kept {kept})"));
+    }
+    if !same_in(&back, &down, LIST) {
+        return Err("Developer: after another page the checklist was no longer where it was left".into());
+    }
+    if other != kept || !same_in(&again, &down, LIST) {
+        return Err("Developer: after the General tab the checklist was no longer where it was left".into());
+    }
+    Ok(())
 }
 
 /// The mouse wheel turned over a point: a negative `dy` moves the page up, to show what's below.

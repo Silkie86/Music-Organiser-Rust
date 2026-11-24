@@ -440,6 +440,7 @@ fn redraw(app: &AppWindow, whole: bool) {
                 id: line.id.into(),
                 what: line.what.into(),
                 expect: line.expect.into(),
+                how: line.how.into(),
                 mark: line.mark.and_then(|m| Mark::ALL.iter().position(|x| *x == m)).map_or(-1, |i| i as i32),
                 note: l.drafts.get(line.id).cloned().unwrap_or(line.note).into(),
                 auto: line.auto,

@@ -66,6 +66,8 @@ struct Shown {
     lines: Rc<CurveLines>,
     filters: RefCell<CurveFilters>,
     from: Choices,
+    /// Shuffled, in the order this number decides, instead of newest found first.
+    shuffle: Cell<Option<u64>>,
 }
 
 impl Shown {
@@ -74,10 +76,14 @@ impl Shown {
     fn show(&self, panel: &Panel) {
         let curves = self.lines.curves.borrow().clone();
         let filters = self.filters.borrow();
-        let (shown, from) = match &curves {
+        let (mut shown, from) = match &curves {
             Some(c) => c.view(&filters),
             None => (Vec::new(), mo_app::filters::Filter::default()),
         };
+        if let Some(seed) = self.shuffle.get() {
+            super::shuffle(&mut shown, seed);
+        }
+        panel.set_curve_shuffled(self.shuffle.get().is_some());
         panel.set_curve_from_filter(self.from.view(&from));
         panel.set_curve_hidden(filters.hidden);
         if let Some(c) = &curves {
@@ -138,6 +144,14 @@ impl CurvesTab {
         panel.on_curve_clear(move || clear(SharedString::new()));
         let hidden = change(|f, t| f.hidden = t == "on");
         panel.on_curve_hidden_toggled(move |on| hidden(if on { "on" } else { "" }.into()));
+        // Shuffled: a new order each time it's picked; or back to newest first.
+        let (shown, weak) = (Rc::clone(&self.shown), panel.as_weak());
+        panel.on_curve_shuffle(move |on| {
+            shown.shuffle.set(on.then(super::seed));
+            if let Some(panel) = weak.upgrade() {
+                shown.show(&panel);
+            }
+        });
         self.bench.fill_in(panel, window_slots);
         let (shown, bench, weak) = (Rc::clone(&self.shown), Rc::clone(&self.bench), panel.as_weak());
         panel.on_curve_open(move |row| {

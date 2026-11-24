@@ -59,6 +59,9 @@ pub struct Recorder {
     rate: AtomicU32,
     /// The newest for the panel.
     pub said: Mutex<Option<Said>>,
+    /// How loud the DAW's input to the plugin has been since the panel last asked ([`record::card::Level`]), set
+    /// from the audio thread.
+    pub daw_level: record::card::Level,
 }
 
 /// Marks a take over when its thread ends, however it ends.
@@ -229,9 +232,141 @@ pub fn inputs() -> Vec<String> {
     record::card::inputs()
 }
 
+/// An input's name split into its sound card and the input on it, as Windows names them: "Input 1/2 (Bitwig
+/// Connect)" is input "Input 1/2" on "Bitwig Connect". A name without a card in brackets is a card of its own.
+pub fn card_and_input(name: &str) -> (&str, &str) {
+    let trimmed = name.trim_end();
+    if let Some(inner) = trimmed.strip_suffix(')')
+        && let Some(open) = inner.find('(')
+    {
+        let (input, card) = (inner[..open].trim(), inner[open + 1..].trim());
+        if !input.is_empty() && !card.is_empty() {
+            return (card, input);
+        }
+    }
+    (trimmed, trimmed)
+}
+
+/// The sound card inputs shown with how loud they are, opened only to be measured while they're asked for (the
+/// Record from menu is open, or one is picked) and closed once they aren't: an input open for nothing can light
+/// Windows' "microphone in use" sign. Each is opened on one thread of the plugin's own, which keeps them (an open
+/// input can't move between threads on every system).
+#[derive(Default)]
+pub struct Meters {
+    /// The inputs to measure, by name.
+    asked: Mutex<Vec<String>>,
+    /// How loud each has been since the panel last took them (0 to 1), by name; none for one that couldn't be opened.
+    levels: Mutex<Vec<(String, Option<f32>)>>,
+    running: AtomicBool,
+}
+
+/// An input open to be measured, and how loud it is.
+type Measured = (record::card::Input, Arc<record::card::Level>);
+
+/// How often the inputs measured are looked at again, and their levels handed on.
+const METER_EVERY: Duration = Duration::from_millis(40);
+
+impl Meters {
+    /// Measures `names` from now on (and no others), starting the thread that does if it isn't going.
+    pub fn ask(self: &Arc<Self>, names: Vec<String>) {
+        let mut asked = lock(&self.asked);
+        if *asked == names {
+            return;
+        }
+        *asked = names;
+        drop(asked);
+        if !self.running.swap(true, Ordering::AcqRel) {
+            let me = Arc::clone(self);
+            if !background("mo-plugin-meters", move || me.run()) {
+                self.running.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    /// The levels since the last time they were taken.
+    pub fn take(&self) -> Vec<(String, Option<f32>)> {
+        std::mem::take(&mut *lock(&self.levels))
+    }
+
+    /// The thread: opens what's asked, closes what isn't, and hands on their levels. Ends once nothing is asked, or
+    /// the panel that asked has gone.
+    fn run(self: Arc<Self>) {
+        let mut open: Vec<(String, Option<Measured>)> = Vec::new();
+        loop {
+            let asked = lock(&self.asked).clone();
+            // The panel holds the other: once it's gone, nothing will read the levels.
+            if asked.is_empty() || Arc::strong_count(&self) == 1 {
+                drop(std::mem::take(&mut open));
+                self.running.store(false, Ordering::Release);
+                // Something asked for after the look above started no thread (this one was still going): look again.
+                if lock(&self.asked).is_empty()
+                    || Arc::strong_count(&self) == 1
+                    || self.running.swap(true, Ordering::AcqRel)
+                {
+                    return;
+                }
+                continue;
+            }
+            open.retain(|(name, _)| asked.contains(name));
+            for name in &asked {
+                if !open.iter().any(|(n, _)| n == name) {
+                    let meter = record::card::meter(name);
+                    if let Err(why) = &meter {
+                        crate::log::line("Record", &format!("Couldn't measure {name}: {why}"));
+                    }
+                    open.push((name.clone(), meter.ok()));
+                }
+            }
+            let levels = open.iter().map(|(name, m)| (name.clone(), m.as_ref().map(|(_, level)| level.take())));
+            {
+                let mut kept = lock(&self.levels);
+                for (name, level) in levels {
+                    match kept.iter_mut().find(|(n, _)| *n == name) {
+                        // The loudest since the panel last looked.
+                        Some((_, Some(was))) => *was = was.max(level.unwrap_or(0.0)),
+                        Some(slot) => slot.1 = level,
+                        None => kept.push((name, level)),
+                    }
+                }
+            }
+            std::thread::sleep(METER_EVERY);
+        }
+    }
+}
+
+/// A level (a sample's size, 1 at full scale) as a part of a meter's length: its decibels from -60 to 0.
+pub fn meter_share(level: f32) -> f32 {
+    if level <= 0.0 || !level.is_finite() {
+        return 0.0;
+    }
+    ((20.0 * level.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_input_name_splits_into_its_card_and_the_input_on_it() {
+        assert_eq!(card_and_input("Input 1/2 (Bitwig Connect)"), ("Bitwig Connect", "Input 1/2"));
+        assert_eq!(card_and_input("Microphone (Blue Snowball)"), ("Blue Snowball", "Microphone"));
+        assert_eq!(
+            card_and_input("Microphone (ManyCam Virtual Microphone)"),
+            ("ManyCam Virtual Microphone", "Microphone")
+        );
+        assert_eq!(card_and_input("Line In"), ("Line In", "Line In"));
+        assert_eq!(card_and_input("(odd)"), ("(odd)", "(odd)"));
+    }
+
+    #[test]
+    fn a_meter_shows_sixty_decibels() {
+        assert_eq!(meter_share(0.0), 0.0);
+        assert_eq!(meter_share(1.0), 1.0);
+        assert_eq!(meter_share(2.0), 1.0);
+        assert!((meter_share(0.1) - 2.0 / 3.0).abs() < 1e-5);
+        assert_eq!(meter_share(0.0001), 0.0);
+        assert_eq!(meter_share(f32::NAN), 0.0);
+    }
 
     #[test]
     fn a_take_thread_that_stops_with_an_error_leaves_nothing_recording() {

@@ -51,6 +51,8 @@ export struct BetaLineInfo {
     id: string,
     what: string,
     expect: string,
+    // How to do it, step by step (empty for a step that says it all in one line).
+    how: string,
     mark: int,
     note: string,
     // Marked by the self-check: its mark and what it found show, with no chips to press.
@@ -217,6 +219,9 @@ export global SettingsData {
     in property <bool> beta-to-try;
     in property <string> beta-message;
     in property <bool> beta-checking;
+    // How far down the Developer tab was turned, kept while the page is away, so the checklist is where it was when
+    // you come back from trying a step (Solomon, 24 Nov).
+    in-out property <length> developer-scroll;
     // Counted up when a step's row that had the keys goes (its mark took it out of Only to try, or the rows were made
     // anew): the window takes the keys back, or no key would work until a click (the 19 Nov review, BT-1).
     in-out property <int> beta-keys-back;
@@ -1110,6 +1115,12 @@ component BetaStep inherits VerticalLayout {
         font-weight: 500;
         wrap: word-wrap;
     }
+    if root.line.how != "": Text {
+        text: "How: " + root.line.how;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
     Text {
         text: "You should see: " + root.line.expect;
         color: Theme.muted;
@@ -1273,10 +1284,28 @@ export component SettingsPage inherits Rectangle {
                 vertical-alignment: center;
             }
         }
-        Flickable {
+        list := Flickable {
             vertical-stretch: 1;
             content-width: self.width;
             content-height: shown.preferred-height;
+            // The Developer tab opens where it was left; changed handlers can run as the page is made, so its place
+            // is only kept once it has been put back.
+            property <bool> placed;
+            property <int> tab: SettingsData.tab;
+            init => {
+                if (SettingsData.tab == 4) {
+                    self.content-y = SettingsData.developer-scroll;
+                }
+                self.placed = true;
+            }
+            changed content-y => {
+                if (self.placed && SettingsData.tab == 4) {
+                    SettingsData.developer-scroll = self.content-y;
+                }
+            }
+            changed tab => {
+                self.content-y = self.tab == 4 ? SettingsData.developer-scroll : 0;
+            }
             shown := VerticalLayout {
                 alignment: start;
                 if SettingsData.tab == 0: GeneralTab { }

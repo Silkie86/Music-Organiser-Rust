@@ -3,6 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
+import { FolderTree, TreeLine, TreePick } from "../folder_tree.slint";
 import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, CutText, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, TipState, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
@@ -388,8 +389,29 @@ export global SoundsData {
     // ("": no button).
     in property <string> bitwig-save-note;
     callback bitwig-save();
-    // The forgotten folder clicked on Rediscover that the list is narrowed to (its own sounds), or none.
+    // What the folder tree's picks are, in a few words ("UKG Snares + 1"), or none: the filter column's line for them.
     in property <string> folder;
+    // The folder tree (mo_app::sound_folders): its lines, the picks and hidden folders as chips, how many are picked,
+    // the line under it, whether it's folded away to its tab, the words in its search box, where its list is turned to,
+    // and the right-click menu of the line clicked.
+    in property <[TreeLine]> tree-lines;
+    in property <[TreePick]> tree-picks;
+    in property <string> tree-picked;
+    in property <string> tree-note;
+    in property <bool> tree-folded;
+    in property <bool> tree-any;
+    in-out property <string> tree-search;
+    in-out property <length> tree-kept-y;
+    in property <[MenuItem]> tree-menu;
+    callback tree-toggled(string);
+    callback tree-opened(string);
+    callback tree-taken-off(string, bool);
+    callback tree-search-edited(string);
+    callback tree-cleared();
+    callback tree-fold();
+    // A right click on a line: its menu is made for it, then shown.
+    callback tree-menu-asked(string);
+    callback tree-menu-chosen(string);
     in property <bool> any-filter;
     // "mix-well", "unused", "used", "favourites", "hide-copies", "hide-silent" or "folder".
     callback toggle(string);
@@ -1616,7 +1638,7 @@ export component SoundsPage inherits Rectangle {
             // how many sounds it would show: the types first, then the rest.
             // The sounds, and the picked one's panel beside them.
             area := Rectangle {
-                x: column.room;
+                x: column.room + (tree.visible ? tree.room : 0px);
                 y: 0;
                 width: split.width - self.x;
                 height: split.height;
@@ -2212,6 +2234,37 @@ export component SoundsPage inherits Rectangle {
                     chosen(id) => { SoundsData.menu-chosen(id); }
                 }
             }
+            // The folder tree, beside the filters on the views they narrow (Tiles, List, Galaxy, History). Folded to its
+            // tab in a narrow window, as the filter column is.
+            tree := FolderTree {
+                x: column.room;
+                y: 0;
+                height: split.height;
+                visible: SoundsData.view < 4;
+                lines: SoundsData.tree-lines;
+                picks: SoundsData.tree-picks;
+                picked-words: SoundsData.tree-picked;
+                note: SoundsData.tree-note;
+                folded: SoundsData.tree-folded;
+                narrow: split.width < 1100px;
+                any-picked: SoundsData.tree-any;
+                search <=> SoundsData.tree-search;
+                kept-y <=> SoundsData.tree-kept-y;
+                toggled(path) => { SoundsData.tree-toggled(path); }
+                opened(path) => { SoundsData.tree-opened(path); }
+                taken-off(path, hidden) => { SoundsData.tree-taken-off(path, hidden); }
+                search-edited(words) => { SoundsData.tree-search-edited(words); }
+                cleared => { SoundsData.tree-cleared(); }
+                fold => { SoundsData.tree-fold(); }
+                right-clicked(path, x, y) => {
+                    SoundsData.tree-menu-asked(path);
+                    tree-menu.open-at(x, y);
+                }
+            }
+            tree-menu := RightClickMenu {
+                items: SoundsData.tree-menu;
+                chosen(id) => { SoundsData.tree-menu-chosen(id); }
+            }
             // After the list, so the opened column of a narrow window lies over it.
             column := FilterColumn {
                 page-width: split.width;
@@ -2340,9 +2393,9 @@ export component SoundsPage inherits Rectangle {
                             on: SoundsData.unused;
                             clicked => { SoundsData.toggle("unused"); }
                         }
-                        // Only while a forgotten folder narrows the list: a click shows every folder's sounds again.
+                        // Only while folders are picked on the folder tree: a click shows every folder's sounds again.
                         if SoundsData.folder != "": TickLine {
-                            text: "In " + SoundsData.folder;
+                            text: "Folders: " + SoundsData.folder;
                             on: true;
                             clicked => { SoundsData.toggle("folder"); }
                         }

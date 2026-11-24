@@ -68,6 +68,8 @@ pub enum Read {
 pub struct Asked {
     pub filters: Filters,
     pub order: Order,
+    /// Shuffled, in the order this number decides, instead of `order`.
+    pub shuffle: Option<u64>,
 }
 
 /// The parts read last, kept while the plugin is loaded ([`crate::kept`]).
@@ -165,7 +167,7 @@ impl Parts {
         let filters = Filters { smallest: self.smallest, ..asked.filters.clone() };
         // On the app's low-priority pool, not rayon's own at normal priority (rule 21).
         let (hits, counts) =
-            mo_app::background::on_pool(|| page::view(&self.cat, &filters, asked.order, false, None, None));
+            mo_app::background::on_pool(|| page::view(&self.cat, &filters, asked.order, false, None, asked.shuffle));
         (hits.into_iter().map(|h| h.entry).collect(), counts)
     }
 
