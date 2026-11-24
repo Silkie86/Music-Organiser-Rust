@@ -1,0 +1,280 @@
+// The folder tree beside a list of sounds (Solomon, 24 Nov 2026): only the folders that hold sounds the other filters
+// let through, each with how many, ticked to narrow the list to them (as many as you like). The lines, picks and
+// words are made by mo_app::sound_folders; this only shows them and says what was clicked.
+import { Theme, Type, Space, Heights, Caps, SearchBox, CutText, ListLine, StudioButton, TagChip, CloseButton } from "studio.slint";
+import { ListView } from "list.slint";
+
+// One line of the tree. `picked`: 0 not, 1 picked with the folders inside it, 2 picked alone ("just this folder"),
+// 3 inside a folder picked with its folders, 4 a folder inside it is picked.
+export struct TreeLine {
+    path: string,
+    label: string,
+    depth: int,
+    count: string,
+    used: string,
+    has-children: bool,
+    open: bool,
+    picked: int,
+    hidden: bool,
+    away: bool,
+    empty: bool,
+}
+
+// A pick or a hidden folder, as a chip over the tree: its name, and whether it's a hidden one (crossed out).
+export struct TreePick {
+    path: string,
+    text: string,
+    hidden: bool,
+}
+
+// The tick box of a line: lit when picked, a dash when a folder inside it is, faintly lit when a folder above it is.
+component TreeTick inherits Rectangle {
+    in property <int> picked;
+    in property <bool> dim;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border-width: 1.5px;
+    property <bool> lit: root.picked == 1 || root.picked == 2;
+    border-color: root.lit || root.picked == 4 ? Theme.accent
+        : root.picked == 3 ? Theme.accent.transparentize(50%)
+        : Theme.muted.transparentize(root.dim ? 70% : 40%);
+    background: root.lit ? Theme.accent : root.picked == 3 ? Theme.accent.transparentize(80%) : transparent;
+    if root.lit || root.picked == 3: Path {
+        x: 2px;
+        y: 3px;
+        width: 10px;
+        height: 8px;
+        viewbox-width: 12;
+        viewbox-height: 10;
+        commands: "M 1 5 L 4.5 8.5 L 11 1.5";
+        stroke: root.lit ? Theme.accent-text : Theme.accent;
+        stroke-width: 2px;
+    }
+    if root.picked == 4: Path {
+        width: 14px;
+        height: 14px;
+        viewbox-width: 14;
+        viewbox-height: 14;
+        commands: "M 3.5 7 L 10.5 7";
+        stroke: Theme.accent;
+        stroke-width: 2px;
+    }
+}
+
+// A small word on a line that says something about it: "just this folder", "drive away".
+component LineTag inherits Rectangle {
+    in property <string> text;
+    in property <color> ink: Theme.faint;
+    height: 16px;
+    width: words.preferred-width + 10px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.ink.transparentize(50%);
+    words := Text {
+        text: root.text;
+        color: root.ink;
+        font-size: Type.tiny;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
+component TreeLineView inherits ListLine {
+    in property <TreeLine> line;
+    callback toggled();
+    callback opened();
+    property <length> indent: root.line.depth * 14px;
+    height: Heights.tick-line;
+    tip: root.line.path;
+    clicked => { root.toggled(); }
+    HorizontalLayout {
+        padding-left: Space.xs + root.indent;
+        padding-right: Space.sm;
+        spacing: Space.xs;
+        // The arrow that opens and closes the folder; room kept for it on a folder with nothing inside to show.
+        Rectangle {
+            width: 14px;
+            arrow-touch := TouchArea {
+                enabled: root.line.has-children;
+                clicked => { root.opened(); }
+            }
+            if root.line.has-children: Path {
+                width: 8px;
+                height: 8px;
+                viewbox-width: 8;
+                viewbox-height: 8;
+                commands: root.line.open ? "M 0 2 L 8 2 L 4 7 Z" : "M 2 0 L 7 4 L 2 8 Z";
+                fill: Theme.muted;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            TreeTick {
+                picked: root.line.picked;
+                dim: root.line.empty || root.line.hidden || root.line.away;
+            }
+        }
+        CutText {
+            over: root.resting;
+            anywhere: true;
+            text: root.line.label;
+            color: root.line.hidden || root.line.away ? Theme.faint.transparentize(30%)
+                : root.line.picked == 1 || root.line.picked == 2 ? Theme.text
+                : root.line.empty ? Theme.faint
+                : Theme.muted;
+            font-size: Type.meta;
+            font-weight: root.line.picked == 1 || root.line.picked == 2 ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            min-width: 40px;
+        }
+        if root.line.picked == 2: VerticalLayout {
+            alignment: center;
+            LineTag {
+                text: "just this folder";
+                ink: Theme.accent;
+            }
+        }
+        if root.line.away: VerticalLayout {
+            alignment: center;
+            LineTag { text: "drive away"; }
+        }
+        if root.line.hidden: VerticalLayout {
+            alignment: center;
+            LineTag { text: "hidden"; }
+        }
+        Text {
+            text: root.line.count;
+            color: Theme.faint;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+        if root.line.used != "": Text {
+            text: root.line.used;
+            color: Theme.faint.transparentize(35%);
+            font-size: Type.tiny;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+    }
+    // The tick box and the words lie under the line's own click; the arrow has its own (above).
+}
+
+// The tree: its name, a box to find a folder, the picks and hidden folders as chips, the lines, and what the picks
+// show. Folded, it's a slim tab that says FOLDERS, lit while anything is picked, and a click opens it again.
+export component FolderTree inherits Rectangle {
+    in property <[TreeLine]> lines;
+    in property <[TreePick]> picks;
+    // "2 picked", or "" for none.
+    in property <string> picked-words;
+    // What the line under the tree says: how many sounds the picks show, or what to do.
+    in property <string> note;
+    in property <bool> folded;
+    in property <bool> any-picked;
+    in-out property <string> search;
+    // Where the list is turned to, kept by the page so a tree made again comes back there.
+    in-out property <length> kept-y;
+    out property <length> room: root.folded ? 28px + Space.sm : 280px + Space.lg;
+    callback toggled(string);
+    callback opened(string);
+    callback taken-off(string);
+    callback right-clicked(string, length, length);
+    callback search-edited(string);
+    callback cleared();
+    callback fold();
+    width: root.folded ? 28px : 280px;
+    clip: true;
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.edge;
+    }
+    if root.folded: Rectangle {
+        width: 27px;
+        border-radius: Theme.radius;
+        background: Theme.surface;
+        VerticalLayout {
+            y: Space.md;
+            height: self.preferred-height;
+            for letter in ["F", "O", "L", "D", "E", "R", "S"]: Caps {
+                text: letter;
+                horizontal-alignment: center;
+                color: root.any-picked ? Theme.accent : Theme.muted;
+            }
+        }
+        tab := TouchArea {
+            clicked => { root.fold(); }
+        }
+    }
+    if !root.folded: VerticalLayout {
+        width: parent.width - Space.md;
+        spacing: Space.sm;
+        HorizontalLayout {
+            height: 22px;
+            Caps {
+                text: "FOLDERS";
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.picked-words;
+                color: Theme.accent;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                horizontal-stretch: 1;
+            }
+            // Folds the tree away to its tab.
+            CloseButton {
+                tip: "Fold the folders away";
+                clicked => { root.fold(); }
+            }
+        }
+        SearchBox {
+            hint: "Find a folder";
+            text <=> root.search;
+            edited(words) => { root.search-edited(words); }
+        }
+        if root.picks.length > 0: FlexboxLayout {
+            spacing: Space.xs;
+            for p in root.picks: TagChip {
+                text: p.hidden ? "Hidden: " + p.text : p.text;
+                on: !p.hidden;
+                remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
+                clicked => { root.taken-off(p.path); }
+                removed => { root.taken-off(p.path); }
+            }
+        }
+        tree := ListView {
+            vertical-stretch: 1;
+            row-height: Heights.tick-line;
+            rows: root.lines.length;
+            kept-y <=> root.kept-y;
+            for l in root.lines: TreeLineView {
+                line: l;
+                toggled => { root.toggled(l.path); }
+                opened => { root.opened(l.path); }
+                right-clicked(x, y) => { root.right-clicked(l.path, x, y); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            padding-bottom: Space.xs;
+            Text {
+                text: root.note;
+                color: Theme.faint;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+            if root.any-picked: StudioButton {
+                text: "Clear";
+                tip: "Take every folder pick off";
+                clicked => { root.cleared(); }
+            }
+        }
+    }
+}

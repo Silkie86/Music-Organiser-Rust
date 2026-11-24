@@ -16,6 +16,7 @@ mod kit;
 mod like;
 mod peaks;
 mod sky;
+mod tree;
 mod yours;
 
 use std::cell::{Cell, RefCell};
@@ -1313,6 +1314,7 @@ fn scan_for_sounds(
             return false;
         }
     };
+    tree::tops_read(&folders);
     let job: RefCell<Option<Job>> = RefCell::new(None);
     let scanned = mo_app::sound_scan::scan(sounds_db, &folders, &|done, of| {
         let mut job = job.borrow_mut();
@@ -2546,6 +2548,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         }
         silent_as_left(&mut p);
         date_by_as_left(&mut p);
+        tree::as_left(&mut p);
         // How far the sounds like your favourites reach too.
         if !p.like_chosen {
             p.like_chosen = true;
@@ -2882,6 +2885,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     wire_rediscover(app);
     grid::connect(app);
     kit::wire(app);
+    tree::wire(app);
     galaxy::wire(app);
     drag_out::wire(app);
     let weak = app.as_weak();
@@ -3462,7 +3466,8 @@ fn wire_rediscover(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            p.filters = Filters { folder: Some(folder.to_string()), ..p.filters.cleared() };
+            p.filters = p.filters.cleared();
+            tree::pick_alone(&mut p, &folder);
             p.pick_view(LIST);
         });
         keep_view(LIST);
@@ -3672,6 +3677,12 @@ pub fn show_copies_for_screens(app: &AppWindow, same: Option<&mo_sounds::copies:
 /// For the screenshots: the fingerprints couldn't be read (`why`), as at a start where the page had none yet, so
 /// Rediscover has dug nothing out (no sounds, folders or years shown); [`index_known`] puts the fingerprints back and
 /// it digs sounds out again. Never reads a file.
+/// Folds the folder tree away or opens it, for the screenshots: the older shots are taken with it folded, as their
+/// fixed points were placed without it.
+pub fn fold_folders_for_screens(app: &AppWindow, folded: bool) {
+    tree::set_folded(app, folded);
+}
+
 pub fn index_failed_for_screens(app: &AppWindow, why: &str) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -3910,7 +3921,7 @@ fn show_chips(app: &AppWindow) {
         data.set_hide_copies_text(list::hide_copies_text(copies::found()).into());
         data.set_hide_silent(!f.show_silent);
         data.set_hide_silent_text(list::hide_silent_text(p.partial.is_none().then(|| p.list.silent())).into());
-        data.set_folder(f.folder.as_deref().unwrap_or_default().into());
+        tree::show(app, &p);
         data.set_any_filter(f.any());
         // The box holds the words the list goes by: Clear filters takes them off too.
         if data.get_search().as_str() != f.search {

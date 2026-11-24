@@ -86,6 +86,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Tiles picked before the sounds arrive: the page keeps a view picked while they're read.
     app.global::<mo_ui::SoundsData>().invoke_pick_view(0);
     mo_ui::sounds::show(&app, sample_sounds(), None, Some("1"));
+    // The folder tree folded away for the shots whose fixed points were placed before it; its own shots open it.
+    mo_ui::sounds::fold_folders_for_screens(&app, true);
     mo_ui::sounds::index_known(&app, std::sync::Arc::new(sample_fingerprints()));
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
     capture(&window);
@@ -2402,6 +2404,45 @@ fn opened_in_sight(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Re
 
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
 /// a light theme.
+/// The folder tree beside the filters (Solomon, 24 Nov 2026): open with two folders picked and one hidden, a folder
+/// found by its search box, a folder picked alone, and folded away to its tab with picks on.
+fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+    let data = app.global::<mo_ui::SoundsData>();
+    data.invoke_close_panel();
+    data.invoke_pick_view(0);
+    mo_ui::sounds::fold_folders_for_screens(app, false);
+    data.invoke_tree_opened(r"D:\Samples".into());
+    data.invoke_tree_toggled(r"D:\Samples\Drums".into());
+    data.invoke_tree_toggled(r"D:\Samples\Loops".into());
+    data.invoke_tree_menu_asked(r"D:\Samples\FX".into());
+    data.invoke_tree_menu_chosen("hide".into());
+    capture(window);
+    shots.push(("sounds-folders.png".into(), capture(window)));
+    // A type picked too: the tree keeps only the folders with kicks, each counting its kicks.
+    data.invoke_toggle_choice("type".into(), "Kick".into());
+    capture(window);
+    shots.push(("sounds-folders-kicks.png".into(), capture(window)));
+    data.invoke_toggle_choice("type".into(), "Kick".into());
+    // Found by its search box: the deep pack folder, a chain of folders that each hold only the next one.
+    data.set_tree_search("processed".into());
+    data.invoke_tree_search_edited("processed".into());
+    data.invoke_tree_menu_asked(
+        r"D:\Samples\Packs\Vintage_Drum_Machines_Collection_Vol_2\Kicks_And_Bass_Drums\Processed".into(),
+    );
+    data.invoke_tree_menu_chosen("just".into());
+    capture(window);
+    shots.push(("sounds-folders-search.png".into(), capture(window)));
+    data.set_tree_search("".into());
+    data.invoke_tree_search_edited("".into());
+    data.invoke_tree_fold();
+    capture(window);
+    shots.push(("sounds-folders-folded.png".into(), capture(window)));
+    // Back as the other shots expect: nothing picked or hidden, folded away.
+    data.invoke_tree_cleared();
+    data.invoke_tree_taken_off(r"D:\Samples\FX".into());
+    mo_ui::sounds::fold_folders_for_screens(app, true);
+}
+
 fn sounds_shots(
     app: &mo_ui::AppWindow,
     window: &MinimalSoftwareWindow,
@@ -2722,6 +2763,7 @@ fn sounds_shots(
     shots.push(("sounds-tag-tip.png".into(), after));
     data.set_search("".into());
     data.invoke_search_edited("".into());
+    folder_shots(app, window, shots);
     app.set_place(Place::Songs.index() as i32);
     Ok(())
 }
