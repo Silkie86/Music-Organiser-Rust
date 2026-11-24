@@ -1102,36 +1102,53 @@ component DawsTab inherits VerticalLayout {
 
 // One step of the beta checklist: what to do, what you should see, its three marks and a note box. Enter in the box
 // keeps the note; a mark keeps what's in the box with it.
+// A wrapping line in a layout, sized to its height at the width it gets. A wrapping Text inside an `if` or a `for` is
+// measured at one line's width, so a list of them came out shorter than drawn and ran under the next card (Solomon's
+// F12 note of 24 Nov: "this build is covering the test results"; the slint-layout-traps note).
+component WrapLine inherits Rectangle {
+    in property <string> text;
+    in property <brush> ink: Theme.muted;
+    in property <length> font-size: Type.meta;
+    in property <int> font-weight: 400;
+    height: words.preferred-height;
+    words := Text {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        text: root.text;
+        color: root.ink;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        wrap: word-wrap;
+    }
+}
+
 component BetaStep inherits VerticalLayout {
     in property <BetaLineInfo> line;
 
     spacing: Space.xs;
     padding-top: Space.xs;
     padding-bottom: Space.xs;
-    Text {
+    WrapLine {
         text: root.line.what;
-        color: Theme.text;
+        ink: Theme.text;
         font-size: Type.meta;
         font-weight: 500;
-        wrap: word-wrap;
     }
-    if root.line.how != "": Text {
+    if root.line.how != "": WrapLine {
         text: "How: " + root.line.how;
-        color: Theme.muted;
+        ink: Theme.muted;
         font-size: Type.meta;
-        wrap: word-wrap;
     }
-    Text {
+    WrapLine {
         text: "You should see: " + root.line.expect;
-        color: Theme.muted;
+        ink: Theme.muted;
         font-size: Type.meta;
-        wrap: word-wrap;
     }
-    if root.line.auto: Text {
+    if root.line.auto: WrapLine {
         text: root.line.mark == 0 ? "Fine: " + root.line.note : root.line.mark == 1 ? "Problem: " + root.line.note : "Not checked yet";
-        color: root.line.mark == 1 ? Theme.text : Theme.muted;
+        ink: root.line.mark == 1 ? Theme.text : Theme.muted;
         font-size: Type.meta;
-        wrap: word-wrap;
     }
     // Works or Skip can take this row out of Only to try: if its box has the keys, the window takes them first (a chip
     // never takes them, so they'd stay in a box that's gone: the 19 Nov review, BT-1).
@@ -1175,7 +1192,7 @@ component BetaStep inherits VerticalLayout {
             edited(t) => { SettingsData.beta-draft(root.line.id, t); }
         }
     }
-    if root.line.said != "": Text {
+    if root.line.said != "": WrapLine {
         text: root.line.said;
         color: Theme.faint;
         font-size: Type.meta;
@@ -1217,11 +1234,8 @@ component DeveloperTab inherits VerticalLayout {
                 clicked => { SettingsData.beta-show-file(); }
             }
         }
-        if SettingsData.beta-message != "": Text {
+        if SettingsData.beta-message != "": WrapLine {
             text: SettingsData.beta-message;
-            color: Theme.muted;
-            font-size: Type.meta;
-            wrap: word-wrap;
         }
         for l in SettingsData.beta-lines: VerticalLayout {
             if l.id == "": Caps {
