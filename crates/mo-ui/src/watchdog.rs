@@ -206,11 +206,15 @@ pub fn watch_window(app: &crate::AppWindow) {
 /// (Solomon's log of 24 Nov: the window left maximised on its own 10 s after a restore, with no page change). Windows
 /// gives the app no word of a click on its title bar, so it goes by what it can see: the pointer is off the window's
 /// inside (on the title bar or an edge, which is where Restore, a double-click and a drag happen) while the window is
-/// in front, or the Windows key or Alt was pressed a moment ago (Win+Down, Alt+Space).
+/// in front, or the Windows key or Alt+Space was pressed a moment ago (Win+Down, the window's own menu).
 #[derive(Default)]
 struct Hands {
-    pointer_inside: bool,
+    /// Where the pointer is: `None` until it is seen after the window came to the front (brought back from the
+    /// taskbar, the pointer stays on the taskbar, which says nothing of the user's hands on the window).
+    pointer_inside: Option<bool>,
     in_front: bool,
+    size: (f64, f64),
+    alt_held: bool,
     key_at: Option<Instant>,
 }
 
@@ -219,14 +223,28 @@ impl Hands {
         use slint::winit_030::winit::event::{ElementState, WindowEvent};
         use slint::winit_030::winit::keyboard::{Key, NamedKey};
         match event {
-            WindowEvent::CursorEntered { .. } | WindowEvent::CursorMoved { .. } => self.pointer_inside = true,
-            WindowEvent::CursorLeft { .. } => self.pointer_inside = false,
-            WindowEvent::Focused(active) => self.in_front = *active,
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && matches!(event.logical_key, Key::Named(NamedKey::Super | NamedKey::Alt)) =>
-            {
-                self.key_at = Some(Instant::now());
+            WindowEvent::Resized(size) => self.size = (f64::from(size.width), f64::from(size.height)),
+            WindowEvent::CursorEntered { .. } => self.pointer_inside = Some(true),
+            // While a drag holds the pointer, it moves on outside the window: only a place inside counts.
+            WindowEvent::CursorMoved { position, .. } => {
+                let inside = (0.0..self.size.0).contains(&position.x) && (0.0..self.size.1).contains(&position.y);
+                self.pointer_inside = Some(inside);
+            }
+            WindowEvent::CursorLeft { .. } => self.pointer_inside = Some(false),
+            WindowEvent::Focused(active) => {
+                self.in_front = *active;
+                self.pointer_inside = None;
+                self.alt_held = false;
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let pressed = event.state == ElementState::Pressed;
+                match &event.logical_key {
+                    Key::Named(NamedKey::Alt) => self.alt_held = pressed,
+                    // Win+Down and the like, and Alt+Space (the window's own menu: Restore, Size, Move).
+                    Key::Named(NamedKey::Super) if pressed => self.key_at = Some(Instant::now()),
+                    Key::Named(NamedKey::Space) if pressed && self.alt_held => self.key_at = Some(Instant::now()),
+                    _ => {}
+                }
             }
             _ => {}
         }
@@ -235,7 +253,7 @@ impl Hands {
     /// Whether the user may have changed the window's size themselves just now.
     fn on_the_frame(&self) -> bool {
         let key = self.key_at.is_some_and(|at| at.elapsed() < Duration::from_secs(5));
-        key || (self.in_front && !self.pointer_inside)
+        key || (self.in_front && self.pointer_inside == Some(false))
     }
 }
 

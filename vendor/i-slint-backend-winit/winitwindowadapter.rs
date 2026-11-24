@@ -283,9 +283,14 @@ impl WinitWindowOrNone {
         }
     }
 
+    #[track_caller]
     fn set_fullscreen(&self, fullscreen: Option<winit::window::Fullscreen>) {
         match self {
-            Self::HasWindow { window, .. } => window.set_fullscreen(fullscreen),
+            Self::HasWindow { window, .. } => {
+                // Music Organiser patch: noted.
+                crate::mo_probe::note(format!("set_fullscreen({fullscreen:?})"));
+                window.set_fullscreen(fullscreen)
+            }
             Self::None(attributes) => attributes.borrow_mut().fullscreen = fullscreen,
         }
     }
@@ -316,9 +321,14 @@ impl WinitWindowOrNone {
         }
     }
 
+    #[track_caller]
     fn set_minimized(&self, minimized: bool) {
         match self {
-            Self::HasWindow { window, .. } => window.set_minimized(minimized),
+            Self::HasWindow { window, .. } => {
+                // Music Organiser patch: noted.
+                crate::mo_probe::note(format!("set_minimized({minimized})"));
+                window.set_minimized(minimized)
+            }
             Self::None(..) => { /* TODO: winit is missing attributes.borrow_mut().minimized = minimized*/
             }
         }

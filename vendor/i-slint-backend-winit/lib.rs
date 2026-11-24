@@ -45,8 +45,15 @@ pub mod mo_probe {
             if seen.len() >= 64 {
                 seen.remove(0);
             }
-            seen.push((Instant::now(), format!("{what} (winitwindowadapter.rs:{})", at.line())));
+            let file = at.file().rsplit(['/', '\\']).next().unwrap_or("?");
+            seen.push((Instant::now(), format!("{what} ({file}:{})", at.line())));
         }
+    }
+
+    /// A note from the app itself, for what it asks of winit directly, so the notes hold every ask.
+    #[track_caller]
+    pub fn note_from_app(what: &str) {
+        note(format!("the app: {what}"));
     }
 
     /// The notes from the last `age`, oldest first, each with how long ago it was.
