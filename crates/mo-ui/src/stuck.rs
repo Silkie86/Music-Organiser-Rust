@@ -39,6 +39,7 @@ pub struct Look {
     /// How long it took to stop. A thread running the app's own code, or waiting in the usual way, stops at once.
     /// One inside a part of Windows that can't be interrupted (its window and keyboard code, mostly) stops only when
     /// it comes out, so a long time here says the freeze was in there, and the functions are where it came out to.
+    /// (Or the whole app stood still, watchdog and all: the freeze line says when that was so.)
     /// On 25 Nov 2026 a 4.1 s freeze while Solomon typed had one look, asked for at 0.3 s and written 2 ms before the
     /// freeze ended, with nothing in the log to say the look had waited all that time.
     pub to_stop: std::time::Duration,
@@ -62,14 +63,17 @@ pub struct Work {
 }
 
 /// For a freeze line: how much of the freeze the window's thread worked, and that it waited for the rest when it
-/// mostly did: "the window's thread worked for 12 ms of it (3 ms of that inside Windows) and waited for the rest".
+/// mostly did: "the window's thread worked for about 12 ms of it (3 ms of that inside Windows) and waited for the
+/// rest". About: Windows counts a thread's work in steps of some 16 ms, and the two readings are taken a moment
+/// before and after the freeze itself, so the work is never given as more than the freeze.
 pub fn work_words(before: Option<Work>, after: Option<Work>, stuck: std::time::Duration) -> Option<String> {
     let (before, after) = (before?, after?);
     let own = after.own.saturating_sub(before.own);
     let in_windows = after.in_windows.saturating_sub(before.in_windows);
-    let worked = own + in_windows;
+    let worked = (own + in_windows).min(stuck);
+    let in_windows = in_windows.min(worked);
     let mut words = format!(
-        "the window's thread worked for {} ms of it ({} ms of that inside Windows)",
+        "the window's thread worked for about {} ms of it ({} ms of that inside Windows)",
         worked.as_millis(),
         in_windows.as_millis()
     );
@@ -302,6 +306,9 @@ mod windows_x64 {
             }
             // GetThreadContext also waits for the stop to have happened (SuspendThread only asks for it).
             let got = GetThreadContext(thread, &mut context.0) != 0;
+            // Only the stopping is timed, not the copy below (a stack Windows moved to disk is slow to copy, and that
+            // isn't the thread being hard to stop). Reading the clock asks Windows for nothing that can be locked.
+            let stopped = std::time::Instant::now();
             let rsp = context.0.Rsp;
             let usable = got && rsp >= window.low && rsp < window.high && rsp.is_multiple_of(8);
             if usable {
@@ -309,13 +316,10 @@ mod windows_x64 {
                 std::ptr::copy_nonoverlapping(rsp as *const u8, copy.as_mut_ptr().add(from), size - from);
             }
             ResumeThread(thread);
-            usable
+            usable.then_some(stopped)
         };
-        // Read once the thread runs again: nothing is asked of Windows while it's stopped but what stops it.
-        let to_stop = asked.elapsed();
-        if !copied {
-            return None;
-        }
+        let stopped = copied?;
+        let to_stop = stopped.saturating_duration_since(asked);
         let (frames, count) = unwind(&mut context.0, window, &copy);
         Some((frames, count, to_stop))
     }
@@ -656,12 +660,19 @@ mod tests {
         // Solomon's 25 Nov: stuck for 4.1 s inside Windows' typing code, hardly working.
         assert_eq!(
             work_words(work(1_000, 500), work(1_009, 503), ms(4_086)).as_deref(),
-            Some("the window's thread worked for 12 ms of it (3 ms of that inside Windows) and waited for the rest")
+            Some(
+                "the window's thread worked for about 12 ms of it (3 ms of that inside Windows) and waited for the rest"
+            )
         );
         // Busy all through: nothing said of waiting.
         assert_eq!(
             work_words(work(0, 0), work(580, 20), ms(612)).as_deref(),
-            Some("the window's thread worked for 600 ms of it (20 ms of that inside Windows)")
+            Some("the window's thread worked for about 600 ms of it (20 ms of that inside Windows)")
+        );
+        // Readings a little wider than the freeze never give more work than the freeze was long.
+        assert_eq!(
+            work_words(work(0, 0), work(10, 630), ms(612)).as_deref(),
+            Some("the window's thread worked for about 612 ms of it (612 ms of that inside Windows)")
         );
         assert_eq!(work_words(None, work(1, 1), ms(612)), None);
         assert_eq!(thousands(0), "0");
@@ -691,17 +702,20 @@ mod tests {
         });
         rx.recv().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let before = window_thread_work();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let after = window_thread_work();
+        // Its spinning is counted as work of its own (given time: a busy test machine may not run it at once, and
+        // Windows counts in steps of some 16 ms).
+        let before = window_thread_work().expect("its work is known");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while window_thread_work().expect("its work is known").own <= before.own {
+            assert!(std::time::Instant::now() < until, "the spinning thread's work never grew from {before:?}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let look = window_thread_now();
         STOP.store(true, Ordering::Relaxed);
         worker.join().unwrap();
         let look = look.expect("the thread was looked at");
-        // A thread in the app's own code stops at once, and its spinning is counted as work of its own.
-        assert!(look.to_stop < std::time::Duration::from_millis(250), "{:?}", look.to_stop);
-        let (before, after) = (before.expect("its work is known"), after.expect("its work is known"));
-        assert!(after.own > before.own, "{before:?} {after:?}");
+        // A thread in the app's own code stops at once (seconds allowed for a busy test machine).
+        assert!(look.to_stop < std::time::Duration::from_secs(5), "{:?}", look.to_stop);
         let frames = look.frames;
         assert!(
             frames.iter().any(|f| f.contains("spin_here_for_the_test")),
