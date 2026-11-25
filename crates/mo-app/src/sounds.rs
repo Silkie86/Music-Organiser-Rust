@@ -713,13 +713,16 @@ impl Drop for SoundList {
 }
 
 impl SoundList {
-    /// The list from the library's sounds: all but the copies you've hidden as duplicates, and the files programs left
-    /// in a temp folder that an older scan took in ([`mo_sounds::scan::in_temp_folder`]). Each loop has the tempo a new
-    /// read gives it ([`with_checked_tempo`]).
+    /// The list from the library's sounds: all but the copies you've hidden as duplicates, the files programs left in a
+    /// temp folder that an older scan took in ([`mo_sounds::scan::in_temp_folder`]), and the sounds made for trying the
+    /// app out ([`mo_library::songs::made_for_tests`]: the recipe's "MO Tone A"; Solomon's F12 note, 25 Nov 2026). Those
+    /// stay in the library, as the hidden copies do. Each loop has the tempo a new read gives it ([`with_checked_tempo`]).
     pub fn new(sounds: Vec<Sound>) -> SoundList {
         let mut sounds: Vec<Sound> = sounds
             .into_par_iter()
-            .filter(|s| !s.hidden && !mo_sounds::scan::in_temp_folder(&s.path))
+            .filter(|s| {
+                !s.hidden && !mo_sounds::scan::in_temp_folder(&s.path) && !mo_library::songs::made_for_tests(s.name())
+            })
             .map(with_checked_tempo)
             .collect();
         // Leaving out the hidden copies keeps the room they took: give it back.
@@ -2941,6 +2944,24 @@ mod tests {
         ]);
         assert_eq!(list.len(), 1);
         assert_eq!(list.sound(0).map(|s| s.id), Some(2));
+    }
+
+    #[test]
+    fn the_tones_made_for_trying_the_app_out_stay_out_of_the_list() {
+        // Solomon's F12 note, 25 Nov 2026: "anything with mo recipe shouldnt turn up in the app". The recipe's tones,
+        // wherever a DAW put a copy, and its multisample of them; a sound of yours with a name close to them stays.
+        let list = SoundList::new(vec![
+            sound(1, r"I:\Recipe\MO Tone A.wav", "Synth", None),
+            sound(2, r"I:\Projects\MO Recipe 05 drum machine\samples\MO Tone B.wav", "Synth", None),
+            sound(3, r"I:\Projects\Media\mo tone c.wav", "Synth", None),
+            sound(4, r"I:\Bitwig\Library\Multisamples\MO Recipe Tones.multisample", "Synth", None),
+            sound(5, r"I:\Samples\MO Tone Bass.wav", "Bass", None),
+            sound(6, r"I:\MO Recipe\Kick.wav", "Kick", None),
+        ]);
+        let ids: Vec<i64> = list.sounds().iter().map(|s| s.id).collect();
+        assert_eq!(ids, [5, 6]);
+        // Not in the list, so nothing that finds sounds by their place offers them.
+        assert!(list.find(1).is_none());
     }
 
     #[test]

@@ -251,9 +251,10 @@ static GLUED_ON: LazyLock<Pattern> = LazyLock::new(|| re(r"^(.*\p{L})([0-9]{1,3}
 /// Fix's copies: "Didums_70 (fixed)", "Didums_70 (fixed 2)".
 static FIXED_TAIL: LazyLock<Pattern> = LazyLock::new(|| re(r"(?i)(\s*\(fixed(\s+[0-9]+)?\))+$"));
 /// A name made for trying the app out ([`made_for_tests`]): "MO Recipe" or "MO Live Test" as words of their own
-/// anywhere in it, letter case aside, spaced or not ("MO_Recipe_3", "mo live test"); not "Demo Recipe" or "MO Recipes".
+/// anywhere in it, letter case aside, spaced or not ("MO_Recipe_3", "mo live test"), or "MO Tone" then one letter
+/// ("MO Tone A"); not "Demo Recipe", "MO Recipes", "MO Tones" or "MO Tone Bass".
 static FOR_TESTS: LazyLock<Pattern> =
-    LazyLock::new(|| re(r"(?i)(?:^|[^\p{L}])mo[\s_-]*(?:recipe|live[\s_-]*test)(?:$|[^\p{L}])"));
+    LazyLock::new(|| re(r"(?i)(?:^|[^\p{L}])mo[\s_-]*(?:recipe|live[\s_-]*test|tone[\s_-]+\p{L})(?:$|[^\p{L}])"));
 /// A word that marks a save, then its number: "Song v2", "Song v2.1", "Song take 4", "Song mix_3", "Song rev 7". There
 /// has to be a space, "_", "-" or "." before the word, so "Remix2" isn't read as a "mix".
 static MARKED_NUMBER: LazyLock<Pattern> = LazyLock::new(|| {
@@ -300,9 +301,10 @@ pub fn is_fixed_copy(name: &str) -> bool {
 
 /// Whether a file named `name` (without its extension) was made for trying the app out, so no page lists it
 /// (Solomon's F12 note, 25 Nov 2026: "anything with mo recipe shouldnt turn up in the app"): the recipe saves, presets
-/// and multisample he made by hand ("MO Recipe 02 notes", rule 4) and the live tests' projects ("MO Live Test
-/// automation", rule 10). They stay on disk and the library keeps up with them, so whatever looks at what's safe to
-/// free still counts them (a plugin or sample only they use is in use): only the lists leave them out.
+/// and multisample he made by hand ("MO Recipe 02 notes", rule 4), the tones made for the recipe ("MO Tone A") and the
+/// live tests' projects ("MO Live Test automation", rule 10). They stay on disk and the libraries keep up with them,
+/// so whatever looks at what's safe to free still counts them (a plugin or sample only they use is in use): only the
+/// lists leave them out.
 pub fn made_for_tests(name: &str) -> bool {
     FOR_TESTS.is_match(name)
 }

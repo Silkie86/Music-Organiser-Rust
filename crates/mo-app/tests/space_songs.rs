@@ -149,29 +149,25 @@ fn songs_made_for_trying_the_app_out_are_never_offered_and_what_they_use_stays_u
         save(12, &recipe.join("MO Recipe 02 notes_2.bwproject"), b"same", "2026-11-09 10:10"),
         save(13, &recipe.join("MO Recipe 02 notes_3.bwproject"), b"the one it opens", "2026-11-09 10:20"),
     ];
-    // A tone in Night Drive's folder that only the recipe's song uses.
-    write(&night.join("MO Tone A.wav"), &[0; 400]);
+    // A sample in Night Drive's folder that only the recipe's song uses.
+    write(&night.join("Pad.wav"), &[0; 400]);
     let mut from =
         FromLibrary { saves, roots: vec![projects.to_string_lossy().into_owned()], ..FromLibrary::default() };
     let looked = |from: &FromLibrary| look(from, CompactSettings::default(), None, &AtomicBool::new(false)).unwrap();
-    let unused_tone = |found: &mo_app::space_songs::Found| {
-        found.songs[0]
-            .report
-            .items
-            .iter()
-            .any(|i| i.kind == CompactKind::UnusedAudio && i.path.ends_with("MO Tone A.wav"))
+    let unused_pad = |found: &mo_app::space_songs::Found| {
+        found.songs[0].report.items.iter().any(|i| i.kind == CompactKind::UnusedAudio && i.path.ends_with("Pad.wav"))
     };
-    // Used by no save, the tone is audio Night Drive's folder could do without.
+    // Used by no save, the sample is audio Night Drive's folder could do without.
     let found = looked(&from);
     let names: Vec<&str> = found.songs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["Night Drive"]);
-    assert!(unused_tone(&found));
-    // Used by the recipe's save: the recipe's song still isn't offered, and the tone stays as used.
-    from.samples = HashMap::from([(13, vec!["MO Tone A.wav".to_owned()])]);
+    assert!(unused_pad(&found));
+    // Used by the recipe's save: the recipe's song still isn't offered, and the sample stays as used.
+    from.samples = HashMap::from([(13, vec!["Pad.wav".to_owned()])]);
     let found = looked(&from);
     let names: Vec<&str> = found.songs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["Night Drive"]);
-    assert!(!unused_tone(&found));
+    assert!(!unused_pad(&found));
     assert!(found.songs[0].report.items.iter().any(|i| i.kind == CompactKind::SameSave));
 }
 
