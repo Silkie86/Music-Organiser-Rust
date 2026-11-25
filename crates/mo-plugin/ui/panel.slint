@@ -4,9 +4,9 @@
 // Chords (Chord check: the chord the notes played in make, as the app's chord reader names it) and DAW check (every
 // CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card, TipLayer, TipState, CutText, Icons, MenuCard } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card, TipLayer, TipState, CutText, Icons, MenuCard, Seam, Widths } from "../../mo-ui/ui/studio.slint";
 import { CurveBench, GridStrip, CurveEditorData, EditorDot, ClipTile, RulerMark } from "../../mo-ui/ui/pages/curve_editor.slint";
-export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem }
+export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem, Widths }
 import { ListView } from "../../mo-ui/ui/list.slint";
 import { FolderTree, PickStrip, TreeLine, TreePick, MixPart } from "../../mo-ui/ui/folder_tree.slint";
 import { RightClickMenu } from "../../mo-ui/ui/studio.slint";
@@ -690,132 +690,147 @@ export component Panel inherits Window {
             spacing: Space.lg;
             // The filter column, laid out as the app's Sounds page lays out its own: tick lists, each choice with its
             // count. It scrolls with the wheel when the window is too short for them all.
-            flick := Flickable {
-                width: 196px;
-                content-width: self.width;
-                content-height: max(self.height, lists.preferred-height);
-                mouse-drag-pan-enabled: false;
-                // The column was made taller or shorter, or what's under the types changed.
-                // What everything but the types' own lines needs.
-                property <length> rest: lists.preferred-height - root.type-filter.chips.length * 26px;
-                function fit() {
-                    root.type-lines = max(9, Math.floor((self.height - self.rest) / 26px));
-                }
-                init => { self.fit(); }
-                changed height => { self.fit(); }
-                changed rest => { self.fit(); }
-                lists := VerticalLayout {
-                    x: 0;
-                    y: 0;
-                    width: flick.width - Space.md;
-                    alignment: start;
-                    spacing: Space.md;
-                    FilterList {
-                        name: "TYPE";
-                        more-name: "More types";
-                        filter: root.type-filter;
-                        toggled(text) => { root.pick("type", text); }
-                        cleared => { root.clear("more-types"); }
+            Rectangle {
+                width: Widths.plugin-filters;
+                flick := Flickable {
+                    width: parent.width;
+                    height: parent.height;
+                    content-width: self.width;
+                    content-height: max(self.height, lists.preferred-height);
+                    mouse-drag-pan-enabled: false;
+                    // The column was made taller or shorter, or what's under the types changed.
+                    // What everything but the types' own lines needs.
+                    property <length> rest: lists.preferred-height - root.type-filter.chips.length * 26px;
+                    function fit() {
+                        root.type-lines = max(9, Math.floor((self.height - self.rest) / 26px));
                     }
-                    // One of three, so a switch: both, hits (one-shots) or loops.
-                    VerticalLayout {
-                        Caps {
-                            text: "LENGTH";
-                            height: 22px;
+                    init => { self.fit(); }
+                    changed height => { self.fit(); }
+                    changed rest => { self.fit(); }
+                    lists := VerticalLayout {
+                        x: 0;
+                        y: 0;
+                        width: flick.width - Space.md;
+                        alignment: start;
+                        spacing: Space.md;
+                        FilterList {
+                            name: "TYPE";
+                            more-name: "More types";
+                            filter: root.type-filter;
+                            toggled(text) => { root.pick("type", text); }
+                            cleared => { root.clear("more-types"); }
                         }
-                        HorizontalLayout {
-                            alignment: start;
-                            Segmented {
-                                property <[FilterChoice]> lengths: root.length-filter.chips;
-                                choices: ["All", "Hits", "Loops"];
-                                pad: Space.md;
-                                current: self.lengths.length < 2 ? 0 : self.lengths[0].on ? 1 : self.lengths[1].on ? 2 : 0;
-                                picked(i) => {
-                                    if i == 0 {
-                                        root.clear("length");
-                                    } else if i != self.current {
-                                        root.pick("length", self.lengths[i - 1].text);
+                        // One of three, so a switch: both, hits (one-shots) or loops.
+                        VerticalLayout {
+                            Caps {
+                                text: "LENGTH";
+                                height: 22px;
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                Segmented {
+                                    property <[FilterChoice]> lengths: root.length-filter.chips;
+                                    choices: ["All", "Hits", "Loops"];
+                                    pad: Space.md;
+                                    current: self.lengths.length < 2 ? 0 : self.lengths[0].on ? 1 : self.lengths[1].on ? 2 : 0;
+                                    picked(i) => {
+                                        if i == 0 {
+                                            root.clear("length");
+                                        } else if i != self.current {
+                                            root.pick("length", self.lengths[i - 1].text);
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    FilterList {
-                        name: "KEY";
-                        filter: root.key-filter;
-                        toggled(text) => { root.pick("key", text); }
-                        cleared => { root.clear("key"); }
-                    }
-                    if root.key-filter.more-picked != "": TickLine {
-                        text: "Keys that mix well";
-                        on: root.mix-well;
-                        clicked => { root.toggle("mix-well"); }
-                    }
-                    // A span of tempos, so a slider with two handles; its bars show where the sounds are.
-                    VerticalLayout {
-                        padding-right: Space.sm;
-                        HorizontalLayout {
-                            height: 22px;
+                        FilterList {
+                            name: "KEY";
+                            filter: root.key-filter;
+                            toggled(text) => { root.pick("key", text); }
+                            cleared => { root.clear("key"); }
+                        }
+                        if root.key-filter.more-picked != "": TickLine {
+                            text: "Keys that mix well";
+                            on: root.mix-well;
+                            clicked => { root.toggle("mix-well"); }
+                        }
+                        // A span of tempos, so a slider with two handles; its bars show where the sounds are.
+                        VerticalLayout {
+                            padding-right: Space.sm;
+                            HorizontalLayout {
+                                height: 22px;
+                                Caps {
+                                    text: "TEMPO";
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: root.tempo-words;
+                                    color: tempo.on ? Theme.text : Theme.faint;
+                                    font-size: Type.meta;
+                                    font-weight: tempo.on ? 600 : 400;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                            tempo := RangeSlider {
+                                low-end: root.tempo-low-end;
+                                high-end: root.tempo-high-end;
+                                step: root.tempo-step;
+                                low: root.tempo-low;
+                                high: root.tempo-high;
+                                bars: root.tempo-bars;
+                                changed(low, high) => { root.tempo-picked(low, high); }
+                            }
+                        }
+                        if root.tag-filter.chips.length + root.tag-filter.more.length > 0: FilterList {
+                            name: "TAG";
+                            more-name: "More tags";
+                            filter: root.tag-filter;
+                            toggled(text) => { root.pick("tag", text); }
+                            cleared => { root.clear("tag"); }
+                        }
+                        VerticalLayout {
                             Caps {
-                                text: "TEMPO";
-                                vertical-alignment: center;
+                                text: "SHOW ONLY";
+                                height: 22px;
                             }
-                            Text {
-                                text: root.tempo-words;
-                                color: tempo.on ? Theme.text : Theme.faint;
-                                font-size: Type.meta;
-                                font-weight: tempo.on ? 600 : 400;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
+                            TickLine {
+                                text: "Favourites";
+                                on: root.favourites;
+                                clicked => { root.toggle("favourites"); }
+                            }
+                            // The sounds most like your favourites show beside them, a few or many.
+                            if root.favourites: LikeFavourites {
+                                value <=> root.like-favourites;
+                                words: root.like-favourites-words;
+                                note: root.like-favourites-note;
+                                released(v) => { root.like-favourites-set(v); }
+                            }
+                            TickLine {
+                                text: root.hide-silent-words;
+                                on: root.hide-silent;
+                                clicked => { root.toggle("hide-silent"); }
+                            }
+                            // The copies the app found (its Sounds page's Hide duplicates): one of each shows.
+                            TickLine {
+                                text: root.hide-copies-words;
+                                on: root.hide-copies;
+                                clicked => { root.toggle("hide-copies"); }
                             }
                         }
-                        tempo := RangeSlider {
-                            low-end: root.tempo-low-end;
-                            high-end: root.tempo-high-end;
-                            step: root.tempo-step;
-                            low: root.tempo-low;
-                            high: root.tempo-high;
-                            bars: root.tempo-bars;
-                            changed(low, high) => { root.tempo-picked(low, high); }
-                        }
                     }
-                    if root.tag-filter.chips.length + root.tag-filter.more.length > 0: FilterList {
-                        name: "TAG";
-                        more-name: "More tags";
-                        filter: root.tag-filter;
-                        toggled(text) => { root.pick("tag", text); }
-                        cleared => { root.clear("tag"); }
-                    }
-                    VerticalLayout {
-                        Caps {
-                            text: "SHOW ONLY";
-                            height: 22px;
-                        }
-                        TickLine {
-                            text: "Favourites";
-                            on: root.favourites;
-                            clicked => { root.toggle("favourites"); }
-                        }
-                        // The sounds most like your favourites show beside them, a few or many.
-                        if root.favourites: LikeFavourites {
-                            value <=> root.like-favourites;
-                            words: root.like-favourites-words;
-                            note: root.like-favourites-note;
-                            released(v) => { root.like-favourites-set(v); }
-                        }
-                        TickLine {
-                            text: root.hide-silent-words;
-                            on: root.hide-silent;
-                            clicked => { root.toggle("hide-silent"); }
-                        }
-                        // The copies the app found (its Sounds page's Hide duplicates): one of each shows.
-                        TickLine {
-                            text: root.hide-copies-words;
-                            on: root.hide-copies;
-                            clicked => { root.toggle("hide-copies"); }
-                        }
-                    }
+                }
+                // Its right edge: drag it wider or narrower (kept for every copy of the plugin).
+                Seam {
+                    x: parent.width;
+                    width: Space.lg;
+                    height: parent.height;
+                    part: "plugin.filters";
+                    now: parent.width;
+                    // Never more than a third of the window: the list keeps the rest.
+                    most: max(self.least, min(Widths.most(self.part), root.width / 3));
+                    resizing(w) => { Widths.plugin-filters = w; }
                 }
             }
             // The folder tree, as on the app's Sounds page: only the folders that hold sounds the other filters let
@@ -826,6 +841,9 @@ export component Panel inherits Window {
                 z: 1;
                 tree := FolderTree {
                     height: parent.height;
+                    part: "plugin.folders";
+                    wide: Widths.plugin-folders;
+                    resizing(w) => { Widths.plugin-folders = w; }
                     lines: root.tree-lines;
                     picks: root.tree-picks;
                     picked-words: root.tree-picked;
@@ -1498,35 +1516,50 @@ export component Panel inherits Window {
         if root.view == 1: HorizontalLayout {
             spacing: Space.lg;
             // The filter column, as the app's MIDI page has it.
-            Flickable {
-                width: 196px;
-                content-width: self.width;
-                content-height: max(self.height, part-lists.preferred-height);
-                mouse-drag-pan-enabled: false;
-                part-lists := VerticalLayout {
-                    x: 0;
-                    y: 0;
-                    width: parent.width - Space.md;
-                    alignment: start;
-                    spacing: Space.md;
-                    FilterList {
-                        name: "KIND";
-                        filter: root.kind-filter;
-                        toggled(text) => { root.midi-pick("kind", text); }
-                        cleared => { root.midi-clear("kind"); }
+            Rectangle {
+                width: Widths.plugin-filters;
+                Flickable {
+                    width: parent.width;
+                    height: parent.height;
+                    content-width: self.width;
+                    content-height: max(self.height, part-lists.preferred-height);
+                    mouse-drag-pan-enabled: false;
+                    part-lists := VerticalLayout {
+                        x: 0;
+                        y: 0;
+                        width: parent.width - Space.md;
+                        alignment: start;
+                        spacing: Space.md;
+                        FilterList {
+                            name: "KIND";
+                            filter: root.kind-filter;
+                            toggled(text) => { root.midi-pick("kind", text); }
+                            cleared => { root.midi-clear("kind"); }
+                        }
+                        FilterList {
+                            name: "FROM";
+                            filter: root.from-filter;
+                            toggled(text) => { root.midi-pick("from", text); }
+                            cleared => { root.midi-clear("from"); }
+                        }
+                        FilterList {
+                            name: "KEY";
+                            filter: root.part-key-filter;
+                            toggled(text) => { root.midi-pick("key", text); }
+                            cleared => { root.midi-clear("key"); }
+                        }
                     }
-                    FilterList {
-                        name: "FROM";
-                        filter: root.from-filter;
-                        toggled(text) => { root.midi-pick("from", text); }
-                        cleared => { root.midi-clear("from"); }
-                    }
-                    FilterList {
-                        name: "KEY";
-                        filter: root.part-key-filter;
-                        toggled(text) => { root.midi-pick("key", text); }
-                        cleared => { root.midi-clear("key"); }
-                    }
+                }
+                // Its right edge: drag it wider or narrower (kept for every copy of the plugin).
+                Seam {
+                    x: parent.width;
+                    width: Space.lg;
+                    height: parent.height;
+                    part: "plugin.filters";
+                    now: parent.width;
+                    // Never more than a third of the window: the list keeps the rest.
+                    most: max(self.least, min(Widths.most(self.part), root.width / 3));
+                    resizing(w) => { Widths.plugin-filters = w; }
                 }
             }
             VerticalLayout {
@@ -1711,53 +1744,68 @@ export component Panel inherits Window {
         if root.view == 2: HorizontalLayout {
             spacing: Space.lg;
             // The filter column, as the app's Presets page has it.
-            Flickable {
-                width: 196px;
-                content-width: self.width;
-                content-height: max(self.height, preset-lists.preferred-height);
-                mouse-drag-pan-enabled: false;
-                preset-lists := VerticalLayout {
-                    x: 0;
-                    y: 0;
-                    width: parent.width - Space.md;
-                    alignment: start;
-                    spacing: Space.md;
-                    FilterList {
-                        name: "PART";
-                        filter: root.preset-part-filter;
-                        toggled(text) => { root.preset-pick("part", text); }
-                        cleared => { root.preset-clear("part"); }
+            Rectangle {
+                width: Widths.plugin-filters;
+                Flickable {
+                    width: parent.width;
+                    height: parent.height;
+                    content-width: self.width;
+                    content-height: max(self.height, preset-lists.preferred-height);
+                    mouse-drag-pan-enabled: false;
+                    preset-lists := VerticalLayout {
+                        x: 0;
+                        y: 0;
+                        width: parent.width - Space.md;
+                        alignment: start;
+                        spacing: Space.md;
+                        FilterList {
+                            name: "PART";
+                            filter: root.preset-part-filter;
+                            toggled(text) => { root.preset-pick("part", text); }
+                            cleared => { root.preset-clear("part"); }
+                        }
+                        FilterList {
+                            name: "TYPE";
+                            filter: root.preset-kind-filter;
+                            toggled(text) => { root.preset-pick("type", text); }
+                            cleared => { root.preset-clear("type"); }
+                        }
+                        FilterList {
+                            name: "FOUND IN";
+                            filter: root.preset-from-filter;
+                            toggled(text) => { root.preset-pick("from", text); }
+                            cleared => { root.preset-clear("from"); }
+                        }
+                        // As the app's page has it, on the page and not in a menu.
+                        TickLine {
+                            text: "Synths that play nothing";
+                            on: root.preset-unused;
+                            clicked => { root.preset-unused-toggled(!root.preset-unused); }
+                        }
+                        FilterList {
+                            name: "FORMAT";
+                            filter: root.preset-format-filter;
+                            toggled(text) => { root.preset-pick("format", text); }
+                            cleared => { root.preset-clear("format"); }
+                        }
+                        FilterList {
+                            name: "PLUGIN";
+                            filter: root.preset-plugin-filter;
+                            toggled(text) => { root.preset-pick("plugin", text); }
+                            cleared => { root.preset-clear("plugin"); }
+                        }
                     }
-                    FilterList {
-                        name: "TYPE";
-                        filter: root.preset-kind-filter;
-                        toggled(text) => { root.preset-pick("type", text); }
-                        cleared => { root.preset-clear("type"); }
-                    }
-                    FilterList {
-                        name: "FOUND IN";
-                        filter: root.preset-from-filter;
-                        toggled(text) => { root.preset-pick("from", text); }
-                        cleared => { root.preset-clear("from"); }
-                    }
-                    // As the app's page has it, on the page and not in a menu.
-                    TickLine {
-                        text: "Synths that play nothing";
-                        on: root.preset-unused;
-                        clicked => { root.preset-unused-toggled(!root.preset-unused); }
-                    }
-                    FilterList {
-                        name: "FORMAT";
-                        filter: root.preset-format-filter;
-                        toggled(text) => { root.preset-pick("format", text); }
-                        cleared => { root.preset-clear("format"); }
-                    }
-                    FilterList {
-                        name: "PLUGIN";
-                        filter: root.preset-plugin-filter;
-                        toggled(text) => { root.preset-pick("plugin", text); }
-                        cleared => { root.preset-clear("plugin"); }
-                    }
+                }
+                // Its right edge: drag it wider or narrower (kept for every copy of the plugin).
+                Seam {
+                    x: parent.width;
+                    width: Space.lg;
+                    height: parent.height;
+                    part: "plugin.filters";
+                    now: parent.width;
+                    // Never more than a third of the window: the list keeps the rest.
+                    most: max(self.least, min(Widths.most(self.part), root.width / 3));
+                    resizing(w) => { Widths.plugin-filters = w; }
                 }
             }
             VerticalLayout {
@@ -1999,20 +2047,35 @@ export component Panel inherits Window {
 
         if root.view == 5 && !root.curve-editing: HorizontalLayout {
             spacing: Space.lg;
-            VerticalLayout {
-                width: 196px;
-                alignment: start;
-                spacing: Space.md;
-                FilterList {
-                    name: "FOUND IN";
-                    filter: root.curve-from-filter;
-                    toggled(text) => { root.curve-pick(text); }
-                    cleared => { root.curve-clear(); }
+            Rectangle {
+                width: Widths.plugin-filters;
+                VerticalLayout {
+                    width: parent.width;
+                    height: parent.height;
+                    alignment: start;
+                    spacing: Space.md;
+                    FilterList {
+                        name: "FOUND IN";
+                        filter: root.curve-from-filter;
+                        toggled(text) => { root.curve-pick(text); }
+                        cleared => { root.curve-clear(); }
+                    }
+                    TickLine {
+                        text: "Show hidden curves";
+                        on: root.curve-hidden;
+                        clicked => { root.curve-hidden-toggled(!root.curve-hidden); }
+                    }
                 }
-                TickLine {
-                    text: "Show hidden curves";
-                    on: root.curve-hidden;
-                    clicked => { root.curve-hidden-toggled(!root.curve-hidden); }
+                // Its right edge: drag it wider or narrower (kept for every copy of the plugin).
+                Seam {
+                    x: parent.width;
+                    width: Space.lg;
+                    height: parent.height;
+                    part: "plugin.filters";
+                    now: parent.width;
+                    // Never more than a third of the window: the list keeps the rest.
+                    most: max(self.least, min(Widths.most(self.part), root.width / 3));
+                    resizing(w) => { Widths.plugin-filters = w; }
                 }
             }
             VerticalLayout {
@@ -2248,40 +2311,55 @@ export component Panel inherits Window {
             HorizontalLayout {
                 vertical-stretch: 1;
                 spacing: Space.lg;
-                ListView {
-                    width: 210px;
-                    row-height: 44px;
-                    rows: root.takes.length;
-                    show-top: root.takes-show-top;
-                    show-ask: root.takes-show-ask;
-                    for t[i] in root.takes: take-line := ListLine {
-                        height: 44px;
-                        selected: i == root.take-picked;
-                        clicked => {
-                            root.take-picked = i;
-                            root.take-pick(i);
-                        }
-                        VerticalLayout {
-                            padding-left: Space.sm;
-                            padding-right: Space.sm;
-                            alignment: center;
-                            CutText {
-                                over: take-line.resting;
-                                mouse: take-line.mouse;
-                                text: t.title;
-                                color: Theme.text;
-                                font-size: Type.body;
-                                overflow: elide;
+                Rectangle {
+                    width: Widths.plugin-takes;
+                    ListView {
+                        width: parent.width;
+                        height: parent.height;
+                        row-height: 44px;
+                        rows: root.takes.length;
+                        show-top: root.takes-show-top;
+                        show-ask: root.takes-show-ask;
+                        for t[i] in root.takes: take-line := ListLine {
+                            height: 44px;
+                            selected: i == root.take-picked;
+                            clicked => {
+                                root.take-picked = i;
+                                root.take-pick(i);
                             }
-                            CutText {
-                                over: take-line.resting;
-                                mouse: take-line.mouse;
-                                text: t.details;
-                                color: Theme.faint;
-                                font-size: Type.small;
-                                overflow: elide;
+                            VerticalLayout {
+                                padding-left: Space.sm;
+                                padding-right: Space.sm;
+                                alignment: center;
+                                CutText {
+                                    over: take-line.resting;
+                                    mouse: take-line.mouse;
+                                    text: t.title;
+                                    color: Theme.text;
+                                    font-size: Type.body;
+                                    overflow: elide;
+                                }
+                                CutText {
+                                    over: take-line.resting;
+                                    mouse: take-line.mouse;
+                                    text: t.details;
+                                    color: Theme.faint;
+                                    font-size: Type.small;
+                                    overflow: elide;
+                                }
                             }
                         }
+                    }
+                    // Its right edge: drag it wider or narrower (kept for every copy of the plugin).
+                    Seam {
+                        x: parent.width;
+                        width: Space.lg;
+                        height: parent.height;
+                        part: "plugin.takes";
+                        now: parent.width;
+                        // Never more than a third of the window: the list keeps the rest.
+                        most: max(self.least, min(Widths.most(self.part), root.width / 3));
+                        resizing(w) => { Widths.plugin-takes = w; }
                     }
                 }
                 VerticalLayout {
