@@ -92,7 +92,7 @@ jobs:
       # took Windows about 4 minutes at the end of each run, and PR caches pushed main's out of GitHub's 10 GB.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          save-if: ${{ github.event_name != 'pull_request' || github.head_ref == 'claude/project-thread-jcn51o' }}  # TEMP: timing only
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Linux libraries for the window
         if: runner.os == 'Linux'
         run: |
