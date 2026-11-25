@@ -862,6 +862,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("songs-next-up.png".into(), capture(&window)));
     app.global::<mo_ui::SongsData>().set_next_up(false);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
+    // The Dust off card above the list: put off in every other shot, so the list stays where their clicks expect it.
+    let mut dusty = sample_songs();
+    dusty.later.clear();
+    mo_ui::songs::show_sample(&app, dusty);
+    shots.push(("songs-dust-off.png".into(), capture(&window)));
+    mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
+    shots.push(("songs-time-spent.png".into(), capture(&window)));
+    app.global::<mo_ui::SongsData>().invoke_close_panel();
+    mo_ui::songs::show_sample(&app, sample_songs());
 
     // The shared parts every page is built from, in Graphite and in a light and a square theme.
     app.set_parts_gallery(true);
@@ -2805,6 +2814,7 @@ fn sounds_shots(
     capture_after(window, Duration::from_millis(700));
     data.invoke_pick_view(1);
     shots.push(("sounds-list.png".into(), capture(window)));
+    scroll_bar_checks(app, window, shots)?;
     // Two years picked on the year strip.
     data.invoke_years_picked(1, 2);
     capture(window);
@@ -4008,6 +4018,7 @@ fn sample_songs() -> mo_app::songs::Songs {
             detected_key: "G minor".into(),
             rating: 4,
             favourite: true,
+            minutes_spent: Some(41 * 60 + 12),
             ..save("Night Drive_14", "FL Studio", 1)
         },
         save("Night Drive_13", "FL Studio", 3),
@@ -4033,9 +4044,16 @@ fn sample_songs() -> mo_app::songs::Songs {
             missing_plugins: 1,
             tags: vec!["dark".into()],
             todos: vec![todo("Needs a second verse", false, 70), todo("Find a better kick", false, 60)],
+            minutes_spent: Some(6 * 60 + 20),
             ..save("Copper Lines", "FL Studio", 70)
         },
-        Save { tempo: Some(174.0), rating: 5, status: "Finished".into(), ..save("Paper Moons_31", "FL Studio", 200) },
+        Save {
+            tempo: Some(174.0),
+            rating: 5,
+            status: "Finished".into(),
+            minutes_spent: Some(26 * 60),
+            ..save("Paper Moons_31", "FL Studio", 200)
+        },
         Save { tempo: Some(110.0), ..save("Low Tide", "Bitwig Studio", 420) },
         Save {
             tempo: Some(136.0),
@@ -4044,8 +4062,15 @@ fn sample_songs() -> mo_app::songs::Songs {
             favourite: true,
             ..save("Fieldwork_9", "FL Studio", 800)
         },
-        Save { tempo: Some(100.0), ..save("Untitled_4", "FL Studio", 1300) },
-        Save { tempo: Some(85.0), ..save("Old Tapes", "FL Studio", 2200) },
+        // Hours spent and left for months: the Dust off card's.
+        Save {
+            tempo: Some(124.0),
+            status: "Arranging".into(),
+            minutes_spent: Some(3 * 60 + 5),
+            ..save("Kite Season", "FL Studio", 500)
+        },
+        Save { tempo: Some(100.0), minutes_spent: Some(14 * 60), ..save("Untitled_4", "FL Studio", 1300) },
+        Save { tempo: Some(85.0), minutes_spent: Some(9 * 60 + 30), ..save("Old Tapes", "FL Studio", 2200) },
     ];
     saves.sort_by_key(|s| std::cmp::Reverse(s.modified));
     // Each save its own id, as in the library (the rail's line finds a song by its save's id).
@@ -4053,7 +4078,13 @@ fn sample_songs() -> mo_app::songs::Songs {
         save.id = id;
     }
     let tags = vec!["dark".into(), "live set".into()];
-    mo_app::songs::Songs::from_saves(&saves, &mo_library::SongChoices::default(), tags, 3, Some(false))
+    let mut songs = mo_app::songs::Songs::from_saves(&saves, &mo_library::SongChoices::default(), tags, 3, Some(false));
+    // Off the Dust off card ("Not now") but in its own shot, so the list sits where the other shots' clicks expect it.
+    let now = chrono::Local::now().naive_local();
+    for row in songs.dusty(now) {
+        songs.later.insert(songs.rows[row].song.key.clone(), i64::MAX);
+    }
+    songs
 }
 
 /// A made-up record for the first sample song's newest save.
@@ -4957,3 +4988,62 @@ fn crop_rgb(shot: &[u8], width: u32, at: (u32, u32), size: (u32, u32)) -> Vec<u8
 fn slug(name: &str) -> String {
     name.to_lowercase().replace(' ', "-")
 }
+
+/// The list's own scroll bar (Solomon's F12 note of 25 Nov, 12:59: Slint's thin one was fiddly, and a drag edge got
+/// in its way), on Sounds' List: lit under the mouse, a click on its track below the thumb turns a page, and the thumb
+/// dragged down turns the list. Each must move the list's lines; the list goes back to its top after.
+fn scroll_bar_checks(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let lines = |shot: &[u8]| crop_rgb(shot, WIDTH, LIST_LINES.0, LIST_LINES.1);
+    let button = slint::platform::PointerEventButton::Left;
+    let at = |y: f32| slint::LogicalPosition::new(SCROLL_BAR_X, y);
+    press(app, slint::platform::Key::Home, false);
+    capture(window);
+    let top = capture(window);
+    hover(window, SCROLL_BAR_X, SCROLL_BAR_TRACK_Y);
+    capture(window);
+    let lit = capture(window);
+    if lit == top {
+        return Err(format!(
+            "sounds-scroll-bar.png: nothing lit at x {SCROLL_BAR_X}; has the list's scroll bar moved?"
+        ));
+    }
+    shots.push(("sounds-scroll-bar.png".into(), lit));
+    window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: at(SCROLL_BAR_TRACK_Y), button });
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: at(SCROLL_BAR_TRACK_Y), button });
+    capture(window);
+    let paged = capture(window);
+    if lines(&paged) == lines(&top) {
+        return Err("sounds scroll bar: a click on its track below the thumb didn't turn the list a page".into());
+    }
+    press(app, slint::platform::Key::Home, false);
+    capture(window);
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(SCROLL_BAR_THUMB_Y) });
+    window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: at(SCROLL_BAR_THUMB_Y), button });
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(SCROLL_BAR_THUMB_Y + 120.0) });
+    capture(window);
+    let dragged = capture(window);
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+        position: at(SCROLL_BAR_THUMB_Y + 120.0),
+        button,
+    });
+    if lines(&dragged) == lines(&top) {
+        return Err("sounds scroll bar: dragging its thumb down didn't turn the list".into());
+    }
+    shots.push(("sounds-scroll-bar-dragged.png".into(), dragged));
+    hover(window, -1.0, -1.0);
+    press(app, slint::platform::Key::Home, false);
+    capture(window);
+    Ok(())
+}
+
+/// Sounds' List with its card open: the scroll bar down the list's right edge, a point on its track near the bottom
+/// (below the thumb when the list is at its top), and its thumb's top part at the list's top.
+const SCROLL_BAR_X: f32 = 939.0;
+const SCROLL_BAR_TRACK_Y: f32 = 860.0;
+const SCROLL_BAR_THUMB_Y: f32 = 170.0;
+/// The list's lines (left of the bar), for telling whether the list turned.
+const LIST_LINES: ((u32, u32), (u32, u32)) = ((500, 160), (420, 700));

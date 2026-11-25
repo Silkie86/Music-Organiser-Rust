@@ -74,6 +74,7 @@ pub const PARTS: &[Part] = &[
     part("plugins.size", 72.0, 48.0, 180.0),
     part("songs.status", 150.0, 70.0, 320.0),
     part("songs.saved", 90.0, 90.0, 220.0),
+    part("songs.time", 40.0, 36.0, 140.0),
 ];
 
 /// The file in the data folder where the CLAP plugin keeps its parts' widths (`mo-plugin`'s `widths`), written whole

@@ -35,8 +35,8 @@ use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedSt
 use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
-    AppWindow, CountLine, DetailPair, HealthLine, MenuItem, NextLine, OlderLine, PanelSong, PluginLine, SampleLine,
-    SaveLine, SongLine, SongTag, SongsData, TodoLine, YearBar,
+    AppWindow, CountLine, DetailPair, DustLine, HealthLine, MenuItem, NextLine, OlderLine, PanelSong, PluginLine,
+    SampleLine, SaveLine, SongLine, SongTag, SongsData, TodoLine, YearBar,
 };
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
@@ -186,9 +186,19 @@ fn start(path: PathBuf, details: LiveDetails, own: bool) -> std::io::Result<mpsc
             crate::finder::add_source(&app, "songs", found);
             crate::midi::songs_offered(&app, offered);
         });
-        watch(&mut live, &weak);
+        watch(&mut live, &weak, &path);
     })?;
     Ok(window)
+}
+
+/// How long FL Studio has had each song open, from the details the library at `path` keeps of its newest FL save:
+/// read once the list is on show (it unpacks each one's details). Whether any was found, so the list is shown again.
+fn learn_minutes(live: &mut Live, path: &Path) -> bool {
+    let found = Library::open_read_only(path).and_then(|library| live.learn_minutes(&library));
+    found.unwrap_or_else(|e| {
+        log::warning("Songs", &format!("Couldn't read how long songs were open in FL Studio: {e}"));
+        false
+    })
 }
 
 /// The songs the MIDI page's "Fits my song" offers (the few saved last), from a list as it was just made: worked out
@@ -381,7 +391,7 @@ fn say_empty(data: &SongsData, empty: bool) {
 /// time saves change, the list is made again and put on the page with a card. A little after the start every folder is
 /// walked once to catch up with what changed while the app was closed (even when the folders can't be watched), and
 /// what's read is kept in the app's own songs.db.
-fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
+fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
     let (tx, rx) = mpsc::channel::<Told>();
     let to_watch = tx.clone();
     let watching = FolderWatch::start(live.roots(), is_project_file, WATCH_QUIET, move |c| {
@@ -391,6 +401,9 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
     *TELL.lock().unwrap_or_else(PoisonError::into_inner) = Some((tx.clone(), live.stopper()));
     // Held so the loop below waits rather than ends if the watch can't start: the catch-up and the retries still run.
     let _still_here = tx;
+    // How long FL Studio had each song open, once the list is on show and what you give songs is taken (so a star
+    // given meanwhile waits for this, rather than being refused): the first pass shows the list again with it.
+    let mut minutes_found = learn_minutes(live, library);
     let _watch = match watching {
         Ok(w) => {
             log::info("Songs", &format!("Watching {} project folders", w.count()));
@@ -417,7 +430,8 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
         let now = Instant::now();
         let due = |at: Option<Instant>| at.map_or(RETRY_AFTER, |at| at.saturating_duration_since(now));
         // A save that couldn't be read (still being written, or locked) is tried again after a quiet moment.
-        let wait = due(catch_up_at).min(due(keep_again_at)).min(RETRY_AFTER);
+        let wait =
+            if minutes_found { Duration::ZERO } else { due(catch_up_at).min(due(keep_again_at)).min(RETRY_AFTER) };
         // What you gave songs on their cards: kept, and the list made again with it. If it can't be kept the list is
         // made again all the same, so the card goes back to what the library has, and a card says why.
         let mut gave = Gave::default();
@@ -427,6 +441,10 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
             Ok(Told::Changed(changes)) => Some(changes),
             Ok(Told::Give(given)) => {
                 gave.keep(live, given);
+                None
+            }
+            Ok(Told::PutOff(key)) => {
+                gave.put_off(live, &key);
                 None
             }
             // The app is closing, and what you gave songs before it is kept: the rest is let go.
@@ -544,9 +562,10 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                 crate::presets::songs_caught_up(&app);
             });
         }
-        if closing || (updated.is_empty() && !renumbered && !gave.any) {
+        if closing || (updated.is_empty() && !renumbered && !gave.any && !minutes_found) {
             continue;
         }
+        minutes_found = false;
         let say_held = gave.held && !std::mem::replace(&mut said_held, true);
         if say_held {
             log::warning("Songs", &format!("{HELD_ONLY}. {HELD_ONLY_WHY}"));
@@ -584,6 +603,8 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
 enum Told {
     Changed(Changes),
     Give(Given),
+    // "Not now" on the Dust off card, for the song with this key.
+    PutOff(String),
     Finish(mpsc::Sender<()>),
 }
 
@@ -601,7 +622,7 @@ fn next(rx: &Receiver<Told>, waiting: &mut VecDeque<Told>, wait: Duration) -> Re
     waiting.extend(rx.try_iter());
     let first = waiting
         .iter()
-        .position(|t| matches!(t, Told::Give(_)))
+        .position(|t| matches!(t, Told::Give(_) | Told::PutOff(_)))
         .or_else(|| waiting.iter().position(|t| matches!(t, Told::Finish(_))))
         .unwrap_or(0);
     match waiting.remove(first) {
@@ -634,13 +655,28 @@ impl Gave {
         let _ = GIVES_WAITING.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
     }
 
+    /// Keeps the song `key` off the Dust off card ("Not now", [`Live::put_off`]), as [`Gave::keep`] keeps a change.
+    fn put_off(&mut self, live: &mut Live, key: &str) {
+        self.any = true;
+        match live.put_off(key) {
+            Ok(held_only) => self.held |= held_only,
+            Err(e) => {
+                log::warning("Songs", &format!("Couldn't keep the song off the Dust off card: {e}"));
+                self.not_kept.push(e.to_string());
+            }
+        }
+        let _ = GIVES_WAITING.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    }
+
     /// Keeps what you've given songs since the pass began, ahead of the rest that came meanwhile ([`next`] takes that
     /// in turn). Whether the app is closing.
     fn take_waiting(&mut self, live: &mut Live, rx: &Receiver<Told>, waiting: &mut VecDeque<Told>) -> bool {
         waiting.extend(rx.try_iter());
-        while let Some(at) = waiting.iter().position(|t| matches!(t, Told::Give(_))) {
-            if let Some(Told::Give(given)) = waiting.remove(at) {
-                self.keep(live, given);
+        while let Some(at) = waiting.iter().position(|t| matches!(t, Told::Give(_) | Told::PutOff(_))) {
+            match waiting.remove(at) {
+                Some(Told::Give(given)) => self.keep(live, given),
+                Some(Told::PutOff(key)) => self.put_off(live, &key),
+                _ => {}
             }
         }
         waiting.iter().any(|t| matches!(t, Told::Finish(_)))
@@ -790,6 +826,8 @@ fn give(app: &AppWindow, at: Option<usize>, what: &str, value: &str) {
     // The line in the list, Next up and the card show it now; the filters' counts follow when the list is made again.
     LINES.with(|l| l.notify.reset());
     fill_next_up(app);
+    // A song given Finished leaves the Dust off card.
+    fill_dust_off(app);
     fill_panel(app);
     GIVES_WAITING.fetch_add(1, Ordering::SeqCst);
     let told = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|(t, _)| t.send(Told::Give(given)));
@@ -809,7 +847,7 @@ fn mended_line(mended: usize) -> String {
 
 /// Puts a list made again on the page, keeping the filters, the song picked and its tab, with its year strip (`years`,
 /// [`Songs::year_counts`], counted where the list was made: not on the window's thread).
-fn show_again(app: &AppWindow, songs: Songs, years: Vec<(i32, usize)>) {
+fn show_again(app: &AppWindow, mut songs: Songs, years: Vec<(i32, usize)>) {
     let _doing = crate::watchdog::doing("Songs: show the list again");
     let data = app.global::<SongsData>();
     let tab = data.get_tab();
@@ -828,6 +866,11 @@ fn show_again(app: &AppWindow, songs: Songs, years: Vec<(i32, usize)>) {
             && a.file_missing == b.file_missing);
         // The year strip counts the new list, as a fresh read does: a save made this year moves its song (review A-4).
         p.years = years;
+        // A song just put off the Dust off card stays off while the page's thread hasn't heard yet (a list made before
+        // it did).
+        for (key, until) in &p.songs.later {
+            songs.later.entry(key.clone()).or_insert(*until);
+        }
         // The old list (thousands of songs) is let go on the freeing thread, not the window's.
         background::free_later(std::mem::replace(&mut p.songs, songs));
         p.picked = if same { row } else { None };
@@ -902,6 +945,12 @@ fn wire_list(app: &AppWindow) {
     data.on_give(move |what, value| {
         if let Some(app) = weak.upgrade() {
             give(&app, None, &what, &value);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_not_now(move |row| {
+        if let (Some(app), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
+            not_now(&app, row);
         }
     });
     // A to-do ticked on Next up: given to its song, which needn't be the one picked.
@@ -1161,6 +1210,49 @@ fn refresh(app: &AppWindow) {
         }
     });
     fill_next_up(app);
+    fill_dust_off(app);
+}
+
+/// The Dust off card: this week's few songs you spent real time on and left, each with its status, time and year.
+fn fill_dust_off(app: &AppWindow) {
+    let data = app.global::<SongsData>();
+    PAGE.with(|p| {
+        let p = p.borrow();
+        data.set_dust_lines(model(p.songs.dust_off_card(p.now).into_iter().filter_map(|row| {
+            let r = p.songs.rows.get(row)?;
+            let year = r.saved.map(|d| chrono::Datelike::year(&d).to_string()).unwrap_or_default();
+            let about = [r.status.as_str(), &r.time_text(), &year]
+                .into_iter()
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            Some(DustLine { row: i32::try_from(row).ok()?, name: r.song.name.as_str().into(), about: about.into() })
+        })));
+    });
+}
+
+/// "Not now" on the Dust off card: the song at `row` leaves the card at once, and is kept off it for about three months
+/// ([`Live::put_off`], on the page's thread).
+fn not_now(app: &AppWindow, row: usize) {
+    let key = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let key = p.songs.rows.get(row)?.song.key.clone();
+        let until = Local::now().timestamp() + mo_app::songs::NOT_NOW_DAYS * 86_400;
+        p.songs.later.insert(key.clone(), until);
+        Some(key)
+    });
+    let Some(key) = key else { return };
+    // The list too: ordered by Dust off, the song leaves the top.
+    refresh(app);
+    GIVES_WAITING.fetch_add(1, Ordering::SeqCst);
+    let told = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|(t, _)| t.send(Told::PutOff(key)));
+    if !matches!(told, Some(Ok(()))) {
+        let _ = GIVES_WAITING.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        failed_card(
+            NOT_KEPT,
+            "the song list isn't being kept up to date just now, so it's back on the card when the app next starts",
+        );
+    }
 }
 
 /// Next up: each song the filters show with something still to do, and those to-dos under it, and how many there are.
@@ -1241,6 +1333,7 @@ fn line(songs: &Songs, entry: &Entry, now: NaiveDateTime) -> SongLine {
                 rating: r.rating,
                 favourite: r.favourite,
                 todos: i32::try_from(r.todos_left()).unwrap_or(i32::MAX),
+                time: r.time_text().into(),
                 // The first status ("Idea") is every song's to begin with, so it isn't shown.
                 status: if r.status == STATUSES[0] { SharedString::new() } else { r.status.as_str().into() },
                 daw: r.song.latest.daw.as_str().into(),
@@ -1418,6 +1511,8 @@ fn panel_song(r: &SongRow) -> PanelSong {
         key_heard: r.musical_key.trim().is_empty() && !r.key().is_empty(),
         tags: r.tags.join(", ").into(),
         notes: r.notes.as_str().into(),
+        time: r.time_text().into(),
+        time_tip: r.time_words().into(),
     }
 }
 
@@ -1853,6 +1948,7 @@ mod tests {
         while let Ok(told) = next(&rx, &mut waiting, Duration::ZERO) {
             order.push(match told {
                 Told::Give(given) => given.song,
+                Told::PutOff(key) => key,
                 Told::Finish(_) => "closing".to_owned(),
                 Told::Changed(_) => "folders".to_owned(),
             });

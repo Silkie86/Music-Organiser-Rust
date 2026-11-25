@@ -1819,6 +1819,10 @@ export component SoundsPage inherits Rectangle {
                             turned: tiles.content-y;
                             after: tiles.row-height;
                             to-top => { tiles.to-top(); }
+                            // Its scroll bar (the list's own is off).
+                            whole: tiles.rows * tiles.row-height;
+                            seen: tiles.visible-height;
+                            scroll-to(y) => { tiles.scroll-to(y); }
                             clip: true;
                             // The height of a tile's lines of words, the same for every tile.
                             name-probe := Text {
@@ -1875,6 +1879,7 @@ export component SoundsPage inherits Rectangle {
                                 source: grid-area.grid;
                             }
                             tiles := ListView {
+                                own-bar: true;
                                 property <int> columns: max(1, floor((self.visible-width - Space.sm) / (TileSize.width + Space.sm)));
                                 row-height: TileSize.height + Space.sm;
                                 rows: SoundsData.tile-rows.length;
@@ -1929,6 +1934,10 @@ export component SoundsPage inherits Rectangle {
                             turned: lines.content-y;
                             after: lines.row-height;
                             to-top => { lines.to-top(); }
+                            // Its scroll bar (the list's own is off).
+                            whole: lines.rows * lines.row-height;
+                            seen: lines.visible-height;
+                            scroll-to(y) => { lines.scroll-to(y); }
                             list-box := VerticalLayout {
                                 // Two lines a sound where the columns would leave its name under about 100 px (in a
                                 // 900 px window); a big window with the panel and the year strip open keeps one line. The
@@ -1941,6 +1950,7 @@ export component SoundsPage inherits Rectangle {
                                     narrow: list-box.narrow;
                                 }
                                 lines := ListView {
+                                    own-bar: true;
                                     row-height: list-box.line-height;
                                     rows: SoundsData.lines.length;
                                     show-top: SoundsData.show-row * self.row-height;
