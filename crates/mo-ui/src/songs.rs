@@ -694,7 +694,7 @@ const NOT_KEPT: &str = "Couldn't keep that for the song";
 
 /// The card's title and words when what you give songs is shown but not kept this time ([`Gave::held`]).
 const HELD_ONLY: &str = "Shown until the app closes";
-const HELD_ONLY_WHY: &str = "The app isn't keeping what you give songs on their cards (status, stars, hearts, tags) \
+const HELD_ONLY_WHY: &str = "The app isn't keeping what you give songs on their cards (status, stars, hearts, tags, to-dos) \
                              in its song library this time, so it lasts only until the app closes.";
 
 /// A card that says what couldn't be done (`title`) and why, on the window's thread.
@@ -708,31 +708,27 @@ fn failed_card(title: &str, why: &str) {
 
 /// The change a click on the card asks for (`what` and `value` as songs.slint's `give` says them), for a song that
 /// has `favourite` and `todos` now; `now` is when, in Unix seconds, for a to-do added. A to-do is ticked or taken off
-/// by its place in the list (`value`). None for words the card never sends, or a to-do that isn't there.
+/// by its place in the list (`value`), and the change names it by its words and when it was added, so it finds the
+/// same one however the list has changed meanwhile. None for words the card never sends, a to-do with no words, or
+/// one that isn't there.
 fn asked_change(what: &str, value: &str, favourite: bool, todos: &[Todo], now: i64) -> Option<Change> {
-    let at = || value.parse::<usize>().ok().filter(|n| *n < todos.len());
+    let at = || value.parse::<usize>().ok().and_then(|n| todos.get(n));
     Some(match what {
         "status" => Change::Status(value.to_owned()),
         "stars" => Change::Rating(value.parse().ok()?),
         "favourite" => Change::Favourite(!favourite),
         "add-tag" => Change::AddTag(value.to_owned()),
         "remove-tag" => Change::RemoveTag(value.to_owned()),
-        "add-todo" => {
-            let mut list = todos.to_vec();
-            list.push(Todo { text: value.to_owned(), done: false, added: now });
-            Change::Todos(list)
-        }
+        // Spaces alone are nothing typed: no card says so.
+        "add-todo" if value.trim().is_empty() => return None,
+        "add-todo" => Change::AddTodo(Todo { text: value.to_owned(), done: false, added: now }),
         "tick-todo" => {
-            let n = at()?;
-            let mut list = todos.to_vec();
-            list[n].done = !list[n].done;
-            Change::Todos(list)
+            let t = at()?;
+            Change::TickTodo { text: t.text.clone(), added: t.added, done: !t.done }
         }
         "remove-todo" => {
-            let n = at()?;
-            let mut list = todos.to_vec();
-            list.remove(n);
-            Change::Todos(list)
+            let t = at()?;
+            Change::RemoveTodo { text: t.text.clone(), added: t.added }
         }
         _ => return None,
     })
@@ -752,6 +748,17 @@ fn show_given(row: &mut SongRow, change: &Change) {
         }
         Change::RemoveTag(tag) => row.tags.retain(|t| song_fields::same_tag(t) != *tag),
         Change::Todos(todos) => row.todos.clone_from(todos),
+        Change::AddTodo(todo) => {
+            if !row.todos.iter().any(|t| song_fields::same_todo(t, &todo.text, todo.added)) {
+                row.todos.push(todo.clone());
+            }
+        }
+        Change::TickTodo { text, added, done } => {
+            for t in row.todos.iter_mut().filter(|t| song_fields::same_todo(t, text, *added)) {
+                t.done = *done;
+            }
+        }
+        Change::RemoveTodo { text, added } => row.todos.retain(|t| !song_fields::same_todo(t, text, *added)),
         Change::Key(_) | Change::Notes(_) => {}
     }
 }
@@ -1194,8 +1201,8 @@ fn fill_next_up(app: &AppWindow) {
     });
 }
 
-/// The picked song's to-dos for its card: those left first, then those done, each with its place in the song's list
-/// and the day it was added; and how many are left ("3 left").
+/// The picked song's to-dos for its card, in their order (a ticked one stays where it is, so a second click can't land
+/// on another), each with its place in the song's list and the day it was added; and how many are left ("3 left").
 fn fill_todos(data: &SongsData, r: &SongRow, now: NaiveDateTime) {
     let line = |(n, t): (usize, &Todo)| TodoLine {
         n: i32::try_from(n).unwrap_or(-1),
@@ -1203,8 +1210,7 @@ fn fill_todos(data: &SongsData, r: &SongRow, now: NaiveDateTime) {
         done: t.done,
         date: added_day(t.added, now).into(),
     };
-    let numbered = || r.todos.iter().enumerate();
-    data.set_song_todos(model(numbered().filter(|(_, t)| !t.done).chain(numbered().filter(|(_, t)| t.done)).map(line)));
+    data.set_song_todos(model(r.todos.iter().enumerate().map(line)));
     let left = r.todos_left();
     data.set_todos_left(if r.todos.is_empty() { SharedString::new() } else { format!("{left} left").into() });
 }
@@ -1812,14 +1818,17 @@ mod tests {
         for status in STATUSES {
             assert!(asked_change("status", status, false, &[], 0).is_some_and(|c| c.checked().is_ok()), "{status}");
         }
-        // A to-do is added at the end, ticked over or taken off by its place; one that isn't there is no change.
+        // A to-do is added, or ticked over or taken off by its place (named by its words and when it was added); one
+        // that isn't there, or spaces alone, is no change.
         let one = Todo { text: "Redo the bass".into(), done: false, added: 5 };
         let todos = [one.clone()];
         let ask = |what: &str, value: &str| asked_change(what, value, false, &todos, 9);
         let added = Todo { text: "Vocal chop".into(), done: false, added: 9 };
-        assert_eq!(ask("add-todo", "Vocal chop"), Some(Change::Todos(vec![one.clone(), added])));
-        assert_eq!(ask("tick-todo", "0"), Some(Change::Todos(vec![Todo { done: true, ..one }])));
-        assert_eq!(ask("remove-todo", "0"), Some(Change::Todos(Vec::new())));
+        assert_eq!(ask("add-todo", "Vocal chop"), Some(Change::AddTodo(added)));
+        assert_eq!(ask("add-todo", "   "), None);
+        let named = (one.text.clone(), one.added);
+        assert_eq!(ask("tick-todo", "0"), Some(Change::TickTodo { text: named.0.clone(), added: 5, done: true }));
+        assert_eq!(ask("remove-todo", "0"), Some(Change::RemoveTodo { text: named.0, added: named.1 }));
         assert_eq!(ask("tick-todo", "1"), None);
         assert_eq!(ask("remove-todo", "x"), None);
         // Six stars, or a tag with no name, is refused before anything shows.

@@ -643,6 +643,29 @@ fn a_songs_to_dos_are_kept_for_every_save_in_their_order_and_a_new_save_starts_w
 }
 
 #[test]
+fn a_to_do_is_added_ticked_and_taken_off_by_its_words_and_time_on_every_save() {
+    let songs = library("todo-changes");
+    song_writes::write(&songs, &put(read(2, TWO), None)).unwrap();
+    let both = rows(&[(1, ONE), (2, TWO)]);
+    let set = |change: Change| song_fields::set(&songs, &both, &change).unwrap();
+    set(Change::AddTodo(todo(" Redo the bass ", false, 10)));
+    set(Change::AddTodo(todo("Clap", false, 20)));
+    set(Change::AddTodo(todo("Clap", false, 20)));
+    let two = vec![todo("Redo the bass", false, 10), todo("Clap", false, 20)];
+    assert_eq!(todos(&songs, 1), two, "trimmed, at the end, not twice");
+    assert_eq!(todos(&songs, 2), two);
+    set(Change::TickTodo { text: "Clap".into(), added: 20, done: true });
+    assert_eq!(todos(&songs, 2)[1], todo("Clap", true, 20));
+    set(Change::RemoveTodo { text: "Redo the bass".into(), added: 10 });
+    set(Change::AddTodo(todo("Vocal chop", false, 30)));
+    assert_eq!(todos(&songs, 1), vec![todo("Clap", true, 20), todo("Vocal chop", false, 30)], "still in order");
+    // One that isn't there changes nothing, and one with no words can't be kept.
+    set(Change::RemoveTodo { text: "Clap".into(), added: 99 });
+    assert_eq!(todos(&songs, 1).len(), 2);
+    assert!(song_fields::set(&songs, &both, &Change::AddTodo(todo("  ", false, 1))).is_err());
+}
+
+#[test]
 fn a_new_save_doesnt_take_on_to_dos_an_older_library_left_under_its_id() {
     let songs = library("leftover-todos");
     let c = Connection::open(&songs).unwrap();

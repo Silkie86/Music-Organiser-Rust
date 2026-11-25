@@ -31,7 +31,7 @@ use mo_library::{plugin_writes, sample_writes};
 use rayon::prelude::*;
 
 use crate::background::{on_bulk_pool, on_pool};
-use crate::songs::{ASK_DOUBTS, DOUBTS_ACROSS_FOLDERS, RUN_GAP, Songs, run_gap, shown_tags};
+use crate::songs::{ASK_DOUBTS, DOUBTS_ACROSS_FOLDERS, RUN_GAP, Songs, run_gap, shown_tags, shown_todos};
 
 /// The details of the saves read here, by their ids, shared with the song panel's reader.
 pub type LiveDetails = Arc<Mutex<HashMap<i64, SaveDetail>>>;
@@ -489,6 +489,11 @@ impl Live {
                 } else {
                     changes.extend(put_on(others));
                 }
+            }
+            // The list the song shows goes to every save first: one added, ticked or taken off then changes the same
+            // list everywhere, whatever list the card had when it was clicked.
+            Ok(Change::AddTodo(_) | Change::TickTodo { .. } | Change::RemoveTodo { .. }) => {
+                changes.push(Change::Todos(shown_todos(song, &real)));
             }
             _ => {}
         }
@@ -1716,6 +1721,26 @@ mod tests {
         let mut taken_off = self::live(vec![newest(), older()]);
         assert!(taken_off.give(&key, &[2], &Change::RemoveTag("dark".into())).unwrap().differs);
         assert_eq!(taken_off.songs().rows[0].tags, ["digitakt"]);
+    }
+
+    /// Review of #748: a to-do added, ticked or taken off changes the list the song shows on every save, whatever
+    /// list the card had (one made before the last change kept), and a save that hadn't got the list gets it.
+    #[test]
+    fn a_to_do_change_goes_to_the_list_the_song_shows_on_every_save() {
+        let todo = |text: &str, added: i64| mo_library::Todo { text: text.into(), done: false, added };
+        let older = Save { todos: vec![todo("A", 1)], ..save(1, "C:\\Music\\Night", "Night_1") };
+        let mut live = live(vec![save(2, "C:\\Music\\Night", "Night_2"), older]);
+        let key = live.songs().rows[0].song.key.clone();
+        assert!(live.give(&key, &[2], &Change::AddTodo(todo("B", 2))).unwrap().differs);
+        assert_eq!(live.saves[0].todos, [todo("A", 1), todo("B", 2)], "the newest gets the list the song showed");
+        assert_eq!(live.saves[1].todos, live.saves[0].todos);
+        // A tick from a card that never saw B still leaves B.
+        let tick = Change::TickTodo { text: "A".into(), added: 1, done: true };
+        assert!(live.give(&key, &[2], &tick).unwrap().differs);
+        assert_eq!(live.songs().rows[0].todos, [mo_library::Todo { done: true, ..todo("A", 1) }, todo("B", 2)]);
+        assert!(live.give(&key, &[2], &Change::RemoveTodo { text: "A".into(), added: 1 }).unwrap().differs);
+        assert_eq!(live.songs().rows[0].todos, [todo("B", 2)]);
+        assert!(!live.give(&key, &[2], &Change::RemoveTodo { text: "A".into(), added: 1 }).unwrap().differs);
     }
 
     /// Review SS-2: taking off the last tag a song shows leaves it with none, rather than an older save's it never

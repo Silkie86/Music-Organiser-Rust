@@ -357,6 +357,14 @@ component TodoCard inherits Rectangle {
 // click on a song's name opens its card.
 component NextUpList inherits Rectangle {
     property <length> line-height: 34px;
+    // A ticked to-do leaves the list at once and the next moves up into its place: a click straight after (a double
+    // click) waits, so it can't tick that one too.
+    property <bool> resting;
+    Timer {
+        interval: 400ms;
+        running: root.resting;
+        triggered => { root.resting = false; }
+    }
     if SongsData.next-lines.length == 0: EmptyState {
         title: "Nothing to do";
         text: "Add to-dos on a song's card.";
@@ -405,7 +413,12 @@ component NextUpList inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
                     TickSquare {
-                        clicked => { SongsData.give-to(line.row, "tick-todo", line.n); }
+                        clicked => {
+                            if (!root.resting) {
+                                root.resting = true;
+                                SongsData.give-to(line.row, "tick-todo", line.n);
+                            }
+                        }
                     }
                 }
                 CutText {
@@ -1101,7 +1114,8 @@ export component SongsPage inherits Rectangle {
                     // nothing moves when one is picked.
                     width: clamp((parent.width - 16px) / 3, 380px, Fit.narrow-max);
                     key-pressed(event) => {
-                        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                        // Not under Next up: the list it would step through isn't on show.
+                        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta || SongsData.next-up) {
                             return reject;
                         }
                         if (event.text == Key.UpArrow) {

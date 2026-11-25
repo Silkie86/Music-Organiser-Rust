@@ -87,11 +87,7 @@ impl SongRow {
             musical_key: pick(&latest.musical_key, |s| &s.musical_key),
             notes: pick(&latest.notes, |s| &s.notes),
             tags: tags_of(latest, &earlier),
-            todos: if latest.todos.is_empty() {
-                earlier.iter().find(|s| !s.todos.is_empty()).map_or_else(Vec::new, |s| s.todos.clone())
-            } else {
-                latest.todos.clone()
-            },
+            todos: todos_of(latest, &earlier),
             find: String::new(),
             song,
         };
@@ -246,6 +242,22 @@ fn earlier_saves<'a>(song: &'a Song, real: &RealDates) -> Vec<&'a Save> {
 /// SG-1), or the newest save would hold the new tag alone and hide the rest.
 pub(crate) fn shown_tags(song: &Song, real: &RealDates) -> Vec<String> {
     tags_of(&song.latest, &earlier_saves(song, real))
+}
+
+/// The to-dos a song shows: its newest save's, or while that has none, the newest older save's that has some. A to-do
+/// added, ticked or taken off goes with them to every save ([`crate::live::Live::give`]), so a save that hasn't got the
+/// list yet can't keep an older one.
+pub(crate) fn shown_todos(song: &Song, real: &RealDates) -> Vec<Todo> {
+    todos_of(&song.latest, &earlier_saves(song, real))
+}
+
+/// [`shown_todos`], with the older saves already in order.
+fn todos_of(latest: &Save, earlier: &[&Save]) -> Vec<Todo> {
+    if latest.todos.is_empty() {
+        earlier.iter().find(|s| !s.todos.is_empty()).map_or_else(Vec::new, |s| s.todos.clone())
+    } else {
+        latest.todos.clone()
+    }
 }
 
 /// [`shown_tags`], with the older saves already in order ([`earlier_saves`]).
