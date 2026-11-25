@@ -445,6 +445,39 @@ pub struct Part {
     pub sound: Option<i64>,
 }
 
+/// A card's one tick above its parts' ticks, for all of them at once (Solomon's F12 notes, 25 Nov 2026: "no way to
+/// deselect projects to fix"). As a part's tick for a group shows: ticked when all it ticks are, a dash when only some
+/// are. A click unticks everything when it shows ticked, and ticks them all otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllTick {
+    /// Something on the card is ticked.
+    pub some: bool,
+    /// Something a click would tick isn't ticked.
+    pub more: bool,
+    /// What a click that ticks does, for its tooltip.
+    pub ticks: &'static str,
+}
+
+/// What the tick for all does when it unticks.
+pub const UNTICK_ALL: &str = "Untick all";
+
+impl AllTick {
+    /// It shows ticked: all it ticks are, and a click unticks everything.
+    pub fn ticked(self) -> bool {
+        self.some && !self.more
+    }
+
+    /// It shows a dash: some are ticked, and a click ticks the rest.
+    pub fn partly(self) -> bool {
+        self.some && self.more
+    }
+
+    /// Its tooltip: what a click does.
+    pub fn tip(self) -> &'static str {
+        if self.ticked() { UNTICK_ALL } else { self.ticks }
+    }
+}
+
 /// The words of a part's link to the Sounds page.
 pub const ON_SOUNDS: &str = "Show on Sounds page";
 

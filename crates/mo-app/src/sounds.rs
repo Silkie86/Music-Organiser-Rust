@@ -881,6 +881,61 @@ impl SoundList {
         self.copies.as_ref().is_some_and(|c| c.group_of.contains_key(&i))
     }
 
+    /// The sound at `i`'s copies (the same audio) as a group, by its number, once the copies are known: None when it
+    /// has none.
+    fn copy_group(&self, i: usize) -> Option<u32> {
+        self.copies.as_ref()?.group_of.get(&i).copied()
+    }
+
+    /// Of the sound at `i` and its copies, the one Hide duplicates shows when no other filter leaves any of them out
+    /// ([`SoundList::keep_first`]): itself when it has none, or while they aren't known.
+    fn kept_copy(&self, i: usize) -> usize {
+        let group = self.copy_group(i).and_then(|g| self.copies.as_ref()?.groups.get(g as usize));
+        group.and_then(|g| g.iter().copied().min_by(|&a, &b| self.keep_first(a, b))).unwrap_or(i)
+    }
+
+    /// Sounds like the one at `at` that are new on the way you came to it: Sounds like this, most alike first, as
+    /// places with how alike (0 to 1), from the fingerprints in `index` (`places` finds a sound's place by its id), at
+    /// most `max`. Left out are it and the sounds at `came` (those you came to it through, each picked from the sounds
+    /// like the one before), and their copies (the same audio, once the copies are known; before they are, a sound
+    /// [`SAME_SOUND`] as alike as it): A's closest was B and B's was A, so clicking the first line went round in a
+    /// circle (Solomon's F12 note, 25 Nov 2026), and the sound itself showed again as its copy. One of each sound's
+    /// copies is enough, as they sound the same: the one Hide duplicates shows. Slow on a big library, as it compares
+    /// the sound with every other: off the window's thread.
+    pub fn like_this(
+        &self,
+        index: &SoundIndex,
+        places: &HashMap<i64, usize>,
+        at: usize,
+        came: &[usize],
+        max: usize,
+    ) -> Vec<(usize, f64)> {
+        let Some(of) = self.sound(at) else { return Vec::new() };
+        let seen: HashSet<usize> = came.iter().copied().chain([at]).collect();
+        let seen_copies: HashSet<u32> = seen.iter().filter_map(|&i| self.copy_group(i)).collect();
+        let new = |i: usize| !seen.contains(&i) && self.copy_group(i).is_none_or(|g| !seen_copies.contains(&g));
+        let get = |id: i64| places.get(&id).copied().filter(|&i| new(i)).and_then(|i| self.sound(i));
+        // A sound's copies come one after the other (they're as alike), so more are asked for until there are enough
+        // once only one of each is kept, or there are no more.
+        let mut ask = max;
+        loop {
+            let found = index.similar(of, get, ask, false);
+            let mut groups = HashSet::new();
+            let one_each: Vec<(usize, f64)> = found
+                .iter()
+                .filter(|&&(_, likeness)| likeness < SAME_SOUND)
+                .filter_map(|&(id, likeness)| Some((*places.get(&id)?, likeness)))
+                .filter(|&(i, _)| self.copy_group(i).is_none_or(|g| groups.insert(g)))
+                .map(|(i, likeness)| (self.kept_copy(i), likeness))
+                .take(max)
+                .collect();
+            if one_each.len() >= max || found.len() < ask {
+                return one_each;
+            }
+            ask = ask.saturating_mul(4);
+        }
+    }
+
     /// How many sounds Hide duplicates leaves out (every copy but one of each sound), once the copies are known.
     pub fn copies(&self) -> Option<usize> {
         self.copies.as_ref().map(|c| c.copies)
@@ -1865,6 +1920,11 @@ fn key_order(s: &Sound) -> i32 {
 /// The setting Hide duplicates is kept in, in the app's own settings ("on" or "off").
 pub const HIDE_COPIES_KEY: &str = "sounds_hide_duplicates";
 
+/// A sound this alike to another (100%, as Sounds like this shows it) is the same sound: a copy whose copies aren't
+/// known yet (Hide duplicates finds them), or the same recording in another file. Sounds like this leaves it out
+/// ([`SoundList::like_this`]).
+pub const SAME_SOUND: f64 = 0.9995;
+
 /// The setting the date the year strip goes by is kept in, in the app's own settings: its name
 /// ([`DateBy::name`]).
 pub const YEARS_BY_KEY: &str = "sounds_years_by";
@@ -2741,6 +2801,49 @@ mod tests {
             [0.0, 0.06, 0.07, 0.5, 1.0, 2.0, -1.0, f32::NAN].map(like_favourites_step),
             [0, 0, 1, 4, LIKE_STEPS, LIKE_STEPS, 0, 0]
         );
+    }
+
+    #[test]
+    fn sounds_like_this_are_new_on_the_way_and_one_of_each_sounds_copies() {
+        use mo_sounds::index::VectorIndex;
+        // Solomon's F12 note, 25 Nov 2026: clicking the first line went round in a circle (A's closest was B, B's
+        // was A), and the picked sound showed again as its copy. 2 is a copy of 1 (the same audio); 3 and 4 are copies
+        // of each other, the closest to 1 after 2; then 5, 6 and 7, each further.
+        let hats = (1..=7).map(|i| sound(i, &format!(r"I:\Hats\{i}.wav"), "Hi-hat", analysed(false, None, None)));
+        let mut list = SoundList::new(hats.collect());
+        list.set_copies(&SameAudio { groups: vec![vec![1, 2], vec![3, 4]], ..SameAudio::default() });
+        let vectors = [
+            (1, [1.0, 0.0]),
+            (2, [1.0, 0.0]),
+            (3, [0.95, 0.05]),
+            (4, [0.95, 0.05]),
+            (5, [0.8, 0.2]),
+            (6, [0.6, 0.4]),
+            (7, [0.0, 1.0]),
+        ];
+        let vectors = vectors.iter().map(|(id, v)| (*id, v.to_vec())).collect();
+        let index = SoundIndex { features: VectorIndex::clap(&vectors), clap: None, deep: false };
+        let places: HashMap<i64, usize> = (0..list.len()).filter_map(|i| Some((list.sound(i)?.id, i))).collect();
+        let like = |of: i64, came: &[i64], max: usize| {
+            let came: Vec<usize> = came.iter().map(|id| places[id]).collect();
+            let found = list.like_this(&index, &places, places[&of], &came, max);
+            assert!(found.windows(2).all(|w| w[0].1 >= w[1].1), "most alike first");
+            ids(&list, &found.into_iter().map(|(i, _)| i).collect::<Vec<_>>())
+        };
+        // Neither it nor its copy, and 3 and 4 once: as the one Hide duplicates shows (all else alike, by path: 3).
+        assert_eq!(like(1, &[], 3), [3, 5, 6]);
+        // Picked from there: the way back to 1 (or its copy) isn't offered, so the first line always leads on.
+        assert_eq!(like(3, &[1], 3), [5, 6, 7]);
+        assert_eq!(like(5, &[1, 3], 2), [6, 7]);
+        // With no more to find, fewer.
+        assert_eq!(like(6, &[1, 3, 5], 5), [7]);
+        assert_eq!(list.like_this(&index, &places, 99, &[], 3), []);
+
+        // Before the copies are known (Hide duplicates has never been on), a sound 100% alike is taken for a copy: 1's
+        // copy 2 doesn't show as the sound itself again. 3 and 4 aren't known as copies of each other: both show.
+        let unknown = SoundList::new((1..=7).filter_map(|i| list.sound(places[&i]).cloned()).collect());
+        let found = unknown.like_this(&index, &places, places[&1], &[], 3);
+        assert_eq!(ids(&unknown, &found.into_iter().map(|(i, _)| i).collect::<Vec<_>>()), [3, 4, 5]);
     }
 
     #[test]

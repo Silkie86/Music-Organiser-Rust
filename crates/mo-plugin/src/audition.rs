@@ -338,9 +338,10 @@ pub struct Playing {
     asks: Consumer<Ask>,
     done: Producer<Box<Voice>>,
     now: Option<Box<Voice>>,
-    /// The sound last picked, once it has ended or the DAW stopped it: it plays again from its start when the DAW
-    /// next starts playing (Solomon, 13 Nov: "pressing play in the DAW should start the currently selected"). The
-    /// plugin's own stop lets it go.
+    /// The loop last picked, once the DAW stopped it: it plays again from its start when the DAW next starts playing
+    /// (Solomon, 13 Nov: "pressing play in the DAW should start the currently selected"). Only a sound set to loop
+    /// (Solomon, 25 Nov: a one-shot played earlier started again on the first beat; he'd meant loops). The plugin's
+    /// own stop lets it go.
     cued: Option<Box<Voice>>,
     /// A sound to hand back that didn't fit in the queue back: handed back first, before anything else is taken.
     /// (The queue is checked for room first, so this stays empty; it's here so nothing is ever freed on this thread.)
@@ -407,12 +408,14 @@ impl Playing {
                 Err(_) => break,
             }
         }
-        // The DAW starts playing: the sound picked starts again from where it was asked to, in time.
+        // The DAW starts playing: a loop picked starts again from where it was asked to, in time. A one-shot still
+        // playing plays on.
         if let Some(song) = song
             && song.playing
             && !self.was_playing
         {
             match &mut self.now {
+                Some(voice) if !voice.looping => {}
                 Some(voice) => {
                     all_off(&mut self.sounding, &mut self.sent, 0);
                     voice.rewind();
@@ -511,14 +514,19 @@ impl Playing {
         }
     }
 
-    /// The sound playing now ends (the DAW stopped, or it played to its end) and is cued, to play again when the DAW
-    /// next starts; the one cued before goes back to the panel's thread.
+    /// The sound playing now ends (the DAW stopped, or it played to its end). A loop is cued, to play again when the
+    /// DAW next starts, and the one cued before goes back to the panel's thread; anything else goes back itself.
     fn park(&mut self) {
         all_off(&mut self.sounding, &mut self.sent, self.stops_at);
         if let Some(old) = self.now.take() {
             self.counts.ended.fetch_add(1, Ordering::AcqRel);
-            if let Some(gone) = self.cued.replace(old) {
-                self.hand_back(gone);
+            if old.looping {
+                if let Some(gone) = self.cued.replace(old) {
+                    self.hand_back(gone);
+                }
+            } else {
+                self.let_cue_go();
+                self.hand_back(old);
             }
         }
     }
@@ -1229,13 +1237,10 @@ mod tests {
         playing.fill(&mut l, &mut r);
         assert_eq!(l, vec![LEVEL, LEVEL, LEVEL, 0.0]);
         assert_eq!(r, l);
-        // Done: the panel's line can go, and it's cued for the DAW's play; the plugin's stop sends it back to be freed
-        // off the audio thread.
+        // Done: the panel's line can go, and a one-shot goes back to be freed off the audio thread.
         assert!(playing.now.is_none());
         assert!(!player.still_playing(n));
-        assert!(playing.cued.is_some());
-        player.stop();
-        playing.fill(&mut l, &mut r);
+        assert!(playing.cued.is_none());
         assert_eq!(lock(&player.done).as_ref().unwrap().slots(), 1);
         player.tidy();
         assert_eq!(lock(&player.done).as_ref().unwrap().slots(), 0);
@@ -1345,31 +1350,32 @@ mod tests {
     }
 
     #[test]
-    fn pressing_play_in_the_daw_starts_the_sound_picked() {
+    fn pressing_play_in_the_daw_starts_the_loop_picked_only() {
         let player = Player::default();
         // Four frames a second at 120 BPM: two frames a beat.
         let mut playing = player.start(4);
         let song = |on: bool, beats: f64| Some(Song { playing: on, beats, tempo: Some(120.0), bar: None });
         let (mut l, mut r) = (vec![9.0; 4], vec![9.0; 4]);
-        // Picked while the DAW is stopped: it plays to its end, and is cued.
+        // A one-shot picked while the DAW is stopped: it plays to its end, and isn't cued (Solomon, 25 Nov).
         let n = match player.hand_over(Box::new(Voice::new(&[vec![0.1, 0.2]], 4, 4)), "hit".into()) {
             Played::Playing(_, n) => n,
             Played::Not(why) => panic!("{why}"),
         };
         playing.fill_in_song(&mut l, &mut r, song(false, 0.0));
         assert_eq!(l, [0.1, 0.2, 0.0, 0.0].map(|x| x * LEVEL).to_vec());
-        assert!(playing.now.is_none() && playing.cued.is_some());
+        assert!(playing.now.is_none() && playing.cued.is_none());
         assert!(!player.still_playing(n), "the panel's line goes when it ends");
-        // The DAW starts on a beat: it plays again from its start.
+        // The DAW starts: it doesn't play again.
         playing.fill_in_song(&mut l, &mut r, song(true, 0.0));
-        assert_eq!(l, [0.1, 0.2, 0.0, 0.0].map(|x| x * LEVEL).to_vec());
-        // Played on, it doesn't start again until the DAW stops and starts.
-        playing.fill_in_song(&mut l, &mut r, song(true, 2.0));
         assert_eq!(l, vec![0.0; 4]);
-        playing.fill_in_song(&mut l, &mut r, song(false, 4.0));
-        // Started half a beat in: it waits for the next beat (one frame), as a click would.
-        playing.fill_in_song(&mut l, &mut r, song(true, 4.5));
-        assert_eq!(l, [0.0, 0.1, 0.2, 0.0].map(|x| x * LEVEL).to_vec());
+        playing.fill_in_song(&mut l, &mut r, song(false, 2.0));
+        // A one-shot still playing as the DAW starts plays on from where it is.
+        player.hand_over(Box::new(Voice::new(&[vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]], 4, 4)), "long".into());
+        playing.fill_in_song(&mut l, &mut r, song(false, 2.0));
+        assert_eq!(l, [0.1, 0.2, 0.3, 0.4].map(|x| x * LEVEL).to_vec());
+        playing.fill_in_song(&mut l, &mut r, song(true, 4.0));
+        assert_eq!(l, [0.5, 0.6, 0.0, 0.0].map(|x| x * LEVEL).to_vec());
+        playing.fill_in_song(&mut l, &mut r, song(false, 6.0));
         // A loop playing when the DAW stops is cued too, and starts from its start with the DAW.
         player.hand_over(Box::new(Voice::new(&[vec![0.5, 0.6, 0.7]], 4, 4).looped()), "loop".into());
         playing.fill_in_song(&mut l, &mut r, song(false, 8.0));

@@ -56,6 +56,15 @@ export struct CardPart {
     more: string,
 }
 
+// The card's one tick above its parts' ticks, for all of them at once (Solomon's F12 notes, 25 Nov 2026: "no way to
+// deselect projects to fix"): ticked when all it ticks are, a dash when some are, and what a click does.
+export struct CardAll {
+    shown: bool,
+    ticked: bool,
+    partly: bool,
+    tip: string,
+}
+
 export global SpaceData {
     in property <string> summary;
     in property <[DriveCard]> drives;
@@ -74,6 +83,7 @@ export global SpaceData {
     in property <string> card-lead;
     // Whether the card's parts have ticks: each keeps room for its tick, so the names line up.
     in property <bool> card-ticks;
+    in property <CardAll> card-all;
     in property <[CardPart]> card-parts;
     // What to know about the parts, above them with the buttons.
     in property <string> card-note;
@@ -89,6 +99,8 @@ export global SpaceData {
     callback chosen(string);
     // A part on the card (its place in the list): its tick changed, its link that opens it, its link that shows more.
     callback tick-part(int, bool);
+    // The tick for all of them: tick them all (true), or untick them all.
+    callback tick-all(bool);
     callback open-part(int);
     callback more-part(int);
 }
@@ -261,6 +273,18 @@ component SpaceCard inherits SidePanel {
         room: root.inside;
         actions: SpaceData.card-actions;
         chosen(id) => { SpaceData.chosen(id); }
+    }
+    // The tick for all the parts' ticks, above theirs: a click only asks, as theirs do.
+    if SpaceData.card-all.shown: HorizontalLayout {
+        alignment: start;
+        TickBox {
+            height: 20px;
+            checked: SpaceData.card-all.ticked;
+            partly: SpaceData.card-all.partly;
+            asks: true;
+            tip: SpaceData.card-all.tip;
+            toggled(ticked) => { SpaceData.tick-all(ticked); }
+        }
     }
     // The parts are measured as if none of their lines wrapped (Slint measures what's in a `for` so), but each is laid
     // out at its real height: so the box is at least as tall as where the last one ends, or the card's own height (and

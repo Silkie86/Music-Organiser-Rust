@@ -1,5 +1,5 @@
 //! What the DAW finds in the plugin's file: its factories. The plugin factory lists every plugin in the file (for now
-//! the one, "DAWmate (test)"); another plugin in the same file goes in its list ([`PLUGINS`]), and another
+//! the one, "DAWmate"); another plugin in the same file goes in its list ([`PLUGINS`]), and another
 //! kind of factory goes beside it in [`MoEntry`]. Beside it now: the preset discovery factory, whose providers list
 //! your favourite sounds ([`crate::favourites`]) and your preset files with the app's parts ([`crate::preset_files`])
 //! in the DAW's browser; another provider goes in its list ([`PROVIDERS`]).

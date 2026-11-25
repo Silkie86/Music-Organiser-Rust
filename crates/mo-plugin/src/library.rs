@@ -232,6 +232,13 @@ pub enum Read {
 /// The library read last, kept while the plugin is loaded ([`crate::kept`]).
 pub(crate) static KEPT: crate::kept::Kept<Library> = crate::kept::Kept::new();
 
+/// The library kept from the last read, even when the app has changed it since: a window opened again shows it at
+/// once while [`read`] reads it again (Solomon, 25 Nov: the app writes to its library as it works, and each window
+/// waited 9 to 90 seconds for the read).
+pub fn kept() -> Option<Arc<Library>> {
+    KEPT.any()
+}
+
 /// The sound library, read once for every copy of the plugin, and kept while the plugin is loaded until the app
 /// changes it. Slow the first time (call it off the panel's thread).
 pub fn read() -> Read {

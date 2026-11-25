@@ -50,6 +50,11 @@ impl<T> Kept<T> {
         (*stamp == Stamp::of(files)).then(|| Arc::clone(kept))
     }
 
+    /// The list kept, even when the app changed its files since: something to show while it's read again.
+    pub fn any(&self) -> Option<Arc<T>> {
+        lock(&self.slot).as_ref().map(|(_, kept)| Arc::clone(kept))
+    }
+
     /// Keeps `list`, read from `files` as `stamp` found them (taken before the read, so a change made while it was
     /// read makes the next window read again). Only while a copy of the plugin is loaded.
     pub fn keep(&self, stamp: Stamp, list: &Arc<T>) {

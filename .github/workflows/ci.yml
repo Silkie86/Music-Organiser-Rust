@@ -201,7 +201,9 @@ jobs:
       - name: Build the setup
         shell: pwsh
         run: |
-          $setup = installer\build.ps1 -Exe target\debug\music-organiser.exe -Out dist
+          # A stand-in for the CLAP plugin (the release builds the real one): only where it goes is tried here.
+          Set-Content -LiteralPath stand-in.clap -Value 'not a plugin' -Encoding ascii
+          $setup = installer\build.ps1 -Exe target\debug\music-organiser.exe -ClapPlugin stand-in.clap -Out dist
           "SETUP=$setup" >> $env:GITHUB_ENV
       - name: Try the setup
         shell: pwsh

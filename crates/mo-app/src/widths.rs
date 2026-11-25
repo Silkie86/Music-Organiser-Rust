@@ -18,7 +18,8 @@ pub const KEY: &str = "widths";
 pub struct Part {
     /// Its name in the setting: `<page>.<part>`.
     pub name: &'static str,
-    /// Its width until you drag it, and again after a double-click on its edge.
+    /// Its width until you drag it, and again after a double-click on its edge. 0 where the page works it out (the
+    /// Songs list, a third of the room): then the page is given 0, and its own width is used.
     pub usual: f32,
     /// The least and the most it may be: enough for what it shows, and not so much the rest of the page goes.
     pub least: f32,
@@ -37,6 +38,16 @@ pub const PARTS: &[Part] = &[
     part("midi.card", 420.0, 320.0, 900.0),
     part("plugins.card", 420.0, 320.0, 900.0),
     part("space.card", 380.0, 320.0, 900.0),
+    // The filter column on the left of a page's list.
+    part("sounds.filters", 208.0, 160.0, 360.0),
+    part("presets.filters", 208.0, 160.0, 360.0),
+    part("midi.filters", 208.0, 160.0, 360.0),
+    part("plugins.filters", 208.0, 160.0, 360.0),
+    part("songs.filters", 208.0, 160.0, 360.0),
+    // The Sounds folder tree, beside the filter column.
+    part("sounds.folders", 280.0, 180.0, 480.0),
+    // The Songs list beside the song's panel. Its usual width is none: the page gives it a third of the room then.
+    part("songs.list", 0.0, 320.0, 1200.0),
 ];
 
 /// The part called `name`, if there is one.
@@ -68,7 +79,8 @@ impl Widths {
         self.chosen.iter().map(|(name, w)| format!("{name}={}", w.round())).collect::<Vec<_>>().join(";")
     }
 
-    /// How wide `name` is: the width you chose, else its usual one. 0 for a part that isn't in the table.
+    /// How wide `name` is: the width you chose, else its usual one. 0 for a part that isn't in the table, or one whose
+    /// usual width the page works out (see [`Part::usual`]) while you haven't chosen one.
     pub fn width(&self, name: &str) -> f32 {
         let Some(part) = find(name) else { return 0.0 };
         self.chosen.get(part.name).copied().unwrap_or(part.usual)
@@ -105,7 +117,11 @@ mod tests {
     #[test]
     fn every_part_once_with_its_usual_width_inside_its_limits() {
         for (i, p) in PARTS.iter().enumerate() {
-            assert!(p.least <= p.usual && p.usual <= p.most, "{}", p.name);
+            // A usual width of 0 only where the page works one out (the Songs list's third of the room): anywhere else
+            // the part would be given no width at all.
+            let worked_out = p.name == "songs.list";
+            assert!(if worked_out { p.usual == 0.0 } else { p.least <= p.usual && p.usual <= p.most }, "{}", p.name);
+            assert!(p.least <= p.most, "{}", p.name);
             assert!(p.name.contains('.') && !p.name.contains(['=', ';']), "{}", p.name);
             assert!(PARTS[..i].iter().all(|q| q.name != p.name), "{} twice", p.name);
         }
@@ -120,6 +136,16 @@ mod tests {
         assert_eq!(w.set("midi.card", 420.2), 420.0);
         assert_eq!(w.value(), "sounds.card=520");
         assert_eq!(w.reset("sounds.card"), 400.0);
+        assert_eq!(w.value(), "");
+    }
+
+    #[test]
+    fn a_worked_out_width_is_none_until_dragged() {
+        let mut w = Widths::default();
+        assert_eq!(w.width("songs.list"), 0.0);
+        assert_eq!(w.set("songs.list", 10.0), 320.0);
+        assert_eq!(w.value(), "songs.list=320");
+        assert_eq!(w.reset("songs.list"), 0.0);
         assert_eq!(w.value(), "");
     }
 

@@ -4,7 +4,7 @@
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { CurveEditor } from "curve_editor.slint";
-import { Theme, AppKeys, Type, Space, Well, Panel, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, Panel, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons, Widths } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -904,6 +904,9 @@ export component PresetsPage inherits Rectangle {
             // as a tick list, the plugins in a menu that scrolls; more than one part or plugin can be picked, one or
             // none of the rest. After the list, so the opened column of a narrow window lies over it.
             column := FilterColumn {
+                part: "presets.filters";
+                wide: Widths.presets-filters;
+                resizing(w) => { Widths.presets-filters = w; }
                 page-width: split.width;
                 height: split.height;
                 active: PresetsData.section == 0 ? PresetsData.any-filter : PresetsData.curve-any-filter;

@@ -7,8 +7,9 @@
 //! - it lists every CLAP extension the DAW has ([`check`]), to settle which of the plan's extensions Bitwig 6.1
 //!   offers.
 //!
-//! It shows in the DAW as the instrument "DAWmate (test)" (its ID is still the one it had as "Music Organiser (test)",
-//! so songs that have it go on loading it). The notes played into it are read for their chords
+//! It shows in the DAW as the instrument "DAWmate" (Solomon, 2026-11-25: the installer brings it; it was "DAWmate
+//! (test)", and before that "Music Organiser (test)"; its ID is still the first one, so songs that have it go on
+//! loading it). The notes played into it are read for their chords
 //! ([`chordcheck`]) and passed on out with Thru on. It writes one thing in the app's files: a curve edited in its
 //! Curves tab, kept as a new curve in `curves.db` ([`curves::save_as_new`]; Solomon, 20 Nov 2026).
 //!
@@ -104,6 +105,8 @@ pub struct Instance {
     pub chords: Arc<chordcheck::Checker>,
     /// The tab the window showed last: it opens on it again.
     pub view: std::sync::atomic::AtomicI32,
+    /// The shuffled order's seed: the same each time the window opens, so it opens on the list it showed.
+    pub seed: u64,
     /// Keeps what the window read while the plugin is loaded ([`kept`]).
     _alive: kept::Alive,
 }
@@ -131,7 +134,7 @@ impl Plugin for MoPlugin {
 impl DefaultPluginFactory for MoPlugin {
     fn get_descriptor() -> PluginDescriptor {
         use clack_plugin::plugin::features::{INSTRUMENT, SAMPLER, STEREO};
-        PluginDescriptor::new("com.silkie86.music-organiser.test", "DAWmate (test)")
+        PluginDescriptor::new("com.silkie86.music-organiser.test", "DAWmate")
             .with_vendor("DAWmate")
             .with_version(env!("CARGO_PKG_VERSION"))
             .with_description("Browse and play your sounds inside the DAW (test version)")
@@ -168,6 +171,9 @@ impl DefaultPluginFactory for MoPlugin {
                 listener: Arc::default(),
                 chords: Arc::default(),
                 view: std::sync::atomic::AtomicI32::new(0),
+                seed: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos() as u64),
                 _alive: kept::Alive::new(),
             }),
             _card: real.then(gpu::hold),

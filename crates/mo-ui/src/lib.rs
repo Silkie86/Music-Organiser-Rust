@@ -17,6 +17,7 @@ mod canvas;
 pub mod cards;
 pub mod close_ask;
 pub mod curve_editor;
+pub mod daw_links;
 pub mod daws;
 pub mod drag;
 pub mod files;
