@@ -148,14 +148,20 @@ impl slint::platform::Platform for Platform {
     }
 }
 
+/// A list worked out: the asking's number, the library it's of, the sounds it shows and the filter column's counts.
+type Found = (u64, Arc<Library>, Vec<usize>, SoundCounts);
+
 /// What background threads hand the panel: the newest of each wins.
 #[derive(Default)]
 struct Slots {
     library: Mutex<Option<Read>>,
+    /// The library read again, when the window opened on the one kept from before and the app had changed it since.
+    library_again: Mutex<Option<Arc<Library>>>,
     /// What the app says about folders (its sample folders, drives away, folders hidden), read with the library.
     folders: Mutex<Option<crate::folders::FolderSettings>>,
-    /// What the list shows for what was asked, with the filter column's counts and the asking's number.
-    found: Mutex<Option<(u64, Vec<usize>, SoundCounts)>>,
+    /// What the list shows for what was asked, with the filter column's counts, the asking's number and the library
+    /// it was worked out of.
+    found: Mutex<Option<Found>>,
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
     /// Works the list out, one asking at a time ([`crate::threads::OneAtATime`]).
@@ -265,6 +271,8 @@ fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
 /// The list's lines, made only for the rows shown (the list can hold half a million sounds).
 struct Lines {
     library: RefCell<Option<Arc<Library>>>,
+    /// A library read again, to show once its list is worked out (until then the lines are the old one's).
+    next: RefCell<Option<Arc<Library>>>,
     shown: RefCell<Arc<Vec<usize>>>,
     /// The waveforms of the lines on show, as pictures.
     waves: RefCell<Kept<slint::Image>>,
@@ -272,6 +280,11 @@ struct Lines {
 }
 
 impl Lines {
+    /// The library a new list is worked out of: the one read again when there is one, else the one on show.
+    fn to_view(&self) -> Option<Arc<Library>> {
+        self.next.borrow().clone().or_else(|| self.library.borrow().clone())
+    }
+
     fn show(&self, library: Option<Arc<Library>>, shown: Arc<Vec<usize>>) {
         *self.library.borrow_mut() = library;
         *self.shown.borrow_mut() = shown;
@@ -715,6 +728,7 @@ impl Shown {
 
         let lines = Rc::new(Lines {
             library: RefCell::new(None),
+            next: RefCell::new(None),
             shown: RefCell::new(Arc::default()),
             waves: RefCell::new(Kept::default()),
             notify: ModelNotify::default(),
@@ -730,8 +744,8 @@ impl Shown {
             lines,
             slots,
             curves: curves_tab::CurvesTab::new(Arc::clone(&instance.player)),
+            asked: Rc::new(RefCell::new(Asked { seed: instance.seed, ..Asked::default() })),
             instance,
-            asked: Rc::new(RefCell::new(Asked { seed: seed(), ..Asked::default() })),
             column: Rc::new(Column::default()),
             midi: midi_tab::MidiTab::new(),
             presets: presets_tab::PresetsTab::new(),
@@ -938,7 +952,7 @@ impl Shown {
             let column = Rc::clone(&self.column);
             let weak = panel.as_weak();
             Rc::new(move |change: &dyn Fn(&mut Asked, Option<&Library>)| {
-                let library = lines.library.borrow().clone();
+                let library = lines.to_view();
                 let before = asked.borrow().clone();
                 change(&mut asked.borrow_mut(), library.as_deref());
                 let asked = asked.borrow().clone();
@@ -1034,14 +1048,30 @@ impl Shown {
             // As the app's Sounds page left Hide silent sounds, before the list's first view.
             slots.shows_silent.store(library::shows_silent(), Ordering::Release);
             slots.hides_copies.store(library::hides_copies(), Ordering::Release);
-            let read = library::read();
             // The types the track's name names, among the library's (it goes over every sound: not on the panel's
             // thread).
-            if let Read::Ready(library) = &read {
-                let types = library.list.type_counts();
-                *lock(&slots.track_types) = crate::track::named(&track, types.iter().map(|(t, _)| t.as_str()));
+            let first = |read: Read| {
+                if let Read::Ready(library) = &read {
+                    let types = library.list.type_counts();
+                    *lock(&slots.track_types) = crate::track::named(&track, types.iter().map(|(t, _)| t.as_str()));
+                }
+                *lock(&slots.library) = Some(read);
+            };
+            // The library kept from before shows at once; when the app has changed it since, it's read again and
+            // takes its place once its list is worked out.
+            let kept = library::kept();
+            if let Some(kept) = &kept {
+                first(Read::Ready(Arc::clone(kept)));
             }
-            *lock(&slots.library) = Some(read);
+            let read = library::read();
+            match (kept, read) {
+                (None, read) => first(read),
+                (Some(kept), Read::Ready(again)) if !Arc::ptr_eq(&kept, &again) => {
+                    *lock(&slots.library_again) = Some(again);
+                }
+                // The same, or it couldn't be read again: the one kept stays.
+                (Some(_), _) => {}
+            }
         });
     }
 
@@ -1946,6 +1976,14 @@ impl Shown {
                 Read::Not(why) => self.panel.set_status(why.into()),
             }
         }
+        // The library read again (the app changed it since the one kept): its list is worked out, and it takes the
+        // old one's place when that's in. The sounds like your favourites are looked for in it again.
+        if let Some(again) = take(&self.slots.library_again) {
+            *self.lines.next.borrow_mut() = Some(Arc::clone(&again));
+            self.slots.like_shown.store(false, Ordering::Release);
+            like_wanted(&again, &self.asked.borrow(), &self.slots);
+            view(again, self.asked.borrow().clone(), Arc::clone(&self.slots));
+        }
         // The folders the app hides are hidden here too, below the app's sample folders: the list again once it's
         // there (before it is, the first view takes them).
         if let Some(settings) = take(&self.slots.folders) {
@@ -1955,7 +1993,7 @@ impl Shown {
                 asked.filters.folder_tops = settings.tops;
             }
             self.column.tree.borrow_mut().away = settings.away.into_iter().collect();
-            let library = self.lines.library.borrow().clone();
+            let library = self.lines.to_view();
             let asked = self.asked.borrow().clone();
             self.column.show(&self.panel, library.as_deref(), &asked);
             if let Some(library) = library {
@@ -1963,7 +2001,7 @@ impl Shown {
             }
         }
         // The sounds like your favourites became known (whichever panel asked for them): the list again, once.
-        if let Some(library) = self.lines.library.borrow().clone()
+        if let Some(library) = self.lines.to_view()
             && !self.slots.like_shown.load(Ordering::Acquire)
             && matches!(library.like(), Like::Ready(_) | Like::Not(_))
         {
@@ -1972,10 +2010,19 @@ impl Shown {
             self.column.show(&self.panel, Some(&library), &asked);
             view(library, asked, Arc::clone(&self.slots));
         }
-        if let Some((number, found, counts)) = take(&self.slots.found)
+        if let Some((number, library, found, counts)) = take(&self.slots.found)
             && number == self.slots.searches.load(Ordering::Acquire)
         {
-            let library = self.lines.library.borrow().clone();
+            // A library read again comes on show with its first list: the Galaxy's stars are read again for it.
+            let before = self.lines.library.borrow().clone();
+            if before.is_some_and(|b| !Arc::ptr_eq(&b, &library)) {
+                self.sky.borrow_mut().forget_map();
+                self.sky_asked.set(false);
+            }
+            if self.lines.next.borrow().as_ref().is_some_and(|n| Arc::ptr_eq(n, &library)) {
+                *self.lines.next.borrow_mut() = None;
+            }
+            let library = Some(library);
             let total = library.as_ref().map_or(0, |l| l.list.len());
             // Silent sounds hidden narrow it too (they're not a filter the Clear chip takes off).
             let hiding_silent = {
@@ -2372,6 +2419,15 @@ impl WindowHandler for Shown {
                 if by != 0 && key.state == KeyState::Down && self.panel.invoke_step(by) {
                     return EventStatus::Captured;
                 }
+                // Left stops the sound and Right plays it again, in the Sounds list.
+                let side = match key.key {
+                    Key::Named(NamedKey::ArrowLeft) => -1,
+                    Key::Named(NamedKey::ArrowRight) => 1,
+                    _ => 0,
+                };
+                if side != 0 && key.state == KeyState::Down && !key.repeat && self.panel.invoke_side(side) {
+                    return EventStatus::Captured;
+                }
                 let Some(text) = key_text(&key.key) else { return EventStatus::Ignored };
                 // What Slint knows of Shift, Ctrl and Alt from here on.
                 if let Some(at) = held_key(&key.key) {
@@ -2421,6 +2477,11 @@ fn like_wanted(library: &Arc<Library>, asked: &Asked, slots: &Slots) {
 /// number, and only the newest asking's answer is shown.
 fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
     let number = slots.searches.fetch_add(1, Ordering::AcqRel) + 1;
+    // Worked out lately: it shows at once (a window opened again asks for what it showed).
+    if let Some((shown, counts)) = Views::get(&library, &asked) {
+        *lock(&slots.found) = Some((number, library, shown, counts));
+        return;
+    }
     let theirs = Arc::clone(&slots);
     slots.lister.ask(move || {
         let slots = theirs;
@@ -2431,11 +2492,48 @@ fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
         let started = Instant::now();
         let (shown, counts) = library.view(&asked);
         crate::log::took_if_slow("List", &format!("Worked out a list of {} sounds", shown.len()), started);
+        Views::keep(&library, &asked, &shown, &counts);
         let mut found = lock(&slots.found);
         if found.as_ref().is_none_or(|(n, ..)| *n < number) {
-            *found = Some((number, shown, counts));
+            *found = Some((number, library, shown, counts));
         }
     });
+}
+
+/// The last few lists worked out, kept while the plugin is loaded, so a window opened again shows its list at once
+/// instead of "Getting the list ready" (Solomon, 25 Nov). Only a few: each is a number a sound (about 4 MB for his
+/// library). A list of a library read again since isn't used.
+struct Views;
+
+/// How many lists [`Views`] keeps.
+const VIEWS_KEPT: usize = 3;
+
+type KeptView = (std::sync::Weak<Library>, Asked, Vec<usize>, SoundCounts);
+
+static VIEWS: Mutex<Vec<KeptView>> = Mutex::new(Vec::new());
+
+impl Views {
+    fn get(library: &Arc<Library>, asked: &Asked) -> Option<(Vec<usize>, SoundCounts)> {
+        let mut views = lock(&VIEWS);
+        views.retain(|(l, ..)| l.strong_count() > 0);
+        let at = views.iter().position(|(l, a, ..)| std::ptr::eq(l.as_ptr(), Arc::as_ptr(library)) && a == asked)?;
+        // The newest used goes last: the oldest goes first when there's no room.
+        let view = views.remove(at);
+        let found = (view.2.clone(), view.3.clone());
+        views.push(view);
+        Some(found)
+    }
+
+    fn keep(library: &Arc<Library>, asked: &Asked, shown: &[usize], counts: &SoundCounts) {
+        let mut views = lock(&VIEWS);
+        views.retain(|(l, a, ..)| {
+            l.strong_count() > 0 && !(std::ptr::eq(l.as_ptr(), Arc::as_ptr(library)) && a == asked)
+        });
+        if views.len() >= VIEWS_KEPT {
+            views.remove(0);
+        }
+        views.push((Arc::downgrade(library), asked.clone(), shown.to_vec(), counts.clone()));
+    }
 }
 
 /// The filter column's lines, kept from one showing to the next, and the counts of the list last worked out (the
@@ -2822,6 +2920,25 @@ fn label_take(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_list_worked_out_is_kept_for_its_library_and_asking_only() {
+        let library = Arc::new(Library::new(vec![mo_sounds::Sound::new(1, r"D:\Drums\kick.wav")]));
+        let asked = Asked { seed: 7, ..Asked::default() };
+        let (shown, counts) = library.view(&asked);
+        Views::keep(&library, &asked, &shown, &counts);
+        assert_eq!(Views::get(&library, &asked), Some((shown.clone(), counts.clone())));
+        // Another asking, or the same library read again: worked out anew.
+        assert!(Views::get(&library, &Asked { seed: 8, ..Asked::default() }).is_none());
+        let again = Arc::new(Library::new(vec![mo_sounds::Sound::new(1, r"D:\Drums\kick.wav")]));
+        assert!(Views::get(&again, &asked).is_none());
+        // Only a few are kept: the oldest goes.
+        for seed in 10..10 + VIEWS_KEPT as u64 {
+            Views::keep(&library, &Asked { seed, ..Asked::default() }, &shown, &counts);
+        }
+        assert!(Views::get(&library, &asked).is_none());
+        assert_eq!(lock(&VIEWS).len(), VIEWS_KEPT);
+    }
 
     #[test]
     fn only_the_newest_drag_asked_for_starts_and_letting_go_calls_it_off() {

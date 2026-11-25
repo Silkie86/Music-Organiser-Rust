@@ -227,9 +227,17 @@ pub fn mend_cut_off_takes() {
     }
 }
 
-/// The sound card inputs to record from, by name. Asks the system: off the panel's thread.
+/// The sound card inputs to record from, by name. Asks the system: off the panel's thread. Each time the system's list
+/// changes, the log says what it has (Solomon, 25 Nov: he thought some inputs were missing).
 pub fn inputs() -> Vec<String> {
-    record::card::inputs()
+    static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let inputs = record::card::inputs();
+    let mut logged = crate::threads::lock(&LOGGED);
+    if *logged != inputs {
+        crate::log::line("Record", &format!("The system has {} inputs: {}", inputs.len(), inputs.join("; ")));
+        logged.clone_from(&inputs);
+    }
+    inputs
 }
 
 /// An input's name split into its sound card and the input on it, as Windows names them: "Input 1/2 (Bitwig

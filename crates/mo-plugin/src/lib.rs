@@ -104,6 +104,8 @@ pub struct Instance {
     pub chords: Arc<chordcheck::Checker>,
     /// The tab the window showed last: it opens on it again.
     pub view: std::sync::atomic::AtomicI32,
+    /// The shuffled order's seed: the same each time the window opens, so it opens on the list it showed.
+    pub seed: u64,
     /// Keeps what the window read while the plugin is loaded ([`kept`]).
     _alive: kept::Alive,
 }
@@ -168,6 +170,9 @@ impl DefaultPluginFactory for MoPlugin {
                 listener: Arc::default(),
                 chords: Arc::default(),
                 view: std::sync::atomic::AtomicI32::new(0),
+                seed: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos() as u64),
                 _alive: kept::Alive::new(),
             }),
             _card: real.then(gpu::hold),
