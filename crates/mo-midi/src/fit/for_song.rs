@@ -131,7 +131,7 @@ impl Own {
         // The loops among them that a folder of `.mid` files has: that folder, and the loop's shape.
         let mut loops: HashSet<(String, i64)> = HashSet::new();
         for (at, e) in cat.entries.iter().enumerate() {
-            if !sources(e).any(&mut is_save) {
+            if !e.sources().any(&mut is_save) {
                 continue;
             }
             in_song.insert(at);
@@ -170,14 +170,9 @@ impl Own {
     }
 }
 
-/// Every file a part's notes are in, the newest first.
-fn sources(e: &Entry) -> impl Iterator<Item = &Arc<Source>> {
-    std::iter::once(&e.phrase.source).chain(&e.other_sources)
-}
-
 /// The `.mid` files among them.
 fn files(e: &Entry) -> impl Iterator<Item = &Arc<Source>> {
-    sources(e).filter(|source| source.kind == SourceKind::File)
+    e.sources().filter(|source| source.kind == SourceKind::File)
 }
 
 /// A part's shape, when it can be a loop a pack has in several keys: never drums (a drum pattern moved is other

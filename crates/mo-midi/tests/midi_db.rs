@@ -165,7 +165,7 @@ fn reads_what_the_csharp_app_saved() {
     assert_eq!(catalogue.entries.len(), 2);
     assert_eq!(catalogue.entries[0].copies(), 2);
     let keys = &catalogue.entries[1];
-    assert_eq!(keys.instrument.as_ref().unwrap().why, "“Keyscape” is a piano plugin");
+    assert_eq!(keys.instrument_why().unwrap().why, "“Keyscape” is a piano plugin");
 
     drop(index);
     assert_eq!(std::fs::read(&path).unwrap(), before, "midi.db is never changed");
