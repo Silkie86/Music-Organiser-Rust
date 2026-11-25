@@ -392,29 +392,6 @@ pub struct Save {
     pub fixed: Option<(PathBuf, bool)>,
 }
 
-/// How a save's time is kept in a file: seconds and nanoseconds since 1970. A time before then (a zeroed or broken
-/// date) or past what a time can hold is kept and read as none, so one odd file never stops a whole list being kept
-/// or read.
-pub mod kept_time {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(time: &Option<SystemTime>, to: S) -> Result<S::Ok, S::Error> {
-        let since = time.and_then(|t| t.duration_since(UNIX_EPOCH).ok());
-        since.map(|d| (d.as_secs(), d.subsec_nanos())).serialize(to)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(from: D) -> Result<Option<SystemTime>, D::Error> {
-        let kept = Option::<(u64, u32)>::deserialize(from)?;
-        Ok(kept.and_then(|(secs, nanos)| {
-            // Past the year 9999 no clock or calendar here reads it.
-            const LATEST: u64 = 253_402_300_799;
-            (secs <= LATEST && nanos < 1_000_000_000).then(|| UNIX_EPOCH.checked_add(Duration::new(secs, nanos)))?
-        }))
-    }
-}
-
 impl Save {
     /// Whether it has a "(fixed)" project as new as it.
     pub fn is_fixed(&self) -> bool {
