@@ -42,7 +42,7 @@ fn own_folder(name: &str) -> bool {
 
 /// A project's copy that's the same as a Library file. It was the same byte for byte when looked at: whatever acts on
 /// it (the converter, then the Recycle Bin) compares the two again first.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryCopy {
     /// The copy in the project's `multi-samples` folder, or a single sample in its `samples` folder.
     pub in_project: String,
@@ -379,11 +379,10 @@ pub fn documents() -> Option<PathBuf> {
 
 /// One of the Bitwig projects in a project folder: one of your saves beside the project, or one in a folder below it
 /// (Bitwig's auto-backups).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Save {
     pub path: PathBuf,
     /// When it was last saved, when that can be read.
-    #[serde(with = "kept_time")]
     pub modified: Option<SystemTime>,
     /// In a folder below the project's own (Bitwig's auto-backups).
     pub below: bool,
@@ -396,7 +395,7 @@ pub struct Save {
 /// How a save's time is kept in a file: seconds and nanoseconds since 1970. A time before then (a zeroed or broken
 /// date) or past what a time can hold is kept and read as none, so one odd file never stops a whole list being kept
 /// or read.
-mod kept_time {
+pub mod kept_time {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use serde::{Deserialize, Deserializer, Serialize, Serializer};

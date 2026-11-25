@@ -8,31 +8,27 @@
 //! [`crate::backup::WRITTEN_WHOLE`] and counted with the caches on the App files card. One too big to be worth
 //! keeping ([`KEEP_AT_MOST`]) isn't kept, and the last one goes.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use mo_space::bitwig::{LibraryCopy, Save};
 use serde::{Deserialize, Serialize};
 
-use crate::space_bitwig::Copies;
+use crate::space_bitwig::{Copies, Project};
 
 /// The file, in the data folder.
 pub const FILE_NAME: &str = "bitwig-copies-found.json";
 
-/// The most the file may take (rule 28): a few thousand copies take about a megabyte.
-pub const KEEP_AT_MOST: usize = 32 * 1024 * 1024;
+/// The most the file may take (rule 28). Solomon's list of 25 Nov 2026 (234 GB of copies in 400 projects) would
+/// have taken 52.8 MB with every path written out in full, which the first make of the file did; this make writes
+/// each path below its project's folder and each original once, and his takes a fraction of that.
+pub const KEEP_AT_MOST: usize = 64 * 1024 * 1024;
 
-/// The file's make: one of another make isn't read.
-const VERSION: u32 = 1;
-
-#[derive(Serialize)]
-struct Writes<'a> {
-    version: u32,
-    /// When the look ended, in seconds since 1970.
-    found_at: u64,
-    found: &'a Copies,
-}
+/// The file's make: one of another make isn't read. 2 since paths are written below their project's folder.
+const VERSION: u32 = 2;
 
 /// A file's make, read first: one of another make may hold anything else.
 #[derive(Deserialize)]
@@ -40,10 +36,121 @@ struct Make {
     version: u32,
 }
 
-#[derive(Deserialize)]
-struct Reads {
+/// The file. Written small, as the list is long: an original many copies are the same as is written once
+/// (`originals`, which copies name by place), and a path in a project's folder is written from that folder on.
+#[derive(Serialize, Deserialize)]
+struct File {
+    version: u32,
+    /// When the look ended, in seconds since 1970.
     found_at: u64,
-    found: Copies,
+    library: Vec<PathBuf>,
+    folders: usize,
+    originals: Vec<String>,
+    projects: Vec<KeptProject>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeptProject {
+    folder: String,
+    copies: Vec<KeptCopy>,
+    saves: Vec<KeptSave>,
+}
+
+/// A copy: its path, its original's place in `originals`, its size.
+#[derive(Serialize, Deserialize)]
+struct KeptCopy(Below, u32, u64);
+
+#[derive(Serialize, Deserialize)]
+struct KeptSave {
+    path: Below,
+    #[serde(with = "mo_space::bitwig::kept_time")]
+    modified: Option<SystemTime>,
+    below: bool,
+    fixed: Option<(Below, bool)>,
+}
+
+/// A path as the file holds it: what follows the project's folder when it begins with it (true), or all of it.
+#[derive(Serialize, Deserialize)]
+struct Below(String, bool);
+
+impl Below {
+    fn of(folder: &str, path: &str) -> Self {
+        match path.strip_prefix(folder) {
+            Some(rest) => Self(rest.to_owned(), true),
+            None => Self(path.to_owned(), false),
+        }
+    }
+
+    fn whole(self, folder: &str) -> String {
+        if self.1 { format!("{folder}{}", self.0) } else { self.0 }
+    }
+}
+
+/// A path as text, or why the list can't be kept.
+fn text(path: &Path) -> Result<&str, String> {
+    path.to_str().ok_or_else(|| format!("{} isn't text", path.display()))
+}
+
+fn to_file(found: &Copies, found_at: u64) -> Result<File, String> {
+    let mut originals: Vec<String> = Vec::new();
+    let mut places: HashMap<&str, u32> = HashMap::new();
+    let mut projects = Vec::with_capacity(found.projects.len());
+    for p in &found.projects {
+        let folder = text(&p.folder)?;
+        let mut copies = Vec::with_capacity(p.copies.len());
+        for c in &p.copies {
+            let place = match places.get(c.library_file.as_str()) {
+                Some(&place) => place,
+                None => {
+                    let place = u32::try_from(originals.len()).map_err(|_| "too many originals".to_owned())?;
+                    originals.push(c.library_file.clone());
+                    places.insert(&c.library_file, place);
+                    place
+                }
+            };
+            copies.push(KeptCopy(Below::of(folder, &c.in_project), place, c.bytes));
+        }
+        let mut saves = Vec::with_capacity(p.saves.len());
+        for s in &p.saves {
+            let fixed = match &s.fixed {
+                Some((path, new)) => Some((Below::of(folder, text(path)?), *new)),
+                None => None,
+            };
+            saves.push(KeptSave {
+                path: Below::of(folder, text(&s.path)?),
+                modified: s.modified,
+                below: s.below,
+                fixed,
+            });
+        }
+        projects.push(KeptProject { folder: folder.to_owned(), copies, saves });
+    }
+    Ok(File { version: VERSION, found_at, library: found.library.clone(), folders: found.folders, originals, projects })
+}
+
+fn from_file(file: File) -> Result<Copies, String> {
+    let originals = file.originals;
+    let mut projects = Vec::with_capacity(file.projects.len());
+    for p in file.projects {
+        let folder = p.folder;
+        let mut copies = Vec::with_capacity(p.copies.len());
+        for KeptCopy(path, place, bytes) in p.copies {
+            let library_file = originals.get(place as usize).ok_or("a copy names an original that isn't there")?;
+            copies.push(LibraryCopy { in_project: path.whole(&folder), library_file: library_file.clone(), bytes });
+        }
+        let saves = p
+            .saves
+            .into_iter()
+            .map(|s| Save {
+                path: PathBuf::from(s.path.whole(&folder)),
+                modified: s.modified,
+                below: s.below,
+                fixed: s.fixed.map(|(path, new)| (PathBuf::from(path.whole(&folder)), new)),
+            })
+            .collect();
+        projects.push(Project { folder: PathBuf::from(folder), copies, saves });
+    }
+    Ok(Copies { library: file.library, folders: file.folders, projects })
 }
 
 /// Keeps what a look that ended at `now` found, in place of the last one. Not kept (and the last one removed, as
@@ -51,7 +158,8 @@ struct Reads {
 pub fn keep(data: &Path, found: &Copies, now: SystemTime) -> io::Result<()> {
     let path = data.join(FILE_NAME);
     let found_at = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let text = match serde_json::to_string(&Writes { version: VERSION, found_at, found }) {
+    let written = to_file(found, found_at).and_then(|file| serde_json::to_string(&file).map_err(|e| e.to_string()));
+    let text = match written {
         Ok(text) if text.len() <= KEEP_AT_MOST => text,
         Ok(text) => {
             forget(data);
@@ -86,10 +194,10 @@ pub fn kept(data: &Path) -> Option<(Copies, SystemTime)> {
         if make.version != VERSION {
             return Ok(None);
         }
-        let read = serde_json::from_slice::<Reads>(&bytes).map_err(|e| e.to_string())?;
+        let file = serde_json::from_slice::<File>(&bytes).map_err(|e| e.to_string())?;
         // A time no clock holds is a damaged file's.
-        let at = UNIX_EPOCH.checked_add(Duration::from_secs(read.found_at)).ok_or("its time can't be read")?;
-        Ok(Some((read.found, at)))
+        let at = UNIX_EPOCH.checked_add(Duration::from_secs(file.found_at)).ok_or("its time can't be read")?;
+        Ok(Some((from_file(file)?, at)))
     });
     match read {
         Ok(kept) => kept,
@@ -118,12 +226,7 @@ pub fn forget(data: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use mo_space::bitwig::{LibraryCopy, Save};
-
     use super::*;
-    use crate::space_bitwig::Project;
 
     fn dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
@@ -186,19 +289,27 @@ mod tests {
         let data = dir("mo-app-bitwig-kept-damaged");
         let file = data.join(FILE_NAME);
         let far = format!(
-            "{{\"version\":1,\"found_at\":{},\"found\":{{\"library\":[],\"folders\":0,\"projects\":[]}}}}",
+            "{{\"version\":2,\"found_at\":{},\"library\":[],\"folders\":0,\"originals\":[],\"projects\":[]}}",
             u64::MAX
         );
-        let partly = "{\"version\":1,\"found_at\":5,\"found\":{\"library\":[]}}";
-        for text in ["", "not json", "{\"version\":1}", partly, &far] {
+        let partly = "{\"version\":2,\"found_at\":5,\"library\":[]}";
+        // A copy that names an original the file doesn't hold.
+        let no_original = "{\"version\":2,\"found_at\":5,\"library\":[],\"folders\":0,\"originals\":[],\"projects\":[\
+            {\"folder\":\"a\",\"copies\":[[[\"/b\",true],0,5]],\"saves\":[]}]}";
+        for text in ["", "not json", "{\"version\":2}", partly, &far, no_original] {
             fs::write(&file, text).unwrap();
             assert_eq!(kept(&data), None, "{text}");
         }
-        let other = serde_json::to_string(&Writes { version: VERSION + 1, found_at: 5, found: &found() }).unwrap();
-        fs::write(&file, other).unwrap();
+        let mut other = to_file(&found(), 5).unwrap();
+        other.version = VERSION + 1;
+        fs::write(&file, serde_json::to_string(&other).unwrap()).unwrap();
         assert_eq!(kept(&data), None, "a later make");
-        fs::write(&file, "{\"version\":2,\"something\":\"else\"}").unwrap();
+        fs::write(&file, "{\"version\":3,\"something\":\"else\"}").unwrap();
         assert_eq!(kept(&data), None, "a later make of another shape");
+        // The first make, which wrote every path in full.
+        fs::write(&file, "{\"version\":1,\"found_at\":5,\"found\":{\"library\":[],\"folders\":0,\"projects\":[]}}")
+            .unwrap();
+        assert_eq!(kept(&data), None, "the first make");
         // A new look's own takes the place of any of them.
         keep(&data, &found(), UNIX_EPOCH).unwrap();
         assert_eq!(kept(&data), Some((found(), UNIX_EPOCH)));
@@ -219,6 +330,56 @@ mod tests {
         fs::write(data.join(FILE_NAME), text.replace("[1795000000,123456700]", "[99999999999999,0]")).unwrap();
         let (read, _) = kept(&data).unwrap();
         assert_eq!(read.projects[0].saves[0].modified, None);
+        let _ = fs::remove_dir_all(&data);
+    }
+
+    /// Solomon's list of 25 Nov 2026 took 52.8 MB as the first make wrote it, over the limit, so nothing was kept
+    /// and Space looked afresh at every start all the same.
+    #[test]
+    fn a_list_as_long_as_solomons_is_small_enough_to_keep() {
+        let data = dir("mo-app-bitwig-kept-long");
+        let library = r"K:\Bitwig Studio\Library\Multisamples\Solomon's own\Keys and pads";
+        let projects = (0..400)
+            .map(|p| {
+                let folder = format!(r"K:\Music\Bitwig Projects\2026\A song with a long name {p}");
+                Project {
+                    copies: (0..400)
+                        .map(|c| LibraryCopy {
+                            in_project: format!(r"{folder}\multi-samples\A multisample's name {c} 2.multisample"),
+                            library_file: format!(r"{library}\A multisample's name {c}.multisample"),
+                            bytes: 1_500_000,
+                        })
+                        .collect(),
+                    saves: (0..30)
+                        .map(|s| Save {
+                            path: PathBuf::from(format!(r"{folder}\auto-backups\A song {s}.bwproject")),
+                            modified: Some(UNIX_EPOCH + Duration::new(1_795_000_000 + s, 5)),
+                            below: true,
+                            fixed: None,
+                        })
+                        .collect(),
+                    folder: PathBuf::from(folder),
+                }
+            })
+            .collect();
+        let long = Copies { library: vec![PathBuf::from(library)], folders: 428, projects };
+        assert_eq!(long.projects.iter().map(|p| p.copies.len()).sum::<usize>(), 160_000);
+        keep(&data, &long, UNIX_EPOCH).unwrap();
+        let size = fs::metadata(data.join(FILE_NAME)).unwrap().len();
+        assert!(size < KEEP_AT_MOST as u64 / 4, "{size} bytes");
+        assert_eq!(kept(&data), Some((long, UNIX_EPOCH)));
+        let _ = fs::remove_dir_all(&data);
+    }
+
+    /// A path outside its project's folder (none is today) is kept whole.
+    #[test]
+    fn a_path_outside_its_projects_folder_comes_back_as_it_was() {
+        let data = dir("mo-app-bitwig-kept-outside");
+        let mut odd = found();
+        odd.projects[0].copies[0].in_project = r"Z:\elsewhere\Keys 2.multisample".to_owned();
+        odd.projects[0].saves[0].fixed = Some((PathBuf::from(r"Z:\elsewhere\GARAGE (fixed).bwproject"), false));
+        keep(&data, &odd, UNIX_EPOCH).unwrap();
+        assert_eq!(kept(&data), Some((odd, UNIX_EPOCH)));
         let _ = fs::remove_dir_all(&data);
     }
 
