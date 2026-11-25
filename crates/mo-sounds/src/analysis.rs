@@ -126,21 +126,36 @@ impl Chroma {
         if strengths.is_empty() {
             return Chroma(Notes::None);
         }
+        // Straight into the 120 bits, with no list in between: this runs for every sound the list reads.
         let packed = (strengths.len() == 12)
-            .then(|| strengths.iter().map(|&x| thousandths(x)).collect::<Option<Vec<u16>>>())
+            .then(|| {
+                let bits = |bits: u128, (i, &x): (usize, &f64)| Some(bits | (u128::from(thousandths(x)?) << (10 * i)));
+                strengths.iter().enumerate().try_fold(0u128, bits)
+            })
             .flatten();
         match packed {
-            Some(ks) => {
-                let mut bits = 0u128;
-                for (i, k) in ks.iter().enumerate() {
-                    bits |= u128::from(*k) << (10 * i);
-                }
+            Some(bits) => {
                 let mut bytes = [0u8; 15];
                 bytes.copy_from_slice(&bits.to_le_bytes()[..15]);
                 Chroma(Notes::Packed(bytes))
             }
             None => Chroma(Notes::Floats(Box::new(strengths.to_vec()))),
         }
+    }
+
+    /// The 12 thousandths as they're packed (10 bits each, the first in the lowest bits), when that's how they're
+    /// held: the same bytes the compact library keeps after its mark, so it reads and writes them as they are.
+    pub(crate) fn packed(&self) -> Option<&[u8; 15]> {
+        match &self.0 {
+            Notes::Packed(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    /// 12 thousandths from their packed bytes. Any 15 bytes are 12 numbers of 10 bits, and each is a thousandth
+    /// [`F64_THOUSANDTHS`] has a float for, so this is what [`Chroma::new`] makes of those floats.
+    pub(crate) fn from_packed(bytes: [u8; 15]) -> Chroma {
+        Chroma(Notes::Packed(bytes))
     }
 
     pub fn len(&self) -> usize {

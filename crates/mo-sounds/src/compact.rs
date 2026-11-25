@@ -1923,7 +1923,7 @@ fn analysis_values(a: Option<&SoundAnalysis>) -> Vec<Value> {
         text(&a.key_source),
         a.chord.as_deref().map_or(Value::Null, text),
         packed_chords(&a.chords),
-        packed(&a.chroma.to_vec()),
+        packed_chroma(&a.chroma),
         json_list(&a.character),
     ]
 }
@@ -1966,7 +1966,7 @@ pub(crate) fn analysis_at(r: &Row<'_>, at: usize) -> Option<SoundAnalysis> {
             Some(ValueRef::Blob(b)) => unpacked_chords(b),
             _ => from_json_list(text(20).as_deref()),
         },
-        chroma: Chroma::new(&unpacked::<f64>(blob(21))),
+        chroma: unpacked_chroma(blob(21)),
         character: from_json_list(text(22).as_deref()),
         waveform: unpacked_peaks(blob(23)),
     })
@@ -2141,6 +2141,34 @@ fn packed<T: Packable>(list: &[T]) -> Value {
     Value::Blob(bytes)
 }
 
+/// A sound's 12 note strengths packed for the copy: what [`packed`] makes of them as floats, without making the floats
+/// when they're held as thousandths already (they nearly always are, and this runs for every sound written).
+fn packed_chroma(chroma: &Chroma) -> Value {
+    match chroma.packed() {
+        Some(bytes) => {
+            let mut out = Vec::with_capacity(16);
+            out.push(THOUSANDTHS);
+            out.extend_from_slice(bytes);
+            Value::Blob(out)
+        }
+        None => packed(&chroma.to_vec()),
+    }
+}
+
+/// The note strengths [`packed_chroma`] packed: what [`unpacked`] gives, held as [`Chroma`] holds it. The usual 12
+/// thousandths (the mark and 15 bytes) are copied as they are, with no list of floats made on the way: this runs for
+/// every sound the list reads.
+fn unpacked_chroma(bytes: &[u8]) -> Chroma {
+    match bytes.split_first() {
+        Some((&THOUSANDTHS, rest)) if rest.len() == 15 => {
+            let mut held = [0u8; 15];
+            held.copy_from_slice(rest);
+            Chroma::from_packed(held)
+        }
+        _ => Chroma::new(&unpacked::<f64>(bytes)),
+    }
+}
+
 /// Whole thousandths packed 10 bits each, after the [`THOUSANDTHS`] mark.
 fn packed_thousandths(ks: &[u16]) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + (ks.len() * 10).div_ceil(8));
@@ -2287,6 +2315,23 @@ mod tests {
         let Value::Blob(bytes) = packed(&chroma) else { panic!() };
         assert_eq!(bytes.len(), 16);
         assert_eq!(unpacked::<f64>(&bytes), chroma);
+        // The note strengths' own way in and out gives the same bytes and the same values, for 12 thousandths, for
+        // every other list, and for bytes whose numbers go past 1000.
+        let odd: Vec<Vec<f64>> = vec![vec![], vec![0.5; 11], vec![0.5; 13], vec![0.1234; 12], vec![1.5; 12]];
+        for list in std::iter::once(chroma.to_vec()).chain(odd) {
+            let held = Chroma::new(&list);
+            assert_eq!(packed_chroma(&held), packed(&list), "{list:?}");
+            let bytes = match packed(&list) {
+                Value::Blob(bytes) => bytes,
+                _ => Vec::new(),
+            };
+            assert_eq!(unpacked_chroma(&bytes), held, "{list:?}");
+            assert_eq!(unpacked_chroma(&bytes).to_vec(), unpacked::<f64>(&bytes), "{list:?}");
+        }
+        let mut high = vec![THOUSANDTHS];
+        high.extend([0xff; 15]);
+        assert_eq!(unpacked_chroma(&high), Chroma::new(&unpacked::<f64>(&high)));
+        assert_eq!(unpacked_chroma(&high).to_vec(), vec![F64_THOUSANDTHS[1023]; 12]);
     }
 
     #[test]

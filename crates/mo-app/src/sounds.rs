@@ -373,53 +373,70 @@ struct Texts {
     all: String,
     /// Where each sound's search text ends in `all` (it starts where the one before ends).
     ends: Vec<usize>,
-    /// Where each sound's lower-cased name is in its search text: its start there and its length. [`ODD_NAME`] for a
-    /// name that isn't there letter for letter (lower-casing a Greek capital sigma depends on what follows it).
-    names: Vec<(u32, u32)>,
+    /// Where each sound's lower-cased name starts in `all` (it's in its search text, as the end of the path).
+    name_starts: Vec<usize>,
+    /// How long each sound's lower-cased name is. [`ODD_NAME`] for a name that isn't in its search text letter for
+    /// letter (lower-casing a Greek capital sigma depends on what follows it).
+    name_lens: Vec<u32>,
     /// The lower-cased names that aren't in their search text, by place.
     odd_names: HashMap<usize, String>,
 }
 
 /// Where a sound's lower-cased name is in its search text (start and length), or the name itself when it isn't there.
-type NamePlace = Result<(u32, u32), String>;
+type NamePlace = Result<(usize, u32), String>;
 
-/// In [`Texts::names`]: the name is in [`Texts::odd_names`].
-const ODD_NAME: (u32, u32) = (u32::MAX, u32::MAX);
+/// In [`Texts::name_lens`]: the name is in [`Texts::odd_names`].
+const ODD_NAME: u32 = u32::MAX;
+
+/// How many sounds' texts are worked out before they're joined on: see [`Texts::new`].
+const TEXTS_AT_ONCE: usize = 32_768;
 
 impl Texts {
     fn new(sounds: &[Sound]) -> Texts {
-        // Worked out on every core, then joined in order.
-        let each: Vec<(String, NamePlace)> = sounds
-            .par_iter()
-            .map(|s| {
-                let hay = hay_of(&Now::of(s, None));
-                let name = s.name().to_lowercase();
-                // The path is the search text's first line, and the name is in it.
-                let path = hay.split('\n').next().unwrap_or_default();
-                let found = path
-                    .rfind(name.as_str())
-                    .and_then(|at| Some((u32::try_from(at).ok()?, u32::try_from(name.len()).ok()?)))
-                    .filter(|at| *at != ODD_NAME);
-                (hay, found.ok_or(name))
-            })
-            .collect();
+        // A search text is little more than the path, so this is close, and a little short only costs a regrow.
+        let guess = sounds.iter().map(|s| s.path.len() + s.sound_type.len() + 16).sum();
         let mut texts = Texts {
-            all: String::with_capacity(each.iter().map(|(hay, _)| hay.len()).sum()),
-            ends: Vec::with_capacity(each.len()),
-            names: Vec::with_capacity(each.len()),
+            all: String::with_capacity(guess),
+            ends: Vec::with_capacity(sounds.len()),
+            name_starts: Vec::with_capacity(sounds.len()),
+            name_lens: Vec::with_capacity(sounds.len()),
             odd_names: HashMap::new(),
         };
-        for (i, (hay, name)) in each.into_iter().enumerate() {
-            texts.all.push_str(&hay);
-            texts.ends.push(texts.all.len());
-            match name {
-                Ok(at) => texts.names.push(at),
-                Err(name) => {
-                    texts.names.push(ODD_NAME);
-                    texts.odd_names.insert(i, name);
+        // Worked out on every core, a batch at a time, and each batch joined on in order and let go: all at once,
+        // every search text was held twice over until the join was done.
+        for batch in sounds.chunks(TEXTS_AT_ONCE) {
+            let each: Vec<(String, NamePlace)> = batch
+                .par_iter()
+                .map(|s| {
+                    let hay = hay_of(&Now::of(s, None));
+                    let name = s.name().to_lowercase();
+                    // The path is the search text's first line, and the name is in it.
+                    let path = hay.split('\n').next().unwrap_or_default();
+                    let found = path
+                        .rfind(name.as_str())
+                        .and_then(|at| Some((at, u32::try_from(name.len()).ok()?)))
+                        .filter(|(_, len)| *len != ODD_NAME);
+                    (hay, found.ok_or(name))
+                })
+                .collect();
+            for (hay, name) in each {
+                let (i, start) = (texts.ends.len(), texts.all.len());
+                texts.all.push_str(&hay);
+                texts.ends.push(texts.all.len());
+                match name {
+                    Ok((at, len)) => {
+                        texts.name_starts.push(start + at);
+                        texts.name_lens.push(len);
+                    }
+                    Err(name) => {
+                        texts.name_starts.push(start);
+                        texts.name_lens.push(ODD_NAME);
+                        texts.odd_names.insert(i, name);
+                    }
                 }
             }
         }
+        texts.all.shrink_to_fit();
         texts
     }
 
@@ -431,12 +448,11 @@ impl Texts {
 
     /// The lower-cased name of the sound at `i`.
     fn name(&self, i: usize) -> &str {
-        let (at, len) = self.names[i];
-        if (at, len) == ODD_NAME {
+        let (start, len) = (self.name_starts[i], self.name_lens[i]);
+        if len == ODD_NAME {
             return self.odd_names.get(&i).map_or("", String::as_str);
         }
-        let hay = self.hay(i);
-        &hay[at as usize..at as usize + len as usize]
+        &self.all[start..start + len as usize]
     }
 }
 
@@ -2579,7 +2595,18 @@ mod tests {
         assert_eq!(texts.name(2), "snare tight");
         // One piece of memory for them all; only a name that isn't in its search text is kept apart.
         assert_eq!(texts.all.len(), sounds.iter().map(|s| hay_of(&Now::of(s, None)).len()).sum::<usize>());
-        assert!(texts.odd_names.len() <= 1, "{:?}", texts.odd_names);
+        assert_eq!(texts.odd_names.keys().copied().collect::<Vec<_>>(), [6], "{:?}", texts.odd_names);
+        assert_eq!(texts.odd_names[&6], "οδος");
+        assert_eq!(texts.name_lens.iter().filter(|len| **len == ODD_NAME).count(), 1);
+        assert_eq!(texts.name_lens[6], ODD_NAME);
+        // More sounds than one batch come out the same, in order.
+        let many: Vec<Sound> =
+            (0..TEXTS_AT_ONCE + 3).map(|i| sound(i as i64, &format!(r"D:\Many\Sound {i}.WAV"), "Kick", None)).collect();
+        let texts = Texts::new(&many);
+        for i in [0, 1, TEXTS_AT_ONCE - 1, TEXTS_AT_ONCE, TEXTS_AT_ONCE + 2] {
+            assert_eq!(texts.hay(i), hay_of(&Now::of(&many[i], None)));
+            assert_eq!(texts.name(i), format!("sound {i}"));
+        }
         let none = Texts::new(&[]);
         assert!(none.all.is_empty() && none.ends.is_empty());
     }
