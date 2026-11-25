@@ -4,19 +4,20 @@
 //! in, or the folder on it was moved or renamed, so the link leads nowhere (it's lost); or a plugin update put a real
 //! folder back where the link was (replaced), or a later move of the folder around it left a second copy there
 //! (doubled), so the plugin saves where its copy doesn't get it. The page looks for them at each read ([`look`]) and
-//! names each one ([`text`]). Link again ([`link_again`]) points a lost link at its copy where it's found now, and for
-//! a replaced or doubled one copies what's new or different across, sets the folder aside and puts the link back. The
-//! folder set aside is kept in the library's folders left behind (Solomon's OK of 21 Nov 2026), so the Space page
-//! reminds you of it until it goes to the Recycle Bin. Nothing here deletes anything: the folders the mo-space steps
-//! set aside stay.
+//! shows each one as a chip with a sign, all of it in its tooltip ([`chips`]). Link again ([`link_again`]) points a
+//! lost link at its copy where it's found now, and for a replaced or doubled one copies what's new or different
+//! across, sets the folder aside and puts the link back. The folder set aside is kept in the library's folders left
+//! behind (Solomon's OK of 21 Nov 2026), so the Space page reminds you of it until it goes to the Recycle Bin. Nothing
+//! here deletes anything: the folders the mo-space steps set aside stay.
 
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use mo_formats::paths::file_name;
 use mo_space::after_move::{self, Elsewhere, OldHome};
-use mo_space::folder_move::{CantMove, Drives, MovedFolder};
+use mo_space::folder_move::{CantMove, Drives, MovedFolder, lead_report};
 use mo_space::{key, size};
 
 /// What the library keeps that the look goes by, as read just before: its moved folders, its folders left behind,
@@ -98,7 +99,7 @@ fn is_dir(path: &str) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_dir())
 }
 
-/// How many the page's line names; the rest are counted.
+/// How many a list in a sentence names; the rest are counted.
 const NAMED: usize = 3;
 
 /// The drive a path is on, as Windows names it ("E:"), or "its drive".
@@ -109,7 +110,7 @@ fn drive_name(path: &str) -> String {
         .unwrap_or_else(|| "its drive".to_owned())
 }
 
-/// One broken link, as the page's line names it.
+/// One broken link, as its tooltip and the log name it.
 fn sentence(b: &Broken) -> String {
     let (from, to) = (&b.moved.from, &b.moved.to);
     match &b.trouble {
@@ -136,58 +137,140 @@ fn sentence(b: &Broken) -> String {
     }
 }
 
-/// The page's line about the moved folders whose link doesn't work: each named (the first few, the ones Link again
-/// can put right first), what that does to the plugin, and what Link again does when it can do anything. Empty when
-/// there are none.
-pub fn text(broken: &[Broken]) -> String {
-    if broken.is_empty() {
-        return String::new();
-    }
-    let mut said: Vec<String> = vec![if broken.len() == 1 {
-        "A moved folder's link needs a look.".to_owned()
-    } else {
-        format!("{} moved folders' links need a look.", broken.len())
-    }];
-    let (fixable, away): (Vec<&Broken>, Vec<&Broken>) = broken.iter().partition(|b| b.can_link_again());
-    said.extend(fixable.iter().chain(&away).take(NAMED).map(|b| sentence(b)));
-    if broken.len() > NAMED {
-        said.push(format!("And {} more.", broken.len() - NAMED));
-    }
-    match broken.iter().filter(|b| matches!(b.trouble, Trouble::Replaced | Trouble::Doubled(_))).count() {
-        0 => {}
-        1 => said.push(
-            "For the real folder, Link again copies its new files, and files that differ, to its copy (keeping the \
+/// All there is to say of one moved folder whose link doesn't work, for its tooltip on the page's line and for the
+/// log: what's wrong, what that does to the plugin, and what Link again does when it does more than point the link
+/// (or what to do when it can't do anything).
+pub fn said(b: &Broken) -> String {
+    let mut said = sentence(b);
+    match &b.trouble {
+        Trouble::Replaced | Trouble::Doubled(_) => said.push_str(
+            " For the real folder, Link again copies its new files, and files that differ, to its copy (keeping the \
              copy's own versions beside it), sets it aside for you to remove on the Space page once the plugin opens \
-             fine, and puts the link back. Close your DAW first."
-                .to_owned(),
+             fine, and puts the link back. Close your DAW first.",
         ),
-        _ => said.push(
-            "For the real folders, Link again copies each one's new files, and files that differ, to its copy \
-             (keeping the copy's own versions beside it), sets them aside for you to remove on the Space page once \
-             the plugins open fine, and puts the links back. Close your DAW first."
-                .to_owned(),
-        ),
-    }
-    // Only Windows names a drive by a letter another drive can take ([`after_move::local_drives`]).
-    let letters = cfg!(windows);
-    match away.len() {
-        0 => {}
-        1 => said.push(format!(
-            "Until that copy is back, the plugin can't find what's in it: plug its drive in, or put the folder back \
-             where its link leads.{}",
-            if letters { " If its drive comes back under another letter, this page offers Link again." } else { "" }
-        )),
-        _ => said.push(format!(
-            "Until those copies are back, the plugins can't find what's in them: plug their drives in, or put each \
-             folder back where its link leads.{}",
-            if letters {
-                " Any whose drive comes back under another letter, this page offers to link again."
-            } else {
-                ""
+        Trouble::CopyAway { .. } => {
+            said.push_str(
+                " Until that copy is back, the plugin can't find what's in it: plug its drive in, or put the folder \
+                 back where its link leads.",
+            );
+            // Only Windows names a drive by a letter another drive can take ([`after_move::local_drives`]).
+            if cfg!(windows) {
+                said.push_str(" If its drive comes back under another letter, this page offers Link again.");
             }
-        )),
+        }
+        Trouble::LeadsElsewhere | Trouble::OnAnotherDrive(_) => {}
     }
-    said.join(" ")
+    said
+}
+
+/// The page's line, before its chips: how many moved folders' links need a look. Empty when none do.
+pub fn head(broken: &[Broken]) -> String {
+    match broken.len() {
+        0 => String::new(),
+        1 => "A moved folder's link needs a look:".to_owned(),
+        n => format!("{n} moved folders' links need a look:"),
+    }
+}
+
+/// One moved folder whose link doesn't work, as a chip on the page's line (Solomon, 24 Nov 2026: a clear sign rather
+/// than words, the explanation in a tooltip): its folder's name, a sign for what's wrong, and all of it (with the
+/// paths) for its tooltip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chip {
+    pub name: String,
+    /// The name of one of the page's drawn signs (`Icons.named`): `unlinked` for a link that leads somewhere else, or
+    /// to a drive that came back under another letter; `away` for a copy that isn't there; `folder` for a real folder
+    /// back where the link was; `copy` for a second copy there.
+    pub icon: &'static str,
+    pub tip: String,
+}
+
+/// Every sign a [`Chip`] can have (besides none, on the one that counts the rest): the page checks that it can draw
+/// each one (mo-ui's `plugins::links::fill`).
+pub const SIGNS: [&str; 4] = ["unlinked", "away", "folder", "copy"];
+
+/// How many chips the page's line shows at most: past that, the last one counts the rest ("+5"), so a drive holding
+/// many moved folders doesn't push the list down by line after line of them.
+const CHIPS: usize = 12;
+
+/// The moved folders whose link doesn't work, as chips on the page's line, the ones Link again can put right first.
+/// `tried` is what the last Link again said of each one it couldn't put right ([`tried`]): that one's tooltip ends with
+/// it. At most [`CHIPS`]: past that, the last counts the rest, with no sign, and names them in its tooltip.
+pub fn chips(broken: &[Broken], tried: &BTreeMap<String, String>) -> Vec<Chip> {
+    let (fixable, away): (Vec<&Broken>, Vec<&Broken>) = broken.iter().partition(|b| b.can_link_again());
+    let ordered: Vec<&Broken> = fixable.into_iter().chain(away).collect();
+    let froms: Vec<&str> = ordered.iter().map(|b| b.moved.from.as_str()).collect();
+    let mut named = names(&froms);
+    let mut chips: Vec<Chip> = ordered
+        .iter()
+        .zip(named.iter().cloned())
+        .take(if ordered.len() > CHIPS { CHIPS - 1 } else { CHIPS })
+        .map(|(b, name)| {
+            let mut tip = said(b);
+            if let Some(why) = tried.get(&key(&b.moved.from)) {
+                tip.push_str(&format!(" Link again said: {why}"));
+            }
+            let icon = match &b.trouble {
+                Trouble::LeadsElsewhere | Trouble::OnAnotherDrive(_) => "unlinked",
+                Trouble::CopyAway { .. } => "away",
+                Trouble::Replaced => "folder",
+                Trouble::Doubled(_) => "copy",
+            };
+            Chip { name, icon, tip }
+        })
+        .collect();
+    let rest = named.split_off(chips.len());
+    if !rest.is_empty() {
+        chips.push(Chip { name: format!("+{}", rest.len()), icon: "", tip: format!("Also {}.", rest.join(", ")) });
+    }
+    chips
+}
+
+/// Each folder by its name, and with the folder it's in when another of `froms` has the same name ("Presets (Native
+/// Instruments)").
+fn names(froms: &[&str]) -> Vec<String> {
+    let same = |a: &str, b: &str| key(file_name(a)) == key(file_name(b));
+    froms
+        .iter()
+        .map(|from| {
+            let name = file_name(from);
+            let parent =
+                from.trim_end_matches(['/', '\\']).rsplit_once(['/', '\\']).map(|(parent, _)| file_name(parent));
+            match parent.filter(|p| !p.is_empty() && froms.iter().filter(|other| same(other, from)).count() > 1) {
+                Some(parent) => format!("{name} ({parent})"),
+                None => name.to_owned(),
+            }
+        })
+        .collect()
+}
+
+/// What Link again does for these, for its button's tooltip (each chip's own says the rest).
+pub fn link_again_tip(broken: &[Broken]) -> String {
+    if broken.iter().any(|b| matches!(b.trouble, Trouble::Replaced | Trouble::Doubled(_))) {
+        "Link again: point each link back at its copy, and put back the links that real folders took the place of. \
+         Close your DAW first."
+            .to_owned()
+    } else {
+        "Link again: point each link back at its copy".to_owned()
+    }
+}
+
+/// What the computer says of a moved folder's link that doesn't lead to its copy while the copy is where the library
+/// says, to tell why in the log ([`mo_space::folder_move::lead_report`]); `None` for the other troubles, whose words
+/// say why already. Reads the disk: call it away from the window's thread.
+pub fn seen(b: &Broken) -> Option<String> {
+    matches!(b.trouble, Trouble::LeadsElsewhere).then(|| lead_report(&b.moved.from, Path::new(&b.moved.to)))
+}
+
+/// One moved folder whose link doesn't work, as the log says it once it's found, with what the computer says of it
+/// ([`seen`]).
+pub fn log_line(b: &Broken, seen: Option<&str>) -> String {
+    let mut line = format!("A moved folder's link needs a look. {}", said(b));
+    if let Some(seen) = seen {
+        line.push(' ');
+        line.push_str(seen);
+    }
+    line
 }
 
 /// What Link again did for one moved folder: where its link is, and what it says.
@@ -367,8 +450,9 @@ pub struct NotKept {
     pub why: String,
 }
 
-/// What Link again says once it's over, with how keeping it in the library went: `moved_kept` for the moved folders
-/// whose copy is somewhere else now, and `homes_kept` for the folders left behind ([`Fixed`]).
+/// What Link again says once it's over, in full, for the log: what it said of each moved folder, with how keeping it
+/// in the library went: `moved_kept` for the moved folders whose copy is somewhere else now, and `homes_kept` for the
+/// folders left behind ([`Fixed`]).
 pub fn done_text(fixed: &Fixed, moved_kept: &Result<(), NotKept>, homes_kept: &Result<(), String>) -> String {
     let mut said: Vec<String> = fixed
         .done
@@ -379,8 +463,56 @@ pub fn done_text(fixed: &Fixed, moved_kept: &Result<(), NotKept>, homes_kept: &R
         })
         .collect();
     if said.is_empty() {
-        said.push("Nothing needed linking again by the time it looked.".to_owned());
+        said.push(NOTHING_NEEDED.to_owned());
     }
+    said.extend(not_kept(fixed, moved_kept, homes_kept));
+    said.join(" ")
+}
+
+/// What Link again says when it finds nothing to do.
+const NOTHING_NEEDED: &str = "Nothing needed linking again by the time it looked.";
+
+/// What Link again's card says when it set real folders aside.
+const SET_ASIDE: &str = "What was in their place is set aside: remove it on the Space page once the plugins open fine.";
+
+/// What Link again says on its card once it's over, short (Solomon, 24 Nov 2026: nothing over-explained): the folders
+/// it linked again and the ones it couldn't, by name, where what it set aside is to go, and what the library couldn't
+/// keep. What it said of each is in the log ([`done_text`]), and in the tooltip of each one still on the page's line
+/// ([`tried`]).
+pub fn card_text(fixed: &Fixed, moved_kept: &Result<(), NotKept>, homes_kept: &Result<(), String>) -> String {
+    let froms: Vec<&str> = fixed.done.iter().map(|d| d.from.as_str()).collect();
+    let (mut linked, mut not) = (Vec::new(), Vec::new());
+    for (d, name) in fixed.done.iter().zip(names(&froms)) {
+        if d.said.is_ok() { linked.push(name) } else { not.push(name) }
+    }
+    let mut said = Vec::new();
+    if !linked.is_empty() {
+        said.push(format!("Linked again: {}.", listed(&linked)));
+    }
+    // What it set aside itself (a folder that moved with its drive was kept before), once the library keeps it: when
+    // it can't, what's below says so instead.
+    if homes_kept.is_ok() && fixed.homes.iter().any(|(_, before)| before.is_none()) {
+        said.push(SET_ASIDE.to_owned());
+    }
+    if !not.is_empty() {
+        said.push(format!("Not linked again: {}. Point at each on the Plugins page to see why.", listed(&not)));
+    }
+    if said.is_empty() {
+        said.push(NOTHING_NEEDED.to_owned());
+    }
+    said.extend(not_kept(fixed, moved_kept, homes_kept));
+    said.join(" ")
+}
+
+/// What Link again said of each moved folder it couldn't put right, by [`key`] of where its link is, for that one's
+/// tooltip on the page's line ([`chips`]).
+pub fn tried(fixed: &Fixed) -> BTreeMap<String, String> {
+    fixed.done.iter().filter_map(|d| d.said.as_ref().err().map(|why| (key(&d.from), why.clone()))).collect()
+}
+
+/// What the library couldn't keep of what Link again did, each a sentence.
+fn not_kept(fixed: &Fixed, moved_kept: &Result<(), NotKept>, homes_kept: &Result<(), String>) -> Vec<String> {
+    let mut said = Vec::new();
     if let Err(not) = moved_kept {
         let froms: Vec<String> = fixed.moved.iter().skip(not.first).map(|m| m.from.clone()).collect();
         said.push(format!(
@@ -398,7 +530,7 @@ pub fn done_text(fixed: &Fixed, moved_kept: &Result<(), NotKept>, homes_kept: &R
             listed(&paths)
         ));
     }
-    said.join(" ")
+    said
 }
 
 /// Whether Link again went well for every folder it looked at, and was kept.
@@ -521,48 +653,150 @@ mod tests {
         records(&moved)
     }
 
-    /// The whole-app review of 19 Nov, PM-2: each kind of broken link is named, with what Link again does, and only
-    /// what it can do.
+    /// The whole-app review of 19 Nov, PM-2, and Solomon's rule of 24 Nov 2026 (a clear sign, the words in a
+    /// tooltip): each broken link is a chip with a sign for its kind of trouble, its tooltip saying what's wrong and
+    /// what Link again does, and only what it can do; the log says each one in full.
     #[test]
-    fn each_broken_link_is_named_with_what_link_again_does() {
-        assert_eq!(text(&[]), "");
+    fn each_broken_link_is_a_chip_saying_what_link_again_does() {
+        assert_eq!(head(&[]), "");
+        assert!(chips(&[], &BTreeMap::new()).is_empty());
         let elsewhere = Elsewhere { was_on: "E:\\".into(), now_on: "F:\\".into(), to: "F:\\Plugin Data\\A".into() };
-        let one = text(&[broken("A", Trouble::OnAnotherDrive(elsewhere))]);
-        assert!(one.starts_with("A moved folder's link needs a look."), "{one}");
+        let one = said(&broken("A", Trouble::OnAnotherDrive(elsewhere.clone())));
         // Nothing says it's the same drive: you're asked to look.
         assert!(one.contains("a folder of the same name is at F:\\Plugin Data\\A: if that's its drive"), "{one}");
         assert!(one.ends_with("Link again points the link there."), "{one}");
-        let back = text(&[broken("A", Trouble::LeadsElsewhere)]);
+        let back = said(&broken("A", Trouble::LeadsElsewhere));
         assert!(back.ends_with("no longer leads to its copy at E:\\Plugin Data\\A: Link again points it back there."));
-        let away = text(&[broken("A", Trouble::CopyAway { drive_away: true })]);
+        let away = said(&broken("A", Trouble::CopyAway { drive_away: true }));
         // The drive by its letter on Windows (a Mac or Linux reads "E:\\" as no drive at all).
         let drive = if cfg!(windows) { "E:" } else { "its drive" };
-        assert!(away.contains(&format!("but {drive} isn't plugged in")) && !away.contains("Link again "), "{away}");
+        assert!(
+            away.contains(&format!("but {drive} isn't plugged in")) && !away.contains("Link again points"),
+            "{away}"
+        );
         assert!(away.contains("put the folder back where its link leads."), "{away}");
         // Only Windows names a drive by a letter another drive can take.
         let offered = away.contains("If its drive comes back under another letter, this page offers Link again.");
         assert_eq!(offered, cfg!(windows), "{away}");
-        let gone = text(&[broken("A", Trouble::CopyAway { drive_away: false })]);
+        let gone = said(&broken("A", Trouble::CopyAway { drive_away: false }));
         assert!(gone.contains("leads to E:\\Plugin Data\\A, which isn't there now. Until that copy"), "{gone}");
-        let update = text(&[broken("A", Trouble::Replaced)]);
+        let update = said(&broken("A", Trouble::Replaced));
         assert!(update.contains("An update put a real folder back at A"), "{update}");
         assert!(update.contains("For the real folder, Link again copies its new files, and files that differ"));
         assert!(update.contains("sets it aside") && update.ends_with("Close your DAW first."), "{update}");
-        let all = text(&[
+
+        let all = [
             broken("D", Trouble::CopyAway { drive_away: true }),
-            broken("E", Trouble::CopyAway { drive_away: true }),
+            broken("E", Trouble::CopyAway { drive_away: false }),
             broken("A", Trouble::LeadsElsewhere),
             broken("B", Trouble::Replaced),
             broken("C", Trouble::Doubled("Native Instruments".into())),
-        ]);
-        assert!(all.starts_with("5 moved folders' links need a look."), "{all}");
-        // The ones Link again can put right are named first.
-        assert!(all.contains("C is a second copy, left when Native Instruments moved"), "{all}");
-        assert!(all.contains("And 2 more.") && !all.contains("D leads"), "{all}");
-        assert!(all.contains("For the real folders, Link again copies each one's new files"), "{all}");
-        assert!(all.contains("Until those copies are back"), "{all}");
-        assert!(!broken("D", Trouble::CopyAway { drive_away: true }).can_link_again());
-        assert!(broken("D", Trouble::Replaced).can_link_again());
+            broken("F", Trouble::OnAnotherDrive(elsewhere)),
+        ];
+        assert_eq!(head(&all), "6 moved folders' links need a look:");
+        assert_eq!(head(&all[..1]), "A moved folder's link needs a look:");
+        // What the last Link again said of one ends its tooltip.
+        let why = "The link was made but doesn't reach E:\\Plugin Data\\A, so the old one is back.";
+        let shown = chips(&all, &BTreeMap::from([(key("A"), why.to_owned())]));
+        // Each by its name with a sign for what's wrong, the ones Link again can put right first.
+        let signs: Vec<(&str, &str)> = shown.iter().map(|c| (c.name.as_str(), c.icon)).collect();
+        let first = [("A", "unlinked"), ("B", "folder"), ("C", "copy"), ("F", "unlinked")];
+        assert_eq!(signs, [&first[..], &[("D", "away"), ("E", "away")]].concat());
+        // Every sign is one the page can draw, and each is used.
+        assert!(
+            shown.iter().all(|c| SIGNS.contains(&c.icon)) && SIGNS.iter().all(|s| signs.iter().any(|(_, i)| i == s))
+        );
+        assert_eq!(shown[0].tip, format!("{back} Link again said: {why}"));
+        assert_eq!(shown[1].tip, said(&all[3]));
+        assert!(shown[2].tip.contains("C is a second copy, left when Native Instruments moved"), "{}", shown[2].tip);
+        assert!(link_again_tip(&all).ends_with("Close your DAW first."));
+        assert_eq!(link_again_tip(&all[2..3]), "Link again: point each link back at its copy");
+        assert!(!all[0].can_link_again());
+        assert!(all[3].can_link_again());
+        // The log says each one in full, with what the computer says of it.
+        assert_eq!(log_line(&all[2], None), format!("A moved folder's link needs a look. {back}"));
+        assert_eq!(
+            log_line(&all[2], Some("It points to X.")),
+            format!("A moved folder's link needs a look. {back} It points to X.")
+        );
+        // Only a link whose copy is where the library says is looked at that way: the others say why already.
+        assert!(seen(&all[0]).is_none() && seen(&all[3]).is_none());
+    }
+
+    /// Solomon's F12 note of 25 Nov 2026 ("why is it saying that they need to be linked again?"): Link again's card was
+    /// a wall of paths. It names each folder once, by its name; the log keeps all it said, and each one it couldn't
+    /// put right keeps what it said for its tooltip.
+    #[test]
+    fn link_agains_card_names_the_folders_and_the_log_keeps_the_rest() {
+        let done = |from: &str, said: Result<&str, &str>| Linked {
+            from: from.to_owned(),
+            said: said.map(str::to_owned).map_err(str::to_owned),
+        };
+        let why = "The link was made but doesn't reach I:\\Plugin Data\\X, so the old one is back.";
+        let mut fixed = Fixed::default();
+        for name in ["Vital", "wavestate native", "Roland Cloud", "Xpand!2", "Nemesis"] {
+            fixed.done.push(done(&format!("C:\\Users\\you\\Documents\\{name}"), Err(why)));
+        }
+        fixed
+            .done
+            .push(done("C:\\ProgramData\\STEAM", Ok("C:\\ProgramData\\STEAM leads to its copy at E:\\STEAM again.")));
+        assert_eq!(
+            card_text(&fixed, &Ok(()), &Ok(())),
+            "Linked again: STEAM. Not linked again: Vital, wavestate native, Roland Cloud and 2 more. Point at each on \
+             the Plugins page to see why."
+        );
+        let log = done_text(&fixed, &Ok(()), &Ok(()));
+        assert!(log.starts_with(&format!("C:\\Users\\you\\Documents\\Vital: {why} ")), "{log}");
+        assert!(log.ends_with("C:\\ProgramData\\STEAM leads to its copy at E:\\STEAM again."), "{log}");
+        let tried = tried(&fixed);
+        assert_eq!(tried.len(), 5);
+        assert_eq!(tried[&key("C:\\Users\\you\\Documents\\Nemesis")], why);
+        // A real folder it set aside: where it's to go.
+        let aside = OldHome {
+            path: "E:\\STEAM (set aside)".into(),
+            bytes: 1,
+            note: String::new(),
+            copy: String::new(),
+            kind: 2,
+        };
+        fixed.homes.push((aside, None));
+        assert!(card_text(&fixed, &Ok(()), &Ok(())).contains(&format!("Linked again: STEAM. {SET_ASIDE} Not linked")));
+        // Unless the library couldn't keep it: then the card says the Space page won't remind you of it, and nothing
+        // says it will (the 25 Nov review).
+        let unkept = card_text(&fixed, &Ok(()), &Err("busy".into()));
+        assert!(!unkept.contains(SET_ASIDE) && unkept.contains("so the Space page won't remind you of"), "{unkept}");
+        assert_eq!(card_text(&Fixed::default(), &Ok(()), &Ok(())), NOTHING_NEEDED);
+        // Two folders of the same name are told apart by the folder each is in.
+        let mut two = Fixed::default();
+        two.done.push(done("C:\\Native Instruments\\Presets", Ok("fine")));
+        two.done.push(done("C:\\u-he\\presets", Err(why)));
+        assert_eq!(
+            card_text(&two, &Ok(()), &Ok(())),
+            "Linked again: Presets (Native Instruments). Not linked again: presets (u-he). Point at each on the Plugins \
+             page to see why."
+        );
+    }
+
+    /// The 25 Nov review: a drive holding many moved folders doesn't fill the page with chips. Past a dozen the last
+    /// one counts the rest and names them in its tooltip; two folders of the same name are told apart.
+    #[test]
+    fn many_broken_links_end_in_a_chip_counting_the_rest() {
+        let all: Vec<Broken> =
+            (1..=15).map(|n| broken(&format!("Folder {n}"), Trouble::CopyAway { drive_away: true })).collect();
+        let shown = chips(&all, &BTreeMap::new());
+        assert_eq!(shown.len(), CHIPS);
+        assert_eq!((shown[10].name.as_str(), shown[10].icon), ("Folder 11", "away"));
+        let last = &shown[CHIPS - 1];
+        assert_eq!((last.name.as_str(), last.icon), ("+4", ""));
+        assert_eq!(last.tip, "Also Folder 12, Folder 13, Folder 14, Folder 15.");
+        // A dozen fit: no chip counts the rest.
+        let shown = chips(&all[..CHIPS], &BTreeMap::new());
+        assert_eq!(shown.len(), CHIPS);
+        assert!(shown.iter().all(|c| c.icon == "away"));
+        // The same name twice: each with the folder it's in.
+        let two = [broken("C:\\A\\Presets", Trouble::LeadsElsewhere), broken("C:\\B\\presets", Trouble::Replaced)];
+        let names: Vec<String> = chips(&two, &BTreeMap::new()).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["Presets (A)", "presets (B)"]);
     }
 
     /// The whole-app review of 19 Nov, PM-2: a moved folder's drive comes back under another letter; the link is
@@ -634,7 +868,7 @@ mod tests {
         let now = Records { homes: vec![home.clone()], ..records(&moved) };
         let found = look(&now, &drives);
         assert!(found.iter().all(|b| matches!(&b.trouble, Trouble::OnAnotherDrive(e) if e.now_on == s(&f))));
-        assert!(text(&found).contains("if that's its drive under a new letter"), "{}", text(&found));
+        assert!(found.iter().all(|b| said(b).contains("if that's its drive under a new letter")), "{found:?}");
         // Not where one of your folders is.
         let yours = Records { yours: vec![s(&on_f(&s(&data)))], ..now.clone() };
         assert!(look(&yours, &drives).iter().all(|b| b.trouble == Trouble::CopyAway { drive_away: false }));

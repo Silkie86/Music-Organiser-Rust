@@ -4,6 +4,7 @@
 //! aside is kept in the library's folders left behind (`mo_library::moves::keep_old_homes`, Solomon's OK of 21 Nov
 //! 2026), so the Space page reminds you of it until it goes to the Recycle Bin.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,12 +17,12 @@ use mo_library::Library;
 use mo_library::moves::{MOVED_FOLDERS, OLD_HOMES, add_moved_folder, keep_old_homes};
 use mo_space::after_move::local_drives;
 use mo_space::folder_move::{MovedFolder, SystemDrives};
-use slint::ComponentHandle;
+use slint::{ComponentHandle, ModelRc, VecModel};
 
 use super::clean::{self, back};
 use super::moving::{Running, kept_when_free};
 use super::{PAGE, fill_panel, refresh};
-use crate::{AppWindow, PluginsData};
+use crate::{AppWindow, LinkTrouble, PluginsData};
 
 /// Counts the looks: only the newest one's finding is shown (rule 12, newest wins).
 static LOOKS: AtomicU64 = AtomicU64::new(0);
@@ -53,17 +54,30 @@ fn records_now(library: &Path) -> Result<Records, String> {
 /// after each move. Each one is said in the log once it's found, not at every look.
 pub(super) fn look(app: &AppWindow) {
     let look = LOOKS.fetch_add(1, Ordering::Relaxed) + 1;
-    let library = PAGE.with(|p| p.borrow().library.clone());
+    // The ones already found were said in the log with what the computer says of them: only new ones are looked at
+    // that way.
+    let (library, known) = PAGE.with(|p| {
+        let p = p.borrow();
+        (p.library.clone(), p.broken.clone())
+    });
     let weak = app.as_weak();
     let spawned = mo_app::background::spawn("Plugins broken links", move || {
-        let found = mo_app::background::guarded(|| -> Result<Vec<Broken>, String> {
+        let found = mo_app::background::guarded(|| -> Result<Vec<(Broken, Option<String>)>, String> {
             // No library (the screenshots, a first start): no moved folders.
             if !library.exists() {
                 return Ok(Vec::new());
             }
             let records = records_now(&library)?;
-            // The drives are only asked for when a lost copy is looked for.
-            Ok(links::look(&records, &local_drives))
+            // The drives are only asked for when a lost copy is looked for. What the computer says of each new link
+            // that doesn't lead to its copy goes in the log with it, to tell why (Solomon's log of 25 Nov 2026).
+            let found = links::look(&records, &local_drives);
+            Ok(found
+                .into_iter()
+                .map(|b| {
+                    let seen = if known.contains(&b) { None } else { links::seen(&b) };
+                    (b, seen)
+                })
+                .collect())
         })
         .and_then(|r| r);
         match found {
@@ -71,14 +85,17 @@ pub(super) fn look(app: &AppWindow) {
                 if LOOKS.load(Ordering::Relaxed) != look {
                     return;
                 }
-                let new: Vec<Broken> = PAGE.with(|p| {
-                    let mut p = p.borrow_mut();
-                    let new = found.iter().filter(|b| !p.broken.contains(b)).cloned().collect();
-                    p.broken = found;
+                let new: Vec<(Broken, Option<String>)> = PAGE.with(|p| {
+                    let mut page = p.borrow_mut();
+                    let p = &mut *page;
+                    let new = found.iter().filter(|(b, _)| !p.broken.contains(b)).cloned().collect();
+                    p.broken = found.into_iter().map(|(b, _)| b).collect();
+                    // What Link again said of one whose link works now is old: it mustn't show if it breaks again.
+                    p.link_tried.retain(|at, _| p.broken.iter().any(|b| mo_space::key(&b.moved.from) == *at));
                     new
                 });
-                for b in &new {
-                    log::warning("Plugins", &links::text(std::slice::from_ref(b)));
+                for (b, seen) in &new {
+                    log::warning("Plugins", &links::log_line(b, seen.as_deref()));
                 }
                 fill(app);
             }),
@@ -90,19 +107,43 @@ pub(super) fn look(app: &AppWindow) {
     }
 }
 
-/// Shows the moved folders whose link doesn't work, with Link again when it can do anything (not while a clean-up,
-/// uninstall or move is under way: one at a time), or that Link again is running, with Stop.
+/// Shows the moved folders whose link doesn't work, each as a chip with a sign and all of it in its tooltip, with Link
+/// again when it can do anything (not while a clean-up, uninstall or move is under way: one at a time), or that Link
+/// again is running, with Stop.
 pub(super) fn fill(app: &AppWindow) {
-    let (text, can, linking) = PAGE.with(|p| {
+    let (head, chips, tip, can, linking) = PAGE.with(|p| {
         let p = p.borrow();
         if p.linking.is_some() {
-            return ("Linking moved folders again…".to_owned(), false, true);
+            return ("Linking moved folders again…".to_owned(), Vec::new(), String::new(), false, true);
         }
         let can = p.broken.iter().any(Broken::can_link_again) && !p.clean.as_ref().is_some_and(|c| c.busy());
-        (links::text(&p.broken), can, false)
+        let chips = links::chips(&p.broken, &p.link_tried);
+        (links::head(&p.broken), chips, links::link_again_tip(&p.broken), can, false)
     });
+    // Each sign a chip can have is one the page can draw (`Icons.named`); mo-screens runs this.
+    #[cfg(debug_assertions)]
+    for sign in links::SIGNS {
+        let drawn = app.global::<crate::Icons>().invoke_named(sign.into());
+        assert!(!drawn.is_empty(), "Icons.named in studio.slint has no {sign}");
+    }
     let data = app.global::<PluginsData>();
-    data.set_link_text(text.into());
+    let changed = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let changed = p.link_chips != chips;
+        if changed {
+            p.link_chips.clone_from(&chips);
+        }
+        changed
+    });
+    if changed {
+        let rows: Vec<LinkTrouble> = chips
+            .into_iter()
+            .map(|c| LinkTrouble { name: c.name.into(), icon: c.icon.into(), tip: c.tip.into() })
+            .collect();
+        data.set_links(ModelRc::new(VecModel::from(rows)));
+    }
+    data.set_link_head(head.into());
+    data.set_link_tip(tip.into());
     data.set_can_link_again(can);
     data.set_linking(linking);
 }
@@ -154,21 +195,25 @@ pub(super) fn link_again(app: &AppWindow) {
             Ok(Ok(fixed)) => {
                 let moved_kept = keep_moved(&library, &fixed);
                 let homes_kept = keep_homes(&library, &fixed);
+                // The log keeps all it said; the card names the folders (Solomon, 24 Nov 2026: nothing
+                // over-explained), and each chip still on the line says what it said of that one.
                 let head = links::done_text(&fixed, &moved_kept, &homes_kept);
+                let short = links::card_text(&fixed, &moved_kept, &homes_kept);
                 if links::all_done(&fixed, &moved_kept, &homes_kept) {
                     log::info("Plugins", &format!("Link again: {head}"));
-                    card.done(&head);
+                    card.done(&short);
                 } else {
                     log::warning("Plugins", &format!("Link again: {head}"));
-                    card.failed(&head);
+                    card.failed(&short);
                 }
-                fixed.done.iter().filter(|d| d.said.is_ok()).map(|d| d.from.clone()).collect()
+                let linked = fixed.done.iter().filter(|d| d.said.is_ok()).map(|d| d.from.clone()).collect();
+                (linked, links::tried(&fixed))
             }
             Ok(Err(why)) => {
                 let head = format!("Nothing was linked again: {why}");
                 log::warning("Plugins", &format!("Link again: {head}"));
                 card.failed(&head);
-                Vec::new()
+                (Vec::new(), BTreeMap::new())
             }
             Err(_) => {
                 log::error("Plugins", "Link again: stopped on a crash part way");
@@ -176,10 +221,11 @@ pub(super) fn link_again(app: &AppWindow) {
                             folders before trying again."
                     .to_owned();
                 card.failed(&head);
-                Vec::new()
+                (Vec::new(), BTreeMap::new())
             }
         };
-        back(&weak, move |app| linked_again(app, linked));
+        let (linked, tried) = linked;
+        back(&weak, move |app| linked_again(app, linked, tried));
     });
     if let Err(e) = spawned {
         log::error("Plugins", &format!("Couldn't start Link again: {e}"));
@@ -217,11 +263,13 @@ fn keep_homes(library: &Path, fixed: &Fixed) -> Result<(), String> {
 }
 
 /// Link again is over: the folders linked again are links now (their room is on the other drive), the Space page
-/// looks for what it set aside when it next shows, and the page looks at the links again.
-fn linked_again(app: &AppWindow, linked: Vec<String>) {
+/// looks for what it set aside when it next shows, and the page looks at the links again, each one still needing a
+/// look saying in its tooltip what Link again said of it (`tried`).
+fn linked_again(app: &AppWindow, linked: Vec<String>, tried: BTreeMap<String, String>) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.linking = None;
+        p.link_tried = tried;
         // What it found before is old now: the line waits for the look below.
         p.broken.clear();
         p.moves += 1;
@@ -262,9 +310,13 @@ pub(super) fn holds(p: &super::Page) -> bool {
     true
 }
 
-/// For the screenshots: the line as it shows for these.
-pub(super) fn show_sample(app: &AppWindow, broken: Vec<Broken>) {
+/// For the screenshots: the line as it shows for these, with what the last Link again said of some (`tried`).
+pub(super) fn show_sample(app: &AppWindow, broken: Vec<Broken>, tried: BTreeMap<String, String>) {
     LOOKS.fetch_add(1, Ordering::Relaxed);
-    PAGE.with(|p| p.borrow_mut().broken = broken);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.broken = broken;
+        p.link_tried = tried;
+    });
     fill(app);
 }
