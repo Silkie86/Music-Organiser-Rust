@@ -861,6 +861,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
     shots.push(("songs-time-spent.png".into(), capture(&window)));
     app.global::<mo_ui::SongsData>().invoke_close_panel();
+    // A song's bounces on its card, and one on the player bar (paused: nothing is played here).
+    if let Some(copper) = mo_ui::songs::sample_row("Copper Lines") {
+        mo_ui::songs::show_picked(&app, copper, sample_detail(), Tab::Overview);
+    }
+    let bar = app.global::<mo_ui::SongPlayer>();
+    bar.set_shown(true);
+    bar.set_title("Copper Lines".into());
+    bar.set_file("Copper Lines (final).wav".into());
+    bar.set_path(r"C:\Music\Exports\Copper Lines (final).wav".into());
+    bar.set_place(0.32);
+    bar.set_time("1:12 / 3:42".into());
+    shots.push(("songs-sound.png".into(), capture(&window)));
+    bar.set_shown(false);
+    app.global::<mo_ui::SongsData>().invoke_close_panel();
     mo_ui::songs::show_sample(&app, sample_songs());
 
     // The shared parts every page is built from, in Graphite and in a light and a square theme.
@@ -4075,6 +4089,21 @@ fn sample_songs() -> mo_app::songs::Songs {
     for row in songs.dusty(now) {
         songs.later.insert(songs.rows[row].song.key.clone(), i64::MAX);
     }
+    // Bounces (made-up files, never read): two of Copper Lines, one of Slow Orbit.
+    let bounce = |name: &str, days: i64| mo_app::bounces::Bounce {
+        path: format!(r"C:\Music\Exports\{name}"),
+        name: name.into(),
+        mtime: (now - Days::days(days)).and_utc().timestamp(),
+    };
+    let key = |name: &str| songs.rows.iter().find(|r| r.song.name == name).map(|r| r.song.key.clone());
+    let mut found = std::collections::HashMap::new();
+    if let Some(k) = key("Copper Lines") {
+        found.insert(k, vec![bounce("Copper Lines (final).wav", 64), bounce("Copper Lines_3.mp3", 80)]);
+    }
+    if let Some(k) = key("Slow Orbit") {
+        found.insert(k, vec![bounce("Slow Orbit v3.wav", 12)]);
+    }
+    songs.set_bounces(&found);
     songs
 }
 

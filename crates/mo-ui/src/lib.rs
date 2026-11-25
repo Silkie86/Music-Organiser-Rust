@@ -34,6 +34,7 @@ pub mod plugins;
 pub mod presets;
 pub mod screen_move;
 pub mod settings;
+pub mod song_player;
 pub mod songs;
 pub mod sounds;
 pub mod space;
@@ -652,7 +653,8 @@ fn stop_what_plays(app: &AppWindow) -> bool {
     let midi = midi::stop_on_escape(app);
     let audition = presets::stop_on_escape(app);
     let tone = curve_editor::stop_tone(app);
-    sound || midi || audition || tone
+    let song = song_player::stop_on_escape(app);
+    sound || midi || audition || tone || song
 }
 
 /// Moves the pick of the list on show one line up (`by` -1) or down (1), as its Up and Down keys do (on Sounds' Tiles, a

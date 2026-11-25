@@ -3,11 +3,11 @@
 //! made when the list draws that line. Picking a song opens its panel at once with what the list knows; the newest
 //! save's plugins, samples and details follow from a background thread that only reads the last song picked.
 
-use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
@@ -35,8 +35,8 @@ use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedSt
 use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
-    AppWindow, CountLine, DetailPair, DustLine, HealthLine, MenuItem, NextLine, OlderLine, PanelSong, PluginLine,
-    SampleLine, SaveLine, SongLine, SongTag, SongsData, TodoLine, YearBar,
+    AppWindow, BounceLine, CountLine, DetailPair, DustLine, HealthLine, MenuItem, NextLine, OlderLine, PanelSong,
+    PluginLine, SampleLine, SaveLine, SongLine, SongTag, SongsData, TodoLine, YearBar,
 };
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
@@ -82,6 +82,8 @@ impl Default for Page {
 
 thread_local! {
     static PAGE: Rc<RefCell<Page>> = Rc::default();
+    /// Made-up songs on show (mo-screens): nothing is looked for in folders.
+    static SAMPLE: Cell<bool> = const { Cell::new(false) };
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
     /// Reads a save's record for the panel, one at a time, newest ask first.
     static READER: RefCell<Option<Newest<(u64, i64)>>> = const { RefCell::new(None) };
@@ -399,11 +401,20 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
     });
     // The card's status, stars, heart and tags come here too ([`give`]): this thread has the list.
     *TELL.lock().unwrap_or_else(PoisonError::into_inner) = Some((tx.clone(), live.stopper()));
+    let to_tell = tx.clone();
     // Held so the loop below waits rather than ends if the watch can't start: the catch-up and the retries still run.
     let _still_here = tx;
     // How long FL Studio had each song open, once the list is on show and what you give songs is taken (so a star
     // given meanwhile waits for this, rather than being refused): the first pass shows the list again with it.
     let mut minutes_found = learn_minutes(live, library);
+    // And each song's bounces, from the folders beside its saves: listed on a thread of their own, so a slow drive
+    // doesn't hold up this one.
+    let rows = live.songs().rows.clone();
+    if let Err(e) = background::spawn("Songs: all bounces", move || {
+        let _ = to_tell.send(Told::AllBounces(mo_app::bounces::find(&rows)));
+    }) {
+        log::warning("Songs", &format!("Couldn't look for the songs' bounces: {e}"));
+    }
     let _watch = match watching {
         Ok(w) => {
             log::info("Songs", &format!("Watching {} project folders", w.count()));
@@ -445,6 +456,14 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
             }
             Ok(Told::PutOff(key)) => {
                 gave.put_off(live, &key);
+                None
+            }
+            Ok(Told::Bounces(key, found)) => {
+                live.set_bounces(&key, found);
+                None
+            }
+            Ok(Told::AllBounces(found)) => {
+                minutes_found |= live.set_all_bounces(found);
                 None
             }
             // The app is closing, and what you gave songs before it is kept: the rest is let go.
@@ -605,6 +624,10 @@ enum Told {
     Give(Given),
     // "Not now" on the Dust off card, for the song with this key.
     PutOff(String),
+    // The bounces of the song with this key, as its card found them just now.
+    Bounces(String, Vec<mo_app::bounces::Bounce>),
+    // Every song's bounces, looked for once the list is on show.
+    AllBounces(HashMap<String, Vec<mo_app::bounces::Bounce>>),
     Finish(mpsc::Sender<()>),
 }
 
@@ -687,6 +710,9 @@ impl Gave {
 /// your project folders part way as the app closes ([`Live::stopper`]); None until the list is up, and once the app
 /// closes.
 static TELL: Mutex<Option<(mpsc::Sender<Told>, Arc<AtomicBool>)>> = Mutex::new(None);
+
+/// Counts the looks for the picked song's bounces, so only the newest is shown ([`look_for_bounces`]).
+static BOUNCE_ASKS: AtomicU64 = AtomicU64::new(0);
 
 /// How many songs given something on their cards the page's thread hasn't kept yet, waited for as the app closes.
 static GIVES_WAITING: AtomicUsize = AtomicUsize::new(0);
@@ -909,6 +935,8 @@ fn wire_filters(app: &AppWindow) {
             "favourites" => f.favourites = !f.favourites,
             "missing" => f.missing = !f.missing,
             "todos" => f.todos = !f.todos,
+            "has-sound" => f.has_sound = !f.has_sound,
+            "no-sound" => f.no_sound = !f.no_sound,
             "hide-archived" => f.hide_archived = !f.hide_archived,
             "only" => f.only = None,
             _ => {}
@@ -946,6 +974,13 @@ fn wire_list(app: &AppWindow) {
         if let Some(app) = weak.upgrade() {
             give(&app, None, &what, &value);
         }
+    });
+    let weak = app.as_weak();
+    data.on_play_sound(move |path| {
+        let Some(app) = weak.upgrade() else { return };
+        let mut title = String::new();
+        with_picked(|_, r| title.clone_from(&r.song.name));
+        crate::song_player::play(&app, &path, &title);
     });
     let weak = app.as_weak();
     data.on_not_now(move |row| {
@@ -1020,6 +1055,7 @@ fn finder_opens() {
 
 /// Shows made-up songs with the filters wired, and Ctrl+K opening them, for mo-screens (no library, nothing read).
 pub fn show_sample(app: &AppWindow, songs: Songs) {
+    SAMPLE.with(|s| s.set(true));
     wire_filters(app);
     wire_list(app);
     finder_opens();
@@ -1198,6 +1234,8 @@ fn refresh(app: &AppWindow) {
         data.set_favourites(f.favourites);
         data.set_missing(f.missing);
         data.set_has_todos(f.todos);
+        data.set_has_sound(f.has_sound);
+        data.set_no_sound(f.no_sound);
         data.set_hide_archived(f.hide_archived);
         data.set_any_filter(f.any());
         data.set_only(f.only.as_ref().map(|o| o.0.as_str()).unwrap_or_default().into());
@@ -1229,6 +1267,67 @@ fn fill_dust_off(app: &AppWindow) {
             Some(DustLine { row: i32::try_from(row).ok()?, name: r.song.name.as_str().into(), about: about.into() })
         })));
     });
+}
+
+/// Looks again for the picked song's bounces, on a thread of its own (it lists its folders), so one exported a minute
+/// ago shows on its card and its line; the page's thread keeps them for the lists it makes from here.
+fn look_for_bounces(app: &AppWindow) {
+    // Made-up songs (mo-screens) have no folders to look in.
+    if SAMPLE.with(Cell::get) {
+        return;
+    }
+    let Some((row, rivals)) = PAGE.with(|p| {
+        let p = p.borrow();
+        let row = p.picked.and_then(|i| p.songs.rows.get(i))?;
+        Some((row.clone(), mo_app::bounces::rivals(&p.songs.rows, row)))
+    }) else {
+        return;
+    };
+    // Newest wins: a look that ends after a newer one began (another song picked) is let go.
+    let ask = BOUNCE_ASKS.fetch_add(1, Ordering::SeqCst) + 1;
+    let weak = app.as_weak();
+    let looked = background::spawn("Songs: bounces", move || {
+        // None of its folders there (a drive away): what was found before stands.
+        if !row.song.saves().any(|s| Path::new(&s.folder).is_dir()) {
+            return;
+        }
+        let found = mo_app::bounces::Folders::default().of(&row, &rivals);
+        if found == row.bounces || BOUNCE_ASKS.load(Ordering::SeqCst) != ask {
+            return;
+        }
+        let key = row.song.key.clone();
+        let _ = weak.upgrade_in_event_loop(move |app| {
+            if BOUNCE_ASKS.load(Ordering::SeqCst) != ask {
+                return;
+            }
+            let (shown, picked, filtered) = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                let filtered = p.filters.has_sound != p.filters.no_sound;
+                let picked = p.picked.and_then(|i| p.songs.rows.get(i)).is_some_and(|r| r.song.key == key);
+                let Some(r) = p.songs.rows.iter_mut().find(|r| r.song.key == key) else { return (false, false, false) };
+                r.bounces.clone_from(&found);
+                (true, picked, filtered)
+            });
+            if !shown {
+                return;
+            }
+            // A sound filter on: the song may come or go from the list.
+            if filtered {
+                refresh(&app);
+            } else {
+                LINES.with(|l| l.notify.reset());
+            }
+            if picked {
+                fill_panel(&app);
+            }
+            if let Some((tell, _)) = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+                let _ = tell.send(Told::Bounces(key, found));
+            }
+        });
+    });
+    if let Err(e) = looked {
+        log::warning("Songs", &format!("Couldn't look for the song's bounces: {e}"));
+    }
 }
 
 /// "Not now" on the Dust off card: the song at `row` leaves the card at once, and is kept off it for about three months
@@ -1334,6 +1433,7 @@ fn line(songs: &Songs, entry: &Entry, now: NaiveDateTime) -> SongLine {
                 favourite: r.favourite,
                 todos: i32::try_from(r.todos_left()).unwrap_or(i32::MAX),
                 time: r.time_text().into(),
+                sound: !r.bounces.is_empty(),
                 // The first status ("Idea") is every song's to begin with, so it isn't shown.
                 status: if r.status == STATUSES[0] { SharedString::new() } else { r.status.as_str().into() },
                 daw: r.song.latest.daw.as_str().into(),
@@ -1375,6 +1475,7 @@ fn pick(app: &AppWindow, row: Option<usize>) {
     data.set_health_open(false);
     data.set_detail_message("Reading…".into());
     fill_panel(app);
+    look_for_bounces(app);
     with_picked(|_, r| crate::arrangement::show_song(app, Some(&r.song.latest.path), r.song.latest.file_missing));
     READER.with(|slot| {
         if let Some(reader) = slot.borrow().as_ref() {
@@ -1422,6 +1523,11 @@ fn fill_panel(app: &AppWindow) {
         data.set_song(panel_song(r));
         fill_tags(&data, &p.filters, r);
         fill_todos(&data, r, p.now);
+        data.set_song_sounds(model(r.bounces.iter().map(|b| BounceLine {
+            path: b.path.as_str().into(),
+            name: b.name.as_str().into(),
+            date: added_day(b.mtime, p.now).into(),
+        })));
         data.set_runs(model(r.runs.iter().rev().map(|run| SharedString::from(panel::run_line(run)))));
         data.set_saves_heading(panel::saves_heading(r).into());
         let older = panel::older_saves(r, &p.songs.real);
@@ -1518,6 +1624,11 @@ fn panel_song(r: &SongRow) -> PanelSong {
 
 fn model<T: Clone + 'static>(items: impl Iterator<Item = T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(items.collect::<Vec<_>>()))
+}
+
+/// The place in the page's rows of the song called `name`: for the screenshots.
+pub fn sample_row(name: &str) -> Option<usize> {
+    PAGE.with(|p| p.borrow().songs.rows.iter().position(|r| r.song.name == name))
 }
 
 /// Opens the panel on the song at `row` with `detail` as its newest save's record, without reading the library: for
@@ -1948,9 +2059,9 @@ mod tests {
         while let Ok(told) = next(&rx, &mut waiting, Duration::ZERO) {
             order.push(match told {
                 Told::Give(given) => given.song,
-                Told::PutOff(key) => key,
+                Told::PutOff(key) | Told::Bounces(key, _) => key,
                 Told::Finish(_) => "closing".to_owned(),
-                Told::Changed(_) => "folders".to_owned(),
+                Told::Changed(_) | Told::AllBounces(_) => "folders".to_owned(),
             });
         }
         assert_eq!(order, ["a", "b", "closing", "folders"]);
