@@ -162,8 +162,8 @@ pub fn show(
     });
 }
 
-/// The right-click menu of the line at `path`: pick it (with its folders, or alone), show only it, hide it on this panel or show it
-/// again, and open every folder inside it. No line has a key: each is for the line clicked.
+/// The right-click menu of the line at `path`: pick it (with its folders, or alone), show only it, hide it on this
+/// panel or show it again, and open every folder inside it. No line has a key: each is for the line clicked.
 pub fn menu(asked: &Asked, library: Option<&Library>, path: &str) -> Vec<MenuItem> {
     let k = tree::key(path);
     let f = &asked.filters;
