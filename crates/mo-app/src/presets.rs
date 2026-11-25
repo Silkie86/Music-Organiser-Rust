@@ -168,8 +168,9 @@ pub fn bitwig_curves_folder(bitwig: &[PathBuf], is_folder: impl Fn(&Path) -> boo
 }
 
 /// The curve files (`.bwcurve`) under `roots`, for the Curves section (Bitwig's curves library). Folders starting
-/// with "." are skipped, as the preset finder does; asks the disk, so never on the window's thread.
-pub fn curve_files(roots: &[PathBuf]) -> Vec<String> {
+/// with "." are skipped, as the preset finder does; asks the disk, so never on the window's thread. With them, the
+/// roots that were listed whole (`files_ending`).
+pub fn curve_files(roots: &[PathBuf]) -> (Vec<String>, Vec<PathBuf>) {
     files_ending(roots, |name| name.ends_with(".bwcurve"))
 }
 
@@ -256,37 +257,49 @@ pub fn duck_folders(program_data: Option<&Path>, home: Option<&Path>) -> Vec<Pat
 
 /// The plugins' shape files under `roots` ([`shape_folders`], [`vital_folders`], [`duck_folders`]): Serum's
 /// `.XferShape` and `.shp`, LFOTool's presets (`.fxp`), Vital's `.vitallfo` and presets (`.vital`), and Duck's
-/// `.dmlfo` and presets. Asks the disk, so never on the window's thread.
-pub fn shape_files(roots: &[PathBuf]) -> Vec<String> {
+/// `.dmlfo` and presets. Asks the disk, so never on the window's thread. With them, the roots that were listed whole
+/// (`files_ending`): the curves of one that wasn't are kept (`mo_presets::curves::Folders`).
+pub fn shape_files(roots: &[PathBuf]) -> (Vec<String>, Vec<PathBuf>) {
     use mo_formats::{duck, serum, vital};
     // A name is checked in small letters, so Duck's presets are known by their folder: the whole path is checked.
-    let mut out = files_ending(roots, |name| {
+    let (mut out, listed) = files_ending(roots, |name| {
         serum::is_shape_file(name)
             || vital::is_shape_file(name)
             || name.ends_with(".dmlfo")
             || name.ends_with(".preset")
     });
     out.retain(|p| !p.to_lowercase().ends_with(".preset") || duck::is_shape_file(p));
-    out
+    (out, listed)
 }
 
 /// The files under `roots` whose name (in small letters) `wanted` takes, sorted, each folder once (a link back up isn't
-/// followed round), at most 16 folders deep; folders starting with "." are skipped.
-fn files_ending(roots: &[PathBuf], wanted: impl Fn(&str) -> bool) -> Vec<String> {
+/// followed round), at most 16 folders deep; folders starting with "." are skipped. With them, the roots that were
+/// listed whole: not one where the root or a folder under it couldn't be listed (gone away since it was found, no
+/// permission), whose files may be missing from the list.
+fn files_ending(roots: &[PathBuf], wanted: impl Fn(&str) -> bool) -> (Vec<String>, Vec<PathBuf>) {
     let mut out = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut todo: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
-    while let Some((dir, depth)) = todo.pop() {
+    // Each folder with the root it's under; and the roots some folder of which couldn't be listed.
+    let mut todo: Vec<(PathBuf, usize, usize)> = roots.iter().enumerate().map(|(n, r)| (r.clone(), 0, n)).collect();
+    let mut unlisted: HashSet<usize> = HashSet::new();
+    while let Some((dir, depth, root)) = todo.pop() {
         if depth > 16 || !seen.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            unlisted.insert(root);
+            continue;
+        };
+        for e in entries {
+            let Ok(e) = e else {
+                unlisted.insert(root);
+                continue;
+            };
             let path = e.path();
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
             if path.is_dir() {
                 if !name.starts_with('.') {
-                    todo.push((path, depth + 1));
+                    todo.push((path, depth + 1, root));
                 }
             } else if wanted(&name.to_lowercase())
                 && let Some(p) = path.to_str()
@@ -296,7 +309,8 @@ fn files_ending(roots: &[PathBuf], wanted: impl Fn(&str) -> bool) -> Vec<String>
         }
     }
     out.sort();
-    out
+    let listed = roots.iter().enumerate().filter(|(n, _)| !unlisted.contains(n)).map(|(_, r)| r.clone()).collect();
+    (out, listed)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2961,6 +2975,7 @@ mod tests {
         let folders = duck_folders(Some(&root), None);
         assert_eq!(folders, [duck.clone(), duck2.clone()]);
         let mut names: Vec<String> = shape_files(&folders)
+            .0
             .iter()
             .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
             .collect();
@@ -2970,7 +2985,14 @@ mod tests {
         let other = root.join("Other");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("Lead.preset"), b"").unwrap();
-        assert_eq!(shape_files(std::slice::from_ref(&other)), Vec::<String>::new());
+        assert_eq!(shape_files(std::slice::from_ref(&other)).0, Vec::<String>::new());
+        // A folder that was listed counts as looked through, files or none; one that has gone away by the time it's
+        // looked through (here: never there) doesn't, so the curves found in it before are kept.
+        let away = root.join("Away");
+        let listed = vec![other.clone()];
+        let both = [other, away];
+        assert_eq!(shape_files(&both).1, listed);
+        assert_eq!(curve_files(&both), (Vec::new(), listed));
         assert_eq!(duck_folders(None, None).iter().filter(|f| f.starts_with(&root)).count(), 0);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -2997,6 +3019,7 @@ mod tests {
         std::fs::write(moved.join("Saw.vitallfo"), b"").unwrap();
         std::fs::write(moved.join("Pad.wav"), b"").unwrap();
         let mut names: Vec<String> = shape_files(std::slice::from_ref(&moved))
+            .0
             .iter()
             .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
             .collect();
@@ -3039,6 +3062,7 @@ mod tests {
         assert_eq!(shape_folders(Some(&docs), Some(&docs)), [serum2.clone(), lfotool.clone(), mac]);
         assert_eq!(shape_folders(None, None), Vec::<PathBuf>::new());
         let names: Vec<String> = shape_files(&folders)
+            .0
             .iter()
             .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
             .collect();

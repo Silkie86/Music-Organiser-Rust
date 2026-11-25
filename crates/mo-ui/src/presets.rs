@@ -2961,15 +2961,14 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
                 folders.extend(logic::vital_folders(documents.as_deref(), home.as_deref(), app_data.as_deref()));
                 let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
                 folders.extend(logic::duck_folders(program_data.as_deref(), home.as_deref()));
-                (logic::shape_files(&folders), folders)
+                logic::shape_files(&folders)
             },
         )
     });
-    let (shapes, mut looked_in) = shapes;
-    looked_in.extend(library_roots);
-    // Only the folders that could still be listed after the look: one that went away meanwhile (and so gave no
-    // files, or only some) counts as away, and its curves are kept.
-    looked_in.retain(|f| std::fs::read_dir(f).is_ok());
+    // Only the folders the look itself listed whole count as looked through: one that went away while it was
+    // looked through (and so gave no files, or only some) keeps its curves, even if it's back by now.
+    let ((library, mut looked_in), (shapes, shape_folders)) = (library, shapes);
+    looked_in.extend(shape_folders);
     paths.extend(library);
     paths.extend(shapes);
     let now = std::time::SystemTime::now()
