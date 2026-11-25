@@ -104,8 +104,8 @@ pub enum Like {
 
 impl Library {
     /// Sounds hidden as duplicates stay out, as in the app's lists (rule 2: their files are still there), and so do
-    /// the files programs leave in a temp folder, by the app's own rule (`SoundList::new`, with
-    /// `mo_sounds::scan::in_temp_folder`).
+    /// the files programs leave in a temp folder and the tones made for trying the app out, by the app's own rules
+    /// (`SoundList::new`, with `mo_sounds::scan::in_temp_folder` and `mo_library::songs::made_for_tests`).
     pub fn new(sounds: Vec<Sound>) -> Library {
         let mut list = SoundList::new(sounds.into_iter().filter(|s| !s.hidden && !s.path.is_empty()).collect());
         // Most liked, until the plugin reads how songs use each sound: favourites first, then the most played.

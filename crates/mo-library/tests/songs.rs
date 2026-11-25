@@ -608,13 +608,16 @@ fn a_save_that_couldnt_be_read_isnt_judged_a_rework_by_its_plugins() {
 #[test]
 fn files_made_for_trying_the_app_out_are_told_by_name() {
     // Not one of the C# cases: Solomon's F12 note of 25 Nov 2026, "anything with mo recipe shouldnt turn up in the
-    // app". Every save, preset and multisample the recipe made is one, as each of his names has it.
+    // app". Every save, preset, multisample and tone the recipe made is one, as each of his names has it.
     let recipe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../mo-formats/tests/fixtures/recipe");
     let mut seen = 0;
-    for daw in ["bitwig", "fl", "studio-one"] {
-        for file in std::fs::read_dir(recipe.join(daw)).unwrap() {
+    let mut folders: Vec<_> = ["bitwig", "fl", "studio-one"].map(|daw| recipe.join(daw)).into();
+    while let Some(folder) = folders.pop() {
+        for file in std::fs::read_dir(folder).unwrap() {
             let path = file.unwrap().path();
-            if path.is_file() {
+            if path.is_dir() {
+                folders.push(path);
+            } else {
                 let name = path.file_stem().unwrap().to_string_lossy().into_owned();
                 assert!(songs::made_for_tests(&name), "{name}");
                 seen += 1;
@@ -634,14 +637,29 @@ fn files_made_for_trying_the_app_out_are_told_by_name() {
         "MO Live Test automation",
         "MO Live Test 1",
         "mo-live-test 2",
+        "MO Tone A",
+        "MO Tone C",
+        "mo_tone_b",
+        "MO Tone B (2)",
     ];
     for name in made_for_tests {
         assert!(songs::made_for_tests(name), "{name}");
     }
-    // A song whose name only has the letters in it isn't one, nor are the recipe's tones: their names don't say so.
-    for name in
-        ["Demo Recipe", "Sumo Recipe", "MO Recipes", "Recipe 2", "MO Tone A", "MO Live Testament", "Night Drive"]
-    {
+    // A name that only has the letters in it isn't one.
+    let yours = [
+        "Demo Recipe",
+        "Sumo Recipe",
+        "MO Recipes",
+        "Recipe 2",
+        "MO Live Testament",
+        "MO Tones",
+        "MO Tone",
+        "MO Tone Bass",
+        "Demo Tone A",
+        "Mono Tone A",
+        "Night Drive",
+    ];
+    for name in yours {
         assert!(!songs::made_for_tests(name), "{name}");
     }
 }
