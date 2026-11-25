@@ -11,7 +11,7 @@ use mo_app::sounds::SoundCounts;
 use slint::{ModelRc, SharedString, VecModel};
 
 use crate::library::{Asked, Library};
-use crate::ui::{TreeLine, TreePick};
+use crate::ui::{MixPart, TreeLine, TreePick};
 use crate::{MenuItem, Panel};
 
 /// What the app says about folders, read with the library: your sample folders (the tree's tops), those whose drive
@@ -35,6 +35,9 @@ pub fn read() -> FolderSettings {
     let hidden = tree::decode_paths(&crate::midi::setting(&data, tree::HIDDEN_KEY).unwrap_or_default());
     FolderSettings { tops, away, hidden }
 }
+
+/// How many types the picks' mix names apart, the rest put together as "Other" (as the app's).
+const MIX_PARTS: usize = 6;
 
 /// The tree's own state on this panel: the branches open, whether it's folded away, the words in its search box,
 /// the drives away, and the line whose menu is open.
@@ -100,16 +103,54 @@ pub fn show(
     if panel.get_tree_search().as_str() != state.search {
         panel.set_tree_search(state.search.as_str().into());
     }
+    let (pick_counts, total) = match library {
+        Some(l) => tree::pick_counts(
+            l.list.folders(),
+            counts.map(|c| &c.folders),
+            &f.folders,
+            &f.hidden_folders,
+            &f.folder_tops,
+        ),
+        None => (vec![String::new(); f.folders.len()], None),
+    };
     let mut picks: Vec<TreePick> = f
         .folders
         .iter()
-        .map(|p| TreePick { path: p.path.as_str().into(), text: tree::last_name(&p.path).into(), hidden: false })
+        .zip(pick_counts)
+        .map(|(p, count)| TreePick {
+            path: p.path.as_str().into(),
+            text: tree::last_name(&p.path).into(),
+            count: count.into(),
+            hidden: false,
+        })
         .collect();
     picks.extend(f.hidden_folders.iter().map(|h| TreePick {
         path: h.as_str().into(),
         text: tree::last_name(h).into(),
+        count: SharedString::new(),
         hidden: true,
     }));
+    // What's in the picks, under the tree: their types and how many your projects use.
+    // The types picked in the filter column lit, the rest dimmed: the bar shows every type in the picks either way.
+    let types_on: Vec<String> = f.sound_types.iter().map(|t| t.to_lowercase()).collect();
+    let mix: Vec<MixPart> = match (library, counts) {
+        (Some(l), Some(c)) if !f.folders.is_empty() => tree::picks_mix(&c.types, &l.types, MIX_PARTS),
+        _ => Vec::new(),
+    }
+    .into_iter()
+    .map(|m| MixPart {
+        dim: !types_on.is_empty() && !types_on.contains(&m.name.to_lowercase()),
+        name: m.name.into(),
+        count: mo_app::sounds::short_count(m.count).into(),
+        share: m.share,
+        colour: m.colour,
+        rest: m.rest,
+    })
+    .collect();
+    panel.set_tree_mix(ModelRc::new(VecModel::from(mix)));
+    let (words, used) = tree::picks_words(total);
+    panel.set_tree_mix_words(words.into());
+    panel.set_tree_used_share(used);
     panel.set_tree_picks(ModelRc::new(VecModel::from(picks)));
     let n = f.folders.len();
     panel.set_tree_picked(if n == 0 { SharedString::new() } else { format!("{n} picked").into() });

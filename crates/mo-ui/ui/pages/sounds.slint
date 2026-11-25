@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { FolderTree, TreeLine, TreePick } from "../folder_tree.slint";
+import { FolderTree, PickStrip, TreeLine, TreePick, MixPart } from "../folder_tree.slint";
 import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, CutText, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, TipState, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar, Icons, InfoTip } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
@@ -410,6 +410,11 @@ export global SoundsData {
     in property <string> tree-note;
     in property <bool> tree-folded;
     in property <bool> tree-any;
+    // What's in the picks, under the tree: their types, the line under them and the share of them used.
+    in property <[MixPart]> tree-mix;
+    in property <string> tree-mix-words;
+    in property <float> tree-used-share;
+    callback tree-mix-picked(string);
     in-out property <string> tree-search;
     in-out property <length> tree-kept-y;
     in property <[MenuItem]> tree-menu;
@@ -1683,7 +1688,7 @@ export component SoundsPage inherits Rectangle {
                 x: column.room + (tree.visible ? tree.room : 0px);
                 y: 0;
                 width: split.width - self.x;
-                height: split.height;
+                height: split.height - (strip.visible ? strip.height : 0px);
                 // In a wide window (the UX review of 10 Nov, A1) the views made of lines (List, History, Rediscover)
                 // stop at `Fit.list-max`, so a line's name and its numbers stay within one look of each other, and the
                 // card takes the room that's left. Tiles and the Galaxy take all the room: more of them is the point.
@@ -2282,6 +2287,18 @@ export component SoundsPage inherits Rectangle {
             }
             // The folder tree, beside the filters on the views they narrow (Tiles, List, Galaxy, History). Folded to its
             // tab in a narrow window, as the filter column is.
+            // The picks as chips along the bottom, under the list and its card (not under the tree, whose lines never move).
+            // Before the tree, so the tree opened over the list in a narrow window lies over it too.
+            strip := PickStrip {
+                x: area.x;
+                y: split.height - self.height;
+                width: area.width;
+                visible: SoundsData.view < 4 && SoundsData.tree-picks.length > 0;
+                picks: SoundsData.tree-picks;
+                any-picked: SoundsData.tree-any;
+                taken-off(path, hidden) => { SoundsData.tree-taken-off(path, hidden); }
+                cleared => { SoundsData.tree-cleared(); }
+            }
             tree := FolderTree {
                 x: column.room;
                 y: 0;
@@ -2294,6 +2311,10 @@ export component SoundsPage inherits Rectangle {
                 folded: SoundsData.tree-folded;
                 narrow: split.width < 1100px;
                 any-picked: SoundsData.tree-any;
+                mix: SoundsData.tree-mix;
+                mix-words: SoundsData.tree-mix-words;
+                used-share: SoundsData.tree-used-share;
+                mix-picked(name) => { SoundsData.tree-mix-picked(name); }
                 search <=> SoundsData.tree-search;
                 kept-y <=> SoundsData.tree-kept-y;
                 toggled(path) => { SoundsData.tree-toggled(path); }

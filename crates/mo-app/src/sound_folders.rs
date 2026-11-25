@@ -566,6 +566,142 @@ impl<I: Fn(usize) -> It, It: Iterator<Item = u32>> Walk<'_, I, It> {
     }
 }
 
+/// How many sounds each pick shows ("412"; "" before the newest list is counted), in the order of `picks`, and what
+/// the picks show together (none before the newest list is counted): sounds, and how many of them your projects use
+/// (none until the use is known). A pick
+/// inside a folder picked with its folders adds nothing to the whole (its sounds are counted there already).
+pub fn pick_counts(
+    f: &Folders,
+    counts: Option<&FolderCounts>,
+    picks: &[FolderPick],
+    hidden: &[String],
+    tops: &[String],
+) -> (Vec<String>, Option<PicksTotal>) {
+    let Some(counts) = counts.filter(|c| c.of == f.stamp && c.sounds.len() == f.nodes.len()) else {
+        return (vec![String::new(); picks.len()], None);
+    };
+    let n = f.nodes.len();
+    let mut is_top: Vec<bool> = f.nodes.iter().map(|n| n.parent.is_none()).collect();
+    for t in tops {
+        if let Some(at) = f.find(t) {
+            is_top[at as usize] = true;
+        }
+    }
+    let hidden: HashSet<u32> = hidden.iter().filter_map(|h| f.find(h)).collect();
+    let used_of = |i: usize| counts.used.as_ref().and_then(|u| u.get(i)).copied().map_or(0, u64::from);
+    // As the tree adds them up: each folder with those inside it, a sample folder and a hidden one apart.
+    let mut shown: Vec<u64> = counts.sounds.iter().map(|&c| u64::from(c)).collect();
+    let mut used: Vec<u64> = (0..n).map(used_of).collect();
+    for i in (0..n).rev() {
+        if let Some(p) = f.nodes[i].parent
+            && !is_top[i]
+            && !hidden.contains(&(i as u32))
+        {
+            shown[p as usize] += shown[i];
+            used[p as usize] += used[i];
+        }
+    }
+    let at: Vec<Option<u32>> = picks.iter().map(|p| f.find(&p.path)).collect();
+    // The folders picked with their insides, to tell a pick within one.
+    let whole: HashSet<u32> = picks.iter().zip(&at).filter(|(p, _)| !p.just_this).filter_map(|(_, a)| *a).collect();
+    let within = |mut i: u32| {
+        while let Some(p) = f.nodes[i as usize].parent {
+            if is_top[i as usize] {
+                return false;
+            }
+            if whole.contains(&p) {
+                return true;
+            }
+            i = p;
+        }
+        false
+    };
+    let mut total = PicksTotal { sounds: 0, used: counts.used.as_ref().map(|_| 0) };
+    let words = picks
+        .iter()
+        .zip(&at)
+        .map(|(p, a)| {
+            let Some(a) = *a else { return String::new() };
+            let i = a as usize;
+            let (s, u) = if p.just_this { (u64::from(counts.sounds[i]), used_of(i)) } else { (shown[i], used[i]) };
+            if !within(a) {
+                total.sounds += s;
+                total.used = total.used.map(|t| t + u);
+            }
+            short_count(s as usize)
+        })
+        .collect();
+    (words, Some(total))
+}
+
+/// What the picked folders show together ([`pick_counts`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PicksTotal {
+    pub sounds: u64,
+    pub used: Option<u64>,
+}
+
+/// The line under the picks' mix: "1,004 sounds · 62 used · 942 never used" (only the sounds until the use is
+/// known; "" before they're counted), and the share of them used (0 to 1).
+pub fn picks_words(total: Option<PicksTotal>) -> (String, f32) {
+    let Some(total) = total else { return (String::new(), 0.0) };
+    let n = |v: u64| mo_library::songs::thousands(usize::try_from(v).unwrap_or(usize::MAX));
+    let sounds = match total.sounds {
+        1 => "1 sound".to_owned(),
+        s => format!("{} sounds", n(s)),
+    };
+    match total.used {
+        Some(u) if total.sounds > 0 => {
+            let u = u.min(total.sounds);
+            (format!("{sounds} · {} used · {} never used", n(u), n(total.sounds - u)), u as f32 / total.sounds as f32)
+        }
+        _ => (sounds, 0.0),
+    }
+}
+
+/// One part of the picks' type mix: a type, how many of the picks' sounds it has, its share of them (0 to 1), its
+/// colour's place in the Sounds palette (-1 grey), and whether it's the rest of the types put together ("Other").
+#[derive(Clone, Debug, PartialEq)]
+pub struct MixPart {
+    pub name: String,
+    pub count: usize,
+    pub share: f32,
+    pub colour: i32,
+    pub rest: bool,
+}
+
+/// The sound types in what the picks show, most first, `most` of them at most and the rest as one grey "Other" part:
+/// from the list's counts by type (lower case, [`crate::sounds::SoundCounts::types`]) over the library's `types`,
+/// whose names they show.
+pub fn picks_mix(by_type: &HashMap<String, usize>, types: &[(String, usize)], most: usize) -> Vec<MixPart> {
+    let mut parts: Vec<(&str, usize)> = types
+        .iter()
+        .filter_map(|(t, _)| by_type.get(&t.to_ascii_lowercase()).copied().filter(|&c| c > 0).map(|c| (t.as_str(), c)))
+        .collect();
+    parts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| by_letters(a.0, b.0)));
+    let all: usize = parts.iter().map(|p| p.1).sum();
+    if all == 0 {
+        return Vec::new();
+    }
+    let share = |c: usize| c as f32 / all as f32;
+    let rest: usize = parts.iter().skip(most).map(|p| p.1).sum();
+    let mut out: Vec<MixPart> = parts
+        .iter()
+        .take(most)
+        .map(|&(t, c)| MixPart {
+            name: t.to_owned(),
+            count: c,
+            share: share(c),
+            colour: crate::sounds::type_colour(t),
+            rest: false,
+        })
+        .collect();
+    if rest > 0 {
+        out.push(MixPart { name: "Other".to_owned(), count: rest, share: share(rest), colour: -1, rest: true });
+    }
+    out
+}
+
 /// What the Folders chip says of the picks: the first's name, and how many more ("UKG Snares + 1"); "" for none.
 pub fn picked_words(picks: &[FolderPick]) -> String {
     let Some(first) = picks.first() else { return String::new() };
@@ -573,14 +709,6 @@ pub fn picked_words(picks: &[FolderPick]) -> String {
     match picks.len() {
         1 => name.to_owned(),
         n => format!("{name} + {}", n - 1),
-    }
-}
-
-/// The line under the tree while folders are picked: how many sounds the picks show ("1 sound", "1,204 sounds").
-pub fn shown_words(n: usize) -> String {
-    match n {
-        1 => "1 sound in the picked folders".to_owned(),
-        n => format!("{} sounds in the picked folders", mo_library::songs::thousands(n)),
     }
 }
 
@@ -856,8 +984,6 @@ mod tests {
         assert_eq!(picks, vec![FolderPick { path: r"I:\AB".into(), just_this: false }]);
         assert_eq!(decode_paths(&encode_paths(["x", "", "y"])), vec!["x", "y"]);
         assert_eq!(last_name(r"I:\"), r"I:\");
-        assert_eq!(shown_words(1), "1 sound in the picked folders");
-        assert_eq!(shown_words(1204), "1,204 sounds in the picked folders");
         assert_eq!(last_name(r"I:\Samples\Kicks\"), "Kicks");
     }
 
@@ -901,5 +1027,50 @@ mod tests {
         let rows = rows(&f, None, ask);
         let tagged: Vec<&str> = rows.iter().filter(|r| r.scanning).map(|r| r.path.as_str()).collect();
         assert_eq!(tagged, [r"G:\Kicks"]);
+    }
+
+    #[test]
+    fn each_pick_says_how_many_and_together_they_count_once() {
+        let f = folders(&[r"G:\Kicks\a.wav", r"G:\Kicks\Deep\b.wav", r"G:\Kicks\Deep\c.wav", r"H:\Pads\d.wav"]);
+        let at = |p: &str| f.find(p).unwrap() as usize;
+        let mut sounds = vec![0u32; f.len()];
+        let mut used = vec![0u32; f.len()];
+        sounds[at(r"G:\Kicks")] = 1;
+        sounds[at(r"G:\Kicks\Deep")] = 2;
+        sounds[at(r"H:\Pads")] = 1;
+        used[at(r"G:\Kicks\Deep")] = 1;
+        let counts = FolderCounts { of: f.stamp(), sounds, used: Some(used) };
+        let pick = |p: &str, just_this| FolderPick { path: p.into(), just_this };
+        // Kicks with its folders, Deep within it (counted once), Pads alone.
+        let picks = [pick(r"G:\Kicks", false), pick(r"G:\Kicks\Deep", false), pick(r"H:\Pads", true)];
+        let (words, total) = pick_counts(&f, Some(&counts), &picks, &[], &[]);
+        assert_eq!(words, ["3", "2", "1"]);
+        assert_eq!(total, Some(PicksTotal { sounds: 4, used: Some(1) }));
+        assert_eq!(picks_words(total), ("4 sounds · 1 used · 3 never used".to_owned(), 0.25));
+        // Kicks alone: only its own sound.
+        let (words, total) = pick_counts(&f, Some(&counts), &[pick(r"G:\Kicks", true)], &[], &[]);
+        assert_eq!((words[0].as_str(), total.map(|t| t.sounds)), ("1", Some(1)));
+        // A hidden folder's sounds don't count in the folder above it.
+        let (words, _) = pick_counts(&f, Some(&counts), &[pick(r"G:\Kicks", false)], &[r"G:\Kicks\Deep".into()], &[]);
+        assert_eq!(words, ["1"]);
+        // Counts of other folders: no numbers.
+        let (words, total) = pick_counts(&f, None, &picks, &[], &[]);
+        assert!(words.iter().all(String::is_empty) && total.is_none());
+        assert_eq!(picks_words(None), (String::new(), 0.0), "no numbers, rather than noughts");
+    }
+
+    #[test]
+    fn the_mix_shows_the_most_types_and_the_rest_together() {
+        let types: Vec<(String, usize)> =
+            ["Kick", "Snare", "Vocal", "FX"].iter().map(|t| ((*t).to_owned(), 1)).collect();
+        let by_type: HashMap<String, usize> =
+            [("kick", 6), ("snare", 2), ("vocal", 1), ("fx", 1)].iter().map(|(t, c)| ((*t).to_owned(), *c)).collect();
+        let mix = picks_mix(&by_type, &types, 2);
+        let names: Vec<&str> = mix.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Kick", "Snare", "Other"]);
+        assert_eq!(mix[2].count, 2);
+        assert!((mix[0].share - 0.6).abs() < 1e-6);
+        assert!(mix[2].rest && !mix[0].rest);
+        assert!(picks_mix(&HashMap::new(), &types, 2).is_empty());
     }
 }
