@@ -17,8 +17,6 @@
 //! its sounds, as many more as there are of them. So a big library is gone through in a moment. Every sound is scored
 //! on rayon's threads: call it on the app's low-priority pool, never the window's thread.
 
-use rayon::prelude::*;
-
 use crate::index::{SoundIndex, VectorIndex, dot};
 
 /// The most favourites of one type each sound is compared with.
@@ -69,41 +67,70 @@ pub fn reach(whole: &SoundIndex, sounds: &[(i64, &str, Role)]) -> Reach {
     }
     let active = whole.active();
     let deep = !std::ptr::eq(active, &whole.features);
-    for (_, places) in by_type {
-        let favourites: Vec<usize> = places.iter().copied().filter(|&i| sounds[i].2 == Role::Favourite).collect();
-        if favourites.is_empty() {
-            continue;
-        }
-        let others: Vec<usize> = places.iter().copied().filter(|&i| sounds[i].2 == Role::Other).collect();
-        for &i in &favourites {
+    // Each type with a favourite: its favourites and its others.
+    let types: Vec<(Vec<usize>, Vec<usize>)> = by_type
+        .into_iter()
+        .filter_map(|(_, places)| {
+            let favourites: Vec<usize> = places.iter().copied().filter(|&i| sounds[i].2 == Role::Favourite).collect();
+            if favourites.is_empty() {
+                return None;
+            }
+            let others: Vec<usize> = places.iter().copied().filter(|&i| sounds[i].2 == Role::Other).collect();
+            Some((others, favourites))
+        })
+        .collect();
+    for (_, favourites) in &types {
+        for &i in favourites {
             out.each[i] = 0;
         }
-        if !deep {
-            for (i, r) in rank(&whole.features, sounds, &others, &favourites) {
+    }
+    // Every type is ranked in one go through an index ([`rank`]), so numbers kept in a file are read once, not once
+    // for each type.
+    if !deep {
+        for ranked in rank(&whole.features, sounds, &types) {
+            for (i, r) in ranked {
                 out.each[i] = r;
             }
-            continue;
         }
-        let heard = |&i: &usize| active.contains(sounds[i].0);
+        return out;
+    }
+    let heard = |&i: &usize| active.contains(sounds[i].0);
+    // Each type's others and favourites CLAP heard, and its favourites CLAP never heard.
+    let mut by_clap: Vec<(Vec<usize>, Vec<usize>)> = Vec::with_capacity(types.len());
+    let mut unheard: Vec<(bool, Vec<usize>)> = Vec::with_capacity(types.len());
+    for (others, favourites) in &types {
         let (heard_favourites, unheard_favourites): (Vec<usize>, Vec<usize>) =
             favourites.iter().copied().partition(heard);
         let (heard_others, unheard_others): (Vec<usize>, Vec<usize>) = others.iter().copied().partition(heard);
-        for (i, r) in rank(active, sounds, &heard_others, &heard_favourites) {
+        unheard.push((!unheard_others.is_empty() || !unheard_favourites.is_empty(), unheard_favourites));
+        by_clap.push((heard_others, heard_favourites));
+    }
+    for ranked in rank(active, sounds, &by_clap) {
+        for (i, r) in ranked {
             out.each[i] = r;
         }
-        if unheard_others.is_empty() && unheard_favourites.is_empty() {
-            continue;
-        }
+    }
+    // The types with a sound or a favourite CLAP never heard, compared in the analyser's.
+    let nothing = || (Vec::new(), Vec::new());
+    let all: Vec<(Vec<usize>, Vec<usize>)> =
+        types.iter().zip(&unheard).map(|(t, (any, _))| if *any { t.clone() } else { nothing() }).collect();
+    let against_unheard: Vec<(Vec<usize>, Vec<usize>)> = types
+        .iter()
+        .zip(&unheard)
+        .map(|((others, _), (any, favourites))| if *any { (others.clone(), favourites.clone()) } else { nothing() })
+        .collect();
+    let all = rank(&whole.features, sounds, &all);
+    let against_unheard = rank(&whole.features, sounds, &against_unheard);
+    for (all, against_unheard) in all.into_iter().zip(against_unheard) {
         // The ones CLAP never heard: placed among all the type's sounds, every favourite in the analyser's.
-        let all = rank(&whole.features, sounds, &others, &favourites);
-        for &(i, r) in &all {
+        for (i, r) in all {
             if !heard(&i) {
                 out.each[i] = r;
                 out.by_analyser.push(i);
             }
         }
         // The ones CLAP heard, against the favourites it didn't: nearer that way, they show sooner.
-        for (i, r) in rank(&whole.features, sounds, &others, &unheard_favourites) {
+        for (i, r) in against_unheard {
             if heard(&i) && r < out.each[i] {
                 out.each[i] = r;
                 out.by_analyser.push(i);
@@ -113,44 +140,61 @@ pub fn reach(whole: &SoundIndex, sounds: &[(i64, &str, Role)]) -> Reach {
     out
 }
 
-/// Each of `others` (places in `sounds`) that `index` has, with its reach to the `favourites` it has: each goes with
-/// the (picked) favourite it's most like, the closest first in each one's group, and its reach is its place there over
-/// the favourites that picked one stands for (so each favourite gets its own share).
+/// For each of `types` (its others and its favourites, as places in `sounds`): each of the others that `index` has,
+/// with its reach to the favourites it has. Each goes with the (picked) favourite it's most like, the closest first in
+/// each one's group, and its reach is its place there over the favourites that picked one stands for (so each
+/// favourite gets its own share). Every type's sounds are asked of the index together ([`VectorIndex::each`]).
 fn rank(
     index: &VectorIndex,
     sounds: &[(i64, &str, Role)],
-    others: &[usize],
-    favourites: &[usize],
-) -> Vec<(usize, u32)> {
-    let favourites: Vec<Vec<f32>> =
-        favourites.iter().filter_map(|&i| index.get(sounds[i].0).map(|v| v.into_owned())).collect();
-    if favourites.is_empty() || others.is_empty() {
-        return Vec::new();
-    }
-    let points = spread(&favourites, POINTS);
-    // How many favourites each picked one stands for: itself and those closest to it.
-    let mut stands_for = vec![0usize; points.len()];
-    for f in &favourites {
-        stands_for[closest(&points, |p| Some(dot(f, p))).map_or(0, |(at, _)| at)] += 1;
-    }
-    // Each sound with the picked favourite it's most like, and how like.
-    let scored: Vec<(usize, usize, f64)> = others
-        .par_iter()
-        .filter_map(|&i| closest(&points, |p| index.dot_with(sounds[i].0, p)).map(|(at, like)| (i, at, like)))
+    types: &[(Vec<usize>, Vec<usize>)],
+) -> Vec<Vec<(usize, u32)>> {
+    // Every type's favourites' fingerprints, those the index has.
+    let ids: Vec<i64> = types.iter().flat_map(|(_, favourites)| favourites.iter().map(|&i| sounds[i].0)).collect();
+    let mut found = index.each(&ids, |_, row| row.to_vec()).into_iter();
+    let favourites: Vec<Vec<Vec<f32>>> = types
+        .iter()
+        .map(|(others, favourites)| {
+            let have: Vec<Vec<f32>> = found.by_ref().take(favourites.len()).flatten().collect();
+            if others.is_empty() { Vec::new() } else { have }
+        })
         .collect();
-    let mut by_point: Vec<Vec<(usize, f64)>> = vec![Vec::new(); points.len()];
-    for (i, at, like) in scored {
-        by_point[at].push((i, like));
-    }
-    let mut out = Vec::with_capacity(others.len());
-    for (group, each) in by_point.iter_mut().zip(&stands_for) {
-        // The closest first; equal ones by id, so the same sounds always come out the same.
-        group.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(sounds[a.0].0.cmp(&sounds[b.0].0)));
-        for (place, (i, _)) in group.iter().enumerate() {
-            out.push((*i, u32::try_from(place / (*each).max(1)).unwrap_or(NEVER - 1)));
+    let points: Vec<Vec<&[f32]>> = favourites.iter().map(|f| spread(f, POINTS)).collect();
+    // Each sound of a type with a favourite to compare with, with the picked favourite it's most like, and how like.
+    let asked: Vec<(usize, usize)> = types
+        .iter()
+        .enumerate()
+        .filter(|(t, _)| !points[*t].is_empty())
+        .flat_map(|(t, (others, _))| others.iter().map(move |&i| (t, i)))
+        .collect();
+    let ids: Vec<i64> = asked.iter().map(|&(_, i)| sounds[i].0).collect();
+    let scored = index.each(&ids, |k, row| closest(&points[asked[k].0], |p| Some(row.dot(p))));
+    let mut by_point: Vec<Vec<Vec<(usize, f64)>>> = points.iter().map(|p| vec![Vec::new(); p.len()]).collect();
+    for (&(t, i), found) in asked.iter().zip(scored) {
+        if let Some((at, like)) = found.flatten() {
+            by_point[t][at].push((i, like));
         }
     }
-    out
+    by_point
+        .into_iter()
+        .enumerate()
+        .map(|(t, mut groups)| {
+            // How many favourites each picked one stands for: itself and those closest to it.
+            let mut stands_for = vec![0usize; groups.len()];
+            for f in &favourites[t] {
+                stands_for[closest(&points[t], |p| Some(dot(f, p))).map_or(0, |(at, _)| at)] += 1;
+            }
+            let mut out = Vec::with_capacity(groups.iter().map(Vec::len).sum());
+            for (group, each) in groups.iter_mut().zip(&stands_for) {
+                // The closest first; equal ones by id, so the same sounds always come out the same.
+                group.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(sounds[a.0].0.cmp(&sounds[b.0].0)));
+                for (place, (i, _)) in group.iter().enumerate() {
+                    out.push((*i, u32::try_from(place / (*each).max(1)).unwrap_or(NEVER - 1)));
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 /// The one of `points` that `like` finds most alike (its place and how alike); none when `like` knows none of them.
