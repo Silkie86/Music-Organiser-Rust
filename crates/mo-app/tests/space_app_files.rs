@@ -61,6 +61,10 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
         write(name, 2);
     }
     write("space-song-prints.db-wal", 3);
+    // The files of numbers "Sounds like this" reads as it needs them (a hash in each name), one still being written.
+    write("sound-likeness-0123456789abcdef.rows", 4);
+    write("sound-prints-0123456789abcdef.rows", 2);
+    write("sound-prints-fedcba9876543210.rows.4321-0.mo-part", 1);
     // The rest: the Bitwig template, the settings.
     fs::write(data.join("Bitwig template").join("Music Organiser template.bwproject"), [0u8; 7]).unwrap();
     write("rust-settings.json", 3);
@@ -73,8 +77,8 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             ("Sound Lab", 60),
             (SOUND_LAB_BACKUP, 55),
             ("Your library", 40),
+            (CACHES, 26),
             (DAMAGED_SOUND_LAB, 25),
-            (CACHES, 19),
             (KEPT_SOUND_LAB, 15),
             (DAMAGED_SOUND_LAB_BACKUP, 13),
             ("Everything else", 10),
@@ -90,8 +94,8 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             ("Sound Lab", 60),
             (SOUND_LAB_BACKUP, 55),
             (NEW_SONG_LIBRARY, 40),
+            (CACHES, 26),
             (DAMAGED_SOUND_LAB, 25),
-            (CACHES, 19),
             (KEPT_SOUND_LAB, 15),
             (DAMAGED_SOUND_LAB_BACKUP, 13),
             ("Everything else", 10),
@@ -117,8 +121,8 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             (OLD_DATABASES, 80),
             ("Sound Lab", 66),
             (NEW_SONG_LIBRARY, 61),
+            (CACHES, 28),
             (DAMAGED_SOUND_LAB, 25),
-            (CACHES, 21),
             (KEPT_SOUND_LAB, 15),
             (DAMAGED_SOUND_LAB_BACKUP, 13),
             ("Everything else", 12),

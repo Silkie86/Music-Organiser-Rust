@@ -1639,19 +1639,16 @@ fn take_again(
             if !count_changed && (on_show.added + ids.len()) * FEW <= index.features.len() =>
         {
             match with_these(&db, &ids, &there, index.clone()) {
-                Ok(Some(mut now)) => {
+                Ok(Some(now)) => {
                     if !Arc::ptr_eq(&now, &index) {
-                        // Its fingerprints are held again, with the scan's in them: back into a file of their own
-                        // (the running app only), here on the reading thread as when the index is built.
-                        if let (Some(folder), Some(changed)) = (LIKENESS_IN.get(), Arc::get_mut(&mut now)) {
-                            mo_app::sound_likeness::keep_prints(changed, folder);
-                        }
+                        // (Its fingerprints are held in memory again, with the scan's in them, until the index is
+                        // next built afresh: the whole file isn't written again for a scan's few sounds.)
                         send(Step::Index(now.clone()));
                         on_show.index = Some(now);
                     }
                     on_show.added += ids.len();
                 }
-                // CLAP's index has a sound that's gone.
+                // CLAP's index has a sound that's gone, or the fingerprints' file can't be read now.
                 Ok(None) => afresh = Some(db),
                 Err(e) => {
                     log::warning("Sounds", &format!("Couldn't read the new sounds' fingerprints, so all of them: {e}"));

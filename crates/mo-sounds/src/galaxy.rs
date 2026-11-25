@@ -78,21 +78,36 @@ pub fn space(wanted: Placing, index: &SoundIndex) -> &'static str {
 ///
 /// "clap+features" joins CLAP's "what it is" (80 %) to the measured "how it sounds" (60 %), so neighbours match in
 /// kind and in character. A sound deep listening hasn't heard yet falls back to its measurements in every space.
-/// The measurements alone are lent straight from the index; joined ones are made when asked for.
+/// The measurements alone are lent straight from an index that holds them (one that keeps them in a file reads each
+/// when asked); joined ones are made when asked for.
 pub struct Fingerprints<'a> {
     pub ids: &'a [i64],
     index: &'a SoundIndex,
     /// Joined with CLAP (and how); `None` for the measurements alone.
     clap: Option<(usize, bool)>,
+    /// A fingerprint the index has couldn't be read (its file's drive gone): see [`Fingerprints::unread`].
+    unread: AtomicBool,
 }
 
 impl<'a> Fingerprints<'a> {
     /// One sound's fingerprint; empty for a sound the features index doesn't have.
     pub fn get(&self, id: i64) -> Cow<'a, [f32]> {
-        let Some(f) = self.index.features.get(id) else { return Cow::Borrowed(&[]) };
+        let Some(f) = self.index.features.get(id) else {
+            if self.index.features.contains(id) {
+                self.unread.store(true, Ordering::Relaxed);
+            }
+            return Cow::Borrowed(&[]);
+        };
         let Some((clap_dim, clap_only)) = self.clap else { return f };
         let mut v = vec![0f32; clap_dim + f.len()];
-        let c = self.index.clap.as_ref().and_then(|c| c.get(id)).filter(|c| c.len() == clap_dim);
+        let c = self.index.clap.as_ref().and_then(|c| {
+            let got = c.get(id);
+            if got.is_none() && c.contains(id) {
+                self.unread.store(true, Ordering::Relaxed);
+            }
+            got
+        });
+        let c = c.filter(|c| c.len() == clap_dim);
         let (wc, wf) = match c {
             None => (0f32, 1f32),
             Some(_) if clap_only => (1.0, 0.0),
@@ -111,11 +126,25 @@ impl<'a> Fingerprints<'a> {
     }
 }
 
+impl Fingerprints<'_> {
+    /// Whether a fingerprint the index has couldn't be read when it was asked for (it's kept in a file, and the file
+    /// can't be read now): it was given as empty, as a sound's the index doesn't have, so stars placed since can't
+    /// be trusted.
+    pub fn unread(&self) -> bool {
+        self.unread.load(Ordering::Relaxed)
+    }
+}
+
 /// The fingerprints for `space` (see [`space`]).
 pub fn fingerprints<'a>(index: &'a SoundIndex, space: &str) -> Fingerprints<'a> {
     let clap = if space == "features" { None } else { index.clap.as_deref() };
     let clap = clap.map(|c| c.dim()).filter(|d| *d > 0);
-    Fingerprints { ids: index.features.ids(), index, clap: clap.map(|d| (d, space == "clap")) }
+    Fingerprints {
+        ids: index.features.ids(),
+        index,
+        clap: clap.map(|d| (d, space == "clap")),
+        unread: AtomicBool::new(false),
+    }
 }
 
 /// True when the saved `map` lacks some sound the features index has. As C#'s `SoundOrganiser.GalaxyOutOfDate`.
@@ -136,7 +165,8 @@ pub struct Updated {
 
 /// Brings the galaxy for `space` up to date from its `saved` map. It's laid out afresh when there's no map yet,
 /// `fresh` asks for it, or more than a fifth of the sounds are new; otherwise the new sounds are placed beside their
-/// sound-alikes, so the stars you know stay where they were. `None` when `cancel` was set. As C#'s
+/// sound-alikes, so the stars you know stay where they were. `None` when `cancel` was set, or when a fingerprint kept
+/// in a file couldn't be read (nothing is placed from numbers that aren't there, so nothing wrong is saved). As C#'s
 /// `SoundOrganiser.UpdateGalaxy`, less the saving: the caller keeps [`Updated::save`] in the library
 /// ([`crate::compact::maps::keep`]).
 pub fn update(
@@ -152,6 +182,9 @@ pub fn update(
     let new_ids: Vec<i64> = prints.ids.iter().copied().filter(|id| !saved.contains_key(id)).collect();
     if fresh || saved.is_empty() || new_ids.len() > prints.ids.len() / 5 {
         let map = layout(prints.ids, &vector, SEED, progress, cancel)?;
+        if prints.unread() {
+            return None;
+        }
         return Some(Updated { save: map.clone(), map, replace: true });
     }
     let mut map = saved;
@@ -159,6 +192,9 @@ pub fn update(
     if !new_ids.is_empty() {
         let mapped: Vec<i64> = prints.ids.iter().copied().filter(|id| map.contains_key(id)).collect();
         save = place_new(&new_ids, &mapped, &vector, &map);
+        if prints.unread() {
+            return None;
+        }
         map.extend(save.iter().map(|(id, p)| (*id, *p)));
     }
     Some(Updated { map, save, replace: false })

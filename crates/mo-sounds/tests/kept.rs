@@ -162,7 +162,8 @@ fn a_file_that_cant_be_read_any_more_finds_nothing_and_says_so_once() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static TOLD: AtomicUsize = AtomicUsize::new(0);
     mo_sounds::index::on_kept_trouble(|what| {
-        assert!(what.contains("sound-likeness-") && what.contains("couldn't be read"), "{what}");
+        let ours = what.contains("sound-likeness-") || what.contains("sound-prints-");
+        assert!(ours && what.contains("couldn't be read"), "{what}");
         // Only this test's own file: the tests run side by side, and another's cut-short file is told of here too.
         if Path::new(what.split(" couldn't be read").next().unwrap()).parent().is_some_and(|d| d.ends_with("gone")) {
             TOLD.fetch_add(1, Ordering::Relaxed);
@@ -313,7 +314,8 @@ fn each_kind_of_file_is_swept_on_its_own() {
     assert!(!clap_file.exists() && done.file.exists() && clap_done.file.exists());
     // The old index, its file gone, still reads what it had open (or finds nothing): it never stops the app.
     let _ = old.nearest(&[1.0; 16], 5);
-    // Each kind's own are removed alone.
+    // Each kind's own are removed alone (nothing holding them open by now).
+    drop((clap, old, new, clap_new));
     assert_eq!(remove_kept(&dir), 1);
     assert!(done.file.exists() && !clap_done.file.exists());
     assert_eq!(remove_kept_prints(&dir), 1);
@@ -394,4 +396,49 @@ fn many_sounds_at_once_from_a_file_that_cant_be_read_get_none() {
     assert_eq!(seen, (0..100).map(|k| (k, 16)).collect::<Vec<_>>());
     // One by one too.
     assert_eq!(kept.each(&[3, 5000 * 3], |_, row| row.to_vec().len()), [Some(16), None]);
+}
+
+#[test]
+fn fingerprints_in_a_file_that_cant_be_read_find_nothing_and_a_scan_says_so() {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::AtomicBool;
+    let dir = folder("full-cut");
+    let mut index = SoundIndex::from_gathered(gathered(9000, 1), Gathered::default(), 9000);
+    let done = index.keep_features_in(&dir).unwrap().unwrap();
+    let q = index.features.get(3).unwrap().into_owned();
+    assert_eq!(index.features.nearest(&q, 5).len(), 5);
+    let quiet = |_: mo_sounds::galaxy::Step| {};
+    let never = AtomicBool::new(false);
+    let laid_out = mo_sounds::galaxy::update(&index, "features", HashMap::new(), false, &quiet, &never);
+    let saved = laid_out.expect("laid out from the file").map;
+    assert_eq!(saved.len(), 9000);
+
+    // Cut short behind its back: only the first hundred sounds' numbers can still be read.
+    fs::File::options().write(true).open(&done.file).unwrap().set_len(4096 + 100 * 16 * 4).unwrap();
+    let kept = &index.features;
+    assert_eq!(kept.get(9000 * 3), None);
+    assert_eq!(kept.dot_with(9000 * 3, &q), None);
+    assert!(kept.get(3).is_some(), "what can still be read is");
+    assert!(kept.nearest(&q, 5).is_empty());
+    let ids: Vec<i64> = (1..=9000).map(|n| n * 3).collect();
+    let got = kept.each(&ids, |_, row| row.to_vec().len());
+    assert!(got[..100].iter().all(|g| *g == Some(16)) && got[100..].iter().all(Option::is_none));
+    // A scan's new sound can't be put in: said, so the app builds the index afresh from the library, rather than
+    // being handed the same index as if it had worked.
+    let more = || {
+        let mut g = Gathered::default();
+        g.push(50_000, &[0.25; 16]);
+        g
+    };
+    let none = HashSet::new();
+    assert!(kept.try_with(&none, more(), true, Some(chroma_downweight)).is_none());
+    assert_eq!(&kept.with(&none, more(), true, Some(chroma_downweight)), kept);
+    assert!(index.with_features(&none, &none, more()).is_none());
+    // Nothing changed needs no read, and is still the same index.
+    assert!(index.with_features(&none, &none, Gathered::default()).is_some());
+    // The galaxy places nothing from numbers it couldn't read: afresh, or a few new stars.
+    assert!(mo_sounds::galaxy::update(&index, "features", HashMap::new(), true, &quiet, &never).is_none());
+    let mut fewer = saved.clone();
+    fewer.remove(&(9000 * 3));
+    assert!(mo_sounds::galaxy::update(&index, "features", fewer, false, &quiet, &never).is_none());
 }

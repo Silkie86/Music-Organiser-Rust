@@ -477,8 +477,20 @@ impl VectorIndex {
         standardise: bool,
         weights: Option<fn(usize) -> Vec<f32>>,
     ) -> VectorIndex {
+        self.try_with(without, more, standardise, weights).unwrap_or_else(|| self.clone())
+    }
+
+    /// As [`VectorIndex::with`], saying so (`None`) when the index's numbers are in a file that can't be read now,
+    /// rather than giving the index back unchanged: the caller then builds one afresh from the library.
+    pub fn try_with(
+        &self,
+        without: &HashSet<i64>,
+        more: Gathered,
+        standardise: bool,
+        weights: Option<fn(usize) -> Vec<f32>>,
+    ) -> Option<VectorIndex> {
         if self.ids.is_empty() {
-            return VectorIndex::from_gathered(more, standardise, weights);
+            return Some(VectorIndex::from_gathered(more, standardise, weights));
         }
         let dim = self.dim;
         // In id order, a later one for the same id winning, as building takes them.
@@ -489,7 +501,7 @@ impl VectorIndex {
             rows.insert(id, row);
         }
         if rows.is_empty() && !without.iter().any(|id| self.contains(*id)) {
-            return self.clone();
+            return Some(self.clone());
         }
         let (ids, rows) = match &self.rows {
             Rows::Full(parts) => {
@@ -504,21 +516,22 @@ impl VectorIndex {
             // Held again: the file is of the numbers as they were, and these are others. (The app never changes
             // CLAP's index this way; [`VectorIndex::keep_in`] puts the new ones in a file of their own if asked.)
             Rows::InFile(file) => {
-                // The file can't be read: the index stays as it is (and finds nothing, as its searches say).
-                let Some(parts) = self.read_back::<u16>(file) else { return self.clone() };
+                // (None when the file can't be read.)
+                let parts = self.read_back::<u16>(file)?;
                 let rows = rows.into_iter().map(|(id, row)| (id, row.iter().map(|x| to_half(*x)).collect())).collect();
                 let (ids, parts) = merged(&self.ids, &parts, dim, without, &rows);
                 (ids, Rows::Half(parts))
             }
-            // The same at full precision: the analyser's fingerprints after a scan, which the app then keeps in a
-            // file again ([`VectorIndex::keep_full_in`]).
+            // The same at full precision: the analyser's fingerprints after a scan. They stay held until the index
+            // is next built afresh and kept ([`VectorIndex::keep_full_in`]): a scan's few sounds aren't worth writing
+            // the whole file again.
             Rows::FullInFile(file) => {
-                let Some(parts) = self.read_back::<f32>(file) else { return self.clone() };
+                let parts = self.read_back::<f32>(file)?;
                 let (ids, parts) = merged(&self.ids, &parts, dim, without, &rows);
                 (ids, Rows::Full(parts))
             }
         };
-        VectorIndex { dim, ids, rows, ready: self.ready.clone() }
+        Some(VectorIndex { dim, ids, rows, ready: self.ready.clone() })
     }
 
     /// Every row read back from `file`, in the parts an index holds them in; none when it can't all be read.
@@ -1001,7 +1014,9 @@ impl SoundIndex {
     /// those listened to again that it could hear) put in, made ready as the ones in it were ([`VectorIndex::with`]):
     /// for the few a scan brings, rather than reading every fingerprint again. CLAP's stay as they are: it never hears
     /// a sound in this app, and one listened to again keeps CLAP's fingerprint. `None` when CLAP's has one of the sounds
-    /// gone: the index is built afresh then, as it is when the count that says whether CLAP has heard enough changes.
+    /// gone, or the analyser's fingerprints are in a file that can't be read now: the index is built afresh then, as
+    /// it is when the count that says whether CLAP has heard enough changes. The fingerprints of the index given are
+    /// held in memory again (they're others than the file's); the app keeps them in a file when it next builds one.
     pub fn with_features(&self, gone: &HashSet<i64>, again: &HashSet<i64>, more: Gathered) -> Option<SoundIndex> {
         if let Some(clap) = &self.clap
             && gone.iter().any(|id| clap.contains(*id))
@@ -1010,7 +1025,7 @@ impl SoundIndex {
         }
         let without: HashSet<i64> = gone.union(again).copied().collect();
         Some(SoundIndex {
-            features: self.features.with(&without, more, true, Some(chroma_downweight)),
+            features: self.features.try_with(&without, more, true, Some(chroma_downweight))?,
             clap: self.clap.clone(),
             deep: self.deep,
         })

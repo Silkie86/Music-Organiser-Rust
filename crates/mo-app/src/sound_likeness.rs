@@ -25,11 +25,10 @@ fn hear_trouble() {
     });
 }
 
-/// Puts the analyser's fingerprints of `index` (just built, or just changed by a scan) in their file in `folder`,
-/// and says in the log how it went. With none, files of earlier ones are removed. As [`keep`]: never on the
-/// window's thread, nor on the pool the pages' quick jobs share.
-pub fn keep_prints(index: &mut SoundIndex, folder: &Path) {
-    hear_trouble();
+/// Puts the analyser's fingerprints of `index` (just built) in their file in `folder`, and says in the log how it
+/// went. With none, files of earlier ones are removed. Not after a scan changes a few (they're held again until the
+/// index is next built): the whole file isn't written again for those.
+fn keep_prints(index: &mut SoundIndex, folder: &Path) {
     let began = Instant::now();
     if index.features.is_empty() {
         let removed = mo_sounds::index::remove_kept_prints(folder);
