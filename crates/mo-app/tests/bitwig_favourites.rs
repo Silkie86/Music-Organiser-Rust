@@ -147,7 +147,15 @@ fn multisamples_are_listed_from_each_library_once() {
     let one = dir.join("One").join("Library");
     let ms = one.join("Multisamples");
     fs::create_dir_all(ms.join("Drums")).unwrap();
-    for name in ["b Snare.multisample", "Drums/A Kick.multisample", "Kick.multisample.backup", ".backup"] {
+    // Not the one made for trying the app out (Solomon's F12 note, 25 Nov 2026).
+    let names = [
+        "b Snare.multisample",
+        "Drums/A Kick.multisample",
+        "Kick.multisample.backup",
+        ".backup",
+        "MO Recipe Tones.multisample",
+    ];
+    for name in names {
         fs::write(ms.join(name), b"").unwrap();
     }
     let found = multisamples(&[one.clone(), one, dir.join("gone")]);

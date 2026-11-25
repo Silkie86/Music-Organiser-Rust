@@ -1239,8 +1239,8 @@ pub const OLDER_SAVES_KEY: &str = "midi_older_saves";
 
 /// The files the index should hold: the newest save of each song (or every save, `older`) that a reader takes and
 /// that was there and readable at the last scan, grouped into songs as the Songs page groups them (Fix's copies still
-/// waiting for Keep or Delete, `pending`, and DAW autosaves left out, as there); and every MIDI file the MIDI
-/// folders' walk found.
+/// waiting for Keep or Delete, `pending`, DAW autosaves and the saves made for trying the app out left out, as there:
+/// [`mo_library::songs::made_for_tests`]); and every MIDI file the MIDI folders' walk found.
 pub fn wanted(
     mut saves: Vec<mo_library::Save>,
     pending: &mo_library::PathSet,
@@ -1254,6 +1254,7 @@ pub fn wanted(
             && s.error.is_none()
             && !pending.contains(&s.path)
             && !mo_library::scan::is_autosave_file(mo_formats::paths::file_name(&s.path))
+            && !mo_library::songs::made_for_tests(&s.name)
             && mo_midi::extract::project_version(&s.path).is_some()
     });
     let readable = saves;
@@ -1960,9 +1961,16 @@ pub(crate) mod tests {
         );
         assert_eq!(wanted(saves.clone(), &none, &choices, true, &files).len(), 3);
         // An autosave is never a song's newest save.
-        let mut with_autosave = saves;
+        let mut with_autosave = saves.clone();
         with_autosave.insert(0, save("C:\\Songs\\Night drive_12 (autosave).flp", 400));
         assert_eq!(paths(wanted(with_autosave, &none, &choices, false, &[]))[0], "C:\\Songs\\Night drive_12.flp");
+        // Nor are the saves made for trying the app out read for their parts, newest or not (Solomon's F12 note,
+        // 25 Nov 2026).
+        let mut with_tests = saves;
+        with_tests.push(save("C:\\Songs\\MO Recipe 02 notes.flp", 500));
+        with_tests.push(save("C:\\Songs\\MO Live Test automation.flp", 600));
+        assert_eq!(paths(wanted(with_tests.clone(), &none, &choices, false, &[])), ["C:\\Songs\\Night drive_12.flp"]);
+        assert_eq!(wanted(with_tests, &none, &choices, true, &[]).len(), 2);
     }
 
     #[test]

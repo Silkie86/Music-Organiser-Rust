@@ -159,10 +159,11 @@ impl Found {
 }
 
 /// Measures every song in the library: its saves still on disk, the DAW's autosaves of it and, when the song has a
-/// folder to itself, everything in that folder. `prints` are the fingerprints of saves the last looks read (see
-/// [`crate::song_room`]): a save unchanged since isn't read again ([`Compare::Remembered`]: Remove reads every save
-/// afresh before anything goes). Spread over the pool it's called in (rule 21): call it on the app's low-priority
-/// pool, never the window's thread.
+/// folder to itself, everything in that folder. The songs made for trying the app out are never offered
+/// ([`Song::made_for_tests`]: Solomon's F12 note, 25 Nov 2026), though the samples their saves use still count as used.
+/// `prints` are the fingerprints of saves the last looks read (see [`crate::song_room`]): a save unchanged since isn't
+/// read again ([`Compare::Remembered`]: Remove reads every save afresh before anything goes). Spread over the pool
+/// it's called in (rule 21): call it on the app's low-priority pool, never the window's thread.
 pub fn look(
     from: &FromLibrary,
     settings: CompactSettings,
@@ -172,8 +173,11 @@ pub fn look(
     let songs = group_songs(&from.saves, &from.choices, &settings.dates);
     let others = Others::new(&songs, &from.samples, from.sample_folders.clone());
     let compare = prints.map_or(Compare::Afresh, Compare::Remembered);
-    let measured: Result<Vec<Option<SongRoom>>, Stopped> =
-        songs.par_iter().map(|song| measure_song(song, from, &others, settings, compare, stop)).collect();
+    let measured: Result<Vec<Option<SongRoom>>, Stopped> = songs
+        .par_iter()
+        .filter(|song| !song.made_for_tests())
+        .map(|song| measure_song(song, from, &others, settings, compare, stop))
+        .collect();
     keep_prints(prints, measured.is_ok(), "Space");
     Ok(Found { songs: measured?.into_iter().flatten().collect(), settings })
 }

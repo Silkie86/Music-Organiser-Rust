@@ -71,7 +71,8 @@ pub fn is_multisample(path: &Path) -> bool {
 
 /// The multisamples in the Multisamples folder of each of `libraries` (Bitwig's Library folders, as Space finds them:
 /// [`crate::space_bitwig::library_folders`]) and the folders in it, each once, by name (ignoring capitals), then
-/// path. Links are never followed, so a folder is never listed twice or left for another drive.
+/// path. Links are never followed, so a folder is never listed twice or left for another drive. One made for trying
+/// the app out isn't listed ([`mo_library::songs::made_for_tests`]: "MO Recipe Tones").
 pub fn multisamples(libraries: &[PathBuf]) -> Vec<Multisample> {
     let mut found: Vec<Multisample> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -86,7 +87,9 @@ pub fn multisamples(libraries: &[PathBuf]) -> Vec<Multisample> {
                     folders.push((path, depth + 1));
                 } else if kind.is_file() && is_multisample(&path) && seen.insert(key(&path)) {
                     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                    found.push(Multisample { path, name });
+                    if !mo_library::songs::made_for_tests(&name) {
+                        found.push(Multisample { path, name });
+                    }
                 }
             }
         }

@@ -604,3 +604,44 @@ fn a_save_that_couldnt_be_read_isnt_judged_a_rework_by_its_plugins() {
     read.plugin_names = vec!["Vital".into()];
     assert!(songs::is_reworked(&earlier, &read));
 }
+
+#[test]
+fn files_made_for_trying_the_app_out_are_told_by_name() {
+    // Not one of the C# cases: Solomon's F12 note of 25 Nov 2026, "anything with mo recipe shouldnt turn up in the
+    // app". Every save, preset and multisample the recipe made is one, as each of his names has it.
+    let recipe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../mo-formats/tests/fixtures/recipe");
+    let mut seen = 0;
+    for daw in ["bitwig", "fl", "studio-one"] {
+        for file in std::fs::read_dir(recipe.join(daw)).unwrap() {
+            let path = file.unwrap().path();
+            if path.is_file() {
+                let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+                assert!(songs::made_for_tests(&name), "{name}");
+                seen += 1;
+            }
+        }
+    }
+    assert!(seen > 50, "only {seen} recipe files");
+    let made_for_tests = [
+        "MO Recipe 02 notes (fixed)",
+        "mo recipe 09b stretch old",
+        "MO_Recipe_3",
+        "MORecipe",
+        "MO Recipe",
+        "Copy of MO Recipe 02 notes",
+        "  MO Recipe 01 empty",
+        "MO Live Test",
+        "MO Live Test automation",
+        "MO Live Test 1",
+        "mo-live-test 2",
+    ];
+    for name in made_for_tests {
+        assert!(songs::made_for_tests(name), "{name}");
+    }
+    // A song whose name only has the letters in it isn't one, nor are the recipe's tones: their names don't say so.
+    for name in
+        ["Demo Recipe", "Sumo Recipe", "MO Recipes", "Recipe 2", "MO Tone A", "MO Live Testament", "Night Drive"]
+    {
+        assert!(!songs::made_for_tests(name), "{name}");
+    }
+}
