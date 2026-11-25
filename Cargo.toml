@@ -9,7 +9,6 @@ exclude = ["tools/galaxycheck", "fuzz", "vendor/femtovg", "vendor/i-slint-backen
 [workspace.package]
 version = "0.9.0-beta.1"
 edition = "2024"
-repository = "https://github.com/Silkie86/Music-Organiser-Rust"
 publish = false
 
 [workspace.dependencies]
