@@ -381,13 +381,116 @@ const SIZE_SQL: &str = "SELECT COALESCE(size, 0) FROM sounds WHERE path = ?1";
 /// read; a sound's size is looked up when the rule above needs it.
 #[derive(Default)]
 pub struct SoundLibrary {
-    /// Each name's sounds, in the order they joined the library.
-    by_name: HashMap<String, Vec<String>>,
+    /// Every sound's path, held small ([`Paths`]).
+    paths: Paths,
     sizes: Sizes,
     /// Whether every sound was read: not when the database couldn't be opened or a row couldn't be read.
     complete: bool,
     /// Whether the sounds of a name are all copies of one sound, worked out once for each name.
     copies: Mutex<HashMap<String, bool>>,
+}
+
+/// Every sound's path, found by file name, held small: half a million paths as a text of their own each, under a
+/// list for each name, took well over 100 MB for as long as the app ran (Solomon's log of 2026-11-25). Each folder is
+/// kept once (a pack's hundreds of sounds share one), the file names lie one after another in one text, and a sound
+/// is three numbers: its folder, and where its name is. Paths are put together again when asked for, exactly as they
+/// were given.
+#[derive(Default)]
+struct Paths {
+    /// Each folder once, with the separator it ends with ("" for a path that's only a name).
+    folders: Vec<Box<str>>,
+    /// Every file name, one after another.
+    names: String,
+    /// Each sound, in the order they joined the library.
+    sounds: Vec<Sound>,
+    /// Each sound's place in `sounds`, by a number made from its name's look-up key ([`name_number`]); in order of
+    /// that number, then of joining. Made by [`Paths::finish`].
+    by_name: Vec<(u64, u32)>,
+}
+
+/// One sound: its folder (a place in [`Paths::folders`]) and its name (where it starts in [`Paths::names`], and how
+/// long it is).
+#[derive(Clone, Copy)]
+struct Sound {
+    folder: u32,
+    name_at: u32,
+    name_len: u32,
+}
+
+/// The number a file name is looked up by: the same for names that differ only in letter case. Two names can share
+/// one by chance, so what's found is still compared by name.
+fn name_number(name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    case::key(name).hash(&mut hasher);
+    hasher.finish()
+}
+
+impl Paths {
+    /// Takes `path` in. `folders` finds a folder already kept. Says no when it can't be held (more text or sounds
+    /// than the numbers reach: over 4 GB of names).
+    fn add(&mut self, path: &str, folders: &mut HashMap<Box<str>, u32>) -> bool {
+        let name = file_name(path);
+        let folder = path.get(..path.len() - name.len()).unwrap_or("");
+        let (Ok(name_at), Ok(name_len)) = (u32::try_from(self.names.len()), u32::try_from(name.len())) else {
+            return false;
+        };
+        if name_at.checked_add(name_len).is_none() || u32::try_from(self.sounds.len()).is_err() {
+            return false;
+        }
+        let folder = match folders.get(folder) {
+            Some(&at) => at,
+            None => {
+                let Ok(at) = u32::try_from(self.folders.len()) else { return false };
+                self.folders.push(folder.into());
+                folders.insert(folder.into(), at);
+                at
+            }
+        };
+        self.names.push_str(name);
+        self.sounds.push(Sound { folder, name_at, name_len });
+        true
+    }
+
+    /// Makes the look-up by name, once every path is in, and gives back the room that was spare.
+    fn finish(&mut self) {
+        self.folders.shrink_to_fit();
+        self.names.shrink_to_fit();
+        self.sounds.shrink_to_fit();
+        let mut by_name: Vec<(u64, u32)> =
+            (0u32..).zip(&self.sounds).map(|(at, sound)| (name_number(self.name(sound)), at)).collect();
+        by_name.sort_unstable();
+        self.by_name = by_name;
+    }
+
+    fn name(&self, sound: &Sound) -> &str {
+        let at = sound.name_at as usize;
+        self.names.get(at..at + sound.name_len as usize).unwrap_or("")
+    }
+
+    fn path(&self, sound: &Sound) -> String {
+        let folder = self.folders.get(sound.folder as usize).map_or("", |f| &**f);
+        let name = self.name(sound);
+        let mut path = String::with_capacity(folder.len() + name.len());
+        path.push_str(folder);
+        path.push_str(name);
+        path
+    }
+
+    /// Every sound called `name` (in any letter case), in the order they joined.
+    fn named(&self, name: &str) -> Vec<String> {
+        let number = name_number(name);
+        let from = self.by_name.partition_point(|(n, _)| *n < number);
+        self.by_name
+            .get(from..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|(n, _)| *n == number)
+            .filter_map(|(_, at)| self.sounds.get(*at as usize))
+            .filter(|sound| case::eq_ignore_case(self.name(sound), name))
+            .map(|sound| self.path(sound))
+            .collect()
+    }
 }
 
 /// Where a library's sizes come from.
@@ -428,21 +531,29 @@ impl SoundLibrary {
         files.sort_unstable_by_key(|(id, _)| *id);
         let mut library =
             SoundLibrary { sizes: Sizes::Database(sounds_db.to_owned()), complete, ..SoundLibrary::default() };
-        for (_, path) in files {
-            library.add(path);
-        }
+        library.take(files.iter().map(|(_, path)| path.as_str()));
         library
+    }
+
+    /// Takes these paths in, in this order. One that can't be held ([`Paths::add`]) leaves the library not
+    /// complete.
+    fn take<'a>(&mut self, paths: impl IntoIterator<Item = &'a str>) {
+        let mut folders = HashMap::new();
+        for path in paths {
+            if !self.paths.add(path, &mut folders) {
+                self.complete = false;
+                break;
+            }
+        }
+        self.paths.finish();
     }
 
     /// A library of these files and sizes (tests give their own).
     pub fn from_files(files: impl IntoIterator<Item = (String, i64)>) -> SoundLibrary {
         let mut library = SoundLibrary { complete: true, ..SoundLibrary::default() };
-        let mut sizes = HashMap::new();
-        for (path, size) in files {
-            sizes.insert(path.clone(), size);
-            library.add(path);
-        }
-        library.sizes = Sizes::Given(sizes);
+        let files: Vec<(String, i64)> = files.into_iter().collect();
+        library.take(files.iter().map(|(path, _)| path.as_str()));
+        library.sizes = Sizes::Given(files.into_iter().collect());
         library
     }
 
@@ -452,23 +563,19 @@ impl SoundLibrary {
         self.complete
     }
 
-    fn add(&mut self, path: String) {
-        self.by_name.entry(case::key(file_name(&path))).or_default().push(path);
-    }
-
     /// Every sound called `name` (in any letter case), in the order they joined the library. Nothing is read from the
     /// disk: whether each is still there is the caller's to check.
-    pub fn named(&self, name: &str) -> &[String] {
-        self.by_name.get(&case::key(name)).map_or(&[], Vec::as_slice)
+    pub fn named(&self, name: &str) -> Vec<String> {
+        self.paths.named(name)
     }
 
     /// How many sounds it knows.
     pub fn len(&self) -> usize {
-        self.by_name.values().map(Vec::len).sum()
+        self.paths.sounds.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
+        self.paths.sounds.is_empty()
     }
 
     /// Whether this library has `sample` (a path as a project saves it), by the rule the locator ends with
@@ -486,7 +593,10 @@ impl SoundLibrary {
     /// sound of that name is the same size, so they're copies of one sound and not different sounds sharing a name.
     fn find(&self, name: &str, folder: Option<&str>) -> Option<String> {
         let key = case::key(name);
-        let all = self.by_name.get(&key)?;
+        let all = self.paths.named(name);
+        if all.is_empty() {
+            return None;
+        }
         let there = |p: &&String| Path::new(p.as_str()).is_file();
         if let Some(want) = folder {
             let parent = |p: &str| split(p).1.iter().rev().nth(1).is_some_and(|f| same(f, want));
@@ -494,7 +604,7 @@ impl SoundLibrary {
                 return Some(p.clone());
             }
         }
-        if !self.copies_of_one(&key, all) {
+        if !self.copies_of_one(&key, &all) {
             return None;
         }
         all.iter().find(there).cloned()
@@ -796,5 +906,46 @@ mod tests {
         assert_eq!(split("/m/b.wav"), ("/", vec!["m", "b.wav"]));
         assert_eq!(split("b.wav"), ("", vec!["b.wav"]));
         assert!(is_drive("K:") && !is_drive("/") && !is_drive(""));
+    }
+
+    #[test]
+    fn the_library_gives_back_each_path_as_it_was_given_by_name_in_any_case() {
+        let given = [
+            r"K:\Packs\Drums\Kick 01.wav",
+            r"K:\Packs\Drums\Snare.wav",
+            "/music/packs/drums/KICK 01.WAV",
+            r"K:\Packs\Other/kick 01.wav",
+            "Loose.wav",
+            r"K:\Packs\Drums\Straße.wav",
+            r"K:\Packs\Drums\Kick 01.wav.bak",
+        ];
+        let library = SoundLibrary::from_files(given.iter().map(|p| ((*p).to_owned(), 10)));
+        assert_eq!((library.len(), library.is_empty(), library.is_complete()), (given.len(), false, true));
+        // Every one of a name, in the order they joined, each exactly as given (its own separators and letters).
+        let kicks = [given[0], given[2], given[3]];
+        for asked in ["Kick 01.wav", "KICK 01.WAV", "kick 01.wav"] {
+            assert_eq!(library.named(asked), kicks, "{asked}");
+        }
+        assert_eq!(library.named("loose.WAV"), ["Loose.wav"]);
+        assert_eq!(library.named("STRASSE.wav"), Vec::<String>::new(), "another name");
+        assert_eq!(library.named("straße.wav"), [given[5]]);
+        assert_eq!(library.named("Kick 01.wav.bak"), [given[6]]);
+        for none in ["", "Kick 01", "Kick 02.wav", "Drums"] {
+            assert!(library.named(none).is_empty(), "{none}");
+        }
+        // The folder is kept once for the sounds in it.
+        assert_eq!(library.paths.folders.len(), 4);
+        assert!(SoundLibrary::default().named("Kick 01.wav").is_empty());
+        assert!(SoundLibrary::default().is_empty());
+    }
+
+    #[test]
+    fn many_sounds_are_each_found_by_their_own_name() {
+        let path = |n: usize| format!(r"L:\Lib\Folder {}\Sound {n}.wav", n % 37);
+        let library = SoundLibrary::from_files((0..5000).map(|n| (path(n), 1)));
+        for n in (0..5000).step_by(7) {
+            assert_eq!(library.named(&format!("sound {n}.WAV")), [path(n)]);
+        }
+        assert_eq!(library.paths.folders.len(), 37);
     }
 }

@@ -1920,7 +1920,7 @@ fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &
     let prints = data.join(mo_space::prints::FILE_NAME);
     // The Sounds library finds the originals of the single sample copies in each project's samples folder.
     let sounds = mo_app::sound_library::shared(&mo_app::sound_library::database_in(&data));
-    let named = |name: &str| sounds.named(name).to_vec();
+    let named = |name: &str| sounds.named(name);
     // An empty Sounds library (not read yet, or none) has no originals to give: the samples folders aren't walked.
     let named: Option<&mo_space::bitwig::Named<'_>> = (!sounds.is_empty()).then_some(&named);
     let found = background::on_bulk_pool(|| {
