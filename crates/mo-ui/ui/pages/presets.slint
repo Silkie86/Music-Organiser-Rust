@@ -161,6 +161,10 @@ export global PresetsData {
     // Export these is running: its button stops it (PS-3).
     in property <bool> exporting-shown;
     callback export-shown();
+    // To Serum 2: every Serum 1 sound shown, as .fxp files in Serum 2's user presets (shown when there are some).
+    in property <int> serum1-shown;
+    in property <ActionKey> serum2-shown-key;
+    callback serum2-shown();
 
     // The Curves section (the search box is shared: `search` holds the section's words on show).
     // Found in: its chips go through `toggle` and `clear-chip`, as "found-in".
@@ -646,6 +650,17 @@ export component PresetsPage inherits Rectangle {
                     tip: "Randomise: make a new curve from parts of the curves shown; with a highlight, roll only that part again";
                     key: PresetsData.randomise-key;
                     clicked => { PresetsData.randomise(); }
+                }
+            }
+            if PresetsData.section == 0 && PresetsData.serum1-shown > 0: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "To Serum 2";
+                    enabled: !PresetsData.exporting;
+                    tip: PresetsData.serum2-shown-key.what + " (" + PresetsData.serum1-shown + "): Serum 2 loads them as they are, from User › From my songs";
+                    key: PresetsData.serum2-shown-key.key;
+                    clicked => { PresetsData.serum2-shown(); }
                 }
             }
             if PresetsData.section == 0: VerticalLayout {

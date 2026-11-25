@@ -1322,6 +1322,10 @@ pub mod act {
     /// Keep an audition in Bitwig: its track stays, as Send to Bitwig would have left it.
     pub const KEEP: &str = "presets.keepAudition";
     pub const EXPORT_SHOWN: &str = "presets.exportShown";
+    /// Put a Serum 1 sound in Serum 2's user presets (Serum 2 loads Serum 1's `.fxp` files as they are).
+    pub const TO_SERUM2: &str = "presets.toSerum2";
+    /// The same for every Serum 1 sound shown.
+    pub const SERUM2_SHOWN: &str = "presets.serum2Shown";
     pub const REVEAL: &str = "presets.reveal";
     /// The sound's song on the Songs page (Show in Songs, as Plugins has it).
     pub const SHOW_IN_SONGS: &str = "presets.showInSongs";
@@ -1377,6 +1381,9 @@ pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
     out.push(offer("Send to Bitwig", act::TO_BITWIG, bitwig && !busy));
     if !file {
         out.push(offer("Export", act::EXPORT, !busy));
+        if is_serum_1(i) {
+            out.push(offer("Put in Serum 2", act::TO_SERUM2, !busy));
+        }
     }
     if file {
         out.push(offer("Show in folder", act::REVEAL, true));
@@ -1387,6 +1394,69 @@ pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
         out.push(offer("Copy the song's path", act::COPY_PATH, true));
     }
     out
+}
+
+/// Whether a line is a song's Serum 1 sound, which Serum 2 can load once it's in its presets folder. A preset file
+/// isn't: Serum 2 finds Serum 1's own presets folder by itself.
+pub fn is_serum_1(i: &Item) -> bool {
+    !i.is_file() && mo_presets::serum2::is_serum_1(&i.row.plugin)
+}
+
+/// How many of the lines shown are songs' Serum 1 sounds ([`is_serum_1`]).
+pub fn serum_1_count(items: &[Item], shown: &[usize]) -> usize {
+    shown.iter().filter(|&&n| items.get(n).is_some_and(is_serum_1)).count()
+}
+
+/// What To Serum 2 puts in for the lines shown: each save with its song's name and its Serum 1 sounds ([`is_serum_1`]),
+/// each with its part (your fix in `fixes`, else the line's), songs in list order; and how many sounds that is.
+pub fn serum2_plan(
+    items: &[Item],
+    shown: &[usize],
+    fixes: &Fixes,
+) -> (Vec<(String, String, Vec<mo_presets::serum2::Pick>)>, usize) {
+    let mut plan: Vec<(String, String, Vec<mo_presets::serum2::Pick>)> = Vec::new();
+    let mut at: HashMap<&str, usize> = HashMap::new();
+    let mut count = 0;
+    for i in shown.iter().filter_map(|&n| items.get(n)).filter(|i| is_serum_1(i)) {
+        let Source::Song { save, key } = &i.row.source else { continue };
+        let pick = mo_presets::serum2::Pick { key: key.clone(), part: i.role_with(fixes) };
+        let n = *at.entry(save.as_str()).or_insert_with(|| {
+            plan.push((save.clone(), i.song.clone(), Vec::new()));
+            plan.len() - 1
+        });
+        plan[n].2.push(pick);
+        count += 1;
+    }
+    (plan, count)
+}
+
+/// What a put in Serum 2 says when it's done: how many went (or were there already), where, and what couldn't go.
+pub fn serum2_summary(done: &[Exported], failed_saves: &[String]) -> String {
+    let files: usize = done.iter().map(|e| e.files.len()).sum();
+    let mut text = if files == 0 {
+        "No Serum 1 sounds went into Serum 2.".to_owned()
+    } else {
+        format!(
+            "{} Serum 1 {} in Serum 2's presets, under User › {}, a folder for each part: load {} from Serum 2's \
+             browser.",
+            thousands(files),
+            if files == 1 { "sound is" } else { "sounds are" },
+            mo_presets::serum2::FROM_SONGS,
+            if files == 1 { "it" } else { "them" },
+        )
+    };
+    let failed: Vec<&String> = done.iter().flat_map(|e| &e.failed).chain(failed_saves).collect();
+    if !failed.is_empty() {
+        text += &format!(
+            " {} couldn't go: {}",
+            thousands(failed.len()),
+            failed.iter().map(|f| f.as_str()).collect::<Vec<_>>().join("; ")
+        );
+        if !text.ends_with('.') {
+            text.push('.');
+        }
+    }
+    text
 }
 
 /// Which line an audition is of, however the list is filtered or sorted meanwhile: its song's save and the sound's key
@@ -2485,8 +2555,33 @@ mod tests {
         };
         assert_eq!(
             ids(&all[0]),
-            [act::AUDITION, act::TO_BITWIG, act::EXPORT, act::SHOW_IN_SONGS, act::REVEAL, act::COPY_PATH]
+            [
+                act::AUDITION,
+                act::TO_BITWIG,
+                act::EXPORT,
+                act::TO_SERUM2,
+                act::SHOW_IN_SONGS,
+                act::REVEAL,
+                act::COPY_PATH
+            ]
         );
+        // Only a song's Serum 1 sound goes into Serum 2: not another plugin's, nor a preset file.
+        assert!(!ids(&all[2]).contains(&act::TO_SERUM2));
+        let mut serum_2 = all[0].clone();
+        serum_2.row.plugin = "Serum 2".into();
+        assert!(!ids(&serum_2).contains(&act::TO_SERUM2));
+        assert!(!offers(&all[0], true, Hearing::Off).iter().any(|o| o.id == act::TO_SERUM2 && o.enabled));
+        assert_eq!(serum_1_count(&all, &[0, 1, 2, 3]), 2);
+        // To Serum 2's plan: one save, both Serum sounds, each with its part (a fix wins over the guess).
+        let mut fixes = Fixes::new();
+        fixes.insert(all[1].row.hash.clone(), Some(Role::Pad));
+        let (plan, n) = serum2_plan(&all, &[3, 2, 1, 0], &fixes);
+        assert_eq!(n, 2);
+        assert_eq!(plan.len(), 1);
+        assert_eq!((plan[0].0.as_str(), plan[0].1.as_str()), ("/s/Didums_77.flp", "Didums"));
+        let parts: Vec<_> = plan[0].2.iter().map(|p| p.part).collect();
+        assert_eq!(parts, [Some(Role::Pad), Some(Role::Bass)]);
+        assert_eq!(serum_1_count(&all, &[2, 3, 9]), 0);
         let mut fl_own = all[2].clone();
         fl_own.row.extension = ".flstate".into();
         assert!(!ids(&fl_own).contains(&act::TO_BITWIG), "an FL plugin's own state can't go into Bitwig");
@@ -2524,6 +2619,31 @@ mod tests {
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].0, "/s/Didums_77.flp");
         assert_eq!(plan[0].1.len(), 2);
+    }
+
+    #[test]
+    fn serum2_summary_says_where_to_find_them() {
+        let e = |files: &[&str], failed: &[&str]| Exported {
+            folder: PathBuf::from("/x"),
+            files: files.iter().map(|f| f.to_string()).collect(),
+            failed: failed.iter().map(|f| f.to_string()).collect(),
+            warning: None,
+        };
+        assert_eq!(
+            serum2_summary(&[e(&["Sub.fxp"], &[])], &[]),
+            "1 Serum 1 sound is in Serum 2's presets, under User › From my songs, a folder for each part: load it from \
+             Serum 2's browser."
+        );
+        assert_eq!(
+            serum2_summary(
+                &[e(&["Sub.fxp", "Hook.fxp"], &["Pad: its Serum 1 settings don't unpack"])],
+                &["Old: gone".to_owned()]
+            ),
+            "2 Serum 1 sounds are in Serum 2's presets, under User › From my songs, a folder for each part: load them \
+             from Serum 2's browser. \
+             2 couldn't go: Pad: its Serum 1 settings don't unpack; Old: gone."
+        );
+        assert_eq!(serum2_summary(&[], &[]), "No Serum 1 sounds went into Serum 2.");
     }
 
     #[test]

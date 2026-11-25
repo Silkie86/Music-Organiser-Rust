@@ -97,6 +97,8 @@ struct Page {
     exporting: bool,
     /// Whether the export running is Export these, which its button (or key) stops (PS-3).
     exporting_shown: bool,
+    /// How many of the lines shown are songs' Serum 1 sounds (the To Serum 2 button shows when there are some).
+    serum_1_shown: usize,
     message: String,
     /// The line being auditioned in Bitwig ([`logic::audition_id`]) and how far it's got.
     hearing: Option<(String, logic::Hearing)>,
@@ -184,6 +186,8 @@ struct FilterAnswer {
     years: Vec<(i32, usize)>,
     chips: logic::FilterChips,
     plugins: Vec<(String, usize)>,
+    /// How many of the lines shown are songs' Serum 1 sounds (for the To Serum 2 button).
+    serum_1: usize,
 }
 
 impl FilterAsk {
@@ -191,7 +195,8 @@ impl FilterAsk {
         let plugins = self.plugins.unwrap_or_else(|| logic::plugins(&self.items));
         let found = logic::filtered_with(&self.items, &self.filters, &self.fixes);
         let chips = logic::filter_chips(&found.counts, &plugins, &self.filters);
-        FilterAnswer { id: self.id, shown: found.shown, years: found.years, chips, plugins }
+        let serum_1 = logic::serum_1_count(&self.items, &found.shown);
+        FilterAnswer { id: self.id, shown: found.shown, years: found.years, chips, plugins, serum_1 }
     }
 }
 
@@ -354,6 +359,8 @@ pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     let key = shortcuts.key_of(act::EXPORT_SHOWN).to_owned();
     let data = app.global::<PresetsData>();
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
+    let key = shortcuts.key_of(act::SERUM2_SHOWN).to_owned();
+    data.set_serum2_shown_key(ActionKey { what: what_of(act::SERUM2_SHOWN).into(), key: key.into() });
     data.set_keep_audition_key(shortcuts.key_of(act::KEEP).into());
     show_card(app);
     show_curve_card(app);
@@ -404,6 +411,8 @@ fn wire(app: &AppWindow) {
     });
     let key = PAGE.with(|p| p.borrow().shortcuts.key_of(act::EXPORT_SHOWN).to_owned());
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
+    let key = PAGE.with(|p| p.borrow().shortcuts.key_of(act::SERUM2_SHOWN).to_owned());
+    data.set_serum2_shown_key(ActionKey { what: what_of(act::SERUM2_SHOWN).into(), key: key.into() });
 
     let weak = app.as_weak();
     data.on_search_edited(move |t| {
@@ -522,6 +531,12 @@ fn wire(app: &AppWindow) {
     data.on_export_shown(move || {
         if let Some(app) = weak.upgrade() {
             export_shown(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_serum2_shown(move || {
+        if let Some(app) = weak.upgrade() {
+            serum2_shown(&app);
         }
     });
 
@@ -863,6 +878,7 @@ fn take_filtered(p: &mut Page, a: FilterAnswer) -> bool {
     p.years = a.years;
     p.chips = a.chips;
     p.plugins = a.plugins;
+    p.serum_1_shown = a.serum_1;
     if let Some(at) = p.to_pick.take()
         && p.shown.contains(&at)
     {
@@ -929,6 +945,7 @@ fn show_everything(app: &AppWindow) {
         data.set_any_filter(f.any());
         data.set_unused(f.unused);
         data.set_shown(p.shown.len() as i32);
+        data.set_serum1_shown(p.serum_1_shown as i32);
         let reading = p.reading.is_some();
         let (mut title, mut text) = logic::empty_words(
             p.items.len() + p.pending.len(),
@@ -1740,6 +1757,9 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
     if id == act::EXPORT_SHOWN {
         return export_shown(app);
     }
+    if id == act::SERUM2_SHOWN {
+        return serum2_shown(app);
+    }
     // Keep goes to the audition playing, whatever line is picked (the strip under the list has it too).
     if id == act::KEEP {
         let playing = PAGE.with(|p| matches!(p.borrow().hearing, Some((_, logic::Hearing::Playing))));
@@ -1771,6 +1791,13 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
         act::SHOW_IN_SONGS if !item.is_file() => show_in_songs(app, item.path()),
         act::COPY_PATH => crate::files::copy_path(&feed, item.path()),
         act::EXPORT if enabled(id) => export_one(app, item, false),
+        act::TO_SERUM2 if enabled(id) => {
+            if let Source::Song { save, key } = &item.row.source {
+                // The item is the line as fixed: its part is yours where you set one.
+                let pick = mo_presets::serum2::Pick { key: key.clone(), part: item.role() };
+                to_serum2(app, vec![(save.clone(), item.song.clone(), vec![pick])], &item.row.name);
+            }
+        }
         act::TO_BITWIG if enabled(id) => {
             if item.is_file() && item.row.extension.eq_ignore_ascii_case(".bwpreset") {
                 send_file(item.path().to_owned());
@@ -2096,6 +2123,73 @@ fn export_shown(app: &AppWindow) -> bool {
         });
     }
     true
+}
+
+/// Put in Serum 2 for every Serum 1 sound shown (its button, or its key). Preset files are left: Serum 2 finds Serum
+/// 1's own presets folder by itself.
+fn serum2_shown(app: &AppWindow) -> bool {
+    if PAGE.with(|p| p.borrow().exporting) {
+        set_message(app, "An export is running: wait for it to finish, then try again.");
+        return false;
+    }
+    let (plan, count) = PAGE.with(|p| {
+        let p = p.borrow();
+        logic::serum2_plan(&p.items, &p.shown, &p.fixed_now)
+    });
+    if plan.is_empty() {
+        set_message(app, "The list shows no Serum 1 sounds from your songs.");
+        return false;
+    }
+    let words = format!("{} Serum 1 sounds", logic::thousands(count));
+    to_serum2(app, plan, &words);
+    true
+}
+
+/// Puts songs' Serum 1 sounds (each save with its song's name and its sounds, with their parts) in Serum 2's user
+/// presets folder, a folder for each part, save by save,
+/// as `.fxp` programs Serum 2 loads as they are ([`mo_presets::serum2`]), then shows the folder they went to.
+fn to_serum2(app: &AppWindow, plan: Vec<(String, String, Vec<mo_presets::serum2::Pick>)>, what: &str) {
+    let feed = PAGE.with(|p| p.borrow().feed.clone());
+    PAGE.with(|p| p.borrow_mut().exporting = true);
+    show_all(app);
+    let job = feed.start("Putting sounds in Serum 2", what);
+    let started = background::spawn("Serum 2 presets", move || {
+        let Some(documents) = bitwig::documents() else {
+            return export_stopped(
+                job,
+                "Your Documents folder wasn't found, so Serum 2's presets weren't either.".into(),
+            );
+        };
+        let user = mo_presets::serum2::user_folder(&documents);
+        let total = plan.len();
+        let (mut done, mut failed) = (Vec::new(), Vec::new());
+        for (n, (save, song, picks)) in plan.iter().enumerate() {
+            match background::on_pool(|| mo_presets::serum2::from_save(save, picks, song, &user)) {
+                Ok(e) => done.push(e),
+                Err(e) => {
+                    log::warning("Presets", &format!("Serum 2 copy of {save}: {e}"));
+                    failed.push(format!("{}: {e}", mo_formats::paths::stem(save)));
+                }
+            }
+            job.progress((n + 1) as f32 / total as f32, Some(&format!("{} of {}", n + 1, total)));
+        }
+        let text = logic::serum2_summary(&done, &failed);
+        if done.iter().all(|e| e.files.is_empty()) {
+            job.failed(&text);
+        } else {
+            job.done(&text);
+            let root = user.join(mo_presets::serum2::FROM_SONGS);
+            let one = done.iter().map(|e| &e.folder).all(|f| *f == done[0].folder);
+            let folder = if one { done[0].folder.clone() } else { root };
+            let folder = folder.to_string_lossy().into_owned();
+            crate::files::reveal(&feed, &folder, &folder);
+        }
+        set_exporting(false, Some(text));
+    });
+    if let Err(e) = started {
+        log::error("Presets", &format!("Couldn't start putting sounds in Serum 2: {e}"));
+        PAGE.with(|p| p.borrow_mut().exporting = false);
+    }
 }
 
 fn set_message(app: &AppWindow, text: &str) {
