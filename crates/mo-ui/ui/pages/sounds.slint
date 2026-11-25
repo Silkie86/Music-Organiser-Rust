@@ -2008,6 +2008,8 @@ export component SoundsPage inherits Rectangle {
                             }
                             PointerPad {
                                 grabbing: SoundsData.galaxy-grabbing;
+                                // Over a star (its ring shows): any star on show is one a click picks, lit or not.
+                                pointing: SoundsData.galaxy-hover-shown;
                                 down(x, y) => {
                                     keys.focus();
                                     SoundsData.galaxy-swept-keys = false;
