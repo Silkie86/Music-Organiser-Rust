@@ -87,7 +87,7 @@ pub const REMOVING_FIXED: &str = if cfg!(windows) {
 };
 
 /// A Bitwig project folder with copies of Library multisamples in it.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
     pub folder: PathBuf,
     /// The copies in its `multi-samples` and `samples` folders that are the same as a Library multisample or a sound the
@@ -160,7 +160,7 @@ const SEPARATORS: [char; 2] = ['\\', '/'];
 
 /// What a look found: the Library folders the copies were compared with, how many project folders keep copies of
 /// multisamples, and each project with copies that are the same as a Library file, biggest first.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Copies {
     pub library: Vec<PathBuf>,
     pub folders: usize,
