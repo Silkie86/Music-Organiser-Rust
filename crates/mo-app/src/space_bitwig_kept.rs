@@ -237,7 +237,10 @@ mod tests {
         let last_year = from - Duration::from_secs(400 * 86_400);
         let with_year = chrono::DateTime::<chrono::Local>::from(last_year).format("%-d %b %Y, %H:%M").to_string();
         assert_eq!(found_when(last_year, from), with_year);
-        assert_eq!(found_when(UNIX_EPOCH + Duration::from_secs(u64::MAX / 4), from), "an earlier day");
+        // (Where the clock itself can hold such a time: Windows' can't, so there it never comes up.)
+        if let Some(far) = UNIX_EPOCH.checked_add(Duration::from_secs(u64::MAX / 4)) {
+            assert_eq!(found_when(far, from), "an earlier day");
+        }
         assert_eq!(from_words(from, true), format!("As found {when}. Checking again…"));
         assert_eq!(from_words(from, false), format!("As found {when}. Measure again checks it."));
         let found = found();
