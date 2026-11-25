@@ -2095,6 +2095,70 @@ export component FilterList inherits VerticalLayout {
     }
 }
 
+// The list's own scroll bar, in place of Slint's thin one (Solomon's F12 note of 25 Nov, 12:59: "fiddly"): a
+// 12 px track down the list's right side, a thumb never shorter than 40 px however long the list, lit under the
+// mouse, and a click on the track above or below the thumb turns a page that way. Only while there's more than
+// fits. It sits over the list's last 12 px, inside the list, so nothing beside the list (a drag edge) covers it.
+export component ScrollRail inherits Rectangle {
+    // How tall all the lines are, how much of them is in sight, how far the list is turned down (its `content-y`),
+    // and a line's height (a page turns a line short).
+    in property <length> whole;
+    in property <length> seen;
+    in property <length> turned;
+    in property <length> line;
+    // A turn to a `content-y`.
+    callback scroll-to(length);
+    property <length> most: max(0px, root.whole - root.seen);
+    property <length> thumb-height: max(40px, min(self.height, self.height * root.seen / max(1px, root.whole)));
+    property <length> thumb-y: self.most <= 0 ? 0 : (self.height - self.thumb-height) * clamp(-root.turned / self.most, 0, 1);
+    visible: self.most > 0 && root.seen > 0;
+    width: 12px;
+    background: grab.has-hover || grab.pressed ? Theme.surface-raised : transparent;
+    animate background { duration: Motion.tap; }
+    thumb := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: root.thumb-y;
+        width: grab.has-hover || grab.pressed ? 8px : 6px;
+        height: root.thumb-height;
+        border-radius: self.width / 2;
+        background: grab.pressed && grab.on-thumb ? Theme.accent : grab.has-hover ? Theme.muted : Theme.stroke.brighter(40%);
+        animate width, background { duration: Motion.tap; }
+    }
+    grab := TouchArea {
+        mouse-cursor: MouseCursor.default;
+        // Whether the press was on the thumb (a drag) or on the track (a page).
+        out property <bool> on-thumb;
+        property <length> from-y;
+        property <length> from-turned;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                self.on-thumb = self.mouse-y >= root.thumb-y && self.mouse-y <= root.thumb-y + root.thumb-height;
+                self.from-y = self.mouse-y;
+                self.from-turned = -root.turned;
+                if !self.on-thumb {
+                    // A page up or down, a line short so the line at the edge stays in sight.
+                    root.scroll-to(-clamp(-root.turned + (self.mouse-y < root.thumb-y ? -1 : 1) * max(root.line, root.seen - root.line),
+                        0px, root.most));
+                }
+            }
+        }
+        // The wheel over the bar turns the list as it does over the lines.
+        scroll-event(e) => {
+            if e.delta-y != 0 {
+                root.scroll-to(-clamp(-root.turned - e.delta-y, 0px, root.most));
+                return accept;
+            }
+            reject
+        }
+        moved => {
+            if self.pressed && self.on-thumb && root.height > root.thumb-height {
+                root.scroll-to(-clamp(self.from-turned + (self.mouse-y - self.from-y) * root.most / (root.height - root.thumb-height),
+                    0px, root.most));
+            }
+        }
+    }
+}
+
 // The seam between a page's list and its side panel: drag it to give the panel more or less room, double-click it for
 // the panel's usual width. The page keeps the panel's width; the app keeps it between runs by the seam's `part`.
 export component PanelDivider inherits Seam {

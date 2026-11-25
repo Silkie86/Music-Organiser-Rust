@@ -3,7 +3,7 @@
 // (i-slint-compiler object_tree.rs, "Custom ListView is OK"), so this one keeps the name. Nothing else may go in one,
 // so the button that takes a list back to its top goes round it, in a `ListBox`.
 import { ListView as SlintListView } from "std-widgets.slint";
-import { AppKeys, Icons, Motion, Space, StudioButton, Theme } from "studio.slint";
+import { AppKeys, Icons, Motion, ScrollRail, Space, StudioButton, Theme } from "studio.slint";
 
 // How wide a page's list of lines gets at most. In a wider window (Solomon's is 3440 across) the list stops here: a
 // line's name and its numbers stay within one look of each other, where they used to end up a screen apart (the UX
@@ -189,63 +189,16 @@ export component ListBox inherits Rectangle {
 
     @children
 
-    // The list's own scroll bar, in place of Slint's thin one (Solomon's F12 note of 25 Nov, 12:59: "fiddly"): a
-    // 12 px track down the list's right side, a thumb never shorter than 40 px however long the list, lit under the
-    // mouse, and a click on the track above or below the thumb turns a page that way. Only while there's more than
-    // fits. It sits over the list's last 12 px, inside the list, so nothing beside the list (a drag edge) covers it.
-    rail := Rectangle {
-        property <length> most: max(0px, root.whole - root.seen);
-        property <length> thumb-height: max(40px, min(self.height, self.height * root.seen / max(1px, root.whole)));
-        property <length> thumb-y: self.most <= 0 ? 0 : (self.height - self.thumb-height) * clamp(-root.turned / self.most, 0, 1);
-        visible: self.most > 0 && root.seen > 0;
+    // The list's own scroll bar (the shared one), over the list's right edge.
+    rail := ScrollRail {
         x: root.width - self.width;
         y: root.height - root.seen;
-        width: 12px;
         height: root.seen;
-        background: grab.has-hover || grab.pressed ? Theme.surface-raised : transparent;
-        animate background { duration: Motion.tap; }
-        thumb := Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: rail.thumb-y;
-            width: grab.has-hover || grab.pressed ? 8px : 6px;
-            height: rail.thumb-height;
-            border-radius: self.width / 2;
-            background: grab.pressed && grab.on-thumb ? Theme.accent : grab.has-hover ? Theme.muted : Theme.stroke.brighter(40%);
-            animate width, background { duration: Motion.tap; }
-        }
-        grab := TouchArea {
-            mouse-cursor: MouseCursor.default;
-            // Whether the press was on the thumb (a drag) or on the track (a page).
-            out property <bool> on-thumb;
-            property <length> from-y;
-            property <length> from-turned;
-            pointer-event(e) => {
-                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
-                    self.on-thumb = self.mouse-y >= rail.thumb-y && self.mouse-y <= rail.thumb-y + rail.thumb-height;
-                    self.from-y = self.mouse-y;
-                    self.from-turned = -root.turned;
-                    if !self.on-thumb {
-                        // A page up or down, a line short so the line at the edge stays in sight.
-                        root.scroll-to(-clamp(-root.turned + (self.mouse-y < rail.thumb-y ? -1 : 1) * max(root.after, root.seen - root.after),
-                            0px, rail.most));
-                    }
-                }
-            }
-            // The wheel over the bar turns the list as it does over the lines.
-            scroll-event(e) => {
-                if e.delta-y != 0 {
-                    root.scroll-to(-clamp(-root.turned - e.delta-y, 0px, rail.most));
-                    return accept;
-                }
-                reject
-            }
-            moved => {
-                if self.pressed && self.on-thumb && rail.height > rail.thumb-height {
-                    root.scroll-to(-clamp(self.from-turned + (self.mouse-y - self.from-y) * rail.most / (rail.height - rail.thumb-height),
-                        0px, rail.most));
-                }
-            }
-        }
+        whole: root.whole;
+        seen: root.seen;
+        turned: root.turned;
+        line: root.after;
+        scroll-to(y) => { root.scroll-to(y); }
     }
 
     Rectangle {
