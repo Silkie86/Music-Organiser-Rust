@@ -139,17 +139,22 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
     let overall = (!taste.is_empty()).then(|| centroid(index, &taste));
 
     let noise: Vec<f64> = candidates.iter().map(|_| rng.next_double()).collect();
+    let ids: Vec<i64> = candidates.iter().map(|c| c.id).collect();
+    // How like its type's taste (else everyone's) each is, where there's a taste to compare with.
+    let likes = index.each(&ids, |k, row| {
+        let c = candidates[k];
+        let centroid =
+            centroids.iter().find(|(k, _)| k.eq_ignore_ascii_case(&c.sound_type)).map(|(_, m)| m).or(overall.as_ref());
+        centroid.map(|m| row.dot(m))
+    });
     let scored: Vec<(&Sound, f64)> = candidates
         .par_iter()
         .zip(&noise)
-        .map(|(c, noise)| {
-            let centroid = centroids
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(&c.sound_type))
-                .map(|(_, m)| m)
-                .or(overall.as_ref());
-            // A sound the index doesn't have counts as all noughts, as before.
-            let fit = centroid.map_or(0.5, |m| (index.dot_with(c.id, m).unwrap_or(0.0) + 1.0) / 2.0);
+        .zip(likes)
+        .map(|((c, noise), like)| {
+            // A sound the index doesn't have counts as all noughts, as before; so does one with no taste to compare
+            // with (each makes a fit of a half).
+            let fit = (like.flatten().unwrap_or(0.0) + 1.0) / 2.0;
             let fresh = if c.plays == 0 { 1.0 } else { 1.0 / f64::from(c.plays.saturating_add(1)) };
             (*c, (1.0 - o.adventure) * fit + 0.15 * fresh + o.adventure * noise)
         })
@@ -218,11 +223,15 @@ pub(crate) fn fresh_seed() -> i32 {
 /// The weighted middle of `items`, made unit length.
 fn centroid(index: &VectorIndex, items: &[(&Sound, f64)]) -> Vec<f32> {
     let mut c: Option<Vec<f32>> = None;
-    for (s, w) in items {
-        let Some(v) = index.get(s.id) else { continue };
-        let c = c.get_or_insert_with(|| vec![0f32; v.len()]);
-        for (x, y) in c.iter_mut().zip(v.iter()) {
-            *x += (f64::from(*y) * w) as f32;
+    // A few thousand at a time (their numbers are held meanwhile), added up in order as before.
+    for some in items.chunks(4096) {
+        let ids: Vec<i64> = some.iter().map(|(s, _)| s.id).collect();
+        for (v, (_, w)) in index.each(&ids, |_, row| row.to_vec()).into_iter().zip(some) {
+            let Some(v) = v else { continue };
+            let c = c.get_or_insert_with(|| vec![0f32; v.len()]);
+            for (x, y) in c.iter_mut().zip(v.iter()) {
+                *x += (f64::from(*y) * w) as f32;
+            }
         }
     }
     let mut c = c.unwrap_or_default();
@@ -240,12 +249,15 @@ fn reason(
     taste: &[(&Sound, f64)],
 ) -> (String, Option<i64>) {
     let mut nearest: Option<(&Sound, f64)> = None;
-    for (t, _) in taste {
-        // Not itself: a starred sound you haven't used yet would be "like" itself (C# names it).
-        if !t.sound_type.eq_ignore_ascii_case(&s.sound_type) || t.id == s.id {
-            continue;
-        }
-        let Some(sim) = index.dot_with(t.id, v) else { continue };
+    // Not itself: a starred sound you haven't used yet would be "like" itself (C# names it).
+    let of_its_type: Vec<&Sound> = taste
+        .iter()
+        .map(|(t, _)| *t)
+        .filter(|t| t.sound_type.eq_ignore_ascii_case(&s.sound_type) && t.id != s.id)
+        .collect();
+    let ids: Vec<i64> = of_its_type.iter().map(|t| t.id).collect();
+    for (t, sim) in of_its_type.into_iter().zip(index.each(&ids, |_, row| row.dot(v))) {
+        let Some(sim) = sim else { continue };
         // The first of the closest, as C#'s stable sort keeps it.
         if nearest.is_none_or(|(_, best)| sim > best) {
             nearest = Some((t, sim));

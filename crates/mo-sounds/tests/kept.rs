@@ -213,3 +213,47 @@ fn the_sound_index_keeps_claps_numbers_only() {
     // None to keep without CLAP.
     assert!(SoundIndex::from_gathered(gathered(50, 1), Gathered::default(), 50).keep_clap_in(&dir).is_none());
 }
+
+#[test]
+fn many_sounds_at_once_get_what_each_gets_on_its_own_however_the_numbers_are_held() {
+    let dir = folder("each");
+    let full = VectorIndex::from_gathered(gathered(9000, 0), false, None);
+    let half = held(9000, 0);
+    let mut kept = half.clone();
+    kept.keep_in(&dir).unwrap().unwrap();
+    let q = half.get(3).unwrap().into_owned();
+    // Every sound of the first part and a few of the others (so a part read whole, and sounds read one by one), out
+    // of order, with ones the index doesn't have and one asked for twice.
+    let mut ids: Vec<i64> = (1..=4096).rev().map(|n| n * 3).collect();
+    ids.extend([9000 * 3, 4, 4097 * 3, -1, 6000 * 3, 3, 9000 * 3 + 3]);
+    for (name, index) in [("full", &full), ("half", &half), ("kept", &kept)] {
+        let dots = index.each(&ids, |k, row| (k, row.dot(&q).to_bits(), row.to_vec()));
+        assert_eq!(dots.len(), ids.len(), "{name}");
+        for (k, (id, got)) in ids.iter().zip(&dots).enumerate() {
+            let want = index.get(*id).map(|v| (k, index.dot_with(*id, &q).unwrap().to_bits(), v.into_owned()));
+            assert_eq!(got, &want, "{name} {id}");
+        }
+        assert_eq!(dots.iter().filter(|d| d.is_none()).count(), 3, "{name}");
+        assert!(index.each(&[], |_, row| row.dot(&q)).is_empty(), "{name}");
+    }
+    // The file and the held numbers are the same bits, so they give the same answers.
+    let bits = |index: &VectorIndex| index.each(&ids, |_, row| row.dot(&q).to_bits());
+    assert_eq!(bits(&kept), bits(&half));
+}
+
+#[test]
+fn many_sounds_at_once_from_a_file_that_cant_be_read_get_none() {
+    let dir = folder("each-gone");
+    let mut kept = held(9000, 0);
+    let done = kept.keep_in(&dir).unwrap().unwrap();
+    // Cut short behind its back: the first part can still be read, the rest can't.
+    let file = fs::OpenOptions::new().write(true).open(&done.file).unwrap();
+    file.set_len(4096 + 4096 * 16 * 2).unwrap();
+    drop(file);
+    let ids: Vec<i64> = (1..=9000).map(|n| n * 3).collect();
+    let got = kept.each(&ids, |_, row| row.to_vec().len());
+    assert!(got[..4096].iter().all(|g| *g == Some(16)));
+    assert!(got[4096..].iter().all(Option::is_none));
+    // One by one too.
+    assert_eq!(kept.each(&[3, 5000 * 3], |_, row| row.to_vec().len()), [Some(16), None]);
+}

@@ -17,8 +17,6 @@
 //! its sounds, as many more as there are of them. So a big library is gone through in a moment. Every sound is scored
 //! on rayon's threads: call it on the app's low-priority pool, never the window's thread.
 
-use rayon::prelude::*;
-
 use crate::index::{SoundIndex, VectorIndex, dot};
 
 /// The most favourites of one type each sound is compared with.
@@ -134,9 +132,12 @@ fn rank(
         stands_for[closest(&points, |p| Some(dot(f, p))).map_or(0, |(at, _)| at)] += 1;
     }
     // Each sound with the picked favourite it's most like, and how like.
-    let scored: Vec<(usize, usize, f64)> = others
-        .par_iter()
-        .filter_map(|&i| closest(&points, |p| index.dot_with(sounds[i].0, p)).map(|(at, like)| (i, at, like)))
+    let ids: Vec<i64> = others.iter().map(|&i| sounds[i].0).collect();
+    let scored: Vec<(usize, usize, f64)> = index
+        .each(&ids, |_, row| closest(&points, |p| Some(row.dot(p))))
+        .into_iter()
+        .zip(others)
+        .filter_map(|(found, &i)| found.flatten().map(|(at, like)| (i, at, like)))
         .collect();
     let mut by_point: Vec<Vec<(usize, f64)>> = vec![Vec::new(); points.len()];
     for (i, at, like) in scored {

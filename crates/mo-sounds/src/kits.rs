@@ -149,9 +149,18 @@ pub fn roll(
             slot.sound = None;
             continue;
         }
+        // How like the vibe each is, where there's a vibe and CLAP has heard it.
+        let likenesses: Vec<Option<f64>> = match (vibe, clap) {
+            (Some(vibe), Some(clap)) => {
+                let ids: Vec<i64> = candidates.iter().map(|c| c.id).collect();
+                clap.each(&ids, |_, row| row.dot(vibe))
+            }
+            _ => vec![None; candidates.len()],
+        };
         let scored: Vec<(&Sound, f64)> = candidates
             .into_iter()
-            .map(|c| {
+            .zip(likenesses)
+            .map(|(c, likeness)| {
                 let mut score = 0.0;
                 // Earlier types in the slot are the better fit (a "Clap" pad prefers claps over snares).
                 let at = slot.types.iter().position(|t| *t == c.sound_type).map_or(-1, |p| p as i64);
@@ -165,7 +174,7 @@ pub fn roll(
                 }
                 // Saturating: a damaged row's rating is clamped to i32's ends, and `- 3` mustn't overflow there.
                 score += f64::from(c.rating.saturating_sub(3).max(0)) * 0.1;
-                if let Some(likeness) = vibe.and_then(|vibe| clap.and_then(|i| i.dot_with(c.id, vibe))) {
+                if let Some(likeness) = likeness {
                     score += 3.0 * likeness;
                 }
                 if let (Some(key), true, Some(p)) = (
