@@ -92,6 +92,10 @@ pub struct Live {
     /// ([`crate::sound_scan::sounds_changed`]), and when a look that failed may be tried again.
     sounds_seen: u64,
     samples_after: Option<Instant>,
+    /// The songs put off the Dust off card, by key, with when they may come back ([`mo_library::dust_off`]).
+    later: HashMap<String, i64>,
+    /// The saves whose time in FL Studio has been looked for in the library ([`Live::learn_minutes`]).
+    minutes_asked: HashSet<i64>,
     /// When the note that the muted samples are mended, refused, may be tried again ([`REFUSED_AGAIN_AFTER`]).
     note_after: Option<Instant>,
     /// Folders found away as saves in them waited to be read again, by key, and when ([`AWAY_AGAIN_AFTER`]).
@@ -353,6 +357,8 @@ impl Live {
             reread_put: HashSet::new(),
             moved_notes: Vec::new(),
             stop: Arc::default(),
+            later: mo_library::dust_off::read(library)?,
+            minutes_asked: HashSet::new(),
         })
     }
 
@@ -526,7 +532,43 @@ impl Live {
 
     /// The list, grouped into songs.
     pub fn songs(&self) -> Songs {
-        Songs::from_saves(&self.saves, &self.choices, self.tags.clone(), self.gap_months, self.asking)
+        let mut songs = Songs::from_saves(&self.saves, &self.choices, self.tags.clone(), self.gap_months, self.asking);
+        songs.later.clone_from(&self.later);
+        songs
+    }
+
+    /// Finds in `library` how long FL Studio has had each song's newest FL save open (its kept details), for those
+    /// not looked for yet: a save read since has it from its file. Reads each one's details, so call it on the page's
+    /// thread, after the list is on show. Whether any was found.
+    pub fn learn_minutes(&mut self, library: &Library) -> Result<bool, LibraryError> {
+        let real = RealDates::now();
+        let ids: Vec<i64> = songs::group_songs(&self.saves, &self.choices, &real)
+            .iter()
+            .filter_map(|song| song.saves().filter(|s| s.daw == "FL Studio").max_by_key(|s| s.mtime))
+            .filter(|s| s.minutes_spent.is_none() && !self.minutes_asked.contains(&s.id))
+            .map(|s| s.id)
+            .collect();
+        self.minutes_asked.extend(&ids);
+        let found = library.minutes_spent(&ids)?;
+        for save in &mut self.saves {
+            if let Some(m) = found.get(&save.id) {
+                save.minutes_spent = Some(*m);
+            }
+        }
+        Ok(!found.is_empty())
+    }
+
+    /// Puts the song `key` off the Dust off card for about three months ([`crate::songs::NOT_NOW_DAYS`]): kept in the
+    /// library when it's the app's own, else until the app closes. Whether it's held here only, till the app closes.
+    pub fn put_off(&mut self, key: &str) -> Result<bool, LibraryError> {
+        let now = chrono::Local::now().timestamp();
+        let until = now + crate::songs::NOT_NOW_DAYS * 86_400;
+        if let Some(songs_db) = &self.writes {
+            mo_library::dust_off::put_off(songs_db, key, until, now)?;
+        }
+        self.later.retain(|_, t| *t > now);
+        self.later.insert(key.to_owned(), until);
+        Ok(self.writes.is_none())
     }
 
     /// The saves whose read failed last time, to read again a moment later; None when there are none.
@@ -1514,6 +1556,8 @@ mod tests {
             reread_put: HashSet::new(),
             moved_notes: Vec::new(),
             stop: Arc::default(),
+            later: HashMap::new(),
+            minutes_asked: HashSet::new(),
         }
     }
 

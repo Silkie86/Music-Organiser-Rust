@@ -49,6 +49,10 @@ pub struct SongRow {
     /// What's still to do on it, and what's done, in your order: its newest save's, or while that has none, the
     /// newest older save's that has some (a new save takes them over, as it does the rest: mo-app's live.rs).
     pub todos: Vec<Todo>,
+    /// How long FL Studio has had it open, in minutes, by FL's own count: the most any of its saves holds (each save
+    /// carries the count on). None for a song not made in FL, or until it's been worked out
+    /// (`mo_app::live::Live::learn_minutes`).
+    pub minutes: Option<u32>,
     /// Everything the search box looks in, upper case, one field after another.
     find: String,
 }
@@ -88,6 +92,7 @@ impl SongRow {
             notes: pick(&latest.notes, |s| &s.notes),
             tags: tags_of(latest, &earlier),
             todos: todos_of(latest, &earlier),
+            minutes: song.saves().filter_map(|s| s.minutes_spent).max(),
             find: String::new(),
             song,
         };
@@ -102,6 +107,33 @@ impl SongRow {
         fields.extend(l.plugin_names.iter().map(String::as_str));
         fields.extend(self.todos.iter().map(|t| t.text.as_str()));
         case::key(&fields.join("\u{1f}"))
+    }
+
+    /// The time FL Studio has had it open, short, for its line: "41h", "40m"; "" when it isn't known.
+    pub fn time_text(&self) -> String {
+        match self.minutes {
+            None | Some(0) => String::new(),
+            Some(m) if m < 60 => format!("{m}m"),
+            Some(m) => format!("{}h", (m + 30) / 60),
+        }
+    }
+
+    /// The same said in full, for its card and the tooltip: "FL Studio has had it open 41 h 12 min".
+    pub fn time_words(&self) -> String {
+        match self.minutes {
+            None | Some(0) => String::new(),
+            Some(m) if m < 60 => format!("FL Studio has had it open {m} min"),
+            Some(m) => format!("FL Studio has had it open {} h {} min", m / 60, m % 60),
+        }
+    }
+
+    /// Whether it's one to dust off: real time put into it (an hour or more, by FL's count), not finished, released
+    /// or archived, and not saved for six months (Solomon's 1.1 plan, 24 Nov 2026).
+    pub fn dusty(&self, now: NaiveDateTime) -> bool {
+        let done = [STATUSES[4], STATUSES[5], STATUSES[6]].iter().any(|s| s.eq_ignore_ascii_case(&self.status));
+        self.minutes.is_some_and(|m| m >= DUSTY_MINUTES)
+            && !done
+            && self.saved.is_some_and(|saved| now - saved >= chrono::Duration::days(DUSTY_DAYS))
     }
 
     /// How many of its to-dos aren't done yet.
@@ -228,6 +260,15 @@ impl SongRow {
             || word.year.is_some_and(|y| [self.saved, self.made].into_iter().flatten().any(|d| d.year() == y))
     }
 }
+
+/// The time a song needs, by FL's count, to be one to dust off ([`SongRow::dusty`]).
+pub const DUSTY_MINUTES: u32 = 60;
+/// How long since it was last saved, in days.
+pub const DUSTY_DAYS: i64 = 183;
+/// How many songs the Dust off card shows a week.
+pub const DUST_OFF_CARD: usize = 3;
+/// How long "Not now" puts a song off the card, in days (about three months).
+pub const NOT_NOW_DAYS: i64 = 91;
 
 /// The older saves a song's fields come from while its newest save hasn't got them: newest first, and a save with no
 /// real date after the rest, as the fields a new save takes over (live.rs).
@@ -376,6 +417,8 @@ pub struct Songs {
     pub daws: Vec<String>,
     /// Songs that may be saves of one, for the Health strip, newest first.
     pub doubts: Vec<Doubt>,
+    /// The songs put off the Dust off card ("Not now"), by key, with when they may come back (Unix seconds).
+    pub later: HashMap<String, i64>,
     /// Which dates are real, as of when the list was made ([`RealDates`]): the save each song opens, the list's order,
     /// its dates and years, and each song's card go by these, so they agree for as long as the list lasts.
     pub real: RealDates,
@@ -456,7 +499,7 @@ impl Songs {
         let copies = rows.iter().map(|r| r.song.copies.len()).sum();
         let daws: BTreeSet<&str> = rows.iter().map(|r| r.song.latest.daw.as_str()).collect();
         let daws = daws.into_iter().map(str::to_owned).collect();
-        Songs { rows, saves, copies, tags, daws, doubts, real }
+        Songs { rows, saves, copies, tags, daws, doubts, later: HashMap::new(), real }
     }
 
     /// The questions about the song at `row`.
@@ -572,10 +615,14 @@ pub enum Order {
     Saved,
     Name,
     Status,
+    /// The most time in FL Studio first ("Most time").
+    Time,
+    /// The songs to dust off first, most time first; then the rest, newest first.
+    DustOff,
 }
 
 impl Order {
-    pub const ALL: [Order; 3] = [Order::Saved, Order::Name, Order::Status];
+    pub const ALL: [Order; 5] = [Order::Saved, Order::Name, Order::Status, Order::Time, Order::DustOff];
 
     /// The column's heading.
     pub fn column(self) -> &'static str {
@@ -583,6 +630,8 @@ impl Order {
             Order::Saved => "Last saved",
             Order::Name => "Song",
             Order::Status => "Status",
+            Order::Time => "Time",
+            Order::DustOff => "Dust off",
         }
     }
 
@@ -620,17 +669,27 @@ impl View {
             let s = &songs.rows[i].status;
             STATUSES.iter().position(|known| known.eq_ignore_ascii_case(s)).unwrap_or(STATUSES.len())
         };
+        // The songs to dust off, by their place among them (put off ones aren't): worked out once, both ways round.
+        let dusty: HashMap<usize, usize> = if listed.by == Order::DustOff {
+            songs.dusty(now).into_iter().enumerate().map(|(k, i)| (i, k)).collect()
+        } else {
+            HashMap::new()
+        };
         // Stable sorts, so songs the same in the column keep the order they came in.
         match listed.by {
             Order::Saved => {}
             Order::Name => rows.sort_by_cached_key(|&i| songs.rows[i].song.name.to_lowercase()),
             Order::Status => rows.sort_by_key(status),
+            Order::Time => rows.sort_by_key(|&i| std::cmp::Reverse(songs.rows[i].minutes)),
+            Order::DustOff => rows.sort_by_key(|i| dusty.get(i).copied().unwrap_or(usize::MAX)),
         }
         if listed.reversed {
             rows.reverse();
             match listed.by {
                 Order::Saved => rows.sort_by_key(|&i| songs.rows[i].saved.is_none()),
                 Order::Status => rows.sort_by_key(|i| status(i) == STATUSES.len()),
+                Order::Time => rows.sort_by_key(|&i| songs.rows[i].minutes.is_none()),
+                Order::DustOff => rows.sort_by_key(|i| !dusty.contains_key(i)),
                 Order::Name => {}
             }
         }
@@ -709,6 +768,45 @@ pub struct SongChips {
 }
 
 impl Songs {
+    /// The songs to dust off ([`SongRow::dusty`]) that aren't put off now, most time first: their places in
+    /// [`Songs::rows`].
+    pub fn dusty(&self, now: NaiveDateTime) -> Vec<usize> {
+        // "Not now" keeps when a song may come back as a moment in time: `now` is the clock on the wall.
+        let now_secs = chrono::TimeZone::from_local_datetime(&chrono::Local, &now)
+            .earliest()
+            .map_or_else(|| now.and_utc().timestamp(), |t| t.timestamp());
+        let mut rows: Vec<usize> = (0..self.rows.len())
+            .filter(|&i| {
+                let r = &self.rows[i];
+                r.dusty(now) && self.later.get(&r.song.key).is_none_or(|&until| until <= now_secs)
+            })
+            .collect();
+        rows.sort_by_key(|&i| std::cmp::Reverse(self.rows[i].minutes));
+        rows
+    }
+
+    /// The Dust off card's songs this week: [`DUST_OFF_CARD`] of [`Songs::dusty`], a new few each week and the same all
+    /// week. Each song's place in the week's draw comes from its key and the week alone, so a song leaving the card
+    /// ("Not now", a new save) leaves the others where they are, and the next one along takes its place.
+    pub fn dust_off_card(&self, now: NaiveDateTime) -> Vec<usize> {
+        use std::hash::{Hash, Hasher};
+        let mut dusty = self.dusty(now);
+        if dusty.len() > DUST_OFF_CARD {
+            let week = now.and_utc().timestamp().div_euclid(7 * 86_400);
+            // SipHash with its fixed keys: the same draw on every run.
+            let draw = |i: &usize| {
+                let mut h = std::hash::DefaultHasher::new();
+                (week, &self.rows[*i].song.key).hash(&mut h);
+                h.finish()
+            };
+            dusty.sort_by_cached_key(draw);
+            dusty.truncate(DUST_OFF_CARD);
+            // Most time first on the card, as in the list.
+            dusty.sort_by_key(|&i| std::cmp::Reverse(self.rows[i].minutes));
+        }
+        dusty
+    }
+
     pub fn chips(&self, f: &Filters, counts: &SongCounts) -> SongChips {
         let n = |map: &HashMap<String, usize>, name: &str| {
             thousands(map.get(&name.to_ascii_lowercase()).copied().unwrap_or(0))
@@ -1276,5 +1374,87 @@ mod tests {
         };
         assert_eq!(names(Filters { todos: true, ..Filters::default() }), ["Night", "Glass"]);
         assert_eq!(names(Filters { search: "master clips".into(), ..Filters::default() }), ["Glass"]);
+    }
+
+    #[test]
+    fn songs_with_hours_in_them_left_for_six_months_are_to_dust_off_most_time_first() {
+        let now = day(2026, 6, 1);
+        let spent =
+            |minutes: u32, status: &str, s: Save| Save { minutes_spent: Some(minutes), status: status.into(), ..s };
+        let s = songs(&[
+            // A newer save still counts on from the older one: the song has the most either holds.
+            spent(40 * 60, "Idea", save("Night_3", day(2025, 1, 1))),
+            spent(41 * 60 + 12, "Idea", save("Night_2", day(2024, 12, 1))),
+            spent(10 * 60, "Mixing", save("Tape", day(2024, 1, 1))),
+            spent(3 * 60, "Idea", save("Kite", day(2026, 5, 1))),
+            spent(20 * 60, "Finished", save("Paper", day(2023, 1, 1))),
+            spent(30, "Idea", save("Short", day(2023, 1, 1))),
+            Save { daw: "Bitwig Studio".into(), ..save("Low", day(2022, 1, 1)) },
+        ]);
+        let row = |name: &str| s.rows.iter().position(|r| r.song.name == name).unwrap();
+        let night = &s.rows[row("Night")];
+        assert_eq!(night.minutes, Some(41 * 60 + 12));
+        assert_eq!(night.time_text(), "41h");
+        assert_eq!(night.time_words(), "FL Studio has had it open 41 h 12 min");
+        assert_eq!(s.rows[row("Short")].time_text(), "30m");
+        assert_eq!(s.rows[row("Low")].time_text(), "");
+        // Kite was saved a month ago, Paper is finished, Short was only open half an hour, Low has no time.
+        assert_eq!(s.dusty(now), [row("Night"), row("Tape")]);
+        assert_eq!(s.dust_off_card(now), [row("Night"), row("Tape")]);
+        // "Not now": off the card until the day it comes back.
+        let mut later = s.clone();
+        let key = s.rows[row("Night")].song.key.clone();
+        later.later.insert(key, day(2026, 9, 1).and_utc().timestamp());
+        assert_eq!(later.dusty(now), [row("Tape")]);
+        assert_eq!(later.dusty(day(2026, 9, 2)), [row("Night"), row("Tape")]);
+
+        let names = |by: Order, reversed: bool| {
+            let mut v = s.view(&Filters::default(), now);
+            v.put_in_order(&s, Listed { by, reversed }, now);
+            v.entries
+                .iter()
+                .filter_map(|e| if let Entry::Song(i) = e { Some(s.rows[*i].song.name.clone()) } else { None })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(Order::Time, false), ["Night", "Paper", "Tape", "Kite", "Short", "Low"]);
+        assert_eq!(names(Order::Time, true), ["Short", "Kite", "Tape", "Paper", "Night", "Low"], "no time stays last");
+        assert_eq!(names(Order::DustOff, false)[..2], ["Night", "Tape"]);
+        // Turned round, the songs put off stay with the rest.
+        let names_later = |reversed: bool| {
+            let mut v = later.view(&Filters::default(), now);
+            v.put_in_order(&later, Listed { by: Order::DustOff, reversed }, now);
+            v.entries
+                .iter()
+                .filter_map(|e| if let Entry::Song(i) = e { Some(later.rows[*i].song.name.clone()) } else { None })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names_later(false)[0], "Tape");
+        assert_eq!(names_later(true)[0], "Tape", "Night is put off: not first either way");
+    }
+
+    #[test]
+    fn the_dust_off_card_shows_a_new_few_each_week_going_round_them_all() {
+        let now = day(2026, 6, 1);
+        let s = songs(
+            &(1u32..)
+                .zip(["Alder", "Birch", "Cedar", "Damson", "Elder", "Fir", "Gorse"])
+                .map(|(n, name)| Save { minutes_spent: Some(60 * n), ..save(name, day(2024, 1, n)) })
+                .collect::<Vec<_>>(),
+        );
+        let mut seen = std::collections::HashSet::new();
+        for week in 0..30 {
+            let card = s.dust_off_card(now + chrono::Duration::days(7 * week));
+            assert_eq!(card.len(), DUST_OFF_CARD);
+            seen.extend(card);
+        }
+        assert_eq!(seen.len(), 7, "every song comes round");
+        // "Not now" on one: the other two stay, and one more takes its place.
+        let card = s.dust_off_card(now);
+        let mut later = s.clone();
+        later.later.insert(s.rows[card[0]].song.key.clone(), i64::MAX);
+        let after = later.dust_off_card(now);
+        assert_eq!(after.len(), DUST_OFF_CARD);
+        assert!(!after.contains(&card[0]));
+        assert!(after.contains(&card[1]) && after.contains(&card[2]), "{card:?} became {after:?}");
     }
 }

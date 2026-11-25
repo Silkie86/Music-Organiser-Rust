@@ -104,6 +104,7 @@ fn give(app: &AppWindow, name: &str, width: f32) {
         "plugins.size" => app.global::<crate::Widths>().set_plugins_size(width),
         "songs.status" => app.global::<crate::Widths>().set_songs_status(width),
         "songs.saved" => app.global::<crate::Widths>().set_songs_saved(width),
+        "songs.time" => app.global::<crate::Widths>().set_songs_time(width),
         _ => debug_assert!(false, "no page has a part called {name}"),
     }
 }

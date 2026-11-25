@@ -2,7 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, AppKeys, Type, Space, PageHeader, Well, Panel, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel, StarsPick, HeartToggle, TagChip, WordBox, MenuChip, Icons, CheckLine, TickSquare, Widths, Seam } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, PageHeader, Well, Panel, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel, StarsPick, HeartToggle, TagChip, WordBox, MenuChip, Icons, CheckLine, TickSquare, Widths, Seam, SignCount } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -23,6 +23,15 @@ export struct SongLine {
     daw: string,
     // How many of its to-dos are left.
     todos: int,
+    // How long FL Studio has had it open ("41 h"); empty when not known.
+    time: string,
+}
+
+// A song on the Dust off card: its place in the page's rows, its name, and its status, time spent and year.
+export struct DustLine {
+    row: int,
+    name: string,
+    about: string,
 }
 
 // One of the picked song's to-dos on its card: `n` is its place in the song's list, which a tick or × names.
@@ -112,6 +121,9 @@ export struct PanelSong {
     key-heard: bool,
     tags: string,
     notes: string,
+    // How long FL Studio has had it open ("41 h"), and that in words; empty when not known.
+    time: string,
+    time-tip: string,
 }
 
 // One of the picked song's tags; `on` while the Tag filter has it.
@@ -246,6 +258,10 @@ export global SongsData {
     // The picked song's to-dos ("add-todo" with the words, "tick-todo" and "remove-todo" with a line's `n`), and
     // "3 left" ("" while it has none).
     in property <[TodoLine]> song-todos;
+    // The Dust off card: a few songs you spent real time on and left (a new few each week); empty hides it.
+    in property <[DustLine]> dust-lines;
+    // "Not now" on the Dust off card: the song at that row is off it for about three months.
+    callback not-now(int);
     in property <string> todos-left;
     // Next up instead of the list: every to-do left on the songs the filters show, under each song's name.
     in-out property <bool> next-up;
@@ -353,6 +369,70 @@ component TodoCard inherits Rectangle {
     }
 }
 
+// Dust off: a few songs you spent real time on in FL Studio and left (not finished, not saved for six months), a new
+// few each week. The heading orders the whole list that way; the moon puts a song off the card for three months.
+component DustOffCard inherits VerticalLayout {
+    padding-left: Space.xs;
+    padding-right: Space.xs;
+    padding-top: Space.sm;
+    padding-bottom: Space.sm;
+    HorizontalLayout {
+        padding-left: Space.md;
+        padding-right: Space.md;
+        ColumnHead {
+            text: "DUST OFF";
+            tip: "Songs you spent hours on and left. Click to order the list this way";
+            on: SongsData.order-column == "Dust off";
+            // Most time first, as TIME.
+            up: SongsData.order-reversed;
+            clicked => { SongsData.order-picked("Dust off"); }
+        }
+    }
+    for d in SongsData.dust-lines: dust-line := ListLine {
+        height: 34px;
+        selected: d.row == SongsData.selected;
+        clicked => { SongsData.select(d.row); }
+        double-clicked => {
+            SongsData.select(d.row);
+            SongsData.open();
+        }
+        HorizontalLayout {
+            padding-left: Space.md;
+            padding-right: Space.sm;
+            spacing: Space.sm;
+            CutText {
+                over: dust-line.resting;
+                mouse: dust-line.mouse;
+                text: d.name;
+                color: Theme.text;
+                font-size: Type.row-title;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+            CutText {
+                over: dust-line.resting;
+                mouse: dust-line.mouse;
+                text: d.about;
+                color: Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                StudioButton {
+                    width: 32px;
+                    icon: Icons.moon;
+                    quiet: true;
+                    tip: "Not now: off this card for 3 months";
+                    clicked => { SongsData.not-now(d.row); }
+                }
+            }
+        }
+    }
+}
+
 // Next up: every to-do left on the songs the filters show, under each song's name. A tick gives it to its song; a
 // click on a song's name opens its card.
 component NextUpList inherits Rectangle {
@@ -438,13 +518,18 @@ component ListSwitch inherits HorizontalLayout {
     spacing: 0;
     alignment: start;
     ToggleChip {
+        icon: Icons.songs;
         text: "Songs";
+        tip: "every song, in the list's order";
         on: !SongsData.next-up;
         joined-right: true;
         clicked => { SongsData.next-up = false; }
     }
     ToggleChip {
-        text: SongsData.next-count > 0 ? "Next up  " + SongsData.next-count : "Next up";
+        icon: Icons.todo;
+        text: "Next up";
+        tip: SongsData.next-count > 0 ? SongsData.next-count + " to-dos left, song by song" : "nothing left to do";
+        badge: SongsData.next-count > 0 ? SongsData.next-count : "";
         on: SongsData.next-up;
         joined-left: true;
         clicked => { SongsData.next-up = true; }
@@ -516,11 +601,21 @@ component SongPanel inherits Panel {
                 font-size: Type.panel-title;
                 font-weight: 600;
             }
-            if SongsData.song.saves != "": CutText {
-                own-mouse: true;
-                text: SongsData.song.saves;
-                color: Theme.muted;
-                font-size: Type.meta;
+            // How many saves, and beside it how long FL Studio has had it open (its words in the tooltip).
+            if SongsData.song.saves != "" || SongsData.song.time != "": HorizontalLayout {
+                spacing: Space.md;
+                CutText {
+                    own-mouse: true;
+                    text: SongsData.song.saves;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    horizontal-stretch: 1;
+                }
+                if SongsData.song.time != "": SignCount {
+                    icon: Icons.clock;
+                    text: SongsData.song.time;
+                    tip: SongsData.song.time-tip;
+                }
             }
             if SongsData.song.backed != "": CutText {
                 own-mouse: true;
@@ -1156,6 +1251,7 @@ export component SongsPage inherits Rectangle {
                                 after: list.row-height;
                                 to-top => { list.to-top(); }
                                 VerticalLayout {
+                                    if !SongsData.any-filter && SongsData.dust-lines.length > 0: DustOffCard { }
                                     // The list or Next up, then the headings, which order the list: a click goes by that
                                     // column, a second turns it round.
                                     HorizontalLayout {
@@ -1186,6 +1282,19 @@ export component SongsPage inherits Rectangle {
                                             on: SongsData.order-column == "Status";
                                             up: SongsData.order-reversed;
                                             clicked => { SongsData.order-picked("Status"); }
+                                        }
+                                        ColumnHead {
+                                            width: Widths.songs-time;
+                                            part: "songs.time";
+                                            resizing(w) => { Widths.songs-time = w; }
+                                            most: self.width + max(0px, switch.width + Space.md + name-head.width - 120px);
+                                            right: true;
+                                            text: "TIME";
+                                            tip: "Time spent in FL Studio";
+                                            on: SongsData.order-column == "Time";
+                                            // Most first.
+                                            up: SongsData.order-reversed;
+                                            clicked => { SongsData.order-picked("Time"); }
                                         }
                                         ColumnHead {
                                             width: Widths.songs-saved;
@@ -1268,27 +1377,9 @@ export component SongsPage inherits Rectangle {
                                                             }
                                                             if line.favourite: Heart { y: (parent.height - self.height) / 2; }
                                                             // To-dos left: the list sign and how many.
-                                                            if line.todos > 0: HorizontalLayout {
-                                                                spacing: Space.xs;
-                                                                VerticalLayout {
-                                                                    alignment: center;
-                                                                    Path {
-                                                                        width: 13px;
-                                                                        height: 13px;
-                                                                        viewbox-width: 16;
-                                                                        viewbox-height: 16;
-                                                                        commands: Icons.todo;
-                                                                        stroke: Theme.muted;
-                                                                        stroke-width: 1.5px;
-                                                                    }
-                                                                }
-                                                                Text {
-                                                                    text: line.todos;
-                                                                    color: Theme.muted;
-                                                                    font-family: Theme.number-font;
-                                                                    font-size: Type.meta;
-                                                                    vertical-alignment: center;
-                                                                }
+                                                            if line.todos > 0: SignCount {
+                                                                icon: Icons.todo;
+                                                                text: line.todos;
                                                             }
                                                             // Its status as a small tag beside the name (the UX review of 10 Nov,
                                                             // C5): one of the main things the list is filtered by. A wide list
@@ -1350,6 +1441,18 @@ export component SongsPage inherits Rectangle {
                                                         if line.status != "": Text {
                                                             text: line.status;
                                                             color: Theme.muted;
+                                                            font-size: Type.meta;
+                                                            horizontal-alignment: right;
+                                                        }
+                                                    }
+                                                    Rectangle {
+                                                        width: Widths.songs-time;
+                                                        Text {
+                                                            x: 0;
+                                                            width: parent.width;
+                                                            text: line.time;
+                                                            color: Theme.muted;
+                                                            font-family: Theme.number-font;
                                                             font-size: Type.meta;
                                                             horizontal-alignment: right;
                                                         }

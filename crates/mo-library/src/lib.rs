@@ -9,6 +9,7 @@
 
 pub mod converts;
 mod db;
+pub mod dust_off;
 pub mod first_use;
 pub mod folders;
 pub mod list_copy;
@@ -92,6 +93,10 @@ pub struct Save {
     /// What's still to do on the song, and what's done, in your order (yours, as its notes are: every save of the
     /// song has the same list, rule 14).
     pub todos: Vec<Todo>,
+    /// How long FL Studio has had it open, in minutes, as the file counts it (FL saves only). Never kept in the
+    /// library on its own (rule 23): a read finds it in the file, and the list works it out from the details it keeps
+    /// ([`Library::minutes_spent`]).
+    pub minutes_spent: Option<u32>,
 }
 
 /// One thing to do on a song, as you typed it on its card.
@@ -138,6 +143,7 @@ impl Default for Save {
             track_count: -1,
             notes: String::new(),
             todos: Vec::new(),
+            minutes_spent: None,
         }
     }
 }
