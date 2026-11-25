@@ -1163,7 +1163,7 @@ export component SongsPage inherits Rectangle {
                                         padding-left: Space.xs + Space.md;
                                         padding-right: Space.xs + Space.md;
                                         spacing: Space.md;
-                                        ListSwitch {
+                                        switch := ListSwitch {
                                             y: (parent.height - self.height) / 2;
                                         }
                                         name-head := ColumnHead {
@@ -1178,8 +1178,9 @@ export component SongsPage inherits Rectangle {
                                             width: Widths.songs-status;
                                             part: "songs.status";
                                             resizing(w) => { Widths.songs-status = w; }
-                                            // Never so wide the name column beside it gets under 120 px.
-                                            most: self.width + max(0px, name-head.width - 120px);
+                                            // Never so wide the name column beside it gets under 120 px (under the
+                                            // Songs / Next up switch and the Song heading, the rows' names have both).
+                                            most: self.width + max(0px, switch.width + Space.md + name-head.width - 120px);
                                             right: true;
                                             text: "STATUS";
                                             on: SongsData.order-column == "Status";
@@ -1190,8 +1191,9 @@ export component SongsPage inherits Rectangle {
                                             width: Widths.songs-saved;
                                             part: "songs.saved";
                                             resizing(w) => { Widths.songs-saved = w; }
-                                            // Never so wide the name column beside it gets under 120 px.
-                                            most: self.width + max(0px, name-head.width - 120px);
+                                            // Never so wide the name column beside it gets under 120 px (under the
+                                            // Songs / Next up switch and the Song heading, the rows' names have both).
+                                            most: self.width + max(0px, switch.width + Space.md + name-head.width - 120px);
                                             right: true;
                                             text: "LAST SAVED";
                                             on: SongsData.order-column == "Last saved";

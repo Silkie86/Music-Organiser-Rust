@@ -726,7 +726,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let held = drag_seam(&app, &window, SONGS_SEAM, 60.0, 1.0, "songs.list", list_width)?;
     shots.push(("songs-list-wider.png".into(), held));
     // A column of the list: Last saved, wider by its heading's left edge (Song, which stretches, gives the room).
+    // The list made wider first (by `SONGS_WIDER_LIST`), so the Song column has room to give beside the Songs / Next
+    // up switch.
+    widths.set_songs_list(SONGS_LIST_WIDTH + SONGS_WIDER_LIST);
     let held = drag_seam(&app, &window, SONGS_SAVED_SEAM, -40.0, -1.0, "songs.saved", || widths.get_songs_saved())?;
+    widths.invoke_reset("songs.list".into());
     shots.push(("songs-column-wider.png".into(), held));
     // The narrowest window the app allows: a filter too long for a line of its own wraps inside, so every chip stays
     // in sight.
@@ -4346,8 +4350,10 @@ const TREE_SEAM: (f32, f32) = (732.0, 500.0);
 /// The gap between the Songs list and its panel, halfway down, and the list's width there (a third of the room).
 const SONGS_SEAM: (f32, f32) = (844.0, 500.0);
 const SONGS_LIST_WIDTH: f32 = 380.0;
-/// The left edge of the Songs list's Last saved heading (in the gap before it).
-const SONGS_SAVED_SEAM: (f32, f32) = (670.0, 130.0);
+/// The left edge of the Songs list's Last saved heading (in the gap before it), the list made `SONGS_WIDER_LIST`
+/// wider than its third (as far as the page lets it).
+const SONGS_WIDER_LIST: f32 = 220.0;
+const SONGS_SAVED_SEAM: (f32, f32) = (750.0, 130.0);
 /// The seam between the Sounds list and its card (the card at its usual width), halfway down.
 const CARD_SEAM: (f32, f32) = (1009.0, 500.0);
 /// The path on the Sounds card, on its one line (Boom Kick's, cut short at its start).
