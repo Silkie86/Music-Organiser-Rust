@@ -440,6 +440,16 @@ export component Panel inherits Window {
     in property <string> record-from;
     // Which side of the input's stereo pair Record takes: 0 both, 1 left, 2 right (one side records as mono).
     in-out property <int> record-side: 0;
+    // The recording part shows (it starts folded away: it's kept per plugin while it's loaded).
+    in-out property <bool> record-open;
+    callback record-open-changed(bool);
+    changed record-open => { root.record-open-changed(root.record-open); }
+    // The take's shape as Path commands (the loudest of each 20th of a second, up and down from the middle), drawn
+    // for the room it has (a Path keeps its drawing's proportions, so the drawing is made its size).
+    in property <string> record-shape;
+    in property <bool> record-has-shape;
+    out property <float> record-wave-width;
+    out property <float> record-wave-height;
     // The Record from menu's lines, and how loud what's picked is (the overall input level, 0 to 1).
     in property <[InputLine]> record-menu;
     in property <float> record-level;
@@ -913,6 +923,14 @@ export component Panel inherits Window {
                         tip: "Stop";
                         clicked => { root.stop(); }
                     }
+                    // Shows or folds away the recording part below; lit while it shows or a take is under way.
+                    StudioButton {
+                        horizontal-stretch: 0;
+                        icon: Icons.record;
+                        main: root.recording || root.record-open;
+                        tip: root.record-open ? "Fold recording away" : "Record from the DAW or a sound card";
+                        clicked => { root.record-open = !root.record-open; }
+                    }
                     if root.in-bitwig && root.picked >= 0: StudioButton {
                         horizontal-stretch: 0;
                         text: "In Bitwig's Sampler";
@@ -920,109 +938,138 @@ export component Panel inherits Window {
                         clicked => { root.try-in-sampler(); }
                     }
                 }
-                HorizontalLayout {
+                // The recording part, folded away to its button in the row above (Solomon, 25 Nov: not something he
+                // needs to see all the time).
+                if root.record-open: HorizontalLayout {
                     spacing: Space.sm;
-                    record-from-button := StudioButton {
-                        horizontal-stretch: 0;
-                        text: "Record from: " + (root.record-from == "" ? "the DAW's input" : root.record-from);
-                        menu: true;
-                        tip: "Pick a sound card, then the input on it: each shows how loud it is";
-                        clicked => {
-                            root.record-menu-opened();
-                            record-menu.show();
-                        }
-                        record-menu := PopupWindow {
-                            x: 0;
-                            y: parent.height + Space.xs;
-                            width: max(parent.width, 320px);
-                            close-policy: close-on-click-outside;
-                            Timer {
-                                interval: 150ms;
-                                running: true;
-                                triggered => { root.record-menu-alive(); }
+                    HorizontalLayout {
+                        spacing: Space.sm;
+                        record-from-button := StudioButton {
+                            horizontal-stretch: 0;
+                            text: "Record from: " + (root.record-from == "" ? "the DAW's input" : root.record-from);
+                            menu: true;
+                            tip: "Pick a sound card, then the input on it: each shows how loud it is";
+                            clicked => {
+                                root.record-menu-opened();
+                                record-menu.show();
                             }
-                            MenuCard {
-                                for line[i] in root.record-menu: Rectangle {
-                                    height: 32px;
-                                    border-radius: Theme.radius;
-                                    background: line.picked
-                                        ? Theme.accent.transparentize(line-touch.has-hover ? 70% : 78%)
-                                        : line-touch.has-hover ? Theme.hover : transparent;
-                                    HorizontalLayout {
-                                        padding-left: Space.md;
-                                        padding-right: Space.md;
-                                        spacing: Space.md;
-                                        Text {
-                                            horizontal-stretch: 1;
-                                            vertical-alignment: center;
-                                            text: (line.back ? "\u{2039}  " : "") + line.text;
-                                            color: line.back ? Theme.muted : Theme.text;
-                                            font-size: Type.body;
-                                            font-weight: line.picked ? 600 : 400;
-                                            overflow: elide;
-                                        }
-                                        if !line.back: VerticalLayout {
-                                            alignment: center;
-                                            LevelBar { share: line.level; }
-                                        }
-                                        if line.card: Text {
-                                            vertical-alignment: center;
-                                            text: "\u{203a}";
-                                            color: Theme.muted;
-                                            font-size: Type.body;
-                                        }
-                                    }
-                                    line-touch := TouchArea {
-                                        clicked => {
-                                            if !line.card && !line.back {
-                                                record-menu.close();
+                            record-menu := PopupWindow {
+                                x: 0;
+                                y: parent.height + Space.xs;
+                                width: max(parent.width, 320px);
+                                close-policy: close-on-click-outside;
+                                Timer {
+                                    interval: 150ms;
+                                    running: true;
+                                    triggered => { root.record-menu-alive(); }
+                                }
+                                MenuCard {
+                                    for line[i] in root.record-menu: Rectangle {
+                                        height: 32px;
+                                        border-radius: Theme.radius;
+                                        background: line.picked
+                                            ? Theme.accent.transparentize(line-touch.has-hover ? 70% : 78%)
+                                            : line-touch.has-hover ? Theme.hover : transparent;
+                                        HorizontalLayout {
+                                            padding-left: Space.md;
+                                            padding-right: Space.md;
+                                            spacing: Space.md;
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                vertical-alignment: center;
+                                                text: (line.back ? "\u{2039}  " : "") + line.text;
+                                                color: line.back ? Theme.muted : Theme.text;
+                                                font-size: Type.body;
+                                                font-weight: line.picked ? 600 : 400;
+                                                overflow: elide;
                                             }
-                                            root.record-menu-clicked(i);
+                                            if !line.back: VerticalLayout {
+                                                alignment: center;
+                                                LevelBar { share: line.level; }
+                                            }
+                                            if line.card: Text {
+                                                vertical-alignment: center;
+                                                text: "\u{203a}";
+                                                color: Theme.muted;
+                                                font-size: Type.body;
+                                            }
+                                        }
+                                        line-touch := TouchArea {
+                                            clicked => {
+                                                // Up first: a line made by `for` can't call up once its menu is closed
+                                                // (Solomon, 25 Nov: no input but the DAW's could be picked).
+                                                root.record-menu-clicked(i);
+                                                if !line.card && !line.back {
+                                                    record-menu.close();
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                    // Both sides of the pair, or one (Solomon, 25 Nov: one mono input of a pair, without a long list of
-                    // every input twice over).
-                    Segmented {
-                        horizontal-stretch: 0;
-                        choices: ["L+R", "L", "R"];
-                        pad: Space.sm;
-                        current: root.record-side;
-                        picked(i) => { root.record-side = i; }
-                    }
-                    StudioButton {
-                        horizontal-stretch: 0;
-                        text: root.recording ? "Stop recording" : "Record";
-                        main: root.recording;
-                        tip: root.record-from == "" ? "Record what the DAW sends the plugin's input (in Bitwig, pick it in the plugin's sidechain)" : "Record " + root.record-from + " straight from the sound card";
-                        clicked => {
-                            if root.recording {
-                                root.record-stop();
-                            } else {
-                                root.record();
+                        // Both sides of the pair, or one (Solomon, 25 Nov: one mono input of a pair, without a long list of
+                        // every input twice over).
+                        Segmented {
+                            horizontal-stretch: 0;
+                            choices: ["L+R", "L", "R"];
+                            pad: Space.sm;
+                            current: root.record-side;
+                            picked(i) => { root.record-side = i; }
+                        }
+                        StudioButton {
+                            horizontal-stretch: 0;
+                            text: root.recording ? "Stop recording" : "Record";
+                            main: root.recording;
+                            tip: root.record-from == "" ? "Record what the DAW sends the plugin's input (in Bitwig, pick it in the plugin's sidechain)" : "Record " + root.record-from + " straight from the sound card";
+                            clicked => {
+                                if root.recording {
+                                    root.record-stop();
+                                } else {
+                                    root.record();
+                                }
                             }
                         }
-                    }
-                    // The overall input level: how loud what Record would take is, now.
-                    VerticalLayout {
-                        alignment: center;
-                        LevelBar { share: root.record-level; }
-                    }
-                    CutText {
-                        own-mouse: true;
-                        live: true;
-                        horizontal-stretch: 1;
-                        vertical-alignment: center;
-                        text: root.record-said;
-                        color: Theme.muted;
-                        font-size: Type.meta;
-                        overflow: elide;
+                        // The overall input level: how loud what Record would take is, now.
+                        VerticalLayout {
+                            alignment: center;
+                            LevelBar { share: root.record-level; }
+                        }
+                        CutText {
+                            own-mouse: true;
+                            live: true;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                            text: root.record-said;
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            overflow: elide;
+                        }
                     }
                 }
-                if root.recorded-name != "": recorded-line := ListLine {
+                // The take's shape as it records (and once it's saved, until the next): its last 30 seconds.
+                if root.record-open && root.record-has-shape: Rectangle {
+                    height: 40px;
+                    border-radius: Theme.radius;
+                    background: Theme.well;
+                    take-wave := Path {
+                        x: Space.xs;
+                        width: parent.width - 2 * Space.xs;
+                        height: parent.height;
+                        viewbox-x: 0;
+                        viewbox-y: 0;
+                        viewbox-width: self.width / 1px;
+                        viewbox-height: self.height / 1px;
+                        commands: root.record-shape;
+                        fill: Theme.accent;
+                        init => {
+                            root.record-wave-width = self.width / 1px;
+                            root.record-wave-height = self.height / 1px;
+                        }
+                        changed width => { root.record-wave-width = self.width / 1px; }
+                    }
+                }
+                if root.record-open && root.recorded-name != "": recorded-line := ListLine {
                     height: 36px;
                     draggable: root.can-drag;
                     lifted: root.recorded-carried;

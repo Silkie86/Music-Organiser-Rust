@@ -41,3 +41,14 @@ fn one_side_of_a_stereo_pair_records_as_a_mono_take() {
     feed.push_interleaved(&[0.1, 0.7, 0.2, 0.8], 2);
     assert_eq!(take.finish().channels, vec![vec![0.1, 0.2]]);
 }
+
+#[test]
+fn a_take_keeps_its_shape_as_it_records() {
+    // 20 stretches a second: at 1000 frames a second, one each 50 frames.
+    let (mut feed, mut take) = record::recording(1000, 1);
+    let mut samples = vec![0.1f32; 120];
+    samples[60] = -0.8;
+    feed.push(&[&samples]);
+    take.gather();
+    assert_eq!(take.shape(), &[0.1, 0.8]);
+}
