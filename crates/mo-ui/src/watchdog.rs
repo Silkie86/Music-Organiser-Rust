@@ -407,6 +407,7 @@ fn watch(feed: &Feed) {
         let answered = Arc::new(AtomicU64::new(0));
         let a = answered.clone();
         let memory_before = crate::stuck::memory_now();
+        let work_before = crate::stuck::window_thread_work();
         // Before the knock is timed, so writing the line isn't counted as the window answering late; the page and
         // the jobs are only asked for when there's a line to write.
         if let Some(now) = memory_before {
@@ -493,6 +494,10 @@ fn watch(feed: &Feed) {
                 busy.push_str("; ");
                 busy.push_str(&memory);
             }
+            if let Some(work) = crate::stuck::work_words(work_before, crate::stuck::window_thread_work(), waited) {
+                busy.push_str("; ");
+                busy.push_str(&work);
+            }
             if let Some(whole) = held_up_words(held_up) {
                 busy.push_str("; ");
                 busy.push_str(&whole);
@@ -558,8 +563,8 @@ fn held_up_words(held_up: Duration) -> Option<String> {
 /// Gives back the page faults the look itself made.
 fn log_thread(waited: Duration) -> u64 {
     let before = crate::stuck::memory_now();
-    if let Some(frames) = crate::stuck::window_thread_now() {
-        log::warning("Freeze", &thread_line(waited, &frames));
+    if let Some(look) = crate::stuck::window_thread_now() {
+        log::warning("Freeze", &thread_line(waited, look.to_stop, &look.frames));
     }
     match (before, crate::stuck::memory_now()) {
         (Some(b), Some(a)) => a.page_faults.saturating_sub(b.page_faults),
@@ -567,9 +572,26 @@ fn log_thread(waited: Duration) -> u64 {
     }
 }
 
-/// "Stuck for 1.0 s, the window's thread was in:" and its functions, innermost first, one a line.
-pub fn thread_line(waited: Duration, frames: &[String]) -> String {
-    let mut text = format!("Stuck for {:.1} s, the window's thread was in:", waited.as_secs_f32());
+/// A thread that takes this long to stop for a look was somewhere it couldn't be stopped, and the line says so.
+const SLOW_TO_STOP: Duration = Duration::from_millis(100);
+
+/// "Stuck for 1.0 s, the window's thread was in:" and its functions, innermost first, one a line. `waited` is how
+/// long it had been stuck when the look was asked for, `to_stop` how long the thread then took to stop: when that was
+/// long, the line gives the moment it did stop and says what the wait means, since the functions are then where the
+/// thread came out to, not where it had been all along.
+pub fn thread_line(waited: Duration, to_stop: Duration, frames: &[String]) -> String {
+    let mut text = if to_stop >= SLOW_TO_STOP {
+        format!(
+            "Stuck for {:.1} s, the window's thread was in (the look was asked for at {:.1} s and the thread took {} ms \
+             to stop, as it does inside a part of Windows that can't be interrupted; these are the functions it came \
+             out to):",
+            (waited + to_stop).as_secs_f32(),
+            waited.as_secs_f32(),
+            to_stop.as_millis()
+        )
+    } else {
+        format!("Stuck for {:.1} s, the window's thread was in:", waited.as_secs_f32())
+    };
     for f in frames {
         text.push_str("\n    ");
         text.push_str(f);
@@ -656,7 +678,7 @@ mod tests {
         // And once more between the two, so a freeze of a second or two has two looks to compare.
         assert!(LOOK_AT_THREAD < LOOK_AGAIN && LOOK_AGAIN < STILL_STUCK);
         assert_eq!(
-            thread_line(LOOK_AT_THREAD, &["a".to_owned()]),
+            thread_line(LOOK_AT_THREAD, Duration::ZERO, &["a".to_owned()]),
             "Stuck for 0.3 s, the window's thread was in:\n    a"
         );
     }
@@ -728,8 +750,19 @@ mod tests {
     #[test]
     fn the_thread_line_lists_its_functions_one_a_line() {
         assert_eq!(
-            thread_line(Duration::from_millis(1040), &["inner (a.rs:3)".to_owned(), "outer".to_owned()]),
+            thread_line(
+                Duration::from_millis(1040),
+                Duration::from_millis(2),
+                &["inner (a.rs:3)".to_owned(), "outer".to_owned()]
+            ),
             "Stuck for 1.0 s, the window's thread was in:\n    inner (a.rs:3)\n    outer"
+        );
+        // Solomon's 25 Nov: asked for at 0.3 s, stopped 3.8 s later.
+        assert_eq!(
+            thread_line(Duration::from_millis(310), Duration::from_millis(3_774), &["outer".to_owned()]),
+            "Stuck for 4.1 s, the window's thread was in (the look was asked for at 0.3 s and the thread took 3774 ms \
+             to stop, as it does inside a part of Windows that can't be interrupted; these are the functions it came \
+             out to):\n    outer"
         );
     }
 

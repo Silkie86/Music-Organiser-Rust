@@ -23,12 +23,61 @@ pub fn remember_this_thread() {
 }
 
 /// The functions the window's thread is in now, innermost first, each as "name (file:line)" where it's known, else
-/// as "module+offset". `None` when it can't be looked at here.
-pub fn window_thread_now() -> Option<Vec<String>> {
+/// as "module+offset", and how long the thread took to stop for the look. `None` when it can't be looked at here.
+pub fn window_thread_now() -> Option<Look> {
     #[cfg(all(windows, target_arch = "x86_64"))]
     return windows_x64::window_thread_now();
     #[cfg(not(all(windows, target_arch = "x86_64")))]
     None
+}
+
+/// One look at the window's thread; see [`window_thread_now`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Look {
+    /// The functions it was in once it had stopped, innermost first.
+    pub frames: Vec<String>,
+    /// How long it took to stop. A thread running the app's own code, or waiting in the usual way, stops at once.
+    /// One inside a part of Windows that can't be interrupted (its window and keyboard code, mostly) stops only when
+    /// it comes out, so a long time here says the freeze was in there, and the functions are where it came out to.
+    /// On 25 Nov 2026 a 4.1 s freeze while Solomon typed had one look, asked for at 0.3 s and written 2 ms before the
+    /// freeze ended, with nothing in the log to say the look had waited all that time.
+    pub to_stop: std::time::Duration,
+}
+
+/// How long the window's thread has worked since it began: in the app's and its libraries' code (`own`), and inside
+/// Windows for them (`in_windows`). Time it only waited counts in neither, so the difference between two of these
+/// over a freeze says whether the thread was busy or waiting on something else. `None` where that isn't known.
+pub fn window_thread_work() -> Option<Work> {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    return windows_x64::window_thread_work();
+    #[cfg(not(all(windows, target_arch = "x86_64")))]
+    None
+}
+
+/// See [`window_thread_work`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Work {
+    pub own: std::time::Duration,
+    pub in_windows: std::time::Duration,
+}
+
+/// For a freeze line: how much of the freeze the window's thread worked, and that it waited for the rest when it
+/// mostly did: "the window's thread worked for 12 ms of it (3 ms of that inside Windows) and waited for the rest".
+pub fn work_words(before: Option<Work>, after: Option<Work>, stuck: std::time::Duration) -> Option<String> {
+    let (before, after) = (before?, after?);
+    let own = after.own.saturating_sub(before.own);
+    let in_windows = after.in_windows.saturating_sub(before.in_windows);
+    let worked = own + in_windows;
+    let mut words = format!(
+        "the window's thread worked for {} ms of it ({} ms of that inside Windows)",
+        worked.as_millis(),
+        in_windows.as_millis()
+    );
+    // Less than half of it at work: the rest it waited, on a lock, the disk, another program or a core to run on.
+    if worked.saturating_mul(2) < stuck {
+        words.push_str(" and waited for the rest");
+    }
+    Some(words)
 }
 
 /// Reads the app's debugging info (the function names a stuck thread's stack is shown with), so the first freeze
@@ -153,7 +202,7 @@ mod windows_memory {
 mod windows_x64 {
     use std::sync::OnceLock;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HMODULE};
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, GetLastError, HANDLE, HMODULE};
     use windows_sys::Win32::System::Diagnostics::Debug::{
         CONTEXT, CONTEXT_FULL_AMD64, GetThreadContext, IMAGEHLP_LINEW64, RtlLookupFunctionEntry, RtlVirtualUnwind,
         SYMBOL_INFOW, SYMOPT_DEFERRED_LOADS, SYMOPT_LOAD_LINES, SYMOPT_UNDNAME, SymFromAddrW, SymGetLineFromAddrW64,
@@ -166,8 +215,8 @@ mod windows_x64 {
     };
     use windows_sys::Win32::System::Threading::{
         CreateMutexA, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, GetCurrentThreadStackLimits,
-        INFINITE, OpenThread, ReleaseMutex, ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION,
-        THREAD_SUSPEND_RESUME, WaitForSingleObject,
+        GetThreadTimes, INFINITE, OpenThread, ReleaseMutex, ResumeThread, SuspendThread, THREAD_GET_CONTEXT,
+        THREAD_QUERY_INFORMATION, THREAD_SUSPEND_RESUME, WaitForSingleObject,
     };
 
     use super::MOST;
@@ -207,17 +256,34 @@ mod windows_x64 {
     #[repr(C, align(16))]
     struct Aligned(CONTEXT);
 
-    pub fn window_thread_now() -> Option<Vec<String>> {
+    pub fn window_thread_now() -> Option<super::Look> {
         let window = WINDOW.get()?;
-        let (frames, count) = walk(window)?;
-        Some(names(&frames[..count]))
+        let (frames, count, to_stop) = walk(window)?;
+        Some(super::Look { frames: names(&frames[..count]), to_stop })
+    }
+
+    pub fn window_thread_work() -> Option<super::Work> {
+        let window = WINDOW.get()?;
+        let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut made, mut ended, mut kernel, mut user) = (zero, zero, zero, zero);
+        // SAFETY: the documented call on a live handle opened with the right to ask (the window's thread lives as
+        // long as the app), with room for each of its four answers.
+        let ok = unsafe { GetThreadTimes(window.thread as HANDLE, &mut made, &mut ended, &mut kernel, &mut user) != 0 };
+        // Each is a count of 100-nanosecond steps, in two halves.
+        let time = |t: FILETIME| {
+            let steps = (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+            std::time::Duration::from_nanos(steps.saturating_mul(100))
+        };
+        ok.then(|| super::Work { own: time(user), in_windows: time(kernel) })
     }
 
     /// Stops the thread, copies its registers and the used part of its stack, and lets it go at once. Only then is
     /// the copy walked for the return addresses: walking asks Windows for each function's unwind data, which can take
     /// a lock (a DLL being loaded, say) that the stopped thread might hold, and that would hang it for good. While
     /// it's stopped nothing here takes a lock or asks for memory: the room for the copy is made before.
-    fn walk(window: &Window) -> Option<([u64; MOST], usize)> {
+    ///
+    /// Also gives how long the thread took to stop: see [`super::Look::to_stop`].
+    fn walk(window: &Window) -> Option<([u64; MOST], usize, std::time::Duration)> {
         let size = usize::try_from(window.high - window.low).ok()?;
         // The stack as it was, low to high, with zeros past its top.
         let mut copy = vec![0u8; size + SLACK];
@@ -225,6 +291,7 @@ mod windows_x64 {
         // SAFETY: CONTEXT is plain data; all zeros is a valid start.
         let mut context: Aligned = unsafe { std::mem::zeroed() };
         context.0.ContextFlags = CONTEXT_FULL_AMD64;
+        let asked = std::time::Instant::now();
         // SAFETY: the documented calls on a live handle opened with these rights (the window's thread lives as long
         // as the app), and the thread is let go on every path. The copy reads only the stack between the thread's
         // stack pointer and its stack's top, which is all in use, so all there to read; it lands in `copy` at the
@@ -244,10 +311,13 @@ mod windows_x64 {
             ResumeThread(thread);
             usable
         };
+        // Read once the thread runs again: nothing is asked of Windows while it's stopped but what stops it.
+        let to_stop = asked.elapsed();
         if !copied {
             return None;
         }
-        Some(unwind(&mut context.0, window, &copy))
+        let (frames, count) = unwind(&mut context.0, window, &copy);
+        Some((frames, count, to_stop))
     }
 
     /// Walks a copied stack: each register that points into the stack is moved to the same place in the copy, so
@@ -581,6 +651,19 @@ mod tests {
         // Nothing known of what it holds: nothing claimed.
         let unknown = Memory { page_faults: 0, in_ram: 0, held: 0 };
         assert!(!memory_words(Some(unknown), Some(after), 0).unwrap().contains(MOVED_TO_DISK));
+        let ms = std::time::Duration::from_millis;
+        let work = |own, in_windows| Some(Work { own: ms(own), in_windows: ms(in_windows) });
+        // Solomon's 25 Nov: stuck for 4.1 s inside Windows' typing code, hardly working.
+        assert_eq!(
+            work_words(work(1_000, 500), work(1_009, 503), ms(4_086)).as_deref(),
+            Some("the window's thread worked for 12 ms of it (3 ms of that inside Windows) and waited for the rest")
+        );
+        // Busy all through: nothing said of waiting.
+        assert_eq!(
+            work_words(work(0, 0), work(580, 20), ms(612)).as_deref(),
+            Some("the window's thread worked for 600 ms of it (20 ms of that inside Windows)")
+        );
+        assert_eq!(work_words(None, work(1, 1), ms(612)), None);
         assert_eq!(thousands(0), "0");
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_000), "1,000");
@@ -608,10 +691,18 @@ mod tests {
         });
         rx.recv().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let frames = window_thread_now();
+        let before = window_thread_work();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let after = window_thread_work();
+        let look = window_thread_now();
         STOP.store(true, Ordering::Relaxed);
         worker.join().unwrap();
-        let frames = frames.expect("the thread was looked at");
+        let look = look.expect("the thread was looked at");
+        // A thread in the app's own code stops at once, and its spinning is counted as work of its own.
+        assert!(look.to_stop < std::time::Duration::from_millis(250), "{:?}", look.to_stop);
+        let (before, after) = (before.expect("its work is known"), after.expect("its work is known"));
+        assert!(after.own > before.own, "{before:?} {after:?}");
+        let frames = look.frames;
         assert!(
             frames.iter().any(|f| f.contains("spin_here_for_the_test")),
             "{frames:#?} ({})",
