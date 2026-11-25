@@ -247,6 +247,8 @@ fn main() -> Result<(), slint::PlatformError> {
             mo_ui::settings::fill_the_screen(&app);
         }
         mo_ui::watchdog::start(watched);
+        // Windows' typing service is read from disk now, in the background, not at the first click in a text box.
+        mo_ui::typing::get_ready();
     })
     .is_err()
     {
