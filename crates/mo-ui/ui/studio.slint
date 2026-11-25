@@ -1820,6 +1820,152 @@ export component FilterList inherits VerticalLayout {
     }
 }
 
+// The widths of the parts of a page you can drag wider or narrower (the side cards, ...), kept by the app between runs
+// (`mo_app::widths`, which has each part's usual width and its limits). A part is named `<page>.<part>`.
+export global Widths {
+    // The least and most a part may be.
+    pure callback least(string) -> length;
+    pure callback most(string) -> length;
+    // A part was dragged to a new width and let go: the app keeps it.
+    callback resized(string, length);
+    // A double-click on a part's edge: the app puts it back to its usual width (and sets the page's width for it).
+    callback reset(string);
+    // The widths of the parts whose page keeps no width of its own (the side cards' are in each page's data). The
+    // app sets them at the start from what it kept; these are the usual widths.
+    in-out property <length> sounds-filters: 208px;
+    in-out property <length> presets-filters: 208px;
+    in-out property <length> midi-filters: 208px;
+    in-out property <length> plugins-filters: 208px;
+    in-out property <length> songs-filters: 208px;
+    in-out property <length> sounds-folders: 280px;
+    // 0 until it's dragged: the Songs list takes a third of the room then.
+    in-out property <length> songs-list: 0px;
+}
+
+// An edge you drag to make a part of a page wider or narrower (a side card, the filter column, the folder tree): a
+// resize cursor and a faint line on the mouse, a badge with the width and its limits while it's held, a tip that says
+// so, and a double-click for the part's usual width. The page keeps the width (`resizing`); the app keeps it between
+// runs by the seam's `part`, as `Widths` knows it.
+export component Seam inherits Rectangle {
+    // Which part's width it sets ("sounds.card"); none for a seam whose width isn't kept.
+    in property <string> part;
+    // The part's width as it's shown now, and the least and most a drag may make it.
+    in property <length> now;
+    in property <length> least: root.part != "" ? Widths.least(root.part) : 0px;
+    in property <length> most: root.part != "" ? Widths.most(root.part) : 100000px;
+    // 1 where a drag to the right makes the part wider (a column on the left of the page), -1 where a drag to the
+    // left does (a card on the right).
+    in property <int> grows: 1;
+    // Off where the page sets the width itself: the seam is only a gap then.
+    in property <bool> enabled: true;
+    // The new width while dragging.
+    callback resizing(length);
+    out property <bool> dragging;
+    property <length> start-width;
+    // Where the press was, in the window: the seam moves while it's dragged, so its own space won't do.
+    property <length> start-x;
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        width: 2px;
+        height: root.dragging ? parent.height : min(48px, parent.height);
+        y: (parent.height - self.height) / 2;
+        border-radius: 1px;
+        background: touch.pressed ? Theme.accent : touch.has-hover ? Theme.stroke : transparent;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.col-resize;
+        pointer-event(e) => {
+            // A drag cut short (the mouse left the window, or the seam was turned off): the width it got is kept, as
+            // when it's let go, and the badge goes.
+            if e.kind == PointerEventKind.cancel {
+                if root.dragging {
+                    root.dragging = false;
+                    if root.part != "" {
+                        Widths.resized(root.part, root.now);
+                    }
+                }
+                return;
+            }
+            if e.button != PointerEventButton.left {
+                return;
+            }
+            if e.kind == PointerEventKind.down {
+                root.start-width = root.now;
+                root.start-x = self.absolute-position.x + self.mouse-x;
+                root.dragging = false;
+            }
+            // Kept only when the seam really moved.
+            if e.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
+                if root.part != "" {
+                    Widths.resized(root.part, root.now);
+                }
+            }
+        }
+        double-clicked => {
+            // Comes before the press's let go: a wobble in the second press isn't a drag to keep over the usual width.
+            root.dragging = false;
+            if root.part != "" {
+                Widths.reset(root.part);
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.dragging = true;
+                root.resizing(clamp(root.start-width + root.grows * (self.absolute-position.x + self.mouse-x - root.start-x),
+                    root.least, max(root.least, root.most)));
+            }
+        }
+    }
+    // While dragging: how wide the part is, and how narrow and wide it may go. Left of the seam, over whatever is
+    // there: a card on the right is drawn after its seam, so it would cover the badge on its own side.
+    if root.dragging: Rectangle {
+        x: -self.width - Space.xs;
+        y: (root.height - self.height) / 2;
+        width: size.preferred-width + 2 * Space.sm;
+        height: size.preferred-height + Space.sm;
+        border-radius: Theme.radius;
+        background: Theme.surface-raised;
+        border-width: 1px;
+        border-color: Theme.accent;
+        size := Text {
+            text: "\{round(root.now / 1px)} px · \{round(root.least / 1px)}–\{round(max(root.least, root.most) / 1px)}";
+            color: Theme.accent;
+            font-size: Type.meta;
+            font-family: Theme.number-font;
+        }
+    }
+    Tip {
+        text: "Drag to resize · double-click for the usual width";
+        hovering: touch.has-hover && !touch.pressed && root.part != "" && root.enabled;
+        at-x: root.width;
+        at-y: root.height / 2;
+    }
+}
+
+// The seam between a page's list and its side panel: drag it to give the panel more or less room, double-click it for
+// the panel's usual width. The page keeps the panel's width; the app keeps it between runs by the seam's `part`.
+export component PanelDivider inherits Seam {
+    // The panel's width now, and the room the list and panel share.
+    in property <length> panel-width;
+    in property <length> room;
+    in property <length> min-list: 380px;
+    // The widest the list gets (`Fit.list-max` on most pages): in a wider window the panel takes the rest, so it's
+    // shown wider than its own width, and can always be dragged as wide as that.
+    in property <length> max-list: 100000px;
+    in property <length> min-panel: root.part != "" ? Widths.least(root.part) : 320px;
+    in property <length> max-panel: root.part != "" ? Widths.most(root.part) : 100000px;
+    width: Space.lg;
+    grows: -1;
+    now: root.panel-width;
+    least: root.min-panel;
+    // Its own most, or the room the list leaves at its widest when that's more, and never so wide the list goes under
+    // its least.
+    most: max(root.min-panel, max(root.room - root.width - root.max-list,
+        min(root.max-panel, root.room - root.width - root.min-list)));
+}
+
 // The filter column: a page's filters as FilterLists and TickLines, one under the other at the page's left side. It
 // scrolls with the wheel when the window is too short for them all. The page places it by hand over the left of the
 // room it shares with its list (`page-width` wide), and starts its list `room` in from the left. In a narrow window
@@ -1833,11 +1979,16 @@ export component FilterColumn inherits Rectangle {
     in property <[string]> tab: ["F", "I", "L", "T", "E", "R", "S"];
     in property <string> tab-close: "CLOSE FILTERS";
     in property <bool> active;
+    // How wide it is (unless it's folded in a narrow window), the part its seam's width is kept as ("sounds.filters"),
+    // and the new width while its seam is dragged: the page keeps it (in `Widths`).
+    in property <length> wide: 208px;
+    in property <string> part;
+    callback resizing(length);
     property <bool> narrow: root.page-width < 860px;
     property <bool> open;
     property <bool> folded: root.narrow && !root.open;
     // How far in the page's list starts.
-    out property <length> room: !root.shown ? 0px : root.narrow ? 28px + Space.sm : 208px + Space.lg;
+    out property <length> room: !root.shown ? 0px : root.narrow ? 28px + Space.sm : root.wide + Space.lg;
     // Room kept free under the filters for what comes and goes as you pick (a Clear button), so its coming doesn't
     // take a line away from a list that fills the room.
     in property <length> keep-free;
@@ -1848,7 +1999,7 @@ export component FilterColumn inherits Rectangle {
     x: 0;
     y: 0;
     visible: root.shown;
-    width: root.folded ? 28px : 208px;
+    width: root.folded ? 28px : root.wide;
     background: root.narrow && root.open ? Theme.background : transparent;
     clip: true;
     flick := Flickable {
@@ -1872,6 +2023,15 @@ export component FilterColumn inherits Rectangle {
         x: parent.width - 1px;
         width: 1px;
         background: Theme.edge;
+    }
+    // Its right edge: drag it to make the column wider or narrower (not while it's folded away in a narrow window).
+    if !root.narrow && root.part != "": Seam {
+        x: parent.width - self.width;
+        width: Space.md;
+        height: parent.height;
+        part: root.part;
+        now: root.wide;
+        resizing(w) => { root.resizing(w); }
     }
     // The tab: all of the folded column, or a line across the top of the opened one.
     if root.narrow: Rectangle {
@@ -3643,125 +3803,6 @@ export component SidePanel inherits Panel {
         x: parent.width - self.width - Space.md;
         y: Space.md;
         clicked => { root.close(); }
-    }
-}
-
-// The widths of the parts of a page you can drag wider or narrower (the side cards, ...), kept by the app between runs
-// (`mo_app::widths`, which has each part's usual width and its limits). A part is named `<page>.<part>`.
-export global Widths {
-    // The least and most a part may be.
-    pure callback least(string) -> length;
-    pure callback most(string) -> length;
-    // A part was dragged to a new width and let go: the app keeps it.
-    callback resized(string, length);
-    // A double-click on a part's edge: the app puts it back to its usual width (and sets the page's width for it).
-    callback reset(string);
-}
-
-// The seam between a page's list and its side panel: drag it to give the panel more or less room, double-click it for
-// the panel's usual width. The page keeps the panel's width; the app keeps it between runs by the seam's `part`.
-export component PanelDivider inherits Rectangle {
-    // Which part's width it sets, as `Widths` knows it ("sounds.card").
-    in property <string> part;
-    // The panel's width now, and the room the list and panel share.
-    in property <length> panel-width;
-    in property <length> room;
-    in property <length> min-list: 380px;
-    // The widest the list gets (`Fit.list-max` on most pages): in a wider window the panel takes the rest, so it's
-    // shown wider than its own width, and can always be dragged as wide as that.
-    in property <length> max-list: 100000px;
-    in property <length> min-panel: root.part != "" ? Widths.least(root.part) : 320px;
-    in property <length> max-panel: root.part != "" ? Widths.most(root.part) : 100000px;
-    // Off where the page sets the widths itself: the seam is only a gap then.
-    in property <bool> enabled: true;
-    // The new width while dragging.
-    callback resizing(length);
-    width: Space.lg;
-    property <length> start-width;
-    // Where the press was, in the window: the seam moves while it's dragged, so its own space won't do.
-    property <length> start-x;
-    property <bool> dragging;
-    // The widest the drag may make the panel: its own most, or the room the list leaves at its widest when that's more,
-    // and never so wide the list goes under its least.
-    property <length> widest: max(root.min-panel, max(root.room - root.width - root.max-list,
-        min(root.max-panel, root.room - root.width - root.min-list)));
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        width: 2px;
-        height: root.dragging ? parent.height : min(48px, parent.height);
-        y: (parent.height - self.height) / 2;
-        border-radius: 1px;
-        background: touch.pressed ? Theme.accent : touch.has-hover ? Theme.stroke : transparent;
-    }
-    touch := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: MouseCursor.col-resize;
-        pointer-event(e) => {
-            // A drag cut short (the mouse left the window, or the seam was turned off): the width it got is kept, as
-            // when it's let go, and the badge goes.
-            if e.kind == PointerEventKind.cancel {
-                if root.dragging {
-                    root.dragging = false;
-                    if root.part != "" {
-                        Widths.resized(root.part, root.panel-width);
-                    }
-                }
-                return;
-            }
-            if e.button != PointerEventButton.left {
-                return;
-            }
-            if e.kind == PointerEventKind.down {
-                root.start-width = root.panel-width;
-                root.start-x = self.absolute-position.x + self.mouse-x;
-                root.dragging = false;
-            }
-            // Kept only when the seam really moved.
-            if e.kind == PointerEventKind.up && root.dragging {
-                root.dragging = false;
-                if root.part != "" {
-                    Widths.resized(root.part, root.panel-width);
-                }
-            }
-        }
-        double-clicked => {
-            // Comes before the press's let go: a wobble in the second press isn't a drag to keep over the usual width.
-            root.dragging = false;
-            if root.part != "" {
-                Widths.reset(root.part);
-            }
-        }
-        moved => {
-            if self.pressed {
-                root.dragging = true;
-                root.resizing(clamp(root.start-width - (self.absolute-position.x + self.mouse-x - root.start-x),
-                    root.min-panel, root.widest));
-            }
-        }
-    }
-    // While dragging: how wide the panel is, and how narrow and wide it may go. Over the list, left of the seam: the
-    // panel is drawn after the seam, so it would cover it on its own side.
-    if root.dragging: Rectangle {
-        x: -self.width - Space.xs;
-        y: (root.height - self.height) / 2;
-        width: size.preferred-width + 2 * Space.sm;
-        height: size.preferred-height + Space.sm;
-        border-radius: Theme.radius;
-        background: Theme.surface-raised;
-        border-width: 1px;
-        border-color: Theme.accent;
-        size := Text {
-            text: "\{round(root.panel-width / 1px)} px · \{round(root.min-panel / 1px)}–\{round(root.widest / 1px)}";
-            color: Theme.accent;
-            font-size: Type.meta;
-            font-family: Theme.number-font;
-        }
-    }
-    Tip {
-        text: "Drag to resize · double-click for the usual width";
-        hovering: touch.has-hover && !touch.pressed && root.part != "";
-        at-x: root.width;
-        at-y: root.height / 2;
     }
 }
 

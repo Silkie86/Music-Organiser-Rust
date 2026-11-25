@@ -70,6 +70,13 @@ fn give(app: &AppWindow, name: &str, width: f32) {
         "midi.card" => app.global::<MidiData>().set_panel_width(width),
         "plugins.card" => app.global::<PluginsData>().set_panel_width(width),
         "space.card" => app.global::<SpaceData>().set_panel_width(width),
+        "sounds.filters" => app.global::<crate::Widths>().set_sounds_filters(width),
+        "presets.filters" => app.global::<crate::Widths>().set_presets_filters(width),
+        "midi.filters" => app.global::<crate::Widths>().set_midi_filters(width),
+        "plugins.filters" => app.global::<crate::Widths>().set_plugins_filters(width),
+        "songs.filters" => app.global::<crate::Widths>().set_songs_filters(width),
+        "sounds.folders" => app.global::<crate::Widths>().set_sounds_folders(width),
+        "songs.list" => app.global::<crate::Widths>().set_songs_list(width),
         _ => debug_assert!(false, "no page has a part called {name}"),
     }
 }

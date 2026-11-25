@@ -4,7 +4,7 @@
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { FolderTree, PickStrip, TreeLine, TreePick, MixPart } from "../folder_tree.slint";
-import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, CutText, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, TipState, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar, Icons, InfoTip } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, CutText, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, TipState, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar, Icons, InfoTip, Widths } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -2300,6 +2300,9 @@ export component SoundsPage inherits Rectangle {
                 cleared => { SoundsData.tree-cleared(); }
             }
             tree := FolderTree {
+                part: "sounds.folders";
+                wide: Widths.sounds-folders;
+                resizing(w) => { Widths.sounds-folders = w; }
                 x: column.room;
                 y: 0;
                 height: split.height;
@@ -2334,6 +2337,9 @@ export component SoundsPage inherits Rectangle {
             }
             // After the list, so the opened column of a narrow window lies over it.
             column := FilterColumn {
+                part: "sounds.filters";
+                wide: Widths.sounds-filters;
+                resizing(w) => { Widths.sounds-filters = w; }
                 page-width: split.width;
                 height: split.height;
                 // Rediscover and Kits keep choices here, not filters.

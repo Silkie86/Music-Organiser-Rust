@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, NoticeStrip, SearchBox, ToggleChip, TickBox, FilterPicks, FilterList, FilterColumn, FilterView, ListLine, CutText, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar, Icons, SignChip } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, NoticeStrip, SearchBox, ToggleChip, TickBox, FilterPicks, FilterList, FilterColumn, FilterView, ListLine, CutText, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar, Icons, SignChip, Widths } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -1220,6 +1220,9 @@ export component PluginsPage inherits Rectangle {
             // tick list; more than one can be picked in each. After the list, so the opened column of a narrow window
             // lies over it.
             column := FilterColumn {
+                part: "plugins.filters";
+                wide: Widths.plugins-filters;
+                resizing(w) => { Widths.plugins-filters = w; }
                 page-width: split.width;
                 height: split.height;
                 active: PluginsData.any-filter;
