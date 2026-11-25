@@ -30,13 +30,16 @@ export struct TreePick {
     hidden: bool,
 }
 
-// One part of the picks' type mix: a type, how many sounds ("243"), its share of the picks' sounds (0 to 1), and its
-// colour's place in the Sounds palette (-1 grey: no type, or the rest together as "Other").
+// One part of the picks' type mix: a type, how many sounds ("243"), its share of the picks' sounds (0 to 1), its
+// colour's place in the Sounds palette (-1 grey), whether it's the rest of the types together ("Other", not a type to
+// pick), and whether it's a type picked in the filter column (`dim` while others are and it isn't).
 export struct MixPart {
     name: string,
     count: string,
     share: float,
     colour: int,
+    rest: bool,
+    dim: bool,
 }
 
 // The tick box of a line: lit when picked, a dash when a folder inside it is, faintly lit when a folder above it is.
@@ -342,8 +345,9 @@ export component FolderTree inherits Rectangle {
                             min-width: 0px;
                             preferred-width: 0px;
                             background: Theme.sound-type(part.colour);
+                            opacity: part.dim ? 0.3 : 1;
                             TouchArea {
-                                enabled: part.colour >= 0 || part.name != "Other";
+                                enabled: !part.rest;
                                 mouse-cursor: self.enabled ? pointer : default;
                                 clicked => { root.mix-picked(part.name); }
                             }
@@ -403,6 +407,8 @@ export component FolderTree inherits Rectangle {
 // two they couldn't be seen under the tree), wrapping to more rows as they need; a chip's × takes it off.
 export component PickStrip inherits Rectangle {
     in property <[TreePick]> picks;
+    // Folders are picked (not only hidden): Clear has something to take off.
+    in property <bool> any-picked;
     callback taken-off(string, bool);
     callback cleared();
     height: root.picks.length > 0 ? row.preferred-height : 0px;
@@ -438,7 +444,8 @@ export component PickStrip inherits Rectangle {
                 removed => { root.taken-off(p.path, p.hidden); }
             }
         }
-        VerticalLayout {
+        if root.any-picked: VerticalLayout {
+            horizontal-stretch: 0;
             alignment: start;
             StudioButton {
                 text: "Clear";

@@ -111,7 +111,7 @@ pub fn show(
             &f.hidden_folders,
             &f.folder_tops,
         ),
-        None => (vec![String::new(); f.folders.len()], tree::PicksTotal::default()),
+        None => (vec![String::new(); f.folders.len()], None),
     };
     let mut picks: Vec<TreePick> = f
         .folders
@@ -131,16 +131,20 @@ pub fn show(
         hidden: true,
     }));
     // What's in the picks, under the tree: their types and how many your projects use.
+    // The types picked in the filter column lit, the rest dimmed: the bar shows every type in the picks either way.
+    let types_on: Vec<String> = f.sound_types.iter().map(|t| t.to_lowercase()).collect();
     let mix: Vec<MixPart> = match (library, counts) {
         (Some(l), Some(c)) if !f.folders.is_empty() => tree::picks_mix(&c.types, &l.types, MIX_PARTS),
         _ => Vec::new(),
     }
     .into_iter()
     .map(|m| MixPart {
+        dim: !types_on.is_empty() && !types_on.contains(&m.name.to_lowercase()),
         name: m.name.into(),
         count: mo_app::sounds::short_count(m.count).into(),
         share: m.share,
         colour: m.colour,
+        rest: m.rest,
     })
     .collect();
     panel.set_tree_mix(ModelRc::new(VecModel::from(mix)));

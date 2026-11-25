@@ -191,13 +191,17 @@ pub(super) fn show(app: &AppWindow, p: &Page) {
         Some(c) if !p.filters.folders.is_empty() => tree::picks_mix(&c.types, &p.types, MIX_PARTS),
         _ => Vec::new(),
     };
+    // The types picked in the filter column lit, the rest dimmed: the bar shows every type in the picks either way.
+    let types_on: Vec<String> = p.filters.sound_types.iter().map(|t| t.to_lowercase()).collect();
     let mix: Vec<MixPart> = mix
         .into_iter()
         .map(|m| MixPart {
+            dim: !types_on.is_empty() && !types_on.contains(&m.name.to_lowercase()),
             name: m.name.into(),
             count: mo_app::sounds::short_count(m.count).into(),
             share: m.share,
             colour: m.colour,
+            rest: m.rest,
         })
         .collect();
     data.set_tree_mix(ModelRc::new(VecModel::from(mix)));
@@ -208,10 +212,11 @@ pub(super) fn show(app: &AppWindow, p: &Page) {
     let n = p.filters.folders.len();
     data.set_tree_picked(if n == 0 { SharedString::new() } else { format!("{n} picked").into() });
     data.set_tree_any(n > 0);
-    data.set_tree_note(
-        if n == 0 { "Tick folders to see only their sounds.".to_owned() } else { tree::shown_words(p.shown.len()) }
-            .into(),
-    );
+    data.set_tree_note(if n == 0 {
+        SharedString::from("Tick folders to see only their sounds.")
+    } else {
+        SharedString::new()
+    });
     data.set_folder(tree::picked_words(&p.filters.folders).into());
 }
 
@@ -311,10 +316,8 @@ pub(super) fn wire(app: &AppWindow) {
     });
     let weak = app.as_weak();
     data.on_tree_mix_picked(move |name| {
-        // A type's colour picks that type, as its line in the filter column would ("Other" is many types: none).
-        if let Some(app) = weak.upgrade()
-            && name != "Other"
-        {
+        // A type's colour picks that type, as its line in the filter column would ("Other" can't be clicked).
+        if let Some(app) = weak.upgrade() {
             app.global::<SoundsData>().invoke_toggle_choice("type".into(), name);
         }
     });

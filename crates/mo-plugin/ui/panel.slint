@@ -1343,6 +1343,7 @@ export component Panel inherits Window {
         // The picked folders as chips along the bottom, every one in sight, as on the app's Sounds page.
         if root.view == 0 && root.tree-picks.length > 0: PickStrip {
             picks: root.tree-picks;
+            any-picked: root.tree-any;
             taken-off(path, hidden) => { root.tree-taken-off(path, hidden); }
             cleared => { root.tree-cleared(); }
         }

@@ -1266,11 +1266,7 @@ impl Shown {
         panel.on_tree_cleared(move || change(&|a, _| a.filters.folders.clear()));
         // A colour of the picks' type mix picks that type, as its line in the filter column would.
         let change = Rc::clone(changed);
-        panel.on_tree_mix_picked(move |name| {
-            if name != "Other" {
-                change(&|a, _| a.filters.pick("type", &name));
-            }
-        });
+        panel.on_tree_mix_picked(move |name| change(&|a, _| a.filters.pick("type", &name)));
         let (column, again) = (Rc::clone(&self.column), Rc::clone(&shown));
         panel.on_tree_opened(move |path| {
             let key = mo_app::sound_folders::key(&path);

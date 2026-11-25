@@ -2287,6 +2287,18 @@ export component SoundsPage inherits Rectangle {
             }
             // The folder tree, beside the filters on the views they narrow (Tiles, List, Galaxy, History). Folded to its
             // tab in a narrow window, as the filter column is.
+            // The picks as chips along the bottom, under the list and its card (not under the tree, whose lines never move).
+            // Before the tree, so the tree opened over the list in a narrow window lies over it too.
+            strip := PickStrip {
+                x: area.x;
+                y: split.height - self.height;
+                width: area.width;
+                visible: SoundsData.view < 4 && SoundsData.tree-picks.length > 0;
+                picks: SoundsData.tree-picks;
+                any-picked: SoundsData.tree-any;
+                taken-off(path, hidden) => { SoundsData.tree-taken-off(path, hidden); }
+                cleared => { SoundsData.tree-cleared(); }
+            }
             tree := FolderTree {
                 x: column.room;
                 y: 0;
@@ -2315,16 +2327,6 @@ export component SoundsPage inherits Rectangle {
                     SoundsData.tree-menu-asked(path);
                     tree-menu.open-at(x, y);
                 }
-            }
-            // The picks as chips along the bottom, under the list (not under the tree, whose lines never move).
-            strip := PickStrip {
-                x: area.x;
-                y: split.height - self.height;
-                width: area.list-width;
-                visible: SoundsData.view < 4 && SoundsData.tree-picks.length > 0;
-                picks: SoundsData.tree-picks;
-                taken-off(path, hidden) => { SoundsData.tree-taken-off(path, hidden); }
-                cleared => { SoundsData.tree-cleared(); }
             }
             tree-menu := RightClickMenu {
                 items: SoundsData.tree-menu;
