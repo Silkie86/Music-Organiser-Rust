@@ -658,15 +658,16 @@ impl VectorIndex {
                 wanted.par_sort_unstable();
                 let made: Vec<(usize, R)> = wanted
                     .par_chunk_by(|a, b| a.0 / CHUNK == b.0 / CHUNK)
-                    .map_init(Vec::new, |numbers: &mut Vec<u16>, group| {
+                    .map_init(Vec::new, |numbers: &mut Vec<u16>, group| -> Vec<(usize, R)> {
                         let part = group[0].0 / CHUNK;
-                        if group.len() >= WHOLE_PART {
-                            // The whole part in one read (4 MB for CLAP's), into this worker's own buffer.
-                            let rows = CHUNK.min(self.ids.len() - part * CHUNK);
+                        // The whole part in one read (4 MB for CLAP's), into this worker's own buffer. When it can't
+                        // all be read, each sound's own numbers are tried, so only those that can't be read are lost.
+                        let rows = CHUNK.min(self.ids.len() - part * CHUNK);
+                        let whole = group.len() >= WHOLE_PART && {
                             numbers.resize(rows * dim, 0);
-                            if !file.read(part * CHUNK * dim, numbers) {
-                                return Vec::new();
-                            }
+                            file.read(part * CHUNK * dim, numbers)
+                        };
+                        if whole {
                             group
                                 .iter()
                                 .map(|&(i, k)| {
@@ -694,6 +695,27 @@ impl VectorIndex {
                     out[k] = Some(r);
                 }
                 out
+            }
+        }
+    }
+
+    /// `with` for each of `ids`' unit vectors the index has (and its place in `ids`), one after another in `ids`'
+    /// order: for sums that must be added up in order. Numbers held in memory are lent as they are; numbers in a file
+    /// are read a few thousand sounds at a time ([`VectorIndex::each`]) and held meanwhile.
+    pub fn in_order(&self, ids: &[i64], mut with: impl FnMut(usize, &[f32])) {
+        if !self.is_kept_in_a_file() {
+            for (k, id) in ids.iter().enumerate() {
+                if let Some(v) = self.get(*id) {
+                    with(k, &v);
+                }
+            }
+            return;
+        }
+        for (n, some) in ids.chunks(CHUNK).enumerate() {
+            for (k, v) in self.each(some, |_, row| row.to_vec()).into_iter().enumerate() {
+                if let Some(v) = v {
+                    with(n * CHUNK + k, &v);
+                }
             }
         }
     }

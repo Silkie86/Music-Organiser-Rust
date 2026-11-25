@@ -161,7 +161,10 @@ fn a_file_that_cant_be_read_any_more_finds_nothing_and_says_so_once() {
     static TOLD: AtomicUsize = AtomicUsize::new(0);
     mo_sounds::index::on_kept_trouble(|what| {
         assert!(what.contains("sound-likeness-") && what.contains("couldn't be read"), "{what}");
-        TOLD.fetch_add(1, Ordering::Relaxed);
+        // Only this test's own file: the tests run side by side, and another's cut-short file is told of here too.
+        if Path::new(what.split(" couldn't be read").next().unwrap()).parent().is_some_and(|d| d.ends_with("gone")) {
+            TOLD.fetch_add(1, Ordering::Relaxed);
+        }
     });
     let dir = folder("gone");
     let was = held(9000, 0);
@@ -235,6 +238,12 @@ fn many_sounds_at_once_get_what_each_gets_on_its_own_however_the_numbers_are_hel
         }
         assert_eq!(dots.iter().filter(|d| d.is_none()).count(), 3, "{name}");
         assert!(index.each(&[], |_, row| row.dot(&q)).is_empty(), "{name}");
+        // One after another: the same sounds, in the order asked.
+        let mut seen = Vec::new();
+        index.in_order(&ids, |k, v| seen.push((k, v.to_vec())));
+        let want: Vec<(usize, Vec<f32>)> =
+            ids.iter().enumerate().filter_map(|(k, id)| Some((k, index.get(*id)?.into_owned()))).collect();
+        assert_eq!(seen, want, "{name}");
     }
     // The file and the held numbers are the same bits, so they give the same answers.
     let bits = |index: &VectorIndex| index.each(&ids, |_, row| row.dot(&q).to_bits());
@@ -243,7 +252,7 @@ fn many_sounds_at_once_get_what_each_gets_on_its_own_however_the_numbers_are_hel
 
 #[test]
 fn many_sounds_at_once_from_a_file_that_cant_be_read_get_none() {
-    let dir = folder("each-gone");
+    let dir = folder("each-cut");
     let mut kept = held(9000, 0);
     let done = kept.keep_in(&dir).unwrap().unwrap();
     // Cut short behind its back: the first part can still be read, the rest can't.
@@ -254,6 +263,17 @@ fn many_sounds_at_once_from_a_file_that_cant_be_read_get_none() {
     let got = kept.each(&ids, |_, row| row.to_vec().len());
     assert!(got[..4096].iter().all(|g| *g == Some(16)));
     assert!(got[4096..].iter().all(Option::is_none));
+    // Cut part way through a part: the part can't be read whole, and its sounds that can still be read are.
+    let file = fs::OpenOptions::new().write(true).open(&done.file).unwrap();
+    file.set_len(4096 + 100 * 16 * 2).unwrap();
+    drop(file);
+    let got = kept.each(&ids, |_, row| row.to_vec().len());
+    assert!(got[..100].iter().all(|g| *g == Some(16)));
+    assert!(got[100..].iter().all(Option::is_none));
+    // In order, the same ones.
+    let mut seen = Vec::new();
+    kept.in_order(&ids, |k, v| seen.push((k, v.len())));
+    assert_eq!(seen, (0..100).map(|k| (k, 16)).collect::<Vec<_>>());
     // One by one too.
     assert_eq!(kept.each(&[3, 5000 * 3], |_, row| row.to_vec().len()), [Some(16), None]);
 }

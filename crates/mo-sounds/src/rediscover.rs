@@ -135,18 +135,25 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
             None => by_type.push((t.0.sound_type.as_str(), vec![*t])),
         }
     }
-    let centroids: Vec<(&str, Vec<f32>)> = by_type.into_iter().map(|(k, g)| (k, centroid(index, &g))).collect();
-    let overall = (!taste.is_empty()).then(|| centroid(index, &taste));
+    let (centroids, overall) = centroids(index, &taste, &by_type);
 
     let noise: Vec<f64> = candidates.iter().map(|_| rng.next_double()).collect();
     let ids: Vec<i64> = candidates.iter().map(|c| c.id).collect();
     // How like its type's taste (else everyone's) each is, where there's a taste to compare with.
-    let likes = index.each(&ids, |k, row| {
-        let c = candidates[k];
-        let centroid =
-            centroids.iter().find(|(k, _)| k.eq_ignore_ascii_case(&c.sound_type)).map(|(_, m)| m).or(overall.as_ref());
-        centroid.map(|m| row.dot(m))
-    });
+    // With no taste at all there's nothing to compare any of them with, and nothing to read.
+    let likes = if overall.is_none() {
+        vec![None; ids.len()]
+    } else {
+        index.each(&ids, |k, row| {
+            let c = candidates[k];
+            let centroid = centroids
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&c.sound_type))
+                .map(|(_, m)| m)
+                .or(overall.as_ref());
+            centroid.map(|m| row.dot(m))
+        })
+    };
     let scored: Vec<(&Sound, f64)> = candidates
         .par_iter()
         .zip(&noise)
@@ -204,11 +211,14 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
         }
     }
 
+    let picks: Vec<(&Sound, &[f32])> = picked.iter().map(|&i| (pool[i].0, &*pool[i].2)).collect();
+    let liked = most_like(index, &picks, &taste);
     picked
         .into_iter()
-        .map(|i| {
-            let (s, score, v) = &pool[i];
-            let (reason, like) = reason(index, usage, s, v, &taste);
+        .zip(liked)
+        .map(|(i, liked)| {
+            let (s, score, _) = &pool[i];
+            let (reason, like) = reason(usage, s, liked);
             Suggestion { id: s.id, reason, like, score: round_to(*score, 3) }
         })
         .collect()
@@ -220,49 +230,75 @@ pub(crate) fn fresh_seed() -> i32 {
     (nanos % i32::MAX as u32) as i32 | 1
 }
 
-/// The weighted middle of `items`, made unit length.
-fn centroid(index: &VectorIndex, items: &[(&Sound, f64)]) -> Vec<f32> {
-    let mut c: Option<Vec<f32>> = None;
-    // A few thousand at a time (their numbers are held meanwhile), added up in order as before.
-    for some in items.chunks(4096) {
-        let ids: Vec<i64> = some.iter().map(|(s, _)| s.id).collect();
-        for (v, (_, w)) in index.each(&ids, |_, row| row.to_vec()).into_iter().zip(some) {
-            let Some(v) = v else { continue };
-            let c = c.get_or_insert_with(|| vec![0f32; v.len()]);
-            for (x, y) in c.iter_mut().zip(v.iter()) {
-                *x += (f64::from(*y) * w) as f32;
+/// The weighted middle of each type's taste, made unit length (in `by_type`'s order, with the type's name), and of
+/// everyone's (none without any taste). The taste's fingerprints are asked of the index once, in the taste's order,
+/// and each is added to its type's sum and to everyone's as it comes: the same sums, in the same order, as adding up
+/// each type's and then everyone's.
+#[allow(clippy::type_complexity)]
+fn centroids<'a>(
+    index: &VectorIndex,
+    taste: &[(&Sound, f64)],
+    by_type: &[(&'a str, Vec<(&Sound, f64)>)],
+) -> (Vec<(&'a str, Vec<f32>)>, Option<Vec<f32>>) {
+    let mut sums: Vec<Option<Vec<f32>>> = vec![None; by_type.len()];
+    let mut everyone: Option<Vec<f32>> = None;
+    let add = |sum: &mut Option<Vec<f32>>, v: &[f32], w: f64| {
+        let sum = sum.get_or_insert_with(|| vec![0f32; v.len()]);
+        for (x, y) in sum.iter_mut().zip(v) {
+            *x += (f64::from(*y) * w) as f32;
+        }
+    };
+    let ids: Vec<i64> = taste.iter().map(|(s, _)| s.id).collect();
+    index.in_order(&ids, |k, v| {
+        let (s, w) = taste[k];
+        add(&mut everyone, v, w);
+        if let Some(t) = by_type.iter().position(|(name, _)| name.eq_ignore_ascii_case(&s.sound_type)) {
+            add(&mut sums[t], v, w);
+        }
+    });
+    let finish = |sum: Option<Vec<f32>>| {
+        let mut c = sum.unwrap_or_default();
+        unit(&mut c);
+        c
+    };
+    let each = by_type.iter().zip(sums).map(|((name, _), sum)| (*name, finish(sum))).collect();
+    (each, (!taste.is_empty()).then(|| finish(everyone)))
+}
+
+/// For each of `picks` (a sound and its fingerprint): the liked sound of its type it's most like, and how like; none
+/// when the index has none of them. Not itself: a starred sound you haven't used yet would be "like" itself (C#
+/// names it). Every liked sound's fingerprint is asked of the index once, for all the picks together.
+fn most_like<'a>(
+    index: &VectorIndex,
+    picks: &[(&Sound, &[f32])],
+    taste: &[(&'a Sound, f64)],
+) -> Vec<Option<(&'a Sound, f64)>> {
+    let ids: Vec<i64> = taste.iter().map(|(t, _)| t.id).collect();
+    // For each liked sound, how like it each pick of its type is.
+    let likes = index.each(&ids, |k, row| {
+        let t = taste[k].0;
+        picks
+            .iter()
+            .enumerate()
+            .filter(|(_, (s, _))| t.sound_type.eq_ignore_ascii_case(&s.sound_type) && t.id != s.id)
+            .map(|(p, (_, v))| (p, row.dot(v)))
+            .collect::<Vec<(usize, f64)>>()
+    });
+    let mut nearest: Vec<Option<(&Sound, f64)>> = vec![None; picks.len()];
+    for ((t, _), likes) in taste.iter().zip(likes) {
+        for (p, sim) in likes.into_iter().flatten() {
+            // The first of the closest, as C#'s stable sort keeps it.
+            if nearest[p].is_none_or(|(_, best)| sim > best) {
+                nearest[p] = Some((t, sim));
             }
         }
     }
-    let mut c = c.unwrap_or_default();
-    unit(&mut c);
-    c
+    nearest
 }
 
-/// Why a sound was suggested: its own use first, then the liked sound it's most like (when it's like one), with that
-/// sound's id.
-fn reason(
-    index: &VectorIndex,
-    usage: &HashMap<i64, Usage>,
-    s: &Sound,
-    v: &[f32],
-    taste: &[(&Sound, f64)],
-) -> (String, Option<i64>) {
-    let mut nearest: Option<(&Sound, f64)> = None;
-    // Not itself: a starred sound you haven't used yet would be "like" itself (C# names it).
-    let of_its_type: Vec<&Sound> = taste
-        .iter()
-        .map(|(t, _)| *t)
-        .filter(|t| t.sound_type.eq_ignore_ascii_case(&s.sound_type) && t.id != s.id)
-        .collect();
-    let ids: Vec<i64> = of_its_type.iter().map(|t| t.id).collect();
-    for (t, sim) in of_its_type.into_iter().zip(index.each(&ids, |_, row| row.dot(v))) {
-        let Some(sim) = sim else { continue };
-        // The first of the closest, as C#'s stable sort keeps it.
-        if nearest.is_none_or(|(_, best)| sim > best) {
-            nearest = Some((t, sim));
-        }
-    }
+/// Why a sound was suggested: its own use first, then the liked sound it's most like (`nearest`, from [`most_like`],
+/// when it's like one), with that sound's id.
+fn reason(usage: &HashMap<i64, Usage>, s: &Sound, nearest: Option<(&Sound, f64)>) -> (String, Option<i64>) {
     let used = used_in(usage, s.id);
     let own = if used == 0 {
         "Never used".to_owned()
