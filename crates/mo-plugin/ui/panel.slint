@@ -431,6 +431,8 @@ export component Panel inherits Window {
     // Record: what comes in, from the DAW's input to the plugin (its sidechain) or straight from a sound card, saved
     // as a WAV that drags out like a sound. `record-from` is the card's name, "" for the DAW's input.
     in property <string> record-from;
+    // Which side of the input's stereo pair Record takes: 0 both, 1 left, 2 right (one side records as mono).
+    in-out property <int> record-side: 0;
     // The Record from menu's lines, and how loud what's picked is (the overall input level, 0 to 1).
     in property <[InputLine]> record-menu;
     in property <float> record-level;
@@ -974,6 +976,15 @@ export component Panel inherits Window {
                                 }
                             }
                         }
+                    }
+                    // Both sides of the pair, or one (Solomon, 25 Nov: one mono input of a pair, without a long list of
+                    // every input twice over).
+                    Segmented {
+                        horizontal-stretch: 0;
+                        choices: ["L+R", "L", "R"];
+                        pad: Space.sm;
+                        current: root.record-side;
+                        picked(i) => { root.record-side = i; }
                     }
                     StudioButton {
                         horizontal-stretch: 0;
