@@ -191,6 +191,8 @@ fn main() -> Result<(), slint::PlatformError> {
         },
     );
     mo_ui::startup::step("Settings page");
+    // The widths you dragged the side cards and columns to, kept in the settings.
+    mo_ui::widths::connect(&app);
     // Presets: the library is only read; part fixes and curves go in the app's own presets.db and curves.db.
     mo_ui::presets::connect(&app, library.clone(), feed.clone(), &shortcuts);
     mo_ui::startup::step("Presets page");

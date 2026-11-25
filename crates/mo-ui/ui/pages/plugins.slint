@@ -228,7 +228,6 @@ export global PluginsData {
     callback use-daws-cleared();
     callback every-save-toggled();
     callback open-use(int);
-    callback panel-resized(length);
 }
 
 // A plugin's state as a small word in its colour.
@@ -1178,7 +1177,7 @@ export component PluginsPage inherits Rectangle {
                     panel-width: area.card-width;
                     room: area.width;
                     resizing(w) => { PluginsData.panel-width = w; }
-                    resized(w) => { PluginsData.panel-resized(w); }
+                    part: "plugins.card";
                 }
                 PluginPanel {
                     x: area.list-width + divider.width;

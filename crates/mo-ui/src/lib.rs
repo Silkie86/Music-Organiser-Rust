@@ -40,6 +40,7 @@ mod stuck;
 pub mod update;
 pub mod watchdog;
 mod waves;
+pub mod widths;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};

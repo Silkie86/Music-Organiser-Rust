@@ -3108,7 +3108,6 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
             }
         }
     });
-    data.on_panel_resized(|w| log::info("Sounds", &format!("Panel width {w:.0}")));
 }
 
 /// The card's heart, Your type menu and tags ([`yours`]).
