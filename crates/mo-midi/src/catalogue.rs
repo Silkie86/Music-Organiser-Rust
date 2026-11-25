@@ -203,6 +203,9 @@ pub struct Catalogue {
     /// Every entry's search text (everything search looks in, in small letters), one after the other: one piece of
     /// memory, not one for each part.
     text: String,
+    /// The search texts of the parts relabelled since ([`Catalogue::relabel`]), in the same way: an entry's place
+    /// past the end of `text` is a place in here.
+    relabelled: String,
     /// The song each file is a save of, by where the file's record is in memory, worked out the first time a search
     /// leaves songs out. Each record is held here too, so its place can't be given to another while this lasts.
     songs: OnceLock<Songs>,
@@ -249,7 +252,8 @@ impl Catalogue {
         rayon::spawn(move || drop(copies));
         // Names, instruments and search text are worked out on every core: hundreds of thousands of parts. So is the
         // folder each loop that may be in other keys is in (see below).
-        let made: Vec<(Entry, Option<String>, String)> = firsts
+        type Made = (Vec<Entry>, (Vec<Option<String>>, Vec<String>));
+        let (mut entries, (folders, texts)): Made = firsts
             .into_par_iter()
             .zip(others)
             .map(|(phrase, other_sources)| {
@@ -271,25 +275,30 @@ impl Catalogue {
                 let p = &entry.phrase;
                 let in_keys = p.shape.is_some() && !entry.is_project() && !p.drums && entry.role() != Role::Drums;
                 let folder = in_keys.then(|| folder_key(&p.source.path));
-                (entry, folder, search_text)
+                (entry, (folder, search_text))
             })
-            .collect();
+            .unzip();
         // The search texts go into one text, each entry keeping where its own is.
-        let mut text = String::with_capacity(made.iter().map(|(_, _, t)| t.len()).sum());
-        let (mut entries, mut folders) = (Vec::with_capacity(made.len()), Vec::with_capacity(made.len()));
-        for (mut entry, folder, words) in made {
-            (entry.text_at, entry.text_len) = (text.len(), text_len(&words));
-            text.push_str(&words);
-            entries.push(entry);
-            folders.push(folder);
+        let mut text = String::with_capacity(texts.iter().map(String::len).sum());
+        for (entry, words) in entries.iter_mut().zip(&texts) {
+            (entry.text_at, entry.text_len) = (text.len(), text_len(words));
+            text.push_str(words);
         }
-        let hash_of = |at: &u32| entries.get(*at as usize).map_or("", |e: &Entry| e.phrase.hash.as_str());
-        let mut by_hash: Vec<u32> = (0..entries.len()).filter_map(|at| u32::try_from(at).ok()).collect();
-        by_hash.par_sort_unstable_by(|a, b| hash_of(a).cmp(hash_of(b)));
-        let find = |hash: &str| {
-            let found = by_hash.binary_search_by(|at| hash_of(at).cmp(hash)).ok()?;
-            by_hash.get(found).map(|&at| at as usize)
-        };
+        rayon::spawn(move || drop(texts));
+        // The places in the order of their hashes, sorted with each hash beside its place (the entries themselves
+        // are big and far apart), and only the places kept.
+        let mut hashed: Vec<(&str, u32)> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(at, e)| Some((e.phrase.hash.as_str(), u32::try_from(at).ok()?)))
+            .collect();
+        hashed.par_sort_unstable();
+        let by_hash: Vec<u32> = hashed.iter().map(|&(_, at)| at).collect();
+        drop(hashed);
+        // While the catalogue is made, the many look-ups of joined phrases' clips go by a table of the hashes where
+        // they are, let go before the entries change.
+        let places: HashMap<&str, usize> =
+            entries.iter().enumerate().map(|(at, e)| (e.phrase.hash.as_str(), at)).collect();
 
         // Each clip learns which longer phrases it's part of.
         let mut within: Vec<(usize, usize)> = Vec::new();
@@ -298,11 +307,12 @@ impl Catalogue {
             hashes.sort_unstable();
             hashes.dedup();
             for hash in hashes {
-                if let Some(member) = find(hash).filter(|m| *m != at) {
+                if let Some(&member) = places.get(hash).filter(|m| **m != at) {
                     within.push((member, at));
                 }
             }
         }
+        drop(places);
         for (member, phrase) in within {
             if let Some(e) = entries.get_mut(member) {
                 e.within.push(phrase);
@@ -358,7 +368,16 @@ impl Catalogue {
             // Longest first; equal lengths keep their order (newest first), as the C# stable sort does.
             e.within.sort_by_key(|&p| std::cmp::Reverse(bars.get(p).copied().unwrap_or(0)));
         }
-        Catalogue { entries, phrase_count, line_count, dates, by_hash, text, songs: OnceLock::new() }
+        Catalogue {
+            entries,
+            phrase_count,
+            line_count,
+            dates,
+            by_hash,
+            text,
+            relabelled: String::new(),
+            songs: OnceLock::new(),
+        }
     }
 
     /// The part with these notes. Entries are made again on every reload, so the page holds on to its picks by
@@ -370,23 +389,33 @@ impl Catalogue {
     }
 
     /// Whether every word (already in small letters, as [`words_of`] gives them) is in the names, folders, kind,
-    /// instrument or key of `e`, which must be one of this catalogue's entries.
+    /// instrument or key of `e`. For one of this catalogue's own entries that's a look in the text kept; for any
+    /// other (one from a catalogue made before, say) its text is worked out again, which is slower but the same.
     pub fn matches(&self, e: &Entry, words: &[String]) -> bool {
-        let text = self.text.get(e.text_at..e.text_at.saturating_add(e.text_len as usize)).unwrap_or("");
+        if !self.entries.as_ptr_range().contains(&std::ptr::from_ref(e)) {
+            let text = search_text_of(&e.phrase, e.phrase.role(), e.instrument);
+            return words.iter().all(|w| text.contains(w.as_str()));
+        }
+        let (from, at) = match e.text_at.checked_sub(self.text.len()) {
+            Some(at) if e.text_len > 0 => (&self.relabelled, at),
+            _ => (&self.text, e.text_at),
+        };
+        let text = from.get(at..at.saturating_add(e.text_len as usize)).unwrap_or("");
         words.iter().all(|w| text.contains(w.as_str()))
     }
 
     /// The song each file in the catalogue is a save of ([`song_of`]), by where the file's record is in memory.
     fn songs(&self) -> &Songs {
         self.songs.get_or_init(|| {
-            let mut files: HashMap<usize, &Arc<Source>> = HashMap::new();
+            // On this thread alone: work shared out from inside a once-only step could wait on a second search
+            // that wants the same step, for good. It's once for each file, not each part, so it's quick.
+            let mut songs = Songs::new();
             for s in self.entries.iter().flat_map(Entry::sources) {
-                files.entry(Arc::as_ptr(s).addr()).or_insert(s);
+                songs
+                    .entry(Arc::as_ptr(s).addr())
+                    .or_insert_with(|| (Arc::clone(s), song_of(&s.path).into_boxed_str()));
             }
-            files
-                .into_par_iter()
-                .map(|(place, s)| (place, (Arc::clone(s), song_of(&s.path).into_boxed_str())))
-                .collect()
+            songs
         })
     }
 
@@ -404,10 +433,11 @@ impl Catalogue {
     pub fn relabel(&mut self, at: usize, role: Option<Role>) {
         if let Some(e) = self.entries.get_mut(at) {
             e.phrase.your_role = role;
-            // Its new text goes on the end of the one text; the old stays where it is, unused (a relabel is rare).
+            // Its new text goes in the small text of relabelled parts (the one big text is never made bigger, which
+            // would copy all of it); the old stays where it is, unused (a relabel is rare).
             let words = search_text_of(&e.phrase, e.phrase.role(), e.instrument);
-            (e.text_at, e.text_len) = (self.text.len(), text_len(&words));
-            self.text.push_str(&words);
+            (e.text_at, e.text_len) = (self.text.len() + self.relabelled.len(), text_len(&words));
+            self.relabelled.push_str(&words);
         }
     }
 
@@ -486,7 +516,7 @@ pub(crate) fn folder_key(path: &str) -> String {
     case::to_lower(path.rfind(['\\', '/']).and_then(|cut| path.get(..cut)).unwrap_or(""))
 }
 
-/// What's typed into a search, as the words [`Entry::matches`] takes: split at spaces, in small letters.
+/// What's typed into a search, as the words [`Catalogue::matches`] takes: split at spaces, in small letters.
 pub fn words_of(text: &str) -> Vec<String> {
     text.split(' ').filter(|w| !w.is_empty()).map(case::to_lower).collect()
 }
@@ -782,6 +812,12 @@ pub(crate) mod tests {
         assert_eq!(c.role_counts().get(&Role::Melody), None);
         assert_eq!(c.search(&Query { text: "arps".into(), ..Query::default() }).1, 1);
         assert_eq!(c.search(&Query { text: "trap keys".into(), ..Query::default() }).1, 1, "its names still match");
+        // A second part relabelled: each reads its own words from the relabelled text.
+        let bass = c.find("B").unwrap();
+        c.relabel(bass, Some(Role::Chords));
+        assert_eq!(c.search(&Query { text: "arps".into(), ..Query::default() }).1, 1);
+        assert_eq!(c.search(&Query { text: "bass hook progression".into(), ..Query::default() }).1, 1);
+        assert_eq!(c.search(&Query { text: "bassline".into(), ..Query::default() }).1, 0);
         c.relabel(keys, None);
         assert_eq!(c.entries[keys].role(), Role::Melody);
         assert_eq!(c.search(&Query { text: "arps".into(), ..Query::default() }).1, 0, "its old words are gone");
@@ -802,6 +838,10 @@ pub(crate) mod tests {
             assert!(c.matches(&c.entries[at], &words_of(&format!("LOOP{n}x many"))));
             assert!(!c.matches(&c.entries[at], &words_of(&format!("loop{}x", n + 1))));
         }
+        // A part of another catalogue (one made before a reload, say) is matched by its own words too.
+        let other = Catalogue::new(vec![phrase(1, &pack, "", "Elsewhere", Role::Bass, "Z")]);
+        assert!(c.matches(&other.entries[0], &words_of("elsewhere bassline")));
+        assert!(!c.matches(&other.entries[0], &words_of("loop0x")));
         assert_eq!(c.find("no such hash"), None);
         assert_eq!(c.find(""), None);
         assert_eq!(Catalogue::default().find("A"), None);
