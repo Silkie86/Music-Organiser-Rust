@@ -725,6 +725,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let list_width = || if widths.get_songs_list() > 0.0 { widths.get_songs_list() } else { SONGS_LIST_WIDTH };
     let held = drag_seam(&app, &window, SONGS_SEAM, 60.0, 1.0, "songs.list", list_width)?;
     shots.push(("songs-list-wider.png".into(), held));
+    // A column of the list: Last saved, wider by its heading's left edge (Song, which stretches, gives the room).
+    let held = drag_seam(&app, &window, SONGS_SAVED_SEAM, -40.0, -1.0, "songs.saved", || widths.get_songs_saved())?;
+    shots.push(("songs-column-wider.png".into(), held));
     // The narrowest window the app allows: a filter too long for a line of its own wraps inside, so every chip stays
     // in sight.
     save_narrow(&window, &out, "songs-narrow.png")?;
@@ -808,6 +811,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     arrangement.invoke_double_clicked();
     arrangement.invoke_pick_view(1);
     shots.push(("arrangement-bitwig-view.png".into(), capture(&window)));
+    // The track names dragged wider (as their right edge does), then back to their usual width.
+    let usual = arrangement.get_header_width();
+    arrangement.invoke_names_resizing(230.0);
+    let wider = capture(&window);
+    if arrangement.get_header_width() != 230.0 {
+        return Err(format!(
+            "arrangement-names-wider.png: the names are {} wide, not 230",
+            arrangement.get_header_width()
+        )
+        .into());
+    }
+    shots.push(("arrangement-names-wider.png".into(), wider));
+    app.global::<mo_ui::Widths>().invoke_reset("songs.tracks".into());
+    capture(&window);
+    if arrangement.get_header_width() != usual {
+        return Err(format!(
+            "arrangement: the names' usual width came back as {}, not {usual}",
+            arrangement.get_header_width()
+        )
+        .into());
+    }
     mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
     mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
     mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
@@ -4293,6 +4317,8 @@ const TREE_SEAM: (f32, f32) = (732.0, 500.0);
 /// The gap between the Songs list and its panel, halfway down, and the list's width there (a third of the room).
 const SONGS_SEAM: (f32, f32) = (844.0, 500.0);
 const SONGS_LIST_WIDTH: f32 = 380.0;
+/// The left edge of the Songs list's Last saved heading (in the gap before it).
+const SONGS_SAVED_SEAM: (f32, f32) = (670.0, 130.0);
 /// The seam between the Sounds list and its card (the card at its usual width), halfway down.
 const CARD_SEAM: (f32, f32) = (1009.0, 500.0);
 /// The path on the Sounds card, on its one line (Boom Kick's, cut short at its start).

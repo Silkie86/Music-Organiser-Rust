@@ -568,6 +568,8 @@ pub struct View {
     peaks: Arc<HashMap<String, Arc<Peaks>>>,
     pub width: f64,
     pub height: f64,
+    /// How wide the track names are, as you dragged them (the Songs page's `songs.tracks`); 0 for the usual width.
+    names: f64,
     /// Pixels per beat; 0 fits the song to the width.
     zoom: f64,
     /// The beat at the timeline's left edge, and how far down the lanes are scrolled.
@@ -615,6 +617,7 @@ impl View {
             peaks: Arc::default(),
             width: 0.0,
             height: 0.0,
+            names: 0.0,
             zoom: 0.0,
             left: 0.0,
             top: 0.0,
@@ -637,8 +640,18 @@ impl View {
         if self.arrangement.markers.is_empty() { 24.0 } else { 42.0 }
     }
 
+    /// How wide the track names are: as you dragged them, else 118 in a narrow view and 172 otherwise; never more
+    /// than half the view, so the timeline keeps room.
     pub fn header_width(&self) -> f64 {
-        if self.width < 520.0 { 118.0 } else { 172.0 }
+        let usual = if self.width < 520.0 { 118.0 } else { 172.0 };
+        let wanted = if self.names > 0.0 { self.names } else { usual };
+        wanted.min((self.width / 2.0).max(usual.min(wanted)))
+    }
+
+    /// The width you dragged the track names to (0 for the usual one). Keeps the place in the song in sight.
+    pub fn set_names_width(&mut self, width: f64) {
+        self.names = if width.is_finite() { width.max(0.0) } else { 0.0 };
+        self.clamp();
     }
 
     fn timeline_width(&self) -> f64 {
@@ -1628,6 +1641,22 @@ mod tests {
         assert_eq!(v.zoom(), v.fit_zoom());
         // A narrow view has a narrower header.
         assert_eq!(view(400.0, 300.0).header_width(), 118.0);
+    }
+
+    #[test]
+    fn track_names_as_wide_as_dragged_within_half_the_view() {
+        let mut v = view(1000.0, 300.0);
+        v.set_names_width(250.0);
+        assert_eq!(v.header_width(), 250.0);
+        v.set_names_width(900.0);
+        assert_eq!(v.header_width(), 500.0);
+        // Narrower than usual is kept as it is, however narrow the view.
+        v.set_names_width(100.0);
+        v.resize(300.0, 300.0);
+        assert_eq!(v.header_width(), 100.0);
+        // Back to the usual width.
+        v.set_names_width(0.0);
+        assert_eq!(v.header_width(), 118.0);
     }
 
     #[test]

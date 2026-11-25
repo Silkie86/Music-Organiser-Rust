@@ -947,7 +947,7 @@ export component SongsPage inherits Rectangle {
                                         padding-left: Space.xs + Space.md;
                                         padding-right: Space.xs + Space.md;
                                         spacing: Space.md;
-                                        ColumnHead {
+                                        name-head := ColumnHead {
                                             horizontal-stretch: 1;
                                             text: "SONG";
                                             on: SongsData.order-column == "Song";
@@ -956,7 +956,11 @@ export component SongsPage inherits Rectangle {
                                             clicked => { SongsData.order-picked("Song"); }
                                         }
                                         if list-well.wide: ColumnHead {
-                                            width: 150px;
+                                            width: Widths.songs-status;
+                                            part: "songs.status";
+                                            resizing(w) => { Widths.songs-status = w; }
+                                            // Never so wide the name column beside it gets under 120 px.
+                                            most: self.width + max(0px, name-head.width - 120px);
                                             right: true;
                                             text: "STATUS";
                                             on: SongsData.order-column == "Status";
@@ -964,7 +968,11 @@ export component SongsPage inherits Rectangle {
                                             clicked => { SongsData.order-picked("Status"); }
                                         }
                                         ColumnHead {
-                                            width: 90px;
+                                            width: Widths.songs-saved;
+                                            part: "songs.saved";
+                                            resizing(w) => { Widths.songs-saved = w; }
+                                            // Never so wide the name column beside it gets under 120 px.
+                                            most: self.width + max(0px, name-head.width - 120px);
                                             right: true;
                                             text: "LAST SAVED";
                                             on: SongsData.order-column == "Last saved";
@@ -994,7 +1002,7 @@ export component SongsPage inherits Rectangle {
                                                 selected: line.row == SongsData.selected;
                                                 // The date's tooltip, over the date at the right.
                                                 tip: line.date-tip;
-                                                tip-from: self.width - Space.md - 90px;
+                                                tip-from: self.width - Space.md - Widths.songs-saved;
                                                 clicked => {
                                                     SongsData.select(line.row);
                                                     keys.focus();
@@ -1086,7 +1094,7 @@ export component SongsPage inherits Rectangle {
                                                     if list-well.wide: VerticalLayout {
                                                         alignment: center;
                                                         spacing: Space.xs;
-                                                        width: 150px;
+                                                        width: Widths.songs-status;
                                                         CutText {
                                                             over: song-line.resting;
                                                             mouse: song-line.mouse;
@@ -1105,7 +1113,7 @@ export component SongsPage inherits Rectangle {
                                                     VerticalLayout {
                                                         alignment: center;
                                                         spacing: Space.xs;
-                                                        width: 90px;
+                                                        width: Widths.songs-saved;
                                                         Text {
                                                             text: line.date;
                                                             color: Theme.muted;

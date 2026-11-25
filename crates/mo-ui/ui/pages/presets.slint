@@ -279,7 +279,7 @@ component PresetLineView inherits ListLine {
             }
         }
         CutText {
-            width: 96px;
+            width: Widths.presets-part;
             over: root.resting;
             mouse: root.mouse;
             text: root.line.part;
@@ -300,14 +300,14 @@ component PresetLineView inherits ListLine {
             vertical-alignment: center;
         }
         if !root.tight: Text {
-            width: 56px;
+            width: Widths.presets-kind;
             text: root.line.kind;
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
         }
         if !root.tight: Text {
-            width: 72px;
+            width: Widths.presets-file;
             text: root.line.format;
             color: Theme.faint;
             font-family: Theme.number-font;
@@ -328,7 +328,7 @@ component PresetHeading inherits HorizontalLayout {
     padding-left: Space.md + Space.sm + Space.md;
     padding-right: Space.md + Space.md;
     spacing: Space.md;
-    ColumnHead {
+    name-head := ColumnHead {
         horizontal-stretch: 3; preferred-width: 0px; min-width: 0px;
         text: "PRESET";
         on: PresetsData.order-column == "Sound";
@@ -336,13 +336,17 @@ component PresetHeading inherits HorizontalLayout {
         clicked => { PresetsData.order-picked("Sound"); }
     }
     ColumnHead {
-        width: 96px;
+        width: Widths.presets-part;
+        part: "presets.part";
+        resizing(w) => { Widths.presets-part = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px) + max(0px, from-head.width - 120px);
         text: "PART";
         on: PresetsData.order-column == "Part";
         up: !PresetsData.order-reversed;
         clicked => { PresetsData.order-picked("Part"); }
     }
-    ColumnHead {
+    from-head := ColumnHead {
         horizontal-stretch: 2; preferred-width: 0px; min-width: 0px;
         text: "SONG OR FOLDER";
         on: PresetsData.order-column == "Song or folder";
@@ -350,14 +354,22 @@ component PresetHeading inherits HorizontalLayout {
         clicked => { PresetsData.order-picked("Song or folder"); }
     }
     if !root.tight: ColumnHead {
-        width: 56px;
+        width: Widths.presets-kind;
+        part: "presets.kind";
+        resizing(w) => { Widths.presets-kind = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px) + max(0px, from-head.width - 120px);
         text: "KIND";
         on: PresetsData.order-column == "Kind";
         up: !PresetsData.order-reversed;
         clicked => { PresetsData.order-picked("Kind"); }
     }
     if !root.tight: ColumnHead {
-        width: 72px;
+        width: Widths.presets-file;
+        part: "presets.file";
+        resizing(w) => { Widths.presets-file = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px) + max(0px, from-head.width - 120px);
         text: "FILE";
         right: true;
         on: PresetsData.order-column == "File";
