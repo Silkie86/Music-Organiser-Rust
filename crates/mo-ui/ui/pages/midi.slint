@@ -294,6 +294,18 @@ component ListHeading inherits HorizontalLayout {
         up: !MidiData.order-reversed;
         clicked => { MidiData.pick("order", "Part"); }
     }
+    // Where it's from (the song or folder, and the DAW): a column of its own, so it never covers the part's name
+    // (Solomon's F12 note of 25 Nov, 12:51).
+    if !root.tight: ColumnHead {
+        width: Widths.midi-from;
+        part: "midi.from";
+        resizing(w) => { Widths.midi-from = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px);
+        text: "FROM";
+        tip: "The song or MIDI folder it's from, and its DAW";
+        can-order: false;
+    }
     if !root.tight: ColumnHead {
         width: Widths.midi-bars;
         part: "midi.bars";
@@ -392,7 +404,8 @@ component MidiLineView inherits ListLine {
                     preferred-width: 0px;
                     min-width: 0px;
                 }
-                CutText {
+                // Beside the name only in a narrow list: otherwise it has its own column.
+                if root.tight: CutText {
                     over: root.resting;
                     mouse: root.mouse;
                     text: root.line.from;
@@ -423,6 +436,15 @@ component MidiLineView inherits ListLine {
                     font-size: Type.meta;
                 }
             }
+        }
+        if !root.tight: CutText {
+            width: Widths.midi-from;
+            over: root.resting;
+            mouse: root.mouse;
+            text: root.line.from;
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
         }
         if !root.tight: Text {
             width: Widths.midi-bars;

@@ -95,6 +95,7 @@ fn give(app: &AppWindow, name: &str, width: f32) {
         "presets.part" => app.global::<crate::Widths>().set_presets_part(width),
         "presets.kind" => app.global::<crate::Widths>().set_presets_kind(width),
         "presets.file" => app.global::<crate::Widths>().set_presets_file(width),
+        "midi.from" => app.global::<crate::Widths>().set_midi_from(width),
         "midi.bars" => app.global::<crate::Widths>().set_midi_bars(width),
         "midi.files" => app.global::<crate::Widths>().set_midi_files(width),
         "midi.key" => app.global::<crate::Widths>().set_midi_key(width),
