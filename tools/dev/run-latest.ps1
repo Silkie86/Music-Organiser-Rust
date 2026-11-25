@@ -42,7 +42,7 @@ param(
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 11
+$LauncherVersion = 12
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -637,17 +637,32 @@ function Build-App {
     # The compiler itself crashing (rustc exits with 101; a plain build error is 1) can come from a damaged
     # incremental cache even when the code is fine, as CI builds without one. The cache only speeds builds up, so
     # it's cleared and the build tried once more.
+    # The compiler running out of memory (25 Nov: "LLVM ERROR: out of memory" on mo-ui's release build, with the PC's
+    # memory nearly full and three crates compiling side by side) is tried once more one crate at a time, which needs
+    # much less memory at once, only slower.
     $crashed = $false
     $full = $false
+    $noMemory = $false
     & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName @KindArgs --color never 2>&1 |
         ForEach-Object {
             if ("$_" -match 'rustc.*\(exit code: 101\)') { $crashed = $true }
             if ("$_" -match 'no space (left )?on device|not enough space on the disk') { $full = $true }
+            if ("$_" -match 'out of memory|Allocation failed|memory allocation of \d+ bytes failed|STATUS_STACK_BUFFER_OVERRUN|0xc0000409|paging file is too small') { $noMemory = $true }
             Say "  $_" 'DarkGray'
         }
     if ($LASTEXITCODE -ne 0 -and $full) {
         Say "The drive the app builds on is full. Free some space on it; the next push is tried again (with the build folder cleared first if space is still short)." 'Red'
         return $null
+    }
+    if ($LASTEXITCODE -ne 0 -and $noMemory) {
+        Say 'The compiler ran out of memory (the PC''s memory was nearly full). Trying once more, one crate at a time (slower, needs less memory)...' 'Yellow'
+        & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName @KindArgs --jobs 1 --color never 2>&1 |
+            ForEach-Object { Say "  $_" 'DarkGray' }
+        if ($LASTEXITCODE -ne 0) {
+            Say 'The build ran out of memory again. Closing big programs (a DAW, a browser) frees memory for it; the next push is tried again.' 'Red'
+            return $null
+        }
+        $crashed = $false
     }
     if ($LASTEXITCODE -ne 0 -and $crashed) {
         Say 'The compiler crashed. Clearing its incremental cache and trying once more...' 'Yellow'
