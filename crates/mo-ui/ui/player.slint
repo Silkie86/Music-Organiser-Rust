@@ -1,0 +1,117 @@
+// The player bar along the bottom of the window: a song's bounce playing (or paused), which keeps playing while you
+// go to other pages. Filled and answered by mo-ui's song_player.rs.
+
+import { Theme, Type, Space, Heights, Icons, StudioButton, CloseButton, CutText } from "studio.slint";
+
+export global SongPlayer {
+    // Whether the bar is up: a bounce was played and the bar hasn't been closed.
+    in property <bool> shown;
+    in property <bool> playing;
+    // The file playing (or paused), so the song's card can mark its line.
+    in property <string> path;
+    // The song's name, and the file's.
+    in property <string> title;
+    in property <string> file;
+    // How far through it is, 0 to 1, and that in time: "1:12 / 3:42".
+    in property <float> place;
+    in property <string> time;
+    // Play or pause, play `path` (another of the song's bounces, or the same again), jump to a place (0 to 1), put the
+    // bar away (it stops), and the bar's clock while playing.
+    callback toggle();
+    callback play(string);
+    callback seek(float);
+    callback close();
+    callback tick();
+}
+
+export component PlayerBar inherits Rectangle {
+    height: 56px;
+    background: Theme.sidebar;
+    Timer {
+        interval: 250ms;
+        running: SongPlayer.playing;
+        triggered => { SongPlayer.tick(); }
+    }
+    // Its top edge, as the rail's seam.
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.edge;
+    }
+    HorizontalLayout {
+        padding-left: Space.lg;
+        padding-right: Space.lg;
+        spacing: Space.lg;
+        VerticalLayout {
+            alignment: center;
+            StudioButton {
+                // Square, not stretched along the bar.
+                width: Heights.button;
+                main: true;
+                icon: SongPlayer.playing ? Icons.pause : Icons.play;
+                tip: SongPlayer.playing ? "Pause" : "Play";
+                clicked => { SongPlayer.toggle(); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            width: 240px;
+            CutText {
+                own-mouse: true;
+                text: SongPlayer.title;
+                color: Theme.text;
+                font-size: Type.row-title;
+                font-weight: 500;
+            }
+            CutText {
+                own-mouse: true;
+                text: SongPlayer.file;
+                color: Theme.muted;
+                font-size: Type.meta;
+            }
+        }
+        // How far through: a click jumps there.
+        track := Rectangle {
+            horizontal-stretch: 1;
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.well;
+            }
+            Rectangle {
+                x: 0;
+                y: (parent.height - self.height) / 2;
+                width: parent.width * clamp(SongPlayer.place, 0, 1);
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.accent;
+            }
+            Rectangle {
+                x: parent.width * clamp(SongPlayer.place, 0, 1) - self.width / 2;
+                y: (parent.height - self.height) / 2;
+                width: 12px;
+                height: 12px;
+                border-radius: 6px;
+                background: Theme.accent;
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { SongPlayer.seek(self.mouse-x / max(1px, self.width)); }
+            }
+        }
+        Text {
+            text: SongPlayer.time;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            CloseButton {
+                clicked => { SongPlayer.close(); }
+            }
+        }
+    }
+}

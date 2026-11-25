@@ -2,6 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { ArrangementPreview } from "arrangement.slint";
+import { SongPlayer } from "../player.slint";
 import { Theme, AppKeys, Type, Space, PageHeader, Well, Panel, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel, StarsPick, HeartToggle, TagChip, WordBox, MenuChip, Icons, CheckLine, TickSquare, Widths, Seam, SignCount } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
@@ -25,6 +26,15 @@ export struct SongLine {
     todos: int,
     // How long FL Studio has had it open ("41 h"); empty when not known.
     time: string,
+    // It has a bounce to play.
+    sound: bool,
+}
+
+// One of the picked song's bounces: the file, its name, and the day it was written.
+export struct BounceLine {
+    path: string,
+    name: string,
+    date: string,
 }
 
 // A song on the Dust off card: its place in the page's rows, its name, and its status, time spent and year.
@@ -158,6 +168,11 @@ export global SongsData {
     in property <bool> missing;
     // Show only songs with to-dos left.
     in property <bool> has-todos;
+    // Only songs with a bounce, or only those with none yet.
+    in property <bool> has-sound;
+    in property <bool> no-sound;
+    // The picked song's bounces, newest first.
+    in property <[BounceLine]> song-sounds;
     in property <bool> hide-archived;
     in property <bool> any-filter;
     // "Using Serum", while the list shows only the songs of one plugin (the Plugins page's Show in Songs).
@@ -262,6 +277,8 @@ export global SongsData {
     in property <[DustLine]> dust-lines;
     // "Not now" on the Dust off card: the song at that row is off it for about three months.
     callback not-now(int);
+    // Play one of the picked song's bounces on the player bar.
+    callback play-sound(string);
     in property <string> todos-left;
     // Next up instead of the list: every to-do left on the songs the filters show, under each song's name.
     in-out property <bool> next-up;
@@ -296,6 +313,76 @@ component TabRoom inherits VerticalLayout {
     in-out property <length> wants;
     init => { self.wants = self.preferred-height; }
     changed preferred-height => { self.wants = self.preferred-height; }
+}
+
+// The picked song's bounces (the sound files exported of it, found beside its saves), newest first, each with a play
+// button: it plays on the player bar along the bottom of the window.
+component SoundCard inherits Rectangle {
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    background: Theme.well;
+    VerticalLayout {
+        padding: Space.sm;
+        spacing: Space.xs;
+        HorizontalLayout {
+            spacing: Space.sm;
+            padding-left: Space.xs;
+            height: 22px;
+            VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 14px;
+                    height: 14px;
+                    viewbox-width: 16;
+                    viewbox-height: 16;
+                    commands: Icons.speaker;
+                    stroke: Theme.muted;
+                    stroke-width: 1.5px;
+                }
+            }
+            Caps {
+                text: "SOUND";
+                vertical-alignment: center;
+            }
+        }
+        for b in SongsData.song-sounds: HorizontalLayout {
+            spacing: Space.sm;
+            padding-left: Space.xs;
+            padding-right: Space.xs;
+            property <bool> on: SongPlayer.playing && SongPlayer.path == b.path;
+            VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    width: 32px;
+                    icon: on ? Icons.pause : Icons.play;
+                    tip: on ? "Pause" : "Play on the player bar";
+                    clicked => {
+                        if (on) {
+                            SongPlayer.toggle();
+                        } else {
+                            SongsData.play-sound(b.path);
+                        }
+                    }
+                }
+            }
+            CutText {
+                own-mouse: true;
+                text: b.name;
+                color: on ? Theme.accent : Theme.text;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: b.date;
+                color: Theme.muted;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+        }
+    }
 }
 
 // The song's to-do list on its card: what's left first, then what's done, and a box to add one (Enter). Kept for the
@@ -776,6 +863,9 @@ component SongPanel inherits Panel {
                     key: SongsData.copy-key.key;
                     clicked => { SongsData.copy-path(); }
                 }
+            }
+            if SongsData.song-sounds.length > 0: SoundCard {
+                vertical-stretch: 0;
             }
             TodoCard {
                 vertical-stretch: 0;
@@ -1381,6 +1471,19 @@ export component SongsPage inherits Rectangle {
                                                                 font-weight: 500;
                                                             }
                                                             if line.favourite: Heart { y: (parent.height - self.height) / 2; }
+                                                            // A bounce to play.
+                                                            if line.sound: VerticalLayout {
+                                                                alignment: center;
+                                                                Path {
+                                                                    width: 13px;
+                                                                    height: 13px;
+                                                                    viewbox-width: 16;
+                                                                    viewbox-height: 16;
+                                                                    commands: Icons.speaker;
+                                                                    stroke: Theme.muted;
+                                                                    stroke-width: 1.5px;
+                                                                }
+                                                            }
                                                             // To-dos left: the list sign and how many.
                                                             if line.todos > 0: SignCount {
                                                                 icon: Icons.todo;
@@ -1617,6 +1720,16 @@ export component SongsPage inherits Rectangle {
                         text: "Has to-dos";
                         on: SongsData.has-todos;
                         clicked => { SongsData.toggle("todos"); }
+                    }
+                    TickLine {
+                        text: "Has sound";
+                        on: SongsData.has-sound;
+                        clicked => { SongsData.toggle("has-sound"); }
+                    }
+                    TickLine {
+                        text: "No sound yet";
+                        on: SongsData.no-sound;
+                        clicked => { SongsData.toggle("no-sound"); }
                     }
                     if SongsData.only != "": TickLine {
                         text: SongsData.only;

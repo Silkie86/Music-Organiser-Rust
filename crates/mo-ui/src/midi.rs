@@ -3940,6 +3940,7 @@ fn play_from(app: &AppWindow, at: usize, resume: bool) {
     }
     crate::sounds::stop_for_another(app);
     crate::curve_editor::call_off_tone();
+    crate::song_player::stop_for_another(app);
     data.set_playing(true);
     data.set_play_note("".into());
     // A loop made again while it plays keeps its own note (that only its first bars play) until the new one starts
