@@ -64,6 +64,7 @@ pub const PARTS: &[Part] = &[
     part("presets.part", 96.0, 56.0, 260.0),
     part("presets.kind", 56.0, 48.0, 160.0),
     part("presets.file", 72.0, 44.0, 180.0),
+    part("midi.from", 180.0, 80.0, 480.0),
     part("midi.bars", 44.0, 44.0, 120.0),
     part("midi.files", 44.0, 44.0, 120.0),
     part("midi.key", 96.0, 48.0, 240.0),
