@@ -539,6 +539,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     capture(&window);
     shots.push(("space-bitwig-wide.png".into(), capture(&window)));
     space.set_panel_width(was);
+    capture(&window);
+    // A click on the "i" by the card's name shows how it works at once, not once the mouse has rested (Solomon's F12
+    // note, 25 Nov 2026: "clicking on info next to bitwig copies does nothing"). Below the "i", where the tip goes:
+    // the "i" itself only lights up under the mouse.
+    let below_info = |shot: &[u8]| crop_rgb(shot, WIDTH, (1080, 72), (320, 130));
+    let before = below_info(&capture(&window));
+    hover(&window, BITWIG_INFO.0, BITWIG_INFO.1);
+    click(&window, BITWIG_INFO.0, BITWIG_INFO.1);
+    let clicked = capture_after(&window, Duration::from_millis(100));
+    if below_info(&clicked) == before {
+        return Err("space-bitwig-info.png: a click on the card's \"i\" showed nothing at once; has it moved?".into());
+    }
+    shots.push(("space-bitwig-info.png".into(), clicked));
+    hover(&window, -1.0, -1.0);
+    // The tick above the card's ticks, clicked while all it ticks are ticked: every save is unticked, and Fix has none.
+    space.invoke_tick_all(false);
+    shots.push(("space-bitwig-untick.png".into(), capture(&window)));
+    if space.get_card_all().ticked || space.get_card_all().partly {
+        return Err("space-bitwig-untick.png: the tick for all still shows something ticked".into());
+    }
     // The old copies card: what moving plugin folders to another drive left, biggest first, with ticks: one that can't
     // go yet, files a try kept aside that wait for your tick, and one with presets saved since its move, which stays
     // until you look.
@@ -2497,6 +2517,23 @@ fn sounds_shots(
     data.set_played(0.35);
     data.set_tile_played(0.35);
     shots.push(("sounds-panel.png".into(), capture(window)));
+    // Sounds like this leads on (Solomon's F12 note, 25 Nov 2026: clicking its first line went round in a circle): a
+    // click on its first line picks that sound, and its own list offers neither it nor the sounds it came through. By
+    // name, as the made-up sounds' names all differ.
+    let mut came = vec![data.get_picked().name.to_string()];
+    for _ in 0..4 {
+        let first = data.get_alike().row_data(0).ok_or("sounds like this: no line to click")?;
+        data.invoke_pick_alike(first.place);
+        let now = data.get_picked().name.to_string();
+        let offered: Vec<String> = data.get_alike().iter().map(|line| line.name.to_string()).collect();
+        if offered.contains(&now) || came.iter().any(|c| offered.contains(c)) {
+            return Err(format!("sounds like this: {now} offers itself or the way back: {offered:?}, came {came:?}"));
+        }
+        came.push(now);
+    }
+    pick_sound(app, 6);
+    data.set_played(0.35);
+    data.set_tile_played(0.35);
     // A sound deep in a pack, with folder names too long for a line, and six tags: its card wraps them, at the usual
     // width and as narrow as it goes, with nothing cut off on the right. Found by name, as the shuffled order changes
     // with every run.
@@ -4172,6 +4209,8 @@ const PAGE_DOWN: f32 = 300.0;
 /// doesn't scroll on its own, as the lists and the arrangement in it do.
 const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
 const OLDER_BUTTON: (f32, f32) = (1205.0, 341.0);
+/// The Space page's card: the "i" beside its kind's name (BITWIG COPIES), at 1440 x 900.
+const BITWIG_INFO: (f32, f32) = (1206.0, 58.0);
 /// Space's Old copies after moving folders line, the page at its top, and a place on the page with nothing on it (right
 /// of its name, left of a card).
 const SPACE_OLD_LINE: (f32, f32) = (400.0, 493.0);
@@ -4753,6 +4792,16 @@ fn capture_sized(window: &MinimalSoftwareWindow, size: (u32, u32), wait: Duratio
         renderer.render(&mut buffer, size.0 as usize);
     });
     buffer.iter().flat_map(|p| [p.r, p.g, p.b]).collect()
+}
+
+/// The pixels of a capture (RGB, `width` across) in the box at `at` (left, top) of `size` (across, down).
+fn crop_rgb(shot: &[u8], width: u32, at: (u32, u32), size: (u32, u32)) -> Vec<u8> {
+    (at.1..at.1 + size.1)
+        .flat_map(|y| {
+            let start = ((y * width + at.0) * 3) as usize;
+            shot.get(start..start + (size.0 * 3) as usize).unwrap_or_default().iter().copied()
+        })
+        .collect()
 }
 
 fn slug(name: &str) -> String {
