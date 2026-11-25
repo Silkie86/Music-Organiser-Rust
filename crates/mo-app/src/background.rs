@@ -7,9 +7,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Starts `work` on a thread of its own called `name`, at low priority. Only the watchdog, which must notice the
-/// window freezing however busy the computer is, the session log's writer, which a crash waits for, and Play in FL
+/// window freezing however busy the computer is, the session log's writer, which a crash waits for, Play in FL
 /// Studio's start, whose note-timing thread takes its priority on Linux and Mac (a short read of the part's notes
-/// first), start their threads another way.
+/// first), and the reading of Windows' typing service, which holds up the window's own library loads while it's
+/// part-way (`mo_ui::typing`), start their threads another way.
 pub fn spawn<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send + 'static) -> io::Result<JoinHandle<T>> {
     std::thread::Builder::new().name(name.to_owned()).spawn(move || {
         lower_priority();
