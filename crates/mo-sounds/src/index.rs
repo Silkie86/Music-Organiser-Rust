@@ -149,12 +149,25 @@ enum Blocks {
     Full(Vec<Vec<f32>>),
     /// Each vector [`held`]: made unit length, each number's half-precision bits.
     Held(Vec<Vec<u16>>),
+    /// Every vector held as [`Blocks::Held`] holds them, in a kept file from an earlier run that was found to be
+    /// exactly these as the library was read ([`Gathered::in_file`]): rows of this many numbers, in id order. None of
+    /// them is in memory, and CLAP's index is made of the file as it is.
+    InFile(Arc<kept::InFile>, usize),
 }
 
 impl Default for Blocks {
     fn default() -> Blocks {
         Blocks::Full(Vec::new())
     }
+}
+
+/// A kept file of CLAP's numbers being checked against the library as it's read ([`clap_check`]).
+pub(crate) type KeptCheck = kept::Against;
+
+/// The file of CLAP's numbers an earlier run kept in `folder` ([`VectorIndex::keep_in`]), opened to be checked row by
+/// row against the library as it's read ([`Gathered::in_file`]). None when there isn't just the one, whole.
+pub(crate) fn clap_check(folder: &Path) -> Option<KeptCheck> {
+    kept::Against::open::<u16>(folder)
 }
 
 /// A CLAP fingerprint as CLAP's index holds it: made unit length, then each number at half precision. The very numbers
@@ -199,11 +212,49 @@ fn room<'a, T>(blocks: &'a mut Vec<Vec<T>>, places: &mut Vec<(usize, usize, usiz
 }
 
 impl Gathered {
+    /// CLAP's fingerprints of the sounds `ids` (in id order, each once), all of them in the kept file `against` was
+    /// checking: every row the library gave was the file's next ([`KeptCheck::next_is`]). None when the file holds
+    /// other rows too, or not one for each id.
+    pub(crate) fn in_file(ids: Vec<i64>, against: KeptCheck) -> Option<Gathered> {
+        let dim = against.dim();
+        let file = against.finish()?;
+        (ids.len() * dim == file.len() && ids.is_sorted_by(|a, b| a < b)).then(|| Gathered {
+            ids,
+            places: Vec::new(),
+            blocks: Blocks::InFile(file, dim),
+        })
+    }
+
+    /// Whether its vectors are all in a kept file, none in memory ([`Gathered::in_file`]).
+    pub fn is_in_file(&self) -> bool {
+        matches!(self.blocks, Blocks::InFile(..))
+    }
+
+    /// One whose vectors are in a file takes them into memory, held as the file holds them, so more can be added
+    /// (not something the app does: a file's vectors go straight into CLAP's index). One that can't be read reads
+    /// as zeros, as a search of a file that can't be read finds nothing.
+    fn in_memory(&mut self) {
+        let Blocks::InFile(file, dim) = &self.blocks else { return };
+        let (file, dim) = (file.clone(), *dim);
+        let (mut blocks, mut places) = (Vec::new(), Vec::new());
+        for i in 0..self.ids.len() {
+            let mut row = vec![0u16; dim];
+            if !file.read(i * dim, &mut row) {
+                row.fill(0);
+            }
+            room(&mut blocks, &mut places, dim).extend_from_slice(&row);
+        }
+        self.places = places;
+        self.blocks = Blocks::Held(blocks);
+    }
+
     /// Adds `id`'s vector (held as the rest are held: see [`Gathered::push_held`]).
     pub fn push(&mut self, id: i64, v: &[f32]) {
+        self.in_memory();
         match &mut self.blocks {
             Blocks::Full(blocks) => room(blocks, &mut self.places, v.len()).extend_from_slice(v),
             Blocks::Held(blocks) => room(blocks, &mut self.places, v.len()).extend(held(v)),
+            Blocks::InFile(..) => return,
         }
         self.ids.push(id);
     }
@@ -215,11 +266,13 @@ impl Gathered {
             return false;
         }
         let floats = blob.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b));
+        self.in_memory();
         match &mut self.blocks {
             Blocks::Full(blocks) => room(blocks, &mut self.places, blob.len() / 4).extend(floats),
             Blocks::Held(blocks) => {
                 room(blocks, &mut self.places, blob.len() / 4).extend(held(&floats.collect::<Vec<f32>>()));
             }
+            Blocks::InFile(..) => return false,
         }
         self.ids.push(id);
         true
@@ -233,9 +286,11 @@ impl Gathered {
         if self.ids.is_empty() {
             self.blocks = Blocks::Held(Vec::new());
         }
+        self.in_memory();
         match &mut self.blocks {
             Blocks::Held(blocks) => room(blocks, &mut self.places, numbers.len()).extend_from_slice(&numbers),
             Blocks::Full(blocks) => room(blocks, &mut self.places, numbers.len()).extend(unheld(&numbers)),
+            Blocks::InFile(..) => return false,
         }
         self.ids.push(id);
         true
@@ -243,7 +298,7 @@ impl Gathered {
 
     /// Whether it holds its vectors as CLAP's index holds them ([`held`]).
     pub fn is_held(&self) -> bool {
-        matches!(self.blocks, Blocks::Held(_)) && !self.ids.is_empty()
+        matches!(self.blocks, Blocks::Held(_) | Blocks::InFile(..)) && !self.ids.is_empty()
     }
 
     /// The same vectors, each as CLAP's index holds it ([`held`]): what the app's own sound library keeps of CLAP's.
@@ -261,7 +316,7 @@ impl Gathered {
 
     /// The same vectors at full precision: held ones as floats ([`unheld`]).
     fn into_full(self) -> Gathered {
-        let Blocks::Held(_) = self.blocks else { return self };
+        let (Blocks::Held(_) | Blocks::InFile(..)) = self.blocks else { return self };
         let mut out = Gathered::default();
         for (id, v) in self.iter() {
             out.push(id, &v);
@@ -280,6 +335,9 @@ impl Gathered {
     /// The most common length, and how many vectors have it; on a tie, the longer (newer analysers give more
     /// numbers). (0, 0) with none.
     pub(crate) fn common_length(&self) -> (usize, usize) {
+        if let Blocks::InFile(_, dim) = &self.blocks {
+            return if self.ids.is_empty() { (0, 0) } else { (*dim, self.ids.len()) };
+        }
         let mut lengths: HashMap<usize, usize> = HashMap::new();
         for &(_, _, len) in &self.places {
             *lengths.entry(len).or_default() += 1;
@@ -289,10 +347,19 @@ impl Gathered {
 
     /// The vector at `i` (in the order they were added), as floats.
     fn at(&self, i: usize) -> Cow<'_, [f32]> {
+        if let Blocks::InFile(file, dim) = &self.blocks {
+            // One that can't be read reads as zeros (the trouble is reported once, where it's read).
+            let mut row = vec![0u16; *dim];
+            if !file.read(i * dim, &mut row) {
+                return Cow::Owned(vec![0.0; *dim]);
+            }
+            return Cow::Owned(unheld(&row));
+        }
         let (b, start, len) = self.places[i];
         match &self.blocks {
             Blocks::Full(blocks) => Cow::Borrowed(&blocks[b][start..start + len]),
             Blocks::Held(blocks) => Cow::Owned(unheld(&blocks[b][start..start + len])),
+            Blocks::InFile(..) => Cow::Owned(Vec::new()),
         }
     }
 
@@ -322,6 +389,7 @@ impl Gathered {
         match &mut self.blocks {
             Blocks::Full(blocks) => blocks[from..to].iter_mut().for_each(|b| *b = Vec::new()),
             Blocks::Held(blocks) => blocks[from..to].iter_mut().for_each(|b| *b = Vec::new()),
+            Blocks::InFile(..) => {}
         }
     }
 }
@@ -384,6 +452,11 @@ impl VectorIndex {
         if !as_held {
             g = g.into_full();
         }
+        // Found whole in a kept file as the library was read: the index is that file, with nothing taken into memory.
+        if let Blocks::InFile(file, dim) = &g.blocks {
+            let (rows, dim) = (Rows::InFile(file.clone()), *dim);
+            return VectorIndex { dim, ids: g.ids, rows, ready: Ready::default() };
+        }
         let (dim, _) = g.common_length();
         if dim == 0 {
             return VectorIndex::default();
@@ -439,6 +512,8 @@ impl VectorIndex {
                     }
                     halves.push(rows.into_boxed_slice());
                 }
+                // Taken whole above.
+                Blocks::InFile(..) => {}
                 Blocks::Full(blocks) => {
                     let mut rows: Vec<f32> = Vec::with_capacity(part.len() * dim);
                     for &i in part {
@@ -1029,6 +1104,14 @@ impl SoundIndex {
             clap: self.clap.clone(),
             deep: self.deep,
         })
+    }
+
+    /// How many bytes of CLAP's numbers are in a kept file, read as they're needed, when they are.
+    pub fn clap_in_file(&self) -> Option<u64> {
+        match &self.clap.as_deref()?.rows {
+            Rows::InFile(file) => Some(file.bytes()),
+            _ => None,
+        }
     }
 
     /// Puts CLAP's numbers, the biggest block the app holds, in a file in `folder` read as it's needed

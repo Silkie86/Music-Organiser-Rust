@@ -1166,6 +1166,108 @@ fn the_fingerprints_come_apart_from_the_list() {
     }
 }
 
+/// The running app's read: once an index has kept CLAP's numbers in a file, the next read finds the file is still
+/// the library's as it goes through the library, and gives the fingerprints as that file, with none in memory. The
+/// index made of it is the same index. A library that has changed since (a fingerprint that differs, one gone), or a
+/// folder with no file or two, is read the usual way.
+#[test]
+fn claps_fingerprints_come_as_the_file_kept_of_them_while_it_is_still_theirs() {
+    let dir = folder("prints-kept");
+    let old = library_with_odd_claps(&dir, 300);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    let kept_in = dir.join("kept");
+    std::fs::create_dir_all(&kept_in).unwrap();
+    let files = || -> Vec<PathBuf> { std::fs::read_dir(&kept_in).unwrap().map(|e| e.unwrap().path()).collect() };
+    let db = SoundsDb::open_read_only(&copy).unwrap();
+    let (_, usual) = db.fingerprints(1).unwrap();
+    assert!(usual.len() > 100 && usual.is_held() && !usual.is_in_file());
+    let analysed = usual.len();
+    // No file yet: read the usual way.
+    let (features, clap) = db.fingerprints_kept(analysed, Some(&kept_in)).unwrap();
+    assert!(!clap.is_in_file());
+    assert_eq!(clap, usual);
+    let mut index = SoundIndex::from_gathered(features.clone(), clap, analysed);
+    assert!(index.deep && index.clap_in_file().is_none());
+    assert!(index.keep_clap_in(&kept_in).unwrap().unwrap().written);
+    assert!(index.clap_in_file().is_some());
+    // Now it comes as the file, and the index made of it is the same one, finding the same sounds.
+    let (again, in_file) = db.fingerprints_kept(analysed, Some(&kept_in)).unwrap();
+    assert!(in_file.is_in_file() && in_file.is_held());
+    assert_eq!((again, in_file.len()), (features.clone(), index.clap.as_ref().unwrap().len()));
+    // Read back they're the same numbers: those of the length the index keeps.
+    let dim = in_file.iter().next().unwrap().1.len();
+    let of_that_length: HashMap<i64, Vec<f32>> =
+        usual.to_vectors().into_iter().filter(|(_, v)| v.len() == dim).collect();
+    assert!(of_that_length.len() < usual.len(), "the test needs CLAP of two lengths");
+    assert_eq!(in_file.to_vectors(), of_that_length);
+    let from_file = SoundIndex::from_gathered(features.clone(), in_file, analysed);
+    assert_eq!(from_file, index);
+    assert_eq!(from_file.clap_in_file(), index.clap_in_file());
+    let id = index.active().ids()[7];
+    let q = index.active().get(id).unwrap().into_owned();
+    assert_eq!(from_file.active().nearest(&q, 10), index.active().nearest(&q, 10));
+    assert_eq!(files().len(), 1);
+    // Not asked to look in the folder, or not deep enough: as before.
+    assert_eq!(db.fingerprints(analysed).unwrap().1, usual);
+    assert!(db.fingerprints_kept(analysed * 2, Some(&kept_in)).unwrap().1.is_empty());
+    // A half-written one beside it, or a folder with such a name, doesn't count.
+    let half = kept_in.join("sound-likeness-0123456789abcdef.rows.4321-0.mo-part");
+    std::fs::write(&half, b"half").unwrap();
+    let not_a_file = kept_in.join("sound-likeness-fedcba9876543210.rows");
+    std::fs::create_dir(&not_a_file).unwrap();
+    assert!(db.fingerprints_kept(analysed, Some(&kept_in)).unwrap().1.is_in_file());
+    std::fs::remove_file(&half).unwrap();
+    std::fs::remove_dir(&not_a_file).unwrap();
+    // A second file of the kind beside it: neither is trusted.
+    let twin = kept_in.join("sound-likeness-0123456789abcdef.rows");
+    std::fs::copy(&files()[0], &twin).unwrap();
+    assert!(!db.fingerprints_kept(analysed, Some(&kept_in)).unwrap().1.is_in_file());
+    std::fs::remove_file(&twin).unwrap();
+    assert!(db.fingerprints_kept(analysed, Some(&kept_in)).unwrap().1.is_in_file());
+    drop(db);
+    // One fingerprint changes in the library (its last byte): the file isn't the library's any more.
+    let (changed, v): (i64, Vec<u8>) = cs(&copy)
+        .query_row(
+            "SELECT sound_id, v FROM sound_clap WHERE length(v) = ?1 ORDER BY sound_id DESC LIMIT 1",
+            [(dim * 2) as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let mut other = v.clone();
+    *other.last_mut().unwrap() ^= 1;
+    cs(&copy).execute("UPDATE sound_clap SET v = ?1 WHERE sound_id = ?2", params![other, changed]).unwrap();
+    let db = SoundsDb::open_read_only(&copy).unwrap();
+    let (_, now) = db.fingerprints_kept(analysed, Some(&kept_in)).unwrap();
+    assert!(!now.is_in_file());
+    assert_eq!(now, db.fingerprints(analysed).unwrap().1);
+    assert_ne!(now, usual);
+    drop(db);
+    // Put back, it's the library's again; with one fingerprint gone, it isn't (the file has a row too many).
+    cs(&copy).execute("UPDATE sound_clap SET v = ?1 WHERE sound_id = ?2", params![v, changed]).unwrap();
+    assert!(
+        SoundsDb::open_read_only(&copy).unwrap().fingerprints_kept(analysed, Some(&kept_in)).unwrap().1.is_in_file()
+    );
+    cs(&copy).execute("DELETE FROM sound_clap WHERE sound_id = ?1", params![changed]).unwrap();
+    let db = SoundsDb::open_read_only(&copy).unwrap();
+    let (_, fewer) = db.fingerprints_kept(analysed - 1, Some(&kept_in)).unwrap();
+    assert!(!fewer.is_in_file());
+    assert_eq!(fewer.len(), usual.len() - 1);
+    // A file cut short, or with something else in it, isn't one.
+    let file = files()[0].clone();
+    let whole = std::fs::read(&file).unwrap();
+    cs(&copy).execute("INSERT INTO sound_clap (sound_id, v) VALUES (?2, ?1)", params![v, changed]).unwrap();
+    let db = SoundsDb::open_read_only(&copy).unwrap();
+    std::fs::write(&file, &whole[..whole.len() - 2]).unwrap();
+    assert!(!db.fingerprints_kept(analysed, Some(&kept_in)).unwrap().1.is_in_file());
+    let mut damaged = whole.clone();
+    damaged[5000] ^= 0x40;
+    std::fs::write(&file, &damaged).unwrap();
+    assert!(!db.fingerprints_kept(analysed, Some(&kept_in)).unwrap().1.is_in_file());
+    std::fs::write(&file, &whole).unwrap();
+    assert!(db.fingerprints_kept(analysed, Some(&kept_in)).unwrap().1.is_in_file());
+}
+
 /// The page reads the copy whenever there's one to read, at once even when it's behind (with the sounds as they were
 /// when it was last brought up to date), and `sounds.db` only when there's none, making it on the same pass. A copy
 /// a newer version of the app made isn't read (or touched): `sounds.db` is, and the page still gets its sounds.

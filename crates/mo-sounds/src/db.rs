@@ -555,6 +555,19 @@ impl SoundsDb {
     /// CLAP is (and keeps CLAP's as the index holds them, which go into it as they are). From `sounds.db` it's a pass
     /// over the whole file: [`SoundsDb::everything`] takes them on the same pass as the list.
     pub fn fingerprints(&self, analysed: usize) -> Result<(Gathered, Gathered), SoundsError> {
+        self.fingerprints_kept(analysed, None)
+    }
+
+    /// As [`SoundsDb::fingerprints`], for the running app, which keeps CLAP's numbers in a file in `likeness`
+    /// (`crate::index::VectorIndex::keep_in`): when the file an earlier run kept there is still exactly the library's
+    /// CLAP fingerprints, they come back as that file ([`Gathered::is_in_file`]) and are never held in memory. Each
+    /// row is checked against the file as it's read from the library. Anything else (no file, the library changed
+    /// since, a copy of the format before) reads them as [`SoundsDb::fingerprints`] does.
+    pub fn fingerprints_kept(
+        &self,
+        analysed: usize,
+        likeness: Option<&Path>,
+    ) -> Result<(Gathered, Gathered), SoundsError> {
         let _turn = turns::long_turn();
         let snapshot = self.conn.unchecked_transaction()?;
         if !self.is_copy() {
@@ -595,7 +608,15 @@ impl SoundsDb {
         )?;
         let deep = crate::learn::heard_enough(usize::try_from(heard).unwrap_or(0), analysed);
         let features = self.copied_gathered("sound_features")?;
-        let clap = if deep { self.copied_clap()? } else { Gathered::default() };
+        let clap = if !deep {
+            Gathered::default()
+        } else if let Some(folder) = likeness
+            && let Some(kept) = self.copied_clap_in(folder)?
+        {
+            kept
+        } else {
+            self.copied_clap()?
+        };
         snapshot.finish()?;
         Ok((features, clap))
     }
@@ -778,6 +799,57 @@ impl SoundsDb {
             turns::give_way();
         }
         Ok(out)
+    }
+
+    /// CLAP's fingerprints in the copy, when the file kept in `folder` holds exactly them: every one read is checked
+    /// against the file's next row, and none is kept in memory. None when there's no such file, or it isn't exactly
+    /// them (the library has changed since it was written: a row that differs, one more or fewer, or rows not in id
+    /// order): they're then read the usual way, and a new file written. Fingerprints of another length than the
+    /// file's are passed over, as the index leaves out all but the most common length, which the file's must be.
+    fn copied_clap_in(&self, folder: &Path) -> Result<Option<Gathered>, SoundsError> {
+        if self.layout != Layout::Copy {
+            return Ok(None);
+        }
+        let Some(mut against) = crate::index::clap_check(folder) else { return Ok(None) };
+        // A library with another number of fingerprints of the file's length has changed since: found at once from
+        // the list's own note of each sound's (its index answers it), so a changed library is read once, not twice.
+        let noted: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sounds WHERE clap_numbers = ?1",
+            [i64::try_from(against.dim()).unwrap_or(-1)],
+            |r| r.get(0),
+        )?;
+        if usize::try_from(noted).ok() != Some(against.rows()) {
+            return Ok(None);
+        }
+        let want = against.dim() * 2;
+        let mut st = self.conn.prepare("SELECT sound_id, v FROM sound_clap")?;
+        let mut rows = st.query([])?;
+        let mut ids: Vec<i64> = Vec::new();
+        // How many fingerprints there are of each other length.
+        let mut others: HashMap<usize, usize> = HashMap::new();
+        while let Some(r) = rows.next()? {
+            turns::give_way();
+            let Ok(ValueRef::Blob(blob)) = r.get_ref(1) else { continue };
+            // Left out as [`Gathered::push_held`] leaves it out.
+            if blob.is_empty() || !blob.len().is_multiple_of(2) {
+                continue;
+            }
+            if blob.len() != want {
+                *others.entry(blob.len()).or_default() += 1;
+                continue;
+            }
+            let id: i64 = r.get(0)?;
+            if ids.last().is_some_and(|last| id <= *last) || !against.next_is(blob) {
+                return Ok(None);
+            }
+            ids.push(id);
+        }
+        // The file's length must be the one the index would pick ([`Gathered::common_length`]: the most common, the
+        // longer on a tie).
+        if others.iter().any(|(len, n)| (*n, *len) > (ids.len(), want)) {
+            return Ok(None);
+        }
+        Ok(Gathered::in_file(ids, against))
     }
 
     /// The vectors in one of the copy's fingerprint tables, gathered by sound as [`SoundsDb::everything`] gathers them
