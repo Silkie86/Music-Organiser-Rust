@@ -1153,6 +1153,7 @@ export component MidiPage inherits Rectangle {
                     room: area.width;
                     resizing(w) => { MidiData.panel-width = w; }
                     part: "midi.card";
+                    max-list: Fit.list-max;
                 }
                 if MidiData.panel-shown: PartPanel {
                     x: area.list-width + divider.width;

@@ -830,6 +830,7 @@ export component PresetsPage inherits Rectangle {
                     enabled: PresetsData.section == 0;
                     resizing(w) => { PresetsData.panel-width = w; }
                     part: "presets.card";
+                    max-list: Fit.list-max;
                 }
                 if PresetsData.section == 0 && PresetsData.panel-shown: PresetPanel {
                     x: area.list-width + divider.width;

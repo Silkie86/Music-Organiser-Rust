@@ -74,8 +74,8 @@ impl Widths {
         self.chosen.get(part.name).copied().unwrap_or(part.usual)
     }
 
-    /// Makes `name` `width` wide, kept within its limits, and returns the width it got (0 for a part that isn't in
-    /// the table, or a width that isn't a number: then nothing changes). Within half a pixel of its usual width it
+    /// Makes `name` `width` wide, kept within its limits, and returns the width it got: 0 for a part that isn't in
+    /// the table, its width as it was for a width that isn't a number (then nothing changes). Within half a pixel of its usual width it
     /// counts as the usual width and isn't kept.
     pub fn set(&mut self, name: &str, width: f32) -> f32 {
         let Some(part) = find(name) else { return 0.0 };

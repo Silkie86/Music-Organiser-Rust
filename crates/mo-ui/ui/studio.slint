@@ -3617,6 +3617,9 @@ export component PanelDivider inherits Rectangle {
     in property <length> panel-width;
     in property <length> room;
     in property <length> min-list: 380px;
+    // The widest the list gets (`Fit.list-max` on most pages): in a wider window the panel takes the rest, so it's
+    // shown wider than its own width, and can always be dragged as wide as that.
+    in property <length> max-list: 100000px;
     in property <length> min-panel: root.part != "" ? Widths.least(root.part) : 320px;
     in property <length> max-panel: root.part != "" ? Widths.most(root.part) : 100000px;
     // Off where the page sets the widths itself: the seam is only a gap then.
@@ -3628,6 +3631,10 @@ export component PanelDivider inherits Rectangle {
     // Where the press was, in the window: the seam moves while it's dragged, so its own space won't do.
     property <length> start-x;
     property <bool> dragging;
+    // The widest the drag may make the panel: its own most, or the room the list leaves at its widest when that's more,
+    // and never so wide the list goes under its least.
+    property <length> widest: max(root.min-panel, max(root.room - root.width - root.max-list,
+        min(root.max-panel, root.room - root.width - root.min-list)));
     Rectangle {
         x: (parent.width - self.width) / 2;
         width: 2px;
@@ -3640,6 +3647,17 @@ export component PanelDivider inherits Rectangle {
         enabled: root.enabled;
         mouse-cursor: MouseCursor.col-resize;
         pointer-event(e) => {
+            // A drag cut short (the mouse left the window, or the seam was turned off): the width it got is kept, as
+            // when it's let go, and the badge goes.
+            if e.kind == PointerEventKind.cancel {
+                if root.dragging {
+                    root.dragging = false;
+                    if root.part != "" {
+                        Widths.resized(root.part, root.panel-width);
+                    }
+                }
+                return;
+            }
             if e.button != PointerEventButton.left {
                 return;
             }
@@ -3657,6 +3675,8 @@ export component PanelDivider inherits Rectangle {
             }
         }
         double-clicked => {
+            // Comes before the press's let go: a wobble in the second press isn't a drag to keep over the usual width.
+            root.dragging = false;
             if root.part != "" {
                 Widths.reset(root.part);
             }
@@ -3665,7 +3685,7 @@ export component PanelDivider inherits Rectangle {
             if self.pressed {
                 root.dragging = true;
                 root.resizing(clamp(root.start-width - (self.absolute-position.x + self.mouse-x - root.start-x),
-                    root.min-panel, max(root.min-panel, min(root.max-panel, root.room - root.width - root.min-list))));
+                    root.min-panel, root.widest));
             }
         }
     }
@@ -3676,12 +3696,12 @@ export component PanelDivider inherits Rectangle {
         y: (root.height - self.height) / 2;
         width: size.preferred-width + 2 * Space.sm;
         height: size.preferred-height + Space.sm;
-        border-radius: 4px;
+        border-radius: Theme.radius;
         background: Theme.surface-raised;
         border-width: 1px;
         border-color: Theme.accent;
         size := Text {
-            text: "\{round(root.panel-width / 1px)} px · \{round(root.min-panel / 1px)}–\{round(min(root.max-panel, max(root.min-panel, root.room - root.width - root.min-list)) / 1px)}";
+            text: "\{round(root.panel-width / 1px)} px · \{round(root.min-panel / 1px)}–\{round(root.widest / 1px)}";
             color: Theme.accent;
             font-size: Type.meta;
             font-family: Theme.number-font;

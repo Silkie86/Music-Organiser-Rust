@@ -1178,6 +1178,7 @@ export component PluginsPage inherits Rectangle {
                     room: area.width;
                     resizing(w) => { PluginsData.panel-width = w; }
                     part: "plugins.card";
+                    max-list: Fit.list-max;
                 }
                 PluginPanel {
                     x: area.list-width + divider.width;

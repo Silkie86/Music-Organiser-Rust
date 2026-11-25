@@ -2248,6 +2248,7 @@ export component SoundsPage inherits Rectangle {
                     room: area.width;
                     resizing(w) => { SoundsData.panel-width = w; }
                     part: "sounds.card";
+                    max-list: area.lines-max;
                 }
                 // Favourites from Bitwig, over the sound card while it's open.
                 if SoundsData.bitwig-shown: BitwigCard {

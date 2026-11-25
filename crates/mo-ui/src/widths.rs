@@ -3,10 +3,15 @@
 
 use std::cell::RefCell;
 
+use mo_app::log;
 use mo_app::widths::{self, Widths};
 use slint::ComponentHandle;
 
 use crate::{AppWindow, MidiData, PluginsData, PresetsData, SoundsData, SpaceData};
+
+/// The limits a seam has when its part isn't in the table: PanelDivider's own, for a seam with no part.
+const UNKNOWN_LEAST: f32 = 320.0;
+const UNKNOWN_MOST: f32 = 100_000.0;
 
 thread_local! {
     static WIDTHS: RefCell<Widths> = RefCell::new(Widths::default());
@@ -20,17 +25,28 @@ pub fn connect(app: &AppWindow) {
     }
     WIDTHS.with(|w| *w.borrow_mut() = kept);
     let data = app.global::<crate::Widths>();
-    data.on_least(|name| widths::find(&name).map_or(0.0, |p| p.least));
-    data.on_most(|name| widths::find(&name).map_or(100_000.0, |p| p.most));
+    // A name not in the table (a slip in a page) gets the seam's own limits, as a seam with no part has.
+    data.on_least(|name| widths::find(&name).map_or(UNKNOWN_LEAST, |p| p.least));
+    data.on_most(|name| widths::find(&name).map_or(UNKNOWN_MOST, |p| p.most));
     data.on_resized(|name, width| {
-        WIDTHS.with(|w| w.borrow_mut().set(&name, width));
+        let Some(part) = widths::find(&name) else {
+            log::warning("Widths", &format!("A seam for {name}, which isn't in the table, was dragged"));
+            return;
+        };
+        let got = WIDTHS.with(|w| w.borrow_mut().set(part.name, width));
+        log::info("Widths", &format!("{} dragged to {width:.0}, kept as {got:.0}", part.name));
         keep();
     });
     let weak = app.as_weak();
     data.on_reset(move |name| {
-        let width = WIDTHS.with(|w| w.borrow_mut().reset(&name));
+        let Some(part) = widths::find(&name) else {
+            log::warning("Widths", &format!("A seam for {name}, which isn't in the table, was double-clicked"));
+            return;
+        };
+        let width = WIDTHS.with(|w| w.borrow_mut().reset(part.name));
+        log::info("Widths", &format!("{} back to its usual {width:.0}", part.name));
         if let Some(app) = weak.upgrade() {
-            give(&app, &name, width);
+            give(&app, part.name, width);
         }
         keep();
     });
@@ -39,6 +55,10 @@ pub fn connect(app: &AppWindow) {
 /// Keeps the widths in the app's settings (written off this thread; nothing is written when they didn't change).
 fn keep() {
     let value = WIDTHS.with(|w| w.borrow().value());
+    // Nothing kept and nothing to keep: no empty setting written into the file.
+    if value.is_empty() && crate::settings::value(widths::KEY).is_none_or(|v| v.is_empty()) {
+        return;
+    }
     crate::settings::remember(widths::KEY, &value);
 }
 
@@ -63,5 +83,25 @@ mod tests {
         for part in mo_app::widths::PARTS {
             assert!(source.contains(&format!("\"{}\" =>", part.name)), "{} has no line in give", part.name);
         }
+    }
+
+    #[test]
+    fn every_seam_names_a_part_in_the_table() {
+        // A seam's `part: "…"` in a page must be in the table, or its width is never kept.
+        let pages = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/pages");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&pages).into_iter().flatten().flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            for line in text.lines().map(str::trim) {
+                let Some(name) = line.strip_prefix("part: \"").and_then(|r| r.strip_suffix("\";")) else { continue };
+                seen += 1;
+                assert!(
+                    mo_app::widths::find(name).is_some(),
+                    "{} names {name}, which isn't in the table",
+                    entry.path().display()
+                );
+            }
+        }
+        assert!(seen >= mo_app::widths::PARTS.len(), "found only {seen} seams in {}", pages.display());
     }
 }

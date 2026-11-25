@@ -466,6 +466,7 @@ export component SpacePage inherits Rectangle {
         min-list: 480px;
         resizing(w) => { SpaceData.panel-width = w; }
         part: "space.card";
+        max-list: Fit.list-max + 2 * Space.xl;
     }
     if root.card-shown: SpaceCard {
         x: root.main-width + divider.width;
