@@ -1,7 +1,8 @@
 //! Which build this is, for the session log's header and F12 notes.
 
 /// "0.9.0-beta.1 build 812 (abc1234)": the app's version, the build's number (the commits that lead to it, so it
-/// counts up with every build) and the commit it was built from. No number from a clone that can't count them.
+/// counts up with every build) and the commit it was built from. Release builds only, and none from a clone that
+/// can't count them.
 pub fn version() -> String {
     label(env!("CARGO_PKG_VERSION"), env!("MO_BUILD"), env!("MO_COMMIT"))
 }

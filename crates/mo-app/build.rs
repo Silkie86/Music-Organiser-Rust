@@ -17,7 +17,14 @@ fn main() {
     // The build's number: how many commits lead to it, so each build Solomon tests counts up from the last (25 Nov:
     // "all these new builds have the same beta number"). The beta number itself (Cargo.toml) moves on with each
     // release, which self-update compares. A clone without the whole history (shallow) can't count: no number then.
+    // Release builds only (the installer from GitHub's Release action, the launcher's Release build): Solomon, 25 Nov,
+    // "only for installers built from the action on github or ... the release builder on the desktop". Cargo says
+    // "release" for the release profile and for the ones built on it (the installer's dist).
+    let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
     let build = std::env::var("MO_BUILD").ok().filter(|b| !b.is_empty()).or_else(|| {
+        if !release {
+            return None;
+        }
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git").args(args).output().ok()?;
             out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
