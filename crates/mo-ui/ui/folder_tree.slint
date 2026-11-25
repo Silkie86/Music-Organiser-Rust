@@ -458,6 +458,16 @@ export component PickStrip inherits Rectangle {
                 vertical-alignment: center;
             }
         }
+        // Clear sits at the left, next to the label and the chips it takes off (Solomon, 25 Nov 2026).
+        if root.any-picked: VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: start;
+            StudioButton {
+                text: "Clear";
+                tip: "Take every folder pick off";
+                clicked => { root.cleared(); }
+            }
+        }
         chips := FlexboxLayout {
             horizontal-stretch: 1;
             spacing: Space.xs;
@@ -467,15 +477,6 @@ export component PickStrip inherits Rectangle {
                 remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
                 clicked => { root.taken-off(p.path, p.hidden); }
                 removed => { root.taken-off(p.path, p.hidden); }
-            }
-        }
-        if root.any-picked: VerticalLayout {
-            horizontal-stretch: 0;
-            alignment: start;
-            StudioButton {
-                text: "Clear";
-                tip: "Take every folder pick off";
-                clicked => { root.cleared(); }
             }
         }
     }
