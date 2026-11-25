@@ -162,7 +162,7 @@ pub fn show(
     });
 }
 
-/// The right-click menu of the line at `path`: pick it (with its folders, or alone), hide it on this panel or show it
+/// The right-click menu of the line at `path`: pick it (with its folders, or alone), show only it, hide it on this panel or show it
 /// again, and open every folder inside it. No line has a key: each is for the line clicked.
 pub fn menu(asked: &Asked, library: Option<&Library>, path: &str) -> Vec<MenuItem> {
     let k = tree::key(path);
@@ -178,17 +178,18 @@ pub fn menu(asked: &Asked, library: Option<&Library>, path: &str) -> Vec<MenuIte
         enabled,
     };
     vec![
-        line(if pick.is_some() { "Take this folder off" } else { "Pick this folder" }, "pick", !hidden_at),
+        line(if pick.is_some() { "Take this folder off" } else { "Add this folder" }, "pick", !hidden_at),
+        line("Show only this folder", "only", !hidden_at && !tree::only_pick(&f.folders, path)),
         line(
             if pick.is_some_and(|p| p.just_this) {
-                "With the folders inside it"
+                "Take in the folders inside it"
             } else {
-                "Just this folder (not the ones inside)"
+                "Leave out the folders inside it"
             },
             "just",
             !hidden_at,
         ),
-        line(if hidden { "Show this folder again here" } else { "Hide this folder here" }, "hide", true),
+        line(if hidden { "Show this folder's sounds again" } else { "Hide this folder's sounds" }, "hide", true),
         MenuItem { enabled: true, ..MenuItem::default() },
         line("Open every folder inside it", "open-all", true),
     ]
@@ -232,6 +233,7 @@ pub fn chosen(id: &str, path: &str, asked: &mut Asked, library: Option<&Library>
     match id {
         "pick" if !within => tree::toggle_pick(&mut f.folders, path),
         "just" if !within => tree::toggle_just_this(&mut f.folders, path),
+        "only" if !within => tree::pick_only(&mut f.folders, path),
         "hide" => tree::toggle_hidden(&mut f.hidden_folders, &mut f.folders, path),
         _ => {}
     }
@@ -256,20 +258,22 @@ mod tests {
     fn menu_lines_pick_alone_and_hide() {
         let mut asked = Asked::default();
         let path = r"G:\Samples\Kicks";
-        assert_eq!(menu(&asked, None, path)[0].what, "Pick this folder");
+        assert_eq!(menu(&asked, None, path)[0].what, "Add this folder");
         chosen("pick", path, &mut asked, None);
         assert_eq!(asked.filters.folders.len(), 1);
         assert_eq!(menu(&asked, None, path)[0].what, "Take this folder off");
         chosen("just", path, &mut asked, None);
         assert!(asked.filters.folders[0].just_this);
-        assert_eq!(menu(&asked, None, path)[1].what, "With the folders inside it");
+        assert_eq!(menu(&asked, None, path)[2].what, "Take in the folders inside it");
+        // It's the only pick already: nothing for "Show only this folder" to do.
+        assert!(!menu(&asked, None, path)[1].enabled);
         // Hiding it takes its pick off, and its pick lines can't be chosen until it's shown again.
         chosen("hide", path, &mut asked, None);
         assert!(asked.filters.folders.is_empty());
         assert_eq!(asked.filters.hidden_folders.len(), 1);
         let lines = menu(&asked, None, path);
-        assert!(!lines[0].enabled && !lines[1].enabled);
-        assert_eq!(lines[2].what, "Show this folder again here");
+        assert!(!lines[0].enabled && !lines[1].enabled && !lines[2].enabled);
+        assert_eq!(lines[3].what, "Show this folder's sounds again");
         chosen("pick", path, &mut asked, None);
         ticked(path, &mut asked, None);
         assert!(asked.filters.folders.is_empty(), "a hidden folder isn't picked");
@@ -282,5 +286,11 @@ mod tests {
         assert!(asked.filters.folders.is_empty());
         chosen("pick", "", &mut asked, None);
         assert!(asked.filters.folders.is_empty(), "no line, no pick");
+        // Only this folder: the other picks come off.
+        chosen("pick", r"G:\Samples\Snares", &mut asked, None);
+        chosen("pick", path, &mut asked, None);
+        chosen("only", path, &mut asked, None);
+        assert_eq!(asked.filters.folders.len(), 1);
+        assert_eq!(asked.filters.folders[0].path, path);
     }
 }
