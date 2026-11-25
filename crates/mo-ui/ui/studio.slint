@@ -1,5 +1,5 @@
 // ListView is only for a long menu's lines: it makes only the lines in sight, and its bar follows the theme.
-import { ListView } from "std-widgets.slint";
+import { ListView, ScrollView } from "std-widgets.slint";
 
 // The app's one shared style (rule 16): colour tokens set from the theme in use, and the few building blocks every
 // page uses. Pages never set a raw colour or their own button look; the style test in mo-ui checks that.
@@ -208,6 +208,12 @@ export global AppKeys {
     // pick, not a click, for a page whose click does more than pick. On Sounds a click on the sound playing stops it,
     // and that pick leaves it playing.
     in-out property <bool> picking-for-menu;
+}
+
+// A filter menu's search (Solomon, 25 Nov 2026: "should be able to search in the plugin filter"): whether a line's words
+// hold what's typed, capitals aside, worked out in Rust (`filters::matches`) as Slint's strings can't look inside.
+export global FilterSearch {
+    pure callback matches(string, string) -> bool;
 }
 
 // The one tooltip (rules 15 and 16): after the mouse rests on a control for a moment, says what it does and shows its
@@ -1436,17 +1442,58 @@ export component PicksChip inherits MenuChipFace {
     // Whether that first line is ticked: while nothing is picked. Where the lines ticked aren't all picked by hand
     // (the MIDI page's "Fit to" ticks the parts the app picked too), the page says when it is.
     in property <bool> any-on: root.value == "";
+    // The orders the menu's lines can be put in ("Most used", "A-Z", "Last used"), and the one they're in; none for
+    // a menu whose order is its own. A pick goes to the page, which sorts the choices.
+    in property <[string]> orders;
+    in property <string> order;
+    callback order-picked(string);
     // A line was picked or unpicked (its words), or Any was.
     callback toggled(string);
     callback cleared();
-    clicked => { menu.show(); }
+    // A long list (more than 12 lines) gets a search box at its top. What's typed narrows the lines to those holding
+    // it; it starts empty each time the menu opens.
+    property <bool> searchable: root.choices.length > 12;
+    property <string> query;
+    clicked => {
+        root.query = "";
+        menu.show();
+    }
     menu := PopupWindow {
         x: 0;
         y: root.height + 4px;
-        width: max(root.width, 240px);
+        width: max(root.width, 260px);
         // Picking, scrolling or dragging its bar keeps it open; a click outside it closes it.
         close-policy: close-on-click-outside;
         MenuCard {
+            if root.searchable: VerticalLayout {
+                padding-bottom: Space.xs;
+                search := SearchBox {
+                    hint: "Search";
+                    edited(words) => { root.query = words; }
+                }
+                // The keys go straight to it once the menu is open (not as it's made: it isn't in the window yet), so
+                // typing narrows the list at once.
+                Timer {
+                    interval: 1ms;
+                    triggered => {
+                        self.running = false;
+                        search.focus-all();
+                    }
+                }
+            }
+            if root.orders.length > 0: HorizontalLayout {
+                padding-bottom: Space.xs;
+                spacing: 0;
+                alignment: start;
+                for o[i] in root.orders: ToggleChip {
+                    text: o;
+                    tip: "Put the list in this order";
+                    on: o == root.order;
+                    joined-left: i > 0;
+                    joined-right: i < root.orders.length - 1;
+                    clicked => { root.order-picked(o); }
+                }
+            }
             MenuLine {
                 text: root.any-text;
                 on: root.any-on;
@@ -1456,7 +1503,8 @@ export component PicksChip inherits MenuChipFace {
                     root.cleared();
                 }
             }
-            if root.choices.length > 0: ListView {
+            // Nothing typed: every line, in a list that only makes the lines in sight (rule 12).
+            if root.choices.length > 0 && root.query == "": ListView {
                 height: min(root.choices.length, 16) * 32px;
                 for c in root.choices: MenuLine {
                     text: c.text;
@@ -1464,6 +1512,22 @@ export component PicksChip inherits MenuChipFace {
                     on: c.on;
                     tickable: true;
                     clicked => { root.toggled(c.text); }
+                }
+            }
+            // Words typed: only the lines holding them, up to 16 in sight and the rest a scroll away.
+            if root.query != "": ScrollView {
+                height: min(found.preferred-height, 16 * 32px);
+                found := VerticalLayout {
+                    for c in root.choices: MenuLine {
+                        property <bool> hit: FilterSearch.matches(c.text, root.query);
+                        visible: self.hit;
+                        height: self.hit ? 32px : 0px;
+                        text: c.text;
+                        key: c.count;
+                        on: c.on;
+                        tickable: true;
+                        clicked => { root.toggled(c.text); }
+                    }
                 }
             }
         }
@@ -1786,6 +1850,10 @@ export component FilterList inherits VerticalLayout {
     in property <length> spare-room;
     // The More menu's row under the lines while it shows, 0 without it.
     property <length> more-row: root.preferred-height - caps.height - lines.preferred-height;
+    // The orders its menu's lines can be put in, and the one they're in (PicksChip's).
+    in property <[string]> orders;
+    in property <string> order;
+    callback order-picked(string);
     out property <int> fits: root.filter.chips.length == 0 || round(lines.preferred-height / Heights.tick-line) != root.filter.chips.length ? 0
         : root.filter.more.length * Heights.tick-line <= root.spare-room + root.more-row ? root.filter.chips.length + root.filter.more.length
         : max(1, root.filter.chips.length + floor(root.spare-room / Heights.tick-line));
@@ -1814,6 +1882,9 @@ export component FilterList inherits VerticalLayout {
             bare: root.filter.chips.length == 0;
             value: root.filter.more-picked;
             choices: root.filter.more;
+            orders: root.orders;
+            order: root.order;
+            order-picked(o) => { root.order-picked(o); }
             toggled(text) => { root.toggled(text); }
             cleared => { root.cleared(); }
         }

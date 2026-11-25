@@ -82,7 +82,7 @@ struct Page {
     picked: Option<usize>,
     years: Vec<(i32, usize)>,
     /// The plugins in the list, most used first, each with how many lines it has.
-    plugins: Vec<(String, usize)>,
+    plugins: Vec<logic::PluginUse>,
     /// The filters as their chips and menus show them now.
     chips: logic::FilterChips,
     songs: usize,
@@ -175,7 +175,7 @@ struct FilterAsk {
     items: Arc<Vec<Item>>,
     fixes: logic::Fixes,
     filters: Filters,
-    plugins: Option<Vec<(String, usize)>>,
+    plugins: Option<Vec<logic::PluginUse>>,
 }
 
 /// What the filters show, worked out together, so the list and its chips change at once (a click on a chip is
@@ -185,7 +185,7 @@ struct FilterAnswer {
     shown: Vec<usize>,
     years: Vec<(i32, usize)>,
     chips: logic::FilterChips,
-    plugins: Vec<(String, usize)>,
+    plugins: Vec<logic::PluginUse>,
     /// How many of the lines shown are songs' Serum 1 sounds (for the To Serum 2 button).
     serum_1: usize,
 }
@@ -532,6 +532,20 @@ fn wire(app: &AppWindow) {
         if let Some(app) = weak.upgrade() {
             export_shown(&app);
         }
+    });
+    data.set_plugin_orders(ModelRc::new(VecModel::from(
+        logic::PluginOrder::labels().into_iter().map(SharedString::from).collect::<Vec<_>>(),
+    )));
+    let weak = app.as_weak();
+    data.on_plugin_order_picked(move |label| {
+        let Some(order) = logic::PluginOrder::from_label(&label) else { return };
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.filters.plugin_order = order;
+            refilter(&mut p);
+        });
+        show_all(&app);
     });
     let weak = app.as_weak();
     data.on_serum2_shown(move || {
@@ -926,6 +940,7 @@ fn show_everything(app: &AppWindow) {
         FILTER_MODELS.with(|m| {
             data.set_part_filter(m.part.view(&p.chips.part));
             data.set_plugin_filter(m.plugin.view(&p.chips.plugin));
+            data.set_plugin_order(f.plugin_order.label().into());
             data.set_format_filter(m.format.view(&p.chips.format));
             data.set_type_filter(m.kind.view(&p.chips.kind));
             data.set_from_filter(m.from.view(&p.chips.from));
