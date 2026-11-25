@@ -1,5 +1,7 @@
-//! An index's half-precision numbers kept in a file beside the app's data and read as they're needed, not held in
-//! the app's own memory (Solomon, 2026-11-25: CLAP's were 465 MB of the app's memory for his half a million sounds).
+//! An index's numbers kept in a file beside the app's data and read as they're needed, not held in the app's own
+//! memory (Solomon, 2026-11-25: CLAP's were 465 MB of the app's memory for his half a million sounds). Two kinds of
+//! file ([`Number`]): CLAP's half-precision numbers (`sound-likeness-…`), and the analyser's fingerprints at full
+//! precision (`sound-prints-…`), each swept and replaced on its own.
 //!
 //! The file is read with ordinary reads, a part of the rows at a time, into a small buffer: Windows keeps what's
 //! been read in its own file cache while it has room, and lets go of it when it's short without writing it to the
@@ -28,11 +30,30 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
-/// What every file starts with: which kind of file, and which layout.
-const MAGIC: &[u8; 8] = b"MOLIKE1\n";
+/// A kind of number an index holds, and the kind of file its numbers are kept in.
+pub(super) trait Number: bytemuck::Pod + PartialEq + Send + Sync {
+    /// What every file of the kind starts with: which kind of file, and which layout.
+    const MAGIC: &'static [u8; 8];
+    /// What every file of the kind's name starts with.
+    const START: &'static str;
+}
+
+/// CLAP's numbers, at half precision.
+impl Number for u16 {
+    const MAGIC: &'static [u8; 8] = b"MOLIKE1\n";
+    const START: &'static str = "sound-likeness-";
+}
+
+/// The analyser's fingerprints, at full precision.
+impl Number for f32 {
+    const MAGIC: &'static [u8; 8] = b"MOPRNT1\n";
+    const START: &'static str = "sound-prints-";
+}
+
+/// The starts of every kind's names.
+const STARTS: [&str; 2] = [<u16 as Number>::START, <f32 as Number>::START];
 /// The numbers start here: a whole page in, so they lie as the processor wants them.
 const HEADER: usize = 4096;
-const START: &str = "sound-likeness-";
 const END: &str = ".rows";
 const PART: &str = ".mo-part";
 /// How much room the drive must have left over after the file is written: this, or as much again as the file for a
@@ -71,6 +92,8 @@ pub(super) struct InFile {
     path: PathBuf,
     /// How many numbers it holds.
     numbers: usize,
+    /// How many bytes each number takes.
+    size: usize,
     /// Whether a failed read has been reported (once is enough).
     told: AtomicBool,
 }
@@ -78,11 +101,13 @@ pub(super) struct InFile {
 impl InFile {
     /// Fills `out` with the numbers from the `at`th on, as the heap held them (every row one after another). Says
     /// no when they can't be read (and reports it the first time): `out` is then not to be used.
-    pub(super) fn read(&self, at: usize, out: &mut [u16]) -> bool {
-        let read = if at.checked_add(out.len()).is_none_or(|end| end > self.numbers) {
+    pub(super) fn read<T: Number>(&self, at: usize, out: &mut [T]) -> bool {
+        let read = if size_of::<T>() != self.size {
+            Err(std::io::Error::other("it holds another kind of number"))
+        } else if at.checked_add(out.len()).is_none_or(|end| end > self.numbers) {
             Err(std::io::Error::other("past the end of the file"))
         } else {
-            read_exact_at(&self.file, bytemuck::cast_slice_mut::<u16, u8>(out), (HEADER + at * 2) as u64)
+            read_exact_at(&self.file, bytemuck::cast_slice_mut::<T, u8>(out), (HEADER + at * self.size) as u64)
         };
         match read {
             Ok(()) => true,
@@ -132,8 +157,8 @@ impl PartialEq for InFile {
     }
 }
 
-/// Whether `name` is the whole name of a file this code writes: the finished kind (`sound-likeness-` + 16 hex digits
-/// + `.rows`), or a half-written one ([`is_half_kept_name`]).
+/// Whether `name` is the whole name of a file this code writes: the finished kind (`sound-likeness-` or
+/// `sound-prints-` + 16 hex digits + `.rows`), or a half-written one ([`is_half_kept_name`]).
 pub fn is_kept_name(name: &str) -> bool {
     hash_and_end(name).is_some_and(|end| end.is_empty()) || is_half_kept_name(name)
 }
@@ -149,26 +174,27 @@ pub fn is_half_kept_name(name: &str) -> bool {
         .is_some_and(|(process, count)| digits(process) && digits(count))
 }
 
-/// What follows a finished file's name in `name`, if it starts with one.
+/// What follows a finished file's name in `name`, if it starts with one (of either kind).
 fn hash_and_end(name: &str) -> Option<&str> {
-    let (hash, end) = name.strip_prefix(START)?.split_at_checked(16)?;
+    let rest = STARTS.iter().find_map(|start| name.strip_prefix(start))?;
+    let (hash, end) = rest.split_at_checked(16)?;
     hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)).then_some(())?;
     end.strip_prefix(END)
 }
 
 /// The header of a file of `numbers` numbers in rows of `dim`.
-fn header(dim: usize, numbers: usize) -> Vec<u8> {
+fn header<T: Number>(dim: usize, numbers: usize) -> Vec<u8> {
     let mut h = vec![0u8; HEADER];
-    h[..8].copy_from_slice(MAGIC);
+    h[..8].copy_from_slice(T::MAGIC);
     h[8..16].copy_from_slice(&(dim as u64).to_le_bytes());
     h[16..24].copy_from_slice(&(numbers as u64).to_le_bytes());
     h
 }
 
-/// Keeps the numbers in `parts` (rows of `dim`, as an index holds them at half precision) in a file in `folder`, and
+/// Keeps the numbers in `parts` (rows of `dim`, as an index holds them) in a file of their kind in `folder`, and
 /// opens it. The caller then lets go of `parts`. Says why when it can't (the index stays as it was): no room, a
 /// folder that can't be written, a file that won't check.
-pub(super) fn keep(dim: usize, parts: &[Box<[u16]>], folder: &Path) -> Result<(Arc<InFile>, Kept), String> {
+pub(super) fn keep<T: Number>(dim: usize, parts: &[Box<[T]>], folder: &Path) -> Result<(Arc<InFile>, Kept), String> {
     if cfg!(target_endian = "big") {
         return Err("this computer keeps numbers the other way round from the file".into());
     }
@@ -176,18 +202,19 @@ pub(super) fn keep(dim: usize, parts: &[Box<[u16]>], folder: &Path) -> Result<(A
     if numbers == 0 {
         return Err("there are none".into());
     }
-    let header = header(dim, numbers);
+    let header = header::<T>(dim, numbers);
     let mut hash = Sha256::new();
     hash.update(&header);
     for part in parts {
-        hash.update(bytemuck::cast_slice::<u16, u8>(part));
+        hash.update(bytemuck::cast_slice::<T, u8>(part));
     }
     let hash = hash.finalize();
-    let name: String = format!("{START}{}{END}", hash.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>());
+    let hash: String = hash.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let name: String = format!("{}{hash}{END}", T::START);
     let path = folder.join(&name);
-    let bytes = (HEADER + numbers * 2) as u64;
-    // The files of other numbers go first, so they don't take the room this one needs.
-    let removed = sweep(folder, &name);
+    let bytes = (HEADER + numbers * size_of::<T>()) as u64;
+    // The files of other numbers of this kind go first, so they don't take the room this one needs.
+    let removed = sweep(folder, &name, T::START);
 
     let mut written = false;
     if !same(&path, &header, parts) {
@@ -200,17 +227,17 @@ pub(super) fn keep(dim: usize, parts: &[Box<[u16]>], folder: &Path) -> Result<(A
     }
     // Checked just now, or inside `write`: a plain file of exactly these numbers.
     let file = File::open(&path).map_err(|e| format!("the file couldn't be opened ({e})"))?;
-    let kept = InFile { file, path: path.clone(), numbers, told: AtomicBool::new(false) };
+    let kept = InFile { file, path: path.clone(), numbers, size: size_of::<T>(), told: AtomicBool::new(false) };
     Ok((Arc::new(kept), Kept { file: path, bytes, written, removed }))
 }
 
 /// Writes the file under a name of this writer's own, checks it, and gives it its name.
-fn write(
+fn write<T: Number>(
     folder: &Path,
     file: &Path,
     name: &str,
     header: &[u8],
-    parts: &[Box<[u16]>],
+    parts: &[Box<[T]>],
     bytes: u64,
 ) -> Result<(), String> {
     match fs4::available_space(folder) {
@@ -232,7 +259,7 @@ fn write(
         let mut out = fs::OpenOptions::new().write(true).create_new(true).open(&part)?;
         out.write_all(header)?;
         for p in parts {
-            out.write_all(bytemuck::cast_slice::<u16, u8>(p))?;
+            out.write_all(bytemuck::cast_slice::<T, u8>(p))?;
         }
         out.sync_all()
     })();
@@ -255,10 +282,10 @@ fn write(
 }
 
 /// Whether `file` is a plain file holding exactly `header` and then the numbers in `parts`. Read a piece at a time.
-fn same(file: &Path, header: &[u8], parts: &[Box<[u16]>]) -> bool {
+fn same<T: Number>(file: &Path, header: &[u8], parts: &[Box<[T]>]) -> bool {
     let numbers: usize = parts.iter().map(|p| p.len()).sum();
     let Ok(meta) = fs::symlink_metadata(file) else { return false };
-    if !meta.is_file() || meta.len() != (header.len() + numbers * 2) as u64 {
+    if !meta.is_file() || meta.len() != (header.len() + numbers * size_of::<T>()) as u64 {
         return false;
     }
     let Ok(mut f) = File::open(file) else { return false };
@@ -269,7 +296,7 @@ fn same(file: &Path, header: &[u8], parts: &[Box<[u16]>]) -> bool {
             f.read_exact(got).is_ok() && got == want
         })
     };
-    is(header) && parts.iter().all(|p| is(bytemuck::cast_slice::<u16, u8>(p)))
+    is(header) && parts.iter().all(|p| is(bytemuck::cast_slice::<T, u8>(p)))
 }
 
 /// Removes `path` if it's a plain file (never a folder, never a link).
@@ -281,16 +308,17 @@ fn remove_plain(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Removes the other files of this kind in `folder` (not `keep`): finished ones of other numbers, and half-written
-/// ones left behind over an hour ago. How many went. One that can't be removed now stays until next time.
-fn sweep(folder: &Path, keep: &str) -> usize {
+/// Removes the other files of one kind (their names begin with `start`) in `folder` (not `keep`): finished ones of
+/// other numbers, and half-written ones left behind over an hour ago. How many went. One that can't be removed now
+/// stays until next time.
+fn sweep(folder: &Path, keep: &str, start: &str) -> usize {
     let Ok(entries) = fs::read_dir(folder) else { return 0 };
     let now = SystemTime::now();
     let mut removed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name == keep || !is_kept_name(name) {
+        if name == keep || !name.starts_with(start) || !is_kept_name(name) {
             continue;
         }
         let path = entry.path();
@@ -311,10 +339,15 @@ fn sweep(folder: &Path, keep: &str) -> usize {
     removed
 }
 
-/// Removes every file of this kind in `folder`: for a library whose index keeps none (CLAP not heard enough, or no
-/// library). How many went.
+/// Removes every file of CLAP's numbers in `folder`: for a library whose index keeps none (CLAP not heard enough, or
+/// no library). How many went.
 pub fn remove_all(folder: &Path) -> usize {
-    sweep(folder, "")
+    sweep(folder, "", <u16 as Number>::START)
+}
+
+/// Removes every file of the analyser's fingerprints in `folder`: for a library with none. How many went.
+pub fn remove_all_prints(folder: &Path) -> usize {
+    sweep(folder, "", <f32 as Number>::START)
 }
 
 #[cfg(test)]
@@ -323,14 +356,25 @@ mod tests {
 
     #[test]
     fn only_whole_names_of_this_kind_are_ours() {
-        for ours in ["sound-likeness-0123456789abcdef.rows", "sound-likeness-0123456789abcdef.rows.4242-0.mo-part"] {
+        for ours in [
+            "sound-likeness-0123456789abcdef.rows",
+            "sound-likeness-0123456789abcdef.rows.4242-0.mo-part",
+            "sound-prints-0123456789abcdef.rows",
+            "sound-prints-0123456789abcdef.rows.4242-0.mo-part",
+        ] {
             assert!(is_kept_name(ours), "{ours}");
         }
         assert!(is_half_kept_name("sound-likeness-0123456789abcdef.rows.4242-17.mo-part"));
+        assert!(is_half_kept_name("sound-prints-0123456789abcdef.rows.4242-17.mo-part"));
         assert!(!is_half_kept_name("sound-likeness-0123456789abcdef.rows"));
+        assert!(!is_half_kept_name("sound-prints-0123456789abcdef.rows"));
         for not in [
             "",
             "sound-likeness-.rows",
+            "sound-prints-.rows",
+            "sound-prints-0123456789abcdef",
+            "sound-prints0123456789abcdef.rows",
+            "sound-printed-0123456789abcdef.rows",
             "sound-likeness-0123456789abcdef",
             "sound-likeness-0123456789abcdef.rows.bak",
             "sound-likeness-0123456789ABCDEF.rows",

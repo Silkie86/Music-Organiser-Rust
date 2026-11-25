@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use mo_sounds::index::{Gathered, SoundIndex, VectorIndex, is_kept_name, remove_kept};
+use mo_sounds::index::{
+    Gathered, SoundIndex, VectorIndex, chroma_downweight, is_kept_name, remove_kept, remove_kept_prints,
+};
 
 /// An empty folder of this test's own, under the build's temp folder.
 fn folder(name: &str) -> PathBuf {
@@ -224,12 +226,14 @@ fn many_sounds_at_once_get_what_each_gets_on_its_own_however_the_numbers_are_hel
     let half = held(9000, 0);
     let mut kept = half.clone();
     kept.keep_in(&dir).unwrap().unwrap();
+    let mut full_kept = full.clone();
+    full_kept.keep_full_in(&dir).unwrap().unwrap();
     let q = half.get(3).unwrap().into_owned();
     // Every sound of the first part and a few of the others (so a part read whole, and sounds read one by one), out
     // of order, with ones the index doesn't have and one asked for twice.
     let mut ids: Vec<i64> = (1..=4096).rev().map(|n| n * 3).collect();
     ids.extend([9000 * 3, 4, 4097 * 3, -1, 6000 * 3, 3, 9000 * 3 + 3]);
-    for (name, index) in [("full", &full), ("half", &half), ("kept", &kept)] {
+    for (name, index) in [("full", &full), ("half", &half), ("kept", &kept), ("full kept", &full_kept)] {
         let dots = index.each(&ids, |k, row| (k, row.dot(&q).to_bits(), row.to_vec()));
         assert_eq!(dots.len(), ids.len(), "{name}");
         for (k, (id, got)) in ids.iter().zip(&dots).enumerate() {
@@ -248,6 +252,120 @@ fn many_sounds_at_once_get_what_each_gets_on_its_own_however_the_numbers_are_hel
     // The file and the held numbers are the same bits, so they give the same answers.
     let bits = |index: &VectorIndex| index.each(&ids, |_, row| row.dot(&q).to_bits());
     assert_eq!(bits(&kept), bits(&half));
+    assert_eq!(bits(&full_kept), bits(&full));
+}
+
+/// The analyser's fingerprints as the app builds them: standardised, chroma counting less, at full precision.
+fn prints(count: i64, salt: i64) -> VectorIndex {
+    VectorIndex::from_gathered(gathered(count, salt), true, Some(chroma_downweight))
+}
+
+#[test]
+fn full_precision_numbers_kept_in_a_file_find_exactly_what_the_held_ones_do() {
+    let dir = folder("full");
+    let was = prints(9000, 0);
+    let mut kept = was.clone();
+    // Not as CLAP's are kept: that's for half precision only.
+    assert!(kept.keep_in(&dir).is_none());
+    let done = kept.keep_full_in(&dir).unwrap().unwrap();
+    assert!(done.written && kept.is_kept_in_a_file() && !kept.is_halved());
+    assert_eq!(done.bytes, 4096 + 9000 * 16 * 4);
+    assert_eq!(fs::metadata(&done.file).unwrap().len(), done.bytes);
+    let name = done.file.file_name().unwrap().to_str().unwrap().to_owned();
+    assert!(name.starts_with("sound-prints-") && is_kept_name(&name), "{name}");
+    assert_eq!((kept.len(), kept.dim(), kept.ids()), (was.len(), was.dim(), was.ids()));
+    for id in [3, 4096 * 3, 4097 * 3, 9000 * 3] {
+        let q = was.get(id).unwrap();
+        assert_eq!(kept.get(id).unwrap().iter().map(|x| x.to_bits()).collect::<Vec<_>>(), {
+            q.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        });
+        assert_eq!(kept.dot_with(id, &q).map(f64::to_bits), was.dot_with(id, &q).map(f64::to_bits));
+        assert_eq!(bits(&kept.nearest(&q, 40)), bits(&was.nearest(&q, 40)), "{id}");
+    }
+    assert_eq!(kept.get(4), None);
+    // Kept already: nothing to do. The same numbers again use the file there is.
+    assert!(kept.keep_full_in(&dir).is_none());
+    let mut again = was.clone();
+    assert!(!again.keep_full_in(&dir).unwrap().unwrap().written);
+    assert_eq!(again, kept);
+    // A half-precision index has nothing to keep this way.
+    assert!(held(10, 0).keep_full_in(&dir).is_none());
+    assert!(VectorIndex::default().keep_full_in(&dir).is_none());
+}
+
+#[test]
+fn each_kind_of_file_is_swept_on_its_own() {
+    let dir = folder("two-kinds");
+    let mut clap = held(300, 0);
+    let clap_file = clap.keep_in(&dir).unwrap().unwrap().file;
+    let mut old = prints(300, 0);
+    let old_file = old.keep_full_in(&dir).unwrap().unwrap().file;
+    assert_eq!(kept_files(&dir).len(), 2);
+    // Other fingerprints: their file takes the old one's place, and CLAP's stays.
+    let mut new = prints(300, 5);
+    let done = new.keep_full_in(&dir).unwrap().unwrap();
+    assert_eq!(done.removed, 1);
+    assert!(clap_file.exists() && !old_file.exists() && done.file.exists());
+    // Other CLAP numbers: the same the other way round.
+    let mut clap_new = held(300, 5);
+    let clap_done = clap_new.keep_in(&dir).unwrap().unwrap();
+    assert_eq!(clap_done.removed, 1);
+    assert!(!clap_file.exists() && done.file.exists() && clap_done.file.exists());
+    // The old index, its file gone, still reads what it had open (or finds nothing): it never stops the app.
+    let _ = old.nearest(&[1.0; 16], 5);
+    // Each kind's own are removed alone.
+    assert_eq!(remove_kept(&dir), 1);
+    assert!(done.file.exists() && !clap_done.file.exists());
+    assert_eq!(remove_kept_prints(&dir), 1);
+    assert!(kept_files(&dir).is_empty());
+}
+
+#[test]
+fn fingerprints_in_a_file_take_a_scans_new_ones_as_held_ones_do() {
+    use std::collections::HashSet;
+    let dir = folder("full-with");
+    let was = prints(5000, 0);
+    let mut kept = was.clone();
+    let first = kept.keep_full_in(&dir).unwrap().unwrap();
+    // A scan: two sounds gone, one listened to again, one new.
+    let without: HashSet<i64> = [6, 4097 * 3].into_iter().collect();
+    let more = || {
+        let mut g = Gathered::default();
+        g.push(9, &[0.5; 16].map(|x: f32| x + 1.0));
+        g.push(20_000, &(0..16).map(|d| d as f32 / 3.0).collect::<Vec<f32>>());
+        g
+    };
+    let want = was.with(&without, more(), true, Some(chroma_downweight));
+    let mut got = kept.with(&without, more(), true, Some(chroma_downweight));
+    assert!(!got.is_kept_in_a_file(), "held again, as they are others now");
+    assert_eq!(got, want);
+    // Nothing changed: the same index, still in its file.
+    let same = kept.with(&HashSet::new(), Gathered::default(), true, Some(chroma_downweight));
+    assert!(same.is_kept_in_a_file());
+    assert_eq!(same, kept);
+    // Kept again: a file of the new numbers, the old one removed, and the same answers.
+    let second = got.keep_full_in(&dir).unwrap().unwrap();
+    assert!(second.written && second.removed == 1 && second.file != first.file);
+    let q = want.get(20_000).unwrap();
+    assert_eq!(bits(&got.nearest(&q, 30)), bits(&want.nearest(&q, 30)));
+    assert_eq!(got.len(), 5000 - 2 + 1);
+}
+
+#[test]
+fn the_sound_index_keeps_the_analysers_fingerprints_beside_claps() {
+    let dir = folder("sound-index-both");
+    let mut index = SoundIndex::from_gathered(gathered(50, 1), gathered(50, 2), 50);
+    let was = index.clone();
+    let q = was.features.get(3).unwrap().into_owned();
+    let want = bits(&was.features.nearest(&q, 10));
+    drop(was);
+    assert!(index.keep_clap_in(&dir).unwrap().unwrap().written);
+    let done = index.keep_features_in(&dir).unwrap().unwrap();
+    assert!(done.written && done.removed == 0 && index.features.is_kept_in_a_file());
+    assert_eq!(kept_files(&dir).len(), 2);
+    assert_eq!(bits(&index.features.nearest(&q, 10)), want);
+    assert!(index.keep_features_in(&dir).is_none());
+    assert!(SoundIndex::default().keep_features_in(&dir).is_none());
 }
 
 #[test]

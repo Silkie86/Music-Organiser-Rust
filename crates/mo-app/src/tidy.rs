@@ -12,9 +12,10 @@
 //!   (`backup.txt.<number>-<number>.mo-part`, `rust-settings.json.mo-part`, `presets.db.new-<number>`), once it's an
 //!   hour old, so one being written right now is left alone; and, as old, a file the app wrote once but no longer
 //!   reads ([`RETIRED`]).
-//! - The data folder again: the file of numbers "Sounds like this" was still writing
-//!   (`sound-likeness-<hash>.rows.<number>-<number>.mo-part`), an hour old. The finished file
-//!   (`sound-likeness-<hash>.rows`) is replaced by the code that writes it, when the numbers change.
+//! - The data folder again: a file of numbers "Sounds like this" was still writing
+//!   (`sound-likeness-<hash>.rows.<number>-<number>.mo-part`, or `sound-prints-…` for the analyser's fingerprints), an
+//!   hour old. The finished files (`sound-likeness-<hash>.rows`, `sound-prints-<hash>.rows`) are replaced by the code
+//!   that writes them, when the numbers change.
 //! - Beside the first data folder (`%LOCALAPPDATA%`): what a crash left of the two files a data folder move writes
 //!   there (`MusicOrganiser-folder.txt.<number>-<number>.mo-part`, `MusicOrganiser-moving.txt.…`), an hour old. That
 //!   folder holds every app's data, so nothing else in it is ever looked at.

@@ -417,11 +417,12 @@ pub fn sample_folders_changed() -> bool {
     SCAN_AGAIN.lock().unwrap_or_else(PoisonError::into_inner).as_ref().is_some_and(|again| again.send(()).is_ok())
 }
 
-/// Where "Sounds like this" keeps CLAP's numbers in a file ([`keep_likeness_in`]); not set, they stay in memory.
+/// Where "Sounds like this" keeps CLAP's numbers and the analyser's fingerprints in files ([`keep_likeness_in`]);
+/// not set, they stay in memory.
 static LIKENESS_IN: OnceLock<PathBuf> = OnceLock::new();
 
-/// From now on the index's CLAP numbers are kept in a file in `folder` (the app's data folder) and read as they're
-/// needed, rather than held in memory. The running app says so once, before the page reads; tests and the
+/// From now on the index's CLAP numbers and the analyser's fingerprints are kept in files in `folder` (the app's
+/// data folder) and read as they're needed, rather than held in memory. The running app says so once, before the page reads; tests and the
 /// screenshots don't, so they write no such file.
 pub fn keep_likeness_in(folder: PathBuf) {
     let _ = LIKENESS_IN.set(folder);
@@ -1638,8 +1639,13 @@ fn take_again(
             if !count_changed && (on_show.added + ids.len()) * FEW <= index.features.len() =>
         {
             match with_these(&db, &ids, &there, index.clone()) {
-                Ok(Some(now)) => {
+                Ok(Some(mut now)) => {
                     if !Arc::ptr_eq(&now, &index) {
+                        // Its fingerprints are held again, with the scan's in them: back into a file of their own
+                        // (the running app only), here on the reading thread as when the index is built.
+                        if let (Some(folder), Some(changed)) = (LIKENESS_IN.get(), Arc::get_mut(&mut now)) {
+                            mo_app::sound_likeness::keep_prints(changed, folder);
+                        }
                         send(Step::Index(now.clone()));
                         on_show.index = Some(now);
                     }
