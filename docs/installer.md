@@ -31,8 +31,11 @@ built.
   next version). After an update, the copies already in place are updated, unless a newer version put them in. One
   the DAW has open (Bitwig keeps its extension and plugins open) waits for a start when the DAW is closed. Uninstall
   leaves the plugin in Common Files\CLAP (taking it out would need an administrator too).
-  Settings › DAWs can still install or take out the links by hand. A launcher build never does this by itself, and a
-  test plugin put in by hand (`tools/dev/install-test-plugin.ps1`) keeps the app from putting the plugin in too.
+  Each link keeps which version put it in, so one that couldn't be written is tried again later, and a link or plugin
+  you took out stays out. Settings › DAWs can still install or take out the links by hand (and then the look leaves
+  them alone that run). A launcher build never does this by itself, nor does a run whose settings can't be kept, and a
+  test plugin put in by hand (`tools/dev/install-test-plugin.ps1`) keeps the app from putting the plugin in too. The
+  plugin now shows in DAWs as "DAWmate" (its ID is unchanged, so songs that have it still load it).
 - The app also sets the helper's startup line. Uninstall removes that line only when it points at the copy being
   removed.
 

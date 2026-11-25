@@ -1427,10 +1427,16 @@ fn check_daws(app: &AppWindow) {
                 let mut p = p.borrow_mut();
                 let Some(p) = p.as_mut().filter(|p| p.daws_asked == asked) else { return false };
                 p.bitwig = status;
-                p.bw_loaded_from = loaded_from;
+                p.bw_loaded_from = loaded_from.clone();
                 p.daws_checking = false;
                 true
             });
+            // Kept, so the look at a later start updates the copy Bitwig loads even when Bitwig isn't open to say.
+            if let Some(from) = loaded_from
+                && value(mo_app::daw_links::BITWIG_LOADED_FROM_KEY).as_deref() != Some(from.as_str())
+            {
+                remember(mo_app::daw_links::BITWIG_LOADED_FROM_KEY, &from);
+            }
             if let Some(app) = weak.upgrade()
                 && newest
             {
@@ -1485,44 +1491,49 @@ pub(crate) fn find_links(library: &Path, chosen: Option<&str>, loaded_from: Opti
     Links { fl_folders, fl_state, bw_users, bw_folders, bw_source, bw_state }
 }
 
-/// Keeps that this app's version wrote the DAWs' links last, so the installed copy doesn't swap them back at its next
-/// start unless it's newer (`mo_app::daw_links`).
-fn kept_who_wrote_links() {
-    if !remember(mo_app::daw_links::WRITTEN_BY_KEY, env!("CARGO_PKG_VERSION")) {
-        log::warning("Settings", "Couldn't keep which version put the DAWs' links in");
+/// Keeps that this app's version wrote a DAW's link last (`key`: FL Studio's or Bitwig's), so the installed copy
+/// doesn't swap it back at its next start unless it's newer (`mo_app::daw_links`).
+fn kept_who_wrote(key: &str) {
+    if !remember(key, crate::daw_links::VERSION) {
+        log::warning("Settings", "Couldn't keep which version put the DAW's link in");
     }
 }
 
+/// Whether the settings this run changes are kept past it (the file could be read at the start).
+pub(crate) fn writable() -> bool {
+    PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.writable))
+}
+
 /// Logs what installing the FL Studio script did.
-pub(crate) fn log_fl_install(done: &scripts::Installed) {
+pub(crate) fn log_fl_install(done: &scripts::Installed, category: &str) {
     for f in &done.went {
-        log::info("Settings", &format!("Installed the FL Studio script in {}", f.display()));
+        log::info(category, &format!("Installed the FL Studio script in {}", f.display()));
     }
     for (f, why) in &done.failed {
-        log::warning("Settings", &format!("Couldn't install the FL Studio script in {}: {why}", f.display()));
+        log::warning(category, &format!("Couldn't install the FL Studio script in {}: {why}", f.display()));
     }
     for f in &done.removed {
-        log::info("Settings", &format!("Took out the FL Studio script from before the rename, {}", f.display()));
+        log::info(category, &format!("Took out the FL Studio script from before the rename, {}", f.display()));
     }
     for (f, why) in &done.left {
-        log::warning("Settings", &format!("Couldn't take out the older FL Studio script {}: {why}", f.display()));
+        log::warning(category, &format!("Couldn't take out the older FL Studio script {}: {why}", f.display()));
     }
 }
 
 /// Logs what installing the Bitwig extension did.
-pub(crate) fn log_bitwig_install(done: &scripts::BitwigInstalled) {
+pub(crate) fn log_bitwig_install(done: &scripts::BitwigInstalled, category: &str) {
     for f in &done.installed.went {
-        log::info("Settings", &format!("Installed the Bitwig extension in {}", f.display()));
+        log::info(category, &format!("Installed the Bitwig extension in {}", f.display()));
     }
     for f in &done.removed {
         let what = if f.extension().is_some_and(|e| e == "bwextension") { "extension" } else { "script" };
-        log::info("Settings", &format!("Took out the older Bitwig {what} {}", f.display()));
+        log::info(category, &format!("Took out the older Bitwig {what} {}", f.display()));
     }
     for (f, why) in &done.installed.left {
-        log::warning("Settings", &format!("Couldn't take out the older Bitwig copy {}: {why}", f.display()));
+        log::warning(category, &format!("Couldn't take out the older Bitwig copy {}: {why}", f.display()));
     }
     for (f, why) in &done.installed.failed {
-        log::warning("Settings", &format!("Couldn't install the Bitwig extension in {}: {why}", f.display()));
+        log::warning(category, &format!("Couldn't install the Bitwig extension in {}: {why}", f.display()));
     }
 }
 
@@ -1672,13 +1683,15 @@ fn install_fl(app: &AppWindow) {
     show(app);
     let weak = app.as_weak();
     let started = background::spawn("Settings FL install", move || {
+        let writing = crate::daw_links::chosen_by_hand();
         let done = scripts::install_fl(&folders);
-        log_fl_install(&done);
+        drop(writing);
+        log_fl_install(&done, "Settings");
         let note = page::installed_note(&done);
         let wrote = !done.went.is_empty();
         let _ = slint::invoke_from_event_loop(move || {
             if wrote {
-                kept_who_wrote_links();
+                kept_who_wrote(mo_app::daw_links::FL_BY_KEY);
             }
             PAGE.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
@@ -1809,13 +1822,15 @@ fn install_bitwig(app: &AppWindow) {
     show(app);
     let weak = app.as_weak();
     let started = background::spawn("Settings Bitwig install", move || {
+        let writing = crate::daw_links::chosen_by_hand();
         let done = scripts::install_bitwig(&source, &folders, &users);
-        log_bitwig_install(&done);
+        drop(writing);
+        log_bitwig_install(&done, "Settings");
         let note = page::bitwig_installed_note(&done);
         let wrote = !done.installed.went.is_empty();
         let _ = slint::invoke_from_event_loop(move || {
             if wrote {
-                kept_who_wrote_links();
+                kept_who_wrote(mo_app::daw_links::BITWIG_BY_KEY);
             }
             PAGE.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
@@ -1858,7 +1873,9 @@ fn take_out(app: &AppWindow, bitwig: bool) {
     show(app);
     let weak = app.as_weak();
     let started = background::spawn("Settings take out", move || {
+        let writing = crate::daw_links::chosen_by_hand();
         let done = scripts::take_out(&files);
+        drop(writing);
         for f in &done.removed {
             log::info("Settings", &format!("Took the DAW link out: {}", f.display()));
         }

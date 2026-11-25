@@ -19,6 +19,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // Started as administrator to put the CLAP plugin into Common Files\CLAP (mo_ui::daw_links): do it and stop.
     if args.first().is_some_and(|a| a == mo_ui::daw_links::PUT_CLAP_PLUGIN) {
+        log_crashes();
         std::process::exit(mo_ui::daw_links::put_plugin_as_admin());
     }
     // Started by the uninstaller: the app and the helper running from this program are asked to close, and waited

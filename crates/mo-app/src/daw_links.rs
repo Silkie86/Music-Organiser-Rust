@@ -5,16 +5,20 @@
 //! - Only the installed copy does this (`update::installed`): a launcher build, which may be older or newer than it,
 //!   leaves the links to Settings › DAWs, so two copies of the app never take turns putting their own in.
 //! - A link that is there but isn't this copy's own is updated, as Settings › DAWs' Install would, when this app is
-//!   newer than the one that last wrote the links ([`WRITTEN_BY_KEY`], kept by every write, Install's too). So an
+//!   newer than the one that last wrote that link ([`FL_BY_KEY`] and the others, kept by every write that went in,
+//!   Install's too; a link that couldn't be written, because the DAW had it open, is tried again at the next start). So an
 //!   update of the app updates the links, and a newer link put in by hand isn't swapped back for an older one. Only
 //!   the link's own files are written (`mo_dawlink::scripts`), and FL's "Let the app make changes" line stays as the
 //!   user set it.
 //! - A link that isn't there goes in only at the first look ([`FIRST_LOOK_KEY`]), and only into a DAW whose user
 //!   folder is there. After that it's the user's choice: one taken out with Take out stays out.
 //! - The CLAP plugin the installer put beside the app goes into `Common Files\CLAP` the same way (Solomon picked that
-//!   folder, with Windows' Yes): Windows asks once for each version, never while a DAW has the plugin open, and not
-//!   again for a version you said no to. A test plugin put in by hand (the same plugin: a DAW would list it twice)
-//!   keeps the app from putting it in.
+//!   folder, with Windows' Yes): put in whenever it isn't there and no version has put it in yet ([`plugin_step`]),
+//!   updated as the links are. Windows asks once for each version, never while a DAW has the plugin loaded, not again
+//!   for a version you said no to, and after a step that failed only on another day. A test plugin put in by hand
+//!   (the same plugin: a DAW would list it twice) keeps the app from putting it in.
+//! - None of this runs when the settings can't be kept (what it did would be forgotten and done again), or after
+//!   Install or Take out on Settings › DAWs in this run (that's your choice).
 //!
 //! Nothing here asks: a copy the DAW has open (Bitwig on Windows) can't be replaced, so the update waits for a start
 //! when the DAW is closed, and Settings › DAWs still offers Install.
@@ -26,11 +30,27 @@ use crate::update::Version;
 /// The app's own setting kept once the first look at the DAWs has been made (so links only go in by themselves once).
 pub const FIRST_LOOK_KEY: &str = "daw_links_first_look";
 
+/// The app's own settings with the version of the app that last put each link in (FL Studio's script, Bitwig's
+/// extension, the CLAP plugin): kept for each one only when it went in, by the look or by Settings › DAWs' Install.
+pub const FL_BY_KEY: &str = "daw_links_fl_by";
+pub const BITWIG_BY_KEY: &str = "daw_links_bitwig_by";
+pub const PLUGIN_BY_KEY: &str = "daw_links_plugin_by";
+
 /// The app's own setting with the version whose CLAP plugin you said no to putting in (Windows asks for each version).
 pub const PLUGIN_DECLINED_KEY: &str = "daw_links_plugin_declined";
 
-/// The app's own setting with the version of the app that last put a link into a DAW.
-pub const WRITTEN_BY_KEY: &str = "daw_links_written_by";
+/// The app's own setting with the version and day the administrator step last couldn't put the plugin in: it's tried
+/// again on another day, not at every start.
+pub const PLUGIN_FAILED_KEY: &str = "daw_links_plugin_failed";
+
+/// The app's own setting with the Extensions folder Bitwig was last seen loading the extension from (the link's
+/// `loadedFrom`), so the look updates that copy too when Bitwig isn't open to say.
+pub const BITWIG_LOADED_FROM_KEY: &str = "bitwig_loaded_from";
+
+/// What [`PLUGIN_FAILED_KEY`] keeps: the version, a space, the day.
+pub fn failed_mark(version: &str, day: &str) -> String {
+    format!("{version} {day}")
+}
 
 /// Whether this app (`this`, its version) is newer than the one that last wrote the links. True when none is kept,
 /// or it can't be read.
@@ -58,6 +78,16 @@ pub fn step(state: ScriptState, first_look: bool, daw_there: bool, newer: bool) 
     match state {
         ScriptState::Outdated if newer => Step::Update,
         ScriptState::NotInstalled if first_look && daw_there => Step::PutIn,
+        _ => Step::Leave,
+    }
+}
+
+/// What to do with the CLAP plugin: put in when it isn't there and no version has put it in yet (`put_in_before`:
+/// [`PLUGIN_BY_KEY`] is kept), so one you took out stays out; updated when this app is newer than the one that wrote it.
+pub fn plugin_step(state: ScriptState, put_in_before: bool, newer: bool) -> Step {
+    match state {
+        ScriptState::Outdated if newer => Step::Update,
+        ScriptState::NotInstalled if !put_in_before => Step::PutIn,
         _ => Step::Leave,
     }
 }
@@ -171,6 +201,17 @@ mod tests {
         assert_eq!(step(ScriptState::NotInstalled, false, true, true), Step::Leave);
         // No FL Studio or Bitwig folder on this computer.
         assert_eq!(step(ScriptState::NotInstalled, true, false, true), Step::Leave);
+    }
+
+    #[test]
+    fn the_plugin_goes_in_until_a_version_has_put_it_in() {
+        assert_eq!(plugin_step(ScriptState::NotInstalled, false, false), Step::PutIn);
+        // Put in once, then taken out: it stays out.
+        assert_eq!(plugin_step(ScriptState::NotInstalled, true, true), Step::Leave);
+        assert_eq!(plugin_step(ScriptState::Outdated, true, true), Step::Update);
+        assert_eq!(plugin_step(ScriptState::Outdated, true, false), Step::Leave);
+        assert_eq!(plugin_step(ScriptState::Installed, false, true), Step::Leave);
+        assert_eq!(failed_mark("1.0.0", "2026-11-25"), "1.0.0 2026-11-25");
     }
 
     #[test]
