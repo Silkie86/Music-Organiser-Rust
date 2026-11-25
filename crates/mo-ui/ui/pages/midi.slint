@@ -1155,11 +1155,16 @@ export component MidiPage inherits Rectangle {
                             turned: lines.content-y;
                             after: lines.row-height;
                             to-top => { lines.to-top(); }
+                            // Its scroll bar (the list's own is off).
+                            whole: lines.rows * lines.row-height;
+                            seen: lines.visible-height;
+                            scroll-to(y) => { lines.scroll-to(y); }
                             VerticalLayout {
                                 ListHeading {
                                     tight: area.list-width < 620px;
                                 }
                                 lines := ListView {
+                                    own-bar: true;
                                     row-height: 52px;
                                     rows: MidiData.lines.length;
                                     show-top: MidiData.show-row * self.row-height;

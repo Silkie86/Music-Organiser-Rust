@@ -3,7 +3,7 @@
 // (i-slint-compiler object_tree.rs, "Custom ListView is OK"), so this one keeps the name. Nothing else may go in one,
 // so the button that takes a list back to its top goes round it, in a `ListBox`.
 import { ListView as SlintListView } from "std-widgets.slint";
-import { AppKeys, Icons, Motion, Space, StudioButton, Theme } from "studio.slint";
+import { AppKeys, Icons, Motion, ScrollRail, Space, StudioButton, Theme } from "studio.slint";
 
 // How wide a page's list of lines gets at most. In a wider window (Solomon's is 3440 across) the list stops here: a
 // line's name and its numbers stay within one look of each other, where they used to end up a screen apart (the UX
@@ -42,6 +42,9 @@ export component ListView inherits SlintListView {
     in property <length> place-y;
     in property <int> place-ask;
     in-out property <int> place-done;
+    // Off where a `ListBox` draws the list's scroll bar instead of Slint's thin one.
+    in property <bool> own-bar;
+    vertical-scrollbar-policy: self.own-bar ? ScrollBarPolicy.always-off : ScrollBarPolicy.as-needed;
 
     // Until the list has laid out the lines it was just given, its height is still the old lines' height: a turn then
     // stopped short, or with fewer lines left none drawn (7 Nov). So a turn waits for them. A list just made has its
@@ -110,6 +113,13 @@ export component ListView inherits SlintListView {
         self.content-y = 0px;
     }
 
+    // Turned to `y` (a `content-y`) by a `ListBox`'s scroll bar: like your own scroll, it ends the wait for a far
+    // turn's second turn first, so that turn can't pull it back.
+    public function scroll-to(y: length) {
+        self.turn-to = 1px;
+        self.content-y = y;
+    }
+
     // Turns only when the line is out of sight. A list just made comes back where it was first, and turns from there.
     function turn() {
         if (self.back-now) {
@@ -165,6 +175,12 @@ export component ListBox inherits Rectangle {
     in property <length> after;
     // Puts the list back at its top (`ListView.to-top`).
     callback to-top();
+    // For its scroll bar: how tall all the lines are (the list's `rows * row-height`: its content-height is stale
+    // until it has laid them out), how much of them is in sight (its `visible-height`), and a turn to a `content-y`
+    // (`ListView.scroll-to`). The list sets `own-bar`, so Slint's bar is off. With no `whole`, there's no bar of ours.
+    in property <length> whole;
+    in property <length> seen;
+    callback scroll-to(length);
     // Bumped by the Home key. Only a list on show is there to see it change.
     property <int> asked: AppKeys.list-top;
     changed asked => {
@@ -173,10 +189,22 @@ export component ListBox inherits Rectangle {
 
     @children
 
+    // The list's own scroll bar (the shared one), over the list's right edge.
+    rail := ScrollRail {
+        x: root.width - self.width;
+        y: root.height - root.seen;
+        height: root.seen;
+        whole: root.whole;
+        seen: root.seen;
+        turned: root.turned;
+        line: root.after;
+        scroll-to(y) => { root.scroll-to(y); }
+    }
+
     Rectangle {
         property <bool> wanted: -root.turned > root.after;
-        // Left of the list's scroll bar (14px in Slint's look).
-        x: root.width - self.width - 14px - Space.md;
+        // Left of the list's scroll bar.
+        x: root.width - self.width - rail.width - Space.md;
         y: root.height - self.height - Space.md;
         // A StudioButton with an icon is this square.
         width: 32px;

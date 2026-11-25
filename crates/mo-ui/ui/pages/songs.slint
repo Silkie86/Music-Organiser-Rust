@@ -1155,6 +1155,10 @@ export component SongsPage inherits Rectangle {
                                 turned: list.content-y;
                                 after: list.row-height;
                                 to-top => { list.to-top(); }
+                                // Its scroll bar (the list's own is off).
+                                whole: list.rows * list.row-height;
+                                seen: list.visible-height;
+                                scroll-to(y) => { list.scroll-to(y); }
                                 VerticalLayout {
                                     // The list or Next up, then the headings, which order the list: a click goes by that
                                     // column, a second turns it round.
@@ -1202,6 +1206,7 @@ export component SongsPage inherits Rectangle {
                                         }
                                     }
                                     list := ListView {
+                                        own-bar: true;
                                         horizontal-stretch: 1;
                                         row-height: SongsData.line-height;
                                         rows: SongsData.lines.length;
