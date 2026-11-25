@@ -137,7 +137,9 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
             writable,
             unsaved: false,
             drafts: HashMap::new(),
-            to_try: false,
+            // On from the start, so a step marked Works leaves the list (Solomon, 25 Nov: "the list shrinks when I've
+            // confirmed it's working"); the chip shows every step again. The screenshots show every step.
+            to_try: live,
             checking: false,
             message,
             model,
