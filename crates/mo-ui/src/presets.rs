@@ -2874,6 +2874,9 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
     });
     let (shapes, mut looked_in) = shapes;
     looked_in.extend(library_roots);
+    // Only the folders that could still be listed after the look: one that went away meanwhile (and so gave no
+    // files, or only some) counts as away, and its curves are kept.
+    looked_in.retain(|f| std::fs::read_dir(f).is_ok());
     paths.extend(library);
     paths.extend(shapes);
     let now = std::time::SystemTime::now()
@@ -2886,7 +2889,15 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
     }
     let (changed, gone) =
         db.out_of_date_in(&paths, folders).map_err(|e| format!("Couldn't read the curves: {}", e.0))?;
+    // Said at every read, so a start with a moved folder's link leading nowhere shows in the log.
+    let say_away = |db: &CurvesDb| match db.folders_away() {
+        Ok(away) => away.iter().for_each(|folder| {
+            log::info("Curves", &format!("{folder} wasn't looked through this time: the curves found in it are kept"));
+        }),
+        Err(e) => log::warning("Curves", &format!("Couldn't read which folders are away: {}", e.0)),
+    };
     if changed.is_empty() && !gone {
+        say_away(&db);
         return db.list().map(with_keys).map_err(|e| format!("Couldn't read the curves: {}", e.0));
     }
     // How far it's got, on the header, while the saves are read.
@@ -2918,10 +2929,7 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
     match scanned {
         Ok(n) => {
             log::info("Curves", &format!("Read {n} saves for their curves"));
-            // Said, so a start with a moved folder's link leading nowhere shows in the log.
-            for folder in db.folders_away().unwrap_or_default() {
-                log::info("Curves", &format!("{folder} isn't there just now: the curves found in it are kept"));
-            }
+            say_away(&db);
         }
         Err(e) => log::warning("Curves", &format!("Couldn't read every save for its curves: {}", e.0)),
     }
