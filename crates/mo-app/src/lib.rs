@@ -75,6 +75,7 @@ pub mod sounds;
 pub mod space;
 pub mod space_bin;
 pub mod space_bitwig;
+pub mod space_bitwig_kept;
 pub mod space_fix_note;
 pub mod space_old;
 pub mod space_plugins;

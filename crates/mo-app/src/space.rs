@@ -335,9 +335,10 @@ pub const APP_FILES: &str = "app-files";
 
 /// The caches the app keeps in its data folder, by name: each made again if it goes, and each held to a limit (rule
 /// 28). Counted on the App files card as one part of their own ([`app_databases`]).
-const CACHE_FILES: [&str; 8] = [
+const CACHE_FILES: [&str; 9] = [
     mo_sounds::copies::FILE_NAME,
     mo_space::prints::FILE_NAME,
+    crate::space_bitwig_kept::FILE_NAME,
     crate::song_room::SPACE_PRINTS,
     crate::song_room::BACKUP_PRINTS,
     mo_library::list_copy::FILE_NAME,

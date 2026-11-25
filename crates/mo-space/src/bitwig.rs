@@ -42,7 +42,7 @@ fn own_folder(name: &str) -> bool {
 
 /// A project's copy that's the same as a Library file. It was the same byte for byte when looked at: whatever acts on
 /// it (the converter, then the Recycle Bin) compares the two again first.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LibraryCopy {
     /// The copy in the project's `multi-samples` folder, or a single sample in its `samples` folder.
     pub in_project: String,
@@ -379,7 +379,7 @@ pub fn documents() -> Option<PathBuf> {
 
 /// One of the Bitwig projects in a project folder: one of your saves beside the project, or one in a folder below it
 /// (Bitwig's auto-backups).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Save {
     pub path: PathBuf,
     /// When it was last saved, when that can be read.

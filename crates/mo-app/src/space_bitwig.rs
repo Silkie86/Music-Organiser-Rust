@@ -87,7 +87,7 @@ pub const REMOVING_FIXED: &str = if cfg!(windows) {
 };
 
 /// A Bitwig project folder with copies of Library multisamples in it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     pub folder: PathBuf,
     /// The copies in its `multi-samples` and `samples` folders that are the same as a Library multisample or a sound the
@@ -160,7 +160,7 @@ const SEPARATORS: [char; 2] = ['\\', '/'];
 
 /// What a look found: the Library folders the copies were compared with, how many project folders keep copies of
 /// multisamples, and each project with copies that are the same as a Library file, biggest first.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Copies {
     pub library: Vec<PathBuf>,
     pub folders: usize,
@@ -362,6 +362,29 @@ pub fn line(found: Option<&Copies>, looking: Option<(usize, usize)>) -> Option<(
         (None, Some(at)) => Some((0, line(looking_words(at), "Measuring…".to_owned()))),
         _ => None,
     }
+}
+
+/// What the card says when what it shows is an earlier run's ([`crate::space_bitwig_kept`]), found at `from`: when
+/// it's from, and that it's being checked (`checking`: a look is on) or how to check it.
+pub fn from_words(from: SystemTime, checking: bool) -> String {
+    let when = chrono::DateTime::<chrono::Local>::from(from).format("%-d %b, %H:%M");
+    if checking {
+        format!("As found {when}. Checking again…")
+    } else {
+        format!("As found {when}. Measure again checks it.")
+    }
+}
+
+/// Marks the Bitwig line as an earlier run's, found at `from`.
+pub fn mark_line(line: &mut Line, from: SystemTime) {
+    let when = chrono::DateTime::<chrono::Local>::from(from).format("%-d %b, %H:%M");
+    line.why = format!("{}, as found {when}", line.why);
+}
+
+/// Marks the Bitwig card as an earlier run's, found at `from` ([`from_words`]).
+pub fn mark_card(card: &mut Card, from: SystemTime, checking: bool) {
+    let words = from_words(from, checking);
+    card.big_note = if card.big_note.is_empty() { words } else { format!("{}. {words}", card.big_note) };
 }
 
 /// What the page says under Biggest wins first about Bitwig copies: why there's no Bitwig line when a look found
