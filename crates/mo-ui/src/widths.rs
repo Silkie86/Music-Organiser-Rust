@@ -82,6 +82,7 @@ fn give(app: &AppWindow, name: &str, width: f32) {
         "songs.filters" => app.global::<crate::Widths>().set_songs_filters(width),
         "sounds.folders" => app.global::<crate::Widths>().set_sounds_folders(width),
         "songs.list" => app.global::<crate::Widths>().set_songs_list(width),
+        "curves.list" => app.global::<crate::Widths>().set_curves_list(width),
         _ => debug_assert!(false, "no page has a part called {name}"),
     }
 }

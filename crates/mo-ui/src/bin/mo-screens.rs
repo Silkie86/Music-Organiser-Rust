@@ -1657,6 +1657,23 @@ fn wide_shots(
         image::save_buffer(&path, &pixels, WIDE.0, WIDE.1, image::ExtendedColorType::Rgb8)?;
         println!("{}", path.display());
     }
+    // A card dragged narrower than it's shown in a wide window (his F12 notes of 25 Nov, 10:03: every card but the
+    // song's stuck): the list grows past its usual widest to take the room, instead of the card staying as it was.
+    show_place(app, Place::Presets);
+    let presets = app.global::<mo_ui::PresetsData>();
+    let kept = presets.get_panel_width();
+    capture_sized(window, WIDE, Duration::from_millis(400));
+    let usual = capture_sized(window, WIDE, Duration::from_millis(400));
+    presets.set_panel_width(kept + 300.0);
+    capture_sized(window, WIDE, Duration::from_millis(400));
+    let narrower = capture_sized(window, WIDE, Duration::from_millis(400));
+    presets.set_panel_width(kept);
+    if usual == narrower {
+        return Err("wide-presets-card-dragged.png: a card dragged to 300 px over its usual width looks the same in a wide window".into());
+    }
+    let path = out.join("wide-presets-card-dragged.png");
+    image::save_buffer(&path, &narrower, WIDE.0, WIDE.1, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
     window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     Ok(())
 }
