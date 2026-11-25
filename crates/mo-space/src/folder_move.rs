@@ -1228,6 +1228,66 @@ pub(crate) fn leads_to(path: &str, to: &Path) -> bool {
     }
 }
 
+/// What the computer says of a link that [`leads_to`] finds doesn't lead to `to`, for the log, to tell why: where the
+/// link points, as it's kept in the link; where opening through it ends up, and where `to` really is (the two
+/// [`leads_to`] compares); how many things each lists; and whether the two are one folder by the numbers the computer
+/// gives each ([`identity`]), which needs no names. Each is what the computer gave, or its error. (Solomon's log of 25
+/// Nov 2026: every moved folder's link failed [`leads_to`], even one Link again had just made, while each copy was
+/// there.)
+pub fn lead_report(path: &str, to: &Path) -> String {
+    let said = |r: io::Result<String>| r.unwrap_or_else(|e| format!("an error ({e})"));
+    let found = |p: &Path| said(fs::read_dir(p).map(|d| d.count().to_string()));
+    let same = match (identity(Path::new(path)), identity(to)) {
+        (Ok(a), Ok(b)) if a == b => "the same folder".to_owned(),
+        (Ok(_), Ok(_)) => "two different folders".to_owned(),
+        (Err(e), _) | (_, Err(e)) => format!("an error ({e})"),
+    };
+    format!(
+        "The link points to {}. Opened through it, the folder is {}; the copy is {}. Listed: {} through the link, {} \
+         in the copy. By the numbers the computer gives each: {same}.",
+        said(fs::read_link(path).map(|p| text(&p))),
+        said(fs::canonicalize(path).map(|p| text(&p))),
+        said(fs::canonicalize(to).map(|p| text(&p))),
+        found(Path::new(path)),
+        found(to),
+    )
+}
+
+/// Which folder (or file) a path opens, following any links on the way, by the numbers the computer gives it: its
+/// drive's serial number and its own number on that drive. The same numbers are the same folder, whatever names lead
+/// to it ([`lead_report`]).
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn identity(path: &Path) -> io::Result<(u32, u64)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, GetFileInformationByHandle,
+    };
+    // Opened only to read its details; a folder opens only with "backup" meaning (as `fs::canonicalize` opens one).
+    let open =
+        fs::OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle stays open while `open` lives, and the call only fills `info`.
+    if unsafe { GetFileInformationByHandle(open.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((info.dwVolumeSerialNumber, (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
+}
+
+/// Which folder (or file) a path opens, following any links on the way: its drive's number and its own number there.
+#[cfg(unix)]
+fn identity(path: &Path) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).map(|m| (m.dev(), m.ino()))
+}
+
+/// Elsewhere there's nothing to tell folders apart by.
+#[cfg(not(any(windows, unix)))]
+fn identity(_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "no folder numbers here"))
+}
+
 /// Whether the old copy beside the link can go: the link is there and leads to the copy on the other drive, and that
 /// copy is there. Not when the drive is unplugged or the copy was moved or renamed (then the old copy is the only one
 /// the plugin could use), nor when an update put a real folder back where the link was.

@@ -103,6 +103,12 @@ struct Page {
     looked_for_half_copies: bool,
     /// The moved folders whose link doesn't work, as the last look found them (the whole-app review of 19 Nov, PM-2).
     broken: Vec<mo_app::plugins::links::Broken>,
+    /// What the last Link again said of each one it couldn't put right, by where its link is (`links::tried`), for
+    /// its chip's tooltip.
+    link_tried: std::collections::BTreeMap<String, String>,
+    /// The chips the line shows now: the list is only given new ones when they change, so a chip under the mouse (and
+    /// its tooltip) stays while the page fills for a pick (the 25 Nov review; as FS-4's `cards::show`).
+    link_chips: Vec<mo_app::plugins::links::Chip>,
     /// Link again's Stop while it runs.
     linking: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -1236,9 +1242,14 @@ pub fn show_sample(app: &AppWindow, plugins: Plugins, row: Option<usize>, tab: i
     copies_arrived(app, asked, copies);
 }
 
-/// For the screenshots: the line naming the moved folders whose link doesn't work, for these.
-pub fn show_links_sample(app: &AppWindow, broken: Vec<mo_app::plugins::links::Broken>) {
-    links::show_sample(app, broken);
+/// For the screenshots: the line naming the moved folders whose link doesn't work, for these, with what the last Link
+/// again said of some (by where their link is).
+pub fn show_links_sample(
+    app: &AppWindow,
+    broken: Vec<mo_app::plugins::links::Broken>,
+    tried: std::collections::BTreeMap<String, String>,
+) {
+    links::show_sample(app, broken, tried);
 }
 
 /// For the screenshots: the picked plugin's Clean up list as it would show, from made-up lines (path, kind, size, why

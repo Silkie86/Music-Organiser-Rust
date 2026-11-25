@@ -462,12 +462,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::plugins::show_sample(&app, plugins, massive, 0, &[]);
     capture(&window);
     shots.push(("plugins-missing.png".into(), capture(&window)));
-    // Two moved folders whose link stopped working (the whole-app review of 19 Nov, PM-2): one whose drive came back
-    // under another letter, and one an update put a real folder back in place of, with Link again.
-    mo_ui::plugins::show_links_sample(&app, sample_broken_links());
+    // Moved folders whose link stopped working (the whole-app review of 19 Nov, PM-2), each a chip with a sign for
+    // what's wrong (Solomon, 24 Nov 2026): one whose link leads elsewhere, one whose drive came back under another
+    // letter, one an update put a real folder back in place of, a second copy, and one whose drive isn't plugged in;
+    // Link again as a sign.
+    let (broken, tried) = sample_broken_links();
+    mo_ui::plugins::show_links_sample(&app, broken, tried);
     capture(&window);
     shots.push(("plugins-links.png".into(), capture(&window)));
-    mo_ui::plugins::show_links_sample(&app, Vec::new());
+    mo_ui::plugins::show_links_sample(&app, Vec::new(), std::collections::BTreeMap::new());
     // Kontakt 7's Clean up list: its sound library ticked, its presets waiting for a tick, one library kept.
     mo_ui::plugins::show_sample(&app, sample_plugins().0, kontakt, 1, &[]);
     mo_ui::plugins::show_clean_sample(
@@ -3911,9 +3914,9 @@ fn sample_detail() -> mo_library::SaveDetail {
 /// with an error.
 const SHOW_BUTTON: (f32, f32) = (1296.0, 342.0);
 
-/// Made-up moved folders whose link doesn't work, as the Plugins page names them: one whose drive may have come back
-/// under another letter, and one an update put a real folder back in place of.
-fn sample_broken_links() -> Vec<mo_app::plugins::links::Broken> {
+/// Made-up moved folders whose link doesn't work, one of each kind the Plugins page shows with its own sign, and what
+/// the last Link again said of one (by where its link is).
+fn sample_broken_links() -> (Vec<mo_app::plugins::links::Broken>, std::collections::BTreeMap<String, String>) {
     use mo_app::plugins::links::{Broken, Trouble};
     let moved = |from: &str, to: &str| mo_space::folder_move::MovedFolder {
         from: from.to_owned(),
@@ -3930,7 +3933,9 @@ fn sample_broken_links() -> Vec<mo_app::plugins::links::Broken> {
         now_on: r"F:\".to_owned(),
         to: r"F:\Plugin Data\Arcade".to_owned(),
     };
-    vec![
+    let vital = r"C:\Users\you\Documents\Vital";
+    let broken = vec![
+        Broken { moved: moved(vital, r"E:\Plugin Data\Vital"), trouble: Trouble::LeadsElsewhere },
         Broken {
             moved: moved(r"C:\Users\you\Documents\Output\Arcade", r"E:\Plugin Data\Arcade"),
             trouble: Trouble::OnAnotherDrive(elsewhere),
@@ -3939,7 +3944,17 @@ fn sample_broken_links() -> Vec<mo_app::plugins::links::Broken> {
             moved: moved(r"C:\ProgramData\Spectrasonics\STEAM", r"E:\Plugin Data\STEAM"),
             trouble: Trouble::Replaced,
         },
-    ]
+        Broken {
+            moved: moved(r"C:\Users\you\Documents\Native Instruments\Kontakt 7", r"E:\Plugin Data\Kontakt 7"),
+            trouble: Trouble::Doubled("Native Instruments".to_owned()),
+        },
+        Broken {
+            moved: moved(r"C:\Users\you\Documents\u-he\Hive.data", r"G:\Plugin Data\Hive.data"),
+            trouble: Trouble::CopyAway { drive_away: true },
+        },
+    ];
+    let said = r"The link was made but doesn't reach E:\Plugin Data\Vital, so the old one is back.";
+    (broken, std::collections::BTreeMap::from([(mo_space::key(vital), said.to_owned())]))
 }
 
 /// Made-up songs and plugins for the Plugins page: some missing, some unused for years, one measured library.

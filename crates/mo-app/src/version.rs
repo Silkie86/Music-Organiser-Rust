@@ -23,9 +23,10 @@ pub fn log_header_of(what: &str, start: chrono::DateTime<chrono::Local>) -> Stri
     let folder =
         std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.display().to_string())).unwrap_or_default();
     format!(
-        "{what} started {}\n  Version:    {}\n  Build:      {build}\n  Watched by: {watched}\n  System:     {} {}\n  Folder:     {folder}",
+        "{what} started {}\n  Version:    {}\n  Build:      {build}\n  Rust:       {}\n  Watched by: {watched}\n  System:     {} {}\n  Folder:     {folder}",
         start.format("%Y-%m-%d %H:%M:%S %:z"),
         version(),
+        env!("MO_RUSTC"),
         std::env::consts::OS,
         std::env::consts::ARCH,
     )

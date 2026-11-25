@@ -16,7 +16,9 @@ use mo_space::after_move::{
     real_place, remove_old_home, replaced, repoint,
 };
 use mo_space::clean::{Bin, Problem, Removed};
-use mo_space::folder_move::{CantMove, Drives, MovedFolder, move_back, move_folder, only_in_old_copy, remove_old_copy};
+use mo_space::folder_move::{
+    CantMove, Drives, MovedFolder, lead_report, move_back, move_folder, only_in_old_copy, remove_old_copy,
+};
 use mo_space::half_copy::MARKER;
 use mo_space::key;
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
@@ -242,6 +244,56 @@ fn linking_again_names_a_folder_the_update_has_a_link_in_the_place_of() {
     assert!(is_link(&steam) && !is_link(&d.join("STEAM").join("Kits")));
     assert_eq!(read(&steam.join("Kits/kick.wav")), "mine");
     assert_eq!(read(&f.join("Kits/kick.wav")), "the update's");
+}
+
+/// Solomon's log of 25 Nov 2026: every moved folder's link failed the check that it leads to its copy, even one Link
+/// again had just made, while each copy was there. What the computer says of each side goes in the log, to tell why:
+/// where the link points, where opening through it ends up and where the copy is (the two the check compares), what
+/// each lists, and whether the two are one folder by the numbers the computer gives each; or the computer's error for
+/// any of them. On Windows the link is a junction, as a move makes it.
+#[test]
+fn what_the_computer_says_of_a_link_and_its_copy_is_told() {
+    let dir = fixtures("mo-space-after-lead-report");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    write(&d, "Plugin Data/Vital/a.vital", "a");
+    write(&d, "Plugin Data/Vital/b.vital", "b");
+    write(&d, "Plugin Data/Other/c.vital", "c");
+    fs::create_dir_all(&c).unwrap();
+    let (copy, at) = (d.join("Plugin Data").join("Vital"), c.join("Vital"));
+    folder_link(&copy, &at);
+    let said = lead_report(&s(&at), &copy);
+    // Both sides are the same folder (the check compares them as they are here, letter case and all).
+    let real_copy = s(&real(&copy));
+    assert!(
+        said.contains(&format!("Opened through it, the folder is {real_copy}; the copy is {real_copy}.")),
+        "{said}"
+    );
+    assert!(said.contains(" Listed: 2 through the link, 2 in the copy. "), "{said}");
+    assert!(said.ends_with("By the numbers the computer gives each: the same folder."), "{said}");
+    // The link names where it points ("\\?\" first on Windows, as it keeps it).
+    assert!(said.starts_with("The link points to ") && said.contains("Vital. Opened"), "{said}");
+
+    // A link to another folder.
+    unlink(&at);
+    let other = d.join("Plugin Data").join("Other");
+    folder_link(&other, &at);
+    let said = lead_report(&s(&at), &copy);
+    let real_other = s(&real(&other));
+    assert!(said.contains(&format!("the folder is {real_other}; the copy is {real_copy}.")), "{said}");
+    assert!(said.contains(" Listed: 1 through the link, 2 in the copy. "), "{said}");
+    assert!(said.ends_with(": two different folders."), "{said}");
+
+    // A link to a folder that isn't there: opening through it and listing it give the computer's error.
+    unlink(&at);
+    folder_link(&d.join("Not there"), &at);
+    let said = lead_report(&s(&at), &copy);
+    assert!(said.contains("Not there. Opened through it, the folder is an error ("), "{said}");
+    assert!(said.contains(&format!("; the copy is {real_copy}. Listed: an error (")), "{said}");
+    assert!(said.contains(", 2 in the copy. By the numbers the computer gives each: an error ("), "{said}");
+    // And where nothing is at all, not even a link.
+    unlink(&at);
+    let said = lead_report(&s(&at), &copy);
+    assert!(said.starts_with("The link points to an error ("), "{said}");
 }
 
 #[test]

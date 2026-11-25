@@ -1,5 +1,5 @@
 // Puts the commit the app was built from into its version line, so a log or an F12 note says exactly which build ran,
-// and the app's name and the words around it from product.toml (mo_app::product).
+// and the Rust that built it, and the app's name and the words around it from product.toml (mo_app::product).
 
 #[path = "product_toml.rs"]
 mod product_toml;
@@ -17,6 +17,19 @@ fn main() {
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+
+    // The Rust that built it, for the log's first lines ("Rust:", a line of its own: the self-check reads "Build:"):
+    // how the standard library looks at files can change from one Rust to the next (Solomon's log of 25 Nov 2026:
+    // every moved folder's link failed a check that had passed). A new Rust builds everything again, this with it.
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let rust = std::process::Command::new(rustc)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        .unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=MO_RUSTC={rust}");
 
     let here = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());
     let file = product_toml::path(&here);

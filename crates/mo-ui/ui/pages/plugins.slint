@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, NoticeStrip, SearchBox, ToggleChip, TickBox, FilterPicks, FilterList, FilterColumn, FilterView, ListLine, CutText, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar, Icons } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, NoticeStrip, SearchBox, ToggleChip, TickBox, FilterPicks, FilterList, FilterColumn, FilterView, ListLine, CutText, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar, Icons, SignChip } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -20,6 +20,16 @@ export struct PluginListLine {
     size: string,
     // 0 installed, 1 missing, 2 installed but unused.
     state: int,
+}
+
+// A moved folder whose link doesn't work, on the line above the list (the whole-app review of 19 Nov, PM-2): its
+// folder's name and a sign for what's wrong (`Icons.named`: unlinked, away, folder or copy), all of it, with the paths,
+// in its tooltip (Solomon, 24 Nov 2026: a clear sign, the explanation in a tooltip). Past a dozen, the last one counts
+// the rest ("+4"), with no sign, and names them in its tooltip.
+export struct LinkTrouble {
+    name: string,
+    icon: string,
+    tip: string,
 }
 
 // An "Install these" card: a missing plugin and how many songs it helps open.
@@ -119,8 +129,11 @@ export global PluginsData {
     in property <bool> can-clear-half-copies;
     callback clear-half-copies();
     // The moved folders whose link doesn't work (lost, or a real folder back where it was), with Link again, and Stop
-    // while it runs (the whole-app review of 19 Nov, PM-2).
-    in property <string> link-text;
+    // while it runs (the whole-app review of 19 Nov, PM-2): how many ("9 moved folders' links need a look:"), each one
+    // as a chip, and what Link again does, for its tooltip.
+    in property <string> link-head;
+    in property <[LinkTrouble]> links;
+    in property <string> link-tip;
     in property <bool> can-link-again;
     in property <bool> linking;
     callback link-again();
@@ -850,22 +863,35 @@ export component PluginsPage inherits Rectangle {
                 }
             }
         }
-        if PluginsData.link-text != "": HorizontalLayout {
+        // How many moved folders' links need a look, each one a chip with a sign for what's wrong (all of it in its
+        // tooltip), and Link again (Stop while it runs) as a sign with its words in its tooltip.
+        if PluginsData.link-head != "": HorizontalLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
-            Text {
-                text: PluginsData.link-text;
-                color: Theme.warning;
-                font-size: Type.meta;
-                wrap: word-wrap;
-                min-width: 0px;
+            FlexboxLayout {
                 horizontal-stretch: 1;
+                spacing-horizontal: Space.xs;
+                spacing-vertical: Space.xs;
+                cross-axis-alignment: center;
+                Text {
+                    text: PluginsData.link-head;
+                    color: Theme.warning;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                }
+                for trouble in PluginsData.links: SignChip {
+                    text: trouble.name;
+                    icon: trouble.icon;
+                    tip: trouble.tip;
+                }
             }
             if PluginsData.can-link-again || PluginsData.linking: VerticalLayout {
                 alignment: center;
-                LinkText {
-                    text: PluginsData.linking ? "Stop" : "Link again";
-                    font-size: Type.meta;
+                // Its own sign, not Measure again's: this one changes what's on the disk (the 25 Nov review).
+                StudioButton {
+                    width: 32px;
+                    icon: PluginsData.linking ? Icons.stop : Icons.link;
+                    tip: PluginsData.linking ? "Stop linking again" : PluginsData.link-tip;
                     clicked => {
                         if (PluginsData.linking) {
                             PluginsData.stop-linking();

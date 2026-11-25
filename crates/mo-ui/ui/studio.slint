@@ -2226,6 +2226,48 @@ export component TagChip inherits HorizontalLayout {
     }
 }
 
+// A small pill in a colour (the warning colour unless given): a drawn sign (an `Icons.named` name, or none) and a word
+// or two, all else in its tooltip. For a few things that each need a look, like the Plugins page's moved folders whose
+// link doesn't work (Solomon, 24 Nov 2026: a clear sign rather than words, the explanation in a tooltip).
+export component SignChip inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <string> tip;
+    in property <color> tint: Theme.warning;
+    height: 22px;
+    border-radius: self.height / 2;
+    background: touch.has-hover ? root.tint.transparentize(75%) : root.tint.transparentize(88%);
+    HorizontalLayout {
+        padding-left: Space.sm;
+        padding-right: Space.sm;
+        spacing: Space.xs;
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            Path {
+                width: 14px;
+                height: 14px;
+                viewbox-width: 16;
+                viewbox-height: 16;
+                commands: Icons.named(root.icon);
+                stroke: root.tint;
+                stroke-width: 1.5px;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.tint;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea { }
+    Tip {
+        text: root.tip;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
+    }
+}
+
 // A small box to type a word or two into on a card, like a new tag: its hint shows while it's empty, Enter says it's
 // done, and Esc clears what's typed (then goes on to the app's keys). Its key (Ctrl+T for a tag) shows in its tooltip,
 // as keys never show on the page.
@@ -2559,6 +2601,12 @@ export global Icons {
     out property <string> clear: "M 4 4 L 12 12 M 12 4 L 4 12";
     // An i in a ring: how this works (its words in the tooltip).
     out property <string> info: "M 14.5 8 A 6.5 6.5 0 1 1 1.5 8 A 6.5 6.5 0 1 1 14.5 8 M 8 7 L 8 11.5 M 8 4.4 L 8 4.6";
+    // A chain link: link again (a moved folder's link, on the Plugins page).
+    out property <string> link: "M 6 11.3 L 4.7 11.3 A 3.3 3.3 0 0 1 4.7 4.7 L 6 4.7 M 10 4.7 L 11.3 4.7 A 3.3 3.3 0 0 1 11.3 11.3 L 10 11.3 M 5.3 8 L 10.7 8";
+    // A chain link struck through: a link that doesn't lead where it should (a moved folder's, on the Plugins page).
+    out property <string> unlinked: "M 6 11.3 L 4.7 11.3 A 3.3 3.3 0 0 1 4.7 4.7 M 10 4.7 L 11.3 4.7 A 3.3 3.3 0 0 1 14 10 M 5.3 8 L 8 8 M 1.5 1.5 L 14.5 14.5";
+    // A drive struck through: what a link leads to isn't there (its drive unplugged, or the folder moved off it).
+    out property <string> away: "M 1.5 9 L 14.5 9 L 14.5 13.5 L 1.5 13.5 Z M 1.5 9 L 3.5 4 L 12.5 4 L 14.5 9 M 4 11.25 L 4.5 11.25 M 1.5 1.5 L 14.5 14.5";
     // A sign by its name, for a button whose sign comes from Rust (`CardAction.icon`, mo-app's
     // `themes::button_icon`): "" for none, and for a name it doesn't know.
     public pure function named(name: string) -> string {
@@ -2575,6 +2623,8 @@ export global Icons {
         if (name == "whole") { return whole; }
         if (name == "metronome") { return metronome; }
         if (name == "clear") { return clear; }
+        if (name == "unlinked") { return unlinked; }
+        if (name == "away") { return away; }
         return "";
     }
     // The rail's places, one each.

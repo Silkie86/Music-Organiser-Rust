@@ -474,6 +474,19 @@ mod tests {
         assert!(start.note.contains("(Debug runs only)"), "{}", start.note);
     }
 
+    /// The header the app writes is the one this reads: a run of a Debug build is told apart (the 25 Nov review: the
+    /// Rust that built the app, put on the "Build:" line, made every Debug run read as a Release one).
+    #[test]
+    fn the_apps_own_header_says_whether_it_was_a_debug_run() {
+        let header = crate::version::log_header(chrono::Local::now());
+        let log = format!("{header}\n10:00:09.000 Info    [Start] Window drawn 9.00 s after the app started: x\n");
+        let mut facts = LogFacts { runs: 1, ..LogFacts::default() };
+        read_one("a.log", log.as_bytes(), long_ago(), &mut facts);
+        // The tests are a Debug build, unless run with --release.
+        let debug = cfg!(debug_assertions);
+        assert_eq!((facts.debug_starts.len(), facts.starts.len()), if debug { (1, 0) } else { (0, 1) }, "{header}");
+    }
+
     #[test]
     fn a_log_not_read_to_its_end_is_said() {
         let full =
