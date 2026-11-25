@@ -1139,7 +1139,7 @@ fn read_all(
     };
     let prints = match std::mem::replace(&mut first.prints, Prints::Read(Gathered::default(), Gathered::default())) {
         Prints::Read(features, clap) => Ok((features, clap, analysed)),
-        Prints::InCopy(db) => match db.fingerprints(analysed) {
+        Prints::InCopy(db) => match db.fingerprints_kept(analysed, LIKENESS_IN.get().map(PathBuf::as_path)) {
             Ok((features, clap)) => Ok((features, clap, analysed)),
             // Damaged where they're kept: made again.
             Err(e) if e.damaged() => {
@@ -1659,7 +1659,8 @@ fn take_again(
         (_, Ok(db), _) => afresh = Some(db),
     }
     if let Some(db) = afresh {
-        on_show.index = send_index(db.fingerprints(analysed_now).map(|(f, c)| (f, c, analysed_now)), send);
+        let prints = db.fingerprints_kept(analysed_now, LIKENESS_IN.get().map(PathBuf::as_path));
+        on_show.index = send_index(prints.map(|(f, c)| (f, c, analysed_now)), send);
         on_show.added = 0;
     }
     on_show.analysed = analysed_now;

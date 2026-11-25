@@ -72,7 +72,19 @@ fn keep_clap(index: &mut SoundIndex, folder: &Path) {
         return;
     }
     match index.keep_clap_in(folder) {
-        None => {}
+        // In the file an earlier run kept, found to be the library's as the library was read.
+        None => {
+            if let Some(bytes) = index.clap_in_file() {
+                crate::log::info(
+                    "Sounds",
+                    &format!(
+                        "Sounds like this: its numbers are read from a file as they're needed, {} the app never \
+                         held (the file from last time, checked as the library was read)",
+                        mo_space::size_text(bytes)
+                    ),
+                );
+            }
+        }
         Some(Ok(kept)) => {
             let size = mo_space::size_text(kept.bytes);
             let how = if kept.written { "written" } else { "found from last time and checked" };

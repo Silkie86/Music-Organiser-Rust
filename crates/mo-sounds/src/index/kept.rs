@@ -126,6 +126,112 @@ impl InFile {
     pub(super) fn len(&self) -> usize {
         self.numbers
     }
+
+    /// How many bytes the file takes.
+    pub(super) fn bytes(&self) -> u64 {
+        (HEADER + self.numbers * self.size) as u64
+    }
+}
+
+/// A kept file from an earlier run, being checked row by row against the library as the library is read, so the
+/// library's numbers needn't be held at all to find the file is still theirs (Solomon's log of 2026-11-25: reading
+/// CLAP's from the library to compare them took the app from 0.5 GB to 1.5 GB for a moment at every start). Every
+/// row must be the file's next ([`Against::next_is`]), and the file must end where the rows do
+/// ([`Against::finish`]): the same check [`keep`] makes of a file it finds, made as the rows go by.
+pub(crate) struct Against {
+    file: File,
+    path: PathBuf,
+    dim: usize,
+    numbers: usize,
+    size: usize,
+    /// How many numbers have been found the same.
+    seen: usize,
+    /// The file's next bytes, read a piece at a time, and how far into them the check is.
+    piece: Vec<u8>,
+    at: usize,
+}
+
+impl Against {
+    /// The one finished file of `T`'s kind in `folder`, opened to be checked. None when there's none, more than one
+    /// (the older ones are swept when one is next kept), or it isn't a whole file of the kind.
+    pub(super) fn open<T: Number>(folder: &Path) -> Option<Against> {
+        if cfg!(target_endian = "big") {
+            return None;
+        }
+        let mut found = None;
+        for entry in fs::read_dir(folder).ok()?.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with(T::START) && is_kept_name(name) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(entry.path());
+            }
+        }
+        let path = found?;
+        let meta = fs::symlink_metadata(&path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let mut file = File::open(&path).ok()?;
+        let mut head = vec![0u8; HEADER];
+        file.read_exact(&mut head).ok()?;
+        let number = |at: usize| Some(usize::try_from(u64::from_le_bytes(head.get(at..at + 8)?.try_into().ok()?)).ok());
+        let (dim, numbers) = (number(8)??, number(16)??);
+        let whole = dim > 0 && numbers > 0 && numbers.is_multiple_of(dim);
+        let bytes = numbers.checked_mul(size_of::<T>())?.checked_add(HEADER)?;
+        if !whole || head != header::<T>(dim, numbers) || meta.len() != bytes as u64 {
+            return None;
+        }
+        Some(Against { file, path, dim, numbers, size: size_of::<T>(), seen: 0, piece: Vec::new(), at: 0 })
+    }
+
+    /// How many numbers each of its rows has.
+    pub(crate) fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Whether the file's next row is `row`, as the library stores it (each number's bytes, little end first: the
+    /// file's own layout). False too once the file has no more rows, or can't be read.
+    pub(crate) fn next_is(&mut self, row: &[u8]) -> bool {
+        if row.len() != self.dim * self.size || self.seen + self.dim > self.numbers {
+            return false;
+        }
+        let mut want = row;
+        while !want.is_empty() {
+            if self.at == self.piece.len() {
+                let left = (self.numbers - self.seen) * self.size - (row.len() - want.len());
+                self.piece.resize(left.min(PIECE), 0);
+                self.at = 0;
+                if self.file.read_exact(&mut self.piece).is_err() {
+                    return false;
+                }
+            }
+            let n = want.len().min(self.piece.len() - self.at);
+            if self.piece[self.at..self.at + n] != want[..n] {
+                return false;
+            }
+            self.at += n;
+            want = &want[n..];
+        }
+        self.seen += self.dim;
+        true
+    }
+
+    /// The file, to read rows from as they're needed, once every row of the library was found in it and it has no
+    /// others. None otherwise.
+    pub(super) fn finish(self) -> Option<Arc<InFile>> {
+        (self.seen == self.numbers).then(|| {
+            Arc::new(InFile {
+                file: self.file,
+                path: self.path,
+                numbers: self.numbers,
+                size: self.size,
+                told: AtomicBool::new(false),
+            })
+        })
+    }
 }
 
 /// Fills `out` from `file` at `offset`, wherever other threads are reading it.
