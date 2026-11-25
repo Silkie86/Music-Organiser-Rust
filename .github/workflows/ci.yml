@@ -57,13 +57,13 @@ jobs:
     needs: scope
     # Runs even when the scope job failed, and then fails itself, so a broken scope never shows as skipped (green).
     if: ${{ !cancelled() }}
-    # On a pull request Mac is advice only (Solomon, 2026-11-05): GitHub sometimes has no Mac runner for hours, and a
-    # PR may merge once Windows and Linux are green. On main Mac still counts; a Mac failure there is fixed at once.
-    continue-on-error: ${{ matrix.os == 'macos-latest' && github.event_name == 'pull_request' }}
+    # Mac runs on main only (Solomon, 2026-11-25). It was advice only on pull requests (2026-11-05), but a PR's run
+    # still ended only when Mac did: GitHub's Mac machines took 35-50 minutes where Windows and Linux took 15-20, and
+    # sometimes had no machine at all. On main Mac still counts; a Mac failure there is fixed at once.
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["windows-latest", "ubuntu-latest"]') || fromJSON('["windows-latest", "macos-latest", "ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     # A hung test fails within the hour rather than at GitHub's 6 (review TC-1).
     timeout-minutes: 60
@@ -71,16 +71,28 @@ jobs:
       - name: Stop if working out what changed failed
         if: needs.scope.result != 'success'
         run: exit 1
+      # Windows Defender looked at every file the build wrote (thousands of them, each test binary tens of MB).
+      - name: Windows Defender leaves the build folders alone
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # the stable branch
         with:
           toolchain: stable
           components: rustfmt, clippy
+      # Rust's own linker on Windows, much quicker than Microsoft's link.exe at linking the 50-odd test binaries. Set
+      # before the cache step so the cached libraries are built with it (a change of linker rebuilds every library with
+      # a build script). Only for the checks: the installer job and the releases keep link.exe.
+      - name: Link with Rust's own linker on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld" >> "$GITHUB_ENV"
       # Only main saves the cache (every PR starts from main's): a PR's own cache is no use to any other PR, saving it
       # took Windows about 4 minutes at the end of each run, and PR caches pushed main's out of GitHub's 10 GB.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          save-if: ${{ github.event_name != 'pull_request' }}
+          save-if: ${{ github.event_name != 'pull_request' || github.head_ref == 'claude/project-thread-jcn51o' }}  # TEMP: timing only
       - name: Linux libraries for the window
         if: runner.os == 'Linux'
         run: |
@@ -133,6 +145,11 @@ jobs:
       - name: Stop if working out what changed failed
         if: needs.scope.result != 'success'
         run: exit 1
+      # Windows Defender looked at every file the build wrote (thousands of them, each test binary tens of MB).
+      - name: Windows Defender leaves the build folders alone
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # the stable branch
         with:
@@ -163,6 +180,11 @@ jobs:
       - name: Stop if working out what changed failed
         if: needs.scope.result != 'success'
         run: exit 1
+      # Windows Defender looked at every file the build wrote (thousands of them, each test binary tens of MB).
+      - name: Windows Defender leaves the build folders alone
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # the stable branch
         with:
