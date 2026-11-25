@@ -28,6 +28,7 @@ pub fn connect(app: &AppWindow) {
     // A name not in the table (a slip in a page) gets the seam's own limits, as a seam with no part has.
     data.on_least(|name| widths::find(&name).map_or(UNKNOWN_LEAST, |p| p.least));
     data.on_most(|name| widths::find(&name).map_or(UNKNOWN_MOST, |p| p.most));
+    data.on_usual(|name| widths::find(&name).map_or(0.0, |p| p.usual));
     data.on_resized(|name, width| {
         let Some(part) = widths::find(&name) else {
             log::warning("Widths", &format!("A seam for {name}, which isn't in the table, was dragged"));
@@ -44,7 +45,11 @@ pub fn connect(app: &AppWindow) {
             return;
         };
         let width = WIDTHS.with(|w| w.borrow_mut().reset(part.name));
-        log::info("Widths", &format!("{} back to its usual {width:.0}", part.name));
+        if part.usual > 0.0 {
+            log::info("Widths", &format!("{} back to its usual {width:.0}", part.name));
+        } else {
+            log::info("Widths", &format!("{} back to its usual width, worked out by the page", part.name));
+        }
         if let Some(app) = weak.upgrade() {
             give(&app, part.name, width);
         }

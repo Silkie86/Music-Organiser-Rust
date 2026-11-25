@@ -2437,12 +2437,13 @@ fn folder_shots(
     data.invoke_tree_menu_chosen("hide".into());
     capture(window);
     shots.push(("sounds-folders.png".into(), capture(window)));
-    // The filter column and the tree, each dragged wider by its right edge.
+    // The filter column and the tree, each dragged narrower by its right edge (at 1440 x 900 the list and card already
+    // have less than their least beside them, so neither may go wider here).
     let widths = app.global::<mo_ui::Widths>();
-    let held = drag_seam(app, window, FILTERS_SEAM, 60.0, 1.0, "sounds.filters", || widths.get_sounds_filters())?;
-    shots.push(("sounds-filters-wider.png".into(), held));
-    let held = drag_seam(app, window, TREE_SEAM, 80.0, 1.0, "sounds.folders", || widths.get_sounds_folders())?;
-    shots.push(("sounds-folders-wider.png".into(), held));
+    let held = drag_seam(app, window, FILTERS_SEAM, -40.0, 1.0, "sounds.filters", || widths.get_sounds_filters())?;
+    shots.push(("sounds-filters-narrower.png".into(), held));
+    let held = drag_seam(app, window, TREE_SEAM, -80.0, 1.0, "sounds.folders", || widths.get_sounds_folders())?;
+    shots.push(("sounds-folders-narrower.png".into(), held));
     // A type picked too: the tree keeps only the folders with kicks, each counting its kicks.
     data.invoke_toggle_choice("type".into(), "Kick".into());
     capture(window);
@@ -4579,8 +4580,8 @@ fn right_click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
 }
 
 /// Drags the seam at `at` (a part's edge) `by` pixels across and lets go, after a picture of it held there. Fails
-/// unless the part `name` (as `mo_app::widths` knows it) is then `by` wider (or narrower, `grows` -1) than it was, and
-/// puts it back to its usual width as a double-click does. `width` reads the part's width from the page.
+/// unless the part `name` (as `mo_app::widths` knows it) is then `by` wider (or narrower, `grows` -1) than it was, or
+/// unless putting it back to its usual width, as a double-click does, gives it the width it had. `width` reads the part's width from the page.
 fn drag_seam(
     app: &mo_ui::AppWindow,
     window: &MinimalSoftwareWindow,
@@ -4608,6 +4609,9 @@ fn drag_seam(
     }
     app.global::<mo_ui::Widths>().invoke_reset(name.into());
     hover(window, -1.0, -1.0);
+    if width() != was {
+        return Err(format!("{name}: a double-click's reset left it {} wide, not its usual {was}", width()));
+    }
     Ok(held)
 }
 

@@ -79,7 +79,8 @@ impl Widths {
         self.chosen.iter().map(|(name, w)| format!("{name}={}", w.round())).collect::<Vec<_>>().join(";")
     }
 
-    /// How wide `name` is: the width you chose, else its usual one. 0 for a part that isn't in the table.
+    /// How wide `name` is: the width you chose, else its usual one. 0 for a part that isn't in the table, or one whose
+    /// usual width the page works out (see [`Part::usual`]) while you haven't chosen one.
     pub fn width(&self, name: &str) -> f32 {
         let Some(part) = find(name) else { return 0.0 };
         self.chosen.get(part.name).copied().unwrap_or(part.usual)
@@ -116,8 +117,10 @@ mod tests {
     #[test]
     fn every_part_once_with_its_usual_width_inside_its_limits() {
         for (i, p) in PARTS.iter().enumerate() {
-            // A usual width of 0: the page works one out (a share of the room).
-            assert!(p.usual == 0.0 || (p.least <= p.usual && p.usual <= p.most), "{}", p.name);
+            // A usual width of 0 only where the page works one out (the Songs list's third of the room): anywhere else
+            // the part would be given no width at all.
+            let worked_out = p.name == "songs.list";
+            assert!(if worked_out { p.usual == 0.0 } else { p.least <= p.usual && p.usual <= p.most }, "{}", p.name);
             assert!(p.least <= p.most, "{}", p.name);
             assert!(p.name.contains('.') && !p.name.contains(['=', ';']), "{}", p.name);
             assert!(PARTS[..i].iter().all(|q| q.name != p.name), "{} twice", p.name);
@@ -133,6 +136,16 @@ mod tests {
         assert_eq!(w.set("midi.card", 420.2), 420.0);
         assert_eq!(w.value(), "sounds.card=520");
         assert_eq!(w.reset("sounds.card"), 400.0);
+        assert_eq!(w.value(), "");
+    }
+
+    #[test]
+    fn a_worked_out_width_is_none_until_dragged() {
+        let mut w = Widths::default();
+        assert_eq!(w.width("songs.list"), 0.0);
+        assert_eq!(w.set("songs.list", 10.0), 320.0);
+        assert_eq!(w.value(), "songs.list=320");
+        assert_eq!(w.reset("songs.list"), 0.0);
         assert_eq!(w.value(), "");
     }
 

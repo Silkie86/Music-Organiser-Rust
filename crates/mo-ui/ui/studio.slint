@@ -1826,6 +1826,8 @@ export global Widths {
     // The least and most a part may be.
     pure callback least(string) -> length;
     pure callback most(string) -> length;
+    // Its usual width (0 where the page works it out).
+    pure callback usual(string) -> length;
     // A part was dragged to a new width and let go: the app keeps it.
     callback resized(string, length);
     // A double-click on a part's edge: the app puts it back to its usual width (and sets the page's width for it).
@@ -1984,11 +1986,18 @@ export component FilterColumn inherits Rectangle {
     in property <length> wide: 208px;
     in property <string> part;
     callback resizing(length);
+    // The room the rest of the page needs beside it (a list and a card at their least): it's never dragged wider
+    // into that, and a width kept from a wider window gives way to it, down to its usual width (it was that wide
+    // before it could be dragged, whatever the room).
+    in property <length> keep-room: 760px;
+    property <length> least: root.part != "" ? Widths.least(root.part) : 160px;
+    property <length> most-now: max(root.part != "" ? Widths.usual(root.part) : 208px, root.page-width - root.keep-room);
+    property <length> shown-wide: max(root.least, min(root.wide, root.most-now));
     property <bool> narrow: root.page-width < 860px;
     property <bool> open;
     property <bool> folded: root.narrow && !root.open;
     // How far in the page's list starts.
-    out property <length> room: !root.shown ? 0px : root.narrow ? 28px + Space.sm : root.wide + Space.lg;
+    out property <length> room: !root.shown ? 0px : root.narrow ? 28px + Space.sm : root.shown-wide + Space.lg;
     // Room kept free under the filters for what comes and goes as you pick (a Clear button), so its coming doesn't
     // take a line away from a list that fills the room.
     in property <length> keep-free;
@@ -1999,7 +2008,7 @@ export component FilterColumn inherits Rectangle {
     x: 0;
     y: 0;
     visible: root.shown;
-    width: root.folded ? 28px : root.wide;
+    width: root.folded ? 28px : root.shown-wide;
     background: root.narrow && root.open ? Theme.background : transparent;
     clip: true;
     flick := Flickable {
@@ -2025,12 +2034,16 @@ export component FilterColumn inherits Rectangle {
         background: Theme.edge;
     }
     // Its right edge: drag it to make the column wider or narrower (not while it's folded away in a narrow window).
-    if !root.narrow && root.part != "": Seam {
+    // Turned off rather than taken away there, so a drag cut short by the window narrowing still keeps its width.
+    Seam {
         x: parent.width - self.width;
         width: Space.md;
         height: parent.height;
+        visible: !root.narrow && root.part != "";
+        enabled: self.visible;
         part: root.part;
-        now: root.wide;
+        now: root.shown-wide;
+        most: min(Widths.most(root.part), root.most-now);
         resizing(w) => { root.resizing(w); }
     }
     // The tab: all of the folded column, or a line across the top of the opened one.

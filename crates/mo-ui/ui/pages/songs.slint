@@ -852,9 +852,11 @@ export component SongsPage inherits Rectangle {
     VerticalLayout {
         // In a window wider than the list and the song's panel at their widest, the page stops there (the UX review
         // of 10 Nov, A1): the list a third of the room up to `Fit.narrow-max`, the panel up to twice `Fit.list-max`
-        // (its arrangement likes the width), side by side from the left. A list dragged wider makes room for itself.
+        // (its arrangement likes the width), side by side from the left. A list or filter column dragged to another
+        // width moves where it stops by as much (the filter column's usual width is 208 px).
         x: 0;
-        width: min(root.width, max(Fit.narrow-max, Widths.songs-list) + 16px + 2 * Fit.list-max + 2 * Space.xl);
+        width: min(root.width, (Widths.songs-filters - 208px) + (Widths.songs-list > 0 ? Widths.songs-list : Fit.narrow-max)
+            + 16px + 2 * Fit.list-max + 2 * Space.xl);
         padding: Space.xl;
         padding-bottom: Space.lg;
         spacing: Space.md;
@@ -891,6 +893,10 @@ export component SongsPage inherits Rectangle {
                 y: 0;
                 width: split.width - self.x;
                 height: split.height;
+                // The list's usual width (a third of the room, within limits), and the widest it may be dragged: never
+                // so wide the panel gets under 480 px, but always as wide as its usual width.
+                property <length> list-third: clamp((self.width - 16px) / 3, 380px, Fit.narrow-max);
+                property <length> list-most: max(self.list-third, self.width - 16px - 480px);
                 // Up and Down step through the list once it has the keys (a line clicked, or Down from the search box).
                 // Esc goes on to the window, whose one step back (app.escape) clears the search, then puts the panel away.
                 keys := FocusScope {
@@ -901,8 +907,8 @@ export component SongsPage inherits Rectangle {
                     // nothing moves when one is picked. A third of the room until its seam is dragged, then the width
                     // it was dragged to; never so wide the panel gets under 480 px.
                     width: Widths.songs-list > 0
-                        ? max(Widths.least("songs.list"), min(Widths.songs-list, parent.width - 16px - 480px))
-                        : clamp((parent.width - 16px) / 3, 380px, Fit.narrow-max);
+                        ? clamp(Widths.songs-list, Widths.least("songs.list"), area.list-most)
+                        : area.list-third;
                     key-pressed(event) => {
                         if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                             return reject;
@@ -1167,7 +1173,7 @@ export component SongsPage inherits Rectangle {
                     height: parent.height;
                     part: "songs.list";
                     now: keys.width;
-                    most: max(self.least, min(Widths.most("songs.list"), parent.width - 16px - 480px));
+                    most: max(self.least, min(Widths.most("songs.list"), area.list-most));
                     resizing(w) => { Widths.songs-list = w; }
                 }
                 // A song line's right-click menu: the panel's buttons, each with its key (rule 15; review X3-24).
@@ -1179,6 +1185,8 @@ export component SongsPage inherits Rectangle {
             // After the list, so the opened column of a narrow window lies over it.
             column := FilterColumn {
                 part: "songs.filters";
+                // The list and the panel at their least beside it.
+                keep-room: 320px + 16px + 480px;
                 wide: Widths.songs-filters;
                 resizing(w) => { Widths.songs-filters = w; }
                 page-width: split.width;
