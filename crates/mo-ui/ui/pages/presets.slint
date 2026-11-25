@@ -86,6 +86,10 @@ export global PresetsData {
     in property <FilterView> format-filter;
     in property <FilterView> type-filter;
     in property <FilterView> plugin-filter;
+    // The orders the Plugin filter's menu can list the plugins in, the one it's in, and a pick of one.
+    in property <[string]> plugin-orders;
+    in property <string> plugin-order;
+    callback plugin-order-picked(string);
     in property <FilterView> from-filter;
     // The song the list is cut to (a song's Presets tab), or "".
     in property <string> song;
@@ -921,6 +925,9 @@ export component PresetsPage inherits Rectangle {
                 if PresetsData.section == 0: FilterList {
                     name: "PLUGIN";
                     filter: PresetsData.plugin-filter;
+                    orders: PresetsData.plugin-orders;
+                    order: PresetsData.plugin-order;
+                    order-picked(o) => { PresetsData.plugin-order-picked(o); }
                     toggled(text) => { PresetsData.toggle("plugin", text); }
                     cleared => { PresetsData.clear-chip("plugin"); }
                 }

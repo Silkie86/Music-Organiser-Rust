@@ -2061,7 +2061,18 @@ fn presets_shots(
     if before == after {
         return Err("filter-menu.png: the Plugin menu didn't open; has its chip moved?".into());
     }
-    shots.push(("filter-menu.png".into(), after));
+    shots.push(("filter-menu.png".into(), after.clone()));
+    // Its search has the keys as it opens: typing narrows the lines to those holding the words.
+    for k in ["p", "h"] {
+        press(app, k, false);
+    }
+    let searched = capture(window);
+    if searched == after {
+        return Err(
+            "filter-search.png: typing in the Plugin menu didn't narrow it; has its search lost the keys?".into()
+        );
+    }
+    shots.push(("filter-search.png".into(), searched));
     click(window, 1000.0, 40.0);
     data.invoke_clear();
     mo_ui::presets::pick_row(app, 3);

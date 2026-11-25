@@ -131,6 +131,8 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
         key_pressed(&weak, &key_feed, &key_name(&text, ctrl, shift, alt, meta), repeat)
     });
 
+    // A filter menu's search: the same matching on every page.
+    app.global::<FilterSearch>().on_matches(|text, query| mo_app::filters::matches(&text, &query));
     cards::connect(&app, &feed);
     note::connect(&app, &feed);
     Ok(app)

@@ -8,6 +8,13 @@
 /// list, like the plugins, goes in a menu that scrolls.
 pub const CHIPS_UP_TO: usize = 10;
 
+/// Whether a filter menu's line holds what was typed in its search: every word typed, anywhere in it, capitals and
+/// accents' case aside ("fab q" finds "FabFilter Pro-Q 3"). Nothing typed holds in every line.
+pub fn matches(text: &str, query: &str) -> bool {
+    let text = text.to_lowercase();
+    query.to_lowercase().split_whitespace().all(|word| text.contains(word))
+}
+
 /// One choice as its chip or menu line shows it: its words, how many lines it would show ("" when it isn't counted),
 /// and whether it's picked.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -136,6 +143,17 @@ pub fn toggle_as<T: Copy, W: AsRef<str>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_finds_every_word_typed_anywhere() {
+        assert!(matches("FabFilter Pro-Q 3", "fab q"));
+        assert!(matches("FabFilter Pro-Q 3", "PRO-Q"));
+        assert!(matches("Serum", ""));
+        assert!(matches("Serum", "  "));
+        assert!(!matches("Serum", "vital"));
+        assert!(!matches("FabFilter Pro-Q 3", "fab c"));
+        assert!(matches("Ölbaum", "öl"));
+    }
 
     fn choices(names: &[&str]) -> Vec<(String, String)> {
         names.iter().map(|n| ((*n).to_owned(), String::new())).collect()

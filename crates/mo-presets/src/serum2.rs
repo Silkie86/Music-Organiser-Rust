@@ -1,14 +1,14 @@
 //! Putting a song's Serum 1 sounds where Serum 2 finds them: Serum 2 loads a Serum 1 `.fxp` as it is (Xfer: "Serum 1
 //! presets are fully compatible with Serum 2"), so each sound is written as a plain Serum 1 program into Serum 2's
 //! user presets folder, `Documents\Xfer\Serum 2 Presets\Presets\User\From my songs\<part>\<name>.fxp`: a folder
-//! for each part the page says the sound plays (Bass, Lead...), and the name of the preset Serum had loaded, else the
-//! song's (Solomon, 25 Nov 2026). No conversion: Solomon found Serum 2 loads the old presets itself, after the C#
+//! for each part the page says the sound plays (Bass, Lead...), named after its song and track (Solomon, 25 Nov 2026:
+//! the presets' own names were mostly "Init"). No conversion: Solomon found Serum 2 loads the old presets itself, after the C#
 //! app's convert-to-Serum-2 attempt.
 //!
 //! Serum 1 keeps the same settings in all three places a song can hold them (checked on Solomon's saves and presets):
 //! a zlib stream (then 12 bytes of its own), which is an `.fxp`'s chunk (after its 60-byte header), a Bitwig `.fxb`
 //! bank's chunk (after its 160-byte header), and a VST3 `.vstpreset`'s component state ("Comp"). So each becomes an
-//! "FPCh" program for the plugin "XfsX". The unpacked state keeps the loaded preset's name at 18,802.
+//! "FPCh" program for the plugin "XfsX".
 //!
 //! Nothing is ever written over: a file of the same name that holds the same settings is left (sent already), and one
 //! that holds others (the song changed since, or a file of Solomon's) keeps its name while this one takes the next
@@ -127,14 +127,21 @@ pub fn part_folder(part: Option<Role>) -> &'static str {
     }
 }
 
-/// A Serum 1 sound's file name: the name of the preset Serum had loaded when its settings keep one, else the song's
-/// name. Serum's own blank start ("Default", "Init") counts as none.
-pub fn file_name(chunk: &[u8], song: &str) -> String {
-    let preset = crate::octave::serum_1_preset_name(chunk)
-        .filter(|n| !n.eq_ignore_ascii_case("default") && !n.eq_ignore_ascii_case("init"));
-    let name = preset.as_deref().unwrap_or(song);
-    let name = if name.trim().is_empty() { "Serum" } else { name };
-    format!("{}.fxp", names::safe_file_name(name))
+/// A Serum 1 sound's file name: its song's name, then its track's or channel's name (`sound`, as the save names it)
+/// when that says more than the plugin ("Didums - Wobble bass"; "Didums" for a track called "Serum"). Solomon, 25 Nov
+/// 2026: the presets' own names were mostly "Init", "better to use the name of the project". The name Serum keeps in
+/// its settings isn't used.
+pub fn file_name(song: &str, sound: &str) -> String {
+    // "Serum - Serum" (a Bitwig track called Serum) says nothing; "Serum - Wobble" says "Wobble".
+    let said: Vec<&str> = sound.split(" - ").map(str::trim).filter(|w| !w.is_empty() && !is_serum_1(w)).collect();
+    let song = song.trim();
+    let name = match (song.is_empty(), said.is_empty()) {
+        (false, true) => song.to_owned(),
+        (false, false) => format!("{song} - {}", said.join(" - ")),
+        (true, false) => said.join(" - "),
+        (true, true) => "Serum".to_owned(),
+    };
+    format!("{}.fxp", names::safe_file_name(&name))
 }
 
 /// One sound to put in Serum 2: its key in its save ([`crate::list::place_keys`]) and the part the page says it plays
@@ -170,8 +177,8 @@ fn place_for(folder: &Path, name: &str, bytes: &[u8]) -> io::Result<Option<PathB
 }
 
 /// Reads a save again and puts the picked Serum 1 sounds into Serum 2's user presets folder (`user`,
-/// [`user_folder`]): each in its part's folder ([`part_folder`]) under [`FROM_SONGS`], named after its preset, else the
-/// song (`song`, its name as the page shows it) ([`file_name`]). What was there already counts as done. Picked sounds
+/// [`user_folder`]): each in its part's folder ([`part_folder`]) under [`FROM_SONGS`], named after its song (`song`, its
+/// name as the page shows it) and track ([`file_name`]). What was there already counts as done. Picked sounds
 /// that aren't Serum 1's, or aren't in the save any more, are told in [`Exported::failed`]; it's an error when nothing
 /// could go. Serum 2's `Presets` folder must be there (Serum 2 is installed); `User` and the folders inside are made.
 /// [`Exported::folder`] is the part's folder when all went to one, else [`FROM_SONGS`].
@@ -209,7 +216,7 @@ pub fn from_save(save: &str, picks: &[Pick], song: &str, user: &Path) -> io::Res
             }
         };
         let folder = root.join(part_folder(pick.part));
-        let name = file_name(chunk, song);
+        let name = file_name(song, &blob.name);
         let bytes = as_fxp(chunk, paths::stem(&name));
         let written =
             std::fs::create_dir_all(&folder).and_then(|()| place_for(&folder, &name, &bytes)).and_then(|place| {
@@ -313,27 +320,17 @@ mod tests {
         assert!(serum_1_chunk(b"VST3", ".vstpreset").is_err());
     }
 
-    /// A made-up Serum 1 chunk whose state keeps this preset name.
-    fn named_chunk(name: &[u8]) -> Vec<u8> {
-        let mut state = vec![0u8; 172_736];
-        state[18_802..18_802 + name.len()].copy_from_slice(name);
-        let mut z = ZlibEncoder::new(Vec::new(), Compression::none());
-        z.write_all(&state).unwrap();
-        let mut c = z.finish().unwrap();
-        c.extend([0u8; 12]);
-        c
-    }
-
     #[test]
-    fn a_sound_is_named_after_its_preset_else_its_song_and_filed_by_part() {
-        assert_eq!(file_name(&named_chunk(b"BA Organ Bass [FP]"), "Didums"), "BA Organ Bass [FP].fxp");
-        assert_eq!(file_name(&named_chunk(b"requiem serum 1"), "Didums"), "requiem serum 1.fxp");
-        // No name kept, or Serum's own blank start: the song's name.
-        assert_eq!(file_name(&named_chunk(b""), "Didums"), "Didums.fxp");
-        assert_eq!(file_name(&named_chunk(b"Default"), "Didums"), "Didums.fxp");
-        assert_eq!(file_name(&chunk(), "neon: rmx"), format!("{}.fxp", names::safe_file_name("neon: rmx")));
-        assert_eq!(file_name(&named_chunk(b"a/b"), "x"), format!("{}.fxp", names::safe_file_name("a/b")));
-        assert_eq!(file_name(&chunk(), " "), "Serum.fxp");
+    fn a_sound_is_named_after_its_song_and_track_and_filed_by_part() {
+        assert_eq!(file_name("Didums", "Wobble bass"), "Didums - Wobble bass.fxp");
+        // A track that's only called after the plugin adds nothing.
+        assert_eq!(file_name("Didums", "Serum"), "Didums.fxp");
+        assert_eq!(file_name("serum test", "Serum - Serum"), "serum test.fxp");
+        assert_eq!(file_name("Didums", "Serum_x64 - Lead"), "Didums - Lead.fxp");
+        assert_eq!(file_name("Didums", ""), "Didums.fxp");
+        assert_eq!(file_name("neon: rmx", "Pad"), format!("{}.fxp", names::safe_file_name("neon: rmx - Pad")));
+        assert_eq!(file_name(" ", "Lead"), "Lead.fxp");
+        assert_eq!(file_name("", "Serum"), "Serum.fxp");
         assert_eq!(part_folder(Some(Role::Bass)), "Bass");
         assert_eq!(part_folder(Some(Role::Stabs)), "Stabs and plucks");
         assert_eq!(part_folder(Some(Role::Fx)), Role::Fx.label());

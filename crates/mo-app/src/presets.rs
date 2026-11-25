@@ -316,6 +316,9 @@ pub struct Item {
     file_key: String,
     /// The plugin's format, worked out once.
     pub format: Format,
+    /// When its save or file was last written (seconds since 1970; 0 when not known), for the plugins' Last used
+    /// order.
+    pub when: i64,
 }
 
 impl Item {
@@ -327,7 +330,7 @@ impl Item {
             Source::Song { .. } => String::new(),
         };
         let format = Format::of(&row);
-        Item { row, song, year, words, file_key, format }
+        Item { row, song, year, words, file_key, format, when: 0 }
     }
 
     /// Your part for the line with `fixes` laid over it: a fix made since the line was read wins.
@@ -482,21 +485,28 @@ pub fn file_items_with(
     modified: &[Option<std::time::SystemTime>],
     known: &KnownPlugins,
 ) -> Vec<Item> {
-    let years: HashMap<&str, Option<i32>> =
-        found.iter().zip(modified).map(|(f, at)| (f.path.as_str(), at.and_then(year_of_time))).collect();
+    let times: HashMap<&str, Option<std::time::SystemTime>> =
+        found.iter().zip(modified).map(|(f, at)| (f.path.as_str(), *at)).collect();
     let mut items: Vec<Item> = mo_presets::library::rows(&[], found)
         .into_iter()
         .map(|mut row| {
             known.fill(&mut row);
-            let year = match &row.source {
-                Source::File { path } => years.get(path.as_str()).copied().flatten(),
+            let at = match &row.source {
+                Source::File { path } => times.get(path.as_str()).copied().flatten(),
                 Source::Song { .. } => None,
             };
-            Item::new(row, String::new(), year)
+            let mut item = Item::new(row, String::new(), at.and_then(year_of_time));
+            item.when = at.and_then(seconds_of).unwrap_or(0);
+            item
         })
         .collect();
     sort_files(&mut items);
     items
+}
+
+/// A time in seconds since 1970, or `None` for one before it.
+fn seconds_of(m: std::time::SystemTime) -> Option<i64> {
+    i64::try_from(m.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).ok()
 }
 
 /// The year of a time, or `None` for one before 1970 or not a real date.
@@ -514,7 +524,7 @@ pub fn year_of(seconds: i64) -> Option<i32> {
 /// The page's lines for a song's sounds as they're read.
 pub fn song_items(rows: Vec<PresetRow>, song: &SongSave) -> Vec<Item> {
     let year = year_of(song.modified);
-    rows.into_iter().map(|row| Item::new(row, song.song.clone(), year)).collect()
+    rows.into_iter().map(|row| Item { when: song.modified, ..Item::new(row, song.song.clone(), year) }).collect()
 }
 
 /// Where the lines come from.
@@ -716,6 +726,42 @@ pub struct Filters {
     pub years: Option<(i32, i32)>,
     /// Show synths whose channel or track plays no notes (tucked away otherwise, as the C# window did).
     pub unused: bool,
+    /// The order the Plugin filter's menu lists the plugins in (not a filter: Clear filters keeps it).
+    pub plugin_order: PluginOrder,
+}
+
+/// The orders the Plugin filter's menu can list the plugins in (Solomon, 25 Nov 2026: "alphabetically or by last used
+/// date or how often used").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PluginOrder {
+    /// The most lines first: the order it always had.
+    #[default]
+    MostUsed,
+    /// By name, A to Z.
+    Name,
+    /// The plugin in the newest save or file first.
+    LastUsed,
+}
+
+impl PluginOrder {
+    pub const ALL: [PluginOrder; 3] = [PluginOrder::MostUsed, PluginOrder::Name, PluginOrder::LastUsed];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PluginOrder::MostUsed => "Most used",
+            PluginOrder::Name => "A-Z",
+            PluginOrder::LastUsed => "Last used",
+        }
+    }
+
+    pub fn from_label(l: &str) -> Option<PluginOrder> {
+        PluginOrder::ALL.into_iter().find(|o| o.label() == l)
+    }
+
+    /// Every order's words, for the menu's chips.
+    pub fn labels() -> Vec<&'static str> {
+        PluginOrder::ALL.iter().map(|o| o.label()).collect()
+    }
 }
 
 impl Filters {
@@ -767,7 +813,7 @@ impl Filters {
 
     /// No filter at all, in this one's order: the order isn't a filter, so it outlives them.
     pub fn only_order(&self) -> Filters {
-        Filters { order: self.order, reversed: self.reversed, ..Filters::default() }
+        Filters { order: self.order, reversed: self.reversed, plugin_order: self.plugin_order, ..Filters::default() }
     }
 
     /// A click on a column's heading: A to Z by that column, a second click Z to A, a third back to the list as it
@@ -1031,16 +1077,16 @@ pub struct FilterChips {
     pub plugin: Filter,
 }
 
-pub fn filter_chips(c: &ChoiceCounts, plugins: &[(String, usize)], f: &Filters) -> FilterChips {
+pub fn filter_chips(c: &ChoiceCounts, plugins: &[PluginUse], f: &Filters) -> FilterChips {
     let one = |label: &str| if label.is_empty() { Vec::new() } else { vec![label.to_owned()] };
     let from = [(From::Songs, c.songs), (From::Files, c.files)].map(|(w, n)| (w.label().to_owned(), thousands(n)));
     let parts: Vec<(String, String)> =
         PartPick::choices().into_iter().zip(&c.parts).map(|(l, n)| (l.to_owned(), thousands(*n))).collect();
-    // The most used first, as `plugins` has them: an order the other filters don't change, so a line doesn't move
-    // under the mouse when they do.
-    let by_plugin: Vec<(String, usize)> = plugins
-        .iter()
-        .map(|(name, _)| (name.clone(), c.plugins.get(&name.to_ascii_lowercase()).copied().unwrap_or(0)))
+    // In the order picked, worked out over every line (as `plugins` has them): an order the other filters don't change,
+    // so a line doesn't move under the mouse when they do.
+    let by_plugin: Vec<(String, usize)> = in_order(plugins, f.plugin_order)
+        .into_iter()
+        .map(|u| (u.name.clone(), c.plugins.get(&u.name.to_ascii_lowercase()).copied().unwrap_or(0)))
         .collect();
     FilterChips {
         format: chips::show(&format_choices(c), &f.formats.iter().map(|x| x.label().to_owned()).collect::<Vec<_>>()),
@@ -1054,15 +1100,42 @@ pub fn filter_chips(c: &ChoiceCounts, plugins: &[(String, usize)], f: &Filters) 
     }
 }
 
-/// The plugins in the list, most used first (ties by name), each with how many lines it has; for the plugin chip.
-/// Names that differ only in ASCII capitals are one plugin, as the plugin filter matches them.
-pub fn plugins(items: &[Item]) -> Vec<(String, usize)> {
-    let mut by: HashMap<String, (String, usize)> = HashMap::new();
+/// One plugin in the list: its name, how many lines it has, and when the newest save or file it's in was written
+/// (seconds since 1970; 0 when none says).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginUse {
+    pub name: String,
+    pub lines: usize,
+    pub newest: i64,
+}
+
+/// The plugins in the list, most used first (ties by name); for the plugin chip. Names that differ only in ASCII
+/// capitals are one plugin, as the plugin filter matches them.
+pub fn plugins(items: &[Item]) -> Vec<PluginUse> {
+    let mut by: HashMap<String, PluginUse> = HashMap::new();
     for i in items.iter().filter(|i| !i.row.plugin.is_empty()) {
-        by.entry(i.row.plugin.to_ascii_lowercase()).or_insert_with(|| (i.row.plugin.clone(), 0)).1 += 1;
+        let u = by.entry(i.row.plugin.to_ascii_lowercase()).or_insert_with(|| PluginUse {
+            name: i.row.plugin.clone(),
+            lines: 0,
+            newest: 0,
+        });
+        u.lines += 1;
+        u.newest = u.newest.max(i.when);
     }
-    let mut out: Vec<(String, usize)> = by.into_values().collect();
-    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    let mut out: Vec<PluginUse> = by.into_values().collect();
+    out.sort_by(|a, b| b.lines.cmp(&a.lines).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    out
+}
+
+/// `plugins` (as [`plugins`] gives them) in `order`, ties by name.
+pub fn in_order(plugins: &[PluginUse], order: PluginOrder) -> Vec<&PluginUse> {
+    let mut out: Vec<&PluginUse> = plugins.iter().collect();
+    let name = |u: &PluginUse| u.name.to_lowercase();
+    match order {
+        PluginOrder::MostUsed => {}
+        PluginOrder::Name => out.sort_by_key(|u| name(u)),
+        PluginOrder::LastUsed => out.sort_by(|a, b| b.newest.cmp(&a.newest).then_with(|| name(a).cmp(&name(b)))),
+    }
     out
 }
 
@@ -2619,6 +2692,35 @@ mod tests {
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].0, "/s/Didums_77.flp");
         assert_eq!(plan[0].1.len(), 2);
+    }
+
+    #[test]
+    fn the_plugin_menu_goes_in_the_order_picked_and_keeps_it_through_clear_filters() {
+        let mut all = items();
+        // Vital's song is newer than Serum's; Fruity Limiter's newest.
+        all[0].when = 100;
+        all[1].when = 300;
+        all[2].when = 900;
+        let mut vital = all[0].clone();
+        vital.row.plugin = "Vital".into();
+        vital.when = 500;
+        all.push(vital);
+        let used = plugins(&all);
+        assert_eq!(used[0], PluginUse { name: "Serum".into(), lines: 2, newest: 300 });
+        let names = |o| in_order(&used, o).iter().map(|u| u.name.clone()).collect::<Vec<_>>();
+        // The preset file (Polysynth) says no time: last in Last used.
+        assert_eq!(names(PluginOrder::MostUsed), ["Serum", "Fruity Limiter", "Polysynth", "Vital"]);
+        assert_eq!(names(PluginOrder::Name), ["Fruity Limiter", "Polysynth", "Serum", "Vital"]);
+        assert_eq!(names(PluginOrder::LastUsed), ["Fruity Limiter", "Vital", "Serum", "Polysynth"]);
+        let mut f = Filters { plugin_order: PluginOrder::Name, ..Filters::default() };
+        f.toggle(PLUGIN, "Serum");
+        assert_eq!(f.cleared().plugin_order, PluginOrder::Name);
+        assert_eq!(PluginOrder::from_label("Last used"), Some(PluginOrder::LastUsed));
+        assert_eq!(PluginOrder::labels(), ["Most used", "A-Z", "Last used"]);
+        // A song's lines take their save's time.
+        let song = SongSave { path: "/s/a.flp".into(), song: "A".into(), modified: 1_700_000_000 };
+        let lines = song_items(vec![all[0].row.clone()], &song);
+        assert_eq!(lines[0].when, 1_700_000_000);
     }
 
     #[test]

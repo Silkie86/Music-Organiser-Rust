@@ -32,7 +32,7 @@ pub struct Presets {
     /// Songs whose newest save changed since the app's Presets page last read it (or that it never read): left out.
     pub songs_missed: usize,
     /// The plugins among them, most used first: the plugin filter's order.
-    pub plugins: Vec<(String, usize)>,
+    pub plugins: Vec<page::PluginUse>,
     /// The Bitwig presets among the files that load a plugin: what a preset dragged into Bitwig is made from.
     template_files: Vec<mo_presets::library::FoundPreset>,
     /// The templates, read from them at the first drag into Bitwig.
