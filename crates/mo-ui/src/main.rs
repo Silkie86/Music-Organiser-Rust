@@ -235,6 +235,8 @@ fn main() -> Result<(), slint::PlatformError> {
     if songs_db.make_wanted() {
         mo_app::song_library::make_later(data, feed.clone());
     }
+    // Windows' typing service is read from disk now, on a thread of its own, not at the first click in a text box.
+    mo_ui::typing::get_ready();
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();
     let sized = app.as_weak();
@@ -247,8 +249,6 @@ fn main() -> Result<(), slint::PlatformError> {
             mo_ui::settings::fill_the_screen(&app);
         }
         mo_ui::watchdog::start(watched);
-        // Windows' typing service is read from disk now, in the background, not at the first click in a text box.
-        mo_ui::typing::get_ready();
     })
     .is_err()
     {
