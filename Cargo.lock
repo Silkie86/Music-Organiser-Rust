@@ -3434,6 +3434,7 @@ dependencies = [
 name = "mo-sounds"
 version = "0.9.0-beta.1"
 dependencies = [
+ "bytemuck",
  "chrono",
  "fs4",
  "half",

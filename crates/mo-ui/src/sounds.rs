@@ -409,6 +409,16 @@ pub fn sample_folders_changed() -> bool {
     SCAN_AGAIN.lock().unwrap_or_else(PoisonError::into_inner).as_ref().is_some_and(|again| again.send(()).is_ok())
 }
 
+/// Where "Sounds like this" keeps CLAP's numbers in a file ([`keep_likeness_in`]); not set, they stay in memory.
+static LIKENESS_IN: OnceLock<PathBuf> = OnceLock::new();
+
+/// From now on the index's CLAP numbers are kept in a file in `folder` (the app's data folder) and read as they're
+/// needed, rather than held in memory. The running app says so once, before the page reads; tests and the
+/// screenshots don't, so they write no such file.
+pub fn keep_likeness_in(folder: PathBuf) {
+    let _ = LIKENESS_IN.set(folder);
+}
+
 /// The one player, made the first time something plays or Settings lists the outputs (nothing opens before a sound
 /// plays).
 static PLAYER: OnceLock<Player> = OnceLock::new();
@@ -1699,7 +1709,14 @@ fn send_index(
 ) -> Option<Arc<SoundIndex>> {
     match prints {
         Ok((features, clap, analysed)) => {
-            let index = Arc::new(background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed)));
+            let mut index = background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed));
+            // CLAP's numbers go in a file read as it's needed (the running app only: `keep_likeness_in`). Here on
+            // the reading thread, not on the pool: it reads or writes a big file, and the pages' quick jobs would
+            // wait behind it.
+            if let Some(folder) = LIKENESS_IN.get() {
+                mo_app::sound_likeness::keep(&mut index, folder);
+            }
+            let index = Arc::new(index);
             send(Step::Index(index.clone()));
             Some(index)
         }

@@ -9,6 +9,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# CLAP's numbers as bytes, to and from the file they're kept in (index/kept.rs).
+bytemuck = "1"
 chrono.workspace = true
 # How much room the disk has, so making the compact library never fills it.
 fs4 = "1.1"

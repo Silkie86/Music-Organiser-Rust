@@ -1,0 +1,215 @@
+//! CLAP's numbers kept in a file (`index/kept.rs`): the same searches, one file, only its own files removed, and a
+//! file that can't be read any more finds nothing rather than stopping the app.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use mo_sounds::index::{Gathered, SoundIndex, VectorIndex, is_kept_name, remove_kept};
+
+/// An empty folder of this test's own, under the build's temp folder.
+fn folder(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-sounds-kept").join(name);
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// `count` made-up fingerprints of 16 numbers, the ids with gaps; more than one part of the index's rows.
+fn gathered(count: i64, salt: i64) -> Gathered {
+    let mut g = Gathered::default();
+    for id in 1..=count {
+        let v: Vec<f32> = (0..16).map(|d| ((id * 31 + d * 17 + salt) % 101) as f32 / 7.0 - 5.0).collect();
+        g.push(id * 3, &v);
+    }
+    g
+}
+
+fn held(count: i64, salt: i64) -> VectorIndex {
+    VectorIndex::from_gathered_halved(gathered(count, salt), false, None)
+}
+
+fn kept_files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> =
+        fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    names.sort();
+    names
+}
+
+fn bits(v: &[(i64, f64)]) -> Vec<(i64, u64)> {
+    v.iter().map(|(id, s)| (*id, s.to_bits())).collect()
+}
+
+#[test]
+fn a_kept_index_finds_exactly_what_the_held_one_does() {
+    let dir = folder("same");
+    let was = held(9000, 0);
+    let mut kept = was.clone();
+    let done = kept.keep_in(&dir).unwrap().unwrap();
+    assert!(done.written && kept.is_kept_in_a_file() && kept.is_halved() && !was.is_kept_in_a_file());
+    assert_eq!(done.bytes, 4096 + 9000 * 16 * 2);
+    assert_eq!(fs::metadata(&done.file).unwrap().len(), done.bytes);
+    assert_eq!(kept_files(&dir), [done.file.file_name().unwrap().to_str().unwrap()]);
+    assert!(is_kept_name(&kept_files(&dir)[0]));
+    assert_eq!((kept.len(), kept.dim(), kept.ids()), (was.len(), was.dim(), was.ids()));
+    for id in [3, 4096 * 3, 4097 * 3, 9000 * 3] {
+        assert_eq!(kept.get(id), was.get(id), "{id}");
+        let q = was.get(id).unwrap();
+        assert_eq!(kept.dot_with(id, &q).map(f64::to_bits), was.dot_with(id, &q).map(f64::to_bits));
+        assert_eq!(bits(&kept.nearest(&q, 40)), bits(&was.nearest(&q, 40)), "{id}");
+    }
+    assert_eq!((kept.get(4), kept.dot_with(4, &[0.0; 16])), (None, None));
+    // Nothing more to do for one already in a file.
+    assert!(kept.keep_in(&dir).is_none());
+    // A scan's change makes it a held one again, with the same rows as the held one's.
+    let gone = [6i64].into_iter().collect();
+    assert_eq!(
+        kept.with(&gone, Gathered::default(), false, None).nearest(&was.get(3).unwrap(), 9000).len(),
+        was.with(&gone, Gathered::default(), false, None).nearest(&was.get(3).unwrap(), 9000).len()
+    );
+    assert!(!kept.with(&gone, Gathered::default(), false, None).is_kept_in_a_file());
+}
+
+#[test]
+fn the_file_of_an_earlier_run_is_used_and_a_damaged_one_is_written_again() {
+    let dir = folder("again");
+    let was = held(5000, 0);
+    let mut first = was.clone();
+    let done = first.keep_in(&dir).unwrap().unwrap();
+    drop(first);
+    let mut second = was.clone();
+    let again = second.keep_in(&dir).unwrap().unwrap();
+    assert!(!again.written);
+    assert_eq!((again.file.clone(), again.bytes, again.removed), (done.file.clone(), done.bytes, 0));
+    drop(second);
+    // One number changed in the file: it isn't trusted.
+    let mut bytes = fs::read(&done.file).unwrap();
+    let at = bytes.len() - 7;
+    bytes[at] ^= 0x40;
+    fs::write(&done.file, &bytes).unwrap();
+    let mut third = was.clone();
+    let mended = third.keep_in(&dir).unwrap().unwrap();
+    assert!(mended.written);
+    let q = was.get(3).unwrap();
+    assert_eq!(bits(&third.nearest(&q, 25)), bits(&was.nearest(&q, 25)));
+    drop(third);
+    // Cut short: the same.
+    fs::write(&done.file, &bytes[..bytes.len() - 2]).unwrap();
+    let mut fourth = was.clone();
+    assert!(fourth.keep_in(&dir).unwrap().unwrap().written);
+    assert_eq!(kept_files(&dir).len(), 1);
+}
+
+#[test]
+fn other_numbers_get_a_file_of_their_own_and_only_this_codes_files_are_removed() {
+    let dir = folder("sweep");
+    let mut old = held(300, 0);
+    let old_file = old.keep_in(&dir).unwrap().unwrap().file;
+    drop(old);
+    // Yours, a folder with a name like ours, a half-written file from now and one from yesterday.
+    fs::write(dir.join("sound-likeness-notes.rows"), b"mine").unwrap();
+    fs::write(dir.join("sounds-rust.db"), b"mine").unwrap();
+    fs::create_dir(dir.join("sound-likeness-0123456789abcdef.rows")).unwrap();
+    let fresh = dir.join("sound-likeness-aaaaaaaaaaaaaaaa.rows.77-0.mo-part");
+    fs::write(&fresh, b"being written").unwrap();
+    let stale = dir.join("sound-likeness-bbbbbbbbbbbbbbbb.rows.78-3.mo-part");
+    fs::write(&stale, b"left behind").unwrap();
+    let yesterday = SystemTime::now() - Duration::from_secs(24 * 3600);
+    fs::File::options().write(true).open(&stale).unwrap().set_modified(yesterday).unwrap();
+
+    let mut new = held(300, 5);
+    let done = new.keep_in(&dir).unwrap().unwrap();
+    assert_ne!(done.file, old_file);
+    assert_eq!(done.removed, 2, "the old numbers' file and the half-written one left behind");
+    let mut want = vec![
+        "sound-likeness-0123456789abcdef.rows".to_owned(),
+        "sound-likeness-aaaaaaaaaaaaaaaa.rows.77-0.mo-part".to_owned(),
+        "sound-likeness-notes.rows".to_owned(),
+        "sounds-rust.db".to_owned(),
+        done.file.file_name().unwrap().to_str().unwrap().to_owned(),
+    ];
+    want.sort();
+    assert_eq!(kept_files(&dir), want);
+    drop(new);
+    // A library with no CLAP index keeps none.
+    assert_eq!(remove_kept(&dir), 1);
+    want.retain(|n| *n != done.file.file_name().unwrap().to_str().unwrap());
+    assert_eq!(kept_files(&dir), want);
+    assert_eq!(fs::read(dir.join("sound-likeness-notes.rows")).unwrap(), b"mine");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_with_one_of_its_names_is_never_followed_or_removed() {
+    let dir = folder("link");
+    let yours = dir.join("yours.bin");
+    fs::write(&yours, b"mine").unwrap();
+    let link = dir.join("sound-likeness-cccccccccccccccc.rows");
+    std::os::unix::fs::symlink(&yours, &link).unwrap();
+    let mut index = held(100, 0);
+    let done = index.keep_in(&dir).unwrap().unwrap();
+    assert_eq!(done.removed, 0);
+    assert_eq!(remove_kept(&dir), 1, "its own");
+    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read(&yours).unwrap(), b"mine");
+}
+
+#[test]
+fn a_file_that_cant_be_read_any_more_finds_nothing_and_says_so_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static TOLD: AtomicUsize = AtomicUsize::new(0);
+    mo_sounds::index::on_kept_trouble(|what| {
+        assert!(what.contains("sound-likeness-") && what.contains("couldn't be read"), "{what}");
+        TOLD.fetch_add(1, Ordering::Relaxed);
+    });
+    let dir = folder("gone");
+    let was = held(9000, 0);
+    let mut kept = was.clone();
+    let done = kept.keep_in(&dir).unwrap().unwrap();
+    let q = was.get(3).unwrap();
+    assert_eq!(kept.nearest(&q, 5).len(), 5);
+    // Cut short behind its back (as a drive that stops answering part way): the rows past the cut can't be read.
+    fs::File::options().write(true).open(&done.file).unwrap().set_len(4096 + 100 * 16 * 2).unwrap();
+    let before = TOLD.load(Ordering::Relaxed);
+    assert_eq!(kept.get(9000 * 3), None);
+    assert_eq!(kept.dot_with(9000 * 3, &q), None);
+    assert!(kept.get(3).is_some(), "what can still be read is");
+    // The first part reaches past the cut, and so does every other: nothing is found, nothing panics.
+    assert!(kept.nearest(&q, 5).is_empty());
+    // A scan's change leaves it as it is.
+    let gone = [6i64].into_iter().collect();
+    assert!(kept.with(&gone, Gathered::default(), false, None).is_kept_in_a_file());
+    assert_eq!(TOLD.load(Ordering::Relaxed), before + 1, "once for the file");
+}
+
+#[test]
+fn a_folder_that_isnt_there_leaves_the_index_as_it_was() {
+    let dir = folder("missing").join("not made");
+    let was = held(100, 0);
+    let mut index = was.clone();
+    assert!(index.keep_in(&dir).unwrap().is_err());
+    assert!(!index.is_kept_in_a_file());
+    assert_eq!(index, was);
+    // Full precision and empty ones have nothing to keep.
+    assert!(VectorIndex::from_gathered(gathered(10, 0), false, None).keep_in(&dir).is_none());
+    assert!(VectorIndex::default().keep_in(&dir).is_none());
+}
+
+#[test]
+fn the_sound_index_keeps_claps_numbers_only() {
+    let dir = folder("sound-index");
+    let mut index = SoundIndex::from_gathered(gathered(50, 1), gathered(50, 2), 50);
+    assert!(index.deep && index.clap.is_some());
+    let was = index.clone();
+    // Shared with `was`: left alone.
+    assert!(index.keep_clap_in(&dir).is_none());
+    let q = was.active().get(3).unwrap().into_owned();
+    let want = bits(&was.active().nearest(&q, 10));
+    drop(was);
+    let done = index.keep_clap_in(&dir).unwrap().unwrap();
+    assert!(done.written && index.active().is_kept_in_a_file() && !index.features.is_kept_in_a_file());
+    assert_eq!(bits(&index.active().nearest(&q, 10)), want);
+    // None to keep without CLAP.
+    assert!(SoundIndex::from_gathered(gathered(50, 1), Gathered::default(), 50).keep_clap_in(&dir).is_none());
+}

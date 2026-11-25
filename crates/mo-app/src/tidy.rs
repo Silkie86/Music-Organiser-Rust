@@ -12,6 +12,9 @@
 //!   (`backup.txt.<number>-<number>.mo-part`, `rust-settings.json.mo-part`, `presets.db.new-<number>`), once it's an
 //!   hour old, so one being written right now is left alone; and, as old, a file the app wrote once but no longer
 //!   reads ([`RETIRED`]).
+//! - The data folder again: the file of numbers "Sounds like this" was still writing
+//!   (`sound-likeness-<hash>.rows.<number>-<number>.mo-part`), an hour old. The finished file
+//!   (`sound-likeness-<hash>.rows`) is replaced by the code that writes it, when the numbers change.
 //! - Beside the first data folder (`%LOCALAPPDATA%`): what a crash left of the two files a data folder move writes
 //!   there (`MusicOrganiser-folder.txt.<number>-<number>.mo-part`, `MusicOrganiser-moving.txt.…`), an hour old. That
 //!   folder holds every app's data, so nothing else in it is ever looked at.
@@ -329,6 +332,9 @@ fn report(done: &Tidied) {
 pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     let mut done = Tidied::default();
     done.add(remove_older(&places.data, |n| is_cut_short(n) || RETIRED.contains(&n), WRITING, now, false));
+    // "Sounds like this" was still writing its file of numbers when the app stopped (its own name, only while it's
+    // written). The finished file is its own to replace (`mo_sounds::index`'s `kept`).
+    done.add(remove_older(&places.data, mo_sounds::index::is_half_kept_name, WRITING, now, false));
     if let Some(beside) = &places.beside_first {
         done.add(remove_older(beside, is_move_part, WRITING, now, false));
     }
