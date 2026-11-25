@@ -2,7 +2,8 @@
   Tries a setup .exe the way people will use it, on a CI machine (never on Solomon's PC: it plays with the user's
   %LOCALAPPDATA%\MusicOrganiser and puts it back as it was):
 
-    1. A new PC, data where it usually goes: the app and its shortcut are in, the Apps list has it, no data note.
+    1. A new PC, data where it usually goes: the app, its CLAP plugin and its shortcut are in, the Apps list has it,
+       no data note. Nothing is put in a CLAP folder (the app does that itself once it runs).
     2. A new PC, data picked elsewhere: the folder starts there (started-here.txt) and the pointer names it; an
        update after it passes the data page by and changes nothing.
     3. A PC with data: it stays where it is, untouched; picking another place only leaves the app the ask to move.
@@ -60,6 +61,9 @@ try {
     # 1. A new PC, the usual place.
     Run-Setup @()
     Check (Test-Path -LiteralPath (Join-Path $app 'music-organiser.exe')) 'the app is in'
+    Check (Test-Path -LiteralPath (Join-Path $app 'plugins\DAWmate.clap')) 'the CLAP plugin is beside it'
+    $commonClap = Join-Path $(if ($env:CommonProgramW6432) { $env:CommonProgramW6432 } else { $env:CommonProgramFiles }) 'CLAP\DAWmate.clap'
+    Check (-not (Test-Path -LiteralPath $commonClap)) 'no CLAP folder written by the setup'
     $menu = Join-Path ([Environment]::GetFolderPath('Programs')) "$name.lnk"
     Check (Test-Path -LiteralPath $menu) "a Start menu shortcut called $name"
     $apps = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |

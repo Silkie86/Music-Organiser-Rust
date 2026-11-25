@@ -501,6 +501,38 @@ fn take_out_aside(older: &Older, done: &mut BitwigInstalled) {
     }
 }
 
+/// The CLAP plugin's file name in a CLAP folder. The installer puts it beside the app as this too, in `plugins`.
+pub const CLAP_PLUGIN_NAME: &str = "DAWmate.clap";
+
+/// The names the same plugin (one ID) has when `tools/dev/install-test-plugin.ps1` puts it in the CLAP folder. While
+/// one is there the app leaves its own out: a DAW would list the plugin twice.
+pub const TEST_CLAP_PLUGIN_NAMES: [&str; 2] = ["DAWmate (test).clap", "Music Organiser (test).clap"];
+
+/// The plugin the installer put beside the app (`plugins\DAWmate.clap`), if it's there.
+pub fn clap_plugin_source(app: &Path) -> Option<PathBuf> {
+    Some(app.parent()?.join("plugins").join(CLAP_PLUGIN_NAME)).filter(|f| f.is_file())
+}
+
+/// Whether the plugin in `folder` is the one `source` holds, byte for byte.
+pub fn clap_state(source: &Path, folder: &Path) -> ScriptState {
+    let Ok(theirs) = fs::read(folder.join(CLAP_PLUGIN_NAME)) else { return ScriptState::NotInstalled };
+    match fs::read(source) {
+        Ok(built) if built == theirs => ScriptState::Installed,
+        _ => ScriptState::Outdated,
+    }
+}
+
+/// Puts the plugin from `source` into `folder` as [`CLAP_PLUGIN_NAME`]: written beside itself, read back, then put in
+/// place, so one that can't be (a DAW has it open) leaves the old one as it was.
+pub fn install_clap(source: &Path, folder: &Path) -> Installed {
+    let mut done = Installed::default();
+    match fs::read(source).and_then(|bytes| write_checked(folder, CLAP_PLUGIN_NAME, &bytes)) {
+        Ok(()) => done.went.push(folder.to_owned()),
+        Err(e) => done.failed.push((folder.to_owned(), e.to_string())),
+    }
+    done
+}
+
 /// Whether `path` is a plain file itself (not a link to one).
 fn plain_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.is_file())

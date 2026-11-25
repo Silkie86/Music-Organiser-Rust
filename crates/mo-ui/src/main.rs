@@ -17,6 +17,10 @@ fn main() -> Result<(), slint::PlatformError> {
     if mo_space::admin::run_step(&args) {
         return Ok(());
     }
+    // Started as administrator to put the CLAP plugin into Common Files\CLAP (mo_ui::daw_links): do it and stop.
+    if args.first().is_some_and(|a| a == mo_ui::daw_links::PUT_CLAP_PLUGIN) {
+        std::process::exit(mo_ui::daw_links::put_plugin_as_admin());
+    }
     // Started by the uninstaller: the app and the helper running from this program are asked to close, and waited
     // for, so their files can go (UP-12). No window or setting of its own; a crash still gets its crash file. Ends
     // with 1 when one is still running, which the uninstaller's log shows.
@@ -205,6 +209,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::startup::step("Space page");
     // The rail's "In your DAWs": what Bitwig has open, asked on a thread of its own.
     mo_ui::daws::connect(&app);
+    // A little after start, the installed copy puts its links into the DAWs, or updates them (Solomon, 25 Nov 2026).
+    mo_ui::daw_links::keep_up_to_date(library.clone(), feed.clone());
     // A while after start, once a day: whether a newer version is out (an installed copy only; Settings turns it off).
     mo_ui::update::connect(&app, feed.clone(), true);
     // The window opens maximised. Its size is given first: without one, Slint shrinks the window winit has just

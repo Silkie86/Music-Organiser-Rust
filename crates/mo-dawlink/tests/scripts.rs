@@ -424,3 +424,30 @@ fn taking_out_never_goes_through_a_link() {
     assert_eq!(take_out(&files).removed.len(), 2);
     assert_eq!(fs::read_dir(&own).unwrap().count(), 0);
 }
+
+#[test]
+fn the_clap_plugin_goes_in_from_beside_the_app_and_is_checked_by_its_bytes() {
+    let root = fixture("clap");
+    let app = root.join("DAWmate").join("music-organiser.exe");
+    assert_eq!(clap_plugin_source(&app), None);
+    fs::create_dir_all(root.join("DAWmate").join("plugins")).unwrap();
+    let source = root.join("DAWmate").join("plugins").join(CLAP_PLUGIN_NAME);
+    fs::write(&source, b"plugin 2").unwrap();
+    assert_eq!(clap_plugin_source(&app), Some(source.clone()));
+
+    let folder = root.join("Programs").join("Common").join("CLAP");
+    assert_eq!(clap_state(&source, &folder), ScriptState::NotInstalled);
+    let done = install_clap(&source, &folder);
+    assert_eq!(done.went, std::slice::from_ref(&folder));
+    assert_eq!(fs::read(folder.join(CLAP_PLUGIN_NAME)).unwrap(), b"plugin 2");
+    assert_eq!(clap_state(&source, &folder), ScriptState::Installed);
+    // No part file stays.
+    assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
+
+    fs::write(&source, b"plugin 3").unwrap();
+    assert_eq!(clap_state(&source, &folder), ScriptState::Outdated);
+    // A source that's gone: nothing is written, and the copy in place stays.
+    let done = install_clap(&root.join("gone.clap"), &folder);
+    assert!(done.went.is_empty() && done.failed.len() == 1, "{done:?}");
+    assert_eq!(fs::read(folder.join(CLAP_PLUGIN_NAME)).unwrap(), b"plugin 2");
+}
