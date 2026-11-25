@@ -3438,7 +3438,6 @@ dependencies = [
  "chrono",
  "fs4",
  "half",
- "memmap2",
  "mo-audio",
  "mo-catch",
  "mo-formats",

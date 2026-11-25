@@ -1,25 +1,29 @@
 //! An index's half-precision numbers kept in a file beside the app's data and read as they're needed, not held in
 //! the app's own memory (Solomon, 2026-11-25: CLAP's were 465 MB of the app's memory for his half a million sounds).
 //!
-//! The file is mapped: Windows reads the parts a search touches and keeps them only while it has room, and when it's
-//! short it lets go of them without writing them to the page file (they're in the file already). The app and its
-//! plugin map the same file, so the two hold it once between them.
+//! The file is read with ordinary reads, a part of the rows at a time, into a small buffer: Windows keeps what's
+//! been read in its own file cache while it has room, and lets go of it when it's short without writing it to the
+//! page file. It isn't mapped into the app's memory: a mapped file that can't be read (the drive gone, a bad sector)
+//! stops the whole program with nothing logged, where a read that fails just says so. A search that can't read
+//! finds nothing, and the trouble is reported once ([`on_trouble`]).
 //!
 //! The file's name says what's in it (a hash of its numbers), so:
-//! - a library whose fingerprints changed gets a file of another name, and a file in use is never written to (Windows
-//!   wouldn't allow it either, with the plugin mapping it);
+//! - a library whose fingerprints changed gets a file of another name, and a file in use is never written to;
 //! - a file of the right name is still checked, number for number, against the ones just read from the library,
 //!   before it's trusted.
 //!
-//! It's written whole under another name first (ending `.part`), flushed to the disk, read back and checked, and only then
-//! given its name. Files of this kind that aren't the one in use are removed (rule 28): only plain files whose whole
+//! It's written whole under another name first (ending `.mo-part`, as the app's other half-written files), flushed
+//! to the disk, read back and checked, and only then given its name. Files of this kind that aren't the one in use
+//! are removed (rule 28), before the new one is written, so they never take its room: only plain files whose whole
 //! name is one this code gives ([`is_kept_name`]), never through a link, and a half-written one only once it's an hour
-//! old (another copy of the app, or its plugin, may be writing it now).
+//! old (another copy of the app may be writing it now; the app's start-up sweep clears those too,
+//! [`is_half_kept_name`]). The plugin never comes here: it writes none of the app's files.
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
@@ -30,8 +34,9 @@ const MAGIC: &[u8; 8] = b"MOLIKE1\n";
 const HEADER: usize = 4096;
 const START: &str = "sound-likeness-";
 const END: &str = ".rows";
-const PART: &str = ".part";
-/// How much room the drive must have left over after the file is written.
+const PART: &str = ".mo-part";
+/// How much room the drive must have left over after the file is written: this, or as much again as the file for a
+/// file smaller than it.
 const SPARE: u64 = 1 << 30;
 /// A half-written file older than this was left by a run that stopped.
 const LEFT_BEHIND: Duration = Duration::from_secs(3600);
@@ -51,47 +56,104 @@ pub struct Kept {
     pub removed: usize,
 }
 
-/// Numbers in a mapped file ([`keep`]).
-pub(super) struct Mapped {
-    map: memmap2::Mmap,
+/// Who hears when a kept file can't be read ([`on_trouble`]).
+static TROUBLE: OnceLock<fn(&str)> = OnceLock::new();
+
+/// From now on `say` is told, once for each file, when a kept file can't be read (the app logs it). The first
+/// caller's stays.
+pub fn on_trouble(say: fn(&str)) {
+    let _ = TROUBLE.set(say);
 }
 
-impl Mapped {
-    /// The numbers, as the heap held them: every row one after another.
-    pub(super) fn numbers(&self) -> &[u16] {
-        // Checked when it was mapped: past the header there's a whole number of them, lying as they must.
-        self.map.get(HEADER..).and_then(|bytes| bytemuck::try_cast_slice(bytes).ok()).unwrap_or(&[])
+/// Numbers in a file ([`keep`]), read as they're asked for.
+pub(super) struct InFile {
+    file: File,
+    path: PathBuf,
+    /// How many numbers it holds.
+    numbers: usize,
+    /// Whether a failed read has been reported (once is enough).
+    told: AtomicBool,
+}
+
+impl InFile {
+    /// Fills `out` with the numbers from the `at`th on, as the heap held them (every row one after another). Says
+    /// no when they can't be read (and reports it the first time): `out` is then not to be used.
+    pub(super) fn read(&self, at: usize, out: &mut [u16]) -> bool {
+        let read = if at.checked_add(out.len()).is_none_or(|end| end > self.numbers) {
+            Err(std::io::Error::other("past the end of the file"))
+        } else {
+            read_exact_at(&self.file, bytemuck::cast_slice_mut::<u16, u8>(out), (HEADER + at * 2) as u64)
+        };
+        match read {
+            Ok(()) => true,
+            Err(e) => {
+                if !self.told.swap(true, Ordering::Relaxed)
+                    && let Some(say) = TROUBLE.get()
+                {
+                    say(&format!("{} couldn't be read ({e})", self.path.display()));
+                }
+                false
+            }
+        }
+    }
+
+    /// How many numbers it holds.
+    pub(super) fn len(&self) -> usize {
+        self.numbers
     }
 }
 
-impl std::fmt::Debug for Mapped {
+/// Fills `out` from `file` at `offset`, wherever other threads are reading it.
+fn read_exact_at(file: &File, mut out: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !out.is_empty() {
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(file, out, offset)?;
+        #[cfg(windows)]
+        let n = std::os::windows::fs::FileExt::seek_read(file, out, offset)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        out = &mut out[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
+
+impl std::fmt::Debug for InFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Mapped({} numbers)", self.numbers().len())
+        write!(f, "InFile({} numbers in {})", self.numbers, self.path.display())
     }
 }
 
-impl PartialEq for Mapped {
-    fn eq(&self, other: &Mapped) -> bool {
-        self.numbers() == other.numbers()
+/// The same numbers: the name is a hash of them.
+impl PartialEq for InFile {
+    fn eq(&self, other: &InFile) -> bool {
+        self.numbers == other.numbers && self.path.file_name() == other.path.file_name()
     }
 }
 
 /// Whether `name` is the whole name of a file this code writes: the finished kind (`sound-likeness-` + 16 hex digits
-/// + `.rows`), or a half-written one (the same + `.` + the writer's number + `.part`).
+/// + `.rows`), or a half-written one ([`is_half_kept_name`]).
 pub fn is_kept_name(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix(START) else { return false };
-    let Some((hash, end)) = rest.split_at_checked(16) else { return false };
-    if !hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
-        return false;
-    }
-    match end.strip_prefix(END) {
-        Some("") => true,
-        Some(part) => part
-            .strip_prefix('.')
-            .and_then(|p| p.strip_suffix(PART))
-            .is_some_and(|pid| !pid.is_empty() && pid.len() <= 10 && pid.bytes().all(|b| b.is_ascii_digit())),
-        None => false,
-    }
+    hash_and_end(name).is_some_and(|end| end.is_empty()) || is_half_kept_name(name)
+}
+
+/// Whether `name` is the whole name of a file this code is still writing: a finished file's name + `.` + the
+/// writer's process number + `-` + its count + `.mo-part`.
+pub fn is_half_kept_name(name: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit());
+    hash_and_end(name)
+        .and_then(|end| end.strip_prefix('.'))
+        .and_then(|end| end.strip_suffix(PART))
+        .and_then(|writer| writer.split_once('-'))
+        .is_some_and(|(process, count)| digits(process) && digits(count))
+}
+
+/// What follows a finished file's name in `name`, if it starts with one.
+fn hash_and_end(name: &str) -> Option<&str> {
+    let (hash, end) = name.strip_prefix(START)?.split_at_checked(16)?;
+    hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)).then_some(())?;
+    end.strip_prefix(END)
 }
 
 /// The header of a file of `numbers` numbers in rows of `dim`.
@@ -104,9 +166,9 @@ fn header(dim: usize, numbers: usize) -> Vec<u8> {
 }
 
 /// Keeps the numbers in `parts` (rows of `dim`, as an index holds them at half precision) in a file in `folder`, and
-/// maps it. The caller then lets go of `parts`. Says why when it can't (the index stays as it was): no room, a
+/// opens it. The caller then lets go of `parts`. Says why when it can't (the index stays as it was): no room, a
 /// folder that can't be written, a file that won't check.
-pub(super) fn keep(dim: usize, parts: &[Box<[u16]>], folder: &Path) -> Result<(Arc<Mapped>, Kept), String> {
+pub(super) fn keep(dim: usize, parts: &[Box<[u16]>], folder: &Path) -> Result<(Arc<InFile>, Kept), String> {
     if cfg!(target_endian = "big") {
         return Err("this computer keeps numbers the other way round from the file".into());
     }
@@ -122,32 +184,24 @@ pub(super) fn keep(dim: usize, parts: &[Box<[u16]>], folder: &Path) -> Result<(A
     }
     let hash = hash.finalize();
     let name: String = format!("{START}{}{END}", hash.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>());
-    let file = folder.join(&name);
+    let path = folder.join(&name);
     let bytes = (HEADER + numbers * 2) as u64;
+    // The files of other numbers go first, so they don't take the room this one needs.
+    let removed = sweep(folder, &name);
 
     let mut written = false;
-    if !same(&file, &header, parts) {
-        if fs::symlink_metadata(&file).is_ok() {
+    if !same(&path, &header, parts) {
+        if fs::symlink_metadata(&path).is_ok() {
             // Of this name, yet not these numbers: damaged. It makes way (if it can't, nothing is kept).
-            remove_plain(&file).map_err(|e| format!("a damaged file of its name couldn't be removed ({e})"))?;
+            remove_plain(&path).map_err(|e| format!("a damaged file of its name couldn't be removed ({e})"))?;
         }
-        write(folder, &file, &name, &header, parts, bytes)?;
+        write(folder, &path, &name, &header, parts, bytes)?;
         written = true;
     }
-    let opened = File::open(&file).map_err(|e| format!("the file couldn't be opened ({e})"))?;
-    // SAFETY: the file is one this code finished and checked (`same`, just now or inside `write`), and nothing writes
-    // to a finished file again: a change of numbers makes a file of another name, and the sweep only removes files,
-    // which leaves a mapping whole (Windows refuses even that while it's mapped). So the bytes mapped don't change
-    // under the slices handed out. Another program cutting the file short meanwhile would stop the app, as it would
-    // if it damaged any file the app has open; nothing of the app's does.
-    #[allow(unsafe_code)]
-    let map = unsafe { memmap2::Mmap::map(&opened) }.map_err(|e| format!("the file couldn't be mapped ({e})"))?;
-    let mapped = Mapped { map };
-    if mapped.map.len() as u64 != bytes || mapped.numbers().len() != numbers {
-        return Err("the file mapped isn't the size written".into());
-    }
-    let removed = sweep(folder, &name);
-    Ok((Arc::new(mapped), Kept { file, bytes, written, removed }))
+    // Checked just now, or inside `write`: a plain file of exactly these numbers.
+    let file = File::open(&path).map_err(|e| format!("the file couldn't be opened ({e})"))?;
+    let kept = InFile { file, path: path.clone(), numbers, told: AtomicBool::new(false) };
+    Ok((Arc::new(kept), Kept { file: path, bytes, written, removed }))
 }
 
 /// Writes the file under a name of this writer's own, checks it, and gives it its name.
@@ -160,20 +214,20 @@ fn write(
     bytes: u64,
 ) -> Result<(), String> {
     match fs4::available_space(folder) {
-        Ok(free) if free < bytes.saturating_add(SPARE) => {
+        Ok(free) if free < bytes.saturating_add(SPARE.min(bytes)) => {
             return Err(format!(
-                "the drive has {} MB free, and the file needs {} MB with 1 GB left over",
+                "the drive has {} MB free, and the file needs {} MB with {} MB left over",
                 free >> 20,
-                bytes >> 20
+                bytes >> 20,
+                SPARE.min(bytes) >> 20
             ));
         }
         _ => {}
     }
-    let part = folder.join(format!("{name}.{}{PART}", std::process::id()));
-    // One of this very name is this writer's own, from an earlier try.
-    if fs::symlink_metadata(&part).is_ok() {
-        remove_plain(&part).map_err(|e| format!("a half-written file couldn't be removed ({e})"))?;
-    }
+    // A name no other writer has, in this process or another.
+    static COUNT: AtomicU32 = AtomicU32::new(0);
+    let count = COUNT.fetch_add(1, Ordering::Relaxed);
+    let part = folder.join(format!("{name}.{}-{count}{PART}", std::process::id()));
     let made = (|| -> std::io::Result<()> {
         let mut out = fs::OpenOptions::new().write(true).create_new(true).open(&part)?;
         out.write_all(header)?;
@@ -192,7 +246,7 @@ fn write(
     }
     if let Err(e) = fs::rename(&part, file) {
         let _ = remove_plain(&part);
-        // The plugin (or another copy of the app) may have finished the same file meanwhile: then that one is used.
+        // Another copy of the app may have finished the same file meanwhile: then that one is used.
         if !same(file, header, parts) {
             return Err(format!("the file couldn't be given its name ({e})"));
         }
@@ -200,8 +254,7 @@ fn write(
     Ok(())
 }
 
-/// Whether `file` is a plain file holding exactly `header` and then the numbers in `parts`. Read as a file (not
-/// through a mapping), a piece at a time.
+/// Whether `file` is a plain file holding exactly `header` and then the numbers in `parts`. Read a piece at a time.
 fn same(file: &Path, header: &[u8], parts: &[Box<[u16]>]) -> bool {
     let numbers: usize = parts.iter().map(|p| p.len()).sum();
     let Ok(meta) = fs::symlink_metadata(file) else { return false };
@@ -229,7 +282,7 @@ fn remove_plain(path: &Path) -> std::io::Result<()> {
 }
 
 /// Removes the other files of this kind in `folder` (not `keep`): finished ones of other numbers, and half-written
-/// ones left behind over an hour ago. How many went. One in use (the plugin's, on Windows) stays until next time.
+/// ones left behind over an hour ago. How many went. One that can't be removed now stays until next time.
 fn sweep(folder: &Path, keep: &str) -> usize {
     let Ok(entries) = fs::read_dir(folder) else { return 0 };
     let now = SystemTime::now();
@@ -270,9 +323,11 @@ mod tests {
 
     #[test]
     fn only_whole_names_of_this_kind_are_ours() {
-        for ours in ["sound-likeness-0123456789abcdef.rows", "sound-likeness-0123456789abcdef.rows.4242.part"] {
+        for ours in ["sound-likeness-0123456789abcdef.rows", "sound-likeness-0123456789abcdef.rows.4242-0.mo-part"] {
             assert!(is_kept_name(ours), "{ours}");
         }
+        assert!(is_half_kept_name("sound-likeness-0123456789abcdef.rows.4242-17.mo-part"));
+        assert!(!is_half_kept_name("sound-likeness-0123456789abcdef.rows"));
         for not in [
             "",
             "sound-likeness-.rows",
@@ -281,11 +336,14 @@ mod tests {
             "sound-likeness-0123456789ABCDEF.rows",
             "sound-likeness-0123456789abcdeg.rows",
             "sound-likeness-0123456789abcdef0.rows",
-            "sound-likeness-0123456789abcdef.rows.part",
-            "sound-likeness-0123456789abcdef.rows..part",
-            "sound-likeness-0123456789abcdef.rows.x1.part",
+            "sound-likeness-0123456789abcdef.rows.mo-part",
+            "sound-likeness-0123456789abcdef.rows.1.mo-part",
+            "sound-likeness-0123456789abcdef.rows.-1.mo-part",
+            "sound-likeness-0123456789abcdef.rows.1-.mo-part",
+            "sound-likeness-0123456789abcdef.rows.x1-2.mo-part",
+            "sound-likeness-0123456789abcdef.rows.1-2.part",
             "my sound-likeness-0123456789abcdef.rows",
-            "sound-likeness-0123456789abcdef.rows.1.part.txt",
+            "sound-likeness-0123456789abcdef.rows.1-2.mo-part.txt",
             "sound-likeness-é123456789abcdef.rows",
         ] {
             assert!(!is_kept_name(not), "{not}");

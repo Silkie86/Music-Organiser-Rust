@@ -194,15 +194,7 @@ fn fingerprints(sounds_db: &Path, analysed: usize) -> Result<SoundIndex, String>
     };
     let (features, clap) = db.fingerprints(analysed).map_err(|e| format!("couldn't read the fingerprints: {e}"))?;
     drop(db);
-    // CLAP's numbers in the file the app keeps them in too (beside the library), so the two hold them once.
-    let folder = copy.parent().map(Path::to_path_buf);
-    Ok(mo_app::background::on_pool(|| {
-        let mut index = SoundIndex::from_gathered(features, clap, analysed);
-        if let Some(folder) = folder.filter(|f| f.is_absolute()) {
-            mo_app::sound_likeness::keep(&mut index, &folder);
-        }
-        index
-    }))
+    Ok(mo_app::background::on_pool(|| SoundIndex::from_gathered(features, clap, analysed)))
 }
 
 /// What the panel asks of the list: the app's own filters (with the search box's words), and the order.

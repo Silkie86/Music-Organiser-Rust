@@ -1,4 +1,5 @@
-//! CLAP's numbers kept in a file (`index/kept.rs`): the same searches, one file, and only its own files removed.
+//! CLAP's numbers kept in a file (`index/kept.rs`): the same searches, one file, only its own files removed, and a
+//! file that can't be read any more finds nothing rather than stopping the app.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
@@ -110,9 +111,9 @@ fn other_numbers_get_a_file_of_their_own_and_only_this_codes_files_are_removed()
     fs::write(dir.join("sound-likeness-notes.rows"), b"mine").unwrap();
     fs::write(dir.join("sounds-rust.db"), b"mine").unwrap();
     fs::create_dir(dir.join("sound-likeness-0123456789abcdef.rows")).unwrap();
-    let fresh = dir.join("sound-likeness-aaaaaaaaaaaaaaaa.rows.77.part");
+    let fresh = dir.join("sound-likeness-aaaaaaaaaaaaaaaa.rows.77-0.mo-part");
     fs::write(&fresh, b"being written").unwrap();
-    let stale = dir.join("sound-likeness-bbbbbbbbbbbbbbbb.rows.78.part");
+    let stale = dir.join("sound-likeness-bbbbbbbbbbbbbbbb.rows.78-3.mo-part");
     fs::write(&stale, b"left behind").unwrap();
     let yesterday = SystemTime::now() - Duration::from_secs(24 * 3600);
     fs::File::options().write(true).open(&stale).unwrap().set_modified(yesterday).unwrap();
@@ -123,7 +124,7 @@ fn other_numbers_get_a_file_of_their_own_and_only_this_codes_files_are_removed()
     assert_eq!(done.removed, 2, "the old numbers' file and the half-written one left behind");
     let mut want = vec![
         "sound-likeness-0123456789abcdef.rows".to_owned(),
-        "sound-likeness-aaaaaaaaaaaaaaaa.rows.77.part".to_owned(),
+        "sound-likeness-aaaaaaaaaaaaaaaa.rows.77-0.mo-part".to_owned(),
         "sound-likeness-notes.rows".to_owned(),
         "sounds-rust.db".to_owned(),
         done.file.file_name().unwrap().to_str().unwrap().to_owned(),
@@ -149,13 +150,37 @@ fn a_link_with_one_of_its_names_is_never_followed_or_removed() {
     let mut index = held(100, 0);
     let done = index.keep_in(&dir).unwrap().unwrap();
     assert_eq!(done.removed, 0);
+    assert_eq!(remove_kept(&dir), 1, "its own");
     assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
     assert_eq!(fs::read(&yours).unwrap(), b"mine");
-    // Its own file can go while it's mapped (on Unix); the link stays, and what it points at.
-    assert_eq!(remove_kept(&dir), 1);
-    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-    assert_eq!(fs::read(&yours).unwrap(), b"mine");
-    assert_eq!(index.get(3).map(|v| v.len()), Some(16));
+}
+
+#[test]
+fn a_file_that_cant_be_read_any_more_finds_nothing_and_says_so_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static TOLD: AtomicUsize = AtomicUsize::new(0);
+    mo_sounds::index::on_kept_trouble(|what| {
+        assert!(what.contains("sound-likeness-") && what.contains("couldn't be read"), "{what}");
+        TOLD.fetch_add(1, Ordering::Relaxed);
+    });
+    let dir = folder("gone");
+    let was = held(9000, 0);
+    let mut kept = was.clone();
+    let done = kept.keep_in(&dir).unwrap().unwrap();
+    let q = was.get(3).unwrap();
+    assert_eq!(kept.nearest(&q, 5).len(), 5);
+    // Cut short behind its back (as a drive that stops answering part way): the rows past the cut can't be read.
+    fs::File::options().write(true).open(&done.file).unwrap().set_len(4096 + 100 * 16 * 2).unwrap();
+    let before = TOLD.load(Ordering::Relaxed);
+    assert_eq!(kept.get(9000 * 3), None);
+    assert_eq!(kept.dot_with(9000 * 3, &q), None);
+    assert!(kept.get(3).is_some(), "what can still be read is");
+    // The first part reaches past the cut, and so does every other: nothing is found, nothing panics.
+    assert!(kept.nearest(&q, 5).is_empty());
+    // A scan's change leaves it as it is.
+    let gone = [6i64].into_iter().collect();
+    assert!(kept.with(&gone, Gathered::default(), false, None).is_kept_in_a_file());
+    assert_eq!(TOLD.load(Ordering::Relaxed), before + 1, "once for the file");
 }
 
 #[test]
