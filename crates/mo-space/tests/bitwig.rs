@@ -313,8 +313,13 @@ fn the_project_folders_are_the_ones_with_a_bitwig_project_and_its_copies() {
     write(&projects, "2024/Garage/multi-samples/Pads.multisample", b"pads");
     write(&dir, "Loose/Loose.bwproject", b"project");
     write(&dir, "Loose/multi-samples/Bass.multisample", b"bass");
+    // A folder with a project made for trying the app out beside one of yours is still yours.
+    write(&projects, "2024/Garage/MO Recipe 05 drum machine.bwproject", b"project");
     // Not these: a project without copies, a multi-samples folder with no project, an FL Studio save beside one, a
-    // project inside a project's copies, and a project in a folder a move left behind.
+    // project inside a project's copies, a project in a folder a move left behind, and a project made for trying the
+    // app out (Solomon's F12 note, 25 Nov 2026).
+    write(&projects, "MO Recipe 05 drum machine/MO Recipe 05 drum machine.bwproject", b"project");
+    write(&projects, "MO Recipe 05 drum machine/multi-samples/MO Recipe Tones.multisample", b"tones");
     write(&projects, "Sketch/Sketch.bwproject", b"project");
     write(&projects, "Stems/multi-samples/Lead.multisample", b"lead");
     write(&projects, "Beat/Beat.flp", b"flp");

@@ -182,6 +182,9 @@ pub struct Updated {
     /// How many saves' count of missing plugins changed when their plugins were looked at again
     /// ([`plugin_writes::recheck_installed`]): kept already, not on the card.
     pub rechecked: usize,
+    /// How many saves made for trying the app out were read, found moved or found gone ([`Listed::follows`]): kept,
+    /// but never on the card, as the list doesn't show them.
+    pub quiet: usize,
     /// Whether it stopped part way as the app closed ([`Live::stopper`]): what's left is read at the next start.
     pub stopped: bool,
 }
@@ -194,12 +197,13 @@ impl Updated {
         self.gone += more.gone;
         self.mended += more.mended;
         self.rechecked += more.rechecked;
+        self.quiet += more.quiet;
         self.stopped |= more.stopped;
         self
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.for_card() && self.mended == 0 && self.rechecked == 0
+        !self.for_card() && self.mended == 0 && self.rechecked == 0 && self.quiet == 0
     }
 
     /// Whether there's anything to say on the card: a save read, moved or gone.
@@ -238,10 +242,24 @@ fn in_export(path: &str, export: Option<&str>) -> bool {
     export.is_some_and(|e| scan::is_inside(path, e))
 }
 
+/// Whether the list follows a save at `path` by where it is: not in a folder the scan leaves out, and not one of Open
+/// in Bitwig's copies in the export folder (`export`). The list as it's loaded ([`Listed::follows`]) and every save
+/// found later ([`Live::update`]) go by it, so neither lets in what the other leaves out.
+fn followed(path: &str, roots: &[String], export: Option<&str>) -> bool {
+    !scan::is_ignored(path, roots) && !in_export(path, export)
+}
+
+/// Whether a save at `path` was made for trying the app out ([`songs::made_for_tests`]: "MO Recipe 02 notes"), by its
+/// name as the library has it: the file's name without its extension.
+fn made_for_tests(path: &str) -> bool {
+    songs::made_for_tests(paths::stem(paths::file_name(path)))
+}
+
 /// Which of the saves the library keeps the Songs page lists: not Fix's copies still waiting for Keep (until Keep, a
 /// song opens its original), not a DAW's autosave copies the C# app's scan let in ("sly_17 (autosaved at 4h10).flp")
-/// or saves in a folder the scan leaves out (a project folder inside one was taken off, FL's Backup), and not Open in
-/// Bitwig's copies in the export folder. The Sounds page counts the songs a sound is used in from the same saves.
+/// or saves in a folder the scan leaves out (a project folder inside one was taken off, FL's Backup), not Open in
+/// Bitwig's copies in the export folder, and not the saves made for trying the app out ("MO Recipe…", "MO Live
+/// Test…"). The Sounds page counts the songs a sound is used in from the same saves.
 pub struct Listed {
     pending: mo_library::PathSet,
     roots: Vec<String>,
@@ -259,9 +277,14 @@ impl Listed {
 
     /// Whether the Songs page lists the save at `path`.
     pub fn has(&self, path: &str) -> bool {
-        (self.pending.is_empty() || !self.pending.contains(path))
-            && !scan::is_ignored(path, &self.roots)
-            && !in_export(path, self.export.as_deref())
+        self.follows(path) && !made_for_tests(path)
+    }
+
+    /// Whether the list follows the save at `path`: [`Listed::has`], and the saves made for trying the app out too.
+    /// The list reads those as they change and keeps them in the library, so what looks at what's safe to free still
+    /// counts them, but never shows them ([`Songs::from_saves`]).
+    pub fn follows(&self, path: &str) -> bool {
+        (self.pending.is_empty() || !self.pending.contains(path)) && followed(path, &self.roots, self.export.as_deref())
     }
 }
 
@@ -320,7 +343,7 @@ impl Live {
         // After every row of the library, Fix's copies left out below included, so no two saves share an id.
         let next_id = saves.iter().map(|s| s.id).max().unwrap_or(0) + 1;
         // The saves the list leaves out stay in the library.
-        saves.retain(|s| listed.has(&s.path));
+        saves.retain(|s| listed.follows(&s.path));
         let Listed { roots, export, .. } = listed;
         // As the C# app: asked unless Settings turned it off; across folders only when turned on.
         let asking = (library.setting(ASK_DOUBTS)?.as_deref() != Some("0"))
@@ -1145,10 +1168,7 @@ impl Live {
         }
         let mut seen = HashSet::new();
         paths.retain(|p| {
-            seen.insert(case::key(p))
-                && scan::is_project_file(p)
-                && !scan::is_ignored(p, &self.roots)
-                && !in_export(p, self.export.as_deref())
+            seen.insert(case::key(p)) && scan::is_project_file(p) && followed(p, &self.roots, self.export.as_deref())
         });
         let mut index: HashMap<String, usize> =
             self.saves.iter().enumerate().map(|(i, s)| (case::key(&s.path), i)).collect();
@@ -1172,8 +1192,12 @@ impl Live {
                     {
                         s.file_missing = true;
                         self.to_mark.insert(s.id);
-                        marked.insert(i);
-                        done.gone += 1;
+                        if songs::made_for_tests(&s.name) {
+                            done.quiet += 1;
+                        } else {
+                            marked.insert(i);
+                            done.gone += 1;
+                        }
                     }
                 }
             }
@@ -1263,9 +1287,15 @@ impl Live {
                         if marked.remove(&i) {
                             done.gone -= 1;
                         }
-                        done.moved.push(detail.save.name.clone());
+                        if songs::made_for_tests(&detail.save.name) {
+                            done.quiet += 1;
+                        } else {
+                            done.moved.push(detail.save.name.clone());
+                        }
                     } else if mends.contains(&path) {
                         done.mended += 1;
+                    } else if songs::made_for_tests(&detail.save.name) {
+                        done.quiet += 1;
                     } else {
                         done.read.push(detail.save.name.clone());
                     }
@@ -1285,7 +1315,11 @@ impl Live {
                     index.insert(case::key(&detail.save.path), self.saves.len());
                     self.to_put.insert(detail.save.id);
                     self.saves.push(detail.save.clone());
-                    done.read.push(detail.save.name.clone());
+                    if songs::made_for_tests(&detail.save.name) {
+                        done.quiet += 1;
+                    } else {
+                        done.read.push(detail.save.name.clone());
+                    }
                 }
             }
             if let Ok(mut d) = self.details.lock() {
@@ -1584,7 +1618,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_leaves_out_fix_copies_autosaves_skipped_folders_and_exports() {
+    fn the_list_leaves_out_fix_copies_autosaves_skipped_folders_exports_and_test_saves() {
         let dir = std::env::temp_dir().join(format!("mo-live-listed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1609,6 +1643,19 @@ mod tests {
         assert!(!listed.has(r"C:\Music\Night_2 (overwritten at 4h10).flp"));
         assert!(!listed.has(r"C:\Music\Backup\Night_2.flp"));
         assert!(!listed.has(r"D:\Exports\Night (Bitwig)\Night.bwproject"));
+        assert!(!listed.follows(r"D:\Exports\Night (Bitwig)\Night.bwproject"));
+        // The saves made for trying the app out (Solomon's F12 note, 25 Nov 2026), whatever the DAW: followed, so the
+        // library keeps up with them, but not listed.
+        for test in [
+            r"C:\Music\MO Recipe 02 notes.flp",
+            r"C:\Music\MO Recipe 02 notes\MO Recipe 02 notes.bwproject",
+            r"C:\Music\Tests\mo recipe 06 mixer.song",
+            r"C:\Music\MO Live Test automation.flp",
+        ] {
+            assert!(listed.follows(test) && !listed.has(test), "{test}");
+        }
+        // Only by its own name: a folder named so doesn't hide a song of yours in it.
+        assert!(listed.has(r"C:\Music\MO Recipe\Night_3.flp"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2273,6 +2320,67 @@ mod tests {
         assert_eq!(kept, [case::to_lower(&moved)]);
         assert!(live.moved_notes.is_empty(), "kept, so not again");
         drop((live, lib, db));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The saves made for trying the app out (Solomon's F12 note, 25 Nov 2026: "anything with mo recipe shouldnt turn
+    /// up in the app"): followed and kept in songs.db like any other, so what looks at what's safe to free still counts
+    /// them, but never shown, nor named on the card.
+    #[test]
+    fn saves_made_for_trying_the_app_out_are_kept_up_with_but_never_shown() {
+        let dir = std::env::temp_dir().join(format!("mo-live-made-for-tests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join("Projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        rusqlite::Connection::open(dir.join("library.db"))
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE roots (path TEXT PRIMARY KEY);
+                 CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT);
+                 INSERT INTO roots VALUES ('{}');",
+                projects.display()
+            ))
+            .unwrap();
+        let songs = dir.join(mo_library::songs_db::FILE_NAME);
+        mo_library::songs_db::make(&dir.join("library.db"), &songs, &mut |_| {}).unwrap();
+        // The start makes it the app's own, to be written.
+        assert!(mo_library::songs_db::at_start(&dir, "test").is_songs_db());
+        let open = || {
+            let lib = Library::open_read_only(&songs).unwrap();
+            Live::load(&lib, 6, LiveDetails::default()).unwrap().with_writes(songs.clone())
+        };
+        let shown = |live: &Live| live.songs().rows.iter().map(|r| r.song.name.clone()).collect::<Vec<_>>();
+        std::fs::write(projects.join("Night_1.flp"), tiny_flp()).unwrap();
+        let recipe = projects.join("MO Recipe 02 notes.flp");
+        std::fs::write(&recipe, tiny_flp()).unwrap();
+        let mut live = open();
+        let caught = live.catch_up();
+        assert_eq!((caught.read.clone(), caught.quiet), (vec!["Night_1".to_owned()], 1));
+        assert_eq!(caught.card().0, "Updated Night_1");
+        assert_eq!(shown(&live), ["Night"]);
+        let kept = live.keep().unwrap().unwrap();
+        assert_eq!(kept.written.put, 2, "{kept:?}");
+        // The next start follows it from the library, and still doesn't show it.
+        let mut next = open();
+        assert_eq!(next.saves.len(), 2);
+        assert_eq!(shown(&next), ["Night"]);
+        assert!(next.catch_up().is_empty());
+        // Saved again: read and kept, quietly. Gone: marked missing, quietly.
+        let later = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+        std::fs::File::options().write(true).open(&recipe).unwrap().set_modified(later).unwrap();
+        let changed = next.update(&Changes { files: vec![recipe.display().to_string()], ..Changes::default() });
+        assert_eq!((changed.for_card(), changed.quiet, changed.is_empty()), (false, 1, false));
+        std::fs::remove_file(&recipe).unwrap();
+        let gone = next.update(&Changes { files: vec![recipe.display().to_string()], ..Changes::default() });
+        assert_eq!((gone.for_card(), gone.gone, gone.quiet), (false, 0, 1));
+        assert!(next.keep().unwrap().is_ok());
+        let lib = Library::open_read_only(&songs).unwrap();
+        assert!(lib.saves().unwrap().iter().any(|s| s.name == "MO Recipe 02 notes" && s.file_missing));
+        // The Sounds page counts by the same list: the save isn't one of the songs a sound is used in.
+        let listed = Listed::read(&lib).unwrap();
+        assert!(listed.follows(&recipe.display().to_string()) && !listed.has(&recipe.display().to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use mo_formats::PluginKind;
 use mo_formats::bitwig::curve::CurvePoint;
 use mo_library::Save;
-use mo_library::songs::Song;
+use mo_library::songs::{Song, made_for_tests};
 use mo_presets::curves::{Curve, SourceKind};
 use mo_presets::export::Exported;
 use mo_presets::filter::{self, Choice, Maker, Type};
@@ -74,12 +74,14 @@ pub fn keeps_settings(path: &str) -> bool {
 }
 
 /// The saves the Sounds section reads: the newest save of each song that keeps its settings, newest first, leaving
-/// out saves that have gone and the converter's own copies in the export folder (they'd show every sound twice).
+/// out saves that have gone, the converter's own copies in the export folder (they'd show every sound twice) and the
+/// songs made for trying the app out, as the Songs page does ([`Song::made_for_tests`]: Solomon's F12 note, 25 Nov
+/// 2026).
 pub fn newest_saves(songs: &[Song], export_root: Option<&Path>) -> Vec<SongSave> {
     // Each song gives its own name: no looking it up again among every song (H-14).
     let mut out: Vec<SongSave> = songs
         .iter()
-        .filter(|s| !s.latest.file_missing && keeps_settings(&s.latest.path))
+        .filter(|s| !s.latest.file_missing && keeps_settings(&s.latest.path) && !s.made_for_tests())
         .filter(|s| !mo_presets::curves::is_export(Path::new(&s.latest.path), export_root))
         .map(|s| SongSave { path: s.latest.path.clone(), song: s.name.clone(), modified: s.latest.mtime })
         .collect();
@@ -88,13 +90,13 @@ pub fn newest_saves(songs: &[Song], export_root: Option<&Path>) -> Vec<SongSave>
 }
 
 /// The saves the Curves section looks in: every save of every song that keeps its settings (a knob move may be in an
-/// older save only), once each, without the export folder's copies. `curves.db` reads each again only when it
-/// changes, so this is quick after the first time.
+/// older save only), once each, without the export folder's copies or the saves made for trying the app out
+/// ([`made_for_tests`]). `curves.db` reads each again only when it changes, so this is quick after the first time.
 pub fn curve_saves(saves: &[Save], export_root: Option<&Path>) -> Vec<String> {
     let mut seen = HashSet::new();
     saves
         .iter()
-        .filter(|s| !s.file_missing && keeps_settings(&s.path))
+        .filter(|s| !s.file_missing && keeps_settings(&s.path) && !made_for_tests(&s.name))
         .filter(|s| !mo_presets::curves::is_export(Path::new(&s.path), export_root))
         .filter(|s| seen.insert(s.path.clone()))
         .map(|s| s.path.clone())
@@ -528,7 +530,9 @@ fn scanned_kind(kind: &str) -> PluginKind {
 }
 
 /// The list's lines for preset files found (`mo_presets::file_store`'s `files`, with when each was last changed, in
-/// the same order), each with its year, in the list's order ([`sort_files`]). Files that aren't presets are left out.
+/// the same order), each with its year, in the list's order ([`sort_files`]). Files that aren't presets are left out,
+/// and so are the presets made for trying the app out, by the file's name or their own ([`made_for_tests`]: "MO
+/// Recipe Polysynth.bwpreset").
 pub fn file_items(found: &[mo_presets::library::FoundPreset], modified: &[Option<std::time::SystemTime>]) -> Vec<Item> {
     file_items_with(found, modified, &KnownPlugins::default())
 }
@@ -543,6 +547,10 @@ pub fn file_items_with(
         found.iter().zip(modified).map(|(f, at)| (f.path.as_str(), *at)).collect();
     let mut items: Vec<Item> = mo_presets::library::rows(&[], found)
         .into_iter()
+        .filter(|row| {
+            let Source::File { path } = &row.source else { return true };
+            !made_for_tests(mo_formats::paths::stem(mo_formats::paths::file_name(path))) && !made_for_tests(&row.name)
+        })
         .map(|mut row| {
             known.fill(&mut row);
             let at = match &row.source {
@@ -3267,5 +3275,44 @@ mod tests {
         assert!(keeps_settings("/a/B.FLP") && keeps_settings("/a/b.bwproject") && !keeps_settings("/a/b.song"));
         assert_eq!(year_of(1_767_225_600), Some(2026));
         assert_eq!(year_of(0), None);
+    }
+
+    #[test]
+    fn the_saves_and_presets_made_for_trying_the_app_out_are_left_out() {
+        // Solomon's F12 note, 25 Nov 2026: "anything with mo recipe shouldnt turn up in the app".
+        let save = |path: &str, mtime: i64| Save {
+            path: path.to_owned(),
+            name: mo_formats::paths::stem(path).to_owned(),
+            folder: "C:\\Songs".to_owned(),
+            mtime,
+            ..Save::default()
+        };
+        let saves = [
+            save("C:\\Songs\\Night_2.flp", 100),
+            save("C:\\Songs\\MO Recipe 03 automation.flp", 300),
+            save("C:\\Songs\\MO Live Test.bwproject", 200),
+        ];
+        let songs = mo_library::songs::group_songs(
+            &saves,
+            &mo_library::SongChoices::default(),
+            &mo_formats::dates::RealDates::now(),
+        );
+        assert_eq!(songs.len(), 3);
+        let newest: Vec<String> = newest_saves(&songs, None).into_iter().map(|s| s.path).collect();
+        assert_eq!(newest, ["C:\\Songs\\Night_2.flp"]);
+        assert_eq!(curve_saves(&saves, None), ["C:\\Songs\\Night_2.flp"]);
+        // A preset file, by its file's name or the name it keeps.
+        let preset = |path: &str, name: &str| mo_presets::library::FoundPreset {
+            path: path.to_owned(),
+            file: Ok(mo_presets::files::PresetFile { name: name.to_owned(), programs: 1, ..Default::default() }),
+        };
+        let found = [
+            preset("C:\\Presets\\Lead.fxp", "Lead"),
+            preset("C:\\Presets\\MO Recipe Polysynth.bwpreset", "MO Recipe Polysynth"),
+            preset("C:\\Presets\\Init.bwpreset", "MO Recipe Polysynth"),
+        ];
+        let items = file_items(&found, &[None, None, None]);
+        let names: Vec<&str> = items.iter().map(|i| i.row.name.as_str()).collect();
+        assert_eq!(names, ["Lead"]);
     }
 }

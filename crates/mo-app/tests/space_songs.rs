@@ -134,6 +134,48 @@ fn every_song_is_measured_and_the_save_it_opens_always_stays() {
 }
 
 #[test]
+fn songs_made_for_trying_the_app_out_are_never_offered_and_what_they_use_stays_used() {
+    // Solomon's F12 note, 25 Nov 2026: "anything with mo recipe shouldnt turn up in the app".
+    let dir = fixtures("mo-app-space-songs-made-for-tests");
+    let projects = dir.join("Projects");
+    let night = projects.join("Night Drive");
+    let recipe = projects.join("MO Recipe 02 notes");
+    // Each song has the same save twice.
+    let saves = vec![
+        save(1, &night.join("Night Drive_1.bwproject"), b"same", "2026-10-10 10:00"),
+        save(2, &night.join("Night Drive_2.bwproject"), b"same", "2026-10-10 10:20"),
+        save(3, &night.join("Night Drive_3.bwproject"), b"the one it opens", "2026-10-10 10:40"),
+        save(11, &recipe.join("MO Recipe 02 notes_1.bwproject"), b"same", "2026-11-09 10:00"),
+        save(12, &recipe.join("MO Recipe 02 notes_2.bwproject"), b"same", "2026-11-09 10:10"),
+        save(13, &recipe.join("MO Recipe 02 notes_3.bwproject"), b"the one it opens", "2026-11-09 10:20"),
+    ];
+    // A tone in Night Drive's folder that only the recipe's song uses.
+    write(&night.join("MO Tone A.wav"), &[0; 400]);
+    let mut from =
+        FromLibrary { saves, roots: vec![projects.to_string_lossy().into_owned()], ..FromLibrary::default() };
+    let looked = |from: &FromLibrary| look(from, CompactSettings::default(), None, &AtomicBool::new(false)).unwrap();
+    let unused_tone = |found: &mo_app::space_songs::Found| {
+        found.songs[0]
+            .report
+            .items
+            .iter()
+            .any(|i| i.kind == CompactKind::UnusedAudio && i.path.ends_with("MO Tone A.wav"))
+    };
+    // Used by no save, the tone is audio Night Drive's folder could do without.
+    let found = looked(&from);
+    let names: Vec<&str> = found.songs.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Night Drive"]);
+    assert!(unused_tone(&found));
+    // Used by the recipe's save: the recipe's song still isn't offered, and the tone stays as used.
+    from.samples = HashMap::from([(13, vec!["MO Tone A.wav".to_owned()])]);
+    let found = looked(&from);
+    let names: Vec<&str> = found.songs.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Night Drive"]);
+    assert!(!unused_tone(&found));
+    assert!(found.songs[0].report.items.iter().any(|i| i.kind == CompactKind::SameSave));
+}
+
+#[test]
 fn a_look_keeps_the_prints_of_the_saves_it_read_for_the_next_start() {
     // The whole-app review of 6 Nov, E1-5: every look read each save of the same size as another whole, again.
     let dir = fixtures("mo-app-space-song-prints");

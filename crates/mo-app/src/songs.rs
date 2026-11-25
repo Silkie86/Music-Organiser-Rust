@@ -461,8 +461,9 @@ pub fn run_gap(setting: Option<&str>, fallback: u32) -> u32 {
 const MOST_DOUBTS: usize = 5000;
 
 impl Songs {
-    /// Groups the saves into songs and puts them in order, last saved first. `asking` is whether to look for songs
-    /// that may be saves of one (`Some`), and then whether also across folders.
+    /// Groups the saves into songs and puts them in order, last saved first, leaving out the songs made for trying the
+    /// app out (Solomon's F12 note, 25 Nov 2026: [`mo_library::Song::made_for_tests`]). `asking` is whether to look
+    /// for songs that may be saves of one (`Some`), and then whether also across folders.
     pub fn from_saves(
         saves: &[Save],
         choices: &SongChoices,
@@ -472,7 +473,8 @@ impl Songs {
     ) -> Songs {
         // One set of real dates for the whole list ([`Songs::real`]).
         let real = RealDates::now();
-        let groups = songs::group_songs(saves, choices, &real);
+        let mut groups = songs::group_songs(saves, choices, &real);
+        groups.retain(|g| !g.made_for_tests());
         let found = asking.map(|across| songs::doubt_pairs(&groups, choices, across, MOST_DOUBTS)).unwrap_or_default();
         let mut rows: Vec<(usize, SongRow)> =
             groups.into_iter().map(|g| SongRow::new(g, gap_months, &real)).enumerate().collect();

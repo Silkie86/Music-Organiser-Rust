@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use mo_formats::paths;
-use mo_library::songs::is_fixed_copy;
+use mo_library::songs::{is_fixed_copy, made_for_tests};
 use rayon::prelude::*;
 
 use crate::clean::{Bin, Done, Problem, STOPPED, Sending, Sent, What, cant_keep};
@@ -333,8 +333,10 @@ fn in_bitwig_project(path: &Path) -> bool {
 /// in the order of their paths: the folders [`LibraryIndex::copies_in`] and [`sample_copies_in`] look in. A root
 /// moved to another drive with a link in its place is read where it really is, and its folders keep the paths you
 /// know, as for the Library. A folder reached two ways (roots inside each other, spelled in another case, or one
-/// through a link) is listed once, so its copies count once. Folders in an "… (old copy)" folder that a move left behind are left out: that goes as a whole. Call it off
-/// the window's thread.
+/// through a link) is listed once, so its copies count once. Folders in an "… (old copy)" folder that a move left
+/// behind are left out: that goes as a whole. So is a folder whose only projects were made for trying the app out
+/// ([`made_for_tests`]: "MO Recipe 05 drum machine"; Solomon's F12 note, 25 Nov 2026). Call it off the window's
+/// thread.
 pub fn project_folders(roots: &[PathBuf], stop: &AtomicBool) -> Result<Vec<PathBuf>, Stopped> {
     let mut found = Vec::new();
     for root in roots {
@@ -342,7 +344,8 @@ pub fn project_folders(roots: &[PathBuf], stop: &AtomicBool) -> Result<Vec<PathB
         found.extend(walk(&real, false, stop, |path, meta| {
             let project = meta.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bwproject"));
             let folder = path.parent()?;
-            if !project || in_a_project(folder) {
+            let for_tests = path.file_stem().is_some_and(|name| made_for_tests(&name.to_string_lossy()));
+            if !project || in_a_project(folder) || for_tests {
                 return None;
             }
             if !folder.join(PROJECT_FOLDER).is_dir() && !folder.join(SAMPLES_FOLDER).is_dir() {

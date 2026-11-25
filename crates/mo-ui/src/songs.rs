@@ -484,11 +484,12 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
                 log::info(
                     "Watch",
                     &format!(
-                        "Project folders: {} read, {} moved, {} gone{} ({} changes seen)",
+                        "Project folders: {} read, {} moved, {} gone{}{} ({} changes seen)",
                         updated.read.len(),
                         updated.moved.len(),
                         updated.gone,
                         mended_line(updated.mended),
+                        quiet_line(updated.quiet),
                         changes.files.len()
                     ),
                 );
@@ -511,12 +512,13 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
             log::info(
                 "Songs",
                 &format!(
-                    "{how} {:.1} s: {} read, {} moved, {} gone{}",
+                    "{how} {:.1} s: {} read, {} moved, {} gone{}{}",
                     began.elapsed().as_secs_f32(),
                     caught.read.len(),
                     caught.moved.len(),
                     caught.gone,
-                    mended_line(caught.mended)
+                    mended_line(caught.mended),
+                    quiet_line(caught.quiet)
                 ),
             );
             tell_pages = caught.for_card();
@@ -868,6 +870,14 @@ fn mended_line(mended: usize) -> String {
     match mended {
         0 => String::new(),
         n => format!(", {n} read again for their muted samples"),
+    }
+}
+
+/// The log's words for the saves made for trying the app out that were read, moved or gone ([`Updated::quiet`]).
+fn quiet_line(quiet: usize) -> String {
+    match quiet {
+        0 => String::new(),
+        n => format!(", {n} made for trying the app out (kept, not shown)"),
     }
 }
 

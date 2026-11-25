@@ -488,3 +488,35 @@ fn the_version_a_missing_plugins_songs_may_open_with_isnt_unused() {
     let ask = p.uninstall_ask(at).unwrap();
     assert!(ask.warning().contains("Songs that use Ozone 9 may open with it"), "{}", ask.warning());
 }
+
+#[test]
+fn the_saves_made_for_trying_the_app_out_still_count_for_what_they_use() {
+    // The lists leave them out (Solomon's F12 note, 25 Nov 2026), but a plugin only they use isn't unused: Clean up,
+    // Uninstall and Space's card must never offer it.
+    let dir = std::env::temp_dir().join(format!("mo-app-plugins-made-for-tests-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("library.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            r"CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+              CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                  name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER,
+                  file_missing INTEGER DEFAULT 0);
+              CREATE TABLE plugins (project_id INTEGER, name TEXT, name_key TEXT, vendor TEXT, kind INTEGER,
+                  format TEXT, path TEXT, installed INTEGER);
+              INSERT INTO projects VALUES (1, 'C:\beats\Night_1.flp', 'Night_1', 'FL Studio', 'C:\beats', 1, 1700000000, 0),
+                  (2, 'C:\beats\MO Live Test.bwproject', 'MO Live Test', 'Bitwig Studio', 'C:\beats', 1, 1760000000, 0);
+              INSERT INTO plugins VALUES (1, 'Pro-Q 3', 'proq3', 'FabFilter', 2, 'VST3', '', 1),
+                  (2, 'Vital', 'vital', 'Vital', 1, 'VST3', '', 1);",
+        )
+        .unwrap();
+    let read = read(&Library::open_read_only(&path).unwrap()).unwrap();
+    let used: Vec<&str> = read.uses.iter().map(|u| u.name.as_str()).collect();
+    assert_eq!(used, ["Pro-Q 3", "Vital"]);
+    let p = Plugins::new(read, now());
+    let vital = p.rows.iter().find(|r| r.name == "Vital").unwrap();
+    assert_eq!((vital.songs, vital.unused, vital.never_used()), (1, false, false));
+    let _ = std::fs::remove_dir_all(&dir);
+}
