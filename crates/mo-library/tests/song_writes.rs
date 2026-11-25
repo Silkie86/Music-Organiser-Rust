@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use mo_library::song_fields::{self, Change, KeepCopy, Kept, SaveRow};
 use mo_library::song_writes::{self, Batch, BitwigReread, Missing, Put};
 use mo_library::songs_db::{self, State};
-use mo_library::{Library, PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail};
+use mo_library::{Library, PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail, Todo};
 use rusqlite::Connection;
 
 /// A data folder holding a library.db with one save (id 1), and the songs.db made from it, the app's own.
@@ -588,4 +588,89 @@ fn a_new_save_doesnt_take_on_tags_an_older_library_left_under_its_id() {
     drop(c);
     song_writes::write(&songs, &put(read(2, TWO), None)).unwrap();
     assert_eq!(yours(&songs, 2).3, vec!["digitakt".to_owned()]);
+}
+
+/// The to-dos the library reads for the save `id`.
+fn todos(songs: &std::path::Path, id: i64) -> Vec<Todo> {
+    Library::open_read_only(songs).unwrap().saves().unwrap().into_iter().find(|s| s.id == id).unwrap().todos
+}
+
+fn todo(text: &str, done: bool, added: i64) -> Todo {
+    Todo { text: text.to_owned(), done, added }
+}
+
+#[test]
+fn a_songs_to_dos_are_kept_for_every_save_in_their_order_and_a_new_save_starts_with_them() {
+    let songs = library("todos");
+    // A library made before to-dos reads none, and gets their table with its first write.
+    let c = Connection::open(&songs).unwrap();
+    c.execute_batch("DROP TABLE todos;").unwrap();
+    drop(c);
+    assert!(todos(&songs, 1).is_empty());
+    song_writes::write(&songs, &put(read(2, TWO), None)).unwrap();
+    let both = rows(&[(1, ONE), (2, TWO)]);
+    let list = vec![todo("  Redo the bass ", false, 10), todo("Clap too loud", true, 20), todo("Vocal chop", false, 5)];
+    song_fields::set(&songs, &both, &Change::Todos(list)).unwrap();
+    let kept = vec![todo("Redo the bass", false, 10), todo("Clap too loud", true, 20), todo("Vocal chop", false, 5)];
+    assert_eq!(todos(&songs, 1), kept, "trimmed, in your order, done kept");
+    assert_eq!(todos(&songs, 2), kept);
+    // The whole list goes each time: one taken off is gone from every save.
+    song_fields::set(&songs, &both, &Change::Todos(kept[1..].to_vec())).unwrap();
+    assert_eq!(todos(&songs, 2), kept[1..].to_vec());
+    song_fields::set(&songs, &both, &Change::Todos(Vec::new())).unwrap();
+    assert!(todos(&songs, 1).is_empty() && todos(&songs, 2).is_empty());
+    // One without words, with a character that can't be shown, or too long can't be kept, and nothing changes.
+    for bad in ["   ", "a\u{1f}b", &"x".repeat(201)] {
+        assert!(song_fields::set(&songs, &both, &Change::Todos(vec![todo(bad, false, 1)])).is_err(), "{bad:?}");
+    }
+    let many = vec![todo("x", false, 1); song_fields::MOST_TODOS + 1];
+    assert!(song_fields::set(&songs, &both, &Change::Todos(many)).is_err());
+    // A new save kept with the song's to-dos (the list takes them over) has them; a save read again keeps its own.
+    song_fields::set(&songs, &both, &Change::Todos(kept.clone())).unwrap();
+    let mut three = read(3, "C:\\Music\\Night\\Night_13.flp");
+    three.save.todos = vec![todo("from the song", false, 30)];
+    song_writes::write(&songs, &put(three, None)).unwrap();
+    assert_eq!(todos(&songs, 3), vec![todo("from the song", false, 30)]);
+    let mut again = read(2, TWO);
+    again.save.todos = Vec::new();
+    song_writes::write(&songs, &put(again, None)).unwrap();
+    assert_eq!(todos(&songs, 2), kept, "a read never sets your to-dos on a save the library has");
+    // The same change made in memory is what the library keeps.
+    let mut held = Save::default();
+    assert!(Change::Todos(vec![todo(" a ", false, 1)]).apply(&mut held));
+    assert_eq!(held.todos, vec![todo("a", false, 1)]);
+    assert!(!Change::Todos(vec![todo("a", false, 1)]).apply(&mut held));
+}
+
+#[test]
+fn a_to_do_is_added_ticked_and_taken_off_by_its_words_and_time_on_every_save() {
+    let songs = library("todo-changes");
+    song_writes::write(&songs, &put(read(2, TWO), None)).unwrap();
+    let both = rows(&[(1, ONE), (2, TWO)]);
+    let set = |change: Change| song_fields::set(&songs, &both, &change).unwrap();
+    set(Change::AddTodo(todo(" Redo the bass ", false, 10)));
+    set(Change::AddTodo(todo("Clap", false, 20)));
+    set(Change::AddTodo(todo("Clap", false, 20)));
+    let two = vec![todo("Redo the bass", false, 10), todo("Clap", false, 20)];
+    assert_eq!(todos(&songs, 1), two, "trimmed, at the end, not twice");
+    assert_eq!(todos(&songs, 2), two);
+    set(Change::TickTodo { text: "Clap".into(), added: 20, done: true });
+    assert_eq!(todos(&songs, 2)[1], todo("Clap", true, 20));
+    set(Change::RemoveTodo { text: "Redo the bass".into(), added: 10 });
+    set(Change::AddTodo(todo("Vocal chop", false, 30)));
+    assert_eq!(todos(&songs, 1), vec![todo("Clap", true, 20), todo("Vocal chop", false, 30)], "still in order");
+    // One that isn't there changes nothing, and one with no words can't be kept.
+    set(Change::RemoveTodo { text: "Clap".into(), added: 99 });
+    assert_eq!(todos(&songs, 1).len(), 2);
+    assert!(song_fields::set(&songs, &both, &Change::AddTodo(todo("  ", false, 1))).is_err());
+}
+
+#[test]
+fn a_new_save_doesnt_take_on_to_dos_an_older_library_left_under_its_id() {
+    let songs = library("leftover-todos");
+    let c = Connection::open(&songs).unwrap();
+    c.execute_batch("PRAGMA foreign_keys = OFF; INSERT INTO todos VALUES (2, 0, 'someone elses', 0, 1);").unwrap();
+    drop(c);
+    song_writes::write(&songs, &put(read(2, TWO), None)).unwrap();
+    assert!(todos(&songs, 2).is_empty());
 }

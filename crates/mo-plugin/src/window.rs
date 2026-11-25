@@ -1389,7 +1389,9 @@ impl Shown {
             let Some(panel) = weak.upgrade() else { return };
             let from = panel.get_record_from();
             let card = (!from.is_empty()).then(|| from.to_string());
-            match recorder.start(card, player.trim()) {
+            // L+R (0) records the pair; L (1) or R (2) one side of it, as a mono take.
+            let only = usize::try_from(panel.get_record_side() - 1).ok();
+            match recorder.start(card, player.trim(), only) {
                 Ok(()) => {
                     panel.set_recording(true);
                     panel.set_record_said("Starting".into());

@@ -379,6 +379,8 @@ pub(crate) fn begin_own<'c>(conn: &'c mut Connection, songs_db: &Path) -> Result
     if own.is_none() {
         return Err(not_own(songs_db));
     }
+    // A library made before to-dos gets their table with its first write (only ever added, rule 6).
+    tx.execute_batch(crate::songs_db::TODOS).map_err(sql)?;
     Ok(tx)
 }
 
@@ -482,6 +484,8 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<(i64, bool)> {
     if new {
         // Whatever an older library left under this id (tags of a save the C# app removed) isn't this save's.
         tx.execute("DELETE FROM tags WHERE project_id = ?1", [id])?;
+        // A new save of a song starts with the song's to-dos, as it does with the rest that's yours.
+        crate::song_fields::put_todos(tx, id, &save.todos)?;
     }
     let mut plugin = tx.prepare_cached(
         "INSERT INTO plugins (project_id, name, name_key, vendor, kind, format, path, installed)

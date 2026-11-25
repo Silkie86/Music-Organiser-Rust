@@ -10,11 +10,12 @@
 //! the stars the filters leave out kept as faint dust: first as small and as bright as the painted dot it takes over
 //! from, then growing and brightening as the view flies in, so the galaxy's brightness changes smoothly all the way in.
 //!
-//! With Light by on, the unlit stars are dimmer and smaller, and the best lit ones are drawn as stars even far out
-//! (never smaller than [`MIN_LIT`] points), each a bright point with a short, faint glow; on the card the very
-//! brightest few also get faint four-point spikes. So what Light by picks out shows at every zoom, while the unlit
-//! stars still keep the map's shape. Which ones those are goes by their rank ([`lit_order`]), the same on the card
-//! and on the processor. Only the card twinkles ([`twinkle_amount`]) and draws spikes.
+//! With Light by on, the unlit stars are dimmer and smaller (close up still clearly stars, [`lit_core`]), and the best
+//! lit ones are drawn as stars even far out (never smaller than [`MIN_LIT`] points), each a bright point with a short,
+//! faint glow; on the card the very brightest few also get faint four-point spikes. So what Light by picks out shows
+//! at every zoom, while the unlit stars still keep the map's shape. Which ones those are goes by their rank
+//! ([`lit_order`]), the same on the card and on the processor. Only the card twinkles ([`twinkle_amount`]) and draws
+//! spikes.
 
 use std::time::Duration;
 
@@ -113,11 +114,28 @@ pub fn lit_size(lit: f32) -> f32 {
     1.0 + 1.8 * lit.clamp(0.0, 1.0).sqrt()
 }
 
-/// How bright a star is for how lit it is (0 to 1), with Light by on: 0.3 for an unlit one (dimmer than the 0.5 of
-/// an all-alike star, so the lit ones stand out), up to 1.5, five times as bright.
+/// How bright a star is for how lit it is (0 to 1), with Light by on, where the stars are painted (far out): from
+/// [`UNLIT_WEIGHT`] for an unlit one (dimmer than the 0.5 of an all-alike star, so the lit ones stand out) up to
+/// [`LIT_BRIGHTEST`], five times as bright. Close up a star on show is drawn as bright as [`lit_core`] says.
 pub fn lit_weight(lit: f32) -> f32 {
-    0.3 + 1.2 * lit.clamp(0.0, 1.0).sqrt()
+    UNLIT_WEIGHT + (LIT_BRIGHTEST - UNLIT_WEIGHT) * lit.clamp(0.0, 1.0).sqrt()
 }
+
+/// An unlit star's [`lit_weight`].
+pub const UNLIT_WEIGHT: f32 = 0.3;
+
+/// How bright a star on show is close up for how lit it is (0 to 1), with Light by on, as a share of the best lit's:
+/// from [`UNLIT_CORE`] for an unlit one up to all of it. So an unlit star is still clearly a star in its type's colour,
+/// one a click picks, and never looks like the grey dust of the stars the filters leave out: it was a fifth of the
+/// best lit's, as far out, and looked like dust (Solomon's F12 note, 25 Nov 2026: "the ones that arent favourites
+/// should still look clickable"). The lit ones still stand out: up to nearly three times as big ([`lit_size`]), with
+/// a bigger glow. The graphics card's shader in `mo-sky` uses the same curve.
+pub fn lit_core(lit: f32) -> f32 {
+    UNLIT_CORE + (1.0 - UNLIT_CORE) * lit.clamp(0.0, 1.0).sqrt()
+}
+
+/// An unlit star's [`lit_core`].
+pub const UNLIT_CORE: f32 = 0.55;
 
 /// How bright every star is with nothing lit.
 pub const ALIKE_WEIGHT: f32 = 0.5;
@@ -148,8 +166,8 @@ pub const FALLOFF: f32 = 1.3;
 /// How bright the best lit star is ([`lit_weight`] of 1): with Light by on, a star's core is its weight over this.
 pub const LIT_BRIGHTEST: f32 = 1.5;
 /// With Light by on, the stars the filters leave out are this much as bright as with Nothing: an unlit star on show is
-/// dimmed too (to [`lit_weight`] of 0), and the left-out ones are kept at about half of it, so what the filters let
-/// through still reads.
+/// dimmed too where the stars are painted (to [`lit_weight`] of 0), and the left-out ones are kept at about half of it,
+/// so what the filters let through still reads.
 pub const DUST_LIT: f32 = 0.5;
 /// The stars the filters leave out are grey dust, whatever their type's colour, so the ones that match stand out in
 /// theirs: this grey (0 black to 1 white), and the most of it they ever lay over the page, however many crowd
@@ -393,6 +411,9 @@ pub fn pack(
         let c = colours.get(at).and_then(|&i| usize::try_from(i).ok()).and_then(|i| palette.get(i)).copied();
         let [r, g, b] = c.unwrap_or(grey);
         let lit = if lighting { light.get(at).copied().unwrap_or(0.0).clamp(0.0, 1.0) } else { 0.0 };
+        // As the card reads it back from the colour's last byte, so the card can tell the star's variety from its
+        // weight exactly.
+        let lit = (lit * 254.0).round() / 254.0;
         let weight = match (want, lighting) {
             (false, _) => 0.05,
             (true, false) => ALIKE_WEIGHT,
@@ -824,6 +845,48 @@ mod tests {
         assert_eq!(lit_share(&four, &[1, 2], &[0.0, 0.5, 1.0, 0.0]), 1.0);
         assert_eq!(lit_share(&four, &[0], &[]), 0.0);
         assert_eq!(lit_share(&four, &[], &[1.0]), 0.0);
+    }
+
+    #[test]
+    fn close_up_an_unlit_star_on_show_is_still_clearly_a_star_not_dust() {
+        // Solomon's F12 note, 25 Nov 2026: with Light by Liked, the sounds that aren't favourites looked like the grey
+        // dust of the ones the filters leave out, not like stars a click picks.
+        assert_eq!(lit_core(0.0), UNLIT_CORE);
+        assert_eq!(lit_core(1.0), 1.0);
+        assert!(lit_core(0.25) > lit_core(0.0) && lit_core(0.25) < lit_core(1.0));
+        // Brighter close up than its share of the painted light far out, as a lit one is the same.
+        assert!(lit_core(0.0) > lit_weight(0.0) / LIT_BRIGHTEST);
+        assert_eq!(lit_core(1.0), lit_weight(1.0) / LIT_BRIGHTEST);
+        // Even with the least variety, its core is in its colour at over twice the brightest the dust gets (as much as
+        // DUST_MOST of the way from a black page to its grey).
+        let least = (0..10_000).map(variety).fold(f32::MAX, f32::min);
+        assert!(lit_core(0.0) * least > 2.0 * DUST_MOST * DUST_GREY, "{}", lit_core(0.0) * least);
+    }
+
+    #[test]
+    fn the_card_tells_a_stars_variety_back_from_its_weight() {
+        // The card has only the weight (lit_weight times the star's variety) and how lit it is as the colour's last
+        // byte holds it, so the weight goes by that byte too: by the exact value, the card drew the least lit of many
+        // up to 14% brighter close up than the processor's picture does.
+        for at in [0, 3, 17, 250, 4096] {
+            for l in [0.0, 0.0019, 0.003, 0.04, 0.5, 0.77, 1.0] {
+                let mut stars = vec![None; at + 2];
+                stars[at] = Some(StarPoint { x: 0.25, y: 0.5 });
+                stars[at + 1] = Some(StarPoint { x: 0.75, y: 0.5 });
+                let mut light = vec![0.0; at + 2];
+                light[at] = l;
+                light[at + 1] = 1.0;
+                let shown = [at, at + 1];
+                let order = lit_order(&stars, &shown, &light);
+                let (b, _) = pack(&stars, &vec![0; at + 2], &[[1, 2, 3]], &shown, &light, &order);
+                let star = b.chunks(STAR_BYTES).find(|s| f32::from_le_bytes(s[0..4].try_into().unwrap()) == 0.25);
+                let star = star.unwrap();
+                let read = f32::from(star[11] - 1) / 254.0;
+                let weight = f32::from_le_bytes(star[12..16].try_into().unwrap());
+                let told = weight / lit_weight(read);
+                assert!((told - variety(at)).abs() < 1e-6, "star {at}, lit {l}: {told} for {}", variety(at));
+            }
+        }
     }
 
     #[test]

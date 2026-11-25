@@ -90,8 +90,14 @@ impl Recorder {
     }
 
     /// Starts a take from the sound card input called `card`, or the DAW's input for none, to be saved with the
-    /// silence at its ends cut at `trim_db` (none: kept). Says why not when one is under way already.
-    pub fn start(self: &Arc<Self>, card: Option<String>, trim_db: Option<i32>) -> Result<(), String> {
+    /// silence at its ends cut at `trim_db` (none: kept): of `only` one side of it when that says one (0 left,
+    /// 1 right), as a mono take. Says why not when one is under way already.
+    pub fn start(
+        self: &Arc<Self>,
+        card: Option<String>,
+        trim_db: Option<i32>,
+        only: Option<usize>,
+    ) -> Result<(), String> {
         if self.busy.swap(true, Ordering::AcqRel) {
             return Err("A take is under way already".into());
         }
@@ -101,7 +107,7 @@ impl Recorder {
             // The take is over however its thread ends (a panic too), so the plugin never counts as recording for
             // good, and never waits for one as it goes (the 19 Nov review's PN-4).
             let _over = Over(&me);
-            let said = me.take(card, trim_db);
+            let said = me.take(card, trim_db, only);
             *lock(&me.said) = Some(said);
         });
         if !started {
@@ -137,14 +143,19 @@ impl Recorder {
     }
 
     /// The take itself, on its own thread: what became of it.
-    fn take(&self, card: Option<String>, trim_db: Option<i32>) -> Said {
+    fn take(&self, card: Option<String>, trim_db: Option<i32>, only: Option<usize>) -> Said {
+        let side = match only {
+            Some(0) => ", left side only",
+            Some(_) => ", right side only",
+            None => "",
+        };
         let (input, mut take, from) = match &card {
-            Some(name) => match record::card::open(Some(name)) {
+            Some(name) => match record::card::open(Some(name), only) {
                 Ok((input, take)) => {
                     let from = input.name.clone();
                     crate::log::line(
                         "Record",
-                        &format!("Recording from {from} ({} Hz, {} channels)", input.rate, input.channels),
+                        &format!("Recording from {from} ({} Hz, {} channels{side})", input.rate, input.channels),
                     );
                     (Some(input), take, from)
                 }
@@ -158,10 +169,10 @@ impl Recorder {
                 if rate == 0 {
                     return Said::Failed("The DAW hasn't started the track's audio yet: turn the track on".into());
                 }
-                let (feed, take) = record::recording(rate, 2);
+                let (feed, take) = record::recording_of(rate, 2, only);
                 *lock(&self.feed) = Some(feed);
                 self.daw_on.store(true, Ordering::Release);
-                crate::log::line("Record", &format!("Recording the DAW's input ({rate} Hz)"));
+                crate::log::line("Record", &format!("Recording the DAW's input ({rate} Hz{side})"));
                 (None, take, DAW_INPUT.to_owned())
             }
         };

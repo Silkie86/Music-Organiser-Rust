@@ -16,7 +16,7 @@ use rayon::prelude::*;
 use crate::galaxy_grid::Crowd;
 use crate::galaxy_look::{
     self as gl, DUST_GREY, DUST_LIT, DUST_MOST, FALLOFF, FAR_GLOW, FAR_HALO, GLOW, GLOW_LIT, HALO, HOT, LIT_BRIGHTEST,
-    Look, MIN_LIT, UNLIT_SIZE, WHITE, lit_size, lit_weight,
+    Look, MIN_LIT, UNLIT_SIZE, WHITE, lit_core, lit_size, lit_weight,
 };
 use crate::galaxy_view::View;
 
@@ -160,9 +160,13 @@ impl Picture {
             let l = self.light.get(at).copied().unwrap_or(0.0);
             let glint = glint.get(at).copied().unwrap_or(0.0);
             // As the card: far out a star that glints is a bright point, going to its close-up size as the view flies
-            // in. Its core is as bright as it's lit, with the same steady variety as on the card.
+            // in. Its core is as bright as it's lit, with the same steady variety as on the card: far out as its share
+            // of the painted light, going to its close-up brightness as the view flies in, where an unlit one is still
+            // clearly a star.
             let size = gl::glint_point(r * UNLIT_SIZE * lit_size(l), glint, crisp, MIN_LIT * self.scale);
-            (size, lit_weight(l) * gl::variety(at) / LIT_BRIGHTEST, crisp.max(painted * glint), l)
+            let far = lit_weight(l) / LIT_BRIGHTEST;
+            let core = far + (lit_core(l) - far) * lk.bright;
+            (size, core * gl::variety(at), crisp.max(painted * glint), l)
         };
         // The biggest a star gets, and how far it reaches: a glow reaches HALO times its star's core, a well lit
         // one's up to twice that.
@@ -817,7 +821,8 @@ mod look {
     use super::*;
 
     /// Draws 450,000 made-up stars in clumps to a PPM file named by GALAXY_LOOK, to judge the look by eye. With
-    /// GALAXY_FEW=n the filters let only one star in n through (318: as Kick with Favourites on a big library).
+    /// GALAXY_FEW=n the filters let only one star in n through (318: as Kick with Favourites on a big library); with
+    /// GALAXY_LIT=liked about one in two hundred are lit, as Light by Liked lights a library with few favourites.
     #[test]
     #[ignore]
     fn render() {
@@ -867,14 +872,21 @@ mod look {
         if few == 1 {
             assert_eq!(crowd.in_view, in_view);
         }
+        // Ranked among themselves, the rest without the measure (the card's harness lights them the same way).
+        let light: Vec<f32> = if std::env::var("GALAXY_LIT").is_ok_and(|l| l == "liked") {
+            (0..n).map(|_| if rnd() < 0.005 { rnd().max(0.01) } else { 0.0 }).collect()
+        } else {
+            Vec::new()
+        };
+        let order = gl::lit_order(&stars, &shown, &light);
         let p = Picture {
             id: 1,
             stars: Arc::new(stars),
             count: n,
             colours: Arc::new(colours),
             shown: Arc::new(shown),
-            light: Arc::default(),
-            order: Arc::default(),
+            light: Arc::new(light),
+            order: Arc::new(order),
             palette,
             view,
             scale: 1.0,

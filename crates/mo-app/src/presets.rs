@@ -169,7 +169,7 @@ pub fn bitwig_curves_folder(bitwig: &[PathBuf], is_folder: impl Fn(&Path) -> boo
 
 /// The curve files (`.bwcurve`) under `roots`, for the Curves section (Bitwig's curves library). Folders starting
 /// with "." are skipped, as the preset finder does; asks the disk, so never on the window's thread.
-pub fn curve_files(roots: &[PathBuf]) -> Vec<String> {
+pub fn curve_files(roots: &[PathBuf]) -> Looked {
     files_ending(roots, |name| name.ends_with(".bwcurve"))
 }
 
@@ -257,7 +257,7 @@ pub fn duck_folders(program_data: Option<&Path>, home: Option<&Path>) -> Vec<Pat
 /// The plugins' shape files under `roots` ([`shape_folders`], [`vital_folders`], [`duck_folders`]): Serum's
 /// `.XferShape` and `.shp`, LFOTool's presets (`.fxp`), Vital's `.vitallfo` and presets (`.vital`), and Duck's
 /// `.dmlfo` and presets. Asks the disk, so never on the window's thread.
-pub fn shape_files(roots: &[PathBuf]) -> Vec<String> {
+pub fn shape_files(roots: &[PathBuf]) -> Looked {
     use mo_formats::{duck, serum, vital};
     // A name is checked in small letters, so Duck's presets are known by their folder: the whole path is checked.
     let mut out = files_ending(roots, |name| {
@@ -266,36 +266,90 @@ pub fn shape_files(roots: &[PathBuf]) -> Vec<String> {
             || name.ends_with(".dmlfo")
             || name.ends_with(".preset")
     });
-    out.retain(|p| !p.to_lowercase().ends_with(".preset") || duck::is_shape_file(p));
+    out.files.retain(|p| !p.to_lowercase().ends_with(".preset") || duck::is_shape_file(p));
     out
 }
 
+/// What a look through some folders for files found ([`curve_files`], [`shape_files`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Looked {
+    /// The files, sorted.
+    pub files: Vec<String>,
+    /// The roots whose own listing was read: the folders looked through (`mo_presets::curves::Folders`).
+    pub listed: Vec<PathBuf>,
+    /// Every folder (a root, or a folder under one) that couldn't be listed, or not to its end, and why: gone away
+    /// since it was found, a link that leads nowhere, no permission. Its files may be missing from `files`, so
+    /// what was found under it before is kept.
+    pub unlisted: Vec<(PathBuf, String)>,
+}
+
 /// The files under `roots` whose name (in small letters) `wanted` takes, sorted, each folder once (a link back up isn't
-/// followed round), at most 16 folders deep; folders starting with "." are skipped.
-fn files_ending(roots: &[PathBuf], wanted: impl Fn(&str) -> bool) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
+/// followed round), at most 16 folders deep; folders starting with "." are skipped. With them, which roots were
+/// listed and which folders couldn't be ([`Looked`]).
+fn files_ending(roots: &[PathBuf], wanted: impl Fn(&str) -> bool) -> Looked {
+    let mut out = Looked::default();
+    // Each folder listed, as the disk names it, and whether that went well: a root that is another root's folder (or
+    // inside one) is looked through once, and counts as listed when that listing was read.
+    let mut seen: HashMap<PathBuf, bool> = HashMap::new();
     let mut todo: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
     while let Some((dir, depth)) = todo.pop() {
-        if depth > 16 || !seen.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+        let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if let Some(&went_well) = seen.get(&real) {
+            if depth == 0 && went_well && !out.listed.contains(&dir) {
+                out.listed.push(dir);
+            }
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let path = e.path();
+        if depth > 16 {
+            continue;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                seen.insert(real, false);
+                out.unlisted.push((dir, e.to_string()));
+                continue;
+            }
+        };
+        seen.insert(real, true);
+        if depth == 0 && !out.listed.contains(&dir) {
+            out.listed.push(dir.clone());
+        }
+        for e in entries {
+            // (No further once a listing fails: asked again, a drive that dropped can give the same error for ever.)
+            let kind = e.and_then(|e| e.file_type().map(|kind| (e.path(), kind)));
+            let (path, kind) = match kind {
+                Ok(found) => found,
+                Err(e) => {
+                    out.unlisted.push((dir.clone(), e.to_string()));
+                    break;
+                }
+            };
+            // A link is what it leads to; one that leads nowhere now may be a folder whose drive is away.
+            let is_dir = if kind.is_symlink() {
+                match std::fs::metadata(&path) {
+                    Ok(m) => m.is_dir(),
+                    Err(e) => {
+                        out.unlisted.push((path, e.to_string()));
+                        continue;
+                    }
+                }
+            } else {
+                kind.is_dir()
+            };
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-            if path.is_dir() {
+            if is_dir {
                 if !name.starts_with('.') {
                     todo.push((path, depth + 1));
                 }
             } else if wanted(&name.to_lowercase())
                 && let Some(p) = path.to_str()
             {
-                out.push(p.to_owned());
+                out.files.push(p.to_owned());
             }
         }
     }
-    out.sort();
+    out.files.sort();
     out
 }
 
@@ -316,6 +370,9 @@ pub struct Item {
     file_key: String,
     /// The plugin's format, worked out once.
     pub format: Format,
+    /// When its save or file was last written (seconds since 1970; 0 when not known), for the plugins' Last used
+    /// order.
+    pub when: i64,
 }
 
 impl Item {
@@ -327,7 +384,7 @@ impl Item {
             Source::Song { .. } => String::new(),
         };
         let format = Format::of(&row);
-        Item { row, song, year, words, file_key, format }
+        Item { row, song, year, words, file_key, format, when: 0 }
     }
 
     /// Your part for the line with `fixes` laid over it: a fix made since the line was read wins.
@@ -482,21 +539,28 @@ pub fn file_items_with(
     modified: &[Option<std::time::SystemTime>],
     known: &KnownPlugins,
 ) -> Vec<Item> {
-    let years: HashMap<&str, Option<i32>> =
-        found.iter().zip(modified).map(|(f, at)| (f.path.as_str(), at.and_then(year_of_time))).collect();
+    let times: HashMap<&str, Option<std::time::SystemTime>> =
+        found.iter().zip(modified).map(|(f, at)| (f.path.as_str(), *at)).collect();
     let mut items: Vec<Item> = mo_presets::library::rows(&[], found)
         .into_iter()
         .map(|mut row| {
             known.fill(&mut row);
-            let year = match &row.source {
-                Source::File { path } => years.get(path.as_str()).copied().flatten(),
+            let at = match &row.source {
+                Source::File { path } => times.get(path.as_str()).copied().flatten(),
                 Source::Song { .. } => None,
             };
-            Item::new(row, String::new(), year)
+            let mut item = Item::new(row, String::new(), at.and_then(year_of_time));
+            item.when = at.and_then(seconds_of).unwrap_or(0);
+            item
         })
         .collect();
     sort_files(&mut items);
     items
+}
+
+/// A time in seconds since 1970, or `None` for one before it.
+fn seconds_of(m: std::time::SystemTime) -> Option<i64> {
+    i64::try_from(m.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).ok()
 }
 
 /// The year of a time, or `None` for one before 1970 or not a real date.
@@ -514,7 +578,7 @@ pub fn year_of(seconds: i64) -> Option<i32> {
 /// The page's lines for a song's sounds as they're read.
 pub fn song_items(rows: Vec<PresetRow>, song: &SongSave) -> Vec<Item> {
     let year = year_of(song.modified);
-    rows.into_iter().map(|row| Item::new(row, song.song.clone(), year)).collect()
+    rows.into_iter().map(|row| Item { when: song.modified, ..Item::new(row, song.song.clone(), year) }).collect()
 }
 
 /// Where the lines come from.
@@ -716,6 +780,42 @@ pub struct Filters {
     pub years: Option<(i32, i32)>,
     /// Show synths whose channel or track plays no notes (tucked away otherwise, as the C# window did).
     pub unused: bool,
+    /// The order the Plugin filter's menu lists the plugins in (not a filter: Clear filters keeps it).
+    pub plugin_order: PluginOrder,
+}
+
+/// The orders the Plugin filter's menu can list the plugins in (Solomon, 25 Nov 2026: "alphabetically or by last used
+/// date or how often used").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PluginOrder {
+    /// The most lines first: the order it always had.
+    #[default]
+    MostUsed,
+    /// By name, A to Z.
+    Name,
+    /// The plugin in the newest save or file first.
+    LastUsed,
+}
+
+impl PluginOrder {
+    pub const ALL: [PluginOrder; 3] = [PluginOrder::MostUsed, PluginOrder::Name, PluginOrder::LastUsed];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PluginOrder::MostUsed => "Most used",
+            PluginOrder::Name => "A-Z",
+            PluginOrder::LastUsed => "Last used",
+        }
+    }
+
+    pub fn from_label(l: &str) -> Option<PluginOrder> {
+        PluginOrder::ALL.into_iter().find(|o| o.label() == l)
+    }
+
+    /// Every order's words, for the menu's chips.
+    pub fn labels() -> Vec<&'static str> {
+        PluginOrder::ALL.iter().map(|o| o.label()).collect()
+    }
 }
 
 impl Filters {
@@ -767,7 +867,7 @@ impl Filters {
 
     /// No filter at all, in this one's order: the order isn't a filter, so it outlives them.
     pub fn only_order(&self) -> Filters {
-        Filters { order: self.order, reversed: self.reversed, ..Filters::default() }
+        Filters { order: self.order, reversed: self.reversed, plugin_order: self.plugin_order, ..Filters::default() }
     }
 
     /// A click on a column's heading: A to Z by that column, a second click Z to A, a third back to the list as it
@@ -1031,16 +1131,16 @@ pub struct FilterChips {
     pub plugin: Filter,
 }
 
-pub fn filter_chips(c: &ChoiceCounts, plugins: &[(String, usize)], f: &Filters) -> FilterChips {
+pub fn filter_chips(c: &ChoiceCounts, plugins: &[PluginUse], f: &Filters) -> FilterChips {
     let one = |label: &str| if label.is_empty() { Vec::new() } else { vec![label.to_owned()] };
     let from = [(From::Songs, c.songs), (From::Files, c.files)].map(|(w, n)| (w.label().to_owned(), thousands(n)));
     let parts: Vec<(String, String)> =
         PartPick::choices().into_iter().zip(&c.parts).map(|(l, n)| (l.to_owned(), thousands(*n))).collect();
-    // The most used first, as `plugins` has them: an order the other filters don't change, so a line doesn't move
-    // under the mouse when they do.
-    let by_plugin: Vec<(String, usize)> = plugins
-        .iter()
-        .map(|(name, _)| (name.clone(), c.plugins.get(&name.to_ascii_lowercase()).copied().unwrap_or(0)))
+    // In the order picked, worked out over every line (as `plugins` has them): an order the other filters don't change,
+    // so a line doesn't move under the mouse when they do.
+    let by_plugin: Vec<(String, usize)> = in_order(plugins, f.plugin_order)
+        .into_iter()
+        .map(|u| (u.name.clone(), c.plugins.get(&u.name.to_ascii_lowercase()).copied().unwrap_or(0)))
         .collect();
     FilterChips {
         format: chips::show(&format_choices(c), &f.formats.iter().map(|x| x.label().to_owned()).collect::<Vec<_>>()),
@@ -1054,15 +1154,42 @@ pub fn filter_chips(c: &ChoiceCounts, plugins: &[(String, usize)], f: &Filters) 
     }
 }
 
-/// The plugins in the list, most used first (ties by name), each with how many lines it has; for the plugin chip.
-/// Names that differ only in ASCII capitals are one plugin, as the plugin filter matches them.
-pub fn plugins(items: &[Item]) -> Vec<(String, usize)> {
-    let mut by: HashMap<String, (String, usize)> = HashMap::new();
+/// One plugin in the list: its name, how many lines it has, and when the newest save or file it's in was written
+/// (seconds since 1970; 0 when none says).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginUse {
+    pub name: String,
+    pub lines: usize,
+    pub newest: i64,
+}
+
+/// The plugins in the list, most used first (ties by name); for the plugin chip. Names that differ only in ASCII
+/// capitals are one plugin, as the plugin filter matches them.
+pub fn plugins(items: &[Item]) -> Vec<PluginUse> {
+    let mut by: HashMap<String, PluginUse> = HashMap::new();
     for i in items.iter().filter(|i| !i.row.plugin.is_empty()) {
-        by.entry(i.row.plugin.to_ascii_lowercase()).or_insert_with(|| (i.row.plugin.clone(), 0)).1 += 1;
+        let u = by.entry(i.row.plugin.to_ascii_lowercase()).or_insert_with(|| PluginUse {
+            name: i.row.plugin.clone(),
+            lines: 0,
+            newest: 0,
+        });
+        u.lines += 1;
+        u.newest = u.newest.max(i.when);
     }
-    let mut out: Vec<(String, usize)> = by.into_values().collect();
-    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    let mut out: Vec<PluginUse> = by.into_values().collect();
+    out.sort_by(|a, b| b.lines.cmp(&a.lines).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    out
+}
+
+/// `plugins` (as [`plugins`] gives them) in `order`, ties by name.
+pub fn in_order(plugins: &[PluginUse], order: PluginOrder) -> Vec<&PluginUse> {
+    let mut out: Vec<&PluginUse> = plugins.iter().collect();
+    let name = |u: &PluginUse| u.name.to_lowercase();
+    match order {
+        PluginOrder::MostUsed => {}
+        PluginOrder::Name => out.sort_by_key(|u| name(u)),
+        PluginOrder::LastUsed => out.sort_by(|a, b| b.newest.cmp(&a.newest).then_with(|| name(a).cmp(&name(b)))),
+    }
     out
 }
 
@@ -2622,6 +2749,35 @@ mod tests {
     }
 
     #[test]
+    fn the_plugin_menu_goes_in_the_order_picked_and_keeps_it_through_clear_filters() {
+        let mut all = items();
+        // Vital's song is newer than Serum's; Fruity Limiter's newest.
+        all[0].when = 100;
+        all[1].when = 300;
+        all[2].when = 900;
+        let mut vital = all[0].clone();
+        vital.row.plugin = "Vital".into();
+        vital.when = 500;
+        all.push(vital);
+        let used = plugins(&all);
+        assert_eq!(used[0], PluginUse { name: "Serum".into(), lines: 2, newest: 300 });
+        let names = |o| in_order(&used, o).iter().map(|u| u.name.clone()).collect::<Vec<_>>();
+        // The preset file (Polysynth) says no time: last in Last used.
+        assert_eq!(names(PluginOrder::MostUsed), ["Serum", "Fruity Limiter", "Polysynth", "Vital"]);
+        assert_eq!(names(PluginOrder::Name), ["Fruity Limiter", "Polysynth", "Serum", "Vital"]);
+        assert_eq!(names(PluginOrder::LastUsed), ["Fruity Limiter", "Vital", "Serum", "Polysynth"]);
+        let mut f = Filters { plugin_order: PluginOrder::Name, ..Filters::default() };
+        f.toggle(PLUGIN, "Serum");
+        assert_eq!(f.cleared().plugin_order, PluginOrder::Name);
+        assert_eq!(PluginOrder::from_label("Last used"), Some(PluginOrder::LastUsed));
+        assert_eq!(PluginOrder::labels(), ["Most used", "A-Z", "Last used"]);
+        // A song's lines take their save's time.
+        let song = SongSave { path: "/s/a.flp".into(), song: "A".into(), modified: 1_700_000_000 };
+        let lines = song_items(vec![all[0].row.clone()], &song);
+        assert_eq!(lines[0].when, 1_700_000_000);
+    }
+
+    #[test]
     fn serum2_summary_says_where_to_find_them() {
         let e = |files: &[&str], failed: &[&str]| Exported {
             folder: PathBuf::from("/x"),
@@ -2961,6 +3117,7 @@ mod tests {
         let folders = duck_folders(Some(&root), None);
         assert_eq!(folders, [duck.clone(), duck2.clone()]);
         let mut names: Vec<String> = shape_files(&folders)
+            .files
             .iter()
             .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
             .collect();
@@ -2970,7 +3127,32 @@ mod tests {
         let other = root.join("Other");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("Lead.preset"), b"").unwrap();
-        assert_eq!(shape_files(std::slice::from_ref(&other)), Vec::<String>::new());
+        assert_eq!(shape_files(std::slice::from_ref(&other)).files, Vec::<String>::new());
+        // A folder that was listed counts as looked through, files or none. One that has gone away by the time it's
+        // looked through (here: never there) doesn't, and is named: the curves found in it before are kept.
+        let away = root.join("Away");
+        let both = [other.clone(), away.clone()];
+        let looked = shape_files(&both);
+        assert_eq!(looked.listed, std::slice::from_ref(&other));
+        assert_eq!(looked.unlisted.iter().map(|(f, _)| f).collect::<Vec<_>>(), [&away]);
+        // The same folder as two roots (one inside the other too) is looked through once, and both count.
+        let inside = other.join("Shapes");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::write(inside.join("a.bwcurve"), b"").unwrap();
+        let twice = curve_files(&[other.clone(), inside.clone(), other.clone()]);
+        assert_eq!(twice.files.len(), 1);
+        assert_eq!(twice.listed.len(), 2);
+        assert!(twice.listed.contains(&other) && twice.listed.contains(&inside) && twice.unlisted.is_empty());
+        // A folder under a root that is a link leading nowhere (its drive away) is named, under its own root only;
+        // the roots themselves were listed. Where links can be made without asking.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("drive-away"), inside.join("Pack")).unwrap();
+            let looked = curve_files(&[other.clone(), root.join("DeviousMachines")]);
+            assert_eq!(looked.listed.len(), 2);
+            assert_eq!(looked.unlisted.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>(), [inside.join("Pack")]);
+            assert_eq!(looked.files.len(), 1);
+        }
         assert_eq!(duck_folders(None, None).iter().filter(|f| f.starts_with(&root)).count(), 0);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -2997,6 +3179,7 @@ mod tests {
         std::fs::write(moved.join("Saw.vitallfo"), b"").unwrap();
         std::fs::write(moved.join("Pad.wav"), b"").unwrap();
         let mut names: Vec<String> = shape_files(std::slice::from_ref(&moved))
+            .files
             .iter()
             .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
             .collect();
@@ -3039,6 +3222,7 @@ mod tests {
         assert_eq!(shape_folders(Some(&docs), Some(&docs)), [serum2.clone(), lfotool.clone(), mac]);
         assert_eq!(shape_folders(None, None), Vec::<PathBuf>::new());
         let names: Vec<String> = shape_files(&folders)
+            .files
             .iter()
             .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
             .collect();

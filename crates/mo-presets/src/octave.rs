@@ -87,21 +87,6 @@ fn serum_1_shift(settings: &[u8]) -> Option<f64> {
     Some(0.0)
 }
 
-/// Where Serum 1's state keeps the name of the preset that was loaded (46 bytes, ending at the first zero), and its
-/// maker's name after it at 18,848 (seen on Solomon's saves and presets; an old 20,704-byte preset leaves it blank).
-const PRESET_NAME_AT: usize = 18_802;
-const PRESET_NAME_LEN: usize = 46;
-
-/// The name of the preset Serum 1 had loaded, from its settings; `None` when it keeps none (blank).
-pub(crate) fn serum_1_preset_name(settings: &[u8]) -> Option<String> {
-    let raw = serum_1_unpacked(settings)?;
-    let field = raw.get(PRESET_NAME_AT..PRESET_NAME_AT + PRESET_NAME_LEN)?;
-    // Latin-1, as Serum writes it, up to its first zero.
-    let name: String = field.iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
-    let name = name.trim();
-    (!name.is_empty() && name.chars().all(|c| !c.is_control())).then(|| name.to_owned())
-}
-
 /// Whether settings unpack as Serum 1's state does (to between a preset file's size and a whole state's).
 pub(crate) fn serum_1_unpacks(settings: &[u8]) -> bool {
     serum_1_unpacked(settings).is_some()

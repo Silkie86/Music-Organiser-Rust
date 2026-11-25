@@ -1,5 +1,5 @@
 // ListView is only for a long menu's lines: it makes only the lines in sight, and its bar follows the theme.
-import { ListView } from "std-widgets.slint";
+import { ListView, ScrollView } from "std-widgets.slint";
 
 // The app's one shared style (rule 16): colour tokens set from the theme in use, and the few building blocks every
 // page uses. Pages never set a raw colour or their own button look; the style test in mo-ui checks that.
@@ -208,6 +208,12 @@ export global AppKeys {
     // pick, not a click, for a page whose click does more than pick. On Sounds a click on the sound playing stops it,
     // and that pick leaves it playing.
     in-out property <bool> picking-for-menu;
+}
+
+// A filter menu's search (Solomon, 25 Nov 2026: "should be able to search in the plugin filter"): whether a line's words
+// hold what's typed, capitals aside, worked out in Rust (`filters::matches`) as Slint's strings can't look inside.
+export global FilterSearch {
+    pure callback matches(string, string) -> bool;
 }
 
 // The one tooltip (rules 15 and 16): after the mouse rests on a control for a moment, says what it does and shows its
@@ -1636,17 +1642,58 @@ export component PicksChip inherits MenuChipFace {
     // Whether that first line is ticked: while nothing is picked. Where the lines ticked aren't all picked by hand
     // (the MIDI page's "Fit to" ticks the parts the app picked too), the page says when it is.
     in property <bool> any-on: root.value == "";
+    // The orders the menu's lines can be put in ("Most used", "A-Z", "Last used"), and the one they're in; none for
+    // a menu whose order is its own. A pick goes to the page, which sorts the choices.
+    in property <[string]> orders;
+    in property <string> order;
+    callback order-picked(string);
     // A line was picked or unpicked (its words), or Any was.
     callback toggled(string);
     callback cleared();
-    clicked => { menu.show(); }
+    // A long list (more than 12 lines) gets a search box at its top. What's typed narrows the lines to those holding
+    // it; it starts empty each time the menu opens.
+    property <bool> searchable: root.choices.length > 12;
+    property <string> query;
+    clicked => {
+        root.query = "";
+        menu.show();
+    }
     menu := PopupWindow {
         x: 0;
         y: root.height + 4px;
-        width: max(root.width, 240px);
+        width: max(root.width, 260px);
         // Picking, scrolling or dragging its bar keeps it open; a click outside it closes it.
         close-policy: close-on-click-outside;
         MenuCard {
+            if root.searchable: VerticalLayout {
+                padding-bottom: Space.xs;
+                search := SearchBox {
+                    hint: "Search";
+                    edited(words) => { root.query = words; }
+                }
+                // The keys go straight to it once the menu is open (not as it's made: it isn't in the window yet), so
+                // typing narrows the list at once.
+                Timer {
+                    interval: 1ms;
+                    triggered => {
+                        self.running = false;
+                        search.focus-all();
+                    }
+                }
+            }
+            if root.orders.length > 0: HorizontalLayout {
+                padding-bottom: Space.xs;
+                spacing: 0;
+                alignment: start;
+                for o[i] in root.orders: ToggleChip {
+                    text: o;
+                    tip: "Put the list in this order";
+                    on: o == root.order;
+                    joined-left: i > 0;
+                    joined-right: i < root.orders.length - 1;
+                    clicked => { root.order-picked(o); }
+                }
+            }
             MenuLine {
                 text: root.any-text;
                 on: root.any-on;
@@ -1656,7 +1703,8 @@ export component PicksChip inherits MenuChipFace {
                     root.cleared();
                 }
             }
-            if root.choices.length > 0: ListView {
+            // Nothing typed: every line, in a list that only makes the lines in sight (rule 12).
+            if root.choices.length > 0 && root.query == "": ListView {
                 height: min(root.choices.length, 16) * 32px;
                 for c in root.choices: MenuLine {
                     text: c.text;
@@ -1664,6 +1712,22 @@ export component PicksChip inherits MenuChipFace {
                     on: c.on;
                     tickable: true;
                     clicked => { root.toggled(c.text); }
+                }
+            }
+            // Words typed: only the lines holding them, up to 16 in sight and the rest a scroll away.
+            if root.query != "": ScrollView {
+                height: min(found.preferred-height, 16 * 32px);
+                found := VerticalLayout {
+                    for c in root.choices: MenuLine {
+                        property <bool> hit: FilterSearch.matches(c.text, root.query);
+                        visible: self.hit;
+                        height: self.hit ? 32px : 0px;
+                        text: c.text;
+                        key: c.count;
+                        on: c.on;
+                        tickable: true;
+                        clicked => { root.toggled(c.text); }
+                    }
                 }
             }
         }
@@ -1986,6 +2050,10 @@ export component FilterList inherits VerticalLayout {
     in property <length> spare-room;
     // The More menu's row under the lines while it shows, 0 without it.
     property <length> more-row: root.preferred-height - caps.height - lines.preferred-height;
+    // The orders its menu's lines can be put in, and the one they're in (PicksChip's).
+    in property <[string]> orders;
+    in property <string> order;
+    callback order-picked(string);
     out property <int> fits: root.filter.chips.length == 0 || round(lines.preferred-height / Heights.tick-line) != root.filter.chips.length ? 0
         : root.filter.more.length * Heights.tick-line <= root.spare-room + root.more-row ? root.filter.chips.length + root.filter.more.length
         : max(1, root.filter.chips.length + floor(root.spare-room / Heights.tick-line));
@@ -2014,6 +2082,9 @@ export component FilterList inherits VerticalLayout {
             bare: root.filter.chips.length == 0;
             value: root.filter.more-picked;
             choices: root.filter.more;
+            orders: root.orders;
+            order: root.order;
+            order-picked(o) => { root.order-picked(o); }
             toggled(text) => { root.toggled(text); }
             cleared => { root.cleared(); }
         }
@@ -2734,6 +2805,8 @@ export component HowItWorks inherits HorizontalLayout {
 // double-click, the wheel in notches (positive away from you) and leaving. Fills its parent.
 export component PointerPad inherits TouchArea {
     in property <bool> grabbing;
+    // The mouse is over something a click picks (a star on the Galaxy): the hand says so.
+    in property <bool> pointing;
     callback down(length, length);
     callback move(length, length);
     callback up();
@@ -2745,7 +2818,7 @@ export component PointerPad inherits TouchArea {
     callback double();
     callback wheel(length, float, float, bool, bool);
     callback gone();
-    mouse-cursor: grabbing ? MouseCursor.grabbing : MouseCursor.default;
+    mouse-cursor: grabbing ? MouseCursor.grabbing : pointing ? MouseCursor.pointer : MouseCursor.default;
     pointer-event(e) => {
         if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
             root.down(self.mouse-x, self.mouse-y);
@@ -2845,6 +2918,8 @@ export global Icons {
     out property <string> whole: "M 2 6 L 2 2 L 6 2 M 10 2 L 14 2 L 14 6 M 14 10 L 14 14 L 10 14 M 6 14 L 2 14 L 2 10";
     // A metronome: a click on every beat.
     out property <string> metronome: "M 4.5 14.5 L 6.5 1.5 L 9.5 1.5 L 11.5 14.5 Z M 8 10.5 L 13 3.5 M 5 11.5 L 11 11.5";
+    // Ticked lines: a song's to-dos (Songs).
+    out property <string> todo: "M 1.5 3.5 L 3 5 L 5.5 2.2 M 8 3.8 L 14.5 3.8 M 1.5 8.5 L 3 10 L 5.5 7.2 M 8 8.8 L 14.5 8.8 M 2 13.5 L 5 13.5 M 8 13.5 L 14.5 13.5";
     // A cross: clear it, take it away.
     out property <string> clear: "M 4 4 L 12 12 M 12 4 L 4 12";
     // An i in a ring: how this works (its words in the tooltip).
@@ -4151,5 +4226,124 @@ export component FolderRow inherits Rectangle {
         hovering: path-touch.has-hover;
         at-x: path-text.x;
         at-y: root.height;
+    }
+}
+
+// A checklist's tick (CheckLine, a song's to-dos): a square, filled with a tick once it's done.
+export component TickSquare inherits Rectangle {
+    in property <bool> done;
+    callback clicked;
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    border-width: 1.5px;
+    border-color: root.done ? Theme.accent : touch.has-hover ? Theme.text : Theme.muted.transparentize(30%);
+    background: root.done ? Theme.accent : transparent;
+    if root.done: Path {
+        x: 2px;
+        y: 3px;
+        width: 10px;
+        height: 8px;
+        viewbox-width: 12;
+        viewbox-height: 10;
+        commands: "M 1 5 L 4.5 8.5 L 11 1.5";
+        stroke: Theme.accent-text;
+        stroke-width: 2px;
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A checklist line's words: faint and struck through once it's done.
+component CheckText inherits Rectangle {
+    in property <string> text;
+    in property <bool> done;
+    in property <bool> over;
+    in property <Point> mouse;
+    if !root.done: CutText {
+        width: parent.width;
+        height: parent.height;
+        over: root.over;
+        mouse: root.mouse;
+        text: root.text;
+        color: Theme.text;
+        font-size: Type.body;
+        vertical-alignment: center;
+    }
+    if root.done: Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        color: Theme.faint;
+        font-size: Type.body;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    // Measured by a copy that isn't cut short, so the line ends with the words.
+    if root.done: Rectangle {
+        x: 0;
+        y: parent.height / 2;
+        width: min(whole.preferred-width, parent.width);
+        height: 1px;
+        background: Theme.faint;
+        whole := Text {
+            visible: false;
+            text: root.text;
+            font-size: Type.body;
+        }
+    }
+}
+
+// A line of a checklist (a song's to-dos): tick it, × (on hover) takes it off; its day at the right.
+export component CheckLine inherits Rectangle {
+    in property <string> text;
+    in property <bool> done;
+    in property <string> date;
+    in property <string> remove-tip;
+    callback ticked;
+    callback removed;
+    height: 30px;
+    border-radius: Theme.radius;
+    background: sense.has-hover ? Theme.hover : transparent;
+    sense := TouchArea { }
+    HorizontalLayout {
+        padding-left: Space.xs;
+        padding-right: Space.xs;
+        spacing: Space.sm;
+        VerticalLayout {
+            alignment: center;
+            TickSquare {
+                done: root.done;
+                clicked => { root.ticked(); }
+            }
+        }
+        CheckText {
+            horizontal-stretch: 1;
+            text: root.text;
+            done: root.done;
+            over: sense.has-hover;
+            mouse: { x: sense.absolute-position.x + sense.mouse-x, y: sense.absolute-position.y + sense.mouse-y };
+        }
+        Text {
+            text: root.date;
+            color: Theme.faint;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+        // Shown while the mouse is on the line or on it (it lies over the line's own sense).
+        remove := HoverSense {
+            width: 20px;
+            opacity: sense.has-hover || self.hovered ? 1 : 0;
+            VerticalLayout {
+                alignment: center;
+                CloseButton {
+                    tip: root.remove-tip;
+                    clicked => { root.removed(); }
+                }
+            }
+        }
     }
 }

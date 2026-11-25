@@ -82,7 +82,7 @@ struct Page {
     picked: Option<usize>,
     years: Vec<(i32, usize)>,
     /// The plugins in the list, most used first, each with how many lines it has.
-    plugins: Vec<(String, usize)>,
+    plugins: Vec<logic::PluginUse>,
     /// The filters as their chips and menus show them now.
     chips: logic::FilterChips,
     songs: usize,
@@ -175,7 +175,7 @@ struct FilterAsk {
     items: Arc<Vec<Item>>,
     fixes: logic::Fixes,
     filters: Filters,
-    plugins: Option<Vec<(String, usize)>>,
+    plugins: Option<Vec<logic::PluginUse>>,
 }
 
 /// What the filters show, worked out together, so the list and its chips change at once (a click on a chip is
@@ -185,7 +185,7 @@ struct FilterAnswer {
     shown: Vec<usize>,
     years: Vec<(i32, usize)>,
     chips: logic::FilterChips,
-    plugins: Vec<(String, usize)>,
+    plugins: Vec<logic::PluginUse>,
     /// How many of the lines shown are songs' Serum 1 sounds (for the To Serum 2 button).
     serum_1: usize,
 }
@@ -532,6 +532,20 @@ fn wire(app: &AppWindow) {
         if let Some(app) = weak.upgrade() {
             export_shown(&app);
         }
+    });
+    data.set_plugin_orders(ModelRc::new(VecModel::from(
+        logic::PluginOrder::labels().into_iter().map(SharedString::from).collect::<Vec<_>>(),
+    )));
+    let weak = app.as_weak();
+    data.on_plugin_order_picked(move |label| {
+        let Some(order) = logic::PluginOrder::from_label(&label) else { return };
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.filters.plugin_order = order;
+            refilter(&mut p);
+        });
+        show_all(&app);
     });
     let weak = app.as_weak();
     data.on_serum2_shown(move || {
@@ -926,6 +940,7 @@ fn show_everything(app: &AppWindow) {
         FILTER_MODELS.with(|m| {
             data.set_part_filter(m.part.view(&p.chips.part));
             data.set_plugin_filter(m.plugin.view(&p.chips.plugin));
+            data.set_plugin_order(f.plugin_order.label().into());
             data.set_format_filter(m.format.view(&p.chips.format));
             data.set_type_filter(m.kind.view(&p.chips.kind));
             data.set_from_filter(m.from.view(&p.chips.from));
@@ -2961,21 +2976,27 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
                 folders.extend(logic::vital_folders(documents.as_deref(), home.as_deref(), app_data.as_deref()));
                 let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
                 folders.extend(logic::duck_folders(program_data.as_deref(), home.as_deref()));
-                (logic::shape_files(&folders), folders)
+                logic::shape_files(&folders)
             },
         )
     });
-    let (shapes, mut looked_in) = shapes;
-    looked_in.extend(library_roots);
-    // Only the folders that could still be listed after the look: one that went away meanwhile (and so gave no
-    // files, or only some) counts as away, and its curves are kept.
-    looked_in.retain(|f| std::fs::read_dir(f).is_ok());
+    // Only the folders the look itself listed count as looked through, and every folder it couldn't list (gone away
+    // while it was looked through, a link leading nowhere, no permission) is named: what was found under one of those
+    // before is kept, even if it's back by now.
+    let mut looked_in = library.listed;
+    looked_in.extend(shapes.listed);
+    let mut unlisted = Vec::new();
+    for (folder, why) in library.unlisted.into_iter().chain(shapes.unlisted) {
+        log::info("Curves", &format!("Couldn't list {} ({why}): the curves found in it are kept", folder.display()));
+        unlisted.push(folder);
+    }
+    let (library, shapes) = (library.files, shapes.files);
     paths.extend(library);
     paths.extend(shapes);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-    let folders = Some(curves::Folders { looked_in: &looked_in, now });
+    let folders = Some(curves::Folders { looked_in: &looked_in, unlisted: &unlisted, now });
     {
         let folders = bitwig_folders.clone();
         on_window(move |_| PAGE.with(|p| p.borrow_mut().bitwig = folders));
