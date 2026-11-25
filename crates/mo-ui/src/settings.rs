@@ -2255,8 +2255,15 @@ pub fn apply_size(app: &AppWindow) {
     let window = app.window();
     let now = window.scale_factor();
     let (had, known) = (SIZED.get(), SYSTEM.get());
-    // The scale is what this last set, unless the system has set its own since (then that's the system's).
-    let system = if known > 0.0 && (now - known * had).abs() < 0.01 { known } else { now };
+    // The screen's own scale, as winit has it. Without winit (the screenshots' window): the scale is what this last
+    // set, unless the system has set its own since (then that's the system's). Guessing it that way failed when the
+    // new screen's scale equals the old one times the size picked (150% on 100%, moved to a 150% screen: PR #728's
+    // review), so winit's word comes first.
+    let guessed = if known > 0.0 && (now - known * had).abs() < 0.01 { known } else { now };
+    let system = {
+        use slint::winit_030::WinitWindowAccessor;
+        window.with_winit_window(|w| w.scale_factor() as f32).unwrap_or(guessed)
+    };
     let wanted = size as f32 / 100.0;
     let scale = system * wanted;
     SYSTEM.set(system);
