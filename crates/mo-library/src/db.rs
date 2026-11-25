@@ -797,6 +797,13 @@ fn summaries_query(columns: &[String], tables: &HashSet<String>) -> String {
     sub("samples", "SELECT COUNT(*) FROM samples WHERE project_id = p.id", "sample_count");
     sub("samples", "SELECT COUNT(*) FROM samples WHERE project_id = p.id AND found = 0", "missing_samples");
     sub("tags", "SELECT group_concat(tag, char(31)) FROM tags WHERE project_id = p.id", "tag_list");
+    // Each to-do as "done, added, text" apart by char(30), in your order. A library made before to-dos has none.
+    sub(
+        "todos",
+        "SELECT group_concat(done || char(30) || added || char(30) || text, char(31) ORDER BY n) FROM todos \
+         WHERE project_id = p.id",
+        "todo_list",
+    );
     // In the order the save's plugins were written, whichever index SQLite reads them from (songs.db's holds them by
     // name): the order is asked for, a sort of one save's few names, still without a look at the table.
     sub(
@@ -850,6 +857,22 @@ pub(crate) fn local(seconds: i64) -> Option<NaiveDateTime> {
     chrono::DateTime::from_timestamp(seconds, 0).map(|t| t.with_timezone(&Local).naive_local())
 }
 
+/// The to-dos as [`summaries_query`] reads them: "done\u{1e}added\u{1e}text", apart by `\u{1f}`. One that can't be
+/// read that way is left out.
+fn todo_list(s: &str) -> Vec<crate::Todo> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    s.split('\u{1f}')
+        .filter_map(|one| {
+            let mut parts = one.splitn(3, '\u{1e}');
+            let done = parts.next()? == "1";
+            let added = parts.next()?.parse().ok()?;
+            Some(crate::Todo { text: parts.next()?.to_owned(), done, added })
+        })
+        .collect()
+}
+
 fn split_list(s: &str) -> Vec<String> {
     if s.is_empty() { Vec::new() } else { s.split('\u{1f}').map(str::to_owned).collect() }
 }
@@ -893,6 +916,7 @@ struct SaveColumns {
     missing_plugins: Option<usize>,
     missing_samples: Option<usize>,
     tag_list: Option<usize>,
+    todo_list: Option<usize>,
     plugin_list: Option<usize>,
     hardware: Option<usize>,
     status: Option<usize>,
@@ -929,6 +953,7 @@ impl SaveColumns {
             missing_plugins: at("missing_plugins"),
             missing_samples: at("missing_samples"),
             tag_list: at("tag_list"),
+            todo_list: at("todo_list"),
             plugin_list: at("plugin_list"),
             hardware: at("hardware"),
             status: at("status"),
@@ -998,6 +1023,7 @@ impl SaveColumns {
             length_bars: known(self.length_bars),
             track_count: known(self.track_count),
             notes: text(self.notes),
+            todos: todo_list(&text(self.todo_list)),
         }
     }
 }

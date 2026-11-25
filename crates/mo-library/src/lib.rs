@@ -89,6 +89,18 @@ pub struct Save {
     pub length_bars: i32,
     pub track_count: i32,
     pub notes: String,
+    /// What's still to do on the song, and what's done, in your order (yours, as its notes are: every save of the
+    /// song has the same list, rule 14).
+    pub todos: Vec<Todo>,
+}
+
+/// One thing to do on a song, as you typed it on its card.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Todo {
+    pub text: String,
+    pub done: bool,
+    /// When it was put on the list, in Unix seconds.
+    pub added: i64,
 }
 
 impl Default for Save {
@@ -125,6 +137,7 @@ impl Default for Save {
             length_bars: -1,
             track_count: -1,
             notes: String::new(),
+            todos: Vec::new(),
         }
     }
 }

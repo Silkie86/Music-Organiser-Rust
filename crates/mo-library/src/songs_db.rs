@@ -96,6 +96,17 @@ const TABLES: &str = "
     CREATE TABLE songs_info (key TEXT PRIMARY KEY, value);
 ";
 
+/// The to-dos you put on songs (one list per save, the same on every save of a song: rule 14), in your order (`n`).
+/// Made with the rest, and by the first write to a library made before to-dos ([`crate::song_writes`]): tables are only
+/// ever added (rule 6), so the layout number stays as it is.
+pub(crate) const TODOS: &str = "
+    CREATE TABLE IF NOT EXISTS todos (
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        n INTEGER NOT NULL, text TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, added INTEGER NOT NULL,
+        PRIMARY KEY (project_id, n)
+    ) WITHOUT ROWID;
+";
+
 /// The indexes, made once the tables are filled (quicker than keeping them up to date row by row): the C# app's, but
 /// for the two the Songs list counts from ([`LIST_INDEXES`]).
 const INDEXES: &str = "
@@ -556,6 +567,7 @@ pub fn make(library_db: &Path, songs_db: &Path, progress: &mut dyn FnMut(f32)) -
         conn.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA foreign_keys = OFF;")
             .map_err(|e| e.to_string())?;
         conn.execute_batch(TABLES).map_err(|e| e.to_string())?;
+        conn.execute_batch(TODOS).map_err(|e| e.to_string())?;
         let read = fill(&old, &conn, &stamp, progress)?;
         drop(old);
         let back = read_back(&conn, &read.tables)?;

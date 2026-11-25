@@ -2,7 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, AppKeys, Type, Space, PageHeader, Well, Panel, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel, StarsPick, HeartToggle, TagChip, WordBox, MenuChip, Icons } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Motion, PageHeader, Well, Panel, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel, StarsPick, HeartToggle, TagChip, WordBox, MenuChip, Icons, CheckLine, TickSquare } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -21,6 +21,27 @@ export struct SongLine {
     favourite: bool,
     status: string,
     daw: string,
+    // How many of its to-dos are left.
+    todos: int,
+}
+
+// One of the picked song's to-dos on its card: `n` is its place in the song's list, which a tick or × names.
+export struct TodoLine {
+    n: int,
+    text: string,
+    done: bool,
+    // The day it was added: "16 Nov".
+    date: string,
+}
+
+// One line of Next up: a song (its name in `text`, its status and date in `about`), or one of its to-dos left (`n`).
+// `row` is the song's place in the page's rows.
+export struct NextLine {
+    song: bool,
+    row: int,
+    n: int,
+    text: string,
+    about: string,
 }
 
 // One of Overview's counts ("9 plugins", "3 missing"), opening the tab at `tab`.
@@ -123,6 +144,8 @@ export global SongsData {
     in property <FilterView> tag-filter;
     in property <bool> favourites;
     in property <bool> missing;
+    // Show only songs with to-dos left.
+    in property <bool> has-todos;
     in property <bool> hide-archived;
     in property <bool> any-filter;
     // "Using Serum", while the list shows only the songs of one plugin (the Plugins page's Show in Songs).
@@ -220,6 +243,16 @@ export global SongsData {
     callback give(string, string);
     in property <[string]> statuses;
     in property <[SongTag]> song-tags;
+    // The picked song's to-dos ("add-todo" with the words, "tick-todo" and "remove-todo" with a line's `n`), and
+    // "3 left" ("" while it has none).
+    in property <[TodoLine]> song-todos;
+    in property <string> todos-left;
+    // Next up instead of the list: every to-do left on the songs the filters show, under each song's name.
+    in-out property <bool> next-up;
+    in property <[NextLine]> next-lines;
+    in property <int> next-count;
+    // A change given to the song at `row` of the page's rows (a to-do ticked on Next up), as `give`.
+    callback give-to(int, string, string);
     // Headings and songs are one height. Slint's ListView places a far jump by the average height of the lines on
     // screen, so with two heights "Show it" landed hundreds of lines away from the song in a big library; with one,
     // a song's place is simply its line number times this.
@@ -249,11 +282,169 @@ component TabRoom inherits VerticalLayout {
     changed preferred-height => { self.wants = self.preferred-height; }
 }
 
+// The song's to-do list on its card: what's left first, then what's done, and a box to add one (Enter). Kept for the
+// song, on all its saves (rule 14).
+component TodoCard inherits Rectangle {
+    // Whether its box has the keys (SongPanel's `todo-keys`).
+    in-out property <bool> box-keys;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    background: Theme.well;
+    VerticalLayout {
+        padding: Space.sm;
+        if SongsData.song-todos.length > 0: HorizontalLayout {
+            spacing: Space.sm;
+            padding-left: Space.xs;
+            padding-right: Space.xs;
+            height: 22px;
+            VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 14px;
+                    height: 14px;
+                    viewbox-width: 16;
+                    viewbox-height: 16;
+                    commands: Icons.todo;
+                    stroke: Theme.muted;
+                    stroke-width: 1.5px;
+                }
+            }
+            Caps {
+                text: "TO-DO";
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: SongsData.todos-left;
+                color: Theme.faint;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+        }
+        for t in SongsData.song-todos: CheckLine {
+            text: t.text;
+            done: t.done;
+            date: t.date;
+            remove-tip: "Take it off the list";
+            ticked => { SongsData.give("tick-todo", t.n); }
+            removed => { SongsData.give("remove-todo", t.n); }
+        }
+        HorizontalLayout {
+            padding-top: SongsData.song-todos.length > 0 ? Space.xs : 0px;
+            WordBox {
+                horizontal-stretch: 1;
+                hint: "Add a to-do";
+                tip: "Type what's left to do on this song and press Enter";
+                // Not while another app's window is in front: the box gets them back with the window.
+                changed has-keys => {
+                    if (self.has-keys || AppKeys.window-active) {
+                        root.box-keys = self.has-keys;
+                    }
+                }
+                accepted(text) => {
+                    if (text != "") {
+                        SongsData.give("add-todo", text);
+                        self.text = "";
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Next up: every to-do left on the songs the filters show, under each song's name. A tick gives it to its song; a
+// click on a song's name opens its card.
+component NextUpList inherits Rectangle {
+    property <length> line-height: 34px;
+    if SongsData.next-lines.length == 0: EmptyState {
+        title: "Nothing to do";
+        text: "Add to-dos on a song's card.";
+    }
+    ListView {
+        row-height: root.line-height;
+        rows: SongsData.next-lines.length;
+        for line in SongsData.next-lines: Rectangle {
+            height: root.line-height;
+            if line.song: song-name := ListLine {
+                x: Space.xs;
+                width: parent.width - 2 * Space.xs;
+                selected: line.row == SongsData.selected;
+                clicked => { SongsData.select(line.row); }
+                double-clicked => {
+                    SongsData.select(line.row);
+                    SongsData.open();
+                }
+                HorizontalLayout {
+                    padding-left: Space.md;
+                    padding-right: Space.md;
+                    padding-top: Space.sm;
+                    spacing: Space.sm;
+                    alignment: start;
+                    CutText {
+                        over: song-name.resting;
+                        mouse: song-name.mouse;
+                        text: line.text;
+                        color: Theme.text;
+                        font-size: Type.row-title;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: line.about;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            if !line.song: HorizontalLayout {
+                padding-left: Space.md + Space.xs;
+                padding-right: Space.md;
+                spacing: Space.sm;
+                VerticalLayout {
+                    alignment: center;
+                    TickSquare {
+                        clicked => { SongsData.give-to(line.row, "tick-todo", line.n); }
+                    }
+                }
+                CutText {
+                    horizontal-stretch: 1;
+                    text: line.text;
+                    color: Theme.text;
+                    font-size: Type.body;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// The list or Next up, with how many to-dos are left.
+component ListSwitch inherits HorizontalLayout {
+    spacing: 0;
+    alignment: start;
+    ToggleChip {
+        text: "Songs";
+        on: !SongsData.next-up;
+        joined-right: true;
+        clicked => { SongsData.next-up = false; }
+    }
+    ToggleChip {
+        text: SongsData.next-count > 0 ? "Next up  " + SongsData.next-count : "Next up";
+        on: SongsData.next-up;
+        joined-left: true;
+        clicked => { SongsData.next-up = true; }
+    }
+}
+
 // The picked song: what it is, its counts and its tabs. Its status, stars, heart and tags are the song's, on all its
 // saves (rule 14), and are kept in songs.db.
 component SongPanel inherits Panel {
     // Whether the tag box has the keys: when the card closes with them, the page gives them back to its list.
     in-out property <bool> tag-keys;
+    // The same for the to-do box.
+    in-out property <bool> todo-keys;
     // How tall the tab on show wants to be, which it says itself (see TabRoom).
     property <length> tab-height;
     // Too narrow for a list line's name to share its line with a date or what's wrong (about 250 px in the narrowest
@@ -477,6 +668,10 @@ component SongPanel inherits Panel {
                     key: SongsData.copy-key.key;
                     clicked => { SongsData.copy-path(); }
                 }
+            }
+            TodoCard {
+                vertical-stretch: 0;
+                box-keys <=> root.todo-keys;
             }
             if SongsData.health-summary != "": NoticeStrip {
                 text: SongsData.health-summary;
@@ -841,13 +1036,18 @@ export component SongsPage inherits Rectangle {
     // review of 14 Nov, AP-1, as Sounds had it on 10 Nov, U-1). They come back to the list. Only then: a card closed
     // by a read meanwhile leaves them where they are (in the search, say). The card is made from this one line.
     property <bool> card-keys;
+    // The same for the card's to-do box.
+    property <bool> card-todo-keys;
     property <bool> card-shown: SongsData.selected >= 0;
     changed card-shown => {
-        if (!self.card-shown && self.card-keys) {
+        if (!self.card-shown && (self.card-keys || self.card-todo-keys)) {
             self.card-keys = false;
+            self.card-todo-keys = false;
             keys.focus();
         }
     }
+    // The list's headings, with the Songs / Next up switch: Next up lies below them.
+    property <length> heads-height: 30px;
 
     VerticalLayout {
         // In a window wider than the list and the song's panel at their widest, the page stops there (the UX review
@@ -933,11 +1133,16 @@ export component SongsPage inherits Rectangle {
                                 after: list.row-height;
                                 to-top => { list.to-top(); }
                                 VerticalLayout {
-                                    // The headings order the list: a click goes by that column, a second turns it round.
+                                    // The list or Next up, then the headings, which order the list: a click goes by that
+                                    // column, a second turns it round.
                                     HorizontalLayout {
+                                        height: root.heads-height;
                                         padding-left: Space.xs + Space.md;
                                         padding-right: Space.xs + Space.md;
                                         spacing: Space.md;
+                                        ListSwitch {
+                                            y: (parent.height - self.height) / 2;
+                                        }
                                         ColumnHead {
                                             horizontal-stretch: 1;
                                             text: "SONG";
@@ -1029,6 +1234,29 @@ export component SongsPage inherits Rectangle {
                                                                 font-weight: 500;
                                                             }
                                                             if line.favourite: Heart { y: (parent.height - self.height) / 2; }
+                                                            // To-dos left: the list sign and how many.
+                                                            if line.todos > 0: HorizontalLayout {
+                                                                spacing: Space.xs;
+                                                                VerticalLayout {
+                                                                    alignment: center;
+                                                                    Path {
+                                                                        width: 13px;
+                                                                        height: 13px;
+                                                                        viewbox-width: 16;
+                                                                        viewbox-height: 16;
+                                                                        commands: Icons.todo;
+                                                                        stroke: Theme.muted;
+                                                                        stroke-width: 1.5px;
+                                                                    }
+                                                                }
+                                                                Text {
+                                                                    text: line.todos;
+                                                                    color: Theme.muted;
+                                                                    font-family: Theme.number-font;
+                                                                    font-size: Type.meta;
+                                                                    vertical-alignment: center;
+                                                                }
+                                                            }
                                                             // Its status as a small tag beside the name (the UX review of 10 Nov,
                                                             // C5): one of the main things the list is filtered by. A wide list
                                                             // has it in a column of its own.
@@ -1115,7 +1343,7 @@ export component SongsPage inherits Rectangle {
                                     }
                                 }
                             }
-                            if SongsData.years.length > 1: YearRange {
+                            if SongsData.years.length > 1 && !SongsData.next-up: YearRange {
                                 width: 56px;
                                 framed: false;
                                 years: SongsData.years;
@@ -1137,6 +1365,32 @@ export component SongsPage inherits Rectangle {
                             action: SongsData.any-filter ? "Clear the filters" : "";
                             act => { SongsData.clear(); }
                         }
+                        // Next up, over the list, its headings and the year strip, with the switch at its top again.
+                        if SongsData.message == "" && SongsData.next-up: Rectangle {
+                            x: 1px;
+                            y: 1px;
+                            width: parent.width - 2px;
+                            height: parent.height - 2px;
+                            border-radius: Theme.radius;
+                            background: Theme.well;
+                            // Clicks and the wheel stop here: the list under it isn't on show.
+                            TouchArea {
+                                scroll-event(e) => { accept }
+                            }
+                            VerticalLayout {
+                                HorizontalLayout {
+                                    height: root.heads-height;
+                                    padding-left: Space.xs + Space.md;
+                                    alignment: start;
+                                    ListSwitch {
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                                NextUpList {
+                                    vertical-stretch: 1;
+                                }
+                            }
+                        }
                     }
                 }
                 if root.card-shown: SongPanel {
@@ -1145,6 +1399,7 @@ export component SongsPage inherits Rectangle {
                     height: parent.height;
                     width: parent.width - self.x;
                     tag-keys <=> root.card-keys;
+                    todo-keys <=> root.card-todo-keys;
                 }
                 if !root.card-shown: SidePanel {
                     x: keys.width + 16px;
@@ -1201,6 +1456,11 @@ export component SongsPage inherits Rectangle {
                         text: "Missing something";
                         on: SongsData.missing;
                         clicked => { SongsData.toggle("missing"); }
+                    }
+                    TickLine {
+                        text: "Has to-dos";
+                        on: SongsData.has-todos;
+                        clicked => { SongsData.toggle("todos"); }
                     }
                     if SongsData.only != "": TickLine {
                         text: SongsData.only;

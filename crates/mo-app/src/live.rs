@@ -1463,8 +1463,9 @@ fn add_hardware_tags(save: &mut Save, before: &[String]) {
     }
 }
 
-/// What you gave a song: its status, rating, favourite, key and notes.
+/// What you gave a song: its status, rating, favourite, key, notes and to-dos.
 fn copy_song_fields(new: &mut Save, from: &Save) {
+    new.todos.clone_from(&from.todos);
     new.status = from.status.clone();
     new.rating = from.rating;
     new.favourite = from.favourite;

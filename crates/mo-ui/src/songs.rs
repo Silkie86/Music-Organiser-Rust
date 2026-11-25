@@ -23,20 +23,20 @@ use mo_app::places::Place;
 use mo_app::shell;
 use mo_app::shortcuts::Shortcuts;
 use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
-use mo_app::songs::{Entry, Filters, Listed, Order, SongRow, Songs, View};
+use mo_app::songs::{Entry, Filters, Listed, NextUp, Order, SongRow, Songs, View};
 use mo_app::{paths, sound_library, year_strip};
 use mo_library::scan::is_project_file;
 use mo_library::song_fields::{self, Change};
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
 use mo_library::watch::{Changes, FolderWatch};
-use mo_library::{Library, STATUSES, SaveDetail};
+use mo_library::{Library, STATUSES, SaveDetail, Todo};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
 use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
-    AppWindow, CountLine, DetailPair, HealthLine, MenuItem, OlderLine, PanelSong, PluginLine, SampleLine, SaveLine,
-    SongLine, SongTag, SongsData, YearBar,
+    AppWindow, CountLine, DetailPair, HealthLine, MenuItem, NextLine, OlderLine, PanelSong, PluginLine, SampleLine,
+    SaveLine, SongLine, SongTag, SongsData, TodoLine, YearBar,
 };
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
@@ -707,14 +707,33 @@ fn failed_card(title: &str, why: &str) {
 }
 
 /// The change a click on the card asks for (`what` and `value` as songs.slint's `give` says them), for a song that
-/// has `favourite` now. None for words the card never sends.
-fn asked_change(what: &str, value: &str, favourite: bool) -> Option<Change> {
+/// has `favourite` and `todos` now; `now` is when, in Unix seconds, for a to-do added. A to-do is ticked or taken off
+/// by its place in the list (`value`). None for words the card never sends, or a to-do that isn't there.
+fn asked_change(what: &str, value: &str, favourite: bool, todos: &[Todo], now: i64) -> Option<Change> {
+    let at = || value.parse::<usize>().ok().filter(|n| *n < todos.len());
     Some(match what {
         "status" => Change::Status(value.to_owned()),
         "stars" => Change::Rating(value.parse().ok()?),
         "favourite" => Change::Favourite(!favourite),
         "add-tag" => Change::AddTag(value.to_owned()),
         "remove-tag" => Change::RemoveTag(value.to_owned()),
+        "add-todo" => {
+            let mut list = todos.to_vec();
+            list.push(Todo { text: value.to_owned(), done: false, added: now });
+            Change::Todos(list)
+        }
+        "tick-todo" => {
+            let n = at()?;
+            let mut list = todos.to_vec();
+            list[n].done = !list[n].done;
+            Change::Todos(list)
+        }
+        "remove-todo" => {
+            let n = at()?;
+            let mut list = todos.to_vec();
+            list.remove(n);
+            Change::Todos(list)
+        }
         _ => return None,
     })
 }
@@ -732,20 +751,23 @@ fn show_given(row: &mut SongRow, change: &Change) {
             }
         }
         Change::RemoveTag(tag) => row.tags.retain(|t| song_fields::same_tag(t) != *tag),
+        Change::Todos(todos) => row.todos.clone_from(todos),
         Change::Key(_) | Change::Notes(_) => {}
     }
 }
 
-/// You gave the picked song a status, stars, a heart or a tag on its card (rule 14: the song's, so every save of it
-/// gets it, its copies in other folders too). Shown at once, then kept by the page's thread ([`watch`]), which makes
-/// the list again; a card says so if it can't be kept.
-fn give(app: &AppWindow, what: &str, value: &str) {
+/// You gave a song a status, stars, a heart, a tag or a to-do on its card, or ticked one of its to-dos on Next up
+/// (`at`, its place in the page's rows; the picked song when none). Rule 14: the song's, so every save of it gets it,
+/// its copies in other folders too. Shown at once, then kept by the page's thread ([`watch`]), which makes the list
+/// again; a card says so if it can't be kept.
+fn give(app: &AppWindow, at: Option<usize>, what: &str, value: &str) {
     let failed = |why: &str| failed_card(NOT_KEPT, why);
+    let now = Local::now().timestamp();
     let asked = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let at = p.picked?;
+        let at = at.or(p.picked)?;
         let row = p.songs.rows.get_mut(at)?;
-        let change = match asked_change(what, value, row.favourite)?.checked() {
+        let change = match asked_change(what, value, row.favourite, &row.todos, now)?.checked() {
             Ok(change) => change,
             Err(why) => return Some(Err(why)),
         };
@@ -758,8 +780,9 @@ fn give(app: &AppWindow, what: &str, value: &str) {
         Some(Err(why)) => return failed(&why),
         None => return,
     };
-    // The line in the list and the card show it now; the filters' counts follow when the list is made again.
+    // The line in the list, Next up and the card show it now; the filters' counts follow when the list is made again.
     LINES.with(|l| l.notify.reset());
+    fill_next_up(app);
     fill_panel(app);
     GIVES_WAITING.fetch_add(1, Ordering::SeqCst);
     let told = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|(t, _)| t.send(Told::Give(given)));
@@ -835,6 +858,7 @@ fn wire_filters(app: &AppWindow) {
         change(&weak, |f| match kind.as_str() {
             "favourites" => f.favourites = !f.favourites,
             "missing" => f.missing = !f.missing,
+            "todos" => f.todos = !f.todos,
             "hide-archived" => f.hide_archived = !f.hide_archived,
             "only" => f.only = None,
             _ => {}
@@ -870,7 +894,14 @@ fn wire_list(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_give(move |what, value| {
         if let Some(app) = weak.upgrade() {
-            give(&app, &what, &value);
+            give(&app, None, &what, &value);
+        }
+    });
+    // A to-do ticked on Next up: given to its song, which needn't be the one picked.
+    let weak = app.as_weak();
+    data.on_give_to(move |row, what, value| {
+        if let (Some(app), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
+            give(&app, Some(row), &what, &value);
         }
     });
     let weak = app.as_weak();
@@ -1110,6 +1141,7 @@ fn refresh(app: &AppWindow) {
         });
         data.set_favourites(f.favourites);
         data.set_missing(f.missing);
+        data.set_has_todos(f.todos);
         data.set_hide_archived(f.hide_archived);
         data.set_any_filter(f.any());
         data.set_only(f.only.as_ref().map(|o| o.0.as_str()).unwrap_or_default().into());
@@ -1121,6 +1153,69 @@ fn refresh(app: &AppWindow) {
             fill_tags(&data, f, r);
         }
     });
+    fill_next_up(app);
+}
+
+/// Next up: each song the filters show with something still to do, and those to-dos under it, and how many there are.
+/// A few hundred lines at most, so made whole.
+fn fill_next_up(app: &AppWindow) {
+    let data = app.global::<SongsData>();
+    PAGE.with(|p| {
+        let p = p.borrow();
+        let lines = p.view.next_up(&p.songs);
+        let left = lines.iter().filter(|l| matches!(l, NextUp::Todo(..))).count();
+        data.set_next_count(i32::try_from(left).unwrap_or(i32::MAX));
+        data.set_next_lines(model(lines.into_iter().filter_map(|l| {
+            let (NextUp::Song(row) | NextUp::Todo(row, _)) = l;
+            let r = p.songs.rows.get(row)?;
+            let row = i32::try_from(row).ok()?;
+            Some(match l {
+                NextUp::Song(_) => NextLine {
+                    song: true,
+                    row,
+                    n: -1,
+                    text: r.song.name.as_str().into(),
+                    about: [r.status.as_str(), &r.short_date(p.now)]
+                        .into_iter()
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                        .into(),
+                },
+                NextUp::Todo(_, n) => NextLine {
+                    song: false,
+                    row,
+                    n: i32::try_from(n).ok()?,
+                    text: r.todos.get(n)?.text.as_str().into(),
+                    about: SharedString::new(),
+                },
+            })
+        })));
+    });
+}
+
+/// The picked song's to-dos for its card: those left first, then those done, each with its place in the song's list
+/// and the day it was added; and how many are left ("3 left").
+fn fill_todos(data: &SongsData, r: &SongRow, now: NaiveDateTime) {
+    let line = |(n, t): (usize, &Todo)| TodoLine {
+        n: i32::try_from(n).unwrap_or(-1),
+        text: t.text.as_str().into(),
+        done: t.done,
+        date: added_day(t.added, now).into(),
+    };
+    let numbered = || r.todos.iter().enumerate();
+    data.set_song_todos(model(numbered().filter(|(_, t)| !t.done).chain(numbered().filter(|(_, t)| t.done)).map(line)));
+    let left = r.todos_left();
+    data.set_todos_left(if r.todos.is_empty() { SharedString::new() } else { format!("{left} left").into() });
+}
+
+/// The day a to-do was added: "16 Nov" this year, "16 Nov 2025" before.
+fn added_day(added: i64, now: NaiveDateTime) -> String {
+    use chrono::Datelike as _;
+    let Some(day) = chrono::DateTime::from_timestamp(added, 0).map(|t| t.with_timezone(&Local).naive_local()) else {
+        return String::new();
+    };
+    if day.year() == now.year() { day.format("%-d %b").to_string() } else { day.format("%-d %b %Y").to_string() }
 }
 
 fn line(songs: &Songs, entry: &Entry, now: NaiveDateTime) -> SongLine {
@@ -1139,6 +1234,7 @@ fn line(songs: &Songs, entry: &Entry, now: NaiveDateTime) -> SongLine {
                 missing_words: r.missing_words().into(),
                 rating: r.rating,
                 favourite: r.favourite,
+                todos: i32::try_from(r.todos_left()).unwrap_or(i32::MAX),
                 // The first status ("Idea") is every song's to begin with, so it isn't shown.
                 status: if r.status == STATUSES[0] { SharedString::new() } else { r.status.as_str().into() },
                 daw: r.song.latest.daw.as_str().into(),
@@ -1226,6 +1322,7 @@ fn fill_panel(app: &AppWindow) {
         let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) else { return };
         data.set_song(panel_song(r));
         fill_tags(&data, &p.filters, r);
+        fill_todos(&data, r, p.now);
         data.set_runs(model(r.runs.iter().rev().map(|run| SharedString::from(panel::run_line(run)))));
         data.set_saves_heading(panel::saves_heading(r).into());
         let older = panel::older_saves(r, &p.songs.real);
@@ -1357,7 +1454,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         }
         "projects.reveal" => data.invoke_reveal(),
         "projects.copyPath" => data.invoke_copy_path(),
-        "projects.favourite" => give(app, "favourite", ""),
+        "projects.favourite" => give(app, None, "favourite", ""),
         // The card's tag box takes the keys.
         "projects.tag" => data.set_tag_asked(data.get_tag_asked().wrapping_add(1)),
         _ => return false,
@@ -1699,22 +1796,32 @@ mod tests {
     /// UX review A2: each click on the card is one change the library takes, and a word the card never sends is none.
     #[test]
     fn a_click_on_the_card_is_one_change_to_the_song() {
-        assert_eq!(asked_change("status", "Mixing", false), Some(Change::Status("Mixing".to_owned())));
-        assert_eq!(asked_change("stars", "4", false), Some(Change::Rating(4)));
-        assert_eq!(asked_change("stars", "lots", false), None);
+        assert_eq!(asked_change("status", "Mixing", false, &[], 0), Some(Change::Status("Mixing".to_owned())));
+        assert_eq!(asked_change("stars", "4", false, &[], 0), Some(Change::Rating(4)));
+        assert_eq!(asked_change("stars", "lots", false, &[], 0), None);
         // The heart turns over what the song has now.
-        assert_eq!(asked_change("favourite", "", false), Some(Change::Favourite(true)));
-        assert_eq!(asked_change("favourite", "", true), Some(Change::Favourite(false)));
+        assert_eq!(asked_change("favourite", "", false, &[], 0), Some(Change::Favourite(true)));
+        assert_eq!(asked_change("favourite", "", true, &[], 0), Some(Change::Favourite(false)));
         assert_eq!(
-            asked_change("add-tag", " Dark ", false).and_then(|c| c.checked().ok()),
+            asked_change("add-tag", " Dark ", false, &[], 0).and_then(|c| c.checked().ok()),
             Some(Change::AddTag("dark".to_owned()))
         );
-        assert_eq!(asked_change("remove-tag", "dark", false), Some(Change::RemoveTag("dark".to_owned())));
-        assert_eq!(asked_change("key", "F# minor", false), None);
+        assert_eq!(asked_change("remove-tag", "dark", false, &[], 0), Some(Change::RemoveTag("dark".to_owned())));
+        assert_eq!(asked_change("key", "F# minor", false, &[], 0), None);
         // Every status the card's menu offers is one the library keeps.
         for status in STATUSES {
-            assert!(asked_change("status", status, false).is_some_and(|c| c.checked().is_ok()), "{status}");
+            assert!(asked_change("status", status, false, &[], 0).is_some_and(|c| c.checked().is_ok()), "{status}");
         }
+        // A to-do is added at the end, ticked over or taken off by its place; one that isn't there is no change.
+        let one = Todo { text: "Redo the bass".into(), done: false, added: 5 };
+        let todos = [one.clone()];
+        let ask = |what: &str, value: &str| asked_change(what, value, false, &todos, 9);
+        let added = Todo { text: "Vocal chop".into(), done: false, added: 9 };
+        assert_eq!(ask("add-todo", "Vocal chop"), Some(Change::Todos(vec![one.clone(), added])));
+        assert_eq!(ask("tick-todo", "0"), Some(Change::Todos(vec![Todo { done: true, ..one }])));
+        assert_eq!(ask("remove-todo", "0"), Some(Change::Todos(Vec::new())));
+        assert_eq!(ask("tick-todo", "1"), None);
+        assert_eq!(ask("remove-todo", "x"), None);
         // Six stars, or a tag with no name, is refused before anything shows.
         assert!(Change::Rating(6).checked().is_err());
         assert!(Change::AddTag("  ".to_owned()).checked().is_err());
