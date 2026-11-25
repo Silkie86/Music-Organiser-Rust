@@ -2965,16 +2965,23 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
             },
         )
     });
-    // Only the folders the look itself listed whole count as looked through: one that went away while it was
-    // looked through (and so gave no files, or only some) keeps its curves, even if it's back by now.
-    let ((library, mut looked_in), (shapes, shape_folders)) = (library, shapes);
-    looked_in.extend(shape_folders);
+    // Only the folders the look itself listed count as looked through, and every folder it couldn't list (gone away
+    // while it was looked through, a link leading nowhere, no permission) is named: what was found under one of those
+    // before is kept, even if it's back by now.
+    let mut looked_in = library.listed;
+    looked_in.extend(shapes.listed);
+    let mut unlisted = Vec::new();
+    for (folder, why) in library.unlisted.into_iter().chain(shapes.unlisted) {
+        log::info("Curves", &format!("Couldn't list {} ({why}): the curves found in it are kept", folder.display()));
+        unlisted.push(folder);
+    }
+    let (library, shapes) = (library.files, shapes.files);
     paths.extend(library);
     paths.extend(shapes);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-    let folders = Some(curves::Folders { looked_in: &looked_in, now });
+    let folders = Some(curves::Folders { looked_in: &looked_in, unlisted: &unlisted, now });
     {
         let folders = bitwig_folders.clone();
         on_window(move |_| PAGE.with(|p| p.borrow_mut().bitwig = folders));
