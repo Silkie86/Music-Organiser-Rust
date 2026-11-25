@@ -251,17 +251,18 @@ fn menu_for(p: &Page, path: &str) -> Vec<MenuItem> {
         enabled,
     };
     vec![
-        line(if pick.is_some() { "Take this folder off" } else { "Pick this folder" }, "pick", !hidden_at),
+        line(if pick.is_some() { "Take this folder off" } else { "Add this folder" }, "pick", !hidden_at),
+        line("Show only this folder", "only", !hidden_at && !tree::only_pick(&p.filters.folders, path)),
         line(
             if pick.is_some_and(|f| f.just_this) {
-                "With the folders inside it"
+                "Take in the folders inside it"
             } else {
-                "Just this folder (not the ones inside)"
+                "Leave out the folders inside it"
             },
             "just",
             !hidden_at,
         ),
-        line(if hidden { "Show this folder again" } else { "Hide this folder" }, "hide", true),
+        line(if hidden { "Show this folder's sounds again" } else { "Hide this folder's sounds" }, "hide", true),
         MenuItem { enabled: true, ..MenuItem::default() },
         line("Open in Explorer", "reveal", true),
         line("Scan your sample folders again", "scan", true),
@@ -372,6 +373,11 @@ pub(super) fn wire(app: &AppWindow) {
         match id.as_str() {
             "pick" => change(&app, |p| tree::toggle_pick(&mut p.filters.folders, &path)),
             "just" => change(&app, |p| tree::toggle_just_this(&mut p.filters.folders, &path)),
+            "only" => change(&app, |p| {
+                if !p.list.folder_hidden(&p.filters, &path) {
+                    tree::pick_only(&mut p.filters.folders, &path);
+                }
+            }),
             "hide" => {
                 change(&app, |p| tree::toggle_hidden(&mut p.filters.hidden_folders, &mut p.filters.folders, &path))
             }

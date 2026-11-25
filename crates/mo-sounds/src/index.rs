@@ -625,6 +625,101 @@ impl VectorIndex {
         })
     }
 
+    /// What `with` makes of each of `ids`' unit vectors (and its place in `ids`), in `ids`' order, on every core;
+    /// none for a sound the index doesn't have (or whose numbers can't be read). For anything that looks at many
+    /// sounds: numbers kept in a file are read a part at a time where many of a part's sounds are asked for, where
+    /// [`VectorIndex::get`] and [`VectorIndex::dot_with`] would read the file once for every sound (and
+    /// "sounds like your favourites" compares each sound with up to 24 favourites).
+    pub fn each<R: Send>(&self, ids: &[i64], with: impl Fn(usize, &Row<'_>) -> R + Sync) -> Vec<Option<R>> {
+        let dim = self.dim;
+        let place = |id: &i64| self.ids.binary_search(id).ok();
+        let lent = |i: usize| (i / CHUNK, (i % CHUNK) * dim..(i % CHUNK) * dim + dim);
+        match &self.rows {
+            Rows::Full(parts) => ids
+                .par_iter()
+                .enumerate()
+                .map(|(k, id)| {
+                    let (part, at) = lent(place(id)?);
+                    Some(with(k, &Row(RowAs::Full(&parts[part][at]))))
+                })
+                .collect(),
+            Rows::Half(parts) => ids
+                .par_iter()
+                .enumerate()
+                .map(|(k, id)| {
+                    let (part, at) = lent(place(id)?);
+                    Some(with(k, &Row(RowAs::Half(&parts[part][at]))))
+                })
+                .collect(),
+            Rows::InFile(file) => {
+                // Each one's row in the index and its place in `ids`, in the file's order, so a part's are together.
+                let mut wanted: Vec<(usize, usize)> =
+                    ids.par_iter().enumerate().filter_map(|(k, id)| Some((place(id)?, k))).collect();
+                wanted.par_sort_unstable();
+                let made: Vec<(usize, R)> = wanted
+                    .par_chunk_by(|a, b| a.0 / CHUNK == b.0 / CHUNK)
+                    .map_init(Vec::new, |numbers: &mut Vec<u16>, group| -> Vec<(usize, R)> {
+                        let part = group[0].0 / CHUNK;
+                        // The whole part in one read (4 MB for CLAP's), into this worker's own buffer. When it can't
+                        // all be read, each sound's own numbers are tried, so only those that can't be read are lost.
+                        let rows = CHUNK.min(self.ids.len() - part * CHUNK);
+                        let whole = group.len() >= WHOLE_PART && {
+                            numbers.resize(rows * dim, 0);
+                            file.read(part * CHUNK * dim, numbers)
+                        };
+                        if whole {
+                            group
+                                .iter()
+                                .map(|&(i, k)| {
+                                    let at = (i % CHUNK) * dim;
+                                    (k, with(k, &Row(RowAs::Half(&numbers[at..at + dim]))))
+                                })
+                                .collect()
+                        } else {
+                            numbers.resize(dim, 0);
+                            group
+                                .iter()
+                                .filter_map(|&(i, k)| {
+                                    if !file.read(i * dim, numbers) {
+                                        return None;
+                                    }
+                                    Some((k, with(k, &Row(RowAs::Half(numbers)))))
+                                })
+                                .collect()
+                        }
+                    })
+                    .flatten_iter()
+                    .collect();
+                let mut out: Vec<Option<R>> = ids.iter().map(|_| None).collect();
+                for (k, r) in made {
+                    out[k] = Some(r);
+                }
+                out
+            }
+        }
+    }
+
+    /// `with` for each of `ids`' unit vectors the index has (and its place in `ids`), one after another in `ids`'
+    /// order: for sums that must be added up in order. Numbers held in memory are lent as they are; numbers in a file
+    /// are read a few thousand sounds at a time ([`VectorIndex::each`]) and held meanwhile.
+    pub fn in_order(&self, ids: &[i64], mut with: impl FnMut(usize, &[f32])) {
+        if !self.is_kept_in_a_file() {
+            for (k, id) in ids.iter().enumerate() {
+                if let Some(v) = self.get(*id) {
+                    with(k, &v);
+                }
+            }
+            return;
+        }
+        for (n, some) in ids.chunks(CHUNK).enumerate() {
+            for (k, v) in self.each(some, |_, row| row.to_vec()).into_iter().enumerate() {
+                if let Some(v) = v {
+                    with(n * CHUNK + k, &v);
+                }
+            }
+        }
+    }
+
     /// The `max` closest sounds to `query`, closest first (ties by id), with their likeness (-1 to 1). Every vector is
     /// compared, in parallel; the query is made unit length first.
     pub fn nearest(&self, query: &[f32], max: usize) -> Vec<(i64, f64)> {
@@ -691,6 +786,39 @@ impl VectorIndex {
                 scored
             })
             .collect()
+    }
+}
+
+/// From this many of a part's sounds asked for at once, [`VectorIndex::each`] reads the whole part from the file in
+/// one read: that's about as quick as a few dozen single reads, and far quicker than thousands.
+const WHOLE_PART: usize = 64;
+
+/// One sound's unit vector as the index holds it, lent for a moment by [`VectorIndex::each`].
+pub struct Row<'a>(RowAs<'a>);
+
+enum RowAs<'a> {
+    Full(&'a [f32]),
+    Half(&'a [u16]),
+}
+
+impl Row<'_> {
+    /// [`dot`] with `other`: the same number [`VectorIndex::dot_with`] gives for the sound, to the last bit.
+    pub fn dot(&self, other: &[f32]) -> f64 {
+        match self.0 {
+            RowAs::Full(v) => dot(v, other),
+            RowAs::Half(v) => {
+                let halves = &*HALVES;
+                v.iter().zip(other).map(|(x, y)| f64::from(from_half(halves, *x) * y)).sum()
+            }
+        }
+    }
+
+    /// The numbers as floats: what [`VectorIndex::get`] gives for the sound.
+    pub fn to_vec(&self) -> Vec<f32> {
+        match self.0 {
+            RowAs::Full(v) => v.to_vec(),
+            RowAs::Half(v) => v.iter().map(|b| from_half(&HALVES, *b)).collect(),
+        }
     }
 }
 

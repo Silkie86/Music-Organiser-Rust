@@ -539,6 +539,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     capture(&window);
     shots.push(("space-bitwig-wide.png".into(), capture(&window)));
     space.set_panel_width(was);
+    capture(&window);
+    // A click on the "i" by the card's name shows how it works at once, not once the mouse has rested (Solomon's F12
+    // note, 25 Nov 2026: "clicking on info next to bitwig copies does nothing"). Below the "i", where the tip goes:
+    // the "i" itself only lights up under the mouse.
+    let below_info = |shot: &[u8]| crop_rgb(shot, WIDTH, (1080, 72), (320, 130));
+    let before = below_info(&capture(&window));
+    hover(&window, BITWIG_INFO.0, BITWIG_INFO.1);
+    click(&window, BITWIG_INFO.0, BITWIG_INFO.1);
+    let clicked = capture_after(&window, Duration::from_millis(100));
+    if below_info(&clicked) == before {
+        return Err("space-bitwig-info.png: a click on the card's \"i\" showed nothing at once; has it moved?".into());
+    }
+    shots.push(("space-bitwig-info.png".into(), clicked));
+    hover(&window, -1.0, -1.0);
+    // The tick above the card's ticks, clicked while all it ticks are ticked: every save is unticked, and Fix has none.
+    space.invoke_tick_all(false);
+    shots.push(("space-bitwig-untick.png".into(), capture(&window)));
+    if space.get_card_all().ticked || space.get_card_all().partly {
+        return Err("space-bitwig-untick.png: the tick for all still shows something ticked".into());
+    }
     // The old copies card: what moving plugin folders to another drive left, biggest first, with ticks: one that can't
     // go yet, files a try kept aside that wait for your tick, and one with presets saved since its move, which stays
     // until you look.
@@ -700,6 +720,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Away again: a click above the page shuts the menu, and the panel is put away.
     click(&window, 600.0, 20.0);
     songs.invoke_close_panel();
+    // The seam between the list and the panel, dragged right: the list wider than its third.
+    let widths = app.global::<mo_ui::Widths>();
+    let list_width = || if widths.get_songs_list() > 0.0 { widths.get_songs_list() } else { SONGS_LIST_WIDTH };
+    let held = drag_seam(&app, &window, SONGS_SEAM, 60.0, 1.0, "songs.list", list_width)?;
+    shots.push(("songs-list-wider.png".into(), held));
     // The narrowest window the app allows: a filter too long for a line of its own wraps inside, so every chip stays
     // in sight.
     save_narrow(&window, &out, "songs-narrow.png")?;
@@ -2030,6 +2055,10 @@ fn presets_shots(
     data.invoke_clear();
     mo_ui::presets::pick_row(app, 3);
     shots.push(("presets-picked.png".into(), capture(window)));
+    // A song's Serum 1 sound: its card offers Put in Serum 2. Then the line before is picked again for the shots after.
+    mo_ui::presets::pick_row(app, 0);
+    shots.push(("presets-serum.png".into(), capture(window)));
+    mo_ui::presets::pick_row(app, 3);
     mo_ui::presets::show_audition_sample(app, true);
     shots.push(("presets-auditioning.png".into(), capture(window)));
     mo_ui::presets::show_audition_sample(app, false);
@@ -2417,7 +2446,11 @@ fn opened_in_sight(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Re
 
 /// The folder tree beside the filters (Solomon, 24 Nov 2026): open with two folders picked and one hidden, a folder
 /// found by its search box, a folder picked alone, and folded away to its tab with picks on.
-fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+fn folder_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
     let data = app.global::<mo_ui::SoundsData>();
     data.invoke_close_panel();
     data.invoke_pick_view(0);
@@ -2434,6 +2467,13 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     data.invoke_tree_menu_chosen("hide".into());
     capture(window);
     shots.push(("sounds-folders.png".into(), capture(window)));
+    // The filter column and the tree, each dragged narrower by its right edge (at 1440 x 900 the list and card already
+    // have less than their least beside them, so neither may go wider here).
+    let widths = app.global::<mo_ui::Widths>();
+    let held = drag_seam(app, window, FILTERS_SEAM, -40.0, 1.0, "sounds.filters", || widths.get_sounds_filters())?;
+    shots.push(("sounds-filters-narrower.png".into(), held));
+    let held = drag_seam(app, window, TREE_SEAM, -80.0, 1.0, "sounds.folders", || widths.get_sounds_folders())?;
+    shots.push(("sounds-folders-narrower.png".into(), held));
     // A type picked too: the tree keeps only the folders with kicks, each counting its kicks.
     data.invoke_toggle_choice("type".into(), "Kick".into());
     capture(window);
@@ -2486,6 +2526,7 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     data.invoke_tree_cleared();
     data.invoke_tree_taken_off(r"D:\Samples\FX".into(), true);
     mo_ui::sounds::fold_folders_for_screens(app, true);
+    Ok(())
 }
 
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
@@ -2503,6 +2544,23 @@ fn sounds_shots(
     data.set_played(0.35);
     data.set_tile_played(0.35);
     shots.push(("sounds-panel.png".into(), capture(window)));
+    // Sounds like this leads on (Solomon's F12 note, 25 Nov 2026: clicking its first line went round in a circle): a
+    // click on its first line picks that sound, and its own list offers neither it nor the sounds it came through. By
+    // name, as the made-up sounds' names all differ.
+    let mut came = vec![data.get_picked().name.to_string()];
+    for _ in 0..4 {
+        let first = data.get_alike().row_data(0).ok_or("sounds like this: no line to click")?;
+        data.invoke_pick_alike(first.place);
+        let now = data.get_picked().name.to_string();
+        let offered: Vec<String> = data.get_alike().iter().map(|line| line.name.to_string()).collect();
+        if offered.contains(&now) || came.iter().any(|c| offered.contains(c)) {
+            return Err(format!("sounds like this: {now} offers itself or the way back: {offered:?}, came {came:?}"));
+        }
+        came.push(now);
+    }
+    pick_sound(app, 6);
+    data.set_played(0.35);
+    data.set_tile_played(0.35);
     // A sound deep in a pack, with folder names too long for a line, and six tags: its card wraps them, at the usual
     // width and as narrow as it goes, with nothing cut off on the right. Found by name, as the shuffled order changes
     // with every run.
@@ -2846,7 +2904,7 @@ fn sounds_shots(
     shots.push(("sounds-tag-tip.png".into(), after));
     data.set_search("".into());
     data.invoke_search_edited("".into());
-    folder_shots(app, window, shots);
+    folder_shots(app, window, shots)?;
     app.set_place(Place::Songs.index() as i32);
     Ok(())
 }
@@ -4190,6 +4248,8 @@ const PAGE_DOWN: f32 = 300.0;
 /// doesn't scroll on its own, as the lists and the arrangement in it do.
 const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
 const OLDER_BUTTON: (f32, f32) = (1205.0, 341.0);
+/// The Space page's card: the "i" beside its kind's name (BITWIG COPIES), at 1440 x 900.
+const BITWIG_INFO: (f32, f32) = (1206.0, 58.0);
 /// Space's Old copies after moving folders line, the page at its top, and a place on the page with nothing on it (right
 /// of its name, left of a card).
 const SPACE_OLD_LINE: (f32, f32) = (400.0, 493.0);
@@ -4228,6 +4288,12 @@ const MENU_LINE: f32 = 32.0;
 /// With the card open: the waveform of the tile at [`MENU_TILE`], and the waveform on the card.
 const TILE_WAVE: (f32, f32) = (560.0, 322.0);
 const CARD_WAVE: (f32, f32) = (1200.0, 292.0);
+/// The right edges of the Sounds filter column and its folder tree (open), halfway down.
+const FILTERS_SEAM: (f32, f32) = (436.0, 500.0);
+const TREE_SEAM: (f32, f32) = (732.0, 500.0);
+/// The gap between the Songs list and its panel, halfway down, and the list's width there (a third of the room).
+const SONGS_SEAM: (f32, f32) = (844.0, 500.0);
+const SONGS_LIST_WIDTH: f32 = 380.0;
 /// The seam between the Sounds list and its card (the card at its usual width), halfway down.
 const CARD_SEAM: (f32, f32) = (1009.0, 500.0);
 /// The path on the Sounds card, on its one line (Boom Kick's, cut short at its start).
@@ -4574,6 +4640,42 @@ fn right_click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
 }
 
+/// Drags the seam at `at` (a part's edge) `by` pixels across and lets go, after a picture of it held there. Fails
+/// unless the part `name` (as `mo_app::widths` knows it) is then `by` wider (or narrower, `grows` -1) than it was, or
+/// unless putting it back to its usual width, as a double-click does, gives it the width it had. `width` reads the part's width from the page.
+fn drag_seam(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    at: (f32, f32),
+    by: f32,
+    grows: f32,
+    name: &str,
+    width: impl Fn() -> f32,
+) -> Result<Vec<u8>, String> {
+    let was = width();
+    let button = slint::platform::PointerEventButton::Left;
+    let from = slint::LogicalPosition::new(at.0, at.1);
+    let to = slint::LogicalPosition::new(at.0 + by, at.1);
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: from });
+    window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: from, button });
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: to });
+    capture(window);
+    let held = capture(window);
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: to, button });
+    let got = width();
+    if (got - was - grows * by).abs() > 1.0 {
+        return Err(format!(
+            "{name}: dragging its seam at {at:?} by {by} made it {got} wide, from {was}; has it moved?"
+        ));
+    }
+    app.global::<mo_ui::Widths>().invoke_reset(name.into());
+    hover(window, -1.0, -1.0);
+    if width() != was {
+        return Err(format!("{name}: a double-click's reset left it {} wide, not its usual {was}", width()));
+    }
+    Ok(held)
+}
+
 /// A left click at a point in the window.
 fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     let position = slint::LogicalPosition::new(x, y);
@@ -4771,6 +4873,16 @@ fn capture_sized(window: &MinimalSoftwareWindow, size: (u32, u32), wait: Duratio
         renderer.render(&mut buffer, size.0 as usize);
     });
     buffer.iter().flat_map(|p| [p.r, p.g, p.b]).collect()
+}
+
+/// The pixels of a capture (RGB, `width` across) in the box at `at` (left, top) of `size` (across, down).
+fn crop_rgb(shot: &[u8], width: u32, at: (u32, u32), size: (u32, u32)) -> Vec<u8> {
+    (at.1..at.1 + size.1)
+        .flat_map(|y| {
+            let start = ((y * width + at.0) * 3) as usize;
+            shot.get(start..start + (size.0 * 3) as usize).unwrap_or_default().iter().copied()
+        })
+        .collect()
 }
 
 fn slug(name: &str) -> String {

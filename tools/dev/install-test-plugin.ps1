@@ -37,6 +37,9 @@ $Plugin = Join-Path $ClapDir 'DAWmate (test).clap'
 # The same plugin under the app's first name: taken out with the copy, as Bitwig would list the one ID twice.
 $FirstPlugin = Join-Path $ClapDir 'Music Organiser (test).clap'
 $OldPlugin = [IO.Path]::Combine($DataRoot, 'Programs', 'Common', 'CLAP', 'Music Organiser (test).clap')
+# The copy the installed DAWmate puts in the CLAP folder: the same plugin (one ID), so it goes as this test plugin goes
+# in, and the installed app leaves the plugin alone while the test one is there (mo_app::daw_links).
+$InstalledPlugin = Join-Path $ClapDir 'DAWmate.clap'
 
 # Runs a few lines of PowerShell as administrator (Windows asks first) and says whether they worked.
 function AsAdmin([string]$Lines) {
@@ -56,6 +59,7 @@ function RemoveOld {
         catch { Say "Couldn't remove the older copy at $OldPlugin : is Bitwig open?" 'Yellow' }
     }
 }
+
 
 if ($Remove) {
     RemoveOld
@@ -107,6 +111,7 @@ if (-not (Test-Path -LiteralPath $Built)) { Say "The build made no $Built." 'Red
 Say "Copying it to $ClapDir. Windows asks for an administrator for this step..." 'Cyan'
 $copy = "[void][IO.Directory]::CreateDirectory($(Quoted $ClapDir))`nCopy-Item -LiteralPath $(Quoted $Built) -Destination $(Quoted $Plugin) -Force"
 $copy += "`nif (Test-Path -LiteralPath $(Quoted $FirstPlugin)) { Remove-Item -LiteralPath $(Quoted $FirstPlugin) }"
+$copy += "`nif (Test-Path -LiteralPath $(Quoted $InstalledPlugin)) { Remove-Item -LiteralPath $(Quoted $InstalledPlugin) }"
 $worked = AsAdmin $copy
 # Checked by its contents, so an old copy left in place (Bitwig had it open) is never taken for the new one.
 $same = (Test-Path -LiteralPath $Plugin) -and
@@ -117,6 +122,10 @@ if (-not $worked -or -not $same) {
 }
 if (Test-Path -LiteralPath $FirstPlugin) {
     Say "The new plugin is in, but the older copy $FirstPlugin is still there: is Bitwig open? Close it and double-click this again." 'Red'
+    exit 1
+}
+if (Test-Path -LiteralPath $InstalledPlugin) {
+    Say "The test plugin is in, but the installed app's copy $InstalledPlugin is still there: is Bitwig open? Close it and double-click this again." 'Red'
     exit 1
 }
 RemoveOld

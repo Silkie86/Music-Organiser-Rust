@@ -294,6 +294,12 @@ pub struct Sky {
 }
 
 impl Sky {
+    /// The map goes, to be read again for a library read again (its stars are the library's sounds, in order).
+    pub fn forget_map(&mut self) {
+        self.map = None;
+        self.changed_stars();
+    }
+
     pub fn has_map(&self) -> bool {
         self.map.is_some()
     }

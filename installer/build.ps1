@@ -2,7 +2,7 @@
   Builds the Windows setup .exe from a built app: installer/setup.iss, with the name, logo and id from product.toml and
   the version from Cargo.toml, so none of them is typed twice.
 
-    installer\build.ps1 -Exe target\dist\music-organiser.exe [-BitwigExtension <file>] [-Out dist]
+    installer\build.ps1 -Exe target\dist\music-organiser.exe [-BitwigExtension <file>] [-ClapPlugin <file>] [-Out dist]
 
   The .pdb beside the .exe (music_organiser.pdb, what a crash log needs to say where it happened) goes in too.
 
@@ -14,6 +14,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Exe,
     [string]$BitwigExtension,
+    # The built CLAP plugin (target\dist\mo_plugin.dll): it goes beside the app as plugins\DAWmate.clap.
+    [string]$ClapPlugin,
     [string]$Out = 'dist'
 )
 $ErrorActionPreference = 'Stop'
@@ -69,6 +71,9 @@ $pdb = Join-Path (Split-Path -Parent $exeFile) 'music_organiser.pdb'
 if (Test-Path -LiteralPath $pdb) { $defines += "/DPdbFile=$pdb" }
 if ($BitwigExtension) {
     $defines += "/DBitwigExtension=$((Resolve-Path -LiteralPath $BitwigExtension).Path)"
+}
+if ($ClapPlugin) {
+    $defines += "/DClapPlugin=$((Resolve-Path -LiteralPath $ClapPlugin).Path)"
 }
 # Inno Setup's own words go to the screen, so this script's only output is the setup's path.
 & $iscc /Q @defines (Join-Path $PSScriptRoot 'setup.iss') | Out-Host

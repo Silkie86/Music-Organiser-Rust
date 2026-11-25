@@ -116,6 +116,12 @@ pub const PRESETS_ACTIONS: &[Action] = &[
     action("presets.audition", "Hear the picked sound in Bitwig; again to stop", "Ctrl+Shift+B"),
     action("presets.keepAudition", "Keep the sound you're hearing in Bitwig: its track stays", "Ctrl+Shift+K"),
     action("presets.exportShown", "Export every sound in the list as it's filtered now", "Ctrl+Shift+S"),
+    action("presets.toSerum2", "Put the picked Serum 1 sound in Serum 2's presets, to load it there", "Alt+S"),
+    action(
+        "presets.serum2Shown",
+        "Put every Serum 1 sound in the list, as it's filtered now, in Serum 2's presets",
+        "Shift+Alt+S",
+    ),
     action("presets.reveal", "Show the picked sound's song file or preset file in its folder", "Ctrl+Shift+E"),
     action("presets.showInSongs", "Show the picked sound's song on the Songs page", "Ctrl+O"),
     action("presets.copyPath", "Copy where the picked sound's song or file is", "Ctrl+Shift+C"),

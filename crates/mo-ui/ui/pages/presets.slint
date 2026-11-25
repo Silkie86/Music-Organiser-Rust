@@ -4,7 +4,7 @@
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { CurveEditor } from "curve_editor.slint";
-import { Theme, AppKeys, Type, Space, Well, Panel, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, Panel, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, StudioSlider, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey, Icons, Widths } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -161,6 +161,10 @@ export global PresetsData {
     // Export these is running: its button stops it (PS-3).
     in property <bool> exporting-shown;
     callback export-shown();
+    // To Serum 2: every Serum 1 sound shown, as .fxp files in Serum 2's user presets (shown when there are some).
+    in property <int> serum1-shown;
+    in property <ActionKey> serum2-shown-key;
+    callback serum2-shown();
 
     // The Curves section (the search box is shared: `search` holds the section's words on show).
     // Found in: its chips go through `toggle` and `clear-chip`, as "found-in".
@@ -648,6 +652,17 @@ export component PresetsPage inherits Rectangle {
                     clicked => { PresetsData.randomise(); }
                 }
             }
+            if PresetsData.section == 0 && PresetsData.serum1-shown > 0: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "To Serum 2";
+                    enabled: !PresetsData.exporting;
+                    tip: PresetsData.serum2-shown-key.what + " (" + PresetsData.serum1-shown + "): Serum 2 loads them as they are, from User › From my songs";
+                    key: PresetsData.serum2-shown-key.key;
+                    clicked => { PresetsData.serum2-shown(); }
+                }
+            }
             if PresetsData.section == 0: VerticalLayout {
                 alignment: center;
                 StudioButton {
@@ -885,6 +900,9 @@ export component PresetsPage inherits Rectangle {
             // as a tick list, the plugins in a menu that scrolls; more than one part or plugin can be picked, one or
             // none of the rest. After the list, so the opened column of a narrow window lies over it.
             column := FilterColumn {
+                part: "presets.filters";
+                wide: Widths.presets-filters;
+                resizing(w) => { Widths.presets-filters = w; }
                 page-width: split.width;
                 height: split.height;
                 active: PresetsData.section == 0 ? PresetsData.any-filter : PresetsData.curve-any-filter;

@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, Tip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, Icons } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, Tip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, Icons, Widths } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -1179,6 +1179,9 @@ export component MidiPage inherits Rectangle {
             // tick list, the keys in a menu that scrolls. Each says how many parts picking it would show. After the
             // list, so the opened column of a narrow window lies over it.
             column := FilterColumn {
+                part: "midi.filters";
+                wide: Widths.midi-filters;
+                resizing(w) => { Widths.midi-filters = w; }
                 page-width: split.width;
                 height: split.height;
                 active: MidiData.any-filter;

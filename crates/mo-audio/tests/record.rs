@@ -28,3 +28,16 @@ fn a_take_is_saved_trimmed_and_never_over_another() {
     assert!(record::save(take.finish(), Some(level), &dir, "Quiet").is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn one_side_of_a_stereo_pair_records_as_a_mono_take() {
+    let (left, right) = ([0.1f32, 0.2, 0.3], [0.7f32, 0.8, 0.9]);
+    let (mut feed, take) = record::recording_of(1000, 2, Some(1));
+    feed.push(&[&left, &right]);
+    let audio = take.finish();
+    assert_eq!(audio.channels, vec![right.to_vec()]);
+    // A sound card's interleaved frames: the left side only.
+    let (mut feed, take) = record::recording_of(1000, 2, Some(0));
+    feed.push_interleaved(&[0.1, 0.7, 0.2, 0.8], 2);
+    assert_eq!(take.finish().channels, vec![vec![0.1, 0.2]]);
+}
