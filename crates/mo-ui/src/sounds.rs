@@ -411,6 +411,16 @@ pub fn sample_folders_changed() -> bool {
 
 /// The one player, made the first time something plays or Settings lists the outputs (nothing opens before a sound
 /// plays).
+/// Where "Sounds like this" keeps CLAP's numbers in a file ([`keep_likeness_in`]); not set, they stay in memory.
+static LIKENESS_IN: OnceLock<PathBuf> = OnceLock::new();
+
+/// From now on the index's CLAP numbers are kept in a file in `folder` (the app's data folder) and read as they're
+/// needed, rather than held in memory. The running app says so once, before the page reads; tests and the
+/// screenshots don't, so they write no such file.
+pub fn keep_likeness_in(folder: PathBuf) {
+    let _ = LIKENESS_IN.set(folder);
+}
+
 static PLAYER: OnceLock<Player> = OnceLock::new();
 /// The output Settings chose (`None`: the computer's default), for the player once it's made.
 static OUTPUT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -1699,7 +1709,14 @@ fn send_index(
 ) -> Option<Arc<SoundIndex>> {
     match prints {
         Ok((features, clap, analysed)) => {
-            let index = Arc::new(background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed)));
+            let index = Arc::new(background::on_pool(move || {
+                let mut index = SoundIndex::from_gathered(features, clap, analysed);
+                // CLAP's numbers go in a file read as it's needed (the running app only: `keep_likeness_in`).
+                if let Some(folder) = LIKENESS_IN.get() {
+                    mo_app::sound_likeness::keep(&mut index, folder);
+                }
+                index
+            }));
             send(Step::Index(index.clone()));
             Some(index)
         }

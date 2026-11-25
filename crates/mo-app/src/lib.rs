@@ -67,6 +67,7 @@ pub mod songs;
 pub mod sound_dates;
 pub mod sound_folders;
 pub mod sound_library;
+pub mod sound_likeness;
 pub mod sound_notes;
 pub mod sound_scan;
 pub mod sounds;
