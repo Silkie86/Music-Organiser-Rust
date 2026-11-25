@@ -59,6 +59,9 @@ pub struct Recorder {
     rate: AtomicU32,
     /// The newest for the panel.
     pub said: Mutex<Option<Said>>,
+    /// The take's shape as it records, newest for the panel: the last [`SHAPE_SHOWN`] of it (see
+    /// [`record::Recording::shape`]).
+    pub shape: Mutex<Option<Vec<f32>>>,
     /// How loud the DAW's input to the plugin has been since the panel last asked ([`record::card::Level`]), set
     /// from the audio thread.
     pub daw_level: record::card::Level,
@@ -74,6 +77,9 @@ impl Drop for Over<'_> {
         self.0.busy.store(false, Ordering::Release);
     }
 }
+
+/// How much of a take's shape shows as it records: its last 30 seconds.
+pub const SHAPE_SHOWN: usize = 30 * record::SHAPE_EVERY as usize;
 
 /// The words for the DAW's input, as the panel names it.
 pub const DAW_INPUT: &str = "the DAW's input";
@@ -179,6 +185,8 @@ impl Recorder {
         loop {
             std::thread::sleep(GATHER_EVERY);
             let ended = take.gather();
+            let shape = take.shape();
+            *lock(&self.shape) = Some(shape[shape.len().saturating_sub(SHAPE_SHOWN)..].to_vec());
             *lock(&self.said) =
                 Some(Said::Going { seconds: take.seconds(), peak_db: take.peak_db(), from: from.clone() });
             if self.stop.load(Ordering::Acquire) || ended || take.full() {

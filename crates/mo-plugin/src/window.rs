@@ -669,6 +669,9 @@ struct Shown {
     recorded: Rc<RefCell<Option<std::path::PathBuf>>>,
     /// The Record from menu: its lines, and how loud each input is.
     record_menu: Rc<RecordMenu>,
+    /// The take's shape last handed over, and the room it was last drawn for.
+    record_shape: RefCell<Vec<f32>>,
+    record_shape_room: Cell<(f32, f32)>,
     /// The number of the newest chord Chord check read that the panel shows ([`crate::chordcheck::Checker::newest`]).
     chords_seen: Cell<u64>,
     /// The number of Chord check's list of takes the panel shows (a pick or a label sets it to none, so it's shown
@@ -752,6 +755,8 @@ impl Shown {
             carried: Cell::new(None),
             recorded: Rc::default(),
             record_menu: Rc::default(),
+            record_shape: RefCell::default(),
+            record_shape_room: Cell::new((0.0, 0.0)),
             chords_seen: Cell::new(u64::MAX),
             takes_seen: Rc::new(Cell::new(u64::MAX)),
             take_picked: Rc::default(),
@@ -1365,6 +1370,9 @@ impl Shown {
                 menu.show(&panel.get_record_from());
             }
         });
+        panel.set_record_open(self.instance.record_open.load(Ordering::Relaxed));
+        let instance = Arc::clone(&self.instance);
+        panel.on_record_open_changed(move |open| instance.record_open.store(open, Ordering::Relaxed));
         let menu = Rc::clone(&self.record_menu);
         panel.on_record_menu_alive(move || menu.alive.set(Some(Instant::now())));
         let (menu, weak) = (Rc::clone(&self.record_menu), panel.as_weak());
@@ -1434,6 +1442,18 @@ impl Shown {
             *self.record_menu.inputs.borrow_mut() = inputs;
         }
         self.record_levels();
+        // The take's shape, drawn again as it grows or the drawing's room changes.
+        if let Some(shape) = lock(&self.instance.recorder.shape).take() {
+            self.panel.set_record_has_shape(!shape.is_empty());
+            *self.record_shape.borrow_mut() = shape;
+            self.record_shape_room.set((0.0, 0.0));
+        }
+        let room = (self.panel.get_record_wave_width(), self.panel.get_record_wave_height());
+        if room != self.record_shape_room.get() {
+            self.record_shape_room.set(room);
+            let path = shape_path(&self.record_shape.borrow(), crate::record::SHAPE_SHOWN, room.0, room.1);
+            self.panel.set_record_shape(path.into());
+        }
         if let Some(hears) = lock(&self.instance.listener.hears).take() {
             self.panel.set_hears(hears.words().into());
         }
@@ -2805,6 +2825,30 @@ fn record_menu_lines(
     }
 }
 
+/// A take's shape (the loudest of each stretch, 0 to 1) as Path commands for a drawing `width` by `height` (in its
+/// own units, the same as its size: a Path keeps its drawing's proportions): one shape, up from the middle and back
+/// down below it, `room` stretches across it. Nothing for no shape yet.
+fn shape_path(shape: &[f32], room: usize, width: f32, height: f32) -> String {
+    use std::fmt::Write;
+    if shape.is_empty() || width <= 0.0 || height <= 0.0 {
+        return String::new();
+    }
+    let (step, middle) = (width / room.max(1) as f32, height / 2.0);
+    let size = |p: f32| if p.is_finite() { p.clamp(0.0, 1.0) * middle } else { 0.0 };
+    let mut out = format!("M 0 {middle:.1}");
+    for (i, p) in shape.iter().enumerate() {
+        let (x, y) = (i as f32 * step, middle - size(*p));
+        let _ = write!(out, " L {x:.1} {y:.1} L {:.1} {y:.1}", x + step);
+    }
+    let _ = write!(out, " L {:.1} {middle:.1}", shape.len() as f32 * step);
+    for (i, p) in shape.iter().enumerate().rev() {
+        let (x, y) = (i as f32 * step, middle + size(*p));
+        let _ = write!(out, " L {:.1} {y:.1} L {x:.1} {y:.1}", x + step);
+    }
+    out.push_str(" Z");
+    out
+}
+
 /// The inputs in `inputs` on the card `card`.
 fn on_card<'a>(inputs: &'a [String], card: &'a str) -> impl Iterator<Item = &'a String> + 'a {
     inputs.iter().filter(move |n| crate::record::card_and_input(n).0 == card)
@@ -2922,6 +2966,15 @@ fn label_take(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_takes_shape_draws_up_and_down_from_the_middle() {
+        assert_eq!(shape_path(&[], 4, 40.0, 10.0), "");
+        assert_eq!(
+            shape_path(&[0.5, 2.0], 4, 40.0, 10.0),
+            "M 0 5.0 L 0.0 2.5 L 10.0 2.5 L 10.0 0.0 L 20.0 0.0 L 20.0 5.0 L 20.0 10.0 L 10.0 10.0 L 10.0 7.5 L 0.0 7.5 Z"
+        );
+    }
 
     #[test]
     fn a_list_worked_out_is_kept_for_its_library_and_asking_only() {

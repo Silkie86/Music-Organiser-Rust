@@ -39,7 +39,14 @@ pub struct Recording {
     peak: f32,
     /// Whether the take is at [`MOST_SECONDS`]: what comes after is let go.
     full: bool,
+    /// Its shape so far: the loudest sample of each [`SHAPE_EVERY`] of a second, for a waveform drawn as it records.
+    shape: Vec<f32>,
+    /// The loudest sample of the stretch not yet in `shape`, and how many frames it has.
+    shaping: (f32, usize),
 }
+
+/// How many of each second's stretches [`Recording::shape`] has (each the loudest sample in it).
+pub const SHAPE_EVERY: u32 = 20;
 
 /// A new take of `channels` channels (1 or more) at `rate` frames a second: the [`Feed`] for the audio thread, the
 /// [`Recording`] for a thread of its own.
@@ -56,7 +63,15 @@ pub fn recording_of(rate: u32, channels: usize, only: Option<usize>) -> (Feed, R
     let kept = vec![Vec::new(); channels];
     (
         Feed { queue, channels, only, lost: 0 },
-        Recording { queue: out, rate: rate.max(1), channels: kept, peak: 0.0, full: false },
+        Recording {
+            queue: out,
+            rate: rate.max(1),
+            channels: kept,
+            peak: 0.0,
+            full: false,
+            shape: Vec::new(),
+            shaping: (0.0, 0),
+        },
     )
 }
 
@@ -111,21 +126,40 @@ impl Recording {
     pub fn gather(&mut self) -> bool {
         let most = self.rate as usize * MOST_SECONDS as usize;
         let n = self.channels.len();
+        let stretch = (self.rate / SHAPE_EVERY).max(1) as usize;
         while self.queue.slots() >= n {
+            if self.full {
+                // Let go: the queue still empties, so the feed never waits.
+                for _ in 0..n {
+                    let _ = self.queue.pop();
+                }
+                continue;
+            }
             for channel in 0..n {
                 let Ok(sample) = self.queue.pop() else { break };
                 self.peak = self.peak.max(sample.abs());
+                self.shaping.0 = self.shaping.0.max(sample.abs());
                 if let Some(kept) = self.channels.get_mut(channel)
                     && kept.len() < most
                 {
                     kept.push(sample);
                 }
             }
+            self.shaping.1 += 1;
+            if self.shaping.1 >= stretch {
+                self.shape.push(self.shaping.0);
+                self.shaping = (0.0, 0);
+            }
             if self.channels.first().is_some_and(|c| c.len() >= most) {
                 self.full = true;
             }
         }
         self.queue.is_abandoned()
+    }
+
+    /// The take's shape so far: the loudest sample (0 to 1, more when it clips) of each [`SHAPE_EVERY`] of a second.
+    pub fn shape(&self) -> &[f32] {
+        &self.shape
     }
 
     /// How long the take is so far.
