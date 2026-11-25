@@ -31,6 +31,7 @@ pub mod one_copy;
 mod piano_roll;
 pub mod plugins;
 pub mod presets;
+pub mod screen_move;
 pub mod settings;
 pub mod songs;
 pub mod sounds;

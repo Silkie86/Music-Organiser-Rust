@@ -193,6 +193,16 @@ pub fn watch_window(app: &crate::AppWindow) {
         {
             crate::settings::restored(&app);
         }
+        // A screen with another scale: the size picked in Settings goes back on at once, once Slint has taken the new
+        // scale, rather than up to a second later by the settings' check (the window looked to jump twice).
+        if what == "scale changed" {
+            let weak = weak.clone();
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                if let Some(app) = weak.upgrade() {
+                    crate::settings::apply_size(&app);
+                }
+            });
+        }
         if what == "resized"
             && let Some(app) = weak.upgrade()
         {
