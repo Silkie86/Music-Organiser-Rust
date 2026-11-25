@@ -251,23 +251,33 @@ export component Tip {
         interval: 600ms;
         running: root.wanted && !root.mine && !root.held;
         triggered => {
-            // The other came up in the same moment.
-            if (root.held) {
-                return;
-            }
-            root.mine = true;
-            root.put-text = root.text;
-            root.put-key = root.key;
-            TipState.text = root.text;
-            TipState.key = root.key;
-            TipState.x = root.absolute-position.x + root.at-x;
-            TipState.y = root.absolute-position.y + root.at-y;
-            TipState.above-y = root.absolute-position.y + root.above-y;
-            TipState.from-x = root.absolute-position.x;
-            TipState.from-y = root.absolute-position.y;
-            TipState.from-line = root.yields-width > 0;
-            TipState.shown = true;
+            root.put-up();
         }
+    }
+    // Puts it up at once, without waiting for the mouse to rest, while the mouse is on its control: for a control whose
+    // click is for showing it (`InfoTip`'s "i"). Up again after a key put it away.
+    public function show-now() {
+        if (root.wanted && !(root.mine && TipState.shown && TipState.text == root.put-text && TipState.key == root.put-key)) {
+            root.put-up();
+        }
+    }
+    function put-up() {
+        // The other came up in the same moment.
+        if (root.held) {
+            return;
+        }
+        root.mine = true;
+        root.put-text = root.text;
+        root.put-key = root.key;
+        TipState.text = root.text;
+        TipState.key = root.key;
+        TipState.x = root.absolute-position.x + root.at-x;
+        TipState.y = root.absolute-position.y + root.at-y;
+        TipState.above-y = root.absolute-position.y + root.above-y;
+        TipState.from-x = root.absolute-position.x;
+        TipState.from-y = root.absolute-position.y;
+        TipState.from-line = root.yields-width > 0;
+        TipState.shown = true;
     }
     changed wanted => {
         if (root.wanted) {
@@ -738,6 +748,8 @@ export component TickBox inherits Rectangle {
     // A click only asks (`toggled`) and leaves `checked` tied to what it's given: set in place, the box still follows
     // it (a box that ticks itself loses that tie). Space's card rows (the whole-app review of 19 Nov, FS-4).
     in property <bool> asks;
+    // What a click does, for a box without words of its own (a card's tick for all of its ticks); "" for none.
+    in property <string> tip;
     callback toggled(bool);
     width: label.preferred-width + 26px;
     Rectangle {
@@ -775,7 +787,7 @@ export component TickBox inherits Rectangle {
         font-size: Type.body;
         vertical-alignment: center;
     }
-    TouchArea {
+    touch := TouchArea {
         clicked => {
             if root.asks {
                 root.toggled(!root.checked);
@@ -783,6 +795,11 @@ export component TickBox inherits Rectangle {
                 root.checked = !root.checked;
             }
         }
+    }
+    Tip {
+        text: root.tip;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
     }
 }
 
@@ -2452,11 +2469,17 @@ export component LinkText inherits Rectangle {
 // (Solomon, 24 Nov 2026: explanations go in tooltips, so nothing on the page is over-explained). It was a "How this
 // works" line that opened a paragraph (the UX review of 10 Nov, C7). What must be known before a button is pressed
 // stays in sight beside the button; this is for how the thing works. Put it beside the heading it explains.
+// A click shows them at once, and they stay while the mouse is on the "i": a press put them away, as it does a
+// button's tip, and they waited for the mouse to rest again (Solomon's F12 note, 25 Nov 2026: "clicking on info next to
+// bitwig copies does nothing").
 export component InfoTip inherits Rectangle {
     in property <string> text;
     width: 20px;
     height: 20px;
-    sense := TouchArea { }
+    sense := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { tip.show-now(); }
+    }
     Path {
         x: 2px;
         y: 2px;
@@ -2468,9 +2491,9 @@ export component InfoTip inherits Rectangle {
         stroke: sense.has-hover ? Theme.text : Theme.muted;
         stroke-width: 1.5px;
     }
-    Tip {
+    tip := Tip {
         text: root.text;
-        hovering: sense.has-hover && !sense.pressed;
+        hovering: sense.has-hover;
         at-y: root.height + Space.xs;
     }
 }

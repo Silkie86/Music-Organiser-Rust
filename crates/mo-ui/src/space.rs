@@ -28,7 +28,7 @@ use mo_app::places::Place;
 use mo_app::plugins::folder_fixes::FolderFix;
 use mo_app::shortcuts::what_of;
 use mo_app::sounds::{CopiesFound, SoundList};
-use mo_app::space::{self, Drive, Holds, OnPlugins, Opens, Part};
+use mo_app::space::{self, AllTick, Drive, Holds, OnPlugins, Opens, Part};
 use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
 use mo_app::space_fix_note;
@@ -53,7 +53,7 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::plugins as plugins_page;
 use crate::sounds::{self as sounds_page, Known};
-use crate::{AppWindow, CardAction, CardPart, DriveCard, MenuItem, RoomLine, SpaceData};
+use crate::{AppWindow, CardAction, CardAll, CardPart, DriveCard, MenuItem, RoomLine, SpaceData};
 
 /// How long what the page shows stays fresh: shown again after this, it looks again (the C# app looked every five
 /// minutes).
@@ -451,6 +451,19 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
                 }
             }
             // The tick box only asks (it doesn't tick itself), so it stays tied to its row: the row that changes is set.
+        });
+        show_card(&app);
+    });
+    // The tick above the card's ticks, for all of them: the Bitwig copies card's (Solomon's F12 notes, 25 Nov 2026).
+    let weak = app.as_weak();
+    data.on_tick_all(move |ticked| {
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            let p = &mut *p;
+            if p.picked == BITWIG_COPIES {
+                p.fixes.tick_all(p.bitwig.as_ref(), ticked);
+            }
         });
         show_card(&app);
     });
@@ -2949,6 +2962,8 @@ fn show_card(app: &AppWindow) {
         data.set_card_big_note(card.big_note.into());
         data.set_card_lead(card.lead.into());
         data.set_card_ticks(card.ticks);
+        let all = if p.picked == BITWIG_COPIES { p.fixes.all_tick(p.bitwig.as_ref()) } else { None };
+        data.set_card_all(card_all(all));
         // Changed only where they change, so how far a look or Fix is, or one tick, doesn't make every row again.
         if card.parts != p.card_parts {
             let rows = p
@@ -2968,6 +2983,16 @@ fn show_card(app: &AppWindow) {
         set_line_menu(&data, &buttons);
         data.set_card_actions(actions(buttons));
     });
+}
+
+/// The card's tick for all of its ticks, as the card shows it: none when it has none.
+fn card_all(all: Option<AllTick>) -> CardAll {
+    all.map_or_else(CardAll::default, |all| CardAll {
+        shown: true,
+        ticked: all.ticked(),
+        partly: all.partly(),
+        tip: all.tip().into(),
+    })
 }
 
 /// The picked line's right-click menu: its card's buttons, each with its key from the shortcut list as it is now

@@ -28,7 +28,7 @@ use mo_space::size::size_text;
 use mo_space::{Stopped, key};
 
 use crate::songs::{plural, thousands};
-use crate::space::{Card, Line, Opens, Part, and_list};
+use crate::space::{AllTick, Card, Line, Opens, Part, and_list};
 use crate::space_bin::BIN;
 use crate::space_fix_note::Stays;
 
@@ -923,6 +923,15 @@ pub struct Fixes {
     running: bool,
 }
 
+/// What the card's tick for all does when it ticks ([`Fixes::tick_all`]).
+pub const TICK_ALL: &str = "Tick each song's newest save";
+
+/// Whether a save Fix can write for (in `state`) is ticked out of the box: its song's `newest` save, unless Fix has
+/// just failed on it (pressing Fix again wouldn't help until something changes).
+fn ticked_at_first(newest: bool, state: &State<'_>) -> bool {
+    newest && !matches!(state, State::Failed(_) | State::StillUses(_, _, Some(_)))
+}
+
 /// Where a save is, as its line says.
 enum State<'a> {
     Writing,
@@ -994,8 +1003,69 @@ impl Fixes {
         if save.below || !matches!(state, State::Failed(_) | State::Outdated(_) | State::StillUses(..) | State::Open) {
             return None;
         }
-        let out_of_the_box = newest && !matches!(state, State::Failed(_) | State::StillUses(_, _, Some(_)));
-        Some(self.ticks.get(&save.path).copied().unwrap_or(out_of_the_box))
+        Some(self.ticks.get(&save.path).copied().unwrap_or_else(|| ticked_at_first(newest, &state)))
+    }
+
+    /// Each save with a tick ([`tick`](Self::tick)), project by project: whether it's its song's newest, whether it's
+    /// fixed (its tick says you heard it play), and whether it's ticked.
+    fn each_tick<'a>(&self, found: &'a Copies) -> Vec<(&'a Save, bool, bool, bool)> {
+        let mut each = Vec::new();
+        for p in &found.projects {
+            let newest: HashSet<&Path> = p.songs().iter().map(|s| s.newest.path.as_path()).collect();
+            for save in &p.saves {
+                let newest = newest.contains(save.path.as_path());
+                if let Some(ticked) = self.tick(newest, save) {
+                    each.push((save, newest, matches!(self.state(save), State::Fixed(_)), ticked));
+                }
+            }
+        }
+        each
+    }
+
+    /// The card's tick for all ([`AllTick`]): it ticks what's ticked out of the box, each song's newest save Fix can
+    /// write for (not one Fix has just failed on), and never a fixed save as heard playing: only you can say you heard
+    /// it play. None when there's nothing to tick or untick (or nothing was found yet).
+    pub fn all_tick(&self, found: Option<&Copies>) -> Option<AllTick> {
+        let (mut some, mut more) = (false, false);
+        for (save, newest, fixed, ticked) in self.each_tick(found?) {
+            some |= ticked;
+            more |= !ticked && !fixed && ticked_at_first(newest, &self.state(save));
+        }
+        (some || more).then_some(AllTick { some, more, ticks: TICK_ALL })
+    }
+
+    /// The card's tick for all, clicked ([`all_tick`](Self::all_tick)): `ticked`, each song's newest save Fix can write
+    /// for is ticked, as out of the box; unticked, every tick goes, Fix's and a fixed save's that you heard it play.
+    pub fn tick_all(&mut self, found: Option<&Copies>, ticked: bool) {
+        let Some(found) = found else { return };
+        if ticked {
+            // Each gets its tick out of the box back: one of its own would stay on that file, so a save made since in
+            // Bitwig would be ticked as the song's newest beside it, and Fix would write for both.
+            let back: Vec<PathBuf> = self
+                .each_tick(found)
+                .into_iter()
+                .filter(|&(save, newest, fixed, t)| !t && !fixed && ticked_at_first(newest, &self.state(save)))
+                .map(|(save, ..)| save.path.clone())
+                .collect();
+            for save in back {
+                self.ticks.remove(&save);
+            }
+            return;
+        }
+        let ticked_now: Vec<PathBuf> = self
+            .each_tick(found)
+            .into_iter()
+            .filter(|&(_, _, fixed, t)| t && !fixed)
+            .map(|(save, ..)| save.path.clone())
+            .collect();
+        for save in ticked_now {
+            self.ticks.insert(save, false);
+        }
+        // A save not on the card now keeps no tick of its own either, and nothing stays ticked as heard playing, even
+        // where its tick isn't shown (while Fix writes, or once the song has a newer save): it would come back ticked
+        // later, and Free the space with it.
+        self.ticks.retain(|_, t| !*t);
+        self.heard.clear();
     }
 
     /// How a save went, from Fix: kept for its line. One that couldn't be fixed loses any tick you gave it.
@@ -2075,5 +2145,86 @@ mod tests {
             )
         );
         assert_eq!(found_words(&Copies::default()).0, "No Bitwig copies of your Library sounds");
+    }
+
+    #[test]
+    fn the_tick_for_all_unticks_every_save_and_ticks_each_songs_newest_again() {
+        use crate::space::UNTICK_ALL;
+        // Solomon's F12 note, 25 Nov 2026: "no way to deselect projects to fix". A folder with two songs (one with an
+        // older save), and a project fixed and heard playing.
+        let mut moon = project("the moonlight garage", &[200 * MB]);
+        let folder = r"K:\Bitwig Studio\Projects\the moonlight garage";
+        moon.saves = vec![
+            save(&format!(r"{folder}\the moonlight TECH.bwproject")),
+            save(&format!(r"{folder}\the moonlight garage v3.bwproject")),
+            save(&format!(r"{folder}\the moonlight garage v2.bwproject")),
+        ];
+        let mut night = project("Night Drive", &[30 * MB]);
+        let fixed = PathBuf::from(r"K:\Bitwig Studio\Projects\Night Drive\Night Drive (fixed).bwproject");
+        night.saves[0].fixed = Some((fixed, true));
+        let found = Copies { library: sample().library, folders: 2, projects: vec![moon.clone(), night.clone()] };
+        let fixed_now = |fixes: &Fixes| fixes.to_fix(&found).into_iter().map(|t| t.save).collect::<Vec<_>>();
+        let mut fixes = Fixes::default();
+
+        // Out of the box each song's newest save is ticked: all it ticks are, so it shows ticked, and a click unticks.
+        let all = fixes.all_tick(Some(&found)).unwrap();
+        assert!(all.ticked() && !all.partly());
+        assert_eq!(all.tip(), UNTICK_ALL);
+        // The older save ticked by hand too, and the fixed project heard playing.
+        fixes.set_tick(Some(&found), moon.saves[2].path.clone(), true);
+        fixes.set_tick(Some(&found), night.saves[0].path.clone(), true);
+        assert_eq!(fixes.button(Some(&found)), Some(("Fix 3 saves".to_owned(), true)));
+        assert_eq!(fixes.to_free(&found).len(), 1);
+
+        // Unticked: every tick goes, Fix's and the one that says it was heard.
+        fixes.tick_all(Some(&found), false);
+        assert_eq!(fixes.button(Some(&found)), Some(("Fix".to_owned(), false)));
+        assert!(fixes.to_free(&found).is_empty());
+        let all = fixes.all_tick(Some(&found)).unwrap();
+        assert!(!all.ticked() && !all.partly());
+        assert_eq!(all.tip(), TICK_ALL);
+        let card = card(Some(&found), None, &fixes);
+        assert!(card.parts.iter().all(|part| part.tick.as_ref().is_none_or(|(_, ticked)| !ticked)));
+
+        // One ticked again by hand: a dash, and a click ticks the rest.
+        fixes.set_tick(Some(&found), moon.saves[0].path.clone(), true);
+        let all = fixes.all_tick(Some(&found)).unwrap();
+        assert!(all.partly() && all.tip() == TICK_ALL);
+        // Ticked: each song's newest save again, not the older one, and never a fixed project as heard: only you can
+        // say you heard it play.
+        fixes.tick_all(Some(&found), true);
+        assert_eq!(fixed_now(&fixes), [moon.saves[0].path.clone(), moon.saves[1].path.clone()]);
+        assert!(fixes.to_free(&found).is_empty());
+        assert!(fixes.all_tick(Some(&found)).unwrap().ticked());
+
+        // Fix failed on one: it waits for you to tick it again, so ticking all leaves it.
+        fixes.done(moon.saves[1].path.clone(), Fixing::Failed("it broke".to_owned()));
+        assert!(fixes.all_tick(Some(&found)).unwrap().ticked());
+        fixes.tick_all(Some(&found), false);
+        fixes.tick_all(Some(&found), true);
+        assert_eq!(fixed_now(&fixes), [moon.saves[0].path.clone()]);
+
+        // While Fix writes, a fixed project's tick that says it was heard isn't shown: unticking all takes it too, so
+        // it doesn't come back ticked when Fix is done.
+        fixes.set_tick(Some(&found), night.saves[0].path.clone(), true);
+        assert_eq!(fixes.to_free(&found).len(), 1);
+        fixes.start(&[]);
+        fixes.tick_all(Some(&found), false);
+        fixes.finished();
+        assert!(fixes.to_free(&found).is_empty());
+        assert!(fixed_now(&fixes).is_empty());
+
+        // Ticked again, each tick follows its song's newest save, as out of the box: a save made since in Bitwig is
+        // ticked in place of the one before, not beside it.
+        fixes.tick_all(Some(&found), true);
+        let mut later = moon.clone();
+        later.saves.insert(0, save(&format!(r"{folder}\the moonlight TECH v2.bwproject")));
+        let found_later = Copies { projects: vec![later.clone(), night.clone()], ..found.clone() };
+        let to_fix: Vec<PathBuf> = fixes.to_fix(&found_later).into_iter().map(|t| t.save).collect();
+        assert_eq!(to_fix, [later.saves[0].path.clone()]);
+
+        // Nothing found yet, or nothing with a tick: no tick for all.
+        assert_eq!(fixes.all_tick(None), None);
+        assert_eq!(Fixes::default().all_tick(Some(&Copies::default())), None);
     }
 }

@@ -129,6 +129,12 @@ struct Page {
     tiles_held: Option<TilesHeld>,
     /// The picked sound, as its place in `list`.
     picked: Option<usize>,
+    /// The sounds you came to the picked one through, each picked from Sounds like this of the one before, by id, the
+    /// first first: Sounds like this leaves them out, so a click on its first line always leads on (Solomon's F12 note,
+    /// 25 Nov 2026). A pick any other way starts again.
+    came: Vec<i64>,
+    /// The next pick is from Sounds like this ([`pick`]).
+    picking_alike: bool,
     /// A sound Ctrl+K jumped to that the filters hid: picked once the list without them arrives.
     to_pick: Option<usize>,
     autoplay: bool,
@@ -239,6 +245,8 @@ impl Default for Page {
             columns_before: None,
             tiles_held: None,
             picked: None,
+            came: Vec::new(),
+            picking_alike: false,
             to_pick: None,
             autoplay: false,
             chose_view: false,
@@ -2152,22 +2160,26 @@ fn usage_of(
 /// How many sounds Sounds like this shows.
 const ALIKE_COUNT: usize = 8;
 
+/// How many of the sounds you came to the picked one through Sounds like this leaves out ([`Page::came`]): the newest.
+const CAME_KEPT: usize = 256;
+
 /// A search for sounds like the one at `at`, answered off the window's thread (comparing with 450,000 others takes
 /// about half a second); only the newest pick's answer is shown.
 struct AlikeAsk {
     at: usize,
+    /// The sounds you came to it through, by id ([`Page::came`]).
+    came: Vec<i64>,
     list: Arc<SoundList>,
     places: Arc<HashMap<i64, usize>>,
     index: Arc<SoundIndex>,
 }
 
 impl AlikeAsk {
-    /// The sounds like it, most alike first, as places in the list with how alike (0 to 1).
+    /// The sounds like it, most alike first, as places in the list with how alike (0 to 1): new ones only, not those
+    /// you came to it through nor a copy of one ([`SoundList::like_this`]).
     fn answer(&self) -> Vec<(usize, f64)> {
-        let Some(s) = self.list.sound(self.at) else { return Vec::new() };
-        let get = |id: i64| self.places.get(&id).and_then(|&i| self.list.sound(i));
-        let found = background::on_pool(|| self.index.similar(s, get, ALIKE_COUNT, false));
-        found.into_iter().filter_map(|(id, likeness)| self.places.get(&id).map(|&i| (i, likeness))).collect()
+        let came: Vec<usize> = self.came.iter().filter_map(|id| self.places.get(id).copied()).collect();
+        background::on_pool(|| self.list.like_this(&self.index, &self.places, self.at, &came, ALIKE_COUNT))
     }
 }
 
@@ -2250,7 +2262,7 @@ fn ask_alike(app: &AppWindow, at: usize) {
     let ask = PAGE.with(|p| {
         let p = p.borrow();
         let index = p.index.clone()?;
-        Some(AlikeAsk { at, list: p.list.clone(), places: p.places.clone(), index })
+        Some(AlikeAsk { at, came: p.came.clone(), list: p.list.clone(), places: p.places.clone(), index })
     });
     let Some(ask) = ask else { return };
     if HERE.with(|h| *h.borrow()) {
@@ -3061,12 +3073,16 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.on_pick_alike(move |place| {
         let Some(app) = weak.upgrade() else { return };
         let Ok(at) = usize::try_from(place) else { return };
+        PAGE.with(|p| p.borrow_mut().picking_alike = true);
         clicked(&app, at);
+        // A click that only stopped it playing picked nothing.
+        PAGE.with(|p| p.borrow_mut().picking_alike = false);
     });
     let weak = app.as_weak();
     data.on_play_alike(move |place| {
         let Some(app) = weak.upgrade() else { return };
         let Ok(at) = usize::try_from(place) else { return };
+        PAGE.with(|p| p.borrow_mut().picking_alike = true);
         pick(&app, at);
         play_picked(&app, 0.0);
         did::played(&app, at);
@@ -4117,7 +4133,25 @@ fn select_row(app: &AppWindow, row: i32, autoplay: bool) {
 fn pick(app: &AppWindow, at: usize) {
     let data = app.global::<SoundsData>();
     PAGE.with(|p| {
-        p.borrow_mut().picked = Some(at);
+        {
+            let mut p = p.borrow_mut();
+            let p = &mut *p;
+            // Picked from Sounds like this: the one it was picked from is on the way to it. Any other pick of another
+            // sound starts again.
+            let from = p.picked.filter(|&was| was != at).and_then(|was| p.list.sound(was)).map(|s| s.id);
+            if std::mem::take(&mut p.picking_alike) {
+                if let Some(id) = from.filter(|id| !p.came.contains(id)) {
+                    p.came.push(id);
+                    // A long way keeps its newest steps.
+                    if p.came.len() > CAME_KEPT {
+                        p.came.remove(0);
+                    }
+                }
+            } else if p.picked != Some(at) {
+                p.came.clear();
+            }
+            p.picked = Some(at);
+        }
         let p = p.borrow();
         data.set_picked(picked_sound(&p, at));
         show_picked_tags(&data, &p);
