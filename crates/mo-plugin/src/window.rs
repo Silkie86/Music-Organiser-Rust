@@ -725,6 +725,7 @@ impl Shown {
         // Taken back whether or not the panel was made, so no later window gets this one.
         NEXT.with(|next| next.borrow_mut().take());
         let panel = panel.map_err(|e| format!("Couldn't make the panel: {e}"))?;
+        crate::widths::connect(&panel);
 
         let lines = Rc::new(Lines {
             library: RefCell::new(None),

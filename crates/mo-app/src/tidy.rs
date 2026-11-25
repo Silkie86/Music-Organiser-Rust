@@ -1015,7 +1015,8 @@ const RETIRED: &[&str] = &["midi-index.read"];
 /// settings' (`backup.txt.<process>-<count>.mo-part`, `backup-songs.txt.…`, [`crate::backup::write_whole`]), the app's
 /// own settings' and the Space page's list of what it put in the Recycle Bin (`rust-settings.json.mo-part`,
 /// `space-binned.json.mo-part`, [`crate::app_settings::WRITTEN_CHECKED`]), the sweep's own (`tidy-notes.txt.mo-part`,
-/// [`write_notes_done`]), a data folder move's notes in the folder it moved to (`moved-in.json.…`, `moving-in.json.…`,
+/// [`write_notes_done`]), the plugin's widths (`plugin-widths.txt.mo-part`, [`crate::widths::PLUGIN_FILE`]), a data
+/// folder move's notes in the folder it moved to (`moved-in.json.…`, `moving-in.json.…`,
 /// [`WRITTEN_WHOLE`]), the Backup settings as older versions wrote them (`backup.txt.mo-part`,
 /// `backup-songs.txt.mo-part`), or a side database being made (`presets.db.new-<number>`, `curves.db.new-<number>`,
 /// with SQLite's own files beside it; `mo_presets::fixes`; the same for `preset-sounds.db.new-<number>`), or the saves
@@ -1026,7 +1027,7 @@ fn is_cut_short(name: &str) -> bool {
     WRITTEN_WHOLE.iter().any(|f| is_whole_part_of(name, f))
         || crate::app_settings::WRITTEN_CHECKED
             .iter()
-            .chain(&[NOTES_DONE_FILE, SETTINGS_FILE, SONGS_FILE])
+            .chain(&[NOTES_DONE_FILE, SETTINGS_FILE, SONGS_FILE, crate::widths::PLUGIN_FILE])
             .any(|f| name.strip_prefix(f) == Some(PART_ENDING))
         || [
             mo_presets::fixes::FILE_NAME,

@@ -503,6 +503,10 @@ export global Widths {
     in-out property <length> songs-tracks: 0px;
     // 0 until it's dragged: the Curves list takes about a fifth of the room then.
     in-out property <length> curves-list: 0px;
+    // The CLAP plugin's (its window sets them from its own file).
+    in-out property <length> plugin-filters: 196px;
+    in-out property <length> plugin-folders: 280px;
+    in-out property <length> plugin-takes: 210px;
     // How wide a page's list is beside its side card (`part`, kept `kept` wide), sharing `room` with it. At its usual
     // width the card takes what the list leaves at its widest (`max-list`, so a line stays readable in a wide window);
     // once you've dragged it, the card is as wide as you made it and the list has the rest, never under `min-list`.

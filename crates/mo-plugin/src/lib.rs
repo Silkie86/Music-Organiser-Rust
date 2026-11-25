@@ -45,6 +45,7 @@ pub mod takes;
 mod threads;
 mod track;
 pub mod waves;
+mod widths;
 mod window;
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -75,9 +75,24 @@ pub const PARTS: &[Part] = &[
     part("songs.saved", 90.0, 90.0, 220.0),
 ];
 
-/// The part called `name`, if there is one.
+/// The file in the data folder where the CLAP plugin keeps its parts' widths (`mo-plugin`'s `widths`), written whole
+/// by way of the same name with [`crate::backup::PART_ENDING`] after it.
+pub const PLUGIN_FILE: &str = "plugin-widths.txt";
+
+/// The CLAP plugin's parts you can drag. The plugin keeps their widths in a file of its own (it never writes the
+/// app's settings); the app has no page for them.
+pub const PLUGIN_PARTS: &[Part] = &[
+    // Each view's filter column (Sounds, MIDI, Presets, Curves): one width for all.
+    part("plugin.filters", 196.0, 160.0, 360.0),
+    // The Sounds view's folder tree.
+    part("plugin.folders", 280.0, 180.0, 480.0),
+    // Chord check's list of takes.
+    part("plugin.takes", 210.0, 160.0, 480.0),
+];
+
+/// The part called `name`, the app's or the plugin's, if there is one.
 pub fn find(name: &str) -> Option<&'static Part> {
-    PARTS.iter().find(|p| p.name == name)
+    PARTS.iter().chain(PLUGIN_PARTS).find(|p| p.name == name)
 }
 
 /// The widths you chose, by part: only parts in [`PARTS`], each within its limits.
@@ -141,14 +156,15 @@ mod tests {
 
     #[test]
     fn every_part_once_with_its_usual_width_inside_its_limits() {
-        for (i, p) in PARTS.iter().enumerate() {
+        let all: Vec<&Part> = PARTS.iter().chain(PLUGIN_PARTS).collect();
+        for (i, p) in all.iter().enumerate() {
             // A usual width of 0 only where the page works one out (the Songs list's third of the room): anywhere else
             // the part would be given no width at all.
             let worked_out = p.name == "songs.list" || p.name == "curves.list" || p.name == "songs.tracks";
             assert!(if worked_out { p.usual == 0.0 } else { p.least <= p.usual && p.usual <= p.most }, "{}", p.name);
             assert!(p.least <= p.most, "{}", p.name);
             assert!(p.name.contains('.') && !p.name.contains(['=', ';']), "{}", p.name);
-            assert!(PARTS[..i].iter().all(|q| q.name != p.name), "{} twice", p.name);
+            assert!(all[..i].iter().all(|q| q.name != p.name), "{} twice", p.name);
         }
     }
 
