@@ -2359,6 +2359,16 @@ impl WindowHandler for Shown {
                 if key.state == KeyState::Down && !key.repeat && key.key == Key::Named(NamedKey::Escape) {
                     self.stop();
                 }
+                // Up and Down move through the list on show (Solomon, 25 Nov), held down too. Where there's no list
+                // to move through (the Galaxy turns with them) they go on to the panel as before.
+                let by = match key.key {
+                    Key::Named(NamedKey::ArrowUp) => -1,
+                    Key::Named(NamedKey::ArrowDown) => 1,
+                    _ => 0,
+                };
+                if by != 0 && key.state == KeyState::Down && self.panel.invoke_step(by) {
+                    return EventStatus::Captured;
+                }
                 let Some(text) = key_text(&key.key) else { return EventStatus::Ignored };
                 // What Slint knows of Shift, Ctrl and Alt from here on.
                 if let Some(at) = held_key(&key.key) {

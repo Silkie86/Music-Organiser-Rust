@@ -324,13 +324,74 @@ export component Panel inherits Window {
     // far through the whole sound (0 the start, 1 the end).
     in property <int> playing-row: -1;
     // A line to bring into sight in each list (the DAW's knobs pick lines): its top, and a count that goes up each
-    // time it's asked.
-    in property <length> sounds-show-top;
-    in property <int> sounds-show-ask;
-    in property <length> parts-show-top;
-    in property <int> parts-show-ask;
-    in property <length> presets-show-top;
-    in property <int> presets-show-ask;
+    // time it's asked. Up and Down ask too (`step`).
+    in-out property <length> sounds-show-top;
+    in-out property <int> sounds-show-ask;
+    in-out property <length> parts-show-top;
+    in-out property <int> parts-show-ask;
+    in-out property <length> presets-show-top;
+    in-out property <int> presets-show-ask;
+    property <length> curves-show-top;
+    property <int> curves-show-ask;
+    property <length> takes-show-top;
+    property <int> takes-show-ask;
+
+    // Up (-1) and Down (+1) move to the line above or below in the list on show, and do what a click on it does
+    // (Solomon, 25 Nov: the arrow keys didn't move through the lists). A curve is only picked: a click opens it in
+    // the editor, which would take the list away. The line is kept in sight. False where there's no list to move
+    // through, so the key goes on as it did (the Galaxy turns with the arrows itself).
+    public function step(by: int) -> bool {
+        if (root.view == 0 && !root.galaxy && root.sounds.length > 0) {
+            let to = root.picked < 0 ? 0 : clamp(root.picked + by, 0, root.sounds.length - 1);
+            if (to != root.picked) {
+                root.picked = to;
+                root.play(root.picked, -1);
+                root.sounds-show-top = root.picked * 48px;
+                root.sounds-show-ask += 1;
+            }
+            return true;
+        }
+        if (root.view == 1 && root.parts.length > 0) {
+            let to = root.midi-picked < 0 ? 0 : clamp(root.midi-picked + by, 0, root.parts.length - 1);
+            if (to != root.midi-picked) {
+                root.midi-picked = to;
+                root.midi-play(root.midi-picked);
+                root.parts-show-top = root.midi-picked * 48px;
+                root.parts-show-ask += 1;
+            }
+            return true;
+        }
+        if (root.view == 2 && root.presets.length > 0) {
+            let to = root.preset-picked < 0 ? 0 : clamp(root.preset-picked + by, 0, root.presets.length - 1);
+            if (to != root.preset-picked) {
+                root.preset-picked = to;
+                root.preset-click(root.preset-picked);
+                root.presets-show-top = root.preset-picked * 48px;
+                root.presets-show-ask += 1;
+            }
+            return true;
+        }
+        if (root.view == 3 && root.takes.length > 0) {
+            let to = root.take-picked < 0 ? 0 : clamp(root.take-picked + by, 0, root.takes.length - 1);
+            if (to != root.take-picked) {
+                root.take-picked = to;
+                root.take-pick(root.take-picked);
+                root.takes-show-top = root.take-picked * 44px;
+                root.takes-show-ask += 1;
+            }
+            return true;
+        }
+        if (root.view == 5 && !root.curve-editing && root.curves.length > 0) {
+            let to = root.curve-picked < 0 ? 0 : clamp(root.curve-picked + by, 0, root.curves.length - 1);
+            if (to != root.curve-picked) {
+                root.curve-picked = to;
+                root.curves-show-top = root.curve-picked * 48px;
+                root.curves-show-ask += 1;
+            }
+            return true;
+        }
+        return false;
+    }
     in property <float> playing-at;
     // What's typed in the search box: kept while another tab shows, as the list keeps it.
     in-out property <string> search-text;
@@ -1894,6 +1955,8 @@ export component Panel inherits Window {
                         row-height: 48px;
                         rows: root.curves.length;
                         kept-y <=> root.curve-list-y;
+                        show-top: root.curves-show-top;
+                        show-ask: root.curves-show-ask;
                         for curve[i] in root.curves: curve-line := ListLine {
                             height: 48px;
                             selected: i == root.curve-picked;
@@ -2085,6 +2148,8 @@ export component Panel inherits Window {
                     width: 210px;
                     row-height: 44px;
                     rows: root.takes.length;
+                    show-top: root.takes-show-top;
+                    show-ask: root.takes-show-ask;
                     for t[i] in root.takes: take-line := ListLine {
                         height: 44px;
                         selected: i == root.take-picked;
