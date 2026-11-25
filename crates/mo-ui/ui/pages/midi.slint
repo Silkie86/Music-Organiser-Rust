@@ -200,7 +200,6 @@ export global MidiData {
 
     in property <bool> panel-shown;
     in-out property <length> panel-width: 420px;
-    callback panel-resized(length);
     callback close-panel();
     in property <PickedPart> picked;
     // The picked part's piano roll: how many keys it shows top to bottom (none while its notes are read), its picture
@@ -1153,7 +1152,8 @@ export component MidiPage inherits Rectangle {
                     panel-width: area.card-width;
                     room: area.width;
                     resizing(w) => { MidiData.panel-width = w; }
-                    resized(w) => { MidiData.panel-resized(w); }
+                    part: "midi.card";
+                    max-list: Fit.list-max;
                 }
                 if MidiData.panel-shown: PartPanel {
                     x: area.list-width + divider.width;

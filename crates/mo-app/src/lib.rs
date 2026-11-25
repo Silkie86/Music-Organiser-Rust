@@ -89,4 +89,5 @@ pub mod trim_copy;
 pub mod update;
 pub mod version;
 pub mod waves;
+pub mod widths;
 pub mod year_strip;

@@ -119,6 +119,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             feed: feed.clone(),
         },
     );
+    // Every part at its usual width: the made-up settings keep none.
+    mo_ui::widths::connect(&app);
     // The Space page, from made-up drives: it only reads the real ones when it's shown in the app.
     mo_ui::space::connect(&app, out.join("no library.db"), feed.clone());
     mo_ui::space::show_sample(&app, sample_space(), "");
@@ -2524,6 +2526,30 @@ fn sounds_shots(
     data.set_every_save(false);
     data.set_card_list(0);
     data.set_panel_width(wide);
+    // The seam left of the card: its tip on the mouse, then dragged 100 px left (the card that much wider, its width
+    // and limits showing while it's held), let go, and put back to its usual width as a double-click does.
+    hover(window, CARD_SEAM.0, CARD_SEAM.1);
+    capture(window);
+    shots.push(("sounds-seam-tip.png".into(), capture(window)));
+    let (seam_at, button) =
+        (slint::LogicalPosition::new(CARD_SEAM.0, CARD_SEAM.1), slint::platform::PointerEventButton::Left);
+    let dragged_to = slint::LogicalPosition::new(CARD_SEAM.0 - 100.0, CARD_SEAM.1);
+    window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: seam_at, button });
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: dragged_to });
+    capture(window);
+    shots.push(("sounds-seam-dragging.png".into(), capture(window)));
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: dragged_to, button });
+    let dragged = data.get_panel_width();
+    if (dragged - wide - 100.0).abs() > 1.0 {
+        return Err(format!(
+            "sounds seam: dragging it 100 px left made the card {dragged} wide, from {wide}; has the seam moved from {CARD_SEAM:?}?"
+        ));
+    }
+    app.global::<mo_ui::Widths>().invoke_reset("sounds.card".into());
+    if data.get_panel_width() != wide {
+        return Err(format!("sounds seam: the usual width put the card at {}, not {wide}", data.get_panel_width()));
+    }
+    hover(window, -1.0, -1.0);
     data.set_search("".into());
     data.invoke_search_edited("".into());
     // Two types at once, with the Clear types chip.
@@ -4174,6 +4200,8 @@ const MENU_LINE: f32 = 32.0;
 /// With the card open: the waveform of the tile at [`MENU_TILE`], and the waveform on the card.
 const TILE_WAVE: (f32, f32) = (560.0, 322.0);
 const CARD_WAVE: (f32, f32) = (1200.0, 292.0);
+/// The seam between the Sounds list and its card (the card at its usual width), halfway down.
+const CARD_SEAM: (f32, f32) = (1009.0, 500.0);
 /// The path on the Sounds card, on its one line (Boom Kick's, cut short at its start).
 const CARD_PATH: (f32, f32) = (1150.0, 226.0);
 /// Below and right of the mouse at [`MENU_TILE`], off its tile (with the card open): a menu opened there covers it.

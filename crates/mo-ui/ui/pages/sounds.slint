@@ -502,7 +502,6 @@ export global SoundsData {
     // sound's tile has played through at a minute in.
     in property <float> tile-played;
     in-out property <length> panel-width: 400px;
-    callback panel-resized(length);
     callback play();
     callback seek(float);
     // A right click over the waveform of the sound playing, on its tile or on its card: it stops.
@@ -2248,7 +2247,8 @@ export component SoundsPage inherits Rectangle {
                     panel-width: area.card-width;
                     room: area.width;
                     resizing(w) => { SoundsData.panel-width = w; }
-                    resized(w) => { SoundsData.panel-resized(w); }
+                    part: "sounds.card";
+                    max-list: area.lines-max;
                 }
                 // Favourites from Bitwig, over the sound card while it's open.
                 if SoundsData.bitwig-shown: BitwigCard {

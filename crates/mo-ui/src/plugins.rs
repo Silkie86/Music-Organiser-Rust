@@ -402,7 +402,6 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
             clean::put_back(&app);
         }
     });
-    data.on_panel_resized(|w| log::info("Plugins", &format!("Panel width {w:.0}")));
 
     let weak = app.as_weak();
     // What the last read was of: the library, its files then ([`mo_library::list_copy::stamp_of`]), Space's Recycle

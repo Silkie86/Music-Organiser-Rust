@@ -138,7 +138,6 @@ export global PresetsData {
     in-out property <length> list-y;
     in property <bool> panel-shown;
     in-out property <length> panel-width: 400px;
-    callback panel-resized(length);
     callback close-panel();
     in property <PresetCard> card;
     in property <[PresetFact]> facts;
@@ -830,7 +829,8 @@ export component PresetsPage inherits Rectangle {
                     // The Curves list keeps its own width: only the Presets seam can be dragged.
                     enabled: PresetsData.section == 0;
                     resizing(w) => { PresetsData.panel-width = w; }
-                    resized(w) => { PresetsData.panel-resized(w); }
+                    part: "presets.card";
+                    max-list: Fit.list-max;
                 }
                 if PresetsData.section == 0 && PresetsData.panel-shown: PresetPanel {
                     x: area.list-width + divider.width;

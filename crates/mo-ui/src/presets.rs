@@ -512,7 +512,6 @@ fn wire(app: &AppWindow) {
             keep_audition(&app);
         }
     });
-    data.on_panel_resized(|w| log::info("Presets", &format!("Panel width {w:.0}")));
     let weak = app.as_weak();
     data.on_menu_chosen(move |id| {
         if let Some(app) = weak.upgrade() {

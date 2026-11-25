@@ -3646,28 +3646,49 @@ export component SidePanel inherits Panel {
     }
 }
 
-// The seam between a page's list and its side panel: drag it to give the panel more or less room. The page keeps the
-// panel's width (and saves it, so each page remembers its own); this only reports the drag.
+// The widths of the parts of a page you can drag wider or narrower (the side cards, ...), kept by the app between runs
+// (`mo_app::widths`, which has each part's usual width and its limits). A part is named `<page>.<part>`.
+export global Widths {
+    // The least and most a part may be.
+    pure callback least(string) -> length;
+    pure callback most(string) -> length;
+    // A part was dragged to a new width and let go: the app keeps it.
+    callback resized(string, length);
+    // A double-click on a part's edge: the app puts it back to its usual width (and sets the page's width for it).
+    callback reset(string);
+}
+
+// The seam between a page's list and its side panel: drag it to give the panel more or less room, double-click it for
+// the panel's usual width. The page keeps the panel's width; the app keeps it between runs by the seam's `part`.
 export component PanelDivider inherits Rectangle {
+    // Which part's width it sets, as `Widths` knows it ("sounds.card").
+    in property <string> part;
     // The panel's width now, and the room the list and panel share.
     in property <length> panel-width;
     in property <length> room;
     in property <length> min-list: 380px;
-    in property <length> min-panel: 320px;
+    // The widest the list gets (`Fit.list-max` on most pages): in a wider window the panel takes the rest, so it's
+    // shown wider than its own width, and can always be dragged as wide as that.
+    in property <length> max-list: 100000px;
+    in property <length> min-panel: root.part != "" ? Widths.least(root.part) : 320px;
+    in property <length> max-panel: root.part != "" ? Widths.most(root.part) : 100000px;
     // Off where the page sets the widths itself: the seam is only a gap then.
     in property <bool> enabled: true;
-    // The new width while dragging, and once more when let go (to save it).
+    // The new width while dragging.
     callback resizing(length);
-    callback resized(length);
     width: Space.lg;
     property <length> start-width;
     // Where the press was, in the window: the seam moves while it's dragged, so its own space won't do.
     property <length> start-x;
     property <bool> dragging;
+    // The widest the drag may make the panel: its own most, or the room the list leaves at its widest when that's more,
+    // and never so wide the list goes under its least.
+    property <length> widest: max(root.min-panel, max(root.room - root.width - root.max-list,
+        min(root.max-panel, root.room - root.width - root.min-list)));
     Rectangle {
         x: (parent.width - self.width) / 2;
         width: 2px;
-        height: min(48px, parent.height);
+        height: root.dragging ? parent.height : min(48px, parent.height);
         y: (parent.height - self.height) / 2;
         border-radius: 1px;
         background: touch.pressed ? Theme.accent : touch.has-hover ? Theme.stroke : transparent;
@@ -3676,6 +3697,17 @@ export component PanelDivider inherits Rectangle {
         enabled: root.enabled;
         mouse-cursor: MouseCursor.col-resize;
         pointer-event(e) => {
+            // A drag cut short (the mouse left the window, or the seam was turned off): the width it got is kept, as
+            // when it's let go, and the badge goes.
+            if e.kind == PointerEventKind.cancel {
+                if root.dragging {
+                    root.dragging = false;
+                    if root.part != "" {
+                        Widths.resized(root.part, root.panel-width);
+                    }
+                }
+                return;
+            }
             if e.button != PointerEventButton.left {
                 return;
             }
@@ -3684,19 +3716,52 @@ export component PanelDivider inherits Rectangle {
                 root.start-x = self.absolute-position.x + self.mouse-x;
                 root.dragging = false;
             }
-            // Saved only when the seam really moved.
+            // Kept only when the seam really moved.
             if e.kind == PointerEventKind.up && root.dragging {
                 root.dragging = false;
-                root.resized(root.panel-width);
+                if root.part != "" {
+                    Widths.resized(root.part, root.panel-width);
+                }
+            }
+        }
+        double-clicked => {
+            // Comes before the press's let go: a wobble in the second press isn't a drag to keep over the usual width.
+            root.dragging = false;
+            if root.part != "" {
+                Widths.reset(root.part);
             }
         }
         moved => {
             if self.pressed {
                 root.dragging = true;
-                root.resizing(clamp(root.start-width - (self.absolute-position.x + self.mouse-x - root.start-x), root.min-panel,
-                    max(root.min-panel, root.room - root.width - root.min-list)));
+                root.resizing(clamp(root.start-width - (self.absolute-position.x + self.mouse-x - root.start-x),
+                    root.min-panel, root.widest));
             }
         }
+    }
+    // While dragging: how wide the panel is, and how narrow and wide it may go. Over the list, left of the seam: the
+    // panel is drawn after the seam, so it would cover it on its own side.
+    if root.dragging: Rectangle {
+        x: -self.width - Space.xs;
+        y: (root.height - self.height) / 2;
+        width: size.preferred-width + 2 * Space.sm;
+        height: size.preferred-height + Space.sm;
+        border-radius: Theme.radius;
+        background: Theme.surface-raised;
+        border-width: 1px;
+        border-color: Theme.accent;
+        size := Text {
+            text: "\{round(root.panel-width / 1px)} px · \{round(root.min-panel / 1px)}–\{round(root.widest / 1px)}";
+            color: Theme.accent;
+            font-size: Type.meta;
+            font-family: Theme.number-font;
+        }
+    }
+    Tip {
+        text: "Drag to resize · double-click for the usual width";
+        hovering: touch.has-hover && !touch.pressed && root.part != "";
+        at-x: root.width;
+        at-y: root.height / 2;
     }
 }
 
