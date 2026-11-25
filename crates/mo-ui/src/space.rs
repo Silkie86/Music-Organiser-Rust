@@ -703,7 +703,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         match id {
             MEASURE => !p.measuring,
             REVEAL => p.picked == space::APP_FILES,
-            FIX => p.picked == BITWIG_COPIES && !p.fixed_removing && enabled(p.fixes.button(p.bitwig.as_ref())),
+            FIX => p.picked == BITWIG_COPIES && enabled(fix_button(&p)),
             REMOVE_FIXED => p.picked == BITWIG_COPIES && enabled(remove_fixed_button(&p)),
             FREE_BITWIG => p.picked == BITWIG_COPIES && enabled(free_bitwig_button(&p)),
             REMOVE => match p.picked.as_str() {
@@ -1923,6 +1923,7 @@ fn look_for_copies(app: &AppWindow) {
             // Let go of the store first, so it can be removed.
             index = None;
             mo_space::prints::forget(&mo_app::paths::data_dir().join(mo_space::prints::FILE_NAME));
+            mo_app::space_bitwig_kept::forget(&mo_app::paths::data_dir());
             arrive(&weak, Step::BitwigCrashed(id));
         }
     };
@@ -1949,8 +1950,10 @@ fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &
     // pool it would hold up the pages' quick jobs, and its threads are low in the system's memory there.
     let data = mo_app::paths::data_dir();
     // What the last run's look found shows while this one looks (a small file, read here off the window's thread).
+    // One that found no copies isn't shown: the page says how far the look is, as it did.
     if ask.first
         && let Some((kept, from)) = mo_app::space_bitwig_kept::kept(&data)
+        && !kept.projects.is_empty()
     {
         arrive(weak, Step::BitwigKept(ask.id, Box::new(kept), from));
     }
@@ -1975,8 +1978,11 @@ fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &
         Ok(copies) => {
             let (headline, words) = space_bitwig::found_words(&copies);
             job.done_as(headline, &words);
-            // Kept for the next start, in place of the last look's.
-            if let Err(e) = mo_app::space_bitwig_kept::keep(&data, &copies, SystemTime::now()) {
+            // Kept for the next start, in place of the last look's; not a look that couldn't see everything (a
+            // drive away, the library unread), whose finds may be a part of what's there, or none of it.
+            if space_bitwig::whole(&copies, &roots)
+                && let Err(e) = mo_app::space_bitwig_kept::keep(&data, &copies, SystemTime::now())
+            {
                 log::warning("Space", &format!("Couldn't keep what the look for Bitwig copies found: {e}"));
             }
             arrive(weak, Step::Bitwig(ask.id, copies));
@@ -3150,6 +3156,8 @@ pub fn show_sample(app: &AppWindow, sample: Sample, picked: &str) {
         p.parts = Some(sample.parts);
         p.bitwig = Some(sample.bitwig);
         p.bitwig_from = sample.bitwig_from;
+        // An earlier run's finds are on show while this run's look checks them.
+        p.bitwig_looking = sample.bitwig_from.map(|_| (0, 0));
         p.fixes = sample.fixes;
         p.old = Some(sample.old);
         p.old_removing = sample.old_removing;

@@ -530,7 +530,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The same card just after a start: what the last run's look found, marked with when it's from, while this run's
     // look checks it; Fix and the Recycle Bin buttons wait for that (Solomon, 25 Nov 2026).
     let from = std::time::UNIX_EPOCH + Duration::from_secs(1_795_543_320);
-    let kept = mo_ui::space::Sample { fixes: sample_fixes(), bitwig_from: Some(from), ..sample_space() };
+    let kept = mo_ui::space::Sample { bitwig_from: Some(from), ..sample_space() };
     mo_ui::space::show_sample(&app, kept, bitwig);
     capture(&window);
     shots.push(("space-bitwig-kept.png".into(), capture(&window)));

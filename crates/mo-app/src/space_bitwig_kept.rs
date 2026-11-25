@@ -34,9 +34,14 @@ struct Writes<'a> {
     found: &'a Copies,
 }
 
+/// A file's make, read first: one of another make may hold anything else.
+#[derive(Deserialize)]
+struct Make {
+    version: u32,
+}
+
 #[derive(Deserialize)]
 struct Reads {
-    version: u32,
     found_at: u64,
     found: Copies,
 }
@@ -76,12 +81,18 @@ pub fn kept(data: &Path) -> Option<(Copies, SystemTime)> {
             return None;
         }
     }
-    let read = fs::read(&path)
-        .map_err(|e| e.to_string())
-        .and_then(|bytes| serde_json::from_slice::<Reads>(&bytes).map_err(|e| e.to_string()));
+    let read = fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| {
+        let make = serde_json::from_slice::<Make>(&bytes).map_err(|e| e.to_string())?;
+        if make.version != VERSION {
+            return Ok(None);
+        }
+        let read = serde_json::from_slice::<Reads>(&bytes).map_err(|e| e.to_string())?;
+        // A time no clock holds is a damaged file's.
+        let at = UNIX_EPOCH.checked_add(Duration::from_secs(read.found_at)).ok_or("its time can't be read")?;
+        Ok(Some((read.found, at)))
+    });
     match read {
-        Ok(r) if r.version == VERSION => Some((r.found, UNIX_EPOCH + Duration::from_secs(r.found_at))),
-        Ok(_) => None,
+        Ok(kept) => kept,
         Err(e) => {
             crate::log::warning(
                 "Space",
@@ -167,22 +178,48 @@ mod tests {
         forget(&data);
         assert_eq!(kept(&data), None);
         forget(&data);
+        let _ = fs::remove_dir_all(&data);
     }
 
     #[test]
     fn a_file_that_cant_be_read_or_is_another_make_gives_nothing() {
         let data = dir("mo-app-bitwig-kept-damaged");
         let file = data.join(FILE_NAME);
-        for text in ["", "not json", "{\"version\":1}", "{\"version\":1,\"found_at\":5,\"found\":{\"library\":[]}}"] {
+        let far = format!(
+            "{{\"version\":1,\"found_at\":{},\"found\":{{\"library\":[],\"folders\":0,\"projects\":[]}}}}",
+            u64::MAX
+        );
+        let partly = "{\"version\":1,\"found_at\":5,\"found\":{\"library\":[]}}";
+        for text in ["", "not json", "{\"version\":1}", partly, &far] {
             fs::write(&file, text).unwrap();
             assert_eq!(kept(&data), None, "{text}");
         }
         let other = serde_json::to_string(&Writes { version: VERSION + 1, found_at: 5, found: &found() }).unwrap();
         fs::write(&file, other).unwrap();
         assert_eq!(kept(&data), None, "a later make");
+        fs::write(&file, "{\"version\":2,\"something\":\"else\"}").unwrap();
+        assert_eq!(kept(&data), None, "a later make of another shape");
         // A new look's own takes the place of any of them.
         keep(&data, &found(), UNIX_EPOCH).unwrap();
         assert_eq!(kept(&data), Some((found(), UNIX_EPOCH)));
+        let _ = fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn a_save_dated_before_1970_or_past_any_calendar_is_kept_without_its_date() {
+        let data = dir("mo-app-bitwig-kept-odd-dates");
+        let mut odd = found();
+        odd.projects[0].saves[0].modified = Some(UNIX_EPOCH - Duration::from_secs(86_400));
+        keep(&data, &odd, UNIX_EPOCH).unwrap();
+        odd.projects[0].saves[0].modified = None;
+        assert_eq!(kept(&data), Some((odd, UNIX_EPOCH)));
+        keep(&data, &found(), UNIX_EPOCH).unwrap();
+        let text = fs::read_to_string(data.join(FILE_NAME)).unwrap();
+        assert!(text.contains("[1795000000,123456700]"), "{text}");
+        fs::write(data.join(FILE_NAME), text.replace("[1795000000,123456700]", "[99999999999999,0]")).unwrap();
+        let (read, _) = kept(&data).unwrap();
+        assert_eq!(read.projects[0].saves[0].modified, None);
+        let _ = fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -192,9 +229,15 @@ mod tests {
 
     #[test]
     fn an_earlier_runs_finds_say_when_theyre_from() {
-        use crate::space_bitwig::{card, from_words, line, mark_card, mark_line};
+        use crate::space_bitwig::{card, found_when, from_words, line, mark_card, mark_line};
         let from = SystemTime::now();
         let when = chrono::DateTime::<chrono::Local>::from(from).format("%-d %b, %H:%M").to_string();
+        assert_eq!(found_when(from, from), when);
+        // Another year's says its year; a time no calendar reads still says something.
+        let last_year = from - Duration::from_secs(400 * 86_400);
+        let with_year = chrono::DateTime::<chrono::Local>::from(last_year).format("%-d %b %Y, %H:%M").to_string();
+        assert_eq!(found_when(last_year, from), with_year);
+        assert_eq!(found_when(UNIX_EPOCH + Duration::from_secs(u64::MAX / 4), from), "an earlier day");
         assert_eq!(from_words(from, true), format!("As found {when}. Checking again…"));
         assert_eq!(from_words(from, false), format!("As found {when}. Measure again checks it."));
         let found = found();

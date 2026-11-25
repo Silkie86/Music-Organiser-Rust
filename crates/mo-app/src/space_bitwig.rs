@@ -210,6 +210,7 @@ pub fn look(
         // Library, or with a project folder away (a drive asleep or unplugged), isn't whole: what's there is kept for
         // when it's back.
         let whole = found.as_ref().is_ok_and(|f| !f.library.is_empty()) && roots.iter().all(|r| r.is_dir());
+        // (With no project folder at all there's no Library either, so this is [`whole`].)
         if let Err(e) = index.keep(whole) {
             crate::log::warning("Space", &format!("Couldn't keep the Bitwig copies' fingerprints for next time: {e}"));
         }
@@ -364,10 +365,33 @@ pub fn line(found: Option<&Copies>, looking: Option<(usize, usize)>) -> Option<(
     }
 }
 
+/// When an earlier run's look ended, as the page says it at `now`: "24 Nov, 18:02", with the year when that isn't
+/// this year's ("24 Nov 2025, 18:02"), so an old list never reads as this week's. "an earlier day" for a time no
+/// calendar reads.
+pub fn found_when(from: SystemTime, now: SystemTime) -> String {
+    let local = |t: SystemTime| {
+        let secs = i64::try_from(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).ok()?;
+        Some(chrono::DateTime::from_timestamp(secs, 0)?.with_timezone(&chrono::Local))
+    };
+    use chrono::Datelike;
+    match (local(from), local(now)) {
+        (Some(from), Some(now)) if from.year() == now.year() => from.format("%-d %b, %H:%M").to_string(),
+        (Some(from), _) => from.format("%-d %b %Y, %H:%M").to_string(),
+        (None, _) => "an earlier day".to_owned(),
+    }
+}
+
+/// Whether a look that ended saw everything: it found a Library, and every one of your project folders (`roots`)
+/// was there, with at least one to look in. One with a drive asleep or unplugged, or the song library unread, isn't
+/// whole: what an earlier look kept (its fingerprints, and what it found) stays for when it's back.
+pub fn whole(found: &Copies, roots: &[PathBuf]) -> bool {
+    !found.library.is_empty() && !roots.is_empty() && roots.iter().all(|r| r.is_dir())
+}
+
 /// What the card says when what it shows is an earlier run's ([`crate::space_bitwig_kept`]), found at `from`: when
 /// it's from, and that it's being checked (`checking`: a look is on) or how to check it.
 pub fn from_words(from: SystemTime, checking: bool) -> String {
-    let when = chrono::DateTime::<chrono::Local>::from(from).format("%-d %b, %H:%M");
+    let when = found_when(from, SystemTime::now());
     if checking {
         format!("As found {when}. Checking again…")
     } else {
@@ -377,7 +401,7 @@ pub fn from_words(from: SystemTime, checking: bool) -> String {
 
 /// Marks the Bitwig line as an earlier run's, found at `from`.
 pub fn mark_line(line: &mut Line, from: SystemTime) {
-    let when = chrono::DateTime::<chrono::Local>::from(from).format("%-d %b, %H:%M");
+    let when = found_when(from, SystemTime::now());
     line.why = format!("{}, as found {when}", line.why);
 }
 
