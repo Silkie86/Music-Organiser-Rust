@@ -1,34 +1,34 @@
 //! Putting a song's Serum 1 sounds where Serum 2 finds them: Serum 2 loads a Serum 1 `.fxp` as it is (Xfer: "Serum 1
 //! presets are fully compatible with Serum 2"), so each sound is written as a plain Serum 1 program into Serum 2's
-//! user presets folder, `Documents\Xfer\Serum 2 Presets\Presets\User\From my songs\<song>\<sound>.fxp`. No
-//! conversion: Solomon found Serum 2 loads the old presets itself (25 Nov 2026), after the C# app's convert-to-Serum-2
-//! attempt.
+//! user presets folder, `Documents\Xfer\Serum 2 Presets\Presets\User\From my songs\<part>\<name>.fxp`: a folder
+//! for each part the page says the sound plays (Bass, Lead...), and the name of the preset Serum had loaded, else the
+//! song's (Solomon, 25 Nov 2026). No conversion: Solomon found Serum 2 loads the old presets itself, after the C#
+//! app's convert-to-Serum-2 attempt.
 //!
 //! Serum 1 keeps the same settings in all three places a song can hold them (checked on Solomon's saves and presets):
 //! a zlib stream (then 12 bytes of its own), which is an `.fxp`'s chunk (after its 60-byte header), a Bitwig `.fxb`
 //! bank's chunk (after its 160-byte header), and a VST3 `.vstpreset`'s component state ("Comp"). So each becomes an
-//! "FPCh" program for the plugin "XfsX", named after the sound.
+//! "FPCh" program for the plugin "XfsX". The unpacked state keeps the loaded preset's name at 18,802.
 //!
 //! Nothing is ever written over: a file of the same name that holds the same settings is left (sent already), and one
 //! that holds others (the song changed since, or a file of Solomon's) keeps its name while this one takes the next
 //! free one ("Lead 2.fxp"). Each file is written as an export is (copy, check, rename: [`export::write_checked`]).
 
-use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use mo_formats::paths;
 use mo_formats::plugins;
-use mo_formats::presets::{PresetBlob, fxp};
+use mo_formats::presets::fxp;
 
 use crate::export::{self, Exported};
 use crate::names;
-use crate::role::Thresholds;
+use crate::role::{Role, Thresholds};
 
 /// Serum 1's VST2 id, as the four letters a preset names its plugin by.
 pub const SERUM_1_ID: &str = "XfsX";
 
-/// The folder inside Serum 2's user presets that the app's copies go in, one folder for each song inside it.
+/// The folder inside Serum 2's user presets that the app's copies go in, one folder for each part inside it.
 pub const FROM_SONGS: &str = "From my songs";
 
 /// Serum 2's user presets folder under a Documents folder (on Windows and a Mac alike):
@@ -117,34 +117,32 @@ pub fn as_fxp(chunk: &[u8], name: &str) -> Vec<u8> {
     fxp::wrap_chunk(chunk, name, id)
 }
 
-/// The folder a song's Serum 1 sounds go to: `<user>\From my songs\<save's name>`.
-pub fn folder_for(user: &Path, save: &str) -> PathBuf {
-    user.join(FROM_SONGS).join(names::safe_file_name(paths::stem(paths::file_name(save))))
+/// The folder a part's sounds go in, inside [`FROM_SONGS`]: the part's name ("Bass", "Stabs and plucks"), or "No
+/// part" when none was guessed.
+pub fn part_folder(part: Option<Role>) -> &'static str {
+    match part {
+        Some(Role::Stabs) => "Stabs and plucks",
+        Some(r) => r.label(),
+        None => "No part",
+    }
 }
 
-/// Each Serum 1 sound's file name among a save's sounds, worked out among all of them in the save's order, so a sound
-/// keeps its name whichever are sent: its name, then where it sits ("Lead (Insert 3)"), then "Lead 2", "Lead 3" for
-/// later ones of the same name. Letter case aside, as Windows sees names. `None` for a sound that isn't Serum 1's.
-pub fn file_names(blobs: &[PresetBlob]) -> Vec<Option<String>> {
-    let mut used: HashSet<String> = HashSet::new();
-    blobs
-        .iter()
-        .map(|p| {
-            serum_1_chunk(&p.data, &p.extension).ok()?;
-            let mut label = if p.name.trim().is_empty() { p.plugin.clone() } else { p.name.clone() };
-            if !p.place.is_empty() {
-                label += &format!(" ({})", p.place.replace(" · ", " "));
-            }
-            let label = names::safe_file_name(&label);
-            let mut name = format!("{label}.fxp");
-            let mut n = 2;
-            while !used.insert(name.to_uppercase()) {
-                name = format!("{label} {n}.fxp");
-                n += 1;
-            }
-            Some(name)
-        })
-        .collect()
+/// A Serum 1 sound's file name: the name of the preset Serum had loaded when its settings keep one, else the song's
+/// name. Serum's own blank start ("Default", "Init") counts as none.
+pub fn file_name(chunk: &[u8], song: &str) -> String {
+    let preset = crate::octave::serum_1_preset_name(chunk)
+        .filter(|n| !n.eq_ignore_ascii_case("default") && !n.eq_ignore_ascii_case("init"));
+    let name = preset.as_deref().unwrap_or(song);
+    let name = if name.trim().is_empty() { "Serum" } else { name };
+    format!("{}.fxp", names::safe_file_name(name))
+}
+
+/// One sound to put in Serum 2: its key in its save ([`crate::list::place_keys`]) and the part the page says it plays
+/// (your fix, else the guess), which names its folder ([`part_folder`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pick {
+    pub key: String,
+    pub part: Option<Role>,
 }
 
 /// Where a program goes in `folder` under `name`: `Ok(None)` when a file there already holds exactly it (sent
@@ -171,12 +169,13 @@ fn place_for(folder: &Path, name: &str, bytes: &[u8]) -> io::Result<Option<PathB
     }
 }
 
-/// Reads a save again and puts its Serum 1 sounds into Serum 2's user presets folder (`user`, [`user_folder`]), in the
-/// song's own folder ([`folder_for`]); only those with these keys ([`crate::list::place_keys`]) when `only` is given.
-/// What was there already from before counts as done. Picked sounds that aren't Serum 1's, or aren't in the save any
-/// more, are told in [`Exported::failed`]; it's an error when nothing could go. Serum 2's `Presets` folder must be
-/// there (Serum 2 is installed); `User` and the folders inside it are made.
-pub fn from_save(save: &str, only: Option<&[String]>, user: &Path) -> io::Result<Exported> {
+/// Reads a save again and puts the picked Serum 1 sounds into Serum 2's user presets folder (`user`,
+/// [`user_folder`]): each in its part's folder ([`part_folder`]) under [`FROM_SONGS`], named after its preset, else the
+/// song (`song`, its name as the page shows it) ([`file_name`]). What was there already counts as done. Picked sounds
+/// that aren't Serum 1's, or aren't in the save any more, are told in [`Exported::failed`]; it's an error when nothing
+/// could go. Serum 2's `Presets` folder must be there (Serum 2 is installed); `User` and the folders inside are made.
+/// [`Exported::folder`] is the part's folder when all went to one, else [`FROM_SONGS`].
+pub fn from_save(save: &str, picks: &[Pick], song: &str, user: &Path) -> io::Result<Exported> {
     let presets = user.parent().ok_or_else(|| io::Error::other("Serum 2's presets folder has no parent"))?;
     if !presets.is_dir() {
         return Err(io::Error::other(format!(
@@ -187,39 +186,33 @@ pub fn from_save(save: &str, only: Option<&[String]>, user: &Path) -> io::Result
     let raw = std::fs::read(save)?;
     let (sounds, warning) = crate::library::sounds_in(save, raw, &Thresholds::default()).map_err(io::Error::other)?;
     let keys = crate::list::place_keys(&sounds);
-    let blobs: Vec<PresetBlob> = sounds.into_iter().map(|s| s.blob).collect();
-    let names = file_names(&blobs);
-    let wanted: Option<HashSet<&str>> = only.map(|keys| keys.iter().map(String::as_str).collect());
     let mut failed = Vec::new();
-    if let Some(wanted) = &wanted {
-        let found: HashSet<&str> = keys.iter().map(String::as_str).collect();
-        let gone = wanted.iter().filter(|k| !found.contains(*k)).count();
-        if gone > 0 {
-            failed.push(format!(
-                "{gone} of the sounds picked {} in the save any more (was it saved again since?)",
-                if gone == 1 { "isn't" } else { "aren't" }
-            ));
-        }
+    let gone = picks.iter().filter(|p| !keys.contains(&p.key)).count();
+    if gone > 0 {
+        failed.push(format!(
+            "{gone} of the sounds picked {} in the save any more (was it saved again since?)",
+            if gone == 1 { "isn't" } else { "aren't" }
+        ));
     }
-    let folder = folder_for(user, save);
+    let song = if song.trim().is_empty() { paths::stem(paths::file_name(save)) } else { song };
+    let root = user.join(FROM_SONGS);
     let mut files = Vec::new();
-    for ((blob, name), key) in blobs.iter().zip(&names).zip(&keys) {
-        let picked = wanted.as_ref().is_none_or(|w| w.contains(key.as_str()));
-        if !picked {
-            continue;
-        }
-        let Some(name) = name else {
-            // Only a sound picked by its key is told about: a whole save's other plugins are simply left.
-            if wanted.is_some() {
-                let why = serum_1_chunk(&blob.data, &blob.extension).err().unwrap_or_default();
+    let mut folders: Vec<PathBuf> = Vec::new();
+    for (sound, key) in sounds.iter().zip(&keys) {
+        let Some(pick) = picks.iter().find(|p| &p.key == key) else { continue };
+        let blob = &sound.blob;
+        let chunk = match serum_1_chunk(&blob.data, &blob.extension) {
+            Ok(chunk) => chunk,
+            Err(why) => {
                 failed.push(format!("{}: {why}", blob.name));
+                continue;
             }
-            continue;
         };
-        let Ok(chunk) = serum_1_chunk(&blob.data, &blob.extension) else { continue };
-        let bytes = as_fxp(chunk, paths::stem(name));
+        let folder = root.join(part_folder(pick.part));
+        let name = file_name(chunk, song);
+        let bytes = as_fxp(chunk, paths::stem(&name));
         let written =
-            std::fs::create_dir_all(&folder).and_then(|()| place_for(&folder, name, &bytes)).and_then(|place| {
+            std::fs::create_dir_all(&folder).and_then(|()| place_for(&folder, &name, &bytes)).and_then(|place| {
                 match place {
                     None => Ok(name.clone()),
                     Some(path) => export::write_checked(&path, &bytes)
@@ -227,16 +220,24 @@ pub fn from_save(save: &str, only: Option<&[String]>, user: &Path) -> io::Result
                 }
             });
         match written {
-            Ok(file) => files.push(file),
+            Ok(file) => {
+                files.push(format!("{}/{file}", part_folder(pick.part)));
+                if !folders.contains(&folder) {
+                    folders.push(folder);
+                }
+            }
             Err(e) => failed.push(format!("{name}: {e}")),
         }
     }
-    if let Ok(now) = std::fs::metadata(&folder).and_then(|m| m.modified()) {
-        export::clear_half_written(&folder, now);
+    for folder in &folders {
+        if let Ok(now) = std::fs::metadata(folder).and_then(|m| m.modified()) {
+            export::clear_half_written(folder, now);
+        }
     }
     if files.is_empty() && !failed.is_empty() {
         return Err(io::Error::other(failed.join("; ")));
     }
+    let folder = if folders.len() == 1 { folders.remove(0) } else { root };
     Ok(Exported { folder, files, failed, warning: warning.map(str::to_owned) })
 }
 
@@ -312,19 +313,38 @@ mod tests {
         assert!(serum_1_chunk(b"VST3", ".vstpreset").is_err());
     }
 
+    /// A made-up Serum 1 chunk whose state keeps this preset name.
+    fn named_chunk(name: &[u8]) -> Vec<u8> {
+        let mut state = vec![0u8; 172_736];
+        state[18_802..18_802 + name.len()].copy_from_slice(name);
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::none());
+        z.write_all(&state).unwrap();
+        let mut c = z.finish().unwrap();
+        c.extend([0u8; 12]);
+        c
+    }
+
     #[test]
-    fn names_are_worked_out_among_the_saves_serum_1_sounds() {
-        let c = chunk();
-        let mut a = PresetBlob::new("Lead", "Serum", ".fxp", as_fxp(&c, "a"));
-        a.place = "Insert 3 · Vocals".into();
-        let b = PresetBlob::new("Bass", "Serum_x64", ".fxp", as_fxp(&c, "b"));
-        let b2 = PresetBlob::new("bass", "Serum", ".vstpreset", vstpreset(SERUM_1_VST3, &c));
-        let other = PresetBlob::new("Pad", "Vital", ".vstpreset", vstpreset(SERUM_2_VST3, &c));
-        let names = file_names(&[a, b, other, b2]);
-        assert_eq!(
-            names,
-            [Some("Lead (Insert 3 Vocals).fxp".into()), Some("Bass.fxp".into()), None, Some("bass 2.fxp".into())]
-        );
+    fn a_sound_is_named_after_its_preset_else_its_song_and_filed_by_part() {
+        assert_eq!(file_name(&named_chunk(b"BA Organ Bass [FP]"), "Didums"), "BA Organ Bass [FP].fxp");
+        assert_eq!(file_name(&named_chunk(b"requiem serum 1"), "Didums"), "requiem serum 1.fxp");
+        // No name kept, or Serum's own blank start: the song's name.
+        assert_eq!(file_name(&named_chunk(b""), "Didums"), "Didums.fxp");
+        assert_eq!(file_name(&named_chunk(b"Default"), "Didums"), "Didums.fxp");
+        assert_eq!(file_name(&chunk(), "neon: rmx"), format!("{}.fxp", names::safe_file_name("neon: rmx")));
+        assert_eq!(file_name(&named_chunk(b"a/b"), "x"), format!("{}.fxp", names::safe_file_name("a/b")));
+        assert_eq!(file_name(&chunk(), " "), "Serum.fxp");
+        assert_eq!(part_folder(Some(Role::Bass)), "Bass");
+        assert_eq!(part_folder(Some(Role::Stabs)), "Stabs and plucks");
+        assert_eq!(part_folder(Some(Role::Fx)), Role::Fx.label());
+        assert_eq!(part_folder(None), "No part");
+        for r in Role::ALL {
+            assert_eq!(
+                names::safe_file_name(part_folder(Some(r))),
+                part_folder(Some(r)),
+                "{r:?} is a safe folder name"
+            );
+        }
     }
 
     #[test]
@@ -354,12 +374,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mo-serum2-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let user = user_folder(&dir);
-        let e = from_save("song.flp", None, &user).unwrap_err();
+        let e = from_save("song.flp", &[], "Song", &user).unwrap_err();
         assert!(e.to_string().contains("is Serum 2 installed?"), "{e}");
         assert!(!dir.exists());
-        assert_eq!(
-            folder_for(&user, r"K:\Bitwig Studio\Projects\a\neon: rmx.bwproject"),
-            user.join(FROM_SONGS).join(names::safe_file_name("neon: rmx"))
-        );
     }
 }

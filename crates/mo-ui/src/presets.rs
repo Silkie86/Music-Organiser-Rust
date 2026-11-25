@@ -1794,7 +1794,9 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
         act::EXPORT if enabled(id) => export_one(app, item, false),
         act::TO_SERUM2 if enabled(id) => {
             if let Source::Song { save, key } = &item.row.source {
-                to_serum2(app, vec![(save.clone(), vec![key.clone()])], &item.row.name);
+                // The item is the line as fixed: its part is yours where you set one.
+                let pick = mo_presets::serum2::Pick { key: key.clone(), part: item.role() };
+                to_serum2(app, vec![(save.clone(), item.song.clone(), vec![pick])], &item.row.name);
             }
         }
         act::TO_BITWIG if enabled(id) => {
@@ -2133,9 +2135,7 @@ fn serum2_shown(app: &AppWindow) -> bool {
     }
     let (plan, count) = PAGE.with(|p| {
         let p = p.borrow();
-        let serum: Vec<usize> =
-            p.shown.iter().copied().filter(|&n| p.items.get(n).is_some_and(logic::is_serum_1)).collect();
-        (logic::export_plan(&p.items, &serum).0, serum.len())
+        logic::serum2_plan(&p.items, &p.shown, &p.fixed_now)
     });
     if plan.is_empty() {
         set_message(app, "The list shows no Serum 1 sounds from your songs.");
@@ -2146,9 +2146,10 @@ fn serum2_shown(app: &AppWindow) -> bool {
     true
 }
 
-/// Puts songs' Serum 1 sounds (each save with the keys of its sounds) in Serum 2's user presets folder, save by save,
+/// Puts songs' Serum 1 sounds (each save with its song's name and its sounds, with their parts) in Serum 2's user
+/// presets folder, a folder for each part, save by save,
 /// as `.fxp` programs Serum 2 loads as they are ([`mo_presets::serum2`]), then shows the folder they went to.
-fn to_serum2(app: &AppWindow, plan: Vec<(String, Vec<String>)>, what: &str) {
+fn to_serum2(app: &AppWindow, plan: Vec<(String, String, Vec<mo_presets::serum2::Pick>)>, what: &str) {
     let feed = PAGE.with(|p| p.borrow().feed.clone());
     PAGE.with(|p| p.borrow_mut().exporting = true);
     show_all(app);
@@ -2163,8 +2164,8 @@ fn to_serum2(app: &AppWindow, plan: Vec<(String, Vec<String>)>, what: &str) {
         let user = mo_presets::serum2::user_folder(&documents);
         let total = plan.len();
         let (mut done, mut failed) = (Vec::new(), Vec::new());
-        for (n, (save, keys)) in plan.iter().enumerate() {
-            match background::on_pool(|| mo_presets::serum2::from_save(save, Some(keys), &user)) {
+        for (n, (save, song, picks)) in plan.iter().enumerate() {
+            match background::on_pool(|| mo_presets::serum2::from_save(save, picks, song, &user)) {
                 Ok(e) => done.push(e),
                 Err(e) => {
                     log::warning("Presets", &format!("Serum 2 copy of {save}: {e}"));
@@ -2178,8 +2179,9 @@ fn to_serum2(app: &AppWindow, plan: Vec<(String, Vec<String>)>, what: &str) {
             job.failed(&text);
         } else {
             job.done(&text);
-            let folder =
-                if done.len() == 1 { done[0].folder.clone() } else { user.join(mo_presets::serum2::FROM_SONGS) };
+            let root = user.join(mo_presets::serum2::FROM_SONGS);
+            let one = done.iter().map(|e| &e.folder).all(|f| *f == done[0].folder);
+            let folder = if one { done[0].folder.clone() } else { root };
             let folder = folder.to_string_lossy().into_owned();
             crate::files::reveal(&feed, &folder, &folder);
         }

@@ -1407,6 +1407,29 @@ pub fn serum_1_count(items: &[Item], shown: &[usize]) -> usize {
     shown.iter().filter(|&&n| items.get(n).is_some_and(is_serum_1)).count()
 }
 
+/// What To Serum 2 puts in for the lines shown: each save with its song's name and its Serum 1 sounds ([`is_serum_1`]),
+/// each with its part (your fix in `fixes`, else the line's), songs in list order; and how many sounds that is.
+pub fn serum2_plan(
+    items: &[Item],
+    shown: &[usize],
+    fixes: &Fixes,
+) -> (Vec<(String, String, Vec<mo_presets::serum2::Pick>)>, usize) {
+    let mut plan: Vec<(String, String, Vec<mo_presets::serum2::Pick>)> = Vec::new();
+    let mut at: HashMap<&str, usize> = HashMap::new();
+    let mut count = 0;
+    for i in shown.iter().filter_map(|&n| items.get(n)).filter(|i| is_serum_1(i)) {
+        let Source::Song { save, key } = &i.row.source else { continue };
+        let pick = mo_presets::serum2::Pick { key: key.clone(), part: i.role_with(fixes) };
+        let n = *at.entry(save.as_str()).or_insert_with(|| {
+            plan.push((save.clone(), i.song.clone(), Vec::new()));
+            plan.len() - 1
+        });
+        plan[n].2.push(pick);
+        count += 1;
+    }
+    (plan, count)
+}
+
 /// What a put in Serum 2 says when it's done: how many went (or were there already), where, and what couldn't go.
 pub fn serum2_summary(done: &[Exported], failed_saves: &[String]) -> String {
     let files: usize = done.iter().map(|e| e.files.len()).sum();
@@ -1414,7 +1437,8 @@ pub fn serum2_summary(done: &[Exported], failed_saves: &[String]) -> String {
         "No Serum 1 sounds went into Serum 2.".to_owned()
     } else {
         format!(
-            "{} Serum 1 {} in Serum 2's presets, under User › {}: load {} from Serum 2's browser.",
+            "{} Serum 1 {} in Serum 2's presets, under User › {}, a folder for each part: load {} from Serum 2's \
+             browser.",
             thousands(files),
             if files == 1 { "sound is" } else { "sounds are" },
             mo_presets::serum2::FROM_SONGS,
@@ -2548,6 +2572,15 @@ mod tests {
         assert!(!ids(&serum_2).contains(&act::TO_SERUM2));
         assert!(!offers(&all[0], true, Hearing::Off).iter().any(|o| o.id == act::TO_SERUM2 && o.enabled));
         assert_eq!(serum_1_count(&all, &[0, 1, 2, 3]), 2);
+        // To Serum 2's plan: one save, both Serum sounds, each with its part (a fix wins over the guess).
+        let mut fixes = Fixes::new();
+        fixes.insert(all[1].row.hash.clone(), Some(Role::Pad));
+        let (plan, n) = serum2_plan(&all, &[3, 2, 1, 0], &fixes);
+        assert_eq!(n, 2);
+        assert_eq!(plan.len(), 1);
+        assert_eq!((plan[0].0.as_str(), plan[0].1.as_str()), ("/s/Didums_77.flp", "Didums"));
+        let parts: Vec<_> = plan[0].2.iter().map(|p| p.part).collect();
+        assert_eq!(parts, [Some(Role::Pad), Some(Role::Bass)]);
         assert_eq!(serum_1_count(&all, &[2, 3, 9]), 0);
         let mut fl_own = all[2].clone();
         fl_own.row.extension = ".flstate".into();
@@ -2598,14 +2631,16 @@ mod tests {
         };
         assert_eq!(
             serum2_summary(&[e(&["Sub.fxp"], &[])], &[]),
-            "1 Serum 1 sound is in Serum 2's presets, under User › From my songs: load it from Serum 2's browser."
+            "1 Serum 1 sound is in Serum 2's presets, under User › From my songs, a folder for each part: load it from \
+             Serum 2's browser."
         );
         assert_eq!(
             serum2_summary(
                 &[e(&["Sub.fxp", "Hook.fxp"], &["Pad: its Serum 1 settings don't unpack"])],
                 &["Old: gone".to_owned()]
             ),
-            "2 Serum 1 sounds are in Serum 2's presets, under User › From my songs: load them from Serum 2's browser. \
+            "2 Serum 1 sounds are in Serum 2's presets, under User › From my songs, a folder for each part: load them \
+             from Serum 2's browser. \
              2 couldn't go: Pad: its Serum 1 settings don't unpack; Old: gone."
         );
         assert_eq!(serum2_summary(&[], &[]), "No Serum 1 sounds went into Serum 2.");
