@@ -7,8 +7,9 @@
 //! - it lists every CLAP extension the DAW has ([`check`]), to settle which of the plan's extensions Bitwig 6.1
 //!   offers.
 //!
-//! It shows in the DAW as the instrument "DAWmate (test)" (its ID is still the one it had as "Music Organiser (test)",
-//! so songs that have it go on loading it). The notes played into it are read for their chords
+//! It shows in the DAW as the instrument "DAWmate" (Solomon, 2026-11-25: the installer brings it; it was "DAWmate
+//! (test)", and before that "Music Organiser (test)"; its ID is still the first one, so songs that have it go on
+//! loading it). The notes played into it are read for their chords
 //! ([`chordcheck`]) and passed on out with Thru on. It writes one thing in the app's files: a curve edited in its
 //! Curves tab, kept as a new curve in `curves.db` ([`curves::save_as_new`]; Solomon, 20 Nov 2026).
 //!
@@ -131,7 +132,7 @@ impl Plugin for MoPlugin {
 impl DefaultPluginFactory for MoPlugin {
     fn get_descriptor() -> PluginDescriptor {
         use clack_plugin::plugin::features::{INSTRUMENT, SAMPLER, STEREO};
-        PluginDescriptor::new("com.silkie86.music-organiser.test", "DAWmate (test)")
+        PluginDescriptor::new("com.silkie86.music-organiser.test", "DAWmate")
             .with_vendor("DAWmate")
             .with_version(env!("CARGO_PKG_VERSION"))
             .with_description("Browse and play your sounds inside the DAW (test version)")

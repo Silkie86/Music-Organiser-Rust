@@ -61,6 +61,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Kernel",
     "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
+    "Win32_System_RestartManager",
     "Win32_System_Threading",
 ] }
 # Dragging sounds and clips out to a DAW: Windows' own drag and drop, and the card that follows the mouse.

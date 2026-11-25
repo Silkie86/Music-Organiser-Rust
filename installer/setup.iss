@@ -1,8 +1,8 @@
 ; The Windows installer (docs/installer.md). Built with Inno Setup 6 by installer/build.ps1, which passes the defines
 ; below from product.toml and Cargo.toml, so the name, logo and version are never typed here.
 ;
-; What it does: puts the app (one .exe) and the Bitwig extension it installs into Bitwig in the user's own Programs
-; folder (Solomon, 2026-11-15: no Windows Yes, for the install or any update), adds Start menu and optional Desktop
+; What it does: puts the app (one .exe), the Bitwig extension and the CLAP plugin it puts into the DAWs in the user's
+; own Programs folder (Solomon, 2026-11-15: no Windows Yes, for the install or any update), adds Start menu and optional Desktop
 ; shortcuts and the Apps list entry, and asks where the data folder goes (Solomon, 2026-11-15). It never writes to a
 ; data folder's files, a DAW's folders, or anything else the user made: the app does all of that itself.
 ;
@@ -63,6 +63,11 @@ Source: "{#PdbFile}"; DestDir: "{app}"; DestName: "music_organiser.pdb"; Flags: 
 ; Beside the app, where Settings > DAWs looks for it (mo_dawlink::scripts::bitwig_extension_source).
 Source: "{#BitwigExtension}"; DestDir: "{app}\extensions"; Flags: ignoreversion
 #endif
+#ifdef ClapPlugin
+; Beside the app too: the app puts it into Common Files\CLAP itself (mo_app::daw_links), with Windows' Yes once for
+; each version, so the setup needs no administrator and a DAW that has the plugin open can't stop the install.
+Source: "{#ClapPlugin}"; DestDir: "{app}\plugins"; DestName: "DAWmate.clap"; Flags: ignoreversion
+#endif
 
 [Icons]
 Name: "{userprograms}\{#AppName}"; Filename: "{app}\{#ExeName}"; Comment: "{#AppDescription}"
@@ -74,8 +79,10 @@ Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flag
 Filename: "{app}\{#ExeName}"; Flags: nowait; Check: StartAfterUpdate
 
 [UninstallDelete]
-; Only what the installer put in: the extensions folder (if the app left nothing else in it) and the app's folder.
+; Only what the installer put in: the extensions and plugins folders (if the app left nothing else in them) and the
+; app's folder.
 Type: dirifempty; Name: "{app}\extensions"
+Type: dirifempty; Name: "{app}\plugins"
 Type: dirifempty; Name: "{app}"
 
 [Code]

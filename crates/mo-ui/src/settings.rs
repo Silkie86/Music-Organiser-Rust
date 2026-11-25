@@ -1427,10 +1427,16 @@ fn check_daws(app: &AppWindow) {
                 let mut p = p.borrow_mut();
                 let Some(p) = p.as_mut().filter(|p| p.daws_asked == asked) else { return false };
                 p.bitwig = status;
-                p.bw_loaded_from = loaded_from;
+                p.bw_loaded_from = loaded_from.clone();
                 p.daws_checking = false;
                 true
             });
+            // Kept, so the look at a later start updates the copy Bitwig loads even when Bitwig isn't open to say.
+            if let Some(from) = loaded_from
+                && value(mo_app::daw_links::BITWIG_LOADED_FROM_KEY).as_deref() != Some(from.as_str())
+            {
+                remember(mo_app::daw_links::BITWIG_LOADED_FROM_KEY, &from);
+            }
             if let Some(app) = weak.upgrade()
                 && newest
             {
@@ -1447,6 +1453,87 @@ fn check_daws(app: &AppWindow) {
             }
         });
         show(app);
+    }
+}
+
+/// The DAWs' folders and how the app's links in them stand.
+pub(crate) struct Links {
+    /// Where the FL Studio script goes: `Settings\Hardware\DAWmate` in each FL Studio user data folder found.
+    pub fl_folders: Vec<PathBuf>,
+    pub fl_state: ScriptState,
+    /// Bitwig's user folders: the one chosen, and `Bitwig Studio` in Documents when it's there.
+    pub bw_users: Vec<PathBuf>,
+    /// Where the Bitwig extension goes.
+    pub bw_folders: Vec<PathBuf>,
+    /// The app's own built extension, when there's one beside the app.
+    pub bw_source: Option<PathBuf>,
+    pub bw_state: ScriptState,
+}
+
+/// Finds the DAWs' folders and how the links in them stand (Settings › DAWs, and the look a little after each start,
+/// `daw_links`). Reads only; for a background thread (a drive that's asleep may take a moment). `chosen`: your Bitwig
+/// Studio folder as Settings has it. `loaded_from`: where Bitwig was seen loading the extension from.
+pub(crate) fn find_links(library: &Path, chosen: Option<&str>, loaded_from: Option<&str>) -> Links {
+    let roots = match Library::open_read_only(library) {
+        Ok(l) => l.roots().unwrap_or_default(),
+        Err(e) => {
+            log::warning("Settings", &format!("Couldn't read the library, to find the DAWs' folders: {e}"));
+            Vec::new()
+        }
+    };
+    let documents = crate::files::documents();
+    let fl_folders = scripts::fl_script_folders(&scripts::fl_user_data_folders(&documents, &roots));
+    let fl_state = scripts::fl_state(&fl_folders);
+    let bw_users = scripts::bitwig_user_folders(chosen, std::slice::from_ref(&documents));
+    let bw_folders = scripts::bitwig_extension_folders(&bw_users, loaded_from);
+    let bw_source = std::env::current_exe().ok().and_then(|exe| scripts::bitwig_extension_source(&exe));
+    let bw_state = bw_source.as_deref().map_or(ScriptState::NotInstalled, |s| scripts::bitwig_state(s, &bw_folders));
+    Links { fl_folders, fl_state, bw_users, bw_folders, bw_source, bw_state }
+}
+
+/// Keeps that this app's version wrote a DAW's link last (`key`: FL Studio's or Bitwig's), so the installed copy
+/// doesn't swap it back at its next start unless it's newer (`mo_app::daw_links`).
+fn kept_who_wrote(key: &str) {
+    if !remember(key, crate::daw_links::VERSION) {
+        log::warning("Settings", "Couldn't keep which version put the DAW's link in");
+    }
+}
+
+/// Whether the settings this run changes are kept past it (the file could be read at the start).
+pub(crate) fn writable() -> bool {
+    PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.writable))
+}
+
+/// Logs what installing the FL Studio script did.
+pub(crate) fn log_fl_install(done: &scripts::Installed, category: &str) {
+    for f in &done.went {
+        log::info(category, &format!("Installed the FL Studio script in {}", f.display()));
+    }
+    for (f, why) in &done.failed {
+        log::warning(category, &format!("Couldn't install the FL Studio script in {}: {why}", f.display()));
+    }
+    for f in &done.removed {
+        log::info(category, &format!("Took out the FL Studio script from before the rename, {}", f.display()));
+    }
+    for (f, why) in &done.left {
+        log::warning(category, &format!("Couldn't take out the older FL Studio script {}: {why}", f.display()));
+    }
+}
+
+/// Logs what installing the Bitwig extension did.
+pub(crate) fn log_bitwig_install(done: &scripts::BitwigInstalled, category: &str) {
+    for f in &done.installed.went {
+        log::info(category, &format!("Installed the Bitwig extension in {}", f.display()));
+    }
+    for f in &done.removed {
+        let what = if f.extension().is_some_and(|e| e == "bwextension") { "extension" } else { "script" };
+        log::info(category, &format!("Took out the older Bitwig {what} {}", f.display()));
+    }
+    for (f, why) in &done.installed.left {
+        log::warning(category, &format!("Couldn't take out the older Bitwig copy {}: {why}", f.display()));
+    }
+    for (f, why) in &done.installed.failed {
+        log::warning(category, &format!("Couldn't install the Bitwig extension in {}: {why}", f.display()));
     }
 }
 
@@ -1469,21 +1556,9 @@ fn look_at_scripts(app: &AppWindow) {
     let Some((library, loaded_from, chosen, programs, asked)) = asked else { return };
     let weak = app.as_weak();
     let started = background::spawn("Settings DAW scripts", move || {
-        let roots = match Library::open_read_only(&library) {
-            Ok(l) => l.roots().unwrap_or_default(),
-            Err(e) => {
-                log::warning("Settings", &format!("Couldn't read the library, to find the DAWs' folders: {e}"));
-                Vec::new()
-            }
-        };
-        let documents = crate::files::documents();
-        let folders = scripts::fl_script_folders(&scripts::fl_user_data_folders(&documents, &roots));
-        let state = scripts::fl_state(&folders);
-        let users = scripts::bitwig_user_folders(chosen.as_deref(), std::slice::from_ref(&documents));
-        let bw_folders = scripts::bitwig_extension_folders(&users, loaded_from.as_deref());
-        let source = std::env::current_exe().ok().and_then(|exe| scripts::bitwig_extension_source(&exe));
+        let Links { fl_folders: folders, fl_state: state, bw_users: users, bw_folders, bw_source: source, bw_state } =
+            find_links(&library, chosen.as_deref(), loaded_from.as_deref());
         let bw_version = source.as_deref().and_then(scripts::extension_version);
-        let bw_state = source.as_deref().map_or(ScriptState::NotInstalled, |s| scripts::bitwig_state(s, &bw_folders));
         let fl_files = scripts::fl_installed_files(&folders);
         let bw_files = scripts::bitwig_installed_files(&bw_folders, &users);
         let missing: HashSet<String> = programs.into_iter().filter(|exe| !shell::usable_exe(exe)).collect();
@@ -1608,21 +1683,16 @@ fn install_fl(app: &AppWindow) {
     show(app);
     let weak = app.as_weak();
     let started = background::spawn("Settings FL install", move || {
+        let writing = crate::daw_links::chosen_by_hand();
         let done = scripts::install_fl(&folders);
-        for f in &done.went {
-            log::info("Settings", &format!("Installed the FL Studio script in {}", f.display()));
-        }
-        for (f, why) in &done.failed {
-            log::warning("Settings", &format!("Couldn't install the FL Studio script in {}: {why}", f.display()));
-        }
-        for f in &done.removed {
-            log::info("Settings", &format!("Took out the FL Studio script from before the rename, {}", f.display()));
-        }
-        for (f, why) in &done.left {
-            log::warning("Settings", &format!("Couldn't take out the older FL Studio script {}: {why}", f.display()));
-        }
+        drop(writing);
+        log_fl_install(&done, "Settings");
         let note = page::installed_note(&done);
+        let wrote = !done.went.is_empty();
         let _ = slint::invoke_from_event_loop(move || {
+            if wrote {
+                kept_who_wrote(mo_app::daw_links::FL_BY_KEY);
+            }
             PAGE.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
                     p.daws_installing = false;
@@ -1752,22 +1822,16 @@ fn install_bitwig(app: &AppWindow) {
     show(app);
     let weak = app.as_weak();
     let started = background::spawn("Settings Bitwig install", move || {
+        let writing = crate::daw_links::chosen_by_hand();
         let done = scripts::install_bitwig(&source, &folders, &users);
-        for f in &done.installed.went {
-            log::info("Settings", &format!("Installed the Bitwig extension in {}", f.display()));
-        }
-        for f in &done.removed {
-            let what = if f.extension().is_some_and(|e| e == "bwextension") { "extension" } else { "script" };
-            log::info("Settings", &format!("Took out the older Bitwig {what} {}", f.display()));
-        }
-        for (f, why) in &done.installed.left {
-            log::warning("Settings", &format!("Couldn't take out the older Bitwig copy {}: {why}", f.display()));
-        }
-        for (f, why) in &done.installed.failed {
-            log::warning("Settings", &format!("Couldn't install the Bitwig extension in {}: {why}", f.display()));
-        }
+        drop(writing);
+        log_bitwig_install(&done, "Settings");
         let note = page::bitwig_installed_note(&done);
+        let wrote = !done.installed.went.is_empty();
         let _ = slint::invoke_from_event_loop(move || {
+            if wrote {
+                kept_who_wrote(mo_app::daw_links::BITWIG_BY_KEY);
+            }
             PAGE.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
                     p.daws_installing = false;
@@ -1809,7 +1873,9 @@ fn take_out(app: &AppWindow, bitwig: bool) {
     show(app);
     let weak = app.as_weak();
     let started = background::spawn("Settings take out", move || {
+        let writing = crate::daw_links::chosen_by_hand();
         let done = scripts::take_out(&files);
+        drop(writing);
         for f in &done.removed {
             log::info("Settings", &format!("Took the DAW link out: {}", f.display()));
         }

@@ -28,7 +28,7 @@ fn says_what_it_is() {
     let entry = entry();
     let descriptor = entry.get_factory::<PluginFactory>().unwrap().plugin_descriptor(0).unwrap();
     assert_eq!(descriptor.id().unwrap().to_bytes(), b"com.silkie86.music-organiser.test");
-    assert_eq!(descriptor.name().unwrap().to_bytes(), b"DAWmate (test)");
+    assert_eq!(descriptor.name().unwrap().to_bytes(), b"DAWmate");
     let features: Vec<_> = descriptor.features().map(|f| f.to_bytes()).collect();
     assert_eq!(features, [&b"instrument"[..], b"sampler", b"stereo"]);
 }
