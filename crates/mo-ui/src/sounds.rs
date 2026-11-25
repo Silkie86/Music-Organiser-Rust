@@ -417,11 +417,12 @@ pub fn sample_folders_changed() -> bool {
     SCAN_AGAIN.lock().unwrap_or_else(PoisonError::into_inner).as_ref().is_some_and(|again| again.send(()).is_ok())
 }
 
-/// Where "Sounds like this" keeps CLAP's numbers in a file ([`keep_likeness_in`]); not set, they stay in memory.
+/// Where "Sounds like this" keeps CLAP's numbers and the analyser's fingerprints in files ([`keep_likeness_in`]);
+/// not set, they stay in memory.
 static LIKENESS_IN: OnceLock<PathBuf> = OnceLock::new();
 
-/// From now on the index's CLAP numbers are kept in a file in `folder` (the app's data folder) and read as they're
-/// needed, rather than held in memory. The running app says so once, before the page reads; tests and the
+/// From now on the index's CLAP numbers and the analyser's fingerprints are kept in files in `folder` (the app's
+/// data folder) and read as they're needed, rather than held in memory. The running app says so once, before the page reads; tests and the
 /// screenshots don't, so they write no such file.
 pub fn keep_likeness_in(folder: PathBuf) {
     let _ = LIKENESS_IN.set(folder);
@@ -1640,12 +1641,14 @@ fn take_again(
             match with_these(&db, &ids, &there, index.clone()) {
                 Ok(Some(now)) => {
                     if !Arc::ptr_eq(&now, &index) {
+                        // (Its fingerprints are held in memory again, with the scan's in them, until the index is
+                        // next built afresh: the whole file isn't written again for a scan's few sounds.)
                         send(Step::Index(now.clone()));
                         on_show.index = Some(now);
                     }
                     on_show.added += ids.len();
                 }
-                // CLAP's index has a sound that's gone.
+                // CLAP's index has a sound that's gone, or the fingerprints' file can't be read now.
                 Ok(None) => afresh = Some(db),
                 Err(e) => {
                     log::warning("Sounds", &format!("Couldn't read the new sounds' fingerprints, so all of them: {e}"));

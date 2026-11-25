@@ -18,7 +18,10 @@ use crate::Sound;
 use crate::learn::Vectors;
 
 mod kept;
-pub use kept::{Kept, is_half_kept_name, is_kept_name, on_trouble as on_kept_trouble, remove_all as remove_kept};
+pub use kept::{
+    Kept, is_half_kept_name, is_kept_name, on_trouble as on_kept_trouble, remove_all as remove_kept,
+    remove_all_prints as remove_kept_prints,
+};
 
 /// Unit-length vectors held in memory for fast likeness search: all in one block, a row per sound, in id order.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -81,6 +84,9 @@ enum Rows {
     /// The same half-precision bits, every row one after another, in a file read as it's needed rather than held
     /// ([`VectorIndex::keep_in`]).
     InFile(Arc<kept::InFile>),
+    /// Full-precision numbers, every row one after another, in a file of their own kind read as it's needed
+    /// ([`VectorIndex::keep_full_in`]): the analyser's fingerprints.
+    FullInFile(Arc<kept::InFile>),
 }
 
 impl Default for Rows {
@@ -471,8 +477,20 @@ impl VectorIndex {
         standardise: bool,
         weights: Option<fn(usize) -> Vec<f32>>,
     ) -> VectorIndex {
+        self.try_with(without, more, standardise, weights).unwrap_or_else(|| self.clone())
+    }
+
+    /// As [`VectorIndex::with`], saying so (`None`) when the index's numbers are in a file that can't be read now,
+    /// rather than giving the index back unchanged: the caller then builds one afresh from the library.
+    pub fn try_with(
+        &self,
+        without: &HashSet<i64>,
+        more: Gathered,
+        standardise: bool,
+        weights: Option<fn(usize) -> Vec<f32>>,
+    ) -> Option<VectorIndex> {
         if self.ids.is_empty() {
-            return VectorIndex::from_gathered(more, standardise, weights);
+            return Some(VectorIndex::from_gathered(more, standardise, weights));
         }
         let dim = self.dim;
         // In id order, a later one for the same id winning, as building takes them.
@@ -483,7 +501,7 @@ impl VectorIndex {
             rows.insert(id, row);
         }
         if rows.is_empty() && !without.iter().any(|id| self.contains(*id)) {
-            return self.clone();
+            return Some(self.clone());
         }
         let (ids, rows) = match &self.rows {
             Rows::Full(parts) => {
@@ -498,21 +516,35 @@ impl VectorIndex {
             // Held again: the file is of the numbers as they were, and these are others. (The app never changes
             // CLAP's index this way; [`VectorIndex::keep_in`] puts the new ones in a file of their own if asked.)
             Rows::InFile(file) => {
-                let mut parts: Vec<Box<[u16]>> = Vec::with_capacity(self.ids.len().div_ceil(CHUNK));
-                for (p, ids) in self.ids.chunks(CHUNK).enumerate() {
-                    let mut part = vec![0u16; ids.len() * dim];
-                    if !file.read(p * CHUNK * dim, &mut part) {
-                        // The file can't be read: the index stays as it is (and finds nothing, as its searches say).
-                        return self.clone();
-                    }
-                    parts.push(part.into_boxed_slice());
-                }
+                // (None when the file can't be read.)
+                let parts = self.read_back::<u16>(file)?;
                 let rows = rows.into_iter().map(|(id, row)| (id, row.iter().map(|x| to_half(*x)).collect())).collect();
                 let (ids, parts) = merged(&self.ids, &parts, dim, without, &rows);
                 (ids, Rows::Half(parts))
             }
+            // The same at full precision: the analyser's fingerprints after a scan. They stay held until the index
+            // is next built afresh and kept ([`VectorIndex::keep_full_in`]): a scan's few sounds aren't worth writing
+            // the whole file again.
+            Rows::FullInFile(file) => {
+                let parts = self.read_back::<f32>(file)?;
+                let (ids, parts) = merged(&self.ids, &parts, dim, without, &rows);
+                (ids, Rows::Full(parts))
+            }
         };
-        VectorIndex { dim, ids, rows, ready: self.ready.clone() }
+        Some(VectorIndex { dim, ids, rows, ready: self.ready.clone() })
+    }
+
+    /// Every row read back from `file`, in the parts an index holds them in; none when it can't all be read.
+    fn read_back<T: kept::Number>(&self, file: &kept::InFile) -> Option<Vec<Box<[T]>>> {
+        let mut parts: Vec<Box<[T]>> = Vec::with_capacity(self.ids.len().div_ceil(CHUNK));
+        for (p, ids) in self.ids.chunks(CHUNK).enumerate() {
+            let mut part = vec![T::zeroed(); ids.len() * self.dim];
+            if !file.read(p * CHUNK * self.dim, &mut part) {
+                return None;
+            }
+            parts.push(part.into_boxed_slice());
+        }
+        Some(parts)
     }
 
     /// The same index with its numbers at half precision (the app makes it with [`VectorIndex::from_gathered_halved`]
@@ -533,7 +565,7 @@ impl VectorIndex {
 
     /// Whether its numbers are in a file read as it's needed ([`VectorIndex::keep_in`]).
     pub fn is_kept_in_a_file(&self) -> bool {
-        matches!(self.rows, Rows::InFile(_))
+        matches!(self.rows, Rows::InFile(_) | Rows::FullInFile(_))
     }
 
     /// Puts a half-precision index's numbers in a file in `folder` and lets go of them here: searches read them from
@@ -551,6 +583,21 @@ impl VectorIndex {
         Some(kept::keep(self.dim, parts, folder).map(|(file, kept)| {
             debug_assert_eq!(file.len(), self.ids.len() * self.dim);
             self.rows = Rows::InFile(file);
+            kept
+        }))
+    }
+
+    /// As [`VectorIndex::keep_in`], for an index at full precision (the analyser's fingerprints): its numbers go in
+    /// a file of their own kind, as they are, and searches find exactly what they found before. One at half
+    /// precision, already in a file, or empty has nothing to do (`None`).
+    pub fn keep_full_in(&mut self, folder: &Path) -> Option<Result<Kept, String>> {
+        let Rows::Full(parts) = &self.rows else { return None };
+        if self.ids.is_empty() || self.dim == 0 {
+            return None;
+        }
+        Some(kept::keep(self.dim, parts, folder).map(|(file, kept)| {
+            debug_assert_eq!(file.len(), self.ids.len() * self.dim);
+            self.rows = Rows::FullInFile(file);
             kept
         }))
     }
@@ -601,6 +648,11 @@ impl VectorIndex {
                 file.read(i * self.dim, &mut row).then_some(())?;
                 Cow::Owned(row.iter().map(|b| from_half(&HALVES, *b)).collect())
             }
+            Rows::FullInFile(file) => {
+                let mut row = vec![0f32; self.dim];
+                file.read(i * self.dim, &mut row).then_some(())?;
+                Cow::Owned(row)
+            }
         })
     }
 
@@ -621,6 +673,11 @@ impl VectorIndex {
                 let mut row = vec![0u16; self.dim];
                 file.read(i * self.dim, &mut row).then_some(())?;
                 row.iter().zip(other).map(|(x, y)| f64::from(from_half(halves, *x) * y)).sum()
+            }
+            Rows::FullInFile(file) => {
+                let mut row = vec![0f32; self.dim];
+                file.read(i * self.dim, &mut row).then_some(())?;
+                dot(&row, other)
             }
         })
     }
@@ -651,52 +708,64 @@ impl VectorIndex {
                     Some(with(k, &Row(RowAs::Half(&parts[part][at]))))
                 })
                 .collect(),
-            Rows::InFile(file) => {
-                // Each one's row in the index and its place in `ids`, in the file's order, so a part's are together.
-                let mut wanted: Vec<(usize, usize)> =
-                    ids.par_iter().enumerate().filter_map(|(k, id)| Some((place(id)?, k))).collect();
-                wanted.par_sort_unstable();
-                let made: Vec<(usize, R)> = wanted
-                    .par_chunk_by(|a, b| a.0 / CHUNK == b.0 / CHUNK)
-                    .map_init(Vec::new, |numbers: &mut Vec<u16>, group| -> Vec<(usize, R)> {
-                        let part = group[0].0 / CHUNK;
-                        // The whole part in one read (4 MB for CLAP's), into this worker's own buffer. When it can't
-                        // all be read, each sound's own numbers are tried, so only those that can't be read are lost.
-                        let rows = CHUNK.min(self.ids.len() - part * CHUNK);
-                        let whole = group.len() >= WHOLE_PART && {
-                            numbers.resize(rows * dim, 0);
-                            file.read(part * CHUNK * dim, numbers)
-                        };
-                        if whole {
-                            group
-                                .iter()
-                                .map(|&(i, k)| {
-                                    let at = (i % CHUNK) * dim;
-                                    (k, with(k, &Row(RowAs::Half(&numbers[at..at + dim]))))
-                                })
-                                .collect()
-                        } else {
-                            numbers.resize(dim, 0);
-                            group
-                                .iter()
-                                .filter_map(|&(i, k)| {
-                                    if !file.read(i * dim, numbers) {
-                                        return None;
-                                    }
-                                    Some((k, with(k, &Row(RowAs::Half(numbers)))))
-                                })
-                                .collect()
-                        }
-                    })
-                    .flatten_iter()
-                    .collect();
-                let mut out: Vec<Option<R>> = ids.iter().map(|_| None).collect();
-                for (k, r) in made {
-                    out[k] = Some(r);
-                }
-                out
-            }
+            Rows::InFile(file) => self.each_in_file::<u16, R>(file, ids, lend_half, with),
+            Rows::FullInFile(file) => self.each_in_file::<f32, R>(file, ids, lend_full, with),
         }
+    }
+
+    /// [`VectorIndex::each`] for numbers in a file (`lend` says how a row of them is lent).
+    fn each_in_file<T: kept::Number, R: Send>(
+        &self,
+        file: &kept::InFile,
+        ids: &[i64],
+        lend: for<'a> fn(&'a [T]) -> RowAs<'a>,
+        with: impl Fn(usize, &Row<'_>) -> R + Sync,
+    ) -> Vec<Option<R>> {
+        let dim = self.dim;
+        let place = |id: &i64| self.ids.binary_search(id).ok();
+        // Each one's row in the index and its place in `ids`, in the file's order, so a part's are together.
+        let mut wanted: Vec<(usize, usize)> =
+            ids.par_iter().enumerate().filter_map(|(k, id)| Some((place(id)?, k))).collect();
+        wanted.par_sort_unstable();
+        let made: Vec<(usize, R)> = wanted
+            .par_chunk_by(|a, b| a.0 / CHUNK == b.0 / CHUNK)
+            .map_init(Vec::new, |numbers: &mut Vec<T>, group| -> Vec<(usize, R)> {
+                let part = group[0].0 / CHUNK;
+                // The whole part in one read (4 MB for CLAP's), into this worker's own buffer. When it can't
+                // all be read, each sound's own numbers are tried, so only those that can't be read are lost.
+                let rows = CHUNK.min(self.ids.len() - part * CHUNK);
+                let whole = group.len() >= WHOLE_PART && {
+                    numbers.resize(rows * dim, T::zeroed());
+                    file.read(part * CHUNK * dim, numbers)
+                };
+                if whole {
+                    group
+                        .iter()
+                        .map(|&(i, k)| {
+                            let at = (i % CHUNK) * dim;
+                            (k, with(k, &Row(lend(&numbers[at..at + dim]))))
+                        })
+                        .collect()
+                } else {
+                    numbers.resize(dim, T::zeroed());
+                    group
+                        .iter()
+                        .filter_map(|&(i, k)| {
+                            if !file.read(i * dim, numbers) {
+                                return None;
+                            }
+                            Some((k, with(k, &Row(lend(numbers)))))
+                        })
+                        .collect()
+                }
+            })
+            .flatten_iter()
+            .collect();
+        let mut out: Vec<Option<R>> = ids.iter().map(|_| None).collect();
+        for (k, r) in made {
+            out[k] = Some(r);
+        }
+        out
     }
 
     /// `with` for each of `ids`' unit vectors the index has (and its place in `ids`), one after another in `ids`'
@@ -744,30 +813,43 @@ impl VectorIndex {
             // held ones are. A part that can't be read has none to offer.
             Rows::InFile(file) => {
                 let halves = &*HALVES;
-                let dim = self.dim;
-                self.ids
-                    .par_chunks(CHUNK)
-                    .enumerate()
-                    .map_init(Vec::new, |rows: &mut Vec<u16>, (part, ids)| {
-                        rows.resize(ids.len() * dim, 0);
-                        if !file.read(part * CHUNK * dim, rows) {
-                            return Vec::new();
-                        }
-                        let mut scored: Vec<(i64, f32)> = rows
-                            .chunks_exact(dim)
-                            .zip(ids)
-                            .map(|(v, id)| (*id, v.iter().zip(&q).map(|(a, b)| from_half(halves, *a) * b).sum::<f32>()))
-                            .collect();
-                        keep_best(&mut scored, max);
-                        scored
-                    })
-                    .flatten_iter()
-                    .collect()
+                self.best_in_file(file, max, |v: &[u16]| {
+                    v.iter().zip(&q).map(|(a, b)| from_half(halves, *a) * b).sum::<f32>()
+                })
+            }
+            Rows::FullInFile(file) => {
+                self.best_in_file(file, max, |v: &[f32]| v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>())
             }
         };
         keep_best(&mut best, max);
         best.sort_unstable_by(closest_first);
         best.into_iter().map(|(id, s)| (id, f64::from(s))).collect()
+    }
+
+    /// As [`VectorIndex::best_of`], each part read from `file` into its worker's own buffer. A part that can't be
+    /// read has none to offer.
+    fn best_in_file<T: kept::Number>(
+        &self,
+        file: &kept::InFile,
+        max: usize,
+        score: impl Fn(&[T]) -> f32 + Sync,
+    ) -> Vec<(i64, f32)> {
+        let dim = self.dim;
+        self.ids
+            .par_chunks(CHUNK)
+            .enumerate()
+            .map_init(Vec::new, |rows: &mut Vec<T>, (part, ids)| {
+                rows.resize(ids.len() * dim, T::zeroed());
+                if !file.read(part * CHUNK * dim, rows) {
+                    return Vec::new();
+                }
+                let mut scored: Vec<(i64, f32)> =
+                    rows.chunks_exact(dim).zip(ids).map(|(v, id)| (*id, score(v))).collect();
+                keep_best(&mut scored, max);
+                scored
+            })
+            .flatten_iter()
+            .collect()
     }
 
     /// Each part of the rows scored by `score` on a worker of its own, keeping its best `max`, all joined.
@@ -799,6 +881,14 @@ pub struct Row<'a>(RowAs<'a>);
 enum RowAs<'a> {
     Full(&'a [f32]),
     Half(&'a [u16]),
+}
+
+fn lend_half(row: &[u16]) -> RowAs<'_> {
+    RowAs::Half(row)
+}
+
+fn lend_full(row: &[f32]) -> RowAs<'_> {
+    RowAs::Full(row)
 }
 
 impl Row<'_> {
@@ -924,7 +1014,9 @@ impl SoundIndex {
     /// those listened to again that it could hear) put in, made ready as the ones in it were ([`VectorIndex::with`]):
     /// for the few a scan brings, rather than reading every fingerprint again. CLAP's stay as they are: it never hears
     /// a sound in this app, and one listened to again keeps CLAP's fingerprint. `None` when CLAP's has one of the sounds
-    /// gone: the index is built afresh then, as it is when the count that says whether CLAP has heard enough changes.
+    /// gone, or the analyser's fingerprints are in a file that can't be read now: the index is built afresh then, as
+    /// it is when the count that says whether CLAP has heard enough changes. The fingerprints of the index given are
+    /// held in memory again (they're others than the file's); the app keeps them in a file when it next builds one.
     pub fn with_features(&self, gone: &HashSet<i64>, again: &HashSet<i64>, more: Gathered) -> Option<SoundIndex> {
         if let Some(clap) = &self.clap
             && gone.iter().any(|id| clap.contains(*id))
@@ -933,7 +1025,7 @@ impl SoundIndex {
         }
         let without: HashSet<i64> = gone.union(again).copied().collect();
         Some(SoundIndex {
-            features: self.features.with(&without, more, true, Some(chroma_downweight)),
+            features: self.features.try_with(&without, more, true, Some(chroma_downweight))?,
             clap: self.clap.clone(),
             deep: self.deep,
         })
@@ -945,6 +1037,14 @@ impl SoundIndex {
     /// stays as it was, and this says why. Never on the window's thread, nor on the pool the pages' quick jobs share.
     pub fn keep_clap_in(&mut self, folder: &Path) -> Option<Result<Kept, String>> {
         Arc::get_mut(self.clap.as_mut()?)?.keep_in(folder)
+    }
+
+    /// Puts the analyser's fingerprints in a file in `folder` read as it's needed too
+    /// ([`VectorIndex::keep_full_in`]): searches find exactly what they found before. `None` when there's nothing to
+    /// do (none, or already in a file); when it can't be done the index stays as it was, and this says why. Never on
+    /// the window's thread, nor on the pool the pages' quick jobs share.
+    pub fn keep_features_in(&mut self, folder: &Path) -> Option<Result<Kept, String>> {
+        self.features.keep_full_in(folder)
     }
 
     /// The index searches use: CLAP when deep listening is on, else the features.

@@ -372,7 +372,20 @@ pub fn app_databases(data: &Path, library: PathBuf) -> Vec<AppDatabase> {
         data.join(mo_presets::curves::FILE_NAME),
     ));
     databases.extend(app_files::caches(CACHE_FILES.iter().map(|name| data.join(name))));
+    // The files of numbers "Sounds like this" reads as it needs them: each has a hash in its name, so they're found
+    // by looking (a half-written one too). Made again if they go, and replaced when the numbers change (rule 28).
+    databases.extend(app_files::caches(likeness_files(data)));
     databases
+}
+
+/// The files of numbers `mo_sounds::index` keeps in the data folder `data` (CLAP's and the analyser's fingerprints).
+fn likeness_files(data: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(data) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(mo_sounds::index::is_kept_name))
+        .map(|e| e.path())
+        .collect()
 }
 
 /// The App files line: what the app's own folder holds and its size, "Measuring…" until it's measured (`parts`
