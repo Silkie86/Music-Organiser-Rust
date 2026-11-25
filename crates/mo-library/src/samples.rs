@@ -422,7 +422,9 @@ struct Sound {
 fn name_number(name: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    case::key(name).hash(&mut hasher);
+    for letter in name.chars().map(case::upper) {
+        letter.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -435,7 +437,8 @@ impl Paths {
         let (Ok(name_at), Ok(name_len)) = (u32::try_from(self.names.len()), u32::try_from(name.len())) else {
             return false;
         };
-        if name_at.checked_add(name_len).is_none() || u32::try_from(self.sounds.len()).is_err() {
+        // One short of what a u32 counts to, so `finish` can number every sound.
+        if name_at.checked_add(name_len).is_none() || self.sounds.len() >= u32::MAX as usize {
             return false;
         }
         let folder = match folders.get(folder) {
