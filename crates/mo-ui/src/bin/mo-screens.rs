@@ -2428,6 +2428,16 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     capture(window);
     shots.push(("sounds-folders-kicks.png".into(), capture(window)));
     data.invoke_toggle_choice("type".into(), "Kick".into());
+    // Many picks: every one in the strip under the list, wrapping; what's in them under the tree.
+    let more = ["Bass", "Brass", "Keys", "Leads", "Pads", "Perc", "Strings", "Vox"];
+    for f in more {
+        data.invoke_tree_toggled(format!(r"D:\Samples\{f}").into());
+    }
+    capture(window);
+    shots.push(("sounds-folders-strip.png".into(), capture(window)));
+    for f in more {
+        data.invoke_tree_toggled(format!(r"D:\Samples\{f}").into());
+    }
     // Found by its search box: the deep pack folder, a chain of folders that each hold only the next one.
     data.set_tree_search("processed".into());
     data.invoke_tree_search_edited("processed".into());

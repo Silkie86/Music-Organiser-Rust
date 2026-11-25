@@ -21,11 +21,22 @@ export struct TreeLine {
     empty: bool,
 }
 
-// A pick or a hidden folder, as a chip over the tree: its name, and whether it's a hidden one (crossed out).
+// A pick or a hidden folder, as a chip in the strip under the list: its name, how many sounds it shows ("412"; ""
+// for a hidden one or before they're counted), and whether it's a hidden one (crossed out).
 export struct TreePick {
     path: string,
     text: string,
+    count: string,
     hidden: bool,
+}
+
+// One part of the picks' type mix: a type, how many sounds ("243"), its share of the picks' sounds (0 to 1), and its
+// colour's place in the Sounds palette (-1 grey: no type, or the rest together as "Other").
+export struct MixPart {
+    name: string,
+    count: string,
+    share: float,
+    colour: int,
 }
 
 // The tick box of a line: lit when picked, a dash when a folder inside it is, faintly lit when a folder above it is.
@@ -182,8 +193,7 @@ component TreeLineView inherits ListLine {
     // The tick box and the words lie under the line's own click; the arrow has its own (above).
 }
 
-// The tree: its name, a box to find a folder, the lines, the picks and hidden folders as chips under them, and what
-// the picks show. Folded, it's a slim tab that says FOLDERS, lit while anything is picked, and a click opens it again.
+// The tree: its name, a box to find a folder, the lines, and what's in the picks under them. Folded, it's a slim tab that says FOLDERS, lit while anything is picked, and a click opens it again.
 export component FolderTree inherits Rectangle {
     in property <[TreeLine]> lines;
     in property <[TreePick]> picks;
@@ -198,6 +208,11 @@ export component FolderTree inherits Rectangle {
     property <bool> open-narrow;
     property <bool> shut: root.narrow ? !root.open-narrow : root.folded;
     in property <bool> any-picked;
+    // What's in the picks: their types, and the line under them ("1,004 sounds · 62 used · 942 never used") with the
+    // share of them used.
+    in property <[MixPart]> mix;
+    in property <string> mix-words;
+    in property <float> used-share;
     in-out property <string> search;
     // Where the list is turned to, kept by the page so a tree made again comes back there.
     in-out property <length> kept-y;
@@ -207,6 +222,8 @@ export component FolderTree inherits Rectangle {
     // A chip's ×: a pick taken off, or a hidden folder shown again (`hidden`).
     callback taken-off(string, bool);
     callback right-clicked(string, length, length);
+    // A colour of the picks' type mix clicked: that type's name.
+    callback mix-picked(string);
     callback search-edited(string);
     callback cleared();
     callback fold();
@@ -282,58 +299,152 @@ export component FolderTree inherits Rectangle {
                 right-clicked(x, y) => { root.right-clicked(l.path, x, y); }
             }
         }
-        // Under the lines, at one height whatever is picked: a tick that adds (or takes off) a chip never moves a line
-        // or what's under the mouse (Solomon, 24 Nov 2026: ticking a folder pushed the tree down a row). More chips
-        // than fit scroll sideways in their row; Clear stays at its end.
-        HorizontalLayout {
-            height: Heights.button;
-            spacing: Space.sm;
+        // Under the lines, at one height whatever is picked, so a tick never moves a line or shrinks the list (Solomon,
+        // 24 Nov 2026). The picks themselves show as chips in a strip under the list ([`PickStrip`]); here, what's in
+        // them: their types as one bar (a click on a colour picks that type) and how many your projects use.
+        Rectangle {
+            height: 104px;
             Rectangle {
-                horizontal-stretch: 1;
-                if root.picks.length == 0: Text {
-                    width: parent.width;
-                    text: "No folders picked";
-                    color: Theme.faint;
-                    font-size: Type.meta;
+                y: 0;
+                height: 1px;
+                background: Theme.edge;
+            }
+            if !root.any-picked: Text {
+                y: Space.sm;
+                width: parent.width;
+                height: Heights.tick-line;
+                text: root.note;
+                color: Theme.faint;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if root.any-picked: VerticalLayout {
+                y: Space.sm;
+                height: parent.height - Space.sm;
+                spacing: Space.xs;
+                alignment: start;
+                // (Clear is in the strip with the picks, under the list.)
+                Caps {
+                    height: Heights.tick-line;
+                    text: "IN YOUR PICKS";
                     vertical-alignment: center;
-                    overflow: elide;
                 }
-                if root.picks.length > 0: Flickable {
-                    width: parent.width;
-                    height: parent.height;
-                    content-width: chips.preferred-width;
-                    interactive: self.content-width > self.width;
-                    chips := HorizontalLayout {
-                        height: parent.height;
-                        spacing: Space.xs;
-                        alignment: start;
-                        for p in root.picks: VerticalLayout {
-                            alignment: center;
-                            TagChip {
-                                text: p.hidden ? "Hidden: " + p.text : p.text;
-                                on: !p.hidden;
-                                remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
-                                clicked => { root.taken-off(p.path, p.hidden); }
-                                removed => { root.taken-off(p.path, p.hidden); }
+                // The types: each part as wide as its share.
+                Rectangle {
+                    height: 10px;
+                    border-radius: 5px;
+                    clip: true;
+                    background: Theme.stroke;
+                    HorizontalLayout {
+                        for part in root.mix: Rectangle {
+                            horizontal-stretch: part.share;
+                            min-width: 0px;
+                            preferred-width: 0px;
+                            background: Theme.sound-type(part.colour);
+                            TouchArea {
+                                enabled: part.colour >= 0 || part.name != "Other";
+                                mouse-cursor: self.enabled ? pointer : default;
+                                clicked => { root.mix-picked(part.name); }
                             }
                         }
                     }
                 }
+                // The first few named, with their colours.
+                HorizontalLayout {
+                    height: 16px;
+                    spacing: Space.sm;
+                    for part[i] in root.mix: HorizontalLayout {
+                        visible: i < 3;
+                        width: i < 3 ? self.preferred-width : 0px;
+                        spacing: Space.xs;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 2px;
+                                background: Theme.sound-type(part.colour);
+                            }
+                        }
+                        Text {
+                            text: part.name + " " + part.count;
+                            color: Theme.muted;
+                            font-size: Type.tiny;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                // How much of them your projects use.
+                Rectangle {
+                    height: 4px;
+                    border-radius: 2px;
+                    clip: true;
+                    background: Theme.stroke;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * clamp(root.used-share, 0, 1);
+                        background: Theme.accent;
+                    }
+                }
+                Text {
+                    text: root.mix-words;
+                    color: Theme.faint;
+                    font-size: Type.tiny;
+                    overflow: elide;
+                }
             }
-            if root.any-picked: StudioButton {
-                horizontal-stretch: 0;
+        }
+    }
+}
+
+// The picked and hidden folders as chips in a strip under the list, every one in sight (Solomon, 25 Nov 2026: past
+// two they couldn't be seen under the tree), wrapping to more rows as they need; a chip's × takes it off.
+export component PickStrip inherits Rectangle {
+    in property <[TreePick]> picks;
+    callback taken-off(string, bool);
+    callback cleared();
+    height: root.picks.length > 0 ? row.preferred-height : 0px;
+    visible: root.picks.length > 0;
+    background: Theme.surface;
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.edge;
+    }
+    row := HorizontalLayout {
+        padding-left: Space.md;
+        padding-right: Space.md;
+        padding-top: Space.sm;
+        padding-bottom: Space.sm;
+        spacing: Space.md;
+        VerticalLayout {
+            alignment: start;
+            Caps {
+                height: Heights.button;
+                text: "FOLDERS";
+                vertical-alignment: center;
+            }
+        }
+        chips := FlexboxLayout {
+            horizontal-stretch: 1;
+            spacing: Space.xs;
+            for p in root.picks: TagChip {
+                text: p.hidden ? "Hidden: " + p.text : p.count == "" ? p.text : p.text + "  " + p.count;
+                on: !p.hidden;
+                remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
+                clicked => { root.taken-off(p.path, p.hidden); }
+                removed => { root.taken-off(p.path, p.hidden); }
+            }
+        }
+        VerticalLayout {
+            alignment: start;
+            StudioButton {
                 text: "Clear";
                 tip: "Take every folder pick off";
                 clicked => { root.cleared(); }
             }
-        }
-        Text {
-            height: Heights.tick-line;
-            text: root.note;
-            color: Theme.faint;
-            font-size: Type.meta;
-            vertical-alignment: center;
-            overflow: elide;
         }
     }
 }

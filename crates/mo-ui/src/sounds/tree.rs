@@ -12,7 +12,7 @@ use mo_app::sound_folders::{self as tree, FolderPick, Picked, TreeAsk};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use super::{FEED, PAGE, Page, refresh};
-use crate::{AppWindow, MenuItem, SoundsData, TreeLine, TreePick};
+use crate::{AppWindow, MenuItem, MixPart, SoundsData, TreeLine, TreePick};
 
 #[derive(Default)]
 struct Tree {
@@ -34,6 +34,9 @@ struct Tree {
     /// The folders being scanned as the tree last showed them, by [`tree::key`].
     scanning: HashSet<String>,
 }
+
+/// How many types the picks' mix names apart, the rest put together as "Other".
+const MIX_PARTS: usize = 6;
 
 /// How many open branches are kept as a setting at most, of those still folders.
 const OPEN_KEPT: usize = 500;
@@ -161,17 +164,46 @@ pub(super) fn show(app: &AppWindow, p: &Page) {
         }
     });
     TREE.with(|t| t.borrow_mut().scanning = scanning);
+    let tops = TOPS.lock().map(|t| t.0.clone()).unwrap_or_default();
+    let folder_counts = p.counts.as_ref().map(|c| &c.folders);
+    let (counts, total) =
+        tree::pick_counts(p.list.folders(), folder_counts, &p.filters.folders, &p.filters.hidden_folders, &tops);
     let mut picks: Vec<TreePick> = p
         .filters
         .folders
         .iter()
-        .map(|f| TreePick { path: f.path.as_str().into(), text: tree::last_name(&f.path).into(), hidden: false })
+        .zip(counts)
+        .map(|(f, count)| TreePick {
+            path: f.path.as_str().into(),
+            text: tree::last_name(&f.path).into(),
+            count: count.into(),
+            hidden: false,
+        })
         .collect();
     picks.extend(p.filters.hidden_folders.iter().map(|h| TreePick {
         path: h.as_str().into(),
         text: tree::last_name(h).into(),
+        count: SharedString::new(),
         hidden: true,
     }));
+    // What's in the picks: their types (the list's counts by type leave the type filter aside) and how many are used.
+    let mix = match p.counts.as_ref() {
+        Some(c) if !p.filters.folders.is_empty() => tree::picks_mix(&c.types, &p.types, MIX_PARTS),
+        _ => Vec::new(),
+    };
+    let mix: Vec<MixPart> = mix
+        .into_iter()
+        .map(|m| MixPart {
+            name: m.name.into(),
+            count: mo_app::sounds::short_count(m.count).into(),
+            share: m.share,
+            colour: m.colour,
+        })
+        .collect();
+    data.set_tree_mix(ModelRc::new(VecModel::from(mix)));
+    let (words, used) = tree::picks_words(total);
+    data.set_tree_mix_words(words.into());
+    data.set_tree_used_share(used);
     data.set_tree_picks(ModelRc::new(VecModel::from(picks)));
     let n = p.filters.folders.len();
     data.set_tree_picked(if n == 0 { SharedString::new() } else { format!("{n} picked").into() });
@@ -276,6 +308,15 @@ pub(super) fn wire(app: &AppWindow) {
             PAGE.with(|p| keep_open(&t, &p.borrow()));
         });
         show_now(&app);
+    });
+    let weak = app.as_weak();
+    data.on_tree_mix_picked(move |name| {
+        // A type's colour picks that type, as its line in the filter column would ("Other" is many types: none).
+        if let Some(app) = weak.upgrade()
+            && name != "Other"
+        {
+            app.global::<SoundsData>().invoke_toggle_choice("type".into(), name);
+        }
     });
     let weak = app.as_weak();
     data.on_tree_taken_off(move |path, hidden| {

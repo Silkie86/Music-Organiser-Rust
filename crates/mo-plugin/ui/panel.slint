@@ -8,7 +8,7 @@ import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickL
 import { CurveBench, GridStrip, CurveEditorData, EditorDot, ClipTile, RulerMark } from "../../mo-ui/ui/pages/curve_editor.slint";
 export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem }
 import { ListView } from "../../mo-ui/ui/list.slint";
-import { FolderTree, TreeLine, TreePick } from "../../mo-ui/ui/folder_tree.slint";
+import { FolderTree, PickStrip, TreeLine, TreePick, MixPart } from "../../mo-ui/ui/folder_tree.slint";
 import { RightClickMenu } from "../../mo-ui/ui/studio.slint";
 
 import "../../mo-ui/fonts/IBMPlexSans-400.ttf";
@@ -198,6 +198,10 @@ export component Panel inherits Window {
     // the panel's own width would loop through its layout).
     in property <bool> tree-narrow;
     in property <bool> tree-any;
+    in property <[MixPart]> tree-mix;
+    in property <string> tree-mix-words;
+    in property <float> tree-used-share;
+    callback tree-mix-picked(string);
     in-out property <string> tree-search;
     in-out property <length> tree-kept-y;
     in property <[MenuItem]> tree-menu;
@@ -732,6 +736,10 @@ export component Panel inherits Window {
                     folded: root.tree-folded;
                     narrow: root.tree-narrow;
                     any-picked: root.tree-any;
+                    mix: root.tree-mix;
+                    mix-words: root.tree-mix-words;
+                    used-share: root.tree-used-share;
+                    mix-picked(name) => { root.tree-mix-picked(name); }
                     search <=> root.tree-search;
                     kept-y <=> root.tree-kept-y;
                     toggled(path) => { root.tree-toggled(path); }
@@ -1331,6 +1339,12 @@ export component Panel inherits Window {
                     overflow: elide;
                 }
             }
+        }
+        // The picked folders as chips along the bottom, every one in sight, as on the app's Sounds page.
+        if root.view == 0 && root.tree-picks.length > 0: PickStrip {
+            picks: root.tree-picks;
+            taken-off(path, hidden) => { root.tree-taken-off(path, hidden); }
+            cleared => { root.tree-cleared(); }
         }
 
         if root.view == 1: HorizontalLayout {
