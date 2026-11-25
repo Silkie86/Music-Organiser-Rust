@@ -11,7 +11,7 @@ use chrono::{Datelike, Days, NaiveDateTime};
 use mo_formats::case;
 use mo_formats::dates::RealDates;
 use mo_library::songs::{self, SaveRun, Song};
-use mo_library::{STATUSES, Save, SongChoices};
+use mo_library::{STATUSES, Save, SongChoices, Todo};
 
 use crate::filters::{self as chips, Filter};
 
@@ -46,6 +46,9 @@ pub struct SongRow {
     pub musical_key: String,
     pub notes: String,
     pub tags: Vec<String>,
+    /// What's still to do on it, and what's done, in your order: its newest save's, or while that has none, the
+    /// newest older save's that has some (a new save takes them over, as it does the rest: mo-app's live.rs).
+    pub todos: Vec<Todo>,
     /// Everything the search box looks in, upper case, one field after another.
     find: String,
 }
@@ -84,6 +87,7 @@ impl SongRow {
             musical_key: pick(&latest.musical_key, |s| &s.musical_key),
             notes: pick(&latest.notes, |s| &s.notes),
             tags: tags_of(latest, &earlier),
+            todos: todos_of(latest, &earlier),
             find: String::new(),
             song,
         };
@@ -96,7 +100,13 @@ impl SongRow {
         let mut fields = vec![self.song.name.as_str(), &l.name, &l.folder, &self.notes, &l.daw];
         fields.extend(self.tags.iter().map(String::as_str));
         fields.extend(l.plugin_names.iter().map(String::as_str));
+        fields.extend(self.todos.iter().map(|t| t.text.as_str()));
         case::key(&fields.join("\u{1f}"))
+    }
+
+    /// How many of its to-dos aren't done yet.
+    pub fn todos_left(&self) -> usize {
+        self.todos.iter().filter(|t| !t.done).count()
     }
 
     /// The key: the one typed in, or else the one its notes point to.
@@ -232,6 +242,22 @@ fn earlier_saves<'a>(song: &'a Song, real: &RealDates) -> Vec<&'a Save> {
 /// SG-1), or the newest save would hold the new tag alone and hide the rest.
 pub(crate) fn shown_tags(song: &Song, real: &RealDates) -> Vec<String> {
     tags_of(&song.latest, &earlier_saves(song, real))
+}
+
+/// The to-dos a song shows: its newest save's, or while that has none, the newest older save's that has some. A to-do
+/// added, ticked or taken off goes with them to every save ([`crate::live::Live::give`]), so a save that hasn't got the
+/// list yet can't keep an older one.
+pub(crate) fn shown_todos(song: &Song, real: &RealDates) -> Vec<Todo> {
+    todos_of(&song.latest, &earlier_saves(song, real))
+}
+
+/// [`shown_todos`], with the older saves already in order.
+fn todos_of(latest: &Save, earlier: &[&Save]) -> Vec<Todo> {
+    if latest.todos.is_empty() {
+        earlier.iter().find(|s| !s.todos.is_empty()).map_or_else(Vec::new, |s| s.todos.clone())
+    } else {
+        latest.todos.clone()
+    }
 }
 
 /// [`shown_tags`], with the older saves already in order ([`earlier_saves`]).
@@ -620,6 +646,23 @@ impl View {
         }
     }
 
+    /// Next up: each song shown that has something still to do, in the list's order, with those to-dos under it (by
+    /// their place in its list). One list of everything waiting, across songs.
+    pub fn next_up(&self, songs: &Songs) -> Vec<NextUp> {
+        let mut lines = Vec::new();
+        for entry in &self.entries {
+            let Entry::Song(row) = entry else { continue };
+            let Some(r) = songs.rows.get(*row) else { continue };
+            let left = r.todos.iter().enumerate().filter(|(_, t)| !t.done).map(|(n, _)| NextUp::Todo(*row, n));
+            let at = lines.len();
+            lines.extend(left);
+            if lines.len() > at {
+                lines.insert(at, NextUp::Song(*row));
+            }
+        }
+        lines
+    }
+
     /// The song `by` lines on from `from` (Up is -1, Down 1), stepping over the headings and stopping at the first and
     /// the last; the first song shown when none is picked or the picked one isn't shown. Its place in
     /// [`Songs::rows`]; none when nothing is shown (review X3-8).
@@ -633,6 +676,15 @@ impl View {
         };
         songs().nth(to)
     }
+}
+
+/// One line of Next up ([`View::next_up`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NextUp {
+    /// A song, by its place in [`Songs::rows`].
+    Song(usize),
+    /// One of its to-dos not done yet: the song's place, and the to-do's in its list.
+    Todo(usize, usize),
 }
 
 /// How many songs each DAW, status and tag would show, with the other filters as they are.
@@ -687,6 +739,8 @@ pub struct Filters {
     pub favourites: bool,
     /// Only songs missing a plugin, a sample or their file.
     pub missing: bool,
+    /// Only songs with something still to do.
+    pub todos: bool,
     /// Archived songs are left out unless their status is picked.
     pub hide_archived: bool,
     /// Only songs last saved in these years, first to last (the year strip); a song with no real date is in none.
@@ -745,6 +799,9 @@ impl Filters {
             return false;
         }
         if self.missing && !r.has_missing() {
+            return false;
+        }
+        if self.todos && r.todos_left() == 0 {
             return false;
         }
         if let Some((first, last)) = self.years
@@ -1188,5 +1245,36 @@ mod tests {
             (tempo_text(92.5), tempo_text(128.25), thousands(16000), thousands(999)),
             ("92.5".into(), "128.25".into(), "16,000".into(), "999".into())
         );
+    }
+
+    #[test]
+    fn a_songs_to_dos_come_from_its_newest_save_with_any_and_next_up_lists_those_left() {
+        let todo = |text: &str, done: bool| Todo { text: text.into(), done, added: 1 };
+        let mut eleven = save("Night_11", day(2026, 3, 1));
+        eleven.todos = vec![todo("Redo the bass", false), todo("Clap", true)];
+        let twelve = save("Night_12", day(2026, 3, 2));
+        let mut other = save("Glass", day(2026, 2, 1));
+        other.todos = vec![todo("Master clips", false)];
+        let done = Save { todos: vec![todo("All done", true)], ..save("Paper", day(2026, 1, 1)) };
+        let s = songs(&[eleven, twelve, other, done]);
+        let night = s.rows.iter().position(|r| r.song.name == "Night").unwrap();
+        assert_eq!(s.rows[night].todos.len(), 2, "the newest save has none: the one before's show");
+        assert_eq!(s.rows[night].todos_left(), 1);
+        let glass = s.rows.iter().position(|r| r.song.name == "Glass").unwrap();
+        let view = s.view(&Filters::default(), day(2026, 6, 1));
+        assert_eq!(
+            view.next_up(&s),
+            [NextUp::Song(night), NextUp::Todo(night, 0), NextUp::Song(glass), NextUp::Todo(glass, 0)],
+            "songs with nothing left to do aren't in it"
+        );
+        let names = |f: Filters| {
+            let v = s.view(&f, day(2026, 6, 1));
+            v.entries
+                .iter()
+                .filter_map(|e| if let Entry::Song(i) = e { Some(s.rows[*i].song.name.clone()) } else { None })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(Filters { todos: true, ..Filters::default() }), ["Night", "Glass"]);
+        assert_eq!(names(Filters { search: "master clips".into(), ..Filters::default() }), ["Glass"]);
     }
 }

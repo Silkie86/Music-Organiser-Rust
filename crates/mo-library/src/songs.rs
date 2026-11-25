@@ -678,6 +678,7 @@ fn original(s: &Save) -> (bool, std::cmp::Reverse<i64>) {
     let organised = s.rating > 0
         || s.favourite
         || !s.tags.is_empty()
+        || !s.todos.is_empty()
         || !s.notes.is_empty()
         || !s.musical_key.is_empty()
         || s.last_opened.is_some()

@@ -1,4 +1,5 @@
-//! What you give a song, kept in the app's own song library: its status, stars, heart, key, notes and tags ([`set`]).
+//! What you give a song, kept in the app's own song library: its status, stars, heart, key, notes, tags and to-dos
+//! ([`set`]).
 //! Rule 14: they're the song's, so one change goes to every save of the song the caller names, in one SQLite
 //! transaction (IMMEDIATE, so nothing else writes meanwhile), read back and checked, all of it or none. Only a
 //! `songs.db` that's the app's own is ever written ([`crate::song_writes`]).
@@ -20,7 +21,7 @@ use mo_formats::case;
 use rusqlite::params;
 
 use crate::song_writes::{begin_own, open_to_write, write_failed};
-use crate::{LibraryError, STATUSES, Save};
+use crate::{LibraryError, STATUSES, Save, Todo};
 
 /// The most stars a song can have.
 pub const MOST_STARS: i32 = 5;
@@ -30,6 +31,10 @@ pub const LONGEST_TAG: usize = 64;
 pub const LONGEST_KEY: usize = 32;
 /// The longest notes kept, in characters.
 pub const LONGEST_NOTES: usize = 20_000;
+/// The longest to-do kept, in characters: one line.
+pub const LONGEST_TODO: usize = 200;
+/// The most to-dos a song keeps, done ones too.
+pub const MOST_TODOS: usize = 200;
 
 /// A save as the library has it: its id, and the path the library keeps it under. Only the row with both is changed,
 /// as everywhere a save's row is written: an id alone may be another save's by now (another copy of the app kept one
@@ -56,6 +61,22 @@ pub enum Change {
     AddTag(String),
     /// Take a tag off, whatever its letter case.
     RemoveTag(String),
+    /// The song's whole to-do list: each one trimmed. `mo_app::live` gives it first with each change below, so every
+    /// save holds the list the song shows before one is added, ticked or taken off.
+    Todos(Vec<Todo>),
+    /// Put a to-do at the end of the list, trimmed (one with the same words and time already there isn't put twice).
+    AddTodo(Todo),
+    /// Tick a to-do, or untick it (`done`): the one with these words, added then.
+    TickTodo {
+        text: String,
+        added: i64,
+        done: bool,
+    },
+    /// Take a to-do off the list: the one with these words, added then.
+    RemoveTodo {
+        text: String,
+        added: i64,
+    },
 }
 
 impl Change {
@@ -99,6 +120,27 @@ impl Change {
                 shown("a tag", &tag, LONGEST_TAG).map(|()| Change::AddTag(tag))
             }
             Change::RemoveTag(tag) => named(tag).map(Change::RemoveTag),
+            Change::Todos(todos) => {
+                if todos.len() > MOST_TODOS {
+                    return Err(format!("a song can have {MOST_TODOS} to-dos at most"));
+                }
+                todos
+                    .iter()
+                    .map(|t| {
+                        let text = t.text.trim();
+                        if text.is_empty() {
+                            return Err("a to-do needs some words".to_owned());
+                        }
+                        shown("a to-do", text, LONGEST_TODO).map(|()| Todo { text: text.to_owned(), ..t.clone() })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Change::Todos)
+            }
+            Change::AddTodo(t) => match Change::Todos(vec![t.clone()]).checked()? {
+                Change::Todos(mut one) if !one.is_empty() => Ok(Change::AddTodo(one.remove(0))),
+                _ => Err("a to-do needs some words".to_owned()),
+            },
+            Change::TickTodo { .. } | Change::RemoveTodo { .. } => Ok(self.clone()),
         }
     }
 
@@ -145,8 +187,38 @@ impl Change {
                 save.tags.retain(|t| same_tag(t) != tag);
                 save.tags.len() != before
             }
+            Change::Todos(todos) => {
+                let differs = save.todos != todos;
+                save.todos = todos;
+                differs
+            }
+            Change::AddTodo(todo) => {
+                let has = save.todos.iter().any(|t| same_todo(t, &todo.text, todo.added));
+                if !has {
+                    save.todos.push(todo);
+                }
+                !has
+            }
+            Change::TickTodo { text, added, done } => {
+                let mut differs = false;
+                for t in save.todos.iter_mut().filter(|t| same_todo(t, &text, added)) {
+                    differs |= t.done != done;
+                    t.done = done;
+                }
+                differs
+            }
+            Change::RemoveTodo { text, added } => {
+                let before = save.todos.len();
+                save.todos.retain(|t| !same_todo(t, &text, added));
+                save.todos.len() != before
+            }
         }
     }
+}
+
+/// Whether `t` is the to-do with these words, added then: how a tick or a × finds it on every save.
+pub fn same_todo(t: &Todo, text: &str, added: i64) -> bool {
+    t.added == added && t.text == text
 }
 
 /// A tag as two spellings of it are compared, and as a new one is kept: without spaces around it, in small letters.
@@ -311,7 +383,66 @@ fn make(tx: &rusqlite::Transaction<'_>, ids: &[i64], change: &Change) -> rusqlit
             }
             Ok(())
         }
+        Change::Todos(todos) => {
+            for id in ids {
+                put_todos(tx, *id, todos)?;
+            }
+            Ok(())
+        }
+        Change::AddTodo(t) => {
+            for id in ids {
+                if !has_todo(tx, *id, &t.text, t.added)? {
+                    tx.execute(
+                        "INSERT INTO todos (project_id, n, text, done, added) \
+                         VALUES (?1, (SELECT COALESCE(MAX(n), -1) + 1 FROM todos WHERE project_id = ?1), ?2, ?3, ?4)",
+                        params![id, t.text, t.done, t.added],
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        Change::TickTodo { text, added, done } => {
+            let mut st =
+                tx.prepare_cached("UPDATE todos SET done = ?4 WHERE project_id = ?1 AND text = ?2 AND added = ?3")?;
+            for id in ids {
+                st.execute(params![id, text, added, done])?;
+            }
+            Ok(())
+        }
+        Change::RemoveTodo { text, added } => {
+            let mut st = tx.prepare_cached("DELETE FROM todos WHERE project_id = ?1 AND text = ?2 AND added = ?3")?;
+            for id in ids {
+                st.execute(params![id, text, added])?;
+            }
+            Ok(())
+        }
     }
+}
+
+/// Whether the save `id` has the to-do with these words, added then, in `tx`.
+fn has_todo(tx: &rusqlite::Transaction<'_>, id: i64, text: &str, added: i64) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM todos WHERE project_id = ?1 AND text = ?2 AND added = ?3)",
+        params![id, text, added],
+        |r| r.get(0),
+    )
+}
+
+/// Makes `todos` the save `id`'s whole to-do list, in their order, in `tx` (the table is there: [`begin_own`]).
+pub(crate) fn put_todos(tx: &rusqlite::Transaction<'_>, id: i64, todos: &[Todo]) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM todos WHERE project_id = ?1", [id])?;
+    let mut put =
+        tx.prepare_cached("INSERT INTO todos (project_id, n, text, done, added) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+    for (n, t) in todos.iter().enumerate() {
+        put.execute(params![id, n as i64, t.text, t.done, t.added])?;
+    }
+    Ok(())
+}
+
+/// The save `id`'s to-do list, in its order, in `tx`.
+fn todos_of(tx: &rusqlite::Transaction<'_>, id: i64) -> rusqlite::Result<Vec<Todo>> {
+    let mut st = tx.prepare_cached("SELECT text, done, added FROM todos WHERE project_id = ?1 ORDER BY n")?;
+    st.query_map([id], |r| Ok(Todo { text: r.get(0)?, done: r.get(1)?, added: r.get(2)? }))?.collect()
 }
 
 /// Whether the save `id` reads back with `change` made ([`make`]), in `tx`.
@@ -330,6 +461,12 @@ fn made(tx: &rusqlite::Transaction<'_>, id: i64, change: &Change) -> rusqlite::R
         Change::Notes(notes) => text("notes")?.as_deref() == Some(notes.as_str()),
         Change::AddTag(tag) => !tags_like(tx, id, tag)?.is_empty(),
         Change::RemoveTag(tag) => tags_like(tx, id, tag)?.is_empty(),
+        Change::Todos(todos) => todos_of(tx, id)? == *todos,
+        Change::AddTodo(t) => has_todo(tx, id, &t.text, t.added)?,
+        Change::TickTodo { text, added, done } => {
+            todos_of(tx, id)?.iter().filter(|t| same_todo(t, text, *added)).all(|t| t.done == *done)
+        }
+        Change::RemoveTodo { text, added } => !has_todo(tx, id, text, *added)?,
     })
 }
 

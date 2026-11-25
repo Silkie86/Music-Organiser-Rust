@@ -818,6 +818,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.global::<mo_ui::SongsData>().set_health_open(true);
     shots.push(("song-panel-health.png".into(), capture(&window)));
     app.global::<mo_ui::SongsData>().set_health_open(false);
+    // A song's to-dos on its card, and Next up: every to-do left, under each song.
+    mo_ui::songs::show_picked(&app, 1, sample_detail(), Tab::Overview);
+    shots.push(("songs-todos.png".into(), capture(&window)));
+    app.global::<mo_ui::SongsData>().set_next_up(true);
+    shots.push(("songs-next-up.png".into(), capture(&window)));
+    app.global::<mo_ui::SongsData>().set_next_up(false);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
 
     // The shared parts every page is built from, in Graphite and in a light and a square theme.
@@ -3954,6 +3960,11 @@ fn sample_songs() -> mo_app::songs::Songs {
         size: 1,
         ..Save::default()
     };
+    let todo = |text: &str, done: bool, days: i64| mo_library::Todo {
+        text: text.into(),
+        done,
+        added: (now - Days::days(days)).and_utc().timestamp(),
+    };
     let mut saves = vec![
         Save {
             tempo: Some(140.0),
@@ -3969,6 +3980,12 @@ fn sample_songs() -> mo_app::songs::Songs {
             missing_samples: 3,
             status: "Mixing".into(),
             tags: vec!["dark".into(), "live set".into()],
+            todos: vec![
+                todo("Fix the 3 missing samples", false, 9),
+                todo("Master is clipping at the end", false, 9),
+                todo("Swap the pad for a Rhodes", true, 13),
+                todo("Vocal chop for the break", false, 5),
+            ],
             ..save("Glass Harbour", "Bitwig Studio", 4)
         },
         save("Glass Harbor", "Bitwig Studio", 300),
@@ -3978,6 +3995,7 @@ fn sample_songs() -> mo_app::songs::Songs {
             tempo: Some(128.0),
             missing_plugins: 1,
             tags: vec!["dark".into()],
+            todos: vec![todo("Needs a second verse", false, 70), todo("Find a better kick", false, 60)],
             ..save("Copper Lines", "FL Studio", 70)
         },
         Save { tempo: Some(174.0), rating: 5, status: "Finished".into(), ..save("Paper Moons_31", "FL Studio", 200) },
@@ -4316,7 +4334,7 @@ const TAG_BOX: (f32, f32) = (1130.0, 467.0);
 const SHORT_LIST: (u32, u32, u32, u32) = (230, 200, 760, 400);
 /// The mouse over each of those lists (Songs' is narrow beside its panel; Plugins' starts low), for the wheel.
 /// The second line of a song's Saves tab (an older save), at 1440 x 900.
-const SECOND_SAVE: (f32, f32) = (1025.0, 544.0);
+const SECOND_SAVE: (f32, f32) = (1025.0, 588.0);
 const SHORT_LIST_WHEEL: (f32, f32) = (600.0, 540.0);
 /// A short wheel turn: less than those lists show, so turning back down goes through lines the list has made.
 const SHORT_TURN: f32 = 100.0;
