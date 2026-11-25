@@ -61,6 +61,8 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
         write(name, 2);
     }
     write("space-song-prints.db-wal", 3);
+    // What the Space page's last look for Bitwig copies found.
+    write("bitwig-copies-found.json", 1);
     // The files of numbers "Sounds like this" reads as it needs them (a hash in each name), one still being written.
     write("sound-likeness-0123456789abcdef.rows", 4);
     write("sound-prints-0123456789abcdef.rows", 2);
@@ -77,7 +79,7 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             ("Sound Lab", 60),
             (SOUND_LAB_BACKUP, 55),
             ("Your library", 40),
-            (CACHES, 26),
+            (CACHES, 27),
             (DAMAGED_SOUND_LAB, 25),
             (KEPT_SOUND_LAB, 15),
             (DAMAGED_SOUND_LAB_BACKUP, 13),
@@ -94,7 +96,7 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             ("Sound Lab", 60),
             (SOUND_LAB_BACKUP, 55),
             (NEW_SONG_LIBRARY, 40),
-            (CACHES, 26),
+            (CACHES, 27),
             (DAMAGED_SOUND_LAB, 25),
             (KEPT_SOUND_LAB, 15),
             (DAMAGED_SOUND_LAB_BACKUP, 13),
@@ -121,7 +123,7 @@ fn the_backup_the_caches_and_a_new_song_library_are_parts_of_their_own() {
             (OLD_DATABASES, 80),
             ("Sound Lab", 66),
             (NEW_SONG_LIBRARY, 61),
-            (CACHES, 28),
+            (CACHES, 29),
             (DAMAGED_SOUND_LAB, 25),
             (KEPT_SOUND_LAB, 15),
             (DAMAGED_SOUND_LAB_BACKUP, 13),
