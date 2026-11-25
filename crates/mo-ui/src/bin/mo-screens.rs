@@ -4991,9 +4991,52 @@ fn scroll_bar_checks(
     let lines = |shot: &[u8]| crop_rgb(shot, WIDTH, LIST_LINES.0, LIST_LINES.1);
     let button = slint::platform::PointerEventButton::Left;
     let at = |y: f32| slint::LogicalPosition::new(SCROLL_BAR_X, y);
-    press(app, slint::platform::Key::Home, false);
-    capture(window);
-    let top = capture(window);
+    let data = app.global::<mo_ui::SoundsData>();
+    // Until two pictures of the list in a row are the same: a slow runner can still be laying the list out (or
+    // filling it) when the check starts, and a press then can land on a thumb still growing (25 Nov, #763's run).
+    let settled = || {
+        let mut last = capture(window);
+        for _ in 0..10 {
+            let now = capture(window);
+            if lines(&now) == lines(&last) {
+                return now;
+            }
+            last = now;
+        }
+        last
+    };
+    // How far the list is turned down, once it has moved from `from` (or after a few tries, unmoved).
+    let turned_from = |from: f32| {
+        for _ in 0..5 {
+            capture(window);
+            if (data.get_lines_y() - from).abs() >= 0.5 {
+                break;
+            }
+        }
+        data.get_lines_y()
+    };
+    // Back to the list's top by the wheel over its lines, checked by where the list says it is. Not by the Home key:
+    // the list is turned to the picked sound, which the shuffle puts anywhere, and Home there left it at its end
+    // (25 Nov: 2 runs in 4), where the thumb covers the point on the track this check clicks.
+    let to_top = || {
+        let (x, y) = LIST_LINES.0;
+        let position = slint::LogicalPosition::new(x as f32 + 40.0, y as f32 + 40.0);
+        for _ in 0..3 {
+            window.dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                position,
+                delta_x: 0.0,
+                delta_y: 100_000.0,
+            });
+            let now = settled();
+            if data.get_lines_y().abs() < 0.5 {
+                return Ok(now);
+            }
+        }
+        Err(format!("sounds scroll bar: the wheel didn't take the list to its top (turned {})", data.get_lines_y()))
+    };
+    to_top()?;
+    hover(window, -1.0, -1.0);
+    let top = settled();
     hover(window, SCROLL_BAR_X, SCROLL_BAR_TRACK_Y);
     capture(window);
     let lit = capture(window);
@@ -5003,31 +5046,37 @@ fn scroll_bar_checks(
         ));
     }
     shots.push(("sounds-scroll-bar.png".into(), lit));
+    let from = data.get_lines_y();
     window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: at(SCROLL_BAR_TRACK_Y), button });
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: at(SCROLL_BAR_TRACK_Y), button });
-    capture(window);
-    let paged = capture(window);
-    if lines(&paged) == lines(&top) {
-        return Err("sounds scroll bar: a click on its track below the thumb didn't turn the list a page".into());
+    let paged = turned_from(from);
+    if (paged - from).abs() < 0.5 {
+        return Err(format!(
+            "sounds scroll bar: a click on its track below the thumb (y {SCROLL_BAR_TRACK_Y}) didn't turn the list a \
+             page: turned {from} before and {paged} after, {} sounds shown",
+            data.get_shown()
+        ));
     }
-    press(app, slint::platform::Key::Home, false);
-    capture(window);
+    to_top()?;
+    let from = data.get_lines_y();
     window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(SCROLL_BAR_THUMB_Y) });
     window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: at(SCROLL_BAR_THUMB_Y), button });
     window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(SCROLL_BAR_THUMB_Y + 120.0) });
-    capture(window);
+    let moved = turned_from(from);
     let dragged = capture(window);
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased {
         position: at(SCROLL_BAR_THUMB_Y + 120.0),
         button,
     });
-    if lines(&dragged) == lines(&top) {
-        return Err("sounds scroll bar: dragging its thumb down didn't turn the list".into());
+    if (moved - from).abs() < 0.5 || lines(&dragged) == lines(&top) {
+        return Err(format!(
+            "sounds scroll bar: dragging its thumb down didn't turn the list: turned {from} before and {moved} after"
+        ));
     }
     shots.push(("sounds-scroll-bar-dragged.png".into(), dragged));
     hover(window, -1.0, -1.0);
-    press(app, slint::platform::Key::Home, false);
-    capture(window);
+    to_top()?;
+    hover(window, -1.0, -1.0);
     Ok(())
 }
 
