@@ -482,6 +482,50 @@ fn look(path: &Path) -> Look {
     }
 }
 
+/// Whether a file read before and no longer listed is to be forgotten: when it's there (the library or the folders
+/// looked through no longer list it), or plainly gone. Not while it only can't be reached: Solomon's Vital folder
+/// was behind a link that led nowhere for one start (25 Nov 2026), its 510 shape files weren't listed, and the scan
+/// forgot their 285 curves until the next start read them all again.
+fn forgotten_unlisted(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => folder_deleted(path),
+        // Can't be looked at (no permission, a share away): kept.
+        Err(_) => false,
+    }
+}
+
+/// Whether `path`, which isn't there, is plainly gone (it or a folder it was in deleted, moved or renamed): going up
+/// from it, the first folder that's still there is a real one that can be opened. Not when that's a link leading nowhere now (a moved
+/// folder's link while its drive is away or the link is being made again), when nothing of the path is there (a drive
+/// unplugged), or when it's a place drives are mounted in (a Mac's /Volumes stays when the drive goes).
+fn folder_deleted(path: &Path) -> bool {
+    for above in path.ancestors().skip(1) {
+        if above.as_os_str().is_empty() {
+            return false;
+        }
+        match std::fs::symlink_metadata(above) {
+            // Not there either: further up.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+            // There: a real folder that opens, or a link that still leads to one.
+            Ok(_) => return above.is_dir() && !holds_drives(above),
+        }
+    }
+    false
+}
+
+/// Whether drives are mounted in `folder` on a Mac or Linux, so that a folder missing from it may be a drive away.
+fn holds_drives(folder: &Path) -> bool {
+    if cfg!(windows) {
+        return false;
+    }
+    let within = |parent: &str| folder.parent() == Some(Path::new(parent));
+    ["/Volumes", "/mnt", "/media", "/run/media"].iter().any(|m| folder == Path::new(m))
+        || within("/media")
+        || within("/run/media")
+}
+
 /// A save read in a scan: its path, date and size, and its curves.
 type ReadSave = (String, (i64, i64), Vec<Found>);
 
@@ -793,7 +837,8 @@ impl CurvesDb {
     }
 
     /// The changed saves with what a look at them found now (never [`Look::Away`]: those are kept as they are), and
-    /// the saves no longer in `paths`.
+    /// the saves no longer in `paths` that are to be forgotten ([`forgotten_unlisted`]: not one that only can't be
+    /// reached now).
     #[allow(clippy::type_complexity)]
     fn changed(&self, paths: &[String]) -> Result<(Vec<(String, Look)>, Vec<String>), CurvesError> {
         let known = self.known()?;
@@ -809,13 +854,16 @@ impl CurvesDb {
                 (Look::There(..), None) => true,
             })
             .collect();
-        let gone = known.into_keys().filter(|k| !seen.contains(k.as_str())).collect();
+        // (A look at each: few, as most saves read before are still listed.)
+        let gone =
+            known.into_keys().filter(|k| !seen.contains(k.as_str()) && forgotten_unlisted(Path::new(k))).collect();
         Ok((changed, gone))
     }
 
     /// Reads the saves among `paths` that changed (over every core, at low priority as the caller's pool is), and
     /// forgets saves no longer in `paths` or no longer there. A save that can't be read or looked at now (locked by
-    /// its DAW, a drive unplugged) keeps what was found in it before and is tried again next time. `progress` counts the
+    /// its DAW, a drive unplugged, a folder behind a link that leads nowhere just now) keeps what was found in it
+    /// before, listed or not, and is tried again next time. `progress` counts the
     /// saves read. Returns how many were read.
     pub fn scan(&mut self, paths: &[String], progress: &Progress) -> Result<usize, CurvesError> {
         let (changed, mut gone) = self.changed(paths)?;
@@ -1815,6 +1863,61 @@ mod tests {
         let saves: Vec<String> = db.known().unwrap().into_keys().collect();
         assert!(saves.contains(&away) && saves.contains(&a) && !saves.contains(&b), "{saves:?}");
         assert_eq!(db.list().unwrap().len(), 1);
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Solomon's Vital folder, 25 Nov 2026: behind a link that led nowhere for one start, so the folders looked
+    /// through didn't list its shapes, and their curves were forgotten until the next start.
+    #[test]
+    fn files_no_longer_listed_are_forgotten_only_when_they_are_there_or_plainly_gone() {
+        let dir = temp_dir("unlisted");
+        let moved = dir.join("moved");
+        std::fs::create_dir_all(&moved).unwrap();
+        let a = library_curve(&dir, "a.bwcurve", "Rise", &[0.0, 1.0, 0.0]);
+        let b = library_curve(&dir, "b.bwcurve", "Fall", &[1.0, 0.0]);
+        std::fs::create_dir_all(dir.join("old")).unwrap();
+        let c = library_curve(&dir.join("old"), "c.bwcurve", "Dip", &[1.0, 0.0, 1.0]);
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        let progress = Progress::default();
+        // Through a link to a moved folder, where links can be made without asking (not on Windows).
+        #[cfg(unix)]
+        let linked = {
+            library_curve(&moved, "v.bwcurve", "Wobble", &[0.0, 1.0, 0.5, 1.0]);
+            std::os::unix::fs::symlink(&moved, dir.join("link")).unwrap();
+            let linked = dir.join("link").join("v.bwcurve").to_string_lossy().into_owned();
+            db.scan(&[a.clone(), b.clone(), c.clone(), linked.clone()], &progress).unwrap();
+            // The link leads nowhere now: its file isn't listed, and can't be reached.
+            std::fs::rename(&moved, dir.join("moved-away")).unwrap();
+            assert!(!forgotten_unlisted(Path::new(&linked)));
+            linked
+        };
+        #[cfg(not(unix))]
+        db.scan(&[a.clone(), b.clone(), c.clone()], &progress).unwrap();
+        // Nothing to do while the only file not listed is the one that can't be reached.
+        #[cfg(unix)]
+        assert_eq!(db.out_of_date(&[a.clone(), b.clone(), c.clone()]).unwrap(), (Vec::new(), false));
+        // `b` is there but no longer listed, `c`'s whole folder is deleted: both forgotten. The linked one is kept.
+        std::fs::remove_dir_all(dir.join("old")).unwrap();
+        assert!(forgotten_unlisted(Path::new(&b)) && forgotten_unlisted(Path::new(&c)));
+        assert_eq!(db.out_of_date(std::slice::from_ref(&a)).unwrap(), (Vec::new(), true));
+        assert_eq!(db.scan(std::slice::from_ref(&a), &progress).unwrap(), 0);
+        let saves: Vec<String> = db.known().unwrap().into_keys().collect();
+        assert!(saves.contains(&a) && !saves.contains(&b) && !saves.contains(&c), "{saves:?}");
+        #[cfg(unix)]
+        {
+            assert!(saves.contains(&linked), "{saves:?}");
+            assert!(db.list().unwrap().iter().any(|c| c.name == "Wobble"));
+            // The link leads there again: nothing was lost, and nothing needs reading.
+            std::fs::rename(dir.join("moved-away"), &moved).unwrap();
+            let all = [a.clone(), linked.clone()];
+            assert_eq!(db.out_of_date(&all).unwrap(), (Vec::new(), false));
+        }
+        // Nothing of a path there (a drive unplugged): kept. On a Mac or Linux, a folder drives are mounted in too.
+        assert!(!folder_deleted(Path::new(if cfg!(windows) { r"Q:\no\such\a.bwcurve" } else { "" })));
+        #[cfg(unix)]
+        assert!(holds_drives(Path::new("/Volumes")) && holds_drives(Path::new("/media/solomon")));
+        assert!(!holds_drives(&dir));
         drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
     }
