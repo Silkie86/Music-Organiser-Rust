@@ -721,6 +721,19 @@ pub fn last_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+/// Picks only `path`: every other pick taken off. It keeps "just this folder" when it had it, else takes in the
+/// folders inside it.
+pub fn pick_only(picks: &mut Vec<FolderPick>, path: &str) {
+    let k = key(path);
+    let just_this = picks.iter().any(|p| key(&p.path) == k && p.just_this);
+    *picks = vec![FolderPick { path: path.to_owned(), just_this }];
+}
+
+/// Whether `path` is already the only pick (so "Show only this folder" has nothing to do).
+pub fn only_pick(picks: &[FolderPick], path: &str) -> bool {
+    matches!(picks, [p] if key(&p.path) == key(path))
+}
+
 /// Picks `path` with the folders inside it, or takes its pick off when it's picked (either way).
 pub fn toggle_pick(picks: &mut Vec<FolderPick>, path: &str) {
     let k = key(path);
@@ -1072,5 +1085,17 @@ mod tests {
         assert!((mix[0].share - 0.6).abs() < 1e-6);
         assert!(mix[2].rest && !mix[0].rest);
         assert!(picks_mix(&HashMap::new(), &types, 2).is_empty());
+    }
+
+    #[test]
+    fn only_this_folder_takes_the_other_picks_off() {
+        let pick = |p: &str, just_this| FolderPick { path: p.into(), just_this };
+        let mut picks = vec![pick(r"I:\A", false), pick(r"I:\B", true), pick(r"I:\C", false)];
+        pick_only(&mut picks, r"i:\b");
+        assert_eq!(picks, vec![pick(r"i:\b", true)], "it keeps just this folder");
+        assert!(only_pick(&picks, r"I:\B"));
+        pick_only(&mut picks, r"I:\D");
+        assert_eq!(picks, vec![pick(r"I:\D", false)], "a folder not picked comes with those inside it");
+        assert!(!only_pick(&[], r"I:\D"));
     }
 }

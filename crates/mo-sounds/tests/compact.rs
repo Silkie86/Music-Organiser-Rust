@@ -182,7 +182,7 @@ fn analysis_json(dice: &mut Dice) -> String {
         key_source: if tonic.is_some() { "chroma".into() } else { Default::default() },
         chord: dice.chance(10).then(|| "Ebm".to_owned()),
         chords,
-        chroma,
+        chroma: chroma.into(),
         character,
         waveform: waveform.into(),
     };

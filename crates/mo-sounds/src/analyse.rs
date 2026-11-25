@@ -255,7 +255,7 @@ pub fn analyse(audio: &AudioData, path: &str) -> Analysed {
             *c /= chroma_max;
         }
     }
-    a.chroma = chroma.iter().map(|c| round_to(*c, 3)).collect();
+    a.chroma = chroma.iter().map(|c| round_to(*c, 3)).collect::<Vec<f64>>().into();
     let tonal = 1.0 - (flatness * 3.0).clamp(0.0, 1.0);
 
     // ---- loop and tempo ----
@@ -791,8 +791,9 @@ mod tests {
         assert!(a.character.iter().any(|w| w == "mono"));
         assert!((a.peak_db - -6.0).abs() < 0.1);
         assert!((a.rms_db - -9.0).abs() < 0.1);
-        let biggest = a.chroma.iter().copied().fold(0.0, f64::max);
-        assert_eq!(a.chroma[9], biggest);
+        let chroma = a.chroma.to_vec();
+        let biggest = chroma.iter().copied().fold(0.0, f64::max);
+        assert_eq!(chroma[9], biggest);
         assert!((a.brightness - 440.0).abs() < 20.0, "{}", a.brightness);
         assert_eq!(a.waveform.len(), 160);
     }

@@ -7,7 +7,7 @@ members = ["crates/*", "tools/formatlab", "tools/miditwin", "tools/theorybench",
 exclude = ["tools/galaxycheck", "fuzz", "vendor/femtovg", "vendor/i-slint-backend-winit"]
 
 [workspace.package]
-version = "0.9.0-beta.1"
+version = "0.9.0-beta.2"
 edition = "2024"
 publish = false
 
