@@ -14,6 +14,20 @@ fn main() {
         })
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=MO_COMMIT={commit}");
+    // The build's number: how many commits lead to it, so each build Solomon tests counts up from the last (25 Nov:
+    // "all these new builds have the same beta number"). The beta number itself (Cargo.toml) moves on with each
+    // release, which self-update compares. A clone without the whole history (shallow) can't count: no number then.
+    let build = std::env::var("MO_BUILD").ok().filter(|b| !b.is_empty()).or_else(|| {
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).output().ok()?;
+            out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        };
+        (git(&["rev-parse", "--is-shallow-repository"])? == "false")
+            .then(|| git(&["rev-list", "--count", "HEAD"]))
+            .flatten()
+    });
+    println!("cargo:rustc-env=MO_BUILD={}", build.unwrap_or_default());
+    println!("cargo:rerun-if-env-changed=MO_BUILD");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
