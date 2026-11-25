@@ -2019,6 +2019,10 @@ fn presets_shots(
     data.invoke_clear();
     mo_ui::presets::pick_row(app, 3);
     shots.push(("presets-picked.png".into(), capture(window)));
+    // A song's Serum 1 sound: its card offers Put in Serum 2. Then the line before is picked again for the shots after.
+    mo_ui::presets::pick_row(app, 0);
+    shots.push(("presets-serum.png".into(), capture(window)));
+    mo_ui::presets::pick_row(app, 3);
     mo_ui::presets::show_audition_sample(app, true);
     shots.push(("presets-auditioning.png".into(), capture(window)));
     mo_ui::presets::show_audition_sample(app, false);

@@ -87,6 +87,11 @@ fn serum_1_shift(settings: &[u8]) -> Option<f64> {
     Some(0.0)
 }
 
+/// Whether settings unpack as Serum 1's state does (to between a preset file's size and a whole state's).
+pub(crate) fn serum_1_unpacks(settings: &[u8]) -> bool {
+    serum_1_unpacked(settings).is_some()
+}
+
 /// Serum 1's state, unpacked, from an .fxp (chunk after its header), a .vstpreset (state after its header), or FL's
 /// raw copy (a few bytes of its own first): the zlib stream is found where it starts.
 fn serum_1_unpacked(settings: &[u8]) -> Option<Vec<u8>> {
