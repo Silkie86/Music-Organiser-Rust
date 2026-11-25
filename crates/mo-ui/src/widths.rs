@@ -83,6 +83,27 @@ fn give(app: &AppWindow, name: &str, width: f32) {
         "sounds.folders" => app.global::<crate::Widths>().set_sounds_folders(width),
         "songs.list" => app.global::<crate::Widths>().set_songs_list(width),
         "curves.list" => app.global::<crate::Widths>().set_curves_list(width),
+        "songs.tracks" => {
+            app.global::<crate::Widths>().set_songs_tracks(width);
+            crate::arrangement::names_width(app, width);
+        }
+        "sounds.type" => app.global::<crate::Widths>().set_sounds_type(width),
+        "sounds.key" => app.global::<crate::Widths>().set_sounds_key(width),
+        "sounds.tempo" => app.global::<crate::Widths>().set_sounds_tempo(width),
+        "sounds.length" => app.global::<crate::Widths>().set_sounds_length(width),
+        "sounds.used" => app.global::<crate::Widths>().set_sounds_used(width),
+        "presets.part" => app.global::<crate::Widths>().set_presets_part(width),
+        "presets.kind" => app.global::<crate::Widths>().set_presets_kind(width),
+        "presets.file" => app.global::<crate::Widths>().set_presets_file(width),
+        "midi.bars" => app.global::<crate::Widths>().set_midi_bars(width),
+        "midi.files" => app.global::<crate::Widths>().set_midi_files(width),
+        "midi.key" => app.global::<crate::Widths>().set_midi_key(width),
+        "midi.saved" => app.global::<crate::Widths>().set_midi_saved(width),
+        "plugins.songs" => app.global::<crate::Widths>().set_plugins_songs(width),
+        "plugins.last" => app.global::<crate::Widths>().set_plugins_last(width),
+        "plugins.size" => app.global::<crate::Widths>().set_plugins_size(width),
+        "songs.status" => app.global::<crate::Widths>().set_songs_status(width),
+        "songs.saved" => app.global::<crate::Widths>().set_songs_saved(width),
         _ => debug_assert!(false, "no page has a part called {name}"),
     }
 }
@@ -106,13 +127,16 @@ mod tests {
         for entry in std::fs::read_dir(&pages).into_iter().flatten().flatten() {
             let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
             for line in text.lines().map(str::trim) {
-                let Some(name) = line.strip_prefix("part: \"").and_then(|r| r.strip_suffix("\";")) else { continue };
-                seen += 1;
-                assert!(
-                    mo_app::widths::find(name).is_some(),
-                    "{} names {name}, which isn't in the table",
-                    entry.path().display()
-                );
+                // `part: "x";` or `part: cond ? "" : "x";`: every quoted name on the line.
+                let Some(rest) = line.strip_prefix("part:") else { continue };
+                for name in rest.split('"').skip(1).step_by(2).filter(|n| !n.is_empty()) {
+                    seen += 1;
+                    assert!(
+                        mo_app::widths::find(name).is_some(),
+                        "{} names {name}, which isn't in the table",
+                        entry.path().display()
+                    );
+                }
             }
         }
         assert!(seen >= mo_app::widths::PARTS.len(), "found only {seen} seams in {}", pages.display());

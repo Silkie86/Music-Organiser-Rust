@@ -286,7 +286,7 @@ component ListHeading inherits HorizontalLayout {
     spacing: Space.md;
     height: 28px;
     Rectangle { width: 8px; }
-    ColumnHead {
+    name-head := ColumnHead {
         horizontal-stretch: 1;
         text: "PART";
         on: MidiData.order-column == "Part";
@@ -295,7 +295,11 @@ component ListHeading inherits HorizontalLayout {
         clicked => { MidiData.pick("order", "Part"); }
     }
     if !root.tight: ColumnHead {
-        width: 44px;
+        width: Widths.midi-bars;
+        part: "midi.bars";
+        resizing(w) => { Widths.midi-bars = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px);
         right: true;
         text: "BARS";
         tip: "How many bars long";
@@ -304,7 +308,11 @@ component ListHeading inherits HorizontalLayout {
         clicked => { MidiData.pick("order", "Bars"); }
     }
     if !root.tight: ColumnHead {
-        width: 44px;
+        width: Widths.midi-files;
+        part: "midi.files";
+        resizing(w) => { Widths.midi-files = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px);
         right: true;
         text: "FILES";
         tip: "How many of your files have these notes";
@@ -313,7 +321,11 @@ component ListHeading inherits HorizontalLayout {
         clicked => { MidiData.pick("order", "Files"); }
     }
     ColumnHead {
-        width: root.tight ? 48px : 96px;
+        width: root.tight ? 48px : Widths.midi-key;
+        part: root.tight ? "" : "midi.key";
+        resizing(w) => { Widths.midi-key = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px);
         text: "KEY";
         on: MidiData.order-column == "Key";
         // Round the circle from C first.
@@ -321,7 +333,11 @@ component ListHeading inherits HorizontalLayout {
         clicked => { MidiData.pick("order", "Key"); }
     }
     ColumnHead {
-        width: 96px;
+        width: Widths.midi-saved;
+        part: "midi.saved";
+        resizing(w) => { Widths.midi-saved = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px);
         text: "SAVED";
         on: MidiData.order-column == "Saved";
         up: MidiData.order-reversed;
@@ -409,7 +425,7 @@ component MidiLineView inherits ListLine {
             }
         }
         if !root.tight: Text {
-            width: 44px;
+            width: Widths.midi-bars;
             text: root.line.bars;
             color: Theme.muted;
             font-family: Theme.number-font;
@@ -418,7 +434,7 @@ component MidiLineView inherits ListLine {
             horizontal-alignment: right;
         }
         if !root.tight: Text {
-            width: 44px;
+            width: Widths.midi-files;
             text: root.line.files;
             color: Theme.muted;
             font-family: Theme.number-font;
@@ -427,7 +443,7 @@ component MidiLineView inherits ListLine {
             horizontal-alignment: right;
         }
         CutText {
-            width: root.tight ? 48px : 96px;
+            width: root.tight ? 48px : Widths.midi-key;
             over: root.resting;
             mouse: root.mouse;
             text: root.line.key;
@@ -437,7 +453,7 @@ component MidiLineView inherits ListLine {
             vertical-alignment: center;
         }
         Text {
-            width: 96px;
+            width: Widths.midi-saved;
             text: root.line.date;
             color: Theme.muted;
             font-family: Theme.number-font;

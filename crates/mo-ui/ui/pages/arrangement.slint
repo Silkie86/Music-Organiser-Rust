@@ -2,7 +2,7 @@
 // on a background thread, and the graphics card draws them into a picture (mo-ui's arrangement.rs and canvas.rs; the
 // processor where there's no card); the words are laid on top here, in the app's own fonts, each clipped to its strip:
 // track names on the left, the ruler along the top, clip names on the timeline.
-import { Theme, CutText, Type, Space, ToggleChip, PointerPad, HoverNote } from "../studio.slint";
+import { Theme, CutText, Type, Space, ToggleChip, PointerPad, HoverNote, Seam, Widths } from "../studio.slint";
 
 // How a label on the picture looks.
 export enum ArrKind {
@@ -37,6 +37,8 @@ export global ArrangementData {
     in property <string> message: "Reading the arrangement…";
     in property <image> picture;
     in property <length> header-width: 172px;
+    // The track names' right edge dragged to a new width: the app draws the song again with it.
+    callback names-resizing(length);
     in property <length> ruler-height: 24px;
     in property <[ArrLabel]> header-labels;
     in property <[ArrLabel]> timeline-labels;
@@ -232,6 +234,19 @@ export component ArrangementPreview inherits VerticalLayout {
                 double => { ArrangementData.double-clicked(); }
                 wheel(x, across, down, ctrl, shift) => { ArrangementData.wheel(x, across, down, ctrl, shift); }
                 gone => { ArrangementData.left(); }
+            }
+            // The track names' right edge: drag it to give the names more or less room (over the pad, so it gets the
+            // mouse first there).
+            Seam {
+                x: ArrangementData.header-width - self.width;
+                y: ArrangementData.ruler-height;
+                width: Space.md;
+                height: max(0px, parent.height - ArrangementData.ruler-height);
+                part: "songs.tracks";
+                // The width last asked for, as soon as it's asked (the picture with it comes a moment later).
+                now: Widths.songs-tracks > 0 ? min(Widths.songs-tracks, self.most) : ArrangementData.header-width;
+                most: max(self.least, min(Widths.most("songs.tracks"), parent.width / 2));
+                resizing(w) => { ArrangementData.names-resizing(w); }
             }
             // What's under the mouse, beside it.
             if ArrangementData.hover-text != "": HoverNote {

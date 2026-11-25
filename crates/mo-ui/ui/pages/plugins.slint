@@ -1062,7 +1062,7 @@ export component PluginsPage inherits Rectangle {
                                     padding-right: Space.md + Space.xs;
                                     spacing: Space.md;
                                     Rectangle { width: 8px; }
-                                    ColumnHead {
+                                    name-head := ColumnHead {
                                         horizontal-stretch: 1;
                                         text: "PLUGIN";
                                         on: PluginsData.sort-column == "Plugin";
@@ -1071,7 +1071,11 @@ export component PluginsPage inherits Rectangle {
                                         clicked => { PluginsData.sort-picked("Plugin"); }
                                     }
                                     ColumnHead {
-                                        width: 80px;
+                                        width: Widths.plugins-songs;
+                                        part: "plugins.songs";
+                                        resizing(w) => { Widths.plugins-songs = w; }
+                                        // Never so wide the name column beside it gets under 120 px.
+                                        most: self.width + max(0px, name-head.width - 120px);
                                         right: true;
                                         text: "SONGS";
                                         on: PluginsData.sort-column == "Songs";
@@ -1079,7 +1083,11 @@ export component PluginsPage inherits Rectangle {
                                         clicked => { PluginsData.sort-picked("Songs"); }
                                     }
                                     if area.wide: ColumnHead {
-                                        width: 76px;
+                                        width: Widths.plugins-last;
+                                        part: "plugins.last";
+                                        resizing(w) => { Widths.plugins-last = w; }
+                                        // Never so wide the name column beside it gets under 120 px.
+                                        most: self.width + max(0px, name-head.width - 120px);
                                         right: true;
                                         text: "LAST USED";
                                         on: PluginsData.sort-column == "Last used";
@@ -1087,7 +1095,11 @@ export component PluginsPage inherits Rectangle {
                                         clicked => { PluginsData.sort-picked("Last used"); }
                                     }
                                     ColumnHead {
-                                        width: 72px;
+                                        width: Widths.plugins-size;
+                                        part: "plugins.size";
+                                        resizing(w) => { Widths.plugins-size = w; }
+                                        // Never so wide the name column beside it gets under 120 px.
+                                        most: self.width + max(0px, name-head.width - 120px);
                                         right: true;
                                         text: "SIZE";
                                         on: PluginsData.sort-column == "Size";
@@ -1153,7 +1165,7 @@ export component PluginsPage inherits Rectangle {
                                                 }
                                             }
                                             Text {
-                                                width: 80px;
+                                                width: Widths.plugins-songs;
                                                 text: line.songs;
                                                 color: Theme.text;
                                                 font-size: Type.meta;
@@ -1161,7 +1173,7 @@ export component PluginsPage inherits Rectangle {
                                                 horizontal-alignment: right;
                                             }
                                             if area.wide: Text {
-                                                width: 76px;
+                                                width: Widths.plugins-last;
                                                 text: line.last;
                                                 color: Theme.muted;
                                                 font-family: Theme.number-font;
@@ -1170,7 +1182,7 @@ export component PluginsPage inherits Rectangle {
                                                 horizontal-alignment: right;
                                             }
                                             Text {
-                                                width: 72px;
+                                                width: Widths.plugins-size;
                                                 text: line.size;
                                                 color: line.state == 2 ? Theme.warning : Theme.muted;
                                                 font-family: Theme.number-font;

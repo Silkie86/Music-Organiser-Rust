@@ -19,7 +19,8 @@ pub struct Part {
     /// Its name in the setting: `<page>.<part>`.
     pub name: &'static str,
     /// Its width until you drag it, and again after a double-click on its edge. 0 where the page works it out (the
-    /// Songs list, a third of the room): then the page is given 0, and its own width is used.
+    /// Songs list, a third of the room; a song's track names, by the view's width): then the page is given 0, and its
+    /// own width is used.
     pub usual: f32,
     /// The least and the most it may be: enough for what it shows, and not so much the rest of the page goes.
     pub least: f32,
@@ -51,6 +52,27 @@ pub const PARTS: &[Part] = &[
     part("songs.list", 0.0, 320.0, 1200.0),
     // The Curves list beside the curve editor. None usual: the page gives it about a fifth of the room then.
     part("curves.list", 0.0, 220.0, 720.0),
+    // The track names in a song's arrangement: usual 118 or 172 by the view's width, worked out by the view.
+    part("songs.tracks", 0.0, 118.0, 480.0),
+    // The lists' columns of fixed width, by page: the least that still shows the heading, about three times as wide
+    // at most. The column that stretches (the name) gives or takes the room.
+    part("sounds.type", 110.0, 60.0, 300.0),
+    part("sounds.key", 52.0, 40.0, 140.0),
+    part("sounds.tempo", 80.0, 60.0, 200.0),
+    part("sounds.length", 56.0, 56.0, 140.0),
+    part("sounds.used", 96.0, 64.0, 240.0),
+    part("presets.part", 96.0, 56.0, 260.0),
+    part("presets.kind", 56.0, 48.0, 160.0),
+    part("presets.file", 72.0, 44.0, 180.0),
+    part("midi.bars", 44.0, 44.0, 120.0),
+    part("midi.files", 44.0, 44.0, 120.0),
+    part("midi.key", 96.0, 48.0, 240.0),
+    part("midi.saved", 96.0, 60.0, 240.0),
+    part("plugins.songs", 80.0, 60.0, 200.0),
+    part("plugins.last", 76.0, 76.0, 200.0),
+    part("plugins.size", 72.0, 48.0, 180.0),
+    part("songs.status", 150.0, 70.0, 320.0),
+    part("songs.saved", 90.0, 90.0, 220.0),
 ];
 
 /// The part called `name`, if there is one.
@@ -122,7 +144,7 @@ mod tests {
         for (i, p) in PARTS.iter().enumerate() {
             // A usual width of 0 only where the page works one out (the Songs list's third of the room): anywhere else
             // the part would be given no width at all.
-            let worked_out = p.name == "songs.list" || p.name == "curves.list";
+            let worked_out = p.name == "songs.list" || p.name == "curves.list" || p.name == "songs.tracks";
             assert!(if worked_out { p.usual == 0.0 } else { p.least <= p.usual && p.usual <= p.most }, "{}", p.name);
             assert!(p.least <= p.most, "{}", p.name);
             assert!(p.name.contains('.') && !p.name.contains(['=', ';']), "{}", p.name);

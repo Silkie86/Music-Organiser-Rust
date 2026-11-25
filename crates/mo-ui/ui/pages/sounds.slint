@@ -763,7 +763,7 @@ component SoundLineView inherits ListLine {
             mouse: root.mouse;
         }
         CutText {
-            width: 110px;
+            width: Widths.sounds-type;
             over: root.resting;
             mouse: root.mouse;
             text: root.line.sound-type;
@@ -772,7 +772,7 @@ component SoundLineView inherits ListLine {
             vertical-alignment: center;
         }
         Text {
-            width: 52px;
+            width: Widths.sounds-key;
             text: root.line.key;
             color: Theme.muted;
             font-family: Theme.number-font;
@@ -780,7 +780,7 @@ component SoundLineView inherits ListLine {
             vertical-alignment: center;
         }
         Text {
-            width: 80px;
+            width: Widths.sounds-tempo;
             text: root.line.bpm;
             color: Theme.muted;
             font-family: Theme.number-font;
@@ -788,7 +788,7 @@ component SoundLineView inherits ListLine {
             vertical-alignment: center;
         }
         Text {
-            width: 56px;
+            width: Widths.sounds-length;
             text: root.line.length;
             color: Theme.muted;
             font-family: Theme.number-font;
@@ -798,7 +798,7 @@ component SoundLineView inherits ListLine {
         }
         // Rediscover's reasons say how it's used already.
         Text {
-            width: root.rediscover ? 0 : 96px;
+            width: root.rediscover ? 0 : Widths.sounds-used;
             text: root.rediscover ? "" : root.history ? root.line.when : root.line.used;
             color: Theme.muted;
             font-family: Theme.number-font;
@@ -838,7 +838,7 @@ component SoundLineView inherits ListLine {
                 mouse: root.mouse;
             }
             Text {
-                width: 56px;
+                width: Widths.sounds-length;
                 text: root.line.length;
                 color: Theme.muted;
                 font-family: Theme.number-font;
@@ -878,7 +878,7 @@ component ListHeading inherits HorizontalLayout {
     spacing: Space.md;
     height: 28px;
     Rectangle { width: 8px; }
-    ColumnHead {
+    name-head := ColumnHead {
         horizontal-stretch: 2;
         preferred-width: 0px;
         min-width: 0px;
@@ -890,7 +890,11 @@ component ListHeading inherits HorizontalLayout {
         clicked => { SoundsData.order-by-column("Sound"); }
     }
     if !root.narrow: ColumnHead {
-        width: 110px;
+        width: Widths.sounds-type;
+        part: "sounds.type";
+        resizing(w) => { Widths.sounds-type = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px);
         text: "TYPE";
         can-order: root.orders;
         on: root.orders && SoundsData.order-column == "Type";
@@ -899,7 +903,11 @@ component ListHeading inherits HorizontalLayout {
         clicked => { SoundsData.order-by-column("Type"); }
     }
     if !root.narrow: ColumnHead {
-        width: 52px;
+        width: Widths.sounds-key;
+        part: "sounds.key";
+        resizing(w) => { Widths.sounds-key = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px);
         text: "KEY";
         can-order: root.orders;
         on: root.orders && SoundsData.order-column == "Key";
@@ -907,22 +915,35 @@ component ListHeading inherits HorizontalLayout {
         up: !SoundsData.order-reversed;
         clicked => { SoundsData.order-by-column("Key"); }
     }
-    if !root.narrow: Caps {
-        width: 80px;
+    // The columns the list can't be ordered by: headings all the same, so their widths can be dragged too.
+    if !root.narrow: ColumnHead {
+        width: Widths.sounds-tempo;
+        part: "sounds.tempo";
+        resizing(w) => { Widths.sounds-tempo = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px);
         text: "TEMPO";
-        vertical-alignment: center;
+        can-order: false;
     }
-    Caps {
-        width: 56px;
+    ColumnHead {
+        width: Widths.sounds-length;
+        part: "sounds.length";
+        resizing(w) => { Widths.sounds-length = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px);
         text: "LENGTH";
-        vertical-alignment: center;
-        horizontal-alignment: right;
+        can-order: false;
+        right: true;
     }
-    if !root.narrow: Caps {
-        width: root.rediscover ? 0 : 96px;
+    if !root.narrow: ColumnHead {
+        width: root.rediscover ? 0 : Widths.sounds-used;
+        part: root.rediscover || (!root.history && !SoundsData.knows-use) ? "" : "sounds.used";
+        resizing(w) => { Widths.sounds-used = w; }
+        // Never so wide the name column beside it gets under 120 px.
+        most: self.width + max(0px, name-head.width - 120px);
         text: root.rediscover ? "" : root.history ? "PLAYED" : SoundsData.knows-use ? "USED" : "";
-        vertical-alignment: center;
-        horizontal-alignment: right;
+        can-order: false;
+        right: true;
     }
     if !root.narrow: Caps {
         horizontal-stretch: root.rediscover ? 3 : 1;

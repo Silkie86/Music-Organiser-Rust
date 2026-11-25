@@ -49,6 +49,8 @@ struct State {
     view: Option<View>,
     /// The size the page gives the picture, in points.
     size: (f64, f64),
+    /// How wide the track names are, as dragged (`songs.tracks`); 0 for the usual width.
+    names: f64,
     palette: Option<Palette>,
     /// Read and draw here instead of on the background threads: for the screenshots, which have no event loop.
     here: bool,
@@ -79,9 +81,27 @@ thread_local! {
     static CARD: RefCell<gpu::Painter<Canvas>> = const { RefCell::new(gpu::Painter::new()) };
 }
 
+/// Gives the track names the width they were dragged to (0 for the usual one), and draws the song again.
+pub fn names_width(app: &AppWindow, width: f32) {
+    let width = f64::from(width);
+    change(&app.as_weak(), |s| {
+        s.names = width;
+        if let Some(v) = s.view.as_mut() {
+            v.set_names_width(width);
+        }
+    });
+}
+
 /// Wires the preview's mouse and view chips, and starts its reading and drawing threads.
 pub fn connect(app: &AppWindow) {
     let data = app.global::<ArrangementData>();
+    let weak = app.as_weak();
+    data.on_names_resizing(move |w| {
+        if let Some(app) = weak.upgrade() {
+            app.global::<crate::Widths>().set_songs_tracks(w);
+            names_width(&app, w);
+        }
+    });
     let weak = app.as_weak();
     data.on_pick_view(move |i| {
         if let Some(app) = weak.upgrade() {
@@ -539,6 +559,7 @@ fn pick_view(app: &AppWindow, index: usize) {
         let notes = arr::notes(&a, p.found.as_deref());
         view.set_peaks(s.peaks.clone());
         view.resize(s.size.0, s.size.1);
+        view.set_names_width(s.names);
         s.view = Some(view);
         Some((a, measured, notes))
     });
