@@ -87,6 +87,9 @@ const AWAY_KEPT: i64 = 90 * 24 * 60 * 60;
 #[derive(Clone, Copy, Debug)]
 pub struct Folders<'a> {
     pub looked_in: &'a [PathBuf],
+    /// Folders (the roots, or folders under them) that couldn't be listed at this read, or not to their end: their
+    /// files may be missing from the list, so nothing read before under one of them is forgotten this time.
+    pub unlisted: &'a [PathBuf],
     pub now: i64,
 }
 
@@ -906,9 +909,12 @@ impl CurvesDb {
         }
         // A file under a folder looked through now is gone when it isn't listed; under one that's away, kept.
         let under = |file: &str, roots: &[String]| roots.iter().any(|r| Path::new(file).starts_with(r));
+        let unlisted = folders.map_or(&[][..], |f| f.unlisted);
+        let not_listed = |file: &str| unlisted.iter().any(|f| Path::new(file).starts_with(f));
         let gone = known
             .into_keys()
-            .filter(|k| !seen.contains(k.as_str()) && (kept.is_empty() || under(k, &looked_in) || !under(k, &kept)))
+            .filter(|k| !seen.contains(k.as_str()) && !not_listed(k))
+            .filter(|k| kept.is_empty() || under(k, &looked_in) || !under(k, &kept))
             .collect();
         Ok(Changes { changed, gone, there, missed, given_up })
     }
@@ -1968,7 +1974,7 @@ mod tests {
         let progress = Progress::default();
         let both = [bitwig.clone(), vital.clone()];
         let day = 24 * 60 * 60;
-        let at = |looked_in, days: i64| Some(Folders { looked_in, now: 1_800_000_000 + days * day });
+        let at = |looked_in, days: i64| Some(Folders { looked_in, unlisted: &[], now: 1_800_000_000 + days * day });
         let all = [a.clone(), b.clone(), v.clone(), song.clone()];
         assert_eq!(db.scan_in(&all, at(&both, 0), &progress).unwrap(), 4);
         assert_eq!(db.out_of_date_in(&all, at(&both, 1)).unwrap(), (Vec::new(), false));
@@ -1992,7 +1998,7 @@ mod tests {
         // says nothing, or one set back to before that day, gives nothing up.
         assert_eq!(db.out_of_date_in(&listed, at(&only_bitwig, 60)).unwrap(), (Vec::new(), false));
         assert_eq!(
-            db.out_of_date_in(&listed, Some(Folders { looked_in: &only_bitwig, now: 0 })).unwrap(),
+            db.out_of_date_in(&listed, Some(Folders { looked_in: &only_bitwig, unlisted: &[], now: 0 })).unwrap(),
             (Vec::new(), false)
         );
         assert_eq!(db.scan_in(&listed, at(&only_bitwig, -400), &progress).unwrap(), 0);
@@ -2027,7 +2033,7 @@ mod tests {
         let b = library_curve(&gone, "b.bwcurve", "Fall", &[1.0, 0.0]);
         let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
         let progress = Progress::default();
-        let at = |looked_in, now: i64| Some(Folders { looked_in, now: 1_800_000_000 + now });
+        let at = |looked_in, now: i64| Some(Folders { looked_in, unlisted: &[], now: 1_800_000_000 + now });
         let both = [old.clone(), gone.clone()];
         assert_eq!(db.scan_in(&[a, b], at(&both, 0), &progress).unwrap(), 2);
         // `old` is still there but no longer one of the folders looked in (another Bitwig folder was chosen);
@@ -2043,6 +2049,27 @@ mod tests {
         assert_eq!(db.scan_in(&[], at(&[], 2), &progress).unwrap(), 0);
         assert!(db.list().unwrap().is_empty() && db.folders_away().unwrap().is_empty());
         assert_eq!(db.out_of_date_in(&[], at(&[], 3)).unwrap(), (Vec::new(), false));
+        // A folder that couldn't be listed at this read (under a root that was, or a root given up just now): nothing
+        // found under it before is forgotten, however often that happens.
+        std::fs::create_dir_all(old.join("pack")).unwrap();
+        let p = library_curve(&old.join("pack"), "p.bwcurve", "Dip", &[1.0, 0.0, 1.0]);
+        let roots = [old.clone()];
+        assert_eq!(db.scan_in(std::slice::from_ref(&p), at(&roots, 3), &progress).unwrap(), 1);
+        let pack = [old.join("pack")];
+        for read in 4..7 {
+            let folders = Some(Folders { looked_in: &roots, unlisted: &pack, now: 1_800_000_000 + read });
+            assert_eq!(db.out_of_date_in(&[], folders).unwrap(), (Vec::new(), false));
+            assert_eq!(db.scan_in(&[], folders, &progress).unwrap(), 0);
+            assert_eq!(db.list().unwrap().len(), 1);
+        }
+        // The same for a root that couldn't be listed itself, read after read, even once the root is given up.
+        for read in 7..10 {
+            let folders = Some(Folders { looked_in: &[], unlisted: &roots, now: 1_800_000_000 + read });
+            assert_eq!(db.scan_in(&[], folders, &progress).unwrap(), 0);
+            assert_eq!(db.list().unwrap().len(), 1);
+        }
+        assert_eq!(db.scan_in(&[], at(&roots, 10), &progress).unwrap(), 0);
+        assert!(db.list().unwrap().is_empty());
         // A read that names no folders (the tests, older callers) forgets what isn't listed, as it always did.
         std::fs::create_dir_all(&gone).unwrap();
         let b = library_curve(&gone, "b.bwcurve", "Fall", &[1.0, 0.0]);
