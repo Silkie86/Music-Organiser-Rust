@@ -24,6 +24,8 @@ const QUEUE_SECONDS: u32 = 2;
 pub struct Feed {
     queue: Producer<f32>,
     channels: usize,
+    /// The one channel taken from what comes in (0 left, 1 right) for a take of one side of a stereo pair.
+    only: Option<usize>,
     /// Samples that didn't fit while the [`Recording`] was behind.
     lost: u64,
 }
@@ -42,12 +44,18 @@ pub struct Recording {
 /// A new take of `channels` channels (1 or more) at `rate` frames a second: the [`Feed`] for the audio thread, the
 /// [`Recording`] for a thread of its own.
 pub fn recording(rate: u32, channels: usize) -> (Feed, Recording) {
-    let channels = channels.clamp(1, 8);
+    recording_of(rate, channels, None)
+}
+
+/// [`recording`], of `only` one channel of what comes in when it says one (0 left, 1 right): a mono take of one side
+/// of a stereo pair (Solomon, 25 Nov).
+pub fn recording_of(rate: u32, channels: usize, only: Option<usize>) -> (Feed, Recording) {
+    let channels = if only.is_some() { 1 } else { channels.clamp(1, 8) };
     let room = (rate.max(1) as usize).saturating_mul(QUEUE_SECONDS as usize).saturating_mul(channels);
     let (queue, out) = RingBuffer::new(room);
     let kept = vec![Vec::new(); channels];
     (
-        Feed { queue, channels, lost: 0 },
+        Feed { queue, channels, only, lost: 0 },
         Recording { queue: out, rate: rate.max(1), channels: kept, peak: 0.0, full: false },
     )
 }
@@ -65,7 +73,7 @@ impl Feed {
                 return;
             }
             for channel in 0..self.channels {
-                let samples = block.get(channel).unwrap_or(first);
+                let samples = block.get(self.only.unwrap_or(channel)).unwrap_or(first);
                 let sample = samples.get(frame).copied().filter(|s| s.is_finite()).unwrap_or(0.0);
                 let _ = self.queue.push(sample);
             }
@@ -81,7 +89,12 @@ impl Feed {
                 continue;
             }
             for channel in 0..self.channels {
-                let sample = frame.get(channel).or(frame.first()).copied().filter(|s| s.is_finite()).unwrap_or(0.0);
+                let sample = frame
+                    .get(self.only.unwrap_or(channel))
+                    .or(frame.first())
+                    .copied()
+                    .filter(|s| s.is_finite())
+                    .unwrap_or(0.0);
                 let _ = self.queue.push(sample);
             }
         }
@@ -256,7 +269,7 @@ fn mend(part: &Path, len: u64) -> std::io::Result<()> {
 /// ends the take.
 #[cfg(feature = "record")]
 pub mod card {
-    use super::{Recording, recording};
+    use super::{Recording, recording_of};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
     /// The sound card inputs this computer has, by name, the system's default first.
@@ -286,11 +299,12 @@ pub mod card {
         pub channels: u16,
     }
 
-    /// Opens the input called `name` (the default for none) in shared mode, and starts a take from it.
-    pub fn open(name: Option<&str>) -> Result<(Input, Recording), String> {
+    /// Opens the input called `name` (the default for none) in shared mode, and starts a take from it: of `only` one
+    /// of its channels when that says one (0 left, 1 right), as a mono take.
+    pub fn open(name: Option<&str>, only: Option<usize>) -> Result<(Input, Recording), String> {
         let (device, supported) = device(name)?;
         let channels = supported.channels();
-        let (mut feed, take) = recording(supported.sample_rate(), usize::from(channels).min(2));
+        let (mut feed, take) = recording_of(supported.sample_rate(), usize::from(channels).min(2), only);
         let input =
             start(&device, &supported, name, move |samples, channels| feed.push_interleaved(samples, channels))?;
         Ok((input, take))

@@ -236,6 +236,8 @@ export component Panel inherits Window {
     // with Loop off): the tip goes with it.
     changed view => {
         TipState.hide();
+        // A text box that goes while it has the keys gives them back to nobody ([`typing`]).
+        root.typing = false;
     }
     changed curve-editing => {
         TipState.hide();
@@ -345,6 +347,9 @@ export component Panel inherits Window {
     // the editor, which would take the list away. The line is kept in sight. False where there's no list to move
     // through, so the key goes on as it did (the Galaxy turns with the arrows itself).
     public function step(by: int) -> bool {
+        if (root.typing) {
+            return false;
+        }
         if (root.view == 0 && !root.galaxy && root.sounds.length > 0) {
             let to = root.picked < 0 ? 0 : clamp(root.picked + by, 0, root.sounds.length - 1);
             if (to != root.picked) {
@@ -397,12 +402,14 @@ export component Panel inherits Window {
         return false;
     }
 
-    // Whether the Sounds search box has the keys: Left and Right move in what's typed there.
-    property <bool> sound-typing;
+    // Whether a text box has the keys (a search, the folder tree's, a chord's "Type it"): the arrow keys move in
+    // what's typed there, not through the list. A box that goes while it has them gives them back to nobody, so a
+    // change of tab starts afresh.
+    property <bool> typing;
     // Left (-1) stops the sound, Right (+1) plays the picked line again from its start, in the Sounds list (Solomon,
     // 25 Nov). False anywhere else, so the key goes on as it did.
     public function side(by: int) -> bool {
-        if (root.view != 0 || root.galaxy || root.sound-typing) {
+        if (root.view != 0 || root.galaxy || root.typing) {
             return false;
         }
         if (by < 0) {
@@ -431,6 +438,8 @@ export component Panel inherits Window {
     // Record: what comes in, from the DAW's input to the plugin (its sidechain) or straight from a sound card, saved
     // as a WAV that drags out like a sound. `record-from` is the card's name, "" for the DAW's input.
     in property <string> record-from;
+    // Which side of the input's stereo pair Record takes: 0 both, 1 left, 2 right (one side records as mono).
+    in-out property <int> record-side: 0;
     // The Record from menu's lines, and how loud what's picked is (the overall input level, 0 to 1).
     in property <[InputLine]> record-menu;
     in property <float> record-level;
@@ -819,6 +828,7 @@ export component Panel inherits Window {
                     used-share: root.tree-used-share;
                     mix-picked(name) => { root.tree-mix-picked(name); }
                     search <=> root.tree-search;
+                    changed typing => { root.typing = self.typing; }
                     kept-y <=> root.tree-kept-y;
                     toggled(path) => { root.tree-toggled(path); }
                     opened(path) => { root.tree-opened(path); }
@@ -837,13 +847,12 @@ export component Panel inherits Window {
                 HorizontalLayout {
                     spacing: Space.sm;
                     SearchBox {
+                        changed has-keys => { root.typing = self.has-keys; }
                         horizontal-stretch: 1;
                         min-width: 160px;
                         hint: "Search sounds";
                         text <=> root.search-text;
                         edited(text) => { root.search(text); }
-                        init => { root.sound-typing = self.has-keys; }
-                        changed has-keys => { root.sound-typing = self.has-keys; }
                     }
                     Segmented {
                         horizontal-stretch: 0;
@@ -974,6 +983,15 @@ export component Panel inherits Window {
                                 }
                             }
                         }
+                    }
+                    // Both sides of the pair, or one (Solomon, 25 Nov: one mono input of a pair, without a long list of
+                    // every input twice over).
+                    Segmented {
+                        horizontal-stretch: 0;
+                        choices: ["L+R", "L", "R"];
+                        pad: Space.sm;
+                        current: root.record-side;
+                        picked(i) => { root.record-side = i; }
                     }
                     StudioButton {
                         horizontal-stretch: 0;
@@ -1467,6 +1485,7 @@ export component Panel inherits Window {
                 HorizontalLayout {
                     spacing: Space.sm;
                     SearchBox {
+                        changed has-keys => { root.typing = self.has-keys; }
                         horizontal-stretch: 1;
                         hint: "Search MIDI";
                         text <=> root.midi-search-text;
@@ -1695,6 +1714,7 @@ export component Panel inherits Window {
             VerticalLayout {
                 spacing: Space.md;
                 SearchBox {
+                    changed has-keys => { root.typing = self.has-keys; }
                     hint: "Search presets";
                     text <=> root.preset-search-text;
                     edited(text) => { root.preset-search(text); }
@@ -1949,6 +1969,7 @@ export component Panel inherits Window {
             VerticalLayout {
                 spacing: Space.md;
                 SearchBox {
+                    changed has-keys => { root.typing = self.has-keys; }
                     hint: "Search curves";
                     text <=> root.curve-search-text;
                     edited(text) => { root.curve-search(text); }
@@ -2286,6 +2307,7 @@ export component Panel inherits Window {
                                         clicked => { root.label(i, "skip", 0); }
                                     }
                                     typed := SearchBox {
+                                        changed has-keys => { root.typing = self.has-keys; }
                                         width: 150px;
                                         search: false;
                                         hint: "Type it";
