@@ -429,11 +429,11 @@ fn the_same_loop_in_other_keys_is_one_set_and_old_notes_get_their_shape() {
     let low: Vec<_> =
         catalogue.entries.iter().filter(|e| e.phrase.clip == "Low C" || e.phrase.clip == "Low F").collect();
     assert_eq!(low.len(), 2);
-    assert!(low.iter().all(|e| e.in_keys == Some(InKeys::Keys(2)) && e.key_group.is_some()));
-    assert_eq!(low[0].key_group, low[1].key_group);
+    assert!(low.iter().all(|e| e.in_keys() == Some(InKeys::Keys(2)) && e.key_group().is_some()));
+    assert_eq!(low[0].key_group(), low[1].key_group());
     for clip in ["Tune", "Low G"] {
         let e = catalogue.entries.iter().find(|e| e.phrase.clip == clip).unwrap();
-        assert!(e.in_keys.is_none() && e.key_group.is_none(), "{clip}");
+        assert!(e.in_keys().is_none() && e.key_group().is_none(), "{clip}");
     }
 
     // Notes saved before shapes were kept get theirs at the next read, from the notes in the index.
@@ -448,7 +448,7 @@ fn the_same_loop_in_other_keys_is_one_set_and_old_notes_get_their_shape() {
     run(&mut store, &dir, false);
     let catalogue = Catalogue::new(store.all(&HashMap::new(), &HashMap::new()).unwrap());
     let low = catalogue.entries.iter().find(|e| e.phrase.clip == "Low C").unwrap();
-    assert_eq!(low.in_keys, Some(InKeys::Octaves(2)));
+    assert_eq!(low.in_keys(), Some(InKeys::Octaves(2)));
 }
 
 #[test]

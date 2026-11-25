@@ -744,7 +744,7 @@ pub fn midi_parts(cat: &Arc<mo_midi::Catalogue>, smallest: usize) -> MidiParts {
     // the page's own search finds them ("Pad Loop F#m" when "Pad Loop Am" heads the group).
     let mut others: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     for (at, e) in cat.entries.iter().enumerate() {
-        if let Some(head) = e.key_group.filter(|&g| g != at) {
+        if let Some(head) = e.key_group().filter(|&g| g != at) {
             let words = others.entry(head).or_default();
             for name in [crate::midi::title(e).as_str(), e.source_name()] {
                 words.push(' ');

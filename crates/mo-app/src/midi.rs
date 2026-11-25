@@ -260,7 +260,10 @@ fn chips_pass(f: &Filters, e: &Entry) -> [bool; 3] {
 pub fn passing<'a>(cat: &'a Catalogue, f: &'a Filters) -> impl Fn(&Entry) -> bool + Sync + 'a {
     let words = mo_midi::catalogue::words_of(&f.text);
     move |e| {
-        big_enough(e, f.smallest) && e.matches(&words) && in_years(f, e, &cat.dates) && chips_pass(f, e) == [true; 3]
+        big_enough(e, f.smallest)
+            && cat.matches(e, &words)
+            && in_years(f, e, &cat.dates)
+            && chips_pass(f, e) == [true; 3]
     }
 }
 
@@ -281,9 +284,9 @@ pub fn view(
     let one_line = !matches!(target, Some(Target::Within(_)));
     if let Some(Target::Like(at)) = target {
         // Not the part's own notes in another key: they're what it's most like.
-        let own = cat.entry(at).and_then(|e| e.key_group);
+        let own = cat.entry(at).and_then(|e| e.key_group());
         if own.is_some() {
-            base.retain(|h| cat.entry(h.entry).is_none_or(|e| e.key_group != own));
+            base.retain(|h| cat.entry(h.entry).is_none_or(|e| e.key_group() != own));
         }
     }
     let counts = counted(cat, &base, f, one_line);
@@ -326,14 +329,14 @@ fn counted(cat: &Catalogue, base: &[Hit], f: &Filters, one_line: bool) -> Choice
 /// Keeps the first hit of each set of the same notes in other keys ([`Entry::key_group`]), in the order they come.
 fn one_per_key_group(cat: &Catalogue, hits: &mut Vec<Hit>) {
     let mut seen = HashSet::new();
-    hits.retain(|h| cat.entry(h.entry).and_then(|e| e.key_group).is_none_or(|g| seen.insert(g)));
+    hits.retain(|h| cat.entry(h.entry).and_then(|e| e.key_group()).is_none_or(|g| seen.insert(g)));
 }
 
 /// The row of `hits` that shows the part at `at`: its own, else the line standing for it in another key.
 pub fn row_of(cat: &Catalogue, hits: &[Hit], at: usize) -> Option<usize> {
     hits.iter().position(|h| h.entry == at).or_else(|| {
-        let group = cat.entry(at).and_then(|e| e.key_group)?;
-        hits.iter().position(|h| cat.entry(h.entry).is_some_and(|e| e.key_group == Some(group)))
+        let group = cat.entry(at).and_then(|e| e.key_group())?;
+        hits.iter().position(|h| cat.entry(h.entry).is_some_and(|e| e.key_group() == Some(group)))
     })
 }
 
@@ -384,7 +387,7 @@ fn counts(cat: &Catalogue, hits: &[Hit], f: &Filters, one_line: bool) -> ChoiceC
     let keys = key_list();
     let entries = || hits.par_iter().filter_map(|h| cat.entry(h.entry).filter(|e| in_years(f, e, &cat.dates)));
     let mut c = entries()
-        .filter(|e| !one_line || e.key_group.is_none())
+        .filter(|e| !one_line || e.key_group().is_none())
         .fold(ChoiceCounts::empty, |mut c, e| {
             choices_of(e, f, &keys, |chip, at| {
                 if let Some(n) = c.chip(chip).get_mut(at) {
@@ -398,10 +401,10 @@ fn counts(cat: &Catalogue, hits: &[Hit], f: &Filters, one_line: bool) -> ChoiceC
         return c;
     }
     // Few: a pack's loops in other keys. Each (set, chip, choice) once.
-    let grouped: Vec<&Entry> = entries().filter(|e| e.key_group.is_some()).collect();
+    let grouped: Vec<&Entry> = entries().filter(|e| e.key_group().is_some()).collect();
     let mut seen = HashSet::new();
     for e in grouped {
-        let group = e.key_group.unwrap_or_default();
+        let group = e.key_group().unwrap_or_default();
         choices_of(e, f, &keys, |chip, at| {
             if seen.insert((group, chip, at))
                 && let Some(n) = c.chip(chip).get_mut(at)
@@ -637,7 +640,7 @@ pub fn from_text(e: &Entry) -> String {
     if e.copies() > 1 {
         text.push_str(&format!(" · in {} files", thousands(e.copies())));
     }
-    match e.in_keys {
+    match e.in_keys() {
         Some(mo_midi::InKeys::Keys(n)) => text.push_str(&format!(" · in {n} keys")),
         Some(mo_midi::InKeys::Octaves(n)) => text.push_str(&format!(" · in {n} octaves")),
         None => {}
@@ -665,7 +668,7 @@ pub fn key_text(e: &Entry) -> String {
 /// when it only says the kind again).
 pub fn details(e: &Entry) -> String {
     let role = role_label(e.role());
-    let instrument = e.instrument.as_ref().map(|i| i.family.name()).filter(|n| {
+    let instrument = e.instrument.map(|family| family.name()).filter(|n| {
         // "Bass" says nothing "Bassline" doesn't.
         let (n, r) = (n.to_lowercase(), role.to_lowercase());
         !r.starts_with(&n) && n != e.role().name().to_lowercase()
@@ -981,7 +984,7 @@ pub fn facts(e: &Entry, dates: &RealDates) -> Vec<(&'static str, String)> {
 
 /// What the instrument guess says and why: "Piano: its track is called Keys".
 pub fn instrument_text(e: &Entry) -> String {
-    e.instrument.as_ref().map(|i| format!("{}: {}", i.family.name(), i.why)).unwrap_or_default()
+    e.instrument_why().map(|i| format!("{}: {}", i.family.name(), i.why)).unwrap_or_default()
 }
 
 /// The other files with these notes, newest first, as names, at most `most` (and how many more).
@@ -1013,13 +1016,7 @@ pub fn gm_sound(e: &Entry) -> mo_midi::gm::GmSound {
     let file = std::path::Path::new(&p.source.path).file_stem().and_then(|s| s.to_str()).unwrap_or("");
     // A project's channel has no program change of its own to go by.
     let program = if e.is_project() { None } else { p.program };
-    mo_midi::gm::sound_for(
-        e.role(),
-        p.drums,
-        program,
-        &[&p.track_name, &p.part, &p.clip, file],
-        e.instrument.as_ref().map(|i| i.family),
-    )
+    mo_midi::gm::sound_for(e.role(), p.drums, program, &[&p.track_name, &p.part, &p.clip, file], e.instrument)
 }
 
 /// A part's tempo, as [`read_tempo`] found it.

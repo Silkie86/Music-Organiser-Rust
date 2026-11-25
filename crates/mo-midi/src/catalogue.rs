@@ -29,23 +29,25 @@ pub struct Entry {
     /// The other files with the same notes (older saves of the song, or the same pattern in another project), newest
     /// first.
     pub other_sources: Vec<Arc<Source>>,
-    /// The instrument it's for, when its names, plugin, channel or General MIDI sound say.
-    pub instrument: Option<InstrumentGuess>,
+    /// The instrument it's for, when its names, plugin, channel or General MIDI sound say. How the app knows is
+    /// worked out when it's asked for ([`Entry::instrument_why`]), not kept for every part.
+    pub instrument: Option<Family>,
     /// For a phrase joined from clips that play back to back: those clips, and where each sits in it.
     pub members: Vec<PhraseMember>,
     /// The longer phrases these notes are part of (as places in [`Catalogue::entries`]), longest first.
     pub within: Vec<usize>,
-    /// The newest of the same notes moved up or down in the same folder of MIDI files (the same
-    /// [`StoredPhrase::shape`]: a pack's loop in every key), as a place in [`Catalogue::entries`]; it stands for them
-    /// all in a list. None when there's no other. See [`Catalogue::new`] for what's grouped.
-    pub key_group: Option<usize>,
-    /// How many keys (or octaves) that set of notes is in.
-    pub in_keys: Option<InKeys>,
-    /// Everything search looks in, in small letters.
-    search_text: String,
-    /// The songs this part is in (see [`song_of`]), worked out the first time they're asked for.
-    songs: OnceLock<Vec<String>>,
+    /// [`Entry::key_group`], or [`NO_GROUP`].
+    key_group: u32,
+    /// [`Entry::in_keys`]: how many, or 0 for none; and whether they're octaves.
+    in_keys: u32,
+    in_octaves: bool,
+    /// Where its search text is in the catalogue's one text, and how long: see [`Catalogue::matches`].
+    text_at: usize,
+    text_len: u32,
 }
+
+/// [`Entry::key_group`] when there's none.
+const NO_GROUP: u32 = u32::MAX;
 
 impl Entry {
     /// How many files have these notes.
@@ -94,19 +96,33 @@ impl Entry {
         self.phrase.key.filter(|k| k.is_sure()).map(|k| k.short()).unwrap_or_default()
     }
 
-    /// Whether this song (as [`song_of`] gives it) has these notes, in any of its saves.
-    pub fn is_in_song(&self, song: &str) -> bool {
-        self.songs
-            .get_or_init(|| {
-                std::iter::once(&self.phrase.source).chain(&self.other_sources).map(|s| song_of(&s.path)).collect()
-            })
-            .iter()
-            .any(|s| s == song)
+    /// Every file that has these notes, the newest first.
+    pub fn sources(&self) -> impl Iterator<Item = &Arc<Source>> {
+        std::iter::once(&self.phrase.source).chain(&self.other_sources)
     }
 
-    /// Whether every word (already in small letters) is in its names, folders, kind, instrument or key.
-    pub fn matches(&self, words: &[String]) -> bool {
-        words.iter().all(|w| self.search_text.contains(w.as_str()))
+    /// Whether this song (as [`song_of`] gives it) has these notes, in any of its saves. Works each file's song out
+    /// again: a search that leaves songs out goes by the catalogue's list of them instead.
+    pub fn is_in_song(&self, song: &str) -> bool {
+        self.sources().any(|s| song_of(&s.path) == song)
+    }
+
+    /// The newest of the same notes moved up or down in the same folder of MIDI files (the same
+    /// [`StoredPhrase::shape`]: a pack's loop in every key), as a place in [`Catalogue::entries`]; it stands for them
+    /// all in a list. None when there's no other. See [`Catalogue::new`] for what's grouped.
+    pub fn key_group(&self) -> Option<usize> {
+        (self.key_group != NO_GROUP).then_some(self.key_group as usize)
+    }
+
+    /// How many keys (or octaves) that set of notes is in.
+    pub fn in_keys(&self) -> Option<InKeys> {
+        let count = self.in_keys as usize;
+        (count > 0).then_some(if self.in_octaves { InKeys::Octaves(count) } else { InKeys::Keys(count) })
+    }
+
+    /// The instrument it's for with how the app knows ("Keyscape is a piano plugin"), worked out now.
+    pub fn instrument_why(&self) -> Option<InstrumentGuess> {
+        instrument_of(&self.phrase)
     }
 }
 
@@ -167,6 +183,9 @@ pub struct Hit {
     pub likeness: Option<f64>,
 }
 
+/// The song each file is a save of, by where the file's record is in memory (with the record, so that place stays its).
+type Songs = HashMap<usize, (Arc<Source>, Box<str>)>;
+
 /// Every part, one entry per set of notes, newest first.
 #[derive(Debug, Default)]
 pub struct Catalogue {
@@ -178,7 +197,15 @@ pub struct Catalogue {
     /// Which files' dates are real, as of when the catalogue was made: the entries' order, the dates the page shows
     /// and the years it counts all go by it, so they agree for as long as the catalogue lasts.
     pub dates: RealDates,
-    by_hash: HashMap<String, usize>,
+    /// The entries' places, in the order of their hashes: [`Catalogue::find`] looks a hash up in it, so no hash is
+    /// kept a second time.
+    by_hash: Vec<u32>,
+    /// Every entry's search text (everything search looks in, in small letters), one after the other: one piece of
+    /// memory, not one for each part.
+    text: String,
+    /// The song each file is a save of, by where the file's record is in memory, worked out the first time a search
+    /// leaves songs out. Each record is held here too, so its place can't be given to another while this lasts.
+    songs: OnceLock<Songs>,
 }
 
 impl Catalogue {
@@ -219,16 +246,15 @@ impl Catalogue {
                 copies.push(p);
             }
         }
-        let by_hash: HashMap<String, usize> = firsts.iter().enumerate().map(|(at, p)| (p.hash.clone(), at)).collect();
         rayon::spawn(move || drop(copies));
         // Names, instruments and search text are worked out on every core: hundreds of thousands of parts. So is the
         // folder each loop that may be in other keys is in (see below).
-        let (mut entries, folders): (Vec<Entry>, Vec<Option<String>>) = firsts
+        let made: Vec<(Entry, Option<String>, String)> = firsts
             .into_par_iter()
             .zip(others)
             .map(|(phrase, other_sources)| {
-                let instrument = instrument_of(&phrase);
-                let search_text = search_text_of(&phrase, phrase.role(), instrument.as_ref());
+                let instrument = instrument_of(&phrase).map(|i| i.family);
+                let search_text = search_text_of(&phrase, phrase.role(), instrument);
                 let members = PhraseMember::decode(&phrase.members);
                 let entry = Entry {
                     phrase,
@@ -236,17 +262,34 @@ impl Catalogue {
                     instrument,
                     members,
                     within: Vec::new(),
-                    key_group: None,
-                    in_keys: None,
-                    search_text,
-                    songs: OnceLock::new(),
+                    key_group: NO_GROUP,
+                    in_keys: 0,
+                    in_octaves: false,
+                    text_at: 0,
+                    text_len: 0,
                 };
                 let p = &entry.phrase;
                 let in_keys = p.shape.is_some() && !entry.is_project() && !p.drums && entry.role() != Role::Drums;
                 let folder = in_keys.then(|| folder_key(&p.source.path));
-                (entry, folder)
+                (entry, folder, search_text)
             })
-            .unzip();
+            .collect();
+        // The search texts go into one text, each entry keeping where its own is.
+        let mut text = String::with_capacity(made.iter().map(|(_, _, t)| t.len()).sum());
+        let (mut entries, mut folders) = (Vec::with_capacity(made.len()), Vec::with_capacity(made.len()));
+        for (mut entry, folder, words) in made {
+            (entry.text_at, entry.text_len) = (text.len(), text_len(&words));
+            text.push_str(&words);
+            entries.push(entry);
+            folders.push(folder);
+        }
+        let hash_of = |at: &u32| entries.get(*at as usize).map_or("", |e: &Entry| e.phrase.hash.as_str());
+        let mut by_hash: Vec<u32> = (0..entries.len()).filter_map(|at| u32::try_from(at).ok()).collect();
+        by_hash.par_sort_unstable_by(|a, b| hash_of(a).cmp(hash_of(b)));
+        let find = |hash: &str| {
+            let found = by_hash.binary_search_by(|at| hash_of(at).cmp(hash)).ok()?;
+            by_hash.get(found).map(|&at| at as usize)
+        };
 
         // Each clip learns which longer phrases it's part of.
         let mut within: Vec<(usize, usize)> = Vec::new();
@@ -255,7 +298,7 @@ impl Catalogue {
             hashes.sort_unstable();
             hashes.dedup();
             for hash in hashes {
-                if let Some(&member) = by_hash.get(hash).filter(|m| **m != at) {
+                if let Some(member) = find(hash).filter(|m| *m != at) {
                     within.push((member, at));
                 }
             }
@@ -299,12 +342,14 @@ impl Catalogue {
                 group.iter().filter_map(|&at| entries.get(at)).map(|e| e.phrase.lowest % 12).collect();
             keys.sort_unstable();
             keys.dedup();
-            let count = if keys.len() > 1 { InKeys::Keys(keys.len()) } else { InKeys::Octaves(group.len()) };
+            let (count, in_octaves) = if keys.len() > 1 { (keys.len(), false) } else { (group.len(), true) };
             line_count -= group.len() - 1;
+            let first = group.first().and_then(|&at| u32::try_from(at).ok()).unwrap_or(NO_GROUP);
             for &at in &group {
                 if let Some(e) = entries.get_mut(at) {
-                    e.key_group = group.first().copied();
-                    e.in_keys = Some(count);
+                    e.key_group = first;
+                    e.in_keys = u32::try_from(count).unwrap_or(u32::MAX);
+                    e.in_octaves = in_octaves;
                 }
             }
         }
@@ -313,18 +358,41 @@ impl Catalogue {
             // Longest first; equal lengths keep their order (newest first), as the C# stable sort does.
             e.within.sort_by_key(|&p| std::cmp::Reverse(bars.get(p).copied().unwrap_or(0)));
         }
-        Catalogue { entries, phrase_count, line_count, dates, by_hash }
+        Catalogue { entries, phrase_count, line_count, dates, by_hash, text, songs: OnceLock::new() }
     }
 
     /// The part with these notes. Entries are made again on every reload, so the page holds on to its picks by
     /// their notes and finds them again here.
     pub fn find(&self, hash: &str) -> Option<usize> {
-        self.by_hash.get(hash).copied()
+        let hash_of = |at: &u32| self.entries.get(*at as usize).map_or("", |e| e.phrase.hash.as_str());
+        let found = self.by_hash.binary_search_by(|at| hash_of(at).cmp(hash)).ok()?;
+        self.by_hash.get(found).map(|&at| at as usize)
+    }
+
+    /// Whether every word (already in small letters, as [`words_of`] gives them) is in the names, folders, kind,
+    /// instrument or key of `e`, which must be one of this catalogue's entries.
+    pub fn matches(&self, e: &Entry, words: &[String]) -> bool {
+        let text = self.text.get(e.text_at..e.text_at.saturating_add(e.text_len as usize)).unwrap_or("");
+        words.iter().all(|w| text.contains(w.as_str()))
+    }
+
+    /// The song each file in the catalogue is a save of ([`song_of`]), by where the file's record is in memory.
+    fn songs(&self) -> &Songs {
+        self.songs.get_or_init(|| {
+            let mut files: HashMap<usize, &Arc<Source>> = HashMap::new();
+            for s in self.entries.iter().flat_map(Entry::sources) {
+                files.entry(Arc::as_ptr(s).addr()).or_insert(s);
+            }
+            files
+                .into_par_iter()
+                .map(|(place, s)| (place, (Arc::clone(s), song_of(&s.path).into_boxed_str())))
+                .collect()
+        })
     }
 
     /// Whether the entry at `at` has a line of its own in a list: it isn't the same loop in another key as a newer one.
     pub fn is_line(&self, at: usize) -> bool {
-        self.entries.get(at).is_some_and(|e| e.key_group.is_none_or(|g| g == at))
+        self.entries.get(at).is_some_and(|e| e.key_group().is_none_or(|g| g == at))
     }
 
     pub fn entry(&self, at: usize) -> Option<&Entry> {
@@ -336,7 +404,10 @@ impl Catalogue {
     pub fn relabel(&mut self, at: usize, role: Option<Role>) {
         if let Some(e) = self.entries.get_mut(at) {
             e.phrase.your_role = role;
-            e.search_text = search_text_of(&e.phrase, e.phrase.role(), e.instrument.as_ref());
+            // Its new text goes on the end of the one text; the old stays where it is, unused (a relabel is rare).
+            let words = search_text_of(&e.phrase, e.phrase.role(), e.instrument);
+            (e.text_at, e.text_len) = (self.text.len(), text_len(&words));
+            self.text.push_str(&words);
         }
     }
 
@@ -357,6 +428,15 @@ impl Catalogue {
             return (hits, phrases.len());
         }
         let words = words_of(&q.text);
+        // The songs to leave out, against each file's song: worked out once for every file, not for every part.
+        let left = (!q.leave_songs.is_empty()).then(|| self.songs());
+        let is_left = |s: &Arc<Source>| match left.and_then(|songs| songs.get(&Arc::as_ptr(s).addr())) {
+            Some((_, song)) => q.leave_songs.iter().any(|l| l.as_str() == &**song),
+            None => {
+                let song = song_of(&s.path);
+                q.leave_songs.contains(&song)
+            }
+        };
         let pool: Vec<usize> = self
             .entries
             .par_iter()
@@ -366,8 +446,8 @@ impl Catalogue {
                 q.role.is_none_or(|r| e.role() == r)
                     && q.from.is_none_or(|f| (f == From::Projects) == e.is_project())
                     && q.like != Some(*at)
-                    && e.matches(&words)
-                    && !q.leave_songs.iter().any(|s| e.is_in_song(s))
+                    && self.matches(e, &words)
+                    && !(left.is_some() && e.sources().any(is_left))
             })
             .map(|(at, _)| at)
             .collect();
@@ -472,11 +552,16 @@ fn folders_of(path: &str) -> Vec<&str> {
     folder.split(['\\', '/']).filter(|f| !f.is_empty()).collect()
 }
 
-fn search_text_of(p: &StoredPhrase, role: Role, instrument: Option<&InstrumentGuess>) -> String {
+/// A search text's length as an entry keeps it.
+fn text_len(text: &str) -> u32 {
+    u32::try_from(text.len()).unwrap_or(u32::MAX)
+}
+
+fn search_text_of(p: &StoredPhrase, role: Role, instrument: Option<Family>) -> String {
     let mut parts: Vec<&str> =
         vec![&p.part, &p.clip, file_stem(&p.source.path), role.name(), role.plural(), &p.source.daw];
-    if let Some(i) = instrument {
-        parts.push(i.family.search_words());
+    if let Some(family) = instrument {
+        parts.push(family.search_words());
     }
     // The General MIDI sound it asks for, except the default piano (what files write when nobody chose) and on drums,
     // where the number picks a drum kit, not one of these sounds.
@@ -605,10 +690,10 @@ pub(crate) mod tests {
             // The same loop in another file, in D minor: grouped with the first.
             shaped(phrase(3, &b, "Lead", "Loop Dm", Role::Melody, "D1"), 62),
         ]);
-        assert_eq!(cat.entries[0].key_group, Some(0));
-        assert_eq!(cat.entries[1].key_group, None, "a second track of the same file stays a line");
-        assert_eq!(cat.entries[2].key_group, Some(0));
-        assert_eq!(cat.entries[0].in_keys, Some(InKeys::Keys(2)));
+        assert_eq!(cat.entries[0].key_group(), Some(0));
+        assert_eq!(cat.entries[1].key_group(), None, "a second track of the same file stays a line");
+        assert_eq!(cat.entries[2].key_group(), Some(0));
+        assert_eq!(cat.entries[0].in_keys(), Some(InKeys::Keys(2)));
         assert_eq!(cat.line_count, 2);
         // Both files with both tracks: two lines, each track's copies together.
         let cat = Catalogue::new(vec![
@@ -618,7 +703,7 @@ pub(crate) mod tests {
             shaped(phrase(4, &b, "Lead high", "Loop Dm", Role::Melody, "D2"), 74),
         ]);
         assert_eq!(cat.line_count, 2);
-        assert_eq!((cat.entries[1].key_group, cat.entries[3].key_group), (Some(1), Some(1)));
+        assert_eq!((cat.entries[1].key_group(), cat.entries[3].key_group()), (Some(1), Some(1)));
     }
 
     #[test]
@@ -696,8 +781,56 @@ pub(crate) mod tests {
         c.relabel(keys, Some(Role::Arp));
         assert_eq!(c.role_counts().get(&Role::Melody), None);
         assert_eq!(c.search(&Query { text: "arps".into(), ..Query::default() }).1, 1);
+        assert_eq!(c.search(&Query { text: "trap keys".into(), ..Query::default() }).1, 1, "its names still match");
         c.relabel(keys, None);
         assert_eq!(c.entries[keys].role(), Role::Melody);
+        assert_eq!(c.search(&Query { text: "arps".into(), ..Query::default() }).1, 0, "its old words are gone");
+    }
+
+    #[test]
+    fn every_part_is_found_by_its_hash_and_matches_its_own_words() {
+        let pack = source(r"D:\Packs\Loops\Many.mid", SourceKind::File, 100);
+        // Hashes out of order, as they come: the newest file first, not the smallest hash.
+        let hashes: Vec<String> = (0..300u32).map(|n| format!("{:08X}", n.wrapping_mul(2_654_435_761))).collect();
+        let phrases =
+            hashes.iter().enumerate().map(|(n, h)| phrase(n as i64, &pack, "", &format!("Loop{n}x"), Role::Melody, h));
+        let c = Catalogue::new(phrases.collect());
+        for (n, h) in hashes.iter().enumerate() {
+            let at = c.find(h).expect("found");
+            assert_eq!(c.entries[at].phrase.id, n as i64);
+            // Its own words and nobody else's: each entry reads its own stretch of the one text.
+            assert!(c.matches(&c.entries[at], &words_of(&format!("LOOP{n}x many"))));
+            assert!(!c.matches(&c.entries[at], &words_of(&format!("loop{}x", n + 1))));
+        }
+        assert_eq!(c.find("no such hash"), None);
+        assert_eq!(c.find(""), None);
+        assert_eq!(Catalogue::default().find("A"), None);
+    }
+
+    #[test]
+    fn leaving_songs_out_is_the_same_the_second_time() {
+        let c = sample();
+        let q = Query { leave_songs: vec![song_of(r"C:\Projects\Didums\Didums_1.flp")], ..Query::default() };
+        let first = c.search(&q);
+        assert_eq!(titles(&c, &first.0), ["Dark keys 01"]);
+        assert_eq!(c.search(&q), first, "from the songs kept the first time");
+        // A song only an older copy is in still leaves the part out.
+        let old = source(r"C:\Projects\Other\Other_1.flp", SourceKind::Project, 50);
+        let new = source(r"C:\Projects\Didums\Didums_70.flp", SourceKind::Project, 300);
+        let c = Catalogue::new(vec![
+            phrase(1, &new, "Piano", "Verse", Role::Chords, "A"),
+            phrase(2, &old, "Piano", "Verse", Role::Chords, "A"),
+        ]);
+        let other = Query { leave_songs: vec![song_of(r"C:\Projects\Other\Other_9.flp")], ..Query::default() };
+        assert_eq!(c.search(&other).1, 0);
+        let neither = Query { leave_songs: vec![song_of(r"C:\Projects\Else\Else_9.flp")], ..Query::default() };
+        assert_eq!(c.search(&neither).1, 1);
+    }
+
+    #[test]
+    fn an_entry_is_no_bigger_than_it_was_made() {
+        // Hundreds of thousands are held at once: a field added here costs that many times its size.
+        assert!(std::mem::size_of::<Entry>() <= 360, "{}", std::mem::size_of::<Entry>());
     }
 
     #[test]
