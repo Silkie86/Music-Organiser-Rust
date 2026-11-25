@@ -72,8 +72,11 @@ impl Word {
             (0..size).map(|_| OnceLock::new()).collect()
         });
         // Set before the number is given out, and only here, under the list's lock: a number anyone holds has its
-        // text.
-        let _ = texts[at].set(held);
+        // text. A place already taken can't be (the list and the texts only grow together), and if it ever were,
+        // the word reads as empty rather than as the text that's there.
+        if texts.get(at).is_none_or(|place| place.set(held).is_err()) {
+            return Word(0);
+        }
         words.insert(held, number);
         Word(number)
     }
@@ -249,9 +252,13 @@ mod tests {
         assert_eq!(serde_json::from_str::<Vec<Word>>(&json).unwrap(), [Word::new("dark"), Word::default()]);
         assert_eq!(std::mem::size_of::<Word>(), 4);
         assert_eq!(std::mem::size_of::<Option<Word>>(), 8);
-        // What it's for: a sound in the list was 496 bytes with its six words as pointers.
-        #[cfg(target_pointer_width = "64")]
-        assert_eq!(std::mem::size_of::<crate::Sound>(), 416);
+    }
+
+    /// What it's for: a sound in the list was 496 bytes with its six words as pointers.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn a_sound_in_the_list_is_no_bigger_than_it_was_made() {
+        assert!(std::mem::size_of::<crate::Sound>() <= 416, "{}", std::mem::size_of::<crate::Sound>());
     }
 
     #[test]
