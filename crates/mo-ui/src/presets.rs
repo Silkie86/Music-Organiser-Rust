@@ -2854,7 +2854,8 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
     let bitwig_folders =
         logic::bitwig_folders(at.bitwig(), &plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     drop(saves);
-    let library_roots: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).collect();
+    // Only the folders that are there: the curves of one that isn't just now are kept (`curves::Folders`).
+    let library_roots: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).filter(|l| l.is_dir()).collect();
     // Bitwig's curves library and the plugins' LFO shapes (Serum, LFOTool, Vital, Duck), looked through side by side.
     let (library, shapes) = background::on_pool(|| {
         rayon::join(
@@ -2867,18 +2868,36 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
                 folders.extend(logic::vital_folders(documents.as_deref(), home.as_deref(), app_data.as_deref()));
                 let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
                 folders.extend(logic::duck_folders(program_data.as_deref(), home.as_deref()));
-                logic::shape_files(&folders)
+                (logic::shape_files(&folders), folders)
             },
         )
     });
+    let (shapes, mut looked_in) = shapes;
+    looked_in.extend(library_roots);
+    // Only the folders that could still be listed after the look: one that went away meanwhile (and so gave no
+    // files, or only some) counts as away, and its curves are kept.
+    looked_in.retain(|f| std::fs::read_dir(f).is_ok());
     paths.extend(library);
     paths.extend(shapes);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let folders = Some(curves::Folders { looked_in: &looked_in, now });
     {
         let folders = bitwig_folders.clone();
         on_window(move |_| PAGE.with(|p| p.borrow_mut().bitwig = folders));
     }
-    let (changed, gone) = db.out_of_date(&paths).map_err(|e| format!("Couldn't read the curves: {}", e.0))?;
+    let (changed, gone) =
+        db.out_of_date_in(&paths, folders).map_err(|e| format!("Couldn't read the curves: {}", e.0))?;
+    // Said at every read, so a start with a moved folder's link leading nowhere shows in the log.
+    let say_away = |db: &CurvesDb| match db.folders_away() {
+        Ok(away) => away.iter().for_each(|folder| {
+            log::info("Curves", &format!("{folder} wasn't looked through this time: the curves found in it are kept"));
+        }),
+        Err(e) => log::warning("Curves", &format!("Couldn't read which folders are away: {}", e.0)),
+    };
     if changed.is_empty() && !gone {
+        say_away(&db);
         return db.list().map(with_keys).map_err(|e| format!("Couldn't read the curves: {}", e.0));
     }
     // How far it's got, on the header, while the saves are read.
@@ -2905,10 +2924,13 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
         }
     }
     let ends = Ends(finished);
-    let scanned = background::on_pool(|| db.scan(&paths, &progress));
+    let scanned = background::on_pool(|| db.scan_in(&paths, folders, &progress));
     drop(ends);
     match scanned {
-        Ok(n) => log::info("Curves", &format!("Read {n} saves for their curves")),
+        Ok(n) => {
+            log::info("Curves", &format!("Read {n} saves for their curves"));
+            say_away(&db);
+        }
         Err(e) => log::warning("Curves", &format!("Couldn't read every save for its curves: {}", e.0)),
     }
     db.list().map(with_keys).map_err(|e| format!("Couldn't read the curves: {}", e.0))

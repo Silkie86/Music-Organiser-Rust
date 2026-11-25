@@ -71,7 +71,57 @@ const SCHEMA: &str = "\
     CREATE INDEX IF NOT EXISTS curve_places_shape ON curve_places (shape);
     CREATE TABLE IF NOT EXISTS your_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS made_curves (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, length REAL NOT NULL, \
-        points TEXT NOT NULL, made INTEGER NOT NULL);";
+        points TEXT NOT NULL, made INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS curve_folders (root TEXT PRIMARY KEY NOT NULL, away INTEGER);";
+
+/// How long the curves of a folder that isn't there any more are kept, in seconds (about 3 months), in case it comes
+/// back: a moved folder's link that leads nowhere for now, a drive that's away.
+const AWAY_KEPT: i64 = 90 * 24 * 60 * 60;
+
+/// The folders a read looked through for its files (Bitwig's curves, the plugins' shapes), and when (seconds since
+/// 1970). Each is remembered in `curve_folders`. One that was looked through before and isn't now keeps the curves
+/// of its files, though they aren't listed: until the next scan when it's plainly not away (still there, or deleted:
+/// [`folder_away`]), else for [`AWAY_KEPT`] from when it was first missed. Solomon's Vital
+/// folder was behind a link that led nowhere for one start (25 Nov 2026), its 510 shape files weren't listed, and
+/// the scan forgot their 285 curves until the next start read them all again.
+#[derive(Clone, Copy, Debug)]
+pub struct Folders<'a> {
+    pub looked_in: &'a [PathBuf],
+    pub now: i64,
+}
+
+/// Whether a folder that wasn't looked through may only be away: behind a link that leads nowhere now, on a drive
+/// that isn't there, or not to be looked at. Not when it's there (it's no longer one of the folders looked in), nor
+/// when nothing is at its place though the folder it was in is there (deleted, moved or renamed).
+fn folder_away(root: &Path) -> bool {
+    if root.is_dir() {
+        // There: away only if it can't be listed (no permission, a share that answers but gives nothing).
+        return std::fs::read_dir(root).is_err();
+    }
+    match std::fs::symlink_metadata(root) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => !root.parent().is_some_and(Path::is_dir),
+        // A link that leads nowhere, or something that can't be looked at.
+        _ => true,
+    }
+}
+
+/// What a look at the saves found to do ([`CurvesDb::changed`]).
+struct Changes {
+    /// The changed saves with what a look at them found now (never [`Look::Away`]: those are kept as they are).
+    changed: Vec<(String, Look)>,
+    /// The saves read before, no longer listed, to forget.
+    gone: Vec<String>,
+    /// `curve_folders` as it's to be: folders to remember as there, folders first missed now, folders to forget.
+    there: Vec<String>,
+    missed: Vec<String>,
+    given_up: Vec<String>,
+}
+
+impl Changes {
+    fn folders_changed(&self) -> bool {
+        !(self.there.is_empty() && self.missed.is_empty() && self.given_up.is_empty())
+    }
+}
 
 /// The most of the file that's kept for its free room to be given back at once: SQLite makes the new file in memory
 /// first (the system's temp folder may be on a full drive), so a bigger one keeps its free room and fills it again.
@@ -786,16 +836,25 @@ impl CurvesDb {
     /// reader), each once, and whether any read before are gone from `paths` or from the disk. Quick: it only looks at
     /// each file's date and size. A save that can't be looked at now isn't counted either way.
     pub fn out_of_date(&self, paths: &[String]) -> Result<(Vec<String>, bool), CurvesError> {
-        let (changed, gone) = self.changed(paths)?;
-        let gone_from_disk = changed.iter().any(|(_, now)| *now == Look::Gone);
-        let changed = changed.into_iter().filter(|(_, now)| *now != Look::Gone).map(|(p, _)| p).collect();
-        Ok((changed, !gone.is_empty() || gone_from_disk))
+        self.out_of_date_in(paths, None)
     }
 
-    /// The changed saves with what a look at them found now (never [`Look::Away`]: those are kept as they are), and
-    /// the saves no longer in `paths`.
-    #[allow(clippy::type_complexity)]
-    fn changed(&self, paths: &[String]) -> Result<(Vec<(String, Look)>, Vec<String>), CurvesError> {
+    /// [`CurvesDb::out_of_date`] for files found by looking through `folders`: a file under a folder that isn't
+    /// there now isn't gone (see [`Folders`]). Also true when the folders remembered need bringing up to date.
+    pub fn out_of_date_in(
+        &self,
+        paths: &[String],
+        folders: Option<Folders<'_>>,
+    ) -> Result<(Vec<String>, bool), CurvesError> {
+        let found = self.changed(paths, folders)?;
+        let to_do = !found.gone.is_empty() || found.folders_changed();
+        let gone_from_disk = found.changed.iter().any(|(_, now)| *now == Look::Gone);
+        let changed = found.changed.into_iter().filter(|(_, now)| *now != Look::Gone).map(|(p, _)| p).collect();
+        Ok((changed, to_do || gone_from_disk))
+    }
+
+    /// What there is to do: the changed saves, the saves no longer in `paths` to forget, and the folders to remember.
+    fn changed(&self, paths: &[String], folders: Option<Folders<'_>>) -> Result<Changes, CurvesError> {
         let known = self.known()?;
         let mut seen = HashSet::new();
         let changed = paths
@@ -809,16 +868,76 @@ impl CurvesDb {
                 (Look::There(..), None) => true,
             })
             .collect();
-        let gone = known.into_keys().filter(|k| !seen.contains(k.as_str())).collect();
-        Ok((changed, gone))
+        let (mut there, mut missed, mut given_up, mut kept) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut looked_in: Vec<String> = Vec::new();
+        if let Some(folders) = folders {
+            looked_in = folders.looked_in.iter().map(|f| f.to_string_lossy().into_owned()).collect();
+            let mut st = self.conn.prepare("SELECT root, away FROM curve_folders")?;
+            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)))?;
+            let remembered: HashMap<String, Option<i64>> = rows.collect::<Result<_, _>>()?;
+            for (root, away) in &remembered {
+                if looked_in.contains(root) {
+                    continue;
+                }
+                // A clock that says nothing (before 1970): kept, and nothing is counted from it.
+                if folders.now <= 0 {
+                    kept.push(root.clone());
+                    continue;
+                }
+                // Not looked through now. Missed before and plainly not away (there but no longer looked in, or
+                // deleted): given up. The first time it's kept all the same, as one that comes back while the read
+                // is under way, or whose link is being made again, looks no different.
+                let plain = !folder_away(Path::new(root));
+                // Kept from when it was first missed: now, when it was there last time. (A clock set back to before
+                // that day gives nothing up, and the day stays as it's written.)
+                if away.is_some_and(|since| since <= folders.now && (plain || folders.now - since >= AWAY_KEPT)) {
+                    given_up.push(root.clone());
+                    continue;
+                }
+                kept.push(root.clone());
+                if away.is_none() {
+                    missed.push(root.clone());
+                }
+            }
+            // New, or back after it was missed.
+            there = looked_in.iter().filter(|f| remembered.get(*f) != Some(&None)).cloned().collect();
+            there.sort();
+            there.dedup();
+        }
+        // A file under a folder looked through now is gone when it isn't listed; under one that's away, kept.
+        let under = |file: &str, roots: &[String]| roots.iter().any(|r| Path::new(file).starts_with(r));
+        let gone = known
+            .into_keys()
+            .filter(|k| !seen.contains(k.as_str()) && (kept.is_empty() || under(k, &looked_in) || !under(k, &kept)))
+            .collect();
+        Ok(Changes { changed, gone, there, missed, given_up })
     }
 
     /// Reads the saves among `paths` that changed (over every core, at low priority as the caller's pool is), and
-    /// forgets saves no longer in `paths` or no longer there. A save that can't be read or looked at now (locked by
-    /// its DAW, a drive unplugged) keeps what was found in it before and is tried again next time. `progress` counts the
+    /// forgets saves no longer in `paths` or no longer there. A save in `paths` that can't be read or looked at now
+    /// (locked by its DAW, a drive unplugged) keeps what was found in it before and is tried again next time. `progress` counts the
     /// saves read. Returns how many were read.
     pub fn scan(&mut self, paths: &[String], progress: &Progress) -> Result<usize, CurvesError> {
-        let (changed, mut gone) = self.changed(paths)?;
+        self.scan_in(paths, None, progress)
+    }
+
+    /// The folders looked through before and not at the last scan, whose curves are kept meanwhile.
+    pub fn folders_away(&self) -> Result<Vec<String>, CurvesError> {
+        let mut st = self.conn.prepare("SELECT root FROM curve_folders WHERE away IS NOT NULL")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// [`CurvesDb::scan`] for files found by looking through `folders`, which are remembered: the files of one that
+    /// isn't there now keep their curves, for about 3 months from when it was first missed (see [`Folders`]).
+    pub fn scan_in(
+        &mut self,
+        paths: &[String],
+        folders: Option<Folders<'_>>,
+        progress: &Progress,
+    ) -> Result<usize, CurvesError> {
+        let Changes { changed, mut gone, there, missed, given_up } = self.changed(paths, folders)?;
+        let now = folders.map_or(0, |f| f.now);
         progress.total.store(changed.len(), Ordering::Relaxed);
         progress.done.store(0, Ordering::Relaxed);
         let results: Vec<Result<ReadSave, (String, bool)>> = changed
@@ -846,6 +965,18 @@ impl CurvesDb {
             }
         }
         let tx = self.conn.transaction()?;
+        for root in &there {
+            tx.execute(
+                "INSERT INTO curve_folders (root, away) VALUES (?1, NULL) ON CONFLICT(root) DO UPDATE SET away = NULL",
+                [root],
+            )?;
+        }
+        for root in &missed {
+            tx.execute("UPDATE curve_folders SET away = ?2 WHERE root = ?1", params![root, now])?;
+        }
+        for root in &given_up {
+            tx.execute("DELETE FROM curve_folders WHERE root = ?1", [root])?;
+        }
         for p in gone.iter().chain(read.iter().map(|r| &r.0)) {
             tx.execute("DELETE FROM curve_places WHERE path = ?1", [p])?;
             tx.execute("DELETE FROM curve_reads WHERE path = ?1", [p])?;
@@ -1815,6 +1946,109 @@ mod tests {
         let saves: Vec<String> = db.known().unwrap().into_keys().collect();
         assert!(saves.contains(&away) && saves.contains(&a) && !saves.contains(&b), "{saves:?}");
         assert_eq!(db.list().unwrap().len(), 1);
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Solomon's Vital folder, 25 Nov 2026: behind a link that led nowhere for one start, so the folders looked
+    /// through didn't list its shapes, and their curves were forgotten until the next start.
+    #[test]
+    fn the_curves_of_a_folder_that_isnt_there_are_kept_for_three_months() {
+        let dir = temp_dir("folder-away");
+        // The Vital folder is on a "drive" of the test's own (a folder that goes and comes back whole).
+        let (bitwig, drive) = (dir.join("bitwig"), dir.join("drive"));
+        let vital = drive.join("plugins").join("vital");
+        std::fs::create_dir_all(&bitwig).unwrap();
+        std::fs::create_dir_all(&vital).unwrap();
+        let a = library_curve(&bitwig, "a.bwcurve", "Rise", &[0.0, 1.0, 0.0]);
+        let b = library_curve(&bitwig, "b.bwcurve", "Fall", &[1.0, 0.0]);
+        let v = library_curve(&vital, "v.bwcurve", "Wobble", &[0.0, 1.0, 0.5, 1.0]);
+        let song = library_curve(&dir, "song.bwcurve", "Dip", &[1.0, 0.0, 1.0]);
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        let progress = Progress::default();
+        let both = [bitwig.clone(), vital.clone()];
+        let day = 24 * 60 * 60;
+        let at = |looked_in, days: i64| Some(Folders { looked_in, now: 1_800_000_000 + days * day });
+        let all = [a.clone(), b.clone(), v.clone(), song.clone()];
+        assert_eq!(db.scan_in(&all, at(&both, 0), &progress).unwrap(), 4);
+        assert_eq!(db.out_of_date_in(&all, at(&both, 1)).unwrap(), (Vec::new(), false));
+        // The drive is away at this start. `b` isn't listed in a folder that is there, and the song's save isn't
+        // listed by the library: both are forgotten, as before. Vital's curve is kept.
+        let unplugged = dir.join("drive-unplugged");
+        std::fs::rename(&drive, &unplugged).unwrap();
+        assert!(folder_away(&vital) && !folder_away(&bitwig) && !folder_away(&drive));
+        let only_bitwig = [bitwig.clone()];
+        let listed = [a.clone()];
+        assert_eq!(db.out_of_date_in(&listed, at(&only_bitwig, 2)).unwrap(), (Vec::new(), true));
+        assert_eq!(db.scan_in(&listed, at(&only_bitwig, 2), &progress).unwrap(), 0);
+        let names = |db: &CurvesDb| -> Vec<String> {
+            let mut names: Vec<String> = db.list().unwrap().into_iter().map(|c| c.name).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&db), ["Rise", "Wobble"]);
+        assert_eq!(db.folders_away().unwrap(), [vital.to_string_lossy().into_owned()]);
+        // Still away: nothing to do, and its curves stay, counted from the day it was first missed. A clock that
+        // says nothing, or one set back to before that day, gives nothing up.
+        assert_eq!(db.out_of_date_in(&listed, at(&only_bitwig, 60)).unwrap(), (Vec::new(), false));
+        assert_eq!(
+            db.out_of_date_in(&listed, Some(Folders { looked_in: &only_bitwig, now: 0 })).unwrap(),
+            (Vec::new(), false)
+        );
+        assert_eq!(db.scan_in(&listed, at(&only_bitwig, -400), &progress).unwrap(), 0);
+        assert_eq!(db.scan_in(&listed, at(&only_bitwig, 60), &progress).unwrap(), 0);
+        assert_eq!(names(&db), ["Rise", "Wobble"]);
+        // Back: nothing is read again, and it's a folder that is there once more (so missed afresh next time).
+        std::fs::rename(&unplugged, &drive).unwrap();
+        let back = [a.clone(), v.clone()];
+        assert_eq!(db.scan_in(&back, at(&both, 61), &progress).unwrap(), 0);
+        assert_eq!(db.out_of_date_in(&back, at(&both, 62)).unwrap(), (Vec::new(), false));
+        assert!(db.folders_away().unwrap().is_empty());
+        std::fs::rename(&drive, &unplugged).unwrap();
+        assert_eq!(db.scan_in(&listed, at(&only_bitwig, 100), &progress).unwrap(), 0);
+        assert_eq!(db.scan_in(&listed, at(&only_bitwig, 100 + 89), &progress).unwrap(), 0);
+        assert_eq!(names(&db), ["Rise", "Wobble"]);
+        // Three months away: given up on, with the folder.
+        assert_eq!(db.out_of_date_in(&listed, at(&only_bitwig, 100 + 90)).unwrap(), (Vec::new(), true));
+        assert_eq!(db.scan_in(&listed, at(&only_bitwig, 100 + 90), &progress).unwrap(), 0);
+        assert_eq!(names(&db), ["Rise"]);
+        assert_eq!(db.out_of_date_in(&listed, at(&only_bitwig, 100 + 91)).unwrap(), (Vec::new(), false));
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_no_longer_looked_in_or_deleted_keeps_its_curves_for_one_read_only() {
+        let dir = temp_dir("folder-left");
+        let (old, gone) = (dir.join("old"), dir.join("gone"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&gone).unwrap();
+        let a = library_curve(&old, "a.bwcurve", "Rise", &[0.0, 1.0, 0.0]);
+        let b = library_curve(&gone, "b.bwcurve", "Fall", &[1.0, 0.0]);
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        let progress = Progress::default();
+        let at = |looked_in, now: i64| Some(Folders { looked_in, now: 1_800_000_000 + now });
+        let both = [old.clone(), gone.clone()];
+        assert_eq!(db.scan_in(&[a, b], at(&both, 0), &progress).unwrap(), 2);
+        // `old` is still there but no longer one of the folders looked in (another Bitwig folder was chosen);
+        // `gone` was deleted. Either may be a folder that came back, or a link being made again, while the read
+        // was under way: kept this once.
+        std::fs::remove_dir_all(&gone).unwrap();
+        assert!(!folder_away(&old) && !folder_away(&gone));
+        assert_eq!(db.scan_in(&[], at(&[], 1), &progress).unwrap(), 0);
+        assert_eq!(db.list().unwrap().len(), 2);
+        assert_eq!(db.folders_away().unwrap().len(), 2);
+        // The same at the next read: forgotten, and the folders with them.
+        assert_eq!(db.out_of_date_in(&[], at(&[], 2)).unwrap(), (Vec::new(), true));
+        assert_eq!(db.scan_in(&[], at(&[], 2), &progress).unwrap(), 0);
+        assert!(db.list().unwrap().is_empty() && db.folders_away().unwrap().is_empty());
+        assert_eq!(db.out_of_date_in(&[], at(&[], 3)).unwrap(), (Vec::new(), false));
+        // A read that names no folders (the tests, older callers) forgets what isn't listed, as it always did.
+        std::fs::create_dir_all(&gone).unwrap();
+        let b = library_curve(&gone, "b.bwcurve", "Fall", &[1.0, 0.0]);
+        assert_eq!(db.scan_in(std::slice::from_ref(&b), at(std::slice::from_ref(&gone), 4), &progress).unwrap(), 1);
+        assert_eq!(db.scan(&[], &progress).unwrap(), 0);
+        assert!(db.list().unwrap().is_empty());
         drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
     }
