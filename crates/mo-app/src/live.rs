@@ -96,6 +96,8 @@ pub struct Live {
     later: HashMap<String, i64>,
     /// The saves whose time in FL Studio has been looked for in the library ([`Live::learn_minutes`]).
     minutes_asked: HashSet<i64>,
+    /// Each song's bounces, by its key, as last looked for ([`Live::set_all_bounces`]).
+    bounces: HashMap<String, Vec<crate::bounces::Bounce>>,
     /// When the note that the muted samples are mended, refused, may be tried again ([`REFUSED_AGAIN_AFTER`]).
     note_after: Option<Instant>,
     /// Folders found away as saves in them waited to be read again, by key, and when ([`AWAY_AGAIN_AFTER`]).
@@ -359,6 +361,7 @@ impl Live {
             stop: Arc::default(),
             later: mo_library::dust_off::read(library)?,
             minutes_asked: HashSet::new(),
+            bounces: HashMap::new(),
         })
     }
 
@@ -534,6 +537,7 @@ impl Live {
     pub fn songs(&self) -> Songs {
         let mut songs = Songs::from_saves(&self.saves, &self.choices, self.tags.clone(), self.gap_months, self.asking);
         songs.later.clone_from(&self.later);
+        songs.set_bounces(&self.bounces);
         songs
     }
 
@@ -556,6 +560,23 @@ impl Live {
             }
         }
         Ok(!found.is_empty())
+    }
+
+    /// Every song's bounces, as [`crate::bounces::find`] found them (on a thread of its own: it lists folders). Whether
+    /// what was found changed.
+    pub fn set_all_bounces(&mut self, found: HashMap<String, Vec<crate::bounces::Bounce>>) -> bool {
+        let changed = found != self.bounces;
+        self.bounces = found;
+        changed
+    }
+
+    /// The bounces of the song `key` as they were found just now (its card opened): kept for the lists made from here.
+    pub fn set_bounces(&mut self, key: &str, found: Vec<crate::bounces::Bounce>) {
+        if found.is_empty() {
+            self.bounces.remove(key);
+        } else {
+            self.bounces.insert(key.to_owned(), found);
+        }
     }
 
     /// Puts the song `key` off the Dust off card for about three months ([`crate::songs::NOT_NOW_DAYS`]): kept in the
@@ -1558,6 +1579,7 @@ mod tests {
             stop: Arc::default(),
             later: HashMap::new(),
             minutes_asked: HashSet::new(),
+            bounces: HashMap::new(),
         }
     }
 

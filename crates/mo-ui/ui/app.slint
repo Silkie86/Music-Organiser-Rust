@@ -32,6 +32,8 @@ export { Widths }
 import { SpacePage, SpaceData, DriveCard, RoomLine, CardPart, CardAll } from "pages/space.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
 import { Finder, FinderData, FinderLine } from "finder.slint";
+import { PlayerBar, SongPlayer } from "player.slint";
+export { SongPlayer }
 import { SettingsPage, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo, DawProgramInfo, BetaLineInfo } from "pages/settings.slint";
 // std-widgets' colours follow the theme (light or dark), for its scroll bars and the About part's Slint logo.
 import { Palette } from "std-widgets.slint";
@@ -400,40 +402,56 @@ export component AppWindow inherits Window {
                     background: Theme.edge;
                 }
             }
-            // The page on show.
-            if root.place == root.songs-place: SongsPage {
+            // The page on show, with the player bar under it while a song's bounce is up.
+            VerticalLayout {
                 horizontal-stretch: 1;
-            }
-            if root.place == root.sounds-place: SoundsPage {
-                horizontal-stretch: 1;
-            }
-            if root.place == root.backup-place: BackupPage {
-                horizontal-stretch: 1;
-            }
-            if root.place == root.plugins-place: PluginsPage {
-                horizontal-stretch: 1;
-            }
-            if root.place == root.presets-place || root.place == root.curves-place: PresetsPage {
-                horizontal-stretch: 1;
-            }
-            if root.place == root.midi-place: MidiPage {
-                horizontal-stretch: 1;
-            }
-            if root.place == root.settings-place && root.settings-built: SettingsPage {
-                horizontal-stretch: 1;
-            }
-            if root.place == root.space-place: SpacePage {
-                horizontal-stretch: 1;
-            }
-            if root.place != root.songs-place && root.place != root.sounds-place && root.place != root.backup-place
-                && root.place != root.midi-place && root.place != root.space-place
-                && !(root.place == root.settings-place && root.settings-built) && root.place != root.presets-place && root.place != root.curves-place
-                && root.place != root.plugins-place: ComingPage {
-                horizontal-stretch: 1;
-                title: root.places[root.place].name;
-                coming: root.places[root.place].coming;
-                can-try-job: root.place == root.settings-place;
-                try-job => { root.try-job(); }
+                // The page on show.
+                if root.place == root.songs-place: SongsPage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                }
+                if root.place == root.sounds-place: SoundsPage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                }
+                if root.place == root.backup-place: BackupPage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                }
+                if root.place == root.plugins-place: PluginsPage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                }
+                if root.place == root.presets-place || root.place == root.curves-place: PresetsPage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                }
+                if root.place == root.midi-place: MidiPage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                }
+                if root.place == root.settings-place && root.settings-built: SettingsPage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                }
+                if root.place == root.space-place: SpacePage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                }
+                if root.place != root.songs-place && root.place != root.sounds-place && root.place != root.backup-place
+                    && root.place != root.midi-place && root.place != root.space-place
+                    && !(root.place == root.settings-place && root.settings-built) && root.place != root.presets-place && root.place != root.curves-place
+                    && root.place != root.plugins-place: ComingPage {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    title: root.places[root.place].name;
+                    coming: root.places[root.place].coming;
+                    can-try-job: root.place == root.settings-place;
+                    try-job => { root.try-job(); }
+                }
+                if SongPlayer.shown: PlayerBar {
+                    vertical-stretch: 0;
+                }
             }
         }
 
@@ -446,7 +464,7 @@ export component AppWindow inherits Window {
 
         ActivityCards {
             x: parent.width - self.width - 20px;
-            y: parent.height - self.height - 20px;
+            y: parent.height - self.height - 20px - (SongPlayer.shown ? 56px : 0px);
             height: self.preferred-height;
             cards: root.cards;
             more: root.more-cards;

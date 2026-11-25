@@ -444,7 +444,10 @@ pub fn player() -> &'static Player {
     PLAYER.get_or_init(|| {
         let player = Player::new(|key| {
             let key = key.to_owned();
-            let _ = slint::invoke_from_event_loop(move || ended(&key));
+            let _ = slint::invoke_from_event_loop(move || {
+                ended(&key);
+                crate::song_player::ended(&key);
+            });
         });
         player.choose(output.clone());
         player
@@ -4403,6 +4406,7 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     // A MIDI loop playing, or one still being made, would play over it (or start on top of it later).
     crate::midi::stop_for_another(app);
     crate::curve_editor::call_off_tone();
+    crate::song_player::stop_for_another(app);
     // The screenshots show a sound playing without a sound card.
     let here = HERE.with(|h| *h.borrow());
     let ask = if here { 0 } else { PLAYS.fetch_add(1, Ordering::SeqCst) + 1 };

@@ -167,6 +167,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // The Songs page reads the song library (the C# app's library.db, read-only, until songs.db is the app's own), and
     // keeps what it reads of your saves, and the Bitwig copies it converts, only ever in songs.db.
     mo_ui::songs::connect(&app, songs_ahead, feed.clone());
+    mo_ui::song_player::connect(&app);
     mo_ui::startup::step("Songs page");
     mo_ui::sounds::keep_likeness_in(mo_app::paths::data_dir());
     mo_ui::sounds::connect(

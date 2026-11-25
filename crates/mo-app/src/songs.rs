@@ -53,6 +53,8 @@ pub struct SongRow {
     /// carries the count on). None for a song not made in FL, or until it's been worked out
     /// (`mo_app::live::Live::learn_minutes`).
     pub minutes: Option<u32>,
+    /// The sound files exported of it, newest first ([`crate::bounces`]): none until they've been looked for.
+    pub bounces: Vec<crate::bounces::Bounce>,
     /// Everything the search box looks in, upper case, one field after another.
     find: String,
 }
@@ -93,6 +95,7 @@ impl SongRow {
             tags: tags_of(latest, &earlier),
             todos: todos_of(latest, &earlier),
             minutes: song.saves().filter_map(|s| s.minutes_spent).max(),
+            bounces: Vec::new(),
             find: String::new(),
             song,
         };
@@ -768,6 +771,13 @@ pub struct SongChips {
 }
 
 impl Songs {
+    /// Gives each song its bounces, by its key ([`crate::bounces::find`]): a song not in `found` has none.
+    pub fn set_bounces(&mut self, found: &HashMap<String, Vec<crate::bounces::Bounce>>) {
+        for row in &mut self.rows {
+            row.bounces = found.get(&row.song.key).cloned().unwrap_or_default();
+        }
+    }
+
     /// The songs to dust off ([`SongRow::dusty`]) that aren't put off now, most time first: their places in
     /// [`Songs::rows`].
     pub fn dusty(&self, now: NaiveDateTime) -> Vec<usize> {
@@ -839,6 +849,9 @@ pub struct Filters {
     pub missing: bool,
     /// Only songs with something still to do.
     pub todos: bool,
+    /// Only songs with a bounce, or only those without one yet (both: every song).
+    pub has_sound: bool,
+    pub no_sound: bool,
     /// Archived songs are left out unless their status is picked.
     pub hide_archived: bool,
     /// Only songs last saved in these years, first to last (the year strip); a song with no real date is in none.
@@ -900,6 +913,9 @@ impl Filters {
             return false;
         }
         if self.todos && r.todos_left() == 0 {
+            return false;
+        }
+        if self.has_sound != self.no_sound && self.has_sound == r.bounces.is_empty() {
             return false;
         }
         if let Some((first, last)) = self.years
@@ -1456,5 +1472,23 @@ mod tests {
         assert_eq!(after.len(), DUST_OFF_CARD);
         assert!(!after.contains(&card[0]));
         assert!(after.contains(&card[1]) && after.contains(&card[2]), "{card:?} became {after:?}");
+    }
+
+    #[test]
+    fn the_sound_filters_show_songs_with_a_bounce_or_those_without_one_yet() {
+        let mut s = songs(&[save("Night", day(2026, 3, 1)), save("Glass", day(2026, 2, 1))]);
+        let night = s.rows.iter().position(|r| r.song.name == "Night").unwrap();
+        let bounce = crate::bounces::Bounce { path: "Night.wav".into(), name: "Night.wav".into(), mtime: 1 };
+        s.set_bounces(&HashMap::from([(s.rows[night].song.key.clone(), vec![bounce])]));
+        let names = |f: Filters| {
+            let v = s.view(&f, day(2026, 6, 1));
+            v.entries
+                .iter()
+                .filter_map(|e| if let Entry::Song(i) = e { Some(s.rows[*i].song.name.clone()) } else { None })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(Filters { has_sound: true, ..Filters::default() }), ["Night"]);
+        assert_eq!(names(Filters { no_sound: true, ..Filters::default() }), ["Glass"]);
+        assert_eq!(names(Filters { has_sound: true, no_sound: true, ..Filters::default() }), ["Night", "Glass"]);
     }
 }
