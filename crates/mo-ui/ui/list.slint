@@ -42,6 +42,9 @@ export component ListView inherits SlintListView {
     in property <length> place-y;
     in property <int> place-ask;
     in-out property <int> place-done;
+    // Off where a `ListBox` draws the list's scroll bar instead of Slint's thin one.
+    in property <bool> own-bar;
+    vertical-scrollbar-policy: self.own-bar ? ScrollBarPolicy.always-off : ScrollBarPolicy.as-needed;
 
     // Until the list has laid out the lines it was just given, its height is still the old lines' height: a turn then
     // stopped short, or with fewer lines left none drawn (7 Nov). So a turn waits for them. A list just made has its
@@ -110,6 +113,13 @@ export component ListView inherits SlintListView {
         self.content-y = 0px;
     }
 
+    // Turned to `y` (a `content-y`) by a `ListBox`'s scroll bar: like your own scroll, it ends the wait for a far
+    // turn's second turn first, so that turn can't pull it back.
+    public function scroll-to(y: length) {
+        self.turn-to = 1px;
+        self.content-y = y;
+    }
+
     // Turns only when the line is out of sight. A list just made comes back where it was first, and turns from there.
     function turn() {
         if (self.back-now) {
@@ -165,6 +175,12 @@ export component ListBox inherits Rectangle {
     in property <length> after;
     // Puts the list back at its top (`ListView.to-top`).
     callback to-top();
+    // For its scroll bar: how tall all the lines are (the list's `rows * row-height`: its content-height is stale
+    // until it has laid them out), how much of them is in sight (its `visible-height`), and a turn to a `content-y`
+    // (`ListView.scroll-to`). The list sets `own-bar`, so Slint's bar is off. With no `whole`, there's no bar of ours.
+    in property <length> whole;
+    in property <length> seen;
+    callback scroll-to(length);
     // Bumped by the Home key. Only a list on show is there to see it change.
     property <int> asked: AppKeys.list-top;
     changed asked => {
@@ -173,10 +189,69 @@ export component ListBox inherits Rectangle {
 
     @children
 
+    // The list's own scroll bar, in place of Slint's thin one (Solomon's F12 note of 25 Nov, 12:59: "fiddly"): a
+    // 12 px track down the list's right side, a thumb never shorter than 40 px however long the list, lit under the
+    // mouse, and a click on the track above or below the thumb turns a page that way. Only while there's more than
+    // fits. It sits over the list's last 12 px, inside the list, so nothing beside the list (a drag edge) covers it.
+    rail := Rectangle {
+        property <length> most: max(0px, root.whole - root.seen);
+        property <length> thumb-height: max(40px, min(self.height, self.height * root.seen / max(1px, root.whole)));
+        property <length> thumb-y: self.most <= 0 ? 0 : (self.height - self.thumb-height) * clamp(-root.turned / self.most, 0, 1);
+        visible: self.most > 0 && root.seen > 0;
+        x: root.width - self.width;
+        y: root.height - root.seen;
+        width: 12px;
+        height: root.seen;
+        background: grab.has-hover || grab.pressed ? Theme.surface-raised : transparent;
+        animate background { duration: Motion.tap; }
+        thumb := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: rail.thumb-y;
+            width: grab.has-hover || grab.pressed ? 8px : 6px;
+            height: rail.thumb-height;
+            border-radius: self.width / 2;
+            background: grab.pressed && grab.on-thumb ? Theme.accent : grab.has-hover ? Theme.muted : Theme.stroke.brighter(40%);
+            animate width, background { duration: Motion.tap; }
+        }
+        grab := TouchArea {
+            mouse-cursor: MouseCursor.default;
+            // Whether the press was on the thumb (a drag) or on the track (a page).
+            out property <bool> on-thumb;
+            property <length> from-y;
+            property <length> from-turned;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    self.on-thumb = self.mouse-y >= rail.thumb-y && self.mouse-y <= rail.thumb-y + rail.thumb-height;
+                    self.from-y = self.mouse-y;
+                    self.from-turned = -root.turned;
+                    if !self.on-thumb {
+                        // A page up or down, a line short so the line at the edge stays in sight.
+                        root.scroll-to(-clamp(-root.turned + (self.mouse-y < rail.thumb-y ? -1 : 1) * max(root.after, root.seen - root.after),
+                            0px, rail.most));
+                    }
+                }
+            }
+            // The wheel over the bar turns the list as it does over the lines.
+            scroll-event(e) => {
+                if e.delta-y != 0 {
+                    root.scroll-to(-clamp(-root.turned - e.delta-y, 0px, rail.most));
+                    return accept;
+                }
+                reject
+            }
+            moved => {
+                if self.pressed && self.on-thumb && rail.height > rail.thumb-height {
+                    root.scroll-to(-clamp(self.from-turned + (self.mouse-y - self.from-y) * rail.most / (rail.height - rail.thumb-height),
+                        0px, rail.most));
+                }
+            }
+        }
+    }
+
     Rectangle {
         property <bool> wanted: -root.turned > root.after;
-        // Left of the list's scroll bar (14px in Slint's look).
-        x: root.width - self.width - 14px - Space.md;
+        // Left of the list's scroll bar.
+        x: root.width - self.width - rail.width - Space.md;
         y: root.height - self.height - Space.md;
         // A StudioButton with an icon is this square.
         width: 32px;

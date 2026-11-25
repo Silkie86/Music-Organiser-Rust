@@ -797,11 +797,16 @@ export component PresetsPage inherits Rectangle {
                             turned: list.content-y;
                             after: list.row-height;
                             to-top => { list.to-top(); }
+                            // Its scroll bar (the list's own is off).
+                            whole: list.rows * list.row-height;
+                            seen: list.visible-height;
+                            scroll-to(y) => { list.scroll-to(y); }
                             VerticalLayout {
                                 PresetHeading {
                                     tight: area.list-width < 620px;
                                 }
                                 list := ListView {
+                                    own-bar: true;
                                     row-height: 48px;
                                     rows: PresetsData.lines.length;
                                     show-top: PresetsData.show-row * self.row-height;
@@ -832,7 +837,12 @@ export component PresetsPage inherits Rectangle {
                             turned: curve-list.content-y;
                             after: curve-list.row-height;
                             to-top => { curve-list.to-top(); }
+                            // Its scroll bar (the list's own is off).
+                            whole: curve-list.rows * curve-list.row-height;
+                            seen: curve-list.visible-height;
+                            scroll-to(y) => { curve-list.scroll-to(y); }
                             curve-list := ListView {
+                                own-bar: true;
                                 row-height: 48px;
                                 rows: PresetsData.curve-lines.length;
                                 show-top: PresetsData.curve-show-row * self.row-height;
