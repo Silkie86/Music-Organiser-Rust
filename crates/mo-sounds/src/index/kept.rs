@@ -153,7 +153,8 @@ pub(crate) struct Against {
 
 impl Against {
     /// The one finished file of `T`'s kind in `folder`, opened to be checked. None when there's none, more than one
-    /// (the older ones are swept when one is next kept), or it isn't a whole file of the kind.
+    /// (the older ones are swept when one is next kept), or it isn't a whole file of the kind. Half-written ones
+    /// beside it (another run's, or one a crash left) and anything that isn't a plain file don't count.
     pub(super) fn open<T: Number>(folder: &Path) -> Option<Against> {
         if cfg!(target_endian = "big") {
             return None;
@@ -162,7 +163,8 @@ impl Against {
         for entry in fs::read_dir(folder).ok()?.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name.starts_with(T::START) && is_kept_name(name) {
+            let finished = name.starts_with(T::START) && hash_and_end(name).is_some_and(str::is_empty);
+            if finished && fs::symlink_metadata(entry.path()).is_ok_and(|m| m.is_file()) {
                 if found.is_some() {
                     return None;
                 }
@@ -190,6 +192,11 @@ impl Against {
     /// How many numbers each of its rows has.
     pub(crate) fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// How many rows it holds.
+    pub(crate) fn rows(&self) -> usize {
+        self.numbers / self.dim
     }
 
     /// Whether the file's next row is `row`, as the library stores it (each number's bytes, little end first: the

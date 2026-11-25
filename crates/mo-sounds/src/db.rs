@@ -811,6 +811,16 @@ impl SoundsDb {
             return Ok(None);
         }
         let Some(mut against) = crate::index::clap_check(folder) else { return Ok(None) };
+        // A library with another number of fingerprints of the file's length has changed since: found at once from
+        // the list's own note of each sound's (its index answers it), so a changed library is read once, not twice.
+        let noted: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sounds WHERE clap_numbers = ?1",
+            [i64::try_from(against.dim()).unwrap_or(-1)],
+            |r| r.get(0),
+        )?;
+        if usize::try_from(noted).ok() != Some(against.rows()) {
+            return Ok(None);
+        }
         let want = against.dim() * 2;
         let mut st = self.conn.prepare("SELECT sound_id, v FROM sound_clap")?;
         let mut rows = st.query([])?;

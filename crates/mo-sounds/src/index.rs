@@ -1106,10 +1106,6 @@ impl SoundIndex {
         })
     }
 
-    /// Puts CLAP's numbers, the biggest block the app holds, in a file in `folder` read as it's needed
-    /// ([`VectorIndex::keep_in`]): searches find exactly what they found before. `None` when there's nothing to do
-    /// (no CLAP index, one already in a file, or one something else holds too); when it can't be done the index
-    /// stays as it was, and this says why. Never on the window's thread, nor on the pool the pages' quick jobs share.
     /// How many bytes of CLAP's numbers are in a kept file, read as they're needed, when they are.
     pub fn clap_in_file(&self) -> Option<u64> {
         match &self.clap.as_deref()?.rows {
@@ -1118,6 +1114,10 @@ impl SoundIndex {
         }
     }
 
+    /// Puts CLAP's numbers, the biggest block the app holds, in a file in `folder` read as it's needed
+    /// ([`VectorIndex::keep_in`]): searches find exactly what they found before. `None` when there's nothing to do
+    /// (no CLAP index, one already in a file, or one something else holds too); when it can't be done the index
+    /// stays as it was, and this says why. Never on the window's thread, nor on the pool the pages' quick jobs share.
     pub fn keep_clap_in(&mut self, folder: &Path) -> Option<Result<Kept, String>> {
         Arc::get_mut(self.clap.as_mut()?)?.keep_in(folder)
     }

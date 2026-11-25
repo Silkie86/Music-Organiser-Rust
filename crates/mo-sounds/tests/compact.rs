@@ -1211,6 +1211,14 @@ fn claps_fingerprints_come_as_the_file_kept_of_them_while_it_is_still_theirs() {
     // Not asked to look in the folder, or not deep enough: as before.
     assert_eq!(db.fingerprints(analysed).unwrap().1, usual);
     assert!(db.fingerprints_kept(analysed * 2, Some(&kept_in)).unwrap().1.is_empty());
+    // A half-written one beside it, or a folder with such a name, doesn't count.
+    let half = kept_in.join("sound-likeness-0123456789abcdef.rows.4321-0.mo-part");
+    std::fs::write(&half, b"half").unwrap();
+    let not_a_file = kept_in.join("sound-likeness-fedcba9876543210.rows");
+    std::fs::create_dir(&not_a_file).unwrap();
+    assert!(db.fingerprints_kept(analysed, Some(&kept_in)).unwrap().1.is_in_file());
+    std::fs::remove_file(&half).unwrap();
+    std::fs::remove_dir(&not_a_file).unwrap();
     // A second file of the kind beside it: neither is trusted.
     let twin = kept_in.join("sound-likeness-0123456789abcdef.rows");
     std::fs::copy(&files()[0], &twin).unwrap();
