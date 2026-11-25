@@ -248,6 +248,8 @@ fn main() -> Result<(), slint::PlatformError> {
             // Maximised (or full screen) again now the window is up, and checked half a second later against the
             // screen's width (Solomon, 19 Nov: a small window in the corner of his 3440-wide screen).
             mo_ui::settings::fill_the_screen(&app);
+            // A drag to a screen with another scale takes Windows' place for the window (25 Nov: it flickered).
+            mo_ui::screen_move::connect(&app);
         }
         mo_ui::watchdog::start(watched);
     })
