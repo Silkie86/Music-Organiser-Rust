@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::compact::{F32_THOUSANDTHS, thousandths};
+use crate::compact::{F32_THOUSANDTHS, F64_THOUSANDTHS, thousandths};
 use crate::music;
 use crate::word::Word;
 
@@ -98,6 +98,112 @@ impl<'de> Deserialize<'de> for Peaks {
     }
 }
 
+/// How strongly each of the 12 notes sounds (0..1, the strongest 1). The analyser rounds each to thousandths, so the
+/// usual 12 are held as whole thousandths inside the sound itself, 15 bytes with no list of their own: as a list of
+/// floats they were 96 bytes and a piece of memory apart for every one of half a million sounds, and they come back
+/// as the same floats to the last bit. Any other list (another length, a number that isn't a thousandth) keeps its
+/// floats.
+///
+/// Made only by [`Chroma::new`], so 12 thousandths are always held packed, and two `Chroma` with the same floats are
+/// equal.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Chroma(Notes);
+
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Notes {
+    #[default]
+    None,
+    /// 12 whole thousandths of 10 bits each, the first in the lowest bits.
+    Packed([u8; 15]),
+    /// Boxed twice, so the rare list costs every sound only a pointer.
+    #[allow(clippy::box_collection)]
+    Floats(Box<Vec<f64>>),
+}
+
+impl Chroma {
+    /// `strengths` held as tightly as they can be with nothing lost.
+    pub fn new(strengths: &[f64]) -> Chroma {
+        if strengths.is_empty() {
+            return Chroma(Notes::None);
+        }
+        // Straight into the 120 bits, with no list in between: this runs for every sound the list reads.
+        let packed = (strengths.len() == 12)
+            .then(|| {
+                let bits = |bits: u128, (i, &x): (usize, &f64)| Some(bits | (u128::from(thousandths(x)?) << (10 * i)));
+                strengths.iter().enumerate().try_fold(0u128, bits)
+            })
+            .flatten();
+        match packed {
+            Some(bits) => {
+                let mut bytes = [0u8; 15];
+                bytes.copy_from_slice(&bits.to_le_bytes()[..15]);
+                Chroma(Notes::Packed(bytes))
+            }
+            None => Chroma(Notes::Floats(Box::new(strengths.to_vec()))),
+        }
+    }
+
+    /// The 12 thousandths as they're packed (10 bits each, the first in the lowest bits), when that's how they're
+    /// held: the same bytes the compact library keeps after its mark, so it reads and writes them as they are.
+    pub(crate) fn packed(&self) -> Option<&[u8; 15]> {
+        match &self.0 {
+            Notes::Packed(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    /// 12 thousandths from their packed bytes. Any 15 bytes are 12 numbers of 10 bits, and each is a thousandth
+    /// [`F64_THOUSANDTHS`] has a float for, so this is what [`Chroma::new`] makes of those floats.
+    pub(crate) fn from_packed(bytes: [u8; 15]) -> Chroma {
+        Chroma(Notes::Packed(bytes))
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.0 {
+            Notes::None => 0,
+            Notes::Packed(_) => 12,
+            Notes::Floats(xs) => xs.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The strengths as a list of floats, as the analyser gave them.
+    pub fn to_vec(&self) -> Vec<f64> {
+        match &self.0 {
+            Notes::None => Vec::new(),
+            Notes::Packed(bytes) => {
+                let mut all = [0u8; 16];
+                all[..15].copy_from_slice(bytes);
+                let bits = u128::from_le_bytes(all);
+                (0..12).map(|i| F64_THOUSANDTHS[((bits >> (10 * i)) & 1023) as usize]).collect()
+            }
+            Notes::Floats(xs) => xs.to_vec(),
+        }
+    }
+}
+
+impl From<Vec<f64>> for Chroma {
+    fn from(strengths: Vec<f64>) -> Chroma {
+        Chroma::new(&strengths)
+    }
+}
+
+impl Serialize for Chroma {
+    /// As the C# app writes them: a list of numbers.
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(self.to_vec())
+    }
+}
+
+impl<'de> Deserialize<'de> for Chroma {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Chroma, D::Error> {
+        Ok(Chroma::new(&Vec::<f64>::deserialize(d)?))
+    }
+}
+
 /// A stretch of a sound that plays one chord.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
@@ -146,7 +252,7 @@ pub struct SoundAnalysis {
     pub chord: Option<String>,
     pub chords: Vec<ChordSpan>,
     /// How much of each of the 12 notes is in the sound, C first.
-    pub chroma: Vec<f64>,
+    pub chroma: Chroma,
     /// Character words: punchy, soft, bright, dark, wide, tonal, noisy…
     pub character: Vec<Word>,
     /// Peak levels in 0..1, for drawing a small waveform.
@@ -172,7 +278,6 @@ impl SoundAnalysis {
         let mut a: SoundAnalysis = serde_json::from_str(json).ok()?;
         // Reading a list doubles its room each time it fills, so with half a million sounds held the spare room adds
         // up. Each list is cut to what it holds (the waveform's `Peaks` is always made at its exact size).
-        a.chroma.shrink_to_fit();
         a.character.shrink_to_fit();
         a.chords.shrink_to_fit();
         Some(a)
@@ -211,7 +316,6 @@ mod tests {
         assert_eq!((a.waveform.len(), a.chroma.len(), a.character.len(), a.chords.len()), (160, 12, 3, 3));
         assert!(a.waveform.as_thousandths().is_some(), "160 thousandths held as 2 bytes each");
         assert_eq!(a.waveform.to_vec(), points.iter().map(|p| p.parse::<f32>().unwrap()).collect::<Vec<_>>());
-        assert_eq!(a.chroma.capacity(), a.chroma.len());
         assert_eq!(a.character.capacity(), a.character.len());
         assert_eq!(a.chords.capacity(), a.chords.len());
     }
@@ -236,5 +340,36 @@ mod tests {
         let json = serde_json::to_string(&held).unwrap();
         assert_eq!(serde_json::from_str::<Peaks>(&json).unwrap(), held);
         assert_eq!(serde_json::to_string(&Peaks::new(&[0.5, 1.0])).unwrap(), "[0.5,1.0]");
+    }
+
+    #[test]
+    fn chroma_comes_back_as_the_same_floats_to_the_last_bit_and_takes_no_list_of_its_own() {
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        // Twelve thousandths, as JSON gives them, at every place in the 15 bytes: packed.
+        for start in [0usize, 1, 85, 1012] {
+            let twelve: Vec<f64> =
+                (0..12).map(|i| format!("{}", (start + i) as f64 / 1000.0).parse().unwrap()).collect();
+            let held = Chroma::new(&twelve);
+            assert!(matches!(held.0, Notes::Packed(_)), "{start}");
+            assert_eq!((bits(&held.to_vec()), held.len()), (bits(&twelve), 12));
+            assert_eq!(serde_json::from_str::<Chroma>(&serde_json::to_string(&held).unwrap()).unwrap(), held);
+        }
+        assert_eq!(serde_json::to_string(&Chroma::new(&[0.5; 12])).unwrap(), format!("[{}]", ["0.5"; 12].join(",")));
+        // Any other list keeps its floats: another length, or a number that isn't a thousandth from 0 to 1.023.
+        let mut odd: Vec<Vec<f64>> = vec![vec![0.5; 11], vec![0.5; 13], vec![0.25]];
+        for x in [0.1234, -0.001, 1.024, -0.0, f64::NAN, f64::INFINITY] {
+            let mut twelve = vec![0.5; 12];
+            twelve[7] = x;
+            odd.push(twelve);
+        }
+        for list in odd {
+            let held = Chroma::new(&list);
+            assert!(matches!(held.0, Notes::Floats(_)), "{list:?}");
+            assert_eq!((bits(&held.to_vec()), held.len()), (bits(&list), list.len()));
+        }
+        assert!(Chroma::new(&[]).is_empty() && Chroma::default().is_empty());
+        assert_eq!(Chroma::new(&[]), Chroma::default());
+        // In the sound itself: two pointers' room, where a list took three and its numbers apart.
+        assert_eq!(std::mem::size_of::<Chroma>(), 16);
     }
 }
