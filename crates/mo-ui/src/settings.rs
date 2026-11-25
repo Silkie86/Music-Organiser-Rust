@@ -943,8 +943,9 @@ static MAXIMISED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 
 /// The window's size changed: when it stopped being maximised (or full screen), a line in the log says so, whether
 /// the user may have done it (see `watchdog::Hands`), and what Slint asked of the window in the 30 s before, from the
-/// notes its patched copy keeps (vendor/i-slint-backend-winit/PATCHED.md). On 24 Nov it left maximised by itself 10 s
-/// after coming back from the taskbar, on Songs with no page change; these lines are to name what did it.
+/// notes its patched copy keeps (vendor/i-slint-backend-winit/PATCHED.md), then what Windows sent the window in the same
+/// time (`screen_move::heard`). On 24 Nov it left maximised by itself 10 s after coming back from the taskbar, on Songs
+/// with no page change, and on 25 Nov with nothing asked at all; these lines are to name what did it.
 pub fn resized(app: &AppWindow, by_user: bool) {
     // A moment later, on the event loop: the app hears of the resize before Slint does, and Slint's own note that
     // winit says maximised changed comes as it handles it.
@@ -979,11 +980,17 @@ fn log_unmaximised(app: &AppWindow, by_user: bool) {
     } else {
         format!("what Slint asked of the window in the 30 s before:\n  {}", asked.join("\n  "))
     };
+    let heard = crate::screen_move::heard(std::time::Duration::from_secs(30));
+    let heard = if heard.is_empty() {
+        "\n  Windows sent no size, place or window-menu message in the 30 s before".to_owned()
+    } else {
+        format!("\nwhat Windows sent the window in the 30 s before:\n  {}", heard.join("\n  "))
+    };
     log::info(
         "Window",
         &format!(
             "The window stopped being maximised (page {place}): it is {}; {who}. Slint draws at scale {}, winit's \
-             scale is {winit_scale}; {asked}",
+             scale is {winit_scale}; {asked}{heard}",
             look.words(),
             app.window().scale_factor(),
         ),
