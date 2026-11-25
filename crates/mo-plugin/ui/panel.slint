@@ -396,6 +396,23 @@ export component Panel inherits Window {
         }
         return false;
     }
+
+    // Whether the Sounds search box has the keys: Left and Right move in what's typed there.
+    property <bool> sound-typing;
+    // Left (-1) stops the sound, Right (+1) plays the picked line again from its start, in the Sounds list (Solomon,
+    // 25 Nov). False anywhere else, so the key goes on as it did.
+    public function side(by: int) -> bool {
+        if (root.view != 0 || root.galaxy || root.sound-typing) {
+            return false;
+        }
+        if (by < 0) {
+            root.stop();
+        } else if (root.picked >= 0 && root.picked < root.sounds.length) {
+            // From its start: a play from a spot (0) starts it again even when it's the line playing.
+            root.play(root.picked, 0);
+        }
+        return true;
+    }
     in property <float> playing-at;
     // What's typed in the search box: kept while another tab shows, as the list keeps it.
     in-out property <string> search-text;
@@ -825,6 +842,8 @@ export component Panel inherits Window {
                         hint: "Search sounds";
                         text <=> root.search-text;
                         edited(text) => { root.search(text); }
+                        init => { root.sound-typing = self.has-keys; }
+                        changed has-keys => { root.sound-typing = self.has-keys; }
                     }
                     Segmented {
                         horizontal-stretch: 0;
