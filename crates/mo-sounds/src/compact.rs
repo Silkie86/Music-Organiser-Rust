@@ -45,7 +45,7 @@ use rusqlite::{
 
 use crate::db::{Reading, SOUND_COLUMNS, int_at, real_at, sound_at, sound_columns, text_at, word_at};
 use crate::index::{held, held_bytes};
-use crate::{ChordSpan, Everything, Peaks, Sound, SoundAnalysis, SoundsDb, SoundsError};
+use crate::{ChordSpan, Chroma, Everything, Peaks, Sound, SoundAnalysis, SoundsDb, SoundsError};
 
 pub mod backup;
 pub mod did;
@@ -1923,7 +1923,7 @@ fn analysis_values(a: Option<&SoundAnalysis>) -> Vec<Value> {
         text(&a.key_source),
         a.chord.as_deref().map_or(Value::Null, text),
         packed_chords(&a.chords),
-        packed(&a.chroma),
+        packed(&a.chroma.to_vec()),
         json_list(&a.character),
     ]
 }
@@ -1966,7 +1966,7 @@ pub(crate) fn analysis_at(r: &Row<'_>, at: usize) -> Option<SoundAnalysis> {
             Some(ValueRef::Blob(b)) => unpacked_chords(b),
             _ => from_json_list(text(20).as_deref()),
         },
-        chroma: unpacked(blob(21)),
+        chroma: Chroma::new(&unpacked::<f64>(blob(21))),
         character: from_json_list(text(22).as_deref()),
         waveform: unpacked_peaks(blob(23)),
     })
@@ -2053,7 +2053,7 @@ pub(crate) trait Packable: Copy + 'static {
 
 /// Each whole number of thousandths a list can be packed with, as the number it stands for: looked up when a list is
 /// unpacked rather than worked out again (a division for each of the waveform's 160 points, in every sound).
-const F64_THOUSANDTHS: [f64; 1024] = {
+pub(crate) const F64_THOUSANDTHS: [f64; 1024] = {
     let mut table = [0.0; 1024];
     let mut k = 0;
     while k < 1024 {

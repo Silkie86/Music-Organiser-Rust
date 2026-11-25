@@ -352,10 +352,8 @@ impl Filters {
 #[derive(Default)]
 struct Shared {
     sounds: Vec<Sound>,
-    /// Lower-cased path, type, tags and character, one per line: what the search words are looked for in.
-    hay: Vec<String>,
-    /// Lower-cased names, for the name order and every order's tie-break.
-    names: Vec<String>,
+    /// Each sound's search text and lower-cased name.
+    texts: Texts,
     /// Which sounds' dates are real, as of when the list was read: the Newest order, the years and which copy is the
     /// older all go by it, so they agree for as long as the list lasts.
     dates: RealDates,
@@ -363,6 +361,83 @@ struct Shared {
     silent: usize,
     /// Which folder each sound is in, and the folders above them: the folder tree.
     folders: Folders,
+}
+
+/// Each sound's search text (lower-cased path, type, tags and character, one per line: what the search words are
+/// looked for in) and its lower-cased name (for the name order and every order's tie-break), all in one piece of
+/// memory. Held as a text of its own for each sound, twice over, they were two more pieces of memory and 48 bytes of
+/// bookkeeping a sound, and the name a second time: it's in the search text already, as the end of the path.
+#[derive(Default)]
+struct Texts {
+    /// Every sound's search text, one after another.
+    all: String,
+    /// Where each sound's search text ends in `all` (it starts where the one before ends).
+    ends: Vec<usize>,
+    /// Where each sound's lower-cased name is in its search text: its start there and its length. [`ODD_NAME`] for a
+    /// name that isn't there letter for letter (lower-casing a Greek capital sigma depends on what follows it).
+    names: Vec<(u32, u32)>,
+    /// The lower-cased names that aren't in their search text, by place.
+    odd_names: HashMap<usize, String>,
+}
+
+/// Where a sound's lower-cased name is in its search text (start and length), or the name itself when it isn't there.
+type NamePlace = Result<(u32, u32), String>;
+
+/// In [`Texts::names`]: the name is in [`Texts::odd_names`].
+const ODD_NAME: (u32, u32) = (u32::MAX, u32::MAX);
+
+impl Texts {
+    fn new(sounds: &[Sound]) -> Texts {
+        // Worked out on every core, then joined in order.
+        let each: Vec<(String, NamePlace)> = sounds
+            .par_iter()
+            .map(|s| {
+                let hay = hay_of(&Now::of(s, None));
+                let name = s.name().to_lowercase();
+                // The path is the search text's first line, and the name is in it.
+                let path = hay.split('\n').next().unwrap_or_default();
+                let found = path
+                    .rfind(name.as_str())
+                    .and_then(|at| Some((u32::try_from(at).ok()?, u32::try_from(name.len()).ok()?)))
+                    .filter(|at| *at != ODD_NAME);
+                (hay, found.ok_or(name))
+            })
+            .collect();
+        let mut texts = Texts {
+            all: String::with_capacity(each.iter().map(|(hay, _)| hay.len()).sum()),
+            ends: Vec::with_capacity(each.len()),
+            names: Vec::with_capacity(each.len()),
+            odd_names: HashMap::new(),
+        };
+        for (i, (hay, name)) in each.into_iter().enumerate() {
+            texts.all.push_str(&hay);
+            texts.ends.push(texts.all.len());
+            match name {
+                Ok(at) => texts.names.push(at),
+                Err(name) => {
+                    texts.names.push(ODD_NAME);
+                    texts.odd_names.insert(i, name);
+                }
+            }
+        }
+        texts
+    }
+
+    /// The search text of the sound at `i`.
+    fn hay(&self, i: usize) -> &str {
+        let start = i.checked_sub(1).map_or(0, |before| self.ends[before]);
+        &self.all[start..self.ends[i]]
+    }
+
+    /// The lower-cased name of the sound at `i`.
+    fn name(&self, i: usize) -> &str {
+        let (at, len) = self.names[i];
+        if (at, len) == ODD_NAME {
+            return self.odd_names.get(&i).map_or("", String::as_str);
+        }
+        let hay = self.hay(i);
+        &hay[at as usize..at as usize + len as usize]
+    }
 }
 
 /// Every sound the page can show (hidden copies left out: they only hide in the app, rule 2), with what's worked out
@@ -633,12 +708,11 @@ impl SoundList {
             .collect();
         // Leaving out the hidden copies keeps the room they took: give it back.
         sounds.shrink_to_fit();
-        let hay = sounds.par_iter().map(|s| hay_of(&Now::of(s, None))).collect();
-        let names = sounds.par_iter().map(|s| s.name().to_lowercase()).collect();
+        let texts = Texts::new(&sounds);
         let silent = sounds.par_iter().filter(|s| s.is_silent()).count();
         let folders = Folders::new(sounds.iter().map(|s| s.path.as_str()));
         SoundList {
-            shared: Arc::new(Shared { sounds, hay, names, dates: RealDates::now(), silent, folders }),
+            shared: Arc::new(Shared { sounds, texts, dates: RealDates::now(), silent, folders }),
             used: None,
             projects: None,
             liked: None,
@@ -1364,7 +1438,7 @@ impl SoundList {
         }
         // Your say changed its type or tags since its words were worked out: worked out again, for it alone.
         let changed = now.words_changed.then(|| hay_of(now));
-        let hay = changed.as_deref().unwrap_or(&self.shared.hay[i]);
+        let hay = changed.as_deref().unwrap_or_else(|| self.shared.texts.hay(i));
         t.words.iter().all(|w| hay.contains(w.as_str()))
     }
 
@@ -1417,7 +1491,7 @@ impl SoundList {
 
     /// The sounds at `a` and `b` by name, then by place: the order of those any other order finds the same.
     fn by_name(&self, a: usize, b: usize) -> std::cmp::Ordering {
-        self.shared.names[a].cmp(&self.shared.names[b]).then(a.cmp(&b))
+        self.shared.texts.name(a).cmp(self.shared.texts.name(b)).then(a.cmp(&b))
     }
 }
 
@@ -2478,6 +2552,36 @@ mod tests {
         assert_eq!(step_ms(Some("0")), STEP_MS);
         assert_eq!(step_ms(Some("x")), STEP_MS);
         assert_eq!(step_ms(None), STEP_MS);
+    }
+
+    #[test]
+    fn each_sounds_search_text_and_name_are_what_they_were_as_texts_of_their_own() {
+        let mut tagged = sound(3, r"D:\Samples\Ünïcode\SNARE Tight.WAV", "Snare", None);
+        tagged.tags = vec!["Punchy".into(), "Top".into()];
+        let sounds = vec![
+            sound(1, r"D:\Samples\Kicks\Kick_01.wav", "Kick", None),
+            sound(2, r"D:\Kick\Kick.wav", "Kick", None),
+            tagged,
+            // No folder, no extension, no name at all.
+            sound(4, "loose", "Unknown", None),
+            sound(5, "", "Unknown", None),
+            sound(6, r"D:\x\.wav", "Unknown", None),
+            // A capital sigma lower-cases by what follows it: the name alone ends in one, the path's doesn't.
+            sound(7, "D:\\Greek\\ΟΔΟΣ.wav", "Loop", None),
+            sound(8, "D:\\Greek\\ΟΔΟΣ", "Loop", None),
+        ];
+        let texts = Texts::new(&sounds);
+        for (i, s) in sounds.iter().enumerate() {
+            assert_eq!(texts.hay(i), hay_of(&Now::of(s, None)), "{}", s.path);
+            assert_eq!(texts.name(i), s.name().to_lowercase(), "{}", s.path);
+        }
+        assert_eq!(texts.hay(2), "d:\\samples\\ünïcode\\snare tight.wav\nsnare\npunchy\ntop");
+        assert_eq!(texts.name(2), "snare tight");
+        // One piece of memory for them all; only a name that isn't in its search text is kept apart.
+        assert_eq!(texts.all.len(), sounds.iter().map(|s| hay_of(&Now::of(s, None)).len()).sum::<usize>());
+        assert!(texts.odd_names.len() <= 1, "{:?}", texts.odd_names);
+        let none = Texts::new(&[]);
+        assert!(none.all.is_empty() && none.ends.is_empty());
     }
 
     fn sound(id: i64, path: &str, ty: &str, analysis: Option<SoundAnalysis>) -> Sound {

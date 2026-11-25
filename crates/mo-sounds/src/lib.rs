@@ -41,7 +41,7 @@ pub mod types;
 pub mod usage;
 pub mod word;
 
-pub use analysis::{ChordSpan, Peaks, SILENT_DB, SoundAnalysis};
+pub use analysis::{ChordSpan, Chroma, Peaks, SILENT_DB, SoundAnalysis};
 pub use db::{
     Everything, KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount, count_analysed,
     count_clap_could_hear,
