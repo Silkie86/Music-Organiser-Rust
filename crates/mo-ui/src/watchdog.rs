@@ -418,6 +418,7 @@ fn watch(feed: &Feed) {
                 held = Some((now.held, Instant::now()));
             }
         }
+        let work_before = crate::stuck::window_thread_work();
         let sent = Instant::now();
         let pauses = pauses_now();
         let answer = move || {
@@ -428,7 +429,8 @@ fn watch(feed: &Feed) {
             return; // The event loop has ended.
         }
         let mut said_still_stuck = false;
-        let mut looked_at_thread = false;
+        // When the first look at the thread came back.
+        let mut looked_at_thread: Option<Instant> = None;
         let mut looked_again = false;
         // How long the watchdog itself was held up while waiting (its short sleeps that came back late).
         let mut held_up = Duration::ZERO;
@@ -458,14 +460,19 @@ fn watch(feed: &Feed) {
             if waited >= STALL && busy.is_none() {
                 busy = Some(busy_with());
             }
-            if waited >= LOOK_AT_THREAD && !looked_at_thread && !paused_since(pauses) {
-                looked_at_thread = true;
+            if waited >= LOOK_AT_THREAD && looked_at_thread.is_none() && !paused_since(pauses) {
                 own_faults += log_thread(waited);
+                looked_at_thread = Some(Instant::now());
                 log::current().inspect(|l| l.flush());
             }
-            // (Not in the same turn as the first look: a watchdog that was itself held up for a second would look
-            // twice at one moment.)
-            else if waited >= LOOK_AGAIN && !looked_again && !paused_since(pauses) {
+            // (Not in the same turn as the first look, and not until as long after it came back as the two are meant
+            // to be apart: a watchdog that was itself held up for a second, or a first look that waited seconds for
+            // the thread to stop, would look twice at one moment.)
+            else if waited >= LOOK_AGAIN
+                && !looked_again
+                && looked_at_thread.is_some_and(|at| at.elapsed() >= LOOK_AGAIN - LOOK_AT_THREAD)
+                && !paused_since(pauses)
+            {
                 looked_again = true;
                 own_faults += log_thread(waited);
                 log::current().inspect(|l| l.flush());
@@ -479,6 +486,8 @@ fn watch(feed: &Feed) {
                 log::current().inspect(|l| l.flush());
             }
         }
+        // Read as soon as the answer is seen, so little of what the window does next is counted with the freeze.
+        let work_after = crate::stuck::window_thread_work();
         let waited = Duration::from_micros(answered.load(Ordering::Acquire));
         // Held on purpose meanwhile (a drag out): not a freeze, and not a slow frame either.
         if paused_since(pauses) {
@@ -492,6 +501,10 @@ fn watch(feed: &Feed) {
             if let Some(memory) = crate::stuck::memory_words(memory_before, crate::stuck::memory_now(), own_faults) {
                 busy.push_str("; ");
                 busy.push_str(&memory);
+            }
+            if let Some(work) = crate::stuck::work_words(work_before, work_after, waited) {
+                busy.push_str("; ");
+                busy.push_str(&work);
             }
             if let Some(whole) = held_up_words(held_up) {
                 busy.push_str("; ");
@@ -558,8 +571,8 @@ fn held_up_words(held_up: Duration) -> Option<String> {
 /// Gives back the page faults the look itself made.
 fn log_thread(waited: Duration) -> u64 {
     let before = crate::stuck::memory_now();
-    if let Some(frames) = crate::stuck::window_thread_now() {
-        log::warning("Freeze", &thread_line(waited, &frames));
+    if let Some(look) = crate::stuck::window_thread_now() {
+        log::warning("Freeze", &thread_line(waited, look.to_stop, &look.frames));
     }
     match (before, crate::stuck::memory_now()) {
         (Some(b), Some(a)) => a.page_faults.saturating_sub(b.page_faults),
@@ -567,9 +580,26 @@ fn log_thread(waited: Duration) -> u64 {
     }
 }
 
-/// "Stuck for 1.0 s, the window's thread was in:" and its functions, innermost first, one a line.
-pub fn thread_line(waited: Duration, frames: &[String]) -> String {
-    let mut text = format!("Stuck for {:.1} s, the window's thread was in:", waited.as_secs_f32());
+/// A thread that takes this long to stop for a look was somewhere it couldn't be stopped, and the line says so.
+const SLOW_TO_STOP: Duration = Duration::from_millis(100);
+
+/// "Stuck for 1.0 s, the window's thread was in:" and its functions, innermost first, one a line. `waited` is how
+/// long it had been stuck when the look was asked for, `to_stop` how long the thread then took to stop: when that was
+/// long, the line gives the moment it did stop and says what the wait means, since the functions are then where the
+/// thread came out to, not where it had been all along.
+pub fn thread_line(waited: Duration, to_stop: Duration, frames: &[String]) -> String {
+    let mut text = if to_stop >= SLOW_TO_STOP {
+        format!(
+            "Stuck for {:.1} s, the window's thread was in (the look was asked for at {:.1} s and the thread took {} ms \
+             to stop, as it does inside a part of Windows that can't be interrupted, or when the whole app stood \
+             still; these are the functions it came out to):",
+            (waited + to_stop).as_secs_f32(),
+            waited.as_secs_f32(),
+            to_stop.as_millis()
+        )
+    } else {
+        format!("Stuck for {:.1} s, the window's thread was in:", waited.as_secs_f32())
+    };
     for f in frames {
         text.push_str("\n    ");
         text.push_str(f);
@@ -656,7 +686,7 @@ mod tests {
         // And once more between the two, so a freeze of a second or two has two looks to compare.
         assert!(LOOK_AT_THREAD < LOOK_AGAIN && LOOK_AGAIN < STILL_STUCK);
         assert_eq!(
-            thread_line(LOOK_AT_THREAD, &["a".to_owned()]),
+            thread_line(LOOK_AT_THREAD, Duration::ZERO, &["a".to_owned()]),
             "Stuck for 0.3 s, the window's thread was in:\n    a"
         );
     }
@@ -728,8 +758,19 @@ mod tests {
     #[test]
     fn the_thread_line_lists_its_functions_one_a_line() {
         assert_eq!(
-            thread_line(Duration::from_millis(1040), &["inner (a.rs:3)".to_owned(), "outer".to_owned()]),
+            thread_line(
+                Duration::from_millis(1040),
+                Duration::from_millis(2),
+                &["inner (a.rs:3)".to_owned(), "outer".to_owned()]
+            ),
             "Stuck for 1.0 s, the window's thread was in:\n    inner (a.rs:3)\n    outer"
+        );
+        // Solomon's 25 Nov: asked for at 0.3 s, stopped 3.8 s later.
+        assert_eq!(
+            thread_line(Duration::from_millis(310), Duration::from_millis(3_774), &["outer".to_owned()]),
+            "Stuck for 4.1 s, the window's thread was in (the look was asked for at 0.3 s and the thread took 3774 ms \
+             to stop, as it does inside a part of Windows that can't be interrupted, or when the whole app stood \
+             still; these are the functions it came out to):\n    outer"
         );
     }
 
