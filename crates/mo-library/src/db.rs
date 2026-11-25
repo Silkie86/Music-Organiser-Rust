@@ -332,6 +332,39 @@ impl Library {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// How long FL Studio had each of these saves open, in minutes, as its reader kept it ("Time spent" among the
+    /// save's details, from FL's own count): only those that have it. Reads and uncompresses each save's details, so
+    /// call it away from the window's thread, for the few saves wanted (each song's newest FL save).
+    pub fn minutes_spent(&self, ids: &[i64]) -> Result<HashMap<i64, u32>, LibraryError> {
+        let mut found = HashMap::new();
+        let packed = self.has("project_info");
+        let mut st = if packed {
+            self.conn.prepare("SELECT info FROM project_info WHERE project_id = ?1")?
+        } else if self.columns.iter().any(|c| c == "info") {
+            self.conn.prepare("SELECT info FROM projects WHERE id = ?1")?
+        } else {
+            return Ok(found);
+        };
+        for id in ids {
+            let info: Option<String> = st
+                .query_row([id], |r| {
+                    Ok(match r.get_ref(0)? {
+                        ValueRef::Blob(b) if packed => {
+                            crate::songs_db::inflate(b).ok().map(|t| String::from_utf8_lossy(&t).into_owned())
+                        }
+                        ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
+                        _ => None,
+                    })
+                })
+                .optional()?
+                .flatten();
+            if let Some(minutes) = info.as_deref().and_then(minutes_in) {
+                found.insert(*id, minutes);
+            }
+        }
+        Ok(found)
+    }
+
     /// One save with its plugins, samples and what its reader found; `None` when there's no save with this id.
     pub fn detail(&self, id: i64) -> Result<Option<SaveDetail>, LibraryError> {
         // One read for all of it, so a scan the C# app saves meanwhile can't mix old counts with new lists.
@@ -857,6 +890,33 @@ pub(crate) fn local(seconds: i64) -> Option<NaiveDateTime> {
     chrono::DateTime::from_timestamp(seconds, 0).map(|t| t.with_timezone(&Local).naive_local())
 }
 
+/// The detail FL saves have for how long FL Studio had them open (`mo_formats::fl`).
+pub(crate) const TIME_SPENT: &str = "Time spent";
+
+/// The minutes in a save's details' "Time spent" ("2 h 24 min", "13 min": `mo_formats::fl::project_time`), from the
+/// details as they're kept (JSON); none when it hasn't one.
+pub(crate) fn minutes_in(info: &str) -> Option<u32> {
+    let info: serde_json::Value = serde_json::from_str(info).ok()?;
+    minutes_of(info.get("Details")?.get(TIME_SPENT)?.as_str()?)
+}
+
+/// The minutes in FL's "Time spent" as its reader words it ("2 h 24 min", "13 min").
+pub(crate) fn minutes_of(text: &str) -> Option<u32> {
+    let mut minutes = 0u32;
+    let mut words = text.split_whitespace();
+    let mut any = false;
+    while let (Some(n), Some(unit)) = (words.next(), words.next()) {
+        let n: u32 = n.parse().ok()?;
+        minutes = minutes.checked_add(match unit {
+            "h" => n.checked_mul(60)?,
+            "min" => n,
+            _ => return None,
+        })?;
+        any = true;
+    }
+    any.then_some(minutes)
+}
+
 /// The to-dos as [`summaries_query`] reads them: "done\u{1e}added\u{1e}text", apart by `\u{1f}`. One that can't be
 /// read that way is left out.
 fn todo_list(s: &str) -> Vec<crate::Todo> {
@@ -1024,6 +1084,8 @@ impl SaveColumns {
             track_count: known(self.track_count),
             notes: text(self.notes),
             todos: todo_list(&text(self.todo_list)),
+            // Learnt later, from the kept details ([`Library::minutes_spent`]).
+            minutes_spent: None,
         }
     }
 }
@@ -1073,6 +1135,20 @@ impl<'de> serde::Deserialize<'de> for InOrder {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn fls_words_for_the_time_read_as_minutes() {
+        assert_eq!(super::minutes_of("2 h 24 min"), Some(144));
+        assert_eq!(super::minutes_of("13 min"), Some(13));
+        assert_eq!(super::minutes_of("3 h"), Some(180));
+        assert_eq!(super::minutes_of(""), None);
+        assert_eq!(super::minutes_of("about an hour"), None);
+        assert_eq!(super::minutes_of("2 days"), None);
+        assert_eq!(super::minutes_in(r#"{"Details":{"Time spent":"1 h 5 min"}}"#), Some(65));
+        assert_eq!(super::minutes_in(r#"{ "Details": { "Time spent": "2 h" } }"#), Some(120), "spaces too");
+        assert_eq!(super::minutes_in(r#"{"Details":{}}"#), None);
+        assert_eq!(super::minutes_in("not JSON"), None);
+    }
 
     #[test]
     fn the_librarys_own_connection_refuses_every_write() {

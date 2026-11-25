@@ -500,6 +500,7 @@ export global Widths {
     in-out property <length> plugins-size: 72px;
     in-out property <length> songs-status: 150px;
     in-out property <length> songs-saved: 90px;
+    in-out property <length> songs-time: 40px;
     // The track names in a song's arrangement (0 for the usual width, which depends on the view's width).
     in-out property <length> songs-tracks: 0px;
     // 0 until it's dragged: the Curves list takes about a fifth of the room then.
@@ -1299,8 +1300,10 @@ export component ToggleChip inherits Rectangle {
     in property <string> icon;
     in property <string> tip;
     in property <string> key;
+    // A short figure after the sign (how many are waiting, say): the chip widens to hold it.
+    in property <string> badge;
     callback clicked;
-    width: root.icon != "" ? 40px : label.preferred-width + 24px;
+    width: root.icon == "" ? label.preferred-width + 24px : root.badge != "" ? 30px + badge-label.preferred-width + 12px : 40px;
     height: 28px;
     border-top-left-radius: joined-left ? 0 : 14px;
     border-bottom-left-radius: joined-left ? 0 : 14px;
@@ -1317,8 +1320,17 @@ export component ToggleChip inherits Rectangle {
         font-size: Type.meta;
         font-weight: 500;
     }
+    badge-label := Text {
+        x: 30px;
+        visible: root.icon != "" && root.badge != "";
+        text: root.badge;
+        color: label.color;
+        font-family: Theme.number-font;
+        font-size: Type.meta;
+        font-weight: 500;
+    }
     if root.icon != "": Path {
-        x: (parent.width - self.width) / 2;
+        x: root.badge != "" ? 12px : (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 14px;
         height: 14px;
@@ -2989,6 +3001,10 @@ export global Icons {
     out property <string> whole: "M 2 6 L 2 2 L 6 2 M 10 2 L 14 2 L 14 6 M 14 10 L 14 14 L 10 14 M 6 14 L 2 14 L 2 10";
     // A metronome: a click on every beat.
     out property <string> metronome: "M 4.5 14.5 L 6.5 1.5 L 9.5 1.5 L 11.5 14.5 Z M 8 10.5 L 13 3.5 M 5 11.5 L 11 11.5";
+    // A clock face: time spent on a song.
+    out property <string> clock: "M 2 8 A 6 6 0 1 0 14 8 A 6 6 0 1 0 2 8 M 8 4.5 L 8 8 L 10.5 9.5";
+    // A crescent moon: not now, later.
+    out property <string> moon: "M 12.8 10.4 A 5.6 5.6 0 1 1 6.2 2.6 A 4.4 4.4 0 0 0 12.8 10.4 Z";
     // Ticked lines: a song's to-dos (Songs).
     out property <string> todo: "M 1.5 3.5 L 3 5 L 5.5 2.2 M 8 3.8 L 14.5 3.8 M 1.5 8.5 L 3 10 L 5.5 7.2 M 8 8.8 L 14.5 8.8 M 2 13.5 L 5 13.5 M 8 13.5 L 14.5 13.5";
     // A cross: clear it, take it away.
@@ -4416,5 +4432,43 @@ export component CheckLine inherits Rectangle {
                 }
             }
         }
+    }
+}
+
+// A small drawn sign (one of the `Icons`) and a figure beside it, muted: how many to-dos a song has left, how long it
+// has been open. `tip` says in words what the figure is.
+export component SignCount inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <string> tip;
+    HorizontalLayout {
+        spacing: Space.xs;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 13px;
+                height: 13px;
+                viewbox-width: 16;
+                viewbox-height: 16;
+                commands: root.icon;
+                stroke: Theme.muted;
+                stroke-width: 1.5px;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+    }
+    sense := TouchArea {
+        enabled: root.tip != "";
+    }
+    Tip {
+        text: root.tip;
+        hovering: sense.has-hover;
+        at-y: root.height + Space.xs;
     }
 }

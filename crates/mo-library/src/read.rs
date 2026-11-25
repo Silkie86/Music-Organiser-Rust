@@ -153,6 +153,7 @@ fn fill(mut save: Save, info: ProjectInfo, installed: &Installed, samples: &Samp
     save.version = info.version.clone();
     save.confidence = info.confidence;
     save.created = info.created.or(save.created);
+    save.minutes_spent = info.details.get(crate::db::TIME_SPENT).and_then(|t| crate::db::minutes_of(t));
     save.track_count = i32::try_from(info.tracks.len()).unwrap_or(i32::MAX);
     let mut plugins: Vec<ProjectPlugin> = info
         .plugins
