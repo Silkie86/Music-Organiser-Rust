@@ -2682,6 +2682,8 @@ export component HowItWorks inherits HorizontalLayout {
 // double-click, the wheel in notches (positive away from you) and leaving. Fills its parent.
 export component PointerPad inherits TouchArea {
     in property <bool> grabbing;
+    // The mouse is over something a click picks (a star on the Galaxy): the hand says so.
+    in property <bool> pointing;
     callback down(length, length);
     callback move(length, length);
     callback up();
@@ -2693,7 +2695,7 @@ export component PointerPad inherits TouchArea {
     callback double();
     callback wheel(length, float, float, bool, bool);
     callback gone();
-    mouse-cursor: grabbing ? MouseCursor.grabbing : MouseCursor.default;
+    mouse-cursor: grabbing ? MouseCursor.grabbing : pointing ? MouseCursor.pointer : MouseCursor.default;
     pointer-event(e) => {
         if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
             root.down(self.mouse-x, self.mouse-y);

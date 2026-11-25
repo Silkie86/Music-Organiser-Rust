@@ -1187,6 +1187,8 @@ export component Panel inherits Window {
                         }
                         PointerPad {
                             grabbing: root.sky-grabbing;
+                            // Over a star (its ring shows): as the app's Galaxy, a hand says a click picks it.
+                            pointing: root.sky-ring;
                             down(x, y) => {
                                 sky-keys.focus();
                                 root.sky-swept-keys = false;

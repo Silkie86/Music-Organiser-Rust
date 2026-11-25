@@ -118,6 +118,8 @@ const FAR_HALO: f32 = 2.2;
 const HALO: f32 = 2.8;
 const FALLOFF: f32 = 1.3;
 const LIT_BRIGHTEST: f32 = 1.5;
+const UNLIT_WEIGHT: f32 = 0.3;
+const UNLIT_CORE: f32 = 0.55;
 const DUST_LIT: f32 = 0.5;
 const DUST_GREY: f32 = 0.6;
 const DUST_MOST: f32 = 0.22;
@@ -162,10 +164,14 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     let rank = f32(star);
     let glint = select(0.0, smoothstep(0.0, 1.0, (rank - camera.glint_start + 1.0) / max(camera.count - camera.glint_start, 1.0)),
                        lighting && rank >= camera.glint_start);
-    // How bright its core is close up: with Light by on, as bright as it's lit, with its steady variety (its weight,
-    // as `pack` made it; the processor's picture does the same). A left-out star is faint dust, fainter still with
-    // Light by on, when the unlit stars on show are dimmed too.
-    let close = select(0.15 * select(1.0, DUST_LIT, lighting), select(1.0, weight / LIT_BRIGHTEST, lighting), shown);
+    // How bright its core is close up: with Light by on, by how lit it is, an unlit one still clearly a star a click
+    // picks (mo_app::galaxy_look::lit_core), with its steady variety (0.6 to 1, which `pack` multiplied its weight by,
+    // mo_app::galaxy_look::lit_weight); the processor's picture does the same. A left-out star is faint dust, fainter
+    // still with Light by on, when the unlit stars on show are dimmed too where they're painted.
+    let lit_root = sqrt(lit);
+    let variety = clamp(weight / (UNLIT_WEIGHT + (LIT_BRIGHTEST - UNLIT_WEIGHT) * lit_root), 0.6, 1.0);
+    let lit_core = (UNLIT_CORE + (1.0 - UNLIT_CORE) * lit_root) * variety;
+    let close = select(0.15 * select(1.0, DUST_LIT, lighting), select(1.0, lit_core, lighting), shown);
     // Where the stars have only just come apart, as bright as the painted dot it takes over from (its light squeezed
     // as the painted picture's is, its colour's brightest part heading for 1), going to its close-up brightness as
     // the view flies in, so it neither jumps nor dips.
@@ -174,9 +180,10 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     let painted_dot = select(DUST_MOST * (1.0 - exp(-camera.gain * weight)),
                              (1.0 - exp(-camera.gain * weight * most)) / max(most, 0.001), shown);
     let core = camera.strength * mix(painted_dot, close, camera.bright);
-    // Far out a star that glints shows as brightly as close up, as much as it glints, and as the view flies in it
-    // never gets dimmer.
-    let show = select(core, max(core, glint * close), shown);
+    // Far out a star that glints shows as much as it glints, as brightly as its share of the painted light, going to
+    // its close-up brightness as the view flies in, so it never gets dimmer (the processor's picture does the same).
+    let glinting = mix(weight / LIT_BRIGHTEST, close, camera.bright);
+    let show = select(core, max(core, glint * glinting), shown);
     // A well lit star is up to nearly three times as big (mo_app::galaxy_look::lit_size, the same curve); with Light by
     // on, an unlit one is smaller than an all-alike star, so the lit ones stand out. Where the stars have only just
     // come apart they're all as small as the painted dots, and grow into their sizes as the view flies in.
@@ -870,6 +877,8 @@ mod tests {
             ("HALO", look::HALO),
             ("FALLOFF", look::FALLOFF),
             ("LIT_BRIGHTEST", look::LIT_BRIGHTEST),
+            ("UNLIT_WEIGHT", look::UNLIT_WEIGHT),
+            ("UNLIT_CORE", look::UNLIT_CORE),
             ("DUST_LIT", look::DUST_LIT),
             ("DUST_GREY", look::DUST_GREY),
             ("DUST_MOST", look::DUST_MOST),
