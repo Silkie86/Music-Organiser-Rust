@@ -1,7 +1,7 @@
 // The folder tree beside a list of sounds (Solomon, 24 Nov 2026): only the folders that hold sounds the other filters
 // let through, each with how many, ticked to narrow the list to them (as many as you like). The lines, picks and
 // words are made by mo_app::sound_folders; this only shows them and says what was clicked.
-import { AppKeys, Theme, Type, Space, Heights, Caps, SearchBox, CutText, ListLine, StudioButton, TagChip, CloseButton } from "studio.slint";
+import { AppKeys, Theme, Type, Space, Heights, Caps, SearchBox, CutText, ListLine, StudioButton, TagChip, CloseButton, Seam, Widths } from "studio.slint";
 import { ListView } from "list.slint";
 
 // One line of the tree. `picked`: 0 not, 1 picked with the folders inside it, 2 picked alone ("just this folder"),
@@ -219,7 +219,19 @@ export component FolderTree inherits Rectangle {
     in-out property <string> search;
     // Where the list is turned to, kept by the page so a tree made again comes back there.
     in-out property <length> kept-y;
-    out property <length> room: root.narrow || root.folded ? 28px + Space.sm : 280px + Space.lg;
+    // How wide it is open, and the new width while its right edge is dragged: the page keeps it (in `Widths`).
+    in property <length> wide: 280px;
+    // The part its seam's width is kept as ("sounds.folders"); none for no seam.
+    in property <string> part;
+    callback resizing(length);
+    // The most it may take of the page now (the page leaves room for its list and card): it's never dragged wider
+    // into the rest, and a width kept from a wider window gives way to it, down to its usual width (it was that wide
+    // before it could be dragged, whatever the room).
+    in property <length> most-wide: 100000px;
+    property <length> least: root.part != "" ? Widths.least(root.part) : 180px;
+    property <length> most-now: max(root.part != "" ? Widths.usual(root.part) : 280px, root.most-wide);
+    property <length> shown-wide: max(root.least, min(root.wide, root.most-now));
+    out property <length> room: root.narrow || root.folded ? 28px + Space.sm : root.shown-wide + Space.lg;
     callback toggled(string);
     callback opened(string);
     // A chip's ×: a pick taken off, or a hidden folder shown again (`hidden`).
@@ -237,7 +249,7 @@ export component FolderTree inherits Rectangle {
             root.fold();
         }
     }
-    width: root.shut ? 28px : 280px;
+    width: root.shut ? 28px : root.shown-wide;
     clip: true;
     background: root.narrow && !root.shut ? Theme.background : transparent;
     Rectangle {
@@ -400,6 +412,19 @@ export component FolderTree inherits Rectangle {
                 }
             }
         }
+    }
+    // Its right edge, open in a wide window: drag it to make the tree wider or narrower. Last, so its badge lies over
+    // the lines; turned off rather than taken away when the tree folds, so a drag cut short still keeps its width.
+    Seam {
+        x: parent.width - self.width;
+        width: Space.md;
+        height: parent.height;
+        visible: !root.shut && !root.narrow && root.part != "";
+        enabled: self.visible;
+        part: root.part;
+        now: root.shown-wide;
+        most: min(Widths.most(root.part), root.most-now);
+        resizing(w) => { root.resizing(w); }
     }
 }
 

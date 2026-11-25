@@ -720,6 +720,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Away again: a click above the page shuts the menu, and the panel is put away.
     click(&window, 600.0, 20.0);
     songs.invoke_close_panel();
+    // The seam between the list and the panel, dragged right: the list wider than its third.
+    let widths = app.global::<mo_ui::Widths>();
+    let list_width = || if widths.get_songs_list() > 0.0 { widths.get_songs_list() } else { SONGS_LIST_WIDTH };
+    let held = drag_seam(&app, &window, SONGS_SEAM, 60.0, 1.0, "songs.list", list_width)?;
+    shots.push(("songs-list-wider.png".into(), held));
     // The narrowest window the app allows: a filter too long for a line of its own wraps inside, so every chip stays
     // in sight.
     save_narrow(&window, &out, "songs-narrow.png")?;
@@ -2435,7 +2440,11 @@ fn opened_in_sight(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Re
 
 /// The folder tree beside the filters (Solomon, 24 Nov 2026): open with two folders picked and one hidden, a folder
 /// found by its search box, a folder picked alone, and folded away to its tab with picks on.
-fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+fn folder_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
     let data = app.global::<mo_ui::SoundsData>();
     data.invoke_close_panel();
     data.invoke_pick_view(0);
@@ -2452,6 +2461,13 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     data.invoke_tree_menu_chosen("hide".into());
     capture(window);
     shots.push(("sounds-folders.png".into(), capture(window)));
+    // The filter column and the tree, each dragged narrower by its right edge (at 1440 x 900 the list and card already
+    // have less than their least beside them, so neither may go wider here).
+    let widths = app.global::<mo_ui::Widths>();
+    let held = drag_seam(app, window, FILTERS_SEAM, -40.0, 1.0, "sounds.filters", || widths.get_sounds_filters())?;
+    shots.push(("sounds-filters-narrower.png".into(), held));
+    let held = drag_seam(app, window, TREE_SEAM, -80.0, 1.0, "sounds.folders", || widths.get_sounds_folders())?;
+    shots.push(("sounds-folders-narrower.png".into(), held));
     // A type picked too: the tree keeps only the folders with kicks, each counting its kicks.
     data.invoke_toggle_choice("type".into(), "Kick".into());
     capture(window);
@@ -2504,6 +2520,7 @@ fn folder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     data.invoke_tree_cleared();
     data.invoke_tree_taken_off(r"D:\Samples\FX".into(), true);
     mo_ui::sounds::fold_folders_for_screens(app, true);
+    Ok(())
 }
 
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
@@ -2881,7 +2898,7 @@ fn sounds_shots(
     shots.push(("sounds-tag-tip.png".into(), after));
     data.set_search("".into());
     data.invoke_search_edited("".into());
-    folder_shots(app, window, shots);
+    folder_shots(app, window, shots)?;
     app.set_place(Place::Songs.index() as i32);
     Ok(())
 }
@@ -4253,6 +4270,12 @@ const MENU_LINE: f32 = 32.0;
 /// With the card open: the waveform of the tile at [`MENU_TILE`], and the waveform on the card.
 const TILE_WAVE: (f32, f32) = (560.0, 322.0);
 const CARD_WAVE: (f32, f32) = (1200.0, 292.0);
+/// The right edges of the Sounds filter column and its folder tree (open), halfway down.
+const FILTERS_SEAM: (f32, f32) = (436.0, 500.0);
+const TREE_SEAM: (f32, f32) = (732.0, 500.0);
+/// The gap between the Songs list and its panel, halfway down, and the list's width there (a third of the room).
+const SONGS_SEAM: (f32, f32) = (844.0, 500.0);
+const SONGS_LIST_WIDTH: f32 = 380.0;
 /// The seam between the Sounds list and its card (the card at its usual width), halfway down.
 const CARD_SEAM: (f32, f32) = (1009.0, 500.0);
 /// The path on the Sounds card, on its one line (Boom Kick's, cut short at its start).
@@ -4597,6 +4620,42 @@ fn right_click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     let button = slint::platform::PointerEventButton::Right;
     window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position, button });
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
+}
+
+/// Drags the seam at `at` (a part's edge) `by` pixels across and lets go, after a picture of it held there. Fails
+/// unless the part `name` (as `mo_app::widths` knows it) is then `by` wider (or narrower, `grows` -1) than it was, or
+/// unless putting it back to its usual width, as a double-click does, gives it the width it had. `width` reads the part's width from the page.
+fn drag_seam(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    at: (f32, f32),
+    by: f32,
+    grows: f32,
+    name: &str,
+    width: impl Fn() -> f32,
+) -> Result<Vec<u8>, String> {
+    let was = width();
+    let button = slint::platform::PointerEventButton::Left;
+    let from = slint::LogicalPosition::new(at.0, at.1);
+    let to = slint::LogicalPosition::new(at.0 + by, at.1);
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: from });
+    window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: from, button });
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: to });
+    capture(window);
+    let held = capture(window);
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: to, button });
+    let got = width();
+    if (got - was - grows * by).abs() > 1.0 {
+        return Err(format!(
+            "{name}: dragging its seam at {at:?} by {by} made it {got} wide, from {was}; has it moved?"
+        ));
+    }
+    app.global::<mo_ui::Widths>().invoke_reset(name.into());
+    hover(window, -1.0, -1.0);
+    if width() != was {
+        return Err(format!("{name}: a double-click's reset left it {} wide, not its usual {was}", width()));
+    }
+    Ok(held)
 }
 
 /// A left click at a point in the window.
