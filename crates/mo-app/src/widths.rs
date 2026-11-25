@@ -32,12 +32,13 @@ const fn part(name: &'static str, usual: f32, least: f32, most: f32) -> Part {
 
 /// Every part you can drag. Their usual widths are the ones the pages had before they could be dragged.
 pub const PARTS: &[Part] = &[
-    // The card beside a page's list (the picked thing's).
-    part("sounds.card", 400.0, 320.0, 900.0),
-    part("presets.card", 400.0, 320.0, 900.0),
-    part("midi.card", 420.0, 320.0, 900.0),
-    part("plugins.card", 420.0, 320.0, 900.0),
-    part("space.card", 380.0, 320.0, 900.0),
+    // The card beside a page's list (the picked thing's). As wide as the window allows: the page keeps the list
+    // at least 380 px (480 on Space) beside it, so on a wide screen a card can take most of it.
+    part("sounds.card", 400.0, 320.0, 2400.0),
+    part("presets.card", 400.0, 320.0, 2400.0),
+    part("midi.card", 420.0, 320.0, 2400.0),
+    part("plugins.card", 420.0, 320.0, 2400.0),
+    part("space.card", 380.0, 320.0, 2400.0),
     // The filter column on the left of a page's list.
     part("sounds.filters", 208.0, 160.0, 360.0),
     part("presets.filters", 208.0, 160.0, 360.0),
@@ -48,6 +49,8 @@ pub const PARTS: &[Part] = &[
     part("sounds.folders", 280.0, 180.0, 480.0),
     // The Songs list beside the song's panel. Its usual width is none: the page gives it a third of the room then.
     part("songs.list", 0.0, 320.0, 1200.0),
+    // The Curves list beside the curve editor. None usual: the page gives it about a fifth of the room then.
+    part("curves.list", 0.0, 220.0, 720.0),
 ];
 
 /// The part called `name`, if there is one.
@@ -119,7 +122,7 @@ mod tests {
         for (i, p) in PARTS.iter().enumerate() {
             // A usual width of 0 only where the page works one out (the Songs list's third of the room): anywhere else
             // the part would be given no width at all.
-            let worked_out = p.name == "songs.list";
+            let worked_out = p.name == "songs.list" || p.name == "curves.list";
             assert!(if worked_out { p.usual == 0.0 } else { p.least <= p.usual && p.usual <= p.most }, "{}", p.name);
             assert!(p.least <= p.most, "{}", p.name);
             assert!(p.name.contains('.') && !p.name.contains(['=', ';']), "{}", p.name);
@@ -153,8 +156,8 @@ mod tests {
     fn kept_within_limits() {
         let mut w = Widths::default();
         assert_eq!(w.set("sounds.card", 10.0), 320.0);
-        assert_eq!(w.set("sounds.card", 5000.0), 900.0);
-        assert_eq!(w.set("sounds.card", f32::NAN), 900.0);
+        assert_eq!(w.set("sounds.card", 5000.0), 2400.0);
+        assert_eq!(w.set("sounds.card", f32::NAN), 2400.0);
         assert_eq!(w.set("nothing.here", 500.0), 0.0);
         assert_eq!(w.width("nothing.here"), 0.0);
     }
@@ -166,6 +169,6 @@ mod tests {
         w.set("space.card", 700.0);
         assert_eq!(Widths::read(&w.value()), w);
         let odd = Widths::read("sounds.card=600; gone.part=300;midi.card=wide;;plugins.card=9999;presets.card");
-        assert_eq!(odd.value(), "plugins.card=900;sounds.card=600");
+        assert_eq!(odd.value(), "plugins.card=2400;sounds.card=600");
     }
 }

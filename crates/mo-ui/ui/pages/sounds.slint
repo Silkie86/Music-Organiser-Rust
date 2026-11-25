@@ -1695,9 +1695,9 @@ export component SoundsPage inherits Rectangle {
                 property <length> lines-max: SoundsData.view == 1 || SoundsData.view == 3 ? Fit.list-max
                     : SoundsData.view == 4 ? Fit.list-max + 300px
                     : self.width;
-                property <length> list-width: min(self.lines-max, SoundsData.panel-shown || SoundsData.bitwig-shown
-                    ? max(380px, self.width - SoundsData.panel-width - divider.width)
-                    : self.width);
+                property <length> list-width: SoundsData.panel-shown || SoundsData.bitwig-shown
+                    ? Widths.list-width("sounds.card", SoundsData.panel-width, self.width - divider.width, 380px, self.lines-max)
+                    : min(self.lines-max, self.width);
                 property <length> card-width: self.width - self.list-width - divider.width;
                 // Rediscover's forgotten folders take the list's right side when there's room.
                 property <length> folders-width: SoundsData.view == 4 && SoundsData.folders.length > 0 && self.list-width >= 900px
@@ -2253,7 +2253,6 @@ export component SoundsPage inherits Rectangle {
                     room: area.width;
                     resizing(w) => { SoundsData.panel-width = w; }
                     part: "sounds.card";
-                    max-list: area.lines-max;
                 }
                 // Favourites from Bitwig, over the sound card while it's open.
                 if SoundsData.bitwig-shown: BitwigCard {

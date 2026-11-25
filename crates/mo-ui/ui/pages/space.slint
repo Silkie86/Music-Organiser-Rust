@@ -5,7 +5,7 @@
 // (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
 // them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, Caps, Well, Panel, PageHeader, ListLine, CutText, SidePanel, PanelDivider, EmptyState, InfoTip, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, Panel, PageHeader, ListLine, CutText, SidePanel, PanelDivider, EmptyState, InfoTip, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu, Widths } from "../studio.slint";
 
 // One drive across the top.
 export struct DriveCard {
@@ -395,10 +395,10 @@ export component SpacePage inherits Rectangle {
     property <bool> card-shown: SpaceData.picked != "";
     // In a wide window the lines stop at `Fit.list-max` (the UX review of 10 Nov, A1), so a line's name and its size
     // stay within one look of each other; the card takes the room that's left.
-    property <length> main-width: min(Fit.list-max + 2 * Space.xl, self.card-shown ? max(480px, self.width - SpaceData.panel-width - divider.width) : self.width);
+    property <length> main-width: self.card-shown ? self.shut-width : min(Fit.list-max + 2 * Space.xl, self.width);
     property <length> card-width: self.width - self.main-width - divider.width - Space.xl;
     // The page's width while a card is open, whether one is or not.
-    property <length> shut-width: min(Fit.list-max + 2 * Space.xl, max(480px, self.width - SpaceData.panel-width - divider.width));
+    property <length> shut-width: Widths.list-width("space.card", SpaceData.panel-width, self.width - divider.width, 480px, Fit.list-max + 2 * Space.xl);
     Flickable {
         x: 0;
         width: root.main-width;
@@ -490,7 +490,6 @@ export component SpacePage inherits Rectangle {
         min-list: 480px;
         resizing(w) => { SpaceData.panel-width = w; }
         part: "space.card";
-        max-list: Fit.list-max + 2 * Space.xl;
     }
     if root.card-shown: SpaceCard {
         x: root.main-width + divider.width;

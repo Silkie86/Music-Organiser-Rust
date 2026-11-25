@@ -1015,7 +1015,7 @@ export component PluginsPage inherits Rectangle {
                 y: 0;
                 width: split.width - self.x;
                 height: split.height;
-                property <length> list-width: min(Fit.list-max, max(380px, self.width - PluginsData.panel-width - divider.width));
+                property <length> list-width: Widths.list-width("plugins.card", PluginsData.panel-width, self.width - divider.width, 380px, Fit.list-max);
                 property <length> card-width: self.width - self.list-width - divider.width;
                 property <length> years-width: PluginsData.years.length > 1 && PluginsData.message == "" ? 56px : 0px;
                 property <bool> wide: self.list-width > 640px;
@@ -1204,7 +1204,6 @@ export component PluginsPage inherits Rectangle {
                     room: area.width;
                     resizing(w) => { PluginsData.panel-width = w; }
                     part: "plugins.card";
-                    max-list: Fit.list-max;
                 }
                 PluginPanel {
                     x: area.list-width + divider.width;

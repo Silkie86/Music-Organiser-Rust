@@ -1859,6 +1859,17 @@ export global Widths {
     in-out property <length> sounds-folders: 280px;
     // 0 until it's dragged: the Songs list takes a third of the room then.
     in-out property <length> songs-list: 0px;
+    // 0 until it's dragged: the Curves list takes about a fifth of the room then.
+    in-out property <length> curves-list: 0px;
+    // How wide a page's list is beside its side card (`part`, kept `kept` wide), sharing `room` with it. At its usual
+    // width the card takes what the list leaves at its widest (`max-list`, so a line stays readable in a wide window);
+    // once you've dragged it, the card is as wide as you made it and the list has the rest, never under `min-list`.
+    public pure function list-width(part: string, kept: length, room: length, min-list: length, max-list: length) -> length {
+        if (kept == usual(part)) {
+            return min(max-list, max(min-list, room - kept));
+        }
+        return max(min-list, room - kept);
+    }
 }
 
 // An edge you drag to make a part of a page wider or narrower (a side card, the filter column, the folder tree): a
@@ -1886,10 +1897,11 @@ export component Seam inherits Rectangle {
     Rectangle {
         x: (parent.width - self.width) / 2;
         width: 2px;
-        height: root.dragging ? parent.height : min(48px, parent.height);
+        height: root.dragging || touch.has-hover ? parent.height : min(40px, parent.height);
         y: (parent.height - self.height) / 2;
         border-radius: 1px;
-        background: touch.pressed ? Theme.accent : touch.has-hover ? Theme.stroke : transparent;
+        // A short grip you can always see where it can be dragged; the whole edge lights under the mouse.
+        background: touch.pressed ? Theme.accent : touch.has-hover ? Theme.muted : root.enabled ? Theme.stroke.brighter(40%) : transparent;
     }
     touch := TouchArea {
         enabled: root.enabled;
@@ -1970,19 +1982,14 @@ export component PanelDivider inherits Seam {
     in property <length> panel-width;
     in property <length> room;
     in property <length> min-list: 380px;
-    // The widest the list gets (`Fit.list-max` on most pages): in a wider window the panel takes the rest, so it's
-    // shown wider than its own width, and can always be dragged as wide as that.
-    in property <length> max-list: 100000px;
     in property <length> min-panel: root.part != "" ? Widths.least(root.part) : 320px;
     in property <length> max-panel: root.part != "" ? Widths.most(root.part) : 100000px;
     width: Space.lg;
     grows: -1;
     now: root.panel-width;
     least: root.min-panel;
-    // Its own most, or the room the list leaves at its widest when that's more, and never so wide the list goes under
-    // its least.
-    most: max(root.min-panel, max(root.room - root.width - root.max-list,
-        min(root.max-panel, root.room - root.width - root.min-list)));
+    // Its own most, and never so wide the list goes under its least.
+    most: max(root.min-panel, min(root.max-panel, root.room - root.width - root.min-list));
 }
 
 // The filter column: a page's filters as FilterLists and TickLines, one under the other at the page's left side. It
