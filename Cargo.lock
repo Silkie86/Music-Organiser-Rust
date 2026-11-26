@@ -3483,6 +3483,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-stretchear"
+version = "0.9.0-beta.2"
+dependencies = [
+ "mo-audio",
+ "mo-sounds",
+ "mo-stretch",
+]
+
+[[package]]
 name = "mo-theorybench"
 version = "0.9.0-beta.2"
 dependencies = [

@@ -1,0 +1,20 @@
+[package]
+name = "mo-stretchear"
+description = "The stretcher ear test: a folder of loops, each stretched slower and faster by every stretcher we're choosing between, with blind names and a key with their scores."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "stretchear"
+path = "src/main.rs"
+
+[dependencies]
+# Reading the loops, writing the WAVs, and the app's stretch today (`timestretch` with the hits put back).
+mo-audio = { path = "../../crates/mo-audio", default-features = false, features = ["stretch"] }
+# A loop's tempo from its name or folder, as the Sounds page reads it.
+mo-sounds = { path = "../../crates/mo-sounds" }
+mo-stretch = { path = "../../crates/mo-stretch" }

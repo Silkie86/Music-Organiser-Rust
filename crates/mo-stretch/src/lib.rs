@@ -7,7 +7,9 @@
 //! Sound in and out is one `f32` slice per channel. Nothing here reads or writes a file, and nothing waits: the work
 //! is all sums, so a caller runs it off any thread that mustn't wait.
 
+pub mod drums;
 mod fft;
+pub mod score;
 mod stft;
 mod stretch;
 
