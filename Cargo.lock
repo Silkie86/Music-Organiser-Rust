@@ -3475,6 +3475,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-stretch"
+version = "0.9.0-beta.2"
+dependencies = [
+ "rustfft",
+]
+
+[[package]]
 name = "mo-theorybench"
 version = "0.9.0-beta.2"
 dependencies = [

@@ -1,0 +1,15 @@
+[package]
+name = "mo-stretch"
+description = "Stretching a sound to another tempo, or moving its pitch, without the other changing: Signalsmith Stretch (MIT) turned into Rust, so it's ours to change. No UI and no files in it: sound in, sound out."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Signalsmith Stretch and Signalsmith Linear are MIT: their notice is kept in LICENSE-SIGNALSMITH.txt.
+
+[lints]
+workspace = true
+
+[dependencies]
+# The Fourier transform the stretcher works in, any size, in Rust. MIT or Apache-2.0.
+rustfft = "6.4"
