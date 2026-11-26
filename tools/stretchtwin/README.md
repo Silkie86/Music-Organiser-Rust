@@ -8,9 +8,12 @@ They never agree to the last bit: the Fourier transforms round differently, and 
 differences on. So each line also says how far the original moves from itself when the sound is nudged by noise far
 too quiet to hear (1e-6, 120 dB under it). Ours should be about as close to the original as that, or closer.
 
-On 26 Nov 2026 (Linux, g++): ours was 82 to 129 dB under the sound for stretching only, and 58 to 71 dB under it with
+On 26 Nov 2026 (Linux, g++): ours was 82 to 130 dB under the sound for stretching only, and 58 to 77 dB under it with
 the pitch moved; the nudged original was 59 to 111 dB and 59 to 70 dB under. With the pitch moved, the worst places were
 the same short moments in both, where a peak in the spectrum sits right on the line between counting and not.
+
+One known difference on purpose: ours works out where each window comes from in f64, not f32, so a song longer
+than about 6 minutes keeps its timing (the original drifts by a few samples there and gets rough).
 
 Not run by CI (it needs a C++ compiler and the network). Run it after changing anything in `mo-stretch` that should
 keep it the same as the original: `tools/stretchtwin/run.sh`.

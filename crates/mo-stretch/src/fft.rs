@@ -117,9 +117,10 @@ impl RealFft {
     }
 }
 
-/// A turn by `phase` radians, worked out in f64 as the original does before it's kept as f32.
+/// A turn by `phase` radians. As the original: the phase is worked out in f64, kept as f32, and turned in f32.
 fn polar(phase: f64) -> Complex32 {
-    Complex32::new(phase.cos() as f32, phase.sin() as f32)
+    let phase = phase as f32;
+    Complex32::new(phase.cos(), phase.sin())
 }
 
 #[cfg(test)]

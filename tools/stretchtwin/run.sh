@@ -7,8 +7,12 @@ root=$(cd "$here/../.." && pwd)
 work=${1:-$(mktemp -d)}
 mkdir -p "$work"
 cd "$work"
-# The versions mo-stretch was turned from.
-[ -d signalsmith-stretch ] || git clone -q --depth 1 https://github.com/Signalsmith-Audio/signalsmith-stretch.git
+# The versions mo-stretch was turned from: Stretch 1.3.2 (a commit: it has no tag of its own) and Linear 0.6.6.
+if [ ! -d signalsmith-stretch ]; then
+	git init -q signalsmith-stretch
+	git -C signalsmith-stretch fetch -q --depth 1 https://github.com/Signalsmith-Audio/signalsmith-stretch.git 88061fd4eda56a2353c5d65c74aa3f4ccf76f9da
+	git -C signalsmith-stretch checkout -q FETCH_HEAD
+fi
 [ -d signalsmith-linear ] || git clone -q --depth 1 --branch 0.6.6 https://github.com/Signalsmith-Audio/linear.git signalsmith-linear
 c++ -O2 -std=c++17 -I"$work/signalsmith-stretch" -I"$work" "$here/twin.cpp" -o twin
 cargo build -q --release --manifest-path "$root/Cargo.toml" -p mo-stretch --example raw

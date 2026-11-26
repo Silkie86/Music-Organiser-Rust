@@ -94,6 +94,9 @@ enum FreqMap {
     Custom(Box<dyn Fn(f32) -> f32 + Send>),
 }
 
+/// Where the random numbers start.
+const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
 /// A small random number generator (xorshift64*): the same numbers every run.
 struct Random(u64);
 
@@ -155,8 +158,8 @@ impl Stretch {
         Self::with_sizes(channels, (sample_rate * 0.1) as usize, (sample_rate * 0.04) as usize)
     }
 
-    /// Windows of `block` samples, a new one every `interval` samples. `channels`, `block` and `interval` are at
-    /// least 1 (smaller is taken as 1); `interval` is at most `block`.
+    /// Windows of `block` samples, a new one every `interval` samples. At least 1 channel, a block of at least 4
+    /// samples and an interval of at least 1 (smaller is taken as that); `interval` is at most `block`.
     pub fn with_sizes(channels: usize, block: usize, interval: usize) -> Self {
         let channels = channels.max(1);
         let block = block.max(4);
@@ -190,7 +193,7 @@ impl Stretch {
             freq_estimate_weighted: 0.0,
             freq_estimate_weight: 0.0,
             freq_estimate: 0.0,
-            random: Random(0x9E37_79B9_7F4A_7C15),
+            random: Random(SEED),
             tmp: vec![0.0; block + interval],
             stft,
         }
@@ -214,8 +217,9 @@ impl Stretch {
         self.stft.synthesis_latency()
     }
 
-    /// Forgets all sound so far.
+    /// Forgets all sound so far (and starts its random numbers again, so a reused stretcher repeats itself).
     pub fn reset(&mut self) {
+        self.random = Random(SEED);
         self.stft.reset(0.1);
         self.prev_input_offset = -1;
         self.channel_bands.fill(Band::default());
@@ -415,8 +419,9 @@ impl Stretch {
     ) {
         let interval = self.stft.interval();
         self.block_process.samples_since_last = 0;
-        // Worked out in the original's order, so it rounds the same.
-        let input_offset = (output_index as f32 * input_samples as f32 / output_samples as f32).round() as i64;
+        // In f64, not the original's f32: past 2^24 samples (6 minutes) f32 can't hold every sample position, and a
+        // long song's windows came from a few samples off (code review of #772).
+        let input_offset = (output_index as f64 * input_samples as f64 / output_samples as f64).round() as i64;
         let input_interval = input_offset - self.prev_input_offset;
         self.prev_input_offset = input_offset;
         self.copy_input(inputs, prev_copied, input_offset.max(0) as usize);
@@ -507,7 +512,8 @@ impl Stretch {
     ) -> bool {
         let playback_rate = input_samples as f32 / output_samples as f32;
         let seek_length = self.output_seek_length(playback_rate);
-        let output_index = output_samples as f32 - seek_length as f32 / playback_rate;
+        // In f64, as the input's place in `start_block`: f32 is a few samples out on a long song.
+        let output_index = output_samples as f64 - seek_length as f64 * output_samples as f64 / input_samples as f64;
         if input_samples < seek_length || output_samples == 0 || output_index < 0.0 {
             for output in outputs.iter_mut() {
                 output[..output_samples].fill(0.0);
@@ -931,7 +937,7 @@ mod tests {
         let tone = sine(440.0, 2.0);
         for ratio in [0.6f32, 1.0, 1.5, 2.0, 3.0] {
             let length = (tone.len() as f32 * ratio) as usize;
-            let out = to_length(&[&tone], RATE, length, 0.0);
+            let out = to_length(&[&tone], RATE, length, 0.0).unwrap();
             assert_eq!(out[0].len(), length);
             let f = frequency(&out[0]);
             assert!((f - 440.0).abs() < 3.0, "{ratio}x: {f} Hz");
@@ -945,7 +951,7 @@ mod tests {
     fn a_moved_tone_moves_by_the_semitones_asked() {
         let tone = sine(330.0, 2.0);
         for (semitones, want) in [(12.0f32, 660.0f32), (-12.0, 165.0), (7.0, 330.0 * 1.4983)] {
-            let out = to_length(&[&tone], RATE, tone.len(), semitones);
+            let out = to_length(&[&tone], RATE, tone.len(), semitones).unwrap();
             let f = frequency(&out[0]);
             assert!((f - want).abs() < want * 0.01, "{semitones} semitones: {f} Hz, wanted {want}");
         }
@@ -957,7 +963,7 @@ mod tests {
         for (i, s) in noisy.iter_mut().enumerate() {
             *s += ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * 0.2;
         }
-        let out = to_length(&[&noisy, &noisy], RATE, noisy.len() * 5 / 4, 2.0);
+        let out = to_length(&[&noisy, &noisy], RATE, noisy.len() * 5 / 4, 2.0).unwrap();
         // Not to the last bit: the second side is locked to the first through a few sums, which round. The original
         // C++ differs by 1.6e-4 here too.
         let worst = out[0].iter().zip(&out[1]).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
@@ -966,8 +972,10 @@ mod tests {
 
     #[test]
     fn silence_stays_silent_and_too_short_is_said() {
+        assert!(to_length(&[&sine(440.0, 0.1)], RATE, 4410, 0.0).is_none(), "0.1 s is too short");
+        assert!(to_length(&[&sine(440.0, 0.15)], RATE, 6615, 0.0).is_some(), "0.15 s is long enough at 1x");
         let silence = vec![0.0f32; 44_100];
-        let out = to_length(&[&silence], RATE, 60_000, 3.0);
+        let out = to_length(&[&silence], RATE, 60_000, 3.0).unwrap();
         assert!(out[0].iter().all(|&s| s == 0.0));
 
         let short = sine(440.0, 0.05);
@@ -987,11 +995,18 @@ mod tests {
             }
         }
         for length in [sound.len() / 4, sound.len() * 4] {
-            let a = to_length(&[&sound], RATE, length, 0.0);
-            let b = to_length(&[&sound], RATE, length, 0.0);
+            let a = to_length(&[&sound], RATE, length, 0.0).unwrap();
+            let b = to_length(&[&sound], RATE, length, 0.0).unwrap();
             assert!(a[0].iter().all(|s| s.is_finite() && s.abs() < 4.0));
             assert_eq!(a, b);
         }
+        // And one stretcher used twice gives the same both times (it starts its random numbers again).
+        let mut stretch = Stretch::new(1, RATE);
+        let mut once = vec![0.0f32; sound.len() * 4];
+        let mut twice = once.clone();
+        assert!(stretch.exact(&[&sound], sound.len(), &mut [&mut once], sound.len() * 4));
+        assert!(stretch.exact(&[&sound], sound.len(), &mut [&mut twice], sound.len() * 4));
+        assert_eq!(once, twice);
     }
 
     /// Fed a piece at a time, as a player would, it gives what a whole-sound stretch gives once it's started.
