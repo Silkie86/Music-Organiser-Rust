@@ -9,13 +9,17 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 use mo_space::bitwig::{
-    FixedProject, LibraryCopy, LibraryIndex, fixed_projects, project_folders, remove_copies, remove_fixed_projects,
-    sample_copies_in, saves_in,
+    FixedProject, LibraryCopy, LibraryIndex, fixed_projects, fixed_still_keeping, project_folders, remove_copies,
+    remove_fixed_projects, sample_copies_in, saved_sample_copies_in, saves_in,
 };
 use mo_space::clean::{Bin, Problem, Removed, What, undo};
 use mo_space::key;
 
 mod common;
+
+#[allow(dead_code)]
+#[path = "../../mo-formats/tests/common/bitwig.rs"]
+mod bitwig_files;
 
 use common::folder_link;
 
@@ -771,4 +775,124 @@ fn a_sample_copy_goes_only_while_its_original_is_outside_every_project() {
     assert!(dir.join("Packs/Snare.wav").exists() && sm.join("Hat-2.wav").exists() && sm.join("Clap-2.wav").exists());
     assert!(undo(&done, &bin).is_empty());
     assert!(sm.join("Snare-2.wav").exists());
+}
+
+/// A Bitwig save whose sample files each have a place in the project's folder and a file reference to where Bitwig
+/// copied it from, as Solomon's Nuero garage 7 keeps its Loopmasters Khords samples (26 Nov 2026).
+fn save_with_copies(path: &Path, copies: &[(&str, &Path)]) {
+    use mo_formats::bitwig::{self, Field, Object, Slot, Text, Value};
+    let mut doc = bitwig::decode(bitwig_files::bitwig_template(bitwig_files::Template::default())).unwrap();
+    let root = doc.root.unwrap();
+    let text = |id: u32, t: &str| Field { id, value: Value::Str(Text::new(t)) };
+    for (n, (inside, from)) in copies.iter().enumerate() {
+        let mut reference = Object::new(0x2a);
+        reference.fields.push(text(0x3b, &s(from)));
+        let reference = doc.add(reference);
+        let mut file = Object::new(0x4a6);
+        file.fields.push(text(0x512, inside.rsplit('/').next().unwrap()));
+        file.fields.push(text(0xd3a, inside));
+        file.fields.push(Field { id: 0xd3b, value: Value::Obj(Slot::Obj(reference)) });
+        let file = doc.add(file);
+        doc.objects[reference.0 as usize].parent = Some((file, 0xd3b));
+        let at = 0x7f20 + n as u32;
+        doc.objects[file.0 as usize].parent = Some((root, at));
+        doc.obj_mut(root).fields.push(Field { id: at, value: Value::Obj(Slot::Obj(file)) });
+    }
+    let zip = doc.zip().map(<[u8]>::to_vec);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bitwig::encode(&doc, zip.as_deref()).unwrap()).unwrap();
+}
+
+/// A sample copy the Sounds library doesn't know is found where the project's save says it was copied from, when
+/// that file is there and the same byte for byte (Solomon's Nuero garage 7, 26 Nov 2026: 336 Khords samples left on
+/// the copies). Never one that differs, one inside another project's own folders, or one already found.
+#[test]
+fn a_sample_copy_is_found_where_the_save_says_it_came_from() {
+    let dir = fixtures("mo-space-bitwig-saved-paths");
+    let pad = [7u8; 4000];
+    let khords = dir.join("ProgramData/Loopmasters/Khords/Packs/Ambient Textures/Samples/Minor Feel");
+    write(&khords, "Air Trumpets.wav", &pad);
+    write(&khords, "Calling.wav", &[8u8; 4000]);
+    write(&dir, "Pack/ukg_snr_blaze.wav", &[5u8; 3000]);
+    // Another project's copy: never an original, even when a save names it.
+    write(&dir, "Projects/Garage/Garage.bwproject", b"project");
+    write(&dir, "Projects/Garage/samples/Frost-2.wav", &[9u8; 2000]);
+    let project = dir.join("Projects/Nuero garage");
+    write(&project, "samples/Air Trumpets-2.wav", &pad);
+    // The same name and size, other sound: left alone.
+    write(&project, "samples/Calling-2.wav", &[1u8; 4000]);
+    write(&project, "samples/Frost-2.wav", &[9u8; 2000]);
+    // Found already (by the Sounds library): not looked for again.
+    write(&project, "samples/ukg_snr_blaze-2.wav", &[5u8; 3000]);
+    // A recording the save doesn't say came from anywhere.
+    write(&project, "samples/Vocal.wav", &[3u8; 1000]);
+    save_with_copies(
+        &project.join("Nuero garage 7.bwproject"),
+        &[
+            ("samples/Air Trumpets-2.wav", &khords.join("Air Trumpets.wav")),
+            ("samples/Calling-2.wav", &khords.join("Calling.wav")),
+            ("samples/Frost-2.wav", &dir.join("Projects/Garage/samples/Frost-2.wav")),
+            ("samples/ukg_snr_blaze-2.wav", &dir.join("Pack/ukg_snr_blaze.wav")),
+        ],
+    );
+    let stop = AtomicBool::new(false);
+    let index = LibraryIndex::new(&[dir.join("Library")], &stop).unwrap();
+    let known = [LibraryCopy {
+        in_project: s(&project.join("samples/ukg_snr_blaze-2.wav")),
+        library_file: s(&dir.join("Pack/ukg_snr_blaze.wav")),
+        bytes: 3000,
+    }];
+    let copies = saved_sample_copies_in(&index, &project, &mut None, &known, &stop).unwrap();
+    assert_eq!(
+        copies.iter().map(keyed).collect::<Vec<_>>(),
+        vec![(key(&s(&project.join("samples/Air Trumpets-2.wav"))), key(&s(&khords.join("Air Trumpets.wav"))), 4000)]
+    );
+    assert!(saved_sample_copies_in(&index, &project, &mut None, &known, &AtomicBool::new(true)).is_err());
+
+    // With every copy found already, nothing more (and the save isn't read: a damaged one changes nothing).
+    fs::write(project.join("Nuero garage 7.bwproject"), b"damaged").unwrap();
+    let all: Vec<LibraryCopy> =
+        ["Air Trumpets-2.wav", "Calling-2.wav", "Frost-2.wav", "ukg_snr_blaze-2.wav", "Vocal.wav"]
+            .iter()
+            .map(|n| LibraryCopy {
+                in_project: s(&project.join("samples").join(n)),
+                library_file: String::new(),
+                bytes: 1,
+            })
+            .collect();
+    assert!(saved_sample_copies_in(&index, &project, &mut None, &all, &stop).unwrap().is_empty());
+    // A damaged save says nothing; it's read again once saved again.
+    assert!(saved_sample_copies_in(&index, &project, &mut None, &known, &stop).unwrap().is_empty());
+}
+
+/// A "(fixed)" project that still keeps a copy found where the saves say it came from is out of date (Fix can now
+/// point it at its original); one that already points it there, or keeps only other copies, stays fixed.
+#[test]
+fn a_fixed_project_still_keeping_a_saved_path_copy_is_out_of_date() {
+    let dir = fixtures("mo-space-bitwig-fixed-still-keeping");
+    let pad = [7u8; 4000];
+    let pack = dir.join("Khords");
+    write(&pack, "Air Trumpets.wav", &pad);
+    let project = dir.join("Projects/Nuero garage");
+    write(&project, "samples/Air Trumpets-2.wav", &pad);
+    let from = pack.join("Air Trumpets.wav");
+    save_with_copies(&project.join("Nuero garage 7.bwproject"), &[("samples/Air Trumpets-2.wav", &from)]);
+    let stop = AtomicBool::new(false);
+    let index = LibraryIndex::new(&[dir.join("Library")], &stop).unwrap();
+    let mut listed = None;
+    let saved = saved_sample_copies_in(&index, &project, &mut listed, &[], &stop).unwrap();
+    assert_eq!(saved.len(), 1);
+    let fixed = project.join("Nuero garage 7 (fixed).bwproject");
+    let fixed_now = |keeps: &[(&str, &Path)]| {
+        save_with_copies(&fixed, keeps);
+        let mut saves = saves_in(&project, &stop).unwrap();
+        assert!(saves[0].is_fixed());
+        fixed_still_keeping(&index, &mut saves, &saved);
+        saves[0].is_fixed()
+    };
+    // Written by the Fix before: it still keeps the copy.
+    assert!(!fixed_now(&[("samples/Air Trumpets-2.wav", &from)]));
+    // Pointing it at the original (nothing in the project's folder), or keeping only another copy: still fixed.
+    assert!(fixed_now(&[("", &from)]));
+    assert!(fixed_now(&[("samples/Vocal.wav", &dir.join("Vocal.wav"))]));
 }

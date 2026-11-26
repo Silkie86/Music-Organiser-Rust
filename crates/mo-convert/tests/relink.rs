@@ -539,6 +539,54 @@ fn a_sample_copy_in_the_samples_folder_points_at_its_original() {
     assert!(err.contains("isn't in this project's multi-samples or samples folder"), "{err}");
 }
 
+/// A sample copy whose file reference still names where Bitwig copied it from, as Solomon's Nuero garage 7 keeps its
+/// Loopmasters Khords samples (26 Nov 2026): Fix points it there, nothing in the project's folder, and drops the old
+/// place inside the project from where it was found before.
+#[test]
+fn a_sample_copy_whose_reference_names_its_original_points_there() {
+    let root = folder("relink sample saved path");
+    let dir = root.join("Projects").join("Nuero garage");
+    let copy = "Air Trumpets-2.wav";
+    std::fs::create_dir_all(dir.join("samples")).unwrap();
+    std::fs::write(dir.join("samples").join(copy), b"RIFF pad").unwrap();
+    let pack = root.join("ProgramData").join("Loopmasters").join("Khords").join("Minor Feel");
+    std::fs::create_dir_all(&pack).unwrap();
+    let original = pack.join("Air Trumpets.wav");
+    std::fs::write(&original, b"RIFF pad").unwrap();
+    let full = original.to_string_lossy().into_owned();
+
+    let mut doc = bitwig::decode(fixtures::bitwig_template(fixtures::Template::default())).unwrap();
+    sample_file(
+        &mut doc,
+        copy,
+        &format!("samples/{copy}"),
+        &full,
+        &[&format!(r"I:\Bitwig Studio\Projects\Nuero garage\samples\{copy}")],
+        8,
+    );
+    for (k, v) in &mut doc.meta {
+        if k.as_str() == "used_files" {
+            *v = Value::Strings(vec![Text::new(&format!("samples/{copy}"))]);
+        }
+    }
+    let zip = doc.zip().map(<[u8]>::to_vec);
+    let project = dir.join("Nuero garage 7.bwproject");
+    std::fs::write(&project, bitwig::encode(&doc, zip.as_deref()).unwrap()).unwrap();
+
+    let relinks = [Relink { copy: dir.join("samples").join(copy), library: original.clone() }];
+    let fixed = mo_convert::relink::fix_bitwig_project_in(&project, &relinks, &[]).unwrap();
+    assert_eq!(fixed.changed, relinks, "{:?}", fixed.left);
+    let back = bitwig::decode(std::fs::read(&fixed.file).unwrap()).unwrap();
+    assert_eq!(back.body_error, None);
+    assert_eq!(
+        sample_file_texts(&back, 0),
+        ("Air Trumpets.wav".to_owned(), String::new(), full.clone(), vec![full.clone()])
+    );
+    let used = back.meta.iter().find(|(k, _)| k.as_str() == "used_files").map(|(_, v)| v.clone());
+    assert_eq!(used, Some(Value::Strings(Vec::new())));
+    assert!(!texts(&fixed.file).iter().any(|t| t.contains(copy)), "nothing names the copy any more");
+}
+
 #[test]
 fn a_same_named_sample_copy_is_told_from_its_original_in_a_samples_folder() {
     let root = folder("relink same-named sample");

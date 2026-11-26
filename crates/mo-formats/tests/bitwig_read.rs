@@ -274,3 +274,48 @@ fn a_multisample_found_outside_the_project_by_its_full_path_is_one_of_its_sample
         assert!(!info.samples.iter().any(|s| s.starts_with(not)), "{not}: {:?}", info.samples);
     }
 }
+
+/// Where a save says each file in its own folder was copied from: the full path in the file reference of a sample
+/// file with a place inside the project (Solomon's Nuero garage 7, 26 Nov 2026: "samples/Air Trumpets-2.wav" from
+/// Loopmasters Khords). Not one outside the project, not a path it was found at before, not a path that isn't full.
+#[test]
+fn a_save_says_where_each_copy_in_its_folder_was_copied_from() {
+    use mo_formats::bitwig::{Field, Object, Slot, Text, Value};
+    let mut doc = bitwig::decode(bitwig_template(Template::default())).unwrap();
+    let text = |id: u32, t: &str| Field { id, value: Value::Str(Text::new(t)) };
+    let root = doc.root.unwrap();
+    let mut sample = |inside: &str, path: &str, at: u32| {
+        let mut reference = Object::new(0x2a);
+        reference.fields.push(text(0x3b, path));
+        let reference = doc.add(reference);
+        let mut old = Object::new(0x2a);
+        old.fields.push(text(0x3b, r"I:\Bitwig Studio\Projects\Nuero garage\samples\Old-2.wav"));
+        let old = doc.add(old);
+        let mut found = Object::new(0x2b4);
+        found.fields.push(Field { id: 0xc5b, value: Value::List(vec![Slot::Obj(old)]) });
+        let found = doc.add(found);
+        let mut file = Object::new(0x4a6);
+        file.fields.push(text(0x512, "x.wav"));
+        file.fields.push(text(0xd3a, inside));
+        file.fields.push(Field { id: 0xd3b, value: Value::Obj(Slot::Obj(reference)) });
+        file.fields.push(Field { id: 0x15, value: Value::Obj(Slot::Obj(found)) });
+        let file = doc.add(file);
+        doc.objects[reference.0 as usize].parent = Some((file, 0xd3b));
+        doc.objects[found.0 as usize].parent = Some((file, 0x15));
+        doc.objects[old.0 as usize].parent = Some((found, 0xc5b));
+        doc.objects[file.0 as usize].parent = Some((root, at));
+        doc.obj_mut(root).fields.push(Field { id: at, value: Value::Obj(Slot::Obj(file)) });
+    };
+    let khords = r"C:\ProgramData\Loopmasters\Khords\Packs\Ambient Textures\Samples\Minor Feel\Air Trumpets.wav";
+    sample("samples/Air Trumpets-2.wav", khords, 0x7f20);
+    // The same file used twice is said once.
+    sample("samples/Air Trumpets-2.wav", khords, 0x7f21);
+    // Outside the project: nothing in its folder.
+    sample("", r"D:\Pack\Kick.wav", 0x7f22);
+    // A path that isn't full says nothing about where it came from.
+    sample("samples/Snare-2.wav", "Snare.wav", 0x7f23);
+    let zip = doc.zip().map(<[u8]>::to_vec);
+    let raw = bitwig::encode(&doc, zip.as_deref()).unwrap();
+    let back = bitwig::decode(raw).unwrap();
+    assert_eq!(bitwig::copied_from(&back), vec![("samples/Air Trumpets-2.wav".to_owned(), khords.to_owned())]);
+}

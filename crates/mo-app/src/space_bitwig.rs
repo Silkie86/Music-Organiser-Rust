@@ -268,6 +268,8 @@ fn look_through(
     // What's read is written to the store as it goes, not only at the end: a look takes minutes when much is new, and
     // one cut short by the app closing would otherwise read it all again at the next start.
     let mut kept_at = std::time::Instant::now();
+    // Finding sample copies by the saves' own paths, for the log: how long, in how many folders, how many found.
+    let (mut saved_time, mut saved_folders, mut saved_found) = (std::time::Duration::ZERO, 0usize, 0usize);
     for (n, folder) in folders.iter().enumerate() {
         if index.remembers() && kept_at.elapsed() >= KEEP_EVERY {
             kept_at = std::time::Instant::now();
@@ -280,20 +282,52 @@ fn look_through(
             Some(named) => bitwig::sample_copies_in(index, folder, named, stop)?,
             None => Vec::new(),
         };
-        let has_samples = !samples.is_empty();
+        // The ones the Sounds library doesn't know, where the project's saves say they were copied from. Not before
+        // the Sounds library is read: every copy would be looked for that way then, reading every project's saves.
+        let mut listed = None;
+        let saved = match named {
+            Some(_) => {
+                let read_at = std::time::Instant::now();
+                let saved = bitwig::saved_sample_copies_in(index, folder, &mut listed, &samples, stop)?;
+                if listed.is_some() {
+                    saved_time += read_at.elapsed();
+                    saved_folders += 1;
+                    saved_found += saved.len();
+                }
+                saved
+            }
+            None => Vec::new(),
+        };
+        let has_samples = !samples.is_empty() || !saved.is_empty();
         copies.extend(samples);
+        copies.extend(saved.iter().cloned());
         copies.sort_by(|a, b| a.in_project.cmp(&b.in_project));
         if !copies.is_empty() {
-            let mut saves = bitwig::saves_in(folder, stop)?;
+            let mut saves = match listed {
+                Some(saves) => saves,
+                None => bitwig::saves_in(folder, stop)?,
+            };
             if has_samples {
                 // A Fix from before it pointed samples at their originals left them all in use.
                 bitwig::fixed_before_samples(&mut saves);
             }
+            // And one from before it looked where the saves say they came from may still keep those.
+            bitwig::fixed_still_keeping(index, &mut saves, &saved);
             found.projects.push(Project { folder: folder.clone(), copies, saves });
         }
         progress(n + 1, folders.len());
     }
     found.projects.sort_by(|a, b| b.bytes().cmp(&a.bytes()).then_with(|| a.folder.cmp(&b.folder)));
+    if saved_folders > 0 {
+        crate::log::info(
+            "Space",
+            &format!(
+                "Bitwig copies: {saved_found} sample copies found where {saved_folders} project folders' saves say \
+                 they came from, in {:.1} s",
+                saved_time.as_secs_f64()
+            ),
+        );
+    }
     Ok(found)
 }
 
