@@ -3455,6 +3455,7 @@ name = "mo-space"
 version = "0.9.0-beta.2"
 dependencies = [
  "chrono",
+ "flate2",
  "fs4",
  "junction",
  "known-folders",

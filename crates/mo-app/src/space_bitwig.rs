@@ -268,6 +268,8 @@ fn look_through(
     // What's read is written to the store as it goes, not only at the end: a look takes minutes when much is new, and
     // one cut short by the app closing would otherwise read it all again at the next start.
     let mut kept_at = std::time::Instant::now();
+    // How long finding sample copies by the saves' own paths took, for the log.
+    let mut saved_time = std::time::Duration::ZERO;
     for (n, folder) in folders.iter().enumerate() {
         if index.remembers() && kept_at.elapsed() >= KEEP_EVERY {
             kept_at = std::time::Instant::now();
@@ -276,10 +278,16 @@ fn look_through(
             }
         }
         let mut copies = index.copies_in(folder, stop)?;
-        let samples = match named {
+        let mut samples = match named {
             Some(named) => bitwig::sample_copies_in(index, folder, named, stop)?,
             None => Vec::new(),
         };
+        // The ones the Sounds library doesn't know, where the project's saves say they were copied from.
+        let read_at = std::time::Instant::now();
+        let saved = bitwig::saved_sample_copies_in(index, folder, &samples, stop)?;
+        saved_time += read_at.elapsed();
+        let has_saved = !saved.is_empty();
+        samples.extend(saved);
         let has_samples = !samples.is_empty();
         copies.extend(samples);
         copies.sort_by(|a, b| a.in_project.cmp(&b.in_project));
@@ -289,11 +297,19 @@ fn look_through(
                 // A Fix from before it pointed samples at their originals left them all in use.
                 bitwig::fixed_before_samples(&mut saves);
             }
+            if has_saved {
+                // And one from before it looked where the saves say they came from left those in use.
+                bitwig::fixed_before_saved_paths(&mut saves);
+            }
             found.projects.push(Project { folder: folder.clone(), copies, saves });
         }
         progress(n + 1, folders.len());
     }
     found.projects.sort_by(|a, b| b.bytes().cmp(&a.bytes()).then_with(|| a.folder.cmp(&b.folder)));
+    crate::log::info(
+        "Space",
+        &format!("Bitwig copies: sample copies found by their saved paths in {:.1} s", saved_time.as_secs_f64()),
+    );
     Ok(found)
 }
 

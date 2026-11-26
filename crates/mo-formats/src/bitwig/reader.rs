@@ -454,6 +454,26 @@ fn culture_order(a: &str, b: &str) -> std::cmp::Ordering {
     key(a).cmp(&key(b)).then_with(|| b.cmp(a))
 }
 
+/// Where a save says each file it keeps in its own folder was copied from: for each sample file ([`CLS_SAMPLE_FILE`])
+/// with a place inside the project's folder (0xd3a, "samples/Air Trumpets-2.wav"), that place and the full path in its
+/// file reference (0xd3b), which Bitwig keeps pointing at the file it copied ("C:\ProgramData\Loopmasters\Khords\…
+/// \Air Trumpets.wav"; Solomon's Nuero garage 7, 26 Nov 2026). Only full paths; each pair once. It doesn't say the
+/// file is still there, nor that it's the same: whoever uses it checks both.
+pub fn copied_from(doc: &Document) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = ids(doc)
+        .filter(|&o| doc.obj(o).class == CLS_SAMPLE_FILE)
+        .filter_map(|f| {
+            let inside = doc.obj(f).str(F_IN_PROJECT);
+            let r = doc.field_obj(f, F_SAMPLE_FILE_REF)?;
+            let from = doc.obj(r).str(F_FILE_PATH);
+            (!inside.is_empty() && paths::is_absolute(from)).then(|| (inside.to_owned(), from.to_owned()))
+        })
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
 /// Whether a multisample's full path is in the project's own `multi-samples` folder, by the project folder's name (the
 /// save's own folder, or the one above Bitwig's `auto-backups`): the drive may have had another letter then. `save` is
 /// the save's full path, with either separator.

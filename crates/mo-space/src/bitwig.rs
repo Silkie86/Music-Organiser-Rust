@@ -59,7 +59,13 @@ pub struct LibraryCopy {
 pub struct LibraryIndex {
     by_size: HashMap<u64, Vec<PathBuf>>,
     prints: Prints,
+    /// What each save read by [`saved_sample_copies_in`] says its copies were copied from, with its size and time
+    /// then: read again only once it's saved again (rule 12). Kept while the app runs only.
+    saved: std::sync::Mutex<HashMap<PathBuf, SavedFrom>>,
 }
+
+/// A save's size and time when it was read, and where it says its copies were copied from.
+type SavedFrom = (u64, Option<SystemTime>, std::sync::Arc<Vec<(String, String)>>);
 
 impl LibraryIndex {
     /// Lists the multisamples in the Library folders (Bitwig's Multisamples folder, and any other the app knows). A
@@ -104,7 +110,7 @@ impl LibraryIndex {
                 by_size.entry(size).or_default().push(path);
             }
         }
-        Ok(LibraryIndex { by_size, prints: Prints::default() })
+        Ok(LibraryIndex { by_size, prints: Prints::default(), saved: Default::default() })
     }
 
     /// Lists the Library folders again for a new look (a multisample may have been added or removed since), keeping
@@ -126,6 +132,30 @@ impl LibraryIndex {
     /// than one look's files (rule 28). An error says why it couldn't be written.
     pub fn keep(&self, whole_look: bool) -> Result<(), String> {
         self.prints.keep(whole_look)
+    }
+
+    /// Where a save says its copies were copied from (`mo_formats::bitwig::copied_from`), read once while it's
+    /// unchanged. Nothing for a save that can't be read or decoded.
+    fn copied_from(&self, save: &Path) -> std::sync::Arc<Vec<(String, String)>> {
+        let now = fs::metadata(save).ok().map(|m| (m.len(), m.modified().ok()));
+        let Some((len, at)) = now else { return Default::default() };
+        let known = self.saved.lock().ok().and_then(|s| s.get(save).cloned());
+        if let Some((l, t, from)) = known
+            && l == len
+            && t == at
+        {
+            return from;
+        }
+        let from: std::sync::Arc<Vec<(String, String)>> = fs::read(save)
+            .ok()
+            .and_then(|raw| mo_formats::bitwig::decode(raw).ok())
+            .map(|doc| mo_formats::bitwig::copied_from(&doc))
+            .unwrap_or_default()
+            .into();
+        if let Ok(mut s) = self.saved.lock() {
+            s.insert(save.to_path_buf(), (len, at, from.clone()));
+        }
+        from
     }
 
     /// Whether the fingerprints are kept in a store ([`LibraryIndex::remember_in`] worked).
@@ -213,19 +243,112 @@ pub type Named<'a> = dyn Fn(&str) -> Vec<String> + Sync + 'a;
 /// that name with Bitwig's "-2" endings taken off ("ukg_snr_blaze-2-2-3.wav" is a copy of "ukg_snr_blaze.wav").
 /// Solomon chose this on 15 Nov 2026: each sampler keeps its own sound, played from the original, and the copies can
 /// then go. A file whose name matches no sound, or whose sound differs, is the project's own (a recording, say) and
-/// isn't listed. Only sounds of the same size are read, with the same prints as the multisamples.
+/// isn't listed. Only sounds of the same size are read, with the same prints as the multisamples. The ones the
+/// library doesn't know may still be found where the project says they came from ([`saved_sample_copies_in`]).
 pub fn sample_copies_in(
     index: &LibraryIndex,
     project: &Path,
     named: &Named<'_>,
     stop: &AtomicBool,
 ) -> Result<Vec<LibraryCopy>, Stopped> {
-    let folder = project.join(SAMPLES_FOLDER);
-    if is_link(&folder) || !folder.is_dir() {
+    let found = samples_in(project);
+    if stop.load(Ordering::Relaxed) {
+        return Err(Stopped);
+    }
+    // Each copy's possible originals: the library's sounds of each of its names, of its size, outside any project.
+    let outside = Outside::default();
+    let extension = |p: &Path| p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let maybe: Vec<(&PathBuf, u64, Vec<PathBuf>)> = found
+        .par_iter()
+        .filter_map(|(path, bytes)| {
+            let ext = extension(path);
+            let mut same_size: Vec<PathBuf> = Vec::new();
+            for name in names(path) {
+                for sound in named(&format!("{name}{ext}")) {
+                    let sound = PathBuf::from(sound);
+                    if !same_size.contains(&sound) && outside.could_be_original(&sound, path, *bytes) {
+                        same_size.push(sound);
+                    }
+                }
+            }
+            (!same_size.is_empty()).then_some((path, *bytes, same_size))
+        })
+        .collect();
+    same_bytes(index, maybe, stop)
+}
+
+/// The single sample copies in a project's `samples` folder that aren't in `known` (the ones [`sample_copies_in`]
+/// found), each the same, byte for byte, as the file the project's own saves say it was copied from: Bitwig keeps that
+/// full path in the copy's file reference (`mo_formats::bitwig::copied_from`). Solomon's Nuero garage 7 (26 Nov 2026)
+/// had 336 Loopmasters Khords samples copied in from `C:\ProgramData\Loopmasters\Khords`, a folder the Sounds library
+/// doesn't look in, so Fix left them all on the copies. The checks are [`sample_copies_in`]'s: the original is there,
+/// of the same size, outside every Bitwig project's own folders, and the same byte for byte. Your saves beside the
+/// project are read newest first (not its auto-backups, nor a "(fixed)" project), each once while it's unchanged, and
+/// only while a copy is still unfound: a folder whose copies were all found is never read.
+pub fn saved_sample_copies_in(
+    index: &LibraryIndex,
+    project: &Path,
+    known: &[LibraryCopy],
+    stop: &AtomicBool,
+) -> Result<Vec<LibraryCopy>, Stopped> {
+    let known: HashSet<String> = known.iter().map(|c| key(&c.in_project)).collect();
+    let mut left: Vec<(PathBuf, u64)> =
+        samples_in(project).into_iter().filter(|(path, _)| !known.contains(&key(&text(path)))).collect();
+    if left.is_empty() {
         return Ok(Vec::new());
     }
-    // Only the folder's own files: Bitwig puts its copies there, never in a folder below.
-    let found: Vec<(PathBuf, u64)> = fs::read_dir(&folder)
+    let outside = Outside::default();
+    let mut maybe: Vec<(PathBuf, u64, Vec<PathBuf>)> = Vec::new();
+    for save in saves_in(project, stop)?.iter().filter(|s| !s.below) {
+        if left.is_empty() {
+            break;
+        }
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stopped);
+        }
+        let from = index.copied_from(&save.path);
+        // By the copy's name in the project's samples folder ("samples/Air Trumpets-2.wav"), as Windows compares names.
+        let mut saved: HashMap<String, Vec<&str>> = HashMap::new();
+        for (inside, original) in from.iter() {
+            if let Some(name) = in_samples_folder(inside) {
+                saved.entry(key(name)).or_default().push(original);
+            }
+        }
+        left.retain(|(path, bytes)| {
+            let name = path.file_name().map(|n| key(&n.to_string_lossy())).unwrap_or_default();
+            let originals: Vec<PathBuf> = saved
+                .get(&name)
+                .into_iter()
+                .flatten()
+                .map(PathBuf::from)
+                .filter(|original| outside.could_be_original(original, path, *bytes))
+                .collect();
+            if originals.is_empty() {
+                return true;
+            }
+            maybe.push((path.clone(), *bytes, originals));
+            false
+        });
+    }
+    let maybe: Vec<(&PathBuf, u64, Vec<PathBuf>)> = maybe.iter().map(|(p, b, o)| (p, *b, o.clone())).collect();
+    same_bytes(index, maybe, stop)
+}
+
+/// A copy's name, when a save's place for a file inside the project ("samples/Air Trumpets-2.wav", either slash) is
+/// in its `samples` folder itself, where Bitwig keeps its copies.
+fn in_samples_folder(inside: &str) -> Option<&str> {
+    let (folder, name) = inside.split_once(['/', '\\'])?;
+    (folder.eq_ignore_ascii_case(SAMPLES_FOLDER) && !name.is_empty() && !name.contains(['/', '\\'])).then_some(name)
+}
+
+/// The files in a project's `samples` folder itself, with their sizes: Bitwig puts its copies there, never in a folder
+/// below. Not a link, nor what's in a `samples` folder that is one.
+fn samples_in(project: &Path) -> Vec<(PathBuf, u64)> {
+    let folder = project.join(SAMPLES_FOLDER);
+    if is_link(&folder) || !folder.is_dir() {
+        return Vec::new();
+    }
+    fs::read_dir(&folder)
         .map(|entries| {
             entries
                 .flatten()
@@ -236,50 +359,48 @@ pub fn sample_copies_in(
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    if stop.load(Ordering::Relaxed) {
-        return Err(Stopped);
+        .unwrap_or_default()
+}
+
+/// Whether a sound may be the original of a single sample copy, with whether each folder is a project's own asked
+/// once.
+#[derive(Default)]
+struct Outside {
+    own: std::sync::Mutex<HashMap<PathBuf, bool>>,
+}
+
+impl Outside {
+    /// Whether `sound` may be the original of `copy` (of `bytes`): a file of the same size, not the copy itself, and
+    /// outside every Bitwig project's own folders and every "(old copy)" folder.
+    fn could_be_original(&self, sound: &Path, copy: &Path, bytes: u64) -> bool {
+        let size = fs::symlink_metadata(sound).ok().filter(|m| m.is_file()).map(|m| m.len());
+        size == Some(bytes) && !crate::half_copy::same_place(&text(sound), &text(copy)) && self.outside(sound)
     }
-    // Each copy's possible originals: the library's sounds of each of its names, of its size, outside any project.
-    // Whether a folder is a project's own is asked once per folder.
-    let own: std::sync::Mutex<HashMap<PathBuf, bool>> = std::sync::Mutex::default();
-    let outside = |sound: &Path| {
+
+    fn outside(&self, sound: &Path) -> bool {
         let Some(at) = sound.parent() else { return false };
-        if let Some(known) = own.lock().ok().and_then(|o| o.get(at).copied()) {
+        if let Some(known) = self.own.lock().ok().and_then(|o| o.get(at).copied()) {
             return !known;
         }
         let real = real_path(&text(at)).map(PathBuf::from);
         let inside = in_old_copy(at)
             || in_bitwig_project(at)
             || real.as_deref().is_some_and(|r| in_old_copy(r) || in_bitwig_project(r));
-        if let Ok(mut o) = own.lock() {
+        if let Ok(mut o) = self.own.lock() {
             o.insert(at.to_path_buf(), inside);
         }
         !inside
-    };
-    let extension = |p: &Path| p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-    let maybe: Vec<(&PathBuf, u64, Vec<PathBuf>)> = found
-        .par_iter()
-        .filter_map(|(path, bytes)| {
-            let ext = extension(path);
-            let mut same_size: Vec<PathBuf> = Vec::new();
-            for name in names(path) {
-                for sound in named(&format!("{name}{ext}")) {
-                    let sound = PathBuf::from(sound);
-                    let size = fs::symlink_metadata(&sound).ok().filter(|m| m.is_file()).map(|m| m.len());
-                    if size == Some(*bytes)
-                        && !same_size.contains(&sound)
-                        && !crate::half_copy::same_place(&text(&sound), &text(path))
-                        && outside(&sound)
-                    {
-                        same_size.push(sound);
-                    }
-                }
-            }
-            (!same_size.is_empty()).then_some((path, *bytes, same_size))
-        })
-        .collect();
-    // Each original read once, its ends then (where those match) the whole of it, as for the multisamples.
+    }
+}
+
+/// Of each copy's possible originals (of its size), the ones the same byte for byte, and of those the one it was most
+/// likely copied from ([`best`]): each original read once, its ends then (where those match) the whole of it, as for
+/// the multisamples.
+fn same_bytes(
+    index: &LibraryIndex,
+    maybe: Vec<(&PathBuf, u64, Vec<PathBuf>)>,
+    stop: &AtomicBool,
+) -> Result<Vec<LibraryCopy>, Stopped> {
     let mut wanted: Vec<&PathBuf> = maybe.iter().flat_map(|(_, _, same)| same.iter()).collect();
     wanted.sort_unstable();
     wanted.dedup();
@@ -419,10 +540,31 @@ pub fn fix_relinks_samples() -> SystemTime {
 /// Marks the "(fixed)" projects written before [`fix_relinks_samples`] as out of date, for a project with single sample
 /// copies: Fix can now point those at their originals too. One whose time can't be read counts as out of date.
 pub fn fixed_before_samples(saves: &mut [Save]) {
+    fixed_before(saves, fix_relinks_samples());
+}
+
+/// When Fix began pointing single sample copies at the file the project says each was copied from
+/// ([`saved_sample_copies_in`]; Solomon's Nuero garage 7, 26 Nov 2026). A "(fixed)" project written before then left
+/// those copies in use.
+pub fn fix_follows_saved_paths() -> SystemTime {
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(FIX_FOLLOWS_SAVED_PATHS)
+}
+
+/// [`fix_follows_saved_paths`] in seconds since 1970: 2026-11-26 23:59:59 UTC, after this Fix was merged.
+const FIX_FOLLOWS_SAVED_PATHS: u64 = 1_795_737_599;
+
+/// Marks the "(fixed)" projects written before [`fix_follows_saved_paths`] as out of date, for a project with single
+/// sample copies found only where its saves say they came from: Fix can now point those at their originals too.
+pub fn fixed_before_saved_paths(saves: &mut [Save]) {
+    fixed_before(saves, fix_follows_saved_paths());
+}
+
+/// Marks the "(fixed)" projects written before `at` as out of date; one whose time can't be read counts as out of date.
+fn fixed_before(saves: &mut [Save], at: SystemTime) {
     for save in saves {
         if let Some((fixed, current)) = &mut save.fixed {
-            let at = fs::metadata(&*fixed).and_then(|m| m.modified()).ok();
-            *current = *current && at.is_some_and(|at| at >= fix_relinks_samples());
+            let written = fs::metadata(&*fixed).and_then(|m| m.modified()).ok();
+            *current = *current && written.is_some_and(|written| written >= at);
         }
     }
 }
