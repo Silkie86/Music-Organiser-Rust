@@ -135,10 +135,13 @@ impl LibraryIndex {
     }
 
     /// Where a save says its copies were copied from (`mo_formats::bitwig::copied_from`), read once while it's
-    /// unchanged. Nothing for a save that can't be read or decoded.
+    /// unchanged. Nothing for a save that can't be read now (kept from, so it's read again at the next look) or can't be
+    /// decoded (kept: it's read again once saved again). A damaged save that trips the decoder is one warning line in
+    /// the log (`mo_catch::catch`), never the end of the look.
     fn copied_from(&self, save: &Path) -> std::sync::Arc<Vec<(String, String)>> {
-        let now = fs::metadata(save).ok().map(|m| (m.len(), m.modified().ok()));
-        let Some((len, at)) = now else { return Default::default() };
+        let Some((len, at)) = fs::metadata(save).ok().map(|m| (m.len(), m.modified().ok())) else {
+            return Default::default();
+        };
         let known = self.saved.lock().ok().and_then(|s| s.get(save).cloned());
         if let Some((l, t, from)) = known
             && l == len
@@ -146,12 +149,12 @@ impl LibraryIndex {
         {
             return from;
         }
-        let from: std::sync::Arc<Vec<(String, String)>> = fs::read(save)
-            .ok()
-            .and_then(|raw| mo_formats::bitwig::decode(raw).ok())
-            .map(|doc| mo_formats::bitwig::copied_from(&doc))
-            .unwrap_or_default()
-            .into();
+        // Not read now (locked while a virus checker or Bitwig has it, a drive waking up): tried again next look.
+        let Ok(raw) = fs::read(save) else { return Default::default() };
+        let read = mo_catch::catch(std::panic::AssertUnwindSafe(|| {
+            mo_formats::bitwig::decode(raw).ok().map(|doc| mo_formats::bitwig::copied_from(&doc))
+        }));
+        let from: std::sync::Arc<Vec<(String, String)>> = read.ok().flatten().unwrap_or_default().into();
         if let Ok(mut s) = self.saved.lock() {
             s.insert(save.to_path_buf(), (len, at, from.clone()));
         }
@@ -274,7 +277,7 @@ pub fn sample_copies_in(
             (!same_size.is_empty()).then_some((path, *bytes, same_size))
         })
         .collect();
-    same_bytes(index, maybe, stop)
+    same_bytes(index, maybe.iter().map(|(p, b, o)| (*p, *b, o.as_slice())).collect(), stop)
 }
 
 /// The single sample copies in a project's `samples` folder that aren't in `known` (the ones [`sample_copies_in`]
@@ -282,12 +285,14 @@ pub fn sample_copies_in(
 /// full path in the copy's file reference (`mo_formats::bitwig::copied_from`). Solomon's Nuero garage 7 (26 Nov 2026)
 /// had 336 Loopmasters Khords samples copied in from `C:\ProgramData\Loopmasters\Khords`, a folder the Sounds library
 /// doesn't look in, so Fix left them all on the copies. The checks are [`sample_copies_in`]'s: the original is there,
-/// of the same size, outside every Bitwig project's own folders, and the same byte for byte. Your saves beside the
-/// project are read newest first (not its auto-backups, nor a "(fixed)" project), each once while it's unchanged, and
-/// only while a copy is still unfound: a folder whose copies were all found is never read.
+/// of the same size, outside every Bitwig project's own folders, and the same byte for byte. Only each song's newest
+/// save beside the project is read (the one Fix writes from; not its auto-backups, nor a "(fixed)" project), each once
+/// while it's unchanged, and only while a copy is still unfound: a folder whose copies were all found is never read.
+/// `saves` is the folder's [`saves_in`], listed here when it's needed and not given.
 pub fn saved_sample_copies_in(
     index: &LibraryIndex,
     project: &Path,
+    saves: &mut Option<Vec<Save>>,
     known: &[LibraryCopy],
     stop: &AtomicBool,
 ) -> Result<Vec<LibraryCopy>, Stopped> {
@@ -297,9 +302,13 @@ pub fn saved_sample_copies_in(
     if left.is_empty() {
         return Ok(Vec::new());
     }
+    let saves = match saves {
+        Some(listed) => listed,
+        None => saves.insert(saves_in(project, stop)?),
+    };
     let outside = Outside::default();
     let mut maybe: Vec<(PathBuf, u64, Vec<PathBuf>)> = Vec::new();
-    for save in saves_in(project, stop)?.iter().filter(|s| !s.below) {
+    for save in newest_of_each_song(project, saves) {
         if left.is_empty() {
             break;
         }
@@ -330,8 +339,40 @@ pub fn saved_sample_copies_in(
             false
         });
     }
-    let maybe: Vec<(&PathBuf, u64, Vec<PathBuf>)> = maybe.iter().map(|(p, b, o)| (p, *b, o.clone())).collect();
-    same_bytes(index, maybe, stop)
+    same_bytes(index, maybe.iter().map(|(p, b, o)| (p, *b, o.as_slice())).collect(), stop)
+}
+
+/// Each song's newest save beside the project (saves newest first, as [`saves_in`] lists them), songs told apart as
+/// the Songs page tells them (`mo_library::songs::key`): the saves Fix writes from.
+fn newest_of_each_song<'a>(project: &Path, saves: &'a [Save]) -> impl Iterator<Item = &'a Save> {
+    let folder = text(project);
+    let mut songs = HashSet::new();
+    saves.iter().filter(move |s| {
+        let stem = paths::stem(&s.path.to_string_lossy()).to_owned();
+        !s.below && songs.insert(mo_library::songs::key(&folder, "Bitwig", &stem))
+    })
+}
+
+/// Marks a save's "(fixed)" project out of date when it still keeps one of `saved` (copies found where the saves say
+/// they came from, [`saved_sample_copies_in`]) as a copy in the project's samples folder: it was written before Fix
+/// looked there, and Fix can now point it at its original. One that already points them there stays fixed. Each fixed
+/// project is read once while it's unchanged.
+pub fn fixed_still_keeping(index: &LibraryIndex, saves: &mut [Save], saved: &[LibraryCopy]) {
+    let names: HashSet<String> =
+        saved.iter().filter_map(|c| Path::new(&c.in_project).file_name().map(|n| key(&n.to_string_lossy()))).collect();
+    if names.is_empty() {
+        return;
+    }
+    for save in saves {
+        if let Some((fixed, current)) = &mut save.fixed
+            && *current
+        {
+            let from = index.copied_from(fixed);
+            let keeps =
+                from.iter().any(|(inside, _)| in_samples_folder(inside).is_some_and(|n| names.contains(&key(n))));
+            *current = !keeps;
+        }
+    }
 }
 
 /// A copy's name, when a save's place for a file inside the project ("samples/Air Trumpets-2.wav", either slash) is
@@ -398,7 +439,7 @@ impl Outside {
 /// the multisamples.
 fn same_bytes(
     index: &LibraryIndex,
-    maybe: Vec<(&PathBuf, u64, Vec<PathBuf>)>,
+    maybe: Vec<(&PathBuf, u64, &[PathBuf])>,
     stop: &AtomicBool,
 ) -> Result<Vec<LibraryCopy>, Stopped> {
     let mut wanted: Vec<&PathBuf> = maybe.iter().flat_map(|(_, _, same)| same.iter()).collect();
@@ -541,22 +582,6 @@ pub fn fix_relinks_samples() -> SystemTime {
 /// copies: Fix can now point those at their originals too. One whose time can't be read counts as out of date.
 pub fn fixed_before_samples(saves: &mut [Save]) {
     fixed_before(saves, fix_relinks_samples());
-}
-
-/// When Fix began pointing single sample copies at the file the project says each was copied from
-/// ([`saved_sample_copies_in`]; Solomon's Nuero garage 7, 26 Nov 2026). A "(fixed)" project written before then left
-/// those copies in use.
-pub fn fix_follows_saved_paths() -> SystemTime {
-    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(FIX_FOLLOWS_SAVED_PATHS)
-}
-
-/// [`fix_follows_saved_paths`] in seconds since 1970: 2026-11-26 23:59:59 UTC, after this Fix was merged.
-const FIX_FOLLOWS_SAVED_PATHS: u64 = 1_795_737_599;
-
-/// Marks the "(fixed)" projects written before [`fix_follows_saved_paths`] as out of date, for a project with single
-/// sample copies found only where its saves say they came from: Fix can now point those at their originals too.
-pub fn fixed_before_saved_paths(saves: &mut [Save]) {
-    fixed_before(saves, fix_follows_saved_paths());
 }
 
 /// Marks the "(fixed)" projects written before `at` as out of date; one whose time can't be read counts as out of date.

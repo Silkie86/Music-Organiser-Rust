@@ -9,8 +9,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 use mo_space::bitwig::{
-    FixedProject, LibraryCopy, LibraryIndex, fix_follows_saved_paths, fixed_before_saved_paths, fixed_projects,
-    project_folders, remove_copies, remove_fixed_projects, sample_copies_in, saved_sample_copies_in, saves_in,
+    FixedProject, LibraryCopy, LibraryIndex, fixed_projects, fixed_still_keeping, project_folders, remove_copies,
+    remove_fixed_projects, sample_copies_in, saved_sample_copies_in, saves_in,
 };
 use mo_space::clean::{Bin, Problem, Removed, What, undo};
 use mo_space::key;
@@ -842,12 +842,12 @@ fn a_sample_copy_is_found_where_the_save_says_it_came_from() {
         library_file: s(&dir.join("Pack/ukg_snr_blaze.wav")),
         bytes: 3000,
     }];
-    let copies = saved_sample_copies_in(&index, &project, &known, &stop).unwrap();
+    let copies = saved_sample_copies_in(&index, &project, &mut None, &known, &stop).unwrap();
     assert_eq!(
         copies.iter().map(keyed).collect::<Vec<_>>(),
         vec![(key(&s(&project.join("samples/Air Trumpets-2.wav"))), key(&s(&khords.join("Air Trumpets.wav"))), 4000)]
     );
-    assert!(saved_sample_copies_in(&index, &project, &known, &AtomicBool::new(true)).is_err());
+    assert!(saved_sample_copies_in(&index, &project, &mut None, &known, &AtomicBool::new(true)).is_err());
 
     // With every copy found already, nothing more (and the save isn't read: a damaged one changes nothing).
     fs::write(project.join("Nuero garage 7.bwproject"), b"damaged").unwrap();
@@ -860,32 +860,39 @@ fn a_sample_copy_is_found_where_the_save_says_it_came_from() {
                 bytes: 1,
             })
             .collect();
-    assert!(saved_sample_copies_in(&index, &project, &all, &stop).unwrap().is_empty());
+    assert!(saved_sample_copies_in(&index, &project, &mut None, &all, &stop).unwrap().is_empty());
     // A damaged save says nothing; it's read again once saved again.
-    assert!(saved_sample_copies_in(&index, &project, &known, &stop).unwrap().is_empty());
+    assert!(saved_sample_copies_in(&index, &project, &mut None, &known, &stop).unwrap().is_empty());
 }
 
-/// A "(fixed)" project written before Fix looked where the saves say their copies came from is out of date for a
-/// project with such copies; one written since isn't.
+/// A "(fixed)" project that still keeps a copy found where the saves say it came from is out of date (Fix can now
+/// point it at its original); one that already points it there, or keeps only other copies, stays fixed.
 #[test]
-fn a_fixed_project_from_before_saved_paths_is_out_of_date() {
-    let dir = fixtures("mo-space-bitwig-fixed-before-saved-paths");
-    let cutoff = fix_follows_saved_paths();
-    for (name, at, current) in
-        [("Old", cutoff - Duration::from_secs(60), false), ("New", cutoff + Duration::from_secs(60), true)]
-    {
-        let folder = dir.join(name);
-        write(&folder, "Song.bwproject", b"save");
-        write(&folder, "Song (fixed).bwproject", b"fixed");
-        let set = |file: &str, at: SystemTime| {
-            fs::File::options().write(true).open(folder.join(file)).unwrap().set_modified(at).unwrap()
-        };
-        set("Song.bwproject", at - Duration::from_secs(600));
-        set("Song (fixed).bwproject", at);
-        let stop = AtomicBool::new(false);
-        let mut saves = saves_in(&folder, &stop).unwrap();
-        assert!(saves[0].is_fixed(), "{name}: fixed after the save and after #462");
-        fixed_before_saved_paths(&mut saves);
-        assert_eq!(saves[0].is_fixed(), current, "{name}");
-    }
+fn a_fixed_project_still_keeping_a_saved_path_copy_is_out_of_date() {
+    let dir = fixtures("mo-space-bitwig-fixed-still-keeping");
+    let pad = [7u8; 4000];
+    let pack = dir.join("Khords");
+    write(&pack, "Air Trumpets.wav", &pad);
+    let project = dir.join("Projects/Nuero garage");
+    write(&project, "samples/Air Trumpets-2.wav", &pad);
+    let from = pack.join("Air Trumpets.wav");
+    save_with_copies(&project.join("Nuero garage 7.bwproject"), &[("samples/Air Trumpets-2.wav", &from)]);
+    let stop = AtomicBool::new(false);
+    let index = LibraryIndex::new(&[dir.join("Library")], &stop).unwrap();
+    let mut listed = None;
+    let saved = saved_sample_copies_in(&index, &project, &mut listed, &[], &stop).unwrap();
+    assert_eq!(saved.len(), 1);
+    let fixed = project.join("Nuero garage 7 (fixed).bwproject");
+    let fixed_now = |keeps: &[(&str, &Path)]| {
+        save_with_copies(&fixed, keeps);
+        let mut saves = saves_in(&project, &stop).unwrap();
+        assert!(saves[0].is_fixed());
+        fixed_still_keeping(&index, &mut saves, &saved);
+        saves[0].is_fixed()
+    };
+    // Written by the Fix before: it still keeps the copy.
+    assert!(!fixed_now(&[("samples/Air Trumpets-2.wav", &from)]));
+    // Pointing it at the original (nothing in the project's folder), or keeping only another copy: still fixed.
+    assert!(fixed_now(&[("", &from)]));
+    assert!(fixed_now(&[("samples/Vocal.wav", &dir.join("Vocal.wav"))]));
 }
