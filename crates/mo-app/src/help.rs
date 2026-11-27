@@ -36,7 +36,7 @@ pub fn for_place(place: Place) -> PageHelp {
         Place::Sounds => PageHelp {
             what: "Every sample in your sound folders, to hear and drag into a DAW.",
             tips: &[
-                "Click a sound to hear it; drag it onto a track in your DAW.",
+                "Click a sound to hear it; drag it into your DAW. Pick a part, or Edit a copy, on its card.",
                 "Narrow the list by type, key and year. Tick Favourites for Sounds like them.",
                 "Galaxy puts alike sounds together: sweep the mouse over the stars to hear them.",
                 "Hide duplicates only hides copies in the app. No sound is ever moved or deleted.",

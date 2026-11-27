@@ -61,6 +61,8 @@ pub const PARTS: &[Part] = &[
     part("songs.filters", 208.0, 160.0, 360.0),
     // The Sounds folder tree, beside the filter column.
     part("sounds.folders", 280.0, 180.0, 480.0),
+    // The Sounds Edit strip along the bottom of the page: its height, dragged by its top edge.
+    part("sounds.edit", 320.0, 240.0, 900.0),
     // The Songs list beside the song's panel. Its usual width is none: the page gives it a third of the room then.
     part("songs.list", 0.0, 320.0, 1200.0),
     // The Curves list beside the curve editor. None usual: the page gives it about a fifth of the room then.

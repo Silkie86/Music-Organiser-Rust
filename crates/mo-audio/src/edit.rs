@@ -392,6 +392,77 @@ pub fn has_sound(audio: &AudioData, span: Span, level: f32) -> bool {
     audio.channels.iter().any(|ch| ch[span.start..span.end].iter().any(|s| s.is_finite() && s.abs() > level))
 }
 
+/// How long the sound is (frames) before each of `edits` and after the last, `frames` long to start with: as [`apply`]
+/// makes it, without doing the work.
+pub fn lengths(frames: usize, edits: &[Edit]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(edits.len() + 1);
+    let mut n = frames;
+    out.push(n);
+    for edit in edits {
+        n = match *edit {
+            Edit::Trim(span) => span.within(n).map_or(n, Span::len),
+            Edit::LoopCrossfade { span, frames: cross } => match span.unwrap_or(Span { start: 0, end: n }).within(n) {
+                // A loop of the whole sound comes out shorter by its crossfade ([`looped`]).
+                Some(s) if s.start == 0 && s.end == n => n - cross.min(n / 2),
+                Some(s) => s.len(),
+                None => n,
+            },
+            _ => n,
+        };
+        out.push(n);
+    }
+    out
+}
+
+/// Where frame `at` of the sound `edits` made (from one `frames` long) came from in the sound before them: through a
+/// trim or a loop it's as far in again as they started, through a reverse it's mirrored, and a fade, a gain or a
+/// normalise leaves it where it was. So the original can be heard from the place the edit has reached. A place past
+/// the end is the end.
+pub fn place_before(frames: usize, edits: &[Edit], at: usize) -> usize {
+    let lengths = lengths(frames, edits);
+    let mut at = at.min(lengths.last().copied().unwrap_or(frames));
+    for (edit, &n) in edits.iter().zip(&lengths).rev() {
+        at = match *edit {
+            Edit::Trim(span) => span.within(n).map_or(at, |s| at + s.start),
+            Edit::LoopCrossfade { span, .. } => {
+                span.unwrap_or(Span { start: 0, end: n }).within(n).map_or(at, |s| at + s.start)
+            }
+            Edit::Reverse(span) => mirrored(span, n, at),
+            _ => at,
+        }
+        .min(n);
+    }
+    at
+}
+
+/// Where frame `at` of the sound before `edits` (`frames` long) is in the sound they make: [`place_before`] the other
+/// way. A frame a trim or a loop cut off is at the edge it was cut at.
+pub fn place_after(frames: usize, edits: &[Edit], at: usize) -> usize {
+    let lengths = lengths(frames, edits);
+    let mut at = at.min(frames);
+    for (edit, n) in edits.iter().zip(lengths.windows(2)) {
+        let (before, after) = (n[0], n[1]);
+        at = match *edit {
+            Edit::Trim(span) => span.within(before).map_or(at, |s| at.saturating_sub(s.start)),
+            Edit::LoopCrossfade { span, .. } => {
+                span.unwrap_or(Span { start: 0, end: before }).within(before).map_or(at, |s| at.saturating_sub(s.start))
+            }
+            Edit::Reverse(span) => mirrored(span, before, at),
+            _ => at,
+        }
+        .min(after);
+    }
+    at
+}
+
+/// Frame `at` of a sound `n` long, after (or before) `span` of it (all of it for `None`) is reversed.
+fn mirrored(span: Option<Span>, n: usize, at: usize) -> usize {
+    match span.unwrap_or(Span { start: 0, end: n }).within(n) {
+        Some(s) if at >= s.start && at < s.end => s.start + s.end - 1 - at,
+        _ => at,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,5 +721,53 @@ mod tests {
         assert!(!has_sound(&a, Span::new(0, 500), 0.01));
         assert!(has_sound(&a, Span::new(600, 800), 0.01));
         assert!(!has_sound(&a, Span::new(2_000, 3_000), 0.01));
+    }
+
+    #[test]
+    fn lengths_are_as_the_edits_make_them() {
+        let a = sound(vec![sine(48_000, 220.0)]);
+        let lists: [&[Edit]; 4] = [
+            &[],
+            &[Edit::Trim(Span::new(1_000, 40_000)), Edit::Reverse(None), Edit::Gain { db: -3.0, span: None }],
+            &[Edit::LoopCrossfade { span: None, frames: 480 }, Edit::Trim(Span::new(100, 90_000))],
+            &[
+                Edit::LoopCrossfade { span: Some(Span::new(2_000, 30_000)), frames: 960 },
+                Edit::Trim(Span::new(50_000, 60_000)),
+                Edit::Normalise { peak_db: 0.0 },
+            ],
+        ];
+        for edits in lists {
+            let lengths = lengths(a.len(), edits);
+            assert_eq!(lengths.len(), edits.len() + 1);
+            for (i, &n) in lengths.iter().enumerate() {
+                assert_eq!(n, apply(&a, &edits[..i]).len(), "after {:?}", &edits[..i]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_place_in_the_edit_is_found_in_the_sound_before_it_and_back() {
+        // Each frame holds its own number, so where a frame came from can be read off it.
+        let a = sound(vec![(0..48_000).map(|i| i as f32).collect()]);
+        let edits = [
+            Edit::Trim(Span::new(1_000, 41_000)),
+            Edit::Reverse(Some(Span::new(5_000, 20_000))),
+            Edit::Fade { span: Span::new(0, 480), way: Way::In, curve: Curve::Linear },
+            Edit::LoopCrossfade { span: Some(Span::new(2_000, 30_000)), frames: 200 },
+        ];
+        let out = apply(&a, &edits);
+        // Away from the fades, the crossfade and the eased edges of the reverse.
+        for at in [10, 500, 2_999, 3_100, 10_000, 17_000, 17_900, 18_200, 25_000, 27_500] {
+            let from = place_before(a.len(), &edits, at);
+            assert_eq!(out.channels[0][at], from as f32, "frame {at}");
+            assert_eq!(place_after(a.len(), &edits, from), at, "and back, from {from}");
+        }
+        // Cut off: at the edge it was cut at. Past the end: the end.
+        assert_eq!(place_after(a.len(), &edits, 0), 0);
+        assert_eq!(place_after(a.len(), &edits, 47_000), out.len());
+        assert_eq!(place_before(a.len(), &edits, 1_000_000), place_before(a.len(), &edits, out.len()));
+        // No edits: where it was.
+        assert_eq!(place_before(a.len(), &[], 123), 123);
+        assert_eq!(place_after(a.len(), &[], 123), 123);
     }
 }

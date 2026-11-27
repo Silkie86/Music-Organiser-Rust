@@ -81,6 +81,7 @@ fn give(app: &AppWindow, name: &str, width: f32) {
         "plugins.filters" => app.global::<crate::Widths>().set_plugins_filters(width),
         "songs.filters" => app.global::<crate::Widths>().set_songs_filters(width),
         "sounds.folders" => app.global::<crate::Widths>().set_sounds_folders(width),
+        "sounds.edit" => app.global::<crate::Widths>().set_sounds_edit(width),
         "songs.list" => app.global::<crate::Widths>().set_songs_list(width),
         "curves.list" => app.global::<crate::Widths>().set_curves_list(width),
         "songs.tracks" => {

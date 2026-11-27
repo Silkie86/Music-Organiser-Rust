@@ -6,6 +6,7 @@ import { Product } from "@product";
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook } from "pages/sounds.slint";
+import { SoundEdit, EditMark, EditChip } from "pages/sound_edit.slint";
 import { MenuItem, CardAction, YearBar, FilterChoice, FilterView } from "studio.slint";
 import { SongsPage, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine } from "pages/songs.slint";
 import { ArrangementData, ArrLabel, ArrKind, ArrSound, ArrChoice } from "pages/arrangement.slint";
@@ -19,6 +20,7 @@ import { Waves, WavePicture } from "studio.slint";
 export { Waves, WavePicture }
 export { DawLine }
 export { AppKeys }
+export { SoundEdit, EditMark, EditChip }
 import { FilterSearch } from "studio.slint";
 export { FilterSearch }
 import { Busy } from "studio.slint";
@@ -115,6 +117,9 @@ export component AppWindow inherits Window {
     // A key press, with its modifiers and whether it's the key held down, for the app-wide shortcut list in mo-app.
     // Returns whether it was used.
     callback key(string, bool, bool, bool, bool, bool) -> bool;
+    // A key let go (its text): a key that does something while it's held (O, to hear the original in the Sounds Edit
+    // strip) stops.
+    callback key-up(string);
 
     // What the app is doing: running and just-finished jobs as lines in the rail (and how many more than fit there),
     // and the ones that failed or that stay until closed as cards, bottom right.
@@ -230,6 +235,12 @@ export component AppWindow inherits Window {
             }
             if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta, event.repeat)) {
                 return accept;
+            }
+            reject
+        }
+        key-released(event) => {
+            if (!root.note-open) {
+                root.key-up(event.text);
             }
             reject
         }

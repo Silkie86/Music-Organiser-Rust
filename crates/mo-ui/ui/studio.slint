@@ -479,6 +479,8 @@ export global Widths {
     in-out property <length> plugins-filters: 208px;
     in-out property <length> songs-filters: 208px;
     in-out property <length> sounds-folders: 280px;
+    // The Sounds Edit strip's height.
+    in-out property <length> sounds-edit: 320px;
     // 0 until it's dragged: the Songs list takes a third of the room then.
     in-out property <length> songs-list: 0px;
     // The lists' columns of fixed width, by page and column.
@@ -633,6 +635,165 @@ export component Seam inherits Rectangle {
     }
 }
 
+// The top edge of a part along the bottom of a page (the Sounds Edit strip), dragged up to make it taller and down to
+// make it shorter, as a `Seam` makes a column wider or narrower: its height is kept as `part`'s, and a double-click
+// puts it back to its usual one.
+export component RowSeam inherits Rectangle {
+    in property <string> part;
+    // The part's height as it's shown now, and the least and most a drag may make it.
+    in property <length> now;
+    in property <length> least: root.part != "" ? Widths.least(root.part) : 0px;
+    in property <length> most: root.part != "" ? Widths.most(root.part) : 100000px;
+    // The new height while dragging.
+    callback resizing(length);
+    out property <bool> dragging;
+    property <length> start-height;
+    // Where the press was, in the window: the seam moves while it's dragged.
+    property <length> start-y;
+    height: 8px;
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 2px;
+        width: root.dragging || touch.has-hover ? parent.width : min(40px, parent.width);
+        x: (parent.width - self.width) / 2;
+        border-radius: 1px;
+        background: touch.pressed ? Theme.accent : touch.has-hover ? Theme.muted : Theme.stroke.brighter(40%);
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.row-resize;
+        pointer-event(e) => {
+            // Cut short (the mouse left the window): the height it got is kept, as when it's let go.
+            if e.kind == PointerEventKind.cancel {
+                if root.dragging {
+                    root.dragging = false;
+                    if root.part != "" {
+                        Widths.resized(root.part, root.now);
+                    }
+                }
+                return;
+            }
+            if e.button != PointerEventButton.left {
+                return;
+            }
+            if e.kind == PointerEventKind.down {
+                root.start-height = root.now;
+                root.start-y = self.absolute-position.y + self.mouse-y;
+                root.dragging = false;
+            }
+            if e.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
+                if root.part != "" {
+                    Widths.resized(root.part, root.now);
+                }
+            }
+        }
+        double-clicked => {
+            root.dragging = false;
+            if root.part != "" {
+                Widths.reset(root.part);
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.dragging = true;
+                root.resizing(clamp(root.start-height - (self.absolute-position.y + self.mouse-y - root.start-y),
+                    root.least, max(root.least, root.most)));
+            }
+        }
+    }
+    // While dragging: how tall the part is, and how short and tall it may go.
+    if root.dragging: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: -self.height - Space.xs;
+        width: size.preferred-width + 2 * Space.sm;
+        height: size.preferred-height + Space.sm;
+        border-radius: Theme.radius;
+        background: Theme.surface-raised;
+        border-width: 1px;
+        border-color: Theme.accent;
+        size := Text {
+            text: "\{round(root.now / 1px)} px · \{round(root.least / 1px)}–\{round(max(root.least, root.most) / 1px)}";
+            color: Theme.accent;
+            font-size: Type.meta;
+            font-family: Theme.number-font;
+        }
+    }
+    Tip {
+        text: "Drag to resize · double-click for the usual height";
+        hovering: touch.has-hover && !touch.pressed && root.part != "";
+        at-x: root.width / 2;
+        at-y: root.height;
+    }
+}
+
+// A fade's handle on the Edit strip's waveform (the 1.1 plan's light sample edits): a dot along the top where the fade
+// ends (at the sound's own start or end while there's none), dragged along to make the fade longer or shorter. The
+// page draws the fade's curve to it, and moves it as it's dragged.
+export component FadeHandle inherits Rectangle {
+    // Where it is, from 0 to 1 of `room` (the waveform's width).
+    in property <float> at;
+    in property <length> room;
+    in property <string> tip;
+    in property <string> key;
+    in property <color> tint: Theme.warning;
+    // Dragged to `at` (0 to 1 of the room), and let go there.
+    callback moving(float);
+    callback let-go();
+    out property <bool> dragging;
+    property <float> start-at;
+    // Where the press was, in the window: the handle moves while it's dragged.
+    property <length> start-x;
+    width: 16px;
+    height: 16px;
+    x: root.at * root.room - self.width / 2;
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: touch.has-hover || root.dragging ? 12px : 10px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.tint;
+        border-width: 1px;
+        border-color: Theme.edge;
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.ew-resize;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.cancel {
+                if root.dragging {
+                    root.dragging = false;
+                    root.let-go();
+                }
+                return;
+            }
+            if e.button != PointerEventButton.left {
+                return;
+            }
+            if e.kind == PointerEventKind.down {
+                root.start-at = root.at;
+                root.start-x = self.absolute-position.x + self.mouse-x;
+                root.dragging = false;
+            }
+            if e.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
+                root.let-go();
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.dragging = true;
+                root.moving(clamp(root.start-at + (self.absolute-position.x + self.mouse-x - root.start-x) / max(1px, root.room), 0, 1));
+            }
+        }
+    }
+    Tip {
+        text: root.tip;
+        key: root.key;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
+    }
+}
+
 // A list's column heading that orders the list (the UX review of 10 Nov, B5): a click on it puts the list in that
 // column's order, a second click turns the order round. The heading the list goes by is lit in the accent colour
 // (the accent means "on") with a small arrow for which way. Every page's list headings are made of these, so the
@@ -720,6 +881,11 @@ export component StudioButton inherits Rectangle {
     // them on one line.
     in property <length> fold-width;
     callback clicked;
+    // Pressed (true) and let go (false), for a button that does something while it's held (the Edit strip's A/B: hear
+    // the original while it's held).
+    callback held(bool);
+    property <bool> down: touch.pressed;
+    changed down => { root.held(self.down); }
     // The room either side of its words (and the menu arrow's).
     property <length> edges: root.menu ? 38px : 24px;
     property <bool> folded: root.fold-width > 0 && root.icon == "" && label.preferred-width + root.edges > root.fold-width;
@@ -1366,6 +1532,11 @@ export component TempoStepper inherits Rectangle {
     in property <string> faster-key;
     // What a click on a changed tempo does, for its tip.
     in property <string> reset-tip: "Back to its own tempo";
+    // What the minus, the plus and the words are, for their tips: a stepper of something else (the Edit strip's gain)
+    // says so.
+    in property <string> down-tip: "Slower";
+    in property <string> up-tip: "Faster";
+    in property <string> value-tip: "The tempo it plays at";
     callback stepped(int);
     callback reset();
     height: 28px;
@@ -1392,7 +1563,7 @@ export component TempoStepper inherits Rectangle {
             clicked => { root.stepped(-1); }
         }
         Tip {
-            text: "Slower";
+            text: root.down-tip;
             key: root.slower-key;
             hovering: minus-touch.has-hover && !minus-touch.pressed;
             at-y: root.height + Space.xs;
@@ -1414,7 +1585,7 @@ export component TempoStepper inherits Rectangle {
             clicked => { root.reset(); }
         }
         Tip {
-            text: root.changed ? root.reset-tip : "The tempo it plays at";
+            text: root.changed ? root.reset-tip : root.value-tip;
             hovering: value-touch.has-hover && !value-touch.pressed;
             at-y: root.height + Space.xs;
         }
@@ -1436,7 +1607,7 @@ export component TempoStepper inherits Rectangle {
             clicked => { root.stepped(1); }
         }
         Tip {
-            text: "Faster";
+            text: root.up-tip;
             key: root.faster-key;
             hovering: plus-touch.has-hover && !plus-touch.pressed;
             at-y: root.height + Space.xs;
@@ -3137,6 +3308,32 @@ export global Icons {
     out property <string> unlinked: "M 6 11.3 L 4.7 11.3 A 3.3 3.3 0 0 1 4.7 4.7 M 10 4.7 L 11.3 4.7 A 3.3 3.3 0 0 1 14 10 M 5.3 8 L 8 8 M 1.5 1.5 L 14.5 14.5";
     // A drive struck through: what a link leads to isn't there (its drive unplugged, or the folder moved off it).
     out property <string> away: "M 1.5 9 L 14.5 9 L 14.5 13.5 L 1.5 13.5 Z M 1.5 9 L 3.5 4 L 12.5 4 L 14.5 9 M 4 11.25 L 4.5 11.25 M 1.5 1.5 L 14.5 14.5";
+    // The Sounds Edit strip's signs (the 1.1 plan's light sample edits).
+    // Two corners crossing: keep only the part picked (a crop).
+    out property <string> trim: "M 4.5 1.5 L 4.5 11.5 L 14.5 11.5 M 1.5 4.5 L 11.5 4.5 L 11.5 14.5";
+    // A slope up from silence, then level: fade in.
+    out property <string> fade-in: "M 2 12.5 L 8.5 4 L 14 4 M 2 12.5 L 14 12.5";
+    // Level, then a slope down to silence: fade out.
+    out property <string> fade-out: "M 2 4 L 7.5 4 L 14 12.5 M 2 12.5 L 14 12.5";
+    // Two arrows going opposite ways: play it backwards.
+    out property <string> reverse: "M 13.5 5.5 L 4 5.5 L 6.5 3 M 4 5.5 L 6.5 8 M 2.5 10.5 L 12 10.5 L 9.5 8 M 12 10.5 L 9.5 13";
+    // Bars of every height between two lines: turn it up to full scale (normalise).
+    out property <string> normalise: "M 2.5 3 L 13.5 3 M 2.5 13 L 13.5 13 M 5.5 10 L 5.5 6 M 8 11.5 L 8 4.5 M 10.5 9.5 L 10.5 6.5";
+    // Two arrows round a loop: crossfade a loop so it joins without a click.
+    out property <string> crossfade: "M 11.5 4.5 L 5.5 4.5 A 2.75 2.75 0 0 0 5.5 10 L 6 10 M 4.5 11.5 L 10.5 11.5 A 2.75 2.75 0 0 0 10.5 6 L 10 6 M 9.5 2.5 L 11.5 4.5 L 9.5 6.5 M 6.5 9.5 L 4.5 11.5 L 6.5 13.5";
+    // A stopwatch: the tempo.
+    out property <string> tempo: "M 6 1.5 L 10 1.5 M 8 1.5 L 8 3.5 M 13.5 9 A 5.5 5.5 0 1 1 2.5 9 A 5.5 5.5 0 1 1 13.5 9 M 8 9 L 10.5 6.5";
+    // A note: the pitch.
+    out property <string> pitch: "M 7.5 12 L 7.5 2.5 L 12.5 1.5 L 12.5 4 L 7.5 5 M 7.5 12 A 2 2 0 1 1 3.5 12 A 2 2 0 1 1 7.5 12";
+    // A hit that rings on: the tail.
+    out property <string> tail: "M 1.5 12 L 3 12 L 4.5 3.5 L 6 9.5 C 8 11 10.5 11.5 14.5 12";
+    // An arrow turning back: undo. And forward again: redo.
+    out property <string> undo: "M 6 9.5 L 2.5 6 L 6 2.5 M 2.5 6 L 10 6 A 3.5 3.5 0 0 1 10 13 L 8 13";
+    out property <string> redo: "M 10 9.5 L 13.5 6 L 10 2.5 M 13.5 6 L 6 6 A 3.5 3.5 0 0 0 6 13 L 8 13";
+    // A and B: hear the original against the edit.
+    out property <string> ab: "M 1.5 12 L 4 4 L 6.5 12 M 2.4 9.2 L 5.6 9.2 M 9.5 4 L 9.5 12 L 12.3 12 A 2 2 0 0 0 12.3 8 L 9.5 8 L 12 8 A 2 2 0 0 0 12 4 Z";
+    // A magnifier with a plus: zoom in.
+    out property <string> zoom: "M 11.5 7 A 4.5 4.5 0 1 1 2.5 7 A 4.5 4.5 0 1 1 11.5 7 M 10.2 10.2 L 14 14 M 5 7 L 9 7 M 7 5 L 7 9";
     // A sign by its name, for a button whose sign comes from Rust (`CardAction.icon`, mo-app's
     // `themes::button_icon`): "" for none, and for a name it doesn't know.
     public pure function named(name: string) -> string {
@@ -4258,8 +4455,10 @@ export component Waveform inherits Rectangle {
     // Whether it's playing now, which shows the playhead.
     in property <bool> playing;
     in property <bool> can-seek;
-    // How long the waveform lasts, for the time under the mouse (0 shows none).
+    // How long the waveform lasts, for the time under the mouse (0 shows none), and where it starts (a waveform zoomed
+    // in on part of a sound, the Edit strip's).
     in property <float> seconds;
+    in property <float> from-seconds;
     // Each line's width: thin enough that the lines stay apart.
     in property <length> line: max(1px, root.width / max(1, root.points) * 0.6);
     callback seek(float);
@@ -4507,7 +4706,7 @@ export component Waveform inherits Rectangle {
         }
     }
     if root.can-seek && area.has-hover && root.seconds > 0: Rectangle {
-        property <float> at: clamp(area.mouse-x / root.width, 0, 1) * root.seconds;
+        property <float> at: root.from-seconds + clamp(area.mouse-x / root.width, 0, 1) * root.seconds;
         property <string> time: at >= 60
             ? floor(at / 60) + ":" + (mod(floor(at), 60) < 10 ? "0" : "") + mod(floor(at), 60)
             : (round(at * 100) / 100) + "s";
