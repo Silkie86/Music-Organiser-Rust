@@ -1,4 +1,4 @@
-﻿//! Writes a new FL Studio 25 project from a song's arrangement (any DAW's, as the readers give it): its tempo, time
+//! Writes a new FL Studio 25 project from a song's arrangement (any DAW's, as the readers give it): its tempo, time
 //! signature, markers, tracks and their names, a pattern for each clip of notes, and its audio clips. What can't go
 //! across (plugins and their settings, automation, a stretched clip's stretch) is listed in [`Written::left_out`].
 //!
