@@ -115,8 +115,11 @@ cat > "$stage/Read me.txt" <<TEXT
 $name $version for Mac (Apple silicon and Intel, macOS $minimum or later)
 
 1. Drag $name.app into Applications.
-2. The first time, right-click it and pick Open, then Open again: this test build isn't from an
-   identified developer yet, so a plain double-click is refused.
+2. The first time, macOS refuses it: this test build isn't from an identified developer.
+   On macOS 15 (Sequoia) or later: double-click it, pick Done, then open System Settings,
+   Privacy & Security, scroll down and pick Open Anyway beside $name, then Open.
+   On macOS 14 or earlier: right-click it, pick Open, then Open again.
+   After that it opens with a plain double-click.
 3. Half a minute after it starts, $name puts its Bitwig extension, its FL Studio script and its CLAP
    plugin (in ~/Library/Audio/Plug-Ins/CLAP) in by itself, and says so. Restart your DAW to see them.
 TEXT

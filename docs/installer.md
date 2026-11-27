@@ -99,8 +99,9 @@ It's kept as the run's `mac` download, not put on the release.
   the plugin goes whole into `~/Library/Audio/Plug-Ins/CLAP` (the user's own, no administrator; copied beside itself,
   checked, then swapped in), the extension and FL script where they go on Windows. Self-update stays Windows only.
 - **Signed ad hoc only.** Apple silicon runs nothing unsigned, so the bundles carry a signature with no name. Without an
-  Apple Developer ID (99 USD a year) and notarisation, macOS refuses a double-click on the first open: right-click,
-  Open, Open. Signing and notarising for real is a choice for Solomon before Mac builds go on the release.
+  Apple Developer ID (99 USD a year) and notarisation, macOS refuses a double-click on the first open: on macOS 15 or
+  later, System Settings, Privacy & Security, Open Anyway; on 14 or earlier, right-click, Open, Open (the Read me says
+  both). Solomon decided on 27 Nov 2026 not to buy a Developer ID for now: Mac testers take the run's `mac` download.
 - **Tried on GitHub's Mac** by `installer/mac/check.sh`: the bundles are whole (Info.plist, both chips, signatures,
   `clap_entry`, the extension), and the app starts with a scratch home folder, runs a minute, writes no crash log, puts
   its plugin in, and closes when asked. Then `clap-validator` (the CLAP project's checker) loads the plugin as a DAW
