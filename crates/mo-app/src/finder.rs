@@ -538,7 +538,8 @@ pub fn pages(shortcuts: &Shortcuts, views: &[(Place, &[&str])]) -> Lines {
         .map(|p| Found {
             name: p.name().to_owned(),
             also: also_of_place(p).to_owned(),
-            detail: "Page".to_owned(),
+            // Under the Pages heading, with its place's icon and key: "Page" under each name said it again.
+            detail: String::new(),
             key: shortcuts.key_of(p.shortcut_id()).to_owned(),
             id: p.name().to_owned(),
             // A page beats a song or sound of the same name: typing "sounds" means the page.
@@ -549,7 +550,7 @@ pub fn pages(shortcuts: &Shortcuts, views: &[(Place, &[&str])]) -> Lines {
         lines.extend(names.iter().map(|v| Found {
             name: format!("{} › {v}", place.name()),
             also: v.to_string(),
-            detail: format!("A view of {}", place.name()),
+            detail: String::new(),
             key: String::new(),
             id: view_id(*place, v),
             weight: 0.8,
@@ -581,7 +582,8 @@ pub fn actions<'a>(shortcuts: &Shortcuts, list: impl IntoIterator<Item = &'a Act
         .map(|a| Found {
             name: a.what.to_owned(),
             also: String::new(),
-            detail: "Action".to_owned(),
+            // Under the Actions heading, with its key: "Action" under each said it again.
+            detail: String::new(),
             key: shortcuts.key_of(a.id).to_owned(),
             id: a.id.to_owned(),
             weight: 0.5,

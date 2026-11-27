@@ -37,7 +37,9 @@ pub fn quiet_button(words: &str) -> bool {
 /// [`quiet_button`] is, so every page agrees without a list of ids.
 pub fn button_icon(words: &str) -> &'static str {
     match words {
-        "Show in folder" | "Open folder" | "Show the song's file" | "Show curve file" => "folder",
+        "Show in folder" | "Open folder" | "Show curve file" => "folder",
+        // Its own sign: on a curve's card it sits beside Show curve file, and two same folders read as one button.
+        "Show the song's file" => "song-file",
         "Copy path" | "Copy the song's path" => "copy",
         _ => "",
     }
@@ -316,7 +318,7 @@ mod tests {
         }
         assert_eq!(button_icon("Show in folder"), "folder");
         assert_eq!(button_icon("Copy path"), "copy");
-        assert_eq!(button_icon("Show the song's file"), "folder");
+        assert_eq!(button_icon("Show the song's file"), "song-file");
         assert_eq!(button_icon("Copy the song's path"), "copy");
         assert_eq!(button_icon("Show in Songs"), "");
     }

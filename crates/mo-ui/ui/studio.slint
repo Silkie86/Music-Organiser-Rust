@@ -2988,6 +2988,8 @@ export global Icons {
     out property <string> speaker: "M 2 6 L 5 6 L 8.5 3 L 8.5 13 L 5 10 L 2 10 Z M 11 5.5 A 3.5 3.5 0 0 1 11 10.5 M 12.8 3.5 A 6 6 0 0 1 12.8 12.5";
     // A folder: show it in its folder.
     out property <string> folder: "M 1.5 3.5 L 6 3.5 L 7.5 5.5 L 14.5 5.5 L 14.5 13 L 1.5 13 Z";
+    // A folder with a note in it: show a song's own file (beside a card's other folder, as on a curve's card).
+    out property <string> song-file: "M 1.5 3.5 L 6 3.5 L 7.5 5.5 L 14.5 5.5 L 14.5 13 L 1.5 13 Z M 9.8 10.8 L 9.8 7 L 12 7.8 M 9.8 10.8 A 1.4 1.4 0 1 1 7 10.8 A 1.4 1.4 0 1 1 9.8 10.8";
     // Two sheets, one over the other: copy.
     out property <string> copy: "M 5.5 5.5 L 14 5.5 L 14 14 L 5.5 14 Z M 10.5 5.5 L 10.5 2 L 2 2 L 2 10.5 L 5.5 10.5";
     // Two crossing arrows: shuffle.
@@ -3028,6 +3030,7 @@ export global Icons {
         if (name == "stop") { return stop; }
         if (name == "folder") { return folder; }
         if (name == "copy") { return copy; }
+        if (name == "song-file") { return song-file; }
         if (name == "shuffle") { return shuffle; }
         if (name == "dice") { return dice; }
         if (name == "again") { return again; }

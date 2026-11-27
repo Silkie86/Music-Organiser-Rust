@@ -353,12 +353,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.set_smallest_parts(strings(SMALLEST_PART_CHOICES.iter().map(|&n| mo_app::midi::smallest_part_words(n))));
     data.set_version(format!("Version {}", mo_app::version::version()).into());
     data.set_credit(page::SLINT_CREDIT.into());
-    data.set_folders_note(page::FOLDERS_NOTE.into());
     data.set_exports_title(page::EXPORTS_TITLE.into());
     data.set_exports_note(page::EXPORTS_NOTE.into());
-    data.set_keys_note(page::KEYS_NOTE.into());
-    data.set_daws_note(page::DAWS_NOTE.into());
-    data.set_kept_note("Your changes are saved as you make them".into());
     show(app);
 
     let weak = app.as_weak();
@@ -2014,7 +2010,7 @@ pub fn show_folders(app: &AppWindow, groups: Result<Vec<page::FolderGroup>, Stri
                 .collect();
             data.set_folder_groups(ModelRc::new(VecModel::from(lines)));
             show_scan_states(true);
-            data.set_folders_note(page::FOLDERS_NOTE.into());
+            data.set_folders_note(SharedString::new());
         }
         Err(e) => {
             log::warning("Settings", &format!("Couldn't read the folders from the library: {e}"));
@@ -2119,7 +2115,15 @@ fn show(app: &AppWindow) {
         let data = app.global::<SettingsData>();
         let tab = Tab::from_setting(s.get(TAB_KEY));
         data.set_tab(tab.index() as i32);
-        data.set_summary(tab.summary().into());
+        // The tab's "i" beside the tabs: what it holds, how it works where it needs saying, and that changes are kept.
+        let how = match tab {
+            Tab::Folders => page::FOLDERS_NOTE,
+            Tab::Shortcuts => page::KEYS_NOTE,
+            Tab::Daws => page::DAWS_NOTE,
+            _ => "",
+        };
+        let how = if how.is_empty() { String::new() } else { format!("\n\n{how}") };
+        data.set_summary(format!("{}.{how}\n\nYour changes are saved as you make them.", tab.summary()).into());
 
         let cards: Vec<ThemeCardInfo> = page::theme_cards(s.get(THEME_KEY))
             .into_iter()
@@ -2136,9 +2140,7 @@ fn show(app: &AppWindow) {
                 picked: c.picked,
             })
             .collect();
-        let note = cards.iter().find(|c| c.picked).map(|c| c.description.clone()).unwrap_or_default();
         data.set_themes(ModelRc::new(VecModel::from(cards)));
-        data.set_theme_note(note);
         let theme = s.get(THEME_KEY).and_then(theme_named).unwrap_or(THEMES[0]);
         let accents: Vec<AccentInfo> = page::accent_choices(&theme, s.get(ACCENT_KEY))
             .into_iter()
@@ -2147,7 +2149,6 @@ fn show(app: &AppWindow) {
         data.set_accents(ModelRc::new(VecModel::from(accents)));
         data.set_font(page::font_index(s.get(FONT_KEY)) as i32);
         data.set_size(page::size_index(s.get(SIZE_KEY)) as i32);
-        data.set_size_note(page::size_note(size_from_setting(s.get(SIZE_KEY))).into());
 
         let start = page::start_index(s.get(START_PAGE_KEY));
         data.set_start_index(start as i32);

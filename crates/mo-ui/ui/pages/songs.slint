@@ -1569,12 +1569,19 @@ export component SongsPage inherits Rectangle {
                                                         alignment: center;
                                                         spacing: Space.xs;
                                                         width: Widths.songs-saved;
-                                                        Text {
-                                                            text: line.date;
-                                                            color: Theme.muted;
-                                                            font-family: Theme.number-font;
-                                                            font-size: Type.meta;
-                                                            horizontal-alignment: right;
+                                                        // The whole date, always: one a little wider than the column
+                                                        // ("15 Jul 2025" at its narrowest) reaches into the gap at its
+                                                        // left instead of being cut off at the list's edge.
+                                                        Rectangle {
+                                                            height: date.preferred-height;
+                                                            date := Text {
+                                                                x: parent.width - self.width;
+                                                                width: self.preferred-width;
+                                                                text: line.date;
+                                                                color: Theme.muted;
+                                                                font-family: Theme.number-font;
+                                                                font-size: Type.meta;
+                                                            }
                                                         }
                                                         if line.rating > 0: HorizontalLayout {
                                                             alignment: end;

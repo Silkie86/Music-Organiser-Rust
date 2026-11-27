@@ -4,7 +4,7 @@
 import { AboutSlint } from "std-widgets.slint";
 import { Product } from "@product";
 import { Fit } from "../list.slint";
-import { Theme, CutText, AppKeys, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, InfoTip, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow, WordBox, Icons } from "../studio.slint";
+import { Theme, CutText, AppKeys, Type, Space, StudioButton, SearchBox, HoverSense, InfoTip, Segmented, MenuChip, PageHeader, Caps, Well, Panel, TabBar, EmptyState, Dot, ToggleChip, FolderRow, WordBox, Icons, Tip } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -104,19 +104,16 @@ export global SettingsData {
     // The tab on show (mo_app::settings::Tab's order).
     in-out property <int> tab;
     in property <[string]> tabs: ["General", "Folders", "DAWs", "Shortcuts", "Developer"];
-    in property <string> summary: "How the app looks and behaves everywhere";
-    // Where your changes are kept, under the tabs.
-    in property <string> kept-note;
+    // What the picked tab holds, for its "i".
+    in property <string> summary;
 
     // General: the look.
     in property <[ThemeCardInfo]> themes;
-    in property <string> theme-note;
     in property <[AccentInfo]> accents;
     in property <[string]> fonts;
     in property <int> font;
     in property <[string]> sizes;
     in property <int> size: 3;
-    in property <string> size-note;
     // General: the start page, the pace and the sound output.
     in property <[string]> start-pages;
     // Which of start-pages is picked.
@@ -174,7 +171,6 @@ export global SettingsData {
     // DAWs: each DAW's link, whether Bitwig is being checked, and the note under them.
     in property <[DawRowInfo]> daws;
     in property <bool> daws-checking;
-    in property <string> daws-note;
     callback check-daws();
     // The background helper: whether it's wanted, and how it's doing, in words.
     in property <bool> helper-on;
@@ -230,7 +226,6 @@ export global SettingsData {
     // did; and whether any key isn't the one it started with.
     in property <[KeyLineInfo]> key-lines;
     in property <string> listening;
-    in property <string> keys-note;
     in property <string> keys-message;
     in property <bool> keys-changed;
     // The words typed in the Shortcuts search box: the list then holds only the actions with them.
@@ -333,7 +328,7 @@ component ChoiceRow inherits VerticalLayout {
 }
 
 // A theme, drawn in its own colours: a rail, a panel with lines of text and an accent button, and its name.
-component ThemePicture inherits Rectangle {
+component ThemePicture inherits HoverSense {
     in property <ThemeCardInfo> info;
     callback picked();
     width: 156px;
@@ -403,6 +398,12 @@ component ThemePicture inherits Rectangle {
     }
     touch := TouchArea {
         clicked => { root.picked(); }
+    }
+    // The theme's own words, on the mouse (Solomon, 24 Nov 2026: explanations in tooltips, not on the page).
+    Tip {
+        text: root.info.description;
+        hovering: root.hovered;
+        at-y: root.height + Space.xs;
     }
 }
 
@@ -529,13 +530,6 @@ component GeneralTab inherits VerticalLayout {
                 picked => { SettingsData.theme-picked(i); }
             }
         }
-        // The picked theme's own words.
-        Text {
-            text: SettingsData.theme-note;
-            color: Theme.muted;
-            font-size: Type.meta;
-            wrap: word-wrap;
-        }
         Caps { text: "ACCENT COLOUR"; }
         HorizontalLayout {
             alignment: start;
@@ -564,12 +558,6 @@ component GeneralTab inherits VerticalLayout {
                     picked(i) => { SettingsData.size-picked(i); }
                 }
             }
-        }
-        Text {
-            text: SettingsData.size-note;
-            color: Theme.muted;
-            font-size: Type.meta;
-            wrap: word-wrap;
         }
         HorizontalLayout {
             alignment: start;
@@ -751,7 +739,13 @@ component GeneralTab inherits VerticalLayout {
 component FoldersTab inherits VerticalLayout {
     spacing: Space.lg;
     alignment: start;
-    HowItWorks { text: SettingsData.folders-note; }
+    // Why the folders couldn't be read, when they couldn't (how the tab works is behind the "i" by the tabs).
+    if SettingsData.folders-note != "": Text {
+        text: SettingsData.folders-note;
+        color: Theme.missing;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
     if SettingsData.folders-message != "": Text {
         text: SettingsData.folders-message;
         color: Theme.text;
@@ -899,7 +893,6 @@ component ShortcutsTab inherits VerticalLayout {
     changed search-asked => { search-box.focus-all(); }
     spacing: Space.lg;
     alignment: start;
-    HowItWorks { text: SettingsData.keys-note; }
     // The curve editor's three keys: which of Shift, Alt and Ctrl is free, bend and make.
     SettingsCard {
         title: "Curve editor: keys held with the mouse";
@@ -970,7 +963,6 @@ component ShortcutsTab inherits VerticalLayout {
 component DawsTab inherits VerticalLayout {
     spacing: Space.lg;
     alignment: start;
-    HowItWorks { text: SettingsData.daws-note; }
     if SettingsData.daws-message != "": Text {
         text: SettingsData.daws-message;
         color: Theme.text;
@@ -1292,25 +1284,22 @@ export component SettingsPage inherits Rectangle {
         spacing: Space.lg;
         PageHeader {
             title: "Settings";
-            summary: SettingsData.summary;
         }
         HorizontalLayout {
-            spacing: Space.lg;
-            // On one line, as there's always room for them: in a narrow window the note beside them is cut short.
+            spacing: Space.sm;
+            alignment: start;
+            // On one line, as there's always room for them.
             TabBar {
                 wrap: false;
                 tabs: SettingsData.tabs;
                 current <=> SettingsData.tab;
                 changed current => { SettingsData.tab-picked(self.current); }
             }
-            CutText {
-                horizontal-stretch: 1;
-                own-mouse: true;
-                text: SettingsData.kept-note;
-                color: Theme.faint;
-                font-size: Type.meta;
-                horizontal-alignment: right;
-                vertical-alignment: center;
+            // What the tab holds, and that changes are kept as they're made: behind an "i" beside the tabs, not as
+            // lines on the page (Solomon, 24 Nov 2026: explanations in tooltips).
+            VerticalLayout {
+                alignment: center;
+                InfoTip { text: SettingsData.summary; }
             }
         }
         list := Flickable {

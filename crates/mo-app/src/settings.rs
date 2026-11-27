@@ -180,15 +180,6 @@ pub fn size_index(setting: Option<&str>) -> usize {
     SIZES.iter().position(|s| *s == size).unwrap_or(3)
 }
 
-/// What the size of everything does, under its choices.
-pub fn size_note(size: u32) -> String {
-    match size {
-        100 => "Everything at its normal size.".to_owned(),
-        s if s < 100 => format!("Everything at {s}%: more fits on the screen."),
-        s => format!("Everything at {s}%: easier to read."),
-    }
-}
-
 /// The start page choices: every place, then "Last page I used".
 pub fn start_choices() -> Vec<&'static str> {
     Place::ALL.iter().map(|p| p.name()).chain([LAST_PAGE_CHOICE]).collect()
@@ -319,7 +310,7 @@ pub fn folder_groups(
             empty: "No MIDI folders yet.",
         },
         FolderGroup {
-            title: "PLUGINS",
+            title: "Plugins",
             list: Some(FolderList::Plugins),
             note: if plugins_are_defaults {
                 "Where your VST3, CLAP and VST2 plugins are installed: the standard folders, as none were chosen."
@@ -330,7 +321,7 @@ pub fn folder_groups(
             empty: "No plugin folders.",
         },
         FolderGroup {
-            title: "PLUGIN DATA ON OTHER DRIVES",
+            title: "Plugin data on other drives",
             list: None,
             note: "Plugin folders moved off their drive, and where they are now. Move one from its plugin's card.",
             folders: moved.iter().map(|m| format!("{}  →  {}", m.from, m.to)).collect(),
