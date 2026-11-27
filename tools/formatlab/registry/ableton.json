@@ -1,0 +1,16 @@
+{
+  "format": "Ableton Live set (.als)",
+  "about": "Gzipped XML (very old sets plain). Read by crates/mo-formats/src/ableton (reader 1). Facts from the format as Live 10-12 save it; none from another program's code. Still to check on a real set of Solomon's: each fact marked unproven.",
+  "facts": [
+    { "where": "Ableton@Creator", "what": "The Live that saved it: \"Ableton Live 12.1.5\".", "proof": "unproven" },
+    { "where": "LiveSet/Tracks", "what": "MidiTrack, AudioTrack, GroupTrack, ReturnTrack in Live's order; Name/UserName (yours) else Name/EffectiveName; TrackGroupId the group's Id or -1; DeviceChain/Mixer/Speaker/Manual false when switched off.", "proof": "unproven" },
+    { "where": "LiveSet/MainTrack (Live 12) or MasterTrack", "what": "DeviceChain/Mixer/Tempo/Manual in BPM; DeviceChain/Mixer/TimeSignature/Manual = (top - 1) + 99 * log2(bottom): 201 is 4/4, 302 is 6/8.", "proof": "unproven" },
+    { "where": "DeviceChain/MainSequencer", "what": "Arrangement clips in ClipTimeable/ArrangerAutomation/Events (MIDI) or Sample/ArrangerAutomation/Events (audio); session clips in ClipSlotList/ClipSlot/ClipSlot/Value. FreezeSequencer is a frozen track's own audio.", "proof": "unproven" },
+    { "where": "MidiClip, AudioClip", "what": "Time and CurrentStart/CurrentEnd in beats. Loop/LoopStart, LoopEnd, LoopOn; StartRelative is the start marker from LoopStart when looping (negative when before it). Disabled true = muted.", "proof": "unproven" },
+    { "where": "MidiClip/Notes/KeyTracks/KeyTrack", "what": "MidiKey and Notes/MidiNoteEvent (Time, Duration in the clip's beats; Velocity 0-127 with fractions from Live 11; IsEnabled false = muted).", "proof": "unproven" },
+    { "where": "AudioClip", "what": "SampleRef/FileRef: Path (Live 11+, forward slashes), RelativePath (from the project folder; a list of RelativePathElement Dir before Live 11, with Name and SearchHint/PathHint), Data (before 11 on Windows: UTF-16LE path as hex). WarpMarkers (SecTime, BeatTime), IsWarped, WarpMode (0 Beats, 1 Tones, 2 Texture, 3 Re-Pitch, 4 Complex, 6 Complex Pro), PitchCoarse, PitchFine (cents), SampleVolume (linear), Fades/FadeInLength, FadeOutLength.", "proof": "unproven" },
+    { "where": "DeviceChain/DeviceChain/Devices", "what": "PluginDevice/PluginDesc/VstPluginInfo (PlugName, Path, UniqueId, Category 1 effect 2 synth) or Vst3PluginInfo (Name, Uid/Fields.0-3 as signed 32-bit parts of the class id); AuPluginDevice/PluginDesc/AuPluginInfo (Name, Manufacturer); MxDevice* (Max for Live, its .amxd in a FileRef); Live's own by element name. Racks: Branches/*/DeviceChain/*/Devices; a Drum Rack's returns in ReturnBranches.", "proof": "unproven" },
+    { "where": "LiveSet/Locators/Locators/Locator", "what": "Time (beats) and Name.", "proof": "unproven" },
+    { "where": "LiveSet/Scenes (Live 11+) or SceneNames", "what": "One element per scene: Name/@Value, or @Value on the old SceneNames/Scene.", "proof": "unproven" }
+  ]
+}

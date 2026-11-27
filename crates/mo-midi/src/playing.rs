@@ -227,7 +227,8 @@ fn by_ending(path: &str, raw: &[u8]) -> Result<Song, Unread> {
         }
         ".als" => {
             let set = ableton::LiveSet::open(raw).map_err(|e| extract::damaged(&e.to_string()))?;
-            set.arrangements().first().map(of).ok_or_else(|| Unread::Failed("It has no arrangement to read".into()))
+            let views = set.try_arrangements().map_err(|e| extract::damaged(&e))?;
+            views.first().map(of).ok_or_else(|| Unread::Failed("It has no arrangement to read".into()))
         }
         _ => Err(Unread::Failed(
             "It isn't a project this app reads (FL Studio, Bitwig, Studio One or Ableton Live)".into(),

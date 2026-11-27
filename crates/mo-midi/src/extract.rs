@@ -200,7 +200,7 @@ fn from_project(path: &str, raw: &[u8]) -> Result<Vec<Found>, Unread> {
         // A file that isn't Bitwig's has no clips, as in the C# reader.
         ".bwproject" => bitwig::reader::Project::open(raw.to_vec()).map(|p| p.midi()).unwrap_or_default(),
         ".song" => studio_one::Song::open(raw).map_err(|e| damaged(&e.to_string()))?.midi(),
-        ".als" => ableton::LiveSet::open(raw).map_err(|e| damaged(&e.to_string()))?.midi(),
+        ".als" => ableton::LiveSet::open(raw).and_then(|s| s.midi()).map_err(|e| damaged(&e.to_string()))?,
         _ => Vec::new(),
     };
     let mut found = Vec::new();

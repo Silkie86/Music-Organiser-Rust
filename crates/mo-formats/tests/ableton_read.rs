@@ -177,17 +177,17 @@ fn a_plain_xml_set_reads_too_and_other_files_dont() {
 #[test]
 fn midi_clips_come_out_by_track_from_where_they_start_playing() {
     let set = LiveSet::open(&gzipped(&set_xml())).unwrap();
-    let clips = set.midi();
+    let clips = set.midi().unwrap();
     assert_eq!(clips.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Hook", "Session Hook"]);
     let hook = &clips[0];
     assert_eq!(hook.ppq, 960);
     assert_eq!(hook.tracks[0].0, "1-Serum");
-    // Played from beat 1 of the clip's own (the start marker): the note at 0 is before it.
+    // The whole loop: the note at 0, before the start marker, plays from the second pass on.
     let notes: Vec<(i64, i64, u8, bool)> =
         hook.tracks[0].1.iter().map(|n| (n.start, n.length, n.key, n.muted)).collect();
-    assert_eq!(notes, [(480, 240, 64, false), (960, 960, 60, true)]);
-    assert_eq!(hook.tracks[0].1[0].velocity, velocity::from_unit(80.0 / 127.0));
-    assert_eq!(hook.end, Some(2880));
+    assert_eq!(notes, [(0, 480, 60, false), (1440, 240, 64, false), (1920, 960, 60, true)]);
+    assert_eq!(hook.tracks[0].1[1].velocity, velocity::from_unit(80.0 / 127.0));
+    assert_eq!(hook.end, Some(3840));
 }
 
 #[test]
@@ -250,4 +250,93 @@ fn an_empty_arrangement_shows_the_session_scenes_one_after_another() {
     );
     let clip = &session.lanes[1].clips[0];
     assert_eq!((clip.start, clip.length, clip.notes.len()), (3.0, 8.0, 1));
+}
+
+#[test]
+fn a_damaged_sets_midi_says_so() {
+    let set = LiveSet::open(&gzipped("<?xml version=\"1.0\"?><Ableton><LiveSet><Tracks>")).unwrap();
+    assert!(set.midi().is_err());
+    assert!(set.try_arrangements().is_err());
+    assert_eq!(set.arrangements()[0].clip_count(), 0);
+}
+
+/// A set with one MIDI track (an Instrument Rack holding a VST3, a Drum Rack whose return holds a VST2 reverb) and
+/// one clip, with its scenes as Live 10 saves them, at the tempo given.
+fn small_set(clip: &str, tempo: f64, arranged: bool) -> String {
+    let (arrangement, session) = if arranged { (clip, "") } else { ("", clip) };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Ableton Creator="Ableton Live 10.1.30"><LiveSet>
+  <Tracks><MidiTrack Id="1"><Name><EffectiveName Value="Keys" /></Name><TrackGroupId Value="-1" />
+    <DeviceChain>
+      <MainSequencer>
+        <ClipSlotList><ClipSlot Id="0"><ClipSlot><Value>{session}</Value></ClipSlot></ClipSlot></ClipSlotList>
+        <ClipTimeable><ArrangerAutomation><Events>{arrangement}</Events></ArrangerAutomation></ClipTimeable>
+      </MainSequencer>
+      <DeviceChain><Devices>
+        <InstrumentGroupDevice Id="0"><Branches><InstrumentBranch Id="0"><DeviceChain><MidiToAudioDeviceChain><Devices>
+          <PluginDevice Id="0"><PluginDesc><Vst3PluginInfo Id="0"><Name Value="Diva" /></Vst3PluginInfo></PluginDesc></PluginDevice>
+        </Devices></MidiToAudioDeviceChain></DeviceChain></InstrumentBranch></Branches></InstrumentGroupDevice>
+        <DrumGroupDevice Id="1"><ReturnBranches><ReturnBranch Id="0"><DeviceChain><AudioToAudioDeviceChain><Devices>
+          <PluginDevice Id="0"><PluginDesc><VstPluginInfo Id="0"><PlugName Value="ValhallaRoom" /></VstPluginInfo></PluginDesc></PluginDevice>
+        </Devices></AudioToAudioDeviceChain></DeviceChain></ReturnBranch></ReturnBranches></DrumGroupDevice>
+      </Devices></DeviceChain>
+    </DeviceChain></MidiTrack></Tracks>
+  <MasterTrack><DeviceChain><Mixer><Tempo><Manual Value="{tempo}" /></Tempo></Mixer></DeviceChain></MasterTrack>
+  <SceneNames><Scene Id="0" Value="Verse" /></SceneNames>
+</LiveSet></Ableton>"#
+    )
+}
+
+#[test]
+fn a_plugin_in_an_instrument_rack_is_the_instrument_and_old_scenes_are_read() {
+    let clip = r#"<MidiClip Id="0" Time="0"><CurrentStart Value="0" /><CurrentEnd Value="4" />
+        <Loop><LoopStart Value="0" /><LoopEnd Value="4" /><LoopOn Value="true" /></Loop>
+        <Notes><KeyTracks><KeyTrack Id="0"><Notes><MidiNoteEvent Time="1" Duration="1" Velocity="90" /></Notes>
+        <MidiKey Value="48" /></KeyTrack></KeyTracks></Notes></MidiClip>"#;
+    let set = LiveSet::open(small_set(clip, 120.0, false).as_bytes()).unwrap();
+    let info = set.info();
+    let plugins: Vec<(&str, PluginKind)> = info.plugins.iter().map(|p| (p.name.as_str(), p.kind)).collect();
+    assert_eq!(
+        plugins,
+        [
+            ("Instrument Rack", PluginKind::Instrument),
+            ("Diva", PluginKind::Instrument),
+            ("Drum Rack", PluginKind::Instrument),
+            ("ValhallaRoom", PluginKind::Effect),
+        ]
+    );
+    assert_eq!(info.details.get("Scenes").map(String::as_str), Some("1"));
+    let views = set.arrangements();
+    assert_eq!(views[0].view, "Ableton session");
+    assert_eq!(views[0].lanes[0].detail, "Diva");
+    assert_eq!(views[0].markers[0].name, "Verse");
+    assert_eq!(views[0].lanes[0].clips[0].notes.len(), 1);
+}
+
+#[test]
+fn a_start_marker_before_the_loop_plays_its_lead_in_once() {
+    let clip = r#"<MidiClip Id="0" Time="0"><CurrentStart Value="0" /><CurrentEnd Value="12" />
+        <Loop><LoopStart Value="4" /><LoopEnd Value="8" /><StartRelative Value="-4" /><LoopOn Value="true" /></Loop>
+        <Notes><KeyTracks><KeyTrack Id="0"><Notes>
+          <MidiNoteEvent Time="0" Duration="1" Velocity="90" /><MidiNoteEvent Time="4" Duration="1" Velocity="90" />
+        </Notes><MidiKey Value="48" /></KeyTrack></KeyTracks></Notes></MidiClip>"#;
+    let set = LiveSet::open(small_set(clip, 120.0, true).as_bytes()).unwrap();
+    let starts: Vec<f64> = set.arrangements()[0].lanes[0].clips[0].notes.iter().map(|n| n.start).collect();
+    assert_eq!(starts, [0.0, 4.0, 8.0]);
+    let midi = set.midi().unwrap();
+    assert_eq!(midi[0].tracks[0].1.iter().map(|n| n.start).collect::<Vec<_>>(), [0, 3840]);
+}
+
+#[test]
+fn an_unwarped_clip_plays_its_seconds_at_any_tempo() {
+    // 30 BPM: two seconds a beat. Ten seconds of the file, placed for five beats.
+    let clip = r#"<AudioClip Id="0" Time="0"><CurrentStart Value="0" /><CurrentEnd Value="5" />
+        <Loop><LoopStart Value="0" /><LoopEnd Value="10" /><LoopOn Value="false" /></Loop>
+        <SampleRef><FileRef><Path Value="C:/Samples/Pad.wav" /></FileRef></SampleRef><IsWarped Value="false" />
+        </AudioClip>"#;
+    let set = LiveSet::open(small_set(clip, 30.0, true).as_bytes()).unwrap();
+    let part = &set.arrangements()[0].lanes[0].clips[0].audio[0];
+    assert_eq!((part.start, part.length, part.from, part.seconds_per_beat), (0.0, 5.0, 0.0, Some(2.0)));
+    assert_eq!(part.stretch, Some(Stretch::Raw));
 }

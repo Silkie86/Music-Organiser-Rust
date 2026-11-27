@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use roxmltree::Node;
 
 use super::{
-    Content, LiveSet, arrangement_clips, at, child, clip_notes, flag, note_velocity, number, session_clips, signature,
-    tempo, track_name, tracks, value,
+    Content, LiveSet, arrangement_clips, at, child, clip_notes, flag, note_velocity, number, scenes, session_clips,
+    signature, tempo, track_name, tracks, value,
 };
 use crate::arrangement::{
     Arrangement, AudioPart, LaneKind, NoteBudget, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, Stretch,
@@ -26,23 +26,26 @@ pub const SESSION_VIEW: &str = "Ableton session";
 const MOST_PASSES: usize = 100_000;
 
 impl LiveSet {
-    /// The arrangement, and the session's scenes when the arrangement has no clips.
+    /// The arrangement, and the session's scenes when the arrangement has no clips; a set too damaged to draw gives
+    /// a view that says so.
     pub fn arrangements(&self) -> Vec<Arrangement> {
-        let doc = match self.doc() {
-            Ok(doc) => doc,
-            Err(_) => return vec![crate::arrangement::unreadable(VIEW, "This set")],
-        };
+        self.try_arrangements().unwrap_or_else(|_| vec![crate::arrangement::unreadable(VIEW, "This set")])
+    }
+
+    /// [`LiveSet::arrangements`], or why the set's XML can't be read.
+    pub fn try_arrangements(&self) -> Result<Vec<Arrangement>, String> {
+        let doc = self.doc()?;
         let Some(set) = child(doc.root_element(), "LiveSet") else {
-            return vec![crate::arrangement::unreadable(VIEW, "This set")];
+            return Err("it has no LiveSet".into());
         };
         let song_tempo = tempo(set).unwrap_or(120.0);
         let mut budget = NoteBudget::new();
         let arranged = self.view(set, song_tempo, &mut budget, None);
         if arranged.clip_count() > 0 {
-            return vec![arranged];
+            return Ok(vec![arranged]);
         }
         let session = self.view(set, song_tempo, &mut budget, Some(scene_starts(set)));
-        if session.clip_count() > 0 { vec![session, arranged] } else { vec![arranged] }
+        Ok(if session.clip_count() > 0 { vec![session, arranged] } else { vec![arranged] })
     }
 
     /// One view: the arrangement's clips, or (with each scene's start) the session's.
@@ -127,7 +130,10 @@ fn instrument_of(track: Node<'_, '_>) -> String {
     }
     let mut found = Vec::new();
     super::devices(track, &mut found);
-    found.into_iter().find(|p| p.kind == crate::model::PluginKind::Instrument).map(|p| p.name).unwrap_or_default()
+    // The instrument inside a rack says more than the rack.
+    let instruments: Vec<_> = found.into_iter().filter(|p| p.kind == crate::model::PluginKind::Instrument).collect();
+    let rack = |name: &str| name.ends_with("Rack");
+    instruments.iter().find(|p| !rack(&p.name)).or(instruments.first()).map(|p| p.name.clone()).unwrap_or_default()
 }
 
 /// The set's locators, as markers.
@@ -150,18 +156,22 @@ fn locators(set: Node<'_, '_>) -> Vec<PreviewMarker> {
 /// Where each scene starts when they're played one after another: each lasts as long as its longest clip (a bar
 /// when it has none), and one more start marks where the last ends.
 fn scene_starts(set: Node<'_, '_>) -> Vec<f64> {
-    let count = child(set, "Scenes").map_or(0, |s| s.children().filter(Node::is_element).count());
-    let mut lengths = vec![0.0f64; count];
+    let mut lengths = vec![0.0f64; scenes(set).len()];
     for track in tracks(set) {
         let Some(sequencer) = at(track, &["DeviceChain", "MainSequencer"]) else { continue };
         for (scene, c) in session_clips(sequencer) {
             let content = Content::of(c);
             let length = if content.looping { content.end - content.loop_start } else { content.end - content.start };
+            // A slot past the scenes listed still gets a scene of its own.
+            if lengths.len() <= scene && scene < 100_000 {
+                lengths.resize(scene + 1, 0.0);
+            }
             if let Some(l) = lengths.get_mut(scene) {
                 *l = l.max(length);
             }
         }
     }
+    let count = lengths.len();
     let bar = signature(set).unwrap_or(TimeSignature::FOUR_FOUR).beats();
     let mut starts = Vec::with_capacity(count + 1);
     let mut at_beat = 0.0;
@@ -175,18 +185,15 @@ fn scene_starts(set: Node<'_, '_>) -> Vec<f64> {
 
 /// The scenes' names at their starts.
 fn scene_markers(set: Node<'_, '_>, starts: &[f64]) -> Vec<PreviewMarker> {
-    let Some(scenes) = child(set, "Scenes") else { return Vec::new() };
-    scenes
-        .children()
-        .filter(Node::is_element)
-        .zip(starts)
+    let listed = scenes(set);
+    // Every scene that has a start but its last (which only marks where the scenes end).
+    let shown = starts.len().saturating_sub(1);
+    (0..shown)
+        .map(|i| (listed.get(i).copied(), starts.get(i).copied().unwrap_or(0.0)))
         .enumerate()
         .map(|(i, (s, beat))| {
-            let name = value(s, &["Name"]).or_else(|| s.attribute("Value")).unwrap_or_default().trim();
-            PreviewMarker {
-                beat: *beat,
-                name: if name.is_empty() { format!("Scene {}", i + 1) } else { name.to_owned() },
-            }
+            let name = s.and_then(|s| value(s, &["Name"]).or_else(|| s.attribute("Value"))).unwrap_or_default().trim();
+            PreviewMarker { beat, name: if name.is_empty() { format!("Scene {}", i + 1) } else { name.to_owned() } }
         })
         .collect()
 }
@@ -302,12 +309,17 @@ fn clip(
                 other => Stretch::Other(other as i32),
             })
         };
+        // An unwarped clip's own times are seconds of the file: worked in the song's beats.
+        let windows = if unwarped_seconds { self::windows(&content.scaled(1.0 / rate), length) } else { windows };
         for &(from, to, at_beat) in &windows {
-            // An unwarped clip's own times are seconds of the file; shown in the song's beats.
-            let (from_second, beats) =
-                if unwarped_seconds { (from, (to - from) / rate) } else { (zero + from * rate, to - from) };
+            let from_second = zero + from * rate;
+            let beats = to - from;
             if beats <= 0.0 {
                 continue;
+            }
+            // Audio parts come out of the same budget as notes: a tiny loop on a long clip can't fill the memory.
+            if !budget.take() {
+                break;
             }
             out.audio.push(AudioPart {
                 path: path.clone(),

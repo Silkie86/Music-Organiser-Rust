@@ -143,7 +143,7 @@ impl LiveSet {
         }
         info.details.insert("Clips".into(), clips.to_string());
         info.details.insert("Notes".into(), notes.to_string());
-        let scenes = child(set, "Scenes").map_or(0, |s| s.children().filter(Node::is_element).count());
+        let scenes = scenes(set).len();
         if scenes > 0 {
             info.details.insert("Scenes".into(), scenes.to_string());
         }
@@ -152,18 +152,21 @@ impl LiveSet {
 
     /// The notes of each MIDI clip, arrangement and session, by the track it's on, in the clip's own timeline from
     /// its start: [`MIDI_PPQ`] ticks a beat.
-    pub fn midi(&self) -> Vec<MidiClip> {
-        let Ok(doc) = self.doc() else { return Vec::new() };
-        let Some(set) = child(doc.root_element(), "LiveSet") else { return Vec::new() };
+    /// A set whose XML won't read says so, rather than giving no clips.
+    pub fn midi(&self) -> std::io::Result<Vec<MidiClip>> {
+        let doc = self.doc().map_err(|e| std::io::Error::other(format!("the set's XML is damaged: {e}")))?;
+        let Some(set) = child(doc.root_element(), "LiveSet") else { return Ok(Vec::new()) };
         let mut out = Vec::new();
         for track in tracks(set) {
             let name = track_name(track);
             for clip in track_clips(track).filter(|c| c.has_tag_name("MidiClip")) {
                 let content = Content::of(clip);
+                // A looping clip's notes before its start marker play from the second pass on: they're its own too.
+                let first = content.first();
                 let mut events: Vec<NoteEvent> = clip_notes(clip)
                     .into_iter()
-                    .filter(|n| n.time >= content.start - 1e-9 && n.time < content.end)
-                    .map(|n| n.event(content.start, f64::from(MIDI_PPQ)))
+                    .filter(|n| n.time >= first - 1e-9 && n.time < content.end)
+                    .map(|n| n.event(first, f64::from(MIDI_PPQ)))
                     .collect();
                 if events.is_empty() {
                     continue;
@@ -174,13 +177,13 @@ impl LiveSet {
                     name: if clip_name.trim().is_empty() { name.clone() } else { clip_name.to_owned() },
                     ppq: MIDI_PPQ,
                     tracks: Vec::new(),
-                    end: Some(ticks(content.end - content.start, f64::from(MIDI_PPQ))),
+                    end: Some(ticks(content.end - first, f64::from(MIDI_PPQ))),
                 };
                 *midi.track(&name) = events;
                 out.push(midi);
             }
         }
-        out
+        Ok(out)
     }
 
     /// An audio file's path as the `FileRef` gives it: in full when it says (Windows paths with Windows' slashes),
@@ -315,6 +318,14 @@ pub fn signature_code(signature: crate::arrangement::TimeSignature) -> i64 {
     i64::from(signature.top()) - 1 + 99 * i64::from(signature.bottom().trailing_zeros())
 }
 
+/// The set's scenes: `Scenes` from Live 11, `SceneNames` before.
+pub(crate) fn scenes<'a, 'i>(set: Node<'a, 'i>) -> Vec<Node<'a, 'i>> {
+    child(set, "Scenes")
+        .or_else(|| child(set, "SceneNames"))
+        .map(|s| s.children().filter(Node::is_element).collect())
+        .unwrap_or_default()
+}
+
 /// The kinds of track Live has, as elements.
 pub(crate) const TRACK_TAGS: [&str; 4] = ["MidiTrack", "AudioTrack", "GroupTrack", "ReturnTrack"];
 
@@ -376,13 +387,24 @@ pub(crate) struct Content {
 }
 
 impl Content {
+    /// Where the clip's notes begin: the start marker, or the loop's start when that's earlier (later passes play it).
+    pub fn first(&self) -> f64 {
+        if self.looping { self.start.min(self.loop_start) } else { self.start }
+    }
+
+    /// The same times, multiplied (an unwarped audio clip's seconds in beats).
+    pub fn scaled(&self, by: f64) -> Content {
+        Content { loop_start: self.loop_start * by, start: self.start * by, end: self.end * by, looping: self.looping }
+    }
+
     pub fn of(clip: Node<'_, '_>) -> Content {
         let loop_start = number(clip, &["Loop", "LoopStart"]).unwrap_or(0.0);
         let looping = flag(clip, &["Loop", "LoopOn"]);
         let end = number(clip, &["Loop", "LoopEnd"]).unwrap_or(loop_start).max(loop_start);
         let start =
             if looping { loop_start + number(clip, &["Loop", "StartRelative"]).unwrap_or(0.0) } else { loop_start };
-        Content { loop_start, start: start.clamp(loop_start, end.max(loop_start)), end, looping }
+        // A start marker before the loop is saved as a negative StartRelative: the first pass plays from there.
+        Content { loop_start, start: start.min(end), end, looping }
     }
 }
 
@@ -508,6 +530,8 @@ fn devices(track: Node<'_, '_>, out: &mut Vec<PluginRef>) {
 fn walk_devices(devices: Node<'_, '_>, instrument_seen: &mut bool, out: &mut Vec<PluginRef>) {
     for d in devices.children().filter(Node::is_element) {
         let tag = d.tag_name().name();
+        // What was seen before this device: a plugin inside an Instrument Rack is the rack's instrument.
+        let before = *instrument_seen;
         let plugin = match tag {
             "PluginDevice" => plugin_device(d, *instrument_seen),
             "AuPluginDevice" => au_device(d, *instrument_seen),
@@ -521,12 +545,14 @@ fn walk_devices(devices: Node<'_, '_>, instrument_seen: &mut bool, out: &mut Vec
             out.push(p);
         }
         // A rack's chains: `Branches/*/DeviceChain/MidiToAudioDeviceChain|AudioToAudioDeviceChain/Devices`.
-        if let Some(branches) = child(d, "Branches") {
+        // A Drum Rack's return chains (`ReturnBranches`) hold effects only.
+        for (list, seen_at_start) in [("Branches", before), ("ReturnBranches", true)] {
+            let Some(branches) = child(d, list) else { continue };
             for chain in branches.descendants().filter(|e| e.has_tag_name("Devices")) {
                 // Only a branch's own device list, not one inside a device further down (walked from there).
                 let parent_device = chain.ancestors().skip(1).find(|a| is_device(*a));
                 if parent_device == Some(d) {
-                    let mut seen = *instrument_seen;
+                    let mut seen = seen_at_start;
                     walk_devices(chain, &mut seen, out);
                 }
             }
@@ -600,7 +626,8 @@ fn max_device(d: Node<'_, '_>) -> PluginRef {
         .descendants()
         .filter(|e| e.has_tag_name("FileRef"))
         .find_map(|f| {
-            let path = value(f, &["Path"]).or_else(|| value(f, &["RelativePath"])).or_else(|| value(f, &["Name"]))?;
+            let given = |name: &str| value(f, &[name]).filter(|v| !v.trim().is_empty());
+            let path = given("Path").or_else(|| given("RelativePath")).or_else(|| given("Name"))?;
             Some(paths::stem(paths::file_name(path)).to_owned()).filter(|n| !n.is_empty())
         })
         .unwrap_or_else(|| "Max for Live device".to_owned());
