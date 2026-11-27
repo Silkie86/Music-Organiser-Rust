@@ -4968,11 +4968,12 @@ fn edit_shots(
     let edit = app.global::<mo_ui::SoundEdit>();
     let data = app.global::<mo_ui::SoundsData>();
     // A drum loop with a tempo, so the ruler counts bars and beats. Found by name, as the shuffled order changes with
-    // every run.
-    data.set_search(EDIT_SOUND.into());
-    data.invoke_search_edited(EDIT_SOUND.into());
-    pick_sound(app, 0);
-    if data.get_picked().name != EDIT_SOUND {
+    // every run; not through the search box, as Esc would clear that first.
+    let found = (0..64).any(|row| {
+        pick_sound(app, row);
+        data.get_picked().name == EDIT_SOUND
+    });
+    if !found {
         return Err(format!("sounds-edit.png: no made-up sound called {EDIT_SOUND} to open the strip on"));
     }
     let tools = ["sounds.editFadeIn", "sounds.editFadeOut", "sounds.editNormalise"];
@@ -5025,8 +5026,6 @@ fn edit_shots(
     }
     data.invoke_card_chosen("sounds.edit".into());
     // As the page was, for the pictures after this one.
-    data.set_search("".into());
-    data.invoke_search_edited("".into());
     pick_sound(app, 6);
     data.set_played(0.35);
     data.set_tile_played(0.35);
