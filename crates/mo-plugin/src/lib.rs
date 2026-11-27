@@ -113,6 +113,9 @@ pub struct Instance {
     /// review's CP-4: it went back to the DAW's input, both sides).
     pub record_from: Mutex<String>,
     pub record_side: std::sync::atomic::AtomicI32,
+    /// Counts the DAW's loads of a state that set them, so an open window shows what a load said (an undo, a preset):
+    /// it compares this with the count it showed last.
+    pub record_loaded: std::sync::atomic::AtomicU64,
     /// What the last window left playing as it closed, for the next one ([`window::LeftPlaying`]).
     pub(crate) left_playing: Mutex<Option<window::LeftPlaying>>,
     /// The shuffled order's seed: the same each time the window opens, so it opens on the list it showed.
@@ -184,6 +187,7 @@ impl DefaultPluginFactory for MoPlugin {
                 record_open: std::sync::atomic::AtomicBool::new(false),
                 record_from: Mutex::new(String::new()),
                 record_side: std::sync::atomic::AtomicI32::new(0),
+                record_loaded: std::sync::atomic::AtomicU64::new(0),
                 left_playing: Mutex::new(None),
                 seed: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -324,13 +328,14 @@ impl PluginStateImpl for MainThread<'_> {
             params.rescan(&self.host, ParamRescanFlags::VALUES);
         }
         // What Record records from, as the project left it (the 26 Nov review's CP-4, kept with the project too): the
-        // next window opens on it. An input that isn't there now is shown, and recorded from, as the DAW's input
+        // next window opens on it, and an open one shows it at its next tick. A state from before Record was kept says
+        // the DAW's input, both sides. An input that isn't there now is shown, and recorded from, as the DAW's input
         // (`window.rs`), with its name kept for when it's back.
-        if let Some(from) = kept.record_from.clone() {
-            *threads::lock(&self.shared.instance.record_from) = from;
-        }
-        if let Some(side) = kept.record_side {
-            self.shared.instance.record_side.store(side, std::sync::atomic::Ordering::Relaxed);
+        if let (Some(from), Some(side)) = (kept.record_from.clone(), kept.record_side) {
+            let instance = &self.shared.instance;
+            *threads::lock(&instance.record_from) = from;
+            instance.record_side.store(side, std::sync::atomic::Ordering::Relaxed);
+            instance.record_loaded.fetch_add(1, std::sync::atomic::Ordering::Release);
         }
         log::line("State", &format!("The DAW handed back the plugin's state: {kept:?}"));
         Ok(())

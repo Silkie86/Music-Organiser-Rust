@@ -84,8 +84,10 @@ struct Page {
     /// Counts the looks for the DAWs' folders, so an older one finishing late is dropped (newest wins).
     scripts_asked: u64,
     daws_installing: bool,
-    /// Whether what runs while `daws_installing` is the plugin's step, waiting on Windows' question.
+    /// Whether the plugin row's step runs (waiting on Windows' question), and whether it's a Take out. Apart from
+    /// `daws_installing`: the question can wait a long time, and the links' buttons stay usable meanwhile (DK-3).
     plugin_asking: bool,
+    plugin_taking_out: bool,
     /// Whether what runs while `daws_installing` is a Take out (its words on the buttons).
     daws_taking_out: bool,
     daws_message: String,
@@ -291,6 +293,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             scripts_asked: 0,
             daws_installing: false,
             plugin_asking: false,
+            plugin_taking_out: false,
             daws_taking_out: false,
             daws_message: String::new(),
             programs_message: String::new(),
@@ -1645,13 +1648,8 @@ fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
     if PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.daws_installing)) {
         PAGE.with(|p| {
             if let Some(p) = p.borrow_mut().as_mut() {
-                let doing = if p.plugin_asking {
-                    "Windows' question about the plugin was waiting"
-                } else if p.daws_taking_out {
-                    "a link was being taken out"
-                } else {
-                    "the extension was being installed"
-                };
+                let doing =
+                    if p.daws_taking_out { "a link was being taken out" } else { "the extension was being installed" };
                 p.daws_message = format!("Your Bitwig Studio folder wasn't changed: {doing}. Choose it again.");
             }
         });
@@ -1969,7 +1967,7 @@ fn plugin_choice(app: &AppWindow, choice: mo_app::daw_links::PluginChoice) {
     use mo_app::daw_links::{PluginChoice, PluginDone};
     let folder = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let p = p.as_mut().filter(|p| p.live && !p.daws_installing)?;
+        let p = p.as_mut().filter(|p| p.live && !p.plugin_asking)?;
         let look = p.plugin.as_ref()?;
         let row = page::plugin_row(Some(look));
         let can = match choice {
@@ -1977,14 +1975,16 @@ fn plugin_choice(app: &AppWindow, choice: mo_app::daw_links::PluginChoice) {
             PluginChoice::TakeOut => row.take_out,
         };
         let folder = look.folder.clone().filter(|_| can)?;
-        p.daws_installing = true;
-        p.daws_taking_out = choice == PluginChoice::TakeOut;
         // The row says Windows is asking (settings.slint), right where the button was pressed.
         p.plugin_asking = true;
-        p.daws_message.clear();
+        p.plugin_taking_out = choice == PluginChoice::TakeOut;
         Some(folder)
     });
-    app.global::<SettingsData>().set_take_out_asking(SharedString::new());
+    // Only the plugin row's ask: a link's, open meanwhile, stays (the two run apart).
+    let data = app.global::<SettingsData>();
+    if data.get_take_out_asking().as_str() == page::PLUGIN_ROW {
+        data.set_take_out_asking(SharedString::new());
+    }
     let Some(folder) = folder else { return };
     show(app);
     let weak = app.as_weak();
@@ -2006,9 +2006,8 @@ fn plugin_choice(app: &AppWindow, choice: mo_app::daw_links::PluginChoice) {
             }
             PAGE.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
-                    p.daws_installing = false;
-                    p.daws_taking_out = false;
                     p.plugin_asking = false;
+                    p.plugin_taking_out = false;
                     p.daws_message = note;
                 }
             });
@@ -2022,9 +2021,8 @@ fn plugin_choice(app: &AppWindow, choice: mo_app::daw_links::PluginChoice) {
         log::error("Settings", &format!("Couldn't start the plugin's step: {e}"));
         PAGE.with(|p| {
             if let Some(p) = p.borrow_mut().as_mut() {
-                p.daws_installing = false;
-                p.daws_taking_out = false;
                 p.plugin_asking = false;
+                p.plugin_taking_out = false;
                 p.daws_message = format!("Couldn't start: {e}");
             }
         });
@@ -2032,12 +2030,13 @@ fn plugin_choice(app: &AppWindow, choice: mo_app::daw_links::PluginChoice) {
     }
 }
 
-/// Shows the plugin's row as found, for the screenshots; `asking`: as while Windows' question waits for Install.
-pub fn show_plugin(app: &AppWindow, look: page::PluginLook, asking: bool) {
+/// Shows the plugin's row as found, for the screenshots; `asking`: as while Windows' question waits for Install (or,
+/// with `taking_out`, for Take out).
+pub fn show_plugin(app: &AppWindow, look: page::PluginLook, asking: bool, taking_out: bool) {
     PAGE.with(|p| {
         if let Some(p) = p.borrow_mut().as_mut() {
-            p.daws_installing = asking;
             p.plugin_asking = asking;
+            p.plugin_taking_out = asking && taking_out;
             p.plugin = Some(look);
         }
     });
@@ -2371,14 +2370,15 @@ fn show(app: &AppWindow) {
         data.set_daws_checking(p.daws_checking);
         data.set_daws_installing(p.daws_installing);
         data.set_daws_taking_out(p.daws_taking_out);
-        data.set_daws_asking_windows(p.plugin_asking);
+        data.set_plugin_asking(p.plugin_asking);
+        data.set_plugin_taking_out(p.plugin_taking_out);
         // An ask whose DAW has nothing left to take out (looked at again, or another folder chosen) is closed, so it
         // never comes back by itself; so is one while Install or Take out runs.
         let asking = data.get_take_out_asking();
         let still = |files: &[PathBuf]| !files.is_empty() && !p.daws_installing;
         let open = (asking.as_str() == p.bitwig.daw && still(&p.bw_files))
             || (asking.as_str() == "FL Studio" && still(&p.fl_files))
-            || (asking.as_str() == page::PLUGIN_ROW && still(plugin_files));
+            || (asking.as_str() == page::PLUGIN_ROW && !plugin_files.is_empty() && !p.plugin_asking);
         if !asking.is_empty() && !open {
             data.set_take_out_asking(SharedString::new());
         }

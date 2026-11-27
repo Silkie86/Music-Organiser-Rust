@@ -544,3 +544,38 @@ fn taking_the_clap_plugin_out_never_goes_through_a_link() {
     assert!(take_out(&[own.join(CLAP_PLUGIN_NAME)]).removed.is_empty());
     assert!(elsewhere.join(CLAP_PLUGIN_NAME).exists());
 }
+
+/// The plugin's state by its size first, then its bytes: a copy of another size is out of date, one of the same size
+/// is the app's own only when every byte is.
+#[test]
+fn the_clap_plugins_state_goes_by_size_then_bytes() {
+    let root = fixture("clap-size");
+    let source = root.join("plugins").join(CLAP_PLUGIN_NAME);
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"plugin 10").unwrap();
+    let folder = root.join("CLAP");
+    fs::create_dir_all(&folder).unwrap();
+    assert!(!clap_plugin_there(&folder));
+    fs::write(folder.join(CLAP_PLUGIN_NAME), b"plugin 9").unwrap();
+    assert!(clap_plugin_there(&folder));
+    assert_eq!(clap_state(&source, &folder), ScriptState::Outdated, "another size");
+    fs::write(folder.join(CLAP_PLUGIN_NAME), b"plugin 11").unwrap();
+    assert_eq!(clap_state(&source, &folder), ScriptState::Outdated, "the same size, other bytes");
+    fs::write(folder.join(CLAP_PLUGIN_NAME), b"plugin 10").unwrap();
+    assert_eq!(clap_state(&source, &folder), ScriptState::Installed);
+    // The app's own copy gone: the one there can't be told to be the same.
+    assert_eq!(clap_state(&root.join("gone.clap"), &folder), ScriptState::Outdated);
+}
+
+/// A DAWmate.clap that is a link counts as there (Take out must leave nothing of that name), though it's never one
+/// Take out may take out.
+#[cfg(unix)]
+#[test]
+fn a_clap_plugin_that_is_a_link_is_there_but_never_taken_out() {
+    let root = fixture("clap-link-there");
+    let folder = root.join("CLAP");
+    fs::create_dir_all(&folder).unwrap();
+    std::os::unix::fs::symlink(root.join("nowhere.clap"), folder.join(CLAP_PLUGIN_NAME)).unwrap();
+    assert!(clap_plugin_there(&folder), "a link that leads nowhere is still there");
+    assert!(clap_installed_files(&folder).is_empty());
+}

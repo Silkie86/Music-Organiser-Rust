@@ -688,6 +688,9 @@ struct Shown {
     recorded: Rc<RefCell<Option<std::path::PathBuf>>>,
     /// The Record from menu: its lines, and how loud each input is.
     record_menu: Rc<RecordMenu>,
+    /// Which of the DAW's state loads the panel's Record from and side show ([`crate::Instance::record_loaded`]): a
+    /// load while the window is open (an undo, a preset) is shown at the next tick.
+    record_loaded_seen: Cell<u64>,
     /// The take's shape last handed over, and the room it was last drawn for.
     record_shape: RefCell<Vec<f32>>,
     record_shape_room: Cell<(f32, f32)>,
@@ -779,6 +782,7 @@ impl Shown {
             carried: Cell::new(None),
             recorded: Rc::default(),
             record_menu: Rc::default(),
+            record_loaded_seen: Cell::new(0),
             record_shape: RefCell::default(),
             record_shape_room: Cell::new((0.0, 0.0)),
             chords_seen: Cell::new(u64::MAX),
@@ -1395,9 +1399,10 @@ impl Shown {
         panel.set_record_open(self.instance.record_open.load(Ordering::Relaxed));
         let instance = Arc::clone(&self.instance);
         panel.on_record_open_changed(move |open| instance.record_open.store(open, Ordering::Relaxed));
-        // What it records from, as it was left while the plugin is loaded.
-        panel.set_record_from(lock(&self.instance.record_from).as_str().into());
-        panel.set_record_side(self.instance.record_side.load(Ordering::Relaxed));
+        // What it records from, as it was left while the plugin is loaded (the DAW's input until the system has said
+        // the kept one is there).
+        self.record_loaded_seen.set(self.instance.record_loaded.load(Ordering::Acquire));
+        self.show_kept_record();
         let instance = Arc::clone(&self.instance);
         panel.on_record_side_changed(move |side| instance.record_side.store(side, Ordering::Relaxed));
         let menu = Rc::clone(&self.record_menu);
@@ -1464,21 +1469,39 @@ impl Shown {
         });
     }
 
+    /// Shows the input Record records from and its side as the plugin keeps them (the project's, or the last pick).
+    /// The input shows, and is recorded from, only once the system has said it's there: until then, and when it isn't
+    /// (a sound card unplugged), it's the DAW's input, with no error. The kept name stays, so the project still has it
+    /// for when the card is back.
+    fn show_kept_record(&self) {
+        let kept = lock(&self.instance.record_from).clone();
+        let shown = if self.record_menu.known.get() {
+            crate::record::kept_input(&kept, &self.record_menu.inputs.borrow()).to_owned()
+        } else {
+            String::new()
+        };
+        if self.record_menu.known.get() && shown.is_empty() && !kept.is_empty() {
+            crate::log::line("Record", &format!("{kept} isn't there now: Record records from the DAW's input"));
+        }
+        if shown != self.panel.get_record_from().as_str() {
+            self.panel.set_record_from(shown.into());
+        }
+        self.panel.set_record_side(self.instance.record_side.load(Ordering::Relaxed));
+    }
+
     /// What Record has to tell (how the take is going, or what became of it), and what Listen hears.
     fn record_said(&self) {
         if let Some(inputs) = take(&self.slots.inputs) {
-            // The input Record was left on (by the project, or the last window), now the system has said what's
-            // there: one that isn't (a sound card unplugged) is shown, and recorded from, as the DAW's input, with no
-            // error. Its name stays kept, so the project still has it for when the card is back.
-            let kept = lock(&self.instance.record_from).clone();
-            let shown = crate::record::kept_input(&kept, &inputs);
-            if shown != self.panel.get_record_from().as_str() {
-                if shown.is_empty() {
-                    crate::log::line("Record", &format!("{kept} isn't there now: Record records from the DAW's input"));
-                }
-                self.panel.set_record_from(shown.into());
-            }
             *self.record_menu.inputs.borrow_mut() = inputs;
+            self.record_menu.known.set(true);
+            self.show_kept_record();
+        }
+        // The DAW loaded a state while the window is open (an undo, a preset): the panel shows what it says, so what
+        // the next save keeps is what's on show (the review of 27 Nov).
+        let loaded = self.instance.record_loaded.load(Ordering::Acquire);
+        if loaded != self.record_loaded_seen.get() {
+            self.record_loaded_seen.set(loaded);
+            self.show_kept_record();
         }
         self.record_levels();
         // The take's shape, drawn again as it grows or the drawing's room changes.
@@ -2798,6 +2821,9 @@ const LEVEL_FALLS: f32 = 0.93;
 struct RecordMenu {
     /// Every input, by its whole name, as the system lists them.
     inputs: RefCell<Vec<String>>,
+    /// Whether the system has said what inputs there are yet (they're asked for off the window's thread as it opens).
+    /// Until then Record shows, records from and measures the DAW's input: a kept card may not be plugged in.
+    known: Cell<bool>,
     /// The card whose inputs show; none for the list of cards.
     card: RefCell<Option<String>>,
     lines: Rc<VecModel<InputLine>>,

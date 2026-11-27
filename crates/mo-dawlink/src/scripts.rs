@@ -522,13 +522,25 @@ pub fn clap_plugin_source(app: &Path) -> Option<PathBuf> {
     Some(app.parent()?.join("plugins").join(CLAP_PLUGIN_NAME)).filter(|f| f.is_file())
 }
 
-/// Whether the plugin in `folder` is the one `source` holds, byte for byte.
+/// Whether the plugin in `folder` is the one `source` holds, byte for byte. Two of different sizes differ without a
+/// byte read (the plugin is megabytes: rule 12, read big files once, and only when it's needed).
 pub fn clap_state(source: &Path, folder: &Path) -> ScriptState {
-    let Ok(theirs) = fs::read(folder.join(CLAP_PLUGIN_NAME)) else { return ScriptState::NotInstalled };
-    match fs::read(source) {
-        Ok(built) if built == theirs => ScriptState::Installed,
+    let theirs = folder.join(CLAP_PLUGIN_NAME);
+    let Ok(their_size) = fs::metadata(&theirs).map(|m| m.len()) else { return ScriptState::NotInstalled };
+    if fs::metadata(source).map(|m| m.len()).ok() != Some(their_size) {
+        return ScriptState::Outdated;
+    }
+    match (fs::read(source), fs::read(&theirs)) {
+        (Ok(built), Ok(theirs)) if built == theirs => ScriptState::Installed,
+        (_, Err(_)) => ScriptState::NotInstalled,
         _ => ScriptState::Outdated,
     }
+}
+
+/// Whether anything is in the CLAP folder `folder` under the plugin's name ([`CLAP_PLUGIN_NAME`]): a file, a folder,
+/// or a link (even one that leads nowhere), as Take out must leave none.
+pub fn clap_plugin_there(folder: &Path) -> bool {
+    fs::symlink_metadata(folder.join(CLAP_PLUGIN_NAME)).is_ok()
 }
 
 /// Puts the plugin from `source` into `folder` as [`CLAP_PLUGIN_NAME`]: written beside itself, read back, then put in

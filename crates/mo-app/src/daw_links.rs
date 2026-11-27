@@ -133,7 +133,10 @@ pub enum PluginDone {
     SaidNo,
     /// A program has the plugin loaded (a DAW, or its plug-in host): Windows was never asked, as the file can't change.
     InUse,
-    /// It didn't happen, with why.
+    /// Windows' step ran, but the plugin there isn't as it should be after it: most likely a DAW held it.
+    NotChanged,
+    /// It couldn't be done, with why (Windows can't be asked from here, there's no plugin beside the app...): closing
+    /// the DAWs wouldn't help.
     Failed(String),
 }
 
@@ -173,9 +176,13 @@ pub fn plugin_note(choice: PluginChoice, done: &PluginDone, folder: &std::path::
             "A program has the DAWmate plugin loaded (a DAW, or its plug-in host), so Windows can't let anyone change \
              it: close your DAWs, then press {press} again."
         ),
+        // Only what a DAW can cause says to close the DAWs.
+        (_, PluginDone::NotChanged) => {
+            format!("Couldn't {verb}: Windows' step didn't change it. Close your DAWs, then press {press} again.")
+        }
         (_, PluginDone::Failed(why)) => {
             let why = why.trim_end_matches('.');
-            format!("Couldn't {verb}: {why}. Close your DAWs, then press {press} again.")
+            format!("Couldn't {verb}: {why}.")
         }
     }
 }
@@ -382,7 +389,12 @@ mod tests {
     #[test]
     fn a_plugin_choice_that_didnt_happen_keeps_nothing() {
         for choice in [PluginChoice::Install, PluginChoice::TakeOut] {
-            for done in [PluginDone::SaidNo, PluginDone::InUse, PluginDone::Failed("Access is denied.".into())] {
+            for done in [
+                PluginDone::SaidNo,
+                PluginDone::InUse,
+                PluginDone::NotChanged,
+                PluginDone::Failed("Access is denied.".into()),
+            ] {
                 assert!(plugin_kept_after(choice, &done, "1.0.0").is_empty(), "{choice:?} {done:?}");
             }
         }
@@ -397,8 +409,20 @@ mod tests {
         assert!(note.contains("until you press Install"), "{note}");
         let note = plugin_note(PluginChoice::TakeOut, &PluginDone::InUse, &folder);
         assert!(note.ends_with("close your DAWs, then press Take out again."), "{note}");
-        let note = plugin_note(PluginChoice::Install, &PluginDone::Failed("Access is denied.".into()), &folder);
-        assert_eq!(note, "Couldn't put the plugin in: Access is denied. Close your DAWs, then press Install again.");
+        // What a DAW can cause says to close the DAWs; what it can't doesn't (the review of 27 Nov).
+        let note = plugin_note(PluginChoice::Install, &PluginDone::NotChanged, &folder);
+        assert_eq!(
+            note,
+            "Couldn't put the plugin in: Windows' step didn't change it. Close your DAWs, then press Install again."
+        );
+        let why = "Windows couldn't start the administrator step (The system cannot find the file specified).";
+        let note = plugin_note(PluginChoice::TakeOut, &PluginDone::Failed(why.into()), &folder);
+        assert_eq!(
+            note,
+            "Couldn't take the plugin out: Windows couldn't start the administrator step (The system cannot find the \
+             file specified)."
+        );
+        assert!(!note.contains("Close your DAWs"), "{note}");
         assert_eq!(
             plugin_note(PluginChoice::Install, &PluginDone::SaidNo, &folder),
             "You said no to Windows' question, so nothing changed."

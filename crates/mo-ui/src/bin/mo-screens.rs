@@ -4680,7 +4680,7 @@ fn settings_shots(
         test_plugin: None,
         can_ask: true,
     };
-    mo_ui::settings::show_plugin(app, plugin.clone(), false);
+    mo_ui::settings::show_plugin(app, plugin.clone(), false, false);
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));
     // Take out on FL Studio's row, asking first and naming the file that goes.
@@ -4694,24 +4694,28 @@ fn settings_shots(
     capture(window);
     shots.push(("settings-daws-plugin-take-out.png".into(), capture(window)));
     data.set_take_out_asking("".into());
-    mo_ui::settings::show_plugin(app, plugin.clone(), true);
+    mo_ui::settings::show_plugin(app, plugin.clone(), true, false);
     capture(window);
     shots.push(("settings-daws-plugin-asking.png".into(), capture(window)));
+    // The same for Take out: its own button says so; Update doesn't, and the links' buttons stay usable (DK-3).
+    mo_ui::settings::show_plugin(app, plugin.clone(), true, true);
+    capture(window);
+    shots.push(("settings-daws-plugin-taking-out.png".into(), capture(window)));
     let test = mo_app::settings::PluginLook {
         files: Vec::new(),
         state: mo_dawlink::scripts::ScriptState::NotInstalled,
         test_plugin: Some(std::path::PathBuf::from(r"C:\Program Files\Common Files\CLAP\DAWmate (test).clap")),
         ..plugin.clone()
     };
-    mo_ui::settings::show_plugin(app, test, false);
+    mo_ui::settings::show_plugin(app, test, false, false);
     capture(window);
     shots.push(("settings-daws-plugin-test.png".into(), capture(window)));
     // A launcher build: nothing beside it to put in.
     let launcher = mo_app::settings::PluginLook { source: false, files: Vec::new(), ..plugin.clone() };
-    mo_ui::settings::show_plugin(app, launcher, false);
+    mo_ui::settings::show_plugin(app, launcher, false, false);
     capture(window);
     shots.push(("settings-daws-plugin-launcher.png".into(), capture(window)));
-    mo_ui::settings::show_plugin(app, plugin, false);
+    mo_ui::settings::show_plugin(app, plugin, false, false);
     scroll(window, 900.0, 500.0, PAGE_DOWN);
     // Further down, the program each DAW's songs open in: FL Studio's chosen here (an invented path, set before
     // show_fl showed the tab), Studio One's chosen in the old app, Bitwig's Windows' choice.

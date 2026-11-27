@@ -39,10 +39,10 @@ pub struct Kept {
     pub panel: Option<(f64, f64)>,
     /// The knobs' values (0 to 1) it has: a knob it doesn't have starts as the panel does.
     pub knobs: Vec<(Knob, f64)>,
-    /// What Record records from: a sound card input by its name, or "" for the DAW's input. None when the state doesn't
-    /// say (written before it was kept): it starts as the plugin does, on the DAW's input.
+    /// What Record records from: a sound card input by its name, or "" for the DAW's input, as a state written before
+    /// it was kept says too (the plugin's start). None only for a state that isn't the plugin's: nothing changes then.
     pub record_from: Option<String>,
-    /// Which side: 0 both (L+R), 1 left, 2 right. None when the state doesn't say.
+    /// Which side: 0 both (L+R), 1 left, 2 right; 0 for a state that doesn't say. None only with `record_from`'s.
     pub record_side: Option<i32>,
 }
 
@@ -103,20 +103,28 @@ pub fn read(state: &str) -> Kept {
             }
         }
     }
-    // A state that keeps a side keeps the input it's of: none said there is the DAW's input (not written, as it's the
-    // start). One that keeps neither was written before they were kept.
-    if record_side.is_some() && record_from.is_none() {
-        record_from = Some(String::new());
+    // What a state of the plugin's doesn't say is the plugin's start: the DAW's input (never written, as it's the
+    // start), both sides. So loading one written before Record was kept, into a plugin already loaded (an undo, an
+    // older preset), puts Record back on the DAW's input, as a plugin that opens it does.
+    Kept {
+        panel: width.zip(height),
+        knobs,
+        record_from: Some(record_from.unwrap_or_default()),
+        record_side: Some(record_side.unwrap_or_default()),
     }
-    Kept { panel: width.zip(height), knobs, record_from, record_side }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// What a state of the plugin's says with nothing kept in it: the plugin's start, Record on the DAW's input.
+    fn start() -> Kept {
+        Kept { record_from: Some(String::new()), record_side: Some(0), ..Kept::default() }
+    }
+
     fn size(panel: (f64, f64)) -> Kept {
-        Kept { panel: Some(panel), ..Kept::default() }
+        Kept { panel: Some(panel), ..start() }
     }
 
     fn all_knobs() -> Vec<(Knob, f64)> {
@@ -151,8 +159,9 @@ mod tests {
     #[test]
     fn a_state_from_an_older_plugin_reads_as_it_did() {
         let knobs = vec![(Knob::Volume, 0.4), (Knob::Loop, 1.0), (Knob::Match, 0.0), (Knob::InTime, 1.0)];
-        // Record isn't said, so it starts as the plugin does (the DAW's input, both sides).
-        let kept = Kept { panel: Some((1280.0, 800.0)), knobs, record_from: None, record_side: None };
+        // Record isn't said, so it's the plugin's start (the DAW's input, both sides), even for a plugin that had
+        // another input picked before the DAW loaded this state.
+        let kept = Kept { panel: Some((1280.0, 800.0)), knobs, record_from: Some(String::new()), record_side: Some(0) };
         assert_eq!(read(OLDER), kept);
     }
 
@@ -204,13 +213,13 @@ mod tests {
     fn record_lines_that_make_no_sense_are_skipped() {
         let state = format!("{NAMED}\nwidth=900\nheight=600\nrecord_side=middle\nrecord_from=Mic (USB)\r\n");
         let kept = read(&state);
-        assert_eq!(kept.record_side, None, "an unknown side is the plugin's start");
+        assert_eq!(kept.record_side, Some(0), "an unknown side is the plugin's start");
         assert_eq!(kept.record_from.as_deref(), Some("Mic (USB)"), "a Windows line end isn't part of the name");
         // A side out of range isn't written, nor a name that would break the lines.
         let state = write((900.0, 600.0), knob, Record { from: "two\nlines", side: 7 });
         assert!(!state.contains("record_"), "{state}");
         let state = write((900.0, 600.0), knob, Record { from: "Mic", side: -1 });
-        assert_eq!(read(&state).record_side, None);
+        assert_eq!(read(&state).record_side, Some(0));
         assert_eq!(read(&state).record_from.as_deref(), Some("Mic"));
     }
 
@@ -234,9 +243,10 @@ mod tests {
     fn a_state_that_makes_no_sense_reads_as_nothing_kept() {
         assert_eq!(read(""), Kept::default());
         assert_eq!(read("something else\nwidth=900\nheight=600\n"), Kept::default());
-        assert_eq!(read(&format!("{NAMED}\nwidth=900\n")), Kept::default());
-        assert_eq!(read(&format!("{NAMED}\nwidth=NaN\nheight=-4\n")), Kept::default());
-        assert_eq!(read(&format!("{NAMED}\nvolume=7\nloop=NaN\n")), Kept::default());
+        // The plugin's, but nothing in it makes sense: its start.
+        assert_eq!(read(&format!("{NAMED}\nwidth=900\n")), start());
+        assert_eq!(read(&format!("{NAMED}\nwidth=NaN\nheight=-4\n")), start());
+        assert_eq!(read(&format!("{NAMED}\nvolume=7\nloop=NaN\n")), start());
     }
 
     #[test]
