@@ -356,12 +356,12 @@ fn show_preset(app: &AppWindow, at: usize) {
 /// A key was changed in Settings: the buttons, card and menu show the new keys at once.
 pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     PAGE.with(|p| p.borrow_mut().shortcuts = shortcuts.clone());
-    let key = shortcuts.key_of(act::EXPORT_SHOWN).to_owned();
+    let key = shortcuts.shown_key(act::EXPORT_SHOWN);
     let data = app.global::<PresetsData>();
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
-    let key = shortcuts.key_of(act::SERUM2_SHOWN).to_owned();
+    let key = shortcuts.shown_key(act::SERUM2_SHOWN);
     data.set_serum2_shown_key(ActionKey { what: what_of(act::SERUM2_SHOWN).into(), key: key.into() });
-    data.set_keep_audition_key(shortcuts.key_of(act::KEEP).into());
+    data.set_keep_audition_key(shortcuts.shown_key(act::KEEP).into());
     show_card(app);
     show_curve_card(app);
 }
@@ -389,7 +389,7 @@ fn wire(app: &AppWindow) {
                 .into_iter()
                 .map(|o| MenuItem {
                     what: o.text.as_str().into(),
-                    key: p.shortcuts.key_of(o.id).into(),
+                    key: p.shortcuts.shown_key(o.id).into(),
                     id: o.id.into(),
                     enabled: o.enabled,
                 })
@@ -409,9 +409,9 @@ fn wire(app: &AppWindow) {
             run_curve_action(&app, curve_act::SAVE_AS_NEW);
         }
     });
-    let key = PAGE.with(|p| p.borrow().shortcuts.key_of(act::EXPORT_SHOWN).to_owned());
+    let key = PAGE.with(|p| p.borrow().shortcuts.shown_key(act::EXPORT_SHOWN));
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
-    let key = PAGE.with(|p| p.borrow().shortcuts.key_of(act::SERUM2_SHOWN).to_owned());
+    let key = PAGE.with(|p| p.borrow().shortcuts.shown_key(act::SERUM2_SHOWN));
     data.set_serum2_shown_key(ActionKey { what: what_of(act::SERUM2_SHOWN).into(), key: key.into() });
 
     let weak = app.as_weak();
@@ -1012,7 +1012,7 @@ fn show_everything(app: &AppWindow) {
         data.set_random_wild(p.random.wild as f32);
         data.set_random_wild_name(mo_app::curve_random::wild_name(p.random.wild).into());
         data.set_random_mixed(p.random.mixed);
-        data.set_randomise_key(p.shortcuts.key_of(curve_act::RANDOMISE).into());
+        data.set_randomise_key(p.shortcuts.shown_key(curve_act::RANDOMISE).into());
         data.set_curves_shown(p.curve_shown.len() as i32);
         let (title, text) = logic::curves_empty(
             p.curves.len(),
@@ -1086,7 +1086,7 @@ fn show_card(app: &AppWindow) {
             c.facts.into_iter().map(|(n, v)| PresetFact { name: n.into(), value: v.into() }).collect::<Vec<_>>(),
         )));
         let offers = logic::offers(item, p.exporting, hearing_of(&p, item));
-        let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
+        let key = |id: &str| SharedString::from(p.shortcuts.shown_key(id));
         data.set_actions(ModelRc::new(VecModel::from(crate::icons_last(
             offers
                 .iter()
@@ -1163,7 +1163,7 @@ fn show_curve_card(app: &AppWindow) {
         editor.set_found(found.into());
         let edited = editor.get_changed();
         let offers = logic::curve_offers(c, !p.bitwig.is_empty() || bitwig_chosen().is_some(), edited);
-        let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
+        let key = |id: &str| SharedString::from(p.shortcuts.shown_key(id));
         editor.set_hear_key(key(curve_act::HEAR));
         editor.set_metronome_key(key(curve_act::METRONOME));
         editor.set_faster_key(key(curve_act::FASTER));
@@ -1722,8 +1722,8 @@ fn hear_curve(app: &AppWindow, sent: Curve) {
     // The key that stops it, as the shortcut list has it now.
     let stops = PAGE.with(|p| {
         let p = p.borrow();
-        let play = p.shortcuts.key_of("app.play");
-        if play.is_empty() { p.shortcuts.key_of(curve_act::HEAR).to_owned() } else { play.to_owned() }
+        let play = p.shortcuts.shown_key("app.play");
+        if play.is_empty() { p.shortcuts.shown_key(curve_act::HEAR) } else { play }
     });
     // As the editor has it (its speed and metronome too); the editor makes it again as the curve is edited.
     let (points, length, hear) = crate::curve_editor::to_hear()

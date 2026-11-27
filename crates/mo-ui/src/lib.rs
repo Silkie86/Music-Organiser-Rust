@@ -334,7 +334,7 @@ fn show_places(app: &AppWindow, shortcuts: &Shortcuts) {
         .map(|p| PlaceInfo {
             name: p.name().into(),
             coming: coming(*p).into(),
-            key: shortcuts.key_of(p.shortcut_id()).into(),
+            key: shortcuts.shown_key(p.shortcut_id()).into(),
             icon: icon(app, *p),
         })
         .collect();
@@ -348,13 +348,13 @@ fn show_places(app: &AppWindow, shortcuts: &Shortcuts) {
     let settings = Place::Settings.index();
     app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));
-    app.global::<FinderData>().set_jump_key(shortcuts.key_of("app.jump").into());
+    app.global::<FinderData>().set_jump_key(shortcuts.shown_key("app.jump").into());
 }
 
 /// The Songs and Backup pages' buttons' tooltips, and the MIDI page's Read MIDI again's key: what each does and its
 /// key, from the one shortcut list (rule 15).
 fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
-    let action = |id: &str| ActionKey { what: what_of(id).into(), key: shortcuts.key_of(id).into() };
+    let action = |id: &str| ActionKey { what: what_of(id).into(), key: shortcuts.shown_key(id).into() };
     let data = app.global::<SongsData>();
     data.set_open_key(action("projects.open"));
     data.set_open_own_key(action("projects.openOwn"));
@@ -365,8 +365,8 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     let backup = app.global::<BackupData>();
     backup.set_run_key(action("backup.now"));
     backup.set_stop_key(action("backup.stop"));
-    app.global::<MidiData>().set_read_again_key(shortcuts.key_of("midi.readAgain").into());
-    app.global::<AppKeys>().set_list_top_key(shortcuts.key_of("app.listTop").into());
+    app.global::<MidiData>().set_read_again_key(shortcuts.shown_key("midi.readAgain").into());
+    app.global::<AppKeys>().set_list_top_key(shortcuts.shown_key("app.listTop").into());
 }
 
 /// Whether the place at `index` is one of the Presets page's two (Presets and Curves: one page, a section each).
@@ -462,10 +462,10 @@ fn page_actions(place: Place) -> &'static [Action] {
 /// keeps for itself. An app-wide action that isn't built yet isn't listed, so every key on the sheet works (X3-22).
 fn key_rows(shortcuts: &Shortcuts, place: Place) -> (Vec<KeyRow>, Vec<KeyRow>) {
     let row = |key: &str, what: &str| KeyRow { key: key.into(), what: what.into() };
-    let mut page: Vec<KeyRow> = page_actions(place).iter().map(|a| row(shortcuts.key_of(a.id), a.what)).collect();
+    let mut page: Vec<KeyRow> = page_actions(place).iter().map(|a| row(&shortcuts.shown_key(a.id), a.what)).collect();
     page.extend(list_keys(place).iter().map(|(key, what)| row(key, what)));
     let mut everywhere: Vec<KeyRow> =
-        APP_ACTIONS.iter().filter(|a| is_built(a.id)).map(|a| row(shortcuts.key_of(a.id), a.what)).collect();
+        APP_ACTIONS.iter().filter(|a| is_built(a.id)).map(|a| row(&shortcuts.shown_key(a.id), a.what)).collect();
     everywhere.push(row("F12", "Write a note for Claude about what's on screen"));
     (page, everywhere)
 }
@@ -739,13 +739,14 @@ mod tests {
         assert_eq!(page[0].what.as_str(), what_of("projects.open"));
         assert!(page.iter().any(|r| r.key == "Up, Down"), "{page:?}");
         // Every key that works everywhere, and none that isn't built yet (X3-22), then F12.
-        assert!(everywhere.iter().any(|r| r.key == "Ctrl+F" && r.what == what_of("app.search")));
+        let shown = mo_app::shortcuts::shown;
+        assert!(everywhere.iter().any(|r| r.key == shown("Ctrl+F") && r.what == what_of("app.search")));
         assert!(everywhere.iter().any(|r| r.key == "Esc" && r.what == what_of("app.escape")));
         assert!(!everywhere.iter().any(|r| r.key == "F5" || r.what.contains("(coming)")), "{everywhere:?}");
         assert_eq!(everywhere.last().map(|r| r.key.as_str()), Some("F12"));
         // Backup has keys of its own now (X3-21); Settings has none.
         let (backup, _) = key_rows(&keys, Place::Backup);
-        assert_eq!(backup.first().map(|r| r.key.as_str()), Some("Ctrl+Enter"));
+        assert_eq!(backup.first().map(|r| r.key.to_string()), Some(shown("Ctrl+Enter")));
         assert!(key_rows(&keys, Place::Settings).0.is_empty());
     }
 

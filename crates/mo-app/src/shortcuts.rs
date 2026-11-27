@@ -471,7 +471,14 @@ impl Shortcuts {
         *self = Shortcuts::with_changes(changed);
     }
 
-    /// The key an action has now, or "" for none.
+    /// The key an action has now as this computer's keyboard names it ([`shown`]: Cmd on a Mac), for a menu line, a
+    /// tooltip or the key sheet. "" for none.
+    pub fn shown_key(&self, id: &str) -> String {
+        shown(self.key_of(id))
+    }
+
+    /// The key an action has now, or "" for none, in the list's own spelling ("Ctrl" is the key Slint calls control:
+    /// Cmd on a Mac).
     pub fn key_of(&self, id: &str) -> &str {
         if let Some(k) = self.changed.get(id) {
             return k;
@@ -617,6 +624,31 @@ const NAMED_KEYS: &[&str] = &[
     "Space",
 ];
 
+/// A key in the list's own spelling ("Ctrl+Shift+E") as this computer's keyboard names it. On a Mac Slint hands the
+/// app Cmd as control and the Control key as meta, so the list's "Ctrl" is Cmd there, "Meta" is Ctrl and "Alt" is
+/// Option ([`as_on_a_mac`]); everywhere else a key shows as it's spelt.
+pub fn shown(key: &str) -> String {
+    if cfg!(target_os = "macos") { as_on_a_mac(key) } else { key.to_owned() }
+}
+
+/// A key in the list's own spelling as a Mac names it: "Ctrl+Shift+E" is "Cmd+Shift+E", "Meta+K" is "Ctrl+K",
+/// "Alt+Left" is "Option+Left". The key itself, and anything that isn't a key ("Up, Down"), is left as it is.
+pub fn as_on_a_mac(key: &str) -> String {
+    let mut rest = key;
+    let mut out = String::new();
+    // The list puts modifiers in this order (see [`normalise`]); a key of its own ("+") is never one.
+    for (list, mac) in [("Ctrl+", "Cmd+"), ("Shift+", "Shift+"), ("Alt+", "Option+"), ("Meta+", "Ctrl+")] {
+        if rest.len() > list.len()
+            && let Some(after) = rest.strip_prefix(list)
+        {
+            out.push_str(mac);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Puts a key in one standard spelling so "shift+ctrl+e" and "Ctrl+Shift+E" match: modifiers in the order Ctrl, Shift,
 /// Alt, Meta, then the key itself (letters upper case, named keys as `NAMED_KEYS` spells them).
 pub fn normalise(key: &str) -> String {
@@ -632,11 +664,13 @@ pub fn normalise(key: &str) -> String {
     };
     let has = |m: &str| parts.iter().any(|p| p.eq_ignore_ascii_case(m));
     let mut out = String::new();
+    // Cmd is the list's Ctrl on a Mac (Slint hands Cmd over as control there), and the Windows key's Meta elsewhere.
+    let cmd_is_ctrl = cfg!(target_os = "macos");
     let modifiers: [(&str, &[&str]); 4] = [
-        ("Ctrl", &["ctrl", "control"]),
+        ("Ctrl", if cmd_is_ctrl { &["ctrl", "control", "cmd", "command"] } else { &["ctrl", "control"] }),
         ("Shift", &["shift"]),
         ("Alt", &["alt", "option"]),
-        ("Meta", &["meta", "cmd"]),
+        ("Meta", if cmd_is_ctrl { &["meta"] } else { &["meta", "cmd"] }),
     ];
     for (name, aliases) in modifiers {
         if aliases.iter().any(|a| has(a)) {
@@ -657,6 +691,26 @@ pub fn normalise(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mac_names_the_keys_its_own_way() {
+        assert_eq!(as_on_a_mac("Ctrl+Shift+E"), "Cmd+Shift+E");
+        assert_eq!(as_on_a_mac("Ctrl+K"), "Cmd+K");
+        assert_eq!(as_on_a_mac("Meta+K"), "Ctrl+K");
+        assert_eq!(as_on_a_mac("Alt+Left"), "Option+Left");
+        assert_eq!(as_on_a_mac("Ctrl+Shift+Alt+Meta+Z"), "Cmd+Shift+Option+Ctrl+Z");
+        assert_eq!(as_on_a_mac("Ctrl++"), "Cmd++");
+        for same in ["+", "F12", "Space", "Up, Down", "", "Shift+?"] {
+            assert_eq!(as_on_a_mac(same), same);
+        }
+        // Everywhere but a Mac a key shows as it's spelt.
+        let expected = if cfg!(target_os = "macos") { "Cmd+Shift+E" } else { "Ctrl+Shift+E" };
+        assert_eq!(shown("Ctrl+Shift+E"), expected);
+        assert_eq!(Shortcuts::default().shown_key("projects.reveal"), expected);
+        // Cmd typed into the list means the key Slint hands over for it.
+        let cmd = if cfg!(target_os = "macos") { "Ctrl+K" } else { "Meta+K" };
+        assert_eq!(normalise("cmd+k"), cmd);
+    }
 
     #[test]
     fn ids_are_unique() {

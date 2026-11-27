@@ -565,7 +565,7 @@ pub fn key_lines(keys: &crate::shortcuts::Shortcuts, search: &str) -> Vec<KeyLin
     let mut out = Vec::new();
     let mut last = "";
     for (page, a) in crate::shortcuts::all_actions().filter(|(page, a)| crate::shortcuts::is_listed(page, a.id)) {
-        let key = keys.key_of(a.id);
+        let key = keys.shown_key(a.id);
         if !words.is_empty() {
             let hay = format!("{}\n{}\n{}", a.what, key, page).to_lowercase();
             if !words.iter().all(|w| hay.contains(w)) {
@@ -580,12 +580,12 @@ pub fn key_lines(keys: &crate::shortcuts::Shortcuts, search: &str) -> Vec<KeyLin
             page: "",
             id: a.id,
             what: a.what,
-            key: if key.is_empty() { "None".to_owned() } else { key.to_owned() },
+            key: if key.is_empty() { "None".to_owned() } else { key },
             changed: keys.is_changed(a.id),
             starts: if a.default_key.is_empty() {
                 "It starts with no key".to_owned()
             } else {
-                format!("It starts as {}", a.default_key)
+                format!("It starts as {}", crate::shortcuts::shown(a.default_key))
             },
         });
     }
@@ -1225,10 +1225,13 @@ mod tests {
         let lines = key_lines(&keys, "");
         assert_eq!(lines[0].page, crate::shortcuts::EVERYWHERE);
         // A search keeps the actions with every word, by what they do, their key or their page, under their pages.
-        let found = key_lines(&keys, "  ctrl+f ");
+        // The key as this computer names it: Cmd+F on a Mac.
+        let ctrl_f_shown = crate::shortcuts::shown("Ctrl+F");
+        let ctrl_f = ctrl_f_shown.to_lowercase();
+        let found = key_lines(&keys, &format!("  {ctrl_f} "));
         assert!(found.iter().any(|l| l.id == "app.search"));
         assert!(found.len() < lines.len() && !found[0].page.is_empty());
-        assert!(found.iter().filter(|l| l.page.is_empty()).all(|l| l.key.to_lowercase().contains("ctrl+f")));
+        assert!(found.iter().filter(|l| l.page.is_empty()).all(|l| l.key.to_lowercase().contains(&ctrl_f)));
         let sounds = key_lines(&keys, "SOUNDS bitwig");
         assert!(sounds.iter().any(|l| l.id == "sounds.toBitwig"));
         assert!(key_lines(&keys, "no such key anywhere").is_empty());
@@ -1241,7 +1244,7 @@ mod tests {
         let bitwig = lines.iter().find(|l| l.id == "sounds.toBitwig").unwrap();
         assert_eq!((bitwig.key.as_str(), bitwig.changed), ("None", true));
         let search = lines.iter().find(|l| l.id == "app.search").unwrap();
-        assert_eq!((search.key.as_str(), search.changed), ("Ctrl+F", false));
+        assert_eq!((search.key.as_str(), search.changed), (ctrl_f_shown.as_str(), false));
         // Only keys that work: no Back, Forward or tabs yet, no Rescan (F5) and no page sizes (the whole-app review of
         // 10 Nov, X3-1), as on the key sheet.
         for id in
