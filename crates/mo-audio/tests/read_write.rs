@@ -408,13 +408,17 @@ fn a_span_reads_just_that_part_of_every_kind_of_file() {
         let long = usize::try_from(frame_at(0.1, whole.sample_rate)).unwrap();
         let span = read_span(path, 0.2, 0.1).unwrap();
         assert_eq!(span.sample_rate, whole.sample_rate, "{}", path.display());
+        // To the last bit; AAC's decoder comes out a little differently after a jump (some 70 dB down, unheard), as
+        // for a read from part way.
+        let aac = path.extension().is_some_and(|e| e == "m4a" || e == "aac");
+        let off = if aac { 1e-3 } else { 0.0 };
         let want: Vec<Vec<f32>> = whole.channels.iter().map(|c| c[at..at + long].to_vec()).collect();
-        assert_eq!(span.channels, want, "{}", path.display());
+        assert_same(&span.channels, &want, off, &path.display().to_string());
         assert!((span.file_seconds - 0.3).abs() < 1e-3, "{}: {}", path.display(), span.file_seconds);
         // Past the end, only as far as there is.
         let rest = read_span(path, 0.2, 9.0).unwrap();
         let want: Vec<Vec<f32>> = whole.channels.iter().map(|c| c[at..].to_vec()).collect();
-        assert_eq!(rest.channels, want, "{}", path.display());
+        assert_same(&rest.channels, &want, off, &path.display().to_string());
         // Starting past the end: nothing.
         assert!(read_span(path, 5.0, 0.1).unwrap().is_empty(), "{}", path.display());
     }
