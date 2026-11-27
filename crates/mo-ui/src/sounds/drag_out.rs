@@ -10,6 +10,8 @@
 use std::path::PathBuf;
 
 use mo_app::drag_out::{self, Payload, SoundItem};
+use mo_app::edit_strip::Carried;
+use mo_app::sound_part::length_text;
 use mo_app::sounds as list;
 use mo_sounds::Peaks;
 use slint::ComponentHandle;
@@ -31,21 +33,6 @@ enum Spot {
     Picked,
     /// The Edit strip, by its handle or its part.
     Edit,
-}
-
-/// What a drag carries of a sound: the whole file, a part of it, or an edit made in the Edit strip.
-pub(super) enum Carried {
-    Whole,
-    /// From and to, in seconds into it.
-    Part(f64, f64),
-    /// The edits of what the strip read (`source`, read as `audio` when its file was last changed `changed`): a copy
-    /// of the sound as they leave it.
-    Edit {
-        source: mo_app::edit_copy::Source,
-        audio: std::sync::Arc<mo_audio::AudioData>,
-        changed: Option<std::time::SystemTime>,
-        edits: Vec<mo_audio::edit::Edit>,
-    },
 }
 
 pub(super) fn wire(app: &AppWindow) {
@@ -193,7 +180,7 @@ fn carry(app: &AppWindow, at: usize, spot: Spot, what: Carried) {
                 }
                 match &what {
                     Carried::Part(from, to) => {
-                        payload.caption.push_str(&format!(" · a part, {}", part::length_text(to - from)));
+                        payload.caption.push_str(&format!(" · a part, {}", length_text(to - from)));
                     }
                     Carried::Edit { .. } => payload.caption.push_str(" · edited"),
                     Carried::Whole => {}

@@ -642,7 +642,7 @@ fn card_wave(s: &Sound) -> (String, i32) {
     let first = ((all as f64 * mo_audio::MAX_SECONDS / seconds).round() as usize).clamp(1, all);
     peaks::with(s, |w| {
         let rest = std::iter::repeat_n(0.0, all - first);
-        (list::wave_path_of(whole_wave::lines(&w.to_vec(), first).into_iter().chain(rest)), all as i32)
+        (list::wave_path_of(mo_app::sound_part::lines(&w.to_vec(), first).into_iter().chain(rest)), all as i32)
     })
     .unwrap_or_default()
 }
