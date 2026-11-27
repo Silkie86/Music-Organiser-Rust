@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, Tip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, Icons, Widths } from "../studio.slint";
+import { Theme, InfoTip, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TempoStepper, Tip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, CutText, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, Icons, Widths } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -595,13 +595,10 @@ component PartPanel inherits SidePanel {
             font-size: Type.meta;
             font-weight: 600;
         }
-        CutText {
-            own-mouse: true;
-            text: MidiData.picked.kind-why;
-            color: Theme.muted;
-            font-size: Type.meta;
-            horizontal-stretch: 1;
-            min-width: 0px;
+        // Why it's that kind, behind an "i" (Solomon, 24 Nov 2026: explanations in tooltips).
+        if MidiData.picked.kind-why != "": VerticalLayout {
+            alignment: center;
+            InfoTip { text: MidiData.picked.kind-why; }
         }
     }
     Text {
@@ -770,7 +767,15 @@ component PartPanel inherits SidePanel {
     }
     VerticalLayout {
         spacing: Space.xs;
-        Caps { text: MidiData.picked.fit-moved ? "KEY, AS IT IS IN YOUR LIBRARY" : "KEY"; }
+        HorizontalLayout {
+            spacing: Space.xs;
+            alignment: start;
+            Caps {
+                y: (parent.height - self.height) / 2;
+                text: MidiData.picked.fit-moved ? "KEY, AS IT IS IN YOUR LIBRARY" : "KEY";
+            }
+            if MidiData.picked.key-why != "": InfoTip { text: MidiData.picked.key-why; }
+        }
         HorizontalLayout {
             spacing: Space.sm;
             alignment: start;
@@ -791,13 +796,6 @@ component PartPanel inherits SidePanel {
             }
         }
         Text {
-            text: MidiData.picked.key-why;
-            color: Theme.muted;
-            font-size: Type.meta;
-            wrap: word-wrap;
-            min-width: 0px;
-        }
-        Text {
             text: MidiData.picked.key-from;
             color: Theme.faint;
             font-size: Type.meta;
@@ -807,18 +805,19 @@ component PartPanel inherits SidePanel {
     }
     if MidiData.picked.chords != "": VerticalLayout {
         spacing: Space.xs;
-        Caps { text: MidiData.picked.fit-moved ? "CHORDS, MOVED TO FIT" : "CHORDS"; }
+        HorizontalLayout {
+            spacing: Space.xs;
+            alignment: start;
+            Caps {
+                y: (parent.height - self.height) / 2;
+                text: MidiData.picked.fit-moved ? "CHORDS, MOVED TO FIT" : "CHORDS";
+            }
+            if MidiData.picked.chords-why != "": InfoTip { text: MidiData.picked.chords-why; }
+        }
         Text {
             text: MidiData.picked.chords;
             color: Theme.text;
             font-size: Type.body;
-            wrap: word-wrap;
-            min-width: 0px;
-        }
-        if MidiData.picked.chords-why != "": Text {
-            text: MidiData.picked.chords-why;
-            color: Theme.muted;
-            font-size: Type.meta;
             wrap: word-wrap;
             min-width: 0px;
         }
