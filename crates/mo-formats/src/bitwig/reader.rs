@@ -66,6 +66,8 @@ const F_OLD_CURVES: u32 = 0x239;
 const F_OLD_CURVE_TARGET: u32 = 0x4cc;
 const F_OLD_CURVE_POINTS: u32 = 0x48e;
 const F_OLD_POINT_VALUE: u32 = 0x28f;
+/// An on/off setting's point (class 0x7d) has a yes or no here instead.
+const F_OLD_POINT_ON: u32 = 0x12e;
 const F_DEVICE_VENDOR: u32 = 0x9b;
 pub(super) const F_DEVICE_CATEGORY: u32 = 0x9c;
 /// What a device is: 0 an audio effect, 1 a note effect, 2 an instrument (as Bitwig 6.1 saves it, on its own devices
@@ -603,7 +605,7 @@ fn body_tracks(doc: &Document) -> (TrackTree<ObjId>, Option<ObjId>) {
 /// deactivated track, with all on it: no sound goes through it.
 /// Each automated setting's values in a save from before Bitwig 6, which keeps them on the track itself: its old
 /// timeline (0x15d) lists one curve (class 0x122) a setting in 0x239, with 0x4cc what it moves and 0x48e.0x21f its
-/// points, 0x28f each one's value (found on Solomon's Bitwig 4.3 to 5.3 saves, 27 Nov 2026; Bitwig 6 has lanes in
+/// points, 0x28f each one's value (0x12e on or off for an on/off setting) (found on Solomon's Bitwig 4.3 to 5.3 saves, 27 Nov 2026; Bitwig 6 has lanes in
 /// 0x2dc9 instead, read by [`super::arrangement`]). Nested tracks have theirs the same way.
 pub(crate) fn old_automation(doc: &Document) -> Vec<Vec<f64>> {
     ids(doc)
@@ -618,7 +620,7 @@ pub(crate) fn old_automation(doc: &Document) -> Vec<Vec<f64>> {
                 .map(|list| {
                     doc.field_list(list, F_NOTES)
                         .into_iter()
-                        .filter_map(|p| doc.obj(p).num(F_OLD_POINT_VALUE))
+                        .filter_map(|p| doc.obj(p).num(F_OLD_POINT_VALUE).or_else(|| doc.obj(p).num(F_OLD_POINT_ON)))
                         .collect()
                 })
                 .unwrap_or_default()
@@ -1192,15 +1194,28 @@ mod tests {
         };
         let moving = curve(&mut doc, &[0.2, 0.9, 0.4]);
         let flat = curve(&mut doc, &[0.5, 0.5]);
+        // An on/off setting's points (a Button modulator, a mute) say yes or no instead.
+        let switch = curve(&mut doc, &[]);
+        let ons: Vec<Slot> = [false, true, true, false]
+            .into_iter()
+            .map(|on| {
+                let mut p = Object::new(0x7d);
+                p.set(F_OLD_POINT_ON, Value::Bool(u8::from(on)));
+                Slot::Obj(doc.add(p))
+            })
+            .collect();
+        let list = doc.field_obj(switch, F_OLD_CURVE_POINTS).unwrap();
+        doc.obj_mut(list).set(F_NOTES, Value::List(ons));
         let stray = curve(&mut doc, &[0.0, 1.0]);
         let mut timeline = Object::new(0xe1);
-        timeline.set(F_OLD_CURVES, Value::List(vec![Slot::Obj(moving), Slot::Obj(flat)]));
+        timeline.set(F_OLD_CURVES, Value::List(vec![Slot::Obj(moving), Slot::Obj(flat), Slot::Obj(switch)]));
         let timeline = doc.add(timeline);
         doc.obj_mut(moving).parent = Some((timeline, F_OLD_CURVES));
         doc.obj_mut(flat).parent = Some((timeline, F_OLD_CURVES));
+        doc.obj_mut(switch).parent = Some((timeline, F_OLD_CURVES));
         let holder = doc.add(Object::new(0xe1));
         doc.obj_mut(stray).parent = Some((holder, 0x1));
-        assert_eq!(old_automation(&doc), vec![vec![0.2, 0.9, 0.4], vec![0.5, 0.5]]);
+        assert_eq!(old_automation(&doc), vec![vec![0.2, 0.9, 0.4], vec![0.5, 0.5], vec![0.0, 1.0, 1.0, 0.0]]);
     }
 
     fn wide(s: &str) -> Vec<u8> {
