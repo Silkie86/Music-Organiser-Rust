@@ -48,6 +48,31 @@ pub const MIXED_COMPRESSED: f64 = 0.3;
 pub const MIXED_AUTOMATION: u32 = 2;
 pub const MIXED_SENDS: u32 = 2;
 
+/// The lines between stages, together: [`Limits::USUAL`] is the constants above; the stage tuner
+/// (`tools/stagetune`) tries others against the statuses you've given your songs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Limits {
+    pub idea_bars: f64,
+    pub arranged_seconds: f64,
+    pub mixed_tracks: u32,
+    pub mixed_eq: f64,
+    pub mixed_compressed: f64,
+    pub mixed_automation: u32,
+    pub mixed_sends: u32,
+}
+
+impl Limits {
+    pub const USUAL: Limits = Limits {
+        idea_bars: IDEA_BARS,
+        arranged_seconds: ARRANGED_SECONDS,
+        mixed_tracks: MIXED_TRACKS,
+        mixed_eq: MIXED_EQ,
+        mixed_compressed: MIXED_COMPRESSED,
+        mixed_automation: MIXED_AUTOMATION,
+        mixed_sends: MIXED_SENDS,
+    };
+}
+
 /// The stages a save's shape can show; Released and Archived are only ever yours.
 const IDEA: usize = 0;
 const IN_PROGRESS: usize = 1;
@@ -66,6 +91,11 @@ pub struct Guess {
 
 /// How far along a save with this shape looks. `bounced_since` is whether the song has a bounce newer than the save.
 pub fn guess(shape: &Shape, bounced_since: bool) -> Guess {
+    guess_with(shape, bounced_since, &Limits::USUAL)
+}
+
+/// [`guess`] with other lines between the stages.
+pub fn guess_with(shape: &Shape, bounced_since: bool, limits: &Limits) -> Guess {
     let mut why = Vec::new();
     let minutes = shape.seconds / 60.0;
     // Whole bars, as they're compared: 15.75 bars is under 16.
@@ -80,40 +110,59 @@ pub fn guess(shape: &Shape, bounced_since: bool) -> Guess {
         1 => ", 1 marker".to_owned(),
         n => format!(", {n} markers"),
     };
-    let share = |n: u32| if shape.tracks == 0 { 0.0 } else { n as f64 / shape.tracks as f64 };
-    let mixed = shape.tracks >= MIXED_TRACKS
-        && share(shape.eq) >= MIXED_EQ
-        && share(shape.compressed) >= MIXED_COMPRESSED
-        && (shape.automation >= MIXED_AUTOMATION || shape.sends >= MIXED_SENDS);
-    let arranged = shape.seconds >= ARRANGED_SECONDS && shape.markers != 1;
-    let started = shape.bars.floor() >= IDEA_BARS;
-
-    let stage = if started && arranged && shape.master_limited() && bounced_since {
+    let at = stage_at(shape, bounced_since, limits);
+    let stage = if at == FINISHED {
         why.push(format!("{} on the master", shape.master_limiter().unwrap_or("A limiter")));
         why.push("a bounce newer than the save".to_owned());
         why.push(format!("{length}{sections}"));
         FINISHED
-    } else if started && mixed {
+    } else if at == MIXING {
         why.push(format!("EQ on {} of {} tracks, a compressor on {}", shape.eq, shape.tracks, shape.compressed));
         why.push(format!("{}, {}", count(shape.sends, "send track"), count(shape.automation, "automation lane")));
         why.push(format!("{length}{sections}"));
         MIXING
-    } else if started && arranged {
+    } else if at == ARRANGING {
         why.push(format!("{length}{sections}"));
         why.push(count(shape.tracks, "mixer track"));
         ARRANGING
-    } else if started {
+    } else if at == IN_PROGRESS {
         why.push(format!("{length}{sections}"));
         IN_PROGRESS
     } else {
         why.push(if shape.bars <= 0.0 {
             "nothing arranged yet".to_owned()
         } else {
-            format!("{length}: under {IDEA_BARS} bars")
+            format!("{length}: under {} bars", limits.idea_bars)
         });
         IDEA
     };
     Guess { stage: STATUSES.get(stage).copied().unwrap_or(STATUSES[0]), why }
+}
+
+/// Only the stage [`guess_with`] gives, without its reasons: quick enough to try many limits on many songs.
+pub fn stage_with(shape: &Shape, bounced_since: bool, limits: &Limits) -> &'static str {
+    STATUSES.get(stage_at(shape, bounced_since, limits)).copied().unwrap_or(STATUSES[0])
+}
+
+fn stage_at(shape: &Shape, bounced_since: bool, limits: &Limits) -> usize {
+    let share = |n: u32| if shape.tracks == 0 { 0.0 } else { n as f64 / shape.tracks as f64 };
+    let mixed = shape.tracks >= limits.mixed_tracks
+        && share(shape.eq) >= limits.mixed_eq
+        && share(shape.compressed) >= limits.mixed_compressed
+        && (shape.automation >= limits.mixed_automation || shape.sends >= limits.mixed_sends);
+    let arranged = shape.seconds >= limits.arranged_seconds && shape.markers != 1;
+    let started = shape.bars.floor() >= limits.idea_bars;
+    if started && arranged && shape.master_limited() && bounced_since {
+        FINISHED
+    } else if started && mixed {
+        MIXING
+    } else if started && arranged {
+        ARRANGING
+    } else if started {
+        IN_PROGRESS
+    } else {
+        IDEA
+    }
 }
 
 fn count(n: u32, what: &str) -> String {
