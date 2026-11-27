@@ -65,6 +65,8 @@ enum Kind {
 pub struct Prints {
     state: Mutex<State>,
     store: Option<Mutex<Connection>>,
+    /// The last [`Prints::keep`] couldn't write to the store: what it held is only here.
+    unwritten: AtomicBool,
 }
 
 #[derive(Default)]
@@ -209,8 +211,27 @@ impl Prints {
             return Ok(());
         }
         let Some(store) = &self.store else { return Ok(()) };
-        let Ok(mut conn) = store.lock() else { return Ok(()) };
-        write(&mut conn, &read, forgot.then_some(&asked)).map_err(|e| e.to_string())
+        let Ok(mut conn) = store.lock() else {
+            self.unwritten.store(true, Ordering::Relaxed);
+            return Ok(());
+        };
+        let written = write(&mut conn, &read, forgot.then_some(&asked)).map_err(|e| e.to_string());
+        self.unwritten.store(written.is_err(), Ordering::Relaxed);
+        written
+    }
+
+    /// Lets go of the prints held here, when the store has every one of them (a store, the last [`Prints::keep`]
+    /// wrote it, and nothing read since): they're read back from it by the next [`Prints::remember_in`], a quick read
+    /// of one table, so they needn't be held between looks (a Library of 235,000 files: about 170 MB). Whether it did;
+    /// if not, nothing changes.
+    pub fn let_go(&mut self) -> bool {
+        let all_written = self.store.is_some()
+            && !self.unwritten.load(Ordering::Relaxed)
+            && self.state.lock().is_ok_and(|s| s.read.is_empty());
+        if all_written {
+            *self = Prints::default();
+        }
+        all_written
     }
 
     /// Whether the prints are kept in a store (an earlier [`Prints::remember_in`] worked).
@@ -445,6 +466,34 @@ mod tests {
         // A look that stopped forgets nothing.
         third.keep(false).expect("kept");
         assert_eq!(third.known(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prints_are_let_go_only_when_the_store_has_them_all() {
+        let dir = folder("let-go");
+        let store = dir.join(FILE_NAME);
+        let stop = AtomicBool::new(false);
+        let a = dir.join("a.multisample");
+        fs::write(&a, b"ay").expect("write");
+        // No store: they're all there is, so they stay.
+        let mut alone = Prints::default();
+        let print = alone.whole(&a, &stop);
+        assert!(print.is_some());
+        assert!(!alone.let_go());
+        assert_eq!(alone.known(), 1);
+        // Read since the last keep: not in the store yet, so they stay.
+        let mut look = Prints::default();
+        assert_eq!(look.remember_in(&store), Ok(0));
+        assert_eq!(look.whole(&a, &stop), print);
+        assert!(!look.let_go());
+        assert!(look.remembers() && look.known() == 1);
+        // Kept: let go, and the next look reads them back without reading the file.
+        look.keep(true).expect("kept");
+        assert!(look.let_go());
+        assert!(!look.remembers() && look.known() == 0);
+        assert_eq!(look.remember_in(&store), Ok(1));
+        assert_eq!(look.whole_and_if_read(&a, &stop), print.map(|p| (p, false)), "from the store, not read");
         let _ = fs::remove_dir_all(&dir);
     }
 

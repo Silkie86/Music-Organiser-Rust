@@ -161,6 +161,13 @@ impl LibraryIndex {
         from
     }
 
+    /// Lets go of the fingerprints held, when their store has every one ([`Prints::let_go`]): the next look takes them
+    /// in again with [`LibraryIndex::remember_in`]. What the saves say they were copied from stays, as only this
+    /// holds it. Whether it did.
+    pub fn let_go_of_prints(&mut self) -> bool {
+        self.prints.let_go()
+    }
+
     /// Whether the fingerprints are kept in a store ([`LibraryIndex::remember_in`] worked).
     pub fn remembers(&self) -> bool {
         self.prints.remembers()

@@ -1926,6 +1926,13 @@ fn look_for_copies(app: &AppWindow) {
             mo_app::space_bitwig_kept::forget(&mo_app::paths::data_dir());
             arrive(&weak, Step::BitwigCrashed(id));
         }
+        // Fingerprints the store has every one of are let go between looks (about 170 MB of paths and prints for
+        // 235,000 Library files, held for as long as the app ran): the next look reads them back from the store in
+        // well under a second, and an unchanged file still isn't read again. What the saves say their copies came
+        // from stays. Without a store, or with prints it couldn't write, they stay as they are.
+        if let Some(index) = index.as_mut() {
+            index.let_go_of_prints();
+        }
     };
     let started = PAGE.with(|p| p.borrow_mut().bitwig_look.ask("Space Bitwig", work, ask));
     if let Err(e) = started {

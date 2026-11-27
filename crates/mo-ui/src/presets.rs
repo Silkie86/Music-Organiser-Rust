@@ -2893,7 +2893,9 @@ fn read_curves(app: &AppWindow) {
                 let changed_meanwhile = p.curve_changes != changes_before;
                 match result {
                     Ok(_) if changed_meanwhile => p.curves_again = true,
-                    Ok((list, keys)) => set_curves(&mut p, list, keys),
+                    Ok(Some((list, keys))) => set_curves(&mut p, list, keys),
+                    // Nothing changed since the list shown first.
+                    Ok(None) => {}
                     Err(e) => {
                         log::warning("Curves", &e);
                         p.curves_failed = Some(e);
@@ -2931,8 +2933,12 @@ fn set_curves(p: &mut Page, list: Vec<Curve>, keys: Vec<logic::CurveKey>) {
     }
 }
 
-/// Shows what `curves.db` holds at once, then reads the saves that changed and gives the list as it is now.
-fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String> {
+/// A list of curves and their [`logic::CurveKey`]s.
+type CurvesRead = (Vec<Curve>, Vec<logic::CurveKey>);
+
+/// Shows what `curves.db` holds at once, then reads the saves that changed and gives the list as it is now; none when
+/// nothing changed, so the list shown first stays (it isn't read and drawn a second time to be the same: every start).
+fn scan_curves(at: &Where) -> Result<Option<CurvesRead>, String> {
     let mut db = CurvesDb::open(&at.data_dir.join(curves::FILE_NAME))
         .map_err(|e| format!("Couldn't open the curves: {}", e.0))?;
     // What opening it did to the file (the move to keeping each curve's points once), for the log.
@@ -3013,7 +3019,7 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
     };
     if changed.is_empty() && !gone {
         say_away(&db);
-        return db.list().map(with_keys).map_err(|e| format!("Couldn't read the curves: {}", e.0));
+        return Ok(None);
     }
     // How far it's got, on the header, while the saves are read.
     let progress = Arc::new(curves::Progress::default());
@@ -3048,7 +3054,7 @@ fn scan_curves(at: &Where) -> Result<(Vec<Curve>, Vec<logic::CurveKey>), String>
         }
         Err(e) => log::warning("Curves", &format!("Couldn't read every save for its curves: {}", e.0)),
     }
-    db.list().map(with_keys).map_err(|e| format!("Couldn't read the curves: {}", e.0))
+    db.list().map(with_keys).map(Some).map_err(|e| format!("Couldn't read the curves: {}", e.0))
 }
 
 fn run_curve_action(app: &AppWindow, id: &str) -> bool {
