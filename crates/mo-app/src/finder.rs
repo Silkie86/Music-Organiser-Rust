@@ -452,7 +452,9 @@ pub fn nothing_found(text: &str, only: Option<Kind>) -> String {
 /// the arrows have `moved` to something it plays (before that, Space is a space in the box).
 pub fn hints(picked: Option<&Hit>, moved: bool) -> String {
     let mut parts = vec!["↑↓ move", "Enter open"];
-    let daw = picked.filter(|h| !h.opens_in.is_empty()).map(|h| format!("Ctrl+Enter open in {}", h.opens_in));
+    let daw = picked
+        .filter(|h| !h.opens_in.is_empty())
+        .map(|h| format!("{} open in {}", crate::shortcuts::shown("Ctrl+Enter"), h.opens_in));
     if let Some(daw) = &daw {
         parts.push(daw);
     }
@@ -540,7 +542,7 @@ pub fn pages(shortcuts: &Shortcuts, views: &[(Place, &[&str])]) -> Lines {
             also: also_of_place(p).to_owned(),
             // Under the Pages heading, with its place's icon and key: "Page" under each name said it again.
             detail: String::new(),
-            key: shortcuts.key_of(p.shortcut_id()).to_owned(),
+            key: shortcuts.shown_key(p.shortcut_id()),
             id: p.name().to_owned(),
             // A page beats a song or sound of the same name: typing "sounds" means the page.
             weight: 1.0,
@@ -584,7 +586,7 @@ pub fn actions<'a>(shortcuts: &Shortcuts, list: impl IntoIterator<Item = &'a Act
             also: String::new(),
             // Under the Actions heading, with its key: "Action" under each said it again.
             detail: String::new(),
-            key: shortcuts.key_of(a.id).to_owned(),
+            key: shortcuts.shown_key(a.id),
             id: a.id.to_owned(),
             weight: 0.5,
         })
@@ -1024,7 +1026,7 @@ mod tests {
         assert_eq!(page_of("Sounds/Galaxy"), Some((Place::Sounds, Some("Galaxy"))));
         assert_eq!(page_of("MIDI"), Some((Place::Midi, None)));
         assert_eq!(page_of("Nowhere"), None);
-        assert_eq!(p.lines[1].key, "Ctrl+2");
+        assert_eq!(p.lines[1].key, crate::shortcuts::shown("Ctrl+2"));
         // The C# app's name for a page finds it.
         let g = find(&[Arc::new(p) as Arc<dyn Source>], "sound lab", None, 4);
         assert_eq!(g[0].hits[0].title, "Sounds");
@@ -1054,7 +1056,8 @@ mod tests {
             plays: false,
             opens_in: "Bitwig".into(),
         };
-        assert!(hints(Some(&song), true).contains("Ctrl+Enter open in Bitwig"));
+        let open_in = format!("{} open in Bitwig", crate::shortcuts::shown("Ctrl+Enter"));
+        assert!(hints(Some(&song), true).contains(&open_in));
         assert!(!hints(Some(&song), true).contains("Space"));
         let sound = Hit { plays: true, opens_in: String::new(), ..song };
         assert!(hints(Some(&sound), true).contains("Space play"));

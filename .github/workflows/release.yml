@@ -184,6 +184,111 @@ jobs:
           name: setup
           path: dist/*.exe
 
+  # The Mac download (installer/mac): DAWmate.app with its CLAP plugin and Bitwig extension inside, each program one
+  # universal file for Apple silicon and Intel, signed ad hoc (no Apple Developer ID yet, so not notarised), in a .zip kept as
+  # this run's download. Tried by installer/mac/check.sh (the app starts, runs and closes) and clap-validator. Not put on
+  # the release yet: Mac testers get it from the run's downloads until it's signed (docs/installer.md).
+  # The Mac app and plugin are built for Apple silicon and Intel side by side (each whole-program build from cold
+  # takes about an hour and a half on GitHub's Mac); "Mac app" joins them into universal files.
+  mac-build:
+    name: Mac build (${{ matrix.target }})
+    needs: [tag]
+    if: needs.tag.outputs.published != 'true'
+    runs-on: macos-latest
+    timeout-minutes: 180
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    env:
+      # The oldest macOS the app is built for (Big Sur, the first with Apple silicon); Info.plist says the same.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # the stable branch
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: dist-mac-${{ matrix.target }}
+          save-if: ${{ github.event_name == 'push' || inputs.release }}
+      - name: Build the app and the CLAP plugin (dist)
+        run: |
+          cargo build --locked --profile dist --target "${{ matrix.target }}" -p mo-ui --bin music-organiser
+          cargo build --locked --profile dist --target "${{ matrix.target }}" -p mo-plugin
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/dist/music-organiser
+            target/${{ matrix.target }}/dist/libmo_plugin.dylib
+          if-no-files-found: error
+          retention-days: 3
+
+  mac:
+    name: Mac app
+    needs: [tag, bitwig-extension, mac-build]
+    if: needs.tag.outputs.published != 'true'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mac-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mac-x86_64-apple-darwin
+          path: target/x86_64-apple-darwin/dist
+      - name: The downloaded program may run
+        run: chmod +x target/*-apple-darwin/dist/music-organiser
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bitwig-extension
+          path: bitwig
+      - name: Make the .zip
+        shell: bash
+        run: |
+          ext=$(ls bitwig/*.bwextension | head -n 1)
+          installer/mac/package.sh dist "$ext"
+          zip=$(ls dist/*-mac.zip)
+          echo "ZIP=$zip" >> "$GITHUB_ENV"
+      - name: Try it
+        run: installer/mac/check.sh "$ZIP"
+      # The CLAP project's own checker loads the plugin as a DAW would and tries every rule of the format.
+      - name: The CLAP plugin passes clap-validator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/validator" "$RUNNER_TEMP/plugin"
+          # One known release of the checker, and only the file with this fingerprint is run.
+          asset=clap-validator-0.4.1-127-g152b982-macos-universal.zip
+          gh release download 0.4.1 --repo free-audio/clap-validator --pattern "$asset" --dir "$RUNNER_TEMP/validator"
+          cd "$RUNNER_TEMP/validator"
+          echo "bbec8cd7d18274e549d5d8c12ece3cec54be966129388dd2e742b9957f2ba9f1  $asset" | shasum -a 256 -c -
+          # The .zip holds a .tar.gz, which holds binaries/clap-validator.
+          ditto -x -k "$asset" .
+          for f in *.tar.gz; do tar -xzf "$f"; done
+          validator=$(find . -type f -name clap-validator | head -n 1)
+          [ -n "$validator" ] || { ls -R; echo "no clap-validator in the download"; exit 1; }
+          chmod +x "$validator"
+          ditto -x -k "$GITHUB_WORKSPACE/$ZIP" "$RUNNER_TEMP/plugin"
+          # The checker runs without the job's token.
+          env -u GH_TOKEN "$validator" --version
+          env -u GH_TOKEN "$validator" validate "$RUNNER_TEMP/plugin/DAWmate.app/Contents/PlugIns/DAWmate.clap"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac
+          path: dist/*.zip
+          if-no-files-found: error
+
   # The only job that writes: it puts the tried setup on a draft release.
   release:
     name: Draft release

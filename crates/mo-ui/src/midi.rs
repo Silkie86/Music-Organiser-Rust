@@ -1001,12 +1001,12 @@ fn remake_ahead(app: &AppWindow, kept: Loaded) {
 /// menu. Again after a key is changed in Settings, so none shows an old key.
 pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     let data = app.global::<MidiData>();
-    data.set_play_key(shortcuts.key_of("app.play").into());
-    data.set_bitwig_key(shortcuts.key_of("midi.playBitwig").into());
-    data.set_fl_key(shortcuts.key_of("midi.playFl").into());
-    data.set_metronome_key(shortcuts.key_of("midi.metronome").into());
-    data.set_faster_key(shortcuts.key_of("midi.faster").into());
-    data.set_slower_key(shortcuts.key_of("midi.slower").into());
+    data.set_play_key(shortcuts.shown_key("app.play").into());
+    data.set_bitwig_key(shortcuts.shown_key("midi.playBitwig").into());
+    data.set_fl_key(shortcuts.shown_key("midi.playFl").into());
+    data.set_metronome_key(shortcuts.shown_key("midi.metronome").into());
+    data.set_faster_key(shortcuts.shown_key("midi.faster").into());
+    data.set_slower_key(shortcuts.shown_key("midi.slower").into());
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.shortcuts = shortcuts.clone();
@@ -2881,7 +2881,7 @@ fn actions(
     let button = |&(id, text, enabled): &(&str, &str, bool)| CardAction {
         text: text.into(),
         tip: what_of(id).into(),
-        key: shortcuts.key_of(id).into(),
+        key: shortcuts.shown_key(id).into(),
         id: id.into(),
         enabled,
         main: false,
@@ -2918,7 +2918,7 @@ fn actions(
         .chain(&list)
         .map(|&(id, text, enabled)| MenuItem {
             what: text.into(),
-            key: shortcuts.key_of(id).into(),
+            key: shortcuts.shown_key(id).into(),
             id: id.into(),
             enabled,
         })
@@ -5977,8 +5977,8 @@ mod tests {
         assert_eq!(
             said(&octave),
             [
-                ("Octave down".to_owned(), "Shift+Alt+Down".to_owned(), true),
-                ("Octave up".to_owned(), "Shift+Alt+Up".to_owned(), false),
+                ("Octave down".to_owned(), mo_app::shortcuts::shown("Shift+Alt+Down"), true),
+                ("Octave up".to_owned(), mo_app::shortcuts::shown("Shift+Alt+Up"), false),
                 ("The app's octave".to_owned(), String::new(), true),
             ]
         );

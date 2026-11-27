@@ -93,3 +93,25 @@ installer\build.ps1 -Exe target\dist\music-organiser.exe -BitwigExtension extens
 
 Never run `installer\check.ps1` on your own PC. It puts your data folder aside while it works, and it's meant only for
 CI.
+
+## The Mac download (a test build, not signed yet)
+
+The Release workflow's two **Mac build** jobs (on every run, try-outs too) build the app and the CLAP plugin for Apple
+silicon and for Intel side by side (about an hour and a half each from cold); the **Mac app** job joins them and makes `DAWmate-<version>-mac.zip` (`installer/mac/package.sh`): `DAWmate.app` and a Read me.
+It's kept as the run's `mac` download, not put on the release.
+
+- **Inside the app** (as a Mac app keeps what it brings): the CLAP plugin's bundle in `Contents/PlugIns/DAWmate.clap`
+  and the Bitwig extension in `Contents/Resources/extensions` (`mo_dawlink::scripts::mac_app_contents`). Run from its
+  bundle, the app puts its DAW links in by itself half a minute after it starts, as the installed app does on Windows:
+  the plugin goes whole into `~/Library/Audio/Plug-Ins/CLAP` (the user's own, no administrator; copied beside itself,
+  checked, then swapped in), the extension and FL script where they go on Windows. Self-update stays Windows only.
+- **Signed ad hoc only.** Apple silicon runs nothing unsigned, so the bundles carry a signature with no name. Without an
+  Apple Developer ID (99 USD a year) and notarisation, macOS refuses a double-click on the first open: on macOS 15 or
+  later, System Settings, Privacy & Security, Open Anyway; on 14 or earlier, right-click, Open, Open (the Read me says
+  both). Solomon decided on 27 Nov 2026 not to buy a Developer ID for now: Mac testers take the run's `mac` download.
+- **Tried on GitHub's Mac** by `installer/mac/check.sh`: the bundles are whole (Info.plist, both chips, signatures,
+  `clap_entry`, the extension), and the app starts with a scratch home folder, runs a minute, writes no crash log, puts
+  its plugin in, and closes when asked. Then `clap-validator` (the CLAP project's checker) loads the plugin as a DAW
+  would.
+- `Info.plist` says why the app may use the sound card's input (recording a take; without it macOS closes an app the
+  moment it opens one) and why it asks Finder for things (sending to the Trash, so Finder's Put Back works).

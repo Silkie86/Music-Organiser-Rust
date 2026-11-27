@@ -2365,7 +2365,11 @@ fn show(app: &AppWindow) {
         data.set_daws(ModelRc::new(VecModel::from(vec![
             row(bitwig, bw_install, bw_ask),
             row(fl, fl_install, fl_ask),
-            row(plugin.status, plugin.install, page::plugin_take_out_ask(plugin_files)),
+            row(
+                plugin.status,
+                plugin.install,
+                page::plugin_take_out_ask(plugin_files, p.plugin.as_ref().is_some_and(|l| l.mac)),
+            ),
         ])));
         data.set_daws_checking(p.daws_checking);
         data.set_daws_installing(p.daws_installing);

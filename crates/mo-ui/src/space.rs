@@ -1010,7 +1010,7 @@ fn actions(buttons: Vec<Button>) -> ModelRc<CardAction> {
             icon: mo_app::themes::button_icon(&b.text).into(),
             text: b.text.into(),
             tip: what_of(b.id).into(),
-            key: keys.key_of(b.id).into(),
+            key: keys.shown_key(b.id).into(),
             id: b.id.into(),
             enabled: b.enabled,
             main: b.main,
@@ -3069,7 +3069,7 @@ fn set_line_menu(data: &SpaceData, buttons: &[Button]) {
         .iter()
         .map(|b| MenuItem {
             what: b.text.as_str().into(),
-            key: keys.key_of(b.id).into(),
+            key: keys.shown_key(b.id).into(),
             id: b.id.into(),
             enabled: b.enabled,
         })

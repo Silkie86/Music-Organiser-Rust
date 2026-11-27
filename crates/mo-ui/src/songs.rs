@@ -2265,7 +2265,7 @@ fn save_menu(daw: &str, keys: &Shortcuts) -> Vec<MenuItem> {
 fn song_menu(daw: &str, keys: &Shortcuts) -> Vec<MenuItem> {
     let item = |what: String, id: &str| MenuItem {
         what: what.into(),
-        key: keys.key_of(id).into(),
+        key: keys.shown_key(id).into(),
         id: id.into(),
         enabled: true,
     };
@@ -2746,7 +2746,8 @@ mod tests {
         let lines = |daw: &str, keys: &Shortcuts| {
             song_menu(daw, keys).iter().map(|i| (i.what.to_string(), i.key.to_string(), i.id.to_string())).collect()
         };
-        let line = |what: &str, key: &str, id: &str| (what.to_owned(), key.to_owned(), id.to_owned());
+        // Each key as this computer names it (Cmd on a Mac).
+        let line = |what: &str, key: &str, id: &str| (what.to_owned(), mo_app::shortcuts::shown(key), id.to_owned());
         let keys = Shortcuts::default();
         let fl: Vec<_> = lines(FL, &keys);
         assert_eq!(

@@ -275,9 +275,15 @@ pub const BITWIG_SCRIPT_NAME: &str = "MusicOrganiser.control.js";
 /// The older script's folder in Bitwig's `Controller Scripts`.
 const BITWIG_SCRIPT_FOLDER: &str = "Music Organiser";
 
-/// The built extension the app installs: next to the app in `extensions` (where the launcher puts it), or, when the
-/// app runs from a build in a copy of the repo, the one Maven built there (`extensions/bitwig-java/target`).
+/// The built extension the app installs: next to the app in `extensions` (where the launcher and the installer put
+/// it; in a Mac app bundle, `Contents/Resources/extensions`), or, when the app runs from a build in a copy of the repo,
+/// the one Maven built there (`extensions/bitwig-java/target`).
 pub fn bitwig_extension_source(app: &Path) -> Option<PathBuf> {
+    // A Mac app bundle keeps it in Contents/Resources/extensions, and is never a build in a copy of the repo.
+    if let Some(contents) = mac_app_contents(app) {
+        let inside = contents.join("Resources").join("extensions").join(BITWIG_EXTENSION_NAME);
+        return inside.is_file().then_some(inside);
+    }
     let beside = app.parent()?.join("extensions").join(BITWIG_EXTENSION_NAME);
     if beside.is_file() {
         return Some(beside);
@@ -517,15 +523,43 @@ pub const CLAP_PLUGIN_NAME: &str = "DAWmate.clap";
 /// one is there the app leaves its own out: a DAW would list the plugin twice.
 pub const TEST_CLAP_PLUGIN_NAMES: [&str; 2] = ["DAWmate (test).clap", "Music Organiser (test).clap"];
 
-/// The plugin the installer put beside the app (`plugins\DAWmate.clap`), if it's there.
+/// The `Contents` folder of the Mac app bundle `app` runs from (`DAWmate.app/Contents/MacOS/music-organiser`), if it
+/// runs from one. What the app brings with it is there, as a Mac app keeps it: the Bitwig extension in
+/// `Resources/extensions` and the CLAP plugin bundle in `PlugIns` (`installer/mac/package.sh`).
+pub fn mac_app_contents(app: &Path) -> Option<&Path> {
+    let macos = app.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    let named = |p: &Path, name: &str| p.file_name().is_some_and(|n| n == name);
+    let is_app = bundle.extension().is_some_and(|e| e.eq_ignore_ascii_case("app"));
+    (named(macos, "MacOS") && named(contents, "Contents") && is_app).then_some(contents)
+}
+
+/// The plugin the app brought with it, if it's there: on Windows the file the installer put beside the app
+/// (`plugins\DAWmate.clap`); in a Mac app bundle the plugin's own bundle folder in `Contents/PlugIns`.
 pub fn clap_plugin_source(app: &Path) -> Option<PathBuf> {
+    if let Some(contents) = mac_app_contents(app) {
+        let bundle = contents.join("PlugIns").join(CLAP_PLUGIN_NAME);
+        return real_folder(&bundle).then_some(bundle);
+    }
     Some(app.parent()?.join("plugins").join(CLAP_PLUGIN_NAME)).filter(|f| f.is_file())
 }
 
-/// Whether the plugin in `folder` is the one `source` holds, byte for byte. Two of different sizes differ without a
+/// Whether the plugin in `folder` is the one `source` holds, byte for byte: one file, or (on a Mac) a bundle folder,
+/// every file in it with the same name and bytes and nothing more. Two files of different sizes differ without a
 /// byte read (the plugin is megabytes: rule 12, read big files once, and only when it's needed).
 pub fn clap_state(source: &Path, folder: &Path) -> ScriptState {
     let theirs = folder.join(CLAP_PLUGIN_NAME);
+    if real_folder(source) {
+        if fs::symlink_metadata(&theirs).is_err() {
+            return ScriptState::NotInstalled;
+        }
+        return if same_tree(source, &theirs).unwrap_or(false) {
+            ScriptState::Installed
+        } else {
+            ScriptState::Outdated
+        };
+    }
     let Ok(their_size) = fs::metadata(&theirs).map(|m| m.len()) else { return ScriptState::NotInstalled };
     if fs::metadata(source).map(|m| m.len()).ok() != Some(their_size) {
         return ScriptState::Outdated;
@@ -544,14 +578,182 @@ pub fn clap_plugin_there(folder: &Path) -> bool {
 }
 
 /// Puts the plugin from `source` into `folder` as [`CLAP_PLUGIN_NAME`]: written beside itself, read back, then put in
-/// place, so one that can't be (a DAW has it open) leaves the old one as it was.
+/// place, so one that can't be (a DAW has it open) leaves the old one as it was. A bundle folder (a Mac's plugin) is
+/// copied whole the same way ([`install_bundle`]).
 pub fn install_clap(source: &Path, folder: &Path) -> Installed {
     let mut done = Installed::default();
-    match fs::read(source).and_then(|bytes| write_checked(folder, CLAP_PLUGIN_NAME, &bytes)) {
+    let placed = if real_folder(source) {
+        install_bundle(source, folder, CLAP_PLUGIN_NAME)
+    } else {
+        fs::read(source).and_then(|bytes| write_checked(folder, CLAP_PLUGIN_NAME, &bytes))
+    };
+    match placed {
         Ok(()) => done.went.push(folder.to_owned()),
         Err(e) => done.failed.push((folder.to_owned(), e.to_string())),
     }
     done
+}
+
+/// Whether `path` is a folder itself (not a link to one).
+fn real_folder(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
+/// Every file in the folder `root`, by its path inside it, with its size, in name order. A link anywhere inside, or
+/// anything that isn't a plain file or folder, is an error: a plugin bundle the app made holds none.
+fn listing(root: &Path) -> io::Result<Vec<(PathBuf, u64)>> {
+    fn walk(root: &Path, inside: &Path, out: &mut Vec<(PathBuf, u64)>) -> io::Result<()> {
+        let mut entries = fs::read_dir(root.join(inside))?.collect::<io::Result<Vec<_>>>()?;
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            let kind = entry.file_type()?;
+            let path = inside.join(entry.file_name());
+            if kind.is_dir() {
+                walk(root, &path, out)?;
+            } else if kind.is_file() {
+                out.push((path, entry.metadata()?.len()));
+            } else {
+                return Err(io::Error::other(format!("{} is a link", root.join(&path).display())));
+            }
+        }
+        Ok(())
+    }
+    if !real_folder(root) {
+        return Err(io::Error::other(format!("{} isn't a folder", root.display())));
+    }
+    let mut out = Vec::new();
+    walk(root, Path::new(""), &mut out)?;
+    Ok(out)
+}
+
+/// Whether the folders `a` and `b` hold the same files (names, sizes, then bytes), one file read at a time.
+fn same_tree(a: &Path, b: &Path) -> io::Result<bool> {
+    let files = listing(a)?;
+    if listing(b)? != files {
+        return Ok(false);
+    }
+    for (inside, _) in &files {
+        if fs::read(a.join(inside))? != fs::read(b.join(inside))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Copies the bundle folder `source` into `folder` (made if it isn't there) as `name`: first whole beside it
+/// (`name.mo-part`), each file synced, then read back and checked against `source`; then the copy that's there (only a
+/// folder of that name, never a link or a file) is moved aside (`name.mo-old`), the new one put in its place, and the
+/// old one taken out. If the new one can't be put in place, the old one goes back. What a cut-off install left beside
+/// it (`.mo-part`, `.mo-old` folders of this name) is cleared first; nothing else in `folder` is touched (rule 28).
+fn install_bundle(source: &Path, folder: &Path, name: &str) -> io::Result<()> {
+    let files = listing(source)?;
+    fs::create_dir_all(folder)?;
+    let target = folder.join(name);
+    let part = folder.join(format!("{name}.mo-part"));
+    let old = folder.join(format!("{name}.mo-old"));
+    if fs::symlink_metadata(&target).is_ok_and(|m| !m.is_dir()) {
+        return Err(io::Error::other(format!("{} is there and isn't the plugin's folder", target.display())));
+    }
+    clear_own(&part)?;
+    clear_own(&old)?;
+    let copied = (|| {
+        for (inside, _) in &files {
+            let to = part.join(inside);
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            // fs::copy keeps the file's permissions: a Mac plugin's program keeps its x bit.
+            fs::copy(source.join(inside), &to)?;
+            // Synced through a handle that may write: Windows refuses to flush one opened only to read.
+            fs::OpenOptions::new().write(true).open(&to)?.sync_all()?;
+        }
+        unmark_download(&part)?;
+        if !same_tree(source, &part)? {
+            return Err(io::Error::other("the copy read back wasn't the one written"));
+        }
+        Ok(())
+    })();
+    if let Err(e) = copied {
+        let _ = clear_own(&part);
+        return Err(e);
+    }
+    let had_one = real_folder(&target);
+    if had_one && let Err(e) = fs::rename(&target, &old) {
+        let _ = clear_own(&part);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&part, &target) {
+        if had_one {
+            let _ = fs::rename(&old, &target);
+        }
+        let _ = clear_own(&part);
+        return Err(e);
+    }
+    // The new one is in place; an old one that can't be taken out now is cleared by the next install.
+    let _ = clear_own(&old);
+    Ok(())
+}
+
+/// Takes out `path` if it's there: only a real folder shaped like a plugin bundle (nothing in it but `Contents`), as
+/// the app's own copies are. A link, a file, or a folder holding anything else is an error, never followed or
+/// removed: it isn't the app's.
+fn clear_own(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+        Ok(m) if m.is_dir() => {
+            let mut names = fs::read_dir(path)?.map(|e| e.map(|e| e.file_name()));
+            if let Some(other) = names.find(|n| n.as_ref().map_or(true, |n| n != "Contents")) {
+                let other = other.map_or_else(|e| e.to_string(), |n| n.to_string_lossy().into_owned());
+                return Err(io::Error::other(format!("{} holds {other}, so it isn't left by the app", path.display())));
+            }
+            fs::remove_dir_all(path)
+        }
+        Ok(_) => Err(io::Error::other(format!("{} is there and isn't a folder", path.display()))),
+    }
+}
+
+/// Takes the app's own plugin bundle (a Mac's `DAWmate.clap` folder, shaped as the app makes it: see [`clear_own`])
+/// out of the CLAP folder `folder`, with what a cut-off copy left beside it. A link under its name is never followed
+/// (rule 28) and is left, as is a plain file (that one is [`clap_installed_files`]'s, for [`take_out`]).
+pub fn take_out_clap_bundle(folder: &Path) -> io::Result<()> {
+    let bundle = folder.join(CLAP_PLUGIN_NAME);
+    if real_folder(&bundle) {
+        clear_own(&bundle)?;
+    }
+    match clear_clap_leftovers(folder).into_iter().next() {
+        Some((_, why)) => Err(io::Error::other(why)),
+        None => Ok(()),
+    }
+}
+
+/// Takes out what a cut-off copy of the plugin bundle left in the CLAP folder `folder` (its `.mo-part` and `.mo-old`
+/// folders, each only when it's shaped like the app's own: see [`clear_own`]). Returns the ones that couldn't go,
+/// with why. Called at every look, so a copy cut off after the swap doesn't stay until the next update (rule 28).
+pub fn clear_clap_leftovers(folder: &Path) -> Vec<(PathBuf, String)> {
+    ["mo-part", "mo-old"]
+        .iter()
+        .map(|end| folder.join(format!("{CLAP_PLUGIN_NAME}.{end}")))
+        .filter_map(|left| clear_own(&left).err().map(|e| (left, e.to_string())))
+        .collect()
+}
+
+/// On a Mac, takes the download's quarantine mark off the app's own copy of its plugin, which `fs::copy` carries
+/// over from the app (macOS marks every file of a download). The app itself was opened by the user, so its own plugin
+/// may load in a DAW as the app's part; without this a DAW is told it "cannot be checked" and won't load it. Only the
+/// copy in `part` (the app's staging folder) is changed. Elsewhere, nothing to do.
+fn unmark_download(part: &Path) -> io::Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let out = std::process::Command::new("/usr/bin/xattr").args(["-dr", "com.apple.quarantine"]).arg(part).output()?;
+    // xattr says "No such xattr" when the copy has no mark: nothing was there to take off.
+    let said = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() || said.contains("No such xattr") {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("macOS kept the download mark on the copy: {}", said.trim())))
+    }
 }
 
 /// Whether `path` is a plain file itself (not a link to one).

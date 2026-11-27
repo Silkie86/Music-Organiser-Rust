@@ -4701,6 +4701,7 @@ fn settings_shots(
         state: mo_dawlink::scripts::ScriptState::Outdated,
         test_plugin: None,
         can_ask: true,
+        mac: false,
     };
     mo_ui::settings::show_plugin(app, plugin.clone(), false, false);
     capture(window);

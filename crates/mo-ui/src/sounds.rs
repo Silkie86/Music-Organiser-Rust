@@ -2762,7 +2762,7 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
     // under it.
     let play = MenuItem {
         what: "Play or stop".into(),
-        key: shortcuts.key_of("app.play").into(),
+        key: shortcuts.shown_key("app.play").into(),
         id: "play".into(),
         enabled: true,
     };
@@ -2770,16 +2770,16 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
     // which takes the keys (the review of 10 Nov, X3-6: its key shows here and in the box's tooltip, not on the card).
     let favourite = MenuItem {
         what: "Favourite, or not".into(),
-        key: shortcuts.key_of(FAVOURITE).into(),
+        key: shortcuts.shown_key(FAVOURITE).into(),
         id: FAVOURITE.into(),
         enabled: true,
     };
     let tag =
-        MenuItem { what: "Add a tag…".into(), key: shortcuts.key_of(TAG).into(), id: TAG.into(), enabled: true };
+        MenuItem { what: "Add a tag…".into(), key: shortcuts.shown_key(TAG).into(), id: TAG.into(), enabled: true };
     let mut menu = vec![play, favourite, tag, MenuItem { enabled: true, ..MenuItem::default() }];
     let mut actions = Vec::new();
     for &(text, id) in CARD_ACTIONS {
-        let key = SharedString::from(shortcuts.key_of(id));
+        let key = SharedString::from(shortcuts.shown_key(id));
         menu.push(MenuItem { what: text.into(), key: key.clone(), id: id.into(), enabled: true });
         actions.push(CardAction {
             text: text.into(),
@@ -2800,9 +2800,9 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
          waveform."
             .into(),
     );
-    data.set_play_key(shortcuts.key_of("app.play").into());
-    data.set_favourite_key(shortcuts.key_of(FAVOURITE).into());
-    data.set_tag_key(shortcuts.key_of(TAG).into());
+    data.set_play_key(shortcuts.shown_key("app.play").into());
+    data.set_favourite_key(shortcuts.shown_key(FAVOURITE).into());
+    data.set_tag_key(shortcuts.shown_key(TAG).into());
     data.set_tag_tip(what_of(TAG).into());
 }
 

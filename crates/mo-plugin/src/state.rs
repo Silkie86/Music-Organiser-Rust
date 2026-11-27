@@ -2,8 +2,8 @@
 //! saved or the track is copied, and hands it back when the project opens again.
 //!
 //! It's a few lines of plain text, a name and a value on each, under a first line that names it: the size the window
-//! was dragged to, where Volume, Loop, Match tempo and In time were left (the knobs that are settings; the list
-//! knobs and Sounds like start again with the panel, by design), and what Record records from (the input by its name,
+//! was dragged to, where Sounds like, Volume, Loop, Match tempo and In time were left (the knobs that are settings;
+//! the list knobs start again with the panel, by design, as turning one plays a sound), and what Record records from (the input by its name,
 //! and L+R, L or R). A line this version doesn't know is skipped, and so is a value that makes no sense, so a project
 //! saved by a newer plugin (or a damaged one) still opens: a state that can't be read is never a reason for the DAW to
 //! refuse the project.
@@ -22,8 +22,13 @@ const NAMED: &str = "Music Organiser plugin state";
 pub const MOST: u64 = 64 * 1024;
 
 /// The knobs kept, with the name each has in the state (never change one: a project keeps it).
-pub const KNOBS: [(Knob, &str); 4] =
-    [(Knob::Volume, "volume"), (Knob::Loop, "loop"), (Knob::Match, "match"), (Knob::InTime, "in_time")];
+pub const KNOBS: [(Knob, &str); 5] = [
+    (Knob::Like, "like"),
+    (Knob::Volume, "volume"),
+    (Knob::Loop, "loop"),
+    (Knob::Match, "match"),
+    (Knob::InTime, "in_time"),
+];
 
 /// The line with the sound card input Record records from, by the name the system gives it ("Input 1/2 (Bitwig
 /// Connect)"): never its place in the list, which changes as cards come and go. Not written for the DAW's input.
@@ -128,8 +133,12 @@ mod tests {
     }
 
     fn all_knobs() -> Vec<(Knob, f64)> {
-        vec![(Knob::Volume, 0.4), (Knob::Loop, 1.0), (Knob::Match, 1.0), (Knob::InTime, 1.0)]
+        vec![(Knob::Like, 1.0), (Knob::Volume, 0.4), (Knob::Loop, 1.0), (Knob::Match, 1.0), (Knob::InTime, 1.0)]
     }
+
+    /// The knobs an older plugin kept (before Sounds like was): what it reads of a newer state.
+    const OLDER_KNOBS: [(Knob, &str); 4] =
+        [(Knob::Volume, "volume"), (Knob::Loop, "loop"), (Knob::Match, "match"), (Knob::InTime, "in_time")];
 
     fn knob(k: Knob) -> f64 {
         if k == Knob::Volume { 0.4 } else { 1.0 }
@@ -184,7 +193,7 @@ mod tests {
                 "width" => width = size,
                 "height" => height = size,
                 name => {
-                    let knob = KNOBS.iter().find(|(_, n)| *n == name).map(|(k, _)| *k);
+                    let knob = OLDER_KNOBS.iter().find(|(_, n)| *n == name).map(|(k, _)| *k);
                     if let (Some(knob), Some(value)) = (knob, value.filter(|v| (0.0..=1.0).contains(v))) {
                         knobs.retain(|(k, _)| *k != knob);
                         knobs.push((knob, value));
@@ -201,7 +210,8 @@ mod tests {
         for from in ["Input 1/2 (Bitwig Connect)", "0.5", "Line = In (USB)", ""] {
             for side in 0..3 {
                 let state = write((960.0, 640.0), knob, Record { from, side });
-                assert_eq!(read_as_older(&state), (Some((960.0, 640.0)), all_knobs()), "{state}");
+                let older: Vec<_> = all_knobs().into_iter().filter(|(k, _)| *k != Knob::Like).collect();
+                assert_eq!(read_as_older(&state), (Some((960.0, 640.0)), older), "{state}");
             }
         }
         // And the older reader reads its own state as this one does.

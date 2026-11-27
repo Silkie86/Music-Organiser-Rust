@@ -3,6 +3,7 @@
 //! own, never the window's (rule 12). A card says what went in. Not for the screenshots or tests, which never reach a
 //! real DAW's folders (rule 11): only `main` starts it.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -77,7 +78,10 @@ struct Keep {
 /// Starts the look. `library`: the song library, for the FL Studio project folders that may have FL's user data
 /// folder above them.
 pub fn keep_up_to_date(library: PathBuf, feed: Feed) {
-    let installed = std::env::current_exe().is_ok_and(|exe| mo_app::update::installed(&exe));
+    // The installer's copy on Windows; on a Mac, the app run from its app bundle (installer/mac), which brings the
+    // extension and the plugin inside it.
+    let installed = std::env::current_exe()
+        .is_ok_and(|exe| mo_app::update::installed(&exe) || scripts::mac_app_contents(&exe).is_some());
     if !installed {
         log::info("DAW links", "A launcher build: the DAWs' links are left to Settings \u{203a} DAWs");
         return;
@@ -216,27 +220,44 @@ fn put_in(links: &Links, first_look: bool, newer: (bool, bool), done: &mut Done)
     }
 }
 
-/// The shared CLAP folder every DAW looks in, `Common Files\CLAP` (Solomon, 2026-11-25: here, with Windows' Yes).
-/// Windows only: the installer that puts the plugin beside the app is Windows only.
+/// The shared CLAP folder every DAW looks in: on Windows `Common Files\CLAP` (Solomon, 2026-11-25: here, with Windows'
+/// Yes); on a Mac the user's own `~/Library/Audio/Plug-Ins/CLAP`, which needs no administrator. Elsewhere none: the app
+/// brings no plugin with it there.
 pub(crate) fn clap_folder() -> Option<PathBuf> {
-    std::env::var_os("CommonProgramW6432")
-        .or_else(|| std::env::var_os("CommonProgramFiles"))
-        .map(|c| PathBuf::from(c).join("CLAP"))
+    if cfg!(windows) {
+        std::env::var_os("CommonProgramW6432")
+            .or_else(|| std::env::var_os("CommonProgramFiles"))
+            .map(|c| PathBuf::from(c).join("CLAP"))
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library").join("Audio").join("Plug-Ins").join("CLAP"))
+    } else {
+        None
+    }
 }
 
-/// The user's own CLAP folder, which DAWs look in too: only looked at for a test plugin put in by hand there.
+/// The other CLAP folder DAWs look in: only looked at for a test plugin put in by hand there. On Windows the user's
+/// own; on a Mac the one for every user (`/Library/Audio/Plug-Ins/CLAP`).
 fn own_clap_folder() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("Programs").join("Common").join("CLAP"))
+    if cfg!(target_os = "macos") {
+        Some(PathBuf::from("/Library/Audio/Plug-Ins/CLAP"))
+    } else {
+        std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("Programs").join("Common").join("CLAP"))
+    }
 }
 
 /// A test plugin put in by hand (`tools/dev/install-test-plugin.ps1`), in the shared CLAP folder `folder` or the
 /// user's own: the same plugin as the app's (one ID), so a DAW would list the two twice.
+/// On a Mac the plugin may also have been put by hand in the folder for every user (`/Library`), where guides say to
+/// put it, under the app's own name; and a Mac's plugin is a bundle folder, not a file.
 pub(crate) fn test_plugin(folder: &Path) -> Option<PathBuf> {
-    [Some(folder.to_owned()), own_clap_folder()]
-        .into_iter()
-        .flatten()
+    let names_by_hand = |f: PathBuf| {
+        let own = cfg!(target_os = "macos").then(|| f.join(scripts::CLAP_PLUGIN_NAME));
+        scripts::TEST_CLAP_PLUGIN_NAMES.map(|n| f.join(n)).into_iter().chain(own)
+    };
+    std::iter::once(folder.to_owned())
         .flat_map(|f| scripts::TEST_CLAP_PLUGIN_NAMES.map(|n| f.join(n)))
-        .find(|f| f.is_file())
+        .chain(own_clap_folder().into_iter().flat_map(names_by_hand))
+        .find(|f| fs::symlink_metadata(f).is_ok())
 }
 
 /// A file's size and when it was last written, to tell a changed one without reading it.
@@ -278,13 +299,23 @@ pub(crate) fn plugin_look() -> mo_app::settings::PluginLook {
         ),
         None => (ScriptState::NotInstalled, None, Vec::new()),
     };
+    // A Mac's plugin is a bundle folder, which Take out takes whole (`scripts::take_out_clap_bundle`).
+    let mut files = files;
+    if let Some(f) = &folder
+        && cfg!(target_os = "macos")
+        && fs::symlink_metadata(f.join(scripts::CLAP_PLUGIN_NAME)).is_ok_and(|m| m.is_dir())
+    {
+        files.push(f.join(scripts::CLAP_PLUGIN_NAME));
+    }
+    let mac = cfg!(target_os = "macos");
     mo_app::settings::PluginLook {
         source: source.is_some(),
         folder,
         state,
         test_plugin,
         files,
-        can_ask: mo_space::admin::Admin::can_ask(&mo_space::admin::AsAdmin),
+        can_ask: mac || mo_space::admin::Admin::can_ask(&mo_space::admin::AsAdmin),
+        mac,
     }
 }
 
@@ -342,6 +373,28 @@ pub(crate) fn plugin_by_choice(choice: PluginChoice) -> PluginDone {
         log::info("Settings", "A program has the CLAP plugin loaded, so Windows isn't asked");
         return PluginDone::InUse;
     }
+    // On a Mac the user's own CLAP folder takes it, or gives it up, without asking anyone.
+    if !cfg!(windows) {
+        let done = match (choice, &source) {
+            (PluginChoice::Install, Some(source)) => match scripts::install_clap(source, &folder).failed.first() {
+                None if scripts::clap_state(source, &folder) == ScriptState::Installed => PluginDone::Went,
+                None => PluginDone::NotChanged,
+                Some((_, why)) => PluginDone::Failed(why.clone()),
+            },
+            (PluginChoice::Install, None) => PluginDone::NotChanged,
+            (PluginChoice::TakeOut, _) => {
+                let gone = scripts::take_out(&scripts::clap_installed_files(&folder));
+                match (scripts::take_out_clap_bundle(&folder), gone.failed.first()) {
+                    (Err(why), _) => PluginDone::Failed(why.to_string()),
+                    (_, Some((_, why))) => PluginDone::Failed(why.clone()),
+                    _ if !scripts::clap_plugin_there(&folder) => PluginDone::Went,
+                    _ => not_taken_out(&folder).map_or(PluginDone::NotChanged, PluginDone::Failed),
+                }
+            }
+        };
+        log::info("Settings", &format!("CLAP plugin, {choice:?} in {}: {done:?}", folder.display()));
+        return done;
+    }
     let admin = mo_space::admin::AsAdmin;
     if !mo_space::admin::Admin::can_ask(&admin) {
         return PluginDone::Failed("this run of the app can't ask Windows".into());
@@ -374,7 +427,9 @@ pub(crate) fn plugin_by_choice(choice: PluginChoice) -> PluginDone {
 /// a link (rule 28). None when there's nothing there or it's the app's own.
 fn not_taken_out(folder: &Path) -> Option<String> {
     let plugin = folder.join(scripts::CLAP_PLUGIN_NAME);
-    let own = scripts::clap_installed_files(folder).contains(&plugin);
+    // On a Mac the app's own is a bundle folder (never a link: `symlink_metadata` doesn't follow one).
+    let bundle = cfg!(target_os = "macos") && fs::symlink_metadata(&plugin).is_ok_and(|m| m.is_dir());
+    let own = bundle || scripts::clap_installed_files(folder).contains(&plugin);
     (scripts::clap_plugin_there(folder) && !own).then(|| {
         format!(
             "{} is a link, or in a linked folder, and the app never takes anything out through a link: take it out by \
@@ -425,6 +480,11 @@ fn put_in_plugin(plugin: &Plugin, feed: &Feed) -> (Option<(Step, Installed)>, As
     if CHOSEN.load(Ordering::Relaxed) {
         return not;
     }
+    // What a cut-off copy left in the CLAP folder (a Mac's plugin is copied whole beside itself first) goes at every
+    // look, not only at the next update; while the step is held, so never under a copy Settings › DAWs is making.
+    for (left, why) in scripts::clear_clap_leftovers(&folder) {
+        log::warning("DAW links", &format!("Couldn't take out {}: {why}", left.display()));
+    }
     if let Some(by_hand) = test_plugin(&folder) {
         log::info(
             "DAW links",
@@ -446,12 +506,34 @@ fn put_in_plugin(plugin: &Plugin, feed: &Feed) -> (Option<(Step, Installed)>, As
         return not;
     }
     if plugin.failed_today {
-        log::info("DAW links", "The plugin couldn't go in earlier today, so Windows is asked again another day");
+        let again = if cfg!(windows) { "Windows is asked again" } else { "it's tried again" };
+        log::info("DAW links", &format!("The plugin couldn't go in earlier today, so {again} another day"));
         return not;
     }
     if in_use(&folder.join(scripts::CLAP_PLUGIN_NAME)) {
         log::info("DAW links", "A program has the CLAP plugin loaded: it's updated at a start when it's closed");
         return not;
+    }
+    // On a Mac the user's own CLAP folder takes it without asking anyone (a DAW that has the old one loaded keeps it
+    // until it loads plugins again).
+    if !cfg!(windows) {
+        let done = scripts::install_clap(&source, &folder);
+        for f in &done.went {
+            log::info("DAW links", &format!("Put the CLAP plugin in {}", f.display()));
+        }
+        for (f, why) in &done.failed {
+            log::warning("DAW links", &format!("Couldn't put the CLAP plugin in {}: {why}", f.display()));
+        }
+        if done.went.is_empty() {
+            // The card that follows says only what went in, so this one says what didn't.
+            let job = feed.start("Putting the DAWmate plugin in", &folder.display().to_string());
+            job.failed_as(
+                "Couldn't put the plugin in",
+                &format!("{} didn't take it. The app tries again at a start on another day.", folder.display()),
+            );
+            return (Some((step, done)), Asked::Failed);
+        }
+        return (Some((step, done)), Asked::Went);
     }
     let admin = mo_space::admin::AsAdmin;
     if !mo_space::admin::Admin::can_ask(&admin) {

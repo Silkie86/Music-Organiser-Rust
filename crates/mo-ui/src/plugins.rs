@@ -1049,7 +1049,7 @@ fn fill_actions(app: &AppWindow) {
         _ => true,
     };
     // The menu says what the card's buttons say (review X3-4); the shortcut list's longer words are the buttons' tips.
-    data.set_measure_key(shortcuts.key_of(MEASURE).into());
+    data.set_measure_key(shortcuts.shown_key(MEASURE).into());
     data.set_measure_tip(PLUGINS_ACTIONS.iter().find(|a| a.id == MEASURE).map_or("", |a| a.what).into());
     // The picked plugin's actions: Measure again is the page's, beside its line.
     let menu: Vec<MenuItem> = PLUGINS_ACTIONS
@@ -1057,7 +1057,7 @@ fn fill_actions(app: &AppWindow) {
         .filter(|a| a.id != MEASURE)
         .map(|a| MenuItem {
             what: action_words(a.id).into(),
-            key: shortcuts.key_of(a.id).into(),
+            key: shortcuts.shown_key(a.id).into(),
             id: a.id.into(),
             enabled: enabled(a.id),
         })
@@ -1073,7 +1073,7 @@ fn fill_actions(app: &AppWindow) {
             .map(|a| CardAction {
                 text: action_words(a.id).into(),
                 tip: a.what.into(),
-                key: shortcuts.key_of(a.id).into(),
+                key: shortcuts.shown_key(a.id).into(),
                 id: a.id.into(),
                 enabled: enabled(a.id),
                 main: false,

@@ -577,7 +577,7 @@ pub fn key_lines(keys: &crate::shortcuts::Shortcuts, search: &str) -> Vec<KeyLin
     let mut out = Vec::new();
     let mut last = "";
     for (page, a) in crate::shortcuts::all_actions().filter(|(page, a)| crate::shortcuts::is_listed(page, a.id)) {
-        let key = keys.key_of(a.id);
+        let key = keys.shown_key(a.id);
         if !words.is_empty() {
             let hay = format!("{}\n{}\n{}", a.what, key, page).to_lowercase();
             if !words.iter().all(|w| hay.contains(w)) {
@@ -592,12 +592,12 @@ pub fn key_lines(keys: &crate::shortcuts::Shortcuts, search: &str) -> Vec<KeyLin
             page: "",
             id: a.id,
             what: a.what,
-            key: if key.is_empty() { "None".to_owned() } else { key.to_owned() },
+            key: if key.is_empty() { "None".to_owned() } else { key },
             changed: keys.is_changed(a.id),
             starts: if a.default_key.is_empty() {
                 "It starts with no key".to_owned()
             } else {
-                format!("It starts as {}", a.default_key)
+                format!("It starts as {}", crate::shortcuts::shown(a.default_key))
             },
         });
     }
@@ -790,8 +790,11 @@ pub struct PluginLook {
     pub test_plugin: Option<PathBuf>,
     /// The app's own files there that Take out would take out (`mo_dawlink::scripts::clap_installed_files`).
     pub files: Vec<PathBuf>,
-    /// Windows' administrator question can be asked from this run (both Install and Take out need it).
+    /// Windows' administrator question can be asked from this run (both Install and Take out need it). On a Mac,
+    /// always: the user's own CLAP folder needs nobody's Yes.
     pub can_ask: bool,
+    /// On a Mac: the folder is the user's own, so nothing asks first, and the plugin is a bundle folder.
+    pub mac: bool,
 }
 
 /// The plugin row on the DAWs tab: how it stands, the facts under it, its Install button's words ("" for none), and
@@ -857,24 +860,27 @@ pub fn plugin_row(look: Option<&PluginLook>) -> PluginRow {
                 .to_owned(),
         ));
     }
-    facts.push(fact(
-        "Then",
+    let then = if look.mac {
+        "Every DAW finds it there: add DAWmate to a track. Close your DAWs before Install or Take out."
+    } else {
         "Every DAW finds it there: add DAWmate to a track. Install and Take out ask Windows first (Yes or No), as the \
          folder is the system's; close your DAWs before either."
-            .to_owned(),
-    ));
+    };
+    facts.push(fact("Then", then.to_owned()));
     row(state, ok, facts, install, take_out)
 }
 
 /// What Take out asks before it takes the app's plugin out, naming each file that goes. "" when there's nothing.
-pub fn plugin_take_out_ask(files: &[PathBuf]) -> String {
+/// `mac`: on a Mac nothing asks first (the folder is the user's own).
+pub fn plugin_take_out_ask(files: &[PathBuf], mac: bool) -> String {
     if files.is_empty() {
         return String::new();
     }
     let listed = files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ");
+    let close = if mac { "Close your DAWs first." } else { "Close your DAWs first: Windows then asks (Yes or No)." };
     format!(
         "Take the DAWmate plugin out? Only the app's own file goes: {listed}. A test plugin and every other plugin there \
-         stay. Close your DAWs first: Windows then asks (Yes or No). The app leaves it out until you press Install."
+         stay. {close} The app leaves it out until you press Install."
     )
 }
 
@@ -1339,10 +1345,13 @@ mod tests {
         let lines = key_lines(&keys, "");
         assert_eq!(lines[0].page, crate::shortcuts::EVERYWHERE);
         // A search keeps the actions with every word, by what they do, their key or their page, under their pages.
-        let found = key_lines(&keys, "  ctrl+f ");
+        // The key as this computer names it: Cmd+F on a Mac.
+        let ctrl_f_shown = crate::shortcuts::shown("Ctrl+F");
+        let ctrl_f = ctrl_f_shown.to_lowercase();
+        let found = key_lines(&keys, &format!("  {ctrl_f} "));
         assert!(found.iter().any(|l| l.id == "app.search"));
         assert!(found.len() < lines.len() && !found[0].page.is_empty());
-        assert!(found.iter().filter(|l| l.page.is_empty()).all(|l| l.key.to_lowercase().contains("ctrl+f")));
+        assert!(found.iter().filter(|l| l.page.is_empty()).all(|l| l.key.to_lowercase().contains(&ctrl_f)));
         let sounds = key_lines(&keys, "SOUNDS bitwig");
         assert!(sounds.iter().any(|l| l.id == "sounds.toBitwig"));
         assert!(key_lines(&keys, "no such key anywhere").is_empty());
@@ -1355,7 +1364,7 @@ mod tests {
         let bitwig = lines.iter().find(|l| l.id == "sounds.toBitwig").unwrap();
         assert_eq!((bitwig.key.as_str(), bitwig.changed), ("None", true));
         let search = lines.iter().find(|l| l.id == "app.search").unwrap();
-        assert_eq!((search.key.as_str(), search.changed), ("Ctrl+F", false));
+        assert_eq!((search.key.as_str(), search.changed), (ctrl_f_shown.as_str(), false));
         // Only keys that work: no Back, Forward or tabs yet, no Rescan (F5) and no page sizes (the whole-app review of
         // 10 Nov, X3-1), as on the key sheet.
         for id in
@@ -1555,7 +1564,7 @@ mod tests {
         assert!(bitwig_installed_note(&done).ends_with("If Bitwig is open, close it, then press Install again."));
         // Take out asks first, naming every file that goes, and says what it did.
         assert_eq!(take_out_ask(true, &[]), "");
-        assert_eq!(plugin_take_out_ask(&[]), "");
+        assert_eq!(plugin_take_out_ask(&[], false), "");
         let ext = PathBuf::from("K/Extensions/DAWmate.bwextension");
         let ask = take_out_ask(true, std::slice::from_ref(&ext));
         assert!(
@@ -1688,6 +1697,7 @@ mod tests {
             state,
             test_plugin: None,
             can_ask: true,
+            mac: false,
         }
     }
 
@@ -1746,11 +1756,15 @@ mod tests {
 
     #[test]
     fn the_plugins_take_out_names_each_file_and_spares_a_test_plugin() {
-        let ask = plugin_take_out_ask(&[PathBuf::from(r"C:\CLAP\DAWmate.clap")]);
+        let ask = plugin_take_out_ask(&[PathBuf::from(r"C:\CLAP\DAWmate.clap")], false);
         assert!(
             ask.starts_with(r"Take the DAWmate plugin out? Only the app's own file goes: C:\CLAP\DAWmate.clap."),
             "{ask}"
         );
         assert!(ask.contains("A test plugin and every other plugin there stay"), "{ask}");
+        assert!(ask.contains("Windows then asks"), "{ask}");
+        // On a Mac nothing asks first.
+        let ask = plugin_take_out_ask(&[PathBuf::from("/Users/a/Library/Audio/Plug-Ins/CLAP/DAWmate.clap")], true);
+        assert!(!ask.contains("Windows"), "{ask}");
     }
 }
