@@ -278,8 +278,8 @@ export global MidiData {
 
 // The list's headings: a click orders the list by that column, a second click turns it round.
 component ListHeading inherits HorizontalLayout {
-    // A narrow list (beside the filter column and the card at 1440 wide) leaves out Bars and Files, which the card
-    // says too, and keeps a short Key, so the part's name has room.
+    // A narrow list (beside the filter column and the card at 1440 wide) leaves out From, Bars and Files, which the
+    // card says too, and keeps a short Key, so the part's name has room (the page's `area.tight`).
     in property <bool> tight;
     padding-left: Space.md + Space.xs;
     padding-right: Space.md + Space.xs;
@@ -429,11 +429,15 @@ component MidiLineView inherits ListLine {
                     preferred-width: 0px;
                     min-width: 0px;
                 }
-                if root.line.phrase != "": Text {
+                // Cut short when the name's room is (review MZ-2), never drawn over the column beside it.
+                if root.line.phrase != "": CutText {
+                    over: root.resting;
+                    mouse: root.mouse;
                     text: root.line.phrase;
                     // Plain information, so not the accent (that means picked or playing).
                     color: Theme.text;
                     font-size: Type.meta;
+                    min-width: 0px;
                 }
             }
         }
@@ -1112,6 +1116,14 @@ export component MidiPage inherits Rectangle {
                 property <length> list-width: Widths.list-width("midi.card", MidiData.panel-width, self.width - divider.width, 380px, Fit.list-max);
                 property <length> card-width: self.width - self.list-width - divider.width;
                 property <length> years-width: MidiData.years.length > 1 && MidiData.empty-title == "" ? 56px : 0px;
+                // The narrow layout (no FROM, Bars or Files column) whenever the wide one would leave the part's name
+                // under 120 px, the least the columns' drags leave it: the heading's other columns, its dot, its six
+                // gaps and its padding (8 + 6 x 12 + 2 x 16 = 112 px) taken from the list beside the years (the 26 Nov
+                // review's MZ-2: a list of 620 to 740 px left the names 0 to 120 px).
+                property <bool> tight: self.list-width - self.years-width
+                    - (Widths.midi-from + Widths.midi-bars + Widths.midi-files + Widths.midi-key + Widths.midi-saved
+                        + 8px + 6 * Space.md + 2 * (Space.md + Space.xs))
+                    < 120px;
                 if area.years-width > 0: YearRange {
                     x: area.list-width - area.years-width;
                     y: 0;
@@ -1160,7 +1172,7 @@ export component MidiPage inherits Rectangle {
                             scroll-to(y) => { lines.scroll-to(y); }
                             VerticalLayout {
                                 ListHeading {
-                                    tight: area.list-width < 620px;
+                                    tight: area.tight;
                                 }
                                 lines := ListView {
                                     own-bar: true;
@@ -1171,7 +1183,7 @@ export component MidiPage inherits Rectangle {
                                     show-done <=> MidiData.show-done;
                                     kept-y <=> MidiData.list-y;
                                     for l in MidiData.lines: MidiLineView {
-                                        tight: area.list-width < 620px;
+                                        tight: area.tight;
                                         // Every line this height: the list counts on it.
                                         height: lines.row-height;
                                         line: l;

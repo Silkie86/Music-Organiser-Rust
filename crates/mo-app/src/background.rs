@@ -79,7 +79,22 @@ pub fn midi_read_pool() -> Option<&'static rayon::ThreadPool> {
     READ.as_ref()
 }
 
-/// The most threads [`on_bulk_pool`] (and [`on_copy_pool`], and [`midi_read_pool`]) gets.
+/// Runs Open in Bitwig's convert of an FL Studio song on a small pool of its own, built as the bulk pool is: it reads
+/// every sample the song uses to its end, and a sample that isn't where FL Studio saved it is looked for in the
+/// project's folders, the DAWs' folders and the Sounds library (rule 13), each read once while the others wait for it.
+/// On [`on_pool`] every thread could end up waiting there, and every page's quick asks with them; on [`on_bulk_pool`]
+/// it would wait behind a scan, and the Songs page's waveforms behind it (the 26 Nov review's CX-2). Waits for it, so
+/// never on the window's thread.
+pub fn on_convert_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    static CONVERT: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
+        let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+        let threads = if threads == 0 { cores() } else { threads };
+        build_bulk_pool("Convert", threads.clamp(1, BULK_THREADS))
+    });
+    install(CONVERT.as_ref(), work)
+}
+
+/// The most threads [`on_bulk_pool`] (and [`on_copy_pool`], [`on_convert_pool`] and [`midi_read_pool`]) gets.
 const BULK_THREADS: usize = 4;
 
 /// A pool of `threads` low-priority threads called `name 0`, `name 1`...; 0 is rayon's own choice, one per core.

@@ -144,6 +144,16 @@ fn start(path: String, from: f64) {
     }
 }
 
+/// Space on the Songs page (F1 Q2 C): pauses the bar when it's playing the bounce at `path`, else plays it there, of
+/// the song called `title`.
+pub fn play_or_pause(app: &AppWindow, path: &str, title: &str) {
+    if app.global::<SongPlayer>().get_playing() && BAR.with(|b| b.borrow().path == path) {
+        pause(app);
+    } else {
+        play(app, path, title);
+    }
+}
+
 /// Play or pause.
 fn toggle(app: &AppWindow) {
     if app.global::<SongPlayer>().get_playing() {

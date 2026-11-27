@@ -1759,6 +1759,16 @@ fn wide_shots(
     let path = out.join("wide-presets-card-dragged.png");
     image::save_buffer(&path, &narrower, WIDE.0, WIDE.1, image::ExtendedColorType::Rgb8)?;
     println!("{}", path.display());
+    // A 1920 px laptop screen at Windows' 125%, the window filling it: the MIDI list is 620 px wide there, too narrow
+    // for the From column beside the part's name, so it takes the narrow layout (the 26 Nov review's MZ-2).
+    const LAPTOP: (u32, u32) = (1536, 864);
+    window.set_size(PhysicalSize::new(LAPTOP.0, LAPTOP.1));
+    show_place(app, Place::Midi);
+    capture_sized(window, LAPTOP, Duration::from_millis(400));
+    let laptop = capture_sized(window, LAPTOP, Duration::from_millis(400));
+    let path = out.join("midi-laptop-125.png");
+    image::save_buffer(&path, &laptop, LAPTOP.0, LAPTOP.1, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
     window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     Ok(())
 }

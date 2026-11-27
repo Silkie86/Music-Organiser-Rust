@@ -623,8 +623,17 @@ fn a_songs_to_dos_are_kept_for_every_save_in_their_order_and_a_new_save_starts_w
     for bad in ["   ", "a\u{1f}b", &"x".repeat(201)] {
         assert!(song_fields::set(&songs, &both, &Change::Todos(vec![todo(bad, false, 1)])).is_err(), "{bad:?}");
     }
-    let many = vec![todo("x", false, 1); song_fields::MOST_TODOS + 1];
-    assert!(song_fields::set(&songs, &both, &Change::Todos(many)).is_err());
+    // A list over the most (an older app's) is the song's already: it's kept, so it can still be ticked and made
+    // shorter (review SZ-2); a to-do added to a song with the most is refused before it's given.
+    let many: Vec<Todo> = (0..=song_fields::MOST_TODOS as i64).map(|n| todo("x", false, n)).collect();
+    song_fields::set(&songs, &both, &Change::Todos(many.clone())).unwrap();
+    assert_eq!(todos(&songs, 1).len(), song_fields::MOST_TODOS + 1);
+    let full = &many[..song_fields::MOST_TODOS];
+    let one_more = Change::AddTodo(todo("y", false, 999));
+    assert!(one_more.has_room(full).is_err() && one_more.has_room(&many).is_err());
+    assert!(one_more.has_room(&many[1..song_fields::MOST_TODOS]).is_ok());
+    assert!(Change::AddTodo(todo("x", false, 3)).has_room(&many).is_ok(), "one that's there isn't added twice");
+    assert!(Change::RemoveTodo { text: "x".into(), added: 3 }.has_room(&many).is_ok());
     // A new save kept with the song's to-dos (the list takes them over) has them; a save read again keeps its own.
     song_fields::set(&songs, &both, &Change::Todos(kept.clone())).unwrap();
     let mut three = read(3, "C:\\Music\\Night\\Night_13.flp");
