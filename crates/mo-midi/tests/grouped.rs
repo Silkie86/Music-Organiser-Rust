@@ -84,7 +84,7 @@ fn same_catalogue(path: &Path) {
     let none = (HashMap::new(), HashMap::new());
     let every = Catalogue::new(store.all(&none.0, &none.1).unwrap());
     let grouped = store.grouped(&none.0, &none.1).unwrap();
-    let kept = grouped.firsts.len();
+    let kept = grouped.sets();
     let cat = Catalogue::from_grouped(grouped);
     assert_eq!(kept, every.entries.len(), "only the newest of each set read in full");
     assert_eq!((cat.phrase_count, cat.line_count), (every.phrase_count, every.line_count));

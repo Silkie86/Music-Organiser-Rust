@@ -25,10 +25,63 @@ use crate::roles::Role;
 /// Parts sorted into sets of the same notes (the same [`StoredPhrase::hash`]): the newest of each set, in the
 /// order [`Catalogue::new`] wants its parts in (newest file first, a date that isn't real last), and beside each
 /// (`others` has one list for each of `firsts`) every other file with those notes, newest first.
-#[derive(Debug, Default)]
+/// Made only in this crate, so the two lists always go together.
+#[derive(Debug)]
 pub struct Grouped {
-    pub firsts: Vec<StoredPhrase>,
-    pub others: Vec<Vec<Arc<Source>>>,
+    pub(crate) firsts: Vec<StoredPhrase>,
+    pub(crate) others: Vec<Vec<Arc<Source>>>,
+    /// Which files' dates are real, as the parts were sorted: the catalogue goes by the same.
+    pub(crate) dates: RealDates,
+}
+
+impl Grouped {
+    /// `phrases`, which come newest file first (as [`crate::store::MidiStore::all`] and [`crate::MidiIndex::all`]
+    /// give them), sorted into sets: the first of each set of notes is the newest copy. The phrases whose file's
+    /// date isn't real (by `dates`) go after the rest first (the store's list has them there already), keeping
+    /// their order.
+    pub(crate) fn of(mut phrases: Vec<StoredPhrase>, dates: RealDates) -> Grouped {
+        let undated = |p: &StoredPhrase| !dates.seconds(p.source.mtime);
+        if !phrases.is_sorted_by_key(undated) {
+            phrases.sort_by_key(undated);
+        }
+        // Which entry each phrase goes to: the first with its notes makes one, and the rest are its copies. Found
+        // from the hashes where they are, before anything is moved.
+        let mut seen: HashMap<&str, usize> = HashMap::with_capacity(phrases.len());
+        let goes_to: Vec<usize> = phrases
+            .iter()
+            .map(|p| {
+                let next = seen.len();
+                *seen.entry(p.hash.as_str()).or_insert(next)
+            })
+            .collect();
+        let count = seen.len();
+        drop(seen);
+        // The first of each set of notes stays where it is in the list, moved up over the copies (the list isn't
+        // copied: a second list of every part would double what the reading holds at its height). A copy keeps only
+        // its file; its names are held in the part itself, almost always, so letting it go here is quick.
+        let mut others: Vec<Vec<Arc<Source>>> = vec![Vec::new(); count];
+        let mut entry_of = goes_to.into_iter();
+        let mut kept = 0;
+        phrases.retain(|p| {
+            let at = entry_of.next().unwrap_or(usize::MAX);
+            if at == kept {
+                kept += 1;
+                return true;
+            }
+            if let Some(list) = others.get_mut(at) {
+                list.push(Arc::clone(&p.source));
+            }
+            false
+        });
+        drop(entry_of);
+        phrases.shrink_to_fit();
+        Grouped { firsts: phrases, others, dates }
+    }
+
+    /// How many sets of notes: the parts read in full.
+    pub fn sets(&self) -> usize {
+        self.firsts.len()
+    }
 }
 
 /// One part as the page lists it: the newest copy of some notes, with every other file that has the same notes.
@@ -227,56 +280,26 @@ impl Catalogue {
     /// The catalogue of `phrases`, which come newest file first (as [`crate::store::MidiStore::all`] and
     /// [`crate::MidiIndex::all`] give them), so the first of each set of notes is the newest copy. The phrases whose
     /// file's date isn't real go after the rest first (the store's list has them there already), keeping their order.
-    pub fn new(mut phrases: Vec<StoredPhrase>) -> Catalogue {
-        let dates = RealDates::now();
-        let undated = |p: &StoredPhrase| !dates.seconds(p.source.mtime);
-        if !phrases.is_sorted_by_key(undated) {
-            phrases.sort_by_key(undated);
-        }
-        let phrase_count = phrases.len();
-        // Which entry each phrase goes to: the first with its notes makes one, and the rest are its copies. Found
-        // from the hashes where they are, before anything is moved.
-        let mut seen: HashMap<&str, usize> = HashMap::with_capacity(phrases.len());
-        let goes_to: Vec<usize> = phrases
-            .iter()
-            .map(|p| {
-                let next = seen.len();
-                *seen.entry(p.hash.as_str()).or_insert(next)
-            })
-            .collect();
-        let count = seen.len();
-        drop(seen);
-        // The first of each set of notes stays where it is in the list, moved up over the copies (the list isn't
-        // copied: a second list of every part would double what the reading holds at its height). A copy keeps only
-        // its file; its names are held in the part itself, almost always, so letting it go here is quick.
-        let mut others: Vec<Vec<Arc<Source>>> = vec![Vec::new(); count];
-        let mut entry_of = goes_to.into_iter();
-        let mut kept = 0;
-        phrases.retain(|p| {
-            let at = entry_of.next().unwrap_or(usize::MAX);
-            if at == kept {
-                kept += 1;
-                return true;
-            }
-            if let Some(list) = others.get_mut(at) {
-                list.push(Arc::clone(&p.source));
-            }
-            false
-        });
-        drop(entry_of);
-        phrases.shrink_to_fit();
-        Catalogue::of_grouped(Grouped { firsts: phrases, others }, dates, phrase_count)
+    pub fn new(phrases: Vec<StoredPhrase>) -> Catalogue {
+        Catalogue::from_grouped(Grouped::of(phrases, RealDates::now()))
     }
 
     /// The catalogue of parts already sorted into sets of the same notes ([`Grouped`], as
     /// [`crate::store::MidiStore::grouped`] reads them): the same catalogue [`Catalogue::new`] makes from every part,
-    /// without the copies' rows ever being read in full.
+    /// without the copies' rows ever being read in full. Its dates are the ones the parts were sorted by.
     pub fn from_grouped(grouped: Grouped) -> Catalogue {
         let phrase_count = grouped.firsts.len() + grouped.others.iter().map(Vec::len).sum::<usize>();
-        Catalogue::of_grouped(grouped, RealDates::now(), phrase_count)
+        let Grouped { firsts, others, dates } = grouped;
+        debug_assert_eq!(firsts.len(), others.len());
+        Catalogue::of_grouped(firsts, others, dates, phrase_count)
     }
 
-    fn of_grouped(Grouped { firsts, others }: Grouped, dates: RealDates, phrase_count: usize) -> Catalogue {
+    fn of_grouped(
+        firsts: Vec<StoredPhrase>,
+        others: Vec<Vec<Arc<Source>>>,
+        dates: RealDates,
+        phrase_count: usize,
+    ) -> Catalogue {
         // Names and instruments are worked out on every core: hundreds of thousands of parts.
         let mut entries: Vec<Entry> = firsts
             .into_par_iter()

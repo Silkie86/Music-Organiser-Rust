@@ -1372,16 +1372,17 @@ pub fn load(library: &Path) -> Result<Loaded, String> {
     .map_err(|e| e.to_string())?;
     let read = began.elapsed();
     let cat = background::on_pool(|| Catalogue::from_grouped(grouped));
-    let grouped = began.elapsed() - read;
+    let made = began.elapsed() - read;
     let loaded = Loaded::new(cat, NotesFrom::Store(path));
-    let listed = began.elapsed() - read - grouped;
+    let listed = began.elapsed() - read - made;
     log::info(
         "MIDI",
         &format!(
-            "Index read from {} in {:.1} s, sorted into parts in {:.1} s, its summary and Ctrl+K lines made in {:.1} s",
+            "Index read from {} (each set of notes' newest copy in full) in {:.1} s, its list made in {:.1} s, its \
+             summary and Ctrl+K lines in {:.1} s",
             mo_midi::store::FILE_NAME,
             read.as_secs_f64(),
-            grouped.as_secs_f64(),
+            made.as_secs_f64(),
             listed.as_secs_f64()
         ),
     );

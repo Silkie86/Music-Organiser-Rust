@@ -1171,20 +1171,27 @@ impl MidiStore {
         cs_roles: &HashMap<String, Role>,
         cs_octaves: &HashMap<String, i32>,
     ) -> Result<crate::Grouped, MidiError> {
-        let (firsts, groups) = self
-            .read_parts(cs_roles, cs_octaves, |conn, sources| Ok(Some(copies_of(conn, sources, &RealDates::now())?)))?;
-        let Some(Groups { order, others, .. }) = groups else { return Ok(crate::Grouped::default()) };
-        // The newest of each set in the order the quick look found them in; a part it saw that wasn't read after
-        // (it can't be: both looked at one moment of the index) is left out, with its copies.
+        let dates = RealDates::now();
+        let (firsts, groups) =
+            self.read_parts(cs_roles, cs_octaves, |conn, sources| Ok(Some(copies_of(conn, sources, &dates)?)))?;
+        let Some(Groups { order, others, .. }) = groups else {
+            return Ok(crate::Grouped::of(self.all(cs_roles, cs_octaves)?, dates));
+        };
+        // The newest of each set in the order the quick look found them in.
         let mut read: Vec<Option<StoredPhrase>> = firsts.into_iter().map(Some).collect();
         read.sort_unstable_by_key(|p| p.as_ref().map(|p| p.id));
         let ids: Vec<i64> = read.iter().map(|p| p.as_ref().map_or(i64::MIN, |p| p.id)).collect();
-        let mut grouped = crate::Grouped { firsts: Vec::with_capacity(order.len()), others: Vec::new() };
+        let mut grouped = crate::Grouped { firsts: Vec::with_capacity(order.len()), others: Vec::new(), dates };
         for (id, copies) in order.into_iter().zip(others) {
-            if let Some(p) = ids.binary_search(&id).ok().and_then(|at| read.get_mut(at)).and_then(Option::take) {
-                grouped.firsts.push(p);
-                grouped.others.push(copies);
-            }
+            let Some(p) = ids.binary_search(&id).ok().and_then(|at| read.get_mut(at)).and_then(Option::take) else {
+                // A part the quick look saw that the full read didn't. It can't be (both looked at one moment of the
+                // index, and leave out the same parts), but if a later change made them disagree, every part is
+                // read in full as before rather than a set of notes going missing from the list.
+                drop((read, grouped));
+                return Ok(crate::Grouped::of(self.all(cs_roles, cs_octaves)?, dates));
+            };
+            grouped.firsts.push(p);
+            grouped.others.push(copies);
         }
         Ok(grouped)
     }
@@ -1471,7 +1478,9 @@ fn parts_between(
     let mut rows = st.query([from, to])?;
     let mut list = Vec::new();
     while let Some(r) = rows.next()? {
-        // A part left out (another copy of notes a newer part has) is passed over before anything of it is read.
+        // A part left out (another copy of notes a newer part has) is passed over before any of its text is read
+        // or any of it is held. SQLite has still looked it up with its notes, key and shape: as quick as reading
+        // all of them was (bench, 27 Nov 2026), and with half as much held at the height of the read.
         let id: i64 = r.get(0)?;
         if keep.is_some_and(|ids| ids.binary_search(&id).is_err()) {
             continue;
