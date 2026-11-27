@@ -9,7 +9,7 @@ use serde::Deserialize;
 use smol_str::SmolStr;
 
 use crate::PluginKind;
-use crate::db::{Library, LibraryError, int, local, plugin_kind, text};
+use crate::db::{Library, LibraryError, int, local, plugin_kind, short, text};
 use crate::folders::FolderList;
 use crate::read::name_key;
 
@@ -97,17 +97,6 @@ pub const UNUSED_YEARS_KEY: &str = "space_unused_years";
 
 /// The setting for how many Install these cards the Plugins page shows.
 pub const NEEDED_COUNT_KEY: &str = "plugins_needed_cards";
-
-/// A text column as [`text`] reads it, held in the value itself when it's short (no piece of memory of its own).
-fn short(r: &rusqlite::Row<'_>, col: &str) -> SmolStr {
-    match r.get_ref(col) {
-        Ok(rusqlite::types::ValueRef::Text(t)) => match std::str::from_utf8(t) {
-            Ok(t) => SmolStr::new(t),
-            Err(_) => String::from_utf8_lossy(t).into(),
-        },
-        _ => SmolStr::default(),
-    }
-}
 
 impl Library {
     /// Every plugin every save uses, leaving out saves whose file has gone (as the C# Plugins page does). One row per

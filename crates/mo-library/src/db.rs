@@ -878,6 +878,17 @@ pub(crate) fn text(r: &Row<'_>, col: &str) -> String {
     }
 }
 
+/// A text column as [`text`] reads it, held in the value itself when it's short (no piece of memory of its own).
+pub(crate) fn short(r: &Row<'_>, col: &str) -> smol_str::SmolStr {
+    match r.get_ref(col) {
+        Ok(ValueRef::Text(t)) => match String::from_utf8_lossy(t) {
+            std::borrow::Cow::Borrowed(t) => t.into(),
+            std::borrow::Cow::Owned(t) => t.into(),
+        },
+        _ => smol_str::SmolStr::default(),
+    }
+}
+
 pub(crate) fn int(r: &Row<'_>, col: &str) -> Option<i64> {
     match r.get_ref(col) {
         Ok(ValueRef::Integer(i)) => Some(i),

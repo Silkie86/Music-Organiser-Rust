@@ -512,25 +512,32 @@ impl Plugins {
         // Each song's newest save's missing plugins.
         let mut missing_by_save: HashMap<i64, HashSet<String>> = HashMap::new();
         for u in uses.iter().filter(|u| !u.installed && newest.contains(&u.save)) {
-            missing_by_save.entry(u.save).or_default().insert(u.key.to_string());
+            let missing = missing_by_save.entry(u.save).or_default();
+            if !missing.contains(u.key.as_str()) {
+                missing.insert(u.key.to_string());
+            }
         }
 
         // Grouped by name key and, for a DAW's own device, the DAW, in the order first met.
-        let mut order: Vec<(String, String)> = Vec::new();
-        let mut groups: HashMap<(String, String), Vec<&PluginUse>> = HashMap::new();
+        // By the uses' own names (no copy of a name for each use); each plugin's made into text of its own once.
+        let mut order: Vec<(&str, &str)> = Vec::new();
+        let mut groups: HashMap<(&str, &str), Vec<&PluginUse>> = HashMap::new();
         for u in &uses {
-            let own = if u.format == "Native" { u.daw.to_string() } else { String::new() };
+            let own = if u.format == "Native" { u.daw.as_str() } else { "" };
             groups
-                .entry((u.key.to_string(), own))
+                .entry((u.key.as_str(), own))
                 .or_insert_with_key(|k| {
-                    order.push(k.clone());
+                    order.push(*k);
                     Vec::new()
                 })
                 .push(u);
         }
         let mut rows: Vec<PluginRow> = order
             .into_iter()
-            .filter_map(|k| groups.remove(&k).map(|g| row(k, &g, &song_of, &saves, &newest, &missing_by_save)))
+            .filter_map(|k| {
+                let g = groups.remove(&k)?;
+                Some(row((k.0.to_owned(), k.1.to_owned()), &g, &song_of, &saves, &newest, &missing_by_save))
+            })
             .collect();
         // The most used first: by songs (the C# page counted saves, so a song saved 40 times came first), then saves,
         // then by name.
@@ -1203,9 +1210,10 @@ fn row(
         .into_iter()
         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
         .map_or(PluginKind::Unknown, |(k, _)| kind_of(k));
-    let mut daws: Vec<String> = g.iter().map(|u| u.daw.to_string()).collect();
-    daws.sort();
+    let mut daws: Vec<&str> = g.iter().map(|u| u.daw.as_str()).collect();
+    daws.sort_unstable();
     daws.dedup();
+    let daws: Vec<String> = daws.into_iter().map(str::to_owned).collect();
 
     let mut ids: Vec<i64> = g.iter().map(|u| u.save).collect();
     ids.sort_unstable();
