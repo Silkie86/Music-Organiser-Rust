@@ -556,15 +556,19 @@ impl Maker for Ramp {
         1000
     }
 
-    fn make(&self, seconds: f64, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) {
+    fn make(&self, seconds: f64, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) -> Result<(), String> {
+        if seconds < 0.0 {
+            return Err("The synth wouldn't start".to_owned());
+        }
         self.asked.lock().unwrap().push(seconds);
         let from = (seconds * 1000.0).round() as usize;
         for start in (from..10_000).step_by(100) {
             let part: Vec<f32> = (start..(start + 100).min(10_000)).map(|i| i as f32 / 10_000.0).collect();
             if !put(vec![part]) {
-                return;
+                return Ok(());
             }
         }
+        Ok(())
     }
 }
 
@@ -605,6 +609,9 @@ fn a_sound_made_as_it_plays_starts_where_asked_and_is_made_again_from_where_its_
 #[test]
 fn a_sound_made_past_its_end_has_nothing_to_play() {
     let ramp = Arc::new(Ramp { asked: Mutex::new(Vec::new()) });
-    let stream = Stream::made(ramp, 12.0, &|| true).unwrap();
+    let stream = Stream::made(ramp.clone(), 12.0, &|| true).unwrap();
     assert_eq!(stream.sample_rate(), 0);
+    // One that couldn't be made says why.
+    let failed = Stream::made(ramp, -1.0, &|| true).err().map(|e| e.to_string());
+    assert_eq!(failed.as_deref(), Some("The synth wouldn't start"));
 }

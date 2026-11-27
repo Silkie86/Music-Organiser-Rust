@@ -70,8 +70,9 @@ pub trait Maker: Send + Sync {
     fn rate(&self) -> u32;
     /// Makes the sound from `seconds` in to its end, handing each part on (its channels, each the same length, at
     /// most a second or so) to `put`, which says whether to go on: false once it's no longer wanted. It runs on a
-    /// thread of its own, a few seconds ahead of where it plays (`put` waits while there's no room).
-    fn make(&self, seconds: f64, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool);
+    /// thread of its own, a few seconds ahead of where it plays (`put` waits while there's no room). Err: why it
+    /// couldn't make it (said by [`Stream::made`] when nothing was made).
+    fn make(&self, seconds: f64, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) -> Result<(), String>;
 }
 
 impl Stream {
@@ -133,7 +134,7 @@ impl Stream {
     /// or the output opened again, makes it again from there.
     pub fn made(maker: Arc<dyn Maker>, from_seconds: f64, wanted: &dyn Fn() -> bool) -> Result<Stream, AudioError> {
         let rate = maker.rate();
-        let (mut more, _) = make_on(Arc::clone(&maker), from_seconds)?;
+        let (mut more, done) = make_on(Arc::clone(&maker), from_seconds)?;
         match next_part(&mut more, wanted) {
             Next::Part(first) => Ok(Stream {
                 source: Some(Source { from: Origin::Made(maker), rate }),
@@ -141,7 +142,12 @@ impl Stream {
                 more,
                 start: frame_at(from_seconds, rate),
             }),
-            Next::Unwanted | Next::Ended => Ok(Stream::nothing()),
+            Next::Unwanted => Ok(Stream::nothing()),
+            // Nothing came: it couldn't be made, or there's nothing from there on.
+            Next::Ended => match done.recv() {
+                Ok(Err(e)) => Err(e),
+                _ => Ok(Stream::nothing()),
+            },
         }
     }
 
@@ -233,7 +239,9 @@ type Reading = (Parts, Receiver<Result<f64, AudioError>>);
 /// takes the priority of the thread that starts it, so a stream a page's low-priority reader opens is read at low
 /// priority there, which its 8 seconds read ahead cover unless the computer stays busy for longer.
 fn read_on(path: PathBuf, from_seconds: f64) -> Result<Reading, AudioError> {
-    hand_on("sound stream", move |each| crate::read::read_parts_from(&path, from_seconds, PART_SECONDS, each))
+    hand_on("sound stream", move |each| {
+        crate::read::read_parts_from(&path, from_seconds, PART_SECONDS, &mut |rate, part| each(rate, part.to_vec()))
+    })
 }
 
 /// Makes `maker`'s sound from `from_seconds` on, on a thread of its own, as [`read_on`] reads a file: it waits while
@@ -241,13 +249,13 @@ fn read_on(path: PathBuf, from_seconds: f64) -> Result<Reading, AudioError> {
 fn make_on(maker: Arc<dyn Maker>, from_seconds: f64) -> Result<Reading, AudioError> {
     hand_on("made sound", move |each| {
         let rate = maker.rate();
-        maker.make(from_seconds, &mut |part| each(rate, &part));
+        maker.make(from_seconds, &mut |part| each(rate, part)).map_err(AudioError::NotSupported)?;
         Ok(from_seconds)
     })
 }
 
-/// What [`hand_on`]'s work hands each part to: the part's rate and channels, and whether to go on.
-type Each<'a> = &'a mut dyn FnMut(u32, &[Vec<f32>]) -> bool;
+/// What [`hand_on`]'s work hands each part to: the part's rate and channels (taken, not copied), and whether to go on.
+type Each<'a> = &'a mut dyn FnMut(u32, Vec<Vec<f32>>) -> bool;
 
 /// Runs `work` on a thread named `name`, handing on the parts it gives to the [`Reading`]: it waits while [`AHEAD`]
 /// parts wait to be played, and is told to stop once they're let go.
@@ -265,8 +273,7 @@ fn hand_on(
                 if parts.is_abandoned() || part.first().is_none_or(Vec::is_empty) {
                     return !parts.is_abandoned();
                 }
-                let mut part =
-                    Arc::new(AudioData { sample_rate: rate, channels: part.to_vec(), ..AudioData::default() });
+                let mut part = Arc::new(AudioData { sample_rate: rate, channels: part, ..AudioData::default() });
                 loop {
                     match parts.push(part) {
                         Ok(()) => return true,

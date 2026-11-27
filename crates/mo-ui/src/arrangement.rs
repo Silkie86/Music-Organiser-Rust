@@ -123,13 +123,13 @@ pub fn connect(app: &AppWindow) {
     data.on_grab(move |x, y| {
         // On the ruler it moves the playhead (and the song's MIDI playing with it).
         let on_ruler = STATE.with(|s| s.borrow().view.as_ref().and_then(|v| v.ruler_beat(f64::from(x), f64::from(y))));
-        if let Some(beat) = on_ruler {
-            if let Some(app) = weak.upgrade() {
-                crate::arrangement_play::ruler(&app, beat);
-            }
-            return;
+        if let Some(beat) = on_ruler
+            && let Some(app) = weak.upgrade()
+        {
+            crate::arrangement_play::ruler(&app, beat);
         }
-        // On a clip or a track's name the press may become a drag out of the app; elsewhere it moves the view.
+        // On a clip or a track's name the press may become a drag out of the app; elsewhere (the ruler too) it moves
+        // the view.
         with_view(&weak, |v| {
             v.left_press(f64::from(x), f64::from(y));
             false
@@ -265,6 +265,11 @@ pub fn set_look(app: &AppWindow, look: &Look) {
 /// Reads and draws on the window's thread from now on: for the screenshots, which have no event loop to post to.
 pub fn draw_here() {
     STATE.with(|s| s.borrow_mut().here = true);
+}
+
+/// Whether it reads and draws on the window's thread ([`draw_here`]): the screenshots.
+pub fn drawing_here() -> bool {
+    STATE.with(|s| s.borrow().here)
 }
 
 /// Shows the arrangement of the save at `path` (the picked song's newest), or empties the preview when no song is

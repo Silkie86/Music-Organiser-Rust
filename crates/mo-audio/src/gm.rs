@@ -241,15 +241,16 @@ impl SongSound {
 
     /// Makes the sound from frame `from` to the end, a part at a time, handing each to `put` until it says stop. None
     /// past the end.
-    fn make_from(&self, from: usize, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) {
+    fn make_from(&self, from: usize, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) -> Result<(), String> {
         let total = self.end + TAIL_FRAMES;
         if from >= total {
-            return;
+            return Ok(());
         }
         let mut settings = SynthesizerSettings::new(RATE as i32);
         settings.maximum_polyphony = VOICES_TOGETHER;
         settings.enable_reverb_and_chorus = true;
-        let Ok(mut synth) = Synthesizer::new(&self.font, &settings) else { return };
+        let mut synth =
+            Synthesizer::new(&self.font, &settings).map_err(|e| format!("The synth wouldn't start: {e:?}"))?;
         for &(channel, program) in &self.sounds {
             synth.process_midi_message(channel, 0xC0, i32::from(program), 0);
         }
@@ -300,7 +301,7 @@ impl SongSound {
         let mut held = [[0u32; 128]; CHANNELS];
         for (frame, off, channel, key, velocity) in events {
             if frame > done && !render_to(&mut synth, &mut done, frame) {
-                return;
+                return Ok(());
             }
             let Some(holding) = held.get_mut(channel as usize).and_then(|keys| keys.get_mut(usize::from(key))) else {
                 continue;
@@ -316,13 +317,14 @@ impl SongSound {
             }
         }
         if !render_to(&mut synth, &mut done, total) {
-            return;
+            return Ok(());
         }
         if filled > 0 {
             part.0.truncate(filled);
             part.1.truncate(filled);
             put(vec![part.0, part.1]);
         }
+        Ok(())
     }
 }
 
@@ -332,9 +334,9 @@ impl crate::play::Maker for SongSound {
         RATE
     }
 
-    fn make(&self, seconds: f64, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) {
+    fn make(&self, seconds: f64, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) -> Result<(), String> {
         let from = if seconds.is_finite() { (seconds.max(0.0) * f64::from(RATE)).round() as usize } else { 0 };
-        self.make_from(from, put);
+        self.make_from(from, put)
     }
 }
 
@@ -741,7 +743,8 @@ mod tests {
         song.make_from(0, &mut |part| {
             parts.push(part);
             true
-        });
+        })
+        .unwrap();
         println!("six seconds made in {:?}", started.elapsed());
         assert!(parts.iter().all(|p| p.len() == 2 && p[0].len() == p[1].len() && p[0].len() <= SONG_PART_FRAMES));
         let frames: usize = parts.iter().map(|p| p[0].len()).sum();
@@ -756,11 +759,12 @@ mod tests {
             handed += 1;
             first.get_or_insert(part[0].clone());
             handed < 3
-        });
+        })
+        .unwrap();
         assert_eq!(handed, 3);
         let start = first.unwrap()[..256].iter().fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(start > 0.001, "{start}");
         // Past its tail: nothing.
-        song.make_from(7 * RATE as usize, &mut |_| panic!("nothing to make"));
+        song.make_from(7 * RATE as usize, &mut |_| panic!("nothing to make")).unwrap();
     }
 }

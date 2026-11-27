@@ -26,10 +26,6 @@ use crate::{AppWindow, ArrChoice, ArrSound, ArrangementData};
 /// The keys of these plays with the player start with this.
 const PLAY_KEY: &str = "arrangement:";
 
-/// Songs with fewer notes than this have their instruments matched on the window's thread, at once; more, on a
-/// thread of their own.
-const QUICK_NOTES: usize = 20_000;
-
 /// Counts the plays asked for (and stops), so a play that gets going after a newer one or a stop stays quiet (newest
 /// wins, rule 12).
 static ASKED: AtomicU64 = AtomicU64::new(0);
@@ -46,9 +42,11 @@ struct State {
     voices: Option<Arc<Vec<Voice>>>,
     /// The sounds you picked for the song's instruments.
     yours: HashMap<String, Sound>,
-    /// Where the playhead is, in beats, and where the play under way started.
+    /// Where the playhead is, in beats, and where the play under way started; whether it's been put anywhere (it
+    /// shows once it has, or while playing).
     at: f64,
     from: f64,
+    placed: bool,
     /// A play is asked for (it may still be getting going), and the player's key for it once it has it.
     playing: bool,
     key: Option<String>,
@@ -145,6 +143,7 @@ pub fn shown(app: &AppWindow, arrangement: Option<Arc<Arrangement>>) {
         s.voices = None;
         s.at = 0.0;
         s.from = 0.0;
+        s.placed = false;
         s.open = None;
         s.waiting = false;
         s.yours = YourSounds::from_setting(crate::settings::value(play::SOUNDS_KEY).as_deref()).of(&s.song);
@@ -154,8 +153,8 @@ pub fn shown(app: &AppWindow, arrangement: Option<Arc<Arrangement>>) {
     data.set_sound_open(-1);
     show_voices(app);
     let Some(a) = arrangement else { return };
-    let notes: usize = a.lanes.iter().flat_map(|l| &l.clips).map(|c| c.notes.len()).sum();
-    if notes < QUICK_NOTES {
+    // Matched off the window's thread (rule 12), but for the screenshots, which have no event loop to post to.
+    if crate::arrangement::drawing_here() {
         voices_matched(app, shown, Arc::new(play::voices(&a)));
         return;
     }
@@ -462,6 +461,7 @@ pub fn ruler(app: &AppWindow, beat: f64) {
     let (playing, key, a) = STATE.with(|s| {
         let mut s = s.borrow_mut();
         s.at = beat;
+        s.placed = true;
         if !s.playing {
             s.from = beat;
         }
@@ -486,20 +486,19 @@ pub fn ruler(app: &AppWindow, beat: f64) {
 pub fn view_moved(app: &AppWindow) {
     let (at, shown) = STATE.with(|s| {
         let s = s.borrow();
-        (s.at, s.playing || s.at > 0.0)
+        (s.at, s.playing || s.placed)
     });
     crate::arrangement::place_playhead(app, shown.then_some(at), false);
 }
 
-/// Stops the song's MIDI, the playhead back where the play started.
+/// Stops the song's MIDI, the playhead back where the play started. Whatever of this page's the player has stops:
+/// also one whose key isn't known here yet (it got going just as a newer play or this stop was asked for), and the
+/// one still playing while a new sound's play gets going.
 fn stop(app: &AppWindow) {
-    let key = STATE.with(|s| s.borrow().key.clone());
     ASKED.fetch_add(1, Ordering::SeqCst);
-    if let Some(key) = key {
-        let player = crate::sounds::player();
-        if player.playing().as_deref() == Some(key.as_str()) {
-            player.stop();
-        }
+    let player = crate::sounds::player();
+    if player.playing().is_some_and(|key| key.starts_with(PLAY_KEY)) {
+        player.stop();
     }
     stopped(app, None);
 }
@@ -516,12 +515,12 @@ fn stopped(app: &AppWindow, why: Option<String>) {
         if was {
             s.at = s.from;
         }
-        s.at
+        (s.placed || s.at > 0.0).then_some(s.at)
     });
     let data = app.global::<ArrangementData>();
     data.set_playing(false);
     data.set_play_note(why.unwrap_or_default().into());
-    crate::arrangement::place_playhead(app, (at > 0.0).then_some(at), false);
+    crate::arrangement::place_playhead(app, at, false);
 }
 
 /// The player says the sound under `key` reached its end: if it's this page's, it's stopped.

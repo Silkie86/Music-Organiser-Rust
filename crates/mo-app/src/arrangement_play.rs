@@ -254,7 +254,10 @@ fn matched(name: &str, detail: &str, notes: &[NoteEvent]) -> (Sound, String) {
     let family = mo_midi::instruments::guess([name, detail], false, None).map(|guess| guess.family);
     let drummy = role == Role::Drums || family.is_some_and(|f| mo_midi::gm::for_family(f).is_none());
     let one_key = notes.windows(2).all(|w| w[0].key == w[1].key);
-    if drummy || (one_key && hit_named(name).is_some()) {
+    // A sample played from FL Studio's step sequencer is a drum when its name says a hit; a tuned part with one key
+    // ("Open pad" holding one chord note) isn't.
+    let stepped = notes.iter().any(|n| n.step);
+    if drummy || (one_key && stepped && hit_named(name).is_some()) {
         // A drum sample played from one key: the hit its name says. A whole kit's part keeps its keys.
         if one_key && let Some(key) = hit_named(name) {
             return (Sound::Hit(key), format!("a drum sample: {} by its name", Sound::Hit(key).name().to_lowercase()));
@@ -394,9 +397,9 @@ pub fn sound_tip(voice: &Voice, sound: Sound) -> String {
     }
 }
 
-/// The tempo the song plays at: its own, else 120.
+/// The tempo the song plays at: its own, held to the 20 to 400 BPM the synth plays at (`mo_audio::gm`), else 120.
 pub fn bpm(a: &Arrangement) -> f64 {
-    if a.tempo.is_finite() && a.tempo >= 20.0 && a.tempo <= 999.0 { a.tempo } else { 120.0 }
+    if a.tempo.is_finite() && a.tempo > 0.0 { a.tempo.clamp(20.0, 400.0) } else { 120.0 }
 }
 
 /// Seconds into the song at `beat`, and the beat at `seconds`, at its tempo ([`bpm`]).
@@ -521,6 +524,12 @@ mod tests {
     }
 
     #[test]
+    fn a_tuned_part_on_one_key_keeps_a_tuned_sound_whatever_its_name() {
+        let a = song(vec![lane("Open pad", vec![clip(0.0, 16.0, vec![note(0.0, 16.0, 60)])])]);
+        assert!(matches!(voices(&a)[0].matched, Sound::Program(_)), "{:?}", voices(&a)[0]);
+    }
+
+    #[test]
     fn names_say_which_hit() {
         for (name, key) in [
             ("Kick", Some(36)),
@@ -613,7 +622,9 @@ mod tests {
         let a = song(Vec::new());
         assert!((seconds_at(&a, 128.0) - 60.0).abs() < 1e-9);
         assert!((beat_at(&a, 30.0) - 64.0).abs() < 1e-9);
-        let odd = Arrangement { tempo: f64::NAN, ..a };
+        let odd = Arrangement { tempo: f64::NAN, ..a.clone() };
         assert_eq!(bpm(&odd), 120.0);
+        // As fast as the synth plays, no faster: the playhead keeps to what's heard.
+        assert_eq!(bpm(&Arrangement { tempo: 522.0, ..a }), 400.0);
     }
 }
