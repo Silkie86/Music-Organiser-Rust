@@ -32,10 +32,13 @@ built.
   next version). After an update, the copies already in place are updated, unless a newer version put them in. One
   the DAW has open (Bitwig keeps its extension and plugins open) waits for a start when the DAW is closed. Uninstall
   leaves the plugin in Common Files\CLAP (taking it out would need an administrator too).
-  Each link keeps which version put it in, so one that couldn't be written is tried again later, and a link or plugin
-  you took out stays out. Settings › DAWs can still install or take out the links by hand (and then the look leaves
-  them alone that run). A launcher build never does this by itself, nor does a run whose settings can't be kept, and a
-  test plugin put in by hand (`tools/dev/install-test-plugin.ps1`) keeps the app from putting the plugin in too. The
+  Each link keeps which version put it in, only once every folder took it, so one that couldn't be written (a copy
+  Bitwig had open) is tried again later, and then only the copies that aren't the app's own yet; a link or plugin you
+  took out stays out. Settings › DAWs can still install or take out the links by hand (and then the look leaves them
+  alone that run; Take out there counts as the first look, so the link isn't put back). The plugin has no row there
+  yet. A launcher build never does this by itself, nor does a run whose settings can't be kept, and a test plugin put
+  in by hand (`tools/dev/install-test-plugin.ps1`, which takes the app's own plugin out) keeps the app from putting
+  the plugin in too; the app's own goes back in once it's gone (the script's `-Remove` puts it back itself). The
   plugin now shows in DAWs as "DAWmate" (its ID is unchanged, so songs that have it still load it).
 - The app also sets the helper's startup line. Uninstall removes that line only when it points at the copy being
   removed.
@@ -55,8 +58,11 @@ data folder's `updates` folder, checked against the `.sha256` beside it on the r
 waits for the app to end (`/WAITPID`), puts the new version in without pages and opens it (`/UPDATED=1`); if a file
 can't be replaced it says so with Retry, and if it stops before the files go in it opens the old version again. Its
 log goes beside it (`<setup>.log`), and when the next start is still the old version the app shows a card saying the
-update didn't go in, with the log's last lines in the app's log. Uninstalling asks the app and the helper to close
-first (`music-organiser.exe --close-for-setup`). A test version (with a dash) is offered only to a copy that is a test version too. Old setups are
+update didn't go in, with the log's last lines in the app's log. The first update, from 0.9.0-beta.1, has none of this
+yet: beta.1's own code starts the setup, with no `/WAITPID` (the setup waits five seconds instead) and no log beside
+it, so a file in use stops it with no Retry box, beta.1 opens again with no card, and the setup's log is the newest
+`Setup Log *.txt` in `%TEMP%`. So the path above is first tried on the update after that one. Uninstalling asks the
+app and the helper to close first (`music-organiser.exe --close-for-setup`). A test version (with a dash) is offered only to a copy that is a test version too. Old setups are
 removed at the next look, and so is a setup GitHub no longer lists (a release taken back is never offered).
 
 ## Making a release

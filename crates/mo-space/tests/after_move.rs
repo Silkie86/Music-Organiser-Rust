@@ -171,11 +171,33 @@ fn a_folder_an_update_made_where_the_link_was_is_linked_again() {
     assert_eq!(kept.path, s(&kept_in));
     assert_eq!(kept.note, "replaced by linking again");
     assert!(copy.join("Pad.db").exists());
-    // Folders of kept files are found beside the copy even when nothing listed them (a try that stopped partway); a
-    // folder that only looks like one isn't.
+    // Folders of kept files are found beside the copy even when nothing listed them (a try that stopped partway), and
+    // so are the folders linking again set aside beside the link (a run cut off after its swap: the whole-app review
+    // of 26 Nov, PG-2), each saying where its files went; a folder that only looks like one isn't.
     fs::create_dir_all(d.join("STEAM (kept from before x)")).unwrap();
-    assert_eq!(kept_beside(&all, &[], &stop), std::slice::from_ref(&kept));
-    assert!(kept_beside(&all, &[home.clone(), kept.clone()], &stop).is_empty());
+    fs::create_dir_all(c.join("STEAM (after update x)")).unwrap();
+    let earlier = s(&c.join("STEAM (after update)"));
+    let found = kept_beside(&all, &[], &stop);
+    assert_eq!(found[0], kept);
+    let set_aside = |found: &[OldHome]| {
+        let mut said: Vec<(String, String, String)> = found
+            .iter()
+            .filter(|h| h.note != kept.note)
+            .map(|h| (h.path.clone(), h.note.clone(), h.copy.clone()))
+            .collect();
+        said.sort();
+        said
+    };
+    let mut want = vec![
+        (earlier.clone(), home.note.clone(), moved.to.clone()),
+        (home.path.clone(), home.note.clone(), moved.to.clone()),
+    ];
+    want.sort();
+    assert_eq!(set_aside(&found), want);
+    assert_eq!(found.len(), 3, "{found:?}");
+    // Once noted, each shows as a folder left behind, not again here.
+    let found = kept_beside(&all, &[home.clone(), kept.clone()], &stop);
+    assert_eq!(found.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(), [earlier.as_str()]);
 
     // The folder set aside goes once nothing is only in it.
     assert!(old_home_can_go(&home, &all));
@@ -968,6 +990,15 @@ fn a_second_copy_a_later_move_made_is_found_and_linked_again() {
     assert_eq!(read(&ni.join("Reaktor 6/new.ens")), "new");
     assert_eq!(read(&d.join("Reaktor 6").join("new.ens")), "new");
     assert!(doubled(&all).is_empty());
+    // Never noted (the run cut off after this swap: the whole-app review of 26 Nov, PG-2), it's found beside the link,
+    // where it really is, saying where its files went.
+    let found: Vec<(String, String, String)> = kept_beside(&all, &[], &stop)
+        .into_iter()
+        .filter(|h| h.note != "replaced by linking again")
+        .map(|h| (h.path, h.note, h.copy))
+        .collect();
+    assert_eq!(found, [(home.path.clone(), home.note.clone(), inner.to.clone())]);
+    assert!(kept_beside(&all, std::slice::from_ref(&home), &stop).iter().all(|h| h.path != home.path));
 }
 
 #[test]

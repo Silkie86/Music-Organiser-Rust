@@ -34,7 +34,10 @@ pub const DAW: &str = "Bitwig Studio";
 /// FS-5, so Space can tell another folder's save uses a project's copy) didn't raise it: only the songs library keeps a
 /// save's samples, and it reads every Bitwig save again once for it (`mo_library::song_writes::to_mend`); raising it
 /// would extract every save's MIDI, presets and curves again for nothing.
-pub const VERSION: u32 = 4;
+///
+/// 5 leaves a note muted in a clip out of the clip's notes, as FL Studio's reader does (the whole-app review of 26 Nov,
+/// CX-1): the MIDI page listed and played them, and its key and chord fits counted them.
+pub const VERSION: u32 = 5;
 
 /// Said when the plugin settings stored at the end of a project are missing or can't be opened.
 pub const ZIP_DAMAGED: &str = "The plugin settings stored in this project can't be read: the end of the file is \
@@ -80,6 +83,8 @@ const F_TRACK_NAME: u32 = 0x15b;
 pub(super) const F_START: u32 = 0x2af;
 pub(super) const F_DURATION: u32 = 0x26;
 pub(super) const F_VELOCITY: u32 = 0xef;
+/// On a clip or a note: 1 when it's muted.
+const F_MUTED: u32 = 0x10f8;
 pub(super) const F_PITCH: u32 = 0xee;
 pub(super) const F_NOTES: u32 = 0x21f;
 pub(super) const F_FILE_PATH: u32 = 0x3b;
@@ -774,7 +779,8 @@ pub fn track_names(doc: &Document) -> TrackNames {
 }
 
 /// One MIDI clip per Bitwig note clip, named after its track ("Bass 1", "Bass 2"...). Nothing for a file that didn't
-/// decode cleanly.
+/// decode cleanly. A muted note is left out, as in FL Studio's (MIDI has none); a muted clip is still one, as an FL
+/// pattern muted in the playlist is: a part you muted in the song is still a part.
 pub fn extract_midi(doc: &Document, names: &TrackNames) -> Vec<MidiClip> {
     if doc.root.is_none() || doc.body_error.is_some() {
         return Vec::new();
@@ -793,7 +799,7 @@ pub fn extract_midi(doc: &Document, names: &TrackNames) -> Vec<MidiClip> {
         let Some((_, notes)) = clips.get_mut(at) else { continue };
         for note in doc.field_list(lane, F_NOTES) {
             let n = doc.obj(note);
-            if n.class != CLS_NOTE {
+            if n.class != CLS_NOTE || n.num(F_MUTED).is_some_and(|m| m > 0.0) {
                 continue;
             }
             let start = n.num(F_START).unwrap_or(0.0);

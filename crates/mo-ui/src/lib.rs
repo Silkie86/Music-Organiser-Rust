@@ -583,11 +583,13 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
         }
         // Where everything the app removes goes first, from any page.
         "app.recycleBin" => files::open_recycle_bin(feed),
-        // Space plays the picked sound on the Sounds page, loops the picked part on the MIDI page and auditions the
-        // picked sound in Bitwig on Presets (X3-13); elsewhere it's left for the page (a button, a text box).
+        // Space plays the picked sound on the Sounds page, loops the picked part on the MIDI page, auditions the
+        // picked sound in Bitwig on Presets (X3-13) and plays the picked song's newest bounce on Songs (review SZ-3);
+        // elsewhere it's left for the page (a button, a text box).
         "app.play" => {
             let place = app.get_place();
-            return (place == Place::Sounds.index() as i32 && sounds::toggle_play(&app))
+            return (place == Place::Songs.index() as i32 && songs::toggle_play(&app))
+                || (place == Place::Sounds.index() as i32 && sounds::toggle_play(&app))
                 || (place == Place::Midi.index() as i32 && midi::toggle_play(&app))
                 || (on_presets_page(place) && presets::toggle_play(&app));
         }

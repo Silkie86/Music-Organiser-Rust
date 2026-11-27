@@ -106,11 +106,14 @@ jobs:
       - name: Launcher scripts parse in Windows PowerShell 5.1
         if: runner.os == 'Windows' && needs.scope.outputs.launcher == 'true'
         shell: powershell
+        # Every script there, as each .cmd starts its .ps1 with Windows PowerShell (the 26 Nov review's IN-1).
         run: |
-          $errors = $null
-          foreach ($script in 'run-latest.ps1', 'twin-test.ps1') {
-            [System.Management.Automation.Language.Parser]::ParseFile("$PWD\tools\dev\$script", [ref]$null, [ref]$errors) | Out-Null
-            if ($errors) { $errors | ForEach-Object { Write-Host $_ }; exit 1 }
+          $scripts = @(Get-ChildItem -LiteralPath tools\dev -Filter *.ps1)
+          if ($scripts.Count -lt 2) { Write-Host "Only $($scripts.Count) launcher scripts found in tools\dev"; exit 1 }
+          foreach ($script in $scripts) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors | ForEach-Object { Write-Host "$($script.Name): $_" }; exit 1 }
           }
       - name: Format
         if: runner.os == 'Linux'

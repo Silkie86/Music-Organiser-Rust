@@ -113,7 +113,7 @@ pub(super) fn confirm(app: &AppWindow) {
         let Stage::Pick { found, files, picked: Some(at), .. } = &c.stage else { return None };
         let u = found.get(*at)?.clone();
         let files = files.clone();
-        c.stage = Stage::Waiting;
+        c.stage = Stage::Waiting { handed_over: false };
         let card = feed.start(&format!("Uninstalling {}", u.name), "Its uninstaller is open in its own window.");
         Some((u, files, ask, c.id, c.stop.clone(), c.row_key.clone(), c.name.clone(), card))
     });
@@ -129,6 +129,11 @@ pub(super) fn confirm(app: &AppWindow) {
             let ran = mo_app::background::guarded(|| uninstallers::run_until(&u, &stop, Some(until)))
                 .unwrap_or_else(uninstallers::Ran::Unclear);
             let watch = uninstall::Watch::after(&ran, started.elapsed(), until);
+            if watch.handed_over.is_some() && !watched.is_empty() {
+                // It ended at once, saying it finished: its files are watched up to the wait's end, so the card says
+                // why it still waits, and that Stop ends it (the whole-app review of 26 Nov, PG-3).
+                back(&weak, move |app| handed_over(app, id));
+            }
             let waited = uninstall::after_run(&ran, &watched, watch, &stop);
             let gone = uninstall::gone_now(&watched);
             // The plugin files it left, offered for the Recycle Bin as when there's no uninstaller (review PM-1).
@@ -163,6 +168,19 @@ pub(super) fn confirm(app: &AppWindow) {
         return;
     }
     remove_files(app);
+}
+
+/// The uninstaller of card `id` ended at once, saying it finished: the card says it may have handed over to a window
+/// the app can't watch, and that Stop ends the wait (PG-3).
+fn handed_over(app: &AppWindow, id: u64) {
+    PAGE.with(|p| {
+        if let Some(c) = p.borrow_mut().clean.as_mut().filter(|c| c.id == id)
+            && let Stage::Waiting { handed_over } = &mut c.stage
+        {
+            *handed_over = true;
+        }
+    });
+    fill(app);
 }
 
 /// The plugin files ticked go to the Recycle Bin, each checked again just before against the plugin as the page

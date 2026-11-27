@@ -58,7 +58,7 @@ impl<T> Kept<T> {
     /// Keeps `list`, read from `files` as `stamp` found them (taken before the read, so a change made while it was
     /// read makes the next window read again). Only while a copy of the plugin is loaded.
     pub fn keep(&self, stamp: Stamp, list: &Arc<T>) {
-        if ALIVE.load(Ordering::Acquire) > 0 {
+        if loaded() {
             *lock(&self.slot) = Some((stamp, Arc::clone(list)));
         }
     }
@@ -70,6 +70,11 @@ impl<T> Kept<T> {
 
 /// How many copies of the plugin are loaded.
 static ALIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a copy of the plugin is loaded: what's kept is kept only then, as the last one to go lets it all go.
+pub fn loaded() -> bool {
+    ALIVE.load(Ordering::Acquire) > 0
+}
 
 /// Held by each copy of the plugin while the DAW has it loaded: when the last one goes, the kept lists go too.
 pub struct Alive(());
@@ -88,6 +93,8 @@ impl Drop for Alive {
             crate::midi::KEPT.clear();
             crate::presets::KEPT.clear();
             crate::galaxy::KEPT.clear();
+            // The lists worked out lately, kept for a quick reopen, go with them (the 26 Nov review's XT-4).
+            crate::window::forget_views();
         }
     }
 }

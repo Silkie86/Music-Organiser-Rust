@@ -333,8 +333,8 @@ pub struct Written {
 /// How long a batch waits for another copy of the app to finish its own: this runs in the background.
 const WAIT: Duration = Duration::from_secs(5);
 
-/// An SQLite error writing `songs_db`, as the library's: busy when another write holds it, else that it wasn't
-/// changed and why.
+/// An SQLite error writing `songs_db` (or any library: the folder lists' too), as the library's: busy when another
+/// write holds it, else that it wasn't changed and why.
 pub(crate) fn write_failed(songs_db: &Path, e: rusqlite::Error) -> LibraryError {
     match e.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: songs_db.to_owned() },

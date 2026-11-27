@@ -1,6 +1,7 @@
 //! MP3, FLAC, M4A (AAC), OGG (Vorbis) and AAC, decoded with symphonia on every system. The C# app needed Windows'
 //! decoders for these, so a Mac or Linux left them out.
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{Cursor, ErrorKind, Read, Seek, SeekFrom};
 use std::panic::AssertUnwindSafe;
@@ -10,11 +11,11 @@ use symphonia::core::codecs::audio::well_known::{CODEC_ID_FLAC, CODEC_ID_MP1, CO
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::packet::Packet;
-use symphonia::core::units::TimeBase;
+use symphonia::core::units::{Time, TimeBase};
 
 use crate::parts::{Each, Ended, Parts};
 use crate::{AudioData, AudioError};
@@ -44,32 +45,117 @@ pub(crate) fn read_other_parts(path: &Path, part_seconds: f64, each: &mut Each) 
     let file = File::open(path)?;
     mo_catch::catch(AssertUnwindSafe(|| {
         let chained = ogg_chained(&mut &file);
-        decode_parts(probe(file, path)?, part_seconds, chained, each)
+        decode_parts(probe(file, path)?, part_seconds, chained, None, each)
     }))
     .unwrap_or_else(|_| Err(AudioError::Format("The decoder couldn't read this file (it may be damaged)".into())))
 }
 
-/// The biggest file whose audio is read into memory to be tried past a damaged ID3v2 tag.
-const MOST_RETRIED: u64 = 256 * 1024 * 1024;
+/// How far before the place asked for [`read_other_parts_from`] goes in the file, so its decoder has settled by the
+/// place: an MP3 or AAC frame carries sound over from the ones before it.
+const SETTLE_SECONDS: f64 = 0.1;
 
-/// The bytes after a file's leading ID3v2 tag, or after its 10-byte header when the tag says it's longer than the
-/// file (cut short). None when the file has no such tag, or is too big to read whole.
-fn after_id3v2(file: &File) -> Option<Vec<u8>> {
+/// [`read_other_parts`] from `from_seconds` into the file on: the first part handed on starts at frame
+/// [`crate::frame_at`]`(from_seconds, rate)`. The file is gone into where it is, by symphonia: an MP3's frame headers are
+/// walked there (they're read, not decoded), and FLAC, Ogg and M4A have ways of their own. Only from a moment before
+/// the place is decoded. Before, every part up to it was decoded and thrown away, so a click near the end of a long MP3
+/// was silent for as long as that took, half a second for 7 minutes, seconds for an hour-long mix (the whole-app review
+/// of 26 Nov, AD-1). None when it can't be gone into that way (a chained Ogg, whose streams joined on are only found by
+/// going through it; a place past the length the file says, as in two MP3s joined; a file symphonia can't go into):
+/// then it's for the caller to decode it from its start. Its whole length in seconds, as [`read_other_parts`] gives it.
+pub(crate) fn read_other_parts_from(
+    path: &Path,
+    from_seconds: f64,
+    part_seconds: f64,
+    each: &mut Each,
+) -> Result<Option<f64>, AudioError> {
+    let file = File::open(path)?;
+    mo_catch::catch(AssertUnwindSafe(|| {
+        if ogg_chained(&mut &file) {
+            return Ok(None);
+        }
+        let mut format = probe(file, path)?;
+        let Some(id) = format.default_track(TrackType::Audio).map(|t| t.id) else { return Ok(None) };
+        let to = from_seconds - SETTLE_SECONDS;
+        if to > 0.0 {
+            let Some(time) = Time::try_from_secs_f64(to) else { return Ok(None) };
+            // A reader that trips over a damaged file on its way there is no reason not to decode it from its start.
+            let seek = SeekTo::Time { time, track_id: Some(id) };
+            if !matches!(mo_catch::catch(AssertUnwindSafe(|| format.seek(SeekMode::Accurate, seek))), Ok(Ok(_))) {
+                return Ok(None);
+            }
+        }
+        decode_parts(format, part_seconds, false, Some(from_seconds), each).map(Some)
+    }))
+    .unwrap_or_else(|_| Err(AudioError::Format("The decoder couldn't read this file (it may be damaged)".into())))
+}
+
+/// The audio after a file's leading ID3v2 tag, or after its 10-byte header when the tag says it's longer than the
+/// file (cut short), read from the file where it is. None when the file has no such tag. Only the tag's header is read
+/// to find out: before, the whole file (up to 256 MB) was read into memory first, also for a file with no tag at all,
+/// and a stream held that copy for as long as it played (the whole-app review of 26 Nov, AD-6).
+fn after_id3v2(file: &File) -> Option<FromByte<File>> {
     let len = file.metadata().ok()?.len();
-    if len > MOST_RETRIED {
+    let mut file = file.try_clone().ok()?;
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut header = [0u8; 10];
+    file.read_exact(&mut header).ok()?;
+    if !header.starts_with(b"ID3") {
         return None;
     }
-    let mut file = file;
-    file.seek(SeekFrom::Start(0)).ok()?;
-    let mut all = Vec::new();
-    file.read_to_end(&mut all).ok()?;
-    let header: [u8; 10] = *all.first_chunk::<10>().filter(|h| h.starts_with(b"ID3"))?;
     // The size is synchsafe (7 bits a byte); a footer (flag 0x10) adds 10 more bytes.
-    let size = header[6..10].iter().fold(0usize, |n, &b| n << 7 | usize::from(b & 0x7F));
+    let size = header[6..10].iter().fold(0u64, |n, &b| n << 7 | u64::from(b & 0x7F));
     let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
     let end = 10 + size + footer;
-    let from = if end < all.len() { end } else { 10 };
-    Some(all.split_off(from))
+    let from = if end < len { end } else { 10 };
+    FromByte::new(file, from, len).ok()
+}
+
+/// A file (or anything else that reads and seeks) read from `from` bytes in, as if it started there: the audio after a
+/// damaged ID3v2 tag, handed to symphonia without reading it into memory ([`after_id3v2`]).
+struct FromByte<R> {
+    inner: R,
+    /// Where it starts in `inner`, and `inner`'s whole length, in bytes.
+    from: u64,
+    len: u64,
+}
+
+impl<R: Seek> FromByte<R> {
+    /// `inner` from `from` bytes in (of `len`), at its start.
+    fn new(mut inner: R, from: u64, len: u64) -> std::io::Result<FromByte<R>> {
+        inner.seek(SeekFrom::Start(from))?;
+        Ok(FromByte { inner, from, len: len.max(from) })
+    }
+}
+
+impl<R: Read> Read for FromByte<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<R: Seek> Seek for FromByte<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let at = match pos {
+            SeekFrom::Start(n) => self.from.checked_add(n),
+            SeekFrom::End(n) => self.len.checked_add_signed(n),
+            SeekFrom::Current(n) => self.inner.stream_position()?.checked_add_signed(n),
+        };
+        // Never before its start: that's the tag, not audio.
+        let at = at
+            .filter(|&at| at >= self.from)
+            .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidInput, "a seek to before the start of the audio"))?;
+        Ok(self.inner.seek(SeekFrom::Start(at))? - self.from)
+    }
+}
+
+impl<R: Read + Seek + Send + Sync> MediaSource for FromByte<R> {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        Some(self.len - self.from)
+    }
 }
 
 /// What a symphonia error means here.
@@ -100,7 +186,7 @@ pub(crate) fn read_ogg_bytes(stream: Vec<u8>, max_seconds: f64, from_frame: u64)
 pub(crate) fn read_ogg_bytes_parts(stream: Vec<u8>, part_seconds: f64, each: &mut Each) -> Result<f64, AudioError> {
     mo_catch::catch(AssertUnwindSafe(|| {
         let chained = ogg_chained(&mut Cursor::new(&stream[..]));
-        decode_parts(probe_ogg(stream)?, part_seconds, chained, each)
+        decode_parts(probe_ogg(stream)?, part_seconds, chained, None, each)
     }))
     .unwrap_or_else(|_| Err(AudioError::Format("The decoder couldn't read this file (it may be damaged)".into())))
 }
@@ -177,7 +263,7 @@ fn probe(file: File, path: &Path) -> Result<Box<dyn FormatReader>, AudioError> {
         // file) stops symphonia's tag reader. Before it had one, the probe looked past the tag for the first frame:
         // the audio after the tag is tried that way instead.
         Err(e) => match after_id3v2(&file) {
-            Some(rest) => look(Box::new(Cursor::new(rest))).map_err(|_| format_error(e)),
+            Some(rest) => look(Box::new(rest)).map_err(|_| format_error(e)),
             None => Err(format_error(e)),
         },
     }
@@ -187,8 +273,10 @@ fn probe(file: File, path: &Path) -> Result<Box<dyn FormatReader>, AudioError> {
 struct AudioTrack {
     /// The id its packets carry.
     id: u32,
-    /// How many frames the file says it has, when it says.
+    /// How many frames the file says it has, when it says, and how many its encoder padded its end with (an MP3's
+    /// LAME tag says).
     frames: Option<u64>,
+    padding: Option<u32>,
     /// What its packets' times count in, when the file says (else they count in frames), and its sample rate as the
     /// file says it.
     time_base: Option<TimeBase>,
@@ -230,6 +318,7 @@ fn audio_track(format: &dyn FormatReader) -> Result<AudioTrack, AudioError> {
     Ok(AudioTrack {
         id: track.id,
         frames: track.num_frames,
+        padding: track.padding,
         time_base: track.time_base,
         rate: params.sample_rate,
         coded,
@@ -268,8 +357,9 @@ struct Stream {
     /// What its packets' times count in (frames when the file doesn't say), and its sample rate as the file says it.
     time_base: Option<TimeBase>,
     told_rate: Option<u32>,
-    /// How many frames the file says it has, when it says.
+    /// How many frames the file says it has, when it says, and how many its encoder padded its end with.
     frames: Option<u64>,
+    padding: Option<u32>,
     coded: Coded,
     /// None for a stream joined on that this app doesn't decode (Opus), or whose sound doesn't match the first one's:
     /// it's counted by its packets' lengths instead.
@@ -287,6 +377,7 @@ impl Stream {
             time_base: track.time_base,
             told_rate: track.rate,
             frames: track.frames,
+            padding: track.padding,
             coded: track.coded,
             decoder: Some(track.decoder),
             kind: None,
@@ -302,6 +393,7 @@ impl Stream {
             time_base: track.time_base,
             told_rate: track.codec_params.as_ref().and_then(|p| p.audio()).and_then(|p| p.sample_rate),
             frames: track.num_frames,
+            padding: track.padding,
             coded: Coded::Other,
             decoder: None,
             kind: None,
@@ -320,6 +412,27 @@ impl Stream {
                 u64::try_from(units).unwrap_or(u64::MAX).max(1)
             }
             _ => MOST_IN_A_PACKET,
+        }
+    }
+
+    /// Keeps the end of an MP3 frame past where the file says its sound ends, when that isn't its encoder's padding.
+    /// symphonia's MP3 reader takes the end from the first frame (its Xing or Info header's frame count, or a guess
+    /// from the first few frames' sizes), and trims every frame after it to nothing: so two MP3s joined end to end
+    /// (the first one's header counts only its own frames) gave only the first, and an MP3 whose guess came out short
+    /// lost its end (the whole-app review of 26 Nov, AD-2). Only a frame that ends inside the padding a LAME tag says
+    /// is trimmed now; with no LAME tag nothing was padded, so nothing is.
+    fn untrim(&self, packet: &mut Packet) {
+        if self.coded != Coded::Mpeg {
+            return;
+        }
+        let past_padding = match (self.frames, self.padding) {
+            (Some(end), Some(padding)) => {
+                u64::try_from(packet.pts.get()).is_ok_and(|starts| starts >= end.saturating_add(u64::from(padding)))
+            }
+            _ => true,
+        };
+        if past_padding {
+            packet.trim_end = symphonia::core::units::Duration::ZERO;
         }
     }
 
@@ -376,8 +489,9 @@ struct Through {
 
 /// Goes through a probed file's audio (`track`) from its start, handing each stretch its decoder gives to `take`: its
 /// sample rate, and its samples, a channel each, as long as each other. Until the file ends, damage ends it (what came
-/// before is kept), or `take` says to stop (false); then, with `count_rest` (a file that doesn't say how long it is),
-/// the rest of it is counted from its packets' lengths, without decoding them.
+/// before is kept), or `take` says to stop (false); then, when `count_rest` says so given how many frames were handed
+/// on (a file that doesn't say how long it is, or says it's shorter than that), the rest of it is counted from its
+/// packets' lengths, without decoding them.
 ///
 /// What the decoder doesn't give is silence of its length, so what comes after stays in its place, as players keep
 /// their time, and the length comes out right: a frame it refuses (damaged on its own, or each one after an MP3's
@@ -392,12 +506,53 @@ struct Through {
 /// (Opus), is silence as long as it is: this read keeps one sound. Damage before any sound, or a real read failure (a
 /// drive gone), is an error rather than a part passed off as the whole file. Both [`decode_format`] and
 /// [`decode_parts`] go through a file this way, so they read it the same.
+///
+/// With `from` (seconds), `format` has been taken part way into the file ([`read_other_parts_from`]), or not far from
+/// its start: the first packet that gives any sound (or is silence in its place) says where the sound starts, and what
+/// comes before `from` isn't handed on. Not the first packet: a Vorbis decoder gives nothing for the first after a jump
+/// (it has no block before it to overlap), though its reader gives it a length.
 fn each_stretch(
     format: &mut dyn FormatReader,
     track: AudioTrack,
-    count_rest: bool,
+    count_rest: &dyn Fn(u64) -> bool,
+    from: Option<f64>,
     take: &mut dyn FnMut(u32, &[Vec<f32>]) -> bool,
 ) -> Result<Through, AudioError> {
+    // Every frame handed to `take`, silence too.
+    let handed = Cell::new(0u64);
+    // Where in the file the first frame of sound goes through starts, in the stream's time units, and with `from`, how
+    // many frames are still to be left out (once the sound's rate is known).
+    let origin = Cell::new(None::<i64>);
+    let placed = |packet: &Packet| {
+        if origin.get().is_none() {
+            origin.set(Some(packet.pts.get().saturating_add_unsigned(packet.trim_start.get())));
+        }
+    };
+    let time_base = track.time_base;
+    let mut left: Option<u64> = None;
+    let take = &mut |rate: u32, stretch: &[Vec<f32>]| {
+        let len = stretch.first().map_or(0, Vec::len);
+        // A stretch with nothing in it (a Vorbis decoder's first after a jump) comes before the sound is placed.
+        if let Some(from) = from.filter(|_| len > 0) {
+            let left = left.get_or_insert_with(|| {
+                let starts = u64::try_from(origin.get().unwrap_or(0)).unwrap_or(0);
+                crate::read::frame_at(from, rate).saturating_sub(frames_in(starts, time_base, rate))
+            });
+            if *left > 0 {
+                if *left >= len as u64 {
+                    *left -= len as u64;
+                    // None of it, but its channels: what it goes to is ready for the sound, even if none comes.
+                    return take(rate, &stretch.iter().map(|_| Vec::new()).collect::<Vec<_>>());
+                }
+                let at = usize::try_from(std::mem::take(left)).unwrap_or(usize::MAX);
+                let rest: Vec<Vec<f32>> = stretch.iter().map(|c| c.get(at..).unwrap_or_default().to_vec()).collect();
+                handed.set(handed.get() + (len - at) as u64);
+                return take(rate, &rest);
+            }
+        }
+        handed.set(handed.get() + len as u64);
+        take(rate, stretch)
+    };
     let mut stream = Stream::of(track);
     let mut rate = 0u32;
     let mut count = 0usize;
@@ -407,8 +562,9 @@ fn each_stretch(
     let mut owed = 0u64;
     // Frames `take` wasn't given when it said to stop.
     let mut not_given = 0u64;
+    let mut first = true;
     let ended = loop {
-        let packet = match format.next_packet() {
+        let mut packet = match format.next_packet() {
             Ok(Some(p)) => p,
             Ok(None) => break Ended::End,
             // The first page of a stream joined on: its packets come with an id and decoder of their own. What's owed
@@ -440,7 +596,15 @@ fn each_stretch(
         if packet.track_id != stream.id {
             continue;
         }
+        stream.untrim(&mut packet);
         let most = stream.most(rate);
+        // FLAC gone into part way: its packets go on from the first one's time.
+        if from.is_some()
+            && std::mem::take(&mut first)
+            && let Some(next) = stream.next.as_mut()
+        {
+            *next = u64::try_from(packet.pts.get()).unwrap_or(0);
+        }
         // FLAC: a jump in the packets' times is frames lost, up to where the file says it ends (one frame's worth when
         // it doesn't say).
         if let Some(next) = stream.next {
@@ -453,6 +617,11 @@ fn each_stretch(
             stream.kind = mpeg_kind(&packet.data);
         }
         let length = stream.length_of(&packet).min(most);
+        // The first packet that gives sound, or silence in its place, starts where its reader says, less what it trims
+        // off its start (an MP3's encoder delay): what came before it gave none.
+        if length > 0 && stream.decoder.is_none() {
+            placed(&packet);
+        }
         let Some(decoder) = stream.decoder.as_mut() else {
             owed = owed.saturating_add(length);
             continue;
@@ -463,6 +632,9 @@ fn each_stretch(
             // memory, so that's damage too), and once the sound has come, damage in an AAC frame can read as a tool
             // this decoder doesn't have.
             Err(Error::DecodeError(_) | Error::IoError(_)) => {
+                if length > 0 {
+                    placed(&packet);
+                }
                 owed = owed.saturating_add(length);
                 continue;
             }
@@ -472,6 +644,9 @@ fn each_stretch(
             }
             Err(e) => return Err(format_error(e)),
         };
+        if buf.frames() > 0 {
+            placed(&packet);
+        }
         let (stretch_rate, channels) = (buf.spec().rate(), buf.spec().channels().count().max(1));
         if rate == 0 {
             (rate, count) = (stretch_rate, channels);
@@ -495,7 +670,7 @@ fn each_stretch(
         }
     };
     if ended == Ended::Stopped {
-        let rest = if count_rest {
+        let rest = if count_rest(handed.get()) {
             not_given + frames_in(owed, stream.time_base, rate) + rest_of(format, stream, rate)
         } else {
             0
@@ -507,7 +682,7 @@ fn each_stretch(
     if rate != 0
         && let Some(left) = silence(rate, count, frames_in(owed, stream.time_base, rate), take)
     {
-        return Ok(Through { ended: Ended::Stopped, rest: if count_rest { left } else { 0 } });
+        return Ok(Through { ended: Ended::Stopped, rest: if count_rest(handed.get()) { left } else { 0 } });
     }
     Ok(Through { ended, rest: 0 })
 }
@@ -518,7 +693,8 @@ fn rest_of(format: &mut dyn FormatReader, mut stream: Stream, rate: u32) -> u64 
     let (mut frames, mut units) = (0u64, 0u64);
     loop {
         match format.next_packet() {
-            Ok(Some(packet)) if packet.track_id == stream.id => {
+            Ok(Some(mut packet)) if packet.track_id == stream.id => {
+                stream.untrim(&mut packet);
                 units = units.saturating_add(stream.length_of(&packet).min(stream.most(rate)));
             }
             Ok(Some(_)) => {}
@@ -552,7 +728,11 @@ fn decode_format(
     let mut wanted = usize::MAX;
     // Every frame handed on, kept or not.
     let mut given = 0u64;
-    let through = each_stretch(format.as_mut(), track, known_frames.is_none(), &mut |rate, stretch| {
+    // The rest is counted when the file doesn't say how long it is, or says it's shorter than what came: a fragmented
+    // M4A says nothing (0), and a minute's read of one longer than a minute was taken for exactly a minute, which
+    // the Sounds page then played only so far (the whole-app review of 26 Nov, AD-4).
+    let count_rest = |handed: u64| known_frames.is_none_or(|known| handed > known);
+    let through = each_stretch(format.as_mut(), track, &count_rest, None, &mut |rate, stretch| {
         if channels.is_empty() {
             sample_rate = rate;
             // `as` saturates: NaN and anything below zero give 0, infinity gives every frame. Never more than one
@@ -580,10 +760,10 @@ fn decode_format(
     }
     let decoded = skipped + channels.first().map_or(0, Vec::len) as u64;
     // The whole length: what was decoded when it was all decoded (to its end or to damage); else what the file says,
-    // or when it doesn't say, all that was handed on and the rest counted.
+    // or when it doesn't say or says less than came, all that was handed on and the rest counted.
     let total = match through.ended {
         Ended::End | Ended::Damage => decoded,
-        Ended::Stopped => known_frames.unwrap_or(given + through.rest),
+        Ended::Stopped => known_frames.filter(|&known| given <= known).unwrap_or(given + through.rest),
     };
     let total = total.max(decoded);
     Ok(AudioData { sample_rate, file_seconds: total as f64 / f64::from(sample_rate), channels, ..AudioData::default() })
@@ -591,20 +771,27 @@ fn decode_format(
 
 /// The whole of a probed file's audio, handed to `each` a part of up to `part_seconds` at a time, in order, with its
 /// sample rate ([`read_other_parts`]); `each` says whether to go on. The file is gone through as [`decode_format`]
-/// goes through it ([`each_stretch`]); `chained` as there. The whole length in seconds: what was decoded, or when
-/// damage or `each` ended it early, what the file says if it's more, so a clip that plays the whole file still plays it
-/// at its speed.
+/// goes through it ([`each_stretch`]); `chained` as there; with `from`, only from there on, `format` having been taken
+/// to a moment before it ([`read_other_parts_from`]). The whole length in seconds: what was decoded, or when damage or
+/// `each` ended it early, what the file says if it's more, so a clip that plays the whole file still plays it at its
+/// speed.
 fn decode_parts(
     mut format: Box<dyn FormatReader>,
     part_seconds: f64,
     chained: bool,
+    from: Option<f64>,
     each: &mut Each,
 ) -> Result<f64, AudioError> {
     let track = audio_track(format.as_ref())?;
     let known_frames = track.frames.filter(|_| !chained);
     let mut parts: Option<Parts> = None;
-    let through = each_stretch(format.as_mut(), track, false, &mut |rate, stretch| {
-        parts.get_or_insert_with(|| Parts::new(rate, stretch.len(), part_seconds)).push(stretch, each)
+    let through = each_stretch(format.as_mut(), track, &|_| false, from, &mut |rate, stretch| {
+        parts
+            .get_or_insert_with(|| {
+                // The frames before the place count in the length.
+                Parts::new(rate, stretch.len(), part_seconds).after(from.map_or(0, |from| crate::frame_at(from, rate)))
+            })
+            .push(stretch, each)
     })?;
     let Some(parts) = parts else {
         return Err(AudioError::Format("The file has no audio in it".into()));
@@ -625,6 +812,7 @@ mod tests {
             time_base: None,
             told_rate: Some(22_050),
             frames: None,
+            padding: None,
             coded: Coded::Mpeg,
             decoder: None,
             kind: mpeg_kind(&[0xFF, 0xF3, 0x80, 0x00]),
@@ -637,6 +825,28 @@ mod tests {
         let mut packet = Packet::new(0, Timestamp::ZERO, Duration::new(dur), header.to_vec());
         (packet.trim_start, packet.trim_end) = (Duration::new(trims.0), Duration::new(trims.1));
         packet
+    }
+
+    /// The whole-app review of 26 Nov, AD-6: the audio after a damaged tag is read from the file where it is, as if
+    /// the file started there, rather than copied into memory.
+    #[test]
+    fn audio_after_a_tag_reads_and_seeks_as_if_the_file_started_there() {
+        let mut audio = FromByte::new(Cursor::new(b"ID3tagAUDIO".to_vec()), 6, 11).unwrap();
+        assert_eq!(audio.byte_len(), Some(5));
+        let mut all = String::new();
+        audio.read_to_string(&mut all).unwrap();
+        assert_eq!(all, "AUDIO");
+        let mut byte = [0u8; 1];
+        assert_eq!(audio.seek(SeekFrom::Start(1)).unwrap(), 1);
+        audio.read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"U");
+        assert_eq!(audio.seek(SeekFrom::End(-2)).unwrap(), 3);
+        assert_eq!(audio.seek(SeekFrom::Current(-1)).unwrap(), 2);
+        audio.read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"D");
+        // Never back into the tag.
+        assert!(audio.seek(SeekFrom::Current(-4)).is_err());
+        assert!(audio.seek(SeekFrom::End(-6)).is_err());
     }
 
     #[test]

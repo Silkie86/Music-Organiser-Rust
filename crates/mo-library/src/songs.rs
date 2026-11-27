@@ -152,6 +152,11 @@ impl Song {
     pub fn made_for_tests(&self) -> bool {
         self.saves().chain(&self.copies).all(|s| made_for_tests(&s.name))
     }
+
+    /// Whether every save of the song, and every copy, is one of the live tests' projects ([`made_for_live_tests`]).
+    pub fn made_for_live_tests(&self) -> bool {
+        self.saves().chain(&self.copies).all(|s| made_for_live_tests(&s.name))
+    }
 }
 
 /// Two songs that may be saves of one: their names (or what's in them) are close but not close enough to be sure.
@@ -255,6 +260,8 @@ static FIXED_TAIL: LazyLock<Pattern> = LazyLock::new(|| re(r"(?i)(\s*\(fixed(\s+
 /// ("MO Tone A"); not "Demo Recipe", "MO Recipes", "MO Tones" or "MO Tone Bass".
 static FOR_TESTS: LazyLock<Pattern> =
     LazyLock::new(|| re(r"(?i)(?:^|[^\p{L}])mo[\s_-]*(?:recipe|live[\s_-]*test|tone[\s_-]+\p{L})(?:$|[^\p{L}])"));
+/// Of those, the live tests' own ([`made_for_live_tests`]): "MO Live Test" as words of their own, as above.
+static LIVE_TEST: LazyLock<Pattern> = LazyLock::new(|| re(r"(?i)(?:^|[^\p{L}])mo[\s_-]*live[\s_-]*test(?:$|[^\p{L}])"));
 /// A word that marks a save, then its number: "Song v2", "Song v2.1", "Song take 4", "Song mix_3", "Song rev 7". There
 /// has to be a space, "_", "-" or "." before the word, so "Remix2" isn't read as a "mix".
 static MARKED_NUMBER: LazyLock<Pattern> = LazyLock::new(|| {
@@ -307,6 +314,13 @@ pub fn is_fixed_copy(name: &str) -> bool {
 /// lists leave them out.
 pub fn made_for_tests(name: &str) -> bool {
     FOR_TESTS.is_match(name)
+}
+
+/// Whether a file named `name` (without its extension) is one of the live tests' projects ("MO Live Test automation",
+/// rule 10): one of [`made_for_tests`], which no list shows, but the one kind the MIDI page's Fits my song still
+/// offers, as the beta checklist's live steps fit a part to that project and play it there (the 26 Nov review's SZ-1).
+pub fn made_for_live_tests(name: &str) -> bool {
+    LIVE_TEST.is_match(name)
 }
 
 fn without_fixed(name: &str) -> String {
@@ -1063,6 +1077,7 @@ mod tests {
             &GLUED_ON,
             &FIXED_TAIL,
             &FOR_TESTS,
+            &LIVE_TEST,
             &MARKED_NUMBER,
             &GLUED_NUMBER,
             &FINAL,

@@ -644,6 +644,9 @@ fn files_made_for_trying_the_app_out_are_told_by_name() {
     ];
     for name in made_for_tests {
         assert!(songs::made_for_tests(name), "{name}");
+        // Of them, the live tests' projects, which Fits my song still offers (review SZ-1).
+        let live = name.to_lowercase().replace(['-', '_'], " ").contains("mo live test");
+        assert_eq!(songs::made_for_live_tests(name), live, "{name}");
     }
     // A name that only has the letters in it isn't one.
     let yours = [
@@ -661,5 +664,6 @@ fn files_made_for_trying_the_app_out_are_told_by_name() {
     ];
     for name in yours {
         assert!(!songs::made_for_tests(name), "{name}");
+        assert!(!songs::made_for_live_tests(name), "{name}");
     }
 }

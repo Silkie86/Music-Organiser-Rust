@@ -108,6 +108,13 @@ pub struct Instance {
     pub view: std::sync::atomic::AtomicI32,
     /// The recording part of the window is open (it starts folded away, and stays as it was left while loaded).
     pub record_open: std::sync::atomic::AtomicBool,
+    /// What Record records from, as its menu was left while loaded: a sound card's input by its name, "" for the DAW's
+    /// input; and which side of it (0 both, 1 left, 2 right). A window opened again records from it too (the 26 Nov
+    /// review's CP-4: it went back to the DAW's input, both sides).
+    pub record_from: Mutex<String>,
+    pub record_side: std::sync::atomic::AtomicI32,
+    /// What the last window left playing as it closed, for the next one ([`window::LeftPlaying`]).
+    pub(crate) left_playing: Mutex<Option<window::LeftPlaying>>,
     /// The shuffled order's seed: the same each time the window opens, so it opens on the list it showed.
     pub seed: u64,
     /// Keeps what the window read while the plugin is loaded ([`kept`]).
@@ -175,6 +182,9 @@ impl DefaultPluginFactory for MoPlugin {
                 chords: Arc::default(),
                 view: std::sync::atomic::AtomicI32::new(0),
                 record_open: std::sync::atomic::AtomicBool::new(false),
+                record_from: Mutex::new(String::new()),
+                record_side: std::sync::atomic::AtomicI32::new(0),
+                left_playing: Mutex::new(None),
                 seed: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos() as u64),

@@ -94,6 +94,8 @@ struct RollAsk {
     /// The pad number of each of `slots`, or `None` for one only there to be kept clear of.
     pads: Vec<Option<u64>>,
     options: kits::Options,
+    /// The folders hidden on the folder tree: their sounds fill no pad ([`super::hiding`]).
+    hidden: mo_app::sounds::Filters,
 }
 
 struct Rolled {
@@ -109,8 +111,11 @@ impl RollAsk {
         let empty = std::collections::HashMap::new();
         let usage = self.list.usage_map().unwrap_or(&empty);
         let mut slots = self.slots;
-        let seed =
-            background::on_pool(|| kits::roll(self.list.sounds(), usage, &self.index, &mut slots, &self.options));
+        let hidden = self.list.hidden_by_folders(&self.hidden);
+        let left_out = |i: usize| hidden.as_ref().is_some_and(|h| h(i));
+        let seed = background::on_pool(|| {
+            kits::roll(self.list.sounds(), usage, &self.index, &mut slots, &self.options, left_out)
+        });
         let sounds = self.pads.iter().zip(&slots).filter_map(|(pad, s)| pad.map(|id| (id, s.sound))).collect();
         Rolled { id: self.id, sounds, seed, full: false }
     }
@@ -385,6 +390,7 @@ fn ready_to_roll(p: &mut Page, pad: Option<u64>) -> Option<(RollAsk, bool)> {
     // The fingerprints are only for the vibe, so rolling doesn't wait for them.
     let index = p.index.clone().unwrap_or_default();
     let list = p.list.clone();
+    let hidden = super::hiding(&p.filters);
     // A library with no sounds in it (made, but nothing scanned into it yet) isn't one still being read.
     let reading = !p.read && !p.unread;
     let k = &mut p.kit;
@@ -403,7 +409,15 @@ fn ready_to_roll(p: &mut Page, pad: Option<u64>) -> Option<(RollAsk, bool)> {
     k.busy = true;
     let (slots, pads) = k.to_roll();
     Some((
-        RollAsk { id: k.asked, list, index, slots, pads, options: kits::Options { seed: 0, ..k.options.clone() } },
+        RollAsk {
+            id: k.asked,
+            list,
+            index,
+            slots,
+            pads,
+            options: kits::Options { seed: 0, ..k.options.clone() },
+            hidden,
+        },
         k.full,
     ))
 }

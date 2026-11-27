@@ -20,7 +20,7 @@ use rayon::prelude::*;
 
 use crate::filters::{self as chips, Filter};
 use crate::sound_dates::{DateBy, FileDates};
-use crate::sound_folders::{FolderCounts, FolderMask, FolderPick, Folders};
+use crate::sound_folders::{FolderCounts, FolderMask, FolderPick, Folders, PicksTotal};
 
 /// Hits, loops or both (the C# Length radio buttons).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -714,14 +714,19 @@ impl Drop for SoundList {
 
 impl SoundList {
     /// The list from the library's sounds: all but the copies you've hidden as duplicates, the files programs left in a
-    /// temp folder that an older scan took in ([`mo_sounds::scan::in_temp_folder`]), and the sounds made for trying the
-    /// app out ([`mo_library::songs::made_for_tests`]: the recipe's "MO Tone A"; Solomon's F12 note, 25 Nov 2026). Those
-    /// stay in the library, as the hidden copies do. Each loop has the tempo a new read gives it ([`with_checked_tempo`]).
+    /// temp folder that an older scan took in ([`mo_sounds::scan::in_temp_folder`]), the sounds made for trying the
+    /// app out ([`mo_library::songs::made_for_tests`]: the recipe's "MO Tone A"; Solomon's F12 note, 25 Nov 2026), and
+    /// the sounds whose file was empty when last listened to ([`Sound::is_empty_file`]: being written again, it's
+    /// listed once it fills). Those stay in the library, as the hidden copies do. Each loop has the tempo a new read
+    /// gives it ([`with_checked_tempo`]).
     pub fn new(sounds: Vec<Sound>) -> SoundList {
         let mut sounds: Vec<Sound> = sounds
             .into_par_iter()
             .filter(|s| {
-                !s.hidden && !mo_sounds::scan::in_temp_folder(&s.path) && !mo_library::songs::made_for_tests(s.name())
+                !s.hidden
+                    && !s.is_empty_file()
+                    && !mo_sounds::scan::in_temp_folder(&s.path)
+                    && !mo_library::songs::made_for_tests(s.name())
             })
             .map(with_checked_tempo)
             .collect();
@@ -891,10 +896,12 @@ impl SoundList {
     }
 
     /// Of the sound at `i` and its copies, the one Hide duplicates shows when no other filter leaves any of them out
-    /// ([`SoundList::keep_first`]): itself when it has none, or while they aren't known.
-    fn kept_copy(&self, i: usize) -> usize {
+    /// ([`SoundList::keep_first`]), of those not `left_out`: itself when it has none, or while they aren't known.
+    fn kept_copy(&self, i: usize, left_out: &impl Fn(usize) -> bool) -> usize {
         let group = self.copy_group(i).and_then(|g| self.copies.as_ref()?.groups.get(g as usize));
-        group.and_then(|g| g.iter().copied().min_by(|&a, &b| self.keep_first(a, b))).unwrap_or(i)
+        group
+            .and_then(|g| g.iter().copied().filter(|&c| !left_out(c)).min_by(|&a, &b| self.keep_first(a, b)))
+            .unwrap_or(i)
     }
 
     /// Sounds like the one at `at` that are new on the way you came to it: Sounds like this, most alike first, as
@@ -903,8 +910,9 @@ impl SoundList {
     /// like the one before), and their copies (the same audio, once the copies are known; before they are, a sound
     /// [`SAME_SOUND`] as alike as it): A's closest was B and B's was A, so clicking the first line went round in a
     /// circle (Solomon's F12 note, 25 Nov 2026), and the sound itself showed again as its copy. One of each sound's
-    /// copies is enough, as they sound the same: the one Hide duplicates shows. Slow on a big library, as it compares
-    /// the sound with every other: off the window's thread.
+    /// copies is enough, as they sound the same: the one Hide duplicates shows. The sounds `left_out` (by place: the
+    /// folders you hid on the folder tree, whose sounds never show) aren't offered either (the whole-app review of 26
+    /// Nov, ST-6). Slow on a big library, as it compares the sound with every other: off the window's thread.
     pub fn like_this(
         &self,
         index: &SoundIndex,
@@ -912,12 +920,13 @@ impl SoundList {
         at: usize,
         came: &[usize],
         max: usize,
+        left_out: impl Fn(usize) -> bool,
     ) -> Vec<(usize, f64)> {
         let Some(of) = self.sound(at) else { return Vec::new() };
         let seen: HashSet<usize> = came.iter().copied().chain([at]).collect();
         let seen_copies: HashSet<u32> = seen.iter().filter_map(|&i| self.copy_group(i)).collect();
         let new = |i: usize| !seen.contains(&i) && self.copy_group(i).is_none_or(|g| !seen_copies.contains(&g));
-        let get = |id: i64| places.get(&id).copied().filter(|&i| new(i)).and_then(|i| self.sound(i));
+        let get = |id: i64| places.get(&id).copied().filter(|&i| new(i) && !left_out(i)).and_then(|i| self.sound(i));
         // A sound's copies come one after the other (they're as alike), so more are asked for until there are enough
         // once only one of each is kept, or there are no more.
         let mut ask = max;
@@ -929,7 +938,7 @@ impl SoundList {
                 .filter(|&&(_, likeness)| likeness < SAME_SOUND)
                 .filter_map(|&(id, likeness)| Some((*places.get(&id)?, likeness)))
                 .filter(|&(i, _)| self.copy_group(i).is_none_or(|g| groups.insert(g)))
-                .map(|(i, likeness)| (self.kept_copy(i), likeness))
+                .map(|(i, likeness)| (self.kept_copy(i, &left_out), likeness))
                 .take(max)
                 .collect();
             if one_each.len() >= max || found.len() < ask {
@@ -1322,7 +1331,7 @@ impl SoundList {
                     (a, tally, held, near)
                 },
             );
-        let folders = self.folder_counts(&near, copies);
+        let mut folders = self.folder_counts(&near, copies, filters);
         if let Some(copies) = copies {
             let kept = self.kept(copies, held.iter().filter(|h| h.2 == 0).map(|h| &h.0));
             shown.extend(kept.values());
@@ -1334,21 +1343,32 @@ impl SoundList {
                 tally.add(group.once());
             }
         }
+        // What the folder tree's picks show, for the line under them: the list itself, where Hide duplicates shows one
+        // of a sound's copies however many picks hold them.
+        if !filters.folders.is_empty() {
+            let used = self.used.as_ref().map(|_| shown.par_iter().filter(|&&i| self.is_used(i)).count() as u64);
+            folders.picked = Some((filters.folders.clone(), PicksTotal { sounds: shown.len() as u64, used }));
+        }
         let mut counts = tally.counts();
         counts.folders = folders;
         (self.ordered(shown, order, seed), counts)
     }
 
+    /// Whether a song uses the sound at `i` (no, while the use isn't known).
+    fn is_used(&self, i: usize) -> bool {
+        self.used.as_ref().is_some_and(|map| map.get(&self.shared.sounds[i].id).is_some_and(|u| u.songs > 0))
+    }
+
     /// How many of the sounds at `near` (those every filter but the folder tree lets through) are right in each
     /// folder, and how many of them your songs use (once that's known). With Hide duplicates on (`copies`), a
-    /// sound's copies in one folder count once there, as picking it shows one of them.
-    fn folder_counts(&self, near: &[usize], copies: Option<&Copies>) -> FolderCounts {
+    /// sound's copies in one folder count once there, as picking it shows one of them, and once in a folder holding
+    /// two folders with copies of it, added up as the tree adds them with `filters`' hidden folders and sample folders
+    /// ([`FolderCounts::twice`]).
+    fn folder_counts(&self, near: &[usize], copies: Option<&Copies>, filters: &Filters) -> FolderCounts {
         let folders = &self.shared.folders;
         let mut sounds = vec![0u32; folders.len()];
         let mut used = self.used.as_ref().map(|_| vec![0u32; folders.len()]);
-        let is_used = |i: usize| {
-            self.used.as_ref().is_some_and(|map| map.get(&self.shared.sounds[i].id).is_some_and(|u| u.songs > 0))
-        };
+        let is_used = |i: usize| self.is_used(i);
         // Each group of copies in a folder, and whether any of them is used: the one the list keeps is a used one when
         // there is one ([`KeptFor::Used`]).
         let mut groups: HashMap<(u32, u32), bool> = HashMap::new();
@@ -1368,15 +1388,26 @@ impl SoundList {
                 used[at as usize] += 1;
             }
         }
-        for ((_, at), any_used) in groups {
+        let mut by_group: HashMap<u32, Vec<(u32, bool)>> = HashMap::new();
+        for ((g, at), any_used) in groups {
             sounds[at as usize] += 1;
             if let Some(used) = used.as_mut()
                 && any_used
             {
                 used[at as usize] += 1;
             }
+            by_group.entry(g).or_default().push((at, any_used));
         }
-        FolderCounts { of: folders.stamp(), sounds, used }
+        let (mut twice, mut twice_used) = (Vec::new(), Vec::new());
+        if by_group.values().any(|f| f.len() > 1) {
+            (twice, twice_used) = (vec![0u32; folders.len()], vec![0u32; folders.len()]);
+            let (tops, hidden) = (&filters.folder_tops, &filters.hidden_folders);
+            folders.count_twice(by_group.into_values(), tops, hidden, &mut twice, &mut twice_used);
+            if used.is_none() {
+                twice_used.clear();
+            }
+        }
+        FolderCounts { of: folders.stamp(), sounds, used, twice, twice_used, picked: None }
     }
 
     /// `shown` in `order`.
@@ -2829,7 +2860,7 @@ mod tests {
         let places: HashMap<i64, usize> = (0..list.len()).filter_map(|i| Some((list.sound(i)?.id, i))).collect();
         let like = |of: i64, came: &[i64], max: usize| {
             let came: Vec<usize> = came.iter().map(|id| places[id]).collect();
-            let found = list.like_this(&index, &places, places[&of], &came, max);
+            let found = list.like_this(&index, &places, places[&of], &came, max, |_| false);
             assert!(found.windows(2).all(|w| w[0].1 >= w[1].1), "most alike first");
             ids(&list, &found.into_iter().map(|(i, _)| i).collect::<Vec<_>>())
         };
@@ -2840,12 +2871,16 @@ mod tests {
         assert_eq!(like(5, &[1, 3], 2), [6, 7]);
         // With no more to find, fewer.
         assert_eq!(like(6, &[1, 3, 5], 5), [7]);
-        assert_eq!(list.like_this(&index, &places, 99, &[], 3), []);
+        assert_eq!(list.like_this(&index, &places, 99, &[], 3, |_| false), []);
+        // A folder hidden on the folder tree: none of its sounds is offered, and of copies, one outside it shows.
+        let hidden = |i: usize| [3, 5].contains(&list.sound(i).map_or(0, |s| s.id));
+        let found = list.like_this(&index, &places, places[&1], &[], 3, hidden);
+        assert_eq!(ids(&list, &found.into_iter().map(|(i, _)| i).collect::<Vec<_>>()), [4, 6, 7]);
 
         // Before the copies are known (Hide duplicates has never been on), a sound 100% alike is taken for a copy: 1's
         // copy 2 doesn't show as the sound itself again. 3 and 4 aren't known as copies of each other: both show.
         let unknown = SoundList::new((1..=7).filter_map(|i| list.sound(places[&i]).cloned()).collect());
-        let found = unknown.like_this(&index, &places, places[&1], &[], 3);
+        let found = unknown.like_this(&index, &places, places[&1], &[], 3, |_| false);
         assert_eq!(ids(&unknown, &found.into_iter().map(|(i, _)| i).collect::<Vec<_>>()), [3, 4, 5]);
     }
 
@@ -2944,6 +2979,18 @@ mod tests {
         ]);
         assert_eq!(list.len(), 1);
         assert_eq!(list.sound(0).map(|s| s.id), Some(2));
+    }
+
+    #[test]
+    fn a_sound_whose_file_is_empty_now_stays_out_of_the_list() {
+        // Being written again (a render over it): its row is kept, but nothing empty is listed (Solomon, 24 Nov 2026).
+        let mut rendering = sound(1, r"I:\Bounces\Lead.wav", "Synth", None);
+        rendering.error = Some(format!("Couldn't read the file: {}", mo_audio::EMPTY_FILE));
+        let mut damaged = sound(2, r"I:\Bounces\Old.wav", "Synth", None);
+        damaged.error = Some("Couldn't read the file: unsupported format".to_owned());
+        let list = SoundList::new(vec![rendering, damaged, sound(3, r"I:\Bounces\Pad.wav", "Pad", None)]);
+        let ids: Vec<i64> = list.sounds().iter().map(|s| s.id).collect();
+        assert_eq!(ids, [2, 3]);
     }
 
     #[test]
@@ -3327,6 +3374,56 @@ mod tests {
         assert_eq!(ids(&list, &list.view(&hidden, Order::Name, 0)), vec![1]);
         assert_eq!(hidden.cleared().hidden_folders, hidden.hidden_folders);
         assert!(!hidden.cleared().any());
+    }
+
+    /// With Hide duplicates on, a sound with copies in two folders shows once from a folder holding both, and two
+    /// picks holding copies of each other say what the list shows (the whole-app review of 26 Nov, ST-5).
+    #[test]
+    fn the_folder_tree_counts_a_sounds_copies_once_as_the_list_shows_them() {
+        let mut list = SoundList::new(vec![
+            sound(1, r"I:\Samples\Pack\Kicks\Kick.wav", "Kick", None),
+            sound(2, r"I:\Samples\Pack\Old\Kick.wav", "Kick", None),
+            sound(3, r"D:\Downloads\Pack\Kick.wav", "Kick", None),
+            sound(4, r"I:\Samples\Pack\Kicks\Snare.wav", "Snare", None),
+        ]);
+        list.set_copies(&SameAudio { groups: vec![vec![1, 2, 3]], ..SameAudio::default() });
+        let f = list.folders();
+        let at = |p: &str| f.find(p).unwrap() as usize;
+        let tops = vec![r"I:\Samples".to_owned(), r"D:\Downloads".to_owned()];
+        let pick = |p: &str| FolderPick { path: p.to_owned(), just_this: false };
+        let filters = Filters {
+            hide_copies: true,
+            folder_tops: tops.clone(),
+            folders: vec![pick(r"I:\Samples\Pack"), pick(r"D:\Downloads\Pack")],
+            ..Filters::default()
+        };
+        let (shown, counts) = list.view_counted(&filters, Order::Name, 0);
+        assert_eq!(shown.len(), 2, "the kick once, and the snare");
+        let open: HashSet<String> = (0..f.len()).map(|i| crate::sound_folders::key(f.path(i as u32))).collect();
+        let none = HashSet::new();
+        let ask = crate::sound_folders::TreeAsk {
+            picks: &filters.folders,
+            hidden: &[],
+            open: &open,
+            search: "",
+            tops: &tops,
+            away: &none,
+            scanning: &none,
+        };
+        let rows = crate::sound_folders::rows(f, Some(&counts.folders), ask);
+        let pack = rows.iter().find(|r| r.path == r"I:\Samples\Pack").unwrap();
+        assert_eq!(pack.count, "2", "the kick in Kicks and Old once, and the snare");
+        assert_eq!(counts.folders.twice[at(r"I:\Samples\Pack")], 1);
+        let (each, total) = crate::sound_folders::pick_counts(f, Some(&counts.folders), &filters.folders, &[], &tops);
+        assert_eq!(each, ["2", "1"]);
+        assert_eq!(total.map(|t| t.sounds), Some(2), "as the list shows: not 3");
+        // Without Hide duplicates every copy shows, and counts.
+        let all = Filters { hide_copies: false, ..filters };
+        let (shown, counts) = list.view_counted(&all, Order::Name, 0);
+        assert_eq!(shown.len(), 4);
+        assert!(counts.folders.twice.is_empty());
+        let (_, total) = crate::sound_folders::pick_counts(f, Some(&counts.folders), &all.folders, &[], &tops);
+        assert_eq!(total.map(|t| t.sounds), Some(4));
     }
 
     #[test]

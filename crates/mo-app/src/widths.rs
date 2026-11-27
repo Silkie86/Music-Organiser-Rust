@@ -4,7 +4,8 @@
 //!
 //! Every such part is in [`PARTS`] once, by a short name such as `sounds.card`, with its usual width and the least and
 //! most it may be. The widths you chose are kept in one setting, [`KEY`], as `name=width` pairs; a part at its usual
-//! width isn't written at all (rule 23: store each fact once, and nothing that's the default anyway). A part no longer
+//! width isn't written at all (rule 23: store each fact once, and nothing that's the default anyway), except a side
+//! card you dragged ([`Part::is_card`]: its usual width is a way of laying out its page). A part no longer
 //! in the table, or a width that isn't a number, is left out when it's read, so an old or hand-edited file can't break
 //! a page.
 
@@ -29,6 +30,18 @@ pub struct Part {
 
 const fn part(name: &'static str, usual: f32, least: f32, most: f32) -> Part {
     Part { name, usual, least, most }
+}
+
+impl Part {
+    /// Whether it's the card beside a page's list. A card's usual width isn't only a width: until you drag it, the
+    /// page lays itself out its usual way (the list at its widest, the card taking the rest, so on a wide window the
+    /// card is much wider than its usual width), and it's given 0 then. Once you've dragged it, it's as wide as you
+    /// made it, even at its usual width: "dragged to 400" and "never dragged" are two facts. Before, a card let go
+    /// within half a pixel of its usual width stayed that wide until the app closed, and came back much wider at the
+    /// next start (the whole-app review of 26 Nov, WI-2).
+    pub fn is_card(&self) -> bool {
+        self.name.ends_with(".card")
+    }
 }
 
 /// Every part you can drag. Their usual widths are the ones the pages had before they could be dragged.
@@ -78,7 +91,9 @@ pub const PARTS: &[Part] = &[
 ];
 
 /// The file in the data folder where the CLAP plugin keeps its parts' widths (`mo-plugin`'s `widths`), written whole
-/// by way of the same name with [`crate::backup::PART_ENDING`] after it.
+/// through [`crate::backup::write_whole`] (so it's on [`crate::backup::WRITTEN_WHOLE`]). Plugins before 27 Nov 2026
+/// wrote it by way of the same name with [`crate::backup::PART_ENDING`] after it, which the start-up sweep still
+/// knows.
 pub const PLUGIN_FILE: &str = "plugin-widths.txt";
 
 /// The CLAP plugin's parts you can drag. The plugin keeps their widths in a file of its own (it never writes the
@@ -115,29 +130,31 @@ impl Widths {
         widths
     }
 
-    /// The setting's value: the parts not at their usual width, by name (so it reads the same each time). "" when
-    /// every part is at its usual width.
+    /// The setting's value: the parts not at their usual width, and the cards you dragged, by name (so it reads the
+    /// same each time). "" when there are none.
     pub fn value(&self) -> String {
         self.chosen.iter().map(|(name, w)| format!("{name}={}", w.round())).collect::<Vec<_>>().join(";")
     }
 
-    /// How wide `name` is: the width you chose, else its usual one. 0 for a part that isn't in the table, or one whose
-    /// usual width the page works out (see [`Part::usual`]) while you haven't chosen one.
+    /// How wide `name` is, as its page is given it: the width you chose, else its usual one. 0 for a part that isn't in
+    /// the table, one whose usual width the page works out (see [`Part::usual`]), or a card ([`Part::is_card`]), while
+    /// you haven't chosen one.
     pub fn width(&self, name: &str) -> f32 {
         let Some(part) = find(name) else { return 0.0 };
-        self.chosen.get(part.name).copied().unwrap_or(part.usual)
+        let usual = if part.is_card() { 0.0 } else { part.usual };
+        self.chosen.get(part.name).copied().unwrap_or(usual)
     }
 
     /// Makes `name` `width` wide, kept within its limits, and returns the width it got: 0 for a part that isn't in
     /// the table, its width as it was for a width that isn't a number (then nothing changes). Within half a pixel of its usual width it
-    /// counts as the usual width and isn't kept.
+    /// counts as the usual width and isn't kept, except for a card ([`Part::is_card`]).
     pub fn set(&mut self, name: &str, width: f32) -> f32 {
         let Some(part) = find(name) else { return 0.0 };
         if !width.is_finite() {
             return self.width(name);
         }
         let width = width.round().clamp(part.least, part.most);
-        if (width - part.usual).abs() < 0.5 {
+        if !part.is_card() && (width - part.usual).abs() < 0.5 {
             self.chosen.remove(part.name);
         } else {
             self.chosen.insert(part.name, width);
@@ -174,12 +191,31 @@ mod tests {
     fn usual_widths_are_not_kept() {
         let mut w = Widths::default();
         assert_eq!(w.value(), "");
-        assert_eq!(w.width("sounds.card"), 400.0);
-        assert_eq!(w.set("sounds.card", 520.4), 520.0);
-        assert_eq!(w.set("midi.card", 420.2), 420.0);
-        assert_eq!(w.value(), "sounds.card=520");
-        assert_eq!(w.reset("sounds.card"), 400.0);
+        assert_eq!(w.width("sounds.filters"), 208.0);
+        assert_eq!(w.set("sounds.filters", 240.4), 240.0);
+        assert_eq!(w.set("midi.filters", 208.2), 208.0);
+        assert_eq!(w.value(), "sounds.filters=240");
+        assert_eq!(w.reset("sounds.filters"), 208.0);
         assert_eq!(w.value(), "");
+    }
+
+    /// The whole-app review of 26 Nov, WI-2: a card is given 0 until it's dragged (its page lays itself out its usual
+    /// way then), and a card dragged to its usual width is kept as dragged, so it comes back the same after a restart;
+    /// only a double-click forgets it.
+    #[test]
+    fn a_card_dragged_to_its_usual_width_is_kept() {
+        let mut w = Widths::default();
+        let cards: Vec<&str> = PARTS.iter().filter(|p| p.is_card()).map(|p| p.name).collect();
+        assert_eq!(cards, ["sounds.card", "presets.card", "midi.card", "plugins.card", "space.card"]);
+        assert!(PLUGIN_PARTS.iter().all(|p| !p.is_card()));
+        assert_eq!(w.width("sounds.card"), 0.0);
+        assert_eq!(w.set("sounds.card", 400.2), 400.0);
+        assert_eq!(w.set("midi.card", 520.4), 520.0);
+        assert_eq!(w.width("sounds.card"), 400.0);
+        assert_eq!(w.value(), "midi.card=520;sounds.card=400");
+        assert_eq!(Widths::read(&w.value()), w);
+        assert_eq!(w.reset("sounds.card"), 0.0);
+        assert_eq!(w.value(), "midi.card=520");
     }
 
     #[test]

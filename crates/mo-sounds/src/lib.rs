@@ -119,6 +119,14 @@ impl Sound {
         self.analysis.as_ref().is_some_and(SoundAnalysis::is_silent)
     }
 
+    /// Whether its file was found empty (0 bytes) when it was last listened to: a sound being written again (a render
+    /// over it, a copy) or one that stopped part way. Its row keeps all you gave it (tags, heart, type, plays), but no
+    /// list shows it until its file fills again and is listened to again (Solomon, 24 Nov 2026: "don't show anything
+    /// empty"; the whole-app review of 26 Nov, ST-3: such a sound was forgotten).
+    pub fn is_empty_file(&self) -> bool {
+        self.error.as_deref().is_some_and(says_empty)
+    }
+
     /// The file's name without its extension: "Kick_01".
     pub fn name(&self) -> &str {
         stem(file_name(&self.path))
@@ -170,6 +178,12 @@ impl Sound {
     pub fn character(&self) -> String {
         self.analysis.as_ref().map(|a| a.character.join(", ")).unwrap_or_default()
     }
+}
+
+/// Whether why a file couldn't be listened to (as a sound's row keeps it) is that the file was empty (0 bytes:
+/// [`mo_audio::EMPTY_FILE`]).
+pub(crate) fn says_empty(error: &str) -> bool {
+    error.contains(mo_audio::EMPTY_FILE)
 }
 
 /// What can be done with a sound that says you like it, as `sound_events.kind` stores it.

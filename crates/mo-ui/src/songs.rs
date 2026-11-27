@@ -105,6 +105,9 @@ thread_local! {
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
     /// Reads a save's record for the panel, one at a time, newest ask first.
     static READER: RefCell<Option<Newest<(u64, i64)>>> = const { RefCell::new(None) };
+    /// Looks for the picked song's bounces, one song at a time, the newest pick first: a burst of picks (an arrow key
+    /// held) lists only the last one's folders, not every one's on a thread of its own (rule 12, review XT-2).
+    static BOUNCE_LOOK: RefCell<Option<Newest<BounceLook>>> = const { RefCell::new(None) };
     /// The activity cards, for Open, Show in folder and Copy path.
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
     /// The save last right-clicked on the Saves tab, by its path, for its menu's lines.
@@ -265,9 +268,10 @@ fn read_shapes(live: &mut Live, tell: &mpsc::Sender<Told>) -> bool {
 
 /// The songs the MIDI page's "Fits my song" offers (the few saved last), from a list as it was just made: worked out
 /// here, on the page's thread, and given to the MIDI page with each list, so it follows the songs you save without
-/// reading the library itself.
+/// reading the library itself. The live tests' projects ("MO Live Test…") are offered too, though the list leaves
+/// them out, so the beta checklist's live steps can be tried on them and not on a song of yours (rule 10, review SZ-1).
 fn fit_songs(songs: &Songs) -> Vec<mo_app::midi_fits::SongChoice> {
-    mo_app::midi_fits::song_choices(songs.rows.iter().map(|r| &r.song), &songs.real)
+    mo_app::midi_fits::song_choices(songs.rows.iter().map(|r| &r.song).chain(&songs.live_tests), &songs.real)
 }
 
 /// Reads the library at `path` and makes the page's list from it, to be kept in the library if it's the app's own
@@ -971,10 +975,14 @@ fn give(app: &AppWindow, at: Option<usize>, what: &str, value: &str) {
         let mut p = p.borrow_mut();
         let at = at.or(p.picked)?;
         let row = p.songs.rows.get_mut(at)?;
+        // Refused here, before it shows, when it can't be kept: a to-do added to a full list too (review SZ-2).
         let change = match asked_change(what, value, row.favourite, &row.todos, now)?.checked() {
             Ok(change) => change,
             Err(why) => return Some(Err(why)),
         };
+        if let Err(why) = change.has_room(&row.todos) {
+            return Some(Err(why));
+        }
         let save_ids: Vec<i64> = row.song.saves().chain(&row.song.copies).map(|s| s.id).collect();
         show_given(row, &change);
         Some(Ok(Given { song: row.song.key.clone(), save_ids, change }))
@@ -1455,8 +1463,8 @@ fn fill_dust_off(app: &AppWindow) {
     });
 }
 
-/// Looks again for the picked song's bounces, on a thread of its own (it lists its folders), so one exported a minute
-/// ago shows on its card and its line; the page's thread keeps them for the lists it makes from here.
+/// Looks again for the picked song's bounces, on the look's own thread ([`BOUNCE_LOOK`]: it lists its folders), so one
+/// exported a minute ago shows on its card and its line; the page's thread keeps them for the lists it makes from here.
 fn look_for_bounces(app: &AppWindow) {
     // Made-up songs (mo-screens) have no folders to look in.
     if SAMPLE.with(Cell::get) {
@@ -1471,49 +1479,87 @@ fn look_for_bounces(app: &AppWindow) {
     };
     // Newest wins: a look that ends after a newer one began (another song picked) is let go.
     let ask = BOUNCE_ASKS.fetch_add(1, Ordering::SeqCst) + 1;
-    let weak = app.as_weak();
-    let looked = background::spawn("Songs: bounces", move || {
-        // None of its folders there (a drive away): what was found before stands.
-        if !row.song.saves().any(|s| Path::new(&s.folder).is_dir()) {
-            return;
+    let look = BounceLook { ask, row, rivals, weak: app.as_weak() };
+    BOUNCE_LOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            match Newest::start("Songs: bounces", look_in_folders) {
+                Ok(worker) => *slot = Some(worker),
+                Err(e) => log::warning("Songs", &format!("Couldn't look for the song's bounces: {e}")),
+            }
         }
-        let found = mo_app::bounces::Folders::default().of(&row, &rivals);
-        if found == row.bounces || BOUNCE_ASKS.load(Ordering::SeqCst) != ask {
-            return;
+        if let Some(worker) = slot.as_ref() {
+            worker.ask(look);
         }
-        let key = row.song.key.clone();
-        let _ = weak.upgrade_in_event_loop(move |app| {
-            if BOUNCE_ASKS.load(Ordering::SeqCst) != ask {
-                return;
-            }
-            let (shown, picked, filtered) = PAGE.with(|p| {
-                let mut p = p.borrow_mut();
-                let filtered = p.filters.has_sound != p.filters.no_sound;
-                let picked = p.picked.and_then(|i| p.songs.rows.get(i)).is_some_and(|r| r.song.key == key);
-                let Some(r) = p.songs.rows.iter_mut().find(|r| r.song.key == key) else { return (false, false, false) };
-                r.bounces.clone_from(&found);
-                (true, picked, filtered)
-            });
-            if !shown {
-                return;
-            }
-            // A sound filter on: the song may come or go from the list.
-            if filtered {
-                refresh(&app);
-            } else {
-                LINES.with(|l| l.notify.reset());
-                fill_board(&app);
-            }
-            if picked {
-                fill_panel(&app);
-            }
-            if let Some((tell, _)) = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
-                let _ = tell.send(Told::Bounces(key, found));
-            }
-        });
     });
-    if let Err(e) = looked {
-        log::warning("Songs", &format!("Couldn't look for the song's bounces: {e}"));
+}
+
+/// A look for a song's bounces ([`look_for_bounces`]): which look it is, the song, and the other songs saved in its
+/// folders.
+struct BounceLook {
+    ask: u64,
+    row: SongRow,
+    rivals: Vec<String>,
+    weak: slint::Weak<AppWindow>,
+}
+
+/// Lists the song's folders for its bounces, on the look's own thread, and shows what it found if no newer look was
+/// asked for meanwhile.
+fn look_in_folders(look: BounceLook) {
+    let BounceLook { ask, row, rivals, weak } = look;
+    // None of its folders there (a drive away): what was found before stands.
+    if BOUNCE_ASKS.load(Ordering::SeqCst) != ask || !row.song.saves().any(|s| Path::new(&s.folder).is_dir()) {
+        return;
+    }
+    let found = mo_app::bounces::Folders::default().of(&row, &rivals);
+    if found == row.bounces || BOUNCE_ASKS.load(Ordering::SeqCst) != ask {
+        return;
+    }
+    let key = row.song.key.clone();
+    let _ = weak.upgrade_in_event_loop(move |app| {
+        if BOUNCE_ASKS.load(Ordering::SeqCst) != ask {
+            return;
+        }
+        let (shown, picked, filtered) = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            let filtered = p.filters.has_sound != p.filters.no_sound;
+            let picked = p.picked.and_then(|i| p.songs.rows.get(i)).is_some_and(|r| r.song.key == key);
+            let Some(r) = p.songs.rows.iter_mut().find(|r| r.song.key == key) else { return (false, false, false) };
+            r.bounces.clone_from(&found);
+            (true, picked, filtered)
+        });
+        if !shown {
+            return;
+        }
+        // A sound filter on: the song may come or go from the list.
+        if filtered {
+            refresh(&app);
+        } else {
+            LINES.with(|l| l.notify.reset());
+            fill_board(&app);
+        }
+        if picked {
+            fill_panel(&app);
+        }
+        if let Some((tell, _)) = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+            let _ = tell.send(Told::Bounces(key, found));
+        }
+    });
+}
+
+/// Space on the Songs page ("Play or stop what's picked", your F1 Q2 C of 24 Nov): plays the picked song's newest
+/// bounce on the player bar, or pauses it when that's what plays. A song with none pauses what the bar plays. False
+/// when there's nothing to play or pause, so the key goes on to the page.
+pub fn toggle_play(app: &AppWindow) -> bool {
+    let mut newest = None;
+    with_picked(|_, r| newest = r.bounces.first().map(|b| (b.path.clone(), r.song.name.clone())));
+    match newest {
+        Some((path, title)) => {
+            crate::song_player::play_or_pause(app, &path, &title);
+            true
+        }
+        // Paused as Esc pauses it.
+        None => crate::song_player::stop_on_escape(app),
     }
 }
 
@@ -2383,8 +2429,9 @@ fn seconds_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// Reads the settings (export folder, template, how steps play) and converts `project` on the low-priority pool.
-/// What was written is remembered after, in songs.db ([`remember_convert`]).
+/// Reads the settings (export folder, template, how steps play) and converts `project` on a low-priority pool of its
+/// own ([`background::on_convert_pool`]: its samples are read and looked for there, so other pages' quick jobs don't
+/// wait behind them). What was written is remembered after, in songs.db ([`remember_convert`]).
 fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
     let lib = Library::open_read_only(db).map_err(|e| format!("Couldn't read the library: {e}"))?;
     let setting = |key: &str| lib.setting(key).map_err(|e| format!("Couldn't read the settings: {e}"));
@@ -2402,7 +2449,7 @@ fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
     }
     let locator = sound_library::locator(Some(&sound_library::database_beside(db)));
     let at = project.to_string_lossy().into_owned();
-    background::on_pool(move || {
+    background::on_convert_pool(move || {
         let written_of = |file: &Path| lib.setting(&bitwig::convert_key(file)).ok().flatten();
         // FL Studio's own sounds only from FL Studio's folder, never another file with the name.
         let find = |sample: &str| locator.locate_to_use(sample, &at);
@@ -2427,6 +2474,31 @@ fn copy_path(path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review SZ-1: the live tests' project is offered to fit to, though the list leaves it out; the recipe's saves
+    /// aren't offered at all.
+    #[test]
+    fn fits_my_song_offers_the_live_tests_project_but_the_list_leaves_it_out() {
+        let save = |name: &str, mtime: i64| mo_library::Save {
+            id: mtime,
+            name: name.into(),
+            path: format!(r"C:\beats\{name}\{name}.bwproject"),
+            daw: "Bitwig Studio".into(),
+            folder: format!(r"C:\beats\{name}"),
+            mtime,
+            ..mo_library::Save::default()
+        };
+        let saves = [
+            save("Night", 1_760_000_000),
+            save("MO Live Test", 1_760_000_300),
+            save("MO Recipe 02 notes", 1_760_000_600),
+        ];
+        let songs = Songs::from_saves(&saves, &mo_library::SongChoices::default(), Vec::new(), 3, None);
+        let listed: Vec<&str> = songs.rows.iter().map(|r| r.song.name.as_str()).collect();
+        assert_eq!(listed, ["Night"]);
+        let offered: Vec<String> = fit_songs(&songs).into_iter().map(|s| s.label).collect();
+        assert_eq!(offered, ["MO Live Test", "Night"], "the newest first");
+    }
 
     /// UX review A2: each click on the card is one change the library takes, and a word the card never sends is none.
     #[test]

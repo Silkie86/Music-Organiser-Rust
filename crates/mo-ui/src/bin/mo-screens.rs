@@ -1749,7 +1749,7 @@ fn wide_shots(
     let kept = presets.get_panel_width();
     capture_sized(window, WIDE, Duration::from_millis(400));
     let usual = capture_sized(window, WIDE, Duration::from_millis(400));
-    presets.set_panel_width(kept + 300.0);
+    presets.set_panel_width(app.global::<mo_ui::Widths>().invoke_usual("presets.card".into()) + 300.0);
     capture_sized(window, WIDE, Duration::from_millis(400));
     let narrower = capture_sized(window, WIDE, Duration::from_millis(400));
     presets.set_panel_width(kept);
@@ -1758,6 +1758,16 @@ fn wide_shots(
     }
     let path = out.join("wide-presets-card-dragged.png");
     image::save_buffer(&path, &narrower, WIDE.0, WIDE.1, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
+    // A 1920 px laptop screen at Windows' 125%, the window filling it: the MIDI list is 620 px wide there, too narrow
+    // for the From column beside the part's name, so it takes the narrow layout (the 26 Nov review's MZ-2).
+    const LAPTOP: (u32, u32) = (1536, 864);
+    window.set_size(PhysicalSize::new(LAPTOP.0, LAPTOP.1));
+    show_place(app, Place::Midi);
+    capture_sized(window, LAPTOP, Duration::from_millis(400));
+    let laptop = capture_sized(window, LAPTOP, Duration::from_millis(400));
+    let path = out.join("midi-laptop-125.png");
+    image::save_buffer(&path, &laptop, LAPTOP.0, LAPTOP.1, image::ExtendedColorType::Rgb8)?;
     println!("{}", path.display());
     window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     Ok(())
@@ -2593,6 +2603,31 @@ fn folder_shots(
     }
     capture(window);
     shots.push(("sounds-folders-strip.png".into(), capture(window)));
+    // Many hidden folders too: three rows of chips in sight, the rest a scroll away (the whole-app review of 26 Nov,
+    // ST-9: the strip grew with no limit and took the list's room). Made-up folders, shown again after.
+    let old: Vec<String> = (1..=40).map(|n| format!(r"E:\Old packs\Bounce pack {n:02}")).collect();
+    // Each one hidden, or shown again when it is.
+    let toggle_old = || {
+        for path in &old {
+            data.invoke_tree_menu_asked(path.as_str().into());
+            data.invoke_tree_menu_chosen("hide".into());
+        }
+    };
+    toggle_old();
+    capture(window);
+    let many = capture(window);
+    // The wheel over the chips turns the strip down to the last of them.
+    let (x, y) = STRIP_WHEEL;
+    scroll(window, x, y, -10.0 * PAGE_DOWN);
+    let down = capture(window);
+    scroll(window, x, y, 10.0 * PAGE_DOWN);
+    hover(window, -1.0, -1.0);
+    if down == many {
+        return Err(format!("sounds-folders-strip-down.png: the wheel at {x}, {y} moved nothing; is the strip there?"));
+    }
+    shots.push(("sounds-folders-strip-many.png".into(), many));
+    shots.push(("sounds-folders-strip-down.png".into(), down));
+    toggle_old();
     for f in more {
         data.invoke_tree_toggled(format!(r"D:\Samples\{f}").into());
     }
@@ -2721,9 +2756,11 @@ fn sounds_shots(
     shots.push(("sounds-seam-dragging.png".into(), capture(window)));
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: dragged_to, button });
     let dragged = data.get_panel_width();
-    if (dragged - wide - 100.0).abs() > 1.0 {
+    // Never dragged, the card is given 0 and shown at its usual width in this window.
+    let usual = app.global::<mo_ui::Widths>().invoke_usual("sounds.card".into());
+    if (dragged - usual - 100.0).abs() > 1.0 {
         return Err(format!(
-            "sounds seam: dragging it 100 px left made the card {dragged} wide, from {wide}; has the seam moved from {CARD_SEAM:?}?"
+            "sounds seam: dragging it 100 px left made the card {dragged} wide, from {usual}; has the seam moved from {CARD_SEAM:?}?"
         ));
     }
     app.global::<mo_ui::Widths>().invoke_reset("sounds.card".into());
@@ -4411,6 +4448,8 @@ const REMOVE_OLDER_BUTTON: (f32, [f32; 2]) = (1150.0, [776.0, 794.0]);
 const PLUGIN_CHIP: (f32, f32) = (288.0, 152.0);
 /// A page's turn of the wheel: `-PAGE_DOWN` turns a page down, `PAGE_DOWN` up ([`scroll`]).
 const PAGE_DOWN: f32 = 300.0;
+/// On the chips of the folder strip under the Sounds list, with the tree open.
+const STRIP_WHEEL: (f32, f32) = (1100.0, 830.0);
 
 /// Where the wheel turns the song panel down in the narrowest window, and by how much: on its status line, which
 /// doesn't scroll on its own, as the lists and the arrangement in it do.

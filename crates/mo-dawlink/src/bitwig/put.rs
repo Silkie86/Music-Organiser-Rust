@@ -249,16 +249,36 @@ fn left_in_launcher(why: &str, track: &str) -> Error {
 
 /// How the words for a put cut off by another project coming to the front begin ([`was_cut_off_by_another_project`]).
 const ABANDONED: &str = "Another project came to the front in Bitwig while the part was being recorded";
-/// Everything the record job sets in the song, for those words.
-const ABANDONED_SET: &str = "the master is muted, arranger record is on, the part's track is armed and your other \
-                             tracks aren't, and the play start, the metronome, the loop, punch in and out, overdub, \
-                             automation write and its mode (touch), the pre-roll (none) and the launch quantize (1 \
-                             bar) are set for it";
+/// How they begin when that happened only once the whole part had played ([`went_in_before_cut_off`]): only setting
+/// Bitwig back was cut off. Begins as [`ABANDONED`] does.
+const ABANDONED_AFTER: &str =
+    "Another project came to the front in Bitwig while the part was being recorded, just after it had played";
+/// What the words say when Bitwig is closed before the song is in front again: the link forgets what it kept then
+/// (extensions/bitwig-java/README.md, 3.32), so nothing puts it back (the 26 Nov review's LT-2).
+const ABANDONED_UNLESS_CLOSED: &str = "If Bitwig is closed, or DAWmate is turned off or updated in it, before your song \
+                                       is in front again, they stay as they are: set them back by hand then.";
+
+/// Everything the record job sets in the song, for those words: arranger record too while it's on (it goes off as
+/// soon as the part's take ends, before the rest is put back).
+fn abandoned_set(record_on: bool) -> String {
+    format!(
+        "the master is muted, {}the part's track is armed and your other tracks aren't, and the play start, the \
+         metronome, the loop, punch in and out, overdub, automation write and its mode (touch), the pre-roll (none) \
+         and the launch quantize (1 bar) are set for it",
+        if record_on { "arranger record is on, " } else { "" }
+    )
+}
 
 /// Whether [`Bitwig::put_in_song`] failed because another project came to the front while it recorded: the song is
 /// left set up for recording then, so the words are worth keeping on screen until they're read.
 pub fn was_cut_off_by_another_project(error: &Error) -> bool {
     matches!(error, Error::Bitwig(words) if words.starts_with(ABANDONED))
+}
+
+/// Whether that happened only after the whole part had played into the arranger: the part is in, and only setting
+/// Bitwig back was cut off (the 26 Nov review's LT-1).
+pub fn went_in_before_cut_off(error: &Error) -> bool {
+    matches!(error, Error::Bitwig(words) if words.starts_with(ABANDONED_AFTER))
 }
 
 /// What the record job's answer comes to: how much of the part the link saw go in, or why it didn't, in words.
@@ -287,19 +307,32 @@ fn went(recorded: &Recorded) -> Result<Seen, String> {
              out (it can take a few presses).",
             if why.is_empty() { String::new() } else { format!(" ({why})") }
         )),
-        "abandoned" if recorded.puts_back_later => Err(format!(
-            "{ABANDONED}, so the link stopped and touched nothing more. Your song is still set up for the \
-             recording: {ABANDONED_SET}. The link puts these back by itself once your song is in front again in \
-             Bitwig, and stops Bitwig if it plays; give it a second or two before you press Play or save. Some of \
-             the part may be in the arranger: undo in Bitwig takes it out."
-        )),
+        "abandoned" if recorded.puts_back_later => {
+            // The take had ended (its end turns arranger record off first): only setting Bitwig back was cut off, and
+            // some of that may have been done.
+            let ended = !recorded.ended.is_empty();
+            let whole = matches!(recorded.ended.as_str(), "done" | "cut") && recorded.clip_played;
+            let (opening, still, part) = if whole {
+                (ABANDONED_AFTER, "may still be", "The whole part went in")
+            } else {
+                (ABANDONED, if ended { "may still be" } else { "is still" }, "Some of the part may be in the arranger")
+            };
+            Err(format!(
+                "{opening}, so the link stopped and touched nothing more. Your song {still} set up for the \
+                 recording: {}. The link puts these back by itself once your song is in front again in Bitwig, and \
+                 stops Bitwig if it plays; give it a second or two before you press Play or save. \
+                 {ABANDONED_UNLESS_CLOSED} {part}: undo in Bitwig takes it out (it can take a few presses).",
+                abandoned_set(!ended)
+            ))
+        }
         // An extension before 3.32 dropped what it had kept.
         "abandoned" => Err(format!(
             "{ABANDONED}, so the link stopped and touched nothing more. Your song is still set up for the \
-             recording, and nothing puts it back: {ABANDONED_SET}. Back in your song, turn record off before you \
+             recording, and nothing puts it back: {}. Back in your song, turn record off before you \
              press Play, set these as you had them, and press Return to arrangement on the part's track. Some of \
              the part may be in the arranger: undo in Bitwig takes it out. (The newest extension, from Settings > \
-             DAWs, puts these back by itself.)"
+             DAWs, puts these back by itself.)",
+            abandoned_set(true)
         )),
         "failed" if why.is_empty() => Err("The recording failed in Bitwig.".to_owned()),
         "failed" => Err(format!("The recording failed in Bitwig: {why}.")),
@@ -351,6 +384,38 @@ mod tests {
         failed.why = "The track bank wasn't made.".into();
         assert_eq!(went(&failed).unwrap_err(), "The recording failed in Bitwig: The track bank wasn't made.");
         assert!(went(&job("something new", "", false)).unwrap_err().contains("wasn't what the app expected"));
+    }
+
+    #[test]
+    fn a_put_cut_off_after_the_part_played_says_the_part_is_in() {
+        let mut after = job("abandoned", "done", true);
+        after.puts_back_later = true;
+        let said = went(&after).unwrap_err();
+        assert!(said.starts_with(ABANDONED_AFTER) && ABANDONED_AFTER.starts_with(ABANDONED), "{said}");
+        assert!(went_in_before_cut_off(&Error::Bitwig(said.clone())));
+        assert!(was_cut_off_by_another_project(&Error::Bitwig(said.clone())), "so its card stays until it's read");
+        // Its end turned record off: never said to be on, nor that only some of the part went in (LT-1).
+        assert!(!said.contains("arranger record is on"), "{said}");
+        assert!(said.contains("Your song may still be set up"), "{said}");
+        assert!(said.contains("The whole part went in: undo in Bitwig takes it out (it can take a few presses)."));
+        // What the link kept is forgotten if Bitwig closes first (LT-2).
+        assert!(said.contains("If Bitwig is closed"), "{said}");
+        // Cut off as the take began: record is on, and some of the part may be in.
+        let mut during = job("abandoned", "", false);
+        during.puts_back_later = true;
+        let said = went(&during).unwrap_err();
+        assert!(!went_in_before_cut_off(&Error::Bitwig(said.clone())));
+        assert!(
+            said.contains("Your song is still set up for the recording: the master is muted, arranger record is on")
+        );
+        assert!(
+            said.contains("Some of the part may be in the arranger: undo in Bitwig takes it out (it can take a few")
+        );
+        // Cut off after a take that stopped early: record is off, and some of it may be in.
+        let mut short = job("abandoned", "stoppedEarly", true);
+        short.puts_back_later = true;
+        let said = went(&short).unwrap_err();
+        assert!(!said.contains("arranger record is on") && said.contains("Some of the part may be in"), "{said}");
     }
 
     #[test]

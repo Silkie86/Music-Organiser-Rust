@@ -95,14 +95,16 @@ fn is_loop(s: &Sound) -> bool {
 }
 
 /// Fills every unlocked pad. Returns the seed used, so the kit can be rolled again the same. `sounds` is the whole
-/// library (hidden copies and silent sounds are left out here), `usage` from [`crate::usage::usage`], `index` from
-/// [`SoundIndex::build`].
+/// library (hidden copies and silent sounds are left out here, and so are those `left_out`, by their place in
+/// `sounds`: the folders you hid on the folder tree, whose sounds never show), `usage` from [`crate::usage::usage`],
+/// `index` from [`SoundIndex::build`].
 pub fn roll(
     sounds: &[Sound],
     usage: &HashMap<i64, Usage>,
     index: &SoundIndex,
     slots: &mut [KitSlot],
     o: &Options,
+    left_out: impl Fn(usize) -> bool,
 ) -> i32 {
     let seed = if o.seed != 0 { o.seed } else { crate::rediscover::fresh_seed() };
     let mut rng = DotnetRandom::new(seed);
@@ -111,13 +113,15 @@ pub fn roll(
     // A locked pad keeps its sound whatever has happened to it since (hidden, or gone in a rescan), as in C#.
     let locked_ids: Vec<i64> = slots.iter().filter(|s| s.kept()).filter_map(|s| s.sound).collect();
     let locked_sound = |id: i64| sounds.iter().find(|s| s.id == id);
+    // The sounds a pad may get: not in a folder you hid (a locked pad keeps its own, above).
+    let shown: Vec<&Sound> = sounds.iter().enumerate().filter(|&(i, _)| !left_out(i)).map(|(_, s)| s).collect();
 
     // The pack everything should come from, when asked.
     let mut the_pack: Option<String> = None;
     if o.same_pack {
         the_pack = locked_ids.iter().find_map(|id| locked_sound(*id)).map(pack);
         if the_pack.is_none() {
-            let visible: Vec<&Sound> = sounds.iter().filter(|s| !s.hidden && !s.is_silent()).collect();
+            let visible: Vec<&Sound> = shown.iter().copied().filter(|s| !s.hidden && !s.is_silent()).collect();
             the_pack = pick_pack(&visible, slots, &mut rng);
         }
     }
@@ -126,7 +130,7 @@ pub fn roll(
     // CLAP's index once for every pad together, not once for each.
     let likenesses: HashMap<i64, f64> = match (vibe, clap) {
         (Some(vibe), Some(clap)) => {
-            let ids: Vec<i64> = sounds
+            let ids: Vec<i64> = shown
                 .iter()
                 .filter(|s| {
                     !s.hidden
@@ -147,8 +151,9 @@ pub fn roll(
         if slot.kept() {
             continue;
         }
-        let candidates: Vec<(&Sound, Option<String>)> = sounds
+        let candidates: Vec<(&Sound, Option<String>)> = shown
             .iter()
+            .copied()
             .filter(|s| {
                 !s.hidden
                     && s.analysis.is_some()
@@ -492,6 +497,7 @@ mod tests {
             &SoundIndex::default(),
             &mut kit,
             &Options { seed: 4, ..Options::default() },
+            |_| false,
         );
         assert_eq!(seed, 4);
         let by_id: HashMap<i64, &Sound> = sounds.iter().map(|s| (s.id, s)).collect();
@@ -508,7 +514,14 @@ mod tests {
         assert!(kit[0].sound.is_some() && kit[8].sound.is_some());
         // The same seed rolls the same kit.
         let mut again = default_drum_kit();
-        roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut again, &Options { seed: 4, ..Options::default() });
+        roll(
+            &sounds,
+            &HashMap::new(),
+            &SoundIndex::default(),
+            &mut again,
+            &Options { seed: 4, ..Options::default() },
+            |_| false,
+        );
         assert_eq!(kit, again);
     }
 
@@ -526,12 +539,19 @@ mod tests {
         for seed in 1..=20 {
             let mut kit = default_drum_kit();
             let o = Options { seed, randomness: 1.0, ..Options::default() };
-            roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o);
+            roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o, |_| false);
             assert_eq!(kit[0].sound, Some(2), "seed {seed}");
         }
         kicks(&mut sounds, 0);
         let mut kit = default_drum_kit();
-        roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &Options { seed: 3, ..Options::default() });
+        roll(
+            &sounds,
+            &HashMap::new(),
+            &SoundIndex::default(),
+            &mut kit,
+            &Options { seed: 3, ..Options::default() },
+            |_| false,
+        );
         assert_eq!(kit[0].sound, None);
     }
 
@@ -543,7 +563,7 @@ mod tests {
         kit[0].sound = Some(16);
         kit[0].locked = true;
         let o = Options { same_pack: true, seed: 9, randomness: 1.0, ..Options::default() };
-        roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o);
+        roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o, |_| false);
         assert_eq!(kit[0].sound, Some(16));
         let by_id: HashMap<i64, &Sound> = sounds.iter().map(|s| (s.id, s)).collect();
         for id in kit.iter().filter_map(|s| s.sound) {
@@ -552,11 +572,33 @@ mod tests {
         // A locked pad keeps its sound even once it's hidden.
         let mut sounds = sounds.clone();
         sounds[15].hidden = true;
-        roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o);
+        roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o, |_| false);
         assert_eq!(kit[0].sound, Some(16));
         for id in kit.iter().filter_map(|s| s.sound) {
             assert_eq!(pack(by_id[&id]), sep("/s/Pack B"), "{id}");
         }
+    }
+
+    /// A folder hidden on the folder tree gives no pad a sound (the whole-app review of 26 Nov, ST-6), but a pad
+    /// locked on one of its sounds keeps it.
+    #[test]
+    fn a_hidden_folders_sounds_fill_no_pad() {
+        let sounds = library();
+        let in_pack_a = |i: usize| sounds[i].path.contains("Pack A");
+        for seed in 1..=10 {
+            let mut kit = default_drum_kit();
+            let o = Options { seed, randomness: 1.0, ..Options::default() };
+            roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o, in_pack_a);
+            let by_id: HashMap<i64, &Sound> = sounds.iter().map(|s| (s.id, s)).collect();
+            assert!(kit.iter().filter_map(|s| s.sound).all(|id| by_id[&id].path.contains("Pack B")), "seed {seed}");
+            assert!(kit[0].sound.is_some());
+        }
+        let mut kit = default_drum_kit();
+        kit[0].sound = Some(1);
+        kit[0].locked = true;
+        let o = Options { same_pack: true, seed: 2, ..Options::default() };
+        roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o, in_pack_a);
+        assert_eq!(kit[0].sound, Some(1));
     }
 
     #[test]
@@ -574,6 +616,7 @@ mod tests {
                 &SoundIndex::default(),
                 &mut kit,
                 &Options { seed, randomness: 0.0, ..Options::default() },
+                |_| false,
             );
             assert_eq!(kit[0].sound, Some(2));
         }
@@ -590,7 +633,7 @@ mod tests {
         for seed in 1..20 {
             let mut kit = default_drum_kit();
             let o = Options { seed, randomness: 0.0, key_tonic: Some(0), ..Options::default() };
-            roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o);
+            roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o, |_| false);
             assert_eq!(kit[8].sound, Some(c));
         }
     }

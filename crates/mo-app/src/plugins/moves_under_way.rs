@@ -235,8 +235,8 @@ pub fn keep_swapped(
 /// `moved`, as `half_copy::half_copies` looks), each the copy of a noted move. A note whose move left nothing in the
 /// folder it went to goes, unless that move is `running` now (the folders being moved, in this run), was noted while
 /// this looked, swapped its folder for its link but isn't kept yet ([`keep_swapped`] couldn't keep it: the whole-app
-/// review of 19 Nov, PM-4), or that folder couldn't be read (its drive not plugged in, no rights: review P-3). Reads
-/// and measures them: call it away from the window's thread.
+/// review of 19 Nov, PM-4; told by the link and its old copy alone, PG-1 of 26 Nov), or that folder couldn't be read
+/// (its drive not plugged in, no rights: review P-3). Reads and measures them: call it away from the window's thread.
 pub fn cut_off(
     file: &Path,
     moved: &[MovedFolder],
@@ -254,9 +254,15 @@ pub fn cut_off(
     // Looked at before the lock: a place that can't be reached may take a while to say so.
     let unreadable: Vec<String> =
         noted.iter().filter(|m| !looked_in(&m.destination)).map(|m| mo_space::key(&m.destination)).collect();
-    // Swapped for its link, but not kept yet: the look that keeps it needs its note.
-    let swapped: Vec<String> =
-        noted.iter().filter(|m| unkept_record(m, moved).is_some()).map(|m| mo_space::key(&m.from)).collect();
+    // Swapped for its link, but not kept yet: the look that keeps it needs its note. Only by what's there (a link,
+    // its old copy beside it), not where the link leads: that check can fail on a link that works (Solomon's log of
+    // 25 Nov), and then the note was dropped, the move recorded nowhere (the whole-app review of 26 Nov, PG-1).
+    // [`keep_swapped`] asks it, and tries again at each look until it can keep the move.
+    let swapped: Vec<String> = noted
+        .iter()
+        .filter(|m| !moved.iter().any(|k| same(&k.from, &m.from)) && folder_move::looks_swapped(&m.from))
+        .map(|m| mo_space::key(&m.from))
+        .collect();
     let now = now();
     let _one = CHANGING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut moves = under_way(file);
@@ -654,6 +660,45 @@ mod tests {
         assert_eq!(kept.len(), 1, "{kept:?}");
         assert!(!pads_copy.join(half_copy::MARKER).exists(), "the marker went");
         assert!(pads_copy.join("a.wav").exists(), "the copy stays: it's in use");
+        assert!(under_way(&file).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The whole-app review of 26 Nov, PG-1: a move cut off after its swap keeps its note while its folder is a link
+    /// with its old copy beside it, even while the check of where the link leads fails (as it did on Solomon's PC on
+    /// 25 Nov): the note is then the move's only record. Nothing is kept until that check works; then it is, and the
+    /// note goes.
+    #[test]
+    fn a_swapped_moves_note_stays_while_its_link_cant_be_checked() {
+        let d = std::env::temp_dir().join(format!("mo-app-moves-unchecked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let file = d.join(FILE_NAME);
+        let (from, copy) = swapped_in(&d, &file, "Kits");
+        // The link leads somewhere the check doesn't take for its copy.
+        let elsewhere = d.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::remove_file(&from).or_else(|_| std::fs::remove_dir(&from)).unwrap();
+        link(&from, &elsewhere);
+        assert!(unkept_record(&under_way(&file)[0], &[]).is_none(), "the check of where it leads fails");
+        let stop = AtomicBool::new(false);
+        for _ in 0..2 {
+            cut_off(&file, &[], &[], &mo_space::folder_move::SystemDrives, &stop).unwrap();
+            assert_eq!(under_way(&file).len(), 1, "its note stays");
+        }
+        let keep = |_: &MovedFolder| -> Result<(), String> { Ok(()) };
+        let mut moved = Vec::new();
+        assert!(keep_swapped(&file, &mut moved, &[], &keep).is_empty(), "not kept while it can't be checked");
+        assert_eq!(under_way(&file).len(), 1);
+        // The check works again: kept, and the note goes.
+        std::fs::remove_file(&from).or_else(|_| std::fs::remove_dir(&from)).unwrap();
+        link(&from, &copy);
+        assert_eq!(keep_swapped(&file, &mut moved, &[], &keep).len(), 1);
+        assert!(under_way(&file).is_empty());
+        // A note whose folder isn't a link any more (put back by hand) goes at the next look, as before.
+        let (pads, _) = swapped_in(&d, &file, "Pads");
+        std::fs::remove_file(&pads).or_else(|_| std::fs::remove_dir(&pads)).unwrap();
+        std::fs::create_dir_all(&pads).unwrap();
+        cut_off(&file, &moved, &[], &mo_space::folder_move::SystemDrives, &stop).unwrap();
         assert!(under_way(&file).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }

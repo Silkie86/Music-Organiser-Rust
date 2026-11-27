@@ -198,6 +198,12 @@ impl Recording {
 /// Saves a take in `folder` (made if it isn't there) as a 24-bit WAV named `name` (".wav" added; a number added when
 /// the name is taken, so nothing is ever written over), with the silence cut off both ends when `trim` gives a level
 /// (see [`crate::trim::level_of_db`]). Fails for a take that's silent all through or empty.
+///
+/// A name is claimed by making its part file (`<name>.wav.part`) new: one that's there already is another save's
+/// (two copies of the plugin, in one DAW or two, saving takes named for the same second), or one a cut-off save left,
+/// so the next name is tried. Before, both saves took the same name and wrote into one part file, so one take was lost
+/// and the other spoilt (the whole-app review of 26 Nov, XD-1). The part becomes the take only while nothing else has
+/// taken its name; else it's left, and `mend_parts` saves it later.
 pub fn save(mut take: AudioData, trim: Option<f32>, folder: &Path, name: &str) -> Result<PathBuf, AudioError> {
     if let Some(level) = trim {
         if crate::trim::sound_span(&take, level).is_none() {
@@ -213,13 +219,36 @@ pub fn save(mut take: AudioData, trim: Option<f32>, folder: &Path, name: &str) -
         name.chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
     let stem = stem.trim().trim_end_matches('.');
     let stem = if stem.is_empty() { "Recording" } else { stem };
-    let mut path = folder.join(format!("{stem}.wav"));
-    let mut n = 2;
-    while path.exists() {
-        path = folder.join(format!("{stem} ({n}).wav"));
+    let mut n = 1;
+    let (path, part, file) = loop {
+        let path = folder.join(if n == 1 { format!("{stem}.wav") } else { format!("{stem} ({n}).wav") });
         n += 1;
+        if std::fs::symlink_metadata(&path).is_ok() {
+            continue;
+        }
+        let part = path.with_extension("wav.part");
+        match std::fs::File::create_new(&part) {
+            Ok(file) => break (path, part, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    };
+    if let Err(e) = crate::write::write_wav_into(file, &take.channels, take.sample_rate, 24) {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
     }
-    crate::write_wav(&path, &take.channels, take.sample_rate, 24)?;
+    // Only saves claim these names, by their part files, so a take of that name now is a file of someone else's:
+    // never written over. The part is left whole, for `mend_parts`.
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Err(AudioError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} was made meanwhile, so the take is kept in {}", path.display(), part.display()),
+        )));
+    }
+    if let Err(e) = std::fs::rename(&part, &path) {
+        let _ = std::fs::remove_file(&part);
+        return Err(e.into());
+    }
     Ok(path)
 }
 

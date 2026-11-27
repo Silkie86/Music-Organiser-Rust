@@ -509,12 +509,14 @@ export global Widths {
     in-out property <length> plugin-filters: 196px;
     in-out property <length> plugin-folders: 280px;
     in-out property <length> plugin-takes: 210px;
-    // How wide a page's list is beside its side card (`part`, kept `kept` wide), sharing `room` with it. At its usual
-    // width the card takes what the list leaves at its widest (`max-list`, so a line stays readable in a wide window);
-    // once you've dragged it, the card is as wide as you made it and the list has the rest, never under `min-list`.
+    // How wide a page's list is beside its side card (`part`, kept `kept` wide), sharing `room` with it. Until you've
+    // dragged the card (`kept` is 0 then), it takes what the list leaves at its widest (`max-list`, so a line stays
+    // readable in a wide window), and its usual width in a narrower one; once you have, the card is as wide as you
+    // made it, its usual width too, and the list has the rest, never under `min-list` (the whole-app review of 26
+    // Nov, WI-2: a card let go at its usual width was laid out its usual way, much wider, after a restart).
     public pure function list-width(part: string, kept: length, room: length, min-list: length, max-list: length) -> length {
-        if (kept == usual(part)) {
-            return min(max-list, max(min-list, room - kept));
+        if (kept == 0px) {
+            return min(max-list, max(min-list, room - usual(part)));
         }
         return max(min-list, room - kept);
     }

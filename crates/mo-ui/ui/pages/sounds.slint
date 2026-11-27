@@ -506,7 +506,8 @@ export global SoundsData {
     // The same for its tile, whose waveform is the sound's first minute only (all the library keeps of it): a longer
     // sound's tile has played through at a minute in.
     in property <float> tile-played;
-    in-out property <length> panel-width: 400px;
+    // 0 until you drag the card: the page lays it out its usual way then (`Widths.list-width`).
+    in-out property <length> panel-width: 0px;
     callback play();
     callback seek(float);
     // A right click over the waveform of the sound playing, on its tile or on its card: it stops.
