@@ -73,6 +73,11 @@ const OTHER_NAMED: &[(&str, &str, List)] = &[
     ("bitwig/curve.rs", "CATEGORY", BwField),
     ("bitwig/curve.rs", "TAGS", BwField),
     ("bitwig/encode.rs", "DEVICE_TYPE", BwField),
+    // Events the FL writer puts its own after or before (it doesn't read them).
+    ("fl/write.rs", "AFTER_PATTERNS", FlEvent),
+    ("fl/write.rs", "BEFORE_PROJECT_TIME", FlEvent),
+    ("fl/write.rs", "AFTER_SAMPLE_PATH", FlEvent),
+    ("fl/write.rs", "BEFORE_CHANNEL_NAME", FlEvent),
 ];
 
 /// Number constants in the reader files that aren't ids of the file format: (file, constant).
