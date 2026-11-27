@@ -1,4 +1,4 @@
-//! The help on the key sheet (F1, ?, or Help on the rail): for each place, one line on what it's for and a few tips,
+//! The help on the key sheet (F1, ?, or the ? beside Settings on the rail): for each place, one line on what it's for and a few tips,
 //! above its keys. Short on purpose (Solomon, 24 Nov 2026: nothing clunky or over-explained): the pages explain
 //! themselves through icons and tooltips, and this is only the "where do I start" for someone new, such as a beta
 //! tester. Keys are never written here: the key sheet lists them under the tips, from the shortcut list (rule 15), so
@@ -109,7 +109,7 @@ mod tests {
             for line in std::iter::once(help.what).chain(help.tips.iter().copied()) {
                 assert!(line.chars().count() <= MAX_LINE, "{place:?}: too long: {line}");
                 assert!(line.ends_with('.'), "{place:?}: a whole sentence: {line}");
-                // Plain ASCII apart from the quotes, so it reads the same in every font the app may fall back to.
+                // Plain ASCII only, so it reads the same in every font the app may fall back to.
                 assert!(line.is_ascii(), "{place:?}: plain characters only: {line}");
             }
         }

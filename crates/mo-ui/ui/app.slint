@@ -136,7 +136,7 @@ export component AppWindow inherits Window {
     // The page's help on the key sheet (mo_app::help).
     in property <string> help-what;
     in property <[string]> help-tips;
-    // The help key, beside Help on the rail.
+    // The help key, on the Help sign beside Settings.
     in property <string> help-key;
     in property <[KeyRow]> page-key-rows;
     in property <[KeyRow]> key-rows;
@@ -367,22 +367,33 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle { }
-                    // Help: the key sheet, for whoever doesn't know F1 or ? yet (a beta tester on their first day).
-                    RailItem {
-                        tint: Theme.muted;
-                        text: "Help";
-                        icon: Icons.help;
-                        key: root.help-key;
-                        lit-bar: false;
-                        clicked => { root.sheet-open = !root.sheet-open; }
-                    }
-                    RailItem {
-                        tint: Theme.place(root.settings-place);
-                        text: root.places[root.settings-place].name;
-                        icon: root.places[root.settings-place].icon;
-                        key: root.places[root.settings-place].key;
-                        selected: root.place == root.settings-place;
-                        clicked => { root.place-chosen(root.settings-place); }
+                    // Settings, and beside it Help: the key sheet, for whoever doesn't know F1 or ? yet (a beta tester
+                    // on their first day). A sign beside Settings, not a line of its own, so the rail grows no taller.
+                    HorizontalLayout {
+                        spacing: Space.xs;
+                        RailItem {
+                            horizontal-stretch: 1;
+                            tint: Theme.place(root.settings-place);
+                            text: root.places[root.settings-place].name;
+                            icon: root.places[root.settings-place].icon;
+                            key: root.places[root.settings-place].key;
+                            selected: root.place == root.settings-place;
+                            clicked => { root.place-chosen(root.settings-place); }
+                        }
+                        VerticalLayout {
+                            // As wide as the sign, the rest to Settings.
+                            horizontal-stretch: 0;
+                            alignment: center;
+                            StudioButton {
+                                icon: Icons.help;
+                                quiet: true;
+                                text: "Help";
+                                tip: "This page's help and keys";
+                                key: root.help-key;
+                                // Opens only: while the sheet is open its backdrop takes the clicks.
+                                clicked => { root.sheet-open = true; }
+                            }
+                        }
                     }
                 }
                 // The light on the picked place, in its colour. One light for the whole list, so it slides from the
