@@ -41,7 +41,13 @@ pub fn to_tempo(audio: &AudioData, from: f64, to: f64) -> Result<AudioData, Stri
     stretch(audio, from, to, true)
 }
 
-/// [`to_tempo`], with the hits put back or not (`hits`: only the tests' measure turns it off).
+/// [`to_tempo`] without the hits put back: the `timestretch` library alone. Only for comparing stretchers (the
+/// ear test, `tools/stretchear`).
+pub fn to_tempo_plain(audio: &AudioData, from: f64, to: f64) -> Result<AudioData, String> {
+    stretch(audio, from, to, false)
+}
+
+/// [`to_tempo`], with the hits put back or not.
 fn stretch(audio: &AudioData, from: f64, to: f64, hits: bool) -> Result<AudioData, String> {
     let from = nearest(from, to).ok_or("That isn't a tempo a loop can be played at")?;
     let channels = audio.channels.len().clamp(1, 2);
