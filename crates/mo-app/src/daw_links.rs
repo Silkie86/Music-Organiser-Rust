@@ -19,6 +19,10 @@
 //!   (the same plugin: a DAW would list it twice) keeps the app from putting it in, and makes it forget that a version
 //!   put its own in (`tools/dev/install-test-plugin.ps1` takes that one out), so the app's own goes back in, with
 //!   Windows' Yes, once the test plugin is gone.
+//! - Settings › DAWs has a row for the plugin too, with Install (or Update) and Take out, each through Windows' Yes
+//!   (the 26 Nov review's DK-2). Install keeps that this version put it in, as the look does; Take out keeps that you
+//!   took it out ([`PLUGIN_TAKEN_OUT_KEY`]), so the look leaves it out, whatever version comes, until Install
+//!   ([`plugin_kept_after`]).
 //! - None of this runs when the settings can't be kept (what it did would be forgotten and done again), or after
 //!   Install or Take out on Settings › DAWs in this run (that's your choice). Take out there also counts as the first
 //!   look, so a link taken out before the first look isn't put back by it.
@@ -41,6 +45,10 @@ pub const FIRST_LOOK_KEY: &str = "daw_links_first_look";
 pub const FL_BY_KEY: &str = "daw_links_fl_by";
 pub const BITWIG_BY_KEY: &str = "daw_links_bitwig_by";
 pub const PLUGIN_BY_KEY: &str = "daw_links_plugin_by";
+
+/// The app's own setting kept while the CLAP plugin is out because you took it out on Settings › DAWs: the look
+/// never puts it in or updates it then. Install on Settings › DAWs blanks it (blank counts as none).
+pub const PLUGIN_TAKEN_OUT_KEY: &str = "daw_links_plugin_taken_out";
 
 /// The app's own setting with the version whose CLAP plugin you said no to putting in (Windows asks for each version).
 pub const PLUGIN_DECLINED_KEY: &str = "daw_links_plugin_declined";
@@ -96,12 +104,79 @@ pub fn step(state: ScriptState, first_look: bool, daw_there: bool, newer: bool) 
 }
 
 /// What to do with the CLAP plugin: put in when it isn't there and no version has put it in yet (`put_in_before`:
-/// [`PLUGIN_BY_KEY`] is kept), so one you took out stays out; updated when this app is newer than the one that wrote it.
-pub fn plugin_step(state: ScriptState, put_in_before: bool, newer: bool) -> Step {
+/// [`PLUGIN_BY_KEY`] is kept), so one taken out by hand stays out; updated when this app is newer than the one that
+/// wrote it. Left alone while you've taken it out on Settings › DAWs (`taken_out`: [`PLUGIN_TAKEN_OUT_KEY`] is kept).
+pub fn plugin_step(state: ScriptState, put_in_before: bool, newer: bool, taken_out: bool) -> Step {
     match state {
+        _ if taken_out => Step::Leave,
         ScriptState::Outdated if newer => Step::Update,
         ScriptState::NotInstalled if !put_in_before => Step::PutIn,
         _ => Step::Leave,
+    }
+}
+
+/// A choice on Settings › DAWs' plugin row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PluginChoice {
+    /// Install or Update: the app's own plugin goes into `Common Files\CLAP`.
+    Install,
+    /// Take out: the app's own plugin comes out of it.
+    TakeOut,
+}
+
+/// What a choice on the plugin row did, once Windows' question was answered (or not asked).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginDone {
+    /// It went in (it's the app's own now), or came out (nothing of the app's is left there).
+    Went,
+    /// You said no to Windows' question: nothing changed.
+    SaidNo,
+    /// A program has the plugin loaded (a DAW, or its plug-in host): Windows was never asked, as the file can't change.
+    InUse,
+    /// It didn't happen, with why.
+    Failed(String),
+}
+
+/// The app's own settings to keep after a choice on the plugin row (`version`: this app's), by their keys, a blank
+/// value taking one away. Install that went keeps that this version put it in (as the look does, so the look only
+/// updates it from a newer version) and that it isn't taken out any more; Take out that went keeps that you took it
+/// out, so the look leaves it out until Install. A choice that didn't happen keeps nothing: things stay as they were.
+pub fn plugin_kept_after(choice: PluginChoice, done: &PluginDone, version: &str) -> Vec<(&'static str, String)> {
+    if *done != PluginDone::Went {
+        return Vec::new();
+    }
+    match choice {
+        PluginChoice::Install => vec![(PLUGIN_BY_KEY, version.to_owned()), (PLUGIN_TAKEN_OUT_KEY, String::new())],
+        PluginChoice::TakeOut => vec![(PLUGIN_TAKEN_OUT_KEY, version.to_owned())],
+    }
+}
+
+/// What a choice on the plugin row did, in words, for under the DAWs tab's cards. `folder`: where the plugin goes.
+pub fn plugin_note(choice: PluginChoice, done: &PluginDone, folder: &std::path::Path) -> String {
+    let (press, verb) = match choice {
+        PluginChoice::Install => ("Install", "put the plugin in"),
+        PluginChoice::TakeOut => ("Take out", "take the plugin out"),
+    };
+    match (choice, done) {
+        (PluginChoice::Install, PluginDone::Went) => format!(
+            "Put the DAWmate plugin in {}. Add it to a track in your DAW (in Bitwig, rescan the plug-ins in Settings \
+             \u{203a} Locations if it isn't listed; a DAW that was open loads the new one when it starts again).",
+            folder.display()
+        ),
+        (PluginChoice::TakeOut, PluginDone::Went) => format!(
+            "Took the DAWmate plugin out of {}. It stays out (the app doesn't put it back by itself) until you press \
+             Install.",
+            folder.display()
+        ),
+        (_, PluginDone::SaidNo) => "You said no to Windows' question, so nothing changed.".to_owned(),
+        (_, PluginDone::InUse) => format!(
+            "A program has the DAWmate plugin loaded (a DAW, or its plug-in host), so Windows can't let anyone change \
+             it: close your DAWs, then press {press} again."
+        ),
+        (_, PluginDone::Failed(why)) => {
+            let why = why.trim_end_matches('.');
+            format!("Couldn't {verb}: {why}. Close your DAWs, then press {press} again.")
+        }
     }
 }
 
@@ -272,13 +347,62 @@ mod tests {
 
     #[test]
     fn the_plugin_goes_in_until_a_version_has_put_it_in() {
-        assert_eq!(plugin_step(ScriptState::NotInstalled, false, false), Step::PutIn);
+        assert_eq!(plugin_step(ScriptState::NotInstalled, false, false, false), Step::PutIn);
         // Put in once, then taken out: it stays out.
-        assert_eq!(plugin_step(ScriptState::NotInstalled, true, true), Step::Leave);
-        assert_eq!(plugin_step(ScriptState::Outdated, true, true), Step::Update);
-        assert_eq!(plugin_step(ScriptState::Outdated, true, false), Step::Leave);
-        assert_eq!(plugin_step(ScriptState::Installed, false, true), Step::Leave);
+        assert_eq!(plugin_step(ScriptState::NotInstalled, true, true, false), Step::Leave);
+        assert_eq!(plugin_step(ScriptState::Outdated, true, true, false), Step::Update);
+        assert_eq!(plugin_step(ScriptState::Outdated, true, false, false), Step::Leave);
+        assert_eq!(plugin_step(ScriptState::Installed, false, true, false), Step::Leave);
         assert_eq!(failed_mark("1.0.0", "2026-11-25"), "1.0.0 2026-11-25");
+    }
+
+    /// DK-2: Take out on Settings › DAWs keeps the plugin out, whatever the look would have done, and from any version
+    /// of the app, until Install.
+    #[test]
+    fn a_plugin_taken_out_on_settings_stays_out_until_install() {
+        for state in [ScriptState::NotInstalled, ScriptState::Outdated, ScriptState::Installed] {
+            for (before, newer) in [(false, false), (false, true), (true, false), (true, true)] {
+                assert_eq!(plugin_step(state, before, newer, true), Step::Leave, "{state:?} {before} {newer}");
+            }
+        }
+        let kept = plugin_kept_after(PluginChoice::TakeOut, &PluginDone::Went, "0.9.0-beta.3");
+        assert_eq!(kept, vec![(PLUGIN_TAKEN_OUT_KEY, "0.9.0-beta.3".to_owned())]);
+        // Install afterwards: kept as put in by this version, and no longer taken out (blank counts as none).
+        let kept = plugin_kept_after(PluginChoice::Install, &PluginDone::Went, "0.9.0-beta.3");
+        assert_eq!(kept, vec![(PLUGIN_BY_KEY, "0.9.0-beta.3".to_owned()), (PLUGIN_TAKEN_OUT_KEY, String::new())]);
+        // Then the look goes by the version again: this one put it in, so only a newer one updates it.
+        let newer = newer_than_writer("0.9.0-beta.3", Some("0.9.0-beta.3"));
+        assert_eq!(plugin_step(ScriptState::Outdated, true, newer, false), Step::Leave);
+        assert_eq!(
+            plugin_step(ScriptState::Outdated, true, newer_than_writer("0.9.0", Some("0.9.0-beta.3")), false),
+            Step::Update
+        );
+    }
+
+    #[test]
+    fn a_plugin_choice_that_didnt_happen_keeps_nothing() {
+        for choice in [PluginChoice::Install, PluginChoice::TakeOut] {
+            for done in [PluginDone::SaidNo, PluginDone::InUse, PluginDone::Failed("Access is denied.".into())] {
+                assert!(plugin_kept_after(choice, &done, "1.0.0").is_empty(), "{choice:?} {done:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_plugin_choice_says_what_it_did() {
+        let folder = PathBuf::from(r"C:\Program Files\Common Files\CLAP");
+        let note = plugin_note(PluginChoice::Install, &PluginDone::Went, &folder);
+        assert!(note.starts_with(r"Put the DAWmate plugin in C:\Program Files\Common Files\CLAP."), "{note}");
+        let note = plugin_note(PluginChoice::TakeOut, &PluginDone::Went, &folder);
+        assert!(note.contains("until you press Install"), "{note}");
+        let note = plugin_note(PluginChoice::TakeOut, &PluginDone::InUse, &folder);
+        assert!(note.ends_with("close your DAWs, then press Take out again."), "{note}");
+        let note = plugin_note(PluginChoice::Install, &PluginDone::Failed("Access is denied.".into()), &folder);
+        assert_eq!(note, "Couldn't put the plugin in: Access is denied. Close your DAWs, then press Install again.");
+        assert_eq!(
+            plugin_note(PluginChoice::Install, &PluginDone::SaidNo, &folder),
+            "You said no to Windows' question, so nothing changed."
+        );
     }
 
     #[test]

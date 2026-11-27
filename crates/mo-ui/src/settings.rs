@@ -79,9 +79,13 @@ struct Page {
     /// The app's own files of each link found in the DAWs' folders, for Take out (FL Studio's, Bitwig's).
     fl_files: Vec<PathBuf>,
     bw_files: Vec<PathBuf>,
+    /// How the app's CLAP plugin stands in `Common Files\CLAP` (none until the first look is in), for its row.
+    plugin: Option<page::PluginLook>,
     /// Counts the looks for the DAWs' folders, so an older one finishing late is dropped (newest wins).
     scripts_asked: u64,
     daws_installing: bool,
+    /// Whether what runs while `daws_installing` is the plugin's step, waiting on Windows' question.
+    plugin_asking: bool,
     /// Whether what runs while `daws_installing` is a Take out (its words on the buttons).
     daws_taking_out: bool,
     daws_message: String,
@@ -283,8 +287,10 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             fl_files: Vec::new(),
             bw_files: Vec::new(),
             bw_loaded_from: None,
+            plugin: None,
             scripts_asked: 0,
             daws_installing: false,
+            plugin_asking: false,
             daws_taking_out: false,
             daws_message: String::new(),
             programs_message: String::new(),
@@ -503,6 +509,18 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.on_take_out_daw(move |bitwig| {
         if let Some(app) = weak.upgrade() {
             take_out(&app, bitwig);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_install_plugin(move || {
+        if let Some(app) = weak.upgrade() {
+            plugin_choice(&app, mo_app::daw_links::PluginChoice::Install);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_take_out_plugin(move || {
+        if let Some(app) = weak.upgrade() {
+            plugin_choice(&app, mo_app::daw_links::PluginChoice::TakeOut);
         }
     });
     let weak = app.as_weak();
@@ -1582,6 +1600,7 @@ fn look_at_scripts(app: &AppWindow) {
         let bw_version = source.as_deref().and_then(scripts::extension_version);
         let fl_files = scripts::fl_installed_files(&folders);
         let bw_files = scripts::bitwig_installed_files(&bw_folders, &users);
+        let plugin = crate::daw_links::plugin_look();
         let missing: HashSet<String> = programs.into_iter().filter(|exe| !shell::usable_exe(exe)).collect();
         let _ = slint::invoke_from_event_loop(move || {
             let newest = PAGE.with(|p| {
@@ -1597,6 +1616,7 @@ fn look_at_scripts(app: &AppWindow) {
                 p.bw_users = users;
                 p.fl_files = fl_files;
                 p.bw_files = bw_files;
+                p.plugin = Some(plugin);
                 true
             });
             if newest && let Some(app) = weak.upgrade() {
@@ -1625,8 +1645,13 @@ fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
     if PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.daws_installing)) {
         PAGE.with(|p| {
             if let Some(p) = p.borrow_mut().as_mut() {
-                let doing =
-                    if p.daws_taking_out { "a link was being taken out" } else { "the extension was being installed" };
+                let doing = if p.plugin_asking {
+                    "Windows' question about the plugin was waiting"
+                } else if p.daws_taking_out {
+                    "a link was being taken out"
+                } else {
+                    "the extension was being installed"
+                };
                 p.daws_message = format!("Your Bitwig Studio folder wasn't changed: {doing}. Choose it again.");
             }
         });
@@ -1937,6 +1962,88 @@ fn take_out(app: &AppWindow, bitwig: bool) {
     }
 }
 
+/// Install (or Update) and Take out on the plugin row (the 26 Nov review's DK-2): through Windows' administrator
+/// question, on a thread of its own so the page never waits for the answer, which the page says it waits for. Then
+/// the settings keep what you chose (`mo_app::daw_links::plugin_kept_after`) and the row looks again.
+fn plugin_choice(app: &AppWindow, choice: mo_app::daw_links::PluginChoice) {
+    use mo_app::daw_links::{PluginChoice, PluginDone};
+    let folder = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live && !p.daws_installing)?;
+        let look = p.plugin.as_ref()?;
+        let row = page::plugin_row(Some(look));
+        let can = match choice {
+            PluginChoice::Install => !row.install.is_empty(),
+            PluginChoice::TakeOut => row.take_out,
+        };
+        let folder = look.folder.clone().filter(|_| can)?;
+        p.daws_installing = true;
+        p.daws_taking_out = choice == PluginChoice::TakeOut;
+        // The row says Windows is asking (settings.slint), right where the button was pressed.
+        p.plugin_asking = true;
+        p.daws_message.clear();
+        Some(folder)
+    });
+    app.global::<SettingsData>().set_take_out_asking(SharedString::new());
+    let Some(folder) = folder else { return };
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Settings plugin", move || {
+        let done = crate::daw_links::plugin_by_choice(choice);
+        let _ = slint::invoke_from_event_loop(move || {
+            let mut kept = true;
+            for (key, value) in mo_app::daw_links::plugin_kept_after(choice, &done, crate::daw_links::VERSION) {
+                kept &= remember(key, &value);
+            }
+            let mut note = mo_app::daw_links::plugin_note(choice, &done, &folder);
+            if !kept {
+                note.push_str(
+                    " Your settings file couldn't be written, so the app may do otherwise at its next start.",
+                );
+            }
+            if done != PluginDone::Went {
+                log::warning("Settings", &format!("The CLAP plugin's {choice:?} didn't happen: {done:?}"));
+            }
+            PAGE.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.daws_installing = false;
+                    p.daws_taking_out = false;
+                    p.plugin_asking = false;
+                    p.daws_message = note;
+                }
+            });
+            if let Some(app) = weak.upgrade() {
+                look_at_scripts(&app);
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start the plugin's step: {e}"));
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.daws_installing = false;
+                p.daws_taking_out = false;
+                p.plugin_asking = false;
+                p.daws_message = format!("Couldn't start: {e}");
+            }
+        });
+        show(app);
+    }
+}
+
+/// Shows the plugin's row as found, for the screenshots; `asking`: as while Windows' question waits for Install.
+pub fn show_plugin(app: &AppWindow, look: page::PluginLook, asking: bool) {
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.daws_installing = asking;
+            p.plugin_asking = asking;
+            p.plugin = Some(look);
+        }
+    });
+    show(app);
+}
+
 /// Shows Bitwig's extension as found, for the screenshots.
 pub fn show_bitwig_extension(app: &AppWindow, state: ScriptState, version: &str, folders: Vec<PathBuf>) {
     PAGE.with(|p| {
@@ -2234,10 +2341,11 @@ fn show(app: &AppWindow) {
             Some(ScriptState::Installed) => "Install again",
             _ => "",
         };
-        let row = |d: page::DawStatus, install: &str, files: &[PathBuf]| DawRowInfo {
+        let row = |d: page::DawStatus, install: &str, take_out_ask: String| DawRowInfo {
             install: install.into(),
-            take_out_ask: page::take_out_ask(d.daw == p.bitwig.daw, files).into(),
+            take_out_ask: take_out_ask.into(),
             bitwig: d.daw == p.bitwig.daw,
+            plugin: d.daw == page::PLUGIN_ROW,
             daw: d.daw.into(),
             state: d.state.into(),
             ok: d.ok,
@@ -2248,19 +2356,29 @@ fn show(app: &AppWindow) {
                     .collect::<Vec<_>>(),
             )),
         };
+        let plugin = page::plugin_row(p.plugin.as_ref());
+        let plugin_files: &[PathBuf] = match &p.plugin {
+            Some(look) if plugin.take_out => &look.files,
+            _ => &[],
+        };
+        let bw_ask = page::take_out_ask(true, &p.bw_files);
+        let fl_ask = page::take_out_ask(false, &p.fl_files);
         data.set_daws(ModelRc::new(VecModel::from(vec![
-            row(bitwig, bw_install, &p.bw_files),
-            row(fl, fl_install, &p.fl_files),
+            row(bitwig, bw_install, bw_ask),
+            row(fl, fl_install, fl_ask),
+            row(plugin.status, plugin.install, page::plugin_take_out_ask(plugin_files)),
         ])));
         data.set_daws_checking(p.daws_checking);
         data.set_daws_installing(p.daws_installing);
         data.set_daws_taking_out(p.daws_taking_out);
+        data.set_daws_asking_windows(p.plugin_asking);
         // An ask whose DAW has nothing left to take out (looked at again, or another folder chosen) is closed, so it
         // never comes back by itself; so is one while Install or Take out runs.
         let asking = data.get_take_out_asking();
         let still = |files: &[PathBuf]| !files.is_empty() && !p.daws_installing;
         let open = (asking.as_str() == p.bitwig.daw && still(&p.bw_files))
-            || (asking.as_str() == "FL Studio" && still(&p.fl_files));
+            || (asking.as_str() == "FL Studio" && still(&p.fl_files))
+            || (asking.as_str() == page::PLUGIN_ROW && still(plugin_files));
         if !asking.is_empty() && !open {
             data.set_take_out_asking(SharedString::new());
         }

@@ -579,6 +579,13 @@ pub fn bitwig_installed_files(folders: &[PathBuf], user_folders: &[PathBuf]) -> 
     own_files(in_extensions.chain(scripts).collect::<Vec<_>>())
 }
 
+/// The app's own files of its CLAP plugin in the CLAP folder `folder`: the plugin ([`CLAP_PLUGIN_NAME`]) and a part
+/// file a cut-off install left. Only plain files of those names, never reached through a link (see [`take_out`]),
+/// and never a test plugin put in by hand, nor anything else in the folder.
+pub fn clap_installed_files(folder: &Path) -> Vec<PathBuf> {
+    own_files([folder.join(CLAP_PLUGIN_NAME), folder.join(format!("{CLAP_PLUGIN_NAME}.mo-part"))])
+}
+
 /// The ones of `files` that [`take_out`] may take out, each once (by its real path).
 fn own_files(files: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -594,16 +601,19 @@ fn own_files(files: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     out.into_iter().map(|(f, _)| f).collect()
 }
 
-/// The app's own file names in the DAWs' folders, and its part files for them.
-const OWN_FILES: [&str; 8] = [
+/// The app's own file names in the DAWs' folders and the CLAP folder, and its part files for them. Never a test
+/// plugin's ([`TEST_CLAP_PLUGIN_NAMES`]): that one was put in by hand, and is taken out the same way.
+const OWN_FILES: [&str; 10] = [
     FL_SCRIPT_NAME,
     FIRST_FL_SCRIPT_NAME,
     BITWIG_EXTENSION_NAME,
     FIRST_BITWIG_EXTENSION_NAME,
     FIRST_BITWIG_ASIDE,
     BITWIG_SCRIPT_NAME,
+    CLAP_PLUGIN_NAME,
     "device_DAWmate.py.mo-part",
     "DAWmate.bwextension.mo-part",
+    "DAWmate.clap.mo-part",
 ];
 
 /// Whether `file` is one [`take_out`] may take out: a plain file of one of the app's own names, in a folder that isn't

@@ -494,3 +494,53 @@ fn the_clap_plugin_goes_in_from_beside_the_app_and_is_checked_by_its_bytes() {
     assert!(done.went.is_empty() && done.failed.len() == 1, "{done:?}");
     assert_eq!(fs::read(folder.join(CLAP_PLUGIN_NAME)).unwrap(), b"plugin 2");
 }
+
+/// Settings › DAWs' Take out for the CLAP plugin (the 26 Nov review's DK-2): only the app's own DAWmate.clap (and a
+/// part file a cut-off install left) goes, never a test plugin put in by hand, nor another plugin, nor the folder.
+#[test]
+fn taking_the_clap_plugin_out_takes_only_the_apps_own() {
+    let root = fixture("clap-take-out");
+    let folder = root.join("Common Files").join("CLAP");
+    fs::create_dir_all(&folder).unwrap();
+    assert!(clap_installed_files(&folder).is_empty(), "nothing there yet");
+    fs::write(folder.join(CLAP_PLUGIN_NAME), b"plugin 2").unwrap();
+    fs::write(folder.join(format!("{CLAP_PLUGIN_NAME}.mo-part")), b"plugin 3, cut off").unwrap();
+    for test in TEST_CLAP_PLUGIN_NAMES {
+        fs::write(folder.join(test), b"a test plugin").unwrap();
+    }
+    fs::write(folder.join("Surge XT.clap"), b"someone else's").unwrap();
+    let files = clap_installed_files(&folder);
+    assert_eq!(files, vec![folder.join(CLAP_PLUGIN_NAME), folder.join(format!("{CLAP_PLUGIN_NAME}.mo-part"))]);
+    let done = take_out(&files);
+    assert_eq!(done.removed.len(), 2, "{done:?}");
+    assert!(done.failed.is_empty());
+    assert!(clap_installed_files(&folder).is_empty());
+    // The folder and everything else in it stay.
+    let mut left: Vec<String> =
+        fs::read_dir(&folder).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    left.sort();
+    assert_eq!(left, ["DAWmate (test).clap", "Music Organiser (test).clap", "Surge XT.clap"]);
+    // A test plugin named on its own is never taken out.
+    let test = folder.join(TEST_CLAP_PLUGIN_NAMES[0]);
+    assert!(take_out(std::slice::from_ref(&test)).removed.is_empty() && test.exists());
+}
+
+/// A CLAP folder that is a link (or a DAWmate.clap that is one) is never taken out through.
+#[cfg(unix)]
+#[test]
+fn taking_the_clap_plugin_out_never_goes_through_a_link() {
+    let root = fixture("clap-take-out-links");
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join(CLAP_PLUGIN_NAME), b"kept").unwrap();
+    let common = root.join("Common Files");
+    fs::create_dir_all(&common).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, common.join("CLAP")).unwrap();
+    assert!(clap_installed_files(&common.join("CLAP")).is_empty());
+    let own = root.join("Own").join("CLAP");
+    fs::create_dir_all(&own).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join(CLAP_PLUGIN_NAME), own.join(CLAP_PLUGIN_NAME)).unwrap();
+    assert!(clap_installed_files(&own).is_empty());
+    assert!(take_out(&[own.join(CLAP_PLUGIN_NAME)]).removed.is_empty());
+    assert!(elsewhere.join(CLAP_PLUGIN_NAME).exists());
+}
