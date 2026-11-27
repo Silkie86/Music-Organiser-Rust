@@ -256,6 +256,9 @@ impl Prints {
                     s.known.shrink_to_fit();
                 }
             }
+            // (Rows only the store has, such as another copy of the app's, are taken in by the next
+            // [`Prints::remember_in`], at every look once the prints are let go, and forgotten at the whole look after.)
+            // A part-way keep with something read walks the table once (about a millisecond for 235,000 files).
             // The prints read, to write: their marks stay until the store has them, so none is lost to a store
             // that's busy, or not there yet.
             let mut read: Vec<(PathBuf, Known)> = Vec::new();
@@ -295,7 +298,12 @@ impl Prints {
                     }
                 }
             }
-            Err(_) => s.forget.extend(gone),
+            Err(_) => {
+                // Tried again at the next keep, each path once however many keeps fail.
+                s.forget.extend(gone);
+                s.forget.sort_unstable();
+                s.forget.dedup();
+            }
         }
         written
     }
