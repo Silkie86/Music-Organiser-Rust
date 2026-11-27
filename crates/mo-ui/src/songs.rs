@@ -2039,8 +2039,12 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             });
             return done;
         }
-        "projects.copyFl" | "projects.copyStudioOne" => {
-            let daw = if id == "projects.copyFl" { daw_copy::Daw::FlStudio } else { daw_copy::Daw::StudioOne };
+        "projects.copyFl" | "projects.copyStudioOne" | "projects.copyLive" => {
+            let daw = match id {
+                "projects.copyFl" => daw_copy::Daw::FlStudio,
+                "projects.copyStudioOne" => daw_copy::Daw::StudioOne,
+                _ => daw_copy::Daw::AbletonLive,
+            };
             let mut done = false;
             with_picked(|p, r| {
                 let save = aimed(r);
@@ -2081,6 +2085,7 @@ fn do_to_save(path: &str, what: &str) {
         "bitwig" => open_in_bitwig(p, s),
         "fl" => open_as_copy(p, s, daw_copy::Daw::FlStudio),
         "studio-one" => open_as_copy(p, s, daw_copy::Daw::StudioOne),
+        "live" => open_as_copy(p, s, daw_copy::Daw::AbletonLive),
         "reveal" => reveal(s),
         "copy" => copy_path(&s.path),
         _ => {}
@@ -2094,7 +2099,7 @@ fn makes_copy_for(daw: &str, copy: daw_copy::Daw) -> bool {
 }
 
 /// The lines of a save's right-click menu: open it in its own DAW (what a double-click does), FL Studio saves also
-/// in Bitwig, a copy for FL Studio and for Studio One (but not for its own DAW), then Show in folder and Copy path.
+/// in Bitwig, a copy for FL Studio, Studio One and Ableton Live (but not for its own DAW), then Show in folder and Copy path.
 /// Right-clicking a save picks it, so each line shows the key that does the same to it (rule 15).
 fn save_menu(daw: &str, keys: &Shortcuts) -> Vec<MenuItem> {
     let item = |what: String, key: &str, id: &str| MenuItem {
@@ -2113,6 +2118,9 @@ fn save_menu(daw: &str, keys: &Shortcuts) -> Vec<MenuItem> {
     }
     if makes_copy_for(daw, daw_copy::Daw::StudioOne) {
         items.push(item("Open a copy in Studio One".into(), keys.key_of("projects.copyStudioOne"), "studio-one"));
+    }
+    if makes_copy_for(daw, daw_copy::Daw::AbletonLive) {
+        items.push(item("Open a copy in Ableton Live".into(), keys.key_of("projects.copyLive"), "live"));
     }
     items.push(item(String::new(), "", ""));
     items.push(item("Show in folder".into(), keys.key_of("projects.reveal"), "reveal"));
@@ -2141,6 +2149,9 @@ fn song_menu(daw: &str, keys: &Shortcuts) -> Vec<MenuItem> {
     }
     if makes_copy_for(daw, daw_copy::Daw::StudioOne) {
         items.push(item("Open a copy in Studio One".into(), "projects.copyStudioOne"));
+    }
+    if makes_copy_for(daw, daw_copy::Daw::AbletonLive) {
+        items.push(item("Open a copy in Ableton Live".into(), "projects.copyLive"));
     }
     // The card's heart and tag box, as the Sounds menu has them: Add a tag gives the box the keys.
     items.push(item("Favourite, or not".into(), "projects.favourite"));
@@ -2584,14 +2595,15 @@ mod tests {
     fn an_fl_save_s_menu_also_opens_it_in_bitwig_and_every_line_shows_its_key() {
         let keys = Shortcuts::default();
         let ids = |daw: &str| save_menu(daw, &keys).iter().map(|i| i.id.to_string()).collect::<Vec<_>>();
-        assert_eq!(ids(FL), ["open", "bitwig", "studio-one", "", "reveal", "copy"]);
-        assert_eq!(ids("Bitwig Studio"), ["open", "fl", "studio-one", "", "reveal", "copy"]);
-        assert_eq!(ids("Studio One"), ["open", "fl", "", "reveal", "copy"]);
+        assert_eq!(ids(FL), ["open", "bitwig", "studio-one", "live", "", "reveal", "copy"]);
+        assert_eq!(ids("Bitwig Studio"), ["open", "fl", "studio-one", "live", "", "reveal", "copy"]);
+        assert_eq!(ids("Studio One"), ["open", "fl", "live", "", "reveal", "copy"]);
+        assert_eq!(ids("Ableton Live"), ["open", "fl", "studio-one", "", "reveal", "copy"]);
         assert_eq!(save_menu("Ableton Live", &keys)[1].what, "Open a copy in FL Studio");
         assert_eq!(save_menu(FL, &keys)[0].what, "Open in FL Studio");
         // Rule 15: every line but the gap shows its key.
         let shown: Vec<_> = save_menu(FL, &keys).iter().map(|i| i.key.to_string()).collect();
-        assert_eq!(shown, ["Double-click", "Ctrl+B", "Alt+S", "", "Ctrl+Shift+E", "Ctrl+Shift+C"]);
+        assert_eq!(shown, ["Double-click", "Ctrl+B", "Alt+S", "Alt+L", "", "Ctrl+Shift+E", "Ctrl+Shift+C"]);
         assert_eq!(save_menu("Bitwig Studio", &keys)[1].key, "Alt+F");
     }
 
@@ -2611,6 +2623,7 @@ mod tests {
                 line("Open in Bitwig", "Ctrl+O", "projects.open"),
                 line("Open in FL Studio", "Ctrl+Shift+O", "projects.openOwn"),
                 line("Open a copy in Studio One", "Alt+S", "projects.copyStudioOne"),
+                line("Open a copy in Ableton Live", "Alt+L", "projects.copyLive"),
                 line("Favourite, or not", "Ctrl+D", "projects.favourite"),
                 line("Add a tag…", "Ctrl+T", "projects.tag"),
                 line("", "", ""),
@@ -2622,14 +2635,15 @@ mod tests {
         assert_eq!(bitwig[0], line("Open in Bitwig Studio", "Ctrl+O", "projects.open"));
         assert_eq!(bitwig[1], line("Open a copy in FL Studio", "Alt+F", "projects.copyFl"));
         assert_eq!(bitwig[2], line("Open a copy in Studio One", "Alt+S", "projects.copyStudioOne"));
-        assert_eq!(bitwig.len(), 8);
+        assert_eq!(bitwig[3], line("Open a copy in Ableton Live", "Alt+L", "projects.copyLive"));
+        assert_eq!(bitwig.len(), 9);
         // Every line runs a Songs action, so its key and its line do the same thing.
         for (_, _, id) in fl.iter().filter(|(_, _, id)| !id.is_empty()) {
             assert!(mo_app::shortcuts::SONGS_ACTIONS.iter().any(|a| a.id == id), "{id}");
         }
         // A key changed in Settings shows on its line.
         let changed = Shortcuts::from_setting(Some(r#"{"projects.reveal":"Ctrl+R"}"#));
-        assert_eq!(lines(BITWIG_STUDIO, &changed)[6], line("Show in folder", "Ctrl+R", "projects.reveal"));
+        assert_eq!(lines(BITWIG_STUDIO, &changed)[7], line("Show in folder", "Ctrl+R", "projects.reveal"));
     }
 
     #[test]

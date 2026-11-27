@@ -385,6 +385,50 @@ pub(crate) fn unreadable(view: &'static str, what: &str) -> Arrangement {
     }
 }
 
+/// A lane's clips of notes as a writer's instrument tracks: one, or one for each instrument when its clips hold
+/// several (an FL pattern plays a part for each of its channels), named after it. A clip with nothing in it stays,
+/// on the first.
+pub(crate) fn instrument_parts(lane: &PreviewLane, name: &str) -> Vec<(String, Vec<PreviewClip>)> {
+    let part_of = |c: &PreviewClip, n: &PreviewNote| -> String {
+        if c.parts.len() > 1 { c.parts.get(usize::from(n.part)).cloned().unwrap_or_default() } else { String::new() }
+    };
+    let mut names: Vec<String> = Vec::new();
+    for c in &lane.clips {
+        for n in &c.notes {
+            let part = part_of(c, n);
+            if !names.contains(&part) {
+                names.push(part);
+            }
+        }
+    }
+    // A clip with nothing in it at all (an empty pattern laid out as a section) stays, on the first track.
+    let empty = |c: &PreviewClip| c.notes.is_empty() && c.audio.is_empty() && c.points.is_empty();
+    if names.len() <= 1 {
+        let clips = lane.clips.iter().filter(|c| !c.notes.is_empty() || empty(c)).cloned().collect();
+        return vec![(name.to_owned(), clips)];
+    }
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(i, part)| {
+            let clips = lane
+                .clips
+                .iter()
+                .filter_map(|c| {
+                    let notes: Vec<PreviewNote> = c.notes.iter().filter(|n| part_of(c, n) == part).copied().collect();
+                    (!notes.is_empty() || (i == 0 && empty(c))).then(|| PreviewClip {
+                        notes,
+                        parts: Vec::new(),
+                        ..c.clone()
+                    })
+                })
+                .collect();
+            let track = if part.trim().is_empty() { name.to_owned() } else { part };
+            (track, clips)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod signature_tests {
     use super::TimeSignature;

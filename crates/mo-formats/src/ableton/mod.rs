@@ -34,6 +34,7 @@ use crate::model::{Confidence, MidiClip, NoteAttribute, NoteEvent, PluginKind, P
 use crate::{paths, plugins, textscan};
 
 pub mod arrangement;
+pub mod write;
 
 pub const DAW: &str = "Ableton Live";
 /// Goes up by one whenever the reader finds more (or different) things in the same files (rule 7).

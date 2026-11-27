@@ -77,8 +77,8 @@ pub const APP_ACTIONS: &[Action] = &[
 /// The Songs page's own actions. The ids are the C# app's Projects page's, so a key changed in either app carries
 /// across. New here: `projects.openOwn`, so the song line's menu and the panel's "Open in FL Studio" have a key too
 /// (rule 15), and `projects.favourite` and `projects.tag` for the card's heart and tag box, with Sounds' keys (the
-/// whole-app review of 14 Nov, SG-5), and `projects.copyFl` and `projects.copyStudioOne` for the menus' "Open a copy
-/// in…" lines (27 Nov 2026).
+/// whole-app review of 14 Nov, SG-5), and `projects.copyFl`, `projects.copyStudioOne` and `projects.copyLive` for the
+/// menus' "Open a copy in…" lines (27 Nov 2026).
 pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.open", "Open the picked song (FL Studio songs go to Bitwig)", "Ctrl+O"),
     action("projects.openOwn", "Open the picked song in the DAW it was made in", "Ctrl+Shift+O"),
@@ -96,6 +96,11 @@ pub const SONGS_ACTIONS: &[Action] = &[
         "projects.copyStudioOne",
         "Make a copy of the picked song for Studio One and open it (the song stays as it is)",
         "Alt+S",
+    ),
+    action(
+        "projects.copyLive",
+        "Make a copy of the picked song for Ableton Live and open it (the song stays as it is)",
+        "Alt+L",
     ),
 ];
 
@@ -699,6 +704,7 @@ mod tests {
         assert_eq!(s.page_action_for("Ctrl+T", SONGS_ACTIONS), Some("projects.tag"));
         assert_eq!(s.page_action_for("Alt+F", SONGS_ACTIONS), Some("projects.copyFl"));
         assert_eq!(s.page_action_for("Alt+S", SONGS_ACTIONS), Some("projects.copyStudioOne"));
+        assert_eq!(s.page_action_for("Alt+L", SONGS_ACTIONS), Some("projects.copyLive"));
         assert_eq!(s.key_of("projects.favourite"), s.key_of("sounds.favourite"));
         assert_eq!(s.key_of("projects.tag"), s.key_of("sounds.tag"));
         assert_eq!(s.page_action_for("Ctrl+O", &[]), None);
