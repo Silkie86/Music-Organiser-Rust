@@ -299,8 +299,11 @@ mod tests {
         fn search(&self, tried: &Tried, target: &Target, most: usize) -> (Search, Vec<(String, i32)>) {
             let mut notes = |_: i64, hash: &str| self.notes.get(hash).cloned();
             let search = tried.search(target, &self.book, &mut notes, most, &pool(), &AtomicBool::new(false));
-            let found =
-                search.found.iter().map(|f| (tried.cat.entries[f.at].phrase.hash.clone(), f.sits.best().0)).collect();
+            let found = search
+                .found
+                .iter()
+                .map(|f| (tried.cat.entries[f.at].phrase.hash.to_string(), f.sits.best().0))
+                .collect();
             (search, found)
         }
     }

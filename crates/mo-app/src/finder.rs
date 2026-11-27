@@ -767,7 +767,7 @@ pub fn midi_parts(cat: &Arc<mo_midi::Catalogue>, smallest: usize) -> MidiParts {
             }
             MidiLine {
                 at: u32::try_from(at).unwrap_or(u32::MAX),
-                name: crate::midi::title(e).into_boxed_str(),
+                name: crate::midi::title(e).into(),
                 also: also.into_boxed_str(),
             }
         })
@@ -786,7 +786,8 @@ pub struct MidiParts {
 /// One part's line: its place in the index, and what it's found by.
 struct MidiLine {
     at: u32,
-    name: Box<str>,
+    /// Held in the line when it's short, as most parts' names are: not a piece of memory each.
+    name: mo_midi::SmolStr,
     also: Box<str>,
 }
 
@@ -819,7 +820,7 @@ impl Source for MidiParts {
         [details.as_str(), from.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
     }
     fn id(&self, at: usize) -> String {
-        self.entry(at).map(|e| e.phrase.hash.clone()).unwrap_or_default()
+        self.entry(at).map(|e| e.phrase.hash.to_string()).unwrap_or_default()
     }
 }
 

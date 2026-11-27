@@ -600,7 +600,7 @@ impl Page {
                 .map(|(r, _)| r)
                 .collect();
         }
-        Some((hash, yours, rows))
+        Some((hash.to_string(), yours, rows))
     }
 
     /// The notes of the part at `at` as they leave the page, moved as it fits ([`Page::fit_move`]).
@@ -610,7 +610,7 @@ impl Page {
         Some(PartOut {
             from: self.notes.clone()?,
             phrase_id: e.phrase.id,
-            hash: e.phrase.hash.clone(),
+            hash: e.phrase.hash.to_string(),
             semitones,
             name: midi_fits::moved_name(&page::title(e), semitones),
             bars: e.phrase.bars,
@@ -2066,7 +2066,7 @@ fn made_song(cat: &Catalogue, notes: &HashMap<String, Vec<NoteEvent>>, save: &st
         .iter()
         .filter(|e| e.phrase.source.path == save)
         .map(|e| {
-            let notes = notes.get(&e.phrase.hash).map(Vec::as_slice).unwrap_or_default();
+            let notes = notes.get(e.phrase.hash.as_str()).map(Vec::as_slice).unwrap_or_default();
             let notes = notes
                 .iter()
                 .map(|n| PreviewNote {
@@ -2078,8 +2078,9 @@ fn made_song(cat: &Catalogue, notes: &HashMap<String, Vec<NoteEvent>>, save: &st
                 })
                 .collect();
             let length = beats(i64::from(e.phrase.bars) * mo_midi::BAR);
-            let clip = PreviewClip { name: e.phrase.clip.clone(), start: 0.0, length, notes, ..PreviewClip::default() };
-            PreviewLane { clips: vec![clip], ..PreviewLane::new(&e.phrase.part, LaneKind::Instrument) }
+            let clip =
+                PreviewClip { name: e.phrase.clip.to_string(), start: 0.0, length, notes, ..PreviewClip::default() };
+            PreviewLane { clips: vec![clip], ..PreviewLane::new(e.phrase.part.as_str(), LaneKind::Instrument) }
         })
         .collect();
     // A made-up Bitwig project is read by its arranger, as a real one with clips there is: its bars are bars Bitwig
@@ -3621,8 +3622,8 @@ pub fn sample() -> Loaded {
         phrases.push(StoredPhrase {
             id: i as i64,
             source: source(path, now - age * day),
-            part: part.to_owned(),
-            clip: clip.to_owned(),
+            part: part.into(),
+            clip: clip.into(),
             role,
             // The reason the analyser gives a part of each kind from its notes.
             role_why: match role {
@@ -3642,12 +3643,16 @@ pub fn sample() -> Loaded {
             key_fact: None,
             chroma: [0; 12],
             chords: Vec::new(),
-            features: (0..48).map(|j| ((j * 37 + i * 53) % 200 + 40) as u8).collect(),
-            hash,
-            members: String::new(),
+            features: (0..48)
+                .map(|j| ((j * 37 + i * 53) % 200 + 40) as u8)
+                .collect::<Vec<u8>>()
+                .try_into()
+                .unwrap_or([0; 48]),
+            hash: hash.into(),
+            members: Default::default(),
             program: None,
             drums: role == Role::Drums,
-            track_name: String::new(),
+            track_name: Default::default(),
             your_octave: None,
             shape: None,
             cut: None,
@@ -4985,7 +4990,7 @@ mod tests {
         PartOut {
             from: s.notes.clone(),
             phrase_id: e.phrase.id,
-            hash: e.phrase.hash.clone(),
+            hash: e.phrase.hash.to_string(),
             semitones,
             name: midi_fits::moved_name(&page::title(e), semitones),
             bars: e.phrase.bars,
@@ -5827,7 +5832,7 @@ mod tests {
         assert_eq!((p.change_octave(Up), p.card_fit()), (None, CardFit::default()));
         p.picked = Some(4);
         p.fit_picked();
-        let hash = p.cat.entry(4).map(|e| e.phrase.hash.clone()).unwrap_or_default();
+        let hash = p.cat.entry(4).map(|e| e.phrase.hash.to_string()).unwrap_or_default();
         let card = p.card_fit();
         let can = |up, down, yours| Some(OctaveButtons { up, down, yours });
         assert_eq!((card.octave, card.moved), (can(true, true, false), true));
@@ -6217,7 +6222,7 @@ mod tests {
         // An octave chosen for the scale is kept in the index, for the next time it's read; the app's pick again
         // takes it out.
         let index = MidiStore::path_beside(&library);
-        let scale = loaded.cat.entries[0].phrase.hash.clone();
+        let scale = loaded.cat.entries[0].phrase.hash.to_string();
         assert_eq!(loaded.cat.entries[0].phrase.your_octave, None);
         let read_again = || load(&library).ok().and_then(|l| l.cat.entries.first().map(|e| e.phrase.your_octave));
         let said = |octaves| [((index.clone(), scale.clone()), octaves)];
@@ -6238,8 +6243,8 @@ mod tests {
         assert!(keep_octaves(&other_way).is_err());
         assert_eq!(read_again(), Some(Some(1)));
         // From the page it goes off the window's thread, the newest said for the notes last.
-        remember_octave(index.clone(), scale.clone(), Some(-3));
-        remember_octave(index.clone(), scale.clone(), Some(-1));
+        remember_octave(index.clone(), scale.clone().to_string(), Some(-3));
+        remember_octave(index.clone(), scale.clone().to_string(), Some(-1));
         let kept = (0..500).any(|_| {
             std::thread::sleep(Duration::from_millis(10));
             read_again() == Some(Some(-1))
