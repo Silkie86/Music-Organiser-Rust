@@ -341,17 +341,23 @@ pub fn link_again(
 /// The folders of files kept aside that aren't in `homes`: the ones linking again kept from before ("… (kept from
 /// before)", beside each moved folder's copy), and the old copy's newer files from moving back ("… (newer files from
 /// the old copy)", beside the link). One a try that stopped partway left is found too, so none of your files are where
-/// the app doesn't show them. Measures them: call it away from the window's thread.
+/// the app doesn't show them. So are the folders linking again set aside ("… (after update)", "… (second copy)",
+/// beside the link) that a run cut off after their swap never noted (a crash in a later folder, the computer
+/// restarting while it copied: the whole-app review of 26 Nov, PG-2): each says where its files went, and is where it
+/// really is, as [`link_again`] keeps it. Measures them: call it away from the window's thread.
 pub fn kept_beside(moved: &[MovedFolder], homes: &[OldHome], stop: &AtomicBool) -> Vec<OldHome> {
-    let known = |path: &Path| homes.iter().any(|h| key(&h.path) == key(&text(path)));
+    let known = |path: &str| homes.iter().any(|h| key(&h.path) == key(path));
     let mut found: Vec<OldHome> = Vec::new();
     let beside = moved.iter().flat_map(|m| {
         [
             (m, m.to.as_str(), KEPT_BEFORE_SUFFIX, "replaced by linking again"),
             (m, m.from.as_str(), KEPT_SUFFIX, "the old copy's newer files, from moving back"),
+            (m, m.from.as_str(), UPDATE_SUFFIX, "left by an update"),
+            (m, m.from.as_str(), SECOND_SUFFIX, "a second copy"),
         ]
     });
     for (m, place, suffix, note) in beside {
+        let set_aside = suffix == UPDATE_SUFFIX || suffix == SECOND_SUFFIX;
         let place = Path::new(place.trim_end_matches(['/', '\\']));
         let (Some(parent), Some(name)) = (place.parent(), place.file_name()) else { continue };
         let start = format!("{}{}", name.to_string_lossy(), suffix.trim_end_matches(')'));
@@ -363,17 +369,18 @@ pub fn kept_beside(moved: &[MovedFolder], homes: &[OldHome], stop: &AtomicBool) 
                 n.is_empty()
                     || n.strip_prefix(' ').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
             });
-            if !numbered || !is_dir(&text(&path)) || is_link(&path) || known(&path) {
+            if !numbered || !is_dir(&text(&path)) || is_link(&path) {
                 continue;
             }
-            if found.iter().any(|h| key(&h.path) == key(&text(&path))) {
+            let at = if set_aside { real_place(&text(&path), moved) } else { text(&path) };
+            if known(&at) || found.iter().any(|h| key(&h.path) == key(&at)) {
                 continue;
             }
             found.push(OldHome {
-                path: text(&path),
+                path: at,
                 bytes: size::measure(&path, stop).map_or(0, |m| m.bytes),
                 note: note.to_owned(),
-                copy: String::new(),
+                copy: if set_aside { m.to.clone() } else { String::new() },
                 kind: m.kind,
             });
         }

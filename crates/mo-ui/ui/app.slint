@@ -6,9 +6,10 @@ import { Product } from "@product";
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook } from "pages/sounds.slint";
+import { SoundEdit, EditMark, EditChip } from "pages/sound_edit.slint";
 import { MenuItem, CardAction, YearBar, FilterChoice, FilterView } from "studio.slint";
 import { SongsPage, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine } from "pages/songs.slint";
-import { ArrangementData, ArrLabel, ArrKind } from "pages/arrangement.slint";
+import { ArrangementData, ArrLabel, ArrKind, ArrSound, ArrChoice } from "pages/arrangement.slint";
 import { BackupPage, BackupData, BackupFolderLine, LeftOutLine } from "pages/backup.slint";
 import { PluginsPage, PluginsData, PluginListLine, NeededCard, RoomBar, RoomFolder, UseRow, CopyRow, CleanRow, LinkTrouble } from "pages/plugins.slint";
 import { PresetsPage, PresetsData, PresetLine, PresetFact, PartChip, PresetCard, CurveLineInfo } from "pages/presets.slint";
@@ -19,6 +20,7 @@ import { Waves, WavePicture } from "studio.slint";
 export { Waves, WavePicture }
 export { DawLine }
 export { AppKeys }
+export { SoundEdit, EditMark, EditChip }
 import { FilterSearch } from "studio.slint";
 export { FilterSearch }
 import { Busy } from "studio.slint";
@@ -57,7 +59,7 @@ export { PresetsData, PresetLine, PresetFact, PartChip, PresetCard, CurveLineInf
 export { MidiData, MidiLine, RollLabel, RollRoom, MidiFact, PickedPart }
 export { FinderData, FinderLine }
 export { Palette, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo, DawProgramInfo, BetaLineInfo }
-export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, FilterChoice, FilterView, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook, BackupData, BackupFolderLine, LeftOutLine, SpaceData, DriveCard, RoomLine, CardPart, CardAll, PluginsData, PluginListLine, NeededCard, RoomBar, RoomFolder, UseRow, CopyRow, CleanRow, LinkTrouble, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
+export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, FilterChoice, FilterView, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook, BackupData, BackupFolderLine, LeftOutLine, SpaceData, DriveCard, RoomLine, CardPart, CardAll, PluginsData, PluginListLine, NeededCard, RoomBar, RoomFolder, UseRow, CopyRow, CleanRow, LinkTrouble, ArrangementData, ArrLabel, ArrKind, ArrSound, ArrChoice, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
 
 export struct PlaceInfo {
     name: string,
@@ -115,6 +117,9 @@ export component AppWindow inherits Window {
     // A key press, with its modifiers and whether it's the key held down, for the app-wide shortcut list in mo-app.
     // Returns whether it was used.
     callback key(string, bool, bool, bool, bool, bool) -> bool;
+    // A key let go (its text): a key that does something while it's held (O, to hear the original in the Sounds Edit
+    // strip) stops.
+    callback key-up(string);
 
     // What the app is doing: running and just-finished jobs as lines in the rail (and how many more than fit there),
     // and the ones that failed or that stay until closed as cards, bottom right.
@@ -133,6 +138,11 @@ export component AppWindow inherits Window {
 
     // The key sheet (F1 or ?).
     // The key sheet's lines: the page's own keys, then the ones that work everywhere.
+    // The page's help on the key sheet (mo_app::help).
+    in property <string> help-what;
+    in property <[string]> help-tips;
+    // The help key, on the Help sign beside Settings.
+    in property <string> help-key;
     in property <[KeyRow]> page-key-rows;
     in property <[KeyRow]> key-rows;
     in-out property <bool> sheet-open;
@@ -225,6 +235,12 @@ export component AppWindow inherits Window {
             }
             if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta, event.repeat)) {
                 return accept;
+            }
+            reject
+        }
+        key-released(event) => {
+            if (!root.note-open) {
+                root.key-up(event.text);
             }
             reject
         }
@@ -362,13 +378,33 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle { }
-                    RailItem {
-                        tint: Theme.place(root.settings-place);
-                        text: root.places[root.settings-place].name;
-                        icon: root.places[root.settings-place].icon;
-                        key: root.places[root.settings-place].key;
-                        selected: root.place == root.settings-place;
-                        clicked => { root.place-chosen(root.settings-place); }
+                    // Settings, and beside it Help: the key sheet, for whoever doesn't know F1 or ? yet (a beta tester
+                    // on their first day). A sign beside Settings, not a line of its own, so the rail grows no taller.
+                    HorizontalLayout {
+                        spacing: Space.xs;
+                        RailItem {
+                            horizontal-stretch: 1;
+                            tint: Theme.place(root.settings-place);
+                            text: root.places[root.settings-place].name;
+                            icon: root.places[root.settings-place].icon;
+                            key: root.places[root.settings-place].key;
+                            selected: root.place == root.settings-place;
+                            clicked => { root.place-chosen(root.settings-place); }
+                        }
+                        VerticalLayout {
+                            // As wide as the sign, the rest to Settings.
+                            horizontal-stretch: 0;
+                            alignment: center;
+                            StudioButton {
+                                icon: Icons.help;
+                                quiet: true;
+                                text: "Help";
+                                tip: "This page's help and keys";
+                                key: root.help-key;
+                                // Opens only: while the sheet is open its backdrop takes the clicks.
+                                clicked => { root.sheet-open = true; }
+                            }
+                        }
                     }
                 }
                 // The light on the picked place, in its colour. One light for the whole list, so it slides from the
@@ -472,6 +508,9 @@ export component AppWindow inherits Window {
         }
 
         if root.sheet-open: KeySheet {
+            page-name: root.place >= 0 && root.place < root.places.length ? root.places[root.place].name : "";
+            help-what: root.help-what;
+            help-tips: root.help-tips;
             page-rows: root.page-key-rows;
             rows: root.key-rows;
             close => {

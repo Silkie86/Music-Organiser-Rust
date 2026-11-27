@@ -25,6 +25,10 @@ pub const FILE: &str = "beta-checklist.json";
 /// The steps, as written (see [`steps`] for the layout).
 pub const LIST: &str = include_str!("../beta/checklist.txt");
 
+/// The short list beta testers see in an installed copy (Solomon, 27 Nov 2026: "Short tester list"): the full list
+/// has steps only he can do (the launcher, his drives, Claude's test projects).
+pub const TESTER_LIST: &str = include_str!("../beta/tester.txt");
+
 /// The most log lines kept with a problem.
 pub const KEPT_LOG_LINES: usize = 60;
 /// The longest note kept, in characters.
@@ -51,6 +55,28 @@ pub struct Step {
 /// with `| how, step by step` after it if it needs one; empty lines and lines starting `#` are left out.
 pub fn steps() -> Vec<Step> {
     parse(LIST)
+}
+
+/// The steps of [`TESTER_LIST`], laid out as [`LIST`] is.
+pub fn tester_steps() -> Vec<Step> {
+    parse(TESTER_LIST)
+}
+
+/// Whether this copy shows the short tester list: an installed copy (`installed`, from [`crate::update::installed`])
+/// where nobody has marked, or written a note on, a step of the full list by hand yet. So a tester sees the short list,
+/// while Solomon, whose data folder holds his marks on the full list, keeps it in his installed copy as well as in the
+/// launcher's builds. The self-check's own marks don't count: it marks its steps on either list.
+pub fn for_tester(installed: bool, marks: &Marks) -> bool {
+    if !installed {
+        return false;
+    }
+    let by_hand = |id: &str| !is_self_check(id) && !id.starts_with("tester.");
+    !marks.steps.keys().any(|id| by_hand(id)) && !marks.notes.keys().any(|id| by_hand(id))
+}
+
+/// The steps to show: [`tester_steps`] or [`steps`].
+pub fn steps_for(tester: bool) -> Vec<Step> {
+    if tester { tester_steps() } else { steps() }
 }
 
 /// The lines of `text` that are none of those (a step with its `|` left out, say), which [`steps`] leaves out.
@@ -361,6 +387,57 @@ mod tests {
             assert!(!s.what.is_empty() && !s.expect.is_empty(), "{} needs what to do and what to see", s.id);
             assert!(!s.id.contains(' '), "{}", s.id);
         }
+    }
+
+    #[test]
+    fn the_tester_list_reads_and_keeps_to_its_own_names() {
+        assert!(bad_lines(TESTER_LIST).is_empty(), "not read as steps: {:?}", bad_lines(TESTER_LIST));
+        let tester = tester_steps();
+        let by_hand = tester.iter().filter(|s| !is_self_check(s.id)).count();
+        assert!((10..=20).contains(&by_hand), "a short list: {by_hand} steps");
+        let mut ids: Vec<_> = tester.iter().map(|s| s.id).collect();
+        ids.sort_unstable();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(before, ids.len(), "two steps share a name");
+        let full = steps();
+        for s in &tester {
+            assert!(!s.area.is_empty() && !s.what.is_empty() && !s.expect.is_empty(), "{} isn't whole", s.id);
+            if is_self_check(s.id) {
+                // A self-check step has the same words on both lists, so its marks hold for either.
+                let same = full.iter().find(|f| f.id == s.id).expect("a self-check step of the full list");
+                assert_eq!(step_words(same), step_words(s), "{}", s.id);
+            } else {
+                assert!(s.id.starts_with("tester."), "{} must be a tester. name", s.id);
+                assert!(!full.iter().any(|f| f.id == s.id), "{} is on the full list too", s.id);
+            }
+            // Nothing only Solomon can do.
+            let words = format!("{} {} {}", s.what, s.expect, s.how);
+            for only_his in ["launcher", "Claude", "I:", "MO Live Test", "%LOCALAPPDATA%"] {
+                assert!(!words.contains(only_his), "{} says {only_his}", s.id);
+            }
+        }
+        assert!(full.iter().all(|f| !f.id.starts_with("tester.")), "tester. names are the short list's");
+    }
+
+    #[test]
+    fn a_tester_sees_the_short_list_until_the_full_list_has_been_marked() {
+        let full = Step { id: "songs.list", area: "Songs", what: "Do it", expect: "It works", how: "" };
+        let auto = Step { id: "auto.crashes", area: "Self-check", what: "Look", expect: "None", how: "" };
+        let tester = Step { id: "tester.songs", area: "Songs", what: "Do it", expect: "It works", how: "" };
+        let mut m = Marks::default();
+        assert!(!for_tester(false, &m), "the launcher's builds keep the full list");
+        assert!(for_tester(true, &m), "a new installed copy shows the short list");
+        m.set(&auto, Some(Mark::Works), "", at(0));
+        m.set(&tester, Some(Mark::Problem), "slow", at(0));
+        assert!(for_tester(true, &m), "the self-check's marks and the tester's own leave it short");
+        m.set_note("songs.list", "try again");
+        assert!(!for_tester(true, &m), "a note on a full-list step keeps the full list");
+        m.set_note("songs.list", "");
+        m.set(&full, Some(Mark::Works), "", at(0));
+        assert!(!for_tester(true, &m), "Solomon's marks keep the full list in his installed copy");
+        assert_eq!(steps_for(true), tester_steps());
+        assert_eq!(steps_for(false), steps());
     }
 
     #[test]

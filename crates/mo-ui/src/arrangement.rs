@@ -121,7 +121,15 @@ pub fn connect(app: &AppWindow) {
     });
     let weak = app.as_weak();
     data.on_grab(move |x, y| {
-        // On a clip or a track's name the press may become a drag out of the app; elsewhere it moves the view.
+        // On the ruler it moves the playhead (and the song's MIDI playing with it).
+        let on_ruler = STATE.with(|s| s.borrow().view.as_ref().and_then(|v| v.ruler_beat(f64::from(x), f64::from(y))));
+        if let Some(beat) = on_ruler
+            && let Some(app) = weak.upgrade()
+        {
+            crate::arrangement_play::ruler(&app, beat);
+        }
+        // On a clip or a track's name the press may become a drag out of the app; elsewhere (the ruler too) it moves
+        // the view.
         with_view(&weak, |v| {
             v.left_press(f64::from(x), f64::from(y));
             false
@@ -259,6 +267,11 @@ pub fn draw_here() {
     STATE.with(|s| s.borrow_mut().here = true);
 }
 
+/// Whether it reads and draws on the window's thread ([`draw_here`]): the screenshots.
+pub fn drawing_here() -> bool {
+    STATE.with(|s| s.borrow().here)
+}
+
 /// Shows the arrangement of the save at `path` (the picked song's newest), or empties the preview when no song is
 /// picked or its save has gone.
 pub fn show_song(app: &AppWindow, path: Option<&str>, missing: bool) {
@@ -273,6 +286,7 @@ pub fn show_song(app: &AppWindow, path: Option<&str>, missing: bool) {
     });
     SHOWN.store(asked, Ordering::Relaxed);
     clear(&data);
+    crate::arrangement_play::shown(app, None);
     let Some(path) = path.filter(|p| !p.is_empty()) else { return };
     if missing {
         data.set_message(NOT_HERE.into());
@@ -564,6 +578,8 @@ fn pick_view(app: &AppWindow, index: usize) {
         Some((a, measured, notes))
     });
     let Some((a, measured, notes)) = shown else { return };
+    crate::arrangement_play::shown(app, Some(a.clone()));
+    crate::arrangement_play::view_moved(app);
     data.set_view(i32::try_from(index).unwrap_or(0));
     data.set_summary(measured.summary.as_str().into());
     if show_notes(&data, &a, notes) {
@@ -673,6 +689,26 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut State)) {
         }
     });
     redraw(&app);
+    crate::arrangement_play::view_moved(&app);
+}
+
+/// Puts the playhead at `beat` on the view, or takes it away (none, or a beat out of sight). With `follow`, a beat
+/// gone past the view's right edge brings the view a page on, as a DAW follows its playhead.
+pub fn place_playhead(app: &AppWindow, beat: Option<f64>, follow: bool) {
+    let (x, moved) = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let (Some(v), Some(beat)) = (s.view.as_mut(), beat) else { return (None, false) };
+        let moved = follow && !v.dragging() && v.follow(beat);
+        (v.x_at(beat), moved)
+    });
+    let data = app.global::<ArrangementData>();
+    data.set_playhead_shown(x.is_some());
+    if let Some(x) = x {
+        data.set_playhead_x(x as f32);
+    }
+    if moved {
+        redraw(app);
+    }
 }
 
 /// Tells the view what the mouse did, shows what's under it now, and draws it again when `f` says the picture changed.
@@ -691,6 +727,7 @@ fn with_view(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut View) -> bool) {
     if changed {
         redraw(&app);
     }
+    crate::arrangement_play::view_moved(&app);
 }
 
 fn show_hover(data: &ArrangementData, hover: Option<Hover>) {

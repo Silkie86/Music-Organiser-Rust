@@ -11,6 +11,7 @@ pub use screens::*;
 
 pub mod ahead;
 pub mod arrangement;
+pub mod arrangement_play;
 pub mod backup;
 pub mod beta;
 mod canvas;
@@ -97,6 +98,7 @@ pub fn page_name() -> &'static str {
 pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> Result<AppWindow, slint::PlatformError> {
     let app = AppWindow::new()?;
     arrangement::connect(&app);
+    arrangement_play::connect(&app);
     waves::connect(&app);
     apply_look(&app, look);
     show_places(&app, &shortcuts);
@@ -130,6 +132,16 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     let key_feed = feed.clone();
     app.global::<AppKeys>().on_key(move |text, ctrl, shift, alt, meta, repeat| {
         key_pressed(&weak, &key_feed, &key_name(&text, ctrl, shift, alt, meta), repeat)
+    });
+
+    // A key let go: the Sounds page's Edit strip plays the original while O is held.
+    let weak = app.as_weak();
+    app.on_key_up(move |text| {
+        if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Sounds.index() as i32
+        {
+            sounds::key_up(&app, &text);
+        }
     });
 
     // A filter menu's search: the same matching on every page.
@@ -318,6 +330,7 @@ pub fn keys_changed(app: &AppWindow, shortcuts: &Shortcuts) {
     sounds::show_keys(app, shortcuts);
     presets::show_keys(app, shortcuts);
     midi::show_keys(app, shortcuts);
+    arrangement_play::show_keys(app, shortcuts);
     plugins::show_keys(app, shortcuts);
     space::show(app);
     if let Some(place) = place() {
@@ -439,6 +452,14 @@ pub fn refresh_keys(app: &AppWindow) {
 
 /// The key sheet's two lists for `place`: its own keys, and the ones that work everywhere.
 fn show_key_rows(app: &AppWindow, shortcuts: &Shortcuts, place: Place) {
+    let help = mo_app::help::for_place(place);
+    app.set_help_what(help.what.into());
+    app.set_help_tips(ModelRc::new(VecModel::from(
+        help.tips.iter().map(|t| slint::SharedString::from(*t)).collect::<Vec<_>>(),
+    )));
+    // F1, or ? when F1 was given to something else, so the Help sign always names a key that works (rule 15).
+    let help_key = [shortcuts.key_of("app.helpF1"), shortcuts.key_of("app.help")].into_iter().find(|k| !k.is_empty());
+    app.set_help_key(help_key.unwrap_or_default().into());
     let (page, everywhere) = key_rows(shortcuts, place);
     app.set_page_key_rows(ModelRc::new(VecModel::from(page)));
     app.set_key_rows(ModelRc::new(VecModel::from(everywhere)));
@@ -585,13 +606,19 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
         }
         // Where everything the app removes goes first, from any page.
         "app.recycleBin" => files::open_recycle_bin(feed),
-        // Space plays the picked sound on the Sounds page, loops the picked part on the MIDI page and auditions the
-        // picked sound in Bitwig on Presets (X3-13); elsewhere it's left for the page (a button, a text box).
+        // Space plays the picked sound on the Sounds page, loops the picked part on the MIDI page, auditions the
+        // picked sound in Bitwig on Presets (X3-13) and plays the picked song's newest bounce on Songs (review SZ-3),
+        // or its MIDI from the arrangement when it has no bounce (and stops the arrangement while that plays);
+        // elsewhere it's left for the page (a button, a text box).
         "app.play" => {
             let place = app.get_place();
-            return (place == Place::Sounds.index() as i32 && sounds::toggle_play(&app))
+            let songs = place == Place::Songs.index() as i32;
+            return (songs && arrangement_play::playing() && arrangement_play::toggle_play(&app))
+                || (songs && songs::toggle_play(&app))
+                || (place == Place::Sounds.index() as i32 && sounds::toggle_play(&app))
                 || (place == Place::Midi.index() as i32 && midi::toggle_play(&app))
-                || (on_presets_page(place) && presets::toggle_play(&app));
+                || (on_presets_page(place) && presets::toggle_play(&app))
+                || (songs && arrangement_play::toggle_play(&app));
         }
         // Ctrl+F: the keys go to the page's search box, its words picked (review X3-22). The page on show sees the
         // count change; a page without a search box lets the key go on. Not while Ctrl+K or the F12 note is open, as
@@ -656,7 +683,8 @@ fn stop_what_plays(app: &AppWindow) -> bool {
     let audition = presets::stop_on_escape(app);
     let tone = curve_editor::stop_tone(app);
     let song = song_player::stop_on_escape(app);
-    sound || midi || audition || tone || song
+    let arranged = arrangement_play::stop_on_escape(app);
+    sound || midi || audition || tone || song || arranged
 }
 
 /// Moves the pick of the list on show one line up (`by` -1) or down (1), as its Up and Down keys do (on Sounds' Tiles, a

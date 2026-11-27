@@ -10,7 +10,7 @@ mod output;
 mod stream;
 
 pub use output::{Event, Events, Opened, Outputs, Render, SystemOutputs};
-pub use stream::Stream;
+pub use stream::{Maker, Stream};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, channel, sync_channel};
@@ -20,10 +20,21 @@ use std::time::{Duration, Instant};
 use mix::{Flow, FromMixer, Mixer, Place, ToMixer};
 use rtrb::{Consumer, RingBuffer};
 
-use crate::AudioData;
+use crate::{AudioData, AudioError};
 
-/// Times one sound reopens the output before it gives up, so an output that keeps going can't loop (as C#).
+/// Times one sound reopens the output before it gives up, so an output that keeps going can't loop (as C#). Only
+/// losses close together count ([`STEADY_SECONDS`]).
 const MAX_REOPENS: u32 = 3;
+
+/// How long a sound must have played on an output before it went for the loss to count afresh: an output that worked
+/// that long isn't one that keeps going. One play can last a whole song or mix, and on Windows every change of the
+/// default output loses it, so the fourth change in one play ended the sound though the new output worked (the
+/// whole-app review of 26 Nov, AD-3).
+const STEADY_SECONDS: u64 = 10;
+
+/// What's told when a sound stops by itself: its key, and for a sound read as it plays that stopped because its file
+/// couldn't be read on, why.
+type OnEnd = Box<dyn Fn(&str, Option<&AudioError>) + Send>;
 
 /// After an output wouldn't open, how long before trying again: a sweep through sounds mustn't try twenty times a
 /// second while a DAW has the interface (as C#).
@@ -112,13 +123,17 @@ impl Player {
     /// A player on the computer's own outputs. Nothing opens until the first sound plays.
     ///
     /// `on_end` is called (on the player's thread) with a sound's key when it stops by itself: it played to its end,
-    /// or its output went and wouldn't come back. Not when it's stopped or replaced.
-    pub fn new(on_end: impl Fn(&str) + Send + 'static) -> Player {
+    /// or its output went and wouldn't come back, or (for a sound read as it plays) its file couldn't be read on, and
+    /// then why (a drive unplugged, the file moved or renamed). Not when it's stopped or replaced.
+    pub fn new(on_end: impl Fn(&str, Option<&AudioError>) + Send + 'static) -> Player {
         Player::with_outputs(Box::new(SystemOutputs::new()), on_end)
     }
 
     /// A player on the outputs given (tests give a stand-in).
-    pub fn with_outputs(outputs: Box<dyn Outputs>, on_end: impl Fn(&str) + Send + 'static) -> Player {
+    pub fn with_outputs(
+        outputs: Box<dyn Outputs>,
+        on_end: impl Fn(&str, Option<&AudioError>) + Send + 'static,
+    ) -> Player {
         let (orders, inbox) = sync_channel(INBOX);
         let shared = Arc::new(Shared::default());
         let keeper = Keeper {
@@ -131,6 +146,7 @@ impl Player {
             open: None,
             openings: 0,
             playing: None,
+            why_ended: None,
             reopens: 0,
             failed_at: None,
             looked_at: None,
@@ -180,6 +196,18 @@ impl Player {
         from: impl FnOnce(Option<(&str, f64)>) -> Result<f64, E>,
     ) -> Result<(), E> {
         self.start_from(sound, key.into(), true, from)
+    }
+
+    /// [`Player::play`], from where `from` says, given the key of the sound playing and where it is at that moment (in
+    /// seconds), with nothing able to start or stop meanwhile; or not at all when it says no (`Err`). So one sound takes
+    /// another's place from the same moment in it (the Sounds Edit strip's original, while it's held, and its edit).
+    pub fn play_from<E>(
+        &self,
+        sound: Arc<AudioData>,
+        key: impl Into<String>,
+        from: impl FnOnce(Option<(&str, f64)>) -> Result<f64, E>,
+    ) -> Result<(), E> {
+        self.start_from(sound, key.into(), false, from)
     }
 
     /// [`Player::play`], only if `wanted` still says so as the sound starts, with no other play or stop able to come
@@ -374,13 +402,16 @@ struct Keeper {
     inbox: Receiver<Order>,
     orders: SyncSender<Order>,
     shared: Arc<Shared>,
-    on_end: Box<dyn Fn(&str) + Send>,
+    on_end: OnEnd,
     /// The output chosen in Settings, or `None` for the computer's default.
     wanted: Option<String>,
     open: Option<Open>,
     openings: u64,
     playing: Option<Playing>,
-    /// Times the sound playing has reopened the output.
+    /// Why the sound playing (by its id) stopped part way, as its read said when its mixer let it go: told with its
+    /// end, which comes just after.
+    why_ended: Option<(u64, AudioError)>,
+    /// Times the sound playing has reopened the output, losses close together.
     reopens: u32,
     failed_at: Option<Instant>,
     looked_at: Option<Instant>,
@@ -430,11 +461,19 @@ impl Keeper {
 
     fn handed_back(&mut self, m: FromMixer) {
         match m {
-            FromMixer::Ended(id) => self.ended(id),
+            FromMixer::Ended(id) => {
+                let why = self.why_ended.take().filter(|(of, _)| *of == id).map(|(_, why)| why);
+                self.ended_because(id, why.as_ref());
+            }
             // Freed here, off the output's thread.
             FromMixer::Done(sound) => drop(sound),
-            // Its channel let go, which stops its reader.
-            FromMixer::DoneFlow(flow) => drop(flow),
+            // Its channel let go, which stops its reader. When its read stopped part way, that's why it ended.
+            FromMixer::DoneFlow(id, flow) => {
+                if let Some(why) = flow.why_ended().filter(|_| self.playing.as_ref().is_some_and(|p| p.id == id)) {
+                    self.why_ended = Some((id, why));
+                }
+                drop(flow);
+            }
         }
     }
 
@@ -458,8 +497,8 @@ impl Keeper {
             Order::Stream { id, stream } => {
                 self.reopens = 0;
                 let start = stream.start_seconds();
-                let Stream { source, first, more, start: frame } = stream;
-                let flow = Some(Box::new(Flow::new(frame, more)));
+                let Stream { source, first, more, said, start: frame } = stream;
+                let flow = Some(Box::new(Flow::new(frame, more, said)));
                 self.playing = Some(Playing { id, sound: first, start, looping: false, source, flow });
                 self.start_now();
             }
@@ -504,6 +543,14 @@ impl Keeper {
                 }
                 match event {
                     Event::Lost(why) => {
+                        // It played a while on this output first: not an output that keeps going, so this loss
+                        // counts afresh.
+                        let steady = self.open.as_ref().is_some_and(|o| {
+                            o.place.played() >= u64::from(o.output.sample_rate).saturating_mul(STEADY_SECONDS).max(1)
+                        });
+                        if steady {
+                            self.reopens = 0;
+                        }
                         self.close(Some(why));
                         if self.playing.is_some() {
                             self.retry();
@@ -550,10 +597,10 @@ impl Keeper {
                     ToMixer::Play { id: p.id, sound, from: 0.0, looping: false, flow: Some(flow) }
                 }
                 // It can't be read again: what was playing of it (before a move) stops too.
-                _ => {
+                read => {
                     let id = p.id;
                     self.tell(ToMixer::Stop);
-                    self.ended(id);
+                    self.ended_because(id, read.and_then(Result::err).as_ref());
                     return;
                 }
             }
@@ -563,6 +610,11 @@ impl Keeper {
 
     /// The sound `id` stopped by itself: if it's still the one playing, it's no longer, and the app is told.
     fn ended(&mut self, id: u64) {
+        self.ended_because(id, None);
+    }
+
+    /// [`Keeper::ended`], telling the app `why` when it stopped because its file couldn't be read on.
+    fn ended_because(&mut self, id: u64, why: Option<&AudioError>) {
         if self.playing.as_ref().is_some_and(|p| p.id == id) {
             self.playing = None;
         }
@@ -574,7 +626,7 @@ impl Keeper {
             }
         };
         if let Some(key) = key {
-            (self.on_end)(&key);
+            (self.on_end)(&key, why);
         }
     }
 

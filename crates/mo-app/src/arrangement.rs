@@ -119,9 +119,10 @@ const PART_SECONDS: f64 = 30.0;
 
 /// What reads the waveforms ([`Peaks::read`]), for the store kept between runs (`peaks_store::PeakStore::open`): when
 /// it changes, waveforms read before are read again. They were read from a file's first minute only, up to 15 Nov
-/// (a beta F12 note: a long clip's waveform stopped part way along); and up to 20 Nov a frame the decoder refused was
-/// left out, so all after it came early and the clip's waveform was stretched (the whole-app review of 19 Nov, SN-18).
-pub const PEAKS_READER: &str = "mo-audio, the whole file, refused frames as silence";
+/// (a beta F12 note: a long clip's waveform stopped part way along); up to 20 Nov a frame the decoder refused was
+/// left out, so all after it came early and the clip's waveform was stretched (the whole-app review of 19 Nov, SN-18);
+/// and up to 27 Nov an MP3 joined onto another ended where the first one did (the whole-app review of 26 Nov, AD-2).
+pub const PEAKS_READER: &str = "mo-audio, the whole file, refused frames as silence, joined MP3s whole";
 
 impl Peaks {
     /// The waveform of a file `file_seconds` long, `step` seconds to each of its `values`.
@@ -703,6 +704,31 @@ impl View {
 
     fn beat(&self, x: f64) -> f64 {
         self.left + (x - self.header_width()) / self.zoom()
+    }
+
+    /// The beat a press at `x`, `y` on the ruler is at, within the song: none off the ruler, or left of the timeline.
+    pub fn ruler_beat(&self, x: f64, y: f64) -> Option<f64> {
+        (y >= 0.0 && y < self.ruler_height() && x > self.header_width() && x < self.width)
+            .then(|| self.beat(x).clamp(0.0, self.song_beats))
+    }
+
+    /// Where `beat` is across the view, while it's in sight on the timeline.
+    pub fn x_at(&self, beat: f64) -> Option<f64> {
+        let x = self.x(beat);
+        (x >= self.header_width() && x <= self.width).then_some(x)
+    }
+
+    /// Moves the view along so `beat` is in sight, when it's gone past the timeline's right edge (or is left of its
+    /// left), as a DAW's view follows its playhead: a page on, with the beat near its left. Whether it moved.
+    pub fn follow(&mut self, beat: f64) -> bool {
+        let x = self.x(beat);
+        if !x.is_finite() || (x >= self.header_width() && x <= self.width - SCROLLBAR) {
+            return false;
+        }
+        let old = self.left;
+        self.left = beat - 0.02 * self.timeline_width() / self.zoom();
+        self.clamp();
+        (self.left - old).abs() > 1e-9
     }
 
     fn clamp(&mut self) {
@@ -1535,6 +1561,28 @@ mod tests {
 
     fn palette() -> Palette {
         Palette::from_look(&Look::from_settings(None, None))
+    }
+
+    /// The ruler says which beat a click is at, a beat in sight says where it is, and a playhead past the right edge
+    /// brings the view a page on.
+    #[test]
+    fn the_ruler_and_the_playhead_find_beats_on_the_view() {
+        let mut v = view(900.0, 300.0);
+        let (hx, ruler) = (v.header_width(), v.ruler_height());
+        assert_eq!(v.ruler_beat(hx - 1.0, 5.0), None, "on the track names");
+        assert_eq!(v.ruler_beat(hx + 100.0, ruler + 1.0), None, "under the ruler");
+        let beat = v.ruler_beat(hx + 100.0, 5.0).unwrap();
+        assert!((v.x_at(beat).unwrap() - (hx + 100.0)).abs() < 1e-6);
+        // Fitted, the whole song is in sight: nothing to follow.
+        assert!(!v.follow(beat));
+        // Zoomed in, a beat past the right edge brings the view to it.
+        v.wheel(hx + 1.0, 0.0, 8.0, true, false);
+        let far = v.ruler_beat(v.width - 20.0, 5.0).unwrap() + 4.0;
+        assert_eq!(v.x_at(far), None);
+        assert!(v.follow(far));
+        let x = v.x_at(far).unwrap();
+        assert!(x > hx && x < hx + 60.0, "{x}");
+        assert!(!v.follow(far));
     }
 
     /// Notes in the same pixels are drawn as one rectangle: as few as the pixels they fill, and those very pixels,

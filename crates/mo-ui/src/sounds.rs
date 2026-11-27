@@ -8,12 +8,16 @@ mod bitwig;
 mod copies;
 mod did;
 mod drag_out;
+mod edit_strip;
 pub use drag_out::card_at_row;
+pub use edit_strip::{for_screens as edit_for_screens, state_for_screens as edit_state_for_screens};
+pub use part::hits_for_screens;
 mod file_dates;
 mod galaxy;
 mod grid;
 mod kit;
 mod like;
+mod part;
 mod peaks;
 mod sky;
 mod tree;
@@ -178,6 +182,15 @@ struct Page {
     /// That play was trimmed (Trim silence was on): its samples don't hold the whole file, so a click on its waveform
     /// plays it again from there rather than moving along what was read.
     play_trimmed: bool,
+    /// Where that play's samples start in its file, in seconds: a part picked on the card, read on its own, starts
+    /// where the play does, and the player's position is counted from there.
+    play_offset: f64,
+    /// That play is of a part picked on the card: where it starts and where the part ends, in seconds into the file.
+    /// It stops at the end ([`playing_changed`]'s ticker stops a part that's played as it's read).
+    play_part: Option<(f64, f64)>,
+    /// That play is the Edit strip's: the edit (or the original while it's held), in memory ([`edit_strip`]). Its
+    /// waveform is the strip's, which shows where it is and stops it.
+    play_edit: bool,
     /// Each sound's place in `list`, by id.
     places: Arc<HashMap<i64, usize>>,
     /// Every sound's fingerprint, once read, for Sounds like this and Rediscover.
@@ -266,6 +279,9 @@ impl Default for Page {
             play: 0,
             play_reads: 0.0,
             play_trimmed: false,
+            play_offset: 0.0,
+            play_part: None,
+            play_edit: false,
             places: Arc::default(),
             index: None,
             no_index: None,
@@ -442,11 +458,13 @@ pub fn player() -> &'static Player {
     // The choice stays locked until the player is made, so one changed meanwhile waits and then reaches it.
     let output = OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     PLAYER.get_or_init(|| {
-        let player = Player::new(|key| {
+        let player = Player::new(|key, why| {
             let key = key.to_owned();
+            let why = why.map(ToString::to_string);
             let _ = slint::invoke_from_event_loop(move || {
-                ended(&key);
-                crate::song_player::ended(&key);
+                ended(&key, why.as_deref());
+                crate::song_player::ended(&key, why.as_deref());
+                crate::arrangement_play::ended(&key);
             });
         });
         player.choose(output.clone());
@@ -603,10 +621,11 @@ fn points(s: &Sound) -> i32 {
 /// The card's waveform for the picked sound `s`, and how many lines across it is: the whole sound, as its play head
 /// and a click on it go. The library keeps the waveform of a sound's first minute, so for a longer one the whole
 /// waveform is read from its file ([`whole_wave`]); until it's back, the first minute shows in its share of the width,
-/// as many lines across as the whole one will be.
+/// as many lines across as the whole one will be. A minute exactly may be more: the analysis reads a minute at most,
+/// and a file that says it's shorter than it is came out at exactly that (the whole-app review of 26 Nov, AD-4).
 fn card_wave(s: &Sound) -> (String, i32) {
     let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds);
-    if seconds <= mo_audio::MAX_SECONDS {
+    if seconds < mo_audio::MAX_SECONDS {
         // Nothing to read for this one: a longer sound's read for the card before it stops.
         whole_wave::let_go();
         return (wave(s), points(s));
@@ -2179,15 +2198,26 @@ struct AlikeAsk {
     list: Arc<SoundList>,
     places: Arc<HashMap<i64, usize>>,
     index: Arc<SoundIndex>,
+    /// The folders hidden on the folder tree ([`hiding`]).
+    hidden: Filters,
 }
 
 impl AlikeAsk {
     /// The sounds like it, most alike first, as places in the list with how alike (0 to 1): new ones only, not those
-    /// you came to it through nor a copy of one ([`SoundList::like_this`]).
+    /// you came to it through nor a copy of one, nor one in a folder you hid ([`SoundList::like_this`]).
     fn answer(&self) -> Vec<(usize, f64)> {
         let came: Vec<usize> = self.came.iter().filter_map(|id| self.places.get(id).copied()).collect();
-        background::on_pool(|| self.list.like_this(&self.index, &self.places, self.at, &came, ALIKE_COUNT))
+        let hidden = self.list.hidden_by_folders(&self.hidden);
+        let left_out = |i: usize| hidden.as_ref().is_some_and(|h| h(i));
+        background::on_pool(|| self.list.like_this(&self.index, &self.places, self.at, &came, ALIKE_COUNT, left_out))
     }
+}
+
+/// Only the folder tree's hidden folders and the sample folders a hide stops at, of `f`: what keeps a hidden folder's
+/// sounds out of Rediscover, Sounds like this and the kit builder, which dig through every sound (the whole-app
+/// review of 26 Nov, ST-1 and ST-6: their sounds "never show", yet these offered them).
+pub(super) fn hiding(f: &Filters) -> Filters {
+    Filters { hidden_folders: f.hidden_folders.clone(), folder_tops: f.folder_tops.clone(), ..Filters::default() }
 }
 
 /// The fingerprints arrived: the picked sound can now say what sounds like it. Public for the screenshots.
@@ -2269,7 +2299,14 @@ fn ask_alike(app: &AppWindow, at: usize) {
     let ask = PAGE.with(|p| {
         let p = p.borrow();
         let index = p.index.clone()?;
-        Some(AlikeAsk { at, came: p.came.clone(), list: p.list.clone(), places: p.places.clone(), index })
+        Some(AlikeAsk {
+            at,
+            came: p.came.clone(),
+            list: p.list.clone(),
+            places: p.places.clone(),
+            index,
+            hidden: hiding(&p.filters),
+        })
     });
     let Some(ask) = ask else { return };
     if HERE.with(|h| *h.borrow()) {
@@ -2548,10 +2585,13 @@ fn none_to_show(app: &AppWindow, title: &str, text: String) {
             p.played = Arc::default();
             p.history.clear();
             p.picked = None;
+            part::forget();
             p.counts = None;
             // Not read after all: the list's word ([`listed`]) doesn't take the place of why.
             p.read = false;
         });
+        // The Edit strip's sound went with them.
+        edit_strip::close(app);
         crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(Arc::default())));
         refresh(app);
     }
@@ -2659,6 +2699,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
             p.trim_db = mo_audio::trim::level_db(crate::settings::value(list::TRIM_LEVEL_KEY).as_deref());
         }
         p.picked = None;
+        part::forget();
         p.rediscover.clear();
         p.re_started = false;
         // The years come with Rediscover's first answer for these sounds.
@@ -2670,6 +2711,8 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
     });
+    // No sound is picked in the new list: the Edit strip closes (its edits are kept for the sound's next pick).
+    edit_strip::close(app);
     galaxy::show_trail(app);
     let list = PAGE.with(|p| p.borrow().list.clone());
     crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(list)));
@@ -2688,8 +2731,12 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
 /// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
 /// buttons after Play (Solomon's F12 note, 2026-11-02 03:28) and the right-click menu lists them under Play, from this
 /// one list so the two can't drift apart.
-const CARD_ACTIONS: &[(&str, &str)] =
-    &[("Send to Bitwig", TO_BITWIG), ("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+const CARD_ACTIONS: &[(&str, &str)] = &[
+    ("Send to Bitwig", TO_BITWIG),
+    ("Edit", edit_strip::EDIT),
+    ("Show in folder", "sounds.reveal"),
+    ("Copy path", "sounds.copyPath"),
+];
 
 /// Send to Bitwig's id in the shortcut list (the C# app's).
 const TO_BITWIG: &str = "sounds.toBitwig";
@@ -2701,6 +2748,12 @@ static SENDING: AtomicBool = AtomicBool::new(false);
 /// The card's buttons and menu again, with keys changed in Settings.
 pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     show_actions(&app.global::<SoundsData>(), shortcuts);
+    edit_strip::show_keys(app, shortcuts);
+}
+
+/// A key let go while the page is shown: letting go of O ends hearing the original on the Edit strip.
+pub fn key_up(app: &AppWindow, text: &str) {
+    edit_strip::key_up(app, text);
 }
 
 /// The card's buttons and the right-click menu, with each one's key and tooltip from the shortcut list (rule 15).
@@ -2764,6 +2817,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = SoundLine>>));
     data.set_views(strings(VIEWS));
     show_actions(&data, shortcuts);
+    edit_strip::show_keys(app, shortcuts);
     // The filters whose choices don't come from the sounds (length, key, tempo) show from the start, without numbers
     // until the sounds are read, so the rows don't jump when they are.
     show_chips(app);
@@ -2985,6 +3039,8 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     tree::wire(app);
     galaxy::wire(app);
     drag_out::wire(app);
+    part::wire(app);
+    edit_strip::wire(app);
     let weak = app.as_weak();
     data.on_list_made(move || {
         // The tiles and the List each come back where they were when they're made again: back on the page, or
@@ -3113,12 +3169,15 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
             let p = p.borrow();
             (p.picked, p.playing)
         });
+        // The end of the part picked on the card, if one is: a click in it moves a play of that part, and any other
+        // play is read again from there, to play as far as its end.
+        let part_end = part::picked_seconds().map(|(_, end)| end);
         match (picked, playing) {
             (Some(i), Some((j, seconds))) if i == j => {
                 let to = f64::from(at) * seconds;
                 match PLAYER.get() {
-                    Some(player) if PAGE.with(|p| seeks(&p.borrow(), player.playing().as_deref(), to)) => {
-                        player.seek(to);
+                    Some(player) if PAGE.with(|p| seeks(&p.borrow(), player.playing().as_deref(), to, part_end)) => {
+                        player.seek(to - PAGE.with(|p| p.borrow().play_offset));
                     }
                     // Still being read, or read only as far as its start: read again from there (newest wins).
                     _ => play_picked(&app, f64::from(at)),
@@ -3132,6 +3191,8 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.on_close_panel(move || {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| p.borrow_mut().picked = None);
+        part::let_go(&app);
+        edit_strip::close(&app);
         app.global::<SoundsData>().set_panel_shown(false);
         redraw();
         // The galaxy's ring leaves the star with it.
@@ -3143,9 +3204,18 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         if let Some(app) = weak.upgrade() {
             if id == "play" {
                 toggle_play(&app);
+            } else if id == edit_strip::EDIT {
+                // The menu's Edit opens the strip on the sound right-clicked (picked by the click), never closes it.
+                edit_strip::open(&app);
             } else {
                 run_action(&app, &id);
             }
+        }
+    });
+    let weak = app.as_weak();
+    data.on_card_chosen(move |id| {
+        if let Some(app) = weak.upgrade() {
+            run_action(&app, &id);
         }
     });
 }
@@ -3213,6 +3283,8 @@ struct RediscoverAsk {
     places: Arc<HashMap<i64, usize>>,
     index: Arc<SoundIndex>,
     options: rediscover::Options,
+    /// The folders hidden on the folder tree, whose sounds are left out before digging ([`hiding`]).
+    hidden: Filters,
 }
 
 /// What Rediscover dug out for one ask.
@@ -3232,18 +3304,27 @@ struct RediscoverAnswer {
 
 impl RediscoverAsk {
     /// Scoring every unused sound takes a while on a big library: it's spread over the low-priority pool's threads.
+    /// The sounds in folders hidden on the folder tree are left out before digging, so the count is made up from the
+    /// others and the forgotten folders' places go to folders that show (the whole-app review of 26 Nov, ST-1).
     fn answer(self) -> RediscoverAnswer {
         let empty = HashMap::new();
         let usage = self.list.usage_map().unwrap_or(&empty);
+        // By place in the list, as `sounds` is.
         let sounds = self.list.sounds();
+        let hidden = self.list.hidden_by_folders(&self.hidden);
+        let left_out = |i: usize| hidden.as_ref().is_some_and(|h| h(i));
         let o = &self.options;
         background::on_pool(|| {
-            let suggested = rediscover::suggest(sounds, usage, &self.index, o);
+            let suggested = rediscover::suggest(sounds, usage, &self.index, o, left_out);
             let likes = suggested.iter().filter_map(|s| Some((s.id, s.like?))).collect();
             let found: Vec<(usize, String)> =
                 suggested.into_iter().filter_map(|s| self.places.get(&s.id).map(|&i| (i, s.reason))).collect();
-            let why = if found.is_empty() { rediscover::why_nothing(sounds, &self.index, o) } else { String::new() };
-            let mut folders = rediscover::folders(sounds, usage);
+            let why = if found.is_empty() {
+                rediscover::why_nothing(sounds, usage, &self.index, o, left_out)
+            } else {
+                String::new()
+            };
+            let mut folders = rediscover::folders(sounds, usage, left_out);
             folders.truncate(FOLDERS);
             RediscoverAnswer {
                 id: self.id,
@@ -3251,7 +3332,7 @@ impl RediscoverAsk {
                 likes,
                 why,
                 folders,
-                years: year_strip::strip(rediscover::years(sounds)),
+                years: year_strip::strip(rediscover::years(sounds, left_out)),
                 learned_from: usage.values().filter(|u| u.songs > 0).count(),
             }
         })
@@ -3276,6 +3357,7 @@ fn rediscover_now(app: &AppWindow) {
             places: p.places.clone(),
             index,
             options: p.re.clone(),
+            hidden: hiding(&p.filters),
         });
         Some((ask, p.list.len()))
     });
@@ -3376,12 +3458,8 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         }
         p.re_likes = a.likes;
         p.re_busy = false;
-        // Nothing from a folder you hid on the folder tree.
-        let mut found = a.found;
-        if let Some(hidden) = p.list.hidden_by_folders(&p.filters) {
-            found.retain(|&(at, _)| !hidden(at));
-        }
-        p.rediscover = found;
+        // Nothing from a folder you hid on the folder tree: they were left out as it dug, and a hide since asks again.
+        p.rediscover = a.found;
         p.re_years = a.years;
         Some((p.rediscover.len(), p.list.knows_use()))
     });
@@ -3398,7 +3476,6 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
     let folders: Vec<FolderLine> = a
         .folders
         .iter()
-        .filter(|f| PAGE.with(|p| !p.borrow().list.folder_hidden(&p.borrow().filters, &f.folder)))
         .map(|f| FolderLine {
             folder: f.folder.clone().into(),
             name: f.folder.rsplit(['\\', '/']).find(|s| !s.is_empty()).unwrap_or(&f.folder).into(),
@@ -3872,8 +3949,9 @@ fn show_sound(app: &AppWindow, at: usize) {
         pick(app, at);
         return;
     }
-    PAGE.with(|p| {
+    let unhid = PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        let hidden = p.filters.hidden_folders.clone();
         // Hide duplicates stays on unless the sound has copies (one of them might show in its place), and Hide silent
         // sounds unless it's silent.
         let hide_copies = p.filters.hide_copies && !p.list.has_copies(at);
@@ -3887,9 +3965,14 @@ fn show_sound(app: &AppWindow, at: usize) {
             !list.hidden_by_folders(&one).is_some_and(|hidden| hidden(at))
         });
         p.to_pick = Some(at);
+        p.filters.hidden_folders != hidden && p.re_started
     });
     app.global::<SoundsData>().set_search(SharedString::new());
     refresh(app);
+    // A folder shown again changes what Rediscover digs through, as a change on the tree does (tree.rs `change`).
+    if unhid {
+        rediscover_now(app);
+    }
 }
 
 /// Opens the page on the sound with id `id` and picks it, as Ctrl+K does: the Space page's links to it. False when the
@@ -4163,6 +4246,10 @@ fn pick(app: &AppWindow, at: usize) {
         data.set_picked(picked_sound(&p, at));
         show_picked_tags(&data, &p);
     });
+    if let Some(id) = PAGE.with(|p| p.borrow().list.sound(at).map(|s| s.id)) {
+        part::sound_picked(app, id);
+        edit_strip::sound_picked(app);
+    }
     data.set_panel_shown(true);
     find_alike(app, at);
     galaxy::show_picked(app);
@@ -4365,6 +4452,10 @@ fn step(app: &AppWindow, d: i32, held: bool) {
 /// Space and the Play button: stops the picked sound if it's playing, else plays it (a play you meant, kept for
 /// History and Most liked).
 pub fn toggle_play(app: &AppWindow) -> bool {
+    // With the Edit strip open on it, the edit plays (or stops).
+    if edit_strip::toggle_play(app) {
+        return true;
+    }
     let (picked, playing) = PAGE.with(|p| {
         let p = p.borrow();
         (p.picked, p.playing)
@@ -4381,10 +4472,16 @@ pub fn toggle_play(app: &AppWindow) -> bool {
     true
 }
 
-/// Plays the picked sound from `from` (0 to 1 of its waveform). The file is read off the window's thread.
+/// Plays the picked sound from `from` (0 to 1 of its waveform). The file is read off the window's thread. With a part
+/// picked on its card, only the part plays: from its start, or from `from` when that's inside it, to its end.
 fn play_picked(app: &AppWindow, from: f64) {
-    if let Some(at) = PAGE.with(|p| p.borrow().picked) {
-        play_sound(app, at, from, mo_audio::MAX_SECONDS);
+    let Some(at) = PAGE.with(|p| p.borrow().picked) else { return };
+    match PAGE.with(|p| p.borrow().list.sound(at).map(|s| s.id)).and_then(part::of) {
+        Some(part) => {
+            let from = if from > part.from && from < part.to { from } else { part.from };
+            play_from(app, at, from, mo_audio::MAX_SECONDS, Some(part.to));
+        }
+        None => play_sound(app, at, from, mo_audio::MAX_SECONDS),
     }
 }
 
@@ -4392,8 +4489,15 @@ fn play_picked(app: &AppWindow, from: f64) {
 /// galaxy's sweep plays the stars it passes without picking them), reading at most `most` seconds of it: a sweep only
 /// needs its start, which reads far quicker than a whole loop. A sound longer than a minute (or not analysed yet) is
 /// played as it's read instead, to its end however long it is (Solomon's F12 note of 24 Nov 2026: a 5:11 song stopped
-/// a minute in); a sweep still reads only its start.
+/// a minute in), and so is one of a minute exactly, which may be longer ([`card_wave`]); a sweep still reads only its
+/// start.
 fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
+    play_from(app, at, from, most, None);
+}
+
+/// [`play_sound`], or with `till` (0 to 1 of the way through) only as far as that: a part picked on the card, read on
+/// its own ([`mo_app::edit_copy::read_part`]) and played without Trim silence.
+fn play_from(app: &AppWindow, at: usize, from: f64, most: f64, till: Option<f64>) {
     let Some((at, path, seconds, trim)) = PAGE.with(|p| {
         let p = p.borrow();
         let s = p.list.sound(at)?;
@@ -4402,11 +4506,18 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     }) else {
         return;
     };
-    let streams = most >= mo_audio::MAX_SECONDS && !(seconds > 0.0 && seconds <= mo_audio::MAX_SECONDS);
+    let trim = trim.filter(|_| till.is_none());
+    let part = till.map(|till| (from * seconds, till * seconds));
+    // A part longer than a minute plays as it's read, as a long sound does (only a minute's read whole first).
+    let streams = match part {
+        Some((start, end)) => end - start > mo_audio::MAX_SECONDS,
+        None => most >= mo_audio::MAX_SECONDS && !(seconds > 0.0 && seconds < mo_audio::MAX_SECONDS),
+    };
     // A MIDI loop playing, or one still being made, would play over it (or start on top of it later).
     crate::midi::stop_for_another(app);
     crate::curve_editor::call_off_tone();
     crate::song_player::stop_for_another(app);
+    crate::arrangement_play::stop_for_another(app);
     // The screenshots show a sound playing without a sound card.
     let here = HERE.with(|h| *h.borrow());
     let ask = if here { 0 } else { PLAYS.fetch_add(1, Ordering::SeqCst) + 1 };
@@ -4416,16 +4527,61 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         let mut p = p.borrow_mut();
         p.playing = Some((at, seconds.max(0.001)));
         p.play = ask;
-        // Played as it's read, a click anywhere moves it: the player reads the file again from there.
-        p.play_reads = if streams { f64::INFINITY } else { most };
+        // Played as it's read, a click anywhere moves it: the player reads the file again from there. A part is read
+        // as far as its end.
+        p.play_reads = match part {
+            Some((_, end)) => end,
+            None if streams => f64::INFINITY,
+            None => most,
+        };
         p.play_trimmed = trim.is_some() && !streams;
+        // A part read on its own starts where the play does, not at the file's start (one played as it's read is
+        // counted from the file's start by the player).
+        p.play_offset = match part {
+            Some((start, _)) if !streams => start,
+            _ => 0.0,
+        };
+        p.play_part = part;
+        p.play_edit = false;
     });
     playing_changed(app);
     if here {
         return;
     }
-    let job = PlayJob { ask, path, from, seconds, most, streams, trim, window: app.as_weak(), held: Arc::default() };
+    // A part read on its own: as far as its end.
+    let till = till.filter(|_| !streams);
+    let job =
+        PlayJob { ask, path, from, seconds, most, streams, trim, till, window: app.as_weak(), held: Arc::default() };
     ask_reader(job);
+}
+
+/// Plays `sound`, made in memory (the Edit strip's edit, or the original it was read from), as the sound at `at`'s:
+/// from `from` seconds into it, and only as far as `till` when there's a part picked on the strip. Nothing is read, so
+/// it starts at once.
+fn play_in_memory(app: &AppWindow, at: usize, sound: Arc<mo_audio::AudioData>, from: f64, till: Option<f64>) {
+    // A MIDI loop playing, or one still being made, would play over it.
+    crate::midi::stop_for_another(app);
+    crate::curve_editor::call_off_tone();
+    crate::song_player::stop_for_another(app);
+    crate::arrangement_play::stop_for_another(app);
+    let here = HERE.with(|h| *h.borrow());
+    let ask = if here { 0 } else { PLAYS.fetch_add(1, Ordering::SeqCst) + 1 };
+    // A read still going for an older play doesn't start its sound after this one.
+    NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.playing = Some((at, sound.seconds().max(0.001)));
+        p.play = ask;
+        p.play_reads = f64::INFINITY;
+        p.play_trimmed = false;
+        p.play_offset = 0.0;
+        p.play_part = till.map(|till| (from, till));
+        p.play_edit = true;
+    });
+    playing_changed(app);
+    if !here {
+        player().play(sound, ask.to_string(), from);
+    }
 }
 
 /// How many sounds may be read at once. Plays asked while every reader is busy replace each other (rule 12), so
@@ -4479,6 +4635,9 @@ struct PlayJob {
     /// Trim silence was on when it was asked for, with the level it counts as silence: it starts past the silence at
     /// its start and stops at the end of the sound, not the end of the file.
     trim: Option<f32>,
+    /// It's read only as far as this (0 to 1 of the way through), from `from`, on its own: a part picked on the card,
+    /// a minute long or less.
+    till: Option<f64>,
     window: slint::Weak<AppWindow>,
     /// How many of its reader's jobs are held: one more while this one is, so the reader is free once it's none.
     held: Arc<AtomicUsize>,
@@ -4495,7 +4654,7 @@ impl Drop for PlayJob {
 /// (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output, overtaken by a newer sound
 /// or dropped, by this play's number; for a sound the sweep didn't ask for they count nothing.
 fn read_and_play(job: PlayJob) {
-    let PlayJob { ask, ref path, from, seconds, most, streams, trim, ref window, .. } = job;
+    let PlayJob { ask, ref path, from, seconds, most, streams, trim, till, ref window, .. } = job;
     let (path, window) = (path.clone(), window.clone());
     // Still the newest play, with no stop since.
     let wanted = || {
@@ -4517,11 +4676,16 @@ fn read_and_play(job: PlayJob) {
     let reads = if trim.is_some() && most < mo_audio::MAX_SECONDS { most + TRIM_LEAD_ROOM } else { most };
     // A long sound plays as it's read, as soon as its first part is (from its start with Trim silence on, past the
     // silence there); any other is read first, as far as it plays.
-    let read = if streams {
+    let read = if let Some(till) = till {
+        // Only the part is read, however long the sound.
+        mo_app::edit_copy::read_part(Path::new(&path), from * seconds, till * seconds).map(ToPlay::Part)
+    } else if streams {
         let quiet = trim.filter(|_| from == 0.0);
-        mo_audio::play::Stream::open(Path::new(&path), from * seconds, quiet, &|| wanted().is_ok()).map(ToPlay::Stream)
+        mo_audio::play::Stream::open(Path::new(&path), from * seconds, quiet, &|| wanted().is_ok())
+            .map(ToPlay::Stream)
+            .map_err(|e| e.to_string())
     } else {
-        mo_audio::read(Path::new(&path), reads).map(ToPlay::Whole)
+        mo_audio::read(Path::new(&path), reads).map(ToPlay::Whole).map_err(|e| e.to_string())
     };
     // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since wins,
     // rather than this sound starting after it and playing on while the page shows another or none.
@@ -4540,10 +4704,11 @@ fn read_and_play(job: PlayJob) {
             }
             player().play_if(Arc::new(audio), ask.to_string(), start, wanted)
         }
+        Ok(ToPlay::Part(part)) => player().play_if(Arc::new(part), ask.to_string(), 0.0, wanted),
         Err(e) => match wanted() {
             Err(unwanted) => Err(unwanted),
             Ok(()) => {
-                couldnt_play(&path, ask, &e.to_string(), window);
+                couldnt_play(&path, ask, &e, window);
                 return;
             }
         },
@@ -4565,6 +4730,8 @@ fn read_and_play(job: PlayJob) {
 enum ToPlay {
     Stream(mo_audio::play::Stream),
     Whole(mo_audio::AudioData),
+    /// A part picked on the card, faded where it was cut: it plays from its start, which is `from`.
+    Part(mo_audio::AudioData),
 }
 
 /// How much further a sweep's read goes with Trim silence on, for the silence at the start it skips.
@@ -4612,25 +4779,28 @@ fn couldnt_play(path: &str, ask: u64, why: &str, window: slint::Weak<AppWindow>)
         if PLAYS.load(Ordering::SeqCst) != ask {
             return;
         }
-        // Stepping or sweeping over many sounds that won't play for the same reason (a drive unplugged) says so once;
-        // the log has each of them.
-        let now = Instant::now();
-        let new_card = FAILED_CARD.with(|c| {
-            let mut c = c.borrow_mut();
-            let fresh =
-                c.as_ref().is_none_or(|(at, before)| *before != why || now.duration_since(*at) >= FAILED_CARD_GAP);
-            if fresh {
-                *c = Some((now, why.clone()));
-            }
-            fresh
-        });
-        if new_card && let Some(feed) = FEED.with(|f| f.borrow().clone()) {
-            feed.start("Couldn't play the sound", "").failed(&why);
-        }
+        failed_card(&why);
         if let Some(app) = window.upgrade() {
             stop(&app);
         }
     });
+}
+
+/// The card saying a sound couldn't be played, and why. Stepping or sweeping over many sounds that won't play for the
+/// same reason (a drive unplugged) says so once; the log has each of them.
+fn failed_card(why: &str) {
+    let now = Instant::now();
+    let new_card = FAILED_CARD.with(|c| {
+        let mut c = c.borrow_mut();
+        let fresh = c.as_ref().is_none_or(|(at, before)| before != why || now.duration_since(*at) >= FAILED_CARD_GAP);
+        if fresh {
+            *c = Some((now, why.to_owned()));
+        }
+        fresh
+    });
+    if new_card && let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+        feed.start("Couldn't play the sound", "").failed(why);
+    }
 }
 
 /// The least time between two "Couldn't play the sound" cards for the same reason: as long as one stays.
@@ -4648,7 +4818,11 @@ fn stop(app: &AppWindow) {
     if let Some(player) = PLAYER.get() {
         player.stop();
     }
-    PAGE.with(|p| p.borrow_mut().playing = None);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.playing = None;
+        p.play_edit = false;
+    });
     playing_changed(app);
 }
 
@@ -4665,6 +4839,13 @@ pub fn escape(app: &AppWindow) -> bool {
     // Favourites from Bitwig's card lies over the sound card: it goes first.
     if data.get_bitwig_shown() {
         bitwig::close(app);
+        return true;
+    }
+    // The Edit strip's part, then the strip, then a part picked on the card go before the card.
+    if edit_strip::escape(app) {
+        return true;
+    }
+    if part::let_go(app) {
         return true;
     }
     if PAGE.with(|p| p.borrow().picked.is_some()) {
@@ -4700,28 +4881,42 @@ pub fn stop_for_another(app: &AppWindow) {
 /// Whether a click `to` seconds into the waveform of the sound shown playing can move the play the player has
 /// (`player_has`: its key), rather than reading the sound again from there: only when the player has that very play
 /// (not an older one, nor none while it's still being read) and the play read that far (a sweep reads only its start).
-fn seeks(p: &Page, player_has: Option<&str>, to: f64) -> bool {
+/// With a part picked on the card that ends at `part_end` seconds, only a play of that part can be moved (to where it
+/// was read from on); without one, only a play that isn't of a part.
+fn seeks(p: &Page, player_has: Option<&str>, to: f64, part_end: Option<f64>) -> bool {
     p.playing.is_some()
         && player_has.is_some_and(|key| key.parse() == Ok(p.play))
+        && to >= p.play_offset
         && to < p.play_reads
         && !p.play_trimmed
+        && !p.play_edit
+        && p.play_part.map(|(_, end)| end) == part_end
 }
 
-/// A sound played to its end by itself: `key` is its play's number.
-fn ended(key: &str) {
+/// A sound played to its end by itself: `key` is its play's number. With `why`, a long sound played as it was read
+/// stopped part way because its file couldn't be read on (a drive unplugged, the file moved or renamed): the log and a
+/// card say so, as for a sound that couldn't be read at all, and its waveform stays where it stopped (the whole-app
+/// review of 26 Nov, AD-5).
+fn ended(key: &str, why: Option<&str>) {
     let ours = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         // By the play's number, not its file: played again near its end, the same sound's older play ends while the
         // new one is still being read, and the page goes on showing the new one.
-        let ours = p.playing.is_some() && key.parse() == Ok(p.play);
-        if ours {
-            p.playing = None;
+        if p.playing.is_none() || key.parse() != Ok(p.play) {
+            return None;
         }
-        ours
+        let path = p.playing.and_then(|(at, _)| p.list.sound(at)).map(|s| s.path.clone());
+        p.playing = None;
+        p.play_edit = false;
+        Some(path)
     });
     // An older sound, cut off by a newer one that's still reading: the newer one keeps the page.
-    if !ours {
+    let Some(path) = ours else {
         return;
+    };
+    if let Some(why) = why {
+        log::warning("Sounds", &format!("Couldn't read on in {}: {why}", path.as_deref().unwrap_or("a sound")));
+        failed_card(why);
     }
     TICKER.with(Timer::stop);
     redraw();
@@ -4731,8 +4926,11 @@ fn ended(key: &str) {
         if let Some(app) = w.borrow().as_ref().and_then(slint::Weak::upgrade) {
             let data = app.global::<SoundsData>();
             data.set_playing(false);
-            data.set_played(1.0);
-            data.set_tile_played(1.0);
+            if why.is_none() {
+                data.set_played(1.0);
+                data.set_tile_played(1.0);
+            }
+            edit_strip::show_playing(&app, false);
         }
     });
 }
@@ -4746,13 +4944,14 @@ thread_local! {
 fn playing_changed(app: &AppWindow) {
     WINDOW.with(|w| *w.borrow_mut() = Some(app.as_weak()));
     let data = app.global::<SoundsData>();
-    let (picked_plays, any) = PAGE.with(|p| {
+    let (picked_plays, any, edit) = PAGE.with(|p| {
         let p = p.borrow();
-        (p.playing.is_some() && p.playing.map(|(i, _)| i) == p.picked, p.playing.is_some())
+        (p.playing.is_some() && p.playing.map(|(i, _)| i) == p.picked, p.playing.is_some(), p.play_edit)
     });
     data.set_playing(picked_plays);
     data.set_played(0.0);
     data.set_tile_played(0.0);
+    edit_strip::show_playing(app, any && edit);
     redraw();
     // Nothing really plays for the screenshots, so nothing moves the waveform along there.
     if !any || HERE.with(|h| *h.borrow()) {
@@ -4763,8 +4962,39 @@ fn playing_changed(app: &AppWindow) {
     TICKER.with(|t| {
         t.start(TimerMode::Repeated, Duration::from_millis(40), move || {
             let Some(app) = weak.upgrade() else { return };
-            let Some(seconds) = PAGE.with(|p| p.borrow().playing.map(|(_, s)| s)) else { return };
-            let at = PLAYER.get().and_then(Player::position).unwrap_or(0.0);
+            let Some((seconds, offset, part, play, edit)) = PAGE.with(|p| {
+                let p = p.borrow();
+                p.playing.map(|(_, s)| (s, p.play_offset, p.play_part, p.play, p.play_edit))
+            }) else {
+                return;
+            };
+            let player = PLAYER.get();
+            // The Edit strip's play: its waveform shows where it is, and it stops at the end of the strip's part.
+            if edit {
+                let ours = player.and_then(Player::playing).is_some_and(|key| key.parse() == Ok(play));
+                let at = player.and_then(Player::position).filter(|_| ours);
+                if !edit_strip::tick(&app, at) {
+                    stop(&app);
+                }
+                return;
+            }
+            let at = match part {
+                // A part: where it starts until the player has it (its place is the sound before's till then), and
+                // stopped at the part's end once it's there.
+                Some((start, end)) => {
+                    if player.and_then(Player::playing).is_none_or(|key| key.parse() != Ok(play)) {
+                        start
+                    } else {
+                        let at = player.and_then(Player::position).unwrap_or(0.0) + offset;
+                        if at >= end {
+                            stop(&app);
+                            return;
+                        }
+                        at
+                    }
+                }
+                None => player.and_then(Player::position).unwrap_or(0.0) + offset,
+            };
             let data = app.global::<SoundsData>();
             data.set_played((at / seconds).clamp(0.0, 1.0) as f32);
             // A tile's waveform is the sound's first minute: a longer sound's tile has played through by then.
@@ -4776,6 +5006,9 @@ fn playing_changed(app: &AppWindow) {
 /// Runs one of the page's own actions (from its key or its menu). Returns whether it did anything, so an unused key
 /// goes on.
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
+    if let Some(done) = edit_strip::run_action(app, id) {
+        return done;
+    }
     let picked = PAGE.with(|p| {
         let p = p.borrow();
         p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.id, s.path.clone(), s.name().to_owned()))
@@ -6157,13 +6390,13 @@ mod tests {
     fn an_older_play_of_the_same_sound_ending_leaves_the_new_one_on_show() {
         // The sound at 4 played (play 5), then played again near its end (play 6): play 5 ends while play 6 is read.
         PAGE.with(|p| *p.borrow_mut() = Page { playing: Some((4, 2.5)), play: 6, ..Page::default() });
-        ended("5");
+        ended("5", None);
         assert_eq!(PAGE.with(|p| p.borrow().playing), Some((4, 2.5)));
         // A key that isn't a play's number is never the page's.
-        ended(r"C:\s\kick.wav");
+        ended(r"C:\s\kick.wav", None);
         assert_eq!(PAGE.with(|p| p.borrow().playing), Some((4, 2.5)));
         // Play 6 ending by itself does stop it on the page.
-        ended("6");
+        ended("6", None);
         assert_eq!(PAGE.with(|p| p.borrow().playing), None);
     }
 
@@ -6171,15 +6404,32 @@ mod tests {
     fn a_click_on_the_waveform_moves_only_the_play_the_player_has_as_far_as_it_was_read() {
         // Play 6 of the sound at 4 is a sweep's: only its first 4 s were read.
         let p = Page { playing: Some((4, 30.0)), play: 6, play_reads: 4.0, ..Page::default() };
-        assert!(seeks(&p, Some("6"), 2.0));
+        assert!(seeks(&p, Some("6"), 2.0, None));
         // Past what was read, the sound is read again from there; so it is while play 6 is still being read (the
         // player has nothing, or an older play of the same sound).
-        assert!(!seeks(&p, Some("6"), 15.0));
-        assert!(!seeks(&p, None, 2.0));
-        assert!(!seeks(&p, Some("5"), 2.0));
+        assert!(!seeks(&p, Some("6"), 15.0, None));
+        assert!(!seeks(&p, None, 2.0, None));
+        assert!(!seeks(&p, Some("5"), 2.0, None));
         // A long sound played as it's read: a click anywhere in it moves it, as the player reads it again from there.
         let streamed = Page { playing: Some((4, 311.0)), play: 6, play_reads: f64::INFINITY, ..Page::default() };
-        assert!(seeks(&streamed, Some("6"), 250.0));
+        assert!(seeks(&streamed, Some("6"), 250.0, None));
+        // A part from 2 s to 5 s, read on its own from 3 s on: a click from there to its end moves it; one before
+        // where it was read from, or after the part, reads it again, as does a click once the part has changed or gone.
+        let part = Page {
+            playing: Some((4, 30.0)),
+            play: 6,
+            play_reads: 5.0,
+            play_offset: 3.0,
+            play_part: Some((3.0, 5.0)),
+            ..Page::default()
+        };
+        assert!(seeks(&part, Some("6"), 4.0, Some(5.0)));
+        assert!(!seeks(&part, Some("6"), 2.5, Some(5.0)));
+        assert!(!seeks(&part, Some("6"), 5.5, Some(5.0)));
+        assert!(!seeks(&part, Some("6"), 4.0, Some(6.0)));
+        assert!(!seeks(&part, Some("6"), 4.0, None));
+        // And a play of the whole sound isn't moved once a part is picked: the part plays instead.
+        assert!(!seeks(&p, Some("6"), 2.0, Some(5.0)));
     }
 
     #[test]
@@ -6337,15 +6587,20 @@ mod tests {
             &LikedWeights::default(),
         );
         let features = (1..=6i64).map(|id| (id, (0..8).map(|d| ((id + d) % 3) as f32).collect())).collect();
-        let index = SoundIndex::build(&features, &Default::default(), 6);
-        let ask = RediscoverAsk {
-            id: 7,
+        let index = Arc::new(SoundIndex::build(&features, &Default::default(), 6));
+        let ask = |id: u64, hidden: Filters| RediscoverAsk {
+            id,
             list: lib.list.clone(),
             places: lib.places.clone(),
-            index: Arc::new(index),
+            index: index.clone(),
             options: rediscover::Options { seed: 1, ..rediscover::Options::default() },
+            hidden,
         };
-        let a = ask.answer();
+        // Their folder hidden on the folder tree: none is dug out, nor the folder offered, and the reason says why.
+        let hid = ask(8, hiding(&Filters { hidden_folders: vec!["Pack".into()], ..Filters::default() })).answer();
+        assert!(hid.found.is_empty() && hid.folders.is_empty(), "{:?} {:?}", hid.found, hid.folders);
+        assert!(hid.why.contains("folders you hid"), "{}", hid.why);
+        let a = ask(7, Filters::default()).answer();
         assert_eq!(a.id, 7);
         assert_eq!(a.learned_from, 1);
         assert!(!a.found.is_empty(), "{}", a.why);

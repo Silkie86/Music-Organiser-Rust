@@ -46,6 +46,24 @@ pub fn is_serum_1(plugin: &str) -> bool {
     p.starts_with("serum") && !p.starts_with("serum 2") && !p.starts_with("serum2") && !p.starts_with("serumfx")
 }
 
+/// Whether one part of a sound's name (a track's or channel's name, or the plugin's: "Serum - Lead" has two parts)
+/// names nothing but Serum 1 itself: "Serum", "Serum_x64", "Serum (x64)", "Xfer Serum", or FL's "Serum #2" for a second
+/// channel of it. The whole part must be such a name: a track called "Serum Bass" says more than the plugin, so it
+/// stays in the file's name (whole-app review of 26 Nov, PZ-3: anything starting "Serum" was left out).
+fn only_names_serum_1(part: &str) -> bool {
+    let lower = part.trim().to_lowercase();
+    // FL calls a second channel of the same plugin "Serum #2".
+    let p = match lower.rsplit_once('#') {
+        Some((before, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => before.trim_end(),
+        _ => lower.as_str(),
+    };
+    let p = p.strip_prefix("xfer records ").or_else(|| p.strip_prefix("xfer ")).unwrap_or(p);
+    let Some(rest) = p.strip_prefix("serum") else { return false };
+    // What may follow the plugin's name: only which build it is ("_x64", " (x64)", " VST3").
+    let rest: String = rest.chars().filter(|c| !matches!(c, ' ' | '_' | '-' | '.' | '(' | ')' | '[' | ']')).collect();
+    matches!(rest.as_str(), "" | "x64" | "x86" | "64" | "32" | "vst" | "vst2" | "vst3")
+}
+
 fn be_u32(raw: &[u8], at: usize) -> Option<usize> {
     raw.get(at..at.checked_add(4)?)?.first_chunk::<4>().and_then(|b| usize::try_from(u32::from_be_bytes(*b)).ok())
 }
@@ -132,8 +150,10 @@ pub fn part_folder(part: Option<Role>) -> &'static str {
 /// 2026: the presets' own names were mostly "Init", "better to use the name of the project". The name Serum keeps in
 /// its settings isn't used.
 pub fn file_name(song: &str, sound: &str) -> String {
-    // "Serum - Serum" (a Bitwig track called Serum) says nothing; "Serum - Wobble" says "Wobble".
-    let said: Vec<&str> = sound.split(" - ").map(str::trim).filter(|w| !w.is_empty() && !is_serum_1(w)).collect();
+    // "Serum - Serum" (a Bitwig track called Serum) says nothing; "Serum - Wobble" says "Wobble", and "Serum Bass -
+    // Serum" says "Serum Bass".
+    let said: Vec<&str> =
+        sound.split(" - ").map(str::trim).filter(|w| !w.is_empty() && !only_names_serum_1(w)).collect();
     let song = song.trim();
     let name = match (song.is_empty(), said.is_empty()) {
         (false, true) => song.to_owned(),
@@ -327,6 +347,14 @@ mod tests {
         assert_eq!(file_name("Didums", "Serum"), "Didums.fxp");
         assert_eq!(file_name("serum test", "Serum - Serum"), "serum test.fxp");
         assert_eq!(file_name("Didums", "Serum_x64 - Lead"), "Didums - Lead.fxp");
+        assert_eq!(file_name("Didums", "Serum (x64)"), "Didums.fxp");
+        assert_eq!(file_name("Didums", "Xfer Serum"), "Didums.fxp");
+        assert_eq!(file_name("Didums", "Serum #2"), "Didums.fxp");
+        // PZ-3 (26 Nov): a track named "Serum Bass" says more than the plugin, so it stays.
+        assert_eq!(file_name("Night Bus", "Serum Bass - Serum"), "Night Bus - Serum Bass.fxp");
+        assert_eq!(file_name("Night Bus", "Serum Sub - Init"), "Night Bus - Serum Sub - Init.fxp");
+        assert_eq!(file_name("Night Bus", "Serum 2 Lead"), "Night Bus - Serum 2 Lead.fxp");
+        assert_eq!(file_name("Night Bus", "Serumish"), "Night Bus - Serumish.fxp");
         assert_eq!(file_name("Didums", ""), "Didums.fxp");
         assert_eq!(file_name("neon: rmx", "Pad"), format!("{}.fxp", names::safe_file_name("neon: rmx - Pad")));
         assert_eq!(file_name(" ", "Lead"), "Lead.fxp");

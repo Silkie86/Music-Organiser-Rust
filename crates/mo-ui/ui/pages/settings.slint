@@ -68,6 +68,8 @@ export struct DawRowInfo {
     ok: bool,
     // Whether this is Bitwig (its colour, and its Check again button).
     bitwig: bool,
+    // Whether this is the app's CLAP plugin's row (Install and Take out ask Windows first), not a DAW's link.
+    plugin: bool,
     // Its Install button's words, or empty for none.
     install: string,
     // What Take out asks before it takes the app's link out of this DAW, or empty for no Take out (nothing there).
@@ -182,11 +184,18 @@ export global SettingsData {
     in property <bool> daws-installing;
     // Whether what runs while daws-installing is a Take out.
     in property <bool> daws-taking-out;
+    // Whether the plugin row's step runs, waiting for the answer to Windows' question, and whether it's a Take out.
+    // Apart from daws-installing: the links' buttons stay usable while Windows waits.
+    in property <bool> plugin-asking;
+    in property <bool> plugin-taking-out;
     // Install on a row: Bitwig's extension (true) or FL Studio's script.
     callback install-daw(bool);
     // Take out on a DAW's row: which DAW's is being asked about (its name, or empty), then taking it out (Bitwig's?).
     in-out property <string> take-out-asking;
     callback take-out-daw(bool);
+    // The plugin row's Install (or Update) and Take out: each asks Windows first.
+    callback install-plugin();
+    callback take-out-plugin();
     // Your Bitwig Studio folder: pick one, or go back to the one in Documents; whether one is chosen (not Documents').
     callback choose-bitwig-folder();
     callback documents-bitwig();
@@ -996,18 +1005,35 @@ component DawsTab inherits VerticalLayout {
             }
             if d.install != "": StudioButton {
                 horizontal-stretch: 0;
-                text: SettingsData.daws-installing ? (SettingsData.daws-taking-out ? "Taking out\u{2026}" : "Installing\u{2026}") : d.install;
-                tip: d.bitwig ? "Puts the app's extension in Bitwig's folders and takes out the older script. Close Bitwig first." : "Puts the app's script in FL Studio's folders, keeping your setting for letting the app make changes";
-                enabled: !SettingsData.daws-installing;
-                clicked => { SettingsData.install-daw(d.bitwig); }
+                // The plugin's row is busy on its own (Windows' question can wait a long time), the links' rows together.
+                text: d.plugin ? (SettingsData.plugin-asking && !SettingsData.plugin-taking-out ? "Asking Windows\u{2026}" : d.install)
+                    : SettingsData.daws-installing ? (SettingsData.daws-taking-out ? "Taking out\u{2026}" : "Installing\u{2026}") : d.install;
+                tip: d.plugin ? "Puts the app's DAWmate plugin in the shared CLAP folder, where every DAW finds it. Windows asks first (Yes or No). Close your DAWs first."
+                    : d.bitwig ? "Puts the app's extension in Bitwig's folders and takes out the older script. Close Bitwig first." : "Puts the app's script in FL Studio's folders, keeping your setting for letting the app make changes";
+                enabled: d.plugin ? !SettingsData.plugin-asking : !SettingsData.daws-installing;
+                clicked => {
+                    if (d.plugin) {
+                        SettingsData.install-plugin();
+                    } else {
+                        SettingsData.install-daw(d.bitwig);
+                    }
+                }
             }
             if d.take-out-ask != "" && SettingsData.take-out-asking != d.daw: StudioButton {
                 horizontal-stretch: 0;
-                text: "Take out\u{2026}";
-                tip: d.bitwig ? "Takes the app's extension (and its older copies) out of Bitwig's folders, after asking" : "Takes the app's script (and its older copy) out of FL Studio's folders, after asking";
-                enabled: !SettingsData.daws-installing;
+                text: d.plugin && SettingsData.plugin-asking && SettingsData.plugin-taking-out ? "Taking out\u{2026}" : "Take out\u{2026}";
+                tip: d.plugin ? "Takes the app's own plugin out of the shared CLAP folder, after asking (a test plugin stays). Windows asks too."
+                    : d.bitwig ? "Takes the app's extension (and its older copies) out of Bitwig's folders, after asking" : "Takes the app's script (and its older copy) out of FL Studio's folders, after asking";
+                enabled: d.plugin ? !SettingsData.plugin-asking : !SettingsData.daws-installing;
                 clicked => { SettingsData.take-out-asking = d.daw; }
             }
+        }
+        // The plugin's Install or Take out waits for Windows' question, which can come up behind this window.
+        if d.plugin && SettingsData.plugin-asking: Text {
+            text: "Windows asks whether DAWmate may change the shared CLAP folder. Answer its question to go on: it may be behind this window (look in the taskbar).";
+            color: Theme.text;
+            font-size: Type.body;
+            wrap: word-wrap;
         }
         // Take out asks first, naming every file that goes.
         if SettingsData.take-out-asking == d.daw && d.take-out-ask != "": Text {
@@ -1022,8 +1048,14 @@ component DawsTab inherits VerticalLayout {
             StudioButton {
                 text: "Take it out";
                 danger: true;
-                enabled: !SettingsData.daws-installing;
-                clicked => { SettingsData.take-out-daw(d.bitwig); }
+                enabled: d.plugin ? !SettingsData.plugin-asking : !SettingsData.daws-installing;
+                clicked => {
+                    if (d.plugin) {
+                        SettingsData.take-out-plugin();
+                    } else {
+                        SettingsData.take-out-daw(d.bitwig);
+                    }
+                }
             }
             StudioButton {
                 text: "Cancel";
@@ -1211,7 +1243,7 @@ component DeveloperTab inherits VerticalLayout {
     alignment: start;
     SettingsCard {
         title: "Beta checklist";
-        intro: "Try each step with your own songs, sounds and DAWs, and mark how it went. Your marks and notes are kept in the data folder, where Claude reads them; a Problem keeps the log's last lines with it, so Claude can see why. The Self-check steps at the end the app marks by itself, once a day.";
+        intro: "Try each step with your own songs, sounds and DAWs, and mark how it went. Your marks and notes are kept in the data folder; a Problem keeps the log's last lines with it, so the reason can be seen. The Self-check steps at the end the app marks by itself, once a day.";
         HorizontalLayout {
             spacing: Space.md;
             Text {
@@ -1255,7 +1287,7 @@ component DeveloperTab inherits VerticalLayout {
     }
     SettingsCard {
         title: "This build";
-        intro: "Which app is running, and where it keeps its files. Claude reads the logs from these folders.";
+        intro: "Which app is running, and where it keeps its files. The logs in these folders say what the app did.";
         for f[i] in SettingsData.facts: FactLine {
             fact: f;
             clicked => { SettingsData.open-fact(i); }

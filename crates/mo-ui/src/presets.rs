@@ -97,6 +97,9 @@ struct Page {
     exporting: bool,
     /// Whether the export running is Export these, which its button (or key) stops (PS-3).
     exporting_shown: bool,
+    /// Whether the export running is To Serum 2, which its button (or key) stops too (the whole-app review of 26 Nov,
+    /// PZ-4).
+    serum2_running: bool,
     /// How many of the lines shown are songs' Serum 1 sounds (the To Serum 2 button shows when there are some).
     serum_1_shown: usize,
     message: String,
@@ -1002,6 +1005,7 @@ fn show_everything(app: &AppWindow) {
         data.set_years_to(to);
         data.set_exporting(p.exporting);
         data.set_exporting_shown(p.exporting_shown);
+        data.set_serum2_running(p.serum2_running);
 
         // The curves.
         data.set_curve_hidden(p.curve_filters.hidden);
@@ -1719,6 +1723,7 @@ fn hear_curve(app: &AppWindow, sent: Curve) {
     crate::sounds::stop_for_another(app);
     crate::midi::stop_for_another(app);
     crate::song_player::stop_for_another(app);
+    crate::arrangement_play::stop_for_another(app);
     // The key that stops it, as the shortcut list has it now.
     let stops = PAGE.with(|p| {
         let p = p.borrow();
@@ -1925,6 +1930,7 @@ fn set_exporting(on: bool, message: Option<String>) {
             let mut p = p.borrow_mut();
             p.exporting = on;
             p.exporting_shown &= on;
+            p.serum2_running &= on;
             if let Some(m) = message {
                 p.message = m;
             }
@@ -2033,7 +2039,8 @@ fn without_template(items: &[&Item], templates: &Templates) -> Vec<String> {
     out
 }
 
-/// Asks the Export these running to stop after the save it's on (its button, or its key, while it runs: PS-3).
+/// Asks the Export these or To Serum 2 running (only one export runs at a time) to stop after the save it's on (its
+/// button, or its key, while it runs: PS-3, and PZ-4 of the 26 Nov review).
 static EXPORT_STOP: AtomicBool = AtomicBool::new(false);
 
 /// Export these: every sound shown, save by save, into the export folder. Preset files are left (they're files).
@@ -2154,6 +2161,11 @@ fn export_shown(app: &AppWindow) -> bool {
 /// Put in Serum 2 for every Serum 1 sound shown (its button, or its key). Preset files are left: Serum 2 finds Serum
 /// 1's own presets folder by itself.
 fn serum2_shown(app: &AppWindow) -> bool {
+    if PAGE.with(|p| p.borrow().serum2_running) {
+        EXPORT_STOP.store(true, Ordering::SeqCst);
+        set_message(app, "Stopping putting sounds in Serum 2 after the save it's on.");
+        return true;
+    }
     if PAGE.with(|p| p.borrow().exporting) {
         set_message(app, "An export is running: wait for it to finish, then try again.");
         return false;
@@ -2173,10 +2185,17 @@ fn serum2_shown(app: &AppWindow) -> bool {
 
 /// Puts songs' Serum 1 sounds (each save with its song's name and its sounds, with their parts) in Serum 2's user
 /// presets folder, a folder for each part, save by save,
-/// as `.fxp` programs Serum 2 loads as they are ([`mo_presets::serum2`]), then shows the folder they went to.
+/// as `.fxp` programs Serum 2 loads as they are ([`mo_presets::serum2`]), then shows the folder they went to. As
+/// Export these does (PS-3), before each save it checks the free room on the Documents folder's drive and stops while
+/// [`logic::EXPORT_HEADROOM`] is still free, and its button (or key) stops it after the save it's on (PZ-4).
 fn to_serum2(app: &AppWindow, plan: Vec<(String, String, Vec<mo_presets::serum2::Pick>)>, what: &str) {
     let feed = PAGE.with(|p| p.borrow().feed.clone());
-    PAGE.with(|p| p.borrow_mut().exporting = true);
+    EXPORT_STOP.store(false, Ordering::SeqCst);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.exporting = true;
+        p.serum2_running = true;
+    });
     show_all(app);
     let job = feed.start("Putting sounds in Serum 2", what);
     let started = background::spawn("Serum 2 presets", move || {
@@ -2188,8 +2207,23 @@ fn to_serum2(app: &AppWindow, plan: Vec<(String, String, Vec<mo_presets::serum2:
         };
         let user = mo_presets::serum2::user_folder(&documents);
         let total = plan.len();
+        let folder_text = documents.to_string_lossy().into_owned();
         let (mut done, mut failed) = (Vec::new(), Vec::new());
+        // How many sounds the saves read so far were asked for: the summary counts those that didn't go (PZ-5).
+        let mut picked = 0;
+        let mut stopped = None;
         for (n, (save, song, picks)) in plan.iter().enumerate() {
+            if EXPORT_STOP.swap(false, Ordering::SeqCst) {
+                stopped =
+                    Some(format!("You stopped it after {} of {} saves.", logic::thousands(n), logic::thousands(total)));
+                break;
+            }
+            // The Documents folder is there; the User folder may not be made yet.
+            if let Err(why) = logic::serum2_room(mo_app::data_move::free_room(&documents), &folder_text, n) {
+                stopped = Some(why);
+                break;
+            }
+            picked += picks.len();
             match background::on_pool(|| mo_presets::serum2::from_save(save, picks, song, &user)) {
                 Ok(e) => done.push(e),
                 Err(e) => {
@@ -2199,7 +2233,10 @@ fn to_serum2(app: &AppWindow, plan: Vec<(String, String, Vec<mo_presets::serum2:
             }
             job.progress((n + 1) as f32 / total as f32, Some(&format!("{} of {}", n + 1, total)));
         }
-        let text = logic::serum2_summary(&done, &failed);
+        let mut text = logic::serum2_summary(&done, &failed, picked);
+        if let Some(stopped) = &stopped {
+            text = if picked == 0 { stopped.clone() } else { format!("{stopped} {text}") };
+        }
         if done.iter().all(|e| e.files.is_empty()) {
             job.failed(&text);
         } else {
@@ -2214,7 +2251,11 @@ fn to_serum2(app: &AppWindow, plan: Vec<(String, String, Vec<mo_presets::serum2:
     });
     if let Err(e) = started {
         log::error("Presets", &format!("Couldn't start putting sounds in Serum 2: {e}"));
-        PAGE.with(|p| p.borrow_mut().exporting = false);
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.exporting = false;
+            p.serum2_running = false;
+        });
     }
 }
 
@@ -2979,24 +3020,23 @@ fn scan_curves(at: &Where) -> Result<Option<CurvesRead>, String> {
     let bitwig_folders =
         logic::bitwig_folders(at.bitwig(), &plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     drop(saves);
-    // Only the folders that are there: the curves of one that isn't just now are kept (`curves::Folders`).
-    let library_roots: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).filter(|l| l.is_dir()).collect();
-    // Bitwig's curves library and the plugins' LFO shapes (Serum, LFOTool, Vital, Duck), looked through side by side.
-    let (library, shapes) = background::on_pool(|| {
-        rayon::join(
-            || logic::curve_files(&library_roots),
-            || {
-                let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
-                let documents = mo_app::bitwig_convert::documents();
-                let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
-                let mut folders = logic::shape_folders(documents.as_deref(), home.as_deref());
-                folders.extend(logic::vital_folders(documents.as_deref(), home.as_deref(), app_data.as_deref()));
-                let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
-                folders.extend(logic::duck_folders(program_data.as_deref(), home.as_deref()));
-                logic::shape_files(&folders)
-            },
-        )
-    });
+    // Where to look: Bitwig's curves library and the plugins' LFO shapes (Serum, LFOTool, Vital, Duck). Only the
+    // folders that are there: the curves of one that isn't just now are kept (`curves::Folders`).
+    let find_roots = || {
+        let library: Vec<PathBuf> = bitwig_folders.iter().map(|b| b.join("Library")).filter(|l| l.is_dir()).collect();
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+        let documents = mo_app::bitwig_convert::documents();
+        let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
+        let mut shapes = logic::shape_folders(documents.as_deref(), home.as_deref());
+        shapes.extend(logic::vital_folders(documents.as_deref(), home.as_deref(), app_data.as_deref()));
+        let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
+        shapes.extend(logic::duck_folders(program_data.as_deref(), home.as_deref()));
+        (library, shapes)
+    };
+    let (library_roots, shape_roots) = background::on_pool(find_roots);
+    // Both looked through side by side.
+    let (library, shapes) =
+        background::on_pool(|| rayon::join(|| logic::curve_files(&library_roots), || logic::shape_files(&shape_roots)));
     // Only the folders the look itself listed count as looked through, and every folder it couldn't list (gone away
     // while it was looked through, a link leading nowhere, no permission) is named: what was found under one of those
     // before is kept, even if it's back by now.
@@ -3006,6 +3046,23 @@ fn scan_curves(at: &Where) -> Result<Option<CurvesRead>, String> {
     for (folder, why) in library.unlisted.into_iter().chain(shapes.unlisted) {
         log::info("Curves", &format!("Couldn't list {} ({why}): the curves found in it are kept", folder.display()));
         unlisted.push(folder);
+    }
+    // A folder that wasn't there when the roots were found, and is back now the others have been listed (a drive
+    // that comes up a little late after Windows starts), wasn't looked through: it counts as one that couldn't be
+    // listed, so what was found in it before is kept, not forgotten for being missed twice in a row (the whole-app
+    // review of 26 Nov, PZ-2). The next read lists it.
+    let (library_now, shapes_now) = background::on_pool(find_roots);
+    for root in library_now.into_iter().chain(shapes_now) {
+        if !looked_in.contains(&root) && !unlisted.contains(&root) {
+            log::info(
+                "Curves",
+                &format!(
+                    "{} came back while the others were looked through: the curves found in it are kept",
+                    root.display()
+                ),
+            );
+            unlisted.push(root);
+        }
     }
     let (library, shapes) = (library.files, shapes.files);
     paths.extend(library);

@@ -22,6 +22,11 @@ fn main() -> Result<(), slint::PlatformError> {
         log_crashes();
         std::process::exit(mo_ui::daw_links::put_plugin_as_admin());
     }
+    // And to take it out again (Settings › DAWs' Take out): only the app's own DAWmate.clap there.
+    if args.first().is_some_and(|a| a == mo_ui::daw_links::TAKE_OUT_CLAP_PLUGIN) {
+        log_crashes();
+        std::process::exit(mo_ui::daw_links::take_plugin_out_as_admin());
+    }
     // Started by the uninstaller: the app and the helper running from this program are asked to close, and waited
     // for, so their files can go (UP-12). No window or setting of its own; a crash still gets its crash file. Ends
     // with 1 when one is still running, which the uninstaller's log shows.
@@ -96,7 +101,16 @@ fn main() -> Result<(), slint::PlatformError> {
     let data = mo_app::paths::data_dir();
     // The app's own song library, songs.db, once it's been made and checked; the C# app's library.db until then (and
     // songs.db is made from it in the background, for the next start).
-    let songs_db = mo_library::songs_db::at_start(&data, &mo_app::version::version());
+    let mut songs_db = mo_library::songs_db::at_start(&data, &mo_app::version::version());
+    // No library at all (a new PC that never had the C# app): a new, empty one, the app's own, so folders can be added
+    // and songs kept. Not while the data folder in use isn't the real one (its drive missing): the real one has a
+    // library.
+    if songs_db.none_yet()
+        && mo_app::paths::problem().is_none()
+        && let Some(made) = mo_app::song_library::start_new(&data)
+    {
+        songs_db = made;
+    }
     log::info("Song library", &songs_db.line());
     if let Some(notice) = songs_db.notice() {
         log::warning("Song library", &notice);

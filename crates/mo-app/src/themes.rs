@@ -321,6 +321,8 @@ mod tests {
         assert_eq!(button_icon("Show the song's file"), "song-file");
         assert_eq!(button_icon("Copy the song's path"), "copy");
         assert_eq!(button_icon("Show in Songs"), "");
+        // Edit keeps its word, as in its mock-up: no sign says "edit this sound" by itself.
+        assert_eq!(button_icon("Edit"), "");
     }
 
     #[test]

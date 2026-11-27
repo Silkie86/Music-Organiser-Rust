@@ -92,7 +92,8 @@ export global SpaceData {
     in property <[CardAction]> card-actions;
     // The picked line's right-click menu: its card's buttons, each with its key (rule 15; the review of 10 Nov, X3-2).
     in property <[MenuItem]> line-menu;
-    in-out property <length> panel-width: 380px;
+    // 0 until you drag the card: the page lays it out its usual way then (`Widths.list-width`).
+    in-out property <length> panel-width: 0px;
     callback pick(string);
     callback close-card();
     // A button on the page or the card (its id).

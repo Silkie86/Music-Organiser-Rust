@@ -4,9 +4,10 @@
 //! its search box are kept here. Picks, hidden folders, open branches and the fold are kept as settings, so the tree
 //! is as you left it at the next start.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_app::sound_folders::{self as tree, FolderPick, Picked, TreeAsk};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -18,6 +19,9 @@ use crate::{AppWindow, MenuItem, MixPart, SoundsData, TreeLine, TreePick};
 struct Tree {
     /// The folders opened, by [`tree::key`].
     open: HashSet<String>,
+    /// Those of them opened while words were in the search box: kept in sight once it's cleared
+    /// ([`tree::search_cleared`]).
+    found_open: HashSet<String>,
     folded: bool,
     search: String,
     /// The folder whose right-click menu is open.
@@ -41,6 +45,13 @@ const MIX_PARTS: usize = 6;
 /// How many open branches are kept as a setting at most, of those still folders.
 const OPEN_KEPT: usize = 500;
 
+/// How often, in seconds, the sample folders' drives are looked at while the Sounds page shows: a drive plugged in
+/// or out after the start says so on the tree (the whole-app review of 26 Nov, ST-10: only a scan looked).
+const DRIVES_EVERY: u32 = 10;
+
+/// The drives are being looked at just now, off the window's thread (a drive that's asleep can take a while).
+static LOOKING: AtomicBool = AtomicBool::new(false);
+
 thread_local! {
     static TREE: RefCell<Tree> = RefCell::default();
 }
@@ -52,22 +63,60 @@ static TOPS: Mutex<(Vec<String>, Vec<String>)> = Mutex::new((Vec::new(), Vec::ne
 /// The sample folders were read for a scan, off the window's thread: each one's drive is looked at there too. The
 /// page then takes them as the tree's tops, and the tree shows again.
 pub(super) fn tops_read(folders: &[String]) {
-    let away: Vec<String> =
-        folders.iter().filter(|f| !std::path::Path::new(f.as_str()).exists()).map(|f| tree::key(f)).collect();
-    *TOPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (folders.to_vec(), away);
+    *TOPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (folders.to_vec(), away(folders));
     let _ = slint::invoke_from_event_loop(|| {
         let Some(app) = TREE.with(|t| t.borrow().app.as_ref().and_then(slint::Weak::upgrade)) else { return };
         let tops = TOPS.lock().map(|t| t.0.clone()).unwrap_or_default();
-        let changed = PAGE.with(|p| {
+        let (changed, rediscover) = PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            (p.filters.folder_tops != tops).then(|| p.filters.folder_tops = tops).is_some()
+            let changed = (p.filters.folder_tops != tops).then(|| p.filters.folder_tops = tops).is_some();
+            (changed, changed && p.re_started)
         });
-        // New tops change what a pick or a hide reaches: the list again. Else only the drives' state changed.
+        // New tops change what a pick or a hide reaches: the list again, and Rediscover's dig. Else only the drives'
+        // state changed.
         if changed {
             refresh(&app);
         }
+        if rediscover {
+            super::rediscover_now(&app);
+        }
         show_now(&app);
     });
+}
+
+/// Which of `folders` are on a drive that isn't there just now, by [`tree::key`]. Asks the drives: never on the
+/// window's thread.
+fn away(folders: &[String]) -> Vec<String> {
+    folders.iter().filter(|f| !std::path::Path::new(f.as_str()).exists()).map(|f| tree::key(f)).collect()
+}
+
+/// Looks at the sample folders' drives again, on a thread of its own (one at a time), and shows the tree again when
+/// one came or went since.
+fn look_at_drives(app: &AppWindow) {
+    let folders = TOPS.lock().map(|t| t.0.clone()).unwrap_or_default();
+    if folders.is_empty() || LOOKING.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let weak = app.as_weak();
+    let looked = mo_app::background::spawn("mo-sounds-drives", move || {
+        let now = away(&folders);
+        let changed = {
+            let mut tops = TOPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            // The same sample folders as when it began (a scan may have read others meanwhile).
+            let changed = tops.0 == folders && tops.1 != now;
+            if changed {
+                tops.1 = now;
+            }
+            changed
+        };
+        LOOKING.store(false, Ordering::Relaxed);
+        if changed {
+            let _ = weak.upgrade_in_event_loop(|app| show_now(&app));
+        }
+    });
+    if looked.is_err() {
+        LOOKING.store(false, Ordering::Relaxed);
+    }
 }
 
 /// The picks, hidden folders, open branches and fold as you left them, the first time the sounds show.
@@ -107,10 +156,11 @@ fn keep(p: &Page) {
     });
 }
 
-/// Keeps the open branches: those still folders, [`OPEN_KEPT`] at most.
+/// Keeps the open branches: those still folders, [`OPEN_KEPT`] at most, those in sight and nearest the top first
+/// ([`tree::open_to_keep`]).
 fn keep_open(t: &Tree, p: &Page) {
-    let folders = p.list.folders();
-    let open: Vec<&String> = t.open.iter().filter(|k| folders.find(k).is_some()).take(OPEN_KEPT).collect();
+    let tops = TOPS.lock().map(|t| t.0.clone()).unwrap_or_default();
+    let open = tree::open_to_keep(p.list.folders(), &t.open, &tops, OPEN_KEPT);
     crate::settings::remember(tree::OPEN_KEY, &tree::encode_paths(open));
 }
 
@@ -225,14 +275,25 @@ fn show_now(app: &AppWindow) {
     PAGE.with(|p| show(app, &p.borrow()));
 }
 
-/// A change to the picks or hidden folders: shown at once (and kept), and the list asked for again.
+/// A change to the picks or hidden folders: shown at once (and kept), and the list asked for again. A folder hidden or
+/// shown again changes what Rediscover digs through and what sounds like the picked one: those are asked again too
+/// (the newest ask wins).
 fn change(app: &AppWindow, f: impl FnOnce(&mut Page)) {
-    PAGE.with(|p| {
+    let (rediscover, alike) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        let hidden = p.filters.hidden_folders.clone();
         f(&mut p);
         show(app, &p);
+        let changed = p.filters.hidden_folders != hidden;
+        (changed && p.re_started, p.picked.filter(|_| changed))
     });
     refresh(app);
+    if rediscover {
+        super::rediscover_now(app);
+    }
+    if let Some(at) = alike {
+        super::find_alike(app, at);
+    }
 }
 
 /// What the right-click menu of a line offers: pick it (with its folders, or alone), hide it or show it again, open it
@@ -275,8 +336,16 @@ pub(super) fn wire(app: &AppWindow) {
     TREE.with(|t| t.borrow_mut().app = Some(app.as_weak()));
     // The "scanning" tags follow the scan: the scan's state is in memory, looked at only when it changed.
     let watch = slint::Timer::default();
-    let (weak, turn) = (app.as_weak(), std::cell::Cell::new(0));
+    let (weak, turn, ticks) = (app.as_weak(), Cell::new(0), Cell::new(0u32));
     watch.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(1), move || {
+        // Now and then, the drives too, while the page shows.
+        ticks.set((ticks.get() + 1) % DRIVES_EVERY);
+        if ticks.get() == 0
+            && let Some(app) = weak.upgrade()
+            && app.get_place() == mo_app::places::Place::Sounds.index() as i32
+        {
+            look_at_drives(&app);
+        }
         let now = mo_app::sound_scan::state_turn();
         if turn.replace(now) == now {
             return;
@@ -306,12 +375,10 @@ pub(super) fn wire(app: &AppWindow) {
     data.on_tree_opened(move |path| {
         let Some(app) = weak.upgrade() else { return };
         TREE.with(|t| {
-            let mut t = t.borrow_mut();
-            let k = tree::key(&path);
-            if !t.open.remove(&k) {
-                t.open.insert(k);
-            }
-            PAGE.with(|p| keep_open(&t, &p.borrow()));
+            let t = &mut *t.borrow_mut();
+            let searching = tree::searching(&t.search);
+            tree::toggle_open(&mut t.open, &mut t.found_open, &path, searching);
+            PAGE.with(|p| keep_open(t, &p.borrow()));
         });
         show_now(&app);
     });
@@ -353,7 +420,19 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_tree_search_edited(move |words| {
         let Some(app) = weak.upgrade() else { return };
-        TREE.with(|t| t.borrow_mut().search = words.to_string());
+        TREE.with(|t| {
+            let t = &mut *t.borrow_mut();
+            t.search = words.to_string();
+            // Cleared: what was opened while searching stays in sight.
+            if !tree::searching(&t.search) && !t.found_open.is_empty() {
+                let tops = TOPS.lock().map(|t| t.0.clone()).unwrap_or_default();
+                PAGE.with(|p| {
+                    let p = p.borrow();
+                    tree::search_cleared(p.list.folders(), &mut t.open, &mut t.found_open, &tops);
+                    keep_open(t, &p);
+                });
+            }
+        });
         show_now(&app);
     });
     let weak = app.as_weak();
@@ -378,9 +457,10 @@ pub(super) fn wire(app: &AppWindow) {
                     tree::pick_only(&mut p.filters.folders, &path);
                 }
             }),
-            "hide" => {
-                change(&app, |p| tree::toggle_hidden(&mut p.filters.hidden_folders, &mut p.filters.folders, &path))
-            }
+            "hide" => change(&app, |p| {
+                let f = &mut p.filters;
+                tree::toggle_hidden(&mut f.hidden_folders, &mut f.folders, &path, &f.folder_tops);
+            }),
             "reveal" => {
                 if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
                     crate::files::open_folder(&feed, &path);

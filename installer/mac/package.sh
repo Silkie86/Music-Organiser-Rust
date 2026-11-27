@@ -9,8 +9,8 @@
 #   installer/mac/package.sh <out folder> <DAWmate.bwextension>
 #
 # The bundles are signed "ad hoc" (no Apple Developer ID): Apple silicon runs nothing unsigned, and a bundle's
-# Info.plist must be sealed by a signature. Not notarised, so the first open needs right-click, Open (docs/installer.md).
-# Plain ASCII, and only what a Mac has (bash 3.2, plutil, lipo, sips, iconutil, codesign, ditto).
+# Info.plist must be sealed by a signature. Not notarised, so the first open needs Open Anyway (docs/installer.md).
+# Plain ASCII, and only what a Mac has (bash 3.2, plutil, lipo, codesign, ditto).
 set -euo pipefail
 
 out=${1:?"the out folder"}
@@ -45,17 +45,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/extensions" "$app/Conten
 cp "$extension" "$app/Contents/Resources/extensions/$name.bwextension"
 lipo -create -output "$app/Contents/MacOS/music-organiser" "$arm/music-organiser" "$intel/music-organiser"
 
-# The logo, as a Mac icon, from the same PNG the window uses (256 px: Finder scales it for the bigger sizes).
-icons="$out/logo.iconset"
-rm -rf "$icons"
-mkdir -p "$icons"
-# Each slot an iconset has, with its size in pixels (the @2x ones are twice their name).
-for slot in 16x16:16 16x16@2x:32 32x32:32 32x32@2x:64 128x128:128 128x128@2x:256 256x256:256; do
-    px=${slot#*:}
-    sips -z "$px" "$px" assets/logo/logo.png --out "$icons/icon_${slot%%:*}.png" > /dev/null
-done
-iconutil -c icns "$icons" -o "$app/Contents/Resources/logo.icns"
-rm -rf "$icons"
+# The logo's Mac icon (tools/logo makes it: the well on a Mac's rounded square, sharp at every size).
+cp assets/logo/logo.icns "$app/Contents/Resources/logo.icns"
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

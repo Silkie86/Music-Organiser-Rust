@@ -51,7 +51,7 @@ pub use link::{
     PLAY_START_NEEDS, PORT, PadContents, PadsFilled, Recorded, ReplaceAnswer, Replaced, SelectedDevice, SelectedTrack,
     TIMEOUT, TakenOut,
 };
-pub use put::{PUT_NEEDS, PutIn, Seen, was_cut_off_by_another_project};
+pub use put::{PUT_NEEDS, PutIn, Seen, was_cut_off_by_another_project, went_in_before_cut_off};
 pub use sampler::{SWAP_NEEDS, Swapped};
 pub use send::{
     Bitwig, KIT_FAILED, KitSound, KitTarget, Mark, PART_FAILED, PART_IN, PART_PLACE, Pad, SOUND_FAILED, SOUND_PLACE,

@@ -32,6 +32,8 @@ struct Node {
     name: String,
     /// Its whole path, as spelt in the first path met with it.
     path: String,
+    /// Its name in lower case, for the tree's search box: worked out once, not at each key typed.
+    lower: String,
     /// The folder it's in; none for a drive's or disk's top.
     parent: Option<u32>,
     /// How many of the list's sounds are right in it.
@@ -47,7 +49,7 @@ pub struct Folders {
     /// The folder each sound is in, by its place in the list; [`NONE`] for a bare name.
     of_sound: Vec<u32>,
     by_key: HashMap<String, u32>,
-    /// The folders right in each folder.
+    /// The folders right in each folder, by name (as the tree lists them).
     children: Vec<Vec<u32>>,
     /// Which making of the folders this is: counts made for another ([`FolderCounts::of`]) aren't taken for these.
     stamp: u64,
@@ -121,6 +123,11 @@ impl Folders {
                 f.children[p as usize].push(i as u32);
             }
         }
+        // Sorted once here, off the window's thread, not each time the tree is shown.
+        let nodes = &f.nodes;
+        for kids in &mut f.children {
+            kids.sort_by(|&a, &b| by_letters(&nodes[a as usize].name, &nodes[b as usize].name));
+        }
         f.of_sound.shrink_to_fit();
         f
     }
@@ -144,7 +151,8 @@ impl Folders {
                         _ => own.to_owned(),
                     };
                     let shown = if is_drive { format!("{path}\\") } else { path.to_owned() };
-                    self.nodes.push(Node { name, path: shown, parent, sounds: 0 });
+                    let lower = name.to_lowercase();
+                    self.nodes.push(Node { name, path: shown, lower, parent, sounds: 0 });
                     let at = (self.nodes.len() - 1) as u32;
                     self.by_key.insert(k, at);
                     at
@@ -310,6 +318,122 @@ pub struct FolderCounts {
     pub sounds: Vec<u32>,
     /// None until the use is known.
     pub used: Option<Vec<u32>>,
+    /// With Hide duplicates on, how many too many a folder's count is once the folders inside it are added in: a
+    /// sound with copies in two folders of its branch shows once from it, as picking it shows one of them (the
+    /// whole-app review of 26 Nov, ST-5). By folder, as `sounds`; empty when no copies are hidden.
+    pub twice: Vec<u32>,
+    /// The same for `used`.
+    pub twice_used: Vec<u32>,
+    /// What the list shows from the picks it was counted with, as the line under them says it: Hide duplicates shows
+    /// one of a sound's copies wherever the picks hold them, so adding up the picks' counts can say more. None with
+    /// nothing picked.
+    pub picked: Option<(Vec<FolderPick>, PicksTotal)>,
+}
+
+impl FolderCounts {
+    /// How many too many folder `i`'s count is, sounds and used, once the folders inside it are added in
+    /// ([`FolderCounts::twice`]).
+    fn twice_at(&self, i: usize) -> (u64, u64) {
+        let at = |v: &[u32]| v.get(i).copied().map_or(0, u64::from);
+        (at(&self.twice), at(&self.twice_used))
+    }
+}
+
+/// Which folder's sounds count in the folder above it on the tree, as [`rows`] adds them up: not a top line's (a
+/// drive's top, or a sample folder: `is_top`), nor a hidden folder's (`hidden`), whose sounds don't show from above.
+pub fn rolls_into(f: &Folders, i: usize, is_top: &[bool], hidden: &[bool]) -> Option<usize> {
+    if is_top[i] || hidden[i] {
+        return None;
+    }
+    f.nodes[i].parent.map(|p| p as usize)
+}
+
+impl Folders {
+    /// Which folders are top lines: a drive's or disk's top, or one of `tops` (your sample folders).
+    pub fn tops_of(&self, tops: &[String]) -> Vec<bool> {
+        let mut is_top: Vec<bool> = self.nodes.iter().map(|n| n.parent.is_none()).collect();
+        for t in tops {
+            if let Some(at) = self.find(t) {
+                is_top[at as usize] = true;
+            }
+        }
+        is_top
+    }
+
+    /// Which folders are hidden themselves (not those inside them), by folder.
+    pub fn hidden_of(&self, hidden: &[String]) -> Vec<bool> {
+        let mut out = vec![false; self.nodes.len()];
+        for h in hidden {
+            if let Some(at) = self.find(h) {
+                out[at as usize] = true;
+            }
+        }
+        out
+    }
+
+    /// The folders `keys` name ([`key`]), by folder.
+    fn marks<'a>(&self, keys: impl IntoIterator<Item = &'a String>) -> Vec<bool> {
+        let mut out = vec![false; self.nodes.len()];
+        for k in keys {
+            if let Some(&at) = self.by_key.get(k) {
+                out[at as usize] = true;
+            }
+        }
+        out
+    }
+
+    /// For each sound with copies in more than one folder (`groups`: each one's folders, and whether its copies there
+    /// are used), how many too many the folders of its branch count it once those inside them are added in
+    /// ([`FolderCounts::twice`]): one for each part of a folder (its own sounds, and each folder inside it that
+    /// counts in it) that holds a copy, but one. Into `twice` and `twice_used`, by folder.
+    pub fn count_twice(
+        &self,
+        groups: impl IntoIterator<Item = Vec<(u32, bool)>>,
+        tops: &[String],
+        hidden: &[String],
+        twice: &mut [u32],
+        twice_used: &mut [u32],
+    ) {
+        let (is_top, hidden) = (self.tops_of(tops), self.hidden_of(hidden));
+        // Each folder of a branch the sound reaches: its parts holding a copy, those of them used, and whether a copy
+        // in it or inside it is used.
+        let mut reached: HashMap<usize, (u32, u32, bool)> = HashMap::new();
+        for folders in groups {
+            if folders.len() < 2 {
+                continue;
+            }
+            reached.clear();
+            for &(at, used) in &folders {
+                let mut i = at as usize;
+                let one = reached.entry(i).or_default();
+                one.0 += 1;
+                one.1 += u32::from(used);
+                one.2 |= used;
+                while let Some(p) = rolls_into(self, i, &is_top, &hidden) {
+                    let seen = reached.contains_key(&p);
+                    reached.entry(p).or_default();
+                    if seen {
+                        break;
+                    }
+                    i = p;
+                }
+            }
+            // Inside before out (a folder comes after the folder it's in): each one's parts are known by its turn.
+            let mut order: Vec<usize> = reached.keys().copied().collect();
+            order.sort_unstable_by(|a, b| b.cmp(a));
+            for i in order {
+                let (parts, used_parts, any_used) = reached[&i];
+                if let Some(p) = rolls_into(self, i, &is_top, &hidden) {
+                    let up = reached.entry(p).or_default();
+                    up.0 += 1;
+                    up.1 += u32::from(any_used);
+                    up.2 |= any_used;
+                }
+                twice[i] += parts.saturating_sub(1);
+                twice_used[i] += used_parts.saturating_sub(1);
+            }
+        }
+    }
 }
 
 /// What the tree shows besides the folders: your picks, hidden folders, the branches open, the search box's words,
@@ -340,11 +464,21 @@ pub fn scanning_tops(state: Option<&crate::sound_scan::ScanState>) -> HashSet<St
         .collect()
 }
 
+/// Whether there are words in the tree's search box: only folders whose line has them all show then.
+pub fn searching(search: &str) -> bool {
+    search.split_whitespace().next().is_some()
+}
+
 /// The tree's lines, in the order they show: each top line, then the open folders inside it, by name. Only folders
 /// with sounds the other filters let through show (with the folders above them), and those picked, hidden or holding
 /// a folder that is, so a pick can always be taken off. With words in the search box, only folders whose line has
-/// them all show, with the folders above them opened. `counts` are none until the newest list is counted: every
-/// folder shows, with no numbers.
+/// them all show, with the folders above them opened; a folder found that you open shows everything inside it (the
+/// whole-app review of 26 Nov, ST-7: its arrow did nothing). `counts` are none until the newest list is counted:
+/// every folder shows, with no numbers.
+///
+/// Called on the window's thread (and the DAW's, in the plugin) at each key typed in the search box: a line's words
+/// are made only for the lines that show, and what doesn't change with the filters (each folder's name in lower case,
+/// the folders inside it by name) is worked out once, with the [`Folders`] (the whole-app review of 26 Nov, ST-2).
 pub fn rows(f: &Folders, counts: Option<&FolderCounts>, ask: TreeAsk) -> Vec<FolderRow> {
     let counts = counts.filter(|c| c.of == f.stamp && c.sounds.len() == f.nodes.len());
     let n = f.nodes.len();
@@ -352,21 +486,16 @@ pub fn rows(f: &Folders, counts: Option<&FolderCounts>, ask: TreeAsk) -> Vec<Fol
         return Vec::new();
     }
     // Each sample folder found once, not each folder's path worked out again.
-    let mut is_top: Vec<bool> = f.nodes.iter().map(|n| n.parent.is_none()).collect();
-    for t in ask.tops {
-        if let Some(at) = f.find(t) {
-            is_top[at as usize] = true;
-        }
-    }
+    let is_top = f.tops_of(ask.tops);
     // A folder's lines inside it: its folders, but not a sample folder, which is a top line of its own.
     let inside = |i: usize| f.children[i].iter().copied().filter(|&c| !is_top[c as usize]);
-    let mut pick_of: HashMap<u32, bool> = HashMap::new();
+    let mut pick_at: Vec<Option<bool>> = vec![None; n];
     for p in ask.picks {
         if let Some(at) = f.find(&p.path) {
-            pick_of.insert(at, p.just_this);
+            pick_at[at as usize] = Some(p.just_this);
         }
     }
-    let hidden: HashSet<u32> = ask.hidden.iter().filter_map(|h| f.find(h)).collect();
+    let hidden = f.hidden_of(ask.hidden);
     // Children come after their parents: one pass from the end adds each folder into the folder it's in.
     let mut all = vec![0u64; n];
     let mut shown = vec![0u64; n];
@@ -386,10 +515,12 @@ pub fn rows(f: &Folders, counts: Option<&FolderCounts>, ask: TreeAsk) -> Vec<Fol
         };
         own_shown[i] = s;
         own_used[i] = u;
-        shown[i] += s;
-        used[i] += u;
-        pick_below[i] |= pick_of.contains_key(&(i as u32));
-        marked[i] |= pick_below[i] || hidden.contains(&(i as u32));
+        // A sound with copies in two of the folders added in counts once here.
+        let (twice, twice_used) = counts.map_or((0, 0), |c| c.twice_at(i));
+        shown[i] = (shown[i] + s).saturating_sub(twice);
+        used[i] = (used[i] + u).saturating_sub(twice_used);
+        pick_below[i] |= pick_at[i].is_some();
+        marked[i] |= pick_below[i] || hidden[i];
         if let Some(p) = f.nodes[i].parent
             && !is_top[i]
         {
@@ -398,7 +529,7 @@ pub fn rows(f: &Folders, counts: Option<&FolderCounts>, ask: TreeAsk) -> Vec<Fol
             marked[p] |= marked[i];
             pick_below[p] |= pick_below[i];
             // A hidden folder's sounds don't show from the folders above it.
-            if !hidden.contains(&(i as u32)) {
+            if !hidden[i] {
                 shown[p] += shown[i];
                 used[p] += used[i];
             }
@@ -406,13 +537,12 @@ pub fn rows(f: &Folders, counts: Option<&FolderCounts>, ask: TreeAsk) -> Vec<Fol
     }
     let words: Vec<String> = ask.search.split_whitespace().map(str::to_lowercase).collect();
     let mut out = Vec::new();
-    let mut tops: Vec<(String, usize)> =
-        (0..n).filter(|&i| is_top[i] && all[i] > 0).map(|i| (f.nodes[i].path.clone(), i)).collect();
-    tops.sort_by(|a, b| by_letters(&a.0, &b.0));
+    let mut tops: Vec<(&str, usize)> =
+        (0..n).filter(|&i| is_top[i] && all[i] > 0).map(|i| (f.nodes[i].path.as_str(), i)).collect();
+    tops.sort_by(|a, b| by_letters(a.0, b.0));
     let walk = Walk {
         f,
         counts,
-        ask: &ask,
         words: &words,
         inside: &inside,
         all: &all,
@@ -422,20 +552,23 @@ pub fn rows(f: &Folders, counts: Option<&FolderCounts>, ask: TreeAsk) -> Vec<Fol
         own_used: &own_used,
         marked: &marked,
         pick_below: &pick_below,
-        pick_of: &pick_of,
+        pick_at: &pick_at,
         hidden: &hidden,
+        open: &f.marks(ask.open),
+        away: &f.marks(ask.away),
+        scanning: &f.marks(ask.scanning),
+        lower: std::cell::RefCell::default(),
     };
     for (_, i) in tops {
-        walk.line(i, 0, true, false, false, &mut out);
+        walk.line(i, 0, true, false, false, !words.is_empty(), &mut out);
     }
     out
 }
 
-/// What [`rows`] works out once and walks the tree with.
+/// What [`rows`] works out once and walks the tree with, by folder.
 struct Walk<'a, I: Fn(usize) -> It, It: Iterator<Item = u32>> {
     f: &'a Folders,
     counts: Option<&'a FolderCounts>,
-    ask: &'a TreeAsk<'a>,
     words: &'a [String],
     inside: &'a I,
     all: &'a [u64],
@@ -446,15 +579,76 @@ struct Walk<'a, I: Fn(usize) -> It, It: Iterator<Item = u32>> {
     marked: &'a [bool],
     /// A folder in each folder's branch (it too) is picked.
     pick_below: &'a [bool],
-    pick_of: &'a HashMap<u32, bool>,
-    hidden: &'a HashSet<u32>,
+    /// How each folder is picked: alone (true), with the folders inside it (false), or not.
+    pick_at: &'a [Option<bool>],
+    hidden: &'a [bool],
+    /// The branches opened, the tops whose drive is away and the folders being scanned.
+    open: &'a [bool],
+    away: &'a [bool],
+    scanning: &'a [bool],
+    /// A line's words in lower case, made again for each line searched (one piece of memory for them all).
+    lower: std::cell::RefCell<String>,
 }
 
 impl<I: Fn(usize) -> It, It: Iterator<Item = u32>> Walk<'_, I, It> {
+    /// The folder after `x` on its line: folders that hold no sound and one folder with sounds are one line with it
+    /// ("Vengeance › Vol 2 › Kicks"). A picked or hidden folder ends a chain, so what's picked is what the line says.
+    fn next_in_chain(&self, x: usize) -> Option<usize> {
+        if self.f.nodes[x].sounds > 0 || self.pick_at[x].is_some() || self.hidden[x] {
+            return None;
+        }
+        let mut with = (self.inside)(x).filter(|&c| self.all[c as usize] > 0);
+        let c = with.next()?;
+        with.next().is_none().then_some(c as usize)
+    }
+
+    /// The folders of the line that starts at folder `i`, first to last.
+    fn chain(&self, i: usize) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(Some(i), |&x| self.next_in_chain(x))
+    }
+
+    /// The folders right inside folder `last` that hold a sound, by name.
+    fn kids(&self, last: usize) -> impl Iterator<Item = usize> + '_ {
+        (self.inside)(last).filter(|&c| self.all[c as usize] > 0).map(|c| c as usize)
+    }
+
+    /// What the line from folder `i` to `last` says: a top line names its whole path.
+    fn label(&self, i: usize, last: usize, top: bool) -> String {
+        if top {
+            return self.f.nodes[last].path.clone();
+        }
+        let mut label = String::new();
+        for (n, c) in self.chain(i).enumerate() {
+            if n > 0 {
+                label.push_str(CHAIN);
+            }
+            label.push_str(&self.f.nodes[c].name);
+        }
+        label
+    }
+
+    /// Whether the line from folder `i` to `last` has every word in the search box, capitals aside.
+    fn matches(&self, i: usize, last: usize, top: bool) -> bool {
+        let mut lower = self.lower.borrow_mut();
+        lower.clear();
+        if top {
+            lower.push_str(&self.f.nodes[last].path.to_lowercase());
+        } else {
+            for (n, c) in self.chain(i).enumerate() {
+                if n > 0 {
+                    lower.push_str(CHAIN);
+                }
+                lower.push_str(&self.f.nodes[c].lower);
+            }
+        }
+        self.words.iter().all(|w| lower.contains(w.as_str()))
+    }
+
     /// The line of the chain that starts at folder `i`, `depth` in, then the lines inside it (when it's open), into
-    /// `out`. Whether any line was put in (with words in the search box, a line shows only when it or a line inside
-    /// it has them). `top` says it's a top line, which names its whole path; `within` that a folder above it is
+    /// `out`. Whether any line was put in (`searching`, a line shows only when it or a line inside it has the search
+    /// box's words). `top` says it's a top line, which names its whole path; `within` that a folder above it is
     /// picked with the folders inside it; `hidden_above` that one above it is hidden.
+    #[allow(clippy::too_many_arguments)]
     fn line(
         &self,
         i: usize,
@@ -462,42 +656,19 @@ impl<I: Fn(usize) -> It, It: Iterator<Item = u32>> Walk<'_, I, It> {
         top: bool,
         within: bool,
         hidden_above: bool,
+        searching: bool,
         out: &mut Vec<FolderRow>,
     ) -> bool {
         let f = self.f;
-        // Folders that hold no sound and one folder with sounds are one line with it: "Vengeance › Vol 2 › Kicks".
-        let mut chain = vec![i];
         let mut last = i;
-        loop {
-            if f.nodes[last].sounds > 0 {
-                break;
-            }
-            let mut with: Vec<u32> = (self.inside)(last).filter(|&c| self.all[c as usize] > 0).collect();
-            if with.len() != 1 {
-                break;
-            }
-            let c = with.pop().unwrap_or(NONE) as usize;
-            // A picked or hidden folder ends a chain, so what's picked is what the line says.
-            if self.pick_of.contains_key(&(last as u32)) || self.hidden.contains(&(last as u32)) {
-                break;
-            }
-            chain.push(c);
+        let (mut hidden, mut scanning) = (self.hidden[i], self.scanning[i]);
+        while let Some(c) = self.next_in_chain(last) {
             last = c;
+            hidden |= self.hidden[c];
+            // Any folder the line takes in: a sample folder may sit inside a chain ("D:" › "Samples").
+            scanning |= self.scanning[c];
         }
-        // A top line names its whole path.
-        let label = if top {
-            f.nodes[last].path.clone()
-        } else {
-            chain.iter().map(|&c| f.nodes[c].name.as_str()).collect::<Vec<_>>().join(CHAIN)
-        };
-        let hidden = self.hidden.contains(&(last as u32)) || chain.iter().any(|c| self.hidden.contains(&(*c as u32)));
-        let away = top && self.ask.away.contains(&key(&f.nodes[i].path));
-        let pick = self.pick_of.get(&(last as u32)).copied();
-        let mut kids: Vec<(String, usize)> = (self.inside)(last)
-            .filter(|&c| self.all[c as usize] > 0)
-            .map(|c| (f.nodes[c as usize].name.clone(), c as usize))
-            .collect();
-        kids.sort_by(|a, b| by_letters(&a.0, &b.0));
+        let pick = self.pick_at[last];
         let just = pick == Some(true);
         let (count, used) =
             if just { (self.own_shown[last], self.own_used[last]) } else { (self.shown[last], self.used[last]) };
@@ -506,57 +677,52 @@ impl<I: Fn(usize) -> It, It: Iterator<Item = u32>> Walk<'_, I, It> {
         if empty && !self.marked[last] && !hidden_above {
             return false;
         }
-        let picked = match pick {
-            Some(true) => Picked::JustThis,
-            Some(false) => Picked::Yes,
-            None if within => Picked::Within,
-            None if kids.iter().any(|&(_, c)| self.pick_below[c]) => Picked::Part,
-            None => Picked::No,
-        };
-        let path = f.nodes[last].path.clone();
-        let searching = !self.words.is_empty();
-        let lower = label.to_lowercase();
-        let matches = !searching || self.words.iter().all(|w| lower.contains(w.as_str()));
-        let open = searching || self.ask.open.contains(&key(&path));
-        let row = FolderRow {
-            path,
-            label,
-            depth,
-            count: if self.counts.is_some() { short_count(count as usize) } else { String::new() },
-            used: match self.counts.and_then(|c| c.used.as_ref()) {
-                Some(_) => format!("{} used", short_count(used as usize)),
-                None => String::new(),
-            },
-            has_children: kids.iter().any(|&(_, c)| self.would_show(c, hidden || hidden_above)),
-            open,
-            picked,
-            hidden: hidden || hidden_above,
-            away,
-            // Any folder the line takes in: a sample folder may sit inside a chain ("D:" › "Samples").
-            // A drive away isn't being scanned, whatever the scan took in.
-            scanning: !away
-                && !self.ask.scanning.is_empty()
-                && chain.iter().any(|&c| self.ask.scanning.contains(&key(&f.nodes[c].path))),
-            empty,
-        };
+        let matches = !searching || self.matches(i, last, top);
+        // Searching, a folder found that you opened shows everything inside it, as with no words.
+        let open_all = searching && matches && self.open[last];
+        let open = searching || self.open[last];
+        // Its line goes here; it's made once it's known to show, after the lines inside it.
         let at = out.len();
-        out.push(row);
+        out.push(FolderRow::default());
         let mut any_inside = false;
         if open {
             let within = within || pick == Some(false);
             let hidden_above = hidden_above || hidden;
-            for (_, c) in kids {
+            for c in self.kids(last) {
                 // Searching, a matching line shows the lines inside it only where they match too.
-                any_inside |= self.line(c, depth + 1, false, within, hidden_above, out);
+                any_inside |= self.line(c, depth + 1, false, within, hidden_above, searching && !open_all, out);
             }
         }
         if searching && !matches && !any_inside {
             out.truncate(at);
             return false;
         }
-        if searching && !any_inside {
-            out[at].open = false;
-        }
+        let away = top && self.away[i];
+        let picked = match pick {
+            Some(true) => Picked::JustThis,
+            Some(false) => Picked::Yes,
+            None if within => Picked::Within,
+            None if self.kids(last).any(|c| self.pick_below[c]) => Picked::Part,
+            None => Picked::No,
+        };
+        out[at] = FolderRow {
+            path: f.nodes[last].path.clone(),
+            label: self.label(i, last, top),
+            depth,
+            count: if self.counts.is_some() { short_count(count as usize) } else { String::new() },
+            used: match self.counts.and_then(|c| c.used.as_ref()) {
+                Some(_) => format!("{} used", short_count(used as usize)),
+                None => String::new(),
+            },
+            has_children: self.kids(last).any(|c| self.would_show(c, hidden || hidden_above)),
+            open: if searching && !open_all { any_inside } else { open },
+            picked,
+            hidden: hidden || hidden_above,
+            away,
+            // A drive away isn't being scanned, whatever the scan took in.
+            scanning: !away && scanning,
+            empty,
+        };
         true
     }
 
@@ -568,8 +734,9 @@ impl<I: Fn(usize) -> It, It: Iterator<Item = u32>> Walk<'_, I, It> {
 
 /// How many sounds each pick shows ("412"; "" before the newest list is counted), in the order of `picks`, and what
 /// the picks show together (none before the newest list is counted): sounds, and how many of them your projects use
-/// (none until the use is known). A pick
-/// inside a folder picked with its folders adds nothing to the whole (its sounds are counted there already).
+/// (none until the use is known). A pick inside a folder picked with its folders adds nothing to the whole (its
+/// sounds are counted there already). Once the list for these picks is counted, the whole is what it shows
+/// ([`FolderCounts::picked`]: with Hide duplicates on, one of a sound's copies in two picks).
 pub fn pick_counts(
     f: &Folders,
     counts: Option<&FolderCounts>,
@@ -581,24 +748,20 @@ pub fn pick_counts(
         return (vec![String::new(); picks.len()], None);
     };
     let n = f.nodes.len();
-    let mut is_top: Vec<bool> = f.nodes.iter().map(|n| n.parent.is_none()).collect();
-    for t in tops {
-        if let Some(at) = f.find(t) {
-            is_top[at as usize] = true;
-        }
-    }
-    let hidden: HashSet<u32> = hidden.iter().filter_map(|h| f.find(h)).collect();
+    let is_top = f.tops_of(tops);
+    let hidden = f.hidden_of(hidden);
     let used_of = |i: usize| counts.used.as_ref().and_then(|u| u.get(i)).copied().map_or(0, u64::from);
-    // As the tree adds them up: each folder with those inside it, a sample folder and a hidden one apart.
+    // As the tree adds them up: each folder with those inside it, a sample folder and a hidden one apart, and a sound
+    // with copies in two of them once.
     let mut shown: Vec<u64> = counts.sounds.iter().map(|&c| u64::from(c)).collect();
     let mut used: Vec<u64> = (0..n).map(used_of).collect();
     for i in (0..n).rev() {
-        if let Some(p) = f.nodes[i].parent
-            && !is_top[i]
-            && !hidden.contains(&(i as u32))
-        {
-            shown[p as usize] += shown[i];
-            used[p as usize] += used[i];
+        let (twice, twice_used) = counts.twice_at(i);
+        shown[i] = shown[i].saturating_sub(twice);
+        used[i] = used[i].saturating_sub(twice_used);
+        if let Some(p) = rolls_into(f, i, &is_top, &hidden) {
+            shown[p] += shown[i];
+            used[p] += used[i];
         }
     }
     let at: Vec<Option<u32>> = picks.iter().map(|p| f.find(&p.path)).collect();
@@ -631,7 +794,11 @@ pub fn pick_counts(
             short_count(s as usize)
         })
         .collect();
-    (words, Some(total))
+    // What the list for these picks shows, once it's counted.
+    match &counts.picked {
+        Some((of, shown)) if of.as_slice() == picks => (words, Some(*shown)),
+        _ => (words, Some(total)),
+    }
 }
 
 /// What the picked folders show together ([`pick_counts`]).
@@ -753,20 +920,97 @@ pub fn toggle_just_this(picks: &mut Vec<FolderPick>, path: &str) {
     }
 }
 
-/// Hides `path`, or shows it again when it's hidden. A folder hidden is taken off the picks.
-pub fn toggle_hidden(hidden: &mut Vec<String>, picks: &mut Vec<FolderPick>, path: &str) {
+/// Hides `path`, or shows it again when it's hidden. A folder hidden is taken off the picks, and so are the picks
+/// inside it (they'd show nothing), but not one inside a sample folder within it (`tops`): that's a top line of its
+/// own, which the hide doesn't reach ([`Folders::mask`]; the whole-app review of 26 Nov, ST-4).
+pub fn toggle_hidden(hidden: &mut Vec<String>, picks: &mut Vec<FolderPick>, path: &str, tops: &[String]) {
     let k = key(path);
     if let Some(at) = hidden.iter().position(|h| key(h) == k) {
         hidden.remove(at);
     } else {
         hidden.push(path.to_owned());
-        // A pick inside it would show nothing: it goes with the pick of the folder itself.
-        let inside = format!("{k}\\");
+        // `p` is `folder` or inside it, both by [`key`].
+        let within = |p: &str, folder: &str| {
+            p == folder || p.strip_prefix(folder).is_some_and(|rest| rest.starts_with('\\') || folder.ends_with('\\'))
+        };
+        // The sample folders inside it: the hide stops at each.
+        let stops: Vec<String> = tops.iter().map(|t| key(t)).filter(|t| *t != k && within(t, &k)).collect();
         picks.retain(|p| {
             let pk = key(&p.path);
-            pk != k && !pk.starts_with(&inside)
+            !within(&pk, &k) || stops.iter().any(|t| within(&pk, t))
         });
     }
+}
+
+/// An arrow clicked on the line at `path`: opens its branch, or closes it. A branch opened while words are in the
+/// search box (`searching`) is noted in `found_open`, so it stays in sight once the search is cleared
+/// ([`search_cleared`]).
+pub fn toggle_open(open: &mut HashSet<String>, found_open: &mut HashSet<String>, path: &str, searching: bool) {
+    let k = key(path);
+    if open.remove(&k) {
+        found_open.remove(&k);
+    } else {
+        if searching {
+            found_open.insert(k.clone());
+        }
+        open.insert(k);
+    }
+}
+
+/// The search box was emptied: each branch opened while searching (`found_open`, emptied now) that's still open has
+/// the folders above it opened too, up to its top line, so it's still in sight (the whole-app review of 26 Nov,
+/// ST-7: it was out of sight in closed folders).
+pub fn search_cleared(f: &Folders, open: &mut HashSet<String>, found_open: &mut HashSet<String>, tops: &[String]) {
+    let is_top = f.tops_of(tops);
+    for k in found_open.drain() {
+        if !open.contains(&k) {
+            continue;
+        }
+        let Some(mut at) = f.by_key.get(&k).map(|&at| at as usize) else { continue };
+        while let Some(p) = f.nodes[at].parent.filter(|_| !is_top[at]) {
+            at = p as usize;
+            open.insert(key(&f.nodes[at].path));
+        }
+    }
+}
+
+/// The open branches (by [`key`]) to keep as a setting, `most` at most: those still folders, the ones in sight
+/// first (every folder above them, up to their top line, open too), then the nearest the top line, then by path.
+/// So it's the same ones each time, and "Open every folder inside it" on a big folder keeps the folder itself and
+/// what shows under it (the whole-app review of 26 Nov, ST-8: a random 500 were kept).
+pub fn open_to_keep<'a>(f: &Folders, open: &'a HashSet<String>, tops: &[String], most: usize) -> Vec<&'a String> {
+    let kept: Vec<(&'a String, usize)> =
+        open.iter().filter_map(|k| f.by_key.get(k).map(|&at| (k, at as usize))).collect();
+    if kept.len() <= most {
+        return kept.into_iter().map(|(k, _)| k).collect();
+    }
+    let (is_top, is_open) = (f.tops_of(tops), f.marks(open));
+    // How many sounds are in each folder's branch: a folder with none of its own and one folder with sounds inside it
+    // is one line with that folder, whose arrow opens it ("Vengeance › Vol 2 › Kicks"), so it needn't be open itself.
+    let mut all: Vec<u64> = f.nodes.iter().map(|n| u64::from(n.sounds)).collect();
+    for i in (0..f.nodes.len()).rev() {
+        if let Some(p) = f.nodes[i].parent.filter(|_| !is_top[i]) {
+            all[p as usize] += all[i];
+        }
+    }
+    let link = |x: usize| {
+        f.nodes[x].sounds == 0
+            && f.children[x].iter().filter(|&&c| !is_top[c as usize] && all[c as usize] > 0).count() == 1
+    };
+    let mut ranked: Vec<(bool, usize, &'a String)> = kept
+        .into_iter()
+        .map(|(k, mut at)| {
+            let (mut depth, mut hidden) = (0, false);
+            while let Some(p) = f.nodes[at].parent.filter(|_| !is_top[at]) {
+                at = p as usize;
+                depth += 1;
+                hidden |= !is_open[at] && !link(at);
+            }
+            (hidden, depth, k)
+        })
+        .collect();
+    ranked.sort_unstable();
+    ranked.into_iter().take(most).map(|(_, _, k)| k).collect()
 }
 
 /// The picks as their setting keeps them: a line each, `+` before a folder picked with the folders inside it, `=`
@@ -897,7 +1141,7 @@ mod tests {
         sounds[f.of_sound(3) as usize] = 1;
         let mut used = vec![0; f.len()];
         used[f.of_sound(0) as usize] = 1;
-        let counts = FolderCounts { of: f.stamp(), sounds, used: Some(used) };
+        let counts = FolderCounts { of: f.stamp(), sounds, used: Some(used), ..FolderCounts::default() };
         let rows = rows(&f, Some(&counts), ask(&[], &[], &open, &tops));
         assert_eq!(
             labels(&rows),
@@ -920,6 +1164,100 @@ mod tests {
         assert!(rows4.iter().all(|r| r.count.is_empty()));
         assert_eq!(rows3[1].picked, Picked::Yes);
         assert_eq!(rows3[0].picked, Picked::Part);
+    }
+
+    /// A folder found by the search, opened by its arrow, shows what's in it; cleared, the search leaves it in sight
+    /// with the folders above it opened (the whole-app review of 26 Nov, ST-7: the arrow did nothing).
+    #[test]
+    fn a_folder_found_and_opened_shows_whats_in_it_and_stays_in_sight() {
+        let f = folders(&PATHS);
+        let tops = vec![r"I:\Samples".to_owned()];
+        let (mut open, mut found_open) = (HashSet::new(), HashSet::new());
+        let mut a = ask(&[], &[], &open, &tops);
+        a.search = "vengeance";
+        let found = rows(&f, None, a);
+        assert_eq!(labels(&found), [r"I:\Samples ", "  Packs ", "    Vengeance › Vol 2 › Kicks "]);
+        assert!(found[2].has_children && !found[2].open);
+        toggle_open(&mut open, &mut found_open, &found[2].path, true);
+        let mut a = ask(&[], &[], &open, &tops);
+        a.search = "vengeance";
+        let opened = rows(&f, None, a);
+        assert_eq!(labels(&opened)[2..], ["    Vengeance › Vol 2 › Kicks ", "      Hard "]);
+        assert!(opened[2].open);
+        // The search cleared: the branches above it open too, so it's still in sight.
+        search_cleared(&f, &mut open, &mut found_open, &tops);
+        assert!(found_open.is_empty());
+        let cleared = rows(&f, None, ask(&[], &[], &open, &tops));
+        assert!(labels(&cleared).contains(&"      Hard ".to_owned()), "{:?}", labels(&cleared));
+        // Closed again while searching: not noted.
+        let mut found_open = HashSet::new();
+        toggle_open(&mut open, &mut found_open, r"i:\samples\packs\vengeance\vol 2\kicks", true);
+        assert!(found_open.is_empty() && !open.contains(&key(r"I:\Samples\Packs\Vengeance\Vol 2\Kicks")));
+        assert!(searching(" ha ") && !searching("  "));
+    }
+
+    /// The open branches kept for the next start, past the most: those in sight, nearest the top first, the same
+    /// ones each time (the whole-app review of 26 Nov, ST-8).
+    #[test]
+    fn the_open_branches_kept_are_those_in_sight_nearest_the_top() {
+        let f = folders(&PATHS);
+        let tops = vec![r"I:\Samples".to_owned()];
+        let open = all_open(&f);
+        let kept = open_to_keep(&f, &open, &tops, 3);
+        // The drives' tops and the sample folder, none deeper.
+        assert_eq!(kept.len(), 3);
+        assert!(kept.contains(&&key(r"I:\Samples")), "{kept:?}");
+        assert_eq!(kept, open_to_keep(&f, &open, &tops, 3), "the same each time");
+        // A branch under a closed one is kept last: it doesn't show.
+        let mut open: HashSet<String> =
+            [r"I:\Samples\Packs\Vengeance", r"G:\Studio", r"G:\Studio\909"].iter().map(|p| key(p)).collect();
+        open.insert(key(r"Z:\Gone"));
+        let kept = open_to_keep(&f, &open, &tops, 2);
+        assert_eq!(kept, [&key(r"G:\Studio"), &key(r"G:\Studio\909")]);
+        assert_eq!(open_to_keep(&f, &open, &tops, 10).len(), 3, "not a folder any more");
+    }
+
+    /// With Hide duplicates on, a sound with copies in two folders counts once in a folder holding both, as the list
+    /// shows it once; the picks' whole is what the list shows (the whole-app review of 26 Nov, ST-5).
+    #[test]
+    fn copies_in_two_folders_count_once_above_them() {
+        let f = folders(&[r"G:\Kicks\A\a.wav", r"G:\Kicks\B\a.wav", r"G:\Kicks\b.wav", r"H:\Pads\a.wav"]);
+        let at = |p: &str| f.find(p).unwrap();
+        let mut sounds = vec![0u32; f.len()];
+        for p in [r"G:\Kicks\A", r"G:\Kicks\B", r"G:\Kicks", r"H:\Pads"] {
+            sounds[at(p) as usize] = 1;
+        }
+        let mut used = vec![0u32; f.len()];
+        used[at(r"G:\Kicks\B") as usize] = 1;
+        // The sound in A and B is one, and one in G:\Kicks itself is the same again; Pads holds another copy.
+        let groups = vec![vec![(at(r"G:\Kicks\A"), false), (at(r"G:\Kicks\B"), true), (at(r"G:\Kicks"), false)]];
+        let (mut twice, mut twice_used) = (vec![0; f.len()], vec![0; f.len()]);
+        f.count_twice(groups.clone(), &[], &[], &mut twice, &mut twice_used);
+        let counts =
+            FolderCounts { of: f.stamp(), sounds, used: Some(used), twice, twice_used, ..FolderCounts::default() };
+        let tops = vec![r"G:\Kicks".to_owned()];
+        let open = all_open(&f);
+        let r = rows(&f, Some(&counts), ask(&[], &[], &open, &tops));
+        assert_eq!(labels(&r), [r"G:\Kicks 1", "  A 1", "  B 1", r"H:\Pads 1"]);
+        assert_eq!(r[0].used, "1 used");
+        let pick = |p: &str| FolderPick { path: p.into(), just_this: false };
+        let (words, total) = pick_counts(&f, Some(&counts), &[pick(r"G:\Kicks")], &[], &tops);
+        assert_eq!((words[0].as_str(), total), ("1", Some(PicksTotal { sounds: 1, used: Some(1) })));
+        // A hidden folder's copy doesn't count above it: then the other two are one there.
+        let (mut twice, mut twice_used) = (vec![0; f.len()], vec![0; f.len()]);
+        let hidden = vec![r"G:\Kicks\B".to_owned()];
+        f.count_twice(groups, &tops, &hidden, &mut twice, &mut twice_used);
+        assert_eq!((twice[at(r"G:\Kicks") as usize], twice_used[at(r"G:\Kicks") as usize]), (1, 0));
+        // Two picks that hold copies of each other: the whole is the list's, once it's counted for these picks.
+        let picks = [pick(r"G:\Kicks"), pick(r"H:\Pads")];
+        let (_, summed) = pick_counts(&f, Some(&counts), &picks, &[], &tops);
+        assert_eq!(summed.map(|t| t.sounds), Some(2));
+        let listed =
+            FolderCounts { picked: Some((picks.to_vec(), PicksTotal { sounds: 1, used: Some(1) })), ..counts.clone() };
+        assert_eq!(pick_counts(&f, Some(&listed), &picks, &[], &tops).1.map(|t| t.sounds), Some(1));
+        // Counted for other picks: added up as before.
+        assert_eq!(pick_counts(&f, Some(&listed), &picks[..1], &[], &tops).1.map(|t| t.sounds), Some(1));
+        assert_eq!(pick_counts(&f, Some(&listed), &[pick(r"H:\Pads")], &[], &tops).1.map(|t| t.sounds), Some(1));
     }
 
     #[test]
@@ -984,17 +1322,37 @@ mod tests {
         assert_eq!(decode_picks(&encode_picks(&picks)), picks);
         assert_eq!(picked_words(&picks), "A + 1");
         let mut hidden = Vec::new();
-        toggle_hidden(&mut hidden, &mut picks, r"I:\B\");
+        toggle_hidden(&mut hidden, &mut picks, r"I:\B\", &[]);
         assert_eq!((hidden.len(), picks.len()), (1, 1));
-        toggle_hidden(&mut hidden, &mut picks, r"I:\b");
+        toggle_hidden(&mut hidden, &mut picks, r"I:\b", &[]);
         assert!(hidden.is_empty());
         toggle_pick(&mut picks, r"I:\a");
         assert!(picks.is_empty());
         // Hiding a folder takes off the picks inside it, not those beside it.
         toggle_pick(&mut picks, r"I:\A\B");
         toggle_pick(&mut picks, r"I:\AB");
-        toggle_hidden(&mut hidden, &mut picks, r"I:\A");
+        toggle_hidden(&mut hidden, &mut picks, r"I:\A", &[]);
         assert_eq!(picks, vec![FolderPick { path: r"I:\AB".into(), just_this: false }]);
+        // But not a pick inside a sample folder within it: the hide stops there, as the tree shows (ST-4).
+        hidden.clear();
+        let tops = [r"I:\Samples".to_owned(), r"I:\Samples\Splice".to_owned()];
+        picks = vec![
+            FolderPick { path: r"I:\Samples\Splice\Kicks".into(), just_this: false },
+            FolderPick { path: r"I:\Samples\Splice".into(), just_this: true },
+            FolderPick { path: r"I:\Samples\Old Pack".into(), just_this: false },
+        ];
+        toggle_hidden(&mut hidden, &mut picks, r"I:\Samples", &tops);
+        assert_eq!(
+            picks.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+            [r"I:\Samples\Splice\Kicks", r"I:\Samples\Splice"]
+        );
+        // Hiding the sample folder itself does reach its picks.
+        toggle_hidden(&mut hidden, &mut picks, r"i:\samples\splice", &tops);
+        assert!(picks.is_empty());
+        // A drive's top hides what's on it.
+        picks = vec![FolderPick { path: r"D:\Kicks".into(), just_this: false }];
+        toggle_hidden(&mut hidden, &mut picks, r"D:\", &[]);
+        assert!(picks.is_empty());
         assert_eq!(decode_paths(&encode_paths(["x", "", "y"])), vec!["x", "y"]);
         assert_eq!(last_name(r"I:\"), r"I:\");
         assert_eq!(last_name(r"I:\Samples\Kicks\"), "Kicks");
@@ -1052,7 +1410,7 @@ mod tests {
         sounds[at(r"G:\Kicks\Deep")] = 2;
         sounds[at(r"H:\Pads")] = 1;
         used[at(r"G:\Kicks\Deep")] = 1;
-        let counts = FolderCounts { of: f.stamp(), sounds, used: Some(used) };
+        let counts = FolderCounts { of: f.stamp(), sounds, used: Some(used), ..FolderCounts::default() };
         let pick = |p: &str, just_this| FolderPick { path: p.into(), just_this };
         // Kicks with its folders, Deep within it (counted once), Pads alone.
         let picks = [pick(r"G:\Kicks", false), pick(r"G:\Kicks\Deep", false), pick(r"H:\Pads", true)];

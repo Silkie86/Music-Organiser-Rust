@@ -159,7 +159,8 @@ export global PluginsData {
     callback unused-picked(string);
 
     // The side card.
-    in-out property <length> panel-width: 420px;
+    // 0 until you drag the card: the page lays it out its usual way then (`Widths.list-width`).
+    in-out property <length> panel-width: 0px;
     in property <bool> has-pick;
     in property <string> name;
     in property <string> facts;

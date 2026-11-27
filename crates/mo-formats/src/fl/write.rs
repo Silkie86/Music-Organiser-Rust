@@ -28,7 +28,7 @@ use super::events::{
     self, EV_CHANNEL_NEW, EV_PATTERN_NAME, EV_PATTERN_NEW, EV_PATTERN_NOTES, EV_PLAYLIST, EV_PLUGIN_NAME,
     EV_SAMPLE_PATH, EV_TEMPO, EV_TITLE, Event,
 };
-use crate::arrangement::{Arrangement, LaneKind, PreviewClip};
+use crate::arrangement::{Arrangement, AudioPart, LaneKind, PreviewClip, PreviewNote};
 
 /// FL Studio 25's empty project (recipe save 01).
 const TEMPLATE: &[u8] = include_bytes!("../../tests/fixtures/recipe/fl/MO Recipe 01 empty.flp");
@@ -43,6 +43,9 @@ const PATTERNS: usize = 999;
 pub const PPQ: f64 = 96.0;
 /// The tracks FL 25's playlist has.
 const TRACKS: usize = 500;
+/// FL Studio's slowest and fastest tempo.
+const SLOWEST: f64 = 10.0;
+const FASTEST: f64 = 522.0;
 /// A pattern clip's item number base: an item above it is a pattern, at or below it a channel.
 const PATTERN_BASE: u16 = 20480;
 
@@ -77,13 +80,11 @@ enum Channel {
     Audio(String),
 }
 
-/// A pattern: its channel, name and notes (in ticks from its start), and how long it plays.
+/// A pattern: its name and notes (each note record names its channel; positions in ticks from its start).
 #[derive(Clone, Debug, PartialEq)]
 struct Pattern {
-    channel: u16,
     name: String,
     notes: Vec<[u8; 24]>,
-    length: u32,
 }
 
 /// One playlist item before it's laid out: where, how long, what (pattern number above the base, or channel), on
@@ -101,16 +102,22 @@ struct Item {
 /// The song as a new FL Studio project. `created` is when it's made, as FL's own date (days since 30 Dec 1899).
 pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
     let mut left_out = Vec::new();
+    let tempo = tempo_of(song);
+    if (tempo - song.tempo).abs() > 1e-9 {
+        left_out.push(format!("The tempo ({:.0} BPM): FL's is {SLOWEST:.0} to {FASTEST:.0}.", song.tempo));
+    }
     let mut channels: Vec<Channel> = Vec::new();
     let mut patterns: Vec<Pattern> = Vec::new();
     let mut items: Vec<Item> = Vec::new();
     let mut track_names: Vec<(String, bool)> = Vec::new();
     let mut audio_channel: HashMap<String, u16> = HashMap::new();
     let mut same_pattern: HashMap<(u16, Vec<[u8; 24]>, u32), u16> = HashMap::new();
+    let mut empty_pattern: HashMap<(String, u32), u16> = HashMap::new();
     let mut stretched = false;
     let mut automation = false;
     let mut too_many_patterns = false;
     let mut gain = false;
+    let mut early_notes = 0usize;
     // A pattern is whole bars of the song's time signature.
     let bar = ticks(song.signature.beats()).unwrap_or(4 * PPQ as u32).max(1);
 
@@ -131,6 +138,17 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
         track_names.push((lane.name.clone(), lane.muted));
         let mut sampler: Option<u16> = None;
         for clip in &lane.clips {
+            // A clip that starts before the song does (a Studio One part a 20th of a beat early, seen on Solomon's
+            // songs) starts with the song instead: FL's playlist has nothing before its start.
+            let from_start;
+            let clip = if clip.start < 0.0 && clip.start + clip.length > 0.0 {
+                let (moved, early) = from_song_start(clip, 60.0 / tempo);
+                early_notes += early;
+                from_start = moved;
+                &from_start
+            } else {
+                clip
+            };
             let Some(at) = ticks(clip.start) else { continue };
             if !clip.notes.is_empty() {
                 let channel = *sampler.get_or_insert_with(|| {
@@ -147,14 +165,34 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
                     }
                     None => {
                         let name = if clip.name.trim().is_empty() { lane.name.clone() } else { clip.name.clone() };
-                        patterns.push(Pattern { channel, name, notes: key.1.clone(), length: key.2 });
+                        patterns.push(Pattern { name, notes: key.1.clone() });
                         let n = patterns.len() as u16;
                         same_pattern.insert(key.clone(), n);
                         n
                     }
                 };
                 // FL repeats a pattern clip longer than its pattern: the clip stops where its notes' bars do.
-                let length = ticks(clip.length).unwrap_or(0).min(key.2).max(1);
+                let length = clip_ticks(clip).min(key.2);
+                items.push(Item { at, length, what: PATTERN_BASE + number, track, muted: clip.muted, audio: None });
+            } else if clip.audio.is_empty() && clip.points.is_empty() {
+                // A clip with nothing in it (an empty pattern laid out as a section): an empty pattern of its name,
+                // as long as the clip's whole bars.
+                let name = if clip.name.trim().is_empty() { lane.name.clone() } else { clip.name.clone() };
+                let length = ticks(clip.length).unwrap_or(0).max(1);
+                let bars = length.div_ceil(bar).saturating_mul(bar);
+                let number = match empty_pattern.get(&(name.clone(), bars)) {
+                    Some(n) => *n,
+                    None if patterns.len() >= PATTERNS => {
+                        too_many_patterns = true;
+                        continue;
+                    }
+                    None => {
+                        patterns.push(Pattern { name: name.clone(), notes: Vec::new() });
+                        let n = patterns.len() as u16;
+                        empty_pattern.insert((name, bars), n);
+                        n
+                    }
+                };
                 items.push(Item { at, length, what: PATTERN_BASE + number, track, muted: clip.muted, audio: None });
             }
             for part in &clip.audio {
@@ -163,17 +201,16 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
                     (channels.len() - 1) as u16
                 });
                 let Some(part_at) = ticks(clip.start + part.start) else { continue };
-                let rate = part.seconds_per_beat.unwrap_or(60.0 / song.tempo);
-                if (rate - 60.0 / song.tempo).abs() > 1e-6 || part.semitones != 0.0 || part.reversed {
+                let rate = part.seconds_per_beat.unwrap_or(60.0 / tempo);
+                if (rate - 60.0 / tempo).abs() > 1e-6 || part.semitones != 0.0 || part.reversed {
                     stretched = true;
                 }
                 gain |= part.gain_db != 0.0;
                 let from = (part.from * 1000.0) as f32;
                 let to = ((part.from + part.length * rate) * 1000.0) as f32;
-                let first = clip.audio.first() == Some(part);
-                let last = clip.audio.last() == Some(part);
-                let fade_in = if first { (clip.fade_in * 60_000.0 / song.tempo) as f32 } else { 0.0 };
-                let fade_out = if last { (clip.fade_out * 60_000.0 / song.tempo) as f32 } else { 0.0 };
+                let (fade_in, fade_out) = clip.fades_of(part);
+                let ms = |beats: f64| (beats * 60_000.0 / tempo) as f32;
+                let (fade_in, fade_out) = (ms(fade_in), ms(fade_out));
                 items.push(Item {
                     at: part_at,
                     length: ticks(part.length).unwrap_or(0).max(1),
@@ -195,6 +232,13 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
     if gain {
         left_out.push("Audio clips' own volume: they play at full volume.".into());
     }
+    if early_notes > 0 {
+        left_out.push(format!(
+            "Where {} before the song's start play{}: on its very start.",
+            if early_notes == 1 { "a note".to_owned() } else { format!("{early_notes} notes") },
+            if early_notes == 1 { "s" } else { "" }
+        ));
+    }
     if automation {
         left_out.push("Automation.".into());
     }
@@ -215,18 +259,96 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
     Written { bytes, left_out }
 }
 
+/// The tempo the copy is written at: the song's, inside FL's range (120 when it isn't a number).
+fn tempo_of(song: &Arrangement) -> f64 {
+    if song.tempo.is_finite() { song.tempo.clamp(SLOWEST, FASTEST) } else { 120.0 }
+}
+
+/// A clip that starts before the song, from the song's start: its notes where they were (one before the start on the
+/// start), its audio cut at the start. Also how many notes were moved to the start. `spb` is the song's seconds a beat,
+/// for audio that doesn't say its own.
+fn from_song_start(clip: &PreviewClip, spb: f64) -> (PreviewClip, usize) {
+    let shift = clip.start;
+    let mut early = 0;
+    let notes = clip
+        .notes
+        .iter()
+        .map(|n| {
+            let start = n.start + shift;
+            if start < 0.0 {
+                early += 1;
+            }
+            PreviewNote { start: start.max(0.0), ..*n }
+        })
+        .collect();
+    let audio = clip
+        .audio
+        .iter()
+        .filter_map(|p| {
+            let start = p.start + shift;
+            if start >= 0.0 {
+                return Some(AudioPart { start, ..p.clone() });
+            }
+            let cut = -start;
+            if p.length <= cut {
+                return None;
+            }
+            // A reversed part plays from its end back to `from`, so cutting its start leaves `from` where it is.
+            let from = if p.reversed { p.from } else { p.from + cut * p.seconds_per_beat.unwrap_or(spb) };
+            Some(AudioPart { start: 0.0, length: p.length - cut, from, ..p.clone() })
+        })
+        .collect();
+    let moved = PreviewClip {
+        name: clip.name.clone(),
+        start: 0.0,
+        length: clip.length + shift,
+        muted: clip.muted,
+        notes,
+        audio,
+        points: Vec::new(),
+        colour: clip.colour,
+        fade_in: (clip.fade_in + shift).max(0.0),
+        fade_out: clip.fade_out.min(clip.length + shift),
+        parts: clip.parts.clone(),
+    };
+    (moved, early)
+}
+
 /// Beats in the written project's ticks, when they're a place in the song (not before its start or past FL's end).
 fn ticks(beats: f64) -> Option<u32> {
     let t = (beats * PPQ).round();
     (t.is_finite() && (0.0..u32::MAX as f64).contains(&t)).then_some(t as u32)
 }
 
+/// How long a clip of notes is in the written project's ticks: at least one, so its notes have a tick to be on, and
+/// all of FL's ticks for one longer than they reach (a damaged save's clip can be 1e20 beats long).
+fn clip_ticks(clip: &PreviewClip) -> u32 {
+    match ticks(clip.length) {
+        Some(t) => t.max(1),
+        None if clip.length > 0.0 => u32::MAX,
+        None => 1,
+    }
+}
+
 /// A clip's notes as a pattern's records, and how long the pattern is: its notes' last bar.
+///
+/// A note the reader gives in the clip stays in it here: one that rounds onto the clip's end tick (a note 0.00003 of
+/// a beat before a Bitwig clip's end) starts on the clip's last tick instead, and one that rounds to a tick before its
+/// start (a hair before it) on its first. FL doesn't play a note at or after the end of its playlist item, so without
+/// this such a note was lost and the copy refused to save (the real-song test of 27 Nov 2026: 87 of Solomon's Bitwig
+/// and Studio One saves). Only rounding is put right: a note further out is left out, so the copy's check sees it.
 fn pattern_notes(clip: &PreviewClip, channel: u16, bar: u32) -> (Vec<[u8; 24]>, u32) {
     let mut records = Vec::new();
     let mut end = 0u32;
+    let last_tick = clip_ticks(clip).saturating_sub(1);
     for n in &clip.notes {
-        let (Some(at), Some(length)) = (ticks(n.start), ticks(n.length)) else { continue };
+        let at = (n.start * PPQ).round();
+        // Within a tick of the clip's edges, rounding moved it there; further out, the note isn't the clip's.
+        if !(-1.0..=f64::from(last_tick) + 1.0).contains(&at) {
+            continue;
+        }
+        let at = at.clamp(0.0, f64::from(last_tick)) as u32;
+        let Some(length) = ticks(n.length) else { continue };
         let length = length.max(1);
         end = end.max(at.saturating_add(length));
         let mut r = [0u8; 24];
@@ -307,8 +429,10 @@ fn assemble(
         for (i, p) in patterns.iter().enumerate() {
             encode(EV_PATTERN_NEW, &((i + 1) as u16).to_le_bytes(), body);
             encode(EV_PATTERN_NAME, &text(&p.name), body);
-            encode(EV_PATTERN_NOTES, &p.notes.concat(), body);
-            let _ = p.channel;
+            // FL writes no notes event for a pattern without notes.
+            if !p.notes.is_empty() {
+                encode(EV_PATTERN_NOTES, &p.notes.concat(), body);
+            }
         }
     };
     let mut skipping_channel = false;
@@ -322,11 +446,7 @@ fn assemble(
             }
         }
         match e.id {
-            EV_TEMPO => encode(
-                EV_TEMPO,
-                &((song.tempo * 1000.0).round().clamp(10_000.0, 999_000.0) as u32).to_le_bytes(),
-                &mut body,
-            ),
+            EV_TEMPO => encode(EV_TEMPO, &((tempo_of(song) * 1000.0).round() as u32).to_le_bytes(), &mut body),
             EV_TIME_SIG_NUMERATOR => encode(e.id, &[song.signature.top().min(255) as u8], &mut body),
             EV_TIME_SIG_DENOMINATOR => encode(e.id, &[song.signature.bottom().min(255) as u8], &mut body),
             EV_TITLE => encode(EV_TITLE, &text(title), &mut body),

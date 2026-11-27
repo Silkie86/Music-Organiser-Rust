@@ -850,6 +850,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     shots.push(("arrangement-light.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &graphite);
+    // The song's MIDI: the playhead moved by a click on the ruler, and the Sounds panel open on the bass, with its
+    // sounds to pick from.
+    mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
+    let header = arrangement.get_header_width();
+    arrangement.invoke_grab(header + 160.0, 6.0);
+    arrangement.invoke_let_go();
+    arrangement.set_sounds_open(true);
+    arrangement.invoke_pick_line(2);
+    let sounds = capture(&window);
+    if !arrangement.get_playhead_shown() || arrangement.get_sound_open() != 2 || !arrangement.get_can_play() {
+        return Err(
+            "arrangement-sounds.png: no playhead after a click on the ruler, or the bass's sounds aren't open".into()
+        );
+    }
+    shots.push(("arrangement-sounds.png".into(), sounds));
+    arrangement.invoke_pick_line(2);
+    arrangement.set_sounds_open(false);
+    mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     // A song with things to look at, its Health strip open.
     mo_ui::songs::show_picked(&app, 1, sample_detail(), Tab::Overview);
     app.global::<mo_ui::SongsData>().set_health_open(true);
@@ -901,6 +921,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     bar.set_place(0.32);
     bar.set_time("1:12 / 3:42".into());
     shots.push(("songs-sound.png".into(), capture(&window)));
+    // Copper Lines' newest bounce playing, started from its line's speaker (the review of 26 Nov, SZ-3): that speaker
+    // is lit (and its line on the card), Slow Orbit's is not. Shown as playing only: nothing is played here.
+    bar.set_playing(true);
+    shots.push(("songs-row-playing.png".into(), capture(&window)));
+    bar.set_playing(false);
     bar.set_shown(false);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
     mo_ui::songs::show_sample(&app, sample_songs());
@@ -1749,7 +1774,7 @@ fn wide_shots(
     let kept = presets.get_panel_width();
     capture_sized(window, WIDE, Duration::from_millis(400));
     let usual = capture_sized(window, WIDE, Duration::from_millis(400));
-    presets.set_panel_width(kept + 300.0);
+    presets.set_panel_width(app.global::<mo_ui::Widths>().invoke_usual("presets.card".into()) + 300.0);
     capture_sized(window, WIDE, Duration::from_millis(400));
     let narrower = capture_sized(window, WIDE, Duration::from_millis(400));
     presets.set_panel_width(kept);
@@ -1758,6 +1783,16 @@ fn wide_shots(
     }
     let path = out.join("wide-presets-card-dragged.png");
     image::save_buffer(&path, &narrower, WIDE.0, WIDE.1, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
+    // A 1920 px laptop screen at Windows' 125%, the window filling it: the MIDI list is 620 px wide there, too narrow
+    // for the From column beside the part's name, so it takes the narrow layout (the 26 Nov review's MZ-2).
+    const LAPTOP: (u32, u32) = (1536, 864);
+    window.set_size(PhysicalSize::new(LAPTOP.0, LAPTOP.1));
+    show_place(app, Place::Midi);
+    capture_sized(window, LAPTOP, Duration::from_millis(400));
+    let laptop = capture_sized(window, LAPTOP, Duration::from_millis(400));
+    let path = out.join("midi-laptop-125.png");
+    image::save_buffer(&path, &laptop, LAPTOP.0, LAPTOP.1, image::ExtendedColorType::Rgb8)?;
     println!("{}", path.display());
     window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     Ok(())
@@ -2593,6 +2628,31 @@ fn folder_shots(
     }
     capture(window);
     shots.push(("sounds-folders-strip.png".into(), capture(window)));
+    // Many hidden folders too: three rows of chips in sight, the rest a scroll away (the whole-app review of 26 Nov,
+    // ST-9: the strip grew with no limit and took the list's room). Made-up folders, shown again after.
+    let old: Vec<String> = (1..=40).map(|n| format!(r"E:\Old packs\Bounce pack {n:02}")).collect();
+    // Each one hidden, or shown again when it is.
+    let toggle_old = || {
+        for path in &old {
+            data.invoke_tree_menu_asked(path.as_str().into());
+            data.invoke_tree_menu_chosen("hide".into());
+        }
+    };
+    toggle_old();
+    capture(window);
+    let many = capture(window);
+    // The wheel over the chips turns the strip down to the last of them.
+    let (x, y) = STRIP_WHEEL;
+    scroll(window, x, y, -10.0 * PAGE_DOWN);
+    let down = capture(window);
+    scroll(window, x, y, 10.0 * PAGE_DOWN);
+    hover(window, -1.0, -1.0);
+    if down == many {
+        return Err(format!("sounds-folders-strip-down.png: the wheel at {x}, {y} moved nothing; is the strip there?"));
+    }
+    shots.push(("sounds-folders-strip-many.png".into(), many));
+    shots.push(("sounds-folders-strip-down.png".into(), down));
+    toggle_old();
     for f in more {
         data.invoke_tree_toggled(format!(r"D:\Samples\{f}").into());
     }
@@ -2668,6 +2728,8 @@ fn sounds_shots(
     pick_sound(app, 6);
     data.set_played(0.35);
     data.set_tile_played(0.35);
+    part_shots(app, window, shots)?;
+    edit_shots(app, window, shots)?;
     // A sound deep in a pack, with folder names too long for a line, and six tags: its card wraps them, at the usual
     // width and as narrow as it goes, with nothing cut off on the right. Found by name, as the shuffled order changes
     // with every run.
@@ -2721,9 +2783,11 @@ fn sounds_shots(
     shots.push(("sounds-seam-dragging.png".into(), capture(window)));
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: dragged_to, button });
     let dragged = data.get_panel_width();
-    if (dragged - wide - 100.0).abs() > 1.0 {
+    // Never dragged, the card is given 0 and shown at its usual width in this window.
+    let usual = app.global::<mo_ui::Widths>().invoke_usual("sounds.card".into());
+    if (dragged - usual - 100.0).abs() > 1.0 {
         return Err(format!(
-            "sounds seam: dragging it 100 px left made the card {dragged} wide, from {wide}; has the seam moved from {CARD_SEAM:?}?"
+            "sounds seam: dragging it 100 px left made the card {dragged} wide, from {usual}; has the seam moved from {CARD_SEAM:?}?"
         ));
     }
     app.global::<mo_ui::Widths>().invoke_reset("sounds.card".into());
@@ -4411,6 +4475,8 @@ const REMOVE_OLDER_BUTTON: (f32, [f32; 2]) = (1150.0, [776.0, 794.0]);
 const PLUGIN_CHIP: (f32, f32) = (288.0, 152.0);
 /// A page's turn of the wheel: `-PAGE_DOWN` turns a page down, `PAGE_DOWN` up ([`scroll`]).
 const PAGE_DOWN: f32 = 300.0;
+/// On the chips of the folder strip under the Sounds list, with the tree open.
+const STRIP_WHEEL: (f32, f32) = (1100.0, 830.0);
 
 /// Where the wheel turns the song panel down in the narrowest window, and by how much: on its status line, which
 /// doesn't scroll on its own, as the lists and the arrangement in it do.
@@ -4625,13 +4691,55 @@ fn settings_shots(
         mo_dawlink::scripts::ScriptState::Outdated,
         vec![std::path::PathBuf::from(r"I:\Fl Studio Data\FL Studio\Settings\Hardware\DAWmate")],
     );
+    // The app's CLAP plugin, an older one in Common Files\CLAP: Update and Take out (the 26 Nov review's DK-2).
+    let clap = std::path::PathBuf::from(r"C:\Program Files\Common Files\CLAP");
+    let plugin = mo_app::settings::PluginLook {
+        source: true,
+        // Written whole, so it shows as on Windows (joined here it would get a '/').
+        files: vec![std::path::PathBuf::from(r"C:\Program Files\Common Files\CLAP\DAWmate.clap")],
+        folder: Some(clap.clone()),
+        state: mo_dawlink::scripts::ScriptState::Outdated,
+        test_plugin: None,
+        can_ask: true,
+        mac: false,
+    };
+    mo_ui::settings::show_plugin(app, plugin.clone(), false, false);
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));
     // Take out on FL Studio's row, asking first and naming the file that goes.
     data.set_take_out_asking("FL Studio".into());
     capture(window);
     shots.push(("settings-daws-take-out.png".into(), capture(window)));
+    // The plugin's row, further down: its Take out asks first too; then Update waiting on Windows' question; then a
+    // test plugin put in by hand, which the app leaves alone (no Install, no Take out of it).
+    scroll(window, 900.0, 500.0, -PAGE_DOWN);
+    data.set_take_out_asking(mo_app::settings::PLUGIN_ROW.into());
+    capture(window);
+    shots.push(("settings-daws-plugin-take-out.png".into(), capture(window)));
     data.set_take_out_asking("".into());
+    mo_ui::settings::show_plugin(app, plugin.clone(), true, false);
+    capture(window);
+    shots.push(("settings-daws-plugin-asking.png".into(), capture(window)));
+    // The same for Take out: its own button says so; Update doesn't, and the links' buttons stay usable (DK-3).
+    mo_ui::settings::show_plugin(app, plugin.clone(), true, true);
+    capture(window);
+    shots.push(("settings-daws-plugin-taking-out.png".into(), capture(window)));
+    let test = mo_app::settings::PluginLook {
+        files: Vec::new(),
+        state: mo_dawlink::scripts::ScriptState::NotInstalled,
+        test_plugin: Some(std::path::PathBuf::from(r"C:\Program Files\Common Files\CLAP\DAWmate (test).clap")),
+        ..plugin.clone()
+    };
+    mo_ui::settings::show_plugin(app, test, false, false);
+    capture(window);
+    shots.push(("settings-daws-plugin-test.png".into(), capture(window)));
+    // A launcher build: nothing beside it to put in.
+    let launcher = mo_app::settings::PluginLook { source: false, files: Vec::new(), ..plugin.clone() };
+    mo_ui::settings::show_plugin(app, launcher, false, false);
+    capture(window);
+    shots.push(("settings-daws-plugin-launcher.png".into(), capture(window)));
+    mo_ui::settings::show_plugin(app, plugin, false, false);
+    scroll(window, 900.0, 500.0, PAGE_DOWN);
     // Further down, the program each DAW's songs open in: FL Studio's chosen here (an invented path, set before
     // show_fl showed the tab), Studio One's chosen in the old app, Bitwig's Windows' choice.
     scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
@@ -4846,6 +4954,162 @@ fn drag_seam(
         return Err(format!("{name}: a double-click's reset left it {} wide, not its usual {was}", width()));
     }
     Ok(held)
+}
+
+/// Two places across the Sounds card's waveform ([`CARD_WAVE`]) to drag between to pick a part.
+const PART_DRAG: (f32, f32) = (1100.0, 1300.0);
+
+/// A part picked on the Sounds card's waveform (the 1.1 plan's light sample edits): pressed and dragged across it, its
+/// edges snapping to the sound's hits, and the handle under it lit to carry the part. A click outside it lets it go, as
+/// Esc does.
+fn part_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let data = app.global::<mo_ui::SoundsData>();
+    // A thirty-second of the way apart: about 12 points on the card, so every place is within snapping reach of one.
+    let hits: Vec<f64> = (1..32).map(|i| f64::from(i) / 32.0).collect();
+    mo_ui::sounds::hits_for_screens(app, &hits);
+    let ((from, to), y) = (PART_DRAG, CARD_WAVE.1);
+    let pick = || {
+        let button = slint::platform::PointerEventButton::Left;
+        let (a, b) = (slint::LogicalPosition::new(from, y), slint::LogicalPosition::new(to, y));
+        window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: a });
+        window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: a, button });
+        window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: b });
+        window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: b, button });
+    };
+    pick();
+    let (a, b) = (data.get_part_from() * 32.0, data.get_part_to() * 32.0);
+    if data.get_part_text().is_empty() {
+        return Err(format!(
+            "sounds-part.png: dragging across the card's waveform at {PART_DRAG:?}, {y} picked no part"
+        ));
+    }
+    if (a - a.round()).abs() > 1e-3 || (b - b.round()).abs() > 1e-3 || b <= a {
+        return Err(format!("sounds-part.png: the part's edges ({a}, {b} thirty-seconds) didn't snap to the hits"));
+    }
+    hover(window, from + 20.0, y);
+    shots.push(("sounds-part.png".into(), capture(window)));
+    click(window, from - 40.0, y);
+    if !data.get_part_text().is_empty() {
+        return Err("sounds-part.png: a click outside the part didn't let it go".into());
+    }
+    pick();
+    if !mo_ui::sounds::escape(app) || !data.get_part_text().is_empty() {
+        return Err("sounds-part.png: Esc didn't let the part go".into());
+    }
+    hover(window, -1.0, -1.0);
+    Ok(())
+}
+
+/// The Edit strip (E) along the bottom of Sounds (the 1.1 plan's light sample edits, mock-up 8): opened on a made-up
+/// drum loop with a fade in, a fade out and a normalise made, and two beats of it picked. Undo and redo step through
+/// the edits, and Esc lets the part go, then closes the strip.
+fn edit_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let edit = app.global::<mo_ui::SoundEdit>();
+    let data = app.global::<mo_ui::SoundsData>();
+    // A drum loop with a tempo, so the ruler counts bars and beats. Found by name, as the shuffled order changes with
+    // every run; not through the search box, as Esc would clear that first.
+    let found = (0..64).any(|row| {
+        pick_sound(app, row);
+        data.get_picked().name == EDIT_SOUND
+    });
+    if !found {
+        return Err(format!("sounds-edit.png: no made-up sound called {EDIT_SOUND} to open the strip on"));
+    }
+    let tools = ["sounds.editFadeIn", "sounds.editFadeOut", "sounds.editNormalise"];
+    mo_ui::sounds::edit_for_screens(app, drum_loop(), Some((0.25, 0.375)), &tools);
+    let (open, ready, edits) = mo_ui::sounds::edit_state_for_screens();
+    if !(open && ready && edit.get_shown() && edit.get_ready()) || edits != tools.len() {
+        return Err(format!("sounds-edit.png: the strip isn't open and ready ({open}, {ready}) or has {edits} edits"));
+    }
+    if edit.get_chips().row_count() != tools.len() || !edit.get_has_part() {
+        return Err("sounds-edit.png: the edits' chips or the part picked don't show".into());
+    }
+    hover(window, -1.0, -1.0);
+    capture(window);
+    shots.push(("sounds-edit.png".into(), capture(window)));
+    // Undo takes the last edit back, and redo makes it again.
+    mo_ui::sounds::run_action(app, "sounds.editUndo");
+    let undone = mo_ui::sounds::edit_state_for_screens().2;
+    mo_ui::sounds::run_action(app, "sounds.editRedo");
+    if undone != tools.len() - 1 || mo_ui::sounds::edit_state_for_screens().2 != tools.len() {
+        return Err("sounds-edit.png: undo and redo didn't step through the edits".into());
+    }
+    // Esc: the part goes first, then the strip.
+    if !mo_ui::sounds::escape(app) || edit.get_has_part() || !edit.get_shown() {
+        return Err("sounds-edit.png: Esc didn't let the strip's part go first".into());
+    }
+    if !mo_ui::sounds::escape(app) || edit.get_shown() {
+        return Err("sounds-edit.png: a second Esc didn't close the strip".into());
+    }
+    // Edit on the right-click menu only opens the strip (chosen twice, it stays open); the card's button closes it too.
+    data.invoke_menu_chosen("sounds.edit".into());
+    data.invoke_menu_chosen("sounds.edit".into());
+    if !edit.get_shown() {
+        return Err("sounds-edit.png: the menu's Edit didn't open the strip, or closed it again".into());
+    }
+    data.invoke_card_chosen("sounds.edit".into());
+    if edit.get_shown() {
+        return Err("sounds-edit.png: the card's Edit button didn't close the strip".into());
+    }
+    // The sound's edits were kept: opened again, they're back. With all of them undone there's nothing to save,
+    // though there's something to redo.
+    mo_ui::sounds::edit_for_screens(app, drum_loop(), None, &[]);
+    if mo_ui::sounds::edit_state_for_screens().2 != tools.len() || !edit.get_has_edits() {
+        return Err("sounds-edit.png: the sound's edits weren't kept for its next opening".into());
+    }
+    for _ in 0..tools.len() {
+        mo_ui::sounds::run_action(app, "sounds.editUndo");
+    }
+    if edit.get_has_edits() || edit.get_can_undo() || !edit.get_can_redo() {
+        return Err("sounds-edit.png: with every edit undone, Save copy still has something to save".into());
+    }
+    data.invoke_card_chosen("sounds.edit".into());
+    // As the page was, for the pictures after this one.
+    pick_sound(app, 6);
+    data.set_played(0.35);
+    data.set_tile_played(0.35);
+    Ok(())
+}
+
+/// The made-up sound the Edit strip's picture opens on: a drum loop at 128 BPM, 7.5 s long (four bars).
+const EDIT_SOUND: &str = "Hats 128";
+
+/// Four bars of a made-up drum loop at 128 BPM for the Edit strip ([`EDIT_SOUND`]'s length and tempo): a kick on each
+/// beat, a hat between.
+fn drum_loop() -> mo_audio::AudioData {
+    let rate = 44_100u32;
+    let beat_seconds = 60.0 / 128.0;
+    let seconds = 16.0 * beat_seconds;
+    let n = (seconds * f64::from(rate)).round() as usize;
+    let mut noise = 0x1234_5678u32;
+    let mut left = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f64 / f64::from(rate);
+        let beat = t % beat_seconds;
+        let kick = (-beat / 0.12).exp() * (std::f64::consts::TAU * (50.0 + 90.0 * (-beat / 0.03).exp()) * beat).sin();
+        noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let white = f64::from(noise >> 8) / f64::from(1u32 << 24) * 2.0 - 1.0;
+        let off = (t + beat_seconds / 2.0) % beat_seconds;
+        let hat = (-off / 0.025).exp() * white * 0.35;
+        left.push((kick * 0.7 + hat) as f32);
+    }
+    let right = left.iter().map(|s| s * 0.9).collect();
+    mo_audio::AudioData {
+        sample_rate: rate,
+        channels: vec![left, right],
+        file_seconds: seconds,
+        embedded_tempo: None,
+        embedded_root_note: None,
+        embedded_is_loop: None,
+    }
 }
 
 /// A left click at a point in the window.

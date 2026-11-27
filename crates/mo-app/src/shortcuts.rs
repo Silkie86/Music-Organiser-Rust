@@ -31,8 +31,8 @@ const fn action(id: &'static str, what: &'static str, default_key: &'static str)
 /// Every action that works everywhere in the app. Pages add their own lists later (`songs.*`, `playground.*`…);
 /// a page's own key beats one of these.
 pub const APP_ACTIONS: &[Action] = &[
-    action("app.help", "Show the keys for this page", "?"),
-    action("app.helpF1", "Show the keys for this page (the help key)", "F1"),
+    action("app.help", "Help and keys for this page", "?"),
+    action("app.helpF1", "Help and keys for this page (the help key)", "F1"),
     action("app.jump", "Jump to anything: songs, sounds, presets, MIDI parts, plugins, settings", "Ctrl+K"),
     action("app.goProjects", "Go to Songs", "Ctrl+1"),
     action("app.goSounds", "Go to Sounds", "Ctrl+2"),
@@ -77,7 +77,8 @@ pub const APP_ACTIONS: &[Action] = &[
 /// The Songs page's own actions. The ids are the C# app's Projects page's, so a key changed in either app carries
 /// across. New here: `projects.openOwn`, so the song line's menu and the panel's "Open in FL Studio" have a key too
 /// (rule 15), and `projects.favourite` and `projects.tag` for the card's heart and tag box, with Sounds' keys (the
-/// whole-app review of 14 Nov, SG-5).
+/// whole-app review of 14 Nov, SG-5), and `projects.copyFl`, `projects.copyStudioOne` and `projects.copyLive` for the
+/// menus' "Open a copy in…" lines (27 Nov 2026).
 pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.open", "Open the picked song (FL Studio songs go to Bitwig)", "Ctrl+O"),
     action("projects.openOwn", "Open the picked song in the DAW it was made in", "Ctrl+Shift+O"),
@@ -86,6 +87,21 @@ pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
     action("projects.favourite", "Make the picked song a favourite, or not", "Ctrl+D"),
     action("projects.tag", "Type a tag for the picked song", "Ctrl+T"),
+    action(
+        "projects.copyFl",
+        "Make a copy of the picked song for FL Studio and open it (the song stays as it is)",
+        "Alt+F",
+    ),
+    action(
+        "projects.copyStudioOne",
+        "Make a copy of the picked song for Studio One and open it (the song stays as it is)",
+        "Alt+S",
+    ),
+    action(
+        "projects.copyLive",
+        "Make a copy of the picked song for Ableton Live and open it (the song stays as it is)",
+        "Alt+L",
+    ),
 ];
 
 /// The Sounds page's own actions, with the C# Sound Lab's ids and keys. Esc stops the sound playing as it does on every
@@ -96,6 +112,29 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
     action("sounds.toBitwig", "Put the picked sound into Bitwig", "Ctrl+B"),
     action("sounds.reveal", "Show the sound's file in Explorer", "Ctrl+Shift+E"),
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
+    // The Edit strip (the 1.1 plan's light sample edits, 27 Nov 2026). Undo, redo and save have the curve editor's
+    // keys; the tools have Alt and a letter, as the curve editor's do.
+    action("sounds.edit", "Edit the picked sound: open or close the Edit strip along the bottom", "E"),
+    action("sounds.editUndo", "Undo the last edit in the Edit strip", "Ctrl+Z"),
+    action("sounds.editRedo", "Redo the edit that was undone", "Ctrl+Shift+Z"),
+    action(
+        "sounds.editSave",
+        "Save the edited sound as a copy in Edited sounds (the file itself never changes)",
+        "Ctrl+S",
+    ),
+    action("sounds.editOriginal", "Hold to hear the original sound while you edit it", "O"),
+    action("sounds.editTrim", "Keep only the part picked in the Edit strip", "Alt+T"),
+    action("sounds.editFadeIn", "Fade in across the part picked (with none, a short fade at the start)", "Alt+I"),
+    action("sounds.editFadeOut", "Fade out across the part picked (with none, a short fade at the end)", "Alt+O"),
+    action("sounds.editReverse", "Play the part picked backwards (the whole sound with none)", "Alt+R"),
+    action("sounds.editNormalise", "Turn the sound up or down so its loudest moment is at full scale", "Alt+N"),
+    action("sounds.editLouder", "Turn the part picked (the whole sound with none) up half a dB", "Alt+Up"),
+    action("sounds.editQuieter", "Turn the part picked (the whole sound with none) down half a dB", "Alt+Down"),
+    action(
+        "sounds.editLoop",
+        "Crossfade the part picked (the whole sound with none) so it loops without a click",
+        "Alt+L",
+    ),
 ];
 
 /// The Plugins page's own actions, with the C# ids. Clean up and Uninstall join with the page's second part.
@@ -744,6 +783,9 @@ mod tests {
         // The card's heart and tag box, with the keys their Sounds twins have.
         assert_eq!(s.page_action_for("Ctrl+D", SONGS_ACTIONS), Some("projects.favourite"));
         assert_eq!(s.page_action_for("Ctrl+T", SONGS_ACTIONS), Some("projects.tag"));
+        assert_eq!(s.page_action_for("Alt+F", SONGS_ACTIONS), Some("projects.copyFl"));
+        assert_eq!(s.page_action_for("Alt+S", SONGS_ACTIONS), Some("projects.copyStudioOne"));
+        assert_eq!(s.page_action_for("Alt+L", SONGS_ACTIONS), Some("projects.copyLive"));
         assert_eq!(s.key_of("projects.favourite"), s.key_of("sounds.favourite"));
         assert_eq!(s.key_of("projects.tag"), s.key_of("sounds.tag"));
         assert_eq!(s.page_action_for("Ctrl+O", &[]), None);

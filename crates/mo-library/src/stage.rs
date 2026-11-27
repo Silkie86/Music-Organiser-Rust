@@ -44,9 +44,34 @@ pub const ARRANGED_SECONDS: f64 = 120.0;
 pub const MIXED_TRACKS: u32 = 3;
 pub const MIXED_EQ: f64 = 0.5;
 pub const MIXED_COMPRESSED: f64 = 0.3;
-/// And at least this many moving settings, or this many send tracks (Bitwig starts every project with one).
+/// And at least this many moving settings. Send tracks don't count: on Solomon's songs they're the DAW's own (FL's
+/// four, Bitwig's one) whatever the stage (stage tuner, 27 Nov 2026).
 pub const MIXED_AUTOMATION: u32 = 2;
-pub const MIXED_SENDS: u32 = 2;
+/// A save longer than this (seconds) is a set or a recording, not a song: it's left an idea, with no guess made.
+pub const LONGEST_SONG: f64 = 15.0 * 60.0;
+
+/// The lines between stages, together: [`Limits::USUAL`] is the constants above; the stage tuner
+/// (`tools/stagetune`) tries others against the statuses you've given your songs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Limits {
+    pub idea_bars: f64,
+    pub arranged_seconds: f64,
+    pub mixed_tracks: u32,
+    pub mixed_eq: f64,
+    pub mixed_compressed: f64,
+    pub mixed_automation: u32,
+}
+
+impl Limits {
+    pub const USUAL: Limits = Limits {
+        idea_bars: IDEA_BARS,
+        arranged_seconds: ARRANGED_SECONDS,
+        mixed_tracks: MIXED_TRACKS,
+        mixed_eq: MIXED_EQ,
+        mixed_compressed: MIXED_COMPRESSED,
+        mixed_automation: MIXED_AUTOMATION,
+    };
+}
 
 /// The stages a save's shape can show; Released and Archived are only ever yours.
 const IDEA: usize = 0;
@@ -66,6 +91,11 @@ pub struct Guess {
 
 /// How far along a save with this shape looks. `bounced_since` is whether the song has a bounce newer than the save.
 pub fn guess(shape: &Shape, bounced_since: bool) -> Guess {
+    guess_with(shape, bounced_since, &Limits::USUAL)
+}
+
+/// [`guess`] with other lines between the stages.
+pub fn guess_with(shape: &Shape, bounced_since: bool, limits: &Limits) -> Guess {
     let mut why = Vec::new();
     let minutes = shape.seconds / 60.0;
     // Whole bars, as they're compared: 15.75 bars is under 16.
@@ -80,40 +110,66 @@ pub fn guess(shape: &Shape, bounced_since: bool) -> Guess {
         1 => ", 1 marker".to_owned(),
         n => format!(", {n} markers"),
     };
-    let share = |n: u32| if shape.tracks == 0 { 0.0 } else { n as f64 / shape.tracks as f64 };
-    let mixed = shape.tracks >= MIXED_TRACKS
-        && share(shape.eq) >= MIXED_EQ
-        && share(shape.compressed) >= MIXED_COMPRESSED
-        && (shape.automation >= MIXED_AUTOMATION || shape.sends >= MIXED_SENDS);
-    let arranged = shape.seconds >= ARRANGED_SECONDS && shape.markers != 1;
-    let started = shape.bars.floor() >= IDEA_BARS;
-
-    let stage = if started && arranged && shape.master_limited() && bounced_since {
+    let at = stage_at(shape, bounced_since, limits);
+    let stage = if at == FINISHED {
         why.push(format!("{} on the master", shape.master_limiter().unwrap_or("A limiter")));
         why.push("a bounce newer than the save".to_owned());
         why.push(format!("{length}{sections}"));
         FINISHED
-    } else if started && mixed {
+    } else if at == MIXING {
+        if let Some(limiter) = shape.master_limiter() {
+            why.push(format!("{limiter} switched on on the master"));
+        }
         why.push(format!("EQ on {} of {} tracks, a compressor on {}", shape.eq, shape.tracks, shape.compressed));
-        why.push(format!("{}, {}", count(shape.sends, "send track"), count(shape.automation, "automation lane")));
+        why.push(count(shape.automation, "automation lane"));
         why.push(format!("{length}{sections}"));
         MIXING
-    } else if started && arranged {
+    } else if at == ARRANGING {
         why.push(format!("{length}{sections}"));
         why.push(count(shape.tracks, "mixer track"));
         ARRANGING
-    } else if started {
+    } else if at == IN_PROGRESS {
         why.push(format!("{length}{sections}"));
         IN_PROGRESS
     } else {
         why.push(if shape.bars <= 0.0 {
             "nothing arranged yet".to_owned()
+        } else if shape.seconds > LONGEST_SONG {
+            format!("{length}: a set or a recording, not a song")
         } else {
-            format!("{length}: under {IDEA_BARS} bars")
+            format!("{length}: under {} bars", limits.idea_bars)
         });
         IDEA
     };
     Guess { stage: STATUSES.get(stage).copied().unwrap_or(STATUSES[0]), why }
+}
+
+/// Only the stage [`guess_with`] gives, without its reasons: quick enough to try many limits on many songs.
+pub fn stage_with(shape: &Shape, bounced_since: bool, limits: &Limits) -> &'static str {
+    STATUSES.get(stage_at(shape, bounced_since, limits)).copied().unwrap_or(STATUSES[0])
+}
+
+fn stage_at(shape: &Shape, bounced_since: bool, limits: &Limits) -> usize {
+    let share = |n: u32| if shape.tracks == 0 { 0.0 } else { n as f64 / shape.tracks as f64 };
+    let mixed = shape.tracks >= limits.mixed_tracks
+        && share(shape.eq) >= limits.mixed_eq
+        && share(shape.compressed) >= limits.mixed_compressed
+        && shape.automation >= limits.mixed_automation;
+    let arranged = shape.seconds >= limits.arranged_seconds && shape.markers != 1;
+    let started = shape.bars.floor() >= limits.idea_bars && shape.seconds <= LONGEST_SONG;
+    if started && arranged && shape.master_limited() && bounced_since {
+        FINISHED
+    } else if started && (mixed || (arranged && shape.master_limited())) {
+        // A limiter switched on over a whole song is Solomon's own sign it's being mixed (27 Nov 2026): his template
+        // keeps one on the master, switched off until then.
+        MIXING
+    } else if started && arranged {
+        ARRANGING
+    } else if started {
+        IN_PROGRESS
+    } else {
+        IDEA
+    }
 }
 
 fn count(n: u32, what: &str) -> String {
@@ -246,11 +302,11 @@ mod tests {
         let mix = Shape { tracks: 12, eq: 9, compressed: 7, sends: 2, automation: 14, ..shape(120.0, 232.0) };
         let g = guess(&mix, false);
         assert_eq!(g.stage, "Mixing");
-        assert_eq!(g.why[..2], ["EQ on 9 of 12 tracks, a compressor on 7", "2 send tracks, 14 automation lanes"]);
+        assert_eq!(g.why[..2], ["EQ on 9 of 12 tracks, a compressor on 7", "14 automation lanes"]);
         // EQ on too few tracks: arranging still.
         assert_eq!(guess(&Shape { eq: 4, ..mix.clone() }, false).stage, "Arranging");
-        // Bitwig's one effect track and no automation: not yet.
-        assert_eq!(guess(&Shape { sends: 1, automation: 0, ..mix.clone() }, false).stage, "Arranging");
+        // No automation: not yet, however many send tracks (a DAW starts with its own).
+        assert_eq!(guess(&Shape { sends: 4, automation: 0, ..mix.clone() }, false).stage, "Arranging");
         // A short loop being mixed is mixing all the same.
         assert_eq!(guess(&Shape { bars: 16.0, seconds: 30.0, ..mix.clone() }, false).stage, "Mixing");
     }
@@ -261,9 +317,21 @@ mod tests {
         let g = guess(&done, true);
         assert_eq!(g.stage, "Finished");
         assert_eq!(g.why[..2], ["Pro-L 2 on the master", "a bounce newer than the save"]);
-        assert_eq!(guess(&done, false).stage, "Arranging");
+        // A limiter switched on with no bounce yet: being mixed.
+        let g = guess(&done, false);
+        assert_eq!(g.stage, "Mixing");
+        assert_eq!(g.why[0], "Pro-L 2 switched on on the master");
         assert_eq!(guess(&Shape { master: vec!["Pro-Q 3".into()], ..done.clone() }, true).stage, "Arranging");
         assert_eq!(guess(&Shape { seconds: 60.0, ..done }, true).stage, "In progress");
+    }
+
+    #[test]
+    fn a_set_or_recording_is_left_an_idea() {
+        let set = Shape { tracks: 2, ..shape(1656.0, 3612.0) };
+        let g = guess(&set, false);
+        assert_eq!(g.stage, "Idea");
+        assert_eq!(g.why, ["60:12 long, 1656 bars: a set or a recording, not a song"]);
+        assert_eq!(guess(&shape(450.0, LONGEST_SONG), false).stage, "Arranging");
     }
 
     #[test]

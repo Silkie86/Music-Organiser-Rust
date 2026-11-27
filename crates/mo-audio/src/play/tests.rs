@@ -115,7 +115,7 @@ fn ramp() -> Arc<AudioData> {
 
 fn player(outputs: &FakeOutputs) -> (Player, Receiver<String>) {
     let (ended, rx) = channel();
-    let player = Player::with_outputs(Box::new(outputs.clone()), move |key| {
+    let player = Player::with_outputs(Box::new(outputs.clone()), move |key, _| {
         let _ = ended.send(key.to_owned());
     });
     (player, rx)
@@ -287,6 +287,36 @@ fn an_output_that_keeps_going_is_given_up_on() {
     assert_eq!(outputs.asked().len(), 2 + MAX_REOPENS as usize);
 }
 
+/// The whole-app review of 26 Nov, AD-3: every loss of the output counted towards giving up, however long the sound had
+/// played in between, so in one long play (a whole song or mix) the fourth change of the default output on Windows
+/// ended it, though the new output had opened fine. Only losses close together count now.
+#[test]
+fn an_output_lost_now_and_then_after_playing_a_while_is_opened_again_each_time() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, ended) = player(&outputs);
+    player.play_looped(ramp(), "a", 0.0);
+    settle(&player);
+    for _ in 0..2 * MAX_REOPENS {
+        // Ten seconds of sound (at 1000 frames a second) on each output before it goes.
+        outputs.pull(STEADY_SECONDS as usize * 1000);
+        outputs.lose();
+        settle(&player);
+    }
+    assert_eq!(outputs.asked().len(), 1 + 2 * MAX_REOPENS as usize);
+    assert_eq!(player.playing().as_deref(), Some("a"));
+    assert!(ended.try_recv().is_err());
+    let heard = outputs.pull(100);
+    assert!(heard[50] > 0.0, "it plays on: {}", heard[50]);
+    // Lost again before it has played a while, as many times as allowed: then it's given up on.
+    outputs.pull(100);
+    for _ in 0..MAX_REOPENS + 1 {
+        outputs.lose();
+        settle(&player);
+    }
+    assert_eq!(ended.try_recv().as_deref(), Ok("a"));
+    assert_eq!(player.playing(), None);
+}
+
 #[test]
 fn a_chosen_output_thats_away_plays_on_the_default_until_it_comes_back() {
     let outputs = FakeOutputs::new(&["Speakers"]);
@@ -443,7 +473,7 @@ fn dropping_the_player_when_a_sound_ends_doesnt_hang() {
     let slot: Arc<Mutex<Option<Player>>> = Arc::default();
     let in_end = Arc::clone(&slot);
     let (done, rx) = channel();
-    let player = Player::with_outputs(Box::new(outputs.clone()), move |_| {
+    let player = Player::with_outputs(Box::new(outputs.clone()), move |_, _| {
         drop(lock(&in_end).take());
         let _ = done.send(());
     });
@@ -543,4 +573,75 @@ fn a_sound_read_as_it_plays_with_nothing_to_play_ends_at_once() {
     settle(&player);
     assert!(outputs.pull(10).iter().all(|s| *s == 0.0));
     assert_eq!(ended.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("past"));
+}
+
+/// A sound made as it plays: the ramp ([`ramp`]) made from wherever it's asked to start, in parts of 100 frames, with
+/// each place it was asked to start from kept.
+struct Ramp {
+    asked: Mutex<Vec<f64>>,
+}
+
+impl Maker for Ramp {
+    fn rate(&self) -> u32 {
+        1000
+    }
+
+    fn make(&self, seconds: f64, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) -> Result<(), String> {
+        if seconds < 0.0 {
+            return Err("The synth wouldn't start".to_owned());
+        }
+        self.asked.lock().unwrap().push(seconds);
+        let from = (seconds * 1000.0).round() as usize;
+        for start in (from..10_000).step_by(100) {
+            let part: Vec<f32> = (start..(start + 100).min(10_000)).map(|i| i as f32 / 10_000.0).collect();
+            if !put(vec![part]) {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Pulls `frames` frames once the made parts have had time to come.
+fn pull_made(outputs: &FakeOutputs, frames: usize) -> Vec<f32> {
+    std::thread::sleep(Duration::from_millis(150));
+    outputs.pull(frames)
+}
+
+#[test]
+fn a_sound_made_as_it_plays_starts_where_asked_and_is_made_again_from_where_its_moved_to() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, ended) = player(&outputs);
+    let ramp = Arc::new(Ramp { asked: Mutex::new(Vec::new()) });
+    let stream = Stream::made(ramp.clone(), 2.0, &|| true).unwrap();
+    assert_eq!(stream.start_seconds(), 2.0);
+    player.play_stream_if(stream, "song", || Ok::<(), ()>(())).unwrap();
+    assert_eq!(player.position(), Some(2.0));
+    settle(&player);
+    let heard = pull_made(&outputs, 200);
+    assert!((heard[100] - 0.21).abs() < 1e-4, "{}", heard[100]);
+
+    player.seek(7.0);
+    settle(&player);
+    let heard = pull_made(&outputs, 100);
+    assert!((heard[50] - 0.705).abs() < 1e-4, "{}", heard[50]);
+    assert_eq!(*ramp.asked.lock().unwrap(), vec![2.0, 7.0]);
+
+    // On to its end, where it ends like any other.
+    for _ in 0..40 {
+        outputs.pull(100);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(ended.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("song"));
+    assert_eq!(player.playing(), None);
+}
+
+#[test]
+fn a_sound_made_past_its_end_has_nothing_to_play() {
+    let ramp = Arc::new(Ramp { asked: Mutex::new(Vec::new()) });
+    let stream = Stream::made(ramp.clone(), 12.0, &|| true).unwrap();
+    assert_eq!(stream.sample_rate(), 0);
+    // One that couldn't be made says why.
+    let failed = Stream::made(ramp, -1.0, &|| true).err().map(|e| e.to_string());
+    assert_eq!(failed.as_deref(), Some("The synth wouldn't start"));
 }

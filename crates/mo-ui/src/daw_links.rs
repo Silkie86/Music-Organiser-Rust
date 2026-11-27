@@ -12,7 +12,7 @@ use std::time::Duration;
 use mo_app::activity::Feed;
 use mo_app::daw_links::{
     self, BITWIG_BY_KEY, BITWIG_LOADED_FROM_KEY, Done, FIRST_LOOK_KEY, FL_BY_KEY, PLUGIN_BY_KEY, PLUGIN_DECLINED_KEY,
-    PLUGIN_FAILED_KEY, Step,
+    PLUGIN_FAILED_KEY, PLUGIN_TAKEN_OUT_KEY, PluginChoice, PluginDone, Step,
 };
 use mo_app::{app_settings, background, log};
 use mo_dawlink::scripts::{self, Installed, ScriptState};
@@ -29,9 +29,18 @@ pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// paths: the step finds the plugin beside itself and the folder itself, so nothing it's started with can steer it.
 pub const PUT_CLAP_PLUGIN: &str = "--put-clap-plugin";
 
+/// The flag the app is started with, as administrator, to take its own CLAP plugin out of `Common Files\CLAP`
+/// (Settings › DAWs' Take out). It takes no paths either: only the app's own `DAWmate.clap` there can go.
+pub const TAKE_OUT_CLAP_PLUGIN: &str = "--take-out-clap-plugin";
+
 /// Held while a link's files are written or taken out, by the look and by Settings › DAWs alike, so two never write
 /// the same part file at once.
 static WRITING: Mutex<()> = Mutex::new(());
+
+/// Held while the plugin is put in or taken out, through Windows' question, by the look and by Settings › DAWs alike,
+/// so the two never ask at once. Apart from [`WRITING`]: the question can wait a long time for an answer, which mustn't
+/// hold up the links' Install and Take out (DK-3).
+static PLUGIN_STEP: Mutex<()> = Mutex::new(());
 
 /// Set when Install or Take out was pressed on Settings › DAWs in this run: the look then leaves the links alone.
 static CHOSEN: AtomicBool = AtomicBool::new(false);
@@ -41,6 +50,14 @@ static CHOSEN: AtomicBool = AtomicBool::new(false);
 pub(crate) fn chosen_by_hand() -> MutexGuard<'static, ()> {
     CHOSEN.store(true, Ordering::Relaxed);
     WRITING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// For Settings › DAWs' plugin row: Install or Take out was pressed, so the look leaves the links and the plugin as you
+/// chose. Returns the guard to hold while Windows is asked: it waits (on its own thread, never the window's) while the
+/// look is asking already.
+pub(crate) fn plugin_by_hand() -> MutexGuard<'static, ()> {
+    CHOSEN.store(true, Ordering::Relaxed);
+    PLUGIN_STEP.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// What the look keeps in the settings once it's done.
@@ -53,6 +70,9 @@ struct Keep {
     declined: bool,
     failed: Option<String>,
     loaded_from: Option<String>,
+    /// A test plugin is in: the mark that a version put the app's own in goes, so that one goes back in once the test
+    /// one is out (`tools/dev/install-test-plugin.ps1` takes the app's own out).
+    forget_plugin: bool,
 }
 
 /// Starts the look. `library`: the song library, for the FL Studio project folders that may have FL's user data
@@ -81,6 +101,7 @@ pub fn keep_up_to_date(library: PathBuf, feed: Feed) {
         newer: newer(PLUGIN_BY_KEY),
         declined: value(PLUGIN_DECLINED_KEY).is_some_and(|v| v == VERSION),
         failed_today: value(PLUGIN_FAILED_KEY).is_some_and(|v| v == daw_links::failed_mark(VERSION, &today)),
+        taken_out: value(PLUGIN_TAKEN_OUT_KEY).is_some(),
     };
     let kept_loaded_from = value(BITWIG_LOADED_FROM_KEY);
     let started = background::spawn("DAW links", move || {
@@ -102,20 +123,24 @@ pub fn keep_up_to_date(library: PathBuf, feed: Feed) {
             }
             let links = settings::find_links(&library, chosen.as_deref(), loaded_from.as_deref());
             put_in(&links, first_look, (fl_newer, bw_newer), &mut done);
-            let (step, asked) = put_in_plugin(&plugin, &feed);
-            match asked {
-                Asked::SaidNo => keep.declined = true,
-                Asked::Failed => keep.failed = Some(daw_links::failed_mark(VERSION, &today)),
-                Asked::Not | Asked::Went => {}
-            }
-            done.plugin = step;
         }
+        // After the links' files, not while they're held: the plugin step writes none of them, and Windows' question
+        // can wait a long time for an answer, which would hold up Install and Take out on Settings › DAWs (DK-3).
+        let (step, asked) = put_in_plugin(&plugin, &feed);
+        match asked {
+            Asked::SaidNo => keep.declined = true,
+            Asked::Failed => keep.failed = Some(daw_links::failed_mark(VERSION, &today)),
+            Asked::TestPlugin => keep.forget_plugin = plugin.before,
+            Asked::Not | Asked::Went => {}
+        }
+        done.plugin = step;
         if let Some((title, detail)) = daw_links::card(&done) {
             feed.told(&title, &detail);
         }
-        keep.fl = done.fl.as_ref().is_some_and(|(_, d)| !d.went.is_empty());
-        keep.bitwig = done.bitwig.as_ref().is_some_and(|(_, d)| !d.installed.went.is_empty());
-        keep.plugin = done.plugin.as_ref().is_some_and(|(_, d)| !d.went.is_empty());
+        // Kept only when every folder took it: a folder Bitwig had open is tried again at the next start (DK-1).
+        keep.fl = done.fl.as_ref().is_some_and(|(_, d)| daw_links::went_everywhere(d));
+        keep.bitwig = done.bitwig.as_ref().is_some_and(|(_, d)| daw_links::went_everywhere(&d.installed));
+        keep.plugin = done.plugin.as_ref().is_some_and(|(_, d)| daw_links::went_everywhere(d));
         let _ = slint::invoke_from_event_loop(move || remember(&keep));
     });
     if let Err(e) = started {
@@ -135,6 +160,10 @@ fn remember(keep: &Keep) {
             put(key, VERSION);
         }
     }
+    if keep.forget_plugin {
+        // Blank counts as none (see keep_up_to_date's `value`).
+        put(PLUGIN_BY_KEY, "");
+    }
     if keep.declined {
         put(PLUGIN_DECLINED_KEY, VERSION);
     }
@@ -151,11 +180,20 @@ fn remember(keep: &Keep) {
 
 /// Puts in or updates each link as [`daw_links::step`] says. `newer`: whether this app is newer than the one that
 /// last wrote FL's link, and Bitwig's.
+///
+/// Only the folders whose copy isn't the app's own yet are written: after a start when one copy couldn't be (Bitwig
+/// had it open), the next writes only that one, not the ones that went in again (DK-1).
 fn put_in(links: &Links, first_look: bool, newer: (bool, bool), done: &mut Done) {
     let fl = daw_links::step(links.fl_state, first_look, !links.fl_folders.is_empty(), newer.0);
     log::info("DAW links", &format!("FL Studio script: {:?}, so {fl:?}", links.fl_state));
     if fl != Step::Leave {
-        let installed = scripts::install_fl(&links.fl_folders);
+        let not_yet: Vec<PathBuf> = links
+            .fl_folders
+            .iter()
+            .filter(|f| scripts::fl_state(std::slice::from_ref(f)) != ScriptState::Installed)
+            .cloned()
+            .collect();
+        let installed = scripts::install_fl(&not_yet);
         settings::log_fl_install(&installed, "DAW links");
         done.fl = Some((fl, installed));
     }
@@ -171,7 +209,12 @@ fn put_in(links: &Links, first_look: bool, newer: (bool, bool), done: &mut Done)
     let bw = daw_links::step(links.bw_state, first_look, !folders.is_empty(), newer.1);
     log::info("DAW links", &format!("Bitwig extension: {:?}, so {bw:?}", links.bw_state));
     if bw != Step::Leave {
-        let installed = scripts::install_bitwig(source, &folders, &users);
+        let not_yet: Vec<PathBuf> = folders
+            .iter()
+            .filter(|f| scripts::bitwig_state(source, std::slice::from_ref(f)) != ScriptState::Installed)
+            .cloned()
+            .collect();
+        let installed = scripts::install_bitwig(source, &not_yet, &users);
         settings::log_bitwig_install(&installed, "DAW links");
         done.bitwig = Some((bw, installed));
     }
@@ -180,7 +223,7 @@ fn put_in(links: &Links, first_look: bool, newer: (bool, bool), done: &mut Done)
 /// The shared CLAP folder every DAW looks in: on Windows `Common Files\CLAP` (Solomon, 2026-11-25: here, with Windows'
 /// Yes); on a Mac the user's own `~/Library/Audio/Plug-Ins/CLAP`, which needs no administrator. Elsewhere none: the app
 /// brings no plugin with it there.
-fn clap_folder() -> Option<PathBuf> {
+pub(crate) fn clap_folder() -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var_os("CommonProgramW6432")
             .or_else(|| std::env::var_os("CommonProgramFiles"))
@@ -202,12 +245,198 @@ fn own_clap_folder() -> Option<PathBuf> {
     }
 }
 
+/// A test plugin put in by hand (`tools/dev/install-test-plugin.ps1`), in the shared CLAP folder `folder` or the
+/// user's own: the same plugin as the app's (one ID), so a DAW would list the two twice.
+/// On a Mac the plugin may also have been put by hand in the folder for every user (`/Library`), where guides say to
+/// put it, under the app's own name; and a Mac's plugin is a bundle folder, not a file.
+pub(crate) fn test_plugin(folder: &Path) -> Option<PathBuf> {
+    let names_by_hand = |f: PathBuf| {
+        let own = cfg!(target_os = "macos").then(|| f.join(scripts::CLAP_PLUGIN_NAME));
+        scripts::TEST_CLAP_PLUGIN_NAMES.map(|n| f.join(n)).into_iter().chain(own)
+    };
+    std::iter::once(folder.to_owned())
+        .flat_map(|f| scripts::TEST_CLAP_PLUGIN_NAMES.map(|n| f.join(n)))
+        .chain(own_clap_folder().into_iter().flat_map(names_by_hand))
+        .find(|f| fs::symlink_metadata(f).is_ok())
+}
+
+/// A file's size and when it was last written, to tell a changed one without reading it.
+type Stamp = Option<(u64, Option<std::time::SystemTime>)>;
+
+fn stamp(file: &Path) -> Stamp {
+    std::fs::metadata(file).ok().map(|m| (m.len(), m.modified().ok()))
+}
+
+/// The plugin's state as last worked out, by both copies' stamps: Settings › DAWs looks each time it shows, and the
+/// plugin is megabytes, so it's read again only when one of them changed (rule 12, read big files once).
+static CLAP_STATE: Mutex<Option<((Stamp, Stamp), ScriptState)>> = Mutex::new(None);
+
+/// [`scripts::clap_state`], kept by the two files' stamps.
+fn clap_state_kept(source: &Path, folder: &Path) -> ScriptState {
+    let stamps = (stamp(source), stamp(&folder.join(scripts::CLAP_PLUGIN_NAME)));
+    let mut kept = CLAP_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((was, state)) = *kept
+        && was == stamps
+        && stamps.0.is_some()
+        && stamps.1.is_some()
+    {
+        return state;
+    }
+    let state = scripts::clap_state(source, folder);
+    *kept = Some((stamps, state));
+    state
+}
+
+/// How the app's CLAP plugin stands, for Settings › DAWs' row: reads the disk, so off the window's thread.
+pub(crate) fn plugin_look() -> mo_app::settings::PluginLook {
+    let source = std::env::current_exe().ok().and_then(|exe| scripts::clap_plugin_source(&exe));
+    let folder = clap_folder();
+    let (state, test_plugin, files) = match &folder {
+        Some(f) => (
+            source.as_deref().map_or(ScriptState::NotInstalled, |s| clap_state_kept(s, f)),
+            test_plugin(f),
+            scripts::clap_installed_files(f),
+        ),
+        None => (ScriptState::NotInstalled, None, Vec::new()),
+    };
+    // A Mac's plugin is a bundle folder, which Take out takes whole (`scripts::take_out_clap_bundle`).
+    let mut files = files;
+    if let Some(f) = &folder
+        && cfg!(target_os = "macos")
+        && fs::symlink_metadata(f.join(scripts::CLAP_PLUGIN_NAME)).is_ok_and(|m| m.is_dir())
+    {
+        files.push(f.join(scripts::CLAP_PLUGIN_NAME));
+    }
+    let mac = cfg!(target_os = "macos");
+    mo_app::settings::PluginLook {
+        source: source.is_some(),
+        folder,
+        state,
+        test_plugin,
+        files,
+        can_ask: mac || mo_space::admin::Admin::can_ask(&mo_space::admin::AsAdmin),
+        mac,
+    }
+}
+
 /// The administrator step: puts the plugin beside this program into `Common Files\CLAP` (written beside itself, read
 /// back, then put in place). Ends with 0 when it went in.
 pub fn put_plugin_as_admin() -> i32 {
     let source = std::env::current_exe().ok().and_then(|exe| scripts::clap_plugin_source(&exe));
     let (Some(source), Some(folder)) = (source, clap_folder()) else { return 2 };
     if scripts::install_clap(&source, &folder).went.is_empty() { 1 } else { 0 }
+}
+
+/// The administrator step for Take out: takes the app's own plugin (`DAWmate.clap`, and a part file a cut-off install
+/// left) out of `Common Files\CLAP`, never a test plugin or anything else there (`scripts::clap_installed_files`).
+/// Ends with 0 when nothing of the app's is left there.
+pub fn take_plugin_out_as_admin() -> i32 {
+    let Some(folder) = clap_folder() else { return 2 };
+    let done = scripts::take_out(&scripts::clap_installed_files(&folder));
+    i32::from(!done.failed.is_empty() || !scripts::clap_installed_files(&folder).is_empty())
+}
+
+/// Settings › DAWs' Install (or Update) and Take out on the plugin row, on a thread of its own (never the window's:
+/// Windows' question waits for you). Never while a program has the plugin loaded, as the put-in look does; then the
+/// administrator step, and what's in the folder after it says how it went.
+pub(crate) fn plugin_by_choice(choice: PluginChoice) -> PluginDone {
+    let _asking = plugin_by_hand();
+    let Some(folder) = clap_folder() else { return PluginDone::Failed("there's no Common Files\\CLAP folder".into()) };
+    let source = std::env::current_exe().ok().and_then(|exe| scripts::clap_plugin_source(&exe));
+    let plugin = folder.join(scripts::CLAP_PLUGIN_NAME);
+    match choice {
+        PluginChoice::Install => {
+            let Some(source) = &source else {
+                return PluginDone::Failed("this copy of the app has no plugin beside it to put in".into());
+            };
+            // The same plugin: a DAW would list the two twice.
+            if let Some(test) = test_plugin(&folder) {
+                return PluginDone::Failed(format!("a test plugin is in ({}): delete it first", test.display()));
+            }
+            // Done already: the look at the start may have put it in while this waited for its turn.
+            if scripts::clap_state(source, &folder) == ScriptState::Installed {
+                return PluginDone::Went;
+            }
+        }
+        PluginChoice::TakeOut => {
+            if !scripts::clap_plugin_there(&folder) && scripts::clap_installed_files(&folder).is_empty() {
+                return PluginDone::Went;
+            }
+            // Something under the plugin's name that the app never takes out (a link, or in a linked folder):
+            // Windows isn't asked for a step that would leave it.
+            if let Some(why) = not_taken_out(&folder) {
+                return PluginDone::Failed(why);
+            }
+        }
+    }
+    if in_use(&plugin) {
+        log::info("Settings", "A program has the CLAP plugin loaded, so Windows isn't asked");
+        return PluginDone::InUse;
+    }
+    // On a Mac the user's own CLAP folder takes it, or gives it up, without asking anyone.
+    if !cfg!(windows) {
+        let done = match (choice, &source) {
+            (PluginChoice::Install, Some(source)) => match scripts::install_clap(source, &folder).failed.first() {
+                None if scripts::clap_state(source, &folder) == ScriptState::Installed => PluginDone::Went,
+                None => PluginDone::NotChanged,
+                Some((_, why)) => PluginDone::Failed(why.clone()),
+            },
+            (PluginChoice::Install, None) => PluginDone::NotChanged,
+            (PluginChoice::TakeOut, _) => {
+                let gone = scripts::take_out(&scripts::clap_installed_files(&folder));
+                match (scripts::take_out_clap_bundle(&folder), gone.failed.first()) {
+                    (Err(why), _) => PluginDone::Failed(why.to_string()),
+                    (_, Some((_, why))) => PluginDone::Failed(why.clone()),
+                    _ if !scripts::clap_plugin_there(&folder) => PluginDone::Went,
+                    _ => not_taken_out(&folder).map_or(PluginDone::NotChanged, PluginDone::Failed),
+                }
+            }
+        };
+        log::info("Settings", &format!("CLAP plugin, {choice:?} in {}: {done:?}", folder.display()));
+        return done;
+    }
+    let admin = mo_space::admin::AsAdmin;
+    if !mo_space::admin::Admin::can_ask(&admin) {
+        return PluginDone::Failed("this run of the app can't ask Windows".into());
+    }
+    let flag = match choice {
+        PluginChoice::Install => PUT_CLAP_PLUGIN,
+        PluginChoice::TakeOut => TAKE_OUT_CLAP_PLUGIN,
+    };
+    let asked = mo_space::admin::Admin::ask(&admin, &[flag.to_owned()]);
+    // What's there now counts, not the step's word.
+    let done = match asked {
+        Err(why) if why.starts_with("You said no") => PluginDone::SaidNo,
+        Err(why) => PluginDone::Failed(why),
+        Ok(()) => match (choice, &source) {
+            (PluginChoice::Install, Some(source)) if scripts::clap_state(source, &folder) == ScriptState::Installed => {
+                PluginDone::Went
+            }
+            // Out only when nothing at all is there under its name, not just nothing the app may take out.
+            (PluginChoice::TakeOut, _) if !scripts::clap_plugin_there(&folder) => PluginDone::Went,
+            (PluginChoice::TakeOut, _) => not_taken_out(&folder).map_or(PluginDone::NotChanged, PluginDone::Failed),
+            _ => PluginDone::NotChanged,
+        },
+    };
+    log::info("Settings", &format!("CLAP plugin, {choice:?} in {}: {done:?}", folder.display()));
+    done
+}
+
+/// Why Take out can't take out what's under the plugin's name in `folder`, when it's there but isn't the app's own
+/// plain file (`scripts::clap_installed_files`): it's a link, or reached through one, and the app never removes through
+/// a link (rule 28). None when there's nothing there or it's the app's own.
+fn not_taken_out(folder: &Path) -> Option<String> {
+    let plugin = folder.join(scripts::CLAP_PLUGIN_NAME);
+    // On a Mac the app's own is a bundle folder (never a link: `symlink_metadata` doesn't follow one).
+    let bundle = cfg!(target_os = "macos") && fs::symlink_metadata(&plugin).is_ok_and(|m| m.is_dir());
+    let own = bundle || scripts::clap_installed_files(folder).contains(&plugin);
+    (scripts::clap_plugin_there(folder) && !own).then(|| {
+        format!(
+            "{} is a link, or in a linked folder, and the app never takes anything out through a link: take it out by \
+             hand",
+            plugin.display()
+        )
+    })
 }
 
 /// What the look knows of the plugin before it looks.
@@ -220,6 +449,8 @@ struct Plugin {
     declined: bool,
     /// The administrator step couldn't put this version in today.
     failed_today: bool,
+    /// You took it out on Settings › DAWs: it stays out until Install there.
+    taken_out: bool,
 }
 
 /// How Windows' question went.
@@ -229,39 +460,43 @@ enum Asked {
     Went,
     SaidNo,
     Failed,
+    /// Not asked: a test plugin was put in by hand.
+    TestPlugin,
 }
 
 /// Puts in or updates the CLAP plugin the installer put beside the app, as [`daw_links::plugin_step`] says, in
 /// `Common Files\CLAP`, which needs Windows' Yes. Not asked while a program has the plugin loaded (then at a later
 /// start), for a version you said no to, or again the same day after the step failed. Left alone when a test plugin
-/// was put in by hand (the same plugin: a DAW would list it twice).
+/// was put in by hand (the same plugin: a DAW would list it twice); [`Asked::TestPlugin`] then has the look forget that
+/// a version put the app's own in, as the test script took it out (DK-2).
 fn put_in_plugin(plugin: &Plugin, feed: &Feed) -> (Option<(Step, Installed)>, Asked) {
     let not = (None, Asked::Not);
     let Some(source) = std::env::current_exe().ok().and_then(|exe| scripts::clap_plugin_source(&exe)) else {
         return not;
     };
     let Some(folder) = clap_folder() else { return not };
+    // One question at a time, and none once the plugin row on Settings › DAWs was used this run (your choice).
+    let _asking = PLUGIN_STEP.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if CHOSEN.load(Ordering::Relaxed) {
+        return not;
+    }
     // What a cut-off copy left in the CLAP folder (a Mac's plugin is copied whole beside itself first) goes at every
-    // look, not only at the next update.
+    // look, not only at the next update; while the step is held, so never under a copy Settings › DAWs is making.
     for (left, why) in scripts::clear_clap_leftovers(&folder) {
         log::warning("DAW links", &format!("Couldn't take out {}: {why}", left.display()));
     }
-    // On a Mac the plugin may also have been put by hand in the folder for every user, where guides say to put it.
-    let names_by_hand = |f: PathBuf| {
-        let own = cfg!(target_os = "macos").then(|| f.join(scripts::CLAP_PLUGIN_NAME));
-        scripts::TEST_CLAP_PLUGIN_NAMES.map(|n| f.join(n)).into_iter().chain(own)
-    };
-    let by_hand = std::iter::once(folder.clone())
-        .flat_map(|f| scripts::TEST_CLAP_PLUGIN_NAMES.map(|n| f.join(n)))
-        .chain(own_clap_folder().into_iter().flat_map(names_by_hand))
-        // A file on Windows, a bundle folder on a Mac.
-        .find(|f| fs::symlink_metadata(f).is_ok());
-    if let Some(by_hand) = by_hand {
-        log::info("DAW links", &format!("The plugin is left alone: {} is there already", by_hand.display()));
-        return not;
+    if let Some(by_hand) = test_plugin(&folder) {
+        log::info(
+            "DAW links",
+            &format!(
+                "The plugin is left alone: {} is there already. The app's own goes back in once it's gone",
+                by_hand.display()
+            ),
+        );
+        return (None, Asked::TestPlugin);
     }
     let state = scripts::clap_state(&source, &folder);
-    let step = daw_links::plugin_step(state, plugin.before, plugin.newer);
+    let step = daw_links::plugin_step(state, plugin.before, plugin.newer, plugin.taken_out);
     log::info("DAW links", &format!("CLAP plugin: {state:?}, so {step:?}"));
     if step == Step::Leave {
         return not;
@@ -386,4 +621,90 @@ fn in_use(file: &Path) -> bool {
 #[cfg(not(windows))]
 fn in_use(_file: &Path) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder of its own under the build folder, empty (tests never reach a real DAW's folders: rule 11).
+    fn fixture(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/mo-ui-daw-links").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The 26 Nov review's DK-1: a start when Bitwig had one copy open put the new one only in the others, so the next
+    /// writes only the copy that isn't the app's own yet, and says nothing more of the ones that went in.
+    #[test]
+    fn a_retry_writes_only_the_copies_that_arent_the_apps_own_yet() {
+        let root = fixture("retry");
+        let source = root.join(scripts::BITWIG_EXTENSION_NAME);
+        std::fs::write(&source, "the app's extension").unwrap();
+        let (k, documents) = (root.join("K").join("Extensions"), root.join("Documents").join("Extensions"));
+        for (folder, copy) in [(&k, "the app's extension"), (&documents, "an older extension")] {
+            std::fs::create_dir_all(folder).unwrap();
+            std::fs::write(folder.join(scripts::BITWIG_EXTENSION_NAME), copy).unwrap();
+        }
+        let fl = root.join("FL").join("Settings").join("Hardware").join(scripts::FL_FOLDER);
+        std::fs::create_dir_all(&fl).unwrap();
+        std::fs::write(fl.join(scripts::FL_SCRIPT_NAME), scripts::FL_SCRIPT).unwrap();
+        let bw_folders = vec![k.clone(), documents.clone()];
+        let links = Links {
+            fl_folders: vec![fl.clone()],
+            fl_state: scripts::fl_state(std::slice::from_ref(&fl)),
+            bw_users: vec![root.join("K"), root.join("Documents")],
+            bw_state: scripts::bitwig_state(&source, &bw_folders),
+            bw_folders,
+            bw_source: Some(source.clone()),
+        };
+        assert_eq!((links.fl_state, links.bw_state), (ScriptState::Installed, ScriptState::Outdated));
+        let mut done = Done::default();
+        put_in(&links, false, (true, true), &mut done);
+        assert!(done.fl.is_none(), "FL's script is the app's own: left as it is");
+        let (step, bitwig) = done.bitwig.expect("Bitwig's copy in Documents is older");
+        assert_eq!(step, Step::Update);
+        assert_eq!(bitwig.installed.went, std::slice::from_ref(&documents), "only the copy that was older");
+        assert!(daw_links::went_everywhere(&bitwig.installed));
+        assert_eq!(std::fs::read(documents.join(scripts::BITWIG_EXTENSION_NAME)).unwrap(), b"the app's extension");
+    }
+    /// Rule 12: the plugin's state is worked out again only when one of the two copies changed (its size or time), and
+    /// then it's right again (the review of 27 Nov).
+    #[test]
+    fn the_plugins_state_is_kept_until_a_copy_changes() {
+        let root = fixture("clap-kept");
+        let source = root.join("plugins").join(scripts::CLAP_PLUGIN_NAME);
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"plugin 2").unwrap();
+        let folder = root.join("CLAP");
+        assert_eq!(clap_state_kept(&source, &folder), ScriptState::NotInstalled);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(scripts::CLAP_PLUGIN_NAME), b"plugin 2").unwrap();
+        assert_eq!(clap_state_kept(&source, &folder), ScriptState::Installed);
+        assert_eq!(clap_state_kept(&source, &folder), ScriptState::Installed, "kept");
+        std::fs::write(&source, b"plugin 30").unwrap();
+        assert_eq!(clap_state_kept(&source, &folder), ScriptState::Outdated, "the app's copy changed");
+        std::fs::remove_file(folder.join(scripts::CLAP_PLUGIN_NAME)).unwrap();
+        assert_eq!(clap_state_kept(&source, &folder), ScriptState::NotInstalled, "taken out");
+    }
+
+    /// Take out never counts a DAWmate.clap that is a link as gone, and never takes it out (the review of 27 Nov).
+    #[cfg(unix)]
+    #[test]
+    fn a_plugin_that_is_a_link_is_never_taken_out() {
+        let root = fixture("clap-linked");
+        let folder = root.join("CLAP");
+        std::fs::create_dir_all(&folder).unwrap();
+        assert_eq!(not_taken_out(&folder), None, "nothing there");
+        std::fs::write(folder.join(scripts::CLAP_PLUGIN_NAME), b"plugin").unwrap();
+        assert_eq!(not_taken_out(&folder), None, "the app's own plain file");
+        std::fs::remove_file(folder.join(scripts::CLAP_PLUGIN_NAME)).unwrap();
+        let elsewhere = root.join("elsewhere.clap");
+        std::fs::write(&elsewhere, b"someone's").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, folder.join(scripts::CLAP_PLUGIN_NAME)).unwrap();
+        let why = not_taken_out(&folder).expect("a link is never taken out");
+        assert!(why.contains("is a link, or in a linked folder"), "{why}");
+        assert!(elsewhere.exists());
+    }
 }

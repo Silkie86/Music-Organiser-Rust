@@ -323,6 +323,49 @@ fn an_older_copy_left_aside_by_a_cut_off_install_goes_back_if_this_one_stops() {
     assert!(extensions.join(FIRST_BITWIG_EXTENSION_NAME).is_file() && !aside.exists(), "Bitwig keeps its link");
 }
 
+#[test]
+fn an_older_copy_left_aside_beside_a_dawmate_copy_stays_aside_if_this_install_stops() {
+    let root = fixture("bitwig-cut-off-beside-new");
+    let (a, b) = (root.join("A").join("Extensions"), root.join("B").join("Extensions"));
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    // A has a DAWmate copy and an older one an earlier install moved aside and couldn't take out.
+    fs::create_dir_all(&a).unwrap();
+    extension(&a.join(BITWIG_EXTENSION_NAME), "3.30");
+    let aside = a.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old"));
+    extension(&aside, "3.29");
+    // B can't take the new copy, so the install stops and undoes what it did.
+    fs::create_dir_all(&b).unwrap();
+    extension(&b.join(FIRST_BITWIG_EXTENSION_NAME), "3.29");
+    fs::create_dir_all(b.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")).join("in the way")).unwrap();
+    let done = install_bitwig(&source, &[a.clone(), b.clone()], &[]);
+    assert!(done.installed.went.is_empty() && done.installed.failed.len() == 2);
+    // A never has two copies of the controller (one ID): the older one stays aside, where Bitwig never loads it.
+    assert!(!a.join(FIRST_BITWIG_EXTENSION_NAME).exists() && aside.is_file(), "DK-5");
+    assert!(a.join(BITWIG_EXTENSION_NAME).is_file());
+    // B is as it was.
+    assert!(b.join(FIRST_BITWIG_EXTENSION_NAME).is_file() && !b.join(BITWIG_EXTENSION_NAME).exists());
+}
+
+#[test]
+fn a_folder_whose_copy_cant_be_replaced_at_the_last_step_fails_alone() {
+    let root = fixture("bitwig-last-step");
+    let (a, b) = (root.join("A").join("Extensions"), root.join("B").join("Extensions"));
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    fs::create_dir_all(&a).unwrap();
+    extension(&a.join(BITWIG_EXTENSION_NAME), "3.30");
+    // B's copy can't be replaced (as when Bitwig has it open on Windows): something is in the way of its name.
+    fs::create_dir_all(b.join(BITWIG_EXTENSION_NAME).join("in the way")).unwrap();
+    let done = install_bitwig(&source, &[a.clone(), b.clone()], &[]);
+    // A went and B didn't: the app keeps the version only when both did (mo_app::daw_links::went_everywhere, DK-1).
+    assert_eq!(done.installed.went, std::slice::from_ref(&a));
+    assert_eq!(done.installed.failed.len(), 1);
+    assert_eq!(done.installed.failed[0].0, b);
+    assert_eq!(bitwig_state(&source, std::slice::from_ref(&a)), ScriptState::Installed);
+    assert!(!b.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")).exists(), "no part file stays");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_folder_listed_twice_through_a_link_is_done_once() {
@@ -571,4 +614,119 @@ fn a_mac_plugin_bundle_keeps_its_program_runnable_and_never_follows_a_link() {
     assert!(done.went.is_empty() && done.failed.len() == 1, "{done:?}");
     assert_eq!(fs::read(theirs.join("keep")).unwrap(), b"keep");
     assert_eq!(clap_state(&bundle, &linked), ScriptState::Outdated);
+}
+
+/// Settings › DAWs' Take out for the CLAP plugin (the 26 Nov review's DK-2): only the app's own DAWmate.clap (and a
+/// part file a cut-off install left) goes, never a test plugin put in by hand, nor another plugin, nor the folder.
+#[test]
+fn taking_the_clap_plugin_out_takes_only_the_apps_own() {
+    let root = fixture("clap-take-out");
+    let folder = root.join("Common Files").join("CLAP");
+    fs::create_dir_all(&folder).unwrap();
+    assert!(clap_installed_files(&folder).is_empty(), "nothing there yet");
+    fs::write(folder.join(CLAP_PLUGIN_NAME), b"plugin 2").unwrap();
+    fs::write(folder.join(format!("{CLAP_PLUGIN_NAME}.mo-part")), b"plugin 3, cut off").unwrap();
+    for test in TEST_CLAP_PLUGIN_NAMES {
+        fs::write(folder.join(test), b"a test plugin").unwrap();
+    }
+    fs::write(folder.join("Surge XT.clap"), b"someone else's").unwrap();
+    let files = clap_installed_files(&folder);
+    assert_eq!(files, vec![folder.join(CLAP_PLUGIN_NAME), folder.join(format!("{CLAP_PLUGIN_NAME}.mo-part"))]);
+    let done = take_out(&files);
+    assert_eq!(done.removed.len(), 2, "{done:?}");
+    assert!(done.failed.is_empty());
+    assert!(clap_installed_files(&folder).is_empty());
+    // The folder and everything else in it stay.
+    let mut left: Vec<String> =
+        fs::read_dir(&folder).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    left.sort();
+    assert_eq!(left, ["DAWmate (test).clap", "Music Organiser (test).clap", "Surge XT.clap"]);
+    // A test plugin named on its own is never taken out.
+    let test = folder.join(TEST_CLAP_PLUGIN_NAMES[0]);
+    assert!(take_out(std::slice::from_ref(&test)).removed.is_empty() && test.exists());
+}
+
+/// A CLAP folder that is a link (or a DAWmate.clap that is one) is never taken out through.
+#[cfg(unix)]
+#[test]
+fn taking_the_clap_plugin_out_never_goes_through_a_link() {
+    let root = fixture("clap-take-out-links");
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join(CLAP_PLUGIN_NAME), b"kept").unwrap();
+    let common = root.join("Common Files");
+    fs::create_dir_all(&common).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, common.join("CLAP")).unwrap();
+    assert!(clap_installed_files(&common.join("CLAP")).is_empty());
+    let own = root.join("Own").join("CLAP");
+    fs::create_dir_all(&own).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join(CLAP_PLUGIN_NAME), own.join(CLAP_PLUGIN_NAME)).unwrap();
+    assert!(clap_installed_files(&own).is_empty());
+    assert!(take_out(&[own.join(CLAP_PLUGIN_NAME)]).removed.is_empty());
+    assert!(elsewhere.join(CLAP_PLUGIN_NAME).exists());
+}
+
+/// The plugin's state by its size first, then its bytes: a copy of another size is out of date, one of the same size
+/// is the app's own only when every byte is.
+#[test]
+fn the_clap_plugins_state_goes_by_size_then_bytes() {
+    let root = fixture("clap-size");
+    let source = root.join("plugins").join(CLAP_PLUGIN_NAME);
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"plugin 10").unwrap();
+    let folder = root.join("CLAP");
+    fs::create_dir_all(&folder).unwrap();
+    assert!(!clap_plugin_there(&folder));
+    fs::write(folder.join(CLAP_PLUGIN_NAME), b"plugin 9").unwrap();
+    assert!(clap_plugin_there(&folder));
+    assert_eq!(clap_state(&source, &folder), ScriptState::Outdated, "another size");
+    fs::write(folder.join(CLAP_PLUGIN_NAME), b"plugin 11").unwrap();
+    assert_eq!(clap_state(&source, &folder), ScriptState::Outdated, "the same size, other bytes");
+    fs::write(folder.join(CLAP_PLUGIN_NAME), b"plugin 10").unwrap();
+    assert_eq!(clap_state(&source, &folder), ScriptState::Installed);
+    // The app's own copy gone: the one there can't be told to be the same.
+    assert_eq!(clap_state(&root.join("gone.clap"), &folder), ScriptState::Outdated);
+}
+
+/// A DAWmate.clap that is a link counts as there (Take out must leave nothing of that name), though it's never one
+/// Take out may take out.
+#[cfg(unix)]
+#[test]
+fn a_clap_plugin_that_is_a_link_is_there_but_never_taken_out() {
+    let root = fixture("clap-link-there");
+    let folder = root.join("CLAP");
+    fs::create_dir_all(&folder).unwrap();
+    std::os::unix::fs::symlink(root.join("nowhere.clap"), folder.join(CLAP_PLUGIN_NAME)).unwrap();
+    assert!(clap_plugin_there(&folder), "a link that leads nowhere is still there");
+    assert!(clap_installed_files(&folder).is_empty());
+}
+
+/// Settings › DAWs' Take out on a Mac: the app's own plugin bundle goes whole, with what a cut-off copy left; a
+/// folder under its name that holds anything else, or a link, is left.
+#[cfg(unix)]
+#[test]
+fn a_mac_plugin_bundle_is_taken_out_whole_and_only_when_its_the_apps() {
+    let root = fixture("clap-bundle-take-out");
+    let folder = root.join("CLAP");
+    let ours = folder.join(CLAP_PLUGIN_NAME);
+    fs::create_dir_all(ours.join("Contents").join("MacOS")).unwrap();
+    fs::write(ours.join("Contents").join("MacOS").join("DAWmate"), b"program").unwrap();
+    fs::create_dir_all(folder.join("DAWmate.clap.mo-part").join("Contents")).unwrap();
+    fs::create_dir_all(folder.join("Other.clap").join("Contents")).unwrap();
+    take_out_clap_bundle(&folder).unwrap();
+    assert!(!clap_plugin_there(&folder));
+    assert!(!folder.join("DAWmate.clap.mo-part").exists());
+    assert!(folder.join("Other.clap").is_dir(), "another plugin stays");
+    // Not shaped as the app makes it: left, and said.
+    fs::create_dir_all(&ours).unwrap();
+    fs::write(ours.join("notes.txt"), b"mine").unwrap();
+    assert!(take_out_clap_bundle(&folder).is_err());
+    assert_eq!(fs::read(ours.join("notes.txt")).unwrap(), b"mine");
+    // A link under its name is never followed.
+    fs::remove_dir_all(&ours).unwrap();
+    let elsewhere = root.join("elsewhere.clap");
+    fs::create_dir_all(elsewhere.join("Contents")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &ours).unwrap();
+    take_out_clap_bundle(&folder).unwrap();
+    assert!(elsewhere.join("Contents").is_dir() && clap_plugin_there(&folder));
 }

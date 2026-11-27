@@ -19,6 +19,42 @@ const WAIT: Duration = Duration::from_secs(45);
 /// Room left free on the drive beyond the new file.
 const SPARE_ROOM: u64 = 1 << 30;
 
+/// Where the DAWs keep your projects unless told otherwise, below your Documents folder: FL Studio, Bitwig Studio and
+/// Studio One's own project folders.
+const USUAL_PROJECT_FOLDERS: [&[&str]; 3] =
+    [&["Image-Line", "FL Studio", "Projects"], &["Bitwig Studio", "Projects"], &["Studio One", "Songs"]];
+
+/// The DAWs' usual project folders in `documents` that are there, for a new library to look in at once.
+pub fn usual_project_folders(documents: &Path) -> Vec<PathBuf> {
+    USUAL_PROJECT_FOLDERS
+        .iter()
+        .map(|parts| parts.iter().fold(documents.to_path_buf(), |p, part| p.join(part)))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// Makes a new, empty song library in the data folder `dir`, when there's none at all (a beta tester's PC, which never
+/// had the C# app: [`songs_db::start_new`]), with the DAWs' usual project folders that are there in its folder list.
+/// `None` (and a line in the log) when it couldn't be made: the app opens as before, with nothing to keep songs in.
+pub fn start_new(dir: &Path) -> Option<songs_db::AtStart> {
+    let folders = mo_space::bitwig::documents().map(|d| usual_project_folders(&d)).unwrap_or_default();
+    match songs_db::start_new(dir, &folders) {
+        Ok(made) => {
+            // Only when this start made it: another copy of the app may have made one a moment before.
+            if matches!(made.state, songs_db::State::New { .. }) {
+                for folder in &folders {
+                    log::info("Song library", &format!("Looks in {} (a DAW's usual project folder)", folder.display()));
+                }
+            }
+            Some(made)
+        }
+        Err(e) => {
+            log::warning("Song library", &format!("Couldn't make a new song library: {e}"));
+            None
+        }
+    }
+}
+
 /// Makes `songs.db` in the data folder `dir` from the `library.db` there, on a low-priority thread of its own, after
 /// [`WAIT`].
 pub fn make_later(dir: PathBuf, feed: Feed) {

@@ -2540,4 +2540,31 @@ mod tests {
         let ids = crate::db::SHOWN_IDS_SQL;
         assert!(plan(ids).contains("USING COVERING INDEX sqlite_autoindex_sounds_1"), "{}", plan(ids));
     }
+
+    #[test]
+    fn damaged_packed_lists_unpack_to_something_without_a_panic() {
+        // A database damaged by a full disk or a crash mid-write can hold any bytes in these blobs; the plugin reads
+        // them inside the DAW too. Every short blob with each mark, and longer ones from a fixed random run.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut blobs: Vec<Vec<u8>> = Vec::new();
+        for mark in [CHORDS, THOUSANDTHS, AS_IS, 0, 0xff] {
+            for len in 0..48usize {
+                blobs.push(std::iter::once(mark).chain((0..len).map(|_| next() as u8)).collect());
+                blobs.push(std::iter::once(mark).chain(std::iter::repeat_n(0xff, len)).collect());
+            }
+        }
+        for blob in &blobs {
+            let _ = unpacked_chords(blob);
+            let _ = unpacked_chroma(blob);
+            let _ = unpacked_peaks(blob);
+            let _ = unpacked::<f32>(blob);
+            let _ = unpacked::<f64>(blob);
+        }
+    }
 }

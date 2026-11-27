@@ -108,6 +108,16 @@ pub struct Instance {
     pub view: std::sync::atomic::AtomicI32,
     /// The recording part of the window is open (it starts folded away, and stays as it was left while loaded).
     pub record_open: std::sync::atomic::AtomicBool,
+    /// What Record records from, as its menu was left while loaded: a sound card's input by its name, "" for the DAW's
+    /// input; and which side of it (0 both, 1 left, 2 right). A window opened again records from it too (the 26 Nov
+    /// review's CP-4: it went back to the DAW's input, both sides).
+    pub record_from: Mutex<String>,
+    pub record_side: std::sync::atomic::AtomicI32,
+    /// Counts the DAW's loads of a state that set them, so an open window shows what a load said (an undo, a preset):
+    /// it compares this with the count it showed last.
+    pub record_loaded: std::sync::atomic::AtomicU64,
+    /// What the last window left playing as it closed, for the next one ([`window::LeftPlaying`]).
+    pub(crate) left_playing: Mutex<Option<window::LeftPlaying>>,
     /// The shuffled order's seed: the same each time the window opens, so it opens on the list it showed.
     pub seed: u64,
     /// Keeps what the window read while the plugin is loaded ([`kept`]).
@@ -175,6 +185,10 @@ impl DefaultPluginFactory for MoPlugin {
                 chords: Arc::default(),
                 view: std::sync::atomic::AtomicI32::new(0),
                 record_open: std::sync::atomic::AtomicBool::new(false),
+                record_from: Mutex::new(String::new()),
+                record_side: std::sync::atomic::AtomicI32::new(0),
+                record_loaded: std::sync::atomic::AtomicU64::new(0),
+                left_playing: Mutex::new(None),
                 seed: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos() as u64),
@@ -284,8 +298,11 @@ impl MainThread<'_> {
 impl PluginStateImpl for MainThread<'_> {
     fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
         use std::io::Write;
-        let knobs = &self.shared.instance.knobs;
-        let state = state::write(self.panel.get(), |k| knobs.get(k));
+        let instance = &self.shared.instance;
+        let from = threads::lock(&instance.record_from).clone();
+        let record =
+            state::Record { from: &from, side: instance.record_side.load(std::sync::atomic::Ordering::Relaxed) };
+        let state = state::write(self.panel.get(), |k| instance.knobs.get(k), record);
         output.write_all(state.as_bytes()).map_err(|_| PluginError::Message("The DAW didn't take the plugin's state"))
     }
 
@@ -309,6 +326,16 @@ impl PluginStateImpl for MainThread<'_> {
         }
         if let (false, Some(params)) = (kept.knobs.is_empty(), self.params) {
             params.rescan(&self.host, ParamRescanFlags::VALUES);
+        }
+        // What Record records from, as the project left it (the 26 Nov review's CP-4, kept with the project too): the
+        // next window opens on it, and an open one shows it at its next tick. A state from before Record was kept says
+        // the DAW's input, both sides. An input that isn't there now is shown, and recorded from, as the DAW's input
+        // (`window.rs`), with its name kept for when it's back.
+        if let (Some(from), Some(side)) = (kept.record_from.clone(), kept.record_side) {
+            let instance = &self.shared.instance;
+            *threads::lock(&instance.record_from) = from;
+            instance.record_side.store(side, std::sync::atomic::Ordering::Relaxed);
+            instance.record_loaded.fetch_add(1, std::sync::atomic::Ordering::Release);
         }
         log::line("State", &format!("The DAW handed back the plugin's state: {kept:?}"));
         Ok(())

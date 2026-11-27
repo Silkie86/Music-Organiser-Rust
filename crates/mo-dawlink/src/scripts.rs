@@ -410,8 +410,10 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
         for part in parts {
             let _ = fs::remove_file(part);
         }
-        // Back as it was before the install that moved it aside, this one or one cut off.
-        for older in olders.iter().flatten().filter(|o| !o.first.exists()) {
+        // Back as it was before the install that moved it aside, this one or one cut off: only where its old name is
+        // free and there's no DAWmate copy beside it, so the folder never has two (as in the last step below; the 26
+        // Nov review's DK-5). Otherwise it stays aside, a name Bitwig never loads, for the next install to take out.
+        for older in olders.iter().flatten().filter(|o| !o.first.exists() && !o.beside_new().exists()) {
             let _ = fs::rename(&older.aside, &older.first);
         }
     };
@@ -499,6 +501,13 @@ struct Older {
     aside: PathBuf,
 }
 
+impl Older {
+    /// The new copy's place in the same folder.
+    fn beside_new(&self) -> PathBuf {
+        self.first.with_file_name(BITWIG_EXTENSION_NAME)
+    }
+}
+
 /// Takes out an older copy moved aside, once the new one is in place: noted as taken out, or as left with why.
 fn take_out_aside(older: &Older, done: &mut BitwigInstalled) {
     match fs::remove_file(&older.aside) {
@@ -537,7 +546,8 @@ pub fn clap_plugin_source(app: &Path) -> Option<PathBuf> {
 }
 
 /// Whether the plugin in `folder` is the one `source` holds, byte for byte: one file, or (on a Mac) a bundle folder,
-/// every file in it with the same name and bytes and nothing more.
+/// every file in it with the same name and bytes and nothing more. Two files of different sizes differ without a
+/// byte read (the plugin is megabytes: rule 12, read big files once, and only when it's needed).
 pub fn clap_state(source: &Path, folder: &Path) -> ScriptState {
     let theirs = folder.join(CLAP_PLUGIN_NAME);
     if real_folder(source) {
@@ -550,11 +560,21 @@ pub fn clap_state(source: &Path, folder: &Path) -> ScriptState {
             ScriptState::Outdated
         };
     }
-    let Ok(theirs) = fs::read(theirs) else { return ScriptState::NotInstalled };
-    match fs::read(source) {
-        Ok(built) if built == theirs => ScriptState::Installed,
+    let Ok(their_size) = fs::metadata(&theirs).map(|m| m.len()) else { return ScriptState::NotInstalled };
+    if fs::metadata(source).map(|m| m.len()).ok() != Some(their_size) {
+        return ScriptState::Outdated;
+    }
+    match (fs::read(source), fs::read(&theirs)) {
+        (Ok(built), Ok(theirs)) if built == theirs => ScriptState::Installed,
+        (_, Err(_)) => ScriptState::NotInstalled,
         _ => ScriptState::Outdated,
     }
+}
+
+/// Whether anything is in the CLAP folder `folder` under the plugin's name ([`CLAP_PLUGIN_NAME`]): a file, a folder,
+/// or a link (even one that leads nowhere), as Take out must leave none.
+pub fn clap_plugin_there(folder: &Path) -> bool {
+    fs::symlink_metadata(folder.join(CLAP_PLUGIN_NAME)).is_ok()
 }
 
 /// Puts the plugin from `source` into `folder` as [`CLAP_PLUGIN_NAME`]: written beside itself, read back, then put in
@@ -693,6 +713,20 @@ fn clear_own(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Takes the app's own plugin bundle (a Mac's `DAWmate.clap` folder, shaped as the app makes it: see [`clear_own`])
+/// out of the CLAP folder `folder`, with what a cut-off copy left beside it. A link under its name is never followed
+/// (rule 28) and is left, as is a plain file (that one is [`clap_installed_files`]'s, for [`take_out`]).
+pub fn take_out_clap_bundle(folder: &Path) -> io::Result<()> {
+    let bundle = folder.join(CLAP_PLUGIN_NAME);
+    if real_folder(&bundle) {
+        clear_own(&bundle)?;
+    }
+    match clear_clap_leftovers(folder).into_iter().next() {
+        Some((_, why)) => Err(io::Error::other(why)),
+        None => Ok(()),
+    }
+}
+
 /// Takes out what a cut-off copy of the plugin bundle left in the CLAP folder `folder` (its `.mo-part` and `.mo-old`
 /// folders, each only when it's shaped like the app's own: see [`clear_own`]). Returns the ones that couldn't go,
 /// with why. Called at every look, so a copy cut off after the swap doesn't stay until the next update (rule 28).
@@ -759,6 +793,13 @@ pub fn bitwig_installed_files(folders: &[PathBuf], user_folders: &[PathBuf]) -> 
     own_files(in_extensions.chain(scripts).collect::<Vec<_>>())
 }
 
+/// The app's own files of its CLAP plugin in the CLAP folder `folder`: the plugin ([`CLAP_PLUGIN_NAME`]) and a part
+/// file a cut-off install left. Only plain files of those names, never reached through a link (see [`take_out`]),
+/// and never a test plugin put in by hand, nor anything else in the folder.
+pub fn clap_installed_files(folder: &Path) -> Vec<PathBuf> {
+    own_files([folder.join(CLAP_PLUGIN_NAME), folder.join(format!("{CLAP_PLUGIN_NAME}.mo-part"))])
+}
+
 /// The ones of `files` that [`take_out`] may take out, each once (by its real path).
 fn own_files(files: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -774,16 +815,19 @@ fn own_files(files: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     out.into_iter().map(|(f, _)| f).collect()
 }
 
-/// The app's own file names in the DAWs' folders, and its part files for them.
-const OWN_FILES: [&str; 8] = [
+/// The app's own file names in the DAWs' folders and the CLAP folder, and its part files for them. Never a test
+/// plugin's ([`TEST_CLAP_PLUGIN_NAMES`]): that one was put in by hand, and is taken out the same way.
+const OWN_FILES: [&str; 10] = [
     FL_SCRIPT_NAME,
     FIRST_FL_SCRIPT_NAME,
     BITWIG_EXTENSION_NAME,
     FIRST_BITWIG_EXTENSION_NAME,
     FIRST_BITWIG_ASIDE,
     BITWIG_SCRIPT_NAME,
+    CLAP_PLUGIN_NAME,
     "device_DAWmate.py.mo-part",
     "DAWmate.bwextension.mo-part",
+    "DAWmate.clap.mo-part",
 ];
 
 /// Whether `file` is one [`take_out`] may take out: a plain file of one of the app's own names, in a folder that isn't

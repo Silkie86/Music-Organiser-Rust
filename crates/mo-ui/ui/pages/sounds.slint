@@ -4,6 +4,7 @@
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { FolderTree, PickStrip, TreeLine, TreePick, MixPart } from "../folder_tree.slint";
+import { EditStrip, SoundEdit } from "sound_edit.slint";
 import { Theme, AppKeys, Type, Space, Heights, Well, Panel, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, CutText, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, TipState, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar, Icons, InfoTip, Widths } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
@@ -484,8 +485,23 @@ export global SoundsData {
     callback drag-row(int);
     callback drag-pad(int);
     callback drag-alike(int);
-    callback drag-picked();
+    // With Ctrl held as it was pressed: the whole file, not the part picked.
+    callback drag-picked(bool);
     callback drag-let-go();
+    // A part picked on the card's waveform (mo-ui's sounds/part.rs): from and to, 0 to 1 of the way through (none
+    // unless `part-to` is past `part-from`), how long it lasts ("0.47 s", "" for none), and the sound's hits as marks
+    // along the waveform's foot. Picked or let go (`pick-part(0, 0)`), its edges snapped to the hits, the hits found
+    // once the mouse comes over the waveform, a press on it noted (`part-pressed`: a part goes only to the sound
+    // pressed on), and the part carried out from its inside.
+    in property <float> part-from;
+    in property <float> part-to;
+    in property <string> part-text;
+    in property <string> part-hits;
+    callback pick-part(float, float);
+    pure callback snap-part(float, float) -> float;
+    callback wants-hits();
+    callback part-pressed();
+    callback drag-part();
     in property <bool> lifted-picked;
     in property <bool> landed-picked;
     in property <int> lifted-row: -1;
@@ -506,17 +522,20 @@ export global SoundsData {
     // The same for its tile, whose waveform is the sound's first minute only (all the library keeps of it): a longer
     // sound's tile has played through at a minute in.
     in property <float> tile-played;
-    in-out property <length> panel-width: 400px;
+    // 0 until you drag the card: the page lays it out its usual way then (`Widths.list-width`).
+    in-out property <length> panel-width: 0px;
     callback play();
     callback seek(float);
     // A right click over the waveform of the sound playing, on its tile or on its card: it stops.
     callback stop-sound();
     callback close-panel();
-    // The picked sound's right-click menu, and what was chosen (from it or a button on the card).
+    // The picked sound's right-click menu, and what was chosen from it.
     in property <[MenuItem]> menu;
     callback menu-chosen(string);
-    // The same, as the card's buttons after Play.
+    // The same, as the card's buttons after Play, and the one pressed (Edit there closes the strip too; the menu's,
+    // chosen on a sound just right-clicked, only opens it).
     in property <[CardAction]> actions;
+    callback card-chosen(string);
     in property <string> play-tip;
     in property <string> play-key;
     // Your say about the picked sound: a favourite or not, your own type for it ("" takes yours away), and a tag added
@@ -1321,29 +1340,47 @@ component SoundPanel inherits SidePanel {
             shape: SoundsData.picked.wave;
             points: SoundsData.picked.points;
             tint: Theme.sound-type(SoundsData.picked.colour);
-            playing: SoundsData.playing;
-            played: SoundsData.playing ? SoundsData.played : 1;
+            // While the Edit strip plays the edit, its waveform shows where it is, not this one.
+            playing: SoundsData.playing && !SoundEdit.playing;
+            played: SoundsData.playing && !SoundEdit.playing ? SoundsData.played : 1;
             seconds: SoundsData.picked.seconds;
             can-seek: true;
             seek(at) => { SoundsData.seek(at); }
             stop => { SoundsData.stop-sound(); }
+            // A part of it can be picked once its length is known.
+            can-pick: SoundsData.picked.seconds > 0;
+            pick-from: SoundsData.part-from;
+            pick-to: SoundsData.part-to;
+            hit-marks: SoundsData.part-hits;
+            wants-hits => { SoundsData.wants-hits(); }
+            pressed => { SoundsData.part-pressed(); }
+            snap(at, within) => { SoundsData.snap-part(at, within) }
+            picked(from, to) => { SoundsData.pick-part(from, to); }
+            drag-part => { SoundsData.drag-part(); }
+            part-let-go => { SoundsData.drag-let-go(); }
         }
     }
     // Where to take the sound from to drag it into a DAW or a folder: a handle of its own, as a click on the waveform
-    // seeks there (Solomon's F12 note, 5 Nov 2026: the card had no plain place to drag it from).
+    // seeks there (Solomon's F12 note, 5 Nov 2026: the card had no plain place to drag it from). With a part picked, it
+    // carries the part (Ctrl as it's pressed: the whole file).
     DragHandle {
-        text: "Drag into your DAW or a folder";
-        tip: "Drag the sound out as its own file, where it is on disk";
+        text: SoundsData.part-text != ""
+            ? "Drag the part · " + SoundsData.part-text
+            : "Drag into your DAW or a folder";
+        tip: SoundsData.part-text != ""
+            ? "Drag the part out as a file of its own, a copy in Edited sounds. Ctrl as you press it: the whole file"
+            : "Drag the sound out as its own file, where it is on disk";
+        lit: SoundsData.part-text != "";
         lifted: SoundsData.lifted-picked;
         landed: SoundsData.landed-picked;
-        drag-out => { SoundsData.drag-picked(); }
+        drag-out => { SoundsData.drag-picked(self.control-held); }
         drag-let-go => { SoundsData.drag-let-go(); }
     }
     // Every card's buttons: the lit one first, in even columns (the UX review of 10 Nov, B2).
     buttons := CardActions {
         room: root.inside;
         actions: SoundsData.actions;
-        chosen(id) => { SoundsData.menu-chosen(id); }
+        chosen(id) => { SoundsData.card-chosen(id); }
         StudioButton {
             width: max(self.min-width, buttons.cell);
             icon: SoundsData.playing ? Icons.stop : Icons.play;
@@ -2733,6 +2770,10 @@ export component SoundsPage inherits Rectangle {
                     }
                 }
             }
+        }
+        // The Edit strip (E), along the bottom: the list and the card stay usable above it.
+        if SoundEdit.shown: EditStrip {
+            most-height: root.height - 360px;
         }
     }
 }

@@ -148,7 +148,7 @@ fn note() -> &'static str {
     }
 }
 
-fn installed() -> bool {
+pub(crate) fn installed() -> bool {
     std::env::current_exe().is_ok_and(|e| update::installed(&e))
 }
 

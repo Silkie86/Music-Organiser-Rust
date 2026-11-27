@@ -45,7 +45,7 @@ pub fn connect(app: &AppWindow) {
             return;
         };
         let width = WIDTHS.with(|w| w.borrow_mut().reset(part.name));
-        if part.usual > 0.0 {
+        if width > 0.0 {
             log::info("Widths", &format!("{} back to its usual {width:.0}", part.name));
         } else {
             log::info("Widths", &format!("{} back to its usual width, worked out by the page", part.name));
@@ -81,6 +81,7 @@ fn give(app: &AppWindow, name: &str, width: f32) {
         "plugins.filters" => app.global::<crate::Widths>().set_plugins_filters(width),
         "songs.filters" => app.global::<crate::Widths>().set_songs_filters(width),
         "sounds.folders" => app.global::<crate::Widths>().set_sounds_folders(width),
+        "sounds.edit" => app.global::<crate::Widths>().set_sounds_edit(width),
         "songs.list" => app.global::<crate::Widths>().set_songs_list(width),
         "curves.list" => app.global::<crate::Widths>().set_curves_list(width),
         "songs.tracks" => {
