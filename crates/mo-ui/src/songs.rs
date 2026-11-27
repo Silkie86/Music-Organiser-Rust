@@ -35,8 +35,8 @@ use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedSt
 use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
-    AppWindow, BounceLine, CountLine, DetailPair, DustLine, HealthLine, MenuItem, NextLine, OlderLine, PanelSong,
-    PluginLine, SampleLine, SaveLine, SongLine, SongTag, SongsData, TodoLine, YearBar,
+    AppWindow, BoardCard, BoardColumn, BounceLine, CountLine, DetailPair, DustLine, HealthLine, MenuItem, NextLine,
+    OlderLine, PanelSong, PluginLine, SampleLine, SaveLine, SongLine, SongTag, SongsData, TodoLine, YearBar,
 };
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
@@ -60,7 +60,22 @@ struct Page {
     health: Vec<Go>,
     /// The library, for Open in Bitwig's settings.
     db: PathBuf,
+    /// The board shows the ideas saved more than a year ago too ("Show all").
+    all_ideas: bool,
+    /// How many cards each of the board's columns shows, by status ("Show more" adds [`BOARD_CARDS`]).
+    board_cards: [usize; STATUSES.len()],
 }
+
+/// Whether the board is on show, for the page's thread: guesses arriving while it's away wait ([`fill_board`]).
+static BOARD_ON: AtomicBool = AtomicBool::new(false);
+
+/// The most cards a board column shows, however often "Show more" is pressed: past that, the search box and filters
+/// find a song quicker than scrolling (rule 12).
+const BOARD_MOST: usize = 600;
+
+/// How many cards a board column shows at first, and how many more each "Show more" adds: a column is a plain
+/// layout, not a list that makes only the lines in sight, so it's kept to a few screens (rule 12).
+const BOARD_CARDS: usize = 60;
 
 impl Default for Page {
     fn default() -> Page {
@@ -76,6 +91,8 @@ impl Default for Page {
             detail: None,
             health: Vec::new(),
             db: PathBuf::new(),
+            all_ideas: false,
+            board_cards: [BOARD_CARDS; STATUSES.len()],
         }
     }
 }
@@ -201,6 +218,48 @@ fn learn_minutes(live: &mut Live, path: &Path) -> bool {
         log::warning("Songs", &format!("Couldn't read how long songs were open in FL Studio: {e}"));
         false
     })
+}
+
+/// The shapes the library at `path` keeps of the songs' newest saves ([`Live::learn_shapes`]). Whether any was found.
+fn learn_shapes(live: &mut Live, path: &Path) -> bool {
+    let found = Library::open_read_only(path).and_then(|library| live.learn_shapes(&library));
+    found.unwrap_or_else(|e| {
+        log::warning("Songs", &format!("Couldn't read the songs' shapes: {e}"));
+        false
+    })
+}
+
+/// How often the list is shown again while shapes are coming in: often enough to see the board fill, not so often the
+/// page's thread does little else.
+const SHAPES_SHOWN_EVERY: Duration = Duration::from_secs(5);
+
+/// Reads the shapes of the songs' newest saves that haven't been read ([`Live::shapes_to_read`]) on a thread of its
+/// own, telling `tell` as each few are read and once it ends. Whether it started.
+fn read_shapes(live: &mut Live, tell: &mpsc::Sender<Told>) -> bool {
+    let list = live.shapes_to_read();
+    if list.is_empty() {
+        return false;
+    }
+    let stop = live.stopper();
+    let tell = tell.clone();
+    let count = list.len();
+    let started = background::spawn("Songs: shapes", move || {
+        let began = Instant::now();
+        mo_app::board::read_shapes(list, &stop, |read| {
+            let _ = tell.send(Told::Shapes(read));
+        });
+        if count >= 20 {
+            log::info("Songs", &format!("Read the shapes of {count} saves in {:.1} s", began.elapsed().as_secs_f32()));
+        }
+        let _ = tell.send(Told::ShapesDone);
+    });
+    match started {
+        Ok(_) => true,
+        Err(e) => {
+            log::warning("Songs", &format!("Couldn't read the songs' shapes: {e}"));
+            false
+        }
+    }
 }
 
 /// The songs the MIDI page's "Fits my song" offers (the few saved last), from a list as it was just made: worked out
@@ -407,6 +466,16 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
     // How long FL Studio had each song open, once the list is on show and what you give songs is taken (so a star
     // given meanwhile waits for this, rather than being refused): the first pass shows the list again with it.
     let mut minutes_found = learn_minutes(live, library);
+    // The board's stage guesses: the shapes kept of the songs' newest saves, then the rest read from their files on a
+    // thread of their own, a few at a time, each few kept as it comes.
+    minutes_found |= learn_shapes(live, library);
+    let shapes_tell = to_tell.clone();
+    let mut reading_shapes = read_shapes(live, &shapes_tell);
+    // New saves were read while the shapes were being read: read theirs once that ends.
+    let mut shapes_again = false;
+    // Shapes came in since the list was last shown with them, and when it was: shown every few seconds as they come.
+    let mut shapes_waiting = false;
+    let mut shapes_shown = Instant::now();
     // And each song's bounces, from the folders beside its saves: listed on a thread of their own, so a slow drive
     // doesn't hold up this one.
     // Only what the look needs of each song: not a copy of the whole list (every song with every save).
@@ -461,10 +530,38 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
             }
             Ok(Told::Bounces(key, found)) => {
                 live.set_bounces(&key, found);
+                // A bounce newer than the newest save can make the song look finished: guessed again.
+                minutes_found = true;
                 None
             }
             Ok(Told::AllBounces(found)) => {
                 minutes_found |= live.set_all_bounces(found);
+                None
+            }
+            Ok(Told::PutAway(id, mtime)) => {
+                gave.put_away(live, id, mtime);
+                None
+            }
+            Ok(Told::Shapes(read)) => {
+                match live.set_shapes(read) {
+                    Ok(changed) => shapes_waiting |= changed,
+                    Err(e) => {
+                        shapes_waiting = true;
+                        log::warning("Songs", &format!("Couldn't keep the songs' shapes in songs.db: {e}"));
+                    }
+                }
+                // Only the board shows them: while it's away they're shown once the reading ends.
+                if shapes_waiting && BOARD_ON.load(Ordering::Relaxed) && shapes_shown.elapsed() >= SHAPES_SHOWN_EVERY {
+                    minutes_found = true;
+                }
+                None
+            }
+            Ok(Told::ShapesDone) => {
+                reading_shapes = false;
+                minutes_found |= shapes_waiting;
+                if std::mem::take(&mut shapes_again) {
+                    reading_shapes = read_shapes(live, &shapes_tell);
+                }
                 None
             }
             // The app is closing, and what you gave songs before it is kept: the rest is let go.
@@ -588,6 +685,18 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
             continue;
         }
         minutes_found = false;
+        if shapes_waiting {
+            shapes_waiting = false;
+            shapes_shown = Instant::now();
+        }
+        // Saves read just now: their shapes too.
+        if !updated.read.is_empty() {
+            if reading_shapes {
+                shapes_again = true;
+            } else {
+                reading_shapes = read_shapes(live, &shapes_tell);
+            }
+        }
         let say_held = gave.held && !std::mem::replace(&mut said_held, true);
         if say_held {
             log::warning("Songs", &format!("{HELD_ONLY}. {HELD_ONLY_WHY}"));
@@ -631,6 +740,11 @@ enum Told {
     Bounces(String, Vec<mo_app::bounces::Bounce>),
     // Every song's bounces, looked for once the list is on show.
     AllBounces(HashMap<String, Vec<mo_app::bounces::Bounce>>),
+    // The board's x on a card ("not for this save"): the save its guess is from, by id, at its time.
+    PutAway(i64, i64),
+    // Some songs' newest saves' shapes, just read from their files; and that the reading has ended.
+    Shapes(Vec<mo_library::song_writes::ShapeRead>),
+    ShapesDone,
     Finish(mpsc::Sender<()>),
 }
 
@@ -648,7 +762,7 @@ fn next(rx: &Receiver<Told>, waiting: &mut VecDeque<Told>, wait: Duration) -> Re
     waiting.extend(rx.try_iter());
     let first = waiting
         .iter()
-        .position(|t| matches!(t, Told::Give(_) | Told::PutOff(_)))
+        .position(|t| matches!(t, Told::Give(_) | Told::PutOff(_) | Told::PutAway(..)))
         .or_else(|| waiting.iter().position(|t| matches!(t, Told::Finish(_))))
         .unwrap_or(0);
     match waiting.remove(first) {
@@ -681,6 +795,20 @@ impl Gave {
         let _ = GIVES_WAITING.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
     }
 
+    /// Keeps the board's guess from save `id` at `mtime` put away ("not for this save", [`Live::put_away`]), as
+    /// [`Gave::keep`] keeps a change.
+    fn put_away(&mut self, live: &mut Live, id: i64, mtime: i64) {
+        self.any = true;
+        match live.put_away(id, mtime) {
+            Ok(held_only) => self.held |= held_only,
+            Err(e) => {
+                log::warning("Songs", &format!("Couldn't keep the stage guess put away: {e}"));
+                self.not_kept.push(e.to_string());
+            }
+        }
+        let _ = GIVES_WAITING.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    }
+
     /// Keeps the song `key` off the Dust off card ("Not now", [`Live::put_off`]), as [`Gave::keep`] keeps a change.
     fn put_off(&mut self, live: &mut Live, key: &str) {
         self.any = true;
@@ -698,10 +826,13 @@ impl Gave {
     /// in turn). Whether the app is closing.
     fn take_waiting(&mut self, live: &mut Live, rx: &Receiver<Told>, waiting: &mut VecDeque<Told>) -> bool {
         waiting.extend(rx.try_iter());
-        while let Some(at) = waiting.iter().position(|t| matches!(t, Told::Give(_) | Told::PutOff(_))) {
+        while let Some(at) =
+            waiting.iter().position(|t| matches!(t, Told::Give(_) | Told::PutOff(_) | Told::PutAway(..)))
+        {
             match waiting.remove(at) {
                 Some(Told::Give(given)) => self.keep(live, given),
                 Some(Told::PutOff(key)) => self.put_off(live, &key),
+                Some(Told::PutAway(id, mtime)) => self.put_away(live, id, mtime),
                 _ => {}
             }
         }
@@ -855,6 +986,7 @@ fn give(app: &AppWindow, at: Option<usize>, what: &str, value: &str) {
     // The line in the list, Next up and the card show it now; the filters' counts follow when the list is made again.
     LINES.with(|l| l.notify.reset());
     fill_next_up(app);
+    fill_board(app);
     // A song given Finished leaves the Dust off card.
     fill_dust_off(app);
     fill_panel(app);
@@ -908,6 +1040,8 @@ fn show_again(app: &AppWindow, mut songs: Songs, years: Vec<(i32, usize)>) {
         for (key, until) in &p.songs.later {
             songs.later.entry(key.clone()).or_insert(*until);
         }
+        // The same for a stage guess just put away.
+        songs.not_now.extend(p.songs.not_now.iter().copied());
         // The old list (thousands of songs) is let go on the freeing thread, not the window's.
         background::free_later(std::mem::replace(&mut p.songs, songs));
         p.picked = if same { row } else { None };
@@ -997,6 +1131,45 @@ fn wire_list(app: &AppWindow) {
     data.on_not_now(move |row| {
         if let (Some(app), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
             not_now(&app, row);
+        }
+    });
+    // The board: a card dragged to another column, or its guess's arrow, gives its song that status; its x puts the
+    // guess away for this save; "Show all" and "Show more" show more of a column.
+    let weak = app.as_weak();
+    data.on_board_move(move |row, status| {
+        if let (Some(app), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
+            give(&app, Some(row), "status", &status);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_board_put_away(move |row| {
+        if let (Some(app), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
+            put_away(&app, row);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_board_show(move |what| {
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            match usize::try_from(what) {
+                // A column's "Show more", by its place.
+                Ok(at) => {
+                    if let Some(n) = p.board_cards.get_mut(at) {
+                        *n = (*n + BOARD_CARDS).min(BOARD_MOST);
+                    }
+                }
+                // Its Idea column's "Show all" (or "Last year only").
+                Err(_) => p.all_ideas = !p.all_ideas,
+            }
+        });
+        fill_board(&app);
+    });
+    // The board switched on: filled now (it isn't while it's away).
+    let weak = app.as_weak();
+    data.on_board_shown(move || {
+        if let Some(app) = weak.upgrade() {
+            fill_board(&app);
         }
     });
     // A to-do ticked on Next up: given to its song, which needn't be the one picked.
@@ -1259,6 +1432,7 @@ fn refresh(app: &AppWindow) {
         }
     });
     fill_next_up(app);
+    fill_board(app);
     fill_dust_off(app);
 }
 
@@ -1327,6 +1501,7 @@ fn look_for_bounces(app: &AppWindow) {
                 refresh(&app);
             } else {
                 LINES.with(|l| l.notify.reset());
+                fill_board(&app);
             }
             if picked {
                 fill_panel(&app);
@@ -1361,6 +1536,148 @@ fn not_now(app: &AppWindow, row: usize) {
         failed_card(
             NOT_KEPT,
             "the song list isn't being kept up to date just now, so it's back on the card when the app next starts",
+        );
+    }
+}
+
+/// The board: a column a status, each with the songs the filters show in the list's order (a few screens of them),
+/// its stage guess where it looks further along than its status says. Only while the board is on show.
+fn fill_board(app: &AppWindow) {
+    let data = app.global::<SongsData>();
+    BOARD_ON.store(data.get_board(), Ordering::Relaxed);
+    // Not while a card is carried: its column would be made again under it. Filled once it's let go.
+    if !data.get_board() || data.get_board_dragging() {
+        return;
+    }
+    PAGE.with(|p| {
+        let p = p.borrow();
+        let columns = mo_app::board::columns(&p.view, &p.songs, p.all_ideas, p.now);
+        data.set_board_all_ideas(p.all_ideas);
+        BOARD.with_borrow_mut(|board| {
+            for (at, column) in columns.iter().enumerate() {
+                let most = p.board_cards.get(at).copied().unwrap_or(BOARD_CARDS);
+                let cards: Vec<BoardCard> = column
+                    .cards
+                    .iter()
+                    .take(most)
+                    .filter_map(|&row| {
+                        let r = p.songs.rows.get(row)?;
+                        let guess = p.songs.suggestion(row);
+                        Some(BoardCard {
+                            row: i32::try_from(row).ok()?,
+                            name: r.song.name.as_str().into(),
+                            daw: r.song.latest.daw.as_str().into(),
+                            time: r.time_text().into(),
+                            sound: !r.bounces.is_empty(),
+                            todos: i32::try_from(r.todos_left()).unwrap_or(i32::MAX),
+                            guess: guess.map(|g| g.stage).unwrap_or_default().into(),
+                            guess_why: guess.map(|g| guess_words(g, r, p.now)).unwrap_or_default().into(),
+                        })
+                    })
+                    .collect();
+                let shown = column.cards.len().min(most);
+                let line = BoardColumn {
+                    status: column.status.into(),
+                    count: mo_app::songs::thousands(column.cards.len() + column.older).into(),
+                    older: i32::try_from(column.older).unwrap_or(i32::MAX),
+                    // Past the most a column shows, there's no more to ask for.
+                    more: if most >= BOARD_MOST {
+                        0
+                    } else {
+                        i32::try_from(column.cards.len() - shown).unwrap_or(i32::MAX)
+                    },
+                    cards: ModelRc::from(board.cards(at)),
+                };
+                board.set_cards(at, cards);
+                board.set_column(at, line);
+            }
+            if data.get_board_columns().row_count() != columns.len() {
+                data.set_board_columns(ModelRc::from(board.columns.clone()));
+            }
+        });
+    });
+}
+
+/// The board's columns and each one's cards, changed in place so a column keeps where it's scrolled to, and only the
+/// cards that changed are made again.
+#[derive(Default)]
+struct Board {
+    columns: Rc<VecModel<BoardColumn>>,
+    cards: Vec<Rc<VecModel<BoardCard>>>,
+}
+
+impl Board {
+    fn cards(&mut self, at: usize) -> Rc<VecModel<BoardCard>> {
+        while self.cards.len() <= at {
+            self.cards.push(Rc::default());
+        }
+        self.cards[at].clone()
+    }
+
+    fn set_cards(&mut self, at: usize, cards: Vec<BoardCard>) {
+        let model = self.cards(at);
+        if model.row_count() != cards.len() {
+            model.set_vec(cards);
+            return;
+        }
+        for (n, card) in cards.into_iter().enumerate() {
+            if model.row_data(n).as_ref() != Some(&card) {
+                model.set_row_data(n, card);
+            }
+        }
+    }
+
+    fn set_column(&mut self, at: usize, column: BoardColumn) {
+        if at < self.columns.row_count() {
+            let same = self.columns.row_data(at).is_some_and(|c| {
+                c.status == column.status && c.count == column.count && c.older == column.older && c.more == column.more
+            });
+            if !same {
+                self.columns.set_row_data(at, column);
+            }
+        } else {
+            self.columns.push(column);
+        }
+    }
+}
+
+thread_local! {
+    static BOARD: RefCell<Board> = RefCell::new(Board::default());
+}
+
+/// A card's guess said in full, for its tooltip: "Looks like Mixing now", the save it's from, and why.
+fn guess_words(guess: &mo_library::stage::Guess, r: &SongRow, now: NaiveDateTime) -> String {
+    let save = mo_app::board::newest(&r.song);
+    let day =
+        if chrono::Datelike::year(&save.modified) == chrono::Datelike::year(&now) { "%-d %b" } else { "%-d %b %Y" };
+    let mut words = format!("Looks like {} now\nFrom the newest save ({}):", guess.stage, save.modified.format(day));
+    for why in &guess.why {
+        words.push_str("\n\u{b7} ");
+        words.push_str(why);
+    }
+    words.push_str("\nYour status stays until you press \u{2192}.");
+    words
+}
+
+/// The board's x on a card: its guess goes, for this save; a newer save is guessed afresh. Kept by the page's thread
+/// ([`Live::put_away`]).
+fn put_away(app: &AppWindow, row: usize) {
+    let from = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let from = p.songs.rows.get(row)?.guessed_from?;
+        p.songs.not_now.insert(from);
+        Some(from)
+    });
+    let Some((id, mtime)) = from else { return };
+    fill_board(app);
+    GIVES_WAITING.fetch_add(1, Ordering::SeqCst);
+    let told =
+        TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|(t, _)| t.send(Told::PutAway(id, mtime)));
+    if !matches!(told, Some(Ok(()))) {
+        let _ = GIVES_WAITING.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        failed_card(
+            NOT_KEPT,
+            "the song list isn't being kept up to date just now, so the guess is back when the app next starts",
         );
     }
 }
@@ -2072,7 +2389,8 @@ mod tests {
                 Told::Give(given) => given.song,
                 Told::PutOff(key) | Told::Bounces(key, _) => key,
                 Told::Finish(_) => "closing".to_owned(),
-                Told::Changed(_) | Told::AllBounces(_) => "folders".to_owned(),
+                Told::PutAway(..) => "put away".to_owned(),
+                Told::Changed(_) | Told::AllBounces(_) | Told::Shapes(_) | Told::ShapesDone => "folders".to_owned(),
             });
         }
         assert_eq!(order, ["a", "b", "closing", "folders"]);

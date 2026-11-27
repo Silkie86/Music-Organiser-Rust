@@ -3,7 +3,7 @@
 import { ListView, ListBox, Fit } from "../list.slint";
 import { ArrangementPreview } from "arrangement.slint";
 import { SongPlayer } from "../player.slint";
-import { Theme, AppKeys, Type, Space, PageHeader, Well, Panel, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel, StarsPick, HeartToggle, TagChip, WordBox, MenuChip, Icons, CheckLine, TickSquare, Widths, Seam, SignCount } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, PageHeader, Well, Panel, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, CutText, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel, StarsPick, HeartToggle, TagChip, WordBox, MenuChip, Icons, CheckLine, TickSquare, Widths, Seam, SignCount, Tip, SignButton, DragCard } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -61,6 +61,30 @@ export struct NextLine {
     n: int,
     text: string,
     about: string,
+}
+
+// A song on the board: its place in the page's rows, its name and DAW, the time FL Studio has had it open, whether
+// it has a bounce, how many to-dos are left; and the stage its newest save looks like it's at when that's later than
+// its status (empty when not), with why.
+export struct BoardCard {
+    row: int,
+    name: string,
+    daw: string,
+    time: string,
+    sound: bool,
+    todos: int,
+    guess: string,
+    guess-why: string,
+}
+
+// One column of the board: a status, how many songs it has ("1,204"), its cards, how many older ideas are behind
+// "Show all", and how many more cards there are behind "Show more".
+export struct BoardColumn {
+    status: string,
+    count: string,
+    older: int,
+    more: int,
+    cards: [BoardCard],
 }
 
 // One of Overview's counts ("9 plugins", "3 missing"), opening the tab at `tab`.
@@ -286,6 +310,22 @@ export global SongsData {
     in property <int> next-count;
     // A change given to the song at `row` of the page's rows (a to-do ticked on Next up), as `give`.
     callback give-to(int, string, string);
+    // The board instead of the list: a column a status, its songs as cards (filled once it's switched on).
+    in-out property <bool> board;
+    in property <[BoardColumn]> board-columns;
+    // The Archived column opened out (it's folded at the right).
+    in-out property <bool> board-archived-open;
+    // The Idea column shows the ideas saved more than a year ago too.
+    in property <bool> board-all-ideas;
+    // A card is being carried: the board isn't filled again under it until it's let go (then `board-shown`).
+    in-out property <bool> board-dragging;
+    callback board-shown();
+    // A card dragged to another column, or its guess's arrow pressed: the song at that row gets that status.
+    callback board-move(int, string);
+    // A card's x: its guess is put away for this save.
+    callback board-put-away(int);
+    // A column's "Show more", by its place; -1 for the Idea column's "Show all" (or back to the last year).
+    callback board-show(int);
     // Headings and songs are one height. Slint's ListView places a far jump by the average height of the lines on
     // screen, so with two heights "Show it" landed hundreds of lines away from the song in a big library; with one,
     // a song's place is simply its line number times this.
@@ -608,9 +648,25 @@ component ListSwitch inherits HorizontalLayout {
         icon: Icons.songs;
         text: "Songs";
         tip: "every song, in the list's order";
-        on: !SongsData.next-up;
+        on: !SongsData.next-up && !SongsData.board;
         joined-right: true;
-        clicked => { SongsData.next-up = false; }
+        clicked => {
+            SongsData.next-up = false;
+            SongsData.board = false;
+        }
+    }
+    ToggleChip {
+        icon: Icons.board;
+        text: "Board";
+        tip: "a column for each status: drag a song to move it on";
+        on: SongsData.board;
+        joined-left: true;
+        joined-right: true;
+        clicked => {
+            SongsData.next-up = false;
+            SongsData.board = true;
+            SongsData.board-shown();
+        }
     }
     ToggleChip {
         icon: Icons.todo;
@@ -619,7 +675,292 @@ component ListSwitch inherits HorizontalLayout {
         badge: SongsData.next-count > 0 ? SongsData.next-count : "";
         on: SongsData.next-up;
         joined-left: true;
-        clicked => { SongsData.next-up = true; }
+        clicked => {
+            SongsData.board = false;
+            SongsData.next-up = true;
+        }
+    }
+}
+
+// The board: a column for each status, Idea to Released, and Archived folded at the right until it's clicked open.
+// Each song is a card; drag one to another column to give it that status, or click it for its panel. A card whose
+// newest save looks further along than its status says carries a gold spark with that stage: its arrow moves it
+// there, its x puts the guess away for this save, and the reasons are in its tooltip (mock-up agreed 27 Nov 2026).
+component SongsBoard inherits Rectangle {
+    background: Theme.background;
+    property <length> gap: Space.sm;
+    property <length> folded: 40px;
+    property <int> open-count: SongsData.board-archived-open ? 7 : 6;
+    property <length> column-width: max(140px, (root.width - (SongsData.board-archived-open ? 0px : root.folded + root.gap)
+        - (root.open-count - 1) * root.gap) / root.open-count);
+    property <length> card-height: 60px;
+    property <length> guess-height: 28px;
+    // All the columns side by side: wider than the board in a narrow window, which then scrolls sideways.
+    property <length> columns-width: SongsData.board-columns.length == 0 ? 0px
+        : (root.open-count) * (root.column-width + root.gap) + (SongsData.board-archived-open ? 0px : root.folded) - root.gap;
+    // A card being dragged: its song's row, its name, the column it's from, and where the pointer is among the columns.
+    property <bool> dragging <=> SongsData.board-dragging;
+    property <int> drag-row: -1;
+    property <string> drag-name;
+    property <int> drag-from: -1;
+    property <length> drag-x;
+    property <length> drag-y;
+    // The column under the pointer while dragging.
+    property <int> drag-to: root.dragging ? root.column-at(root.drag-x) : -1;
+
+    pure function column-at(x: length) -> int {
+        clamp(Math.floor(x / (root.column-width + root.gap)), 0, SongsData.board-columns.length - 1)
+    }
+    pure function daw-colour(daw: string) -> color {
+        daw == "FL Studio" ? Theme.fl-studio : daw == "Bitwig Studio" ? Theme.bitwig : daw == "Studio One"
+            ? Theme.studio-one : Theme.faint
+    }
+
+    // Clicks and the wheel stop here: the list under it isn't on show.
+    TouchArea {
+        scroll-event(e) => { accept }
+    }
+    cols := Flickable {
+        content-width: max(root.width, root.columns-width);
+        content-height: root.height;
+        mouse-drag-pan-enabled: false;
+    for column[at] in SongsData.board-columns: Rectangle {
+        property <bool> archived: at == 6;
+        property <bool> shut: self.archived && !SongsData.board-archived-open;
+        x: at * (root.column-width + root.gap);
+        y: 0;
+        width: self.shut ? root.folded : root.column-width;
+        height: root.height - self.y;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: root.drag-to == at && root.drag-from != at ? Theme.accent : Theme.edge;
+        background: root.drag-to == at && root.drag-from != at ? Theme.accent.transparentize(90%) : Theme.well;
+        // Archived, folded: its count and its name down the strip; a click opens it out.
+        if self.shut: Rectangle {
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { SongsData.board-archived-open = true; }
+            }
+            VerticalLayout {
+                padding-top: Space.md;
+                spacing: Space.sm;
+                alignment: start;
+                Text {
+                    text: column.count;
+                    color: Theme.muted;
+                    font-family: Theme.number-font;
+                    font-size: Type.meta;
+                    horizontal-alignment: center;
+                }
+                Caps {
+                    text: "A\nR\nC\nH\nI\nV\nE\nD";
+                    horizontal-alignment: center;
+                }
+            }
+        }
+        if !(at == 6 && !SongsData.board-archived-open): VerticalLayout {
+            padding: Space.sm;
+            spacing: Space.sm;
+            HorizontalLayout {
+                height: 22px;
+                padding-left: Space.xs;
+                padding-right: Space.xs;
+                Caps {
+                    text: column.status.to-uppercase();
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: column.count;
+                    color: Theme.muted;
+                    font-family: Theme.number-font;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                }
+                if column.status == "Archived": TouchArea {
+                    width: 20px;
+                    mouse-cursor: pointer;
+                    clicked => { SongsData.board-archived-open = false; }
+                    Path {
+                        width: 12px;
+                        height: 12px;
+                        viewbox-width: 16;
+                        viewbox-height: 16;
+                        commands: Icons.next;
+                        stroke: Theme.muted;
+                        stroke-width: 1.5px;
+                    }
+                }
+            }
+            flick := Flickable {
+                vertical-stretch: 1;
+                content-width: flick.width;
+                content-height: cards.preferred-height;
+                mouse-drag-pan-enabled: false;
+                cards := VerticalLayout {
+                    x: 0;
+                    y: 0;
+                    width: flick.width;
+                    spacing: Space.sm;
+                    alignment: start;
+                    for card in column.cards: one := DragCard {
+                        height: root.card-height + (card.guess != "" ? root.guess-height : 0px);
+                        picked: card.row == SongsData.selected;
+                        lifted: root.dragging && root.drag-row == card.row;
+                        drag-started => {
+                            root.dragging = true;
+                            root.drag-row = card.row;
+                            root.drag-name = card.name;
+                            root.drag-from = at;
+                        }
+                        drag-moved => {
+                            root.drag-x = self.pointer-at.x - cols.absolute-position.x - cols.content-x;
+                            root.drag-y = self.pointer-at.y - cols.absolute-position.y;
+                        }
+                        dropped => {
+                            root.dragging = false;
+                            if (root.drag-to >= 0 && root.drag-to != root.drag-from) {
+                                SongsData.board-move(card.row, SongsData.board-columns[root.drag-to].status);
+                            }
+                            // What changed while it was carried.
+                            SongsData.board-shown();
+                        }
+                        cancelled => {
+                            root.dragging = false;
+                            SongsData.board-shown();
+                        }
+                        clicked => { SongsData.select(card.row); }
+                        double-clicked => {
+                            SongsData.select(card.row);
+                            SongsData.open();
+                        }
+                        // The DAW's colour down its left edge.
+                        Rectangle {
+                            x: 0;
+                            width: 3px;
+                            background: root.daw-colour(card.daw);
+                        }
+                        // The guess's reasons, while the mouse rests on the card.
+                        Tip {
+                            text: card.guess-why;
+                            hovering: one.hovered && card.guess != "";
+                            at-y: one.height + Space.xs;
+                        }
+                        VerticalLayout {
+                            padding-left: Space.md;
+                            padding-right: Space.sm;
+                            padding-top: Space.sm;
+                            padding-bottom: Space.sm;
+                            spacing: Space.xs;
+                            CutText {
+                                text: card.name;
+                                color: Theme.text;
+                                font-size: Type.row-title;
+                                font-weight: 500;
+                            }
+                            HorizontalLayout {
+                                spacing: Space.md;
+                                alignment: start;
+                                height: 18px;
+                                // No tips of their own: a press on them is the card's, to pick or drag it.
+                                if card.time != "": SignCount {
+                                    icon: Icons.clock;
+                                    text: card.time;
+                                }
+                                if card.sound: SignCount {
+                                    icon: Icons.speaker;
+                                }
+                                if card.todos > 0: SignCount {
+                                    icon: Icons.todo;
+                                    text: card.todos;
+                                }
+                            }
+                            // The guess: a gold spark and the stage, its reasons in the tooltip; the arrow moves the
+                            // song there, the x puts the guess away for this save.
+                            if card.guess != "": HorizontalLayout {
+                                height: root.guess-height - Space.xs;
+                                spacing: Space.xs;
+                                HorizontalLayout {
+                                    horizontal-stretch: 1;
+                                    min-width: 0px;
+                                    HorizontalLayout {
+                                        spacing: Space.xs;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Path {
+                                                width: 13px;
+                                                height: 13px;
+                                                viewbox-width: 16;
+                                                viewbox-height: 16;
+                                                commands: Icons.spark;
+                                                fill: Theme.warning;
+                                            }
+                                        }
+                                        Text {
+                                            text: card.guess;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                            min-width: 0px;
+                                            color: Theme.warning;
+                                            font-size: Type.meta;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    SignButton {
+                                        icon: Icons.move-on;
+                                        tint: Theme.warning;
+                                        boxed: true;
+                                        tip: "Move it to " + card.guess;
+                                        clicked => { SongsData.board-move(card.row, card.guess); }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    SignButton {
+                                        icon: Icons.clear;
+                                        tip: "Not for this save";
+                                        clicked => { SongsData.board-put-away(card.row); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if column.more > 0: StudioButton {
+                        text: "Show more · " + column.more;
+                        clicked => { SongsData.board-show(at); }
+                    }
+                    if column.status == "Idea" && (column.older > 0 || SongsData.board-all-ideas): StudioButton {
+                        text: SongsData.board-all-ideas ? "Last year only" : "Show " + column.older + " older";
+                        clicked => { SongsData.board-show(-1); }
+                    }
+                }
+            }
+        }
+    }
+    }
+    if SongsData.board-columns.length > 0 && root.dragging: Rectangle {
+        x: clamp(root.drag-x + cols.content-x - root.column-width / 2, 0px, root.width - self.width);
+        y: clamp(root.drag-y - 20px, 0px, root.height - self.height);
+        width: root.column-width;
+        height: 44px;
+        border-radius: Theme.radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+        background: Theme.surface-raised;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: Theme.shadow;
+        CutText {
+            x: Space.md;
+            width: parent.width - 2 * Space.md;
+            text: root.drag-name;
+            color: Theme.text;
+            font-size: Type.row-title;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
     }
 }
 
@@ -1244,7 +1585,7 @@ export component SongsPage inherits Rectangle {
             keys.focus();
         }
     }
-    // The list's headings, with the Songs / Next up switch: Next up lies below them.
+    // The list's headings.
     property <length> heads-height: 30px;
 
     VerticalLayout {
@@ -1258,10 +1599,19 @@ export component SongsPage inherits Rectangle {
         padding: Space.xl;
         padding-bottom: Space.lg;
         spacing: Space.md;
-        PageHeader {
-            title: "Songs";
-            summary: SongsData.count;
-            job-line: false;
+        // The page's title, and the switch between the list, the board and Next up at its right.
+        HorizontalLayout {
+            spacing: Space.md;
+            PageHeader {
+                horizontal-stretch: 1;
+                title: "Songs";
+                summary: SongsData.count;
+                job-line: false;
+            }
+            VerticalLayout {
+                alignment: center;
+                ListSwitch { }
+            }
         }
         search-box := SearchBox {
             // Esc goes on to the window's keys (the page's next step back, app.escape), and Ctrl+Up and Ctrl+Down step
@@ -1309,7 +1659,8 @@ export component SongsPage inherits Rectangle {
                         : area.list-third;
                     key-pressed(event) => {
                         // Not under Next up: the list it would step through isn't on show.
-                        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta || SongsData.next-up) {
+                        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta || SongsData.next-up
+                            || SongsData.board) {
                             return reject;
                         }
                         if (event.text == Key.UpArrow) {
@@ -1353,9 +1704,6 @@ export component SongsPage inherits Rectangle {
                                         padding-left: Space.xs + Space.md;
                                         padding-right: Space.xs + Space.md;
                                         spacing: Space.md;
-                                        switch := ListSwitch {
-                                            y: (parent.height - self.height) / 2;
-                                        }
                                         name-head := ColumnHead {
                                             horizontal-stretch: 1;
                                             text: "SONG";
@@ -1368,9 +1716,8 @@ export component SongsPage inherits Rectangle {
                                             width: Widths.songs-status;
                                             part: "songs.status";
                                             resizing(w) => { Widths.songs-status = w; }
-                                            // Never so wide the name column beside it gets under 120 px (under the
-                                            // Songs / Next up switch and the Song heading, the rows' names have both).
-                                            most: self.width + max(0px, switch.width + Space.md + name-head.width - 120px);
+                                            // Never so wide the name column beside it gets under 120 px.
+                                            most: self.width + max(0px, name-head.width - 120px);
                                             right: true;
                                             text: "STATUS";
                                             on: SongsData.order-column == "Status";
@@ -1381,7 +1728,7 @@ export component SongsPage inherits Rectangle {
                                             width: Widths.songs-time;
                                             part: "songs.time";
                                             resizing(w) => { Widths.songs-time = w; }
-                                            most: self.width + max(0px, switch.width + Space.md + name-head.width - 120px);
+                                            most: self.width + max(0px, name-head.width - 120px);
                                             right: true;
                                             text: "TIME";
                                             tip: "Time spent in FL Studio";
@@ -1394,9 +1741,8 @@ export component SongsPage inherits Rectangle {
                                             width: Widths.songs-saved;
                                             part: "songs.saved";
                                             resizing(w) => { Widths.songs-saved = w; }
-                                            // Never so wide the name column beside it gets under 120 px (under the
-                                            // Songs / Next up switch and the Song heading, the rows' names have both).
-                                            most: self.width + max(0px, switch.width + Space.md + name-head.width - 120px);
+                                            // Never so wide the name column beside it gets under 120 px.
+                                            most: self.width + max(0px, name-head.width - 120px);
                                             right: true;
                                             text: "LAST SAVED";
                                             on: SongsData.order-column == "Last saved";
@@ -1629,14 +1975,6 @@ export component SongsPage inherits Rectangle {
                                 scroll-event(e) => { accept }
                             }
                             VerticalLayout {
-                                HorizontalLayout {
-                                    height: root.heads-height;
-                                    padding-left: Space.xs + Space.md;
-                                    alignment: start;
-                                    ListSwitch {
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                }
                                 NextUpList {
                                     vertical-stretch: 1;
                                 }
@@ -1644,15 +1982,27 @@ export component SongsPage inherits Rectangle {
                         }
                     }
                 }
+                // The board, over the list and the panel's place: a card clicked slides its panel in from the right.
+                if SongsData.message == "" && SongsData.board: SongsBoard {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                }
                 if root.card-shown: SongPanel {
-                    x: keys.width + 16px;
+                    // Over the board, at the right: narrower there, so most of the board stays in sight.
+                    x: SongsData.board && SongsData.message == ""
+                        ? parent.width - min(parent.width - keys.width - 16px, max(480px, parent.width * 0.4))
+                        : keys.width + 16px;
+                    drop-shadow-blur: SongsData.board ? 24px : 0px;
+                    drop-shadow-color: Theme.shadow;
                     y: 0;
                     height: parent.height;
                     width: parent.width - self.x;
                     tag-keys <=> root.card-keys;
                     todo-keys <=> root.card-todo-keys;
                 }
-                if !root.card-shown: SidePanel {
+                if !root.card-shown && !SongsData.board: SidePanel {
                     x: keys.width + 16px;
                     y: 0;
                     height: parent.height;
@@ -1664,7 +2014,7 @@ export component SongsPage inherits Rectangle {
                     }
                 }
                 // The gap between the list and the panel: drag it to give the list more or less room.
-                Seam {
+                if !SongsData.board: Seam {
                     x: keys.width;
                     width: 16px;
                     height: parent.height;
