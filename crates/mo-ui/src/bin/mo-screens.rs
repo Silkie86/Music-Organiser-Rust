@@ -901,6 +901,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     bar.set_place(0.32);
     bar.set_time("1:12 / 3:42".into());
     shots.push(("songs-sound.png".into(), capture(&window)));
+    // Copper Lines' newest bounce playing, started from its line's speaker (the review of 26 Nov, SZ-3): that speaker
+    // is lit (and its line on the card), Slow Orbit's is not. Shown as playing only: nothing is played here.
+    bar.set_playing(true);
+    shots.push(("songs-row-playing.png".into(), capture(&window)));
+    bar.set_playing(false);
     bar.set_shown(false);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
     mo_ui::songs::show_sample(&app, sample_songs());

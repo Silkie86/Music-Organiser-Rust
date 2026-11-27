@@ -1243,6 +1243,12 @@ fn wire_list(app: &AppWindow) {
         crate::song_player::play(&app, &path, &title);
     });
     let weak = app.as_weak();
+    data.on_play_row(move |row| {
+        if let (Some(app), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
+            play_row(&app, row);
+        }
+    });
+    let weak = app.as_weak();
     data.on_not_now(move |row| {
         if let (Some(app), Ok(row)) = (weak.upgrade(), usize::try_from(row)) {
             not_now(&app, row);
@@ -1658,7 +1664,7 @@ fn look_in_folders(look: BounceLook) {
 /// when there's nothing to play or pause, so the key goes on to the page.
 pub fn toggle_play(app: &AppWindow) -> bool {
     let mut newest = None;
-    with_picked(|_, r| newest = r.bounces.first().map(|b| (b.path.clone(), r.song.name.clone())));
+    with_picked(|_, r| newest = newest_bounce(r));
     match newest {
         Some((path, title)) => {
             crate::song_player::play_or_pause(app, &path, &title);
@@ -1667,6 +1673,21 @@ pub fn toggle_play(app: &AppWindow) -> bool {
         // Paused as Esc pauses it.
         None => crate::song_player::stop_on_escape(app),
     }
+}
+
+/// The speaker on a line of the list (the review of 26 Nov, SZ-3): plays the newest bounce of the song at `row` of the
+/// page's rows on the player bar, or pauses it when that's what plays, as Space does for the picked song. The line
+/// isn't picked for it, so a few songs can be heard one after another without their cards opening.
+fn play_row(app: &AppWindow, row: usize) {
+    let newest = PAGE.with(|p| p.borrow().songs.rows.get(row).and_then(newest_bounce));
+    if let Some((path, title)) = newest {
+        crate::song_player::play_or_pause(app, &path, &title);
+    }
+}
+
+/// A song's newest bounce (its path) and the song's name, to play on the bar; `None` when it has none.
+fn newest_bounce(r: &SongRow) -> Option<(String, String)> {
+    r.bounces.first().map(|b| (b.path.clone(), r.song.name.clone()))
 }
 
 /// "Not now" on the Dust off card: the song at `row` leaves the card at once, and is kept off it for about three months
@@ -1914,7 +1935,7 @@ fn line(songs: &Songs, entry: &Entry, now: NaiveDateTime) -> SongLine {
                 favourite: r.favourite,
                 todos: i32::try_from(r.todos_left()).unwrap_or(i32::MAX),
                 time: r.time_text().into(),
-                sound: !r.bounces.is_empty(),
+                bounce: r.bounces.first().map(|b| b.path.as_str()).unwrap_or_default().into(),
                 // The first status ("Idea") is every song's to begin with, so it isn't shown.
                 status: if r.status == STATUSES[0] { SharedString::new() } else { r.status.as_str().into() },
                 daw: r.song.latest.daw.as_str().into(),

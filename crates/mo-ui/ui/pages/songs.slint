@@ -26,8 +26,8 @@ export struct SongLine {
     todos: int,
     // How long FL Studio has had it open ("41 h"); empty when not known.
     time: string,
-    // It has a bounce to play.
-    sound: bool,
+    // Its newest bounce, which the line's speaker button plays; empty when it has none.
+    bounce: string,
 }
 
 // One of the picked song's bounces: the file, its name, and the day it was written.
@@ -303,6 +303,9 @@ export global SongsData {
     callback not-now(int);
     // Play one of the picked song's bounces on the player bar.
     callback play-sound(string);
+    // The speaker on the song at `row` of the page's rows: plays its newest bounce on the player bar, or pauses it when
+    // that's what plays. The line isn't picked for it.
+    callback play-row(int);
     in property <string> todos-left;
     // Next up instead of the list: every to-do left on the songs the filters show, under each song's name.
     in-out property <bool> next-up;
@@ -1819,17 +1822,25 @@ export component SongsPage inherits Rectangle {
                                                                 font-weight: 500;
                                                             }
                                                             if line.favourite: Heart { y: (parent.height - self.height) / 2; }
-                                                            // A bounce to play.
-                                                            if line.sound: VerticalLayout {
-                                                                alignment: center;
-                                                                Path {
-                                                                    width: 13px;
-                                                                    height: 13px;
-                                                                    viewbox-width: 16;
-                                                                    viewbox-height: 16;
-                                                                    commands: Icons.speaker;
-                                                                    stroke: Theme.muted;
-                                                                    stroke-width: 1.5px;
+                                                            // A bounce to play: a click plays its newest on the player
+                                                            // bar (or pauses it), without picking the line. Lit in the
+                                                            // accent while it's what plays. It hangs in a box as wide
+                                                            // as its sign and with no height of its own, so the line
+                                                            // keeps the room and height it had with the plain sign
+                                                            // (nothing moves, the name isn't cut any shorter); its
+                                                            // click area reaches a little past the box.
+                                                            if line.bounce != "": Rectangle {
+                                                                width: 14px;
+                                                                property <bool> on: SongPlayer.playing && SongPlayer.path == line.bounce;
+                                                                SignButton {
+                                                                    x: (parent.width - self.width) / 2;
+                                                                    y: (parent.height - self.height) / 2;
+                                                                    icon: Icons.speaker;
+                                                                    // As big as the to-do sign beside it.
+                                                                    sign-size: 13px;
+                                                                    tint: on ? Theme.accent : Theme.muted;
+                                                                    tip: on ? "Pause this song's bounce" : "Play this song's newest bounce on the player bar";
+                                                                    clicked => { SongsData.play-row(line.row); }
                                                                 }
                                                             }
                                                             // To-dos left: the list sign and how many.
