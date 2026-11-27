@@ -9,6 +9,7 @@ pub mod events;
 pub mod notes;
 pub mod presets;
 pub mod song;
+pub mod write;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};

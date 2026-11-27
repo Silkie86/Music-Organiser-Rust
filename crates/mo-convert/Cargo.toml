@@ -22,6 +22,8 @@ mo-library = { path = "../mo-library" }
 memchr = "2"
 # How long a compressed sample is (MP3, OGG, M4A, FL Studio's own Ogg-in-WAV sounds): asked of its decoder.
 mo-audio = { path = "../mo-audio", default-features = false }
+# FL Studio dates a project it opens in the computer's own time.
+chrono.workspace = true
 
 [dev-dependencies]
 # The made-up Bitwig files shared from mo-formats' tests use it.

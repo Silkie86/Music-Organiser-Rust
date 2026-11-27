@@ -30,7 +30,7 @@ use crate::sample::read_sample;
 use crate::{bitwig, lost};
 
 /// The longest file name the app makes (as the C# app's).
-const LONGEST_FILE_NAME: usize = 120;
+pub(crate) const LONGEST_FILE_NAME: usize = 120;
 
 /// The heading for sounds taken from older saves (the C# `Exporter.TakenHeader`).
 const TAKEN_HEADER: &str =
@@ -64,7 +64,7 @@ pub fn safe_file_name(name: &str) -> String {
 }
 
 /// [`safe_file_name`], at most `longest` UTF-16 units long (as C# counts), cut between whole characters.
-fn cut(name: &str, longest: usize) -> String {
+pub(crate) fn cut(name: &str, longest: usize) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c < ' ' { '_' } else { c })

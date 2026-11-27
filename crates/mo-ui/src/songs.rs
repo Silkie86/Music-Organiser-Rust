@@ -16,6 +16,7 @@ use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::bitwig_convert::{self as bitwig, Converted};
+use mo_app::daw_copy;
 use mo_app::finder::{self, Kind};
 use mo_app::live::{Live, LiveDetails, Updated};
 use mo_app::log;
@@ -2018,6 +2019,7 @@ fn do_to_save(path: &str, what: &str) {
     with_save(path, |p, s| match what {
         "open" => open_save(s),
         "bitwig" => open_in_bitwig(p, s),
+        "fl" => open_as_copy(p, s, daw_copy::Daw::FlStudio),
         "reveal" => reveal(s),
         "copy" => copy_path(&s.path),
         _ => {}
@@ -2036,6 +2038,9 @@ fn save_menu(daw: &str) -> Vec<MenuItem> {
     let mut items = vec![item(format!("Open in {daw}"), "Double-click", "open")];
     if daw == FL {
         items.push(item("Open in Bitwig".into(), "", "bitwig"));
+    } else {
+        // A copy of the song made for FL Studio, in the export folder: the song itself is only read.
+        items.push(item("Open a copy in FL Studio".into(), "", "fl"));
     }
     items.push(item(String::new(), "", ""));
     items.push(item("Show in folder".into(), "", "reveal"));
@@ -2200,6 +2205,63 @@ impl Drop for Converting {
 /// The main Open button: FL Studio songs go to Bitwig (as in the C# app), the rest open in their own DAW.
 fn open_main(page: &Page, save: &mo_library::Save) {
     if save.daw == FL { open_in_bitwig(page, save) } else { open_save(save) }
+}
+
+/// Writes a copy of a save for `daw` into the export folder and opens it there, on a background thread; the card says
+/// how it went and what didn't come across. The save is only read, and the copy never goes over a file
+/// ([`daw_copy::copy_for`]).
+fn open_as_copy(page: &Page, save: &mo_library::Save, daw: daw_copy::Daw) {
+    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
+    let chosen = crate::settings::value(&shell::daw_exe_key(daw.name()));
+    let (db, path, name) = (page.db.clone(), save.path.clone(), save.name.clone());
+    // A second press while the first is still writing would make a second copy: the first is the one that counts.
+    let Some(converting) = Converting::start(&path) else { return };
+    let started = background::spawn("Copy for DAW", move || {
+        let _converting = converting;
+        if !shell::exists(&path) {
+            feed.start(&format!("Can't find {name}"), "").failed(MOVED_OR_DELETED);
+            return;
+        }
+        let job = feed.start(&format!("Making a copy of {name} for {}", daw.name()), "");
+        let root = Library::open_read_only(&db)
+            .map_err(|e| format!("Couldn't read the library: {e}"))
+            .and_then(|lib| {
+                lib.setting(bitwig::EXPORT_FOLDER_KEY).map_err(|e| format!("Couldn't read the settings: {e}"))
+            })
+            .and_then(|setting| bitwig::export_folder(setting.as_deref(), bitwig::documents().as_deref()));
+        let locator = sound_library::locator(Some(&sound_library::database_beside(&db)));
+        let made = root.and_then(|root| {
+            background::on_pool(move || {
+                let find = |sample: &str| locator.locate_to_use(sample, &path);
+                // A damaged song can make a reader give up: that's one warning, and the card says so.
+                mo_catch::catch(std::panic::AssertUnwindSafe(|| {
+                    daw_copy::copy_for(Path::new(&path), &root, daw, &find)
+                }))
+                .unwrap_or_else(|_| Err("The song couldn't be read well enough to copy.".into()))
+            })
+        });
+        match made {
+            Ok(copy) => {
+                log::info("Copy for DAW", &format!("{name} became {}", copy.file.display()));
+                let exe = chosen.as_deref().filter(|e| shell::usable_exe(e));
+                let file = copy.file.to_string_lossy().into_owned();
+                match shell::run(&shell::open(&file, exe, shell::Os::THIS)) {
+                    Ok(()) => job.done(&copy.message),
+                    Err(e) => {
+                        log::warning("Copy for DAW", &format!("{file}: {e}"));
+                        job.failed(&format!("{} It couldn't be opened in {}: {e}", copy.message, daw.name()));
+                    }
+                }
+            }
+            Err(e) => {
+                log::warning("Copy for DAW", &format!("{name}: {e}"));
+                job.failed(&format!("Couldn't make a copy for {}: {e}", daw.name()));
+            }
+        }
+    });
+    if let Err(e) = started {
+        log::error("Copy for DAW", &format!("Couldn't start making a copy: {e}"));
+    }
 }
 
 /// Converts an FL Studio save for Bitwig into the export folder and opens the new project in Bitwig, on a background
@@ -2417,7 +2479,8 @@ mod tests {
     fn an_fl_save_s_menu_also_opens_it_in_bitwig() {
         let ids = |daw: &str| save_menu(daw).iter().map(|i| i.id.to_string()).collect::<Vec<_>>();
         assert_eq!(ids(FL), ["open", "bitwig", "", "reveal", "copy"]);
-        assert_eq!(ids("Bitwig Studio"), ["open", "", "reveal", "copy"]);
+        assert_eq!(ids("Bitwig Studio"), ["open", "fl", "", "reveal", "copy"]);
+        assert_eq!(save_menu("Ableton Live")[1].what, "Open a copy in FL Studio");
         assert_eq!(save_menu(FL)[0].what, "Open in FL Studio");
     }
 

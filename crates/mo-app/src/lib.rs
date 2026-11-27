@@ -11,6 +11,8 @@ pub mod backup_older;
 pub mod beta;
 pub mod binned;
 pub mod bitwig_convert;
+/// A song as a new project for another DAW (FL Studio so far), in the export folder: see `mo_convert::export`.
+pub use mo_convert::export as daw_copy;
 pub mod bitwig_favourites;
 pub mod board;
 pub mod bounces;
