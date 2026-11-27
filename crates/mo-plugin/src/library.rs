@@ -149,19 +149,27 @@ impl Library {
 
     /// Works out how close each sound is to your favourites, from the sounds' fingerprints in the app's library: read
     /// once (it's opened, read and let go again, as [`read`] does), and let go once it's worked out, so only the
-    /// answer (a number for each sound) is kept. Slow: seconds for a big library, and the fingerprints take a few
-    /// hundred megabytes while it works (call it off the panel's thread).
+    /// answer (a number for each sound) is kept. Slow: seconds for a big library, and the fingerprints take tens
+    /// of megabytes while it works, a few hundred when CLAP's can't come from the app's file (call it off the panel's
+    /// thread).
     pub fn read_like(&self) {
         let started = std::time::Instant::now();
+        let mut from_file = false;
         let like = match &self.from {
             Some((sounds_db, analysed)) => match fingerprints(sounds_db, *analysed) {
-                Ok(index) => Like::Ready(mo_app::background::on_pool(|| self.list.like_favourites_in(&index))),
+                Ok(index) => {
+                    from_file = index.clap_in_file().is_some();
+                    Like::Ready(mo_app::background::on_pool(|| self.list.like_favourites_in(&index)))
+                }
                 Err(why) => Like::Not(why),
             },
             None => Like::Not("No sound library to read".into()),
         };
         let said = match &like {
             Like::Not(why) => format!("Sounds like your favourites not worked out: {why}"),
+            _ if from_file => {
+                "Worked out the sounds like your favourites (CLAP's numbers read from the app's file)".into()
+            }
             _ => "Worked out the sounds like your favourites".to_owned(),
         };
         crate::log::took("Library", &said, started);
@@ -192,7 +200,12 @@ fn fingerprints(sounds_db: &Path, analysed: usize) -> Result<SoundIndex, String>
         Ok(_) => return Err("the sound library isn't one this plugin can read".into()),
         Err(e) => return Err(format!("couldn't open the sound library: {e}")),
     };
-    let (features, clap) = db.fingerprints(analysed).map_err(|e| format!("couldn't read the fingerprints: {e}"))?;
+    // CLAP's numbers, the biggest part, from the file the app keeps them in beside the library when it's still
+    // exactly the library's (read as they're needed, never held here in the DAW); else read from the library. Only
+    // read: the plugin never writes or removes the app's files.
+    let (features, clap) = db
+        .fingerprints_kept(analysed, sounds_db.parent())
+        .map_err(|e| format!("couldn't read the fingerprints: {e}"))?;
     drop(db);
     Ok(mo_app::background::on_pool(|| SoundIndex::from_gathered(features, clap, analysed)))
 }
