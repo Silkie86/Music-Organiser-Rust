@@ -1,5 +1,5 @@
-//! Curve and shape files (Serum, LFO Tool, Vital, Duck, Bitwig curves) and the knob moves found in a song: everything the
-//! Curves page reads. The first byte picks the file's ending, the rest is the file. A reader may say the file is
+//! Curve and shape files (Serum, LFO Tool, Vital, Duck, Bitwig curves) and the knob moves found in a song: everything
+//! the Curves page reads. The first byte picks the file's ending, the rest is the file. A reader may say the file is
 //! damaged, but must never panic or hang.
 #![no_main]
 

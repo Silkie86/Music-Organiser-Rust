@@ -9,82 +9,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-thread_local! {
-    /// What the last panic on this thread said, even one a reader caught itself (that is still a reader stopping on
-    /// a file, and its file loses what it would have shown).
-    static PANICKED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-}
+#[path = "../../mo-formats/tests/common/broken.rs"]
+mod broken;
 
-/// Notes every panic on the thread it happens on (once per test program), as well as printing it as usual.
-fn note_panics() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let usual = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let said = format!("{} at {:?}", info.payload_as_str().unwrap_or("a panic"), info.location());
-            let _ = PANICKED.try_with(|p| *p.borrow_mut() = Some(said));
-            usual(info);
-        }));
-    });
-}
-
-/// Runs `read`, and says what made it panic, if anything did (caught by the reader itself or not).
-fn panic_in(read: impl FnOnce()) -> Option<String> {
-    note_panics();
-    PANICKED.with(|p| p.borrow_mut().take());
-    let caught = mo_catch::catch(std::panic::AssertUnwindSafe(read));
-    let said = PANICKED.with(|p| p.borrow_mut().take());
-    if caught.is_err() { Some(said.unwrap_or_else(|| "a panic".into())) } else { said }
-}
-
-/// A small, fixed random number maker (xorshift), so the broken copies are the same on every run.
-struct Dice(u64);
-
-impl Dice {
-    fn below(&mut self, n: usize) -> usize {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        if n == 0 { 0 } else { (self.0 % n as u64) as usize }
-    }
-}
-
-/// Values that make a length, a count or a place go wrong.
-const ODD_WORDS: [u32; 7] = [0, 1, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff, 0xffff, 0x0100_0000];
-
-fn broken(file: &[u8], cuts: usize, changes: usize, dice: &mut Dice) -> Vec<(String, Vec<u8>)> {
-    let len = file.len();
-    let mut out: Vec<(String, Vec<u8>)> =
-        (1..=cuts).map(|i| len * i / (cuts + 1)).map(|at| (format!("cut at {at}"), file[..at].to_vec())).collect();
-    for _ in 0..changes {
-        let mut f = file.to_vec();
-        let mut how = Vec::new();
-        for _ in 0..1 + dice.below(3) {
-            // Mostly in the header, where the sizes and counts are.
-            let at = if dice.below(3) > 0 { dice.below(f.len().min(256)) } else { dice.below(f.len()) };
-            match dice.below(3) {
-                0 => {
-                    let bit = dice.below(8);
-                    f[at] ^= 1 << bit;
-                    how.push(format!("bit {bit} of byte {at} flipped"));
-                }
-                1 if at + 4 <= f.len() => {
-                    let w = ODD_WORDS[dice.below(ODD_WORDS.len())];
-                    let bytes = if dice.below(2) == 0 { w.to_le_bytes() } else { w.to_be_bytes() };
-                    f[at..at + 4].copy_from_slice(&bytes);
-                    how.push(format!("bytes {at}..{} set to {bytes:02x?}", at + 4));
-                }
-                _ => {
-                    let n = 1 + dice.below(32.min(f.len() - at));
-                    f.drain(at..at + n);
-                    how.push(format!("{n} bytes taken out at {at}"));
-                }
-            }
-        }
-        out.push((how.join(", "), f));
-    }
-    out
-}
+use broken::*;
 
 fn tone(name: &str) -> Vec<u8> {
     std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)).unwrap()
@@ -137,11 +65,11 @@ fn sound_readers_survive_broken_files() {
     {
         files.push((name.rsplit('.').next().unwrap(), tone(name)));
     }
-    let mut dice = Dice(0x2545_f491_4f6c_dd1d);
+    let mut dice = Dice::named("sounds");
     let mut slowest = (Duration::ZERO, String::new());
     for (n, (ending, file)) in files.iter().enumerate() {
         let path = dir.join(format!("broken.{ending}"));
-        for (how, bytes) in broken(file, 12, 60, &mut dice) {
+        for (how, bytes) in broken(file, 12, 60, Some(256), &mut dice) {
             std::fs::write(&path, &bytes).unwrap();
             let started = Instant::now();
             let said = panic_in(|| {

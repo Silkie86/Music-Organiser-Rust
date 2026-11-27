@@ -5,6 +5,7 @@
 
 pub mod ableton;
 pub mod bitwig;
+pub mod broken;
 pub mod midi;
 pub mod studio_one;
 

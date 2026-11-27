@@ -1,6 +1,6 @@
 //! The MIDI page's looks into a file: the parts the index finds in a MIDI file or in any song (FL Studio, Bitwig,
-//! Ableton, Studio One), and the song as it plays. The first byte picks the file's ending, the rest is the file. A reader may say the file is damaged, but
-//! must never panic or hang.
+//! Ableton, Studio One), and the song as it plays. The first byte picks the file's ending, the rest is the file. A
+//! reader may say the file is damaged, but must never panic or hang.
 #![no_main]
 
 use std::path::Path;

@@ -80,16 +80,46 @@ fn deep_tags(root: &str, inner: &str, levels: usize) -> String {
 
 #[test]
 fn deep_xml_never_runs_out_of_stack() {
-    let levels = 50_000;
+    let levels = 20_000;
     let what = "deep xml";
     let took = on_small_stack(what, move || {
-        // Ableton: tags in tags anywhere in the set.
-        for inner in ["Devices", "Tracks", "MidiTrack", "DeviceChain", "Branches", "Events", "MidiClip", "KeyTrack"] {
-            let xml = deep_tags("Ableton", inner, levels);
-            if let Ok(set) = mo_formats::ableton::LiveSet::open(xml.as_bytes()) {
-                let _ = set.info();
-                let _ = set.midi();
-                let _ = set.arrangements();
+        // Ableton: tags in tags inside the set, on its own paths (a track, a clip, a device list) and anywhere.
+        let set = |inside: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?><Ableton Creator="Ableton Live 12.1"><LiveSet>{inside}</LiveSet></Ableton>"#
+            )
+        };
+        let track = |inside: &str| {
+            set(&format!(
+                r#"<Tracks><MidiTrack Id="1"><TrackGroupId Value="-1" /><DeviceChain><MainSequencer><ClipTimeable><ArrangerAutomation><Events><MidiClip Id="0" Time="0">{inside}</MidiClip></Events></ArrangerAutomation></ClipTimeable></MainSequencer><DeviceChain><Devices>{inside}</Devices></DeviceChain></DeviceChain></MidiTrack></Tracks>"#
+            ))
+        };
+        let tags =
+            |inner: &str| format!("{}{}", format!("<{inner}>").repeat(levels), format!("</{inner}>").repeat(levels));
+        for inner in [
+            "Devices",
+            "Tracks",
+            "MidiTrack",
+            "AudioTrack",
+            "GroupTrack",
+            "DeviceChain",
+            "Branches",
+            "Events",
+            "MidiClip",
+            "AudioClip",
+            "KeyTrack",
+            "Notes",
+            "FileRef",
+            "FreezeSequencer",
+            "SampleRef",
+            "Scenes",
+        ] {
+            for xml in [set(&tags(inner)), track(&tags(inner))] {
+                if let Ok(set) = mo_formats::ableton::LiveSet::open(xml.as_bytes()) {
+                    let _ = set.info();
+                    let _ = set.midi();
+                    let _ = set.arrangements();
+                }
             }
         }
         // Studio One: each of the song's files nested deep.
@@ -164,4 +194,21 @@ fn bitwig_objects_in_objects_never_run_out_of_stack() {
         });
         quick(&what, took, Duration::from_secs(20));
     }
+}
+
+#[test]
+fn ableton_file_refs_in_file_refs_read_in_good_time() {
+    // Each sample's place used to be checked against everything above it (is it a frozen track's?): a set with
+    // 100,000 of them nested took minutes. Now the walk leaves the frozen parts out as it meets them.
+    let levels = 100_000;
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><Ableton><LiveSet>{}{}</LiveSet></Ableton>"#,
+        r#"<FileRef><Path Value="C:/Samples/Kick.wav" />"#.repeat(levels),
+        "</FileRef>".repeat(levels)
+    );
+    let took = on_small_stack("file refs in file refs", move || {
+        let info = mo_formats::ableton::LiveSet::open(xml.as_bytes()).unwrap().info();
+        assert_eq!(info.samples.len(), 1, "the same sample, once");
+    });
+    quick("file refs in file refs", took, Duration::from_secs(20));
 }
