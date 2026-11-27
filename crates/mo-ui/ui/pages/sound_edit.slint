@@ -417,6 +417,9 @@ export component EditStrip inherits Rectangle {
             // can go, and the pad each one lands on (four across, as a Drum Machine's page; eight for more than
             // sixteen).
             if SoundEdit.slicing: send := HorizontalLayout {
+                // As wide as its button, which is as wide as Drag the edit whatever it says ("Send 9 slices", "Send 10
+                // slices"): undo and redo beside it stay where they are as the Sensitivity changes how many there are.
+                horizontal-stretch: 0;
                 property <int> across: SoundEdit.pads.length > 16 ? 8 : 4;
                 property <int> rows: ceil(SoundEdit.pads.length / self.across);
                 property <length> pad-width: 66px;
@@ -424,6 +427,7 @@ export component EditStrip inherits Rectangle {
                 property <length> menu-width: max(320px, self.across * self.pad-width + Space.xs + 2 * Space.sm);
                 property <length> menu-height: 2 * Space.xs + 26px + 32px + self.rows * self.pad-height + Space.xs + 32px + 2px + 26px;
                 send-button := StudioButton {
+                    width: 170px;
                     text: SoundEdit.send-text;
                     main: true;
                     menu: true;
