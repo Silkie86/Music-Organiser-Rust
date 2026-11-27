@@ -512,16 +512,16 @@ impl Plugins {
         // Each song's newest save's missing plugins.
         let mut missing_by_save: HashMap<i64, HashSet<String>> = HashMap::new();
         for u in uses.iter().filter(|u| !u.installed && newest.contains(&u.save)) {
-            missing_by_save.entry(u.save).or_default().insert(u.key.clone());
+            missing_by_save.entry(u.save).or_default().insert(u.key.to_string());
         }
 
         // Grouped by name key and, for a DAW's own device, the DAW, in the order first met.
         let mut order: Vec<(String, String)> = Vec::new();
         let mut groups: HashMap<(String, String), Vec<&PluginUse>> = HashMap::new();
         for u in &uses {
-            let own = if u.format == "Native" { u.daw.clone() } else { String::new() };
+            let own = if u.format == "Native" { u.daw.to_string() } else { String::new() };
             groups
-                .entry((u.key.clone(), own))
+                .entry((u.key.to_string(), own))
                 .or_insert_with_key(|k| {
                     order.push(k.clone());
                     Vec::new()
@@ -1203,7 +1203,7 @@ fn row(
         .into_iter()
         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
         .map_or(PluginKind::Unknown, |(k, _)| kind_of(k));
-    let mut daws: Vec<String> = g.iter().map(|u| u.daw.clone()).collect();
+    let mut daws: Vec<String> = g.iter().map(|u| u.daw.to_string()).collect();
     daws.sort();
     daws.dedup();
 

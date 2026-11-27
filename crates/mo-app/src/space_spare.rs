@@ -103,7 +103,7 @@ pub type Sent = space_removing::Sent<SpareCopy>;
 pub fn formats_used(uses: &[PluginUse]) -> Used {
     let mut out = Used::new();
     for u in uses.iter().filter(|u| !u.format.eq_ignore_ascii_case("Native") && !u.name.trim().is_empty()) {
-        out.entry(u.name.clone()).or_default().entry(u.format.clone()).or_default().insert(u.save);
+        out.entry(u.name.to_string()).or_default().entry(u.format.to_string()).or_default().insert(u.save);
     }
     out
 }
@@ -549,13 +549,13 @@ mod tests {
     fn uses(save: i64, name: &str, format: &str) -> PluginUse {
         PluginUse {
             save,
-            name: name.to_owned(),
-            key: mo_library::read::name_key(name),
-            vendor: String::new(),
+            name: name.into(),
+            key: mo_library::read::name_key(name).into(),
+            vendor: Default::default(),
             kind: PluginKind::Instrument,
-            format: format.to_owned(),
+            format: format.into(),
             installed: true,
-            daw: "FL Studio".to_owned(),
+            daw: "FL Studio".into(),
         }
     }
 

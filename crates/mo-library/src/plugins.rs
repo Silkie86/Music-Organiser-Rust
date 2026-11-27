@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDateTime;
 use serde::Deserialize;
+use smol_str::SmolStr;
 
 use crate::PluginKind;
 use crate::db::{Library, LibraryError, int, local, plugin_kind, text};
@@ -16,16 +17,16 @@ use crate::read::name_key;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginUse {
     pub save: i64,
-    pub name: String,
+    pub name: SmolStr,
     /// [`name_key`] of the name, as the C# app stored it.
-    pub key: String,
-    pub vendor: String,
+    pub key: SmolStr,
+    pub vendor: SmolStr,
     pub kind: PluginKind,
     /// "VST2", "VST3", "CLAP", "AU", "Native" (the DAW's own device) …
-    pub format: String,
+    pub format: SmolStr,
     pub installed: bool,
     /// The save's DAW: "FL Studio", "Bitwig" …
-    pub daw: String,
+    pub daw: SmolStr,
 }
 
 /// One plugin inside an installed plugin file, as the C# app's plugin scanner read it.
@@ -97,6 +98,17 @@ pub const UNUSED_YEARS_KEY: &str = "space_unused_years";
 /// The setting for how many Install these cards the Plugins page shows.
 pub const NEEDED_COUNT_KEY: &str = "plugins_needed_cards";
 
+/// A text column as [`text`] reads it, held in the value itself when it's short (no piece of memory of its own).
+fn short(r: &rusqlite::Row<'_>, col: &str) -> SmolStr {
+    match r.get_ref(col) {
+        Ok(rusqlite::types::ValueRef::Text(t)) => match std::str::from_utf8(t) {
+            Ok(t) => SmolStr::new(t),
+            Err(_) => String::from_utf8_lossy(t).into(),
+        },
+        _ => SmolStr::default(),
+    }
+}
+
 impl Library {
     /// Every plugin every save uses, leaving out saves whose file has gone (as the C# Plugins page does). One row per
     /// plugin in a save, so a save with Serum twice has it twice.
@@ -124,21 +136,21 @@ impl Library {
             picked.join(", ")
         ))?;
         let rows = st.query_map([], |r| {
-            let name = text(r, "name");
+            let name = short(r, "name");
             // A row an older app wrote without its key gets one, worked out the same way.
-            let key = match text(r, "name_key") {
-                k if k.is_empty() => name_key(&name),
+            let key = match short(r, "name_key") {
+                k if k.is_empty() => name_key(&name).into(),
                 k => k,
             };
             Ok(PluginUse {
                 save: int(r, "project_id").unwrap_or(0),
                 key,
                 name,
-                vendor: text(r, "vendor"),
+                vendor: short(r, "vendor"),
                 kind: plugin_kind(int(r, "kind").unwrap_or(0)),
-                format: text(r, "format"),
+                format: short(r, "format"),
                 installed: int(r, "installed") == Some(1),
-                daw: text(r, "daw"),
+                daw: short(r, "daw"),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)

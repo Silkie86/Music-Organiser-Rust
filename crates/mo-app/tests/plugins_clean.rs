@@ -78,7 +78,7 @@ fn space(name: &str, folders: &[(&Path, u8, u64)]) -> StoredSpace {
     StoredSpace {
         key: mo_library::read::name_key(name),
         name: name.into(),
-        vendor: String::new(),
+        vendor: Default::default(),
         folders: folders
             .iter()
             .map(|(p, k, b)| StoredFolder { path: s(p), kind: *k, bytes: *b, shared_with: Vec::new(), added: false })
@@ -91,8 +91,8 @@ fn uses(save: i64, name: &str) -> PluginUse {
     PluginUse {
         save,
         name: name.into(),
-        key: mo_library::read::name_key(name),
-        vendor: String::new(),
+        key: mo_library::read::name_key(name).into(),
+        vendor: Default::default(),
         kind: PluginKind::Instrument,
         format: "VST3".into(),
         installed: true,

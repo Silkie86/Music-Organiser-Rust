@@ -4261,12 +4261,12 @@ fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::Scann
                 uses.push(PluginUse {
                     save: s.id,
                     name: name.into(),
-                    key: mo_library::read::name_key(name),
+                    key: mo_library::read::name_key(name).into(),
                     vendor: vendor.into(),
                     kind,
                     format: format.into(),
                     installed,
-                    daw: s.daw.clone(),
+                    daw: s.daw.as_str().into(),
                 });
             }
         }

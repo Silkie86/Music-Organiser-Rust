@@ -458,8 +458,8 @@ mod tests {
         let uses = |save: i64, name: &str| PluginUse {
             save,
             name: name.into(),
-            key: mo_library::read::name_key(name),
-            vendor: String::new(),
+            key: mo_library::read::name_key(name).into(),
+            vendor: Default::default(),
             kind: PluginKind::Instrument,
             format: "VST3".into(),
             installed: true,

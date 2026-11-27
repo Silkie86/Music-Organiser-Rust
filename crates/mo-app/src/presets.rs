@@ -473,7 +473,7 @@ impl KnownPlugins {
                 PluginKind::NoteEffect => 2,
                 PluginKind::Unknown => continue,
             };
-            tally.entry(used.key).or_default()[at] += 1;
+            tally.entry(used.key.into()).or_default()[at] += 1;
         }
         for (key, [synth, effect, note]) in tally {
             let kind = if synth >= effect && synth >= note {

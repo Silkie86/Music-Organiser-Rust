@@ -24,6 +24,8 @@ serde_json = "1"
 # songs.db: each save's track details compressed, and the new file checked against library.db row by row.
 flate2 = "1"
 sha2 = "0.10"
+# A plugin use's names, held in the use itself when short (almost all are): one row for each plugin in each save.
+smol_str = "0.3"
 
 # Where Windows really keeps Documents, even when you've moved it (the DAWs' user folders are there).
 [target.'cfg(windows)'.dependencies]
