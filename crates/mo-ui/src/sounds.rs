@@ -3899,8 +3899,9 @@ fn show_sound(app: &AppWindow, at: usize) {
         pick(app, at);
         return;
     }
-    PAGE.with(|p| {
+    let unhid = PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        let hidden = p.filters.hidden_folders.clone();
         // Hide duplicates stays on unless the sound has copies (one of them might show in its place), and Hide silent
         // sounds unless it's silent.
         let hide_copies = p.filters.hide_copies && !p.list.has_copies(at);
@@ -3914,9 +3915,14 @@ fn show_sound(app: &AppWindow, at: usize) {
             !list.hidden_by_folders(&one).is_some_and(|hidden| hidden(at))
         });
         p.to_pick = Some(at);
+        p.filters.hidden_folders != hidden && p.re_started
     });
     app.global::<SoundsData>().set_search(SharedString::new());
     refresh(app);
+    // A folder shown again changes what Rediscover digs through, as a change on the tree does (tree.rs `change`).
+    if unhid {
+        rediscover_now(app);
+    }
 }
 
 /// Opens the page on the sound with id `id` and picks it, as Ctrl+K does: the Space page's links to it. False when the

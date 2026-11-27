@@ -518,7 +518,18 @@ impl Songs {
         let copies = rows.iter().map(|r| r.song.copies.len()).sum();
         let daws: BTreeSet<&str> = rows.iter().map(|r| r.song.latest.daw.as_str()).collect();
         let daws = daws.into_iter().map(str::to_owned).collect();
-        Songs { rows, saves, copies, tags, daws, doubts, later: HashMap::new(), not_now: HashSet::new(), real, live_tests }
+        Songs {
+            rows,
+            saves,
+            copies,
+            tags,
+            daws,
+            doubts,
+            later: HashMap::new(),
+            not_now: HashSet::new(),
+            real,
+            live_tests,
+        }
     }
 
     /// The questions about the song at `row`.
