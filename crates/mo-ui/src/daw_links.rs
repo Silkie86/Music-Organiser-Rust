@@ -3,6 +3,7 @@
 //! own, never the window's (rule 12). A card says what went in. Not for the screenshots or tests, which never reach a
 //! real DAW's folders (rule 11): only `main` starts it.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -240,12 +241,21 @@ fn put_in_plugin(plugin: &Plugin, feed: &Feed) -> (Option<(Step, Installed)>, As
         return not;
     };
     let Some(folder) = clap_folder() else { return not };
-    let by_hand = [Some(folder.clone()), own_clap_folder()]
-        .into_iter()
-        .flatten()
+    // What a cut-off copy left in the CLAP folder (a Mac's plugin is copied whole beside itself first) goes at every
+    // look, not only at the next update.
+    for (left, why) in scripts::clear_clap_leftovers(&folder) {
+        log::warning("DAW links", &format!("Couldn't take out {}: {why}", left.display()));
+    }
+    // On a Mac the plugin may also have been put by hand in the folder for every user, where guides say to put it.
+    let names_by_hand = |f: PathBuf| {
+        let own = cfg!(target_os = "macos").then(|| f.join(scripts::CLAP_PLUGIN_NAME));
+        scripts::TEST_CLAP_PLUGIN_NAMES.map(|n| f.join(n)).into_iter().chain(own)
+    };
+    let by_hand = std::iter::once(folder.clone())
         .flat_map(|f| scripts::TEST_CLAP_PLUGIN_NAMES.map(|n| f.join(n)))
+        .chain(own_clap_folder().into_iter().flat_map(names_by_hand))
         // A file on Windows, a bundle folder on a Mac.
-        .find(|f| f.exists());
+        .find(|f| fs::symlink_metadata(f).is_ok());
     if let Some(by_hand) = by_hand {
         log::info("DAW links", &format!("The plugin is left alone: {} is there already", by_hand.display()));
         return not;
@@ -261,7 +271,8 @@ fn put_in_plugin(plugin: &Plugin, feed: &Feed) -> (Option<(Step, Installed)>, As
         return not;
     }
     if plugin.failed_today {
-        log::info("DAW links", "The plugin couldn't go in earlier today, so Windows is asked again another day");
+        let again = if cfg!(windows) { "Windows is asked again" } else { "it's tried again" };
+        log::info("DAW links", &format!("The plugin couldn't go in earlier today, so {again} another day"));
         return not;
     }
     if in_use(&folder.join(scripts::CLAP_PLUGIN_NAME)) {
@@ -278,8 +289,16 @@ fn put_in_plugin(plugin: &Plugin, feed: &Feed) -> (Option<(Step, Installed)>, As
         for (f, why) in &done.failed {
             log::warning("DAW links", &format!("Couldn't put the CLAP plugin in {}: {why}", f.display()));
         }
-        let asked = if done.went.is_empty() { Asked::Failed } else { Asked::Went };
-        return (Some((step, done)), asked);
+        if done.went.is_empty() {
+            // The card that follows says only what went in, so this one says what didn't.
+            let job = feed.start("Putting the DAWmate plugin in", &folder.display().to_string());
+            job.failed_as(
+                "Couldn't put the plugin in",
+                &format!("{} didn't take it. The app tries again at a start on another day.", folder.display()),
+            );
+            return (Some((step, done)), Asked::Failed);
+        }
+        return (Some((step, done)), Asked::Went);
     }
     let admin = mo_space::admin::AsAdmin;
     if !mo_space::admin::Admin::can_ask(&admin) {

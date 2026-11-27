@@ -217,9 +217,12 @@ jobs:
           name: bitwig-extension
           path: bitwig
       - name: Make the .zip
+        shell: bash
         run: |
           ext=$(ls bitwig/*.bwextension | head -n 1)
-          echo "ZIP=$(installer/mac/package.sh dist "$ext" | tail -n 1)" >> "$GITHUB_ENV"
+          installer/mac/package.sh dist "$ext"
+          zip=$(ls dist/*-mac.zip)
+          echo "ZIP=$zip" >> "$GITHUB_ENV"
       - name: Try it
         run: installer/mac/check.sh "$ZIP"
       # The CLAP project's own checker loads the plugin as a DAW would and tries every rule of the format.
@@ -239,9 +242,10 @@ jobs:
           validator=$(find . -type f -name clap-validator | head -n 1)
           [ -n "$validator" ] || { ls -R; echo "no clap-validator in the download"; exit 1; }
           chmod +x "$validator"
-          "$validator" --version
           ditto -x -k "$GITHUB_WORKSPACE/$ZIP" "$RUNNER_TEMP/plugin"
-          "$validator" validate "$RUNNER_TEMP/plugin/DAWmate.app/Contents/PlugIns/DAWmate.clap"
+          # The checker runs without the job's token.
+          env -u GH_TOKEN "$validator" --version
+          env -u GH_TOKEN "$validator" validate "$RUNNER_TEMP/plugin/DAWmate.app/Contents/PlugIns/DAWmate.clap"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mac

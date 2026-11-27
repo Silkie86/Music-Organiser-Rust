@@ -419,11 +419,13 @@ impl Shortcuts {
     pub fn set(&mut self, id: &str, key: &str) -> String {
         let Some((page, action)) = all_actions().find(|(_, a)| a.id == id) else { return String::new() };
         let key = written(key);
+        // The key as this computer names it, for the words under the list (Cmd on a Mac).
+        let says = shown(&key);
         if KEPT.iter().any(|k| normalise(k) == normalise(&key)) {
             return match key.as_str() {
                 "F12" => "F12 is kept for writing a note to Claude.".to_owned(),
-                "Tab" | "Shift+Tab" => format!("{key} is kept for moving between boxes and buttons."),
-                _ => format!("{key} is kept for moving through the lists."),
+                "Tab" | "Shift+Tab" => format!("{says} is kept for moving between boxes and buttons."),
+                _ => format!("{says} is kept for moving through the lists."),
             };
         }
         let same = |k: &str| !key.is_empty() && normalise(k) == normalise(&key);
@@ -435,12 +437,12 @@ impl Shortcuts {
         // One that isn't built yet isn't on the list to give its key back, so it's let go without a word, and what
         // else the key does is said instead (F5 is Rescan's, not built, and three pages' own).
         if let Some(taken) = taken.filter(|a| is_listed(page, a.id)) {
-            message = format!("{key} was \"{}\", which has no key now. Default puts it back.", taken.what);
+            message = format!("{says} was \"{}\", which has no key now. Default puts it back.", taken.what);
         } else if page != EVERYWHERE
             && let Some((_, wide)) =
                 all_actions().find(|(p, a)| *p == EVERYWHERE && is_built(a.id) && same(self.key_of(a.id)))
         {
-            message = format!("{key} is also \"{}\" everywhere else; on {page} it does this instead.", wide.what);
+            message = format!("{says} is also \"{}\" everywhere else; on {page} it does this instead.", wide.what);
         } else if page == EVERYWHERE {
             let mut pages: Vec<&str> =
                 all_actions().filter(|(p, a)| *p != EVERYWHERE && same(self.key_of(a.id))).map(|(p, _)| p).collect();
@@ -448,7 +450,7 @@ impl Shortcuts {
             if !pages.is_empty() {
                 let one = pages.len() == 1;
                 message = format!(
-                    "{} keep{} {key} for a job of {} own.",
+                    "{} keep{} {says} for a job of {} own.",
                     pages.join(" and "),
                     if one { "s" } else { "" },
                     if one { "its" } else { "their" }
@@ -474,7 +476,9 @@ impl Shortcuts {
     /// The key an action has now as this computer's keyboard names it ([`shown`]: Cmd on a Mac), for a menu line, a
     /// tooltip or the key sheet. "" for none.
     pub fn shown_key(&self, id: &str) -> String {
-        shown(self.key_of(id))
+        // A key kept from the settings file is in whatever spelling it was saved with ("shift+ctrl+r").
+        let key = self.key_of(id);
+        if key.is_empty() { String::new() } else { shown(&normalise(key)) }
     }
 
     /// The key an action has now, or "" for none, in the list's own spelling ("Ctrl" is the key Slint calls control:

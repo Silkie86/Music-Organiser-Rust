@@ -279,11 +279,12 @@ const BITWIG_SCRIPT_FOLDER: &str = "Music Organiser";
 /// it; in a Mac app bundle, `Contents/Resources/extensions`), or, when the app runs from a build in a copy of the repo,
 /// the one Maven built there (`extensions/bitwig-java/target`).
 pub fn bitwig_extension_source(app: &Path) -> Option<PathBuf> {
-    // A Mac app bundle keeps it in Contents/Resources/extensions.
-    let beside = match mac_app_contents(app) {
-        Some(contents) => contents.join("Resources").join("extensions").join(BITWIG_EXTENSION_NAME),
-        None => app.parent()?.join("extensions").join(BITWIG_EXTENSION_NAME),
-    };
+    // A Mac app bundle keeps it in Contents/Resources/extensions, and is never a build in a copy of the repo.
+    if let Some(contents) = mac_app_contents(app) {
+        let inside = contents.join("Resources").join("extensions").join(BITWIG_EXTENSION_NAME);
+        return inside.is_file().then_some(inside);
+    }
+    let beside = app.parent()?.join("extensions").join(BITWIG_EXTENSION_NAME);
     if beside.is_file() {
         return Some(beside);
     }
@@ -645,6 +646,7 @@ fn install_bundle(source: &Path, folder: &Path, name: &str) -> io::Result<()> {
             fs::copy(source.join(inside), &to)?;
             fs::File::open(&to)?.sync_all()?;
         }
+        unmark_download(&part)?;
         if !same_tree(source, &part)? {
             return Err(io::Error::other("the copy read back wasn't the one written"));
         }
@@ -671,13 +673,51 @@ fn install_bundle(source: &Path, folder: &Path, name: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Takes out `path` if it's there: only a real folder (a link or a file of that name is an error, never followed).
+/// Takes out `path` if it's there: only a real folder shaped like a plugin bundle (nothing in it but `Contents`), as
+/// the app's own copies are. A link, a file, or a folder holding anything else is an error, never followed or
+/// removed: it isn't the app's.
 fn clear_own(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
-        Ok(m) if m.is_dir() => fs::remove_dir_all(path),
+        Ok(m) if m.is_dir() => {
+            let mut names = fs::read_dir(path)?.map(|e| e.map(|e| e.file_name()));
+            if let Some(other) = names.find(|n| n.as_ref().map_or(true, |n| n != "Contents")) {
+                let other = other.map_or_else(|e| e.to_string(), |n| n.to_string_lossy().into_owned());
+                return Err(io::Error::other(format!("{} holds {other}, so it isn't left by the app", path.display())));
+            }
+            fs::remove_dir_all(path)
+        }
         Ok(_) => Err(io::Error::other(format!("{} is there and isn't a folder", path.display()))),
+    }
+}
+
+/// Takes out what a cut-off copy of the plugin bundle left in the CLAP folder `folder` (its `.mo-part` and `.mo-old`
+/// folders, each only when it's shaped like the app's own: see [`clear_own`]). Returns the ones that couldn't go,
+/// with why. Called at every look, so a copy cut off after the swap doesn't stay until the next update (rule 28).
+pub fn clear_clap_leftovers(folder: &Path) -> Vec<(PathBuf, String)> {
+    ["mo-part", "mo-old"]
+        .iter()
+        .map(|end| folder.join(format!("{CLAP_PLUGIN_NAME}.{end}")))
+        .filter_map(|left| clear_own(&left).err().map(|e| (left, e.to_string())))
+        .collect()
+}
+
+/// On a Mac, takes the download's quarantine mark off the app's own copy of its plugin, which `fs::copy` carries
+/// over from the app (macOS marks every file of a download). The app itself was opened by the user, so its own plugin
+/// may load in a DAW as the app's part; without this a DAW is told it "cannot be checked" and won't load it. Only the
+/// copy in `part` (the app's staging folder) is changed. Elsewhere, nothing to do.
+fn unmark_download(part: &Path) -> io::Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let out = std::process::Command::new("/usr/bin/xattr").args(["-dr", "com.apple.quarantine"]).arg(part).output()?;
+    // xattr says "No such xattr" when the copy has no mark: nothing was there to take off.
+    let said = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() || said.contains("No such xattr") {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("macOS kept the download mark on the copy: {}", said.trim())))
     }
 }
 

@@ -515,11 +515,28 @@ fn a_mac_plugin_bundle_goes_in_whole_and_is_checked_file_by_file() {
     assert_eq!(fs::read(folder.join("Other.clap").join("x")).unwrap(), b"theirs");
 
     // A cut-off install's leftovers are cleared, and the install still goes in.
-    fs::create_dir_all(folder.join("DAWmate.clap.mo-part").join("half")).unwrap();
+    fs::create_dir_all(folder.join("DAWmate.clap.mo-part").join("Contents").join("half")).unwrap();
     fs::create_dir_all(folder.join("DAWmate.clap.mo-old")).unwrap();
     let done = install_clap(&bundle, &folder);
     assert!(done.failed.is_empty(), "{done:?}");
     assert!(!folder.join("DAWmate.clap.mo-part").exists() && !folder.join("DAWmate.clap.mo-old").exists());
+
+    // The look clears them too, without an install; a folder of that name holding anything else isn't the app's,
+    // so it stays, and so does what's in it.
+    fs::create_dir_all(folder.join("DAWmate.clap.mo-old").join("Contents")).unwrap();
+    fs::create_dir_all(folder.join("DAWmate.clap.mo-part")).unwrap();
+    fs::write(folder.join("DAWmate.clap.mo-part").join("notes.txt"), b"mine").unwrap();
+    let left = clear_clap_leftovers(&folder);
+    assert!(!folder.join("DAWmate.clap.mo-old").exists());
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0].0, folder.join("DAWmate.clap.mo-part"));
+    assert_eq!(fs::read(folder.join("DAWmate.clap.mo-part").join("notes.txt")).unwrap(), b"mine");
+    // While it's there, an install says why and leaves the plugin in place as it was.
+    let done = install_clap(&bundle, &folder);
+    assert!(done.went.is_empty() && done.failed.len() == 1, "{done:?}");
+    assert_eq!(fs::read(&program).unwrap(), b"plugin 3");
+    fs::remove_dir_all(folder.join("DAWmate.clap.mo-part")).unwrap();
+    assert!(clear_clap_leftovers(&folder).is_empty());
 
     // A file where the bundle goes isn't the plugin's: it's left, and the install says why.
     let other = root.join("other-folder");

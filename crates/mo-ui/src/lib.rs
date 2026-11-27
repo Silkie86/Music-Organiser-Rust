@@ -349,6 +349,8 @@ fn show_places(app: &AppWindow, shortcuts: &Shortcuts) {
     app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));
     app.global::<FinderData>().set_jump_key(shortcuts.shown_key("app.jump").into());
+    // Ctrl+K's own key for opening a line in its DAW (not on the list), as this computer names it.
+    app.global::<FinderData>().set_daw_key(mo_app::shortcuts::shown("Ctrl+Enter").into());
 }
 
 /// The Songs and Backup pages' buttons' tooltips, and the MIDI page's Read MIDI again's key: what each does and its

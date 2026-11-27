@@ -49,10 +49,10 @@ lipo -create -output "$app/Contents/MacOS/music-organiser" "$arm/music-organiser
 icons="$out/logo.iconset"
 rm -rf "$icons"
 mkdir -p "$icons"
-for size in 16 32 128 256; do
-    sips -z "$size" "$size" assets/logo/logo.png --out "$icons/icon_${size}x${size}.png" > /dev/null
-    half=$((size / 2))
-    if [ "$half" -ge 16 ]; then cp "$icons/icon_${size}x${size}.png" "$icons/icon_${half}x${half}@2x.png"; fi
+# Each slot an iconset has, with its size in pixels (the @2x ones are twice their name).
+for slot in 16x16:16 16x16@2x:32 32x32:32 32x32@2x:64 128x128:128 128x128@2x:256 256x256:256; do
+    px=${slot#*:}
+    sips -z "$px" "$px" assets/logo/logo.png --out "$icons/icon_${slot%%:*}.png" > /dev/null
 done
 iconutil -c icns "$icons" -o "$app/Contents/Resources/logo.icns"
 rm -rf "$icons"
