@@ -5,23 +5,29 @@
 //! - Only the installed copy does this (`update::installed`): a launcher build, which may be older or newer than it,
 //!   leaves the links to Settings › DAWs, so two copies of the app never take turns putting their own in.
 //! - A link that is there but isn't this copy's own is updated, as Settings › DAWs' Install would, when this app is
-//!   newer than the one that last wrote that link ([`FL_BY_KEY`] and the others, kept by every write that went in,
-//!   Install's too; a link that couldn't be written, because the DAW had it open, is tried again at the next start). So an
-//!   update of the app updates the links, and a newer link put in by hand isn't swapped back for an older one. Only
-//!   the link's own files are written (`mo_dawlink::scripts`), and FL's "Let the app make changes" line stays as the
-//!   user set it.
+//!   newer than the one that last wrote that link ([`FL_BY_KEY`] and the others, kept by every write that went into
+//!   every folder, Install's too: [`went_everywhere`]). A copy that couldn't be written, because the DAW had it open, is
+//!   tried again at the next start, and only the copies that aren't the app's own yet are written then. So an update
+//!   of the app updates the links, and a newer link put in by hand isn't swapped back for an older one. Only the link's
+//!   own files are written (`mo_dawlink::scripts`), and FL's "Let the app make changes" line stays as the user set it.
 //! - A link that isn't there goes in only at the first look ([`FIRST_LOOK_KEY`]), and only into a DAW whose user
 //!   folder is there. After that it's the user's choice: one taken out with Take out stays out.
 //! - The CLAP plugin the installer put beside the app goes into `Common Files\CLAP` the same way (Solomon picked that
 //!   folder, with Windows' Yes): put in whenever it isn't there and no version has put it in yet ([`plugin_step`]),
 //!   updated as the links are. Windows asks once for each version, never while a DAW has the plugin loaded, not again
 //!   for a version you said no to, and after a step that failed only on another day. A test plugin put in by hand
-//!   (the same plugin: a DAW would list it twice) keeps the app from putting it in.
+//!   (the same plugin: a DAW would list it twice) keeps the app from putting it in, and makes it forget that a version
+//!   put its own in (`tools/dev/install-test-plugin.ps1` takes that one out), so the app's own goes back in, with
+//!   Windows' Yes, once the test plugin is gone.
 //! - None of this runs when the settings can't be kept (what it did would be forgotten and done again), or after
-//!   Install or Take out on Settings › DAWs in this run (that's your choice).
+//!   Install or Take out on Settings › DAWs in this run (that's your choice). Take out there also counts as the first
+//!   look, so a link taken out before the first look isn't put back by it.
 //!
-//! Nothing here asks: a copy the DAW has open (Bitwig on Windows) can't be replaced, so the update waits for a start
-//! when the DAW is closed, and Settings › DAWs still offers Install.
+//! Only the plugin asks (Windows' question, needed for `Common Files\CLAP`): a link's copy the DAW has open (Bitwig on
+//! Windows) can't be replaced, so its update waits for a start when the DAW is closed, and Settings › DAWs offers
+//! Update meanwhile.
+
+use std::path::PathBuf;
 
 use mo_dawlink::scripts::{BitwigInstalled, Installed, ScriptState};
 
@@ -59,6 +65,13 @@ pub fn newer_than_writer(this: &str, written_by: Option<&str>) -> bool {
         None => true,
         Some(writer) => Version::parse(this).is_some_and(|v| v > writer),
     }
+}
+
+/// Whether a write of a link counts as this version's, so its `_BY` key ([`FL_BY_KEY`] and the others) is kept: it went
+/// in, and into every folder. When a folder couldn't take it (Bitwig had that copy open), the key isn't kept, so the
+/// next start tries that folder again (the 26 Nov review's DK-1).
+pub fn went_everywhere(done: &Installed) -> bool {
+    !done.went.is_empty() && done.failed.is_empty()
 }
 
 /// What to do with one DAW's link.
@@ -110,57 +123,111 @@ fn listed(names: &[&str]) -> String {
     }
 }
 
+/// The folders of a write that failed, by their full paths: `a`, `a and b`.
+fn folders(failed: &[(PathBuf, String)]) -> String {
+    let names: Vec<String> = failed.iter().map(|(f, _)| f.display().to_string()).collect();
+    listed(&names.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
 /// The card's title and words, when a link went in or was updated. None when nothing went in: a copy that couldn't be
-/// written (the DAW has it open) is only logged, as it's tried again at the next start and Settings › DAWs shows it.
+/// written (the DAW has it open) is only logged then, as it's tried again at the next start and Settings › DAWs shows
+/// it. When it went into some folders and not others, the card says so and names the ones it didn't (DK-1).
 pub fn card(done: &Done) -> Option<(String, String)> {
     let mut put_in: Vec<&str> = Vec::new();
     let mut updated: Vec<&str> = Vec::new();
-    let mut words: Vec<&str> = Vec::new();
+    // Went into some folders, not all: by the step, so the title says what it was.
+    let mut partly_in: Vec<&str> = Vec::new();
+    let mut partly_updated: Vec<&str> = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut sort = |name, step: Step, all: bool| match (step == Step::PutIn, all) {
+        (true, true) => put_in.push(name),
+        (false, true) => updated.push(name),
+        (true, false) => partly_in.push(name),
+        (false, false) => partly_updated.push(name),
+    };
     if let Some((step, fl)) = &done.fl
         && !fl.went.is_empty()
     {
+        sort("FL Studio", *step, fl.failed.is_empty());
         if *step == Step::PutIn {
-            put_in.push("FL Studio");
             words.push(
                 "Restart FL Studio, then in Options \u{203a} MIDI settings pick DAWmate as the controller type of its \
-                 port.",
+                 port."
+                    .to_owned(),
+            );
+        } else if !fl.removed.is_empty() {
+            // The copy from before the rename went: FL's port still names that script, which is gone (DK-6).
+            words.push(
+                "Restart FL Studio, then in Options \u{203a} MIDI settings pick DAWmate as the controller type of the \
+                 port the Music Organiser script was on: that older copy is taken out."
+                    .to_owned(),
             );
         } else {
-            updated.push("FL Studio");
-            words.push("Restart FL Studio to load the new script.");
+            words.push("Restart FL Studio to load the new script.".to_owned());
+        }
+        for (file, _) in &fl.left {
+            words.push(format!(
+                "The copy from before the rename, {}, couldn't be taken out, so FL Studio may list both: pick DAWmate.",
+                file.display()
+            ));
+        }
+        if !fl.failed.is_empty() {
+            words.push(format!(
+                "Couldn't put the script in {}: install it again from Settings \u{203a} DAWs once that folder can \
+                 take it.",
+                folders(&fl.failed)
+            ));
         }
     }
     if let Some((step, bw)) = &done.bitwig
         && !bw.installed.went.is_empty()
     {
-        if *step == Step::PutIn {
-            put_in.push("Bitwig");
-            words.push("Bitwig picks up the extension by itself (restart Bitwig if it doesn't).");
+        sort("Bitwig", *step, bw.installed.failed.is_empty());
+        if bw.installed.failed.is_empty() {
+            words.push(if *step == Step::PutIn {
+                "Bitwig picks up the extension by itself (restart Bitwig if it doesn't).".to_owned()
+            } else {
+                "Bitwig picks up the new extension by itself (restart Bitwig if it doesn't).".to_owned()
+            });
         } else {
-            updated.push("Bitwig");
-            words.push("Bitwig picks up the new extension by itself (restart Bitwig if it doesn't).");
+            // Most likely the copy Bitwig loads, which it keeps open: never said to be updated then.
+            words.push(format!(
+                "Couldn't put the new extension in {}: Bitwig keeps the copy it loads open, so it may still run the \
+                 older one from there. It goes in at a later start when Bitwig is closed, or close Bitwig and install \
+                 it again from Settings \u{203a} DAWs.",
+                folders(&bw.installed.failed)
+            ));
         }
     }
-    let links = !put_in.is_empty() || !updated.is_empty();
+    let links = done.fl.as_ref().is_some_and(|(_, fl)| !fl.went.is_empty())
+        || done.bitwig.as_ref().is_some_and(|(_, bw)| !bw.installed.went.is_empty());
     if let Some((step, plugin)) = &done.plugin
         && !plugin.went.is_empty()
     {
-        if *step == Step::PutIn {
-            put_in.push("your CLAP plug-ins");
-            words.push(
-                "Add the DAWmate plugin to a track in your DAW (in Bitwig, rescan the plug-ins in Settings \u{203a} \
-                 Locations if it isn't listed).",
-            );
+        sort("your CLAP plug-ins", *step, plugin.failed.is_empty());
+        words.push(if *step == Step::PutIn {
+            "Add the DAWmate plugin to a track in your DAW (in Bitwig, rescan the plug-ins in Settings \u{203a} \
+             Locations if it isn't listed)."
+                .to_owned()
         } else {
-            updated.push("your CLAP plug-ins");
-            words.push("Restart your DAW for the new DAWmate plugin.");
+            "Restart your DAW for the new DAWmate plugin.".to_owned()
+        });
+    }
+    let mut said: Vec<String> = Vec::new();
+    for (names, what) in [
+        (&put_in, "now in"),
+        (&updated, "updated in"),
+        (&partly_in, "only partly in"),
+        (&partly_updated, "only partly updated in"),
+    ] {
+        if !names.is_empty() {
+            said.push(format!("{what} {}", listed(names)));
         }
     }
-    let title = match (put_in.is_empty(), updated.is_empty()) {
-        (true, true) => return None,
-        (false, true) => format!("DAWmate is now in {}", listed(&put_in)),
-        (true, false) => format!("DAWmate is updated in {}", listed(&updated)),
-        (false, false) => format!("DAWmate is now in {}, and updated in {}", listed(&put_in), listed(&updated)),
+    let title = match said.as_slice() {
+        [] => return None,
+        [one] => format!("DAWmate is {one}"),
+        [rest @ .., last] => format!("DAWmate is {}, and {last}", rest.join(", ")),
     };
     let mut detail = words.join(" ");
     if links {
@@ -246,6 +313,57 @@ mod tests {
         assert_eq!(title, "DAWmate is updated in your CLAP plug-ins");
         assert_eq!(detail, "Restart your DAW for the new DAWmate plugin.");
         assert_eq!(listed(&["a", "b", "c"]), "a, b and c");
+    }
+
+    fn failed(folder: &str) -> (PathBuf, String) {
+        (PathBuf::from(folder), "in use".into())
+    }
+
+    #[test]
+    fn a_write_counts_only_when_every_folder_took_it() {
+        assert!(went_everywhere(&went("K")));
+        assert!(!went_everywhere(&Installed::default()), "nothing went in");
+        // Bitwig had the Documents copy open: that folder is tried again at the next start (DK-1).
+        let half = Installed { failed: vec![failed("D")], ..went("K") };
+        assert!(!went_everywhere(&half));
+        let none = Installed { failed: vec![failed("D")], ..Installed::default() };
+        assert!(!went_everywhere(&none));
+    }
+
+    #[test]
+    fn a_card_never_says_updated_when_a_folder_failed() {
+        let installed = Installed { failed: vec![failed("C:\\Docs\\Bitwig Studio\\Extensions")], ..went("K") };
+        let done = Done {
+            bitwig: Some((Step::Update, BitwigInstalled { installed, ..BitwigInstalled::default() })),
+            ..Done::default()
+        };
+        let (title, detail) = card(&done).unwrap();
+        assert_eq!(title, "DAWmate is only partly updated in Bitwig");
+        assert!(detail.contains("Couldn't put the new extension in C:\\Docs\\Bitwig Studio\\Extensions"), "{detail}");
+        assert!(detail.contains("at a later start when Bitwig is closed"), "{detail}");
+        assert!(!detail.contains("picks up the new extension"), "{detail}");
+        // With another link that went in whole.
+        let done = Done { fl: Some((Step::Update, went("F"))), ..done };
+        assert_eq!(card(&done).unwrap().0, "DAWmate is updated in FL Studio, and only partly updated in Bitwig");
+    }
+
+    #[test]
+    fn a_card_for_fls_script_from_before_the_rename_says_to_pick_dawmate() {
+        let fl = Installed {
+            removed: vec![PathBuf::from("F\\Music Organiser\\device_MusicOrganiser.py")],
+            ..went("F\\DAWmate")
+        };
+        let (title, detail) = card(&Done { fl: Some((Step::Update, fl)), ..Done::default() }).unwrap();
+        assert_eq!(title, "DAWmate is updated in FL Studio");
+        assert!(detail.contains("pick DAWmate as the controller type of the port the Music Organiser script was on"));
+        assert!(!detail.contains("to load the new script"), "{detail}");
+        // The old copy couldn't be taken out: FL may list both.
+        let fl = Installed { left: vec![failed("F\\Music Organiser\\device_MusicOrganiser.py")], ..went("F\\DAWmate") };
+        let (_, detail) = card(&Done { fl: Some((Step::Update, fl)), ..Done::default() }).unwrap();
+        assert!(
+            detail.contains("device_MusicOrganiser.py, couldn't be taken out, so FL Studio may list both"),
+            "{detail}"
+        );
     }
 
     #[test]

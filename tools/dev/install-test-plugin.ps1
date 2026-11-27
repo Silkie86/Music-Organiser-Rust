@@ -14,6 +14,10 @@
   replaced (Windows won't replace a file a program has open). In Bitwig: Settings, Locations, Plug-ins, then rescan
   if it doesn't show.
 
+  The installed DAWmate's own plugin (DAWmate.clap in the CLAP folder) is the same plugin, so it comes out while the
+  test one is in. -Remove puts it back from the installed app's folder; else the installed app puts it back itself
+  at a start once the test one is gone (Windows asks first).
+
   Options:  -Repo <folder>   build this copy of the code instead of the launcher's
             -Remove          take the plugin out of the CLAP folder again
 
@@ -40,6 +44,8 @@ $OldPlugin = [IO.Path]::Combine($DataRoot, 'Programs', 'Common', 'CLAP', 'Music 
 # The copy the installed DAWmate puts in the CLAP folder: the same plugin (one ID), so it goes as this test plugin goes
 # in, and the installed app leaves the plugin alone while the test one is there (mo_app::daw_links).
 $InstalledPlugin = Join-Path $ClapDir 'DAWmate.clap'
+# The installed DAWmate's own plugin, beside the app in its usual folder: -Remove puts it back in from there.
+$AppPlugin = [IO.Path]::Combine($DataRoot, 'Programs', 'DAWmate', 'plugins', 'DAWmate.clap')
 
 # Runs a few lines of PowerShell as administrator (Windows asks first) and says whether they worked.
 function AsAdmin([string]$Lines) {
@@ -70,11 +76,20 @@ if ($Remove) {
         }
         Say "Removed $FirstPlugin" 'Green'
     }
+    # The installed DAWmate's own plugin goes back in the same step, as putting the test one in took it out.
+    $putBack = ''
+    if ((Test-Path -LiteralPath $AppPlugin) -and -not (Test-Path -LiteralPath $InstalledPlugin)) {
+        $putBack = "`nCopy-Item -LiteralPath $(Quoted $AppPlugin) -Destination $(Quoted $InstalledPlugin) -ErrorAction SilentlyContinue"
+    }
     if (Test-Path -LiteralPath $Plugin) {
-        if ((AsAdmin "Remove-Item -LiteralPath $(Quoted $Plugin)") -and -not (Test-Path -LiteralPath $Plugin)) {
+        if ((AsAdmin "Remove-Item -LiteralPath $(Quoted $Plugin)$putBack") -and -not (Test-Path -LiteralPath $Plugin)) {
             Say "Removed $Plugin" 'Green'
         }
         else { Say "Couldn't remove $Plugin : is Bitwig open? Close it and try again." 'Red'; exit 1 }
+        if ($putBack) {
+            if (Test-Path -LiteralPath $InstalledPlugin) { Say "Put the installed DAWmate's own plugin back: $InstalledPlugin" 'Green' }
+            else { Say "Couldn't put the installed DAWmate's own plugin back. It puts it back itself at a start (Windows asks first)." 'Yellow' }
+        }
     }
     elseif (-not $hadFirst) { Say 'The test plugin isn''t installed.' }
     exit 0
@@ -130,4 +145,5 @@ if (Test-Path -LiteralPath $InstalledPlugin) {
 }
 RemoveOld
 Say "Installed: $Plugin" 'Green'
+Say 'While it is in, the installed DAWmate''s own plugin is out (they are the same plugin). Run this with -Remove to take the test one out and put that one back.' 'Green'
 Say 'Open Bitwig, add the instrument "DAWmate (test)" to a track, and open its window. A song that had "Music Organiser (test)" in it opens it as DAWmate (test).' 'Green'

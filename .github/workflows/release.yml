@@ -141,8 +141,11 @@ jobs:
     needs: bitwig-extension
     runs-on: windows-latest
     steps:
+      # The whole history, so the app's build number can be counted (crates/mo-app/build.rs counts only in a clone that
+      # isn't shallow): the released app's version line says "build N", as the launcher's builds do (review IN-3).
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # the stable branch
         with:

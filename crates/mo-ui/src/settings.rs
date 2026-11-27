@@ -1691,7 +1691,8 @@ fn install_fl(app: &AppWindow) {
         drop(writing);
         log_fl_install(&done, "Settings");
         let note = page::installed_note(&done);
-        let wrote = !done.went.is_empty();
+        // Only when every folder took it: else the look at the next start tries the rest again (DK-1).
+        let wrote = mo_app::daw_links::went_everywhere(&done);
         let _ = slint::invoke_from_event_loop(move || {
             if wrote {
                 kept_who_wrote(mo_app::daw_links::FL_BY_KEY);
@@ -1830,7 +1831,8 @@ fn install_bitwig(app: &AppWindow) {
         drop(writing);
         log_bitwig_install(&done, "Settings");
         let note = page::bitwig_installed_note(&done);
-        let wrote = !done.installed.went.is_empty();
+        // Only when every folder took it: else the look at the next start tries the rest again (DK-1).
+        let wrote = mo_app::daw_links::went_everywhere(&done.installed);
         let _ = slint::invoke_from_event_loop(move || {
             if wrote {
                 kept_who_wrote(mo_app::daw_links::BITWIG_BY_KEY);
@@ -1887,6 +1889,11 @@ fn take_out(app: &AppWindow, bitwig: bool) {
         }
         let note = page::taken_out_note(bitwig, &done);
         let _ = slint::invoke_from_event_loop(move || {
+            // A link taken out by hand counts as the first look, so the look never puts it back in by itself (DK-4).
+            let first_look = mo_app::daw_links::FIRST_LOOK_KEY;
+            if value(first_look).is_none_or(|v| v.trim().is_empty()) && !remember(first_look, "done") {
+                log::warning("Settings", "Couldn't keep that the DAWs' links were chosen by hand");
+            }
             PAGE.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
                     p.daws_installing = false;
