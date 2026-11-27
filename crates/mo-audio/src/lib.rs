@@ -29,7 +29,7 @@ mod write;
 pub use other::OTHER_EXTENSIONS;
 pub use read::{
     EMPTY_FILE, MAX_SECONDS, OGG_IN_WAV, can_read_from, frame_at, read, read_from, read_parts, read_parts_from,
-    reads_exactly,
+    read_span, reads_exactly,
 };
 pub use wma::WMA_EXTENSIONS;
 pub use write::write_wav;

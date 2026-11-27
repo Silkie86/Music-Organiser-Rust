@@ -50,33 +50,43 @@ pub fn to_drag(original: &Path, db: Option<i32>, is_loop: bool) -> (PathBuf, Opt
     }
 }
 
-/// How long the copies' folder, once looked up, is used for drags before it's looked up again (a change in Settings
+/// How long the export folder, once looked up, is used for drags before it's looked up again (a change in Settings
 /// reaches drags within this; the song library isn't opened twice for each drag in between).
 const FOLDER_KEPT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The copies' folder this run, and when it was looked up.
-static FOLDER_NOW: Mutex<Option<(std::time::Instant, Result<PathBuf, String>)>> = Mutex::new(None);
+/// The export folder this run, and when it was looked up.
+static EXPORTS_NOW: Mutex<Option<(std::time::Instant, Result<PathBuf, String>)>> = Mutex::new(None);
 
 /// [`folder_in`] for the data folder in use, looked up again at most every [`FOLDER_KEPT`].
 fn folder_now() -> Result<PathBuf, String> {
-    let mut now = FOLDER_NOW.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    exports_now().map(|exports| exports.join(FOLDER))
+}
+
+/// The export folder set in Settings for the data folder in use ([`exports_in`]), looked up again at most every
+/// [`FOLDER_KEPT`]: for the copies a drag makes (trimmed ones here, edited ones in `crate::edit_copy`).
+pub(crate) fn exports_now() -> Result<PathBuf, String> {
+    let mut now = EXPORTS_NOW.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     match &*now {
-        Some((at, folder)) if at.elapsed() < FOLDER_KEPT => folder.clone(),
+        Some((at, exports)) if at.elapsed() < FOLDER_KEPT => exports.clone(),
         _ => {
-            let folder = folder_in(&crate::paths::data_dir());
-            *now = Some((std::time::Instant::now(), folder.clone()));
-            folder
+            let exports = exports_in(&crate::paths::data_dir());
+            *now = Some((std::time::Instant::now(), exports.clone()));
+            exports
         }
     }
 }
 
-/// Where trimmed copies go for the data folder `data`: [`FOLDER`] in the export folder set in Settings, read from the
-/// app's own song library (songs.db once it's the app's own, library.db before), as every other export reads it
-/// (DF-2, 14 Nov review: it read library.db, which the archive step takes away). Opens the library: off the window's
-/// thread.
+/// Where trimmed copies go for the data folder `data`: [`FOLDER`] in its export folder ([`exports_in`]).
 pub fn folder_in(data: &Path) -> Result<PathBuf, String> {
+    exports_in(data).map(|exports| exports.join(FOLDER))
+}
+
+/// The export folder set in Settings for the data folder `data`, read from the app's own song library (songs.db once
+/// it's the app's own, library.db before), as every other export reads it (DF-2, 14 Nov review: it read library.db,
+/// which the archive step takes away). Opens the library: off the window's thread.
+fn exports_in(data: &Path) -> Result<PathBuf, String> {
     let library = mo_library::songs_db::to_read(data);
-    crate::bitwig_convert::export_folder_in(&library).map(|exports| exports.join(FOLDER))
+    crate::bitwig_convert::export_folder_in(&library)
 }
 
 /// Whether `name` is a copy whose making was cut short, in [`FOLDER`]: written under this program's own name first

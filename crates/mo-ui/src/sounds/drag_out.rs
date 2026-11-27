@@ -1,7 +1,8 @@
 //! Dragging sounds off the Sounds page into a DAW or a folder (`crate::drag` runs the drag): a tile, a line of any
 //! list view, a pad of the kit builder, a "Sounds like this" line, a line of the Galaxy's swept list, or the picked
 //! sound by its card's handle. Each goes out as its own file, where it is on disk, never moved (rule 2); with Trim
-//! silence on, as a trimmed copy in the export folder instead ([`mo_app::trim_copy`]), the original left as it is.
+//! silence on, as a trimmed copy in the export folder instead ([`mo_app::trim_copy`]), the original left as it is. A
+//! part picked on the card's waveform goes as a copy of the part ([`mo_app::edit_copy`]; [`super::part`]).
 //!
 //! A drag that lands counts towards how liked the sound is, as in the C# app ([`super::did`]; the C# app counted it as
 //! the drag began).
@@ -13,7 +14,7 @@ use mo_app::sounds as list;
 use mo_sounds::Peaks;
 use slint::ComponentHandle;
 
-use super::{PAGE, did, kit};
+use super::{PAGE, did, kit, part};
 use crate::drag::{self, Drag, Outcome};
 use crate::{AppWindow, SoundsData};
 
@@ -37,28 +38,39 @@ pub(super) fn wire(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         let at = PAGE.with(|p| usize::try_from(row).ok().and_then(|r| p.borrow().entry(r)));
         if let Some(at) = at {
-            carry(&app, at, Spot::Row(row));
+            carry(&app, at, Spot::Row(row), None);
         }
     });
     let weak = app.as_weak();
     data.on_drag_pad(move |pad| {
         let Some(app) = weak.upgrade() else { return };
         if let Some(at) = kit::pad_place(pad) {
-            carry(&app, at, Spot::Pad(pad));
+            carry(&app, at, Spot::Pad(pad), None);
         }
     });
     let weak = app.as_weak();
     data.on_drag_alike(move |place| {
         let Some(app) = weak.upgrade() else { return };
         if let Ok(at) = usize::try_from(place) {
-            carry(&app, at, Spot::Alike(place));
+            carry(&app, at, Spot::Alike(place), None);
         }
     });
+    // The card's handle carries the part picked on its waveform, if there is one, unless Ctrl was held as it was
+    // pressed (`whole`).
     let weak = app.as_weak();
-    data.on_drag_picked(move || {
+    data.on_drag_picked(move |whole| {
         let Some(app) = weak.upgrade() else { return };
         if let Some(at) = PAGE.with(|p| p.borrow().picked) {
-            carry(&app, at, Spot::Picked);
+            let part = if whole { None } else { part::picked_seconds() };
+            carry(&app, at, Spot::Picked, part);
+        }
+    });
+    // A press inside the part on the card's waveform that moved: the part.
+    let weak = app.as_weak();
+    data.on_drag_part(move || {
+        let Some(app) = weak.upgrade() else { return };
+        if let (Some(at), Some(part)) = (PAGE.with(|p| p.borrow().picked), part::picked_seconds()) {
+            carry(&app, at, Spot::Picked, Some(part));
         }
     });
     let weak = app.as_weak();
@@ -100,8 +112,12 @@ pub fn card_at_row(app: &AppWindow, row: i32) -> Option<Payload> {
     drag_out::sounds(vec![item(app, at)?.0])
 }
 
-/// Drags the sound at `at` in the library out of the app, picked up at `spot`.
-fn carry(app: &AppWindow, at: usize, spot: Spot) {
+/// Drags the sound at `at` in the library out of the app, picked up at `spot`: the whole file, or with `part` (from
+/// and to, in seconds into it) a copy of that part ([`mo_app::edit_copy::part_to_drag`]). A part longer than
+/// [`mo_app::edit_copy::MOST_SECONDS`] goes as the whole file, and the card says so.
+fn carry(app: &AppWindow, at: usize, spot: Spot, part: Option<(f64, f64)>) {
+    let too_long = part.is_some_and(|(from, to)| to - from > mo_app::edit_copy::MOST_SECONDS);
+    let part = part.filter(|_| !too_long);
     let Some((mut item, unread)) = item(app, at) else { return };
     // By its id: the sounds may be read again while it's carried, and another take its place.
     let Some((id, trim)) = PAGE.with(|p| {
@@ -124,14 +140,21 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
                         item.card.title
                     ));
                 }
-                // Trim silence on: the trimmed copy goes instead (made now, or the one made before). One that can't
-                // be made leaves the original to go: the card says so, and the log says why (SN-12).
-                let (path, why) = mo_app::trim_copy::to_drag(&item.path, trim.0, trim.1);
-                let untrimmed = why.is_some();
-                if let Some(why) = why {
-                    mo_app::log::warning("Sounds", &why);
+                // A part: its copy, made now or the one made before; one that can't be made is no drag (the
+                // card says why). The part is what was asked for, so Trim silence doesn't come into it.
+                let mut untrimmed = false;
+                if let Some((from, to)) = part {
+                    item.path = mo_app::edit_copy::part_to_drag(&item.path, from, to)?;
+                } else {
+                    // Trim silence on: the trimmed copy goes instead (made now, or the one made before). One that
+                    // can't be made leaves the original to go: the card says so, and the log says why (SN-12).
+                    let (path, why) = mo_app::trim_copy::to_drag(&item.path, trim.0, trim.1);
+                    untrimmed = why.is_some();
+                    if let Some(why) = why {
+                        mo_app::log::warning("Sounds", &why);
+                    }
+                    item.path = path;
                 }
-                item.path = path;
                 // Its waveform, for its line on the card, read here too when it wasn't yet (none if it can't be).
                 if let Some(Unread { db, id }) = unread
                     && let Ok(waves) = super::peaks::read(&db, &[id])
@@ -142,6 +165,15 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
                 let mut payload = drag_out::sounds(vec![item]).ok_or_else(|| "There's nothing to drag.".to_owned())?;
                 if untrimmed {
                     payload.caption.push_str(", untrimmed");
+                }
+                if let Some((from, to)) = part {
+                    payload.caption.push_str(&format!(" · a part, {}", part::length_text(to - from)));
+                }
+                if too_long {
+                    payload.caption.push_str(&format!(
+                        " · the whole file: a part over {} minutes isn't copied",
+                        mo_app::edit_copy::MOST_SECONDS / 60.0
+                    ));
                 }
                 Ok(payload)
             }),

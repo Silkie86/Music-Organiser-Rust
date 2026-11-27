@@ -2723,6 +2723,7 @@ fn sounds_shots(
     pick_sound(app, 6);
     data.set_played(0.35);
     data.set_tile_played(0.35);
+    part_shots(app, window, shots)?;
     // A sound deep in a pack, with folder names too long for a line, and six tags: its card wraps them, at the usual
     // width and as narrow as it goes, with nothing cut off on the right. Found by name, as the shuffled order changes
     // with every run.
@@ -4905,6 +4906,54 @@ fn drag_seam(
         return Err(format!("{name}: a double-click's reset left it {} wide, not its usual {was}", width()));
     }
     Ok(held)
+}
+
+/// Two places across the Sounds card's waveform ([`CARD_WAVE`]) to drag between to pick a part.
+const PART_DRAG: (f32, f32) = (1100.0, 1300.0);
+
+/// A part picked on the Sounds card's waveform (the 1.1 plan's light sample edits): pressed and dragged across it, its
+/// edges snapping to the sound's hits, and the handle under it lit to carry the part. A click outside it lets it go, as
+/// Esc does.
+fn part_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let data = app.global::<mo_ui::SoundsData>();
+    // A thirty-second of the way apart: about 12 points on the card, so every place is within snapping reach of one.
+    let hits: Vec<f64> = (1..32).map(|i| f64::from(i) / 32.0).collect();
+    mo_ui::sounds::hits_for_screens(app, &hits);
+    let ((from, to), y) = (PART_DRAG, CARD_WAVE.1);
+    let pick = || {
+        let button = slint::platform::PointerEventButton::Left;
+        let (a, b) = (slint::LogicalPosition::new(from, y), slint::LogicalPosition::new(to, y));
+        window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: a });
+        window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: a, button });
+        window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: b });
+        window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: b, button });
+    };
+    pick();
+    let (a, b) = (data.get_part_from() * 32.0, data.get_part_to() * 32.0);
+    if data.get_part_text().is_empty() {
+        return Err(format!(
+            "sounds-part.png: dragging across the card's waveform at {PART_DRAG:?}, {y} picked no part"
+        ));
+    }
+    if (a - a.round()).abs() > 1e-3 || (b - b.round()).abs() > 1e-3 || b <= a {
+        return Err(format!("sounds-part.png: the part's edges ({a}, {b} thirty-seconds) didn't snap to the hits"));
+    }
+    hover(window, from + 20.0, y);
+    shots.push(("sounds-part.png".into(), capture(window)));
+    click(window, from - 40.0, y);
+    if !data.get_part_text().is_empty() {
+        return Err("sounds-part.png: a click outside the part didn't let it go".into());
+    }
+    pick();
+    if !mo_ui::sounds::escape(app) || !data.get_part_text().is_empty() {
+        return Err("sounds-part.png: Esc didn't let the part go".into());
+    }
+    hover(window, -1.0, -1.0);
+    Ok(())
 }
 
 /// A left click at a point in the window.

@@ -256,16 +256,25 @@ pub fn peak(audio: &AudioData) -> f32 {
 pub fn part(audio: &AudioData, span: Span) -> AudioData {
     let frames = frames_of(audio);
     let span = span.within(frames).unwrap_or(Span { start: frames, end: frames });
-    let rate = f64::from(audio.sample_rate);
     let mut out = AudioData {
         channels: audio.channels.iter().map(|ch| ch[span.start..span.end].to_vec()).collect(),
         embedded_is_loop: if span.len() == frames { audio.embedded_is_loop } else { None },
         ..audio.clone_notes()
     };
-    let n = span.len();
-    let edge_in = if span.start > 0 { ((EDGE_IN_SECONDS * rate).round() as usize).min(n / 2) } else { 0 };
-    let edge_out = if span.end < frames { ((EDGE_OUT_SECONDS * rate).round() as usize).min(n / 2) } else { 0 };
-    for ch in &mut out.channels {
+    ease_cuts(&mut out, span.start > 0, span.end < frames);
+    out.file_seconds = out.seconds();
+    out
+}
+
+/// Fades a part cut out of a sound in over [`EDGE_IN_SECONDS`] when it was cut at its start (`cut_start`) and out
+/// over [`EDGE_OUT_SECONDS`] when it was cut at its end (`cut_end`), so neither cut clicks: [`part`]'s edges, for a
+/// part read on its own ([`crate::read_span`]).
+pub fn ease_cuts(audio: &mut AudioData, cut_start: bool, cut_end: bool) {
+    let n = frames_of(audio);
+    let rate = f64::from(audio.sample_rate);
+    let edge_in = if cut_start { ((EDGE_IN_SECONDS * rate).round() as usize).min(n / 2) } else { 0 };
+    let edge_out = if cut_end { ((EDGE_OUT_SECONDS * rate).round() as usize).min(n / 2) } else { 0 };
+    for ch in &mut audio.channels {
         for (i, s) in ch.iter_mut().enumerate().take(edge_in) {
             *s *= i as f32 / edge_in as f32;
         }
@@ -273,8 +282,6 @@ pub fn part(audio: &AudioData, span: Span) -> AudioData {
             ch[n - 1 - j] *= j as f32 / edge_out as f32;
         }
     }
-    out.file_seconds = out.seconds();
-    out
 }
 
 impl AudioData {
