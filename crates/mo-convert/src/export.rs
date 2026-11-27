@@ -105,11 +105,12 @@ pub fn copy_for(
     }
     let raw = std::fs::read(project).map_err(|e| format!("Couldn't read the song: {e}"))?;
     let mut views = arrangement::read_bytes(project, &raw);
-    // The first view, unless nothing plays in it (no notes, no audio) and something does in another: an FL song
-    // played in pattern mode has no patterns in its playlist (an automation clip may be there on its own), and its
-    // second view lays its patterns out one after another, as it opens in Bitwig (1,743 of Solomon's FL saves in the
-    // real-song test of 27 Nov 2026 couldn't be copied before).
-    let plays = |v: &Arrangement| counts(v) != (0, 0);
+    // The first view, unless it holds no notes or audio and another does: an FL song played in pattern mode has no
+    // patterns in its playlist (an automation clip may be there on its own), and its second view lays its patterns out
+    // one after another, as it opens in Bitwig (1,743 of Solomon's FL saves in the real-song test of 27 Nov 2026
+    // couldn't be copied before). Muted notes count: a song whose channels are all switched off is still copied.
+    let plays =
+        |v: &Arrangement| v.lanes.iter().flat_map(|l| &l.clips).any(|c| !c.notes.is_empty() || !c.audio.is_empty());
     let chosen = if views.first().is_some_and(plays) { 0 } else { views.iter().position(plays).unwrap_or(0) };
     let first_view = views.first().map(|v| v.view);
     if views.is_empty() {
