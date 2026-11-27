@@ -3335,6 +3335,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "smol_str 0.3.7",
  "thread-priority",
 ]
 

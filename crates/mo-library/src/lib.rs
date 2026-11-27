@@ -34,6 +34,8 @@ pub use db::{
     UsageRules,
 };
 pub use mo_formats::{Confidence, PluginKind};
+/// The short text a [`PluginUse`] holds its names in.
+pub use smol_str::SmolStr;
 pub use songs::{SaveRun, Song, SongChoices, SongDoubt};
 
 use chrono::NaiveDateTime;

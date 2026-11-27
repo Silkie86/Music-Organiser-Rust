@@ -465,7 +465,7 @@ impl KnownPlugins {
                 known.by_id.entry(id_key(&id)).or_insert((name, kind));
             }
         }
-        let mut tally: HashMap<String, [usize; 3]> = HashMap::new();
+        let mut tally: HashMap<mo_library::SmolStr, [usize; 3]> = HashMap::new();
         for used in lib.plugin_uses().unwrap_or_default() {
             let at = match used.kind {
                 PluginKind::Instrument => 0,
@@ -483,7 +483,7 @@ impl KnownPlugins {
             } else {
                 PluginKind::NoteEffect
             };
-            known.in_songs.insert(key, kind);
+            known.in_songs.insert(key.into(), kind);
         }
         known
     }

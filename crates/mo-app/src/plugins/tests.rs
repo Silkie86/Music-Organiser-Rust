@@ -20,8 +20,8 @@ fn uses(save: i64, name: &str, format: &str, kind: PluginKind, installed: bool, 
     PluginUse {
         save,
         name: name.into(),
-        key: mo_library::read::name_key(name),
-        vendor: String::new(),
+        key: mo_library::read::name_key(name).into(),
+        vendor: Default::default(),
         kind,
         format: format.into(),
         installed,
@@ -33,7 +33,7 @@ fn space(name: &str, folders: &[(&str, u8, u64)]) -> StoredSpace {
     StoredSpace {
         key: mo_library::read::name_key(name),
         name: name.into(),
-        vendor: String::new(),
+        vendor: Default::default(),
         folders: folders
             .iter()
             .map(|(p, k, b)| StoredFolder {
