@@ -8,6 +8,7 @@ built.
 | File | What it does |
 | --- | --- |
 | `product.toml` | The name (DAWmate), description, publisher, website, logo files and the installer's fixed id. |
+| `assets/logo/` | The logo: its SVG drawings and what `tools/logo` makes from them (the .ico, the Mac's .icns, and Setup's pictures `setup-side-*.bmp` and `setup-small-*.bmp`, one per screen scale). |
 | `installer/setup.iss` | The Inno Setup script: files, shortcuts, the "Where should your data go?" page, uninstall. |
 | `installer/build.ps1` | Reads `product.toml` and `Cargo.toml`, runs Inno Setup, writes `dist/<Name>-Setup-<version>.exe`. |
 | `installer/check.ps1` | Tries a setup on a CI machine: new PC, picked data folder, PC with data, update, uninstall. |
