@@ -58,6 +58,8 @@ const F_SAMPLE_FILE_REF: u32 = 0xd3b;
 const CLS_HARDWARE_IO: u32 = 0x461;
 // Fields.
 pub(super) const F_DEVICE_NAME: u32 = 0x9a;
+/// On a device's definition: 0 when it's switched off with its power button.
+const F_DEVICE_ON: u32 = 0xa3;
 const F_DEVICE_VENDOR: u32 = 0x9b;
 pub(super) const F_DEVICE_CATEGORY: u32 = 0x9c;
 /// What a device is: 0 an audio effect, 1 a note effect, 2 an instrument (as Bitwig 6.1 saves it, on its own devices
@@ -609,6 +611,11 @@ pub(crate) fn chains(doc: &Document) -> crate::shape::Chains {
             continue;
         }
         if matches!(device_kind(object), PluginKind::Instrument | PluginKind::NoteEffect) {
+            continue;
+        }
+        // A device switched off with its power button does nothing to the sound: Solomon's template keeps a limiter
+        // on the master, usually off, so counting it would make every song look finished.
+        if object.num(F_DEVICE_ON) == Some(0.0) {
             continue;
         }
         let name = object.str(F_DEVICE_NAME);

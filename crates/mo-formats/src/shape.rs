@@ -13,7 +13,7 @@ use regex::Regex;
 use crate::arrangement::{Arrangement, LaneKind};
 
 /// Goes up by one whenever what a shape is read as changes (rule 7): the library reads every kept shape again.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// What a save holds, counted.
 #[derive(Clone, Debug, Default, PartialEq)]

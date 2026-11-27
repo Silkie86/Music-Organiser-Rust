@@ -159,17 +159,14 @@ fn best_limits(songs: &[Song]) -> Vec<(Limits, Score)> {
                 for mixed_eq in [0.2, 0.35, 0.5, 0.65] {
                     for mixed_compressed in [0.1, 0.2, 0.3, 0.45] {
                         for mixed_automation in [1, 2, 4, 8] {
-                            for mixed_sends in [1, 2, 3] {
-                                all.push(Limits {
-                                    idea_bars,
-                                    arranged_seconds,
-                                    mixed_tracks,
-                                    mixed_eq,
-                                    mixed_compressed,
-                                    mixed_automation,
-                                    mixed_sends,
-                                });
-                            }
+                            all.push(Limits {
+                                idea_bars,
+                                arranged_seconds,
+                                mixed_tracks,
+                                mixed_eq,
+                                mixed_compressed,
+                                mixed_automation,
+                            });
                         }
                     }
                 }
@@ -254,7 +251,7 @@ fn summary(songs: &[Song]) -> String {
 fn said(l: &Limits, s: &Score) -> String {
     format!(
         "same {}/{}, later {}, ideas offered a move {} | idea<{} bars, arranged>={}s, mixed: tracks>={} EQ>={} comp>={} \
-         automation>={} or sends>={}",
+         automation>={}",
         s.same,
         s.marked,
         s.later,
@@ -264,8 +261,7 @@ fn said(l: &Limits, s: &Score) -> String {
         l.mixed_tracks,
         l.mixed_eq,
         l.mixed_compressed,
-        l.mixed_automation,
-        l.mixed_sends
+        l.mixed_automation
     )
 }
 
