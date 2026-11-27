@@ -447,6 +447,7 @@ pub fn player() -> &'static Player {
             let _ = slint::invoke_from_event_loop(move || {
                 ended(&key);
                 crate::song_player::ended(&key);
+                crate::arrangement_play::ended(&key);
             });
         });
         player.choose(output.clone());
@@ -4407,6 +4408,7 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     crate::midi::stop_for_another(app);
     crate::curve_editor::call_off_tone();
     crate::song_player::stop_for_another(app);
+    crate::arrangement_play::stop_for_another(app);
     // The screenshots show a sound playing without a sound card.
     let here = HERE.with(|h| *h.borrow());
     let ask = if here { 0 } else { PLAYS.fetch_add(1, Ordering::SeqCst) + 1 };

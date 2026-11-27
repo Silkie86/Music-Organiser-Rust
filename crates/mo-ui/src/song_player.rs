@@ -81,6 +81,7 @@ pub fn play(app: &AppWindow, path: &str, title: &str) {
     crate::sounds::stop_for_another(app);
     crate::midi::stop_for_another(app);
     crate::curve_editor::call_off_tone();
+    crate::arrangement_play::stop_for_another(app);
     let from = BAR.with(|b| {
         let mut b = b.borrow_mut();
         if b.path != path {

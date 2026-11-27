@@ -1719,6 +1719,7 @@ fn hear_curve(app: &AppWindow, sent: Curve) {
     crate::sounds::stop_for_another(app);
     crate::midi::stop_for_another(app);
     crate::song_player::stop_for_another(app);
+    crate::arrangement_play::stop_for_another(app);
     // The key that stops it, as the shortcut list has it now.
     let stops = PAGE.with(|p| {
         let p = p.borrow();

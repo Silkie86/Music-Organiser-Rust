@@ -11,6 +11,7 @@ pub use screens::*;
 
 pub mod ahead;
 pub mod arrangement;
+pub mod arrangement_play;
 pub mod backup;
 pub mod beta;
 mod canvas;
@@ -97,6 +98,7 @@ pub fn page_name() -> &'static str {
 pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> Result<AppWindow, slint::PlatformError> {
     let app = AppWindow::new()?;
     arrangement::connect(&app);
+    arrangement_play::connect(&app);
     waves::connect(&app);
     apply_look(&app, look);
     show_places(&app, &shortcuts);
@@ -318,6 +320,7 @@ pub fn keys_changed(app: &AppWindow, shortcuts: &Shortcuts) {
     sounds::show_keys(app, shortcuts);
     presets::show_keys(app, shortcuts);
     midi::show_keys(app, shortcuts);
+    arrangement_play::show_keys(app, shortcuts);
     plugins::show_keys(app, shortcuts);
     space::show(app);
     if let Some(place) = place() {
@@ -583,13 +586,15 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
         }
         // Where everything the app removes goes first, from any page.
         "app.recycleBin" => files::open_recycle_bin(feed),
-        // Space plays the picked sound on the Sounds page, loops the picked part on the MIDI page and auditions the
-        // picked sound in Bitwig on Presets (X3-13); elsewhere it's left for the page (a button, a text box).
+        // Space plays the picked sound on the Sounds page, loops the picked part on the MIDI page, auditions the
+        // picked sound in Bitwig on Presets (X3-13) and plays the picked song's MIDI from its arrangement on Songs;
+        // elsewhere it's left for the page (a button, a text box).
         "app.play" => {
             let place = app.get_place();
             return (place == Place::Sounds.index() as i32 && sounds::toggle_play(&app))
                 || (place == Place::Midi.index() as i32 && midi::toggle_play(&app))
-                || (on_presets_page(place) && presets::toggle_play(&app));
+                || (on_presets_page(place) && presets::toggle_play(&app))
+                || (place == Place::Songs.index() as i32 && arrangement_play::toggle_play(&app));
         }
         // Ctrl+F: the keys go to the page's search box, its words picked (review X3-22). The page on show sees the
         // count change; a page without a search box lets the key go on. Not while Ctrl+K or the F12 note is open, as
@@ -654,7 +659,8 @@ fn stop_what_plays(app: &AppWindow) -> bool {
     let audition = presets::stop_on_escape(app);
     let tone = curve_editor::stop_tone(app);
     let song = song_player::stop_on_escape(app);
-    sound || midi || audition || tone || song
+    let arranged = arrangement_play::stop_on_escape(app);
+    sound || midi || audition || tone || song || arranged
 }
 
 /// Moves the pick of the list on show one line up (`by` -1) or down (1), as its Up and Down keys do (on Sounds' Tiles, a

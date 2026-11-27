@@ -10,7 +10,7 @@ mod output;
 mod stream;
 
 pub use output::{Event, Events, Opened, Outputs, Render, SystemOutputs};
-pub use stream::Stream;
+pub use stream::{Maker, Stream};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, channel, sync_channel};
