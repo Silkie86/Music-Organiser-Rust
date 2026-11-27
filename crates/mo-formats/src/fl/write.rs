@@ -43,6 +43,9 @@ const PATTERNS: usize = 999;
 pub const PPQ: f64 = 96.0;
 /// The tracks FL 25's playlist has.
 const TRACKS: usize = 500;
+/// FL Studio's slowest and fastest tempo.
+const SLOWEST: f64 = 10.0;
+const FASTEST: f64 = 522.0;
 /// A pattern clip's item number base: an item above it is a pattern, at or below it a channel.
 const PATTERN_BASE: u16 = 20480;
 
@@ -77,13 +80,11 @@ enum Channel {
     Audio(String),
 }
 
-/// A pattern: its channel, name and notes (in ticks from its start), and how long it plays.
+/// A pattern: its name and notes (each note record names its channel; positions in ticks from its start).
 #[derive(Clone, Debug, PartialEq)]
 struct Pattern {
-    channel: u16,
     name: String,
     notes: Vec<[u8; 24]>,
-    length: u32,
 }
 
 /// One playlist item before it's laid out: where, how long, what (pattern number above the base, or channel), on
@@ -101,12 +102,17 @@ struct Item {
 /// The song as a new FL Studio project. `created` is when it's made, as FL's own date (days since 30 Dec 1899).
 pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
     let mut left_out = Vec::new();
+    let tempo = tempo_of(song);
+    if (tempo - song.tempo).abs() > 1e-9 {
+        left_out.push(format!("The tempo ({:.0} BPM): FL's is {SLOWEST:.0} to {FASTEST:.0}.", song.tempo));
+    }
     let mut channels: Vec<Channel> = Vec::new();
     let mut patterns: Vec<Pattern> = Vec::new();
     let mut items: Vec<Item> = Vec::new();
     let mut track_names: Vec<(String, bool)> = Vec::new();
     let mut audio_channel: HashMap<String, u16> = HashMap::new();
     let mut same_pattern: HashMap<(u16, Vec<[u8; 24]>, u32), u16> = HashMap::new();
+    let mut empty_pattern: HashMap<(String, u32), u16> = HashMap::new();
     let mut stretched = false;
     let mut automation = false;
     let mut too_many_patterns = false;
@@ -147,7 +153,7 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
                     }
                     None => {
                         let name = if clip.name.trim().is_empty() { lane.name.clone() } else { clip.name.clone() };
-                        patterns.push(Pattern { channel, name, notes: key.1.clone(), length: key.2 });
+                        patterns.push(Pattern { name, notes: key.1.clone() });
                         let n = patterns.len() as u16;
                         same_pattern.insert(key.clone(), n);
                         n
@@ -156,6 +162,26 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
                 // FL repeats a pattern clip longer than its pattern: the clip stops where its notes' bars do.
                 let length = ticks(clip.length).unwrap_or(0).min(key.2).max(1);
                 items.push(Item { at, length, what: PATTERN_BASE + number, track, muted: clip.muted, audio: None });
+            } else if clip.audio.is_empty() && clip.points.is_empty() {
+                // A clip with nothing in it (an empty pattern laid out as a section): an empty pattern of its name,
+                // as long as the clip's whole bars.
+                let name = if clip.name.trim().is_empty() { lane.name.clone() } else { clip.name.clone() };
+                let length = ticks(clip.length).unwrap_or(0).max(1);
+                let bars = length.div_ceil(bar).saturating_mul(bar);
+                let number = match empty_pattern.get(&(name.clone(), bars)) {
+                    Some(n) => *n,
+                    None if patterns.len() >= PATTERNS => {
+                        too_many_patterns = true;
+                        continue;
+                    }
+                    None => {
+                        patterns.push(Pattern { name: name.clone(), notes: Vec::new() });
+                        let n = patterns.len() as u16;
+                        empty_pattern.insert((name, bars), n);
+                        n
+                    }
+                };
+                items.push(Item { at, length, what: PATTERN_BASE + number, track, muted: clip.muted, audio: None });
             }
             for part in &clip.audio {
                 let channel = *audio_channel.entry(part.path.clone()).or_insert_with(|| {
@@ -163,17 +189,16 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
                     (channels.len() - 1) as u16
                 });
                 let Some(part_at) = ticks(clip.start + part.start) else { continue };
-                let rate = part.seconds_per_beat.unwrap_or(60.0 / song.tempo);
-                if (rate - 60.0 / song.tempo).abs() > 1e-6 || part.semitones != 0.0 || part.reversed {
+                let rate = part.seconds_per_beat.unwrap_or(60.0 / tempo);
+                if (rate - 60.0 / tempo).abs() > 1e-6 || part.semitones != 0.0 || part.reversed {
                     stretched = true;
                 }
                 gain |= part.gain_db != 0.0;
                 let from = (part.from * 1000.0) as f32;
                 let to = ((part.from + part.length * rate) * 1000.0) as f32;
-                let first = clip.audio.first() == Some(part);
-                let last = clip.audio.last() == Some(part);
-                let fade_in = if first { (clip.fade_in * 60_000.0 / song.tempo) as f32 } else { 0.0 };
-                let fade_out = if last { (clip.fade_out * 60_000.0 / song.tempo) as f32 } else { 0.0 };
+                let (fade_in, fade_out) = clip.fades_of(part);
+                let ms = |beats: f64| (beats * 60_000.0 / tempo) as f32;
+                let (fade_in, fade_out) = (ms(fade_in), ms(fade_out));
                 items.push(Item {
                     at: part_at,
                     length: ticks(part.length).unwrap_or(0).max(1),
@@ -213,6 +238,11 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
     items.sort_by_key(|i| (i.at, std::cmp::Reverse(i.track)));
     let bytes = assemble(song, title, created, &channels, &patterns, &items, &track_names);
     Written { bytes, left_out }
+}
+
+/// The tempo the copy is written at: the song's, inside FL's range (120 when it isn't a number).
+fn tempo_of(song: &Arrangement) -> f64 {
+    if song.tempo.is_finite() { song.tempo.clamp(SLOWEST, FASTEST) } else { 120.0 }
 }
 
 /// Beats in the written project's ticks, when they're a place in the song (not before its start or past FL's end).
@@ -307,8 +337,10 @@ fn assemble(
         for (i, p) in patterns.iter().enumerate() {
             encode(EV_PATTERN_NEW, &((i + 1) as u16).to_le_bytes(), body);
             encode(EV_PATTERN_NAME, &text(&p.name), body);
-            encode(EV_PATTERN_NOTES, &p.notes.concat(), body);
-            let _ = p.channel;
+            // FL writes no notes event for a pattern without notes.
+            if !p.notes.is_empty() {
+                encode(EV_PATTERN_NOTES, &p.notes.concat(), body);
+            }
         }
     };
     let mut skipping_channel = false;
@@ -322,11 +354,7 @@ fn assemble(
             }
         }
         match e.id {
-            EV_TEMPO => encode(
-                EV_TEMPO,
-                &((song.tempo * 1000.0).round().clamp(10_000.0, 999_000.0) as u32).to_le_bytes(),
-                &mut body,
-            ),
+            EV_TEMPO => encode(EV_TEMPO, &((tempo_of(song) * 1000.0).round() as u32).to_le_bytes(), &mut body),
             EV_TIME_SIG_NUMERATOR => encode(e.id, &[song.signature.top().min(255) as u8], &mut body),
             EV_TIME_SIG_DENOMINATOR => encode(e.id, &[song.signature.bottom().min(255) as u8], &mut body),
             EV_TITLE => encode(EV_TITLE, &text(title), &mut body),

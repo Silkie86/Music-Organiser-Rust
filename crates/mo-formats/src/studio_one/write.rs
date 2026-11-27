@@ -150,19 +150,26 @@ fn music_tracks(lane: &crate::arrangement::PreviewLane, name: &str) -> Vec<(Stri
             }
         }
     }
+    // A clip with nothing in it at all (an empty pattern laid out as a section) stays, on the first track.
+    let empty = |c: &PreviewClip| c.notes.is_empty() && c.audio.is_empty() && c.points.is_empty();
     if names.len() <= 1 {
-        let clips = lane.clips.iter().filter(|c| !c.notes.is_empty()).cloned().collect();
+        let clips = lane.clips.iter().filter(|c| !c.notes.is_empty() || empty(c)).cloned().collect();
         return vec![(name.to_owned(), clips)];
     }
     names
         .into_iter()
-        .map(|part| {
+        .enumerate()
+        .map(|(i, part)| {
             let clips = lane
                 .clips
                 .iter()
                 .filter_map(|c| {
                     let notes: Vec<PreviewNote> = c.notes.iter().filter(|n| part_of(c, n) == part).copied().collect();
-                    (!notes.is_empty()).then(|| PreviewClip { notes, parts: Vec::new(), ..c.clone() })
+                    (!notes.is_empty() || (i == 0 && empty(c))).then(|| PreviewClip {
+                        notes,
+                        parts: Vec::new(),
+                        ..c.clone()
+                    })
                 })
                 .collect();
             let track = if part.trim().is_empty() { name.to_owned() } else { part };
@@ -256,7 +263,6 @@ impl Parts<'_> {
         let mut events = String::new();
         for clip in clips {
             let name = if clip.name.trim().is_empty() { track } else { &clip.name };
-            let (first, last) = (clip.audio.first(), clip.audio.last());
             for part in &clip.audio {
                 let at = clip.start + part.start;
                 let at = if at.is_finite() { at.max(0.0) } else { 0.0 };
@@ -273,8 +279,8 @@ impl Parts<'_> {
                     1.0
                 };
                 self.stretched |= (speed - 1.0).abs() > 1e-6 && !matches!(part.stretch, None | Some(Stretch::Raw));
-                let fade_in = if first == Some(part) { clip.fade_in * spb } else { 0.0 };
-                let fade_out = if last == Some(part) { clip.fade_out * spb } else { 0.0 };
+                let (fade_in, fade_out) = clip.fades_of(part);
+                let (fade_in, fade_out) = (fade_in * spb, fade_out * spb);
                 let semitones = if part.semitones.is_finite() { part.semitones.clamp(-128.0, 128.0) } else { 0.0 };
                 let (whole, cents) = (semitones.trunc(), ((semitones - semitones.trunc()) * 100.0).round());
                 let from = if part.from.is_finite() { part.from.max(0.0) } else { 0.0 };
@@ -560,11 +566,13 @@ fn song_xml(text: &str, song: &Arrangement, tempo: f64, end: f64, tracks: &str) 
         .markers
         .iter()
         .filter(|m| m.beat.is_finite() && m.beat >= 0.0)
-        .map(|m| {
+        .enumerate()
+        .map(|(n, m)| {
+            // A marker with no name gets its number: one with none would be taken for one of Studio One's own.
+            let name = if m.name.trim().is_empty() { format!("#{}", n + 1) } else { attr(&m.name) };
             format!(
-                "\t\t\t\t<MarkerEvent markerStop=\"0\" markerType=\"0\" start=\"{}\" timeFormat=\"2\" name=\"{}\"/>\n",
+                "\t\t\t\t<MarkerEvent markerStop=\"0\" markerType=\"0\" start=\"{}\" timeFormat=\"2\" name=\"{name}\"/>\n",
                 m.beat,
-                attr(&m.name)
             )
         })
         .collect();

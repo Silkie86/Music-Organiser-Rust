@@ -77,7 +77,8 @@ pub const APP_ACTIONS: &[Action] = &[
 /// The Songs page's own actions. The ids are the C# app's Projects page's, so a key changed in either app carries
 /// across. New here: `projects.openOwn`, so the song line's menu and the panel's "Open in FL Studio" have a key too
 /// (rule 15), and `projects.favourite` and `projects.tag` for the card's heart and tag box, with Sounds' keys (the
-/// whole-app review of 14 Nov, SG-5).
+/// whole-app review of 14 Nov, SG-5), and `projects.copyFl` and `projects.copyStudioOne` for the menus' "Open a copy
+/// in…" lines (27 Nov 2026).
 pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.open", "Open the picked song (FL Studio songs go to Bitwig)", "Ctrl+O"),
     action("projects.openOwn", "Open the picked song in the DAW it was made in", "Ctrl+Shift+O"),
@@ -86,6 +87,16 @@ pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
     action("projects.favourite", "Make the picked song a favourite, or not", "Ctrl+D"),
     action("projects.tag", "Type a tag for the picked song", "Ctrl+T"),
+    action(
+        "projects.copyFl",
+        "Make a copy of the picked song for FL Studio and open it (the song stays as it is)",
+        "Alt+F",
+    ),
+    action(
+        "projects.copyStudioOne",
+        "Make a copy of the picked song for Studio One and open it (the song stays as it is)",
+        "Alt+S",
+    ),
 ];
 
 /// The Sounds page's own actions, with the C# Sound Lab's ids and keys. Esc stops the sound playing as it does on every
@@ -686,6 +697,8 @@ mod tests {
         // The card's heart and tag box, with the keys their Sounds twins have.
         assert_eq!(s.page_action_for("Ctrl+D", SONGS_ACTIONS), Some("projects.favourite"));
         assert_eq!(s.page_action_for("Ctrl+T", SONGS_ACTIONS), Some("projects.tag"));
+        assert_eq!(s.page_action_for("Alt+F", SONGS_ACTIONS), Some("projects.copyFl"));
+        assert_eq!(s.page_action_for("Alt+S", SONGS_ACTIONS), Some("projects.copyStudioOne"));
         assert_eq!(s.key_of("projects.favourite"), s.key_of("sounds.favourite"));
         assert_eq!(s.key_of("projects.tag"), s.key_of("sounds.tag"));
         assert_eq!(s.page_action_for("Ctrl+O", &[]), None);
