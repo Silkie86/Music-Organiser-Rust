@@ -147,10 +147,12 @@ pub fn read_from(index: &Path, smallest: usize) -> Read {
     // let go (the store drops with the read).
     let read = mo_app::background::on_pool(|| {
         let store = MidiStore::open_read_only(index).map_err(|e| format!("Couldn't open the MIDI index: {e}"))?;
-        let phrases =
-            store.all(&HashMap::new(), &HashMap::new()).map_err(|e| format!("Couldn't read the MIDI index: {e}"))?;
+        // Only the newest copy of each set of notes is read in full; the other copies only their files.
+        let grouped = store
+            .grouped(&HashMap::new(), &HashMap::new())
+            .map_err(|e| format!("Couldn't read the MIDI index: {e}"))?;
         drop(store);
-        Ok::<_, String>(Catalogue::new(phrases))
+        Ok::<_, String>(Catalogue::from_grouped(grouped))
     });
     let cat = match read {
         Ok(cat) => cat,

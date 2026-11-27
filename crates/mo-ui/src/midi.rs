@@ -1364,13 +1364,14 @@ pub fn load(library: &Path) -> Result<Loaded, String> {
     let began = Instant::now();
     // In pieces at once, on the shared low-priority threads (rules 12 and 21).
     let path_now = path.clone();
-    let phrases = background::on_pool(move || {
+    // Only the newest copy of each set of notes is read in full; the other copies only their files.
+    let grouped = background::on_pool(move || {
         let store = MidiStore::open_read_only(&path_now)?;
-        store.all(&up.old_roles, &up.old_octaves)
+        store.grouped(&up.old_roles, &up.old_octaves)
     })
     .map_err(|e| e.to_string())?;
     let read = began.elapsed();
-    let cat = background::on_pool(|| Catalogue::new(phrases));
+    let cat = background::on_pool(|| Catalogue::from_grouped(grouped));
     let grouped = began.elapsed() - read;
     let loaded = Loaded::new(cat, NotesFrom::Store(path));
     let listed = began.elapsed() - read - grouped;

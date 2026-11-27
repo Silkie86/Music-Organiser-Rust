@@ -22,6 +22,15 @@ use crate::instruments::{self, Family, InstrumentGuess};
 use crate::member::PhraseMember;
 use crate::roles::Role;
 
+/// Parts sorted into sets of the same notes (the same [`StoredPhrase::hash`]): the newest of each set, in the
+/// order [`Catalogue::new`] wants its parts in (newest file first, a date that isn't real last), and beside each
+/// (`others` has one list for each of `firsts`) every other file with those notes, newest first.
+#[derive(Debug, Default)]
+pub struct Grouped {
+    pub firsts: Vec<StoredPhrase>,
+    pub others: Vec<Vec<Arc<Source>>>,
+}
+
 /// One part as the page lists it: the newest copy of some notes, with every other file that has the same notes.
 #[derive(Debug)]
 pub struct Entry {
@@ -256,7 +265,18 @@ impl Catalogue {
         });
         drop(entry_of);
         phrases.shrink_to_fit();
-        let firsts = phrases;
+        Catalogue::of_grouped(Grouped { firsts: phrases, others }, dates, phrase_count)
+    }
+
+    /// The catalogue of parts already sorted into sets of the same notes ([`Grouped`], as
+    /// [`crate::store::MidiStore::grouped`] reads them): the same catalogue [`Catalogue::new`] makes from every part,
+    /// without the copies' rows ever being read in full.
+    pub fn from_grouped(grouped: Grouped) -> Catalogue {
+        let phrase_count = grouped.firsts.len() + grouped.others.iter().map(Vec::len).sum::<usize>();
+        Catalogue::of_grouped(grouped, RealDates::now(), phrase_count)
+    }
+
+    fn of_grouped(Grouped { firsts, others }: Grouped, dates: RealDates, phrase_count: usize) -> Catalogue {
         // Names and instruments are worked out on every core: hundreds of thousands of parts.
         let mut entries: Vec<Entry> = firsts
             .into_par_iter()

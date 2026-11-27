@@ -27,7 +27,7 @@ pub mod rejoin;
 pub mod roles;
 pub mod store;
 
-pub use catalogue::{Catalogue, Entry, From, Hit, InKeys, Query};
+pub use catalogue::{Catalogue, Entry, From, Grouped, Hit, InKeys, Query};
 pub use chord::PhraseChord;
 pub use index::{Failure, Features, Key, MidiError, MidiIndex, Source, SourceKind, Stopper, StoredPhrase, features_of};
 pub use instruments::{Family, InstrumentGuess};
