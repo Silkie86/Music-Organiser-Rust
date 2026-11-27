@@ -98,6 +98,15 @@ pub struct Live {
     minutes_asked: HashSet<i64>,
     /// Each song's bounces, by its key, as last looked for ([`Live::set_all_bounces`]).
     bounces: HashMap<String, Vec<crate::bounces::Bounce>>,
+    /// Each song's newest save's shape, by the save's id, as read ([`Live::learn_shapes`], [`Live::set_shapes`]).
+    shapes: HashMap<i64, crate::board::KeptShape>,
+    /// The saves whose kept shape has been looked for in the library ([`Live::learn_shapes`]).
+    shapes_asked: HashSet<i64>,
+    /// The saves whose stage guess you put away, as `(id, time)` ([`mo_library::stage::not_now`]).
+    not_now: HashSet<(i64, i64)>,
+    /// The saves handed out to be read for their shape, as `(id, time, size)` ([`Live::shapes_to_read`]): one whose
+    /// file couldn't be read isn't asked for again until it changes, or the app starts again.
+    shapes_tried: HashSet<(i64, i64, i64)>,
     /// When the note that the muted samples are mended, refused, may be tried again ([`REFUSED_AGAIN_AFTER`]).
     note_after: Option<Instant>,
     /// Folders found away as saves in them waited to be read again, by key, and when ([`AWAY_AGAIN_AFTER`]).
@@ -385,6 +394,10 @@ impl Live {
             later: mo_library::dust_off::read(library)?,
             minutes_asked: HashSet::new(),
             bounces: HashMap::new(),
+            shapes: HashMap::new(),
+            shapes_asked: HashSet::new(),
+            not_now: mo_library::stage::not_now(library)?,
+            shapes_tried: HashSet::new(),
         })
     }
 
@@ -561,7 +574,88 @@ impl Live {
         let mut songs = Songs::from_saves(&self.saves, &self.choices, self.tags.clone(), self.gap_months, self.asking);
         songs.later.clone_from(&self.later);
         songs.set_bounces(&self.bounces);
+        songs.set_shapes(&self.shapes);
+        songs.not_now.clone_from(&self.not_now);
         songs
+    }
+
+    /// Each song's newest save (FL Studio or Bitwig) by its file's time, for the stage guess.
+    fn newest_with_shape(&self) -> Vec<&Save> {
+        let real = RealDates::now();
+        let newest: HashSet<i64> = songs::group_songs(&self.saves, &self.choices, &real)
+            .iter()
+            .map(|song| crate::board::newest(song).id)
+            .collect();
+        self.saves
+            .iter()
+            .filter(|s| newest.contains(&s.id) && crate::board::has_shape(&s.daw) && !s.file_missing)
+            .collect()
+    }
+
+    /// Finds in `library` the shapes kept for each song's newest save not looked for yet ([`mo_library::stage`]), so
+    /// they aren't read from their files again. Call it on the page's thread, after the list is on show. Whether any
+    /// was found.
+    pub fn learn_shapes(&mut self, library: &Library) -> Result<bool, LibraryError> {
+        let asking: Vec<(i64, i64, i64)> = self
+            .newest_with_shape()
+            .into_iter()
+            .filter(|s| !self.shapes.contains_key(&s.id) && !self.shapes_asked.contains(&s.id))
+            .map(|s| (s.id, s.mtime, s.size))
+            .collect();
+        let ids: Vec<i64> = asking.iter().map(|a| a.0).collect();
+        self.shapes_asked.extend(&ids);
+        let mut found = library.shapes(&ids)?;
+        let any = !found.is_empty();
+        // The library only gives a shape that's of the save's file as it has it, and the list is the library's as
+        // it was loaded: the same file.
+        for (id, mtime, size) in asking {
+            if let Some(shape) = found.remove(&id) {
+                self.shapes.insert(id, crate::board::KeptShape { mtime, size, shape });
+            }
+        }
+        Ok(any)
+    }
+
+    /// The songs' newest saves whose shape is still to be read from their files: none read yet, or only from the file
+    /// as it was before. Each is handed out once while its file stays the same (one that can't be read waits for the
+    /// next start), and none in a folder found away just now (a drive or network place gone can take seconds a look).
+    pub fn shapes_to_read(&mut self) -> Vec<crate::board::ToRead> {
+        let list: Vec<crate::board::ToRead> = self
+            .newest_with_shape()
+            .into_iter()
+            .filter(|s| self.shapes.get(&s.id).is_none_or(|k| k.mtime != s.mtime || k.size != s.size))
+            .filter(|s| !self.shapes_tried.contains(&(s.id, s.mtime, s.size)))
+            .filter(|s| !self.away.contains_key(&folder_key(&s.path)))
+            .map(|s| crate::board::ToRead { id: s.id, path: s.path.clone(), mtime: s.mtime, size: s.size })
+            .collect();
+        self.shapes_tried.extend(list.iter().map(|t| (t.id, t.mtime, t.size)));
+        list
+    }
+
+    /// Shapes just read from their files ([`crate::board::read_shapes`]): kept for the lists made from here, and in
+    /// the library when it's the app's own. Says whether the songs' guesses may have changed.
+    pub fn set_shapes(&mut self, read: Vec<mo_library::song_writes::ShapeRead>) -> Result<bool, LibraryError> {
+        let kept = match &self.writes {
+            Some(songs_db) => mo_library::song_writes::keep_shapes(songs_db, &read).map(|_| ()),
+            None => Ok(()),
+        };
+        let changed = !read.is_empty();
+        for r in read {
+            self.shapes.insert(r.id, crate::board::KeptShape { mtime: r.mtime, size: r.size, shape: r.shape });
+        }
+        kept.map(|()| changed)
+    }
+
+    /// Puts away the stage guess made from save `id` as it is at `mtime` ("not for this save"): kept in the library
+    /// when it's the app's own, else until the app closes.
+    /// Whether it's held here only, till the app closes.
+    pub fn put_away(&mut self, id: i64, mtime: i64) -> Result<bool, LibraryError> {
+        if let Some(songs_db) = &self.writes {
+            mo_library::stage::put_away(songs_db, id, mtime)?;
+        }
+        self.not_now.retain(|(i, _)| *i != id);
+        self.not_now.insert((id, mtime));
+        Ok(self.writes.is_none())
     }
 
     /// Finds in `library` how long FL Studio has had each song's newest FL save open (its kept details), for those
@@ -1094,6 +1188,26 @@ impl Live {
             .collect();
         details.extend(moved);
         drop(details);
+        // The board's shapes and guesses put away go by the save's id too.
+        for &(given, kept) in ids {
+            if let Some(shape) = self.shapes.remove(&given) {
+                self.shapes.insert(kept, shape);
+            }
+            if self.shapes_asked.remove(&given) {
+                self.shapes_asked.insert(kept);
+            }
+        }
+        let moved: Vec<(i64, i64)> = self.not_now.iter().filter(|(id, _)| to.contains_key(id)).copied().collect();
+        for (given, mtime) in moved {
+            self.not_now.remove(&(given, mtime));
+            if let Some(&kept) = to.get(&given) {
+                self.not_now.insert((kept, mtime));
+                // Kept under its new id too; if that can't be written it's back at the next start, no more.
+                if let Some(songs_db) = &self.writes {
+                    let _ = mo_library::stage::put_away(songs_db, kept, mtime);
+                }
+            }
+        }
         let highest = ids.iter().map(|&(_, kept)| kept).max().unwrap_or(0);
         self.next_id = self.next_id.max(highest + 1);
     }
@@ -1614,6 +1728,10 @@ mod tests {
             later: HashMap::new(),
             minutes_asked: HashSet::new(),
             bounces: HashMap::new(),
+            shapes: HashMap::new(),
+            shapes_asked: HashSet::new(),
+            not_now: HashSet::new(),
+            shapes_tried: HashSet::new(),
         }
     }
 
@@ -1948,6 +2066,31 @@ mod tests {
             mtime: 1_700_000_000 + id,
             ..Save::default()
         }
+    }
+
+    #[test]
+    fn a_songs_newest_save_is_read_for_its_shape_once_and_its_guess_can_be_put_away() {
+        use mo_formats::shape::Shape;
+        use mo_library::song_writes::ShapeRead;
+        let mut live =
+            super::tests::live(vec![save(1, "E:\\Music\\Kite", "Kite_1"), save(2, "E:\\Music\\Kite", "Kite_2")]);
+        let to_read = live.shapes_to_read();
+        assert_eq!(to_read.iter().map(|t| t.id).collect::<Vec<_>>(), [2], "only the newest save");
+        let shape = Shape { seconds: 200.0, bars: 100.0, markers: 4, tracks: 2, ..Shape::default() };
+        assert!(
+            live.set_shapes(vec![ShapeRead { id: 2, mtime: 1_700_000_002, size: 1000, shape: Some(shape) }]).unwrap()
+        );
+        assert!(live.shapes_to_read().is_empty(), "read once");
+        let songs = live.songs();
+        assert_eq!(songs.rows[0].guess.as_ref().map(|g| g.stage), Some("Arranging"));
+        assert_eq!(songs.suggestion(0).map(|g| g.stage), Some("Arranging"));
+        assert!(live.put_away(2, 1_700_000_002).unwrap(), "held here only: no songs.db");
+        assert_eq!(live.songs().suggestion(0), None, "not for this save");
+        // Saved again: read again, and guessed afresh; handed out once.
+        live.saves[1].mtime += 60;
+        assert_eq!(live.shapes_to_read().len(), 1);
+        assert!(live.shapes_to_read().is_empty(), "not again while it's being read, or couldn't be");
+        assert_eq!(live.songs().rows[0].guess, None, "the old shape is of another file");
     }
 
     #[test]

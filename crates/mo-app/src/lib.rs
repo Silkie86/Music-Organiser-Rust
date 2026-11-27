@@ -12,6 +12,7 @@ pub mod beta;
 pub mod binned;
 pub mod bitwig_convert;
 pub mod bitwig_favourites;
+pub mod board;
 pub mod bounces;
 pub mod chord_check;
 pub mod curve_card;

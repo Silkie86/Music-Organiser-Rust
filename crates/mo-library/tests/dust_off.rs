@@ -99,3 +99,19 @@ fn a_list_it_cant_read_is_left_as_it_is() {
     assert_eq!(settings(&path)[dust_off::SETTING], "not a list");
     assert!(dust_off::read(&Library::open_read_only(&path).unwrap()).unwrap().is_empty());
 }
+
+#[test]
+fn a_guess_put_away_is_kept_for_that_save_as_it_is() {
+    use std::collections::HashSet;
+    let dir = folder("stage-not-now");
+    let path = library(&dir);
+    let read = || mo_library::stage::not_now(&Library::open_read_only(&path).unwrap()).unwrap();
+    assert!(read().is_empty());
+    assert!(mo_library::stage::put_away(&path, 1, 100).unwrap());
+    assert!(!mo_library::stage::put_away(&path, 1, 100).unwrap());
+    assert!(mo_library::stage::put_away(&path, 2, 100).unwrap());
+    // The same save saved again: one line for it, with its new time.
+    assert!(mo_library::stage::put_away(&path, 1, 200).unwrap());
+    assert_eq!(read(), HashSet::from([(1, 200), (2, 100)]));
+    assert_eq!(settings(&path)["export_folder"], r"C:\Exports");
+}

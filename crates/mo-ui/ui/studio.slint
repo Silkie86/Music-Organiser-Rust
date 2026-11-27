@@ -2662,6 +2662,101 @@ export component SignChip inherits Rectangle {
     }
 }
 
+// A small sign button on a card: a drawn sign (one of the `Icons`), its tooltip and a click. `boxed` draws an edge in
+// its `tint` round it, filled faintly under the mouse; without, the sign lights under the mouse.
+export component SignButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> tip;
+    in property <color> tint: Theme.muted;
+    in property <bool> boxed;
+    callback clicked;
+    width: root.boxed ? 24px : 20px;
+    height: 20px;
+    border-radius: 4px;
+    border-width: root.boxed ? 1px : 0px;
+    border-color: root.tint;
+    background: root.boxed && touch.has-hover ? root.tint.transparentize(75%) : transparent;
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Path {
+        width: root.boxed ? 12px : 10px;
+        height: root.boxed ? 12px : 10px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: root.icon;
+        stroke: !root.boxed && touch.has-hover ? Theme.text : root.tint;
+        stroke-width: 1.5px;
+    }
+    Tip {
+        text: root.tip;
+        hovering: touch.has-hover;
+        at-y: root.height + Space.xs;
+    }
+}
+
+// A card that is clicked to pick it and can be dragged somewhere else (the Songs board's): lit under the mouse, edged
+// in the accent while picked, faint where it was while it's carried. A press that moves more than a few points is a
+// drag: `pointer-at` says where the mouse is in the window as it goes, `dropped` that it was let go (not a click). What's in it goes over its touch area, so its own buttons take their clicks.
+export component DragCard inherits Rectangle {
+    in property <bool> picked;
+    in property <bool> lifted;
+    out property <bool> dragging;
+    out property <bool> hovered: touch.has-hover && !self.dragging;
+    out property <Point> pointer-at;
+    callback drag-started;
+    callback drag-moved;
+    callback dropped;
+    callback cancelled;
+    callback clicked;
+    callback double-clicked;
+    border-radius: Theme.radius;
+    border-width: root.picked ? 2px : 1px;
+    border-color: root.lifted || root.picked ? Theme.accent : Theme.edge;
+    background: root.lifted ? Theme.well : touch.has-hover ? Theme.hover : Theme.surface-raised;
+    opacity: root.lifted ? 0.4 : 1;
+    clip: true;
+    touch := TouchArea {
+        mouse-cursor: root.dragging ? grabbing : pointer;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.up && root.dragging) {
+                root.dragging = false;
+                root.dropped();
+            }
+            if (e.kind == PointerEventKind.cancel && root.dragging) {
+                root.dragging = false;
+                root.cancelled();
+            }
+        }
+        moved => {
+            if (!self.pressed) {
+                return;
+            }
+            root.pointer-at = { x: self.absolute-position.x + self.mouse-x, y: self.absolute-position.y + self.mouse-y };
+            if (!root.dragging && (abs(self.mouse-x - self.pressed-x) > 6px || abs(self.mouse-y - self.pressed-y) > 6px)) {
+                root.dragging = true;
+                root.drag-started();
+            }
+            if (root.dragging) {
+                root.drag-moved();
+            }
+        }
+        // Slint says a click before it says the mouse went up: while it's carried, letting go isn't a click.
+        clicked => {
+            if (!root.dragging) {
+                root.clicked();
+            }
+        }
+        double-clicked => {
+            if (!root.dragging) {
+                root.double-clicked();
+            }
+        }
+    }
+    @children
+}
+
 // A small box to type a word or two into on a card, like a new tag: its hint shows while it's empty, Enter says it's
 // done, and Esc clears what's typed (then goes on to the app's keys). Its key (Ctrl+T for a tag) shows in its tooltip,
 // as keys never show on the page.
@@ -3007,6 +3102,12 @@ export global Icons {
     out property <string> whole: "M 2 6 L 2 2 L 6 2 M 10 2 L 14 2 L 14 6 M 14 10 L 14 14 L 10 14 M 6 14 L 2 14 L 2 10";
     // A metronome: a click on every beat.
     out property <string> metronome: "M 4.5 14.5 L 6.5 1.5 L 9.5 1.5 L 11.5 14.5 Z M 8 10.5 L 13 3.5 M 5 11.5 L 11 11.5";
+    // The Songs board: three columns of cards.
+    out property <string> board: "M 2 2.5 L 5.5 2.5 L 5.5 13.5 L 2 13.5 Z M 6.25 2.5 L 9.75 2.5 L 9.75 10 L 6.25 10 Z M 10.5 2.5 L 14 2.5 L 14 7 L 10.5 7 Z";
+    // A guess: a four-pointed spark.
+    out property <string> spark: "M 8 1.5 Q 8.6 7.4 14.5 8 Q 8.6 8.6 8 14.5 Q 7.4 8.6 1.5 8 Q 7.4 7.4 8 1.5 Z";
+    // Move it on: an arrow to the right.
+    out property <string> move-on: "M 2.5 8 L 13 8 M 9 4 L 13 8 L 9 12";
     // A clock face: time spent on a song.
     out property <string> clock: "M 2 8 A 6 6 0 1 0 14 8 A 6 6 0 1 0 2 8 M 8 4.5 L 8 8 L 10.5 9.5";
     // A crescent moon: not now, later.

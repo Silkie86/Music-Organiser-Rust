@@ -14,10 +14,12 @@
 //! The lines between stages are first guesses from the 1.1 plan (24 Nov 2026); they're to be tuned on counts from
 //! Solomon's songs, then checked with him on 20 songs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use mo_formats::shape::Shape;
 use rusqlite::params_from_iter;
+use serde_json::{Value, json};
 
 use crate::{Library, LibraryError, STATUSES};
 
@@ -124,6 +126,38 @@ pub fn suggest(status: &str, guess: &Guess) -> Option<&'static str> {
     let at = |s: &str| STATUSES.iter().position(|t| t.eq_ignore_ascii_case(s));
     let (mine, guessed) = (at(status)?, at(guess.stage)?);
     (mine <= FINISHED && guessed > mine).then_some(guess.stage)
+}
+
+/// The setting that keeps the guesses you said "not for this save" to (the card's x): a JSON list of
+/// `[save id, its time]`, so a newer save of the song (or the same one saved again) is guessed afresh.
+pub const NOT_NOW: &str = "stage_not_now";
+/// At most this many are kept; the oldest go first, and are only ever saves long since saved over.
+const MOST_NOT_NOW: usize = 2000;
+
+/// The saves whose guess you put away, as `(id, time)`; a list that can't be read is none.
+pub fn not_now(library: &Library) -> Result<HashSet<(i64, i64)>, LibraryError> {
+    Ok(library.setting(NOT_NOW)?.map(|text| parse_not_now(&text)).unwrap_or_default())
+}
+
+fn parse_not_now(text: &str) -> HashSet<(i64, i64)> {
+    let Ok(Value::Array(list)) = serde_json::from_str::<Value>(text) else { return HashSet::new() };
+    list.iter().filter_map(|v| Some((v.get(0)?.as_i64()?, v.get(1)?.as_i64()?))).collect()
+}
+
+/// Puts away the guess for the save `id` as it is at `mtime`, in the library at `library` (its `settings`). Says
+/// whether it changed.
+pub fn put_away(library: &Path, id: i64, mtime: i64) -> Result<bool, LibraryError> {
+    crate::setting_list::change(library, NOT_NOW, |list| {
+        let before = list.clone();
+        // One a save: an older time of the same save is let go.
+        list.retain(|v| v.get(0).and_then(Value::as_i64) != Some(id));
+        list.push(json!([id, mtime]));
+        if list.len() > MOST_NOT_NOW {
+            let over = list.len() - MOST_NOT_NOW;
+            list.drain(..over);
+        }
+        *list != before
+    })
 }
 
 impl Library {
@@ -242,5 +276,11 @@ mod tests {
         assert_eq!(suggest("Released", &Guess { stage: "Finished", why: Vec::new() }), None);
         assert_eq!(suggest("Archived", &mixing), None);
         assert_eq!(suggest("Something else", &mixing), None);
+    }
+
+    #[test]
+    fn a_not_now_list_that_cant_be_read_is_none() {
+        assert!(parse_not_now("oops").is_empty());
+        assert_eq!(parse_not_now("[[3, 9], [4], [\"a\", 1]]"), HashSet::from([(3, 9)]));
     }
 }

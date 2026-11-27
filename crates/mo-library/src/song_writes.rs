@@ -388,7 +388,7 @@ pub(crate) fn begin_own<'c>(conn: &'c mut Connection, songs_db: &Path) -> Result
 
 /// One save's shape to keep ([`keep_shapes`]): the save's id, its file as it was when the shape was read (its time
 /// and size, as the library has them), and the shape, or `None` when it has none.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShapeRead {
     pub id: i64,
     pub mtime: i64,

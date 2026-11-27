@@ -862,6 +862,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("songs-next-up.png".into(), capture(&window)));
     app.global::<mo_ui::SongsData>().set_next_up(false);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
+    // The board: a column a status, Archived folded; then a card picked, its panel over the board's right.
+    let data = app.global::<mo_ui::SongsData>();
+    let picked = data.get_selected();
+    data.set_selected(-1);
+    data.set_board(true);
+    data.invoke_board_shown();
+    shots.push(("songs-board.png".into(), capture(&window)));
+    data.set_board_archived_open(true);
+    data.invoke_board_shown();
+    shots.push(("songs-board-archived.png".into(), capture(&window)));
+    data.set_board_archived_open(false);
+    if let Some(night) = mo_ui::songs::sample_row("Night Drive") {
+        mo_ui::songs::show_picked(&app, night, sample_detail(), Tab::Overview);
+    }
+    shots.push(("songs-board-card.png".into(), capture(&window)));
+    data.set_board(false);
+    // Back to the song picked before, for the shots after.
+    mo_ui::songs::show_picked(&app, usize::try_from(picked).unwrap_or(1), sample_detail(), Tab::Overview);
+    data.invoke_close_panel();
     // The Dust off card above the list: put off in every other shot, so the list stays where their clicks expect it.
     let mut dusty = sample_songs();
     dusty.later.clear();
@@ -4113,6 +4132,30 @@ fn sample_songs() -> mo_app::songs::Songs {
         found.insert(k, vec![bounce("Slow Orbit v3.wav", 12)]);
     }
     songs.set_bounces(&found);
+    // Stage guesses for the board: Night Drive looks mixed, Copper Lines arranged.
+    let shape =
+        |seconds: f64, tracks: u32, eq: u32, compressed: u32, sends: u32, automation: u32| mo_formats::shape::Shape {
+            seconds,
+            bars: seconds / 60.0 * 140.0 / 4.0,
+            markers: 5,
+            automation,
+            tracks,
+            eq,
+            compressed,
+            sends,
+            master: Vec::new(),
+        };
+    let mut shapes = std::collections::HashMap::new();
+    for r in &songs.rows {
+        let guessed = match r.song.name.as_str() {
+            "Night Drive" => shape(232.0, 12, 9, 7, 2, 14),
+            "Copper Lines" => shape(150.0, 6, 1, 0, 1, 0),
+            _ => continue,
+        };
+        let save = mo_app::board::newest(&r.song);
+        shapes.insert(save.id, mo_app::board::KeptShape { mtime: save.mtime, size: save.size, shape: Some(guessed) });
+    }
+    songs.set_shapes(&shapes);
     songs
 }
 

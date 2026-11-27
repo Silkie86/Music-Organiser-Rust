@@ -55,6 +55,10 @@ pub struct SongRow {
     pub minutes: Option<u32>,
     /// The sound files exported of it, newest first ([`crate::bounces`]): none until they've been looked for.
     pub bounces: Vec<crate::bounces::Bounce>,
+    /// How far along its newest save looks ([`mo_library::stage::guess`]), once that save's shape is read
+    /// ([`Songs::set_shapes`]); and that save, as `(id, time)`, for "not for this save".
+    pub guess: Option<mo_library::stage::Guess>,
+    pub guessed_from: Option<(i64, i64)>,
     /// Everything the search box looks in, upper case, one field after another.
     find: String,
 }
@@ -96,6 +100,8 @@ impl SongRow {
             todos: todos_of(latest, &earlier),
             minutes: song.saves().filter_map(|s| s.minutes_spent).max(),
             bounces: Vec::new(),
+            guess: None,
+            guessed_from: None,
             find: String::new(),
             song,
         };
@@ -422,6 +428,8 @@ pub struct Songs {
     pub doubts: Vec<Doubt>,
     /// The songs put off the Dust off card ("Not now"), by key, with when they may come back (Unix seconds).
     pub later: HashMap<String, i64>,
+    /// The saves whose stage guess you put away ("not for this save"), as `(id, time)` ([`mo_library::stage::not_now`]).
+    pub not_now: HashSet<(i64, i64)>,
     /// Which dates are real, as of when the list was made ([`RealDates`]): the save each song opens, the list's order,
     /// its dates and years, and each song's card go by these, so they agree for as long as the list lasts.
     pub real: RealDates,
@@ -504,7 +512,7 @@ impl Songs {
         let copies = rows.iter().map(|r| r.song.copies.len()).sum();
         let daws: BTreeSet<&str> = rows.iter().map(|r| r.song.latest.daw.as_str()).collect();
         let daws = daws.into_iter().map(str::to_owned).collect();
-        Songs { rows, saves, copies, tags, daws, doubts, later: HashMap::new(), real }
+        Songs { rows, saves, copies, tags, daws, doubts, later: HashMap::new(), not_now: HashSet::new(), real }
     }
 
     /// The questions about the song at `row`.
@@ -778,6 +786,32 @@ impl Songs {
         for row in &mut self.rows {
             row.bounces = found.get(&row.song.key).cloned().unwrap_or_default();
         }
+    }
+
+    /// Gives each song the guess at how far along it looks, from its newest save's shape in `shapes` (by save id) as
+    /// long as that's of the save's file as it is now, and its bounces (so call it after [`Songs::set_bounces`]): a
+    /// song whose newest save hasn't been read for its shape, or has none, has no guess.
+    pub fn set_shapes(&mut self, shapes: &HashMap<i64, crate::board::KeptShape>) {
+        for row in &mut self.rows {
+            let save = crate::board::newest(&row.song);
+            let shape = shapes.get(&save.id).filter(|k| k.mtime == save.mtime && k.size == save.size);
+            row.guessed_from = Some((save.id, save.mtime));
+            row.guess = shape.and_then(|k| k.shape.as_ref()).map(|shape| {
+                let bounced_since = row.bounces.iter().any(|b| b.mtime > save.mtime);
+                mo_library::stage::guess(shape, bounced_since)
+            });
+        }
+    }
+
+    /// The stage to suggest moving the song at `row` to, with why: its guess, when that's later than its status
+    /// ([`mo_library::stage::suggest`]) and you haven't put it away for this save.
+    pub fn suggestion(&self, row: usize) -> Option<&mo_library::stage::Guess> {
+        let r = self.rows.get(row)?;
+        let guess = r.guess.as_ref()?;
+        if r.guessed_from.is_some_and(|from| self.not_now.contains(&from)) {
+            return None;
+        }
+        mo_library::stage::suggest(&r.status, guess).map(|_| guess)
     }
 
     /// The songs to dust off ([`SongRow::dusty`]) that aren't put off now, most time first: their places in
