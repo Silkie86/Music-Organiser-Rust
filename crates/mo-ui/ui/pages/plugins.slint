@@ -1232,7 +1232,8 @@ export component PluginsPage inherits Rectangle {
                 }
             }
             // The filters, in a column at the side as on every page (Solomon, 10 Nov 2026): each one's choices as a
-            // tick list; more than one can be picked in each. After the list, so the opened column of a narrow window
+            // tick list; more than one can be picked in each. A filter with no choices yet (while the plugins are
+            // read) isn't shown: its name alone over nothing looked broken. After the list, so the opened column of a narrow window
             // lies over it.
             column := FilterColumn {
                 part: "plugins.filters";
@@ -1241,25 +1242,25 @@ export component PluginsPage inherits Rectangle {
                 page-width: split.width;
                 height: split.height;
                 active: PluginsData.any-filter;
-                FilterList {
+                if PluginsData.show-filter.chips.length + PluginsData.show-filter.more.length > 0: FilterList {
                     name: "SHOW";
                     filter: PluginsData.show-filter;
                     toggled(text) => { PluginsData.toggle("show", text); }
                     cleared => { PluginsData.clear-filter("show"); }
                 }
-                FilterList {
+                if PluginsData.kind-filter.chips.length + PluginsData.kind-filter.more.length > 0: FilterList {
                     name: "KIND";
                     filter: PluginsData.kind-filter;
                     toggled(text) => { PluginsData.toggle("kind", text); }
                     cleared => { PluginsData.clear-filter("kind"); }
                 }
-                FilterList {
+                if PluginsData.format-filter.chips.length + PluginsData.format-filter.more.length > 0: FilterList {
                     name: "FORMAT";
                     filter: PluginsData.format-filter;
                     toggled(text) => { PluginsData.toggle("format", text); }
                     cleared => { PluginsData.clear-filter("format"); }
                 }
-                FilterList {
+                if PluginsData.daw-filter.chips.length + PluginsData.daw-filter.more.length > 0: FilterList {
                     name: "DAW";
                     filter: PluginsData.daw-filter;
                     toggled(text) => { PluginsData.toggle("daw", text); }
