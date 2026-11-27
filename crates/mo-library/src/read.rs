@@ -10,7 +10,7 @@ use std::path::Path;
 use mo_formats::case;
 use mo_formats::paths::{file_name, stem};
 use mo_formats::plugins::{self, elektron_device, is_fl_studio_bundled, vst2_id_in};
-use mo_formats::{PluginKind, PluginRef, ProjectInfo, SampleUse, bitwig, fl, studio_one};
+use mo_formats::{PluginKind, PluginRef, ProjectInfo, SampleUse, ableton, bitwig, fl, studio_one};
 
 use crate::samples::SampleLocator;
 use crate::scan::{daw_of, mtime};
@@ -132,6 +132,7 @@ pub fn read_save(path: &str, installed: &Installed, samples: &SampleLocator) -> 
             Ok(project) => bitwig::read_project(Some(&project), &project.doc.raw, file, &known),
             Err(raw) => bitwig::read_project(None, &raw, file, &known),
         }),
+        ableton::DAW => ableton::read(file),
         _ => studio_one::read(file),
     }));
     let info = match read {

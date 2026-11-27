@@ -827,6 +827,12 @@ fn look_for_content_folders(ext: &str) -> Vec<String> {
                 folders.extend(home.as_ref().map(|h| h.join(".BitwigStudio").join("installed-packages")));
             }
         }
+        ".als" => {
+            // Live's User Library and its Packs: in Documents on Windows, in Music on a Mac.
+            for base in [documents.clone(), home.as_ref().map(|h| h.join("Music"))].into_iter().flatten() {
+                folders.push(base.join("Ableton"));
+            }
+        }
         ".song" => {
             if let Some(d) = &documents {
                 folders.push(d.join("Studio One"));

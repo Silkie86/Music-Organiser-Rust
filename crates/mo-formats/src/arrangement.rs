@@ -345,6 +345,10 @@ pub fn read_bytes(path: &Path, raw: &[u8]) -> Vec<Arrangement> {
             Ok(doc) => crate::bitwig::arrangement::read(&doc),
             Err(_) => vec![unreadable(crate::bitwig::arrangement::VIEW, "This project")],
         },
+        "als" => match crate::ableton::LiveSet::open(raw) {
+            Ok(set) => set.arrangements(),
+            Err(_) => vec![unreadable(crate::ableton::arrangement::VIEW, "This set")],
+        },
         "song" => match crate::studio_one::Song::open(raw) {
             Ok(mut song) => vec![song.arrangement()],
             Err(_) => vec![unreadable(crate::studio_one::arrangement::VIEW, "This song")],

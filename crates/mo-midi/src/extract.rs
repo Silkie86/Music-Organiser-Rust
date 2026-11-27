@@ -12,7 +12,7 @@ use std::io;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
-use mo_formats::{MidiClip, NoteEvent, bitwig, case, fl, midi, paths, studio_one};
+use mo_formats::{MidiClip, NoteEvent, ableton, bitwig, case, fl, midi, paths, studio_one};
 
 use crate::analyser::{self, Analysis};
 use crate::instruments;
@@ -39,6 +39,7 @@ pub fn project_version(path: &str) -> Option<u32> {
         ".flp" => (fl::VERSION, crate::rejoin::VERSION),
         ".bwproject" => (bitwig::reader::VERSION, 0),
         ".song" => (studio_one::VERSION, 0),
+        ".als" => (ableton::VERSION, 0),
         _ => return None,
     };
     Some(joins * 1_000_000 + VERSION * 100 + reader)
@@ -46,7 +47,8 @@ pub fn project_version(path: &str) -> Option<u32> {
 
 // Each of the three keeps to its own digits (a reader's the last two, the analysis's the four before them, the
 // joins' the millions), so two different sets can never give the same number, and a change to any reads again.
-const _: () = assert!(fl::VERSION < 100 && bitwig::reader::VERSION < 100 && studio_one::VERSION < 100);
+const _: () =
+    assert!(fl::VERSION < 100 && bitwig::reader::VERSION < 100 && studio_one::VERSION < 100 && ableton::VERSION < 100);
 const _: () = assert!(VERSION < 10_000 && crate::rejoin::VERSION < 4_000);
 
 /// One part found in a file, ready to save.
@@ -198,6 +200,7 @@ fn from_project(path: &str, raw: &[u8]) -> Result<Vec<Found>, Unread> {
         // A file that isn't Bitwig's has no clips, as in the C# reader.
         ".bwproject" => bitwig::reader::Project::open(raw.to_vec()).map(|p| p.midi()).unwrap_or_default(),
         ".song" => studio_one::Song::open(raw).map_err(|e| damaged(&e.to_string()))?.midi(),
+        ".als" => ableton::LiveSet::open(raw).and_then(|s| s.midi()).map_err(|e| damaged(&e.to_string()))?,
         _ => Vec::new(),
     };
     let mut found = Vec::new();
