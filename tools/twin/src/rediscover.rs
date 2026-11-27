@@ -225,10 +225,10 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
     let answers: Vec<Value> = queries()
         .iter()
         .map(|o| {
-            let found = suggest(&sounds, &usage, &index, o);
+            let found = suggest(&sounds, &usage, &index, o, |_| false);
             json!({
                 "Suggestions": found.iter().map(|s| json!({ "Id": s.id, "Reason": s.reason, "Score": s.score })).collect::<Vec<_>>(),
-                "WhyNothing": if found.is_empty() { json!(why_nothing(&sounds, &index, o)) } else { Value::Null },
+                "WhyNothing": if found.is_empty() { json!(why_nothing(&sounds, &usage, &index, o, |_| false)) } else { Value::Null },
             })
         })
         .collect();
@@ -240,7 +240,7 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
                 slots[0].sound = sounds.iter().find(|s| s.path == path).map(|s| s.id);
                 slots[0].locked = true;
             }
-            let seed = roll(&sounds, &usage, &index, &mut slots, &k.options);
+            let seed = roll(&sounds, &usage, &index, &mut slots, &k.options, |_| false);
             json!({ "Seed": seed, "Pads": slots.iter().map(|s| s.sound).collect::<Vec<_>>() })
         })
         .collect();
@@ -271,8 +271,8 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
         "duplicates": duplicates,
         // The years alone, newest first, less undated files, as the C# app listed them (the Rust strip also counts each
         // one's sounds, and leaves out years still to come).
-        "years": years(&sounds).iter().map(|y| y.0).filter(|&y| y > 1980).collect::<Vec<_>>(),
-        "folders": folders(&sounds, &usage)
+        "years": years(&sounds, |_| false).iter().map(|y| y.0).filter(|&y| y > 1980).collect::<Vec<_>>(),
+        "folders": folders(&sounds, &usage, |_| false)
             .iter()
             .map(|f| json!({ "Folder": f.folder, "Sounds": f.sounds, "Used": f.used, "Share": f.share }))
             .collect::<Vec<_>>(),

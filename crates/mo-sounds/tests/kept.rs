@@ -141,6 +141,35 @@ fn other_numbers_get_a_file_of_their_own_and_only_this_codes_files_are_removed()
     assert_eq!(fs::read(dir.join("sound-likeness-notes.rows")).unwrap(), b"mine");
 }
 
+/// The index built again while the app runs (a scan forgot sounds): the old file goes before the new one is written,
+/// but the old index still reads it, so its room comes back only once that index is let go. The room check counts it
+/// (the whole-app review of 26 Nov, SK-1: the new file was refused for room only the old one held).
+// Unix only: Windows can't remove a file an index still has open, so the room never waits to come back there.
+#[cfg(unix)]
+#[test]
+fn a_file_removed_while_an_index_still_reads_it_is_room_coming_back() {
+    use mo_sounds::index::room_coming_back;
+    let dir = folder("coming-back");
+    let mut old = held(300, 0);
+    let first = old.keep_in(&dir).unwrap().unwrap();
+    assert_eq!(room_coming_back(&dir), 0);
+    let mut new = held(300, 1);
+    let second = new.keep_in(&dir).unwrap().unwrap();
+    assert_eq!(second.removed, 1);
+    assert!(!first.file.exists());
+    assert_eq!(room_coming_back(&dir), first.bytes);
+    // Another index reading the same file counts it once; another folder's room isn't this one's.
+    let also = old.clone();
+    assert_eq!(room_coming_back(&dir), first.bytes);
+    assert_eq!(room_coming_back(&dir.join("elsewhere")), 0);
+    drop(old);
+    assert_eq!(room_coming_back(&dir), first.bytes, "still read by the other");
+    drop(also);
+    assert_eq!(room_coming_back(&dir), 0);
+    drop(new);
+    assert_eq!(kept_files(&dir), [second.file.file_name().unwrap().to_str().unwrap()]);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_link_with_one_of_its_names_is_never_followed_or_removed() {

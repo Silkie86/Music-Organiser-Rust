@@ -97,6 +97,21 @@ fn extracts_note_clips() {
     assert_eq!(notes.iter().map(NoteEvent::velocity7).collect::<Vec<_>>(), [64, 127, 102]);
 }
 
+/// The whole-app review of 26 Nov, CX-1: a note muted in a clip isn't one of its notes, as in FL Studio's reader.
+#[test]
+fn a_muted_note_is_left_out_of_its_clip() {
+    let mut doc = bitwig::decode(bitwig_project_bytes()).expect("a Bitwig file");
+    let notes: Vec<bitwig::ObjId> =
+        (0..doc.objects.len() as u32).map(bitwig::ObjId).filter(|&o| doc.obj(o).class == 0x66).collect();
+    assert_eq!(notes.len(), 3);
+    // The second note (on beat 1.5) muted, as Bitwig writes it; the third said not to be.
+    doc.obj_mut(notes[1]).set(0x10f8, bitwig::Value::Bool(1));
+    doc.obj_mut(notes[2]).set(0x10f8, bitwig::Value::Bool(0));
+    let clips = Project::new(doc).midi();
+    let mut clip = clips[0].clone();
+    assert_eq!(clip.track("Keys Display").clone(), [note(0, 960, 60, 0.5), note(1920, 960, 64, 0.8)]);
+}
+
 #[test]
 fn extracts_plugin_states_named_by_track() {
     let path = bitwig_project(&test_dir("bitwig-read-presets"), "Loop Idea");

@@ -84,7 +84,7 @@ pub fn scan(sounds_db: &Path, folders: &[String], progress: &dyn Fn(usize, usize
     }
     // Settings shows how far it is, folder by folder, whatever happens to it ([`state`]).
     let mut told = Told::new(sounds_db, folders);
-    let found = background::on_bulk_pool(|| scan::find_sounds(folders));
+    let (found, empty) = background::on_bulk_pool(|| scan::find_sounds(folders));
     let known = match SoundsDb::open_read_only(&copy).and_then(|db| db.known_files()) {
         Ok(known) => known,
         Err(e) => {
@@ -92,7 +92,7 @@ pub fn scan(sounds_db: &Path, folders: &[String], progress: &dyn Fn(usize, usize
             return Err(e.to_string());
         }
     };
-    let ScanPlan { mut listen, moves, forget } = scan::plan(&found, &known, folders);
+    let ScanPlan { mut listen, moves, forget } = scan::plan(&found, &empty, &known, folders);
     let mut scanned = Scanned { found: found.files.len(), ..Scanned::default() };
     let again = try_again(&copy, &mut listen, &found, &moves, folders);
     told.found(&found, &listen, again.as_ref().map(|a| &a.added));

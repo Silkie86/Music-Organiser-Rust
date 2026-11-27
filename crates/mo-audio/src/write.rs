@@ -14,6 +14,28 @@ use crate::AudioError;
 /// kept as they are, except that a sample that isn't a number is written as silence and an endless one as full
 /// scale).
 pub fn write_wav(path: &Path, channels: &[Vec<f32>], sample_rate: u32, bits: u16) -> Result<(), AudioError> {
+    let (head, frames) = head(channels, sample_rate, bits)?;
+    let part = path.with_extension("wav.part");
+    let written = File::create(&part)
+        .and_then(|file| write_part(file, &head, channels, frames, bits))
+        .and_then(|()| std::fs::rename(&part, path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&part);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// [`write_wav`]'s samples, written into `file`, a file the caller has made (and so claimed: a take's part file,
+/// `crate::record::save`) and renames once this is done.
+pub(crate) fn write_wav_into(file: File, channels: &[Vec<f32>], sample_rate: u32, bits: u16) -> Result<(), AudioError> {
+    let (head, frames) = head(channels, sample_rate, bits)?;
+    write_part(file, &head, channels, frames, bits).map_err(AudioError::from)
+}
+
+/// A WAV file's header for `channels` (all the same length) at `sample_rate`, `bits` 16, 24 or 32 (floats), and how
+/// many frames follow it.
+fn head(channels: &[Vec<f32>], sample_rate: u32, bits: u16) -> Result<(Vec<u8>, usize), AudioError> {
     if bits != 16 && bits != 24 && bits != 32 {
         return Err(AudioError::NotSupported(format!("Writing {bits}-bit WAV files")));
     }
@@ -58,19 +80,12 @@ pub fn write_wav(path: &Path, channels: &[Vec<f32>], sample_rate: u32, bits: u16
     }
     head.extend_from_slice(b"data");
     head.extend_from_slice(&data_size.to_le_bytes());
-
-    let part = path.with_extension("wav.part");
-    let written = write_part(&part, &head, channels, frames, bits).and_then(|()| std::fs::rename(&part, path));
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&part);
-        return Err(e.into());
-    }
-    Ok(())
+    Ok((head, frames))
 }
 
 /// Streams the header and the samples to `part`, a little at a time, so a long export isn't held in memory twice.
-fn write_part(part: &Path, head: &[u8], channels: &[Vec<f32>], frames: usize, bits: u16) -> std::io::Result<()> {
-    let mut out = BufWriter::new(File::create(part)?);
+fn write_part(part: File, head: &[u8], channels: &[Vec<f32>], frames: usize, bits: u16) -> std::io::Result<()> {
+    let mut out = BufWriter::new(part);
     out.write_all(head)?;
     for i in 0..frames {
         for ch in channels {

@@ -148,8 +148,19 @@ impl slint::platform::Platform for Platform {
     }
 }
 
-/// A list worked out: the asking's number, the library it's of, the sounds it shows and the filter column's counts.
-type Found = (u64, Arc<Library>, Vec<usize>, SoundCounts);
+/// A list worked out: the asking's number, the library it's of, the sounds it shows, the filter column's counts, and
+/// whether it was worked out again for what was asked already ([`Again`]).
+type Found = (u64, Arc<Library>, Vec<usize>, SoundCounts, Again);
+
+/// Who a list is worked out for: someone asking for something else (a search, a filter, an order), or the same asking
+/// again because something under it changed (the library read again, the folders the app hides, the sounds like your
+/// favourites found). The line picked stays picked through the second, found again by its sound (the 26 Nov review's
+/// CP-3: a library read again half a minute after the window opened took the place in the list away).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Again {
+    No,
+    Yes,
+}
 
 /// What background threads hand the panel: the newest of each wins.
 #[derive(Default)]
@@ -340,6 +351,14 @@ impl Lines {
         let library = self.library.borrow();
         let at = *self.shown.borrow().get(row)?;
         library.as_ref()?.list.sound(at).map(|s| s.id)
+    }
+
+    /// The row the sound with id `sound` is on, if the list shows it (a look through the list: only when a list is
+    /// worked out again).
+    fn row_of(&self, sound: i64) -> Option<usize> {
+        let library = self.library.borrow();
+        let list = &library.as_ref()?.list;
+        self.shown.borrow().iter().position(|&at| list.sound(at).is_some_and(|s| s.id == sound))
     }
 }
 
@@ -716,6 +735,8 @@ struct Shown {
     sky_asked: Cell<bool>,
     /// When the timer last ran: a glide of the Galaxy goes on by the time since.
     ticked: Cell<Instant>,
+    /// The widths of the parts you drag as the panel last had them ([`crate::widths::tick`]).
+    widths_seen: Cell<u64>,
 }
 
 impl Shown {
@@ -728,7 +749,7 @@ impl Shown {
         // Taken back whether or not the panel was made, so no later window gets this one.
         NEXT.with(|next| next.borrow_mut().take());
         let panel = panel.map_err(|e| format!("Couldn't make the panel: {e}"))?;
-        crate::widths::connect(&panel);
+        let widths_seen = Cell::new(connect_globals(&panel));
 
         let lines = Rc::new(Lines {
             library: RefCell::new(None),
@@ -738,6 +759,8 @@ impl Shown {
             notify: ModelNotify::default(),
         });
         let slots = Arc::new(Slots::default());
+        // What the last window left playing: a click on it still stops it, and a part still follows the tempo.
+        let left = lock(&instance.left_playing).take().unwrap_or_default();
         let shown = Shown {
             context,
             draws,
@@ -763,14 +786,14 @@ impl Shown {
             take_picked: Rc::default(),
             takes_shown: Rc::default(),
             take_rows: RefCell::default(),
-            playing: Cell::new(None),
+            playing: Cell::new(left.playing),
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
             dragging: Cell::new(false),
             right_now: Rc::default(),
             keys_told: Cell::new([false; 3]),
-            heard: Rc::default(),
-            part: Rc::default(),
+            heard: Rc::new(Cell::new(left.heard)),
+            part: Rc::new(RefCell::new(left.part)),
             tempo_seen: Cell::new(None),
             sky: Rc::default(),
             sky_names: RefCell::default(),
@@ -779,6 +802,7 @@ impl Shown {
             painter_failed: Cell::new(false),
             sky_asked: Cell::new(false),
             ticked: Cell::new(Instant::now()),
+            widths_seen,
         };
         shown.fill_in();
         // What the knobs were turned to while no panel was open isn't acted on now (a sound would play as it opens);
@@ -971,7 +995,7 @@ impl Shown {
                 }
                 if let Some(library) = library {
                     like_wanted(&library, &asked, &slots);
-                    view(library, asked, Arc::clone(&slots));
+                    view(library, asked, Arc::clone(&slots), Again::No);
                 }
             })
         };
@@ -1305,18 +1329,15 @@ impl Shown {
         panel.on_tree_mix_picked(move |name| change(&|a, _| a.filters.pick("type", &name)));
         let (column, again) = (Rc::clone(&self.column), Rc::clone(&shown));
         panel.on_tree_opened(move |path| {
-            let key = mo_app::sound_folders::key(&path);
-            {
-                let mut tree = column.tree.borrow_mut();
-                if !tree.open.remove(&key) {
-                    tree.open.insert(key);
-                }
-            }
+            crate::folders::opened(&path, &column.tree);
             again();
         });
-        let (column, again) = (Rc::clone(&self.column), Rc::clone(&shown));
+        let (column, again, lines, asked) =
+            (Rc::clone(&self.column), Rc::clone(&shown), Rc::clone(&self.lines), Rc::clone(&self.asked));
         panel.on_tree_search_edited(move |words| {
-            column.tree.borrow_mut().search = words.to_string();
+            let library = lines.library.borrow().clone();
+            let tops = asked.borrow().filters.folder_tops.clone();
+            crate::folders::searched(&words, library.as_deref(), &tops, &column.tree);
             again();
         });
         let (column, again) = (Rc::clone(&self.column), Rc::clone(&shown));
@@ -1374,9 +1395,14 @@ impl Shown {
         panel.set_record_open(self.instance.record_open.load(Ordering::Relaxed));
         let instance = Arc::clone(&self.instance);
         panel.on_record_open_changed(move |open| instance.record_open.store(open, Ordering::Relaxed));
+        // What it records from, as it was left while the plugin is loaded.
+        panel.set_record_from(lock(&self.instance.record_from).as_str().into());
+        panel.set_record_side(self.instance.record_side.load(Ordering::Relaxed));
+        let instance = Arc::clone(&self.instance);
+        panel.on_record_side_changed(move |side| instance.record_side.store(side, Ordering::Relaxed));
         let menu = Rc::clone(&self.record_menu);
         panel.on_record_menu_alive(move || menu.alive.set(Some(Instant::now())));
-        let (menu, weak) = (Rc::clone(&self.record_menu), panel.as_weak());
+        let (menu, weak, instance) = (Rc::clone(&self.record_menu), panel.as_weak(), Arc::clone(&self.instance));
         panel.on_record_menu_clicked(move |row| {
             let (Some(panel), Some(line)) =
                 (weak.upgrade(), usize::try_from(row).ok().and_then(|r| menu.lines.row_data(r)))
@@ -1388,6 +1414,7 @@ impl Shown {
             } else if line.card {
                 *menu.card.borrow_mut() = Some(line.key.to_string());
             } else {
+                *lock(&instance.record_from) = line.key.to_string();
                 panel.set_record_from(line.key);
                 *menu.card.borrow_mut() = None;
             }
@@ -1978,6 +2005,7 @@ impl Shown {
         self.instance.view.store(self.panel.get_view(), Ordering::Relaxed);
         let size = self.panel.window().size().to_logical(self.panel.window().scale_factor());
         self.panel.set_tree_narrow(size.width < TREE_NARROW);
+        crate::widths::tick(&self.panel, &self.widths_seen);
         self.follow_tempo();
         self.knobs();
         if let Some(read) = take(&self.slots.library) {
@@ -1994,7 +2022,7 @@ impl Shown {
                     }
                     self.column.show(&self.panel, Some(&library), &self.asked.borrow());
                     like_wanted(&library, &self.asked.borrow(), &self.slots);
-                    view(library, self.asked.borrow().clone(), Arc::clone(&self.slots));
+                    view(library, self.asked.borrow().clone(), Arc::clone(&self.slots), Again::No);
                 }
                 Read::Not(why) => self.panel.set_status(why.into()),
             }
@@ -2005,7 +2033,7 @@ impl Shown {
             *self.lines.next.borrow_mut() = Some(Arc::clone(&again));
             self.slots.like_shown.store(false, Ordering::Release);
             like_wanted(&again, &self.asked.borrow(), &self.slots);
-            view(again, self.asked.borrow().clone(), Arc::clone(&self.slots));
+            view(again, self.asked.borrow().clone(), Arc::clone(&self.slots), Again::Yes);
         }
         // The folders the app hides are hidden here too, below the app's sample folders: the list again once it's
         // there (before it is, the first view takes them).
@@ -2020,7 +2048,7 @@ impl Shown {
             let asked = self.asked.borrow().clone();
             self.column.show(&self.panel, library.as_deref(), &asked);
             if let Some(library) = library {
-                view(library, asked, Arc::clone(&self.slots));
+                view(library, asked, Arc::clone(&self.slots), Again::Yes);
             }
         }
         // The sounds like your favourites became known (whichever panel asked for them): the list again, once.
@@ -2031,11 +2059,16 @@ impl Shown {
             self.slots.like_shown.store(true, Ordering::Release);
             let asked = self.asked.borrow().clone();
             self.column.show(&self.panel, Some(&library), &asked);
-            view(library, asked, Arc::clone(&self.slots));
+            view(library, asked, Arc::clone(&self.slots), Again::Yes);
         }
-        if let Some((number, library, found, counts)) = take(&self.slots.found)
+        if let Some((number, library, found, counts, again)) = take(&self.slots.found)
             && number == self.slots.searches.load(Ordering::Acquire)
         {
+            // The same asking worked out again: the sound picked stays picked, wherever it is in the new list.
+            let picked = match again {
+                Again::Yes => usize::try_from(self.panel.get_picked()).ok().and_then(|row| self.lines.sound(row)),
+                Again::No => None,
+            };
             // A library read again comes on show with its first list: the Galaxy's stars are read again for it.
             let before = self.lines.library.borrow().clone();
             if before.is_some_and(|b| !Arc::ptr_eq(&b, &library)) {
@@ -2056,13 +2089,14 @@ impl Shown {
             let narrowed =
                 self.asked.borrow().any() || hiding_silent || !self.asked.borrow().filters.hidden_folders.is_empty();
             self.panel.set_status(count_line(total, narrowed.then_some(found.len())).into());
-            self.panel.set_picked(-1);
             *self.column.counts.borrow_mut() = Some(counts);
             self.column.show(&self.panel, library.as_deref(), &self.asked.borrow());
             // The Galaxy shows the same sounds as the list.
             let found = Arc::new(found);
             self.sky.borrow_mut().set_shown(Arc::clone(&found));
             self.lines.show(library, found);
+            let row = picked.and_then(|sound| self.lines.row_of(sound)).and_then(|row| i32::try_from(row).ok());
+            self.panel.set_picked(row.unwrap_or(-1));
         }
         if let Some(played) = take(&self.slots.played) {
             let line = match played {
@@ -2301,7 +2335,9 @@ impl Shown {
 
     /// The DAW's tempo moved while a MIDI part plays: the part is made again at the new tempo and goes on from the
     /// same place in it, once the new tempo has stayed a moment (not at every step of a tempo being dragged). A part
-    /// played again later is made at the tempo then (Solomon, 23 Nov 2026: a part kept its old tempo).
+    /// played again later is made at the tempo then (Solomon, 23 Nov 2026: a part kept its old tempo). It runs on the
+    /// window's timer, so a closed window can't follow the tempo: the part plays on at the tempo it was made at, and
+    /// the next window opened takes it ([`LeftPlaying`]) and makes it again at the DAW's tempo then.
     fn follow_tempo(&self) {
         let player = &self.instance.player;
         let Some(now) = player.tempo() else { return };
@@ -2373,6 +2409,25 @@ impl Shown {
     }
 }
 
+impl Drop for Shown {
+    /// What's playing plays on with the window closed: the next window takes it ([`LeftPlaying`]).
+    fn drop(&mut self) {
+        let part = self.part.try_borrow_mut().ok().and_then(|mut part| part.take());
+        let left = LeftPlaying { heard: self.heard.get(), playing: self.playing.get(), part };
+        *lock(&self.instance.left_playing) = Some(left);
+    }
+}
+
+/// What a window left playing as it closed (a sound or a MIDI part plays on): the next window opened takes it, so a
+/// click on the line playing still stops it, and a MIDI part still follows the DAW's tempo once it's open (the 26 Nov
+/// review's CP-5: a new window didn't know what was playing).
+#[derive(Default)]
+pub(crate) struct LeftPlaying {
+    heard: Option<(Heard, bool)>,
+    playing: Option<u64>,
+    part: Option<PartPlayed>,
+}
+
 impl WindowHandler for Shown {
     fn draw(&self) -> Result<(), HandlerError> {
         let (width, height) = self.size.get();
@@ -2432,25 +2487,6 @@ impl WindowHandler for Shown {
                 if key.state == KeyState::Down && !key.repeat && key.key == Key::Named(NamedKey::Escape) {
                     self.stop();
                 }
-                // Up and Down move through the list on show (Solomon, 25 Nov), held down too. Where there's no list
-                // to move through (the Galaxy turns with them) they go on to the panel as before.
-                let by = match key.key {
-                    Key::Named(NamedKey::ArrowUp) => -1,
-                    Key::Named(NamedKey::ArrowDown) => 1,
-                    _ => 0,
-                };
-                if by != 0 && key.state == KeyState::Down && self.panel.invoke_step(by) {
-                    return EventStatus::Captured;
-                }
-                // Left stops the sound and Right plays it again, in the Sounds list.
-                let side = match key.key {
-                    Key::Named(NamedKey::ArrowLeft) => -1,
-                    Key::Named(NamedKey::ArrowRight) => 1,
-                    _ => 0,
-                };
-                if side != 0 && key.state == KeyState::Down && !key.repeat && self.panel.invoke_side(side) {
-                    return EventStatus::Captured;
-                }
                 let Some(text) = key_text(&key.key) else { return EventStatus::Ignored };
                 // What Slint knows of Shift, Ctrl and Alt from here on.
                 if let Some(at) = held_key(&key.key) {
@@ -2458,11 +2494,10 @@ impl WindowHandler for Shown {
                     told[at] = key.state == KeyState::Down;
                     self.keys_told.set(told);
                 }
-                self.send(match (key.state, key.repeat) {
-                    (KeyState::Down, false) => Slint::KeyPressed { text },
-                    (KeyState::Down, true) => Slint::KeyPressRepeated { text },
-                    (KeyState::Up, _) => Slint::KeyReleased { text },
-                });
+                key_in(self.draws.window(), &self.panel, &key, text);
+                if !self.draws.waits_for_the_screen() {
+                    self.render();
+                }
             }
             Event::Window(WindowEvent::Focused) => self.send(Slint::WindowActiveChanged(true)),
             Event::Window(WindowEvent::Unfocused) => {
@@ -2474,6 +2509,14 @@ impl WindowHandler for Shown {
         }
         EventStatus::Captured
     }
+}
+
+/// What the panel's shared parts from the app's style ask of Rust: the widths of the parts you drag (the number to
+/// hand [`crate::widths::tick`] is returned), and a filter menu's search (`FilterSearch` has no answer of its own:
+/// unset, every line was hidden as soon as a letter was typed, the 26 Nov review's PZ-1).
+fn connect_globals(panel: &Panel) -> u64 {
+    panel.global::<crate::ui::FilterSearch>().on_matches(|text, query| mo_app::filters::matches(&text, &query));
+    crate::widths::connect(panel)
 }
 
 /// The list's top line: "1,234 sounds", or "12 of 1,234 sounds" when searched.
@@ -2498,11 +2541,11 @@ fn like_wanted(library: &Arc<Library>, asked: &Asked, slots: &Slots) {
 
 /// Works out what `asked` shows of `library` on a background thread; it lands in `slots.found` with this asking's
 /// number, and only the newest asking's answer is shown.
-fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
+fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>, again: Again) {
     let number = slots.searches.fetch_add(1, Ordering::AcqRel) + 1;
     // Worked out lately: it shows at once (a window opened again asks for what it showed).
     if let Some((shown, counts)) = Views::get(&library, &asked) {
-        *lock(&slots.found) = Some((number, library, shown, counts));
+        *lock(&slots.found) = Some((number, library, shown, counts, again));
         return;
     }
     let theirs = Arc::clone(&slots);
@@ -2512,20 +2555,31 @@ fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
         if slots.searches.load(Ordering::Acquire) != number {
             return;
         }
-        let started = Instant::now();
-        let (shown, counts) = library.view(&asked);
-        crate::log::took_if_slow("List", &format!("Worked out a list of {} sounds", shown.len()), started);
-        Views::keep(&library, &asked, &shown, &counts);
+        let (shown, counts) = work_out(&library, &asked);
         let mut found = lock(&slots.found);
         if found.as_ref().is_none_or(|(n, ..)| *n < number) {
-            *found = Some((number, library, shown, counts));
+            *found = Some((number, library, shown, counts, again));
         }
     });
 }
 
+/// Works out what `asked` shows of `library` (on the list's own thread), and keeps it for a quick reopen ([`Views`])
+/// when it's the library's last word on it: not while the sounds like your favourites are asked for and still being
+/// found, or that list without them would come back once they're known (the 26 Nov review's CP-2).
+fn work_out(library: &Arc<Library>, asked: &Asked) -> (Vec<usize>, SoundCounts) {
+    let started = Instant::now();
+    let (shown, counts, settled) = library.view_settled(asked);
+    crate::log::took_if_slow("List", &format!("Worked out a list of {} sounds", shown.len()), started);
+    if settled {
+        Views::keep(library, asked, &shown, &counts);
+    }
+    (shown, counts)
+}
+
 /// The last few lists worked out, kept while the plugin is loaded, so a window opened again shows its list at once
 /// instead of "Getting the list ready" (Solomon, 25 Nov). Only a few: each is a number a sound (about 4 MB for his
-/// library). A list of a library read again since isn't used.
+/// library). A list of a library read again since isn't used, and the last copy of the plugin taken out of the DAW
+/// lets them all go ([`forget_views`]).
 struct Views;
 
 /// How many lists [`Views`] keeps.
@@ -2547,7 +2601,11 @@ impl Views {
         Some(found)
     }
 
+    /// Keeps a list worked out, only while a copy of the plugin is loaded (as [`crate::kept::Kept::keep`]).
     fn keep(library: &Arc<Library>, asked: &Asked, shown: &[usize], counts: &SoundCounts) {
+        if !crate::kept::loaded() {
+            return;
+        }
         let mut views = lock(&VIEWS);
         views.retain(|(l, a, ..)| {
             l.strong_count() > 0 && !(std::ptr::eq(l.as_ptr(), Arc::as_ptr(library)) && a == asked)
@@ -2557,6 +2615,11 @@ impl Views {
         }
         views.push((Arc::downgrade(library), asked.clone(), shown.to_vec(), counts.clone()));
     }
+}
+
+/// Lets go of the lists [`Views`] keeps: the last copy of the plugin has gone ([`crate::kept::Alive`]).
+pub(crate) fn forget_views() {
+    lock(&VIEWS).clear();
 }
 
 /// The filter column's lines, kept from one showing to the next, and the counts of the list last worked out (the
@@ -2909,6 +2972,31 @@ fn held_key(key: &Key) -> Option<usize> {
     }
 }
 
+/// Hands a key to the panel (`text`, as [`key_text`] makes it). What has the keys there uses it first: a text box (a
+/// search, the folder tree's, a chord's "Type it") moves its cursor with the arrows, and the Galaxy turns with them.
+/// An arrow nothing used moves through the list on show (Solomon, 25 Nov), held down too: Up and Down to the line
+/// above or below, Left stops the sound and Right plays it again. So what has the keys now decides, as Slint says,
+/// not a note of which box had them last, which a box that went (a tab changed, the tree folded) never put right
+/// (the 26 Nov review's CP-1). A click on a line gives the lists the keys back (the panel's `list-keys`).
+fn key_in(window: &slint::Window, panel: &Panel, key: &keyboard_types::KeyboardEvent, text: SharedString) {
+    use slint::platform::{WindowEvent as Slint, WindowEventDispatchResult as Used};
+    let event = match (key.state, key.repeat) {
+        (KeyState::Down, false) => Slint::KeyPressed { text },
+        (KeyState::Down, true) => Slint::KeyPressRepeated { text },
+        (KeyState::Up, _) => Slint::KeyReleased { text },
+    };
+    if matches!(window.dispatch_event_with_result(event), Ok(Used::Accepted)) || key.state != KeyState::Down {
+        return;
+    }
+    match key.key {
+        Key::Named(NamedKey::ArrowUp) => panel.invoke_step(-1),
+        Key::Named(NamedKey::ArrowDown) => panel.invoke_step(1),
+        Key::Named(NamedKey::ArrowLeft) if !key.repeat => panel.invoke_side(-1),
+        Key::Named(NamedKey::ArrowRight) if !key.repeat => panel.invoke_side(1),
+        _ => {}
+    }
+}
+
 /// What Slint is told a key typed: the letters it gives, or Slint's own sign for a key that types none.
 fn key_text(key: &Key) -> Option<SharedString> {
     use slint::platform::Key as S;
@@ -2977,8 +3065,14 @@ mod tests {
         );
     }
 
+    /// Held by each test of the lists kept ([`Views`]): they share them.
+    static VIEWS_TESTS: Mutex<()> = Mutex::new(());
+
     #[test]
     fn a_list_worked_out_is_kept_for_its_library_and_asking_only() {
+        let _one_at_a_time = lock(&VIEWS_TESTS);
+        // Kept only while a copy of the plugin is loaded.
+        let _alive = crate::kept::Alive::new();
         let library = Arc::new(Library::new(vec![mo_sounds::Sound::new(1, r"D:\Drums\kick.wav")]));
         let asked = Asked { seed: 7, ..Asked::default() };
         let (shown, counts) = library.view(&asked);
@@ -2994,6 +3088,146 @@ mod tests {
         }
         assert!(Views::get(&library, &asked).is_none());
         assert_eq!(lock(&VIEWS).len(), VIEWS_KEPT);
+        // The last copy of the plugin gone: they go too (XT-4).
+        forget_views();
+        assert!(lock(&VIEWS).is_empty());
+    }
+
+    #[test]
+    fn a_list_without_the_sounds_like_your_favourites_is_not_kept_while_they_are_found() {
+        let _one_at_a_time = lock(&VIEWS_TESTS);
+        let _alive = crate::kept::Alive::new();
+        let mut favourite = mo_sounds::Sound::new(1, r"D:\Drums\kick.wav");
+        favourite.favourite = true;
+        let library = Arc::new(Library::new(vec![favourite, mo_sounds::Sound::new(2, r"D:\Drums\snare.wav")]));
+        let mut asked = Asked { seed: 21, ..Asked::default() };
+        asked.filters.toggle("favourites");
+        asked.filters.like_favourites = 2;
+        assert!(asked.filters.wants_like_favourites());
+        // Being found (CP-2): the list without them is shown, but not kept to come back once they're known.
+        assert!(library.start_like(&asked));
+        let _ = work_out(&library, &asked);
+        assert!(Views::get(&library, &asked).is_none());
+        // Known (here, that they couldn't be): that list is the library's last word, and is kept.
+        library.set_like(Like::Not("no fingerprints in this test".into()));
+        let (shown, counts) = work_out(&library, &asked);
+        assert_eq!(Views::get(&library, &asked), Some((shown, counts)));
+        // Not asked for: kept at once.
+        let plain = Asked { seed: 22, ..Asked::default() };
+        let (shown, counts) = work_out(&library, &plain);
+        assert_eq!(Views::get(&library, &plain), Some((shown, counts)));
+    }
+
+    /// A panel as the plugin's window makes it (its shared parts wired as there), drawn on the processor in a window
+    /// of its own 1280 by 800, with nothing behind it: no DAW, no files.
+    fn test_panel() -> (Panel, Rc<MinimalSoftwareWindow>) {
+        let _ = slint::platform::set_platform(Box::new(Platform { started: Instant::now() }));
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        NEXT.with(|next| *next.borrow_mut() = Some(Rc::clone(&window) as Rc<dyn WindowAdapter>));
+        let panel = Panel::new().unwrap();
+        let _ = connect_globals(&panel);
+        window.set_size(slint::PhysicalSize::new(1280, 800));
+        panel.show().unwrap();
+        (panel, window)
+    }
+
+    /// Draws the panel once, so its lists have made the lines in sight.
+    fn draw(window: &MinimalSoftwareWindow) {
+        let mut picture = vec![Pixel::default(); 1280 * 800];
+        window.request_redraw();
+        window.draw_if_needed(|renderer| {
+            renderer.render(picture.as_mut_slice(), 1280);
+        });
+    }
+
+    fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
+        use slint::platform::WindowEvent as Slint;
+        let (position, button) = (LogicalPosition::new(x, y), PointerEventButton::Left);
+        window.dispatch_event(Slint::PointerMoved { position });
+        window.dispatch_event(Slint::PointerPressed { position, button });
+        window.dispatch_event(Slint::PointerReleased { position, button });
+    }
+
+    /// A key pressed and let go, as the window hands it on.
+    fn press(window: &MinimalSoftwareWindow, panel: &Panel, key: Key) {
+        let text = key_text(&key).unwrap();
+        let down = keyboard_types::KeyboardEvent { state: KeyState::Down, key, ..Default::default() };
+        key_in(window.window(), panel, &down, text.clone());
+        key_in(window.window(), panel, &keyboard_types::KeyboardEvent { state: KeyState::Up, ..down }, text);
+    }
+
+    #[test]
+    fn a_filter_menus_search_finds_its_lines_in_the_plugin_too() {
+        // PZ-1: unset, the answer was false for every line, and a letter typed emptied the menu.
+        let (panel, _window) = test_panel();
+        let search = panel.global::<crate::ui::FilterSearch>();
+        assert!(search.invoke_matches("Serum".into(), "ser".into()));
+        assert!(search.invoke_matches("FabFilter Pro-Q 3".into(), "fab q".into()));
+        assert!(!search.invoke_matches("Massive".into(), "ser".into()));
+    }
+
+    #[test]
+    fn after_a_search_a_click_on_a_line_gives_the_arrows_back_to_the_list() {
+        let (panel, window) = test_panel();
+        let wave = slint::Image::default();
+        let line = |n: usize| SoundLine {
+            name: format!("Kick {n}.wav").into(),
+            folder: "Drums".into(),
+            facts: SharedString::new(),
+            favourite: false,
+            colour: -1,
+            wave: wave.clone(),
+        };
+        panel.set_sounds(ModelRc::new(VecModel::from((0..40).map(line).collect::<Vec<_>>())));
+        // The tree folded to its tab: its own search box isn't there, so Tab puts the keys in Search sounds.
+        panel.set_tree_folded(true);
+        let played = Rc::new(RefCell::new(Vec::new()));
+        let heard = Rc::clone(&played);
+        panel.on_play(move |row, _| heard.borrow_mut().push(row));
+        let searched = Rc::new(RefCell::new(Vec::new()));
+        let typed = Rc::clone(&searched);
+        panel.on_search(move |words| typed.borrow_mut().push(words.to_string()));
+        let stopped = Rc::new(Cell::new(0));
+        let stops = Rc::clone(&stopped);
+        panel.on_stop(move || stops.set(stops.get() + 1));
+        draw(&window);
+
+        // Typing in Search sounds: the arrows move its cursor, not through the list.
+        press(&window, &panel, Key::Named(NamedKey::Tab));
+        press(&window, &panel, Key::Character("k".into()));
+        assert_eq!(*searched.borrow(), ["k"], "Tab put the keys in Search sounds");
+        press(&window, &panel, Key::Named(NamedKey::ArrowDown));
+        press(&window, &panel, Key::Named(NamedKey::ArrowLeft));
+        assert!(played.borrow().is_empty() && stopped.get() == 0);
+        assert_eq!(panel.get_picked(), -1);
+
+        // A click on a line (the lowest in sight, found from the bottom of the list up) plays it...
+        let mut y = 790.0;
+        while played.borrow().is_empty() && y > 200.0 {
+            click(&window, 700.0, y);
+            y -= 10.0;
+        }
+        assert_eq!((panel.get_view(), panel.get_galaxy()), (0, false), "only lines were clicked");
+        let clicked = *played.borrow().last().expect("a line was clicked");
+        assert_eq!(panel.get_picked(), clicked);
+        // ...and gives the lists the keys: Down plays the next line, Left stops it, and a letter no longer searches.
+        press(&window, &panel, Key::Named(NamedKey::ArrowDown));
+        assert_eq!((panel.get_picked(), played.borrow().last().copied()), (clicked + 1, Some(clicked + 1)));
+        press(&window, &panel, Key::Named(NamedKey::ArrowLeft));
+        assert_eq!(stopped.get(), 1);
+        press(&window, &panel, Key::Character("s".into()));
+        assert_eq!(searched.borrow().len(), 1);
+
+        // A box that goes while it has the keys (the tab changed) takes nothing with it: back on Sounds, Up steps.
+        press(&window, &panel, Key::Named(NamedKey::Tab));
+        press(&window, &panel, Key::Character("s".into()));
+        assert_eq!(searched.borrow().len(), 2, "Tab put the keys back in Search sounds");
+        panel.set_view(1);
+        draw(&window);
+        panel.set_view(0);
+        draw(&window);
+        press(&window, &panel, Key::Named(NamedKey::ArrowUp));
+        assert_eq!(panel.get_picked(), clicked);
     }
 
     #[test]

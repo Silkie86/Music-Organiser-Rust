@@ -44,6 +44,8 @@ const MIX_PARTS: usize = 6;
 #[derive(Default)]
 pub struct TreeState {
     pub open: HashSet<String>,
+    /// Those of them opened while words were in the search box: kept in sight once it's cleared.
+    pub found_open: HashSet<String>,
     pub folded: bool,
     pub search: String,
     pub away: HashSet<String>,
@@ -234,8 +236,27 @@ pub fn chosen(id: &str, path: &str, asked: &mut Asked, library: Option<&Library>
         "pick" if !within => tree::toggle_pick(&mut f.folders, path),
         "just" if !within => tree::toggle_just_this(&mut f.folders, path),
         "only" if !within => tree::pick_only(&mut f.folders, path),
-        "hide" => tree::toggle_hidden(&mut f.hidden_folders, &mut f.folders, path),
+        "hide" => tree::toggle_hidden(&mut f.hidden_folders, &mut f.folders, path, &f.folder_tops),
         _ => {}
+    }
+}
+
+/// An arrow clicked on the line at `path`: its branch opened or closed (one found by the search too).
+pub fn opened(path: &str, state: &RefCell<TreeState>) {
+    let state = &mut *state.borrow_mut();
+    let searching = tree::searching(&state.search);
+    tree::toggle_open(&mut state.open, &mut state.found_open, path, searching);
+}
+
+/// New words in the tree's search box. Cleared, what was opened while searching stays in sight, with the folders above
+/// it opened.
+pub fn searched(words: &str, library: Option<&Library>, tops: &[String], state: &RefCell<TreeState>) {
+    let state = &mut *state.borrow_mut();
+    state.search = words.to_owned();
+    if !tree::searching(words)
+        && let Some(library) = library
+    {
+        tree::search_cleared(library.list.folders(), &mut state.open, &mut state.found_open, tops);
     }
 }
 
@@ -292,5 +313,22 @@ mod tests {
         chosen("only", path, &mut asked, None);
         assert_eq!(asked.filters.folders.len(), 1);
         assert_eq!(asked.filters.folders[0].path, path);
+    }
+
+    #[test]
+    fn a_branch_opened_while_searching_is_one_to_keep_in_sight() {
+        let state = RefCell::new(TreeState::default());
+        let path = r"G:\Samples\Kicks";
+        opened(path, &state);
+        assert!(state.borrow().open.contains(&tree::key(path)));
+        assert!(state.borrow().found_open.is_empty(), "opened with no words in the box");
+        opened(path, &state);
+        searched("kick", None, &[], &state);
+        assert_eq!(state.borrow().search, "kick");
+        opened(path, &state);
+        assert!(state.borrow().found_open.contains(&tree::key(path)));
+        // Closed again, it's no longer one to keep in sight.
+        opened(path, &state);
+        assert!(state.borrow().open.is_empty() && state.borrow().found_open.is_empty());
     }
 }

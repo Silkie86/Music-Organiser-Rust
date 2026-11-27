@@ -382,8 +382,8 @@ pub fn sample_folder_state(folder: &str, state: Option<&ScanState>, today: Naive
 /// The line under the Folders tab's title.
 pub const FOLDERS_NOTE: &str = "The folders the app looks in, and at the bottom the one it puts exports in. Adding \
     or removing one never moves or deletes anything on disk, and a project folder taken off keeps its songs listed. \
-    The Songs page takes up a changed project folder (one added, or one taken off) at the next start, and reads the \
-    saves in a new one then. Sounds looks through a new sample folder for sounds straight away.";
+    The Songs page looks through a new project folder straight away and lists its saves once they're read, and Sounds \
+    looks through a new sample folder for sounds straight away.";
 
 /// The folder picker's title for a list.
 pub fn pick_title(list: FolderList) -> &'static str {
@@ -407,16 +407,28 @@ pub fn folder_change_note(
 ) -> Option<String> {
     let songs = list == FolderList::Projects;
     match done {
+        // Songs isn't reading yet, or couldn't read the library (`scanning` false): it takes the folder up at its next
+        // look, or the next start.
+        Ok(true) if songs && !scanning => Some(if added {
+            format!("Added {folder}. Songs lists the saves in it from the next start.")
+        } else {
+            format!(
+                "Took {folder} off the list. Nothing on disk was changed, and its songs stay listed; Songs stops \
+                 watching it from the next start."
+            )
+        }),
         Ok(true) => Some(match (added, songs) {
             (true, false) if list == FolderList::Samples && scanning => {
                 format!("Added {folder}. Sounds is looking through it for new sounds: its row says how far it is.")
             }
             (true, false) => format!("Added {folder}."),
-            (true, true) => format!("Added {folder}. Songs lists the saves in it from the next start."),
+            (true, true) => {
+                format!("Added {folder}. Songs is looking through it and lists its saves once they're read.")
+            }
             (false, false) => format!("Took {folder} off the list. Nothing on disk was changed."),
             (false, true) => format!(
                 "Took {folder} off the list. Nothing on disk was changed, and its songs stay listed; Songs stops \
-                 watching it from the next start."
+                 watching it now."
             ),
         }),
         Ok(false) if added => Some(format!("{folder} is already on the list.")),
@@ -595,7 +607,7 @@ pub fn key_lines(keys: &crate::shortcuts::Shortcuts, search: &str) -> Vec<KeyLin
 /// The Shortcuts tab's words above the list.
 pub const KEYS_NOTE: &str = "Keys that work on every page come first, then each page's own. Click a key and press the \
                              one you want (Esc stops listening); the same idea has the same key on every page. F12 \
-                             stays the note for Claude, and F1 or ? on a page shows its keys.";
+                             stays the note for Claude, and F1 or ? on a page shows its help and keys.";
 
 /// The credit Slint's royalty-free licence asks for (decided 2026-10-30), with what it means.
 /// How a DAW's link stands, for a row on the DAWs tab: a short state, whether it's working, and the facts under it.
@@ -1374,11 +1386,14 @@ mod tests {
         // A project folder says when Songs takes it up.
         let projects = FolderList::Projects;
         assert_eq!(
-            folder_change_note(projects, true, r"K:\New", Ok(true), false).as_deref(),
-            Some(r"Added K:\New. Songs lists the saves in it from the next start.")
+            folder_change_note(projects, true, r"K:\New", Ok(true), true).as_deref(),
+            Some(r"Added K:\New. Songs is looking through it and lists its saves once they're read.")
         );
-        let off = folder_change_note(projects, false, "x", Ok(true), false);
-        assert!(off.is_some_and(|n| n.contains("from the next start")));
+        let off = folder_change_note(projects, false, "x", Ok(true), true);
+        assert!(off.is_some_and(|n| n.contains("stops watching it now")));
+        // The Songs page isn't reading (yet): from the next start.
+        let later = folder_change_note(projects, true, "x", Ok(true), false);
+        assert!(later.is_some_and(|n| n.contains("from the next start")));
         let groups = folder_groups(vec![], vec![], vec![], vec![], vec![], &[]);
         let lists: Vec<_> = groups.iter().map(|g| g.list).collect();
         assert_eq!(

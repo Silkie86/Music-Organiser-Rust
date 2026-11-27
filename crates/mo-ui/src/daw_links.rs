@@ -52,6 +52,9 @@ struct Keep {
     declined: bool,
     failed: Option<String>,
     loaded_from: Option<String>,
+    /// A test plugin is in: the mark that a version put the app's own in goes, so that one goes back in once the test
+    /// one is out (`tools/dev/install-test-plugin.ps1` takes the app's own out).
+    forget_plugin: bool,
 }
 
 /// Starts the look. `library`: the song library, for the FL Studio project folders that may have FL's user data
@@ -98,20 +101,24 @@ pub fn keep_up_to_date(library: PathBuf, feed: Feed) {
             }
             let links = settings::find_links(&library, chosen.as_deref(), loaded_from.as_deref());
             put_in(&links, first_look, (fl_newer, bw_newer), &mut done);
-            let (step, asked) = put_in_plugin(&plugin, &feed);
-            match asked {
-                Asked::SaidNo => keep.declined = true,
-                Asked::Failed => keep.failed = Some(daw_links::failed_mark(VERSION, &today)),
-                Asked::Not | Asked::Went => {}
-            }
-            done.plugin = step;
         }
+        // After the links' files, not while they're held: the plugin step writes none of them, and Windows' question
+        // can wait a long time for an answer, which would hold up Install and Take out on Settings › DAWs (DK-3).
+        let (step, asked) = put_in_plugin(&plugin, &feed);
+        match asked {
+            Asked::SaidNo => keep.declined = true,
+            Asked::Failed => keep.failed = Some(daw_links::failed_mark(VERSION, &today)),
+            Asked::TestPlugin => keep.forget_plugin = plugin.before,
+            Asked::Not | Asked::Went => {}
+        }
+        done.plugin = step;
         if let Some((title, detail)) = daw_links::card(&done) {
             feed.told(&title, &detail);
         }
-        keep.fl = done.fl.as_ref().is_some_and(|(_, d)| !d.went.is_empty());
-        keep.bitwig = done.bitwig.as_ref().is_some_and(|(_, d)| !d.installed.went.is_empty());
-        keep.plugin = done.plugin.as_ref().is_some_and(|(_, d)| !d.went.is_empty());
+        // Kept only when every folder took it: a folder Bitwig had open is tried again at the next start (DK-1).
+        keep.fl = done.fl.as_ref().is_some_and(|(_, d)| daw_links::went_everywhere(d));
+        keep.bitwig = done.bitwig.as_ref().is_some_and(|(_, d)| daw_links::went_everywhere(&d.installed));
+        keep.plugin = done.plugin.as_ref().is_some_and(|(_, d)| daw_links::went_everywhere(d));
         let _ = slint::invoke_from_event_loop(move || remember(&keep));
     });
     if let Err(e) = started {
@@ -131,6 +138,10 @@ fn remember(keep: &Keep) {
             put(key, VERSION);
         }
     }
+    if keep.forget_plugin {
+        // Blank counts as none (see keep_up_to_date's `value`).
+        put(PLUGIN_BY_KEY, "");
+    }
     if keep.declined {
         put(PLUGIN_DECLINED_KEY, VERSION);
     }
@@ -147,11 +158,20 @@ fn remember(keep: &Keep) {
 
 /// Puts in or updates each link as [`daw_links::step`] says. `newer`: whether this app is newer than the one that
 /// last wrote FL's link, and Bitwig's.
+///
+/// Only the folders whose copy isn't the app's own yet are written: after a start when one copy couldn't be (Bitwig
+/// had it open), the next writes only that one, not the ones that went in again (DK-1).
 fn put_in(links: &Links, first_look: bool, newer: (bool, bool), done: &mut Done) {
     let fl = daw_links::step(links.fl_state, first_look, !links.fl_folders.is_empty(), newer.0);
     log::info("DAW links", &format!("FL Studio script: {:?}, so {fl:?}", links.fl_state));
     if fl != Step::Leave {
-        let installed = scripts::install_fl(&links.fl_folders);
+        let not_yet: Vec<PathBuf> = links
+            .fl_folders
+            .iter()
+            .filter(|f| scripts::fl_state(std::slice::from_ref(f)) != ScriptState::Installed)
+            .cloned()
+            .collect();
+        let installed = scripts::install_fl(&not_yet);
         settings::log_fl_install(&installed, "DAW links");
         done.fl = Some((fl, installed));
     }
@@ -167,7 +187,12 @@ fn put_in(links: &Links, first_look: bool, newer: (bool, bool), done: &mut Done)
     let bw = daw_links::step(links.bw_state, first_look, !folders.is_empty(), newer.1);
     log::info("DAW links", &format!("Bitwig extension: {:?}, so {bw:?}", links.bw_state));
     if bw != Step::Leave {
-        let installed = scripts::install_bitwig(source, &folders, &users);
+        let not_yet: Vec<PathBuf> = folders
+            .iter()
+            .filter(|f| scripts::bitwig_state(source, std::slice::from_ref(f)) != ScriptState::Installed)
+            .cloned()
+            .collect();
+        let installed = scripts::install_bitwig(source, &not_yet, &users);
         settings::log_bitwig_install(&installed, "DAW links");
         done.bitwig = Some((bw, installed));
     }
@@ -213,12 +238,15 @@ enum Asked {
     Went,
     SaidNo,
     Failed,
+    /// Not asked: a test plugin was put in by hand.
+    TestPlugin,
 }
 
 /// Puts in or updates the CLAP plugin the installer put beside the app, as [`daw_links::plugin_step`] says, in
 /// `Common Files\CLAP`, which needs Windows' Yes. Not asked while a program has the plugin loaded (then at a later
 /// start), for a version you said no to, or again the same day after the step failed. Left alone when a test plugin
-/// was put in by hand (the same plugin: a DAW would list it twice).
+/// was put in by hand (the same plugin: a DAW would list it twice); [`Asked::TestPlugin`] then has the look forget that
+/// a version put the app's own in, as the test script took it out (DK-2).
 fn put_in_plugin(plugin: &Plugin, feed: &Feed) -> (Option<(Step, Installed)>, Asked) {
     let not = (None, Asked::Not);
     let Some(source) = std::env::current_exe().ok().and_then(|exe| scripts::clap_plugin_source(&exe)) else {
@@ -231,8 +259,14 @@ fn put_in_plugin(plugin: &Plugin, feed: &Feed) -> (Option<(Step, Installed)>, As
         .flat_map(|f| scripts::TEST_CLAP_PLUGIN_NAMES.map(|n| f.join(n)))
         .find(|f| f.is_file());
     if let Some(by_hand) = by_hand {
-        log::info("DAW links", &format!("The plugin is left alone: {} is there already", by_hand.display()));
-        return not;
+        log::info(
+            "DAW links",
+            &format!(
+                "The plugin is left alone: {} is there already. The app's own goes back in once it's gone",
+                by_hand.display()
+            ),
+        );
+        return (None, Asked::TestPlugin);
     }
     let state = scripts::clap_state(&source, &folder);
     let step = daw_links::plugin_step(state, plugin.before, plugin.newer);
@@ -338,4 +372,52 @@ fn in_use(file: &Path) -> bool {
 #[cfg(not(windows))]
 fn in_use(_file: &Path) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder of its own under the build folder, empty (tests never reach a real DAW's folders: rule 11).
+    fn fixture(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/mo-ui-daw-links").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The 26 Nov review's DK-1: a start when Bitwig had one copy open put the new one only in the others, so the next
+    /// writes only the copy that isn't the app's own yet, and says nothing more of the ones that went in.
+    #[test]
+    fn a_retry_writes_only_the_copies_that_arent_the_apps_own_yet() {
+        let root = fixture("retry");
+        let source = root.join(scripts::BITWIG_EXTENSION_NAME);
+        std::fs::write(&source, "the app's extension").unwrap();
+        let (k, documents) = (root.join("K").join("Extensions"), root.join("Documents").join("Extensions"));
+        for (folder, copy) in [(&k, "the app's extension"), (&documents, "an older extension")] {
+            std::fs::create_dir_all(folder).unwrap();
+            std::fs::write(folder.join(scripts::BITWIG_EXTENSION_NAME), copy).unwrap();
+        }
+        let fl = root.join("FL").join("Settings").join("Hardware").join(scripts::FL_FOLDER);
+        std::fs::create_dir_all(&fl).unwrap();
+        std::fs::write(fl.join(scripts::FL_SCRIPT_NAME), scripts::FL_SCRIPT).unwrap();
+        let bw_folders = vec![k.clone(), documents.clone()];
+        let links = Links {
+            fl_folders: vec![fl.clone()],
+            fl_state: scripts::fl_state(std::slice::from_ref(&fl)),
+            bw_users: vec![root.join("K"), root.join("Documents")],
+            bw_state: scripts::bitwig_state(&source, &bw_folders),
+            bw_folders,
+            bw_source: Some(source.clone()),
+        };
+        assert_eq!((links.fl_state, links.bw_state), (ScriptState::Installed, ScriptState::Outdated));
+        let mut done = Done::default();
+        put_in(&links, false, (true, true), &mut done);
+        assert!(done.fl.is_none(), "FL's script is the app's own: left as it is");
+        let (step, bitwig) = done.bitwig.expect("Bitwig's copy in Documents is older");
+        assert_eq!(step, Step::Update);
+        assert_eq!(bitwig.installed.went, std::slice::from_ref(&documents), "only the copy that was older");
+        assert!(daw_links::went_everywhere(&bitwig.installed));
+        assert_eq!(std::fs::read(documents.join(scripts::BITWIG_EXTENSION_NAME)).unwrap(), b"the app's extension");
+    }
 }

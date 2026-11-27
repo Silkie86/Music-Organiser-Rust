@@ -1370,6 +1370,8 @@ component SongPanel inherits Panel {
                               clicked => { SongsData.pick-save(line.path, line.name); }
                               double-clicked => { SongsData.open-save(line.path); }
                               right-clicked(x, y) => {
+                                  // Picked too, so the keys on the menu's lines act on this save.
+                                  SongsData.pick-save(line.path, line.name);
                                   SongsData.save-menu-for(line.path);
                                   save-menu.open-at(x, y);
                               }

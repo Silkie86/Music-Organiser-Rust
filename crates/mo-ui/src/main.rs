@@ -96,7 +96,16 @@ fn main() -> Result<(), slint::PlatformError> {
     let data = mo_app::paths::data_dir();
     // The app's own song library, songs.db, once it's been made and checked; the C# app's library.db until then (and
     // songs.db is made from it in the background, for the next start).
-    let songs_db = mo_library::songs_db::at_start(&data, &mo_app::version::version());
+    let mut songs_db = mo_library::songs_db::at_start(&data, &mo_app::version::version());
+    // No library at all (a new PC that never had the C# app): a new, empty one, the app's own, so folders can be added
+    // and songs kept. Not while the data folder in use isn't the real one (its drive missing): the real one has a
+    // library.
+    if songs_db.none_yet()
+        && mo_app::paths::problem().is_none()
+        && let Some(made) = mo_app::song_library::start_new(&data)
+    {
+        songs_db = made;
+    }
     log::info("Song library", &songs_db.line());
     if let Some(notice) = songs_db.notice() {
         log::warning("Song library", &notice);

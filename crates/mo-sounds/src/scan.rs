@@ -99,13 +99,15 @@ fn names(path: &str) -> impl Iterator<Item = &str> {
 /// Every sound file in `folders`, with the size and modified time the folder listing gave, walked on every core of the
 /// current rayon pool (the caller runs it on the low-priority pool). Folders that couldn't be read this time are listed
 /// in `unreadable`, so their sounds aren't taken for gone. The files in a temp folder aren't sounds ([`is_sound_file`]),
-/// so one an older scan took in is taken for gone, and forgotten. Nor is an empty file (0 bytes: a copy that never
-/// finished, with no sound in it): the Sounds list never shows one (Solomon, 24 Nov 2026: "don't show anything empty"),
-/// and one an older scan took in is forgotten. Once it fills, the next scan finds it as a new sound.
-pub fn find_sounds(folders: &[String]) -> Found {
+/// so one an older scan took in is taken for gone, and forgotten. Nor is an empty file (0 bytes, with no sound in it):
+/// the Sounds list never shows one (Solomon, 24 Nov 2026: "don't show anything empty"). The empty ones come back apart,
+/// for [`plan`]: one the library never had a sound of (a copy that never finished) isn't taken in, and once it fills
+/// the next scan finds it as a new sound; one that had a sound keeps its row while it's empty.
+pub fn find_sounds(folders: &[String]) -> (Found, Vec<FoundFile>) {
     let mut found = find_files(folders, &is_sound_file, &|name, _parent| is_hidden_folder(name));
-    found.files.retain(|f| f.size > 0);
-    found
+    let (files, empty) = std::mem::take(&mut found.files).into_iter().partition(|f| f.size > 0);
+    found.files = files;
+    (found, empty)
 }
 
 /// What a scan has to do.
@@ -120,7 +122,8 @@ pub struct ScanPlan {
     pub forget: Vec<String>,
 }
 
-/// Works out what a scan of `folders` has to do, from what [`find_sounds`] found and what the library knows.
+/// Works out what a scan of `folders` has to do, from what [`find_sounds`] found (the sound files, and the `empty`
+/// ones apart) and what the library knows.
 ///
 /// As the C# app: a folder on an unplugged drive, or one that couldn't be read this time, keeps its sounds; so does a
 /// file still there that the app can't read. Only files really gone are forgotten.
@@ -128,7 +131,13 @@ pub struct ScanPlan {
 /// Unlike the C# app, a sound outside every listed folder is never forgotten (the C# app forgot it): a folder taken
 /// off the list for a while, or a list that failed to load, mustn't wipe the tags, stars and plays you gave its sounds.
 /// The page shows only sounds under the listed folders.
-pub fn plan(found: &Found, known: &[KnownSound], folders: &[String]) -> ScanPlan {
+///
+/// Nor is a sound whose file is empty (0 bytes) just now, when it had a sound before: it's being written again (a
+/// render over the same file, a copy) or stopped part way. It's listened to, so its row says the file is empty and no
+/// list shows it ([`crate::Sound::is_empty_file`]), keeping its heart, tags, type and plays; once the file fills it's
+/// a changed file, listened to again (the whole-app review of 26 Nov, ST-3: it was forgotten). One the library knew
+/// only as empty (a copy that never finished, taken in by an older scan) is forgotten.
+pub fn plan(found: &Found, empty: &[FoundFile], known: &[KnownSound], folders: &[String]) -> ScanPlan {
     // Each path's key is worked out once: with hundreds of thousands of sounds, every extra pass is that many strings.
     let known_keys: Vec<String> = known.iter().map(|k| case::key(&k.path)).collect();
     let known_by_key: HashMap<&str, &KnownSound> = known_keys.iter().map(String::as_str).zip(known).collect();
@@ -158,17 +167,30 @@ pub fn plan(found: &Found, known: &[KnownSound], folders: &[String]) -> ScanPlan
             || (!can_read(p) && folders.iter().any(|f| is_inside(p, f)) && Path::new(p).is_file())
     };
 
-    let gone: Vec<&KnownSound> = known
-        .iter()
-        .zip(&known_keys)
-        .filter(|(k, key)| !present.contains(*key) && !kept(&k.path))
-        .map(|(k, _)| k)
-        .collect();
+    let empty_now: HashMap<String, &FoundFile> = empty.iter().map(|f| (case::key(&f.path), f)).collect();
+    let mut emptied: Vec<FoundFile> = Vec::new();
+    let mut gone: Vec<&KnownSound> = Vec::new();
+    for (k, key) in known.iter().zip(&known_keys) {
+        if present.contains(key) || kept(&k.path) {
+            continue;
+        }
+        match empty_now.get(key.as_str()) {
+            // Still empty, and its row says so already.
+            Some(_) if k.empty => {}
+            // Empty now, though it had a sound: its row is kept, and says so once it's listened to.
+            Some(f) if k.size > 0 => emptied.push((*f).clone()),
+            _ => gone.push(k),
+        }
+    }
     let moves = moves(gone.iter().map(|k| (k.path.as_str(), k.size, k.mtime)), added);
 
     // A moved file whose new name says what its old one did isn't listened to again.
     let arrived: HashSet<String> = moves.iter().filter(|(f, t)| same_hints(f, t)).map(|(_, t)| case::key(t)).collect();
     listen.retain(|f| !arrived.contains(&case::key(&f.path)));
+    if !emptied.is_empty() {
+        listen.extend(emptied);
+        listen.sort_by(|a, b| a.path.cmp(&b.path));
+    }
     let moved_from: HashSet<String> = moves.iter().map(|(f, _)| case::key(f)).collect();
     let forget = gone.iter().filter(|k| !moved_from.contains(&case::key(&k.path))).map(|k| k.path.clone()).collect();
     ScanPlan { listen, moves, forget }

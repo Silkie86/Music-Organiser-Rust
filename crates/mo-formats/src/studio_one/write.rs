@@ -93,7 +93,7 @@ pub fn write(song: &Arrangement, title: &str, format: &FormatOf) -> Written {
         let music = has_notes || (empty && lane.kind == LaneKind::Instrument);
         if music {
             instruments = true;
-            for (track, clips) in music_tracks(lane, &name) {
+            for (track, clips) in crate::arrangement::instrument_parts(lane, &name) {
                 let events = out.music_events(&track, &clips);
                 out.track(false, &track, lane, &events);
             }
@@ -133,42 +133,6 @@ pub fn write(song: &Arrangement, title: &str, format: &FormatOf) -> Written {
     let song_end = if end > EMPTY_END - 16.0 { (end / 4.0).ceil() * 4.0 + 16.0 } else { EMPTY_END };
     let bytes = assemble(song, title, tempo, out.tracks, song_end, &out).unwrap_or_default();
     Written { bytes, left_out }
-}
-
-/// A lane's clips of notes as Studio One's instrument tracks: one, or one for each instrument when its clips hold
-/// several (an FL pattern plays a part for each of its channels), named after it.
-fn music_tracks(lane: &crate::arrangement::PreviewLane, name: &str) -> Vec<(String, Vec<PreviewClip>)> {
-    let part_of = |c: &PreviewClip, n: &PreviewNote| -> String {
-        if c.parts.len() > 1 { c.parts.get(usize::from(n.part)).cloned().unwrap_or_default() } else { String::new() }
-    };
-    let mut names: Vec<String> = Vec::new();
-    for c in &lane.clips {
-        for n in &c.notes {
-            let part = part_of(c, n);
-            if !names.contains(&part) {
-                names.push(part);
-            }
-        }
-    }
-    if names.len() <= 1 {
-        let clips = lane.clips.iter().filter(|c| !c.notes.is_empty()).cloned().collect();
-        return vec![(name.to_owned(), clips)];
-    }
-    names
-        .into_iter()
-        .map(|part| {
-            let clips = lane
-                .clips
-                .iter()
-                .filter_map(|c| {
-                    let notes: Vec<PreviewNote> = c.notes.iter().filter(|n| part_of(c, n) == part).copied().collect();
-                    (!notes.is_empty()).then(|| PreviewClip { notes, parts: Vec::new(), ..c.clone() })
-                })
-                .collect();
-            let track = if part.trim().is_empty() { name.to_owned() } else { part };
-            (track, clips)
-        })
-        .collect()
 }
 
 /// What the tracks add to each of the song's files.
@@ -256,7 +220,6 @@ impl Parts<'_> {
         let mut events = String::new();
         for clip in clips {
             let name = if clip.name.trim().is_empty() { track } else { &clip.name };
-            let (first, last) = (clip.audio.first(), clip.audio.last());
             for part in &clip.audio {
                 let at = clip.start + part.start;
                 let at = if at.is_finite() { at.max(0.0) } else { 0.0 };
@@ -273,8 +236,8 @@ impl Parts<'_> {
                     1.0
                 };
                 self.stretched |= (speed - 1.0).abs() > 1e-6 && !matches!(part.stretch, None | Some(Stretch::Raw));
-                let fade_in = if first == Some(part) { clip.fade_in * spb } else { 0.0 };
-                let fade_out = if last == Some(part) { clip.fade_out * spb } else { 0.0 };
+                let (fade_in, fade_out) = clip.fades_of(part);
+                let (fade_in, fade_out) = (fade_in * spb, fade_out * spb);
                 let semitones = if part.semitones.is_finite() { part.semitones.clamp(-128.0, 128.0) } else { 0.0 };
                 let (whole, cents) = (semitones.trunc(), ((semitones - semitones.trunc()) * 100.0).round());
                 let from = if part.from.is_finite() { part.from.max(0.0) } else { 0.0 };
@@ -560,11 +523,13 @@ fn song_xml(text: &str, song: &Arrangement, tempo: f64, end: f64, tracks: &str) 
         .markers
         .iter()
         .filter(|m| m.beat.is_finite() && m.beat >= 0.0)
-        .map(|m| {
+        .enumerate()
+        .map(|(n, m)| {
+            // A marker with no name gets its number: one with none would be taken for one of Studio One's own.
+            let name = if m.name.trim().is_empty() { format!("#{}", n + 1) } else { attr(&m.name) };
             format!(
-                "\t\t\t\t<MarkerEvent markerStop=\"0\" markerType=\"0\" start=\"{}\" timeFormat=\"2\" name=\"{}\"/>\n",
+                "\t\t\t\t<MarkerEvent markerStop=\"0\" markerType=\"0\" start=\"{}\" timeFormat=\"2\" name=\"{name}\"/>\n",
                 m.beat,
-                attr(&m.name)
             )
         })
         .collect();
@@ -625,7 +590,7 @@ fn replace_value(text: &str, before: &str, value: &str) -> Option<String> {
 }
 
 /// Text as an XML attribute's value.
-fn attr(s: &str) -> String {
+pub(crate) fn attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

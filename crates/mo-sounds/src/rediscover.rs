@@ -69,12 +69,14 @@ pub(crate) fn used_in(usage: &HashMap<i64, Usage>, id: i64) -> u32 {
 }
 
 /// The years the sounds' files are dated, newest first, each with how many sounds, for the page's year strip (which
-/// leaves out the years no one picks: `mo_app::year_strip::strip`). Hidden copies and silent sounds are left out, as
-/// they're never suggested, and so is a date that isn't real (still to come, or before 1981), which is in no year.
-pub fn years(sounds: &[Sound]) -> Vec<(i32, usize)> {
+/// leaves out the years no one picks: `mo_app::year_strip::strip`). Hidden copies, silent sounds and those `left_out`
+/// (by their place in `sounds`: the folders you hid on the folder tree) are left out, as they're never suggested, and
+/// so is a date that isn't real (still to come, or before 1981), which is in no year.
+pub fn years(sounds: &[Sound], left_out: impl Fn(usize) -> bool) -> Vec<(i32, usize)> {
     let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
     let dates = RealDates::now();
-    for s in sounds.iter().filter(|s| !s.hidden && !s.is_silent() && dates.local(s.added)) {
+    let shown = sounds.iter().enumerate().filter(|&(i, s)| !left_out(i) && !s.hidden && !s.is_silent());
+    for (_, s) in shown.filter(|(_, s)| dates.local(s.added)) {
         *counts.entry(s.added.year()).or_default() += 1;
     }
     counts.into_iter().rev().collect()
@@ -95,17 +97,28 @@ fn dated_in(s: &Sound, years: Option<(i32, i32)>, dates: &RealDates) -> bool {
     years.is_none_or(|(first, last)| dates.local(s.added) && (first..=last).contains(&s.added.year()))
 }
 
+/// Whether a sound can be suggested, or teach your taste, whatever its use and year: not a hidden copy, listened
+/// to, not silent, of the types asked for and in the index.
+fn may_suggest(s: &Sound, index: &VectorIndex, o: &Options) -> bool {
+    !s.hidden && s.analysis.is_some() && !s.is_silent() && s.is_of_types(&o.sound_types) && index.contains(s.id)
+}
+
 /// Suggests unused sounds you might like, best first. `sounds` is the whole library (hidden copies and silent sounds
-/// are left out here), `usage` comes from [`crate::usage::usage`], `index` from [`SoundIndex::build`].
-pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex, o: &Options) -> Vec<Suggestion> {
+/// are left out here, and so are those `left_out`, by their place in `sounds`: the folders you hid on the folder
+/// tree, whose sounds never show), `usage` comes from [`crate::usage::usage`], `index` from [`SoundIndex::build`].
+/// The sounds left out don't teach your taste either, and the count is made up from the others (the whole-app review
+/// of 26 Nov, ST-1: they were dropped after the pick, so fewer came than asked for).
+pub fn suggest(
+    sounds: &[Sound],
+    usage: &HashMap<i64, Usage>,
+    index: &SoundIndex,
+    o: &Options,
+    left_out: impl Fn(usize) -> bool,
+) -> Vec<Suggestion> {
     let mut rng = DotnetRandom::new(if o.seed == 0 { fresh_seed() } else { o.seed });
     let index = index.active();
-    let sounds: Vec<&Sound> = sounds
-        .iter()
-        .filter(|s| {
-            !s.hidden && s.analysis.is_some() && !s.is_silent() && s.is_of_types(&o.sound_types) && index.contains(s.id)
-        })
-        .collect();
+    let sounds: Vec<&Sound> =
+        sounds.iter().enumerate().filter(|&(i, s)| !left_out(i) && may_suggest(s, index, o)).map(|(_, s)| s).collect();
 
     // Your taste: what you've used, starred, rated or keep playing.
     let taste: Vec<(&Sound, f64)> = sounds
@@ -321,32 +334,61 @@ fn reason(usage: &HashMap<i64, Usage>, s: &Sound, nearest: Option<(&Sound, f64)>
     (format!("{own}, from {}", s.folder()), None)
 }
 
-/// Why [`suggest`] found nothing, in words for the page.
-pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String {
-    let visible: Vec<&Sound> = sounds.iter().filter(|s| !s.hidden).collect();
+/// Why [`suggest`] found nothing, in words for the page. Each step says why when no sound gets past it; when only
+/// sounds `left_out` (by their place in `sounds`: in folders you hid on the folder tree) would have, that's the reason
+/// given instead, as showing their folder again would find them.
+pub fn why_nothing(
+    sounds: &[Sound],
+    usage: &HashMap<i64, Usage>,
+    index: &SoundIndex,
+    o: &Options,
+    left_out: impl Fn(usize) -> bool,
+) -> String {
+    // Each sound with whether it's in a hidden folder: a step that only those get past says so.
+    let visible: Vec<(&Sound, bool)> =
+        sounds.iter().enumerate().filter(|(_, s)| !s.hidden).map(|(i, s)| (s, left_out(i))).collect();
+    let types = types_in_words(&o.sound_types);
+    let kind = if types.is_empty() { String::new() } else { format!("{types} ") };
+    let hidden_folders = || {
+        format!(
+            "The {kind}sounds that would fit are in folders you hid on the folder tree. Show one again from its \
+             crossed-out chip under Tiles or List."
+        )
+    };
+    let only_hidden = |left: &[(&Sound, bool)]| !left.is_empty() && left.iter().all(|&(_, out)| out);
     if visible.is_empty() {
         // The Sounds page scans the sample folders at each start.
         return "No sounds yet. Add your sample folders in Settings and let the scan finish.".to_owned();
     }
-    let analysed: Vec<&Sound> = visible.into_iter().filter(|s| s.analysis.is_some()).collect();
+    if only_hidden(&visible) {
+        return hidden_folders();
+    }
+    let analysed: Vec<(&Sound, bool)> = visible.into_iter().filter(|(s, _)| s.analysis.is_some()).collect();
     if analysed.is_empty() || index.active().is_empty() {
         return "None of your sounds have been listened to yet. Let the scan of your sample folders finish, then \
                 shuffle again."
             .to_owned();
     }
-    let of_type: Vec<&Sound> = analysed.into_iter().filter(|s| s.is_of_types(&o.sound_types)).collect();
-    let types = types_in_words(&o.sound_types);
-    let kind = if types.is_empty() { String::new() } else { format!("{types} ") };
+    if only_hidden(&analysed) {
+        return hidden_folders();
+    }
+    let of_type: Vec<(&Sound, bool)> = analysed.into_iter().filter(|(s, _)| s.is_of_types(&o.sound_types)).collect();
     if of_type.is_empty() {
         return format!("No sounds are sorted as {types} yet. Pick another type, or Any type.");
     }
+    if only_hidden(&of_type) {
+        return hidden_folders();
+    }
     // Silent sounds are never suggested.
-    let of_type: Vec<&Sound> = of_type.into_iter().filter(|s| !s.is_silent()).collect();
+    let of_type: Vec<(&Sound, bool)> = of_type.into_iter().filter(|(s, _)| !s.is_silent()).collect();
     if of_type.is_empty() {
         return format!("Every {kind}sound is silent all through: there's none to suggest.");
     }
+    if only_hidden(&of_type) {
+        return hidden_folders();
+    }
     // Only sounds the index has can be suggested (deep listening may not have heard these yet).
-    let mut of_type: Vec<&Sound> = of_type.into_iter().filter(|s| index.active().contains(s.id)).collect();
+    let mut of_type: Vec<(&Sound, bool)> = of_type.into_iter().filter(|(s, _)| index.active().contains(s.id)).collect();
     if of_type.is_empty() {
         // With no type picked there's no other to pick: what's true for now instead. Closely is deep listening
         // (CLAP), which this version doesn't run: the scan's new sounds are measured, but CLAP never hears them.
@@ -357,13 +399,24 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
         };
         return format!("None of your {kind}sounds have been listened to closely enough to suggest. {next}");
     }
+    if only_hidden(&of_type) {
+        return hidden_folders();
+    }
     if let Some((first, last)) = o.years {
         let dates = RealDates::now();
-        of_type.retain(|s| dated_in(s, o.years, &dates));
+        of_type.retain(|(s, _)| dated_in(s, o.years, &dates));
         if of_type.is_empty() {
             let when = if first == last { first.to_string() } else { format!("{first} to {last}") };
             return format!("No {kind}sounds are dated {when}. Pick other years on the strip, or clear it.");
         }
+        if only_hidden(&of_type) {
+            return hidden_folders();
+        }
+    }
+    // The sounds used few enough times to suggest: only ones in hidden folders, or none.
+    let unused: Vec<(&Sound, bool)> = of_type.into_iter().filter(|(s, _)| used_in(usage, s.id) <= o.max_uses).collect();
+    if only_hidden(&unused) {
+        return hidden_folders();
     }
     if o.max_uses == 0 {
         format!(
@@ -375,13 +428,14 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
 }
 
 /// Your sample folders by how little of them your songs use, then the biggest first: find forgotten packs.
-/// Hidden copies and silent sounds are left out. A folder spelt two ways (by case) counts once, under the first
-/// spelling met.
+/// Hidden copies, silent sounds and those `left_out` (by their place in `sounds`: the folders you hid on the folder
+/// tree) are left out. A folder spelt two ways (by case) counts once, under the first spelling met.
 /// As in C#, a project's use of a hidden copy isn't credited to the copy that's shown.
-pub fn folders(sounds: &[Sound], usage: &HashMap<i64, Usage>) -> Vec<FolderUse> {
+pub fn folders(sounds: &[Sound], usage: &HashMap<i64, Usage>, left_out: impl Fn(usize) -> bool) -> Vec<FolderUse> {
     let mut at: HashMap<String, usize> = HashMap::new();
     let mut out: Vec<FolderUse> = Vec::new();
-    for s in sounds.iter().filter(|s| !s.hidden && !s.is_silent()) {
+    let shown = sounds.iter().enumerate().filter(|&(i, s)| !left_out(i) && !s.hidden && !s.is_silent());
+    for (_, s) in shown {
         let dir = directory(&s.path);
         let i = *at.entry(folder_letters(dir).collect()).or_insert_with(|| {
             let dir = if cfg!(windows) { dir.replace('/', "\\") } else { dir.to_owned() };
@@ -450,14 +504,14 @@ mod tests {
     fn suggests_unused_sounds_like_the_ones_you_use() {
         let (sounds, usage, index) = library();
         let o = Options { sound_types: vec!["Kick".into()], count: 3, seed: 5, ..Options::default() };
-        let s = suggest(&sounds, &usage, &index, &o);
+        let s = suggest(&sounds, &usage, &index, &o, |_| false);
         assert_eq!(s.len(), 3);
         assert!(s.iter().all(|x| x.id != 1 && x.id <= 10), "{s:?}");
         assert!(s[0].reason.starts_with("Never used. Sounds like 1, which is in 5 of your songs"), "{}", s[0].reason);
         // The one it names, for the card to list its projects.
         assert_eq!(s[0].like, Some(1));
         // The same seed gives the same list.
-        assert_eq!(s, suggest(&sounds, &usage, &index, &o));
+        assert_eq!(s, suggest(&sounds, &usage, &index, &o, |_| false));
     }
 
     #[test]
@@ -468,20 +522,23 @@ mod tests {
             s.analysis = Some(SoundAnalysis { peak_db: -120.0, ..SoundAnalysis::default() });
         }
         let o = Options { sound_types: vec!["Kick".into()], count: 3, seed: 5, ..Options::default() };
-        assert_eq!(suggest(&sounds, &usage, &index, &o), Vec::new());
+        assert_eq!(suggest(&sounds, &usage, &index, &o, |_| false), Vec::new());
         // Nor are they counted in their folder, nor in why there's none: the kick that isn't silent is used.
-        let kicks = folders(&sounds, &usage).into_iter().find(|f| f.folder.ends_with("Kicks")).unwrap();
+        let kicks = folders(&sounds, &usage, |_| false).into_iter().find(|f| f.folder.ends_with("Kicks")).unwrap();
         assert_eq!((kicks.sounds, kicks.used), (1, 1));
-        assert!(why_nothing(&sounds, &index, &o).starts_with("Every Kick sound is used in a song already"));
+        assert!(
+            why_nothing(&sounds, &usage, &index, &o, |_| false)
+                .starts_with("Every Kick sound is used in a song already")
+        );
         let mut all_silent = sounds.clone();
         all_silent[0].analysis = Some(SoundAnalysis { peak_db: -120.0, ..SoundAnalysis::default() });
         assert_eq!(
-            why_nothing(&all_silent, &index, &o),
+            why_nothing(&all_silent, &usage, &index, &o, |_| false),
             "Every Kick sound is silent all through: there's none to suggest."
         );
         // A sound that only whispers is no silent one.
         sounds[4].analysis = Some(SoundAnalysis { peak_db: -70.0, ..SoundAnalysis::default() });
-        let found = suggest(&sounds, &usage, &index, &o);
+        let found = suggest(&sounds, &usage, &index, &o, |_| false);
         assert_eq!(found.iter().map(|s| s.id).collect::<Vec<_>>(), [5]);
     }
 
@@ -489,7 +546,7 @@ mod tests {
     fn with_no_taste_the_reason_names_the_folder() {
         let (sounds, _, index) = library();
         let o = Options { sound_types: vec!["Hat".into()], count: 2, seed: 9, ..Options::default() };
-        let s = suggest(&sounds, &HashMap::new(), &index, &o);
+        let s = suggest(&sounds, &HashMap::new(), &index, &o, |_| false);
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].reason, "Never used, from Hats");
     }
@@ -500,7 +557,7 @@ mod tests {
         // Sound 12, a hat, starred but never used: the only hat you like.
         sounds[11].favourite = true;
         let o = Options { sound_types: vec!["Hat".into()], count: 10, seed: 4, ..Options::default() };
-        let s = suggest(&sounds, &HashMap::new(), &index, &o);
+        let s = suggest(&sounds, &HashMap::new(), &index, &o, |_| false);
         let twelve = s.iter().find(|x| x.id == 12).unwrap();
         assert_eq!(twelve.reason, "Never used, from Hats");
         assert!(s.iter().any(|x| x.reason == "Never used. Sounds like 12, a favourite"), "{s:?}");
@@ -511,12 +568,12 @@ mod tests {
         let (sounds, usage, index) = library();
         // As on the Type filter: Kick and Hat picked is a kick or a hat (the whole-app review of 6 Nov, X3-23).
         let o = Options { sound_types: vec!["Kick".into(), "Hat".into()], count: 19, seed: 3, ..Options::default() };
-        let s = suggest(&sounds, &usage, &index, &o);
+        let s = suggest(&sounds, &usage, &index, &o, |_| false);
         assert_eq!(s.len(), 19, "every unused kick and hat: {s:?}");
         assert!(s.iter().any(|x| x.id <= 10) && s.iter().any(|x| x.id > 10), "{s:?}");
         // The type in another case is the same type, as the filter's chips count it.
         let o = Options { sound_types: vec!["kICK".into()], count: 30, seed: 3, ..Options::default() };
-        let s = suggest(&sounds, &usage, &index, &o);
+        let s = suggest(&sounds, &usage, &index, &o, |_| false);
         assert_eq!(s.len(), 9);
         assert!(s.iter().all(|x| x.id <= 10 && x.id != 1), "{s:?}");
         // All the way through: the taste each sound is scored against and the "Sounds like" reason too, not only
@@ -529,62 +586,113 @@ mod tests {
             s.sound_type = s.sound_type.to_ascii_lowercase().as_str().into();
         }
         let o = Options { count: 19, seed: 3, ..Options::default() };
-        let as_typed = suggest(&liked, &usage, &index, &o);
+        let as_typed = suggest(&liked, &usage, &index, &o, |_| false);
         assert!(as_typed.iter().any(|x| x.id % 2 == 0 && x.reason.contains("Sounds like 1,")), "{as_typed:?}");
-        assert_eq!(suggest(&spelt, &usage, &index, &o), as_typed);
+        assert_eq!(suggest(&spelt, &usage, &index, &o, |_| false), as_typed);
         // Why nothing names every type picked.
         let o = Options { sound_types: vec!["Snare".into(), "Pad".into(), "Clap".into()], ..Options::default() };
-        assert!(suggest(&sounds, &usage, &index, &o).is_empty());
+        assert!(suggest(&sounds, &usage, &index, &o, |_| false).is_empty());
         assert_eq!(
-            why_nothing(&sounds, &index, &o),
+            why_nothing(&sounds, &usage, &index, &o, |_| false),
             "No sounds are sorted as Snare, Pad or Clap yet. Pick another type, or Any type."
         );
         let o = Options { sound_types: vec!["Kick".into(), "Hat".into()], ..Options::default() };
         let mut every_one_used = usage.clone();
         every_one_used.extend((2..=20).map(|id| (id, Usage { projects: 3, songs: 1, ..Usage::default() })));
-        assert!(suggest(&sounds, &every_one_used, &index, &o).is_empty());
-        assert!(why_nothing(&sounds, &index, &o).starts_with("Every Kick or Hat sound is used in a song already"));
+        assert!(suggest(&sounds, &every_one_used, &index, &o, |_| false).is_empty());
+        assert!(
+            why_nothing(&sounds, &every_one_used, &index, &o, |_| false)
+                .starts_with("Every Kick or Hat sound is used in a song already")
+        );
     }
 
     #[test]
     fn why_nothing_says_what_is_missing() {
         let (mut sounds, usage, index) = library();
         let o = Options { sound_types: vec!["Snare".into()], ..Options::default() };
-        assert!(suggest(&sounds, &usage, &index, &o).is_empty());
+        assert!(suggest(&sounds, &usage, &index, &o, |_| false).is_empty());
         assert_eq!(
-            why_nothing(&sounds, &index, &o),
+            why_nothing(&sounds, &usage, &index, &o, |_| false),
             "No sounds are sorted as Snare yet. Pick another type, or Any type."
         );
         let o = Options { years: Some((1999, 1999)), ..Options::default() };
         assert_eq!(
-            why_nothing(&sounds, &index, &o),
+            why_nothing(&sounds, &usage, &index, &o, |_| false),
             "No sounds are dated 1999. Pick other years on the strip, or clear it."
         );
         let o = Options { years: Some((1997, 1999)), ..Options::default() };
         assert_eq!(
-            why_nothing(&sounds, &index, &o),
+            why_nothing(&sounds, &usage, &index, &o, |_| false),
             "No sounds are dated 1997 to 1999. Pick other years on the strip, or clear it."
         );
         // Pads the index hasn't heard yet.
         sounds.push(analysed(40, r"D:\Packs\Pads\40.wav", "Pad"));
         let o = Options { sound_types: vec!["Pad".into()], ..Options::default() };
-        assert!(suggest(&sounds, &usage, &index, &o).is_empty());
+        assert!(suggest(&sounds, &usage, &index, &o, |_| false).is_empty());
         assert_eq!(
-            why_nothing(&sounds, &index, &o),
+            why_nothing(&sounds, &usage, &index, &o, |_| false),
             "None of your Pad sounds have been listened to closely enough to suggest. Pick another type, or Any type."
         );
         // With Any type picked already, it isn't offered again (review of 7cc595f).
         let only_the_pad: Vec<Sound> = sounds.iter().filter(|s| s.id == 40).cloned().collect();
         assert_eq!(
-            why_nothing(&only_the_pad, &index, &Options::default()),
+            why_nothing(&only_the_pad, &usage, &index, &Options::default(), |_| false),
             "None of your sounds have been listened to closely enough to suggest. The old app did that as it added \
              them, and this version can't yet."
         );
         for s in &mut sounds {
             s.hidden = true;
         }
-        assert!(why_nothing(&sounds, &index, &Options::default()).starts_with("No sounds yet"));
-        assert!(why_nothing(&[], &SoundIndex::default(), &Options::default()).starts_with("No sounds yet"));
+        assert!(why_nothing(&sounds, &usage, &index, &Options::default(), |_| false).starts_with("No sounds yet"));
+        assert!(
+            why_nothing(&[], &usage, &SoundIndex::default(), &Options::default(), |_| false)
+                .starts_with("No sounds yet")
+        );
+    }
+
+    /// The folders hidden on the folder tree are left out before digging: the count is made up from the others, the
+    /// forgotten folders and the years leave them out, and when only they would fit, that's why nothing is found (the
+    /// whole-app review of 26 Nov, ST-1: they were dropped after the pick, so fewer came, or none with no reason).
+    #[test]
+    fn sounds_in_hidden_folders_are_left_out_before_digging() {
+        let (sounds, usage, index) = library();
+        // The hats' folder hidden, and kicks 2 to 4.
+        let hidden = |i: usize| sounds[i].id > 10 || (2..=4).contains(&sounds[i].id);
+        let o = Options { count: 8, seed: 5, ..Options::default() };
+        let s = suggest(&sounds, &usage, &index, &o, hidden);
+        let ids: Vec<i64> = s.iter().map(|x| x.id).collect();
+        assert_eq!(ids.len(), 6, "every kick that isn't hidden or used: {ids:?}");
+        assert!(ids.iter().all(|&id| (5..=10).contains(&id)), "{ids:?}");
+        // With room to spare, the count is made up from what isn't hidden.
+        let few = Options { count: 3, seed: 5, ..Options::default() };
+        assert_eq!(suggest(&sounds, &usage, &index, &few, hidden).len(), 3);
+        let f = folders(&sounds, &usage, hidden);
+        assert_eq!(f.iter().map(|f| (f.folder.as_str(), f.sounds)).collect::<Vec<_>>(), [(r"D:\Packs\Kicks", 7)]);
+        let at = |y| chrono::NaiveDate::from_ymd_opt(y, 5, 1).unwrap().into();
+        let mut dated = sounds.clone();
+        for s in &mut dated {
+            s.added = at(if s.id > 10 { 2020 } else { 2019 });
+        }
+        assert_eq!(years(&dated, hidden), [(2019, 7)]);
+        // Only hats asked for, and every hat hidden: that's the reason, not that none are sorted as hats.
+        let hats = Options { sound_types: vec!["Hat".into()], ..Options::default() };
+        assert!(suggest(&sounds, &usage, &index, &hats, hidden).is_empty());
+        assert_eq!(
+            why_nothing(&sounds, &usage, &index, &hats, hidden),
+            "The Hat sounds that would fit are in folders you hid on the folder tree. Show one again from its \
+             crossed-out chip under Tiles or List."
+        );
+        // Every kick that isn't hidden is used, and the hidden ones aren't: they would fit.
+        let kicks = Options { sound_types: vec!["Kick".into()], ..Options::default() };
+        let mut used = usage.clone();
+        used.extend((5..=10).map(|id| (id, Usage { projects: 1, songs: 1, ..Usage::default() })));
+        assert!(suggest(&sounds, &used, &index, &kicks, hidden).is_empty());
+        assert!(why_nothing(&sounds, &used, &index, &kicks, hidden).starts_with("The Kick sounds that would fit"));
+        // And when the hidden ones are used too, it's that every one is used.
+        used.extend((2..=4).map(|id| (id, Usage { projects: 1, songs: 1, ..Usage::default() })));
+        assert!(why_nothing(&sounds, &used, &index, &kicks, hidden).starts_with("Every Kick sound is used"));
+        // Every sound hidden: not "no sounds yet".
+        assert!(why_nothing(&sounds, &usage, &index, &o, |_| true).starts_with("The sounds that would fit"));
     }
 
     #[test]
@@ -592,7 +700,7 @@ mod tests {
         let (mut sounds, usage, _) = library();
         sounds.push(analysed(30, r"d:\packs\kicks\30.wav", "Kick"));
         sounds.push(analysed(31, r"E:\x.wav", "Kick"));
-        let f = folders(&sounds, &usage);
+        let f = folders(&sounds, &usage, |_| false);
         assert_eq!(
             f.iter().map(|f| f.folder.as_str()).collect::<Vec<_>>(),
             [r"D:\Packs\Hats", r"E:\", r"D:\Packs\Kicks"]
@@ -613,7 +721,7 @@ mod tests {
             r"D:\top.wav",
         ];
         let sounds: Vec<Sound> = paths.iter().zip(1..).map(|(p, id)| sound(id, p)).collect();
-        let found = folders(&sounds, &HashMap::new());
+        let found = folders(&sounds, &HashMap::new(), |_| false);
         assert_eq!(found.len(), 7);
         for f in &found {
             assert_eq!(sounds.iter().filter(|s| in_folder(&s.path, &f.folder)).count(), f.sounds, "{}", f.folder);
@@ -639,7 +747,7 @@ mod tests {
         sounds[2].added = at(2024);
         sounds[3].added = at(2107);
         // A date still to come (a broken one) and a file with none (1970) are in no year.
-        assert_eq!(years(&sounds), [(2024, 1), (2019, sounds.len() - 3)]);
+        assert_eq!(years(&sounds, |_| false), [(2024, 1), (2019, sounds.len() - 3)]);
         // A span of years lets in each year in it, its ends too.
         let d = RealDates::now();
         assert!(dated_in(&sounds[2], Some((2020, 2024)), &d));

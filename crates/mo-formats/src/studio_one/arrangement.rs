@@ -521,10 +521,14 @@ impl Song<'_> {
                                     .reduce(f64::max)
                                     .unwrap_or(4.0);
                             }
+                            // A note that starts at the part's end doesn't play. The end is worked out through the
+                            // tempo map, so it can come out a hair (1e-13 of a beat) after a note that starts right on
+                            // it: such a note is left out as Studio One leaves it out (seen on Solomon's songs, where
+                            // it made a copy for FL Studio refuse to save).
                             let notes = all
                                 .iter()
                                 .filter(from_offset)
-                                .filter(|n| n.start < offset + length)
+                                .filter(|n| n.start < offset + length - 1e-9)
                                 .take_while(|_| budget.take())
                                 .map(|n| PreviewNote {
                                     start: n.start - offset,
@@ -556,7 +560,8 @@ impl Song<'_> {
                                 // damaged pattern's steps all past the part, or a loop too short to move `at` on).
                                 'passes: while at < length - 1e-9 {
                                     let mut placed = false;
-                                    for n in steps.iter().filter(|n| at + n.start < length) {
+                                    // As for a note part: a step on the part's end doesn't play.
+                                    for n in steps.iter().filter(|n| at + n.start < length - 1e-9) {
                                         if !budget.take() {
                                             break 'passes;
                                         }

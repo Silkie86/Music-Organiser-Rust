@@ -509,12 +509,14 @@ export global Widths {
     in-out property <length> plugin-filters: 196px;
     in-out property <length> plugin-folders: 280px;
     in-out property <length> plugin-takes: 210px;
-    // How wide a page's list is beside its side card (`part`, kept `kept` wide), sharing `room` with it. At its usual
-    // width the card takes what the list leaves at its widest (`max-list`, so a line stays readable in a wide window);
-    // once you've dragged it, the card is as wide as you made it and the list has the rest, never under `min-list`.
+    // How wide a page's list is beside its side card (`part`, kept `kept` wide), sharing `room` with it. Until you've
+    // dragged the card (`kept` is 0 then), it takes what the list leaves at its widest (`max-list`, so a line stays
+    // readable in a wide window), and its usual width in a narrower one; once you have, the card is as wide as you
+    // made it, its usual width too, and the list has the rest, never under `min-list` (the whole-app review of 26
+    // Nov, WI-2: a card let go at its usual width was laid out its usual way, much wider, after a restart).
     public pure function list-width(part: string, kept: length, room: length, min-list: length, max-list: length) -> length {
-        if (kept == usual(part)) {
-            return min(max-list, max(min-list, room - kept));
+        if (kept == 0px) {
+            return min(max-list, max(min-list, room - usual(part)));
         }
         return max(min-list, room - kept);
     }
@@ -3125,6 +3127,8 @@ export global Icons {
     out property <string> clear: "M 4 4 L 12 12 M 12 4 L 4 12";
     // An i in a ring: how this works (its words in the tooltip).
     out property <string> info: "M 14.5 8 A 6.5 6.5 0 1 1 1.5 8 A 6.5 6.5 0 1 1 14.5 8 M 8 7 L 8 11.5 M 8 4.4 L 8 4.6";
+    // A question mark in a ring: help (the key sheet, from the rail).
+    out property <string> help: "M 14.5 8 A 6.5 6.5 0 1 1 1.5 8 A 6.5 6.5 0 1 1 14.5 8 M 6 6.3 A 2 2 0 1 1 8.8 8.1 C 8.2 8.4 8 8.8 8 9.6 M 8 11.6 L 8 11.8";
     // A chain link: link again (a moved folder's link, on the Plugins page).
     out property <string> link: "M 6 11.3 L 4.7 11.3 A 3.3 3.3 0 0 1 4.7 4.7 L 6 4.7 M 10 4.7 L 11.3 4.7 A 3.3 3.3 0 0 1 11.3 11.3 L 10 11.3 M 5.3 8 L 10.7 8";
     // A chain link struck through: a link that doesn't lead where it should (a moved folder's, on the Plugins page).

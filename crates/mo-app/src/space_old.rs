@@ -229,7 +229,11 @@ fn status_words(l: &Leftover, homes: &[OldHome]) -> (String, bool) {
         Left::OldCopy(_) | Left::Unknown => None,
         Left::NotKept(_) => Some("No move was kept for it: the app found it beside its link.".to_owned()),
         Left::Behind(at) => Some(behind_words(homes.get(*at).map_or("", |h| h.note.as_str()))),
-        Left::Kept(h) => Some(format!("{} A try that stopped part way left them here.", behind_words(&h.note))),
+        // Files kept aside, or a folder linking again set aside (it says where its files went) but never noted.
+        Left::Kept(h) if h.copy.is_empty() => {
+            Some(format!("{} A try that stopped part way left them here.", behind_words(&h.note)))
+        }
+        Left::Kept(h) => Some(format!("{} Linking again stopped before it noted it.", behind_words(&h.note))),
     };
     let now_in = (!l.now_in.is_empty()).then(|| format!("Its files are now in {there}."));
     let checked = match &l.only {

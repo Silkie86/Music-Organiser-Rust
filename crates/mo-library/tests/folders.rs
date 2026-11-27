@@ -58,6 +58,20 @@ fn project_folders_are_added_and_removed_and_nothing_else_changes() {
     assert_eq!(projects, 1);
 }
 
+/// The 26 Nov review's LY-1: another write holding the library past the wait is busy (try again in a moment), as the
+/// other settings say it, and nothing is changed.
+#[test]
+fn a_busy_library_says_so_and_nothing_changes() {
+    let path = make("busy.db");
+    let holder = Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    let busy = add_folder(&path, FolderList::Projects, r"E:\Songs", &[]).unwrap_err();
+    assert!(busy.is_busy(), "{busy}");
+    holder.execute_batch("ROLLBACK;").unwrap();
+    drop(holder);
+    assert_eq!(roots(&path), [r"C:\beats"]);
+}
+
 #[test]
 fn listed_folders_are_kept_as_the_csharp_app_reads_them() {
     let path = make("lists.db");

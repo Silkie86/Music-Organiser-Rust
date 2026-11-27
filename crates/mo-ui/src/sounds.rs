@@ -452,11 +452,12 @@ pub fn player() -> &'static Player {
     // The choice stays locked until the player is made, so one changed meanwhile waits and then reaches it.
     let output = OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     PLAYER.get_or_init(|| {
-        let player = Player::new(|key| {
+        let player = Player::new(|key, why| {
             let key = key.to_owned();
+            let why = why.map(ToString::to_string);
             let _ = slint::invoke_from_event_loop(move || {
-                ended(&key);
-                crate::song_player::ended(&key);
+                ended(&key, why.as_deref());
+                crate::song_player::ended(&key, why.as_deref());
             });
         });
         player.choose(output.clone());
@@ -613,10 +614,11 @@ fn points(s: &Sound) -> i32 {
 /// The card's waveform for the picked sound `s`, and how many lines across it is: the whole sound, as its play head
 /// and a click on it go. The library keeps the waveform of a sound's first minute, so for a longer one the whole
 /// waveform is read from its file ([`whole_wave`]); until it's back, the first minute shows in its share of the width,
-/// as many lines across as the whole one will be.
+/// as many lines across as the whole one will be. A minute exactly may be more: the analysis reads a minute at most,
+/// and a file that says it's shorter than it is came out at exactly that (the whole-app review of 26 Nov, AD-4).
 fn card_wave(s: &Sound) -> (String, i32) {
     let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds);
-    if seconds <= mo_audio::MAX_SECONDS {
+    if seconds < mo_audio::MAX_SECONDS {
         // Nothing to read for this one: a longer sound's read for the card before it stops.
         whole_wave::let_go();
         return (wave(s), points(s));
@@ -2189,15 +2191,26 @@ struct AlikeAsk {
     list: Arc<SoundList>,
     places: Arc<HashMap<i64, usize>>,
     index: Arc<SoundIndex>,
+    /// The folders hidden on the folder tree ([`hiding`]).
+    hidden: Filters,
 }
 
 impl AlikeAsk {
     /// The sounds like it, most alike first, as places in the list with how alike (0 to 1): new ones only, not those
-    /// you came to it through nor a copy of one ([`SoundList::like_this`]).
+    /// you came to it through nor a copy of one, nor one in a folder you hid ([`SoundList::like_this`]).
     fn answer(&self) -> Vec<(usize, f64)> {
         let came: Vec<usize> = self.came.iter().filter_map(|id| self.places.get(id).copied()).collect();
-        background::on_pool(|| self.list.like_this(&self.index, &self.places, self.at, &came, ALIKE_COUNT))
+        let hidden = self.list.hidden_by_folders(&self.hidden);
+        let left_out = |i: usize| hidden.as_ref().is_some_and(|h| h(i));
+        background::on_pool(|| self.list.like_this(&self.index, &self.places, self.at, &came, ALIKE_COUNT, left_out))
     }
+}
+
+/// Only the folder tree's hidden folders and the sample folders a hide stops at, of `f`: what keeps a hidden folder's
+/// sounds out of Rediscover, Sounds like this and the kit builder, which dig through every sound (the whole-app
+/// review of 26 Nov, ST-1 and ST-6: their sounds "never show", yet these offered them).
+pub(super) fn hiding(f: &Filters) -> Filters {
+    Filters { hidden_folders: f.hidden_folders.clone(), folder_tops: f.folder_tops.clone(), ..Filters::default() }
 }
 
 /// The fingerprints arrived: the picked sound can now say what sounds like it. Public for the screenshots.
@@ -2279,7 +2292,14 @@ fn ask_alike(app: &AppWindow, at: usize) {
     let ask = PAGE.with(|p| {
         let p = p.borrow();
         let index = p.index.clone()?;
-        Some(AlikeAsk { at, came: p.came.clone(), list: p.list.clone(), places: p.places.clone(), index })
+        Some(AlikeAsk {
+            at,
+            came: p.came.clone(),
+            list: p.list.clone(),
+            places: p.places.clone(),
+            index,
+            hidden: hiding(&p.filters),
+        })
     });
     let Some(ask) = ask else { return };
     if HERE.with(|h| *h.borrow()) {
@@ -3230,6 +3250,8 @@ struct RediscoverAsk {
     places: Arc<HashMap<i64, usize>>,
     index: Arc<SoundIndex>,
     options: rediscover::Options,
+    /// The folders hidden on the folder tree, whose sounds are left out before digging ([`hiding`]).
+    hidden: Filters,
 }
 
 /// What Rediscover dug out for one ask.
@@ -3249,18 +3271,27 @@ struct RediscoverAnswer {
 
 impl RediscoverAsk {
     /// Scoring every unused sound takes a while on a big library: it's spread over the low-priority pool's threads.
+    /// The sounds in folders hidden on the folder tree are left out before digging, so the count is made up from the
+    /// others and the forgotten folders' places go to folders that show (the whole-app review of 26 Nov, ST-1).
     fn answer(self) -> RediscoverAnswer {
         let empty = HashMap::new();
         let usage = self.list.usage_map().unwrap_or(&empty);
+        // By place in the list, as `sounds` is.
         let sounds = self.list.sounds();
+        let hidden = self.list.hidden_by_folders(&self.hidden);
+        let left_out = |i: usize| hidden.as_ref().is_some_and(|h| h(i));
         let o = &self.options;
         background::on_pool(|| {
-            let suggested = rediscover::suggest(sounds, usage, &self.index, o);
+            let suggested = rediscover::suggest(sounds, usage, &self.index, o, left_out);
             let likes = suggested.iter().filter_map(|s| Some((s.id, s.like?))).collect();
             let found: Vec<(usize, String)> =
                 suggested.into_iter().filter_map(|s| self.places.get(&s.id).map(|&i| (i, s.reason))).collect();
-            let why = if found.is_empty() { rediscover::why_nothing(sounds, &self.index, o) } else { String::new() };
-            let mut folders = rediscover::folders(sounds, usage);
+            let why = if found.is_empty() {
+                rediscover::why_nothing(sounds, usage, &self.index, o, left_out)
+            } else {
+                String::new()
+            };
+            let mut folders = rediscover::folders(sounds, usage, left_out);
             folders.truncate(FOLDERS);
             RediscoverAnswer {
                 id: self.id,
@@ -3268,7 +3299,7 @@ impl RediscoverAsk {
                 likes,
                 why,
                 folders,
-                years: year_strip::strip(rediscover::years(sounds)),
+                years: year_strip::strip(rediscover::years(sounds, left_out)),
                 learned_from: usage.values().filter(|u| u.songs > 0).count(),
             }
         })
@@ -3293,6 +3324,7 @@ fn rediscover_now(app: &AppWindow) {
             places: p.places.clone(),
             index,
             options: p.re.clone(),
+            hidden: hiding(&p.filters),
         });
         Some((ask, p.list.len()))
     });
@@ -3393,12 +3425,8 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         }
         p.re_likes = a.likes;
         p.re_busy = false;
-        // Nothing from a folder you hid on the folder tree.
-        let mut found = a.found;
-        if let Some(hidden) = p.list.hidden_by_folders(&p.filters) {
-            found.retain(|&(at, _)| !hidden(at));
-        }
-        p.rediscover = found;
+        // Nothing from a folder you hid on the folder tree: they were left out as it dug, and a hide since asks again.
+        p.rediscover = a.found;
         p.re_years = a.years;
         Some((p.rediscover.len(), p.list.knows_use()))
     });
@@ -3415,7 +3443,6 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
     let folders: Vec<FolderLine> = a
         .folders
         .iter()
-        .filter(|f| PAGE.with(|p| !p.borrow().list.folder_hidden(&p.borrow().filters, &f.folder)))
         .map(|f| FolderLine {
             folder: f.folder.clone().into(),
             name: f.folder.rsplit(['\\', '/']).find(|s| !s.is_empty()).unwrap_or(&f.folder).into(),
@@ -3889,8 +3916,9 @@ fn show_sound(app: &AppWindow, at: usize) {
         pick(app, at);
         return;
     }
-    PAGE.with(|p| {
+    let unhid = PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        let hidden = p.filters.hidden_folders.clone();
         // Hide duplicates stays on unless the sound has copies (one of them might show in its place), and Hide silent
         // sounds unless it's silent.
         let hide_copies = p.filters.hide_copies && !p.list.has_copies(at);
@@ -3904,9 +3932,14 @@ fn show_sound(app: &AppWindow, at: usize) {
             !list.hidden_by_folders(&one).is_some_and(|hidden| hidden(at))
         });
         p.to_pick = Some(at);
+        p.filters.hidden_folders != hidden && p.re_started
     });
     app.global::<SoundsData>().set_search(SharedString::new());
     refresh(app);
+    // A folder shown again changes what Rediscover digs through, as a change on the tree does (tree.rs `change`).
+    if unhid {
+        rediscover_now(app);
+    }
 }
 
 /// Opens the page on the sound with id `id` and picks it, as Ctrl+K does: the Space page's links to it. False when the
@@ -4418,7 +4451,8 @@ fn play_picked(app: &AppWindow, from: f64) {
 /// galaxy's sweep plays the stars it passes without picking them), reading at most `most` seconds of it: a sweep only
 /// needs its start, which reads far quicker than a whole loop. A sound longer than a minute (or not analysed yet) is
 /// played as it's read instead, to its end however long it is (Solomon's F12 note of 24 Nov 2026: a 5:11 song stopped
-/// a minute in); a sweep still reads only its start.
+/// a minute in), and so is one of a minute exactly, which may be longer ([`card_wave`]); a sweep still reads only its
+/// start.
 fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     play_from(app, at, from, most, None);
 }
@@ -4439,7 +4473,7 @@ fn play_from(app: &AppWindow, at: usize, from: f64, most: f64, till: Option<f64>
     // A part longer than a minute plays as it's read, as a long sound does (only a minute's read whole first).
     let streams = match part {
         Some((start, end)) => end - start > mo_audio::MAX_SECONDS,
-        None => most >= mo_audio::MAX_SECONDS && !(seconds > 0.0 && seconds <= mo_audio::MAX_SECONDS),
+        None => most >= mo_audio::MAX_SECONDS && !(seconds > 0.0 && seconds < mo_audio::MAX_SECONDS),
     };
     // A MIDI loop playing, or one still being made, would play over it (or start on top of it later).
     crate::midi::stop_for_another(app);
@@ -4676,25 +4710,28 @@ fn couldnt_play(path: &str, ask: u64, why: &str, window: slint::Weak<AppWindow>)
         if PLAYS.load(Ordering::SeqCst) != ask {
             return;
         }
-        // Stepping or sweeping over many sounds that won't play for the same reason (a drive unplugged) says so once;
-        // the log has each of them.
-        let now = Instant::now();
-        let new_card = FAILED_CARD.with(|c| {
-            let mut c = c.borrow_mut();
-            let fresh =
-                c.as_ref().is_none_or(|(at, before)| *before != why || now.duration_since(*at) >= FAILED_CARD_GAP);
-            if fresh {
-                *c = Some((now, why.clone()));
-            }
-            fresh
-        });
-        if new_card && let Some(feed) = FEED.with(|f| f.borrow().clone()) {
-            feed.start("Couldn't play the sound", "").failed(&why);
-        }
+        failed_card(&why);
         if let Some(app) = window.upgrade() {
             stop(&app);
         }
     });
+}
+
+/// The card saying a sound couldn't be played, and why. Stepping or sweeping over many sounds that won't play for the
+/// same reason (a drive unplugged) says so once; the log has each of them.
+fn failed_card(why: &str) {
+    let now = Instant::now();
+    let new_card = FAILED_CARD.with(|c| {
+        let mut c = c.borrow_mut();
+        let fresh = c.as_ref().is_none_or(|(at, before)| before != why || now.duration_since(*at) >= FAILED_CARD_GAP);
+        if fresh {
+            *c = Some((now, why.to_owned()));
+        }
+        fresh
+    });
+    if new_card && let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+        feed.start("Couldn't play the sound", "").failed(why);
+    }
 }
 
 /// The least time between two "Couldn't play the sound" cards for the same reason: as long as one stays.
@@ -4779,21 +4816,29 @@ fn seeks(p: &Page, player_has: Option<&str>, to: f64, part_end: Option<f64>) -> 
         && p.play_part.map(|(_, end)| end) == part_end
 }
 
-/// A sound played to its end by itself: `key` is its play's number.
-fn ended(key: &str) {
+/// A sound played to its end by itself: `key` is its play's number. With `why`, a long sound played as it was read
+/// stopped part way because its file couldn't be read on (a drive unplugged, the file moved or renamed): the log and a
+/// card say so, as for a sound that couldn't be read at all, and its waveform stays where it stopped (the whole-app
+/// review of 26 Nov, AD-5).
+fn ended(key: &str, why: Option<&str>) {
     let ours = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         // By the play's number, not its file: played again near its end, the same sound's older play ends while the
         // new one is still being read, and the page goes on showing the new one.
-        let ours = p.playing.is_some() && key.parse() == Ok(p.play);
-        if ours {
-            p.playing = None;
+        if p.playing.is_none() || key.parse() != Ok(p.play) {
+            return None;
         }
-        ours
+        let path = p.playing.and_then(|(at, _)| p.list.sound(at)).map(|s| s.path.clone());
+        p.playing = None;
+        Some(path)
     });
     // An older sound, cut off by a newer one that's still reading: the newer one keeps the page.
-    if !ours {
+    let Some(path) = ours else {
         return;
+    };
+    if let Some(why) = why {
+        log::warning("Sounds", &format!("Couldn't read on in {}: {why}", path.as_deref().unwrap_or("a sound")));
+        failed_card(why);
     }
     TICKER.with(Timer::stop);
     redraw();
@@ -4803,8 +4848,10 @@ fn ended(key: &str) {
         if let Some(app) = w.borrow().as_ref().and_then(slint::Weak::upgrade) {
             let data = app.global::<SoundsData>();
             data.set_playing(false);
-            data.set_played(1.0);
-            data.set_tile_played(1.0);
+            if why.is_none() {
+                data.set_played(1.0);
+                data.set_tile_played(1.0);
+            }
         }
     });
 }
@@ -6251,13 +6298,13 @@ mod tests {
     fn an_older_play_of_the_same_sound_ending_leaves_the_new_one_on_show() {
         // The sound at 4 played (play 5), then played again near its end (play 6): play 5 ends while play 6 is read.
         PAGE.with(|p| *p.borrow_mut() = Page { playing: Some((4, 2.5)), play: 6, ..Page::default() });
-        ended("5");
+        ended("5", None);
         assert_eq!(PAGE.with(|p| p.borrow().playing), Some((4, 2.5)));
         // A key that isn't a play's number is never the page's.
-        ended(r"C:\s\kick.wav");
+        ended(r"C:\s\kick.wav", None);
         assert_eq!(PAGE.with(|p| p.borrow().playing), Some((4, 2.5)));
         // Play 6 ending by itself does stop it on the page.
-        ended("6");
+        ended("6", None);
         assert_eq!(PAGE.with(|p| p.borrow().playing), None);
     }
 
@@ -6448,15 +6495,20 @@ mod tests {
             &LikedWeights::default(),
         );
         let features = (1..=6i64).map(|id| (id, (0..8).map(|d| ((id + d) % 3) as f32).collect())).collect();
-        let index = SoundIndex::build(&features, &Default::default(), 6);
-        let ask = RediscoverAsk {
-            id: 7,
+        let index = Arc::new(SoundIndex::build(&features, &Default::default(), 6));
+        let ask = |id: u64, hidden: Filters| RediscoverAsk {
+            id,
             list: lib.list.clone(),
             places: lib.places.clone(),
-            index: Arc::new(index),
+            index: index.clone(),
             options: rediscover::Options { seed: 1, ..rediscover::Options::default() },
+            hidden,
         };
-        let a = ask.answer();
+        // Their folder hidden on the folder tree: none is dug out, nor the folder offered, and the reason says why.
+        let hid = ask(8, hiding(&Filters { hidden_folders: vec!["Pack".into()], ..Filters::default() })).answer();
+        assert!(hid.found.is_empty() && hid.folders.is_empty(), "{:?} {:?}", hid.found, hid.folders);
+        assert!(hid.why.contains("folders you hid"), "{}", hid.why);
+        let a = ask(7, Filters::default()).answer();
         assert_eq!(a.id, 7);
         assert_eq!(a.learned_from, 1);
         assert!(!a.found.is_empty(), "{}", a.why);

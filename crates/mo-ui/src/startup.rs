@@ -79,13 +79,22 @@ pub enum Missing {
 /// Asks, before the window opens and before any file of the app is opened, what to do about a moved data folder that
 /// can't be found (F-2): `problem` is why. Windows' own buttons (Yes, No, Cancel) carry the three choices.
 pub fn data_folder_missing(problem: &str) -> Missing {
-    // Where the installer started the data elsewhere, the first folder holds nothing: it's no old copy (DA-4).
-    let no = if mo_app::paths::first_has_data() {
+    // Only a folder a move left its note in is an old copy. Where the installer started the data elsewhere, the first
+    // folder holds nothing (DA-4), or only what runs opened on it since have written (the whole-app review of 26 Nov,
+    // BD-3).
+    let no = if mo_app::paths::first_is_old_copy() {
         "No: open on the old copy. It is from before the move, and changes made now stay in it, not in the moved \
          folder."
+            .to_owned()
+    } else if mo_app::paths::first_has_data() {
+        format!(
+            "No: open on what's in {}. Changes made now stay there, not in the folder that can't be found.",
+            mo_app::paths::first_dir().display()
+        )
     } else {
         "No: open with no data at all. Your data is all in the folder that can't be found, and anything done now \
          stays apart from it."
+            .to_owned()
     };
     let answer = rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Warning)

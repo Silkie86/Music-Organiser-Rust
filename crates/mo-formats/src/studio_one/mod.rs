@@ -34,8 +34,9 @@ pub const DAW: &str = "Studio One";
 /// and Note FX. 3 is what the Rust reader finds differently (DIFFERENCES.md): a song with a file that won't come out
 /// of the zip whole is read on, with a warning. 4 reads a TempoMapSegment's seconds per beat as such when the
 /// metainfo has no tempo (it was taken for BPM), gives "NaN" velocities the quietest MIDI 1.0 value in the MIDI as in
-/// the preview, and keeps a network share's server in a media pool url.
-pub const VERSION: u32 = 4;
+/// the preview, and keeps a network share's server in a media pool url. 5 finds the MIDI of parts whose notes are in
+/// the media pool (Studio One 4 on), and leaves out a note on a part's very end, which doesn't play.
+pub const VERSION: u32 = 5;
 pub const EXTENSIONS: [&str; 1] = ["song"];
 
 const PRESET_EXTENSIONS: [&str; 6] = [".vstpreset", ".fxp", ".fxb", ".aupreset", ".preset", ".multipreset"];
@@ -192,10 +193,52 @@ impl<'a> Song<'a> {
         info.dedupe()
     }
 
-    /// The notes of each instrument part. Positions are in quarter notes unless the part (or its track) says its time
-    /// format is seconds, when the song's tempo turns them into beats. Studio One has changed this between versions,
-    /// so the app calls Studio One's MIDI export experimental.
+    /// The notes of each instrument part, as the song plays them: each part's notes as the arrangement reads them
+    /// ([`Song::arrangement`]), so from where Studio One keeps them (`NoteEvent`s in `song.xml` in older songs; the
+    /// media pool's `.musicx` or `.pattern` file, found by the part's clipID, from Studio One 4 on), cut to what the
+    /// part shows of them, transposed as the part is, the track's playing take only, and timed through the song's tempo
+    /// map where a part counts in seconds. Muted parts and tracks are still parts. Studio One has changed its layout
+    /// between versions, so the app calls Studio One's MIDI export experimental.
+    ///
+    /// Before reader version 5 only `MusicTrack`s with notes in `song.xml` were read: the real-song test of 27 Nov 2026
+    /// found 945 of Solomon's 1,677 songs with notes gave the MIDI page no parts at all. That layout is still read
+    /// ([`Song::inline_midi`]) when the arrangement finds no notes.
     pub fn midi(&mut self) -> Vec<MidiClip> {
+        let song = self.arrangement();
+        let ticks = |beats: f64| (beats * MIDI_PPQ as f64).round_ties_even() as i64;
+        // A place a damaged song gives that no song reaches is left out, as the arrangement's own limit has it.
+        let placed = |beats: f64| beats.is_finite() && beats.abs() <= crate::arrangement::MOST_BEATS;
+        let mut clips = Vec::new();
+        for lane in song.lanes.iter().filter(|l| l.kind == crate::arrangement::LaneKind::Instrument && !l.layer) {
+            for (i, part) in lane.clips.iter().enumerate() {
+                let name = if part.name.is_empty() || part.name == lane.name {
+                    format!("{} part {}", lane.name, i + 1)
+                } else {
+                    part.name.clone()
+                };
+                let mut clip = MidiClip { name, ppq: MIDI_PPQ, ..MidiClip::default() };
+                let notes = clip.track(&lane.name);
+                notes.extend(part.notes.iter().filter(|n| placed(n.start) && placed(n.length)).map(|n| NoteEvent {
+                    start: ticks(n.start),
+                    length: ticks(n.length).max(1),
+                    key: n.key,
+                    velocity: n.velocity,
+                    muted: n.muted,
+                    step: false,
+                    attribute: NoteAttribute::NONE,
+                }));
+                if !notes.is_empty() {
+                    clips.push(clip);
+                }
+            }
+        }
+        if clips.is_empty() { self.inline_midi() } else { clips }
+    }
+
+    /// The oldest layout's parts: a `MusicTrack` with its notes as `NoteEvent`s in the part itself (as the C# reader
+    /// read them), for a song the arrangement finds no notes in. Positions are in quarter notes unless the part (or its
+    /// track) says its time format is seconds, when the song's tempo turns them into beats.
+    fn inline_midi(&mut self) -> Vec<MidiClip> {
         let from_meta = self.meta_tempo();
         let Some(text) = self.xml("Song/song.xml") else { return Vec::new() };
         let Ok(song) = parse(&text) else { return Vec::new() };

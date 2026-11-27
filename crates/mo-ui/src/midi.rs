@@ -67,11 +67,8 @@ pub struct Loaded {
     smallest: usize,
 }
 
-/// An index of fewer parts than this is summed up on the thread that asks, not on the shared threads.
-const SMALL_INDEX: usize = 1_000;
-
 impl Loaded {
-    /// Call it off the window's thread: for a big index it waits for the shared low-priority threads.
+    /// Call it off the window's thread: it waits for the shared low-priority threads.
     pub fn new(cat: impl Into<Arc<Catalogue>>, notes: NotesFrom) -> Loaded {
         let smallest = SMALLEST.load(Ordering::Relaxed);
         let cat: Arc<Catalogue> = cat.into();
@@ -84,10 +81,10 @@ impl Loaded {
             )
         };
         // Side by side on the shared low-priority threads: the summary and years each go through every part, and
-        // Ctrl+K gets a line for each. A few parts (the screenshots' made-up ones, made on the window's thread) are
-        // made where they are: nothing waits for the pool.
-        let ((summary, years), found) =
-            if cat.entries.len() < SMALL_INDEX { make() } else { background::on_pool(make) };
+        // Ctrl+K gets a line for each. However few parts there are (none yet, before the first reading): rayon asked
+        // from a thread outside its pools starts a pool of its own, a thread per core at normal priority, kept for
+        // the rest of the run (rule 21; the 26 Nov review's MZ-3).
+        let ((summary, years), found) = background::on_pool(make);
         Loaded { cat, notes, summary, hidden, years, found, smallest }
     }
 }
@@ -108,8 +105,9 @@ struct Page {
     counts: page::ChoiceCounts,
     /// The part playing as a loop (or being made into one), as its place in the catalogue's entries.
     looping: Option<usize>,
-    /// The part playing (or starting) in a DAW, as its phrase's ID (which a fresh read of the list keeps): picking
-    /// another plays that one there instead (the 6 Nov review's D-3).
+    /// The part playing (or starting) in a DAW, as its phrase's ID (found again by its notes when the index is read
+    /// again, which gives a save read again new IDs: [`Page::find_daw_again`]): picking another plays that one there
+    /// instead (the 6 Nov review's D-3).
     in_daw: Option<i64>,
     /// The picked part, as its place in the catalogue's entries, and its row in the list on show (kept, so stepping
     /// down a long list never searches it).
@@ -181,7 +179,8 @@ struct Page {
     /// again when they change (MI-3); none for a part alone, or in FL.
     daw_song: BitwigGiven,
     /// The part in a DAW (with `in_daw`, its phrase, which says the entry is still that part), so [`fit_follows`]
-    /// follows it while another part is picked for a right-click's menu (MP-1).
+    /// follows it while another part is picked for a right-click's menu (MP-1). Found again by its notes when the
+    /// index is read again ([`Page::find_daw_again`]).
     daw_at: Option<usize>,
     /// What the picked part's card says and offers about its fit now ([`show_card_fit`]).
     card_fit: CardFit,
@@ -471,6 +470,30 @@ impl Page {
     fn heard_song(&self, at: usize) -> Option<&SongChoice> {
         let song = self.picked_fit.as_ref().filter(|_| self.picked == Some(at)).map(|picked| &picked.song);
         song.or(self.fits_song.as_ref())
+    }
+
+    /// The part sent to a DAW ([`Page::daw_at`]), by its notes' fingerprint, and whether it's the one playing there
+    /// now (`in_daw` is its phrase): taken before the index is read again, to find it in the new one
+    /// ([`Page::find_daw_again`]).
+    fn daw_part(&self) -> Option<(String, bool)> {
+        let e = self.cat.entry(self.daw_at?)?;
+        Some((e.phrase.hash.to_string(), self.in_daw == Some(e.phrase.id)))
+    }
+
+    /// The index was read again: the part sent to a DAW (`was`, [`Page::daw_part`]) is found in it by its notes, as
+    /// the picked and looping parts are, with its phrase's ID there while it plays; a reading moves parts down the
+    /// list and gives a save read again new IDs, and the octave, the song's bars and Play with the song followed the
+    /// old place (the 26 Nov review's MZ-1). Gone from the index, it has no place, and the ID it had stays, so Stop
+    /// still knows it.
+    fn find_daw_again(&mut self, was: Option<(String, bool)>) {
+        let Some((hash, playing)) = was else {
+            self.daw_at = None;
+            return;
+        };
+        self.daw_at = self.cat.find(&hash);
+        if playing && let Some(id) = self.daw_at.and_then(|at| self.cat.entry(at)).map(|e| e.phrase.id) {
+            self.in_daw = Some(id);
+        }
     }
 
     /// What Play in Bitwig plays the part at `at` with while "Play with the song" is on: the bars of the song it was
@@ -1435,6 +1458,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         // The picked part stays picked when the index is read again, found by its notes; so does the one playing.
         let hash = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         let looping = p.looping.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
+        let daw = p.daw_part();
         p.years = loaded.years;
         p.summary = summary.clone();
         // The old index goes on the freeing thread: tens of thousands of parts take a while to let go.
@@ -1451,6 +1475,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         }
         let was_looping = p.looping.is_some();
         p.looping = looping.and_then(|h| p.cat.find(&h));
+        p.find_daw_again(daw);
         p.picked_row = None;
         p.target = None;
         // The old list points into the old index: nothing shows until the new one is worked out.
@@ -3383,11 +3408,13 @@ fn put_part(
         // was pressed, but no recording heard it) keeps its own headline.
         // Another project came to the front: the song is left set up for recording, and Bitwig is most likely over
         // the app, so the card stays until it's read (the 19 Nov review's LK-1).
+        // Cut off only once the whole part had played: it's in, and only setting Bitwig back was (LT-1).
         Err(e) if mo_dawlink::bitwig::was_cut_off_by_another_project(&e) => {
             let why = e.to_string();
-            log::warning("MIDI", &format!("Putting {} in {} failed: {why}", part.name, song.name));
-            job.failed_to_read(midi_fits::PUT_FAILED, &why);
-            false
+            let went_in = mo_dawlink::bitwig::went_in_before_cut_off(&e);
+            log::warning("MIDI", &format!("Putting {} in {} was cut off: {why}", part.name, song.name));
+            job.failed_to_read(if went_in { midi_fits::PUT_IN_NOT_BACK } else { midi_fits::PUT_FAILED }, &why);
+            went_in
         }
         Err(e) if heard => failed(job, midi_fits::PUT_STOPPED, e.to_string()),
         Err(e) => failed(job, midi_fits::PUT_FAILED, e.to_string()),
@@ -4297,9 +4324,16 @@ fn take_in_daw() -> Option<InDaw> {
     slot.take()
 }
 
+/// The part a stop is for, to put back when Bitwig can't stop it ([`stop_bitwig_in`]): its phrase's ID, and its
+/// notes' fingerprint, which finds it again in an index read since it was sent (review MZ-1).
+struct SentPart {
+    id: i64,
+    hash: Option<String>,
+}
+
 /// Stops what plays in a DAW, without the window waiting: FL's notes let go by themselves, Bitwig's clip comes out
 /// on a thread of its own, in its place in the line taken now (so a Play pressed after it goes after it).
-fn stop_in_daw(playing: InDaw, part: Option<i64>, weak: Option<slint::Weak<AppWindow>>) {
+fn stop_in_daw(playing: InDaw, part: Option<SentPart>, weak: Option<slint::Weak<AppWindow>>) {
     match playing {
         InDaw::Fl(fl) => fl.stop(),
         InDaw::Bitwig(bitwig) => {
@@ -4331,7 +4365,7 @@ fn stop_in_daw(playing: InDaw, part: Option<i64>, weak: Option<slint::Weak<AppWi
 /// before the turn ends, so the start behind sees it. The card says why.
 fn stop_bitwig_in(
     bitwig: mo_dawlink::bitwig::Playing,
-    part: Option<i64>,
+    part: Option<SentPart>,
     turn: &mo_dawlink::bitwig::Turn<'_>,
     weak: Option<slint::Weak<AppWindow>>,
 ) {
@@ -4385,8 +4419,16 @@ fn stop_bitwig_in(
             if DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst) == at {
                 data.set_daw_starting("".into());
                 data.set_daw_playing(Daw::Bitwig.id().into());
-                // Picking its part again leaves it as it is.
-                PAGE.with(|p| p.borrow_mut().in_daw = part);
+                // Picking its part again leaves it as it is. Found by its notes, its place and phrase are the
+                // index's now, should it have been read again since (review MZ-1).
+                PAGE.with(|p| {
+                    let mut p = p.borrow_mut();
+                    let at = part.as_ref().and_then(|s| s.hash.as_deref()).and_then(|h| p.cat.find(h));
+                    if at.is_some() {
+                        p.daw_at = at;
+                    }
+                    p.in_daw = at.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.id).or(part.map(|s| s.id));
+                });
                 show_picked_plays(&app);
             }
             if let Some(audition) = audition {
@@ -4549,9 +4591,13 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
                     // Stopped (or another part asked for) just as it went in: stopped inside its own turn.
                     match (playing, &turn) {
                         (InDaw::Bitwig(bitwig), Some(turn)) => {
-                            stop_bitwig_in(bitwig, Some(phrase_id), turn, Some(weak));
+                            let sent = SentPart { id: phrase_id, hash: Some(part.hash.clone()) };
+                            stop_bitwig_in(bitwig, Some(sent), turn, Some(weak));
                         }
-                        (playing, _) => stop_in_daw(playing, Some(phrase_id), Some(weak)),
+                        (playing, _) => {
+                            let sent = SentPart { id: phrase_id, hash: Some(part.hash.clone()) };
+                            stop_in_daw(playing, Some(sent), Some(weak));
+                        }
                     }
                     return;
                 }
@@ -4607,7 +4653,11 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
 /// Stops what plays (or is starting) in a DAW, and the buttons say so at once. A start still on its way sees the
 /// newer ask and stops what it started.
 fn stop_daw(app: &AppWindow) {
-    let part = PAGE.with(|p| p.borrow_mut().in_daw.take());
+    let part = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let hash = p.daw_part().filter(|(_, playing)| *playing).map(|(hash, _)| hash);
+        p.in_daw.take().map(|id| SentPart { id, hash })
+    });
     if let Some(playing) = take_in_daw() {
         stop_in_daw(playing, part, Some(app.as_weak()));
     }
@@ -4985,6 +5035,32 @@ mod tests {
         assert_eq!(s.cat.entries.len(), 9);
         assert_eq!(s.cat.phrase_count, 10);
         assert!(Role::ALL.iter().filter(|r| **r != Role::Other).all(|r| s.cat.role_counts().contains_key(r)));
+    }
+
+    /// Review MZ-1: the part playing in a DAW is found again when the index is read again, though a newer save's part
+    /// comes first now and its own save was read again (new IDs): its octave, the song's bars and Play with the song
+    /// still reach it.
+    #[test]
+    fn the_part_in_a_daw_is_found_again_in_an_index_read_again() {
+        let mut p = Page { cat: sample().cat, daw_at: Some(4), ..Page::default() };
+        p.in_daw = p.cat.entry(4).map(|e| e.phrase.id);
+        assert!(p.daw_follows(4, 2, false));
+        let was = p.daw_part();
+        let mut phrases: Vec<StoredPhrase> =
+            p.cat.entries.iter().map(|e| StoredPhrase { id: e.phrase.id + 100, ..e.phrase.clone() }).collect();
+        let newer = StoredPhrase { id: 999, hash: "NEWER".into(), ..phrases[0].clone() };
+        phrases.insert(0, newer);
+        p.cat = Arc::new(Catalogue::new(phrases));
+        p.find_daw_again(was);
+        assert_eq!(p.daw_at, Some(5));
+        assert_eq!(p.in_daw, p.cat.entry(5).map(|e| e.phrase.id));
+        assert!(p.daw_follows(5, 2, false), "its octave still reaches it");
+        assert!(!p.daw_follows(4, 2, false), "not the part now where it was");
+        // Gone from the index: no place, and the ID it had stays, so Stop still knows it.
+        let (was, id) = (p.daw_part(), p.in_daw);
+        p.cat = Arc::new(Catalogue::new(Vec::new()));
+        p.find_daw_again(was);
+        assert_eq!((p.daw_at, p.in_daw), (None, id));
     }
 
     /// The made-up part `e`'s notes as they leave the page, moved by `semitones`.

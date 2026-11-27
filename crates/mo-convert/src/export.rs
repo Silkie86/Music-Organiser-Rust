@@ -19,6 +19,7 @@ use crate::save::{LONGEST_FILE_NAME, cut, safe_file_name, save_checked_new};
 pub enum Daw {
     FlStudio,
     StudioOne,
+    AbletonLive,
 }
 
 impl Daw {
@@ -27,6 +28,7 @@ impl Daw {
         match self {
             Daw::FlStudio => mo_formats::fl::DAW,
             Daw::StudioOne => mo_formats::studio_one::DAW,
+            Daw::AbletonLive => mo_formats::ableton::DAW,
         }
     }
 
@@ -34,6 +36,7 @@ impl Daw {
         match self {
             Daw::FlStudio => "flp",
             Daw::StudioOne => "song",
+            Daw::AbletonLive => "als",
         }
     }
 
@@ -42,20 +45,26 @@ impl Daw {
         project.extension().is_some_and(|e| e.eq_ignore_ascii_case(self.extension()))
     }
 
-    fn write(self, song: &Arrangement, title: &str) -> (Vec<u8>, Vec<String>) {
+    /// The song as a project for this DAW, to go in `folder`; and what couldn't go across.
+    fn write(self, song: &Arrangement, title: &str, folder: &Path) -> (Vec<u8>, Vec<String>) {
+        // What Studio One and Live keep about each audio file, from its header, when it's on this computer.
+        let format = |path: &str| {
+            crate::sample::format_of(Path::new(path)).map(|(rate, channels, seconds)| {
+                mo_formats::studio_one::write::SampleFormat { rate, channels, seconds }
+            })
+        };
         match self {
             Daw::FlStudio => {
                 let w = mo_formats::fl::write::write(song, title, delphi_now());
                 (w.bytes, w.left_out)
             }
             Daw::StudioOne => {
-                // What Studio One keeps about each audio file, from its header, when it's on this computer.
-                let format = |path: &str| {
-                    crate::sample::format_of(Path::new(path)).map(|(rate, channels, seconds)| {
-                        mo_formats::studio_one::write::SampleFormat { rate, channels, seconds }
-                    })
-                };
                 let w = mo_formats::studio_one::write::write(song, title, &format);
+                (w.bytes, w.left_out)
+            }
+            // A set has no title of its own: its file's name is its name.
+            Daw::AbletonLive => {
+                let w = mo_formats::ableton::write::write(song, &format, Some(&folder.to_string_lossy()));
                 (w.bytes, w.left_out)
             }
         }
@@ -104,14 +113,29 @@ pub fn copy_for(
         return Err(format!("This is already a {} project.", daw.name()));
     }
     let raw = std::fs::read(project).map_err(|e| format!("Couldn't read the song: {e}"))?;
-    let views = arrangement::read_bytes(project, &raw);
-    let mut song = views.into_iter().next().ok_or("The app can't read this kind of project's arrangement.")?;
+    let mut views = arrangement::read_bytes(project, &raw);
+    // The first view, unless it holds no notes or audio and another does: an FL song played in pattern mode has no
+    // patterns in its playlist (an automation clip may be there on its own), and its second view lays its patterns out
+    // one after another, as it opens in Bitwig (1,743 of Solomon's FL saves in the real-song test of 27 Nov 2026
+    // couldn't be copied before). Muted notes count: a song whose channels are all switched off is still copied.
+    let plays =
+        |v: &Arrangement| v.lanes.iter().flat_map(|l| &l.clips).any(|c| !c.notes.is_empty() || !c.audio.is_empty());
+    let chosen = if views.first().is_some_and(plays) { 0 } else { views.iter().position(plays).unwrap_or(0) };
+    let first_view = views.first().map(|v| v.view);
+    if views.is_empty() {
+        return Err("The app can't read this kind of project's arrangement.".into());
+    }
+    let mut song = views.swap_remove(chosen);
+    let why_not_first = first_view
+        .filter(|_| chosen > 0)
+        .map(|first| format!("The song's {first} is empty, so the copy is laid out \"{}\".", song.view));
     if song.lanes.is_empty() && !song.notes.is_empty() {
         return Err(song.notes.join(" "));
     }
     let missing = find_samples(&mut song, find);
     let stem = paths::stem(&project.to_string_lossy()).to_owned();
-    let (bytes, mut left_out) = daw.write(&song, &stem);
+    let folder = file_for(project, export_root, daw, &stem).parent().map(Path::to_path_buf).unwrap_or_default();
+    let (bytes, mut left_out) = daw.write(&song, &stem, &folder);
     if bytes.is_empty() {
         return Err("The new project couldn't be put together.".into());
     }
@@ -143,6 +167,11 @@ pub fn copy_for(
         // False when the name was taken while this saved (a second press, another program): the next name is tried.
         if save_checked_new(&file, &bytes, |b| check(&file, b))? {
             let mut message = format!("Saved a copy for {} as {}.", daw.name(), file.display());
+            // Why the copy is laid out as it is, before what didn't go across.
+            if let Some(why) = &why_not_first {
+                message.push(' ');
+                message.push_str(why);
+            }
             if !left_out.is_empty() {
                 message.push_str(" Not carried over: ");
                 message.push_str(&left_out.join(" "));
@@ -245,6 +274,50 @@ mod tests {
         );
     }
 
+    /// Recipe save 02 with nothing in its playlist: FL plays its pattern in pattern mode.
+    fn pattern_mode_flp(dir: &Path) -> PathBuf {
+        let raw = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../mo-formats/tests/fixtures/recipe/fl/MO Recipe 02 notes.flp"),
+        )
+        .unwrap();
+        let flp = mo_formats::fl::events::load(&raw).unwrap();
+        let mut body = Vec::new();
+        for e in flp.events.iter().filter(|e| e.id != mo_formats::fl::events::EV_PLAYLIST) {
+            body.push(e.id);
+            if e.id >= 192 {
+                let mut n = e.data.len();
+                while n >= 0x80 {
+                    body.push((n & 0x7f) as u8 | 0x80);
+                    n >>= 7;
+                }
+                body.push(n as u8);
+            }
+            body.extend_from_slice(&e.data);
+        }
+        // The header as it was (FLhd, its 6 bytes, FLdt), then the events' new length.
+        let mut out = raw[..18].to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        let file = dir.join("Pattern Mode.flp");
+        std::fs::write(&file, out).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_song_in_fls_pattern_mode_is_copied_as_it_opens_in_bitwig() {
+        // 1,743 of Solomon's FL saves are played in pattern mode (real-song test, 27 Nov 2026): their playlist is
+        // empty, so a copy from it had nothing in it and wasn't made.
+        let d = dir("pattern-mode");
+        let flp = pattern_mode_flp(&d);
+        let views = arrangement::read(&flp).unwrap();
+        assert!(views[0].lanes.is_empty() && views[1].note_count() > 0, "{views:?}");
+        let copy = copy_for(&flp, &d.join("Exports"), Daw::StudioOne, &as_named).unwrap();
+        assert!(copy.message.contains("so the copy is laid out \"As it opens in Bitwig\""), "{}", copy.message);
+        assert!(!copy.left_out.iter().any(|l| l.contains("laid out")), "{:?}", copy.left_out);
+        let back = arrangement::read(&copy.file).unwrap().remove(0);
+        assert_eq!(back.note_count(), views[1].note_count());
+    }
+
     #[test]
     fn a_studio_one_song_becomes_an_fl_project_beside_the_last_copy() {
         let d = dir("copy-for");
@@ -267,5 +340,35 @@ mod tests {
         let song_copy = copy_for(&first.file, &root, Daw::StudioOne, &as_named).unwrap();
         assert_eq!(song_copy.file.extension().unwrap(), "song");
         assert_eq!(arrangement::read(&song_copy.file).unwrap().remove(0).note_count(), original.note_count());
+        // And as a Live set, which reads back the same too.
+        let set = copy_for(&song, &root, Daw::AbletonLive, &as_named).unwrap();
+        assert_eq!(set.file, root.join("MO Recipe 02 notes").join("Ableton Live").join("MO Recipe 02 notes.als"));
+        assert_eq!(arrangement::read(&set.file).unwrap().remove(0).note_count(), original.note_count());
+        assert!(
+            copy_for(&set.file, &root, Daw::AbletonLive, &as_named).is_err(),
+            "a Live set isn't converted for Live"
+        );
+    }
+
+    #[test]
+    fn a_bitwig_song_s_audio_goes_into_a_live_set_by_its_path_and_from_the_set_s_folder() {
+        let d = dir("copy-for-live");
+        let song = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mo-formats/tests/fixtures/recipe/bitwig/MO Recipe 12 gain and fades.bwproject");
+        let root = d.join("Exports");
+        let sample = d.join("Samples").join("Tone.wav");
+        let found = sample.to_string_lossy().into_owned();
+        let set = copy_for(&song, &root, Daw::AbletonLive, &|_| Some(found.clone())).unwrap();
+        let back = arrangement::read(&set.file).unwrap().remove(0);
+        let parts: Vec<_> = back.lanes.iter().flat_map(|l| &l.clips).flat_map(|c| &c.audio).collect();
+        assert!(!parts.is_empty());
+        assert!(parts.iter().all(|p| Path::new(&p.path) == sample), "{parts:?}");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(
+            &mut flate2::read::GzDecoder::new(&std::fs::read(&set.file).unwrap()[..]),
+            &mut xml,
+        )
+        .unwrap();
+        assert!(xml.contains("<RelativePath Value=\"../../../Samples/Tone.wav\" />"), "{xml}");
     }
 }

@@ -1,7 +1,7 @@
 // The folder tree beside a list of sounds (Solomon, 24 Nov 2026): only the folders that hold sounds the other filters
 // let through, each with how many, ticked to narrow the list to them (as many as you like). The lines, picks and
 // words are made by mo_app::sound_folders; this only shows them and says what was clicked.
-import { AppKeys, Theme, Type, Space, Heights, Caps, SearchBox, CutText, ListLine, StudioButton, TagChip, CloseButton, Seam, Widths } from "studio.slint";
+import { AppKeys, Theme, Type, Space, Heights, Caps, SearchBox, CutText, ListLine, StudioButton, TagChip, CloseButton, Seam, Widths, ScrollRail } from "studio.slint";
 import { ListView } from "list.slint";
 
 // One line of the tree. `picked`: 0 not, 1 picked with the folders inside it, 2 picked alone ("just this folder"),
@@ -431,14 +431,19 @@ export component FolderTree inherits Rectangle {
     }
 }
 
-// The picked and hidden folders as chips in a strip under the list, every one in sight (Solomon, 25 Nov 2026: past
-// two they couldn't be seen under the tree), wrapping to more rows as they need; a chip's × takes it off.
+// The picked and hidden folders as chips in a strip under the list (Solomon, 25 Nov 2026: past two they couldn't be
+// seen under the tree), wrapping to more rows as they need; a chip's × takes it off. Up to three rows are in sight;
+// past that the rest are a scroll away, with the shared scroll bar at the right, so every chip can still be reached
+// (the review of 26 Nov: forty hidden folders made six rows, and the list lost that room for good).
 export component PickStrip inherits Rectangle {
     in property <[TreePick]> picks;
     // Folders are picked (not only hidden): Clear has something to take off.
     in property <bool> any-picked;
     callback taken-off(string, bool);
     callback cleared();
+    // A chip's height (a ToggleChip's), and how tall three rows of them are.
+    property <length> chip: 28px;
+    property <length> most: 3 * root.chip + 2 * Space.xs;
     height: root.picks.length > 0 ? row.preferred-height : 0px;
     visible: root.picks.length > 0;
     background: Theme.surface;
@@ -471,16 +476,36 @@ export component PickStrip inherits Rectangle {
                 clicked => { root.cleared(); }
             }
         }
-        chips := FlexboxLayout {
+        flick := Flickable {
             horizontal-stretch: 1;
-            spacing: Space.xs;
-            for p in root.picks: TagChip {
-                text: p.hidden ? "Hidden: " + p.text : p.count == "" ? p.text : p.text + "  " + p.count;
-                on: !p.hidden;
-                remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
-                clicked => { root.taken-off(p.path, p.hidden); }
-                removed => { root.taken-off(p.path, p.hidden); }
+            height: min(chips.preferred-height, root.most);
+            content-width: self.width;
+            content-height: chips.preferred-height;
+            mouse-drag-pan-enabled: false;
+            chips := FlexboxLayout {
+                x: 0;
+                y: 0;
+                width: flick.width;
+                spacing: Space.xs;
+                for p in root.picks: TagChip {
+                    text: p.hidden ? "Hidden: " + p.text : p.count == "" ? p.text : p.text + "  " + p.count;
+                    on: !p.hidden;
+                    remove-tip: p.hidden ? "Show this folder's sounds again" : "Take this folder off";
+                    clicked => { root.taken-off(p.path, p.hidden); }
+                    removed => { root.taken-off(p.path, p.hidden); }
+                }
             }
         }
+    }
+    // The chips' scroll bar, only while there are more than three rows: in the strip's right margin, beside them.
+    ScrollRail {
+        x: root.width - self.width;
+        y: flick.y;
+        height: flick.height;
+        whole: chips.preferred-height;
+        seen: flick.height;
+        turned: flick.content-y;
+        line: root.chip + Space.xs;
+        scroll-to(y) => { flick.content-y = y; }
     }
 }

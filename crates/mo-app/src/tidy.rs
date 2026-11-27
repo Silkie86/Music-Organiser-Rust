@@ -1022,11 +1022,12 @@ const RETIRED: &[&str] = &["midi-index.read"];
 /// settings' (`backup.txt.<process>-<count>.mo-part`, `backup-songs.txt.…`, [`crate::backup::write_whole`]), the app's
 /// own settings' and the Space page's list of what it put in the Recycle Bin (`rust-settings.json.mo-part`,
 /// `space-binned.json.mo-part`, [`crate::app_settings::WRITTEN_CHECKED`]), the sweep's own (`tidy-notes.txt.mo-part`,
-/// [`write_notes_done`]), the plugin's widths (`plugin-widths.txt.mo-part`, [`crate::widths::PLUGIN_FILE`]), a data
-/// folder move's notes in the folder it moved to (`moved-in.json.…`, `moving-in.json.…`,
-/// [`WRITTEN_WHOLE`]), the Backup settings as older versions wrote them (`backup.txt.mo-part`,
-/// `backup-songs.txt.mo-part`), or a side database being made (`presets.db.new-<number>`, `curves.db.new-<number>`,
-/// with SQLite's own files beside it; `mo_presets::fixes`; the same for `preset-sounds.db.new-<number>`), or the saves
+/// [`write_notes_done`]), the plugin's widths (`plugin-widths.txt.…`, [`WRITTEN_WHOLE`]; `plugin-widths.txt.mo-part` as
+/// older plugins wrote it, [`crate::widths::PLUGIN_FILE`]), a data folder move's notes in the folder it moved to
+/// (`moved-in.json.…`, `moving-in.json.…`, [`WRITTEN_WHOLE`]), the Backup settings as older versions wrote them
+/// (`backup.txt.mo-part`, `backup-songs.txt.mo-part`), or a side database being made (`presets.db.new-<number>`,
+/// `curves.db.new-<number>`, with SQLite's own files beside it; `mo_presets::fixes`; the same for
+/// `preset-sounds.db.new-<number>`), or the saves
 /// list's copy being made (`library-list-rust.db.new-<number>`, `mo_library::list_copy`), the song library
 /// (`songs.db.new-<number>`, `mo_library::songs_db`) or the MIDI index copied into a new layout
 /// (`midi-index.db.new-<number>`, `mo_midi::store`).
@@ -3230,6 +3231,9 @@ mod tests {
         assert!(is_cut_short("backup.txt.mo-part") && is_cut_short("backup-songs.txt.mo-part"));
         assert!(is_cut_short("rust-settings.json.mo-part") && !is_cut_short("rust-settings.json"));
         assert!(is_cut_short("space-binned.json.mo-part") && !is_cut_short("space-binned.json"));
+        // The plugin's widths, as two DAWs write them at once, and as older plugins did.
+        assert!(is_cut_short("plugin-widths.txt.4120-3.mo-part") && is_cut_short("plugin-widths.txt.mo-part"));
+        assert!(!is_cut_short("plugin-widths.txt"));
         assert!(!is_cut_short("rust-settings.json.unreadable") && !is_cut_short("rust-settings.json.mo-part-2"));
         assert!(!is_cut_short("presets.db.new-12-old") && !is_cut_short("presets.db") && !is_cut_short("backup.txt"));
         assert!(!is_cut_short("library.db.new-12") && !is_cut_short("backup.txt.mo-part.2"));

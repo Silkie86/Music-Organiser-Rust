@@ -404,8 +404,10 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
         for part in parts {
             let _ = fs::remove_file(part);
         }
-        // Back as it was before the install that moved it aside, this one or one cut off.
-        for older in olders.iter().flatten().filter(|o| !o.first.exists()) {
+        // Back as it was before the install that moved it aside, this one or one cut off: only where its old name is
+        // free and there's no DAWmate copy beside it, so the folder never has two (as in the last step below; the 26
+        // Nov review's DK-5). Otherwise it stays aside, a name Bitwig never loads, for the next install to take out.
+        for older in olders.iter().flatten().filter(|o| !o.first.exists() && !o.beside_new().exists()) {
             let _ = fs::rename(&older.aside, &older.first);
         }
     };
@@ -491,6 +493,13 @@ pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBu
 struct Older {
     first: PathBuf,
     aside: PathBuf,
+}
+
+impl Older {
+    /// The new copy's place in the same folder.
+    fn beside_new(&self) -> PathBuf {
+        self.first.with_file_name(BITWIG_EXTENSION_NAME)
+    }
 }
 
 /// Takes out an older copy moved aside, once the new one is in place: noted as taken out, or as left with why.

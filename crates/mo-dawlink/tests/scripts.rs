@@ -323,6 +323,49 @@ fn an_older_copy_left_aside_by_a_cut_off_install_goes_back_if_this_one_stops() {
     assert!(extensions.join(FIRST_BITWIG_EXTENSION_NAME).is_file() && !aside.exists(), "Bitwig keeps its link");
 }
 
+#[test]
+fn an_older_copy_left_aside_beside_a_dawmate_copy_stays_aside_if_this_install_stops() {
+    let root = fixture("bitwig-cut-off-beside-new");
+    let (a, b) = (root.join("A").join("Extensions"), root.join("B").join("Extensions"));
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    // A has a DAWmate copy and an older one an earlier install moved aside and couldn't take out.
+    fs::create_dir_all(&a).unwrap();
+    extension(&a.join(BITWIG_EXTENSION_NAME), "3.30");
+    let aside = a.join(format!("{FIRST_BITWIG_EXTENSION_NAME}.mo-old"));
+    extension(&aside, "3.29");
+    // B can't take the new copy, so the install stops and undoes what it did.
+    fs::create_dir_all(&b).unwrap();
+    extension(&b.join(FIRST_BITWIG_EXTENSION_NAME), "3.29");
+    fs::create_dir_all(b.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")).join("in the way")).unwrap();
+    let done = install_bitwig(&source, &[a.clone(), b.clone()], &[]);
+    assert!(done.installed.went.is_empty() && done.installed.failed.len() == 2);
+    // A never has two copies of the controller (one ID): the older one stays aside, where Bitwig never loads it.
+    assert!(!a.join(FIRST_BITWIG_EXTENSION_NAME).exists() && aside.is_file(), "DK-5");
+    assert!(a.join(BITWIG_EXTENSION_NAME).is_file());
+    // B is as it was.
+    assert!(b.join(FIRST_BITWIG_EXTENSION_NAME).is_file() && !b.join(BITWIG_EXTENSION_NAME).exists());
+}
+
+#[test]
+fn a_folder_whose_copy_cant_be_replaced_at_the_last_step_fails_alone() {
+    let root = fixture("bitwig-last-step");
+    let (a, b) = (root.join("A").join("Extensions"), root.join("B").join("Extensions"));
+    let source = root.join(BITWIG_EXTENSION_NAME);
+    extension(&source, "3.31");
+    fs::create_dir_all(&a).unwrap();
+    extension(&a.join(BITWIG_EXTENSION_NAME), "3.30");
+    // B's copy can't be replaced (as when Bitwig has it open on Windows): something is in the way of its name.
+    fs::create_dir_all(b.join(BITWIG_EXTENSION_NAME).join("in the way")).unwrap();
+    let done = install_bitwig(&source, &[a.clone(), b.clone()], &[]);
+    // A went and B didn't: the app keeps the version only when both did (mo_app::daw_links::went_everywhere, DK-1).
+    assert_eq!(done.installed.went, std::slice::from_ref(&a));
+    assert_eq!(done.installed.failed.len(), 1);
+    assert_eq!(done.installed.failed[0].0, b);
+    assert_eq!(bitwig_state(&source, std::slice::from_ref(&a)), ScriptState::Installed);
+    assert!(!b.join(format!("{BITWIG_EXTENSION_NAME}.mo-part")).exists(), "no part file stays");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_folder_listed_twice_through_a_link_is_done_once() {
