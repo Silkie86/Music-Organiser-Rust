@@ -7,7 +7,7 @@
 
 == Start
 tester.install | Install DAWmate with the setup and open it from the Start menu | It installs without an administrator question and opens in a few seconds | 1) Run the DAWmate setup you were sent (if Windows shows a blue box, click More info, then Run anyway). 2) Keep the folders it suggests unless you'd like your data elsewhere. 3) Finish, then open DAWmate from the Start menu
-tester.folders | In Settings > Folders, add the folders where your projects and your samples are | Songs lists your projects within a minute and Sounds fills with your samples | 1) Click Settings at the bottom left, then Folders. 2) Under Projects press Add and pick the folder your DAW saves songs in (DAWmate already looks in the usual FL Studio, Bitwig and Studio One folders). 3) Under Samples press Add and pick your sample folders. 4) Click Songs and Sounds and watch them fill
+tester.folders | In Settings > Folders, add the folders where your projects and your samples are | Songs lists your projects within a minute and Sounds fills with your samples | 1) Click Settings at the bottom left, then Folders. 2) Under Projects press Add a folder... and pick the folder your DAW saves songs in (DAWmate already looks in the usual FL Studio, Bitwig and Studio One folders). 3) Under Samples press Add a folder... and pick your sample folders. 4) Click Songs and Sounds and watch them fill
 tester.close | Use the app for a while, then close it | It closes at once and opens again next time as you left it | Use a few pages for five minutes or so, close DAWmate with the window's X, then open it again from the Start menu
 
 == Songs
@@ -30,7 +30,7 @@ tester.presets | Open Presets and look through your presets | Your synths' prese
 tester.space | Open Space and wait for the cards to fill | The sizes look about right and nothing is removed unless you ask | Click Space and wait a little: each card says how much room something takes. Nothing goes anywhere until you tick it and press a button, and what goes can be put back
 
 == DAWs
-tester.daw-link | In Settings > DAWs, press Install for each DAW you use | Each DAW's row says it's linked once the DAW is open | 1) Click Settings, then DAWs. 2) Press Install on your DAW's row. 3) Open (or restart) the DAW. 4) Back in DAWmate the row says Linked or installed
+tester.daw-link | If you use Bitwig or FL Studio, link it in Settings > DAWs | Its row says it's linked once the DAW is open | 1) Click Settings, then DAWs. 2) Press Install on Bitwig's or FL Studio's row (Studio One needs no link). 3) Open (or restart) the DAW. 4) Back in DAWmate the row says Linked or installed
 
 == Reporting
 tester.help | On any page, click the ? beside Settings at the bottom left | A short note says what the page is for, with its keys | Click a page on the left, then the ? at the bottom left. Press Esc to close it. Try it on a page you're not sure about

@@ -75,6 +75,7 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
     } else {
         (Marks::default(), false, String::new())
     };
+    let read = live && writable;
     let (mut writable, mut message) = (live && writable, message);
     if writable {
         let weak = app.as_weak();
@@ -122,9 +123,9 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
         }
     }
     // An installed copy nobody has marked the full list in shows testers their short list (Solomon, 27 Nov 2026).
-    // The screenshots show the full list.
-    let installed = live && std::env::current_exe().is_ok_and(|exe| mo_app::update::installed(&exe));
-    let tester = beta::for_tester(installed, &marks);
+    // The screenshots show the full list, and so does a marks file that couldn't be read: it may hold Solomon's marks.
+    // (One look beside the app, as the update card's; the marks file was just read here too.)
+    let tester = read && beta::for_tester(crate::update::installed(), &marks);
     let steps = beta::steps_for(tester);
     let done = steps.iter().filter(|s| marks.current(s).is_some()).count();
     if live {
@@ -299,6 +300,8 @@ fn self_checked(app: &AppWindow, found: Result<Vec<self_check::Found>, String>) 
         let version = mo_app::version::version();
         let log_file = log::current().and_then(|c| c.path());
         let when = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+        // Only the steps on the list shown (the tester list leaves out the data folder's place).
+        let found: Vec<_> = found.into_iter().filter(|f| l.steps.iter().any(|s| s.id == f.id)).collect();
         let problems = found.iter().filter(|f| f.mark == Mark::Problem).count();
         for f in found {
             let Some(step) = l.steps.iter().find(|s| s.id == f.id).cloned() else { continue };
