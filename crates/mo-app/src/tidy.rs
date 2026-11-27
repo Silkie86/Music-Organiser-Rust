@@ -37,6 +37,8 @@
 //! - `Trimmed sounds\` in the export folder: a trimmed copy Trim silence was still making
 //!   (`<copy>.<number>.wav` or `.wav.part`, [`crate::trim_copy::is_half_made`]), an hour old. Never the copies: DAW
 //!   projects use them.
+//! - `Edited sounds\` in the export folder: a part of a sound the card was still cutting out, named as trimmed copies
+//!   are while they're made ([`crate::edit_copy::is_half_made`]), an hour old. Never the copies.
 //! - `updates\`: a fetched setup (`DAWmate-Setup-<version>.exe`, its `.sha256` and its `.log`) once that version or a
 //!   newer one runs, only when the installed copy runs (a launcher's build leaves the installed copy's update be), and
 //!   a fetch cut short (`… .exe.mo-part`), an hour old.
@@ -398,6 +400,10 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     // while it's written). Never the copies: DAW projects use them (DF-5).
     if let Some(trimmed) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::trim_copy::FOLDER])) {
         done.add(remove_older(&trimmed, crate::trim_copy::is_half_made, WRITING, now, false));
+    }
+    // The same for a part of a sound its card was still cutting out (`edit_copy`).
+    if let Some(edited) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::edit_copy::FOLDER])) {
+        done.add(remove_older(&edited, crate::edit_copy::is_half_made, WRITING, now, false));
     }
     // A Record take the plugin was still saving when the DAW stopped (DF-5) is mended, never thrown away: it's his
     // audio (the 19 Nov review's DA-1). Only one with nothing saved in it goes. Only the app's own take names.
@@ -1887,6 +1893,39 @@ mod tests {
         let mended = takes.join("Recording 2026-11-15 21-05-00 (recovered).wav");
         assert_eq!(mo_audio::read(&mended, 60.0).unwrap().channels[0].len(), 60);
         assert!(done.takes.iter().any(|t| t.contains("(recovered)")), "{:?}", done.takes);
+    }
+
+    #[test]
+    fn half_made_edited_copies_go_and_nothing_else_there() {
+        let dir = test_folder("edited");
+        let exports = dir.join("Music Organiser Exports");
+        let places = Places { exports: Some(exports.clone()), ..test_places(&dir) };
+        let bin = TestBin(dir.join("bin"));
+        let edited = exports.join(crate::edit_copy::FOLDER);
+        fs::create_dir_all(&edited).unwrap();
+        let copy = mo_sounds::trimmed::part_name("D:\\Samples\\Loop.wav", 1.0, 2.0);
+        let stem = copy.strip_suffix(".wav").unwrap().to_owned();
+        let gone = [edited.join(format!("{stem}.4242.wav")), edited.join(format!("{stem}.4242.wav.part"))];
+        let kept = [
+            edited.join(&copy),
+            edited.join("Loop.wav"),
+            edited.join("Loop.4242.wav"),
+            exports.join(format!("{stem}.4242.wav")),
+        ];
+        for f in gone.iter().chain(&kept) {
+            fs::write(f, b"x").unwrap();
+        }
+        sweep(&places, SystemTime::now() + WRITING + Duration::from_secs(60), &bin);
+        for f in &gone {
+            assert!(!f.exists(), "{} should go", f.display());
+        }
+        for f in &kept {
+            assert!(f.exists(), "{} should stay", f.display());
+        }
+        // Written a moment ago: another copy's making may still be going on.
+        fs::write(&gone[0], b"x").unwrap();
+        sweep(&places, SystemTime::now(), &bin);
+        assert!(gone[0].exists());
     }
 
     #[test]

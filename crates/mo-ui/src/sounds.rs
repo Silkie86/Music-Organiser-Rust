@@ -9,11 +9,13 @@ mod copies;
 mod did;
 mod drag_out;
 pub use drag_out::card_at_row;
+pub use part::hits_for_screens;
 mod file_dates;
 mod galaxy;
 mod grid;
 mod kit;
 mod like;
+mod part;
 mod peaks;
 mod sky;
 mod tree;
@@ -178,6 +180,12 @@ struct Page {
     /// That play was trimmed (Trim silence was on): its samples don't hold the whole file, so a click on its waveform
     /// plays it again from there rather than moving along what was read.
     play_trimmed: bool,
+    /// Where that play's samples start in its file, in seconds: a part picked on the card, read on its own, starts
+    /// where the play does, and the player's position is counted from there.
+    play_offset: f64,
+    /// That play is of a part picked on the card: where it starts and where the part ends, in seconds into the file.
+    /// It stops at the end ([`playing_changed`]'s ticker stops a part that's played as it's read).
+    play_part: Option<(f64, f64)>,
     /// Each sound's place in `list`, by id.
     places: Arc<HashMap<i64, usize>>,
     /// Every sound's fingerprint, once read, for Sounds like this and Rediscover.
@@ -266,6 +274,8 @@ impl Default for Page {
             play: 0,
             play_reads: 0.0,
             play_trimmed: false,
+            play_offset: 0.0,
+            play_part: None,
             places: Arc::default(),
             index: None,
             no_index: None,
@@ -2548,6 +2558,7 @@ fn none_to_show(app: &AppWindow, title: &str, text: String) {
             p.played = Arc::default();
             p.history.clear();
             p.picked = None;
+            part::forget();
             p.counts = None;
             // Not read after all: the list's word ([`listed`]) doesn't take the place of why.
             p.read = false;
@@ -2659,6 +2670,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
             p.trim_db = mo_audio::trim::level_db(crate::settings::value(list::TRIM_LEVEL_KEY).as_deref());
         }
         p.picked = None;
+        part::forget();
         p.rediscover.clear();
         p.re_started = false;
         // The years come with Rediscover's first answer for these sounds.
@@ -2985,6 +2997,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     tree::wire(app);
     galaxy::wire(app);
     drag_out::wire(app);
+    part::wire(app);
     let weak = app.as_weak();
     data.on_list_made(move || {
         // The tiles and the List each come back where they were when they're made again: back on the page, or
@@ -3113,12 +3126,15 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
             let p = p.borrow();
             (p.picked, p.playing)
         });
+        // The end of the part picked on the card, if one is: a click in it moves a play of that part, and any other
+        // play is read again from there, to play as far as its end.
+        let part_end = part::picked_seconds().map(|(_, end)| end);
         match (picked, playing) {
             (Some(i), Some((j, seconds))) if i == j => {
                 let to = f64::from(at) * seconds;
                 match PLAYER.get() {
-                    Some(player) if PAGE.with(|p| seeks(&p.borrow(), player.playing().as_deref(), to)) => {
-                        player.seek(to);
+                    Some(player) if PAGE.with(|p| seeks(&p.borrow(), player.playing().as_deref(), to, part_end)) => {
+                        player.seek(to - PAGE.with(|p| p.borrow().play_offset));
                     }
                     // Still being read, or read only as far as its start: read again from there (newest wins).
                     _ => play_picked(&app, f64::from(at)),
@@ -3132,6 +3148,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.on_close_panel(move || {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| p.borrow_mut().picked = None);
+        part::let_go(&app);
         app.global::<SoundsData>().set_panel_shown(false);
         redraw();
         // The galaxy's ring leaves the star with it.
@@ -4163,6 +4180,9 @@ fn pick(app: &AppWindow, at: usize) {
         data.set_picked(picked_sound(&p, at));
         show_picked_tags(&data, &p);
     });
+    if let Some(id) = PAGE.with(|p| p.borrow().list.sound(at).map(|s| s.id)) {
+        part::sound_picked(app, id);
+    }
     data.set_panel_shown(true);
     find_alike(app, at);
     galaxy::show_picked(app);
@@ -4381,10 +4401,16 @@ pub fn toggle_play(app: &AppWindow) -> bool {
     true
 }
 
-/// Plays the picked sound from `from` (0 to 1 of its waveform). The file is read off the window's thread.
+/// Plays the picked sound from `from` (0 to 1 of its waveform). The file is read off the window's thread. With a part
+/// picked on its card, only the part plays: from its start, or from `from` when that's inside it, to its end.
 fn play_picked(app: &AppWindow, from: f64) {
-    if let Some(at) = PAGE.with(|p| p.borrow().picked) {
-        play_sound(app, at, from, mo_audio::MAX_SECONDS);
+    let Some(at) = PAGE.with(|p| p.borrow().picked) else { return };
+    match PAGE.with(|p| p.borrow().list.sound(at).map(|s| s.id)).and_then(part::of) {
+        Some(part) => {
+            let from = if from > part.from && from < part.to { from } else { part.from };
+            play_from(app, at, from, mo_audio::MAX_SECONDS, Some(part.to));
+        }
+        None => play_sound(app, at, from, mo_audio::MAX_SECONDS),
     }
 }
 
@@ -4394,6 +4420,12 @@ fn play_picked(app: &AppWindow, from: f64) {
 /// played as it's read instead, to its end however long it is (Solomon's F12 note of 24 Nov 2026: a 5:11 song stopped
 /// a minute in); a sweep still reads only its start.
 fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
+    play_from(app, at, from, most, None);
+}
+
+/// [`play_sound`], or with `till` (0 to 1 of the way through) only as far as that: a part picked on the card, read on
+/// its own ([`mo_app::edit_copy::read_part`]) and played without Trim silence.
+fn play_from(app: &AppWindow, at: usize, from: f64, most: f64, till: Option<f64>) {
     let Some((at, path, seconds, trim)) = PAGE.with(|p| {
         let p = p.borrow();
         let s = p.list.sound(at)?;
@@ -4402,7 +4434,13 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     }) else {
         return;
     };
-    let streams = most >= mo_audio::MAX_SECONDS && !(seconds > 0.0 && seconds <= mo_audio::MAX_SECONDS);
+    let trim = trim.filter(|_| till.is_none());
+    let part = till.map(|till| (from * seconds, till * seconds));
+    // A part longer than a minute plays as it's read, as a long sound does (only a minute's read whole first).
+    let streams = match part {
+        Some((start, end)) => end - start > mo_audio::MAX_SECONDS,
+        None => most >= mo_audio::MAX_SECONDS && !(seconds > 0.0 && seconds <= mo_audio::MAX_SECONDS),
+    };
     // A MIDI loop playing, or one still being made, would play over it (or start on top of it later).
     crate::midi::stop_for_another(app);
     crate::curve_editor::call_off_tone();
@@ -4416,15 +4454,30 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         let mut p = p.borrow_mut();
         p.playing = Some((at, seconds.max(0.001)));
         p.play = ask;
-        // Played as it's read, a click anywhere moves it: the player reads the file again from there.
-        p.play_reads = if streams { f64::INFINITY } else { most };
+        // Played as it's read, a click anywhere moves it: the player reads the file again from there. A part is read
+        // as far as its end.
+        p.play_reads = match part {
+            Some((_, end)) => end,
+            None if streams => f64::INFINITY,
+            None => most,
+        };
         p.play_trimmed = trim.is_some() && !streams;
+        // A part read on its own starts where the play does, not at the file's start (one played as it's read is
+        // counted from the file's start by the player).
+        p.play_offset = match part {
+            Some((start, _)) if !streams => start,
+            _ => 0.0,
+        };
+        p.play_part = part;
     });
     playing_changed(app);
     if here {
         return;
     }
-    let job = PlayJob { ask, path, from, seconds, most, streams, trim, window: app.as_weak(), held: Arc::default() };
+    // A part read on its own: as far as its end.
+    let till = till.filter(|_| !streams);
+    let job =
+        PlayJob { ask, path, from, seconds, most, streams, trim, till, window: app.as_weak(), held: Arc::default() };
     ask_reader(job);
 }
 
@@ -4479,6 +4532,9 @@ struct PlayJob {
     /// Trim silence was on when it was asked for, with the level it counts as silence: it starts past the silence at
     /// its start and stops at the end of the sound, not the end of the file.
     trim: Option<f32>,
+    /// It's read only as far as this (0 to 1 of the way through), from `from`, on its own: a part picked on the card,
+    /// a minute long or less.
+    till: Option<f64>,
     window: slint::Weak<AppWindow>,
     /// How many of its reader's jobs are held: one more while this one is, so the reader is free once it's none.
     held: Arc<AtomicUsize>,
@@ -4495,7 +4551,7 @@ impl Drop for PlayJob {
 /// (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output, overtaken by a newer sound
 /// or dropped, by this play's number; for a sound the sweep didn't ask for they count nothing.
 fn read_and_play(job: PlayJob) {
-    let PlayJob { ask, ref path, from, seconds, most, streams, trim, ref window, .. } = job;
+    let PlayJob { ask, ref path, from, seconds, most, streams, trim, till, ref window, .. } = job;
     let (path, window) = (path.clone(), window.clone());
     // Still the newest play, with no stop since.
     let wanted = || {
@@ -4517,11 +4573,16 @@ fn read_and_play(job: PlayJob) {
     let reads = if trim.is_some() && most < mo_audio::MAX_SECONDS { most + TRIM_LEAD_ROOM } else { most };
     // A long sound plays as it's read, as soon as its first part is (from its start with Trim silence on, past the
     // silence there); any other is read first, as far as it plays.
-    let read = if streams {
+    let read = if let Some(till) = till {
+        // Only the part is read, however long the sound.
+        mo_app::edit_copy::read_part(Path::new(&path), from * seconds, till * seconds).map(ToPlay::Part)
+    } else if streams {
         let quiet = trim.filter(|_| from == 0.0);
-        mo_audio::play::Stream::open(Path::new(&path), from * seconds, quiet, &|| wanted().is_ok()).map(ToPlay::Stream)
+        mo_audio::play::Stream::open(Path::new(&path), from * seconds, quiet, &|| wanted().is_ok())
+            .map(ToPlay::Stream)
+            .map_err(|e| e.to_string())
     } else {
-        mo_audio::read(Path::new(&path), reads).map(ToPlay::Whole)
+        mo_audio::read(Path::new(&path), reads).map(ToPlay::Whole).map_err(|e| e.to_string())
     };
     // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since wins,
     // rather than this sound starting after it and playing on while the page shows another or none.
@@ -4540,10 +4601,11 @@ fn read_and_play(job: PlayJob) {
             }
             player().play_if(Arc::new(audio), ask.to_string(), start, wanted)
         }
+        Ok(ToPlay::Part(part)) => player().play_if(Arc::new(part), ask.to_string(), 0.0, wanted),
         Err(e) => match wanted() {
             Err(unwanted) => Err(unwanted),
             Ok(()) => {
-                couldnt_play(&path, ask, &e.to_string(), window);
+                couldnt_play(&path, ask, &e, window);
                 return;
             }
         },
@@ -4565,6 +4627,8 @@ fn read_and_play(job: PlayJob) {
 enum ToPlay {
     Stream(mo_audio::play::Stream),
     Whole(mo_audio::AudioData),
+    /// A part picked on the card, faded where it was cut: it plays from its start, which is `from`.
+    Part(mo_audio::AudioData),
 }
 
 /// How much further a sweep's read goes with Trim silence on, for the silence at the start it skips.
@@ -4667,6 +4731,10 @@ pub fn escape(app: &AppWindow) -> bool {
         bitwig::close(app);
         return true;
     }
+    // A part picked on the card goes before the card.
+    if part::let_go(app) {
+        return true;
+    }
     if PAGE.with(|p| p.borrow().picked.is_some()) {
         data.invoke_close_panel();
         return true;
@@ -4700,11 +4768,15 @@ pub fn stop_for_another(app: &AppWindow) {
 /// Whether a click `to` seconds into the waveform of the sound shown playing can move the play the player has
 /// (`player_has`: its key), rather than reading the sound again from there: only when the player has that very play
 /// (not an older one, nor none while it's still being read) and the play read that far (a sweep reads only its start).
-fn seeks(p: &Page, player_has: Option<&str>, to: f64) -> bool {
+/// With a part picked on the card that ends at `part_end` seconds, only a play of that part can be moved (to where it
+/// was read from on); without one, only a play that isn't of a part.
+fn seeks(p: &Page, player_has: Option<&str>, to: f64, part_end: Option<f64>) -> bool {
     p.playing.is_some()
         && player_has.is_some_and(|key| key.parse() == Ok(p.play))
+        && to >= p.play_offset
         && to < p.play_reads
         && !p.play_trimmed
+        && p.play_part.map(|(_, end)| end) == part_end
 }
 
 /// A sound played to its end by itself: `key` is its play's number.
@@ -4763,8 +4835,30 @@ fn playing_changed(app: &AppWindow) {
     TICKER.with(|t| {
         t.start(TimerMode::Repeated, Duration::from_millis(40), move || {
             let Some(app) = weak.upgrade() else { return };
-            let Some(seconds) = PAGE.with(|p| p.borrow().playing.map(|(_, s)| s)) else { return };
-            let at = PLAYER.get().and_then(Player::position).unwrap_or(0.0);
+            let Some((seconds, offset, part, play)) = PAGE.with(|p| {
+                let p = p.borrow();
+                p.playing.map(|(_, s)| (s, p.play_offset, p.play_part, p.play))
+            }) else {
+                return;
+            };
+            let player = PLAYER.get();
+            let at = match part {
+                // A part: where it starts until the player has it (its place is the sound before's till then), and
+                // stopped at the part's end once it's there.
+                Some((start, end)) => {
+                    if player.and_then(Player::playing).is_none_or(|key| key.parse() != Ok(play)) {
+                        start
+                    } else {
+                        let at = player.and_then(Player::position).unwrap_or(0.0) + offset;
+                        if at >= end {
+                            stop(&app);
+                            return;
+                        }
+                        at
+                    }
+                }
+                None => player.and_then(Player::position).unwrap_or(0.0) + offset,
+            };
             let data = app.global::<SoundsData>();
             data.set_played((at / seconds).clamp(0.0, 1.0) as f32);
             // A tile's waveform is the sound's first minute: a longer sound's tile has played through by then.
@@ -6171,15 +6265,32 @@ mod tests {
     fn a_click_on_the_waveform_moves_only_the_play_the_player_has_as_far_as_it_was_read() {
         // Play 6 of the sound at 4 is a sweep's: only its first 4 s were read.
         let p = Page { playing: Some((4, 30.0)), play: 6, play_reads: 4.0, ..Page::default() };
-        assert!(seeks(&p, Some("6"), 2.0));
+        assert!(seeks(&p, Some("6"), 2.0, None));
         // Past what was read, the sound is read again from there; so it is while play 6 is still being read (the
         // player has nothing, or an older play of the same sound).
-        assert!(!seeks(&p, Some("6"), 15.0));
-        assert!(!seeks(&p, None, 2.0));
-        assert!(!seeks(&p, Some("5"), 2.0));
+        assert!(!seeks(&p, Some("6"), 15.0, None));
+        assert!(!seeks(&p, None, 2.0, None));
+        assert!(!seeks(&p, Some("5"), 2.0, None));
         // A long sound played as it's read: a click anywhere in it moves it, as the player reads it again from there.
         let streamed = Page { playing: Some((4, 311.0)), play: 6, play_reads: f64::INFINITY, ..Page::default() };
-        assert!(seeks(&streamed, Some("6"), 250.0));
+        assert!(seeks(&streamed, Some("6"), 250.0, None));
+        // A part from 2 s to 5 s, read on its own from 3 s on: a click from there to its end moves it; one before
+        // where it was read from, or after the part, reads it again, as does a click once the part has changed or gone.
+        let part = Page {
+            playing: Some((4, 30.0)),
+            play: 6,
+            play_reads: 5.0,
+            play_offset: 3.0,
+            play_part: Some((3.0, 5.0)),
+            ..Page::default()
+        };
+        assert!(seeks(&part, Some("6"), 4.0, Some(5.0)));
+        assert!(!seeks(&part, Some("6"), 2.5, Some(5.0)));
+        assert!(!seeks(&part, Some("6"), 5.5, Some(5.0)));
+        assert!(!seeks(&part, Some("6"), 4.0, Some(6.0)));
+        assert!(!seeks(&part, Some("6"), 4.0, None));
+        // And a play of the whole sound isn't moved once a part is picked: the part plays instead.
+        assert!(!seeks(&p, Some("6"), 2.0, Some(5.0)));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mo_audio::{AudioError, EMPTY_FILE, frame_at, read, read_from, read_parts, read_parts_from, write_wav};
+use mo_audio::{AudioError, EMPTY_FILE, frame_at, read, read_from, read_parts, read_parts_from, read_span, write_wav};
 
 fn fixture(name: &str, bytes: &[u8]) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-audio");
@@ -362,6 +362,35 @@ fn reads_from_part_way_into_every_kind_of_file() {
     })
     .unwrap();
     assert_eq!(handed, 0);
+}
+
+#[test]
+fn a_span_reads_just_that_part_of_every_kind_of_file() {
+    // A part picked on a waveform plays and is copied without reading the rest of the file: the same frames as the
+    // whole file read, from where it starts, for as long as it lasts, or to the file's end.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-audio");
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("span.wav");
+    let ramp: Vec<f32> = (0..11_025).map(|i| i as f32 / 11_025.0 - 0.5).collect();
+    write_wav(&wav, &[ramp.clone(), ramp], 22050, 24).unwrap();
+    let mut files = vec![wav];
+    files.extend(["tone.flac", "tone.mp3", "tone.m4a", "tone.ogg", "tone.aac"].map(tone));
+    for path in &files {
+        let whole = read(path, 60.0).unwrap();
+        let at = usize::try_from(frame_at(0.2, whole.sample_rate)).unwrap();
+        let long = usize::try_from(frame_at(0.1, whole.sample_rate)).unwrap();
+        let span = read_span(path, 0.2, 0.1).unwrap();
+        assert_eq!(span.sample_rate, whole.sample_rate, "{}", path.display());
+        let want: Vec<Vec<f32>> = whole.channels.iter().map(|c| c[at..at + long].to_vec()).collect();
+        assert_eq!(span.channels, want, "{}", path.display());
+        assert!((span.file_seconds - 0.3).abs() < 1e-3, "{}: {}", path.display(), span.file_seconds);
+        // Past the end, only as far as there is.
+        let rest = read_span(path, 0.2, 9.0).unwrap();
+        let want: Vec<Vec<f32>> = whole.channels.iter().map(|c| c[at..].to_vec()).collect();
+        assert_eq!(rest.channels, want, "{}", path.display());
+        // Starting past the end: nothing.
+        assert!(read_span(path, 5.0, 0.1).unwrap().is_empty(), "{}", path.display());
+    }
 }
 
 /// A WAV as FL Studio keeps its own sounds: format 0x674F ("Og"), a whole Ogg Vorbis stream in the data chunk.

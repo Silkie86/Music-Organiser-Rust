@@ -2363,6 +2363,10 @@ export component ListLine inherits Rectangle {
     in property <MouseCursor> cursor: MouseCursor.default;
     // This press has started a drag, so letting go isn't a click.
     property <bool> dragged;
+    // Ctrl was held as the left button went down: a drag of the line carries something else (the Sounds card's handle
+    // carries the whole file rather than the part picked). Not Alt: on Windows a drag with Alt held asks for a
+    // shortcut, which a drag of a copy can't give, so Explorer would refuse it.
+    out property <bool> control-held;
     border-radius: Theme.radius;
     // No easing here: lists reuse their lines as they scroll, and an eased line would trail the scroll.
     background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
@@ -2405,6 +2409,7 @@ export component ListLine inherits Rectangle {
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                 root.dragged = false;
+                root.control-held = e.modifiers.control;
             } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left && root.dragged {
                 root.drag-let-go();
             } else if e.kind == PointerEventKind.cancel && root.dragged {
@@ -2457,11 +2462,13 @@ export component ListLine inherits Rectangle {
 // then `drag-let-go`; `lifted` dims it while it's carried, `landed` glows round it once it has landed).
 export component DragHandle inherits ListLine {
     in property <string> text;
+    // It carries something picked out of the whole (the Sounds card's part): outlined in the accent.
+    in property <bool> lit;
     draggable: true;
     cursor: MouseCursor.grab;
     height: 32px;
     border-width: 1px;
-    border-color: Theme.edge;
+    border-color: root.lit ? Theme.accent : Theme.edge;
     HorizontalLayout {
         width: 100%;
         height: 100%;
@@ -2476,7 +2483,7 @@ export component DragHandle inherits ListLine {
                 viewbox-width: 16;
                 viewbox-height: 16;
                 commands: Icons.grip;
-                stroke: Theme.muted;
+                stroke: root.lit ? Theme.text : Theme.muted;
                 stroke-width: 1.5px;
             }
         }
@@ -2484,7 +2491,7 @@ export component DragHandle inherits ListLine {
             horizontal-stretch: 1;
             min-width: 0px;
             text: root.text;
-            color: Theme.muted;
+            color: root.lit ? Theme.text : Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
             overflow: elide;
@@ -4253,6 +4260,60 @@ export component Waveform inherits Rectangle {
     // A right click over it while it plays (one that can seek: a tile's waveform is its tile's): the page stops the
     // sound (Solomon, 11 Nov 2026: "maybe only there over the waveform right click should stop it").
     callback stop();
+    // Picking a part of it (the Sounds card's, the 1.1 plan's light sample edits): a press and drag across it picks
+    // one, lit between two lines, its edges on the sound's hits nearby (`snap`; Shift: just where the mouse is). A
+    // press on an edge moves that edge; a press inside the part that moves carries the part out of the app
+    // (`drag-part`, then `part-let-go` if the button comes up before the drag has got going). A click still plays from
+    // there: one outside the part lets it go first (`picked(0, 0)`).
+    in property <bool> can-pick;
+    // The part, from 0 to 1 of the way through: none unless `pick-to` is past `pick-from`.
+    in property <float> pick-from;
+    in property <float> pick-to;
+    // The hits, as a path of short lines along its foot, 1000 across and 10 high.
+    in property <string> hit-marks;
+    in property <color> pick-tint: Theme.here-colour;
+    // The mouse came over it, or the sound under a mouse resting on it changed: the page finds the hits, so they're
+    // there to snap to by the time a part is picked.
+    callback wants-hits();
+    // A left press on it, to pick a part or change one: the page notes whose waveform it is (and finds its hits).
+    callback pressed();
+    // Where an edge goes when the mouse is at `at` (0 to 1): on the hit nearest it, if one is no further away than
+    // `within` (0 to 1 of the width), else at `at`.
+    pure callback snap(float, float) -> float;
+    callback picked(float, float);
+    callback drag-part();
+    callback part-let-go();
+    // What the press is doing: 0 nothing; 1 picking a new part; 2 moving an edge; 3 pressed inside the part; 4 the part
+    // carried out. With the end of the part that stays put, the end that moves, and whether the mouse has moved enough
+    // to count (then letting go isn't a click).
+    property <int> doing;
+    property <float> fixed;
+    property <float> moving;
+    property <bool> moved;
+    property <bool> has-part: root.can-pick && root.pick-to > root.pick-from;
+    // Wide enough on the waveform for a press near an edge to move it; a narrower part is carried out from anywhere
+    // on it.
+    property <bool> roomy: (root.pick-to - root.pick-from) * root.width > 3 * root.edge-room;
+    property <bool> changing: root.doing == 1 || root.doing == 2;
+    property <float> shown-from: root.changing ? min(root.fixed, root.moving) : root.pick-from;
+    property <float> shown-to: root.changing ? max(root.fixed, root.moving) : root.pick-to;
+    property <bool> shows-part: root.can-pick && root.shown-to > root.shown-from && (root.doing != 1 || root.moved);
+    // How near an edge a press moves it, and how near a hit an edge snaps to it.
+    property <length> edge-room: 5px;
+    property <length> snap-room: 8px;
+    pure function on-edge(x: length, at: float) -> bool {
+        root.has-part && (root.roomy || !root.inside(x)) && abs(x - at * root.width) <= root.edge-room
+    }
+    pure function inside(x: length) -> bool {
+        root.has-part && root.place(x) > root.pick-from && root.place(x) < root.pick-to
+    }
+    pure function place(x: length) -> float {
+        clamp(x / max(1px, root.width), 0, 1)
+    }
+    // How near a hit an edge snaps to it, from 0 to 1 of the width: not at all with Shift held.
+    pure function snap-within(shift: bool) -> float {
+        shift ? 0 : root.snap-room / max(1px, root.width)
+    }
     // Where the Waveform sits in the window, in pixels. The window puts a picture on a whole pixel but draws a path just
     // where it is, so the card draws the lines as far past a whole pixel as the Waveform sits, and the picture goes that
     // far back: the lines land just where the path's would.
@@ -4264,6 +4325,12 @@ export component Waveform inherits Rectangle {
         Waves.asked);
     property <bool> on-card: root.drawn.picture.width > 0;
     clip: true;
+    // Another sound under a mouse resting on it (picked by the arrow keys, say): its hits are wanted too.
+    changed shape => {
+        if area.has-hover && root.can-pick {
+            root.wants-hits();
+        }
+    }
     // The card's picture, shown pixel for pixel: see-through where it hasn't played yet, full where it has.
     if root.on-card: Image {
         x: -root.drawn.x * 1phx;
@@ -4312,6 +4379,47 @@ export component Waveform inherits Rectangle {
             stroke-width: root.line;
         }
     }
+    // The part picked: what's outside it dimmed, its inside lit, a line at each edge.
+    if root.shows-part: Rectangle {
+        Rectangle {
+            x: 0;
+            width: root.width * root.shown-from;
+            background: Theme.well.transparentize(45%);
+        }
+        Rectangle {
+            x: root.width * root.shown-to;
+            width: root.width * (1 - root.shown-to);
+            background: Theme.well.transparentize(45%);
+        }
+        Rectangle {
+            x: root.width * root.shown-from;
+            width: root.width * (root.shown-to - root.shown-from);
+            background: root.pick-tint.transparentize(84%);
+        }
+        Rectangle {
+            x: root.width * root.shown-from - 1px;
+            width: 2px;
+            background: root.pick-tint;
+        }
+        Rectangle {
+            x: root.width * root.shown-to - 1px;
+            width: 2px;
+            background: root.pick-tint;
+        }
+    }
+    // The hits, short marks along the foot: where a part's edges snap to.
+    if root.can-pick && root.hit-marks != "": Path {
+        y: root.height - 6px;
+        width: root.width;
+        height: 6px;
+        commands: root.hit-marks;
+        viewbox-width: 1000;
+        viewbox-height: 10;
+        fit: fill;
+        stroke: Theme.muted;
+        stroke-width: 1.5px;
+        opacity: 0.8;
+    }
     if root.playing && root.played < 1: Rectangle {
         x: min(root.width * clamp(root.played, 0, 1), root.width - 2px);
         width: 2px;
@@ -4319,10 +4427,73 @@ export component Waveform inherits Rectangle {
     }
     area := TouchArea {
         enabled: root.can-seek;
-        mouse-cursor: root.can-seek ? MouseCursor.pointer : MouseCursor.default;
-        clicked => { root.seek(clamp(self.mouse-x / self.width, 0, 1)); }
-        // Let go over it, as a click is.
+        mouse-cursor: !root.can-seek ? MouseCursor.default
+            : root.on-edge(self.mouse-x, root.pick-from) || root.on-edge(self.mouse-x, root.pick-to)
+            ? MouseCursor.ew-resize
+            : root.inside(self.mouse-x) ? MouseCursor.grab : MouseCursor.pointer;
+        changed has-hover => {
+            if self.has-hover && root.can-pick {
+                root.wants-hits();
+            }
+        }
+        clicked => {
+            if !root.moved {
+                if root.has-part && !root.inside(self.mouse-x) && !root.on-edge(self.mouse-x, root.pick-from)
+                    && !root.on-edge(self.mouse-x, root.pick-to) {
+                    root.picked(0, 0);
+                }
+                root.seek(root.place(self.mouse-x));
+            }
+        }
         pointer-event(e) => {
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                // Whatever the press does, the last one's is over (it may have been on another sound's waveform).
+                root.moved = false;
+                root.doing = 0;
+            }
+            if root.can-pick && e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                root.pressed();
+                if root.on-edge(self.mouse-x, root.pick-from) {
+                    root.doing = 2;
+                    root.fixed = root.pick-to;
+                    root.moving = root.pick-from;
+                } else if root.on-edge(self.mouse-x, root.pick-to) {
+                    root.doing = 2;
+                    root.fixed = root.pick-from;
+                    root.moving = root.pick-to;
+                } else if root.inside(self.mouse-x) {
+                    root.doing = 3;
+                } else {
+                    root.doing = 1;
+                    root.fixed = root.snap(root.place(self.mouse-x), root.snap-within(e.modifiers.shift));
+                    root.moving = root.fixed;
+                }
+            } else if root.can-pick && e.kind == PointerEventKind.move && self.pressed {
+                if root.changing && (root.moved || abs(self.mouse-x - self.pressed-x) > 3px) {
+                    root.moved = true;
+                    root.moving = root.snap(root.place(self.mouse-x), root.snap-within(e.modifiers.shift));
+                } else if root.doing == 3
+                    && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
+                    root.moved = true;
+                    root.doing = 4;
+                    root.drag-part();
+                }
+            } else if e.button == PointerEventButton.left && e.kind == PointerEventKind.up {
+                if root.can-pick && root.changing && root.moved {
+                    root.picked(min(root.fixed, root.moving), max(root.fixed, root.moving));
+                } else if root.doing == 4 {
+                    root.part-let-go();
+                }
+                root.doing = 0;
+            } else if e.kind == PointerEventKind.cancel {
+                // Taken away mid-press (the window lost the mouse): a pick cut short keeps the part there was, and a
+                // carry that hadn't got going is off.
+                if root.doing == 4 {
+                    root.part-let-go();
+                }
+                root.doing = 0;
+            }
+            // A right click: let go over it, as a click is.
             if e.kind == PointerEventKind.up && e.button == PointerEventButton.right && root.playing
                 && self.mouse-x >= 0 && self.mouse-x <= self.width && self.mouse-y >= 0 && self.mouse-y <= self.height {
                 root.stop();

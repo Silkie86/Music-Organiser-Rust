@@ -85,6 +85,40 @@ pub fn read_parts(
     read_parts_from(path, 0.0, part_seconds, each)
 }
 
+/// `seconds` of a sound file from `from_seconds` in, or as much as there is before its end: a part picked on a
+/// waveform, read without the rest of the file however long it is (a WAV or AIFF straight from there, the other kinds
+/// decoded from their start, as in [`read_parts_from`]). Its `file_seconds` is how far it got: the end of the part,
+/// or the end of the file when the part runs past it. Empty with no rate when it starts past the end.
+pub fn read_span(path: &Path, from_seconds: f64, seconds: f64) -> Result<AudioData, AudioError> {
+    let mut out = AudioData::default();
+    let mut want = 0usize;
+    // Parts of a second or so: a WAV opens again for each, and a short span is read in one.
+    let part_seconds = seconds.clamp(0.05, 2.0);
+    read_parts_from(path, from_seconds, part_seconds, &mut |rate, part| {
+        if part.is_empty() {
+            // Still on its way there.
+            return true;
+        }
+        if out.channels.is_empty() {
+            out.sample_rate = rate;
+            want = usize::try_from(frame_at(seconds, rate)).unwrap_or(usize::MAX);
+            out.channels = part.iter().map(|_| Vec::with_capacity(want.min(1 << 24))).collect();
+        }
+        let left = want.saturating_sub(out.len());
+        for (all, more) in out.channels.iter_mut().zip(part) {
+            all.extend_from_slice(&more[..left.min(more.len())]);
+        }
+        out.len() < want
+    })?;
+    // Every channel as long as the shortest.
+    let len = out.channels.iter().map(Vec::len).min().unwrap_or(0);
+    for channel in &mut out.channels {
+        channel.truncate(len);
+    }
+    out.file_seconds = from_seconds.max(0.0) + out.seconds();
+    Ok(out)
+}
+
 /// [`read_parts`] from `from_seconds` into the file on (where a long sound plays from): the first part handed on starts
 /// at frame [`frame_at`]`(from_seconds, rate)`, and nothing is handed on past the end. A WAV or AIFF is read from there
 /// straight away; the other kinds are decoded from the start, and what comes before it isn't handed on: on the way

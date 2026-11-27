@@ -34,6 +34,7 @@ pub mod daw_links;
 pub mod drag_card;
 pub mod drag_out;
 pub mod drive_room;
+pub mod edit_copy;
 pub mod filters;
 pub mod finder;
 pub mod frame_timing;
