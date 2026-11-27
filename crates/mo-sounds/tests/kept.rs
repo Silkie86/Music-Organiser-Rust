@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime};
 
 use mo_sounds::index::{
     Gathered, SoundIndex, VectorIndex, chroma_downweight, is_kept_name, remove_kept, remove_kept_prints,
-    room_coming_back,
 };
 
 /// An empty folder of this test's own, under the build's temp folder.
@@ -142,12 +141,14 @@ fn other_numbers_get_a_file_of_their_own_and_only_this_codes_files_are_removed()
     assert_eq!(fs::read(dir.join("sound-likeness-notes.rows")).unwrap(), b"mine");
 }
 
-#[cfg(unix)]
 /// The index built again while the app runs (a scan forgot sounds): the old file goes before the new one is written,
 /// but the old index still reads it, so its room comes back only once that index is let go. The room check counts it
 /// (the whole-app review of 26 Nov, SK-1: the new file was refused for room only the old one held).
+// Unix only: Windows can't remove a file an index still has open, so the room never waits to come back there.
+#[cfg(unix)]
 #[test]
 fn a_file_removed_while_an_index_still_reads_it_is_room_coming_back() {
+    use mo_sounds::index::room_coming_back;
     let dir = folder("coming-back");
     let mut old = held(300, 0);
     let first = old.keep_in(&dir).unwrap().unwrap();
@@ -169,6 +170,7 @@ fn a_file_removed_while_an_index_still_reads_it_is_room_coming_back() {
     assert_eq!(kept_files(&dir), [second.file.file_name().unwrap().to_str().unwrap()]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_link_with_one_of_its_names_is_never_followed_or_removed() {
     let dir = folder("link");
