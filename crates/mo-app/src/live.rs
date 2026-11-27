@@ -183,6 +183,11 @@ impl Mend {
 pub struct Updated {
     /// The saves read again or for the first time, by name.
     pub read: Vec<String>,
+    /// How many of [`Updated::read`] were new to the list.
+    pub new: usize,
+    /// Whether this was the first look at a folder (one just added, or a new library's): saves it found are "found",
+    /// not "updated". A new save the watch sees later (Save new version) is still an update.
+    pub first_look: bool,
     /// The saves found in a new folder, by name.
     pub moved: Vec<String>,
     /// How many saves' files have gone (moved somewhere the app doesn't watch, or deleted).
@@ -204,6 +209,8 @@ impl Updated {
     /// This and `more` together.
     pub fn and(mut self, more: Updated) -> Updated {
         self.read.extend(more.read);
+        self.new += more.new;
+        self.first_look |= more.first_look;
         self.moved.extend(more.moved);
         self.gone += more.gone;
         self.mended += more.mended;
@@ -226,6 +233,15 @@ impl Updated {
     /// app read it again".
     pub fn card(&self) -> (String, String) {
         let (r, m, g) = (self.read.len(), self.moved.len(), self.gone);
+        // A first look at a folder that only found saves new to the list: found, not "updated".
+        if self.first_look && r > 0 && self.new == r && m == 0 && g == 0 {
+            let title = match (r, self.read.first()) {
+                (1, Some(name)) => format!("Found {name}"),
+                (n, _) => format!("Found {} projects", mo_library::songs::thousands(n)),
+            };
+            let line = if r == 1 { "New in your project folders" } else { "New in your project folders, now listed" };
+            return (title, line.to_owned());
+        }
         let title = match (r + m + g, self.read.first().or(self.moved.first())) {
             (1, Some(name)) => format!("Updated {name}"),
             (1, None) => "Updated 1 project".to_owned(),
@@ -428,6 +444,18 @@ impl Live {
     /// The project folders, for the folder watch.
     pub fn roots(&self) -> &[String] {
         &self.roots
+    }
+
+    /// The project folders as Settings › Folders has them now, once one was added or taken off: the next
+    /// [`Live::catch_up`] walks them, so a folder added is listed this run, not from the next start. A save in a folder
+    /// taken off stays on the list, as at the next start.
+    pub fn set_roots(&mut self, roots: Vec<String>) {
+        self.roots = roots;
+    }
+
+    /// Whether the list has no saves at all (a new library before its first look at the folders).
+    pub fn is_empty(&self) -> bool {
+        self.saves.is_empty()
     }
 
     /// Gives the song `key` `change`, as you gave it on its card (rule 14: every save of it gets it, its copies in other
@@ -1452,6 +1480,7 @@ impl Live {
                         done.quiet += 1;
                     } else {
                         done.read.push(detail.save.name.clone());
+                        done.new += 1;
                     }
                 }
             }
@@ -2192,6 +2221,14 @@ mod tests {
         assert_eq!(gone.card(), ("Updated 1 project".into(), "Missing: moved or deleted".into()));
         let moved = Updated { moved: vec!["Night_11".into()], ..Updated::default() };
         assert_eq!(moved.card(), ("Updated Night_11".into(), "Found in its new folder".into()));
+        // A first look at a folder: every save read is new, so they're found, not updated.
+        let found = Updated { read: vec!["a".into(), "b".into()], new: 2, first_look: true, ..Updated::default() };
+        assert_eq!(found.card(), ("Found 2 projects".into(), "New in your project folders, now listed".into()));
+        let first = Updated { read: vec!["Night_1".into()], new: 1, first_look: true, ..Updated::default() };
+        assert_eq!(first.card(), ("Found Night_1".into(), "New in your project folders".into()));
+        // A new save the watch sees (Save new version) is still an update.
+        let saved = Updated { read: vec!["Night_2".into()], new: 1, ..Updated::default() };
+        assert_eq!(saved.card(), ("Updated Night_2".into(), "Saved in its folder, so the app read it again".into()));
         assert!(Updated::default().is_empty());
         // Saves read again only to mend their muted samples are kept, but not on the card.
         let mended = Updated { mended: 3, ..Updated::default() };
@@ -2544,7 +2581,7 @@ mod tests {
         let mut live = open();
         let caught = live.catch_up();
         assert_eq!((caught.read.clone(), caught.quiet), (vec!["Night_1".to_owned()], 1));
-        assert_eq!(caught.card().0, "Updated Night_1");
+        assert_eq!(caught.card().0, "Updated Night_1", "the watch's own catch-up, not a first look");
         assert_eq!(shown(&live), ["Night"]);
         let kept = live.keep().unwrap().unwrap();
         assert_eq!(kept.written.put, 2, "{kept:?}");

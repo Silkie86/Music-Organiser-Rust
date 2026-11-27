@@ -1342,6 +1342,10 @@ fn edit_folder(app: &AppWindow, list: FolderList, folder: String, add: bool) {
                 if add && list == FolderList::Samples {
                     scanning = crate::sounds::sample_folders_changed();
                 }
+                // And Songs walks a new project folder now, and stops watching one taken off.
+                if list == FolderList::Projects {
+                    scanning = crate::songs::project_folders_changed();
+                }
             }
             Ok(folders::Changed::AsItWas) => {}
             Err(e) => log::warning("Settings", &format!("Couldn't change the {list:?} folders: {e}")),
