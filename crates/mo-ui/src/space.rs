@@ -1913,8 +1913,8 @@ fn look_for_copies(app: &AppWindow) {
     });
     let Some(ask) = ask else { return };
     let weak = app.as_weak();
-    // The Library as the last look read it, kept on the thread so a file isn't read again while it's unchanged. A
-    // crash in a look (logged as one) leaves the thread for the next look; the Library is read again then, and the
+    // The Library as the last look read it, kept on the thread so a file isn't read again while it's unchanged (while
+    // its fingerprints have no store to be read back from). A crash in a look (logged as one) leaves the thread for the next look; the Library is read again then, and the
     // fingerprints kept between starts are forgotten, in case the crash came from what was kept.
     let mut index = None;
     let work = move |ask: BitwigAsk| {
@@ -1925,6 +1925,13 @@ fn look_for_copies(app: &AppWindow) {
             mo_space::prints::forget(&mo_app::paths::data_dir().join(mo_space::prints::FILE_NAME));
             mo_app::space_bitwig_kept::forget(&mo_app::paths::data_dir());
             arrive(&weak, Step::BitwigCrashed(id));
+        }
+        // Fingerprints kept in their store are let go between looks (about 170 MB of paths and prints for 235,000
+        // Library files, held for as long as the app ran): the next look reads them back from the store in well
+        // under a second, and a file still isn't read again while it's unchanged. Without a store they stay, as
+        // they're all the look has.
+        if index.as_ref().is_some_and(LibraryIndex::remembers) {
+            index = None;
         }
     };
     let started = PAGE.with(|p| p.borrow_mut().bitwig_look.ask("Space Bitwig", work, ask));
