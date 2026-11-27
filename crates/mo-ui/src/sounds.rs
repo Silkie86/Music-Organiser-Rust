@@ -10,7 +10,10 @@ mod did;
 mod drag_out;
 mod edit_strip;
 pub use drag_out::card_at_row;
-pub use edit_strip::{for_screens as edit_for_screens, state_for_screens as edit_state_for_screens};
+pub use edit_strip::{
+    for_screens as edit_for_screens, slices_state_for_screens as edit_slices_for_screens,
+    state_for_screens as edit_state_for_screens,
+};
 pub use part::hits_for_screens;
 mod file_dates;
 mod galaxy;

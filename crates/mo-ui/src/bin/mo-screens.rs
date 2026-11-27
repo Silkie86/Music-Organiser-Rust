@@ -5071,12 +5071,201 @@ fn edit_shots(
         return Err("sounds-edit.png: with every edit undone, Save copy still has something to save".into());
     }
     data.invoke_card_chosen("sounds.edit".into());
+    slices_shots(app, window, shots)?;
     // As the page was, for the pictures after this one.
     pick_sound(app, 6);
     data.set_played(0.35);
     data.set_tile_played(0.35);
     Ok(())
 }
+
+/// The Edit strip's Slices (slice to pads, mock-up 9), on the drum loop the strip's own picture left picked: cut at its
+/// hits, with a slice picked; then Send's menu, with the pad each slice goes on. Checked after: a line dragged, taken
+/// away and put back; the cuts on the beats; the sensitivity; undo and redo; the edit's own tools waiting; Esc's
+/// steps; and the slicing kept for the sound's next opening. Last, that a long list of edits doesn't push the strip
+/// wider than the page.
+fn slices_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let edit = app.global::<mo_ui::SoundEdit>();
+    let data = app.global::<mo_ui::SoundsData>();
+    let cuts = || mo_ui::sounds::edit_slices_for_screens().0;
+    // Where the line of the cut `i` is, from 0 to 1 across the waveform.
+    let line = |i: usize| edit.get_cuts().row_data(i).map(|c| c.at);
+    // How near a line a press takes hold of it: about 5 points of the waveform's width.
+    let within = 0.004;
+    let click_at = |at: f32| {
+        edit.invoke_slice_down(at, within, true);
+        edit.invoke_slice_up(false);
+        // The click plays the slice: stopped, for the pictures.
+        mo_ui::sounds::stop_on_escape(app);
+    };
+    let double_click_at = |at: f32| {
+        edit.invoke_slice_down(at, within, true);
+        edit.invoke_slice_up(false);
+        edit.invoke_slice_down(at, within, true);
+        edit.invoke_slice_double();
+        edit.invoke_slice_up(false);
+        mo_ui::sounds::stop_on_escape(app);
+    };
+    mo_ui::sounds::edit_for_screens(app, drum_loop(), None, &["sounds.editSlices"]);
+    let hits = cuts();
+    if !edit.get_slicing() || hits < 8 || edit.get_cuts().row_count() != hits || edit.get_pads().row_count() != hits {
+        return Err(format!("sounds-slices.png: the Slices aren't on, or cut the drum loop into {hits} slices"));
+    }
+    if edit.get_send_text() != format!("Send {hits} slices") || !edit.get_can_send() {
+        return Err(format!("sounds-slices.png: Send says \"{}\" for {hits} slices", edit.get_send_text()));
+    }
+    // A click in the fifth slice picks it.
+    let (Some(fifth), Some(sixth)) = (line(4), line(5)) else {
+        return Err("sounds-slices.png: the fifth and sixth lines aren't on show".into());
+    };
+    click_at((fifth + sixth) / 2.0);
+    if mo_ui::sounds::edit_slices_for_screens().1 != Some(4)
+        || (edit.get_slice_from() - fifth).abs() > 1e-4
+        || (edit.get_slice_to() - sixth).abs() > 1e-4
+        || !edit.get_has_part()
+    {
+        return Err("sounds-slices.png: a click in the fifth slice didn't pick it".into());
+    }
+    hover(window, -1.0, -1.0);
+    capture(window);
+    let sliced = capture(window);
+    shots.push(("sounds-slices.png".into(), sliced.clone()));
+    // Send's menu, opened with the mouse: above its button, as the strip is at the foot of the window.
+    click(window, SLICES_SEND.0, SLICES_SEND.1);
+    hover(window, -1.0, -1.0);
+    let menu = capture(window);
+    if menu == sliced {
+        return Err("sounds-slices-send.png: Send's menu didn't open; has the button moved?".into());
+    }
+    shots.push(("sounds-slices-send.png".into(), menu));
+    // A click away from it closes it.
+    click(window, SLICES_AWAY.0, SLICES_AWAY.1);
+    hover(window, -1.0, -1.0);
+    if capture(window) != sliced {
+        return Err("sounds-slices-send.png: a click away from Send's menu didn't close it".into());
+    }
+    // A line dragged moves its cut; undo puts it back, and redo moves it again.
+    let (Some(third), Some(fourth)) = (line(2), line(3)) else {
+        return Err("sounds-slices.png: the third and fourth lines aren't on show".into());
+    };
+    let to = third + (fourth - third) * 0.4;
+    // The mouse over a line takes hold of it; the lines' mark is what has its shape worked out again.
+    let mark = edit.get_cuts_mark();
+    let held = |at: f32| edit.invoke_slice_near(at, within, edit.get_cuts_mark());
+    if !held(third) || held(to) {
+        return Err("sounds-slices.png: the mouse takes hold of a line where there's none, or of none on one".into());
+    }
+    edit.invoke_slice_down(third, within, true);
+    edit.invoke_slice_move(to, true, true);
+    edit.invoke_slice_up(false);
+    let near = |i: usize, at: f32| line(i).is_some_and(|now| (now - at).abs() < 1e-4);
+    if !near(2, to) || cuts() != hits || !edit.get_can_undo() {
+        return Err("sounds-slices.png: dragging the third line didn't move its cut".into());
+    }
+    if edit.get_cuts_mark() == mark || held(third) || !held(to) {
+        return Err("sounds-slices.png: the mouse's shape didn't follow the line that was dragged".into());
+    }
+    mo_ui::sounds::run_action(app, "sounds.editUndo");
+    let back = near(2, third) && edit.get_can_redo();
+    mo_ui::sounds::run_action(app, "sounds.editRedo");
+    if !back || !near(2, to) {
+        return Err("sounds-slices.png: undo and redo didn't step through the cuts".into());
+    }
+    // A double-click on a line takes it away; one where there's none puts a cut there.
+    double_click_at(to);
+    if cuts() != hits - 1 {
+        return Err("sounds-slices.png: a double-click on a line didn't take it away".into());
+    }
+    double_click_at(third);
+    if cuts() != hits || !near(2, third) {
+        return Err("sounds-slices.png: a double-click between two lines didn't add a cut there".into());
+    }
+    // On the beats: four bars of four, or a cut a bar; and each slice on to the sound's end.
+    edit.invoke_cut_at_picked("Every beat".into());
+    let beats = cuts();
+    edit.invoke_cut_at_picked("Every bar".into());
+    if beats != 16 || cuts() != 4 || edit.get_cut_at() != "Every bar" || edit.get_cut_at_hits() {
+        return Err(format!("sounds-slices.png: on the beats there are {beats} cuts, and {} on the bars", cuts()));
+    }
+    edit.invoke_each_picked("to the sound's end".into());
+    click_at(0.1);
+    if edit.get_each() != "to the sound's end" || (edit.get_slice_to() - 1.0).abs() > 1e-4 {
+        return Err("sounds-slices.png: each slice doesn't run on to the sound's end when asked to".into());
+    }
+    edit.invoke_each_picked("to the next cut".into());
+    // Back at the hits. The sensitivity up takes smaller hits too, and down only the biggest; let go, it's one undo.
+    edit.invoke_cut_at_picked(format!("Hits ({hits})").into());
+    if cuts() != hits || !edit.get_cut_at_hits() {
+        return Err("sounds-slices.png: Cut at Hits didn't put the cuts back at the hits".into());
+    }
+    edit.invoke_sensitivity_moved(1.0);
+    let most = cuts();
+    edit.invoke_sensitivity_moved(0.0);
+    let fewest = cuts();
+    edit.invoke_sensitivity_released(0.0);
+    if most < hits || fewest > hits || fewest == 0 {
+        return Err(format!("sounds-slices.png: the sensitivity gives {fewest}, {hits} and {most} cuts, low to high"));
+    }
+    mo_ui::sounds::run_action(app, "sounds.editUndo");
+    if cuts() != hits || (edit.get_sensitivity() - 0.5).abs() > 1e-6 {
+        return Err("sounds-slices.png: the sensitivity slider let go wasn't one step for undo".into());
+    }
+    // With the Slices on, the edit's own tools wait; Save and Send are the slices' (nothing is written here).
+    let edits = mo_ui::sounds::edit_state_for_screens().2;
+    if mo_ui::sounds::run_action(app, "sounds.editReverse") || mo_ui::sounds::edit_state_for_screens().2 != edits {
+        return Err("sounds-slices.png: an edit's tool worked with the Slices on".into());
+    }
+    mo_ui::sounds::run_action(app, "sounds.editSlicesBitwig");
+    mo_ui::sounds::run_action(app, "sounds.editSave");
+    // Esc: the slice picked goes, then the Slices (the strip stays, with the edit's tools), then the strip.
+    click_at((fifth + sixth) / 2.0);
+    if !mo_ui::sounds::escape(app) || mo_ui::sounds::edit_slices_for_screens().1.is_some() || !edit.get_slicing() {
+        return Err("sounds-slices.png: Esc didn't let the slice picked go first".into());
+    }
+    if !mo_ui::sounds::escape(app) || edit.get_slicing() || !edit.get_shown() {
+        return Err("sounds-slices.png: a second Esc didn't turn the Slices off and leave the strip open".into());
+    }
+    // On again, the cuts are as they were left; and closed and opened again, the Slices are still on.
+    edit.invoke_tool("sounds.editSlices".into());
+    edit.invoke_slice_down(third, within, true);
+    edit.invoke_slice_move(to, true, true);
+    edit.invoke_slice_up(false);
+    edit.invoke_tool("sounds.editSlices".into());
+    edit.invoke_tool("sounds.editSlices".into());
+    if !edit.get_slicing() || cuts() != hits || !near(2, to) {
+        return Err("sounds-slices.png: the cuts weren't kept while the Slices were off".into());
+    }
+    data.invoke_card_chosen("sounds.edit".into());
+    mo_ui::sounds::edit_for_screens(app, drum_loop(), None, &[]);
+    if !edit.get_slicing() || cuts() != hits || !near(2, to) {
+        return Err("sounds-slices.png: the sound's slicing wasn't kept for its next opening".into());
+    }
+    edit.invoke_tool("sounds.editSlices".into());
+    // A long list of edits: its chips run off the left of their row, and the strip stays as wide as the page.
+    let margin = |pixels: &[u8]| crop_rgb(pixels, WIDTH, (WIDTH - 20, 0), (20, HEIGHT));
+    hover(window, -1.0, -1.0);
+    let before = margin(&capture(window));
+    for _ in 0..MANY_EDITS {
+        mo_ui::sounds::run_action(app, "sounds.editReverse");
+    }
+    if edit.get_chips().row_count() != MANY_EDITS || margin(&capture(window)) != before {
+        return Err("sounds-edit.png: a long list of edits pushed the Edit strip wider than the page".into());
+    }
+    data.invoke_card_chosen("sounds.edit".into());
+    Ok(())
+}
+
+/// The Edit strip's Send button with the Slices on, near its right end (however wide its words make it), and a place
+/// on the strip's heading where a click does nothing but close a menu.
+const SLICES_SEND: (f32, f32) = (1380.0, 628.0);
+const SLICES_AWAY: (f32, f32) = (640.0, 588.0);
+
+/// Enough edits that their chips are wider than the Edit strip.
+const MANY_EDITS: usize = 40;
 
 /// The made-up sound the Edit strip's picture opens on: a drum loop at 128 BPM, 7.5 s long (four bars).
 const EDIT_SOUND: &str = "Hats 128";

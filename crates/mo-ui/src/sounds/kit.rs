@@ -77,7 +77,7 @@ impl Default for Kit {
 
 /// Where kits go in Bitwig while the app runs: a new Drum Machine, or the one selected in Bitwig once Bitwig didn't add
 /// one for the ID.
-static KITS_TO_BITWIG: to_bitwig::Kits = to_bitwig::Kits::new();
+pub(super) static KITS_TO_BITWIG: to_bitwig::Kits = to_bitwig::Kits::new();
 
 thread_local! {
     static PADS: Rc<VecModel<PadLine>> = Rc::new(VecModel::default());

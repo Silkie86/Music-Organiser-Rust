@@ -10,6 +10,8 @@
 //! The reading and the edit's making are done on a thread of their own, newest wins (rule 12); the edit's outline is
 //! kept fine enough to draw any part of it at once, so zooming in waits for nothing. Each sound's edits are kept while
 //! the app is open, so going to another sound and back finds them where they were.
+//!
+//! Its Slices cut the edit for a drum machine's pads ([`slices`], mock-up 9).
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -28,6 +30,8 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use super::{FEED, HERE, PAGE, drag_out, part, play_in_memory, player};
 use crate::{AppWindow, EditChip, EditMark, SoundEdit, SoundsData};
+
+mod slices;
 
 /// How many lines across the strip's waveform is.
 const POINTS: usize = 600;
@@ -74,17 +78,21 @@ const LOUDER: &str = "sounds.editLouder";
 const QUIETER: &str = "sounds.editQuieter";
 const LOOP: &str = "sounds.editLoop";
 
-/// One sound's edits: the list applied now, and the lists undo and redo go back and forth to.
+/// Something with undo and redo: what it is now, and what undo and redo go back and forth to. A drag changes it as it
+/// goes ([`History::live`]) and is one step once it ends.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct Edits {
-    now: Vec<Edit>,
-    undo: Vec<Vec<Edit>>,
-    redo: Vec<Vec<Edit>>,
+struct History<T> {
+    now: T,
+    undo: Vec<T>,
+    redo: Vec<T>,
+    /// What it was as a drag started, while one goes on.
+    live: Option<T>,
 }
 
-impl Edits {
-    /// Makes `next` the list, with the one before kept for undo; what was undone is gone.
-    fn change(&mut self, next: Vec<Edit>) {
+impl<T: Clone + PartialEq> History<T> {
+    /// Makes `next` what it is, with what it was kept for undo; what was undone is gone.
+    fn change(&mut self, next: T) {
+        self.end_live();
         if next == self.now {
             return;
         }
@@ -92,18 +100,47 @@ impl Edits {
         self.redo.clear();
     }
 
+    /// Makes `next` what it is while a drag goes on, without a step for undo: the step is made as it ends
+    /// ([`History::end_live`]), back to what it was as it started.
+    fn live(&mut self, next: T) {
+        if self.live.is_none() {
+            self.live = Some(self.now.clone());
+        }
+        self.now = next;
+    }
+
+    /// The drag ended: one step for undo, if it changed anything.
+    fn end_live(&mut self) {
+        if let Some(before) = self.live.take()
+            && before != self.now
+        {
+            self.undo.push(before);
+            self.redo.clear();
+        }
+    }
+
     fn undo(&mut self) -> bool {
+        self.end_live();
         let Some(before) = self.undo.pop() else { return false };
         self.redo.push(std::mem::replace(&mut self.now, before));
         true
     }
 
     fn redo(&mut self) -> bool {
+        self.end_live();
         let Some(after) = self.redo.pop() else { return false };
         self.undo.push(std::mem::replace(&mut self.now, after));
         true
     }
+
+    /// Whether there's anything to undo or redo.
+    fn has_steps(&self) -> bool {
+        !(self.undo.is_empty() && self.redo.is_empty() && self.live.is_none())
+    }
 }
+
+/// One sound's edits: the list applied now, and the lists undo and redo go back and forth to.
+type Edits = History<Vec<Edit>>;
 
 /// The edit as it sounds, made from the original and a list of edits.
 struct Made {
@@ -115,6 +152,8 @@ struct Made {
     step: f64,
     /// Where its hits are (seconds), those that rise by [`USUAL_RISE_DB`] or more.
     hits: Arc<[f64]>,
+    /// Every hit, with how much it rises (dB): where the Slices' cuts go, as big as their sensitivity asks.
+    all_hits: Arc<[(f64, f32)]>,
 }
 
 /// The sound the strip edits.
@@ -142,15 +181,28 @@ struct Opened {
     held: Option<bool>,
     /// A press on the strip's waveform was on this sound: a pick made with it is this sound's alone.
     pressed: bool,
+    /// Its Slices, once they've been on: whether they're on now, and where the cuts are.
+    sliced: Option<slices::Sliced>,
+    /// The slice picked (its number less one), heard as it's clicked.
+    slice: Option<usize>,
+    /// What a press on the Slices' waveform is doing, while the button is down.
+    slice_press: Option<slices::Press>,
+}
+
+/// A sound's edits and slicing, kept while the app is open: by its id and what was read of it (a long sound's part).
+struct Kept {
+    id: i64,
+    source: Source,
+    edits: Edits,
+    sliced: Option<slices::Sliced>,
 }
 
 #[derive(Default)]
 struct Strip {
     open: bool,
     sound: Option<Opened>,
-    /// Each sound's edits, kept while the app is open, by id and what was read of it (a long sound's part), the
-    /// newest last.
-    kept: Vec<(i64, Source, Edits)>,
+    /// Each sound's edits and slicing, kept while the app is open, the newest last.
+    kept: Vec<Kept>,
     /// The sounds found too long to edit whole on reading them, though their analysis didn't say so (it has no
     /// length yet): the part picked on their card is read instead.
     long: Vec<i64>,
@@ -159,6 +211,8 @@ struct Strip {
     worker: Option<Newest<Job>>,
     /// The key that hears the original, as the shortcut list has it ("O").
     original_key: String,
+    /// Slices are on their way to Bitwig or a folder: Send waits until they're there.
+    sending: bool,
 }
 
 /// A read or a make, for the strip's thread.
@@ -280,6 +334,7 @@ pub(super) fn wire(app: &AppWindow) {
             close(&app);
         }
     });
+    slices::wire(app);
 }
 
 /// The strip's tips, with each tool's key from the shortcut list (rule 15).
@@ -299,12 +354,15 @@ pub(super) fn show_keys(app: &AppWindow, keys: &Shortcuts) {
     data.set_louder_key(key(LOUDER));
     data.set_quieter_key(key(QUIETER));
     data.set_loop_key(key(LOOP));
+    data.set_slices_key(key(slices::SLICES));
+    data.set_bitwig_key(key(slices::TO_BITWIG));
     STRIP.with(|s| s.borrow_mut().original_key = keys.key_of(ORIGINAL).to_owned());
 }
 
 /// Runs one of the strip's actions (its key, its button or its line on the card's menu), if it's one of them: whether
 /// it did anything (`None` for any other action). E opens and closes the strip while a sound is picked; the rest work
 /// while it's open on a sound read and ready (the gain and fade keys too), so with it closed their keys go on.
+/// The Slices' own ([`slices`]) are among them.
 pub(super) fn run_action(app: &AppWindow, id: &str) -> Option<bool> {
     if id == EDIT {
         return Some(toggle(app));
@@ -315,11 +373,20 @@ pub(super) fn run_action(app: &AppWindow, id: &str) -> Option<bool> {
     if !ready() {
         return Some(false);
     }
+    // With the Slices on, the strip's tools are theirs: undo and redo step through the cuts, Save saves the slices,
+    // and the edit's own tools wait until they're off (the cuts are of the edit as it is).
+    let slicing = STRIP.with(|s| s.borrow().sound.as_ref().is_some_and(slices::on));
     Some(match id {
+        slices::SLICES => slices::toggle(app),
+        slices::TO_BITWIG => slices::send(app, slices::To::Bitwig),
+        ORIGINAL => hear_original(app, true),
+        UNDO if slicing => slices::step(app, true),
+        REDO if slicing => slices::step(app, false),
+        SAVE if slicing => slices::send(app, slices::To::Folder),
+        _ if slicing => false,
         UNDO => step_history(app, true),
         REDO => step_history(app, false),
         SAVE => save(),
-        ORIGINAL => hear_original(app, true),
         TRIM => trim(app),
         FADE_IN => fade_tool(app, true),
         FADE_OUT => fade_tool(app, false),
@@ -402,12 +469,13 @@ pub(super) fn close(app: &AppWindow) {
     show(app);
 }
 
-/// Esc's steps on the page, before the card's: the part picked on the strip goes, then the strip. Whether it did one.
+/// Esc's steps on the page, before the card's: the slice picked goes, then the Slices (back to the edit's tools); the
+/// part picked on the strip goes, then the strip. Whether it did one.
 pub(super) fn escape(app: &AppWindow) -> bool {
     let (open, had_part) = STRIP.with(|s| {
         let mut s = s.borrow_mut();
         let open = s.open;
-        let had = s.sound.as_mut().and_then(|o| o.pick.take()).is_some();
+        let had = s.sound.as_mut().is_some_and(|o| slices::escape(o) || o.pick.take().is_some());
         (open, had)
     });
     if !open {
@@ -486,11 +554,14 @@ fn load(app: &AppWindow) {
     let ask = STRIP.with(|s| {
         let mut s = s.borrow_mut();
         stash(&mut s);
-        let edits = s
+        let (edits, sliced) = s
             .kept
             .iter()
-            .position(|(i, read, _)| *i == id && *read == source)
-            .map(|at| s.kept.remove(at).2)
+            .position(|k| k.id == id && k.source == source)
+            .map(|at| {
+                let k = s.kept.remove(at);
+                (k.edits, k.sliced)
+            })
             .unwrap_or_default();
         s.asked += 1;
         s.sound = Some(Opened {
@@ -509,6 +580,9 @@ fn load(app: &AppWindow) {
             dragging: None,
             held: None,
             pressed: false,
+            sliced,
+            slice: None,
+            slice_press: None,
         });
         s.asked
     });
@@ -518,13 +592,18 @@ fn load(app: &AppWindow) {
     }
 }
 
-/// Puts the open sound's edits with the kept ones (only a sound with edits, or with something to redo), the newest
-/// last, and lets the sound go.
+/// Puts the open sound's edits and slicing with the kept ones (only a sound with edits, with something to undo or
+/// redo, or with Slices worth keeping), the newest last, and lets the sound go.
 fn stash(s: &mut Strip) {
-    let Some(o) = s.sound.take() else { return };
-    s.kept.retain(|(i, read, _)| !(*i == o.id && *read == o.source));
-    if !(o.edits.now.is_empty() && o.edits.undo.is_empty() && o.edits.redo.is_empty()) {
-        s.kept.push((o.id, o.source, o.edits));
+    let Some(mut o) = s.sound.take() else { return };
+    s.kept.retain(|k| !(k.id == o.id && k.source == o.source));
+    // A line let go of as the sound changed is where it was dragged to.
+    if let Some(sliced) = o.sliced.as_mut() {
+        sliced.history.end_live();
+    }
+    let sliced = o.sliced.filter(slices::Sliced::worth_keeping);
+    if !o.edits.now.is_empty() || o.edits.has_steps() || sliced.is_some() {
+        s.kept.push(Kept { id: o.id, source: o.source, edits: o.edits, sliced });
         if s.kept.len() > KEPT {
             s.kept.remove(0);
         }
@@ -589,9 +668,9 @@ fn make(original: &AudioData, edits: Vec<Edit>) -> Made {
             audio.channels.iter().map(|c| c[from..to].iter().fold(0.0f32, |m, s| m.max(s.abs()))).fold(0.0, f32::max)
         })
         .collect();
-    let hits: Arc<[f64]> =
-        edit_copy::hits_in(&audio).into_iter().filter(|(_, rise)| *rise >= USUAL_RISE_DB).map(|(at, _)| at).collect();
-    Made { edits, audio: Arc::new(audio), steps, step: each as f64 / rate, hits }
+    let all_hits: Arc<[(f64, f32)]> = edit_copy::hits_in(&audio).into();
+    let hits: Arc<[f64]> = all_hits.iter().filter(|(_, rise)| *rise >= USUAL_RISE_DB).map(|(at, _)| *at).collect();
+    Made { edits, audio: Arc::new(audio), steps, step: each as f64 / rate, hits, all_hits }
 }
 
 /// A read or a make came back: taken only while it's the newest asked for, of the sound still open.
@@ -690,6 +769,8 @@ fn took_made(app: &AppWindow, made: Made) {
         o.made = Some(made);
         // Made: a make that failed before is past.
         o.note.clear();
+        // The Slices, if they're on, are of this edit now.
+        slices::edit_made(o);
         changed
     });
     let (edit_plays, play, held) = PAGE.with(|p| {
@@ -946,13 +1027,18 @@ fn view(o: &Opened) -> (f64, f64) {
     o.zoom.unwrap_or((0.0, seconds))
 }
 
+/// The part of the edit that's picked: the part picked on its waveform; with the Slices on, the slice picked.
+fn part_now(o: &Opened) -> Option<(f64, f64)> {
+    if slices::on(o) { slices::picked(o) } else { o.pick }
+}
+
 /// Zooms in on the part picked (`true`), a little either side of it, or back out to the whole sound.
 fn zoom(app: &AppWindow, on: bool) {
     STRIP.with(|s| {
         let mut s = s.borrow_mut();
         let Some(o) = s.sound.as_mut() else { return };
         o.zoom = None;
-        if on && let Some((from, to)) = o.pick {
+        if on && let Some((from, to)) = part_now(o) {
             let (_, end) = view(o);
             let room = ((to - from) * 0.1).max(0.01);
             o.zoom = Some(((from - room).max(0.0), (to + room).min(end)));
@@ -1008,8 +1094,8 @@ fn seek(app: &AppWindow, at: f64) {
     play_edit(app, from, till);
 }
 
-/// Play on the page with the strip open on the picked sound: the edit plays (the part picked, with one), or stops.
-/// Whether it was the strip's to do.
+/// Play on the page with the strip open on the picked sound: the edit plays (the part picked, or the slice, with
+/// one), or stops. Whether it was the strip's to do.
 pub(super) fn toggle_play(app: &AppWindow) -> bool {
     let picked_id = PAGE.with(|p| {
         let p = p.borrow();
@@ -1017,7 +1103,7 @@ pub(super) fn toggle_play(app: &AppWindow) -> bool {
     });
     let Some(pick) = STRIP.with(|s| {
         let s = s.borrow();
-        s.sound.as_ref().filter(|o| s.open && o.made.is_some() && Some(o.id) == picked_id).map(|o| o.pick)
+        s.sound.as_ref().filter(|o| s.open && o.made.is_some() && Some(o.id) == picked_id).map(part_now)
     }) else {
         return false;
     };
@@ -1054,13 +1140,13 @@ fn play_edit(app: &AppWindow, from: f64, till: Option<f64>) {
 
 /// O held (`on`) or let go, or the A/B button: the original plays from the moment the edit has got to, and the edit
 /// comes back from the same moment as it's let go. With nothing playing, the original plays while it's held (from the
-/// start of the part picked, if there is one). Whether it did anything.
+/// start of the part picked, or of the slice picked with the Slices on, if there is one). Whether it did anything.
 fn hear_original(app: &AppWindow, on: bool) -> bool {
     let Some((original, edited, edits, pick, held)) = STRIP.with(|s| {
         let s = s.borrow();
         let o = s.sound.as_ref().filter(|_| s.open)?;
         let made = o.made.as_ref()?;
-        Some((o.original.clone()?, made.audio.clone(), made.edits.clone(), o.pick, o.held))
+        Some((o.original.clone()?, made.audio.clone(), made.edits.clone(), part_now(o), o.held))
     }) else {
         return false;
     };
@@ -1214,16 +1300,25 @@ fn save() -> bool {
 /// Drags the edit out of the app (its part, for `part`: a press inside the part picked on the strip that moved), as a
 /// copy in Edited sounds. With no edits (and no part), the sound itself goes, as from the card.
 fn drag(app: &AppWindow, part: bool) {
+    let pick = STRIP.with(|s| s.borrow().sound.as_ref().and_then(|o| o.pick));
+    if part && pick.is_none() {
+        return;
+    }
+    carry(app, pick.filter(|_| part));
+}
+
+/// Drags the edit out of the app, or only `part` of it (from and to, seconds into the edit: the part picked, or a
+/// slice), as a copy in Edited sounds. With no edits and no part, the sound itself goes, as from the card.
+fn carry(app: &AppWindow, part: Option<(f64, f64)>) {
     let Some(at) = PAGE.with(|p| p.borrow().picked) else { return };
-    let Some((source, original, changed, mut edits, pick)) = STRIP.with(|s| {
+    let Some((source, original, changed, mut edits)) = STRIP.with(|s| {
         let s = s.borrow();
         let o = s.sound.as_ref()?;
-        Some((o.source.clone(), o.original.clone()?, o.changed, o.edits.now.clone(), o.pick))
+        Some((o.source.clone(), o.original.clone()?, o.changed, o.edits.now.clone()))
     }) else {
         return;
     };
-    if part {
-        let Some(p) = pick else { return };
+    if let Some(p) = part {
         let rate = f64::from(original.sample_rate.max(1));
         edits.push(Edit::Trim(Span::new((p.0 * rate).round() as usize, (p.1 * rate).round() as usize)));
     }
@@ -1254,15 +1349,21 @@ fn show(app: &AppWindow) {
             data.set_can_redo(false);
             data.set_has_edits(false);
             data.set_has_part(false);
+            slices::show_none(&data);
             return;
         };
+        // With the Slices on, undo and redo are the cuts', and the chips name the pads.
+        let slicing = slices::on(o);
+        let (can_undo, can_redo) =
+            if slicing { slices::steps(o) } else { (!o.edits.undo.is_empty(), !o.edits.redo.is_empty()) };
         data.set_name(o.name.as_str().into());
         data.set_colour(o.colour);
         data.set_note(o.note.as_str().into());
-        data.set_can_undo(!o.edits.undo.is_empty());
-        data.set_can_redo(!o.edits.redo.is_empty());
+        data.set_can_undo(can_undo);
+        data.set_can_redo(can_redo);
         data.set_has_edits(!o.edits.now.is_empty());
-        data.set_chips(ModelRc::new(VecModel::from(chips(o))));
+        data.set_chips(ModelRc::new(VecModel::from(if slicing { slices::pad_chips(o) } else { chips(o) })));
+        slices::show(&data, o, s.sending);
         data.set_original(o.held.is_some());
         let gain = gain_now(o);
         data.set_gain_text(gain_text(gain).into());
@@ -1291,6 +1392,13 @@ fn show(app: &AppWindow) {
         let hits: Vec<f64> = made.hits.iter().filter(|h| **h >= from && **h <= to).map(|h| (h - from) / long).collect();
         data.set_hit_marks(part::marks(&hits).into());
         match o.pick {
+            // The Slices have their own: how many, and the one picked (which the zoom goes to).
+            _ if slicing => {
+                data.set_has_part(slices::picked(o).is_some());
+                data.set_pick_from(0.0);
+                data.set_pick_to(0.0);
+                data.set_picked_text(slices::heading(o, seconds).into());
+            }
             Some((a, b)) => {
                 data.set_has_part(true);
                 data.set_pick_from(across(a));
@@ -1506,6 +1614,8 @@ pub fn for_screens(app: &AppWindow, audio: AudioData, part: Option<(f64, f64)>, 
     show(app);
 }
 
+pub use slices::state_for_screens as slices_state_for_screens;
+
 /// For the screenshots: whether the strip is open, ready, and how many edits it has.
 pub fn state_for_screens() -> (bool, bool, usize) {
     STRIP.with(|s| {
@@ -1544,6 +1654,9 @@ mod tests {
             dragging: None,
             held: None,
             pressed: false,
+            sliced: None,
+            slice: None,
+            slice_press: None,
         }
     }
 

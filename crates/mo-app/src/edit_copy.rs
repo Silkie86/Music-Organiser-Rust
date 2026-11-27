@@ -8,7 +8,11 @@
 //! of it (`mo_sounds::trimmed::part_name`, `edit_name`), so the same part or the same edits again reuse the copy, an
 //! original changed since gets it made again, and a project that uses it still counts as using the original.
 //!
-//! Also where a sound's hits are, for snapping a picked part's edges to them ([`hits_of`], [`hits_in`]).
+//! Slices for a drum machine's pads (the Edit strip's Slices) go in a folder of their own there, one per slicing
+//! ("Loop 128 slices (5e6f7a8b)", `mo_sounds::trimmed::slices_folder`), numbered in their order.
+//!
+//! Also where a sound's hits are, for snapping a picked part's edges to them ([`hits_of`], [`hits_in`]), and where
+//! the cuts for slices go ([`cuts_at_hits`], [`cuts_at_beats`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -33,6 +37,12 @@ pub const LEAST_PART_SECONDS: f64 = 0.010;
 /// The longest sound the Edit strip edits, or the longest part of a longer one: two minutes of 48 kHz stereo is 46 MB
 /// as it's read, and the strip holds that and the edit made of it.
 pub const EDIT_MOST_SECONDS: f64 = 2.0 * 60.0;
+
+/// The most slices a sound is cut into: four pages of a Drum Machine's pads, from C1 up.
+pub const MOST_SLICES: usize = 64;
+
+/// The shortest slice (seconds): a cut nearer than this to the one before it, or to the sound's end, is left out.
+pub const LEAST_SLICE_SECONDS: f64 = 0.030;
 
 /// What the Edit strip edits: the sound at `path`, whole; or, for one longer than [`EDIT_MOST_SECONDS`], the part
 /// picked on its card, `span` seconds into it.
@@ -129,15 +139,7 @@ pub fn edit_in(
     if edits.is_empty() {
         return Err("There are no edits to save yet.".to_owned());
     }
-    let meta = std::fs::metadata(original).map_err(|e| format!("Couldn't look at {}: {e}", original.display()))?;
-    let changed = meta.modified().ok();
-    // Changed since it was read: a copy of the old sound would carry the new one's date, and be taken for it from then on.
-    if changed != read_changed {
-        return Err(format!(
-            "{} has changed since the Edit strip opened it: open it again to edit it as it is now.",
-            original.file_name().map_or_else(|| original.display().to_string(), |n| n.to_string_lossy().into_owned())
-        ));
-    }
+    let changed = unchanged_since(original, read_changed)?;
     // The part read (to the millisecond) and every edit, written out in full: the same edits of the same part are the
     // same copy.
     let ms = |s: f64| if s.is_finite() { (s.max(0.0) * 1000.0).round() as u64 } else { 0 };
@@ -156,6 +158,153 @@ pub fn edit_in(
     }
     write_new(&edited, &copy, changed)?;
     Ok(copy)
+}
+
+/// Where the slices of a sound `seconds` long start, cut at its hits (`hits`: each one's place in seconds and its
+/// rise in dB, in order) that rise by `rise_db` or more: at most [`MOST_SLICES`] of them, the biggest rises when there
+/// are more, none nearer than [`LEAST_SLICE_SECONDS`] to the one before or to the end. What comes before the first hit
+/// is left out. With no hit that big, the whole sound is the one slice.
+pub fn cuts_at_hits(hits: &[(f64, f32)], rise_db: f32, seconds: f64) -> Vec<f64> {
+    let mut kept: Vec<(f64, f32)> = hits
+        .iter()
+        .copied()
+        .filter(|(at, rise)| *rise >= rise_db && at.is_finite() && *at >= 0.0 && *at <= seconds - LEAST_SLICE_SECONDS)
+        .collect();
+    kept.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut cuts: Vec<(f64, f32)> = Vec::new();
+    for hit in kept {
+        match cuts.last_mut() {
+            // Too near the one before: the bigger of the two stays.
+            Some(last) if hit.0 - last.0 < LEAST_SLICE_SECONDS => {
+                if hit.1 > last.1 {
+                    *last = hit;
+                }
+            }
+            _ => cuts.push(hit),
+        }
+    }
+    if cuts.len() > MOST_SLICES {
+        let mut by_rise = cuts.clone();
+        by_rise.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.total_cmp(&b.0)));
+        let least = by_rise[MOST_SLICES - 1];
+        let mut room = MOST_SLICES;
+        cuts.retain(|c| {
+            let keep = room > 0 && (c.1 > least.1 || (c.1 == least.1 && c.0 <= least.0));
+            room -= usize::from(keep);
+            keep
+        });
+    }
+    if cuts.is_empty() && seconds > 0.0 {
+        return vec![0.0];
+    }
+    cuts.into_iter().map(|(at, _)| at).collect()
+}
+
+/// Where the slices of a sound `seconds` long start, cut every `beats` beats at `bpm` from its start: at most
+/// [`MOST_SLICES`] (the last one then runs on to the end), none shorter than [`LEAST_SLICE_SECONDS`].
+pub fn cuts_at_beats(seconds: f64, bpm: f64, beats: f64) -> Vec<f64> {
+    let each = 60.0 / bpm * beats;
+    if !(each.is_finite() && each >= LEAST_SLICE_SECONDS && seconds > 0.0) {
+        return if seconds > 0.0 { vec![0.0] } else { Vec::new() };
+    }
+    (0..MOST_SLICES)
+        .map(|i| i as f64 * each)
+        .take_while(|at| *at == 0.0 || *at <= seconds - LEAST_SLICE_SECONDS)
+        .collect()
+}
+
+/// The frames of each slice of a sound `frames` long cut at `cuts` (frames, in order): from each cut to the next
+/// (the last to the end); or, for `to_end`, every one on to the sound's end.
+pub fn slice_spans(cuts: &[usize], frames: usize, to_end: bool) -> Vec<edit::Span> {
+    cuts.iter()
+        .enumerate()
+        .map(|(i, &from)| {
+            let till = if to_end { frames } else { cuts.get(i + 1).copied().unwrap_or(frames) };
+            edit::Span::new(from.min(frames), till.min(frames))
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// The slices `spans` of the sound `source` as the Edit strip made it (`audio`: what was read, when its file was last
+/// changed `read_changed`, with its edits made; `what` tells those edits from others), each a file of its own, made
+/// now or before, in a folder for this slicing in [`FOLDER`] in the export folder: their paths, in order; or why
+/// there are none. Never on the window's thread.
+pub fn slices_to_keep(
+    source: &Source,
+    audio: &mo_audio::AudioData,
+    read_changed: Option<SystemTime>,
+    what: &str,
+    spans: &[edit::Span],
+) -> Result<Vec<PathBuf>, String> {
+    let folder = crate::trim_copy::exports_now()?.join(FOLDER);
+    slices_in(source, audio, read_changed, what, spans, &folder)
+}
+
+/// [`slices_to_keep`]'s work, with the slicings' folders kept in `folder`.
+pub fn slices_in(
+    source: &Source,
+    audio: &mo_audio::AudioData,
+    read_changed: Option<SystemTime>,
+    what: &str,
+    spans: &[edit::Span],
+    folder: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let original = &source.path;
+    if spans.is_empty() {
+        return Err("There are no slices to send yet.".to_owned());
+    }
+    if spans.len() > MOST_SLICES {
+        return Err(format!("That's {} slices: {MOST_SLICES} is the most.", spans.len()));
+    }
+    let changed = unchanged_since(original, read_changed)?;
+    let slicing = slicing_text(source, what, spans);
+    let path = original.to_string_lossy();
+    let into = folder.join(mo_sounds::trimmed::slices_folder(&path, &slicing));
+    let mut made = Vec::with_capacity(spans.len());
+    for (i, &span) in spans.iter().enumerate() {
+        let copy = into.join(mo_sounds::trimmed::slice_name(&path, &slicing, i + 1));
+        if !fresh(&copy, changed) {
+            let _making = MAKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !fresh(&copy, changed) {
+                let slice = edit::part(audio, span);
+                if slice.is_empty() {
+                    return Err(format!("Slice {} has no sound in it.", i + 1));
+                }
+                write_new(&slice, &copy, changed)?;
+            }
+        }
+        made.push(copy);
+    }
+    Ok(made)
+}
+
+/// The name of the folder the slices `spans` of `source` go in ([`slices_to_keep`]; `what` tells its edits from
+/// others): "Loop 128 slices (5e6f7a8b)".
+pub fn slices_folder_name(source: &Source, what: &str, spans: &[edit::Span]) -> String {
+    mo_sounds::trimmed::slices_folder(&source.path.to_string_lossy(), &slicing_text(source, what, spans))
+}
+
+/// What tells one slicing of a sound from another: the part read (to the millisecond), its edits and every slice's
+/// frames, written out in full. The same slicing again is the same folder, and another never changes the slices a
+/// project already uses.
+fn slicing_text(source: &Source, what: &str, spans: &[edit::Span]) -> String {
+    let ms = |s: f64| if s.is_finite() { (s.max(0.0) * 1000.0).round() as u64 } else { 0 };
+    format!("{:?} {what} {spans:?}", source.span.map(|(from, to)| (ms(from), ms(to))))
+}
+
+/// When the sound at `original` was last changed, if that's still when it was read (`read_changed`); or that it has
+/// changed since: a copy of the old sound would carry the new one's date, and be taken for it from then on.
+fn unchanged_since(original: &Path, read_changed: Option<SystemTime>) -> Result<Option<SystemTime>, String> {
+    let meta = std::fs::metadata(original).map_err(|e| format!("Couldn't look at {}: {e}", original.display()))?;
+    let changed = meta.modified().ok();
+    if changed != read_changed {
+        return Err(format!(
+            "{} has changed since the Edit strip opened it: open it again to edit it as it is now.",
+            original.file_name().map_or_else(|| original.display().to_string(), |n| n.to_string_lossy().into_owned())
+        ));
+    }
+    Ok(changed)
 }
 
 /// Whether the copy at `copy` was made before, and the original (last changed `changed`) hasn't changed since: a copy
@@ -483,6 +632,111 @@ mod tests {
         assert!(stale.as_ref().is_err_and(|e| e.contains("has changed")), "{stale:?}");
         // Nothing half made is left.
         let left: Vec<String> = std::fs::read_dir(&copies)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| is_half_made(n))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cuts_go_at_the_hits_big_enough_and_never_too_close() {
+        let hits = [(0.0, 40.0), (0.5, 8.0), (1.0, 20.0), (1.01, 30.0), (1.5, 12.0), (1.99, 50.0)];
+        // Every hit of 12 dB or more: the nearer of two too close gives way to the bigger, and one too near the end
+        // is left out.
+        assert_eq!(cuts_at_hits(&hits, 12.0, 2.0), vec![0.0, 1.01, 1.5]);
+        assert_eq!(cuts_at_hits(&hits, 6.0, 2.0), vec![0.0, 0.5, 1.01, 1.5]);
+        // None that big: the whole sound is the one slice.
+        assert_eq!(cuts_at_hits(&hits, 60.0, 2.0), vec![0.0]);
+        assert!(cuts_at_hits(&hits, 6.0, 0.0).is_empty());
+        // More than the most: the biggest rises stay, in their order.
+        let many: Vec<(f64, f32)> =
+            (0..100).map(|i| (f64::from(i) * 0.1, if i % 2 == 0 { 30.0 } else { 10.0 })).collect();
+        let cuts = cuts_at_hits(&many, 6.0, 20.0);
+        assert_eq!(cuts.len(), MOST_SLICES);
+        assert!(cuts.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(cuts.iter().filter(|c| ((*c / 0.1).round() as i64) % 2 == 0).count(), 50, "every big one");
+    }
+
+    #[test]
+    fn cuts_go_on_the_beats() {
+        // 120 BPM: a beat is half a second.
+        assert_eq!(cuts_at_beats(2.0, 120.0, 1.0), vec![0.0, 0.5, 1.0, 1.5]);
+        assert_eq!(cuts_at_beats(2.0, 120.0, 4.0), vec![0.0]);
+        assert_eq!(cuts_at_beats(2.01, 120.0, 0.5).len(), 4 * 2, "no sliver of a slice at the end");
+        assert_eq!(cuts_at_beats(600.0, 120.0, 0.25).len(), MOST_SLICES);
+        // No tempo to speak of: one slice.
+        assert_eq!(cuts_at_beats(2.0, 0.0, 1.0), vec![0.0]);
+        assert_eq!(cuts_at_beats(2.0, f64::NAN, 1.0), vec![0.0]);
+        assert!(cuts_at_beats(0.0, 120.0, 1.0).is_empty());
+    }
+
+    #[test]
+    fn slices_run_to_the_next_cut_or_to_the_end() {
+        use mo_audio::edit::Span;
+        assert_eq!(
+            slice_spans(&[0, 250, 600], 1_000, false),
+            [Span::new(0, 250), Span::new(250, 600), Span::new(600, 1_000)]
+        );
+        assert_eq!(slice_spans(&[100, 600], 1_000, true), [Span::new(100, 1_000), Span::new(600, 1_000)]);
+        assert!(slice_spans(&[1_000], 1_000, false).is_empty(), "a cut at the end is no slice");
+    }
+
+    #[test]
+    fn slices_are_saved_once_in_a_folder_of_their_slicing() {
+        use mo_audio::edit::Span;
+        let dir = folder("slices");
+        let original = dir.join("Loop 128.wav");
+        ramp(&original);
+        let source = Source { path: original.clone(), span: None };
+        let ToEdit { audio, changed } = read_to_edit(&source).unwrap();
+        let copies = dir.join("Edited sounds");
+        let spans = slice_spans(&[0, 250, 600], audio.len(), false);
+        let made = slices_in(&source, &audio, changed, "[]", &spans, &copies).unwrap();
+        assert_eq!(made.len(), 3);
+        let into = made[0].parent().unwrap();
+        assert_eq!(into.parent(), Some(copies.as_path()));
+        assert!(mo_sounds::trimmed::is_slices_folder(&into.file_name().unwrap().to_string_lossy()));
+        assert_eq!(into.file_name().unwrap().to_string_lossy(), slices_folder_name(&source, "[]", &spans));
+        let names: Vec<String> = made.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert!(
+            names[0].starts_with("Loop 128 01 (slice ") && names[2].starts_with("Loop 128 03 (slice "),
+            "{names:?}"
+        );
+        let mark = mo_sounds::trimmed::mark(&original.to_string_lossy());
+        assert!(names.iter().all(|n| mo_sounds::trimmed::mark_in(n) == Some(mark.as_str())));
+        let lengths: Vec<usize> = made.iter().map(|p| mo_audio::read(p, 60.0).unwrap().len()).collect();
+        assert_eq!(lengths, [250, 350, 400]);
+        // The same slicing again: the slices made before, as they are.
+        std::fs::write(&made[1], b"kept").unwrap();
+        assert_eq!(slices_in(&source, &audio, changed, "[]", &spans, &copies).unwrap(), made);
+        assert_eq!(std::fs::read(&made[1]).unwrap(), b"kept");
+        // Other cuts, or the same cuts of other edits: another folder, and the first one's slices stay as they were.
+        let other =
+            slices_in(&source, &audio, changed, "[]", &[Span::new(0, 500), Span::new(500, 1_000)], &copies).unwrap();
+        assert_ne!(other[0].parent(), made[0].parent());
+        let edited = slices_in(&source, &audio, changed, "[Reverse(None)]", &spans, &copies).unwrap();
+        assert_ne!(edited[0].parent(), made[0].parent());
+        assert_eq!(std::fs::read(&made[1]).unwrap(), b"kept");
+        // Another sound of the same name (in another pack), cut the same: a folder of its own.
+        let pack = dir.join("Pack B");
+        std::fs::create_dir_all(&pack).unwrap();
+        let twin = Source { path: pack.join("Loop 128.wav"), span: None };
+        ramp(&twin.path);
+        let ToEdit { audio: twin_audio, changed: twin_changed } = read_to_edit(&twin).unwrap();
+        let twins = slices_in(&twin, &twin_audio, twin_changed, "[]", &spans, &copies).unwrap();
+        assert_ne!(twins[0].parent(), made[0].parent());
+        assert_eq!(std::fs::read_dir(made[0].parent().unwrap()).unwrap().count(), 3, "only its own three");
+        // None, too many, or a file changed since it was read: no slices.
+        assert!(slices_in(&source, &audio, changed, "[]", &[], &copies).is_err());
+        let many = vec![Span::new(0, 10); MOST_SLICES + 1];
+        assert!(slices_in(&source, &audio, changed, "[]", &many, &copies).is_err());
+        let earlier = changed.and_then(|c| c.checked_sub(std::time::Duration::from_secs(60)));
+        let stale = slices_in(&source, &audio, earlier, "[]", &[Span::new(0, 100)], &copies);
+        assert!(stale.as_ref().is_err_and(|e| e.contains("has changed")), "{stale:?}");
+        // Nothing half made is left.
+        let left: Vec<String> = std::fs::read_dir(into)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|n| is_half_made(n))
