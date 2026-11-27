@@ -2179,15 +2179,26 @@ struct AlikeAsk {
     list: Arc<SoundList>,
     places: Arc<HashMap<i64, usize>>,
     index: Arc<SoundIndex>,
+    /// The folders hidden on the folder tree ([`hiding`]).
+    hidden: Filters,
 }
 
 impl AlikeAsk {
     /// The sounds like it, most alike first, as places in the list with how alike (0 to 1): new ones only, not those
-    /// you came to it through nor a copy of one ([`SoundList::like_this`]).
+    /// you came to it through nor a copy of one, nor one in a folder you hid ([`SoundList::like_this`]).
     fn answer(&self) -> Vec<(usize, f64)> {
         let came: Vec<usize> = self.came.iter().filter_map(|id| self.places.get(id).copied()).collect();
-        background::on_pool(|| self.list.like_this(&self.index, &self.places, self.at, &came, ALIKE_COUNT))
+        let hidden = self.list.hidden_by_folders(&self.hidden);
+        let left_out = |i: usize| hidden.as_ref().is_some_and(|h| h(i));
+        background::on_pool(|| self.list.like_this(&self.index, &self.places, self.at, &came, ALIKE_COUNT, left_out))
     }
+}
+
+/// Only the folder tree's hidden folders and the sample folders a hide stops at, of `f`: what keeps a hidden folder's
+/// sounds out of Rediscover, Sounds like this and the kit builder, which dig through every sound (the whole-app
+/// review of 26 Nov, ST-1 and ST-6: their sounds "never show", yet these offered them).
+pub(super) fn hiding(f: &Filters) -> Filters {
+    Filters { hidden_folders: f.hidden_folders.clone(), folder_tops: f.folder_tops.clone(), ..Filters::default() }
 }
 
 /// The fingerprints arrived: the picked sound can now say what sounds like it. Public for the screenshots.
@@ -2269,7 +2280,14 @@ fn ask_alike(app: &AppWindow, at: usize) {
     let ask = PAGE.with(|p| {
         let p = p.borrow();
         let index = p.index.clone()?;
-        Some(AlikeAsk { at, came: p.came.clone(), list: p.list.clone(), places: p.places.clone(), index })
+        Some(AlikeAsk {
+            at,
+            came: p.came.clone(),
+            list: p.list.clone(),
+            places: p.places.clone(),
+            index,
+            hidden: hiding(&p.filters),
+        })
     });
     let Some(ask) = ask else { return };
     if HERE.with(|h| *h.borrow()) {
@@ -3213,6 +3231,8 @@ struct RediscoverAsk {
     places: Arc<HashMap<i64, usize>>,
     index: Arc<SoundIndex>,
     options: rediscover::Options,
+    /// The folders hidden on the folder tree, whose sounds are left out before digging ([`hiding`]).
+    hidden: Filters,
 }
 
 /// What Rediscover dug out for one ask.
@@ -3232,18 +3252,27 @@ struct RediscoverAnswer {
 
 impl RediscoverAsk {
     /// Scoring every unused sound takes a while on a big library: it's spread over the low-priority pool's threads.
+    /// The sounds in folders hidden on the folder tree are left out before digging, so the count is made up from the
+    /// others and the forgotten folders' places go to folders that show (the whole-app review of 26 Nov, ST-1).
     fn answer(self) -> RediscoverAnswer {
         let empty = HashMap::new();
         let usage = self.list.usage_map().unwrap_or(&empty);
+        // By place in the list, as `sounds` is.
         let sounds = self.list.sounds();
+        let hidden = self.list.hidden_by_folders(&self.hidden);
+        let left_out = |i: usize| hidden.as_ref().is_some_and(|h| h(i));
         let o = &self.options;
         background::on_pool(|| {
-            let suggested = rediscover::suggest(sounds, usage, &self.index, o);
+            let suggested = rediscover::suggest(sounds, usage, &self.index, o, left_out);
             let likes = suggested.iter().filter_map(|s| Some((s.id, s.like?))).collect();
             let found: Vec<(usize, String)> =
                 suggested.into_iter().filter_map(|s| self.places.get(&s.id).map(|&i| (i, s.reason))).collect();
-            let why = if found.is_empty() { rediscover::why_nothing(sounds, &self.index, o) } else { String::new() };
-            let mut folders = rediscover::folders(sounds, usage);
+            let why = if found.is_empty() {
+                rediscover::why_nothing(sounds, usage, &self.index, o, left_out)
+            } else {
+                String::new()
+            };
+            let mut folders = rediscover::folders(sounds, usage, left_out);
             folders.truncate(FOLDERS);
             RediscoverAnswer {
                 id: self.id,
@@ -3251,7 +3280,7 @@ impl RediscoverAsk {
                 likes,
                 why,
                 folders,
-                years: year_strip::strip(rediscover::years(sounds)),
+                years: year_strip::strip(rediscover::years(sounds, left_out)),
                 learned_from: usage.values().filter(|u| u.songs > 0).count(),
             }
         })
@@ -3276,6 +3305,7 @@ fn rediscover_now(app: &AppWindow) {
             places: p.places.clone(),
             index,
             options: p.re.clone(),
+            hidden: hiding(&p.filters),
         });
         Some((ask, p.list.len()))
     });
@@ -3376,12 +3406,8 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         }
         p.re_likes = a.likes;
         p.re_busy = false;
-        // Nothing from a folder you hid on the folder tree.
-        let mut found = a.found;
-        if let Some(hidden) = p.list.hidden_by_folders(&p.filters) {
-            found.retain(|&(at, _)| !hidden(at));
-        }
-        p.rediscover = found;
+        // Nothing from a folder you hid on the folder tree: they were left out as it dug, and a hide since asks again.
+        p.rediscover = a.found;
         p.re_years = a.years;
         Some((p.rediscover.len(), p.list.knows_use()))
     });
@@ -3398,7 +3424,6 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
     let folders: Vec<FolderLine> = a
         .folders
         .iter()
-        .filter(|f| PAGE.with(|p| !p.borrow().list.folder_hidden(&p.borrow().filters, &f.folder)))
         .map(|f| FolderLine {
             folder: f.folder.clone().into(),
             name: f.folder.rsplit(['\\', '/']).find(|s| !s.is_empty()).unwrap_or(&f.folder).into(),
@@ -6337,15 +6362,20 @@ mod tests {
             &LikedWeights::default(),
         );
         let features = (1..=6i64).map(|id| (id, (0..8).map(|d| ((id + d) % 3) as f32).collect())).collect();
-        let index = SoundIndex::build(&features, &Default::default(), 6);
-        let ask = RediscoverAsk {
-            id: 7,
+        let index = Arc::new(SoundIndex::build(&features, &Default::default(), 6));
+        let ask = |id: u64, hidden: Filters| RediscoverAsk {
+            id,
             list: lib.list.clone(),
             places: lib.places.clone(),
-            index: Arc::new(index),
+            index: index.clone(),
             options: rediscover::Options { seed: 1, ..rediscover::Options::default() },
+            hidden,
         };
-        let a = ask.answer();
+        // Their folder hidden on the folder tree: none is dug out, nor the folder offered, and the reason says why.
+        let hid = ask(8, hiding(&Filters { hidden_folders: vec!["Pack".into()], ..Filters::default() })).answer();
+        assert!(hid.found.is_empty() && hid.folders.is_empty(), "{:?} {:?}", hid.found, hid.folders);
+        assert!(hid.why.contains("folders you hid"), "{}", hid.why);
+        let a = ask(7, Filters::default()).answer();
         assert_eq!(a.id, 7);
         assert_eq!(a.learned_from, 1);
         assert!(!a.found.is_empty(), "{}", a.why);

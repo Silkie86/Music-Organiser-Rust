@@ -1329,18 +1329,15 @@ impl Shown {
         panel.on_tree_mix_picked(move |name| change(&|a, _| a.filters.pick("type", &name)));
         let (column, again) = (Rc::clone(&self.column), Rc::clone(&shown));
         panel.on_tree_opened(move |path| {
-            let key = mo_app::sound_folders::key(&path);
-            {
-                let mut tree = column.tree.borrow_mut();
-                if !tree.open.remove(&key) {
-                    tree.open.insert(key);
-                }
-            }
+            crate::folders::opened(&path, &column.tree);
             again();
         });
-        let (column, again) = (Rc::clone(&self.column), Rc::clone(&shown));
+        let (column, again, lines, asked) =
+            (Rc::clone(&self.column), Rc::clone(&shown), Rc::clone(&self.lines), Rc::clone(&self.asked));
         panel.on_tree_search_edited(move |words| {
-            column.tree.borrow_mut().search = words.to_string();
+            let library = lines.library.borrow().clone();
+            let tops = asked.borrow().filters.folder_tops.clone();
+            crate::folders::searched(&words, library.as_deref(), &tops, &column.tree);
             again();
         });
         let (column, again) = (Rc::clone(&self.column), Rc::clone(&shown));
