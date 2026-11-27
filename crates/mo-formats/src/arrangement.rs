@@ -135,6 +135,17 @@ impl PreviewClip {
     pub fn end(&self) -> f64 {
         self.start + self.length
     }
+
+    /// How long one of its audio parts fades in and out, in beats, when each part is written as a clip of its own:
+    /// the clip's fade in ends, and its fade out starts, where they did on the clip, so a looped clip fades once
+    /// (in on its first part, out on its last) and a part the fade only reaches the end of fades for that bit. The two
+    /// are no longer together than the part ([`fades_within`]).
+    pub fn fades_of(&self, part: &AudioPart) -> (f64, f64) {
+        let fade_in = self.fade_in - part.start;
+        let fade_out = part.start + part.length - (self.length - self.fade_out);
+        let real = |x: f64| if x.is_finite() { x } else { 0.0 };
+        fades_within(real(fade_in), real(fade_out), real(part.length))
+    }
 }
 
 /// A track in the arrangement. `detail` says what plays it (a plugin, a sample) or what it moves (an automation
