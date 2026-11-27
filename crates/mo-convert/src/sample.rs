@@ -23,6 +23,39 @@ const PEEK_SECONDS: f64 = 0.25;
 /// told, the length is 0 and the MD5 is left at zeros (Bitwig then reads the file itself), and the rate and channels
 /// say 44100 and 2, as the C# app's do.
 pub fn read_sample(path: &Path) -> Option<SampleFile> {
+    let (mut file, size, head, found, ogg_in_wav) = header(path)?;
+    // A length of 0 is no use to Bitwig (it reads the file itself), so neither is the MD5: not worked out.
+    let Some((rate, channels, seconds)) = found else {
+        return Some(SampleFile { bytes: size, md5: [0; 16], rate: 44100, channels: 2, seconds: 0.0, ogg_in_wav });
+    };
+    file.seek(SeekFrom::Start(head.len() as u64)).ok()?;
+    let mut md5 = Md5::new();
+    md5.update(&head);
+    let mut bytes = head.len() as u64;
+    let mut buffer = vec![0u8; 1 << 16];
+    loop {
+        let n = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        md5.update(buffer.get(..n)?);
+        bytes += n as u64;
+    }
+    Some(SampleFile { bytes, md5: md5.finalize().into(), rate, channels, seconds, ogg_in_wav })
+}
+
+/// The rate, channels and seconds of a sample, from its header (or its decoder, for a file whose header doesn't say),
+/// without reading the rest of it; `None` when it can't be read or timed.
+pub fn format_of(path: &Path) -> Option<(u32, u16, f64)> {
+    header(path)?.3
+}
+
+/// A sample opened and its header read: the file, its size, its start, its rate, channels and seconds when they can be
+/// told, and whether it's a WAV that keeps Ogg Vorbis inside.
+#[allow(clippy::type_complexity)]
+fn header(path: &Path) -> Option<(std::fs::File, u64, Vec<u8>, Option<(u32, u16, f64)>, bool)> {
     let mut file = std::fs::File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     let mut head = vec![0u8; HEADER.min(size as usize)];
@@ -47,26 +80,7 @@ pub fn read_sample(path: &Path) -> Option<SampleFile> {
         .or_else(|| flac(&head))
         .filter(|&(_, _, seconds)| seconds > 0.0)
         .or_else(|| if plain { None } else { decoded(path, &head) });
-    // A length of 0 is no use to Bitwig (it reads the file itself), so neither is the MD5: not worked out.
-    let Some((rate, channels, seconds)) = found else {
-        return Some(SampleFile { bytes: size, md5: [0; 16], rate: 44100, channels: 2, seconds: 0.0, ogg_in_wav });
-    };
-    file.seek(SeekFrom::Start(head.len() as u64)).ok()?;
-    let mut md5 = Md5::new();
-    md5.update(&head);
-    let mut bytes = head.len() as u64;
-    let mut buffer = vec![0u8; 1 << 16];
-    loop {
-        let n = match file.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return None,
-        };
-        md5.update(buffer.get(..n)?);
-        bytes += n as u64;
-    }
-    Some(SampleFile { bytes, md5: md5.finalize().into(), rate, channels, seconds, ogg_in_wav })
+    Some((file, size, head, found, ogg_in_wav))
 }
 
 /// The rate, channels and seconds of a file whose header doesn't say them plainly (MP3, OGG, M4A, a WAV that keeps

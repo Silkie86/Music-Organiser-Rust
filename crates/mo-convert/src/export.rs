@@ -18,6 +18,7 @@ use crate::save::{LONGEST_FILE_NAME, cut, safe_file_name, save_checked_new};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Daw {
     FlStudio,
+    StudioOne,
 }
 
 impl Daw {
@@ -25,12 +26,14 @@ impl Daw {
     pub fn name(self) -> &'static str {
         match self {
             Daw::FlStudio => mo_formats::fl::DAW,
+            Daw::StudioOne => mo_formats::studio_one::DAW,
         }
     }
 
     fn extension(self) -> &'static str {
         match self {
             Daw::FlStudio => "flp",
+            Daw::StudioOne => "song",
         }
     }
 
@@ -43,6 +46,16 @@ impl Daw {
         match self {
             Daw::FlStudio => {
                 let w = mo_formats::fl::write::write(song, title, delphi_now());
+                (w.bytes, w.left_out)
+            }
+            Daw::StudioOne => {
+                // What Studio One keeps about each audio file, from its header, when it's on this computer.
+                let format = |path: &str| {
+                    crate::sample::format_of(Path::new(path)).map(|(rate, channels, seconds)| {
+                        mo_formats::studio_one::write::SampleFormat { rate, channels, seconds }
+                    })
+                };
+                let w = mo_formats::studio_one::write::write(song, title, &format);
                 (w.bytes, w.left_out)
             }
         }
@@ -250,5 +263,9 @@ mod tests {
             copy_for(&first.file, &root, Daw::FlStudio, &as_named).is_err(),
             "an FL project isn't converted for FL"
         );
+        // And the FL copy, as a Studio One song: the same notes again.
+        let song_copy = copy_for(&first.file, &root, Daw::StudioOne, &as_named).unwrap();
+        assert_eq!(song_copy.file.extension().unwrap(), "song");
+        assert_eq!(arrangement::read(&song_copy.file).unwrap().remove(0).note_count(), original.note_count());
     }
 }

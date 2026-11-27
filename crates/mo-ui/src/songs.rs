@@ -2020,6 +2020,7 @@ fn do_to_save(path: &str, what: &str) {
         "open" => open_save(s),
         "bitwig" => open_in_bitwig(p, s),
         "fl" => open_as_copy(p, s, daw_copy::Daw::FlStudio),
+        "studio-one" => open_as_copy(p, s, daw_copy::Daw::StudioOne),
         "reveal" => reveal(s),
         "copy" => copy_path(&s.path),
         _ => {}
@@ -2041,6 +2042,10 @@ fn save_menu(daw: &str) -> Vec<MenuItem> {
     } else {
         // A copy of the song made for FL Studio, in the export folder: the song itself is only read.
         items.push(item("Open a copy in FL Studio".into(), "", "fl"));
+    }
+    if daw != daw_copy::Daw::StudioOne.name() {
+        // And one for Studio One, the same way.
+        items.push(item("Open a copy in Studio One".into(), "", "studio-one"));
     }
     items.push(item(String::new(), "", ""));
     items.push(item("Show in folder".into(), "", "reveal"));
@@ -2214,8 +2219,9 @@ fn open_as_copy(page: &Page, save: &mo_library::Save, daw: daw_copy::Daw) {
     let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
     let chosen = crate::settings::value(&shell::daw_exe_key(daw.name()));
     let (db, path, name) = (page.db.clone(), save.path.clone(), save.name.clone());
-    // A second press while the first is still writing would make a second copy: the first is the one that counts.
-    let Some(converting) = Converting::start(&path) else { return };
+    // A second press while the first is still writing would make a second copy: the first is the one that counts. A
+    // copy for another DAW is its own.
+    let Some(converting) = Converting::start(&format!("{path}\n{}", daw.name())) else { return };
     let started = background::spawn("Copy for DAW", move || {
         let _converting = converting;
         if !shell::exists(&path) {
@@ -2478,8 +2484,9 @@ mod tests {
     #[test]
     fn an_fl_save_s_menu_also_opens_it_in_bitwig() {
         let ids = |daw: &str| save_menu(daw).iter().map(|i| i.id.to_string()).collect::<Vec<_>>();
-        assert_eq!(ids(FL), ["open", "bitwig", "", "reveal", "copy"]);
-        assert_eq!(ids("Bitwig Studio"), ["open", "fl", "", "reveal", "copy"]);
+        assert_eq!(ids(FL), ["open", "bitwig", "studio-one", "", "reveal", "copy"]);
+        assert_eq!(ids("Bitwig Studio"), ["open", "fl", "studio-one", "", "reveal", "copy"]);
+        assert_eq!(ids("Studio One"), ["open", "fl", "", "reveal", "copy"]);
         assert_eq!(save_menu("Ableton Live")[1].what, "Open a copy in FL Studio");
         assert_eq!(save_menu(FL)[0].what, "Open in FL Studio");
     }
