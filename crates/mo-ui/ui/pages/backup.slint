@@ -243,7 +243,14 @@ export component BackupPage inherits Rectangle {
                     max-width: Fit.list-max;
                     VerticalLayout {
                         spacing: Space.sm;
-                        Caps { text: "HOW MUCH"; }
+                        HorizontalLayout {
+                            spacing: Space.xs;
+                            alignment: start;
+                            Caps { text: "HOW MUCH"; vertical-alignment: center; }
+                            // What the picked choice does, behind its "i" (Solomon, 24 Nov 2026: explanations in
+                            // tooltips).
+                            if BackupData.level-note != "": InfoTip { text: BackupData.level-note; }
+                        }
                         HorizontalLayout {
                             alignment: start;
                             Segmented {
@@ -252,16 +259,17 @@ export component BackupPage inherits Rectangle {
                                 picked(i) => { BackupData.level-picked(i); }
                             }
                         }
-                        Text {
-                            text: BackupData.level-note;
-                            color: Theme.muted;
-                            font-size: Type.meta;
-                            wrap: word-wrap;
-                        }
                     }
                     VerticalLayout {
                         spacing: Space.sm;
-                        Caps { text: "FORMAT"; }
+                        HorizontalLayout {
+                            spacing: Space.xs;
+                            alignment: start;
+                            Caps { text: "FORMAT"; vertical-alignment: center; }
+                            // What the picked choice does, behind its "i" (Solomon, 24 Nov 2026: explanations in
+                            // tooltips).
+                            if BackupData.format-note != "": InfoTip { text: BackupData.format-note; }
+                        }
                         HorizontalLayout {
                             alignment: start;
                             Segmented {
@@ -269,12 +277,6 @@ export component BackupPage inherits Rectangle {
                                 current: BackupData.format;
                                 picked(i) => { BackupData.format-picked(i); }
                             }
-                        }
-                        Text {
-                            text: BackupData.format-note;
-                            color: Theme.muted;
-                            font-size: Type.meta;
-                            wrap: word-wrap;
                         }
                     }
                     VerticalLayout {
@@ -335,7 +337,14 @@ export component BackupPage inherits Rectangle {
                             padding: Space.lg;
                             spacing: Space.md;
                             alignment: start;
-                            Caps { text: "WHAT GOES"; }
+                            HorizontalLayout {
+                                spacing: Space.xs;
+                                alignment: start;
+                                Caps { text: "WHAT GOES"; vertical-alignment: center; }
+                                // What never stays behind, behind its "i" (Solomon, 24 Nov 2026: explanations in
+                                // tooltips).
+                                InfoTip { text: "Your newest save of each song, and any save you mark, always go."; }
+                            }
                             if BackupData.goes == "": Text {
                                 text: BackupData.plan-note;
                                 color: Theme.muted;
@@ -390,12 +399,6 @@ export component BackupPage inherits Rectangle {
                                     font-size: Type.meta;
                                     vertical-alignment: center;
                                 }
-                            }
-                            Text {
-                                text: "Your newest save of each song, and any save you mark, always go.";
-                                color: Theme.muted;
-                                font-size: Type.meta;
-                                wrap: word-wrap;
                             }
                         }
                     }
