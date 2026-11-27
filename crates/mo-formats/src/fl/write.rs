@@ -46,19 +46,22 @@ const TRACKS: usize = 500;
 /// A pattern clip's item number base: an item above it is a pattern, at or below it a channel.
 const PATTERN_BASE: u16 = 20480;
 
-const EV_TIME_SIG_TOP: u8 = 17;
-const EV_TIME_SIG_BOTTOM: u8 = 18;
-const EV_PATTERN_EXTRA: u8 = 226;
+const EV_TIME_SIG_NUMERATOR: u8 = 17;
+const EV_TIME_SIG_DENOMINATOR: u8 = 18;
+/// The event after the patterns in FL's empty project: the patterns go just before it.
+const AFTER_PATTERNS: u8 = 226;
 const EV_ARRANGEMENT_NEW: u8 = 99;
 const EV_TRACK_DATA: u8 = 238;
 const EV_TRACK_NAME: u8 = 239;
 const EV_PROJECT_TIME: u8 = 237;
-const EV_PROJECT_INFO: u8 = 195;
-const EV_MARKER_POSITION: u8 = 148;
+/// The event FL writes the project's dates (237) after.
+const BEFORE_PROJECT_TIME: u8 = 195;
+const EV_TIME_MARKER: u8 = 148;
 const EV_MARKER_NAME: u8 = 205;
-const EV_SAMPLE_LIST_END: u8 = 170;
+/// The event FL writes just after an audio clip channel's sample path (196).
+const AFTER_SAMPLE_PATH: u8 = 170;
 /// The block of settings FL writes after a channel's plugin type, before its name.
-const EV_CHANNEL_SETTINGS: u8 = 212;
+const BEFORE_CHANNEL_NAME: u8 = 212;
 
 /// A project written, and what of the song couldn't go into it.
 #[derive(Clone, Debug, PartialEq)]
@@ -324,16 +327,16 @@ fn assemble(
                 &((song.tempo * 1000.0).round().clamp(10_000.0, 999_000.0) as u32).to_le_bytes(),
                 &mut body,
             ),
-            EV_TIME_SIG_TOP => encode(e.id, &[song.signature.top().min(255) as u8], &mut body),
-            EV_TIME_SIG_BOTTOM => encode(e.id, &[song.signature.bottom().min(255) as u8], &mut body),
+            EV_TIME_SIG_NUMERATOR => encode(e.id, &[song.signature.top().min(255) as u8], &mut body),
+            EV_TIME_SIG_DENOMINATOR => encode(e.id, &[song.signature.bottom().min(255) as u8], &mut body),
             EV_TITLE => encode(EV_TITLE, &text(title), &mut body),
-            EV_PROJECT_INFO => {
+            BEFORE_PROJECT_TIME => {
                 encode(e.id, data, &mut body);
                 let mut time = created.to_le_bytes().to_vec();
                 time.extend_from_slice(&0f64.to_le_bytes());
                 encode(EV_PROJECT_TIME, &time, &mut body);
             }
-            EV_PATTERN_EXTRA if !patterns_written => {
+            AFTER_PATTERNS if !patterns_written => {
                 patterns_written = true;
                 write_patterns(&mut body);
                 encode(e.id, data, &mut body);
@@ -368,14 +371,14 @@ fn assemble(
                             for t in &audio_block {
                                 match t.id {
                                     EV_CHANNEL_NEW => encode(t.id, &number, &mut body),
-                                    EV_SAMPLE_LIST_END => {
+                                    AFTER_SAMPLE_PATH => {
                                         encode(EV_SAMPLE_PATH, &text(path), &mut body);
                                         encode(t.id, &t.data, &mut body);
                                     }
                                     _ => encode(t.id, &t.data, &mut body),
                                 }
                                 // The channel's name follows the block of settings that starts it, as FL writes it.
-                                if t.id == EV_CHANNEL_SETTINGS {
+                                if t.id == BEFORE_CHANNEL_NAME {
                                     encode(EV_PLUGIN_NAME, &text(name), &mut body);
                                 }
                             }
@@ -392,7 +395,7 @@ fn assemble(
                 encode(EV_PLAYLIST, &playlist(items), &mut body);
                 for m in &song.markers {
                     let Some(at) = ticks(m.beat) else { continue };
-                    encode(EV_MARKER_POSITION, &at.to_le_bytes(), &mut body);
+                    encode(EV_TIME_MARKER, &at.to_le_bytes(), &mut body);
                     encode(33, &[4], &mut body);
                     encode(34, &[4], &mut body);
                     encode(46, &[0], &mut body);
