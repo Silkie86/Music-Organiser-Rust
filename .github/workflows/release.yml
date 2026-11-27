@@ -265,14 +265,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$RUNNER_TEMP/validator" "$RUNNER_TEMP/plugin"
-          gh release download --repo free-audio/clap-validator --pattern '*mac*' --dir "$RUNNER_TEMP/validator"
+          # One known release of the checker, and only the file with this fingerprint is run.
+          asset=clap-validator-0.4.1-127-g152b982-macos-universal.zip
+          gh release download 0.4.1 --repo free-audio/clap-validator --pattern "$asset" --dir "$RUNNER_TEMP/validator"
           cd "$RUNNER_TEMP/validator"
-          for f in *; do
-            case "$f" in
-              *.tar.gz) tar -xzf "$f" ;;
-              *.zip) ditto -x -k "$f" . ;;
-            esac
-          done
+          echo "bbec8cd7d18274e549d5d8c12ece3cec54be966129388dd2e742b9957f2ba9f1  $asset" | shasum -a 256 -c -
+          # The .zip holds a .tar.gz, which holds binaries/clap-validator.
+          ditto -x -k "$asset" .
+          for f in *.tar.gz; do tar -xzf "$f"; done
           validator=$(find . -type f -name clap-validator | head -n 1)
           [ -n "$validator" ] || { ls -R; echo "no clap-validator in the download"; exit 1; }
           chmod +x "$validator"
