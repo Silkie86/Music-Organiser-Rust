@@ -190,7 +190,8 @@ jobs:
     needs: [tag, bitwig-extension]
     if: needs.tag.outputs.published != 'true'
     runs-on: macos-latest
-    timeout-minutes: 150
+    # Four whole-program (fat LTO) builds from cold take well over an hour on GitHub's Mac.
+    timeout-minutes: 240
     env:
       # The oldest macOS the app is built for (Big Sur, the first with Apple silicon); Info.plist says the same.
       MACOSX_DEPLOYMENT_TARGET: "11.0"
