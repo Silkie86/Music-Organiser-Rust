@@ -2678,6 +2678,9 @@ export component SignButton inherits Rectangle {
     in property <string> tip;
     in property <color> tint: Theme.muted;
     in property <bool> boxed;
+    // How big the sign is drawn: a sign that stands for a thing on a list's line (the Songs list's speaker) is drawn
+    // as big as that line's other signs.
+    in property <length> sign-size: root.boxed ? 12px : 10px;
     callback clicked;
     width: root.boxed ? 24px : 20px;
     height: 20px;
@@ -2690,8 +2693,8 @@ export component SignButton inherits Rectangle {
         clicked => { root.clicked(); }
     }
     Path {
-        width: root.boxed ? 12px : 10px;
-        height: root.boxed ? 12px : 10px;
+        width: root.sign-size;
+        height: root.sign-size;
         viewbox-width: 16;
         viewbox-height: 16;
         commands: root.icon;

@@ -776,6 +776,108 @@ pub fn bitwig_extension_facts(
     (facts, button)
 }
 
+/// How the app's CLAP plugin stands, for its row on the DAWs tab (the 26 Nov review's DK-2): found away from the
+/// window, as the links are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginLook {
+    /// The installer's copy beside this app (`plugins\DAWmate.clap`) is there: none in a launcher build.
+    pub source: bool,
+    /// The shared CLAP folder it goes into (`Common Files\CLAP`): none where there's no such folder (not Windows).
+    pub folder: Option<PathBuf>,
+    /// Whether the one in the folder is the installer's copy, byte for byte (only known with `source`).
+    pub state: ScriptState,
+    /// A test plugin put in by hand (`tools/dev/install-test-plugin.ps1`), when there's one.
+    pub test_plugin: Option<PathBuf>,
+    /// The app's own files there that Take out would take out (`mo_dawlink::scripts::clap_installed_files`).
+    pub files: Vec<PathBuf>,
+    /// Windows' administrator question can be asked from this run (both Install and Take out need it).
+    pub can_ask: bool,
+}
+
+/// The plugin row on the DAWs tab: how it stands, the facts under it, its Install button's words ("" for none), and
+/// whether it has Take out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginRow {
+    pub status: DawStatus,
+    pub install: &'static str,
+    pub take_out: bool,
+}
+
+/// The plugin row's title, also what its Take out ask is kept under.
+pub const PLUGIN_ROW: &str = "DAWmate plugin";
+
+/// The plugin row from how it stands (none while it's being looked at).
+pub fn plugin_row(look: Option<&PluginLook>) -> PluginRow {
+    let fact = |what, value: String| Fact { what, value, button: None };
+    let row = |state: &str, ok, facts, install, take_out| PluginRow {
+        status: DawStatus { daw: PLUGIN_ROW, state: state.to_owned(), ok, facts },
+        install,
+        take_out,
+    };
+    let Some(look) = look else { return row("Looking\u{2026}", false, Vec::new(), "", false) };
+    let Some(folder) = &look.folder else {
+        let facts = vec![fact(
+            "Goes into",
+            "Common Files\\CLAP, on Windows: the installed app puts it there, with Windows' Yes".to_owned(),
+        )];
+        return row("Only on Windows", false, facts, "", false);
+    };
+    let there = look.files.iter().any(|f| f.file_name().is_some_and(|n| n == mo_dawlink::scripts::CLAP_PLUGIN_NAME));
+    let mut facts = vec![fact("Goes into", folder.display().to_string())];
+    let take_out = look.can_ask && !look.files.is_empty();
+    let (state, ok, mut install) = if let Some(test) = &look.test_plugin {
+        facts.push(fact("Test plugin", test.display().to_string()));
+        facts.push(fact(
+            "So",
+            "The app leaves its own plugin out while a test plugin is in: a DAW would list it twice. Delete the test \
+             plugin by hand to use the app's own, then press Install."
+                .to_owned(),
+        ));
+        ("A test plugin is in", true, "")
+    } else if !look.source {
+        facts.push(fact(
+            "This copy",
+            "Has no plugins\\DAWmate.clap beside it (a launcher build), so it can't put the plugin in or tell its \
+             version: the installed DAWmate does that."
+                .to_owned(),
+        ));
+        if there { ("Plugin in", true, "") } else { ("Plugin not in", false, "") }
+    } else {
+        match look.state {
+            ScriptState::Installed => ("Plugin in", true, ""),
+            ScriptState::Outdated => ("Plugin out of date", false, "Update"),
+            ScriptState::NotInstalled => ("Plugin not in", false, "Install"),
+        }
+    };
+    if !look.can_ask && (!install.is_empty() || !look.files.is_empty()) {
+        install = "";
+        facts.push(fact(
+            "Changing it",
+            "Needs Windows' administrator question, which this run of the app can't ask: start DAWmate itself"
+                .to_owned(),
+        ));
+    }
+    facts.push(fact(
+        "Then",
+        "Every DAW finds it there: add DAWmate to a track. Install and Take out ask Windows first (Yes or No), as the \
+         folder is the system's; close your DAWs before either."
+            .to_owned(),
+    ));
+    row(state, ok, facts, install, take_out)
+}
+
+/// What Take out asks before it takes the app's plugin out, naming each file that goes. "" when there's nothing.
+pub fn plugin_take_out_ask(files: &[PathBuf]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let listed = files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ");
+    format!(
+        "Take the DAWmate plugin out? Only the app's own file goes: {listed}. A test plugin and every other plugin there \
+         stay. Close your DAWs first: Windows then asks (Yes or No). The app leaves it out until you press Install."
+    )
+}
+
 /// The title of the picker Bitwig's card opens for your Bitwig Studio folder.
 pub const BITWIG_PICK_TITLE: &str = "Choose your Bitwig Studio folder";
 
@@ -1453,6 +1555,7 @@ mod tests {
         assert!(bitwig_installed_note(&done).ends_with("If Bitwig is open, close it, then press Install again."));
         // Take out asks first, naming every file that goes, and says what it did.
         assert_eq!(take_out_ask(true, &[]), "");
+        assert_eq!(plugin_take_out_ask(&[]), "");
         let ext = PathBuf::from("K/Extensions/DAWmate.bwextension");
         let ask = take_out_ask(true, std::slice::from_ref(&ext));
         assert!(
@@ -1574,5 +1677,80 @@ mod tests {
         for (daw, key, _) in shell::DAW_PROGRAMS {
             assert!(crate::app_settings::FROM_CSHARP.contains(&key), "{daw}");
         }
+    }
+    /// A look at the plugin on a PC where Windows can be asked (no real folders: the facts as found).
+    fn plugin_look(state: ScriptState, files: &[&str]) -> PluginLook {
+        let folder = PathBuf::from(r"C:\Program Files\Common Files\CLAP");
+        PluginLook {
+            source: true,
+            files: files.iter().map(|f| folder.join(f)).collect(),
+            folder: Some(folder),
+            state,
+            test_plugin: None,
+            can_ask: true,
+        }
+    }
+
+    /// The 26 Nov review's DK-2: the plugin's row says how it stands and offers Install, Update and Take out.
+    #[test]
+    fn the_plugin_row_says_how_it_stands() {
+        let looking = plugin_row(None);
+        assert_eq!((looking.status.state.as_str(), looking.install, looking.take_out), ("Looking\u{2026}", "", false));
+        let out = plugin_row(Some(&plugin_look(ScriptState::NotInstalled, &[])));
+        assert_eq!(
+            (out.status.state.as_str(), out.status.ok, out.install, out.take_out),
+            ("Plugin not in", false, "Install", false)
+        );
+        assert_eq!(out.status.daw, PLUGIN_ROW);
+        assert_eq!(out.status.facts[0].value, r"C:\Program Files\Common Files\CLAP");
+        let old = plugin_row(Some(&plugin_look(ScriptState::Outdated, &["DAWmate.clap"])));
+        assert_eq!((old.status.state.as_str(), old.install, old.take_out), ("Plugin out of date", "Update", true));
+        let ours = plugin_row(Some(&plugin_look(ScriptState::Installed, &["DAWmate.clap"])));
+        assert_eq!(
+            (ours.status.state.as_str(), ours.status.ok, ours.install, ours.take_out),
+            ("Plugin in", true, "", true)
+        );
+        // Only a part file a cut-off install left: Take out tidies it, Install puts the plugin in.
+        let part = plugin_row(Some(&plugin_look(ScriptState::NotInstalled, &["DAWmate.clap.mo-part"])));
+        assert_eq!((part.install, part.take_out), ("Install", true));
+    }
+
+    #[test]
+    fn the_plugin_row_never_offers_what_cant_be_done() {
+        // A launcher build: no plugin beside it to put in, so no Install (Take out of the installed app's one is fine).
+        let launcher = PluginLook { source: false, ..plugin_look(ScriptState::NotInstalled, &["DAWmate.clap"]) };
+        let row = plugin_row(Some(&launcher));
+        assert_eq!((row.status.state.as_str(), row.install, row.take_out), ("Plugin in", "", true));
+        assert!(row.status.facts.iter().any(|f| f.value.contains("a launcher build")), "{:?}", row.status.facts);
+        let launcher = PluginLook { source: false, ..plugin_look(ScriptState::NotInstalled, &[]) };
+        let row = plugin_row(Some(&launcher));
+        assert_eq!((row.status.state.as_str(), row.install, row.take_out), ("Plugin not in", "", false));
+        // A test plugin put in by hand: no Install (a DAW would list it twice); the app's own can still come out.
+        let test = PluginLook {
+            test_plugin: Some(PathBuf::from(r"C:\Program Files\Common Files\CLAP\DAWmate (test).clap")),
+            ..plugin_look(ScriptState::NotInstalled, &[])
+        };
+        let row = plugin_row(Some(&test));
+        assert_eq!((row.status.state.as_str(), row.install, row.take_out), ("A test plugin is in", "", false));
+        let both = PluginLook { files: vec![PathBuf::from("DAWmate.clap")], ..test };
+        assert!(plugin_row(Some(&both)).take_out);
+        // Windows' question can't be asked from this run: nothing to press.
+        let no_ask = PluginLook { can_ask: false, ..plugin_look(ScriptState::Outdated, &["DAWmate.clap"]) };
+        let row = plugin_row(Some(&no_ask));
+        assert_eq!((row.install, row.take_out), ("", false));
+        // Not Windows: no Common Files\CLAP.
+        let elsewhere = PluginLook { folder: None, ..plugin_look(ScriptState::NotInstalled, &[]) };
+        let row = plugin_row(Some(&elsewhere));
+        assert_eq!((row.status.state.as_str(), row.install, row.take_out), ("Only on Windows", "", false));
+    }
+
+    #[test]
+    fn the_plugins_take_out_names_each_file_and_spares_a_test_plugin() {
+        let ask = plugin_take_out_ask(&[PathBuf::from(r"C:\CLAP\DAWmate.clap")]);
+        assert!(
+            ask.starts_with(r"Take the DAWmate plugin out? Only the app's own file goes: C:\CLAP\DAWmate.clap."),
+            "{ask}"
+        );
+        assert!(ask.contains("A test plugin and every other plugin there stay"), "{ask}");
     }
 }

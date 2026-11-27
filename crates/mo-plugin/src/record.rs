@@ -259,6 +259,12 @@ pub fn inputs() -> Vec<String> {
     inputs
 }
 
+/// The input Record records from, of the one it was left on (`kept`, by its name; "" for the DAW's input) and the
+/// inputs the system has now: that one when it's there, else the DAW's input ("").
+pub fn kept_input<'a>(kept: &'a str, inputs: &[String]) -> &'a str {
+    if inputs.iter().any(|i| i == kept) { kept } else { "" }
+}
+
 /// An input's name split into its sound card and the input on it, as Windows names them: "Input 1/2 (Bitwig
 /// Connect)" is input "Input 1/2" on "Bitwig Connect". A name without a card in brackets is a card of its own.
 pub fn card_and_input(name: &str) -> (&str, &str) {
@@ -383,6 +389,16 @@ mod tests {
         );
         assert_eq!(card_and_input("Line In"), ("Line In", "Line In"));
         assert_eq!(card_and_input("(odd)"), ("(odd)", "(odd)"));
+    }
+
+    #[test]
+    fn an_input_that_isnt_there_now_is_the_daws_input() {
+        let inputs = vec!["Input 1/2 (Bitwig Connect)".to_owned(), "Microphone (Blue Snowball)".to_owned()];
+        assert_eq!(kept_input("Microphone (Blue Snowball)", &inputs), "Microphone (Blue Snowball)");
+        // Unplugged, or the system couldn't say: the DAW's input, with no error.
+        assert_eq!(kept_input("Input 3/4 (Scarlett)", &inputs), "");
+        assert_eq!(kept_input("Input 1/2 (Bitwig Connect)", &[]), "");
+        assert_eq!(kept_input("", &inputs), "");
     }
 
     #[test]

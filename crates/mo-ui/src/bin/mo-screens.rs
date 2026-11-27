@@ -921,6 +921,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     bar.set_place(0.32);
     bar.set_time("1:12 / 3:42".into());
     shots.push(("songs-sound.png".into(), capture(&window)));
+    // Copper Lines' newest bounce playing, started from its line's speaker (the review of 26 Nov, SZ-3): that speaker
+    // is lit (and its line on the card), Slow Orbit's is not. Shown as playing only: nothing is played here.
+    bar.set_playing(true);
+    shots.push(("songs-row-playing.png".into(), capture(&window)));
+    bar.set_playing(false);
     bar.set_shown(false);
     app.global::<mo_ui::SongsData>().invoke_close_panel();
     mo_ui::songs::show_sample(&app, sample_songs());
@@ -4685,13 +4690,54 @@ fn settings_shots(
         mo_dawlink::scripts::ScriptState::Outdated,
         vec![std::path::PathBuf::from(r"I:\Fl Studio Data\FL Studio\Settings\Hardware\DAWmate")],
     );
+    // The app's CLAP plugin, an older one in Common Files\CLAP: Update and Take out (the 26 Nov review's DK-2).
+    let clap = std::path::PathBuf::from(r"C:\Program Files\Common Files\CLAP");
+    let plugin = mo_app::settings::PluginLook {
+        source: true,
+        // Written whole, so it shows as on Windows (joined here it would get a '/').
+        files: vec![std::path::PathBuf::from(r"C:\Program Files\Common Files\CLAP\DAWmate.clap")],
+        folder: Some(clap.clone()),
+        state: mo_dawlink::scripts::ScriptState::Outdated,
+        test_plugin: None,
+        can_ask: true,
+    };
+    mo_ui::settings::show_plugin(app, plugin.clone(), false, false);
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));
     // Take out on FL Studio's row, asking first and naming the file that goes.
     data.set_take_out_asking("FL Studio".into());
     capture(window);
     shots.push(("settings-daws-take-out.png".into(), capture(window)));
+    // The plugin's row, further down: its Take out asks first too; then Update waiting on Windows' question; then a
+    // test plugin put in by hand, which the app leaves alone (no Install, no Take out of it).
+    scroll(window, 900.0, 500.0, -PAGE_DOWN);
+    data.set_take_out_asking(mo_app::settings::PLUGIN_ROW.into());
+    capture(window);
+    shots.push(("settings-daws-plugin-take-out.png".into(), capture(window)));
     data.set_take_out_asking("".into());
+    mo_ui::settings::show_plugin(app, plugin.clone(), true, false);
+    capture(window);
+    shots.push(("settings-daws-plugin-asking.png".into(), capture(window)));
+    // The same for Take out: its own button says so; Update doesn't, and the links' buttons stay usable (DK-3).
+    mo_ui::settings::show_plugin(app, plugin.clone(), true, true);
+    capture(window);
+    shots.push(("settings-daws-plugin-taking-out.png".into(), capture(window)));
+    let test = mo_app::settings::PluginLook {
+        files: Vec::new(),
+        state: mo_dawlink::scripts::ScriptState::NotInstalled,
+        test_plugin: Some(std::path::PathBuf::from(r"C:\Program Files\Common Files\CLAP\DAWmate (test).clap")),
+        ..plugin.clone()
+    };
+    mo_ui::settings::show_plugin(app, test, false, false);
+    capture(window);
+    shots.push(("settings-daws-plugin-test.png".into(), capture(window)));
+    // A launcher build: nothing beside it to put in.
+    let launcher = mo_app::settings::PluginLook { source: false, files: Vec::new(), ..plugin.clone() };
+    mo_ui::settings::show_plugin(app, launcher, false, false);
+    capture(window);
+    shots.push(("settings-daws-plugin-launcher.png".into(), capture(window)));
+    mo_ui::settings::show_plugin(app, plugin, false, false);
+    scroll(window, 900.0, 500.0, PAGE_DOWN);
     // Further down, the program each DAW's songs open in: FL Studio's chosen here (an invented path, set before
     // show_fl showed the tab), Studio One's chosen in the old app, Bitwig's Windows' choice.
     scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
