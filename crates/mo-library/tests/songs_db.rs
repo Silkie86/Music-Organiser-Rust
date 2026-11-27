@@ -698,3 +698,14 @@ fn a_new_library_is_never_made_over_one_thats_there() {
     let lib = Library::open_read_only(&second.library).unwrap();
     assert_eq!(lib.roots().unwrap().len(), 1, "the first one's folder list is kept");
 }
+
+/// A library.db that can't be looked at (here a link to a drive that's away) is someone's library: never an empty one
+/// in its place, which would win at every later start.
+#[cfg(unix)]
+#[test]
+fn a_library_that_cant_be_looked_at_is_never_replaced_by_a_new_one() {
+    let dir = empty_data("away");
+    std::os::unix::fs::symlink(dir.join("gone").join("library.db"), dir.join(songs_db::OLD_FILE_NAME)).unwrap();
+    assert!(songs_db::start_new(&dir, &[]).is_err());
+    assert!(!dir.join(songs_db::FILE_NAME).exists());
+}

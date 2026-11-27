@@ -367,11 +367,18 @@ const NO_LIBRARY_YET: &str = "there's no library yet";
 pub fn start_new(dir: &Path, project_folders: &[PathBuf]) -> Result<AtStart, LibraryError> {
     let songs_db = dir.join(FILE_NAME);
     let failed = |why: String| LibraryError::Write { path: songs_db.clone(), why };
-    if dir.join(OLD_FILE_NAME).exists() {
-        return Err(failed("library.db is there, so songs.db is made from it instead".to_owned()));
+    // Only when both are surely not there: anything by either name (a file that can't be read, a link to a drive
+    // that's away), or a folder that can't be looked in, is someone's library, never replaced by an empty one.
+    for name in [OLD_FILE_NAME, FILE_NAME] {
+        match fs::symlink_metadata(dir.join(name)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) if name == FILE_NAME => return Ok(at_start(dir, "")),
+            Ok(_) => return Err(failed(format!("{name} is there, so the library is made from it instead"))),
+            Err(e) => return Err(failed(format!("{name} couldn't be looked at ({e})"))),
+        }
     }
     let new = new_path(&songs_db);
-    let mut part = Part::new(new.clone());
+    let part = Part::new(new.clone());
     let made = (|| -> Result<usize, String> {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let mut conn = Connection::open(&new).map_err(|e| e.to_string())?;
@@ -404,19 +411,32 @@ pub fn start_new(dir: &Path, project_folders: &[PathBuf]) -> Result<AtStart, Lib
     })();
     let folders = made.map_err(failed)?;
     // Never over one that's there: hard-linked in, which fails if a songs.db appeared meanwhile (a rename would
-    // replace it). A drive that can't link (FAT, exFAT, some network places) gets a rename, looked at just before.
+    // replace it). A drive that can't link (FAT, exFAT, some network places) gets a copy into a file only made if
+    // none is there.
     match fs::hard_link(&new, &songs_db) {
         // The part file goes with `part`; songs.db is the same file under its own name.
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(at_start(dir, "")),
-        Err(_) if songs_db.exists() => return Ok(at_start(dir, "")),
-        Err(_) => {
-            fs::rename(&new, &songs_db).map_err(|e| failed(format!("it couldn't be put in place ({e})")))?;
-            part.kept();
-        }
+        Err(_) => match copy_in_new(&new, &songs_db) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(at_start(dir, "")),
+            Err(e) => return Err(failed(format!("it couldn't be put in place ({e})"))),
+        },
     }
     drop(part);
     Ok(AtStart { library: songs_db, state: State::New { folders } })
+}
+
+/// Copies the new library at `from` to `to`, a file made only if none is there (AlreadyExists if one is), and
+/// flushed to the disk. One cut short is taken away again.
+fn copy_in_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut out = fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+    let copied = std::io::copy(&mut fs::File::open(from)?, &mut out).and_then(|_| out.sync_all());
+    if copied.is_err() {
+        drop(out);
+        let _ = fs::remove_file(to);
+    }
+    copied
 }
 
 /// The note, in the data folder, of a `songs.db` that couldn't be made ([`note_failed`]).

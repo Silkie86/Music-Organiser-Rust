@@ -40,8 +40,11 @@ pub fn start_new(dir: &Path) -> Option<songs_db::AtStart> {
     let folders = mo_space::bitwig::documents().map(|d| usual_project_folders(&d)).unwrap_or_default();
     match songs_db::start_new(dir, &folders) {
         Ok(made) => {
-            for folder in &folders {
-                log::info("Song library", &format!("Looks in {} (a DAW's usual project folder)", folder.display()));
+            // Only when this start made it: another copy of the app may have made one a moment before.
+            if matches!(made.state, songs_db::State::New { .. }) {
+                for folder in &folders {
+                    log::info("Song library", &format!("Looks in {} (a DAW's usual project folder)", folder.display()));
+                }
             }
             Some(made)
         }

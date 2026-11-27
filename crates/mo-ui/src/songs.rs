@@ -438,10 +438,22 @@ const KEEP_AGAIN_AFTER: Duration = Duration::from_secs(60);
 /// What the page says when the library has no songs, and the line under it.
 const NO_SONGS: &str = "No songs in the library yet";
 const NO_SONGS_TEXT: &str =
-    "Add the folders your projects are in on Settings › Folders: the songs in them are listed as they're found.";
+    "Add the folders your projects are in on Settings › Folders: the songs in them are listed once they're read.";
+/// What the empty list says while the project folders are looked through for the first time.
+const LOOKING: &str = "Looking through your project folders";
+const LOOKING_TEXT: &str = "Your songs are listed here once they're read.";
 
 /// What the page says when the library can't be read (the reason goes under it).
 const CANT_READ: &str = "Your songs couldn't be read";
+
+/// Says over the empty list that the project folders are being looked through for the first time.
+fn say_looking(weak: &slint::Weak<AppWindow>) {
+    let _ = weak.upgrade_in_event_loop(|app| {
+        let data = app.global::<SongsData>();
+        data.set_message(LOOKING.into());
+        data.set_message_text(LOOKING_TEXT.into());
+    });
+}
 
 /// Says over the list that the library has no songs, or takes that away.
 fn say_empty(data: &SongsData, empty: bool) {
@@ -487,7 +499,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
     }) {
         log::warning("Songs", &format!("Couldn't look for the songs' bounces: {e}"));
     }
-    let mut _watch = match watching {
+    let mut watch = match watching {
         Ok(w) => {
             log::info("Songs", &format!("Watching {} project folders", w.count()));
             Some(w)
@@ -497,7 +509,14 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
             None
         }
     };
-    let mut catch_up_at = Some(Instant::now() + CATCH_UP_AFTER);
+    // A new library (no saves yet, but folders to look in): looked through at once, and the page says so.
+    let first_look = live.is_empty() && !live.roots().is_empty();
+    if first_look {
+        say_looking(weak);
+    }
+    let mut catch_up_at = Some(Instant::now() + if first_look { Duration::ZERO } else { CATCH_UP_AFTER });
+    // When a failed read of the project folders after a change on Settings is tried again.
+    let mut folders_again_at: Option<Instant> = None;
     let mut keep_again_at: Option<Instant> = None;
     // Whether a card said that what you give songs isn't kept this time: once a run is enough.
     let mut said_held = false;
@@ -572,40 +591,48 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
                 break;
             }
             // A project folder added or taken off on Settings: watched, and walked now, so its songs list this run.
-            Ok(Told::FoldersChanged) => {
-                match Library::open_read_only(library).and_then(|lib| lib.roots()) {
-                    Ok(roots) => {
-                        live.set_roots(roots);
-                        // The old watch ends before the new one starts, so no change is told twice.
-                        _watch = None;
-                        let to_watch = watch_tell.clone();
-                        _watch = match FolderWatch::start(live.roots(), is_project_file, WATCH_QUIET, move |c| {
-                            let _ = to_watch.send(Told::Changed(c));
-                        }) {
-                            Ok(w) => {
-                                log::info("Songs", &format!("Watching {} project folders", w.count()));
-                                Some(w)
-                            }
-                            Err(e) => {
-                                log::warning("Songs", &format!("Can't watch the project folders: {e}"));
-                                None
-                            }
-                        };
-                        catch_up_at = Some(Instant::now());
-                    }
-                    Err(e) => log::warning("Songs", &format!("Couldn't read the project folders again: {e}")),
-                }
-                None
-            }
+            // Only a wake: the change itself is [`FOLDERS_CHANGED`], looked at below.
+            Ok(Told::FoldersChanged) => None,
             Err(RecvTimeoutError::Timeout) => {
                 tried_again = true;
                 live.retries()
             }
             Err(RecvTimeoutError::Disconnected) => break,
         };
+        // A project folder added or taken off on Settings (also before this thread began): watched as they are now,
+        // and the folders added walked now, so their songs list this run. One that can't be read is tried again a
+        // minute later.
+        let mut changes = changes;
+        let mut walked_added = false;
+        if folders_again_at.is_none_or(|at| Instant::now() >= at) && FOLDERS_CHANGED.swap(false, Ordering::AcqRel) {
+            match take_up_folders(live, library, &watch_tell, &mut watch) {
+                Ok(added) => {
+                    folders_again_at = None;
+                    if !added.is_empty() {
+                        if live.is_empty() {
+                            say_looking(weak);
+                        }
+                        walked_added = true;
+                        let mut walk = changes.unwrap_or_default();
+                        walk.overflowed.extend(added);
+                        changes = Some(walk);
+                    }
+                }
+                Err(e) => {
+                    log::warning("Songs", &format!("Couldn't read the project folders again: {e}; tried again soon"));
+                    FOLDERS_CHANGED.store(true, Ordering::Release);
+                    folders_again_at = Some(Instant::now() + KEEP_AGAIN_AFTER);
+                }
+            }
+        }
         let mut updated = Updated::default();
         if let Some(changes) = &changes {
             updated = live.update(changes);
+            if walked_added {
+                updated.first_look = true;
+                // The pages that took their saves from songs.db (Presets, Curves, MIDI) hear of them once kept.
+                tell_pages |= updated.for_card();
+            }
             if !updated.is_empty() {
                 log::info(
                     "Watch",
@@ -629,7 +656,9 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
         if !closing && catch_up_at.is_some_and(|at| Instant::now() >= at) {
             catch_up_at = None;
             let began = Instant::now();
-            let caught = live.catch_up();
+            let was_empty = live.is_empty();
+            let mut caught = live.catch_up();
+            caught.first_look = was_empty;
             let how = if caught.stopped {
                 "Stopped catching up with the project folders as the app closed, after"
             } else {
@@ -647,7 +676,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
                     quiet_line(caught.quiet)
                 ),
             );
-            tell_pages = caught.for_card();
+            tell_pages |= caught.for_card();
             catch_up_tries_until = Some(Instant::now() + CATCH_UP_TRIES);
             updated = updated.and(caught);
         } else if tried_again && updated.for_card() && catch_up_tries_until.is_some_and(|until| Instant::now() < until)
@@ -778,12 +807,52 @@ enum Told {
     Finish(mpsc::Sender<()>),
 }
 
+/// A project folder was added or taken off on Settings and the page's thread hasn't taken it up yet ([`watch`]).
+/// Kept here rather than only sent, so a change made before the thread began isn't lost.
+static FOLDERS_CHANGED: AtomicBool = AtomicBool::new(false);
+
 /// A project folder was added or taken off on Settings › Folders: the page's thread watches the folders as they are
-/// now and walks them at once, so a new folder's songs are listed this run.
-pub fn project_folders_changed() {
-    if let Some((tell, _)) = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
-        let _ = tell.send(Told::FoldersChanged);
+/// now and walks the ones added, so a new folder's songs are listed this run. Whether the page is reading the library
+/// (`false` before its first read is done, or when it couldn't read it: the next start takes the folder up then, as
+/// Settings says).
+pub fn project_folders_changed() -> bool {
+    FOLDERS_CHANGED.store(true, Ordering::Release);
+    TELL.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|(tell, _)| tell.send(Told::FoldersChanged).is_ok())
+}
+
+/// Reads the project folders again from the library at `library` and gives them to `live`. When they changed, a
+/// watch of them as they are now takes `watch`'s place (only once it's started: until then the old one carries on).
+/// The folders added, to be walked.
+fn take_up_folders(
+    live: &mut Live,
+    library: &Path,
+    tell: &mpsc::Sender<Told>,
+    watch: &mut Option<FolderWatch>,
+) -> Result<Vec<String>, mo_library::LibraryError> {
+    let roots = Library::open_read_only(library)?.roots()?;
+    let known: HashSet<String> = live.roots().iter().map(|r| mo_formats::case::key(r)).collect();
+    let added: Vec<String> = roots.iter().filter(|r| !known.contains(&mo_formats::case::key(r))).cloned().collect();
+    let same = added.is_empty() && roots.len() == known.len();
+    live.set_roots(roots);
+    if !same {
+        let to_watch = tell.clone();
+        match FolderWatch::start(live.roots(), is_project_file, WATCH_QUIET, move |c| {
+            let _ = to_watch.send(Told::Changed(c));
+        }) {
+            Ok(w) => {
+                log::info("Songs", &format!("Watching {} project folders", w.count()));
+                *watch = Some(w);
+            }
+            Err(e) => log::warning(
+                "Songs",
+                &format!("Can't watch the project folders as they are now: {e}; the ones watched before still are"),
+            ),
+        }
     }
+    Ok(added)
 }
 
 /// A song given something on its card ([`Live::give`]): the song as the list showed it (its key, and the ids of its

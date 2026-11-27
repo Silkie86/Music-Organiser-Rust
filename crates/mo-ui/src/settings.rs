@@ -1330,7 +1330,7 @@ fn edit_folder(app: &AppWindow, list: FolderList, folder: String, add: bool) {
                 }
                 // And Songs walks a new project folder now, and stops watching one taken off.
                 if list == FolderList::Projects {
-                    crate::songs::project_folders_changed();
+                    scanning = crate::songs::project_folders_changed();
                 }
             }
             Ok(folders::Changed::AsItWas) => {}
