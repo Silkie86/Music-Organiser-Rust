@@ -28,8 +28,9 @@ import sys
 # A change to any of these can change every crate.
 WHOLE = ("Cargo.toml", "Cargo.lock", "deny.toml", "rust-toolchain", "rust-toolchain.toml", ".cargo/", ".github/",
          "clippy.toml", "rustfmt.toml", "tools/dev/ci_scope.py")
-# Changes that never change what's built: notes, docs and the launcher's own scripts (checked on their own).
-NOTHING = ("docs/", "README", "CLAUDE.md", "screenshots/", "tools/dev/", ".gitignore", ".gitattributes")
+# Changes that never change what's built: notes, docs, the launcher's own scripts (checked on their own) and the tool
+# that makes the logo's pictures (run by hand; the pictures it makes are in assets/, which the installer check follows).
+NOTHING = ("docs/", "README", "CLAUDE.md", "screenshots/", "tools/dev/", "tools/logo/", ".gitignore", ".gitattributes")
 
 
 def packages():

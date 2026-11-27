@@ -62,6 +62,8 @@ $defines = @(
     "/DAppVersion=$version",
     "/DAppVersionNumbers=$numbers",
     "/DLogoIco=$(Join-Path $top $product['logo_ico'])",
+    # The installer's pictures sit beside the .ico (tools/logo makes them all).
+    "/DLogoDir=$(Split-Path -Parent (Join-Path $top $product['logo_ico']))",
     "/DExeFile=$exeFile",
     "/DExeName=music-organiser.exe",
     "/DOutputDir=$outDir",

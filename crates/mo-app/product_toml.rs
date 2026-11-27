@@ -22,7 +22,8 @@ pub fn read(file: &Path) -> HashMap<String, String> {
 }
 
 /// The keys the app and the installer use. Every one must be there.
-pub const KEYS: &[&str] = &["name", "description", "publisher", "website", "logo_png", "logo_ico", "installer_id"];
+pub const KEYS: &[&str] =
+    &["name", "description", "publisher", "website", "logo_png", "logo_ico", "logo_icns", "installer_id"];
 
 pub fn parse(text: &str) -> Result<HashMap<String, String>, String> {
     let mut found = HashMap::new();

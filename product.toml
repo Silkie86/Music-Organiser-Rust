@@ -1,7 +1,8 @@
 # The app's name, logo and the words around them, in one place. The name is DAWmate (Solomon, 2026-11-15; "Music
-# Organiser" was the working title). The logo is "Dm, in the well" (Solomon, 2026-11-15): assets/logo/logo.svg is the
-# drawing, logo.png and logo.ico are made from it. Change either here: the app (title bar, About, logs, Windows' file
-# details) and the installer all follow. The version is the workspace's, in Cargo.toml.
+# Organiser" was the working title). The logo is "Dm, in the well" (Solomon, 2026-11-15; finished 2026-11-27):
+# tools/logo/draw.py draws the SVGs in assets/logo, and tools/logo (cargo run --release --manifest-path
+# tools/logo/Cargo.toml) makes the .png, .ico, .icns and the installer's pictures from them. Change either here: the
+# app (title bar, About, logs, Windows' file details) and the installer all follow. The version is the workspace's, in Cargo.toml.
 #
 # What does NOT follow, on purpose: the data folder (MusicOrganiser, so a rename never loses anyone's data), the
 # .exe's file name, and the IDs the DAWs know the app's links by (the Bitwig controller and CLAP plugin IDs, which
@@ -19,10 +20,12 @@ publisher = "Silkie86"
 # The app's page, for the installer and the update check.
 website = "https://github.com/Silkie86/Music-Organiser-Rust"
 
-# The logo: a square PNG for the window, and an .ico (16 to 256 pixels) for the .exe and the installer. Paths are from
-# this file's folder.
+# The logo: a square PNG for the window, an .ico (16 to 256 pixels) for the .exe and the installer, and an .icns (16 to
+# 1024) for the Mac's app. The installer's pictures (setup-side-*.bmp, setup-small-*.bmp) sit beside the .ico. Paths
+# are from this file's folder.
 logo_png = "assets/logo/logo.png"
 logo_ico = "assets/logo/logo.ico"
+logo_icns = "assets/logo/logo.icns"
 
 # Windows knows the installed app by this. It never changes, even when the name does, so a renamed version installs
 # over the old one instead of beside it.
