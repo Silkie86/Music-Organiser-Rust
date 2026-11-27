@@ -1,13 +1,14 @@
-//! Copies of a sound's edits, for dragging into a DAW or keeping (the 1.1 plan's light sample edits): for now, a part
-//! picked on its card's waveform ("Loop 128 (part 1.406-1.875 s, 1a2b3c4d).wav").
+//! Copies of a sound's edits, for dragging into a DAW or keeping (the 1.1 plan's light sample edits): a part picked on
+//! its card's waveform ("Loop 128 (part 1.406-1.875 s, 1a2b3c4d).wav"), and a sound as the Edit strip's edits leave
+//! it ("Loop 128 (edited 5e6f7a8b, 1a2b3c4d).wav").
 //!
 //! The original is never changed or moved (rule 2). Copies go in `Edited sounds` in the export folder, beside
 //! `Trimmed sounds`: they're yours, as DAW projects go on using them, so the app never tidies them away (only a copy
-//! whose making was cut short, [`is_half_made`]). A part's name says which part of which sound it is
-//! (`mo_sounds::trimmed::part_name`), so dragging the same part again reuses its copy, an original changed since
-//! gets it made again, and a project that uses it still counts as using the original.
+//! whose making was cut short, [`is_half_made`]). A copy's name says which part of which sound it is, or which edits
+//! of it (`mo_sounds::trimmed::part_name`, `edit_name`), so the same part or the same edits again reuse the copy, an
+//! original changed since gets it made again, and a project that uses it still counts as using the original.
 //!
-//! Also where a sound's hits are, for snapping a picked part's edges to them ([`hits_of`]).
+//! Also where a sound's hits are, for snapping a picked part's edges to them ([`hits_of`], [`hits_in`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -28,6 +29,140 @@ pub const HITS_MOST_SECONDS: f64 = 2.0 * 60.0;
 
 /// The shortest part worth a copy (seconds): a press that barely moved isn't a part.
 pub const LEAST_PART_SECONDS: f64 = 0.010;
+
+/// The longest sound the Edit strip edits, or the longest part of a longer one: two minutes of 48 kHz stereo is 46 MB
+/// as it's read, and the strip holds that and the edit made of it.
+pub const EDIT_MOST_SECONDS: f64 = 2.0 * 60.0;
+
+/// What the Edit strip edits: the sound at `path`, whole; or, for one longer than [`EDIT_MOST_SECONDS`], the part
+/// picked on its card, `span` seconds into it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Source {
+    pub path: PathBuf,
+    pub span: Option<(f64, f64)>,
+}
+
+/// What the Edit strip read of a sound ([`read_to_edit`]).
+#[derive(Clone, Debug)]
+pub struct ToEdit {
+    pub audio: mo_audio::AudioData,
+    /// When the file was last changed as it was read: a copy is made only of the file as it still is.
+    pub changed: Option<SystemTime>,
+}
+
+/// Why [`read_to_edit`] read nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unread {
+    /// The sound is longer than [`EDIT_MOST_SECONDS`]: a part of it picked on its card is edited instead.
+    TooLong,
+    /// It couldn't be read, or there's no sound in it: why.
+    Failed(String),
+}
+
+impl std::fmt::Display for Unread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unread::TooLong => write!(
+                f,
+                "It's longer than {} minutes: pick a part of it on its card to edit that part.",
+                EDIT_MOST_SECONDS / 60.0
+            ),
+            Unread::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+/// Reads what the Edit strip edits ([`Source`]), all of it, with the file's date; or why it can't: it's longer than
+/// [`EDIT_MOST_SECONDS`], the file can't be read, or there's no sound in it. Never on the window's thread.
+pub fn read_to_edit(source: &Source) -> Result<ToEdit, Unread> {
+    let path = &source.path;
+    let failed = |e: String| Unread::Failed(format!("Couldn't read {}: {e}", path.display()));
+    // Before the read: a change while it reads leaves the date older than the file's, so the copy waits for a read of
+    // the file as it is.
+    let changed = std::fs::metadata(path).map_err(|e| failed(e.to_string()))?.modified().ok();
+    let audio = match source.span {
+        Some((from, to)) => {
+            if to - from > EDIT_MOST_SECONDS + 0.001 {
+                return Err(Unread::Failed(format!(
+                    "The part picked is longer than {} minutes, too long to edit.",
+                    EDIT_MOST_SECONDS / 60.0
+                )));
+            }
+            read_part(path, from, to).map_err(failed)?
+        }
+        None => {
+            let audio = mo_audio::read(path, EDIT_MOST_SECONDS + 1.0).map_err(|e| failed(e.to_string()))?;
+            if !edit::is_whole(&audio) {
+                return Err(Unread::TooLong);
+            }
+            audio
+        }
+    };
+    if audio.sample_rate == 0 || audio.is_empty() {
+        return Err(Unread::Failed("There's no sound in it to edit.".to_owned()));
+    }
+    Ok(ToEdit { audio, changed })
+}
+
+/// The copy of the sound `source` as `edits` leave it, made now or before, in [`FOLDER`] in the export folder; or why
+/// there's none. `audio` is the sound as [`read_to_edit`] read it, when the file was last changed `read_changed`.
+/// Never on the window's thread.
+pub fn edit_to_keep(
+    source: &Source,
+    audio: &mo_audio::AudioData,
+    read_changed: Option<SystemTime>,
+    edits: &[edit::Edit],
+) -> Result<PathBuf, String> {
+    let folder = crate::trim_copy::exports_now()?.join(FOLDER);
+    edit_in(source, audio, read_changed, edits, &folder)
+}
+
+/// [`edit_to_keep`]'s work, with copies kept in `folder`.
+pub fn edit_in(
+    source: &Source,
+    audio: &mo_audio::AudioData,
+    read_changed: Option<SystemTime>,
+    edits: &[edit::Edit],
+    folder: &Path,
+) -> Result<PathBuf, String> {
+    let original = &source.path;
+    if edits.is_empty() {
+        return Err("There are no edits to save yet.".to_owned());
+    }
+    let meta = std::fs::metadata(original).map_err(|e| format!("Couldn't look at {}: {e}", original.display()))?;
+    let changed = meta.modified().ok();
+    // Changed since it was read: a copy of the old sound would carry the new one's date, and be taken for it from then on.
+    if changed != read_changed {
+        return Err(format!(
+            "{} has changed since the Edit strip opened it: open it again to edit it as it is now.",
+            original.file_name().map_or_else(|| original.display().to_string(), |n| n.to_string_lossy().into_owned())
+        ));
+    }
+    // The part read (to the millisecond) and every edit, written out in full: the same edits of the same part are the
+    // same copy.
+    let ms = |s: f64| if s.is_finite() { (s.max(0.0) * 1000.0).round() as u64 } else { 0 };
+    let what = format!("{:?} {edits:?}", source.span.map(|(from, to)| (ms(from), ms(to))));
+    let copy = folder.join(mo_sounds::trimmed::edit_name(&original.to_string_lossy(), &what));
+    if fresh(&copy, changed) {
+        return Ok(copy);
+    }
+    let _making = MAKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if fresh(&copy, changed) {
+        return Ok(copy);
+    }
+    let edited = edit::apply(audio, edits);
+    if edited.is_empty() {
+        return Err("The edits leave no sound to save.".to_owned());
+    }
+    write_new(&edited, &copy, changed)?;
+    Ok(copy)
+}
+
+/// Whether the copy at `copy` was made before, and the original (last changed `changed`) hasn't changed since: a copy
+/// carries its original's date.
+fn fresh(copy: &Path, changed: Option<SystemTime>) -> bool {
+    std::fs::metadata(copy).is_ok_and(|c| c.is_file() && c.modified().ok().zip(changed).is_none_or(|(c, o)| c >= o))
+}
 
 /// The copy of the part of the sound at `original` from `from` to `to` seconds in, made now or before, in [`FOLDER`]
 /// in the export folder set in Settings (looked up as trimmed copies look it up, at most every half minute:
@@ -54,16 +189,12 @@ pub fn part_in(original: &Path, from: f64, to: f64, folder: &Path) -> Result<Pat
     let meta = std::fs::metadata(original).map_err(|e| format!("Couldn't look at {}: {e}", original.display()))?;
     let changed = meta.modified().ok();
     let copy = folder.join(mo_sounds::trimmed::part_name(&original.to_string_lossy(), from, to));
-    // Made before, and the original hasn't changed since (a copy carries its original's date).
-    let fresh = |copy: &Path| {
-        std::fs::metadata(copy).is_ok_and(|c| c.is_file() && c.modified().ok().zip(changed).is_none_or(|(c, o)| c >= o))
-    };
-    if fresh(&copy) {
+    if fresh(&copy, changed) {
         return Ok(copy);
     }
     let _making = MAKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Another drag may have made it while this one waited.
-    if fresh(&copy) {
+    if fresh(&copy, changed) {
         return Ok(copy);
     }
     let part = read_part(original, from, to).map_err(|e| format!("Couldn't read {}: {e}", original.display()))?;
@@ -162,9 +293,24 @@ pub fn hits_of(path: &Path) -> Result<Hits, String> {
     if too_long || rate == 0 {
         return Ok(Hits { at: Vec::new(), seconds });
     }
+    Ok(Hits { at: hits_of_mono(&mono, rate), seconds: mono.len() as f64 / f64::from(rate) })
+}
+
+/// The hits of a sound read whole (an edit in the Edit strip), as [`hits_of`] finds them: each one's place in seconds
+/// and its rise (dB). None for one longer than [`HITS_MOST_SECONDS`].
+pub fn hits_in(audio: &mo_audio::AudioData) -> Vec<(f64, f32)> {
+    let frames = audio.channels.iter().map(Vec::len).min().unwrap_or(0);
+    if audio.sample_rate == 0 || frames as f64 > HITS_MOST_SECONDS * f64::from(audio.sample_rate) {
+        return Vec::new();
+    }
+    let share = 1.0 / audio.channels.len().max(1) as f32;
+    let mono: Vec<f32> = (0..frames).map(|i| audio.channels.iter().map(|c| c[i]).sum::<f32>() * share).collect();
+    hits_of_mono(&mono, audio.sample_rate)
+}
+
+fn hits_of_mono(mono: &[f32], rate: u32) -> Vec<(f64, f32)> {
     let each = f64::from(rate);
-    let at = mo_audio::hits::find_in(&mono, rate).into_iter().map(|h| (h.at as f64 / each, h.rise_db)).collect();
-    Ok(Hits { at, seconds: mono.len() as f64 / each })
+    mo_audio::hits::find_in(mono, rate).into_iter().map(|h| (h.at as f64 / each, h.rise_db)).collect()
 }
 
 #[cfg(test)]
@@ -279,6 +425,8 @@ mod tests {
         mo_audio::write_wav(&original, &[ch], 48_000, 24).unwrap();
         let hits = hits_of(&original).unwrap();
         assert!((hits.seconds - 1.0).abs() < 1e-9);
+        // The same from the sound read whole, as the Edit strip finds them.
+        assert_eq!(hits_in(&mo_audio::read(&original, 60.0).unwrap()), hits.at);
         let at: Vec<f64> = hits.at.iter().map(|h| h.0).collect();
         assert_eq!(at.len(), 2, "{at:?}");
         assert!((at[0] - 0.25).abs() < 0.003 && (at[1] - 0.75).abs() < 0.003, "{at:?}");
@@ -288,6 +436,76 @@ mod tests {
         let hits = hits_of(&long).unwrap();
         assert!(hits.at.is_empty());
         assert!(hits.seconds > HITS_MOST_SECONDS, "{}", hits.seconds);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_edit_is_saved_once_and_reused() {
+        use mo_audio::edit::{Edit, Span};
+        let dir = folder("edit");
+        let original = dir.join("Loop 128.wav");
+        ramp(&original);
+        let source = Source { path: original.clone(), span: None };
+        let ToEdit { audio, changed } = read_to_edit(&source).unwrap();
+        assert_eq!(audio.len(), 1_000);
+        let copies = dir.join("Edited sounds");
+        let edits = [Edit::Reverse(None)];
+        let copy = edit_in(&source, &audio, changed, &edits, &copies).unwrap();
+        assert_eq!(copy.parent(), Some(copies.as_path()), "its folder made");
+        let name = copy.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("Loop 128 (edited "), "{name}");
+        let mark = mo_sounds::trimmed::mark(&original.to_string_lossy());
+        assert_eq!(mo_sounds::trimmed::mark_in(&name), Some(mark.as_str()));
+        let back = mo_audio::read(&copy, 60.0).unwrap();
+        assert_eq!((back.channels.len(), back.len()), (2, 1_000));
+        assert!((back.channels[0][0] - 0.999).abs() < 1e-4, "played backwards: {}", back.channels[0][0]);
+        // The same edits again: the copy made before, as it is (not written again).
+        std::fs::write(&copy, b"kept").unwrap();
+        assert_eq!(edit_in(&source, &audio, changed, &edits, &copies).unwrap(), copy);
+        assert_eq!(std::fs::read(&copy).unwrap(), b"kept");
+        // Other edits, or the same edits of a part: other copies.
+        let louder = edit_in(&source, &audio, changed, &[Edit::Normalise { peak_db: 0.0 }], &copies).unwrap();
+        assert_ne!(louder, copy);
+        let part = Source { path: original.clone(), span: Some((0.25, 0.5)) };
+        let part_audio = read_to_edit(&part).unwrap().audio;
+        assert_eq!(part_audio.len(), 250);
+        let part_copy = edit_in(&part, &part_audio, changed, &edits, &copies).unwrap();
+        assert!(part_copy != copy && part_copy != louder);
+        assert_eq!(mo_audio::read(&part_copy, 60.0).unwrap().len(), 250);
+        // A trim's copy is as long as the trim.
+        let trimmed = edit_in(&source, &audio, changed, &[Edit::Trim(Span::new(100, 300))], &copies).unwrap();
+        assert_eq!(mo_audio::read(&trimmed, 60.0).unwrap().len(), 200);
+        // No edits: nothing to save.
+        assert!(edit_in(&source, &audio, changed, &[], &copies).is_err());
+        // The file changed after it was read: no copy of the old sound under the new one's date.
+        let earlier = changed.and_then(|c| c.checked_sub(std::time::Duration::from_secs(60)));
+        let stale = edit_in(&source, &audio, earlier, &[Edit::Reverse(Some(Span::new(0, 10)))], &copies);
+        assert!(stale.as_ref().is_err_and(|e| e.contains("has changed")), "{stale:?}");
+        // Nothing half made is left.
+        let left: Vec<String> = std::fs::read_dir(&copies)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| is_half_made(n))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sound_too_long_to_edit_whole_is_edited_a_part_at_a_time() {
+        let dir = folder("long-edit");
+        let long = dir.join("Long.wav");
+        mo_audio::write_wav(&long, &[vec![0.25; 125_000]], 1_000, 16).unwrap();
+        let whole = read_to_edit(&Source { path: long.clone(), span: None }).err();
+        assert_eq!(whole, Some(Unread::TooLong));
+        assert!(Unread::TooLong.to_string().contains("longer than 2 minutes"));
+        let part = read_to_edit(&Source { path: long.clone(), span: Some((10.0, 20.0)) }).unwrap().audio;
+        assert_eq!(part.len(), 10_000);
+        assert!(read_to_edit(&Source { path: long, span: Some((0.0, 124.0)) }).is_err(), "a part too long");
+        let empty = dir.join("Empty.wav");
+        mo_audio::write_wav(&empty, &[Vec::new()], 1_000, 16).unwrap();
+        let empty = read_to_edit(&Source { path: empty, span: None }).err();
+        assert!(matches!(empty, Some(Unread::Failed(_))), "{empty:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -198,6 +198,18 @@ impl Player {
         self.start_from(sound, key.into(), true, from)
     }
 
+    /// [`Player::play`], from where `from` says, given the key of the sound playing and where it is at that moment (in
+    /// seconds), with nothing able to start or stop meanwhile; or not at all when it says no (`Err`). So one sound takes
+    /// another's place from the same moment in it (the Sounds Edit strip's original, while it's held, and its edit).
+    pub fn play_from<E>(
+        &self,
+        sound: Arc<AudioData>,
+        key: impl Into<String>,
+        from: impl FnOnce(Option<(&str, f64)>) -> Result<f64, E>,
+    ) -> Result<(), E> {
+        self.start_from(sound, key.into(), false, from)
+    }
+
     /// [`Player::play`], only if `wanted` still says so as the sound starts, with no other play or stop able to come
     /// in between: so a stop or a newer sound asked for just before can't be undone by this one starting after it.
     /// Gives back what `wanted` said. `wanted` should only take a quick look (a stop waits for it).

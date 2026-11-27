@@ -110,6 +110,7 @@ fn pick(app: &AppWindow, from: f64, to: f64) {
     let part = ((to - from) * seconds >= edit_copy::LEAST_PART_SECONDS).then_some(Part { id, from, to });
     PART.set(part);
     show(app);
+    super::edit_strip::card_part_changed(app);
 }
 
 /// Lets the part go. Whether one was on show on the card (Esc's step): a part of a sound that's no longer picked (the
@@ -118,6 +119,7 @@ pub(super) fn let_go(app: &AppWindow) -> bool {
     let shown = picked().and_then(|(id, _)| of(id)).is_some();
     if PART.take().is_some() {
         show(app);
+        super::edit_strip::card_part_changed(app);
     }
     shown
 }
@@ -173,7 +175,7 @@ pub(super) fn length_text(seconds: f64) -> String {
 
 /// The hits at `at` (0 to 1) as short lines along a waveform's foot, a path 1000 across and 10 high. Hits closer than
 /// a few tenths of a percent of the width to the last one shown are left out: on the card they'd be one mark.
-fn marks(at: &[f64]) -> String {
+pub(super) fn marks(at: &[f64]) -> String {
     let mut path = String::new();
     let mut last = f64::NEG_INFINITY;
     for &a in at {
@@ -212,7 +214,7 @@ fn snap(at: f32, within: f32) -> f32 {
 }
 
 /// [`snap`]'s work, on hits `at` (0 to 1, in order).
-fn snap_to(hits: &[f64], at: f64, within: f64) -> f64 {
+pub(super) fn snap_to(hits: &[f64], at: f64, within: f64) -> f64 {
     if within <= 0.0 || !at.is_finite() {
         return at;
     }

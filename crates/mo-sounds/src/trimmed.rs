@@ -1,8 +1,8 @@
 //! Names of the copies the app makes of a sound to drag into a DAW: the trimmed copies Trim silence makes
-//! (`mo_app::trim_copy`) and the parts picked on a sound's card (`mo_app::edit_copy`). Each is the original's name,
-//! what was done, and a mark made from the original's path, so a project that uses a copy still counts as using the
-//! original ([`crate::usage`]): "Kick 01 (trimmed -60 dB, 1a2b3c4d).wav", "Loop 128 (part 1.406-1.875 s,
-//! 1a2b3c4d).wav".
+//! (`mo_app::trim_copy`), the parts picked on a sound's card and the sounds edited in the Edit strip
+//! (`mo_app::edit_copy`). Each is the original's name, what was done, and a mark made from the original's path, so a
+//! project that uses a copy still counts as using the original ([`crate::usage`]): "Kick 01 (trimmed -60 dB,
+//! 1a2b3c4d).wav", "Loop 128 (part 1.406-1.875 s, 1a2b3c4d).wav", "Loop 128 (edited 5e6f7a8b, 1a2b3c4d).wav".
 
 use mo_formats::case;
 
@@ -30,6 +30,15 @@ pub fn part_name(path: &str, from: f64, to: f64) -> String {
     format!("{} (part {}-{} s, {}).wav", stem_of(path), secs(ms(from)), secs(ms(to)), mark(path))
 }
 
+/// The file name of the sound at `path` as `edits` leave it: `edits` is any text that tells one set of edits from
+/// another (the edits written out in full), which goes into the name as eight hex digits, so the same edits saved again
+/// are the same copy and other edits are another.
+pub fn edit_name(path: &str, edits: &str) -> String {
+    let mut h = crate::compact::Hash::new();
+    h.bytes(edits.as_bytes());
+    format!("{} (edited {:08x}, {}).wav", stem_of(path), h.0 as u32, mark(path))
+}
+
 /// The start of a copy's name: the original's name without its extension, cut to [`NAME_KEPT`] characters.
 fn stem_of(path: &str) -> String {
     let file = crate::file_name(path);
@@ -38,7 +47,7 @@ fn stem_of(path: &str) -> String {
     if stem.trim().is_empty() { "Sound".to_owned() } else { stem }
 }
 
-/// The mark in a copy's file name ([`copy_name`], [`part_name`]), or `None` for any other name.
+/// The mark in a copy's file name ([`copy_name`], [`part_name`], [`edit_name`]), or `None` for any other name.
 pub fn mark_in(file_name: &str) -> Option<&str> {
     let rest = file_name.strip_suffix(").wav").or_else(|| file_name.strip_suffix(").WAV"))?;
     let (head, mark) = rest.rsplit_once(", ")?;
@@ -49,6 +58,8 @@ pub fn mark_in(file_name: &str) -> Option<&str> {
         number(level.strip_prefix('-').unwrap_or(level))
     } else if let Some(span) = what.strip_prefix("part ").and_then(|w| w.strip_suffix(" s")) {
         span.split_once('-').is_some_and(|(from, to)| seconds(from) && seconds(to))
+    } else if let Some(key) = what.strip_prefix("edited ") {
+        key.len() == 8 && key.bytes().all(|b| b.is_ascii_hexdigit())
     } else {
         false
     };
@@ -86,6 +97,17 @@ mod tests {
         assert_eq!(mark_in("Loop (part one, 1234abcd).wav"), None);
         assert_eq!(mark_in("Loop (take 2, 1234abcd).wav"), None);
         assert_eq!(mark_in("Kick (trimmed -60 dB, 1234abcd).wav"), Some("1234abcd"));
+    }
+
+    #[test]
+    fn an_edits_name_tells_its_edits_apart_and_carries_its_originals_mark() {
+        let name = edit_name("D:\\Samples\\Loop 128.wav", "[Reverse(None)]");
+        assert!(name.starts_with("Loop 128 (edited ") && name.ends_with(").wav"), "{name}");
+        assert_eq!(mark_in(&name), Some(mark("D:\\Samples\\Loop 128.wav").as_str()));
+        assert_eq!(name, edit_name("D:\\Samples\\Loop 128.wav", "[Reverse(None)]"), "the same edits, the same copy");
+        assert_ne!(name, edit_name("D:\\Samples\\Loop 128.wav", "[Normalise { peak_db: 0.0 }]"));
+        assert_eq!(mark_in("Loop (edited 12345, 1234abcd).wav"), None);
+        assert_eq!(mark_in("Loop (edited nothing!, 1234abcd).wav"), None);
     }
 
     #[test]

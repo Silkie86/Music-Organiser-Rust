@@ -8,7 +8,9 @@ mod bitwig;
 mod copies;
 mod did;
 mod drag_out;
+mod edit_strip;
 pub use drag_out::card_at_row;
+pub use edit_strip::{for_screens as edit_for_screens, state_for_screens as edit_state_for_screens};
 pub use part::hits_for_screens;
 mod file_dates;
 mod galaxy;
@@ -186,6 +188,9 @@ struct Page {
     /// That play is of a part picked on the card: where it starts and where the part ends, in seconds into the file.
     /// It stops at the end ([`playing_changed`]'s ticker stops a part that's played as it's read).
     play_part: Option<(f64, f64)>,
+    /// That play is the Edit strip's: the edit (or the original while it's held), in memory ([`edit_strip`]). Its
+    /// waveform is the strip's, which shows where it is and stops it.
+    play_edit: bool,
     /// Each sound's place in `list`, by id.
     places: Arc<HashMap<i64, usize>>,
     /// Every sound's fingerprint, once read, for Sounds like this and Rediscover.
@@ -276,6 +281,7 @@ impl Default for Page {
             play_trimmed: false,
             play_offset: 0.0,
             play_part: None,
+            play_edit: false,
             places: Arc::default(),
             index: None,
             no_index: None,
@@ -2584,6 +2590,8 @@ fn none_to_show(app: &AppWindow, title: &str, text: String) {
             // Not read after all: the list's word ([`listed`]) doesn't take the place of why.
             p.read = false;
         });
+        // The Edit strip's sound went with them.
+        edit_strip::close(app);
         crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(Arc::default())));
         refresh(app);
     }
@@ -2703,6 +2711,8 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
     });
+    // No sound is picked in the new list: the Edit strip closes (its edits are kept for the sound's next pick).
+    edit_strip::close(app);
     galaxy::show_trail(app);
     let list = PAGE.with(|p| p.borrow().list.clone());
     crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(list)));
@@ -2721,8 +2731,12 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
 /// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
 /// buttons after Play (Solomon's F12 note, 2026-11-02 03:28) and the right-click menu lists them under Play, from this
 /// one list so the two can't drift apart.
-const CARD_ACTIONS: &[(&str, &str)] =
-    &[("Send to Bitwig", TO_BITWIG), ("Show in folder", "sounds.reveal"), ("Copy path", "sounds.copyPath")];
+const CARD_ACTIONS: &[(&str, &str)] = &[
+    ("Send to Bitwig", TO_BITWIG),
+    ("Edit", edit_strip::EDIT),
+    ("Show in folder", "sounds.reveal"),
+    ("Copy path", "sounds.copyPath"),
+];
 
 /// Send to Bitwig's id in the shortcut list (the C# app's).
 const TO_BITWIG: &str = "sounds.toBitwig";
@@ -2734,6 +2748,12 @@ static SENDING: AtomicBool = AtomicBool::new(false);
 /// The card's buttons and menu again, with keys changed in Settings.
 pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     show_actions(&app.global::<SoundsData>(), shortcuts);
+    edit_strip::show_keys(app, shortcuts);
+}
+
+/// A key let go while the page is shown: letting go of O ends hearing the original on the Edit strip.
+pub fn key_up(app: &AppWindow, text: &str) {
+    edit_strip::key_up(app, text);
 }
 
 /// The card's buttons and the right-click menu, with each one's key and tooltip from the shortcut list (rule 15).
@@ -2797,6 +2817,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = SoundLine>>));
     data.set_views(strings(VIEWS));
     show_actions(&data, shortcuts);
+    edit_strip::show_keys(app, shortcuts);
     // The filters whose choices don't come from the sounds (length, key, tempo) show from the start, without numbers
     // until the sounds are read, so the rows don't jump when they are.
     show_chips(app);
@@ -3019,6 +3040,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     galaxy::wire(app);
     drag_out::wire(app);
     part::wire(app);
+    edit_strip::wire(app);
     let weak = app.as_weak();
     data.on_list_made(move || {
         // The tiles and the List each come back where they were when they're made again: back on the page, or
@@ -3170,6 +3192,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| p.borrow_mut().picked = None);
         part::let_go(&app);
+        edit_strip::close(&app);
         app.global::<SoundsData>().set_panel_shown(false);
         redraw();
         // The galaxy's ring leaves the star with it.
@@ -3181,9 +3204,18 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         if let Some(app) = weak.upgrade() {
             if id == "play" {
                 toggle_play(&app);
+            } else if id == edit_strip::EDIT {
+                // The menu's Edit opens the strip on the sound right-clicked (picked by the click), never closes it.
+                edit_strip::open(&app);
             } else {
                 run_action(&app, &id);
             }
+        }
+    });
+    let weak = app.as_weak();
+    data.on_card_chosen(move |id| {
+        if let Some(app) = weak.upgrade() {
+            run_action(&app, &id);
         }
     });
 }
@@ -4216,6 +4248,7 @@ fn pick(app: &AppWindow, at: usize) {
     });
     if let Some(id) = PAGE.with(|p| p.borrow().list.sound(at).map(|s| s.id)) {
         part::sound_picked(app, id);
+        edit_strip::sound_picked(app);
     }
     data.set_panel_shown(true);
     find_alike(app, at);
@@ -4419,6 +4452,10 @@ fn step(app: &AppWindow, d: i32, held: bool) {
 /// Space and the Play button: stops the picked sound if it's playing, else plays it (a play you meant, kept for
 /// History and Most liked).
 pub fn toggle_play(app: &AppWindow) -> bool {
+    // With the Edit strip open on it, the edit plays (or stops).
+    if edit_strip::toggle_play(app) {
+        return true;
+    }
     let (picked, playing) = PAGE.with(|p| {
         let p = p.borrow();
         (p.picked, p.playing)
@@ -4505,6 +4542,7 @@ fn play_from(app: &AppWindow, at: usize, from: f64, most: f64, till: Option<f64>
             _ => 0.0,
         };
         p.play_part = part;
+        p.play_edit = false;
     });
     playing_changed(app);
     if here {
@@ -4515,6 +4553,35 @@ fn play_from(app: &AppWindow, at: usize, from: f64, most: f64, till: Option<f64>
     let job =
         PlayJob { ask, path, from, seconds, most, streams, trim, till, window: app.as_weak(), held: Arc::default() };
     ask_reader(job);
+}
+
+/// Plays `sound`, made in memory (the Edit strip's edit, or the original it was read from), as the sound at `at`'s:
+/// from `from` seconds into it, and only as far as `till` when there's a part picked on the strip. Nothing is read, so
+/// it starts at once.
+fn play_in_memory(app: &AppWindow, at: usize, sound: Arc<mo_audio::AudioData>, from: f64, till: Option<f64>) {
+    // A MIDI loop playing, or one still being made, would play over it.
+    crate::midi::stop_for_another(app);
+    crate::curve_editor::call_off_tone();
+    crate::song_player::stop_for_another(app);
+    crate::arrangement_play::stop_for_another(app);
+    let here = HERE.with(|h| *h.borrow());
+    let ask = if here { 0 } else { PLAYS.fetch_add(1, Ordering::SeqCst) + 1 };
+    // A read still going for an older play doesn't start its sound after this one.
+    NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.playing = Some((at, sound.seconds().max(0.001)));
+        p.play = ask;
+        p.play_reads = f64::INFINITY;
+        p.play_trimmed = false;
+        p.play_offset = 0.0;
+        p.play_part = till.map(|till| (from, till));
+        p.play_edit = true;
+    });
+    playing_changed(app);
+    if !here {
+        player().play(sound, ask.to_string(), from);
+    }
 }
 
 /// How many sounds may be read at once. Plays asked while every reader is busy replace each other (rule 12), so
@@ -4751,7 +4818,11 @@ fn stop(app: &AppWindow) {
     if let Some(player) = PLAYER.get() {
         player.stop();
     }
-    PAGE.with(|p| p.borrow_mut().playing = None);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.playing = None;
+        p.play_edit = false;
+    });
     playing_changed(app);
 }
 
@@ -4770,7 +4841,10 @@ pub fn escape(app: &AppWindow) -> bool {
         bitwig::close(app);
         return true;
     }
-    // A part picked on the card goes before the card.
+    // The Edit strip's part, then the strip, then a part picked on the card go before the card.
+    if edit_strip::escape(app) {
+        return true;
+    }
     if part::let_go(app) {
         return true;
     }
@@ -4815,6 +4889,7 @@ fn seeks(p: &Page, player_has: Option<&str>, to: f64, part_end: Option<f64>) -> 
         && to >= p.play_offset
         && to < p.play_reads
         && !p.play_trimmed
+        && !p.play_edit
         && p.play_part.map(|(_, end)| end) == part_end
 }
 
@@ -4832,6 +4907,7 @@ fn ended(key: &str, why: Option<&str>) {
         }
         let path = p.playing.and_then(|(at, _)| p.list.sound(at)).map(|s| s.path.clone());
         p.playing = None;
+        p.play_edit = false;
         Some(path)
     });
     // An older sound, cut off by a newer one that's still reading: the newer one keeps the page.
@@ -4854,6 +4930,7 @@ fn ended(key: &str, why: Option<&str>) {
                 data.set_played(1.0);
                 data.set_tile_played(1.0);
             }
+            edit_strip::show_playing(&app, false);
         }
     });
 }
@@ -4867,13 +4944,14 @@ thread_local! {
 fn playing_changed(app: &AppWindow) {
     WINDOW.with(|w| *w.borrow_mut() = Some(app.as_weak()));
     let data = app.global::<SoundsData>();
-    let (picked_plays, any) = PAGE.with(|p| {
+    let (picked_plays, any, edit) = PAGE.with(|p| {
         let p = p.borrow();
-        (p.playing.is_some() && p.playing.map(|(i, _)| i) == p.picked, p.playing.is_some())
+        (p.playing.is_some() && p.playing.map(|(i, _)| i) == p.picked, p.playing.is_some(), p.play_edit)
     });
     data.set_playing(picked_plays);
     data.set_played(0.0);
     data.set_tile_played(0.0);
+    edit_strip::show_playing(app, any && edit);
     redraw();
     // Nothing really plays for the screenshots, so nothing moves the waveform along there.
     if !any || HERE.with(|h| *h.borrow()) {
@@ -4884,13 +4962,22 @@ fn playing_changed(app: &AppWindow) {
     TICKER.with(|t| {
         t.start(TimerMode::Repeated, Duration::from_millis(40), move || {
             let Some(app) = weak.upgrade() else { return };
-            let Some((seconds, offset, part, play)) = PAGE.with(|p| {
+            let Some((seconds, offset, part, play, edit)) = PAGE.with(|p| {
                 let p = p.borrow();
-                p.playing.map(|(_, s)| (s, p.play_offset, p.play_part, p.play))
+                p.playing.map(|(_, s)| (s, p.play_offset, p.play_part, p.play, p.play_edit))
             }) else {
                 return;
             };
             let player = PLAYER.get();
+            // The Edit strip's play: its waveform shows where it is, and it stops at the end of the strip's part.
+            if edit {
+                let ours = player.and_then(Player::playing).is_some_and(|key| key.parse() == Ok(play));
+                let at = player.and_then(Player::position).filter(|_| ours);
+                if !edit_strip::tick(&app, at) {
+                    stop(&app);
+                }
+                return;
+            }
             let at = match part {
                 // A part: where it starts until the player has it (its place is the sound before's till then), and
                 // stopped at the part's end once it's there.
@@ -4919,6 +5006,9 @@ fn playing_changed(app: &AppWindow) {
 /// Runs one of the page's own actions (from its key or its menu). Returns whether it did anything, so an unused key
 /// goes on.
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
+    if let Some(done) = edit_strip::run_action(app, id) {
+        return done;
+    }
     let picked = PAGE.with(|p| {
         let p = p.borrow();
         p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.id, s.path.clone(), s.name().to_owned()))

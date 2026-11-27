@@ -2729,6 +2729,7 @@ fn sounds_shots(
     data.set_played(0.35);
     data.set_tile_played(0.35);
     part_shots(app, window, shots)?;
+    edit_shots(app, window, shots)?;
     // A sound deep in a pack, with folder names too long for a line, and six tags: its card wraps them, at the usual
     // width and as narrow as it goes, with nothing cut off on the right. Found by name, as the shuffled order changes
     // with every run.
@@ -5000,6 +5001,114 @@ fn part_shots(
     }
     hover(window, -1.0, -1.0);
     Ok(())
+}
+
+/// The Edit strip (E) along the bottom of Sounds (the 1.1 plan's light sample edits, mock-up 8): opened on a made-up
+/// drum loop with a fade in, a fade out and a normalise made, and two beats of it picked. Undo and redo step through
+/// the edits, and Esc lets the part go, then closes the strip.
+fn edit_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let edit = app.global::<mo_ui::SoundEdit>();
+    let data = app.global::<mo_ui::SoundsData>();
+    // A drum loop with a tempo, so the ruler counts bars and beats. Found by name, as the shuffled order changes with
+    // every run; not through the search box, as Esc would clear that first.
+    let found = (0..64).any(|row| {
+        pick_sound(app, row);
+        data.get_picked().name == EDIT_SOUND
+    });
+    if !found {
+        return Err(format!("sounds-edit.png: no made-up sound called {EDIT_SOUND} to open the strip on"));
+    }
+    let tools = ["sounds.editFadeIn", "sounds.editFadeOut", "sounds.editNormalise"];
+    mo_ui::sounds::edit_for_screens(app, drum_loop(), Some((0.25, 0.375)), &tools);
+    let (open, ready, edits) = mo_ui::sounds::edit_state_for_screens();
+    if !(open && ready && edit.get_shown() && edit.get_ready()) || edits != tools.len() {
+        return Err(format!("sounds-edit.png: the strip isn't open and ready ({open}, {ready}) or has {edits} edits"));
+    }
+    if edit.get_chips().row_count() != tools.len() || !edit.get_has_part() {
+        return Err("sounds-edit.png: the edits' chips or the part picked don't show".into());
+    }
+    hover(window, -1.0, -1.0);
+    capture(window);
+    shots.push(("sounds-edit.png".into(), capture(window)));
+    // Undo takes the last edit back, and redo makes it again.
+    mo_ui::sounds::run_action(app, "sounds.editUndo");
+    let undone = mo_ui::sounds::edit_state_for_screens().2;
+    mo_ui::sounds::run_action(app, "sounds.editRedo");
+    if undone != tools.len() - 1 || mo_ui::sounds::edit_state_for_screens().2 != tools.len() {
+        return Err("sounds-edit.png: undo and redo didn't step through the edits".into());
+    }
+    // Esc: the part goes first, then the strip.
+    if !mo_ui::sounds::escape(app) || edit.get_has_part() || !edit.get_shown() {
+        return Err("sounds-edit.png: Esc didn't let the strip's part go first".into());
+    }
+    if !mo_ui::sounds::escape(app) || edit.get_shown() {
+        return Err("sounds-edit.png: a second Esc didn't close the strip".into());
+    }
+    // Edit on the right-click menu only opens the strip (chosen twice, it stays open); the card's button closes it too.
+    data.invoke_menu_chosen("sounds.edit".into());
+    data.invoke_menu_chosen("sounds.edit".into());
+    if !edit.get_shown() {
+        return Err("sounds-edit.png: the menu's Edit didn't open the strip, or closed it again".into());
+    }
+    data.invoke_card_chosen("sounds.edit".into());
+    if edit.get_shown() {
+        return Err("sounds-edit.png: the card's Edit button didn't close the strip".into());
+    }
+    // The sound's edits were kept: opened again, they're back. With all of them undone there's nothing to save,
+    // though there's something to redo.
+    mo_ui::sounds::edit_for_screens(app, drum_loop(), None, &[]);
+    if mo_ui::sounds::edit_state_for_screens().2 != tools.len() || !edit.get_has_edits() {
+        return Err("sounds-edit.png: the sound's edits weren't kept for its next opening".into());
+    }
+    for _ in 0..tools.len() {
+        mo_ui::sounds::run_action(app, "sounds.editUndo");
+    }
+    if edit.get_has_edits() || edit.get_can_undo() || !edit.get_can_redo() {
+        return Err("sounds-edit.png: with every edit undone, Save copy still has something to save".into());
+    }
+    data.invoke_card_chosen("sounds.edit".into());
+    // As the page was, for the pictures after this one.
+    pick_sound(app, 6);
+    data.set_played(0.35);
+    data.set_tile_played(0.35);
+    Ok(())
+}
+
+/// The made-up sound the Edit strip's picture opens on: a drum loop at 128 BPM, 7.5 s long (four bars).
+const EDIT_SOUND: &str = "Hats 128";
+
+/// Four bars of a made-up drum loop at 128 BPM for the Edit strip ([`EDIT_SOUND`]'s length and tempo): a kick on each
+/// beat, a hat between.
+fn drum_loop() -> mo_audio::AudioData {
+    let rate = 44_100u32;
+    let beat_seconds = 60.0 / 128.0;
+    let seconds = 16.0 * beat_seconds;
+    let n = (seconds * f64::from(rate)).round() as usize;
+    let mut noise = 0x1234_5678u32;
+    let mut left = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f64 / f64::from(rate);
+        let beat = t % beat_seconds;
+        let kick = (-beat / 0.12).exp() * (std::f64::consts::TAU * (50.0 + 90.0 * (-beat / 0.03).exp()) * beat).sin();
+        noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let white = f64::from(noise >> 8) / f64::from(1u32 << 24) * 2.0 - 1.0;
+        let off = (t + beat_seconds / 2.0) % beat_seconds;
+        let hat = (-off / 0.025).exp() * white * 0.35;
+        left.push((kick * 0.7 + hat) as f32);
+    }
+    let right = left.iter().map(|s| s * 0.9).collect();
+    mo_audio::AudioData {
+        sample_rate: rate,
+        channels: vec![left, right],
+        file_seconds: seconds,
+        embedded_tempo: None,
+        embedded_root_note: None,
+        embedded_is_loop: None,
+    }
 }
 
 /// A left click at a point in the window.

@@ -112,6 +112,29 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
     action("sounds.toBitwig", "Put the picked sound into Bitwig", "Ctrl+B"),
     action("sounds.reveal", "Show the sound's file in Explorer", "Ctrl+Shift+E"),
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
+    // The Edit strip (the 1.1 plan's light sample edits, 27 Nov 2026). Undo, redo and save have the curve editor's
+    // keys; the tools have Alt and a letter, as the curve editor's do.
+    action("sounds.edit", "Edit the picked sound: open or close the Edit strip along the bottom", "E"),
+    action("sounds.editUndo", "Undo the last edit in the Edit strip", "Ctrl+Z"),
+    action("sounds.editRedo", "Redo the edit that was undone", "Ctrl+Shift+Z"),
+    action(
+        "sounds.editSave",
+        "Save the edited sound as a copy in Edited sounds (the file itself never changes)",
+        "Ctrl+S",
+    ),
+    action("sounds.editOriginal", "Hold to hear the original sound while you edit it", "O"),
+    action("sounds.editTrim", "Keep only the part picked in the Edit strip", "Alt+T"),
+    action("sounds.editFadeIn", "Fade in across the part picked (with none, a short fade at the start)", "Alt+I"),
+    action("sounds.editFadeOut", "Fade out across the part picked (with none, a short fade at the end)", "Alt+O"),
+    action("sounds.editReverse", "Play the part picked backwards (the whole sound with none)", "Alt+R"),
+    action("sounds.editNormalise", "Turn the sound up or down so its loudest moment is at full scale", "Alt+N"),
+    action("sounds.editLouder", "Turn the part picked (the whole sound with none) up half a dB", "Alt+Up"),
+    action("sounds.editQuieter", "Turn the part picked (the whole sound with none) down half a dB", "Alt+Down"),
+    action(
+        "sounds.editLoop",
+        "Crossfade the part picked (the whole sound with none) so it loops without a click",
+        "Alt+L",
+    ),
 ];
 
 /// The Plugins page's own actions, with the C# ids. Clean up and Uninstall join with the page's second part.
