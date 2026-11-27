@@ -113,8 +113,22 @@ pub fn copy_for(
         return Err(format!("This is already a {} project.", daw.name()));
     }
     let raw = std::fs::read(project).map_err(|e| format!("Couldn't read the song: {e}"))?;
-    let views = arrangement::read_bytes(project, &raw);
-    let mut song = views.into_iter().next().ok_or("The app can't read this kind of project's arrangement.")?;
+    let mut views = arrangement::read_bytes(project, &raw);
+    // The first view, unless it holds no notes or audio and another does: an FL song played in pattern mode has no
+    // patterns in its playlist (an automation clip may be there on its own), and its second view lays its patterns out
+    // one after another, as it opens in Bitwig (1,743 of Solomon's FL saves in the real-song test of 27 Nov 2026
+    // couldn't be copied before). Muted notes count: a song whose channels are all switched off is still copied.
+    let plays =
+        |v: &Arrangement| v.lanes.iter().flat_map(|l| &l.clips).any(|c| !c.notes.is_empty() || !c.audio.is_empty());
+    let chosen = if views.first().is_some_and(plays) { 0 } else { views.iter().position(plays).unwrap_or(0) };
+    let first_view = views.first().map(|v| v.view);
+    if views.is_empty() {
+        return Err("The app can't read this kind of project's arrangement.".into());
+    }
+    let mut song = views.swap_remove(chosen);
+    let why_not_first = first_view
+        .filter(|_| chosen > 0)
+        .map(|first| format!("The song's {first} is empty, so the copy is laid out \"{}\".", song.view));
     if song.lanes.is_empty() && !song.notes.is_empty() {
         return Err(song.notes.join(" "));
     }
@@ -153,6 +167,11 @@ pub fn copy_for(
         // False when the name was taken while this saved (a second press, another program): the next name is tried.
         if save_checked_new(&file, &bytes, |b| check(&file, b))? {
             let mut message = format!("Saved a copy for {} as {}.", daw.name(), file.display());
+            // Why the copy is laid out as it is, before what didn't go across.
+            if let Some(why) = &why_not_first {
+                message.push(' ');
+                message.push_str(why);
+            }
             if !left_out.is_empty() {
                 message.push_str(" Not carried over: ");
                 message.push_str(&left_out.join(" "));
@@ -253,6 +272,50 @@ mod tests {
             "{:?}",
             info.samples
         );
+    }
+
+    /// Recipe save 02 with nothing in its playlist: FL plays its pattern in pattern mode.
+    fn pattern_mode_flp(dir: &Path) -> PathBuf {
+        let raw = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../mo-formats/tests/fixtures/recipe/fl/MO Recipe 02 notes.flp"),
+        )
+        .unwrap();
+        let flp = mo_formats::fl::events::load(&raw).unwrap();
+        let mut body = Vec::new();
+        for e in flp.events.iter().filter(|e| e.id != mo_formats::fl::events::EV_PLAYLIST) {
+            body.push(e.id);
+            if e.id >= 192 {
+                let mut n = e.data.len();
+                while n >= 0x80 {
+                    body.push((n & 0x7f) as u8 | 0x80);
+                    n >>= 7;
+                }
+                body.push(n as u8);
+            }
+            body.extend_from_slice(&e.data);
+        }
+        // The header as it was (FLhd, its 6 bytes, FLdt), then the events' new length.
+        let mut out = raw[..18].to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        let file = dir.join("Pattern Mode.flp");
+        std::fs::write(&file, out).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_song_in_fls_pattern_mode_is_copied_as_it_opens_in_bitwig() {
+        // 1,743 of Solomon's FL saves are played in pattern mode (real-song test, 27 Nov 2026): their playlist is
+        // empty, so a copy from it had nothing in it and wasn't made.
+        let d = dir("pattern-mode");
+        let flp = pattern_mode_flp(&d);
+        let views = arrangement::read(&flp).unwrap();
+        assert!(views[0].lanes.is_empty() && views[1].note_count() > 0, "{views:?}");
+        let copy = copy_for(&flp, &d.join("Exports"), Daw::StudioOne, &as_named).unwrap();
+        assert!(copy.message.contains("so the copy is laid out \"As it opens in Bitwig\""), "{}", copy.message);
+        assert!(!copy.left_out.iter().any(|l| l.contains("laid out")), "{:?}", copy.left_out);
+        let back = arrangement::read(&copy.file).unwrap().remove(0);
+        assert_eq!(back.note_count(), views[1].note_count());
     }
 
     #[test]
