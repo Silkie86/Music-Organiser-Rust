@@ -639,3 +639,62 @@ fn a_songs_db_made_before_them_gets_the_songs_lists_indexes_once() {
     assert!(refused.contains("isn't the app's song library"), "{refused}");
     assert_eq!(indexes(&other, "samples"), ["ix_samples_path", "ix_samples_project"]);
 }
+
+/// A data folder of its own, empty, for the tests of a PC that never had a library.
+fn empty_data(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-songs-db-new").join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn a_pc_with_no_library_gets_a_new_empty_one_that_folders_can_be_added_to() {
+    let dir = empty_data("new");
+    let projects = dir.join("Bitwig Studio").join("Projects");
+    std::fs::create_dir_all(&projects).unwrap();
+    let start = songs_db::at_start(&dir, "test");
+    assert!(start.none_yet(), "{start:?}");
+    assert!(!start.is_songs_db());
+
+    let made = songs_db::start_new(&dir, std::slice::from_ref(&projects)).unwrap();
+    assert_eq!(made.state, State::New { folders: 1 });
+    assert!(made.is_songs_db());
+    assert_eq!(made.library, dir.join(songs_db::FILE_NAME));
+    // Only songs.db is left: no part file, no library.db.
+    let names: Vec<String> =
+        std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.iter().all(|n| !n.contains(".new-")), "{names:?}");
+    assert!(!dir.join(songs_db::OLD_FILE_NAME).exists());
+
+    // The next start opens it as the app's own; it holds the folder, no saves, and takes another folder.
+    let next = songs_db::at_start(&dir, "test");
+    assert_eq!(next.state, State::Own);
+    let lib = Library::open_read_only(&made.library).unwrap();
+    assert_eq!(lib.roots().unwrap(), vec![projects.to_string_lossy().into_owned()]);
+    assert!(lib.saves().unwrap().is_empty());
+    drop(lib);
+    let more = dir.join("FL");
+    folders::add_folder(&made.library, FolderList::Projects, &more.to_string_lossy(), &[]).unwrap();
+    let lib = Library::open_read_only(&made.library).unwrap();
+    assert_eq!(lib.roots().unwrap().len(), 2);
+}
+
+#[test]
+fn a_new_library_is_never_made_over_one_thats_there() {
+    // library.db there: songs.db is made from it instead, never a new one.
+    let old = library("new-beside-old");
+    let dir = old.parent().unwrap();
+    let _ = std::fs::remove_file(dir.join(songs_db::FILE_NAME));
+    assert!(songs_db::start_new(dir, &[]).is_err());
+    assert!(!dir.join(songs_db::FILE_NAME).exists());
+
+    // A songs.db already there (another copy of the app made it a moment ago) is opened as it is.
+    let dir = empty_data("twice");
+    let first = songs_db::start_new(&dir, &[dir.join("a")]).unwrap();
+    assert_eq!(first.state, State::New { folders: 1 });
+    let second = songs_db::start_new(&dir, &[]).unwrap();
+    assert_eq!(second.state, State::Own);
+    let lib = Library::open_read_only(&second.library).unwrap();
+    assert_eq!(lib.roots().unwrap().len(), 1, "the first one's folder list is kept");
+}

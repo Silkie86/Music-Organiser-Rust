@@ -231,6 +231,9 @@ pub enum State {
     /// `songs.db`, though it couldn't be looked at as the app started (`why`): `library.db` has gone (it's put away
     /// once `songs.db` has worked for a week), so `songs.db` is all there is, and each page says what it finds.
     Only { why: String },
+    /// `songs.db`, made just now, empty, as there was no library at all: a new PC, or one that never had the C# app
+    /// ([`start_new`]). The app's own from the start; `folders` is how many project folders it was given.
+    New { folders: usize },
 }
 
 impl AtStart {
@@ -241,7 +244,13 @@ impl AtStart {
 
     /// Whether the app reads its own `songs.db` (rather than `library.db`).
     pub fn is_songs_db(&self) -> bool {
-        matches!(self.state, State::Own | State::Switched | State::Only { .. })
+        matches!(self.state, State::Own | State::Switched | State::Only { .. } | State::New { .. })
+    }
+
+    /// Whether there's no library at all yet (no `songs.db`, no `library.db`): the app makes a new one
+    /// ([`start_new`]) unless the data folder in use isn't the real one this run.
+    pub fn none_yet(&self) -> bool {
+        matches!(&self.state, State::Kept { why } if why == NO_LIBRARY_YET)
     }
 
     /// What the log says.
@@ -260,6 +269,10 @@ impl AtStart {
             State::Only { why } => {
                 format!("Reading songs.db, though it couldn't be looked at just now ({why}): there's no library.db")
             }
+            State::New { folders } => format!(
+                "There was no song library yet, so a new, empty songs.db was made, the app's own, with {folders} of \
+                 the DAWs' usual project folders"
+            ),
         }
     }
 
@@ -329,7 +342,7 @@ pub fn at_start(dir: &Path, app: &str) -> AtStart {
             Some(_) => to_make("library.db has changed since songs.db was made"),
         },
         Ok(Found::Nothing) if old.is_file() => to_make("there's no songs.db yet"),
-        Ok(Found::Nothing) => old_one(State::Kept { why: "there's no library yet".to_owned() }),
+        Ok(Found::Nothing) => old_one(State::Kept { why: NO_LIBRARY_YET.to_owned() }),
         Ok(Found::Newer(version)) => old_one(State::Kept {
             why: format!("songs.db was made by a newer version of the app (layout {version}), so it's left as it is"),
         }),
@@ -338,6 +351,72 @@ pub fn at_start(dir: &Path, app: &str) -> AtStart {
         Err(Unread { why, passing: true }) => old_one(State::Unread { why }),
         Err(Unread { why, passing: false }) => old_one(State::Unusable { why }),
     }
+}
+
+/// Why [`at_start`] found nothing to open: neither `songs.db` nor `library.db` is there ([`AtStart::none_yet`]).
+const NO_LIBRARY_YET: &str = "there's no library yet";
+
+/// Makes a new, empty `songs.db` in the data folder `dir`, the app's own library from the start, when there's no
+/// library there at all (no `songs.db`, no `library.db`): a beta tester's PC, which never had the C# app. Without it
+/// nothing could be kept: no project folder could be added, so no song ever listed. `project_folders` go in its folder
+/// list (the DAWs' usual ones that are there), so the first look at the folders finds songs without a trip to
+/// Settings. Made the safe way, as [`make`] makes one: in a file of its own, checked, then renamed, and never over a
+/// file that's there (another copy of the app may have made one meanwhile: that one is opened then).
+///
+/// Writes a small file, quick enough for the start.
+pub fn start_new(dir: &Path, project_folders: &[PathBuf]) -> Result<AtStart, LibraryError> {
+    let songs_db = dir.join(FILE_NAME);
+    let failed = |why: String| LibraryError::Write { path: songs_db.clone(), why };
+    if dir.join(OLD_FILE_NAME).exists() {
+        return Err(failed("library.db is there, so songs.db is made from it instead".to_owned()));
+    }
+    let new = new_path(&songs_db);
+    let mut part = Part::new(new.clone());
+    let made = (|| -> Result<usize, String> {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let mut conn = Connection::open(&new).map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;").map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute_batch(TABLES).map_err(|e| e.to_string())?;
+        tx.execute_batch(TODOS).map_err(|e| e.to_string())?;
+        tx.execute_batch(INDEXES).map_err(|e| e.to_string())?;
+        let now = unix_now();
+        tx.execute("INSERT INTO songs_info (key, value) VALUES ('made_at', ?1), ('own_since', ?1)", [now])
+            .map_err(|e| e.to_string())?;
+        let mut folders = 0;
+        for folder in project_folders {
+            let Some(text) = folder.to_str() else { continue };
+            folders +=
+                tx.execute("INSERT OR IGNORE INTO roots (path) VALUES (?1)", [text]).map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if check != "ok" {
+            return Err(format!("SQLite's check of it failed ({check})"));
+        }
+        conn.execute_batch(&format!(
+            "PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {VERSION}; PRAGMA journal_mode = WAL;"
+        ))
+        .map_err(|e| e.to_string())?;
+        conn.close().map_err(|(_, e)| e.to_string())?;
+        fs::OpenOptions::new().write(true).open(&new).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+        Ok(folders)
+    })();
+    let folders = made.map_err(failed)?;
+    // Never over one that's there: hard-linked in, which fails if a songs.db appeared meanwhile (a rename would
+    // replace it). A drive that can't link (FAT, exFAT, some network places) gets a rename, looked at just before.
+    match fs::hard_link(&new, &songs_db) {
+        // The part file goes with `part`; songs.db is the same file under its own name.
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(at_start(dir, "")),
+        Err(_) if songs_db.exists() => return Ok(at_start(dir, "")),
+        Err(_) => {
+            fs::rename(&new, &songs_db).map_err(|e| failed(format!("it couldn't be put in place ({e})")))?;
+            part.kept();
+        }
+    }
+    drop(part);
+    Ok(AtStart { library: songs_db, state: State::New { folders } })
 }
 
 /// The note, in the data folder, of a `songs.db` that couldn't be made ([`note_failed`]).

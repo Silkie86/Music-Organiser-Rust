@@ -438,7 +438,7 @@ const KEEP_AGAIN_AFTER: Duration = Duration::from_secs(60);
 /// What the page says when the library has no songs, and the line under it.
 const NO_SONGS: &str = "No songs in the library yet";
 const NO_SONGS_TEXT: &str =
-    "Add the folders your projects are in on Settings › Folders: the songs in them are listed from the next start.";
+    "Add the folders your projects are in on Settings › Folders: the songs in them are listed as they're found.";
 
 /// What the page says when the library can't be read (the reason goes under it).
 const CANT_READ: &str = "Your songs couldn't be read";
@@ -462,6 +462,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
     // The card's status, stars, heart and tags come here too ([`give`]): this thread has the list.
     *TELL.lock().unwrap_or_else(PoisonError::into_inner) = Some((tx.clone(), live.stopper()));
     let to_tell = tx.clone();
+    let watch_tell = tx.clone();
     // Held so the loop below waits rather than ends if the watch can't start: the catch-up and the retries still run.
     let _still_here = tx;
     // How long FL Studio had each song open, once the list is on show and what you give songs is taken (so a star
@@ -486,7 +487,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
     }) {
         log::warning("Songs", &format!("Couldn't look for the songs' bounces: {e}"));
     }
-    let _watch = match watching {
+    let mut _watch = match watching {
         Ok(w) => {
             log::info("Songs", &format!("Watching {} project folders", w.count()));
             Some(w)
@@ -569,6 +570,32 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
             Ok(Told::Finish(done)) => {
                 let _ = done.send(());
                 break;
+            }
+            // A project folder added or taken off on Settings: watched, and walked now, so its songs list this run.
+            Ok(Told::FoldersChanged) => {
+                match Library::open_read_only(library).and_then(|lib| lib.roots()) {
+                    Ok(roots) => {
+                        live.set_roots(roots);
+                        // The old watch ends before the new one starts, so no change is told twice.
+                        _watch = None;
+                        let to_watch = watch_tell.clone();
+                        _watch = match FolderWatch::start(live.roots(), is_project_file, WATCH_QUIET, move |c| {
+                            let _ = to_watch.send(Told::Changed(c));
+                        }) {
+                            Ok(w) => {
+                                log::info("Songs", &format!("Watching {} project folders", w.count()));
+                                Some(w)
+                            }
+                            Err(e) => {
+                                log::warning("Songs", &format!("Can't watch the project folders: {e}"));
+                                None
+                            }
+                        };
+                        catch_up_at = Some(Instant::now());
+                    }
+                    Err(e) => log::warning("Songs", &format!("Couldn't read the project folders again: {e}")),
+                }
+                None
             }
             Err(RecvTimeoutError::Timeout) => {
                 tried_again = true;
@@ -746,7 +773,17 @@ enum Told {
     // Some songs' newest saves' shapes, just read from their files; and that the reading has ended.
     Shapes(Vec<mo_library::song_writes::ShapeRead>),
     ShapesDone,
+    // A project folder was added or taken off on Settings › Folders.
+    FoldersChanged,
     Finish(mpsc::Sender<()>),
+}
+
+/// A project folder was added or taken off on Settings › Folders: the page's thread watches the folders as they are
+/// now and walks them at once, so a new folder's songs are listed this run.
+pub fn project_folders_changed() {
+    if let Some((tell, _)) = TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+        let _ = tell.send(Told::FoldersChanged);
+    }
 }
 
 /// A song given something on its card ([`Live::give`]): the song as the list showed it (its key, and the ids of its
@@ -2458,7 +2495,9 @@ mod tests {
                 Told::PutOff(key) | Told::Bounces(key, _) => key,
                 Told::Finish(_) => "closing".to_owned(),
                 Told::PutAway(..) => "put away".to_owned(),
-                Told::Changed(_) | Told::AllBounces(_) | Told::Shapes(_) | Told::ShapesDone => "folders".to_owned(),
+                Told::Changed(_) | Told::AllBounces(_) | Told::Shapes(_) | Told::ShapesDone | Told::FoldersChanged => {
+                    "folders".to_owned()
+                }
             });
         }
         assert_eq!(order, ["a", "b", "closing", "folders"]);
