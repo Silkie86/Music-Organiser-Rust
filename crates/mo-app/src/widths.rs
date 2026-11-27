@@ -78,7 +78,9 @@ pub const PARTS: &[Part] = &[
 ];
 
 /// The file in the data folder where the CLAP plugin keeps its parts' widths (`mo-plugin`'s `widths`), written whole
-/// by way of the same name with [`crate::backup::PART_ENDING`] after it.
+/// through [`crate::backup::write_whole`] (so it's on [`crate::backup::WRITTEN_WHOLE`]). Plugins before 27 Nov 2026
+/// wrote it by way of the same name with [`crate::backup::PART_ENDING`] after it, which the start-up sweep still
+/// knows.
 pub const PLUGIN_FILE: &str = "plugin-widths.txt";
 
 /// The CLAP plugin's parts you can drag. The plugin keeps their widths in a file of its own (it never writes the
