@@ -14,7 +14,7 @@
 //! look, files that look didn't ask about are forgotten, so the store never holds more than one look's files (rule
 //! 28).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -65,20 +65,42 @@ enum Kind {
 pub struct Prints {
     state: Mutex<State>,
     store: Option<Mutex<Connection>>,
-    /// The last [`Prints::keep`] couldn't write to the store: what it held is only here.
-    unwritten: AtomicBool,
 }
 
+/// Each file's prints, and what happened to it since the last [`Prints::keep`] as marks beside them ([`ASKED`],
+/// [`READ`], [`WHOLE_READ`]): each path is held once (a Library of 235,000 files held it four times, about 80 MB more).
 #[derive(Default)]
 struct State {
-    known: HashMap<PathBuf, Known>,
-    /// The files asked about since the last [`Prints::keep`].
-    asked: HashSet<PathBuf>,
-    /// The files read since the last [`Prints::keep`], to write to the store.
-    read: HashSet<PathBuf>,
-    /// The files whose whole print was read since the last [`Prints::keep`] (a read of the whole file, or of a small
-    /// file's ends, which are the whole of it), so it's of them as they are now.
-    whole_read: HashSet<PathBuf>,
+    known: HashMap<PathBuf, Slot>,
+    /// How many are marked [`READ`] and how many [`WHOLE_READ`], so a keep with nothing to do looks at none of them.
+    reads: usize,
+    whole_reads: usize,
+    /// Files a whole look forgot that a keep couldn't take out of the store yet: the next keep tries again.
+    forget: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy)]
+struct Slot {
+    known: Known,
+    marks: u8,
+}
+
+/// Asked about since the last [`Prints::keep`] of a whole look.
+const ASKED: u8 = 1;
+/// Read since the last [`Prints::keep`], to write to the store.
+const READ: u8 = 2;
+/// Its whole print was read since the last [`Prints::keep`] (a read of the whole file, or of a small file's ends, which
+/// are the whole of it), so it's of the file as it is now.
+const WHOLE_READ: u8 = 4;
+
+impl State {
+    /// Marks a slot, counting the marks new to it.
+    fn mark(slot: &mut Slot, marks: u8, reads: &mut usize, whole_reads: &mut usize) {
+        let new = marks & !slot.marks;
+        *reads += usize::from(new & READ != 0);
+        *whole_reads += usize::from(new & WHOLE_READ != 0);
+        slot.marks |= marks;
+    }
 }
 
 impl Prints {
@@ -87,8 +109,15 @@ impl Prints {
     /// while the app runs only.
     pub fn remember_in(&mut self, path: &Path) -> Result<usize, String> {
         let conn = open(path)?;
-        let rows = match load(&conn) {
-            Ok(rows) => rows,
+        // Read straight into a table of their own (no list of them all first), taken in only once the whole store
+        // has been read: one that stops part way (damaged, busy) leaves nothing of it here.
+        let mut fresh: HashMap<PathBuf, Slot> = HashMap::new();
+        let loaded = load(&conn, |path, known| {
+            // A file kept twice (two spellings of one path) keeps the first, as it always has.
+            fresh.entry(path).or_insert(Slot { known, marks: 0 });
+        });
+        let n = match loaded {
+            Ok(n) => n,
             Err(e) if is_damage(&e) => {
                 // Read as far as the header (it's ours), but not its rows: damaged. Made again, empty.
                 drop(conn);
@@ -100,10 +129,14 @@ impl Prints {
             // Busy, or a disk that couldn't be read just now: left as it is, and tried again at the next look.
             Err(e) => return Err(e.to_string()),
         };
-        let n = rows.len();
         if let Ok(mut s) = self.state.lock() {
-            for (path, k) in rows {
-                s.known.entry(path).or_insert(k);
+            if s.known.is_empty() {
+                s.known = fresh;
+            } else {
+                // What was read while the app ran wins over what the store had.
+                for (path, slot) in fresh {
+                    s.known.entry(path).or_insert(slot);
+                }
             }
         }
         self.store = Some(Mutex::new(conn));
@@ -142,8 +175,15 @@ impl Prints {
         let (len, modified) = (meta.len(), meta.modified().ok());
         let (kept, whole_read) = {
             let mut s = self.state.lock().ok()?;
-            s.asked.insert(path.to_path_buf());
-            (s.known.get(path).copied(), s.whole_read.contains(path))
+            // Only a file known is marked: a whole look's keep forgets the known ones it didn't ask about, and one
+            // asked about but not known has nothing to forget.
+            match s.known.get_mut(path) {
+                Some(slot) => {
+                    slot.marks |= ASKED;
+                    (Some(slot.known), slot.marks & WHOLE_READ != 0)
+                }
+                None => (None, false),
+            }
         };
         let same = kept.filter(|k| Some(k.modified) == modified && k.len == len);
         match (same, kind) {
@@ -175,14 +215,20 @@ impl Prints {
         if whole_now {
             known.whole = Some(print);
         }
-        let mut s = self.state.lock().ok()?;
-        s.known.insert(path.to_path_buf(), known);
         // Read again and the same as kept: nothing new for the store.
-        if !unchanged {
-            s.read.insert(path.to_path_buf());
-        }
-        if whole_now {
-            s.whole_read.insert(path.to_path_buf());
+        let marks = ASKED | if unchanged { 0 } else { READ } | if whole_now { WHOLE_READ } else { 0 };
+        let mut s = self.state.lock().ok()?;
+        let s = &mut *s;
+        match s.known.get_mut(path) {
+            Some(slot) => {
+                slot.known = known;
+                State::mark(slot, marks, &mut s.reads, &mut s.whole_reads);
+            }
+            None => {
+                let mut slot = Slot { known, marks: 0 };
+                State::mark(&mut slot, marks, &mut s.reads, &mut s.whole_reads);
+                s.known.insert(path.to_path_buf(), slot);
+            }
         }
         Some((print, whole_now || whole_read))
     }
@@ -191,43 +237,75 @@ impl Prints {
     /// ask about are forgotten, in the store and here, so neither grows past one look's files. An error says why the
     /// store couldn't be written (the prints are still kept while the app runs).
     pub fn keep(&self, whole_look: bool) -> Result<(), String> {
-        let (read, asked, forgot) = {
+        let (read, gone) = {
             let Ok(mut s) = self.state.lock() else { return Ok(()) };
             let s = &mut *s;
-            let read: Vec<(PathBuf, Known)> =
-                s.read.drain().filter_map(|p| s.known.get(&p).copied().map(|k| (p, k))).collect();
-            s.whole_read.clear();
             // Only a whole look uses (and starts again) the files asked about: one kept part way through, or stopped,
-            // leaves them for the whole look's end, so what it asked about before then isn't forgotten.
-            let asked = if whole_look { std::mem::take(&mut s.asked) } else { HashSet::new() };
-            let before = s.known.len();
+            // leaves them for the whole look's end, so what it asked about before then isn't forgotten. The paths
+            // forgotten are moved out of the table, not copied.
+            let mut gone = std::mem::take(&mut s.forget);
             if whole_look {
-                s.known.retain(|p, _| asked.contains(p));
+                let before = s.known.len();
+                for (path, slot) in s.known.extract_if(|_, slot| slot.marks & ASKED == 0) {
+                    s.reads -= usize::from(slot.marks & READ != 0);
+                    s.whole_reads -= usize::from(slot.marks & WHOLE_READ != 0);
+                    gone.push(path);
+                }
+                // Only when much went: the table is often let go just after ([`Prints::let_go`]).
+                if s.known.len() < before / 2 {
+                    s.known.shrink_to_fit();
+                }
             }
-            (read, asked, s.known.len() != before)
+            // The prints read, to write: their marks stay until the store has them, so none is lost to a store
+            // that's busy, or not there yet.
+            let mut read: Vec<(PathBuf, Known)> = Vec::new();
+            let write_them = self.store.is_some() && s.reads > 0;
+            if whole_look || s.whole_reads > 0 || write_them {
+                for (path, slot) in &mut s.known {
+                    if write_them && slot.marks & READ != 0 {
+                        read.push((path.clone(), slot.known));
+                    }
+                    slot.marks &= if whole_look { READ } else { READ | ASKED };
+                }
+                s.whole_reads = 0;
+            }
+            (read, gone)
         };
-        // Nothing new and nothing forgotten: the store is as it should be.
-        if read.is_empty() && !forgot {
+        // Nothing new and nothing forgotten: the store is as it should be. With no store, nothing to forget in it.
+        let Some(store) = &self.store else { return Ok(()) };
+        if read.is_empty() && gone.is_empty() {
             return Ok(());
         }
-        let Some(store) = &self.store else { return Ok(()) };
-        let Ok(mut conn) = store.lock() else {
-            self.unwritten.store(true, Ordering::Relaxed);
-            return Ok(());
+        let written = match store.lock() {
+            Ok(mut conn) => write(&mut conn, &read, &gone).map_err(|e| e.to_string()),
+            Err(_) => Err("the prints store couldn't be used".to_owned()),
         };
-        let written = write(&mut conn, &read, forgot.then_some(&asked)).map_err(|e| e.to_string());
-        self.unwritten.store(written.is_err(), Ordering::Relaxed);
+        let Ok(mut s) = self.state.lock() else { return written };
+        let s = &mut *s;
+        match &written {
+            Ok(()) => {
+                // Written as they were then: one read again since (other prints) stays marked for the next keep.
+                for (path, known) in &read {
+                    if let Some(slot) = s.known.get_mut(path)
+                        && slot.marks & READ != 0
+                        && slot.known == *known
+                    {
+                        slot.marks &= !READ;
+                        s.reads -= 1;
+                    }
+                }
+            }
+            Err(_) => s.forget.extend(gone),
+        }
         written
     }
 
-    /// Lets go of the prints held here, when the store has every one of them (a store, the last [`Prints::keep`]
-    /// wrote it, and nothing read since): they're read back from it by the next [`Prints::remember_in`], a quick read
-    /// of one table, so they needn't be held between looks (a Library of 235,000 files: about 170 MB). Whether it did;
-    /// if not, nothing changes.
+    /// Lets go of the prints held here, when the store has every one of them (a store, and nothing read or forgotten
+    /// that it doesn't have yet): they're read back from it by the next [`Prints::remember_in`], a quick read of one
+    /// table, so they needn't be held between looks (a Library of 235,000 files: about 170 MB). Whether it did; if
+    /// not, nothing changes.
     pub fn let_go(&mut self) -> bool {
-        let all_written = self.store.is_some()
-            && !self.unwritten.load(Ordering::Relaxed)
-            && self.state.lock().is_ok_and(|s| s.read.is_empty());
+        let all_written = self.store.is_some() && self.state.lock().is_ok_and(|s| s.reads == 0 && s.forget.is_empty());
         if all_written {
             *self = Prints::default();
         }
@@ -357,9 +435,13 @@ fn remove(path: &Path) {
     }
 }
 
-fn load(conn: &Connection) -> rusqlite::Result<Vec<(PathBuf, Known)>> {
+/// Hands each kept file's prints to `take` as it's read, and says how many there were. A damaged row stops it with an
+/// error.
+fn load(conn: &Connection, mut take: impl FnMut(PathBuf, Known)) -> rusqlite::Result<usize> {
     let mut st = conn.prepare("SELECT path, size, modified, ends, whole FROM prints")?;
-    let rows = st.query_map([], |r| {
+    let mut rows = st.query([])?;
+    let mut n = 0;
+    while let Some(r) = rows.next()? {
         let path: String = r.get(0)?;
         let known = Known {
             len: u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
@@ -367,22 +449,19 @@ fn load(conn: &Connection) -> rusqlite::Result<Vec<(PathBuf, Known)>> {
             ends: print_of(r.get(3)?),
             whole: print_of(r.get(4)?),
         };
-        Ok((PathBuf::from(path), known))
-    })?;
-    rows.collect()
+        take(PathBuf::from(path), known);
+        n += 1;
+    }
+    Ok(n)
 }
 
-/// Writes the prints read, in one go; with `only`, rows for files not in it go too.
-fn write(conn: &mut Connection, read: &[(PathBuf, Known)], only: Option<&HashSet<PathBuf>>) -> rusqlite::Result<()> {
+/// Writes the prints read, and forgets the files `gone` (a whole look didn't ask about them), in one go.
+fn write(conn: &mut Connection, read: &[(PathBuf, Known)], gone: &[PathBuf]) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
-    if let Some(only) = only {
-        let kept: Vec<String> = {
-            let mut st = tx.prepare("SELECT path FROM prints")?;
-            st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
-        };
-        let mut gone = tx.prepare("DELETE FROM prints WHERE path = ?1")?;
-        for path in kept.iter().filter(|p| !only.contains(Path::new(p))) {
-            gone.execute([path])?;
+    {
+        let mut forget = tx.prepare("DELETE FROM prints WHERE path = ?1")?;
+        for text in gone.iter().filter_map(|p| p.to_str()) {
+            forget.execute([text])?;
         }
     }
     {
@@ -498,6 +577,66 @@ mod tests {
     }
 
     #[test]
+    fn prints_read_before_the_store_opens_are_written_to_it_later() {
+        let dir = folder("before-store");
+        let store = dir.join(FILE_NAME);
+        let stop = AtomicBool::new(false);
+        let (a, b) = (dir.join("a.multisample"), dir.join("b.multisample"));
+        fs::write(&a, b"ay").expect("write");
+        fs::write(&b, b"bee").expect("write");
+        // A store from before has `b`'s print; a look with no store (busy at its start) reads `a`.
+        let mut before = Prints::default();
+        assert_eq!(before.remember_in(&store), Ok(0));
+        let b_print = before.whole(&b, &stop);
+        before.keep(true).expect("kept");
+        drop(before);
+        let mut look = Prints::default();
+        let a_print = look.whole(&a, &stop);
+        look.keep(true).expect("no store: nothing written, nothing lost");
+        assert!(!look.let_go(), "no store yet");
+        // The store opens at the next look: what was read here stays, and is written at the next keep.
+        assert_eq!(look.remember_in(&store), Ok(1));
+        assert_eq!(look.known(), 2);
+        assert_eq!(look.whole_and_if_read(&a, &stop), a_print.map(|p| (p, false)));
+        assert_eq!(look.whole(&b, &stop), b_print);
+        assert!(!look.let_go(), "`a` isn't in the store yet");
+        look.keep(true).expect("kept");
+        assert!(look.let_go());
+        assert_eq!(look.remember_in(&store), Ok(2));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_a_whole_look_forgot_go_from_the_store_once_it_can_be_written() {
+        let dir = folder("forget-later");
+        let store = dir.join(FILE_NAME);
+        let stop = AtomicBool::new(false);
+        let (a, b) = (dir.join("a.multisample"), dir.join("b.multisample"));
+        fs::write(&a, b"ay").expect("write");
+        fs::write(&b, b"bee").expect("write");
+        let mut first = Prints::default();
+        assert_eq!(first.remember_in(&store), Ok(0));
+        assert!(first.whole(&a, &stop).is_some() && first.whole(&b, &stop).is_some());
+        first.keep(true).expect("kept");
+        // The next whole look asks only about `a`, while another copy of the app holds the store.
+        assert!(first.whole(&a, &stop).is_some());
+        let other = Connection::open(&store).expect("open");
+        other.execute_batch("BEGIN EXCLUSIVE").expect("lock");
+        assert!(first.keep(true).is_err(), "busy");
+        assert!(!first.let_go(), "the store still has `b`");
+        other.execute_batch("COMMIT").expect("unlock");
+        drop(other);
+        // The next keep takes `b` out, though it has nothing new.
+        first.keep(false).expect("kept");
+        let rows: i64 = Connection::open(&store)
+            .and_then(|c| c.query_row("SELECT COUNT(*) FROM prints", [], |r| r.get(0)))
+            .expect("count");
+        assert_eq!(rows, 1);
+        assert!(first.let_go());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn prints_kept_part_way_through_a_look_are_kept_and_not_forgotten_at_its_end() {
         let dir = folder("part-way");
         let store = dir.join(FILE_NAME);
@@ -586,7 +725,8 @@ mod tests {
         // The ends kept with the old print went with it: they're read again, not the ones from before.
         assert_ne!(prints.ends(&a, &stop), Some(ends));
         assert_eq!(prints.ends(&a, &stop), ends_hash(&a, &stop));
-        assert!(prints.state.lock().expect("state").read.contains(&a), "the new print goes to the store");
+        let read = prints.state.lock().expect("state").known.get(&a).is_some_and(|slot| slot.marks & READ != 0);
+        assert!(read, "the new print goes to the store");
         let _ = fs::remove_dir_all(&dir);
     }
 
