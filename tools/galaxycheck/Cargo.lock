@@ -2950,6 +2950,7 @@ version = "0.9.0-beta.2"
 name = "mo-convert"
 version = "0.9.0-beta.2"
 dependencies = [
+ "chrono",
  "md-5",
  "memchr",
  "mo-audio",
