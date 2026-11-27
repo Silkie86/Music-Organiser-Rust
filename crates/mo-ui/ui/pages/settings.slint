@@ -140,6 +140,9 @@ export global SettingsData {
     in property <bool> data-moving;
     in property <bool> data-ready;
     callback move-data();
+    // The F12 notes and the logs, for a beta tester to send (the Developer tab, with these, is Solomon's only).
+    callback open-notes();
+    callback open-logs();
     callback stop-data-move();
     callback cancel-data-move();
     // About.
@@ -688,6 +691,16 @@ component GeneralTab inherits VerticalLayout {
         HorizontalLayout {
             alignment: start;
             spacing: Space.sm;
+            StudioButton {
+                text: "Notes";
+                tip: "Open the folder your F12 notes are saved in";
+                clicked => { SettingsData.open-notes(); }
+            }
+            StudioButton {
+                text: "Logs";
+                tip: "Open the folder of the app's logs";
+                clicked => { SettingsData.open-logs(); }
+            }
             if !SettingsData.data-moving: StudioButton {
                 text: "Move to another drive\u{2026}";
                 tip: "Pick a drive or an empty folder: the data goes into a MusicOrganiser folder there";

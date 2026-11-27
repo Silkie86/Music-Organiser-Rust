@@ -829,9 +829,9 @@ impl Source for MidiParts {
 /// The Settings page's tabs, each found by what's on it too ("theme" finds General). The id is the tab's name.
 pub fn settings() -> Lines {
     use crate::settings::Tab;
-    let lines = Tab::ALL
-        .into_iter()
-        .map(|t| Found {
+    let lines = Tab::shown()
+        .iter()
+        .map(|&t| Found {
             name: format!("Settings › {}", t.name()),
             also: format!("{} {}", t.name(), settings_words(t)),
             detail: t.summary().to_owned(),

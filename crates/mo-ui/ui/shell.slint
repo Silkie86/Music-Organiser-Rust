@@ -252,7 +252,7 @@ export component KeySheet inherits Rectangle {
     }
 }
 
-// F12: a note to Claude about what's on screen.
+// F12: a note about what's on screen (for Claude on Solomon's copy, for him from a beta tester).
 export component NoteDialog inherits Rectangle {
     in-out property <string> text;
     in property <bool> has-picture;
@@ -280,14 +280,14 @@ export component NoteDialog inherits Rectangle {
             padding: Space.lg;
             spacing: Space.md;
             Text {
-                text: "Note for Claude";
+                text: "Write a note";
                 color: Theme.text;
                 font-family: Theme.title-font;
                 font-size: Type.heading;
                 font-weight: 600;
             }
             Text {
-                text: "What did you see, or what should change? It's saved with a picture of the window and the app's last log lines, where Claude can read it.";
+                text: "What did you see, or what should change? It's saved in the notes folder with a picture of the window and the app's last log lines.";
                 color: Theme.muted;
                 font-size: Type.meta;
                 wrap: word-wrap;

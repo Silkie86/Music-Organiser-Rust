@@ -437,7 +437,7 @@ impl Shortcuts {
         let key = written(key);
         if KEPT.iter().any(|k| normalise(k) == normalise(&key)) {
             return match key.as_str() {
-                "F12" => "F12 is kept for writing a note to Claude.".to_owned(),
+                "F12" => "F12 is kept for writing a note.".to_owned(),
                 "Tab" | "Shift+Tab" => format!("{key} is kept for moving between boxes and buttons."),
                 _ => format!("{key} is kept for moving through the lists."),
             };
@@ -829,7 +829,7 @@ mod tests {
     #[test]
     fn kept_keys_cant_be_given_and_question_marks_are_one_key() {
         let mut keys = Shortcuts::default();
-        assert!(keys.set("app.search", "F12").contains("note to Claude"));
+        assert!(keys.set("app.search", "F12").contains("writing a note"));
         assert!(keys.set("app.search", "Tab").contains("kept"));
         assert_eq!(keys.key_of("app.search"), "Ctrl+F");
         keys.set("app.help", "Shift+?");

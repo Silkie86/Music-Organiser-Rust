@@ -31,6 +31,7 @@ pub mod curve_strip;
 pub mod curve_touch;
 pub mod data_move;
 pub mod daw_links;
+pub mod developer;
 pub mod drag_card;
 pub mod drag_out;
 pub mod drive_room;

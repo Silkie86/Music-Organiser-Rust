@@ -72,7 +72,7 @@ pub fn save(folder: &Path, note: &Note, now: DateTime<Local>) -> std::io::Result
     } else {
         "(no words)"
     };
-    let mut md = format!("# Note for Claude, {}\n\n{words}\n\n", now.format("%Y-%m-%d %H:%M:%S"));
+    let mut md = format!("# Note, {}\n\n{words}\n\n", now.format("%Y-%m-%d %H:%M:%S"));
     md += &format!("- Page: {}\n", if note.page.is_empty() { "?" } else { note.page });
     md += &format!("- Version: {}\n", note.version);
     if let Some(p) = note.log_path {
@@ -253,7 +253,7 @@ mod tests {
         let md = std::fs::read_to_string(&path).expect("readable");
         let name = path.file_stem().expect("named").to_string_lossy().into_owned();
         // Said at its end, added to what was on disk: the words before it are as they were written.
-        assert!(md.starts_with("# Note for Claude, ") && md.contains("\nStill here\n"), "{md}");
+        assert!(md.starts_with("# Note, ") && md.contains("\nStill here\n"), "{md}");
         let end =
             format!("- Picture: {name}.png\n\nThe picture ({name}.png) couldn't be saved: the window was too big\n");
         assert!(md.ends_with(&end), "{md}");
