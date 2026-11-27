@@ -137,7 +137,9 @@ fn icns(tree: &Tree) -> Vec<u8> {
 /// A plain 24-bit BMP. The installer's pictures have no see-through parts: anything see-through is laid on white.
 fn bmp(pixmap: &Pixmap) -> Vec<u8> {
     let rgb: Vec<u8> = rgba(pixmap)
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| {
             let a = u16::from(p[3]);
             let on_white = |c: u8| ((u16::from(c) * a + 255 * (255 - a)) / 255) as u8;
