@@ -8,6 +8,7 @@
 // `match_indices`) says, which is always between letters.
 #![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
+pub mod ableton;
 pub mod arrangement;
 pub mod bitwig;
 pub mod case;

@@ -19,7 +19,7 @@ use std::path::Path;
 
 use mo_formats::arrangement::{Arrangement, MOST_BEATS, TimeSignature};
 use mo_formats::dates::RealDates;
-use mo_formats::{NoteAttribute, NoteEvent, bitwig, case, fl, paths, studio_one};
+use mo_formats::{NoteAttribute, NoteEvent, ableton, bitwig, case, fl, paths, studio_one};
 use mo_harmony::Grid;
 
 use crate::PPQ;
@@ -225,7 +225,13 @@ fn by_ending(path: &str, raw: &[u8]) -> Result<Song, Unread> {
             let mut song = studio_one::Song::open(raw).map_err(|e| extract::damaged(&e.to_string()))?;
             Ok(of(&song.arrangement()))
         }
-        _ => Err(Unread::Failed("It isn't a project this app reads (FL Studio, Bitwig or Studio One)".into())),
+        ".als" => {
+            let set = ableton::LiveSet::open(raw).map_err(|e| extract::damaged(&e.to_string()))?;
+            set.arrangements().first().map(of).ok_or_else(|| Unread::Failed("It has no arrangement to read".into()))
+        }
+        _ => Err(Unread::Failed(
+            "It isn't a project this app reads (FL Studio, Bitwig, Studio One or Ableton Live)".into(),
+        )),
     }
 }
 
@@ -786,7 +792,7 @@ mod tests {
             // A date still to come says nothing; nor does a file that's gone, or one no reader takes.
             save("C:\\Songs\\Clock wrong.flp", now + 90_000_000),
             mo_library::Save { file_missing: true, ..save("C:\\Songs\\Gone.flp", now - 10) },
-            save("C:\\Songs\\Sketch.als", now - 20),
+            save("C:\\Songs\\Sketch.ptx", now - 20),
         ];
         let dates = RealDates::at(now);
         let songs = mo_library::songs::group_songs(&saves, &mo_library::SongChoices::default(), &dates);

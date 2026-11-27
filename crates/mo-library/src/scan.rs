@@ -21,6 +21,7 @@ pub fn daw_of(path: &str) -> Option<&'static str> {
         ".bwproject" => Some("Bitwig Studio"),
         ".flp" => Some("FL Studio"),
         ".song" => Some("Studio One"),
+        ".als" => Some(mo_formats::ableton::DAW),
         _ => None,
     }
 }
@@ -484,6 +485,7 @@ mod tests {
         assert_eq!(daw_of(r"C:\m\Song.FLP"), Some("FL Studio"));
         assert_eq!(daw_of("/m/a.bwproject"), Some("Bitwig Studio"));
         assert_eq!(daw_of("/m/a.song"), Some("Studio One"));
+        assert_eq!(daw_of("/m/A.ALS"), Some("Ableton Live"));
         assert_eq!(daw_of("/m/a.wav"), None);
         assert!(is_project_file(r"C:\m\Night Drive_14.flp"));
         assert!(!is_project_file(r"C:\m\._Night Drive_14.flp"));
