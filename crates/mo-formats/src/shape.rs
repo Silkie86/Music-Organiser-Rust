@@ -93,7 +93,10 @@ pub fn read_bytes(path: &Path, raw: impl crate::bitwig::FileBytes + AsRef<[u8]>)
                 .filter(|l| l.kind == LaneKind::Automation && !l.muted)
                 .filter(|l| moves(l.clips.iter().filter(|c| !c.muted).flat_map(|c| &c.points).map(|p| p.value)))
                 .count() as u32;
-            Some(shape(view, automation, crate::bitwig::reader::chains(&doc)))
+            // A save from before Bitwig 6 keeps its automation elsewhere, and has no lanes like these.
+            let old =
+                crate::bitwig::reader::old_automation(&doc).into_iter().filter(|v| moves(v.iter().copied())).count();
+            Some(shape(view, automation + old as u32, crate::bitwig::reader::chains(&doc)))
         }
         _ => None,
     }

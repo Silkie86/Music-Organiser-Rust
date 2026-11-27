@@ -60,6 +60,12 @@ const CLS_HARDWARE_IO: u32 = 0x461;
 pub(super) const F_DEVICE_NAME: u32 = 0x9a;
 /// On a device's definition: 0 when it's switched off with its power button.
 const F_DEVICE_ON: u32 = 0xa3;
+/// Before Bitwig 6: one automated setting's curve, in a track's old timeline (0x15d) list 0x239.
+const CLS_OLD_CURVE: u32 = 0x122;
+const F_OLD_CURVES: u32 = 0x239;
+const F_OLD_CURVE_TARGET: u32 = 0x4cc;
+const F_OLD_CURVE_POINTS: u32 = 0x48e;
+const F_OLD_POINT_VALUE: u32 = 0x28f;
 const F_DEVICE_VENDOR: u32 = 0x9b;
 pub(super) const F_DEVICE_CATEGORY: u32 = 0x9c;
 /// What a device is: 0 an audio effect, 1 a note effect, 2 an instrument (as Bitwig 6.1 saves it, on its own devices
@@ -595,6 +601,31 @@ fn body_tracks(doc: &Document) -> (TrackTree<ObjId>, Option<ObjId>) {
 /// like a track), the effect (send) tracks, and the master's effects, each in the order the file has them. A device in
 /// a chain or layer inside a track counts for that track. Instruments and note effects are left out, and so is a
 /// deactivated track, with all on it: no sound goes through it.
+/// Each automated setting's values in a save from before Bitwig 6, which keeps them on the track itself: its old
+/// timeline (0x15d) lists one curve (class 0x122) a setting in 0x239, with 0x4cc what it moves and 0x48e.0x21f its
+/// points, 0x28f each one's value (found on Solomon's Bitwig 4.3 to 5.3 saves, 27 Nov 2026; Bitwig 6 has lanes in
+/// 0x2dc9 instead, read by [`super::arrangement`]). Nested tracks have theirs the same way.
+pub(crate) fn old_automation(doc: &Document) -> Vec<Vec<f64>> {
+    ids(doc)
+        .filter(|&o| {
+            let object = doc.obj(o);
+            object.class == CLS_OLD_CURVE && object.has(F_OLD_CURVE_TARGET)
+        })
+        // Only the curves a track's old timeline lists: the same class elsewhere is something else's.
+        .filter(|&o| doc.ancestor(o, |p, _| doc.field_list(p, F_OLD_CURVES).contains(&o)).is_some())
+        .map(|o| {
+            doc.field_obj(o, F_OLD_CURVE_POINTS)
+                .map(|list| {
+                    doc.field_list(list, F_NOTES)
+                        .into_iter()
+                        .filter_map(|p| doc.obj(p).num(F_OLD_POINT_VALUE))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 pub(crate) fn chains(doc: &Document) -> crate::shape::Chains {
     let (body, master) = body_tracks(doc);
     let active: Vec<ObjId> =
@@ -1132,6 +1163,45 @@ pub fn each_blob_within(raw: &[u8], limits: BlobLimits, mut scan: impl FnMut(&[u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A save from before Bitwig 6: a track's old timeline lists its curves, one moving and one flat; a curve of the
+    /// same class that no timeline lists isn't the song's automation.
+    #[test]
+    fn a_pre_6_saves_automation_curves_are_found_on_its_tracks_old_timeline() {
+        use super::super::format::{Object, Slot, Value};
+        let mut raw = b"BtWg".to_vec();
+        raw.extend_from_slice(format!("000200010000{:08x}{:016x}00", 42, 0).as_bytes());
+        let mut doc = super::super::format::decode(raw).unwrap();
+        let curve = |doc: &mut Document, values: &[f64]| {
+            let points: Vec<Slot> = values
+                .iter()
+                .map(|&v| {
+                    let mut p = Object::new(0x108);
+                    p.set(F_OLD_POINT_VALUE, Value::F64(v));
+                    Slot::Obj(doc.add(p))
+                })
+                .collect();
+            let mut list = Object::new(0x6e);
+            list.set(F_NOTES, Value::List(points));
+            let list = doc.add(list);
+            let target = doc.add(Object::new(0x65));
+            let mut c = Object::new(CLS_OLD_CURVE);
+            c.set(F_OLD_CURVE_TARGET, Value::Obj(Slot::Obj(target)));
+            c.set(F_OLD_CURVE_POINTS, Value::Obj(Slot::Obj(list)));
+            doc.add(c)
+        };
+        let moving = curve(&mut doc, &[0.2, 0.9, 0.4]);
+        let flat = curve(&mut doc, &[0.5, 0.5]);
+        let stray = curve(&mut doc, &[0.0, 1.0]);
+        let mut timeline = Object::new(0xe1);
+        timeline.set(F_OLD_CURVES, Value::List(vec![Slot::Obj(moving), Slot::Obj(flat)]));
+        let timeline = doc.add(timeline);
+        doc.obj_mut(moving).parent = Some((timeline, F_OLD_CURVES));
+        doc.obj_mut(flat).parent = Some((timeline, F_OLD_CURVES));
+        let holder = doc.add(Object::new(0xe1));
+        doc.obj_mut(stray).parent = Some((holder, 0x1));
+        assert_eq!(old_automation(&doc), vec![vec![0.2, 0.9, 0.4], vec![0.5, 0.5]]);
+    }
 
     fn wide(s: &str) -> Vec<u8> {
         let units: Vec<u16> = s.encode_utf16().collect();
