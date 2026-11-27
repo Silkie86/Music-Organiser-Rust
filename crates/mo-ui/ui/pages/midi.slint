@@ -199,7 +199,8 @@ export global MidiData {
     callback clear();
 
     in property <bool> panel-shown;
-    in-out property <length> panel-width: 420px;
+    // 0 until you drag the card: the page lays it out its usual way then (`Widths.list-width`).
+    in-out property <length> panel-width: 0px;
     callback close-panel();
     in property <PickedPart> picked;
     // The picked part's piano roll: how many keys it shows top to bottom (none while its notes are read), its picture

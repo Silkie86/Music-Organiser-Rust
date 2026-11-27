@@ -112,6 +112,15 @@ fn every_old_copy_and_folder_left_behind_is_listed_with_its_size_biggest_first()
     let only: Vec<Option<Vec<String>>> = reminder.leftovers.iter().map(|l| l.only.clone()).collect();
     assert_eq!(only, [Some(Vec::new()), Some(Vec::new()), Some(Vec::new()), None]);
     assert!(reminder.leftovers.iter().all(|l| l.can_go()));
+    // Not in the records (Link again cut off after its swap: the whole-app review of 26 Nov, PG-2), the folder set
+    // aside is found all the same, saying where its files went, and checked against them.
+    let unrecorded = remind(&moved, &[], &[], &stop).unwrap();
+    let found = unrecorded.leftovers.iter().find(|l| l.path == home.path).unwrap();
+    assert!(matches!(&found.what, Left::Kept(h) if h.note == home.note && h.copy == home.copy), "{found:?}");
+    assert_eq!(
+        (found.now_in.as_str(), found.only.clone(), found.can_go()),
+        (steam.to.as_str(), Some(Vec::new()), true)
+    );
 
     // Something saved into an old copy after the move is named, and that one can't go until you've looked.
     write(Path::new(&presets.old_copy), "late.fxp", "late");
@@ -125,13 +134,16 @@ fn every_old_copy_and_folder_left_behind_is_listed_with_its_size_biggest_first()
     // The copy on the other drive went missing (unplugged, say): that old copy is still listed, but it stays, and the
     // headline counts only what can go.
     fs::rename(&steam.to, d.join("STEAM renamed")).unwrap();
-    let reminder = remind(&moved, &[], &[], &stop).unwrap();
+    let reminder = remind(&moved, std::slice::from_ref(&home), &[], &stop).unwrap();
     let first = &reminder.leftovers[0];
     assert_eq!(first.path, steam.old_copy);
     assert!(first.stays.as_deref().is_some_and(|w| w.contains("only copy the plugin could use")), "{first:?}");
-    assert_eq!(reminder.leftovers.len(), 3);
+    // So does the folder set aside whose files went there.
+    let set_aside = reminder.leftovers.iter().find(|l| l.path == home.path).unwrap();
+    assert!(set_aside.stays.as_deref().is_some_and(|w| w.contains("isn't there now")), "{set_aside:?}");
+    assert_eq!(reminder.leftovers.len(), 4);
     assert_eq!(reminder.bytes(), 8);
-    assert_eq!(reminder.title(), "2 old copies left after moving folders (8 bytes), and 1 that can't go yet");
+    assert_eq!(reminder.title(), "2 old copies left after moving folders (8 bytes), and 2 that can't go yet");
     fs::rename(d.join("STEAM renamed"), &steam.to).unwrap();
 
     // Once they're gone there's nothing to remind you of.

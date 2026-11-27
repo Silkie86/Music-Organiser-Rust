@@ -87,8 +87,9 @@ const AWAY_KEPT: i64 = 90 * 24 * 60 * 60;
 #[derive(Clone, Copy, Debug)]
 pub struct Folders<'a> {
     pub looked_in: &'a [PathBuf],
-    /// Folders (the roots, or folders under them) that couldn't be listed at this read, or not to their end: their
-    /// files may be missing from the list, so nothing read before under one of them is forgotten this time.
+    /// Folders (the roots, or folders under them) that couldn't be listed at this read, or not to their end, and roots
+    /// that weren't there when the roots were found but are back once the others were listed: their files may be
+    /// missing from the list, so nothing read before under one of them is forgotten this time.
     pub unlisted: &'a [PathBuf],
     pub now: i64,
 }
@@ -2004,6 +2005,16 @@ mod tests {
         assert_eq!(db.scan_in(&listed, at(&only_bitwig, -400), &progress).unwrap(), 0);
         assert_eq!(db.scan_in(&listed, at(&only_bitwig, 60), &progress).unwrap(), 0);
         assert_eq!(names(&db), ["Rise", "Wobble"]);
+        // Back while a read is under way, after its roots were found (the whole-app review of 26 Nov, PZ-2): it wasn't
+        // looked through, and it's plainly there now, but the read names it as a folder it couldn't list, so its
+        // curve stays.
+        std::fs::rename(&unplugged, &drive).unwrap();
+        let came_back = [vital.clone()];
+        let folders = Some(Folders { looked_in: &only_bitwig, unlisted: &came_back, now: 1_800_000_000 + 60 * day });
+        assert_eq!(db.out_of_date_in(&listed, folders).unwrap().0, Vec::<String>::new());
+        assert_eq!(db.scan_in(&listed, folders, &progress).unwrap(), 0);
+        assert_eq!(names(&db), ["Rise", "Wobble"]);
+        std::fs::rename(&drive, &unplugged).unwrap();
         // Back: nothing is read again, and it's a folder that is there once more (so missed afresh next time).
         std::fs::rename(&unplugged, &drive).unwrap();
         let back = [a.clone(), v.clone()];

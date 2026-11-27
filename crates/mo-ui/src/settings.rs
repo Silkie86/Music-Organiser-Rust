@@ -941,19 +941,21 @@ static MAXIMISED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// the user may have done it (see `watchdog::Hands`), and what Slint asked of the window in the 30 s before, from the
 /// notes its patched copy keeps (vendor/i-slint-backend-winit/PATCHED.md), then what Windows sent the window in the same
 /// time (`screen_move::heard`). On 24 Nov it left maximised by itself 10 s after coming back from the taskbar, on Songs
-/// with no page change, and on 25 Nov with nothing asked at all; these lines are to name what did it.
-pub fn resized(app: &AppWindow, by_user: bool) {
+/// with no page change, and on 25 Nov with nothing asked at all; these lines are to name what did it. `minimised_for`:
+/// the resize is the window coming back from the taskbar after that long, and the line looks back to when it was
+/// minimised, if that's longer (the whole-app review of 26 Nov, WI-1).
+pub fn resized(app: &AppWindow, by_user: bool, minimised_for: Option<std::time::Duration>) {
     // A moment later, on the event loop: the app hears of the resize before Slint does, and Slint's own note that
     // winit says maximised changed comes as it handles it.
     let weak = app.as_weak();
     slint::Timer::single_shot(std::time::Duration::from_millis(0), move || {
         if let Some(app) = weak.upgrade() {
-            log_unmaximised(&app, by_user);
+            log_unmaximised(&app, by_user, minimised_for);
         }
     });
 }
 
-fn log_unmaximised(app: &AppWindow, by_user: bool) {
+fn log_unmaximised(app: &AppWindow, by_user: bool, minimised_for: Option<std::time::Duration>) {
     use slint::winit_030::WinitWindowAccessor;
     let Some((look, winit_scale)) = app.window().with_winit_window(|w| (look_at(w), w.scale_factor())) else {
         return;
@@ -970,23 +972,35 @@ fn log_unmaximised(app: &AppWindow, by_user: bool) {
         "not by the user: the pointer was inside the window (or not seen since it came to the front), or the app \
          wasn't in front; no Windows key or Alt+Space"
     };
-    let asked = i_slint_backend_winit::mo_probe::since(std::time::Duration::from_secs(30));
+    // Back from the taskbar, from a second before it was minimised (both lists keep only their last few dozen).
+    let back = minimised_for.map_or(std::time::Duration::from_secs(30), |away| {
+        (away + std::time::Duration::from_secs(1)).max(std::time::Duration::from_secs(30))
+    });
+    let secs = back.as_secs();
+    let asked = i_slint_backend_winit::mo_probe::since(back);
     let asked = if asked.is_empty() {
-        "Slint asked nothing of the window in the 30 s before".to_owned()
+        format!("Slint asked nothing of the window in the {secs} s before")
     } else {
-        format!("what Slint asked of the window in the 30 s before:\n  {}", asked.join("\n  "))
+        format!("what Slint asked of the window in the {secs} s before:\n  {}", asked.join("\n  "))
     };
-    let heard = crate::screen_move::heard(std::time::Duration::from_secs(30));
+    let heard = crate::screen_move::heard(back);
     let heard = if heard.is_empty() {
-        "\n  Windows sent no size, place or window-menu message in the 30 s before".to_owned()
+        format!("\n  Windows sent no size, place or window-menu message in the {secs} s before")
     } else {
-        format!("\nwhat Windows sent the window in the 30 s before:\n  {}", heard.join("\n  "))
+        format!("\nwhat Windows sent the window in the {secs} s before:\n  {}", heard.join("\n  "))
+    };
+    let what = match minimised_for {
+        Some(away) => format!(
+            "The window came back from the taskbar no longer maximised, {} s after it was minimised",
+            away.as_secs()
+        ),
+        None => "The window stopped being maximised".to_owned(),
     };
     log::info(
         "Window",
         &format!(
-            "The window stopped being maximised (page {place}): it is {}; {who}. Slint draws at scale {}, winit's \
-             scale is {winit_scale}; {asked}{heard}",
+            "{what} (page {place}): it is {}; {who}. Slint draws at scale {}, winit's scale is {winit_scale}; \
+             {asked}{heard}",
             look.words(),
             app.window().scale_factor(),
         ),

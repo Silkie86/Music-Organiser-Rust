@@ -1749,7 +1749,7 @@ fn wide_shots(
     let kept = presets.get_panel_width();
     capture_sized(window, WIDE, Duration::from_millis(400));
     let usual = capture_sized(window, WIDE, Duration::from_millis(400));
-    presets.set_panel_width(kept + 300.0);
+    presets.set_panel_width(app.global::<mo_ui::Widths>().invoke_usual("presets.card".into()) + 300.0);
     capture_sized(window, WIDE, Duration::from_millis(400));
     let narrower = capture_sized(window, WIDE, Duration::from_millis(400));
     presets.set_panel_width(kept);
@@ -2756,9 +2756,11 @@ fn sounds_shots(
     shots.push(("sounds-seam-dragging.png".into(), capture(window)));
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: dragged_to, button });
     let dragged = data.get_panel_width();
-    if (dragged - wide - 100.0).abs() > 1.0 {
+    // Never dragged, the card is given 0 and shown at its usual width in this window.
+    let usual = app.global::<mo_ui::Widths>().invoke_usual("sounds.card".into());
+    if (dragged - usual - 100.0).abs() > 1.0 {
         return Err(format!(
-            "sounds seam: dragging it 100 px left made the card {dragged} wide, from {wide}; has the seam moved from {CARD_SEAM:?}?"
+            "sounds seam: dragging it 100 px left made the card {dragged} wide, from {usual}; has the seam moved from {CARD_SEAM:?}?"
         ));
     }
     app.global::<mo_ui::Widths>().invoke_reset("sounds.card".into());

@@ -72,8 +72,13 @@ pub(super) enum Stage {
         lines: Vec<FileLine>,
         ticks: Vec<bool>,
     },
-    /// Uninstall: its uninstaller is open, and the app waits for the plugin's files to go.
-    Waiting,
+    /// Uninstall: its uninstaller is open, and the app waits for the plugin's files to go. `handed_over`: it ended at
+    /// once, saying it finished, so it may have handed over to a window the app can't watch, or been closed without
+    /// uninstalling; the wait goes on up to its end ([`mo_app::plugins::uninstall::Watch::after`]), and the card says
+    /// Stop ends it (the whole-app review of 26 Nov, PG-3).
+    Waiting {
+        handed_over: bool,
+    },
     /// Move: which folder to move.
     MovePick {
         intro: String,
@@ -348,7 +353,7 @@ fn left_after(row_key: &(String, String), still: Option<Done>, list: Option<&[mo
 
 impl Cleaning {
     pub(super) fn busy(&self) -> bool {
-        matches!(self.stage, Stage::Removing | Stage::PuttingBack | Stage::Waiting | Stage::Moving)
+        matches!(self.stage, Stage::Removing | Stage::PuttingBack | Stage::Waiting { .. } | Stage::Moving)
     }
 }
 
@@ -624,7 +629,8 @@ pub(super) fn held(p: &super::Page) -> bool {
     }
     let Some(c) = p.clean.as_ref().filter(|c| c.busy()) else { return false };
     p.feed.start(&format!("{} is still under way", c.title.trim_end_matches('?')), "").failed(
-        "One clean-up, uninstall or move at a time: this starts once it's done (or once you press Stop on it).",
+        "One clean-up, uninstall, move or Link again at a time: try this again once it's done (or once you press \
+         Stop on it).",
     );
     true
 }
@@ -845,17 +851,25 @@ pub(super) fn fill(app: &AppWindow) {
             Stage::Checking | Stage::Finding | Stage::MoveChecking => 0,
             Stage::Ready { .. } | Stage::Pick { .. } | Stage::Files { .. } => 1,
             Stage::MovePick { .. } | Stage::MoveReady { .. } => 1,
-            Stage::Removing | Stage::Waiting | Stage::Moving => 2,
+            Stage::Removing | Stage::Waiting { .. } | Stage::Moving => 2,
             Stage::Done { .. } => 3,
             Stage::PuttingBack => 4,
         });
+        let handed_over = format!(
+            "Its uninstaller handed over to a window the app can't watch. Waiting up to {} minutes from its start for \
+             its files to go: if you closed that window without uninstalling, press Stop.",
+            mo_app::plugins::uninstall::WAIT.as_secs() / 60
+        );
         let (busy, can_stop) = match c.stage {
             Stage::Checking => ("Checking the folders for samples your songs use…", true),
             Stage::Finding => ("Looking for its uninstaller…", true),
             Stage::Removing => {
                 (if cfg!(windows) { "Sending to the Recycle Bin…" } else { "Sending to the Trash…" }, true)
             }
-            Stage::Waiting => ("Its uninstaller is open in its own window. Waiting for its files to go…", true),
+            Stage::Waiting { handed_over: false } => {
+                ("Its uninstaller is open in its own window. Waiting for its files to go…", true)
+            }
+            Stage::Waiting { handed_over: true } => (handed_over.as_str(), true),
             Stage::PuttingBack => ("Putting back…", false),
             Stage::MoveChecking => ("Checking it can move there…", true),
             Stage::Moving => (

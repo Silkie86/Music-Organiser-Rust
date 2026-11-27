@@ -170,16 +170,21 @@ pub fn remind(
         if stop.load(Ordering::Relaxed) {
             return Err(Stopped);
         }
-        // Kept aside, they say nothing of where their files went: there's nothing to check them against.
+        // Files kept aside say nothing of where their files went: there's nothing to check them against. A folder
+        // linking again set aside does (PG-2), so what's only in it is looked at, as for any folder left behind.
         let stays = old_home_stays(&h, moved);
+        let only = match stays {
+            None => only_in_old_home(&h, stop).map_err(|_| Stopped)?,
+            Some(_) => None,
+        };
         leftovers.push(Leftover {
             path: h.path.clone(),
             bytes: h.bytes,
+            now_in: h.copy.clone(),
             what: Left::Kept(h),
-            now_in: String::new(),
             since: None,
             stays,
-            only: None,
+            only,
         });
     }
     for found in not_kept(moved, homes, look_in, &leftovers, stop)? {

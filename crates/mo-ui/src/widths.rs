@@ -45,7 +45,7 @@ pub fn connect(app: &AppWindow) {
             return;
         };
         let width = WIDTHS.with(|w| w.borrow_mut().reset(part.name));
-        if part.usual > 0.0 {
+        if width > 0.0 {
             log::info("Widths", &format!("{} back to its usual {width:.0}", part.name));
         } else {
             log::info("Widths", &format!("{} back to its usual width, worked out by the page", part.name));

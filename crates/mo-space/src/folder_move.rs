@@ -684,6 +684,16 @@ pub fn swapped_unkept(
     })
 }
 
+/// Whether `from` looks like a folder a move swapped for its link: it's a link, and its old copy is a real folder
+/// beside it. Where the link leads isn't asked, as [`swapped_unkept`] asks before a move is kept: that check failed
+/// for every moved folder on Solomon's PC on 25 Nov 2026 ([`lead_report`]), and a move cut off after its swap must
+/// keep its note until it can be kept (the whole-app review of 26 Nov, PG-1). Looks at the disk: call it away from
+/// the window's thread.
+pub fn looks_swapped(from: &str) -> bool {
+    let from = from.trim_end_matches(['/', '\\']);
+    is_link(Path::new(from)) && real_folder(&format!("{from}{OLD_SUFFIX}"))
+}
+
 /// A time as the C# app writes one: seven digits after the second (chrono's own `%.Nf` only does 3, 6 or 9).
 pub(crate) fn csharp_time(now: chrono::DateTime<chrono::Local>) -> String {
     use chrono::Timelike;
