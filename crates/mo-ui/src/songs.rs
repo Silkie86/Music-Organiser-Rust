@@ -409,9 +409,10 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>, library: &Path) {
     let mut minutes_found = learn_minutes(live, library);
     // And each song's bounces, from the folders beside its saves: listed on a thread of their own, so a slow drive
     // doesn't hold up this one.
-    let rows = live.songs().rows.clone();
+    // Only what the look needs of each song: not a copy of the whole list (every song with every save).
+    let wanted = mo_app::bounces::songs(&live.songs().rows);
     if let Err(e) = background::spawn("Songs: all bounces", move || {
-        let _ = to_tell.send(Told::AllBounces(mo_app::bounces::find(&rows)));
+        let _ = to_tell.send(Told::AllBounces(mo_app::bounces::find_for(&wanted)));
     }) {
         log::warning("Songs", &format!("Couldn't look for the songs' bounces: {e}"));
     }

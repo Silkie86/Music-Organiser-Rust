@@ -855,18 +855,28 @@ fn due(p: &Page) -> bool {
 /// Puts the lines read while a filtering held the list ([`Page::pending`]) in, in place, once nothing else holds it.
 /// Whether any went in.
 fn take_waiting(p: &mut Page) -> bool {
-    if p.pending.is_empty() {
+    let done = p.reading.is_none();
+    let Page { items, pending, .. } = p;
+    if pending.is_empty() && !done {
         return false;
     }
-    let Page { items, pending, .. } = p;
     let Some(all) = Arc::get_mut(items) else { return false };
-    // Room for at least twice the lines when it grows, so a big batch (every preset file at once) moves the list
-    // rarely.
-    if all.capacity() - all.len() < pending.len() {
-        all.reserve(pending.len().max(all.len()));
+    let took = !pending.is_empty();
+    if took {
+        // Room for at least twice the lines when it grows, so a big batch (every preset file at once) moves the
+        // list rarely.
+        if all.capacity() - all.len() < pending.len() {
+            all.reserve(pending.len().max(all.len()));
+        }
+        all.append(pending);
     }
-    all.append(pending);
-    true
+    // Once every line is read, the room kept for more goes back (up to as much again as the list, which it never
+    // fills now), and so does the waiting list's: once, a copy of the list in a few milliseconds.
+    if done && (all.capacity() > all.len() || pending.capacity() > 0) {
+        all.shrink_to_fit();
+        pending.shrink_to_fit();
+    }
+    took
 }
 
 /// Ctrl+K gets the lines once they're all read and in: handed over while reading, it would hold the list.

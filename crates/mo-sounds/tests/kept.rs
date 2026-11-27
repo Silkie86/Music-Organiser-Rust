@@ -442,3 +442,30 @@ fn fingerprints_in_a_file_that_cant_be_read_find_nothing_and_a_scan_says_so() {
     fewer.remove(&(9000 * 3));
     assert!(mo_sounds::galaxy::update(&index, "features", fewer, false, &quiet, &never).is_none());
 }
+
+#[test]
+fn the_galaxy_reads_many_fingerprints_from_files_as_it_reads_each() {
+    use mo_sounds::galaxy::fingerprints;
+    let dir = folder("galaxy-many");
+    let held = SoundIndex::from_gathered(gathered(5000, 1), gathered(5000, 2), 5000);
+    // CLAP's numbers a copy of their own: shared, they couldn't be put in a file.
+    let mut kept = held.clone();
+    kept.clap = held.clap.as_deref().cloned().map(std::sync::Arc::new);
+    assert!(kept.keep_clap_in(&dir).unwrap().unwrap().written);
+    assert!(kept.keep_features_in(&dir).unwrap().unwrap().written);
+    let mut ids: Vec<i64> = (1..=5000).rev().map(|n| n * 3).collect();
+    ids.extend([4, -1, 3]);
+    for space in ["features", "clap", "clap+features"] {
+        for (name, index) in [("held", &held), ("kept", &kept)] {
+            let prints = fingerprints(index, space);
+            let many = prints.many(&ids);
+            assert_eq!(many.len(), ids.len());
+            for (id, got) in ids.iter().zip(&many) {
+                assert_eq!(got.as_ref(), prints.get(*id).as_ref(), "{space} {name} {id}");
+            }
+            assert!(!prints.unread(), "{space} {name}");
+        }
+        // The file holds the same bits.
+        assert_eq!(fingerprints(&held, space).many(&ids), fingerprints(&kept, space).many(&ids), "{space}");
+    }
+}
