@@ -2,10 +2,10 @@
 //! signature, markers, tracks and their names, a pattern for each clip of notes, and its audio clips. What can't go
 //! across (plugins and their settings, automation, a stretched clip's stretch) is listed in [`Written::left_out`].
 //!
-//! The project is built on FL Studio 25's own empty project (`template/fl25-empty.flp`: Solomon's recipe save "MO
-//! Recipe 01 empty", FL 25.2.5, with its registration text, project folder and dates taken out) and FL's own audio
-//! clip channel (`template/fl25-audio-channel.events`, from recipe save 04 without its sample), so every event FL
-//! expects is there, in the order FL writes it. What's added follows the recipe saves:
+//! The project is built on FL Studio 25's own empty project (the recipe test save "MO Recipe 01 empty", FL 25.2.5,
+//! with its registration text, project folder and dates taken out as it's read) and FL's own audio clip channel (from
+//! recipe save 04, without its sample), so every event FL expects is there, in the order FL writes it. What's added
+//! follows the recipe saves:
 //!
 //! - Each instrument track becomes an empty Sampler channel named after the track (FL can't load another DAW's
 //!   instrument); each audio file an audio clip channel (type 4) with its path (event 196).
@@ -15,7 +15,8 @@
 //! - The playlist (233) holds 80-byte items: u32 position, u16 20480, u16 the pattern (20480 + its number) or the
 //!   audio channel, u32 length, u16 the track (499 for track 1, counting down), u16 flags at 18 (0x40, and 0x2000 when
 //!   muted), at 24 and 28 a pattern's -1 or an audio clip's start and end in the file in milliseconds (-1.0 for the
-//!   whole file), a number for each item at 32, fades in milliseconds at 36 and 44, and 1.0 as a double at 64.
+//!   whole file), a number for each item at 32, fades in milliseconds at 36 and 44, 1.0 as a float at 52 on an audio
+//!   clip, 3 at 56 when it has fades, and 1.0 as a double at 64.
 //! - A marker is 148 (its position), 33 and 34 (4 and 4), 46, 45, 168, 101 (0), then 205 its name, after the playlist.
 //! - A track's name (239) follows its record (238), whose byte 12 is 0 when the track is switched off.
 //!
@@ -29,10 +30,14 @@ use super::events::{
 };
 use crate::arrangement::{Arrangement, LaneKind, PreviewClip};
 
-/// FL Studio 25's empty project, without anything of Solomon's.
-const TEMPLATE: &[u8] = include_bytes!("template/fl25-empty.flp");
-/// FL Studio 25's audio clip channel, without its sample's name and path.
-const AUDIO_CHANNEL: &[u8] = include_bytes!("template/fl25-audio-channel.events");
+/// FL Studio 25's empty project (recipe save 01).
+const TEMPLATE: &[u8] = include_bytes!("../../tests/fixtures/recipe/fl/MO Recipe 01 empty.flp");
+/// A project with FL Studio 25's audio clip channel as its third channel (recipe save 04).
+const AUDIO_TEMPLATE: &[u8] = include_bytes!("../../tests/fixtures/recipe/fl/MO Recipe 04 audio clip.flp");
+/// The empty project's events that are about whoever saved it: registration text, project folder, dates.
+const NOT_TAKEN: [u8; 3] = [200, 202, EV_PROJECT_TIME];
+/// The patterns FL can hold.
+const PATTERNS: usize = 999;
 
 /// Ticks a beat in the written project (the empty project's own).
 pub const PPQ: f64 = 96.0;
@@ -101,6 +106,10 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
     let mut same_pattern: HashMap<(u16, Vec<[u8; 24]>, u32), u16> = HashMap::new();
     let mut stretched = false;
     let mut automation = false;
+    let mut too_many_patterns = false;
+    let mut gain = false;
+    // A pattern is whole bars of the song's time signature.
+    let bar = ticks(song.signature.beats()).unwrap_or(4 * PPQ as u32).max(1);
 
     for lane in &song.lanes {
         match lane.kind {
@@ -125,10 +134,14 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
                     channels.push(Channel::Sampler(lane.name.clone()));
                     (channels.len() - 1) as u16
                 });
-                let (notes, length) = pattern_notes(clip, channel);
+                let (notes, length) = pattern_notes(clip, channel, bar);
                 let key = (channel, notes, length);
                 let number = match same_pattern.get(&key) {
                     Some(n) => *n,
+                    None if patterns.len() >= PATTERNS => {
+                        too_many_patterns = true;
+                        continue;
+                    }
                     None => {
                         let name = if clip.name.trim().is_empty() { lane.name.clone() } else { clip.name.clone() };
                         patterns.push(Pattern { channel, name, notes: key.1.clone(), length: key.2 });
@@ -151,6 +164,7 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
                 if (rate - 60.0 / song.tempo).abs() > 1e-6 || part.semitones != 0.0 || part.reversed {
                     stretched = true;
                 }
+                gain |= part.gain_db != 0.0;
                 let from = (part.from * 1000.0) as f32;
                 let to = ((part.from + part.length * rate) * 1000.0) as f32;
                 let first = clip.audio.first() == Some(part);
@@ -175,12 +189,25 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
                 .into(),
         );
     }
+    if gain {
+        left_out.push("Audio clips' own volume: they play at full volume.".into());
+    }
     if automation {
         left_out.push("Automation.".into());
     }
-    if channels.iter().any(|c| matches!(c, Channel::Sampler(_))) {
-        left_out.push("Instruments and effects: each instrument track gets an empty Sampler named after it.".into());
+    if too_many_patterns {
+        left_out.push(format!("Clips after the first {PATTERNS} different ones (FL holds no more patterns)."));
     }
+    if channels.iter().any(|c| matches!(c, Channel::Sampler(_))) {
+        left_out.push("Instruments: each instrument track gets an empty Sampler named after it.".into());
+    }
+    if !track_names.is_empty() {
+        left_out.push("Effects and mixer settings.".into());
+    }
+    for note in &song.notes {
+        left_out.push(note.clone());
+    }
+    items.sort_by_key(|i| (i.at, std::cmp::Reverse(i.track)));
     let bytes = assemble(song, title, created, &channels, &patterns, &items, &track_names);
     Written { bytes, left_out }
 }
@@ -192,7 +219,7 @@ fn ticks(beats: f64) -> Option<u32> {
 }
 
 /// A clip's notes as a pattern's records, and how long the pattern is: its notes' last bar.
-fn pattern_notes(clip: &PreviewClip, channel: u16) -> (Vec<[u8; 24]>, u32) {
+fn pattern_notes(clip: &PreviewClip, channel: u16, bar: u32) -> (Vec<[u8; 24]>, u32) {
     let mut records = Vec::new();
     let mut end = 0u32;
     for n in &clip.notes {
@@ -210,8 +237,6 @@ fn pattern_notes(clip: &PreviewClip, channel: u16) -> (Vec<[u8; 24]>, u32) {
         records.push(r);
     }
     records.sort_by_key(|r| (r.first_chunk::<4>().map(|b| u32::from_le_bytes(*b)), r.get(12).copied()));
-    // FL counts a pattern's length in its own 4/4 bars.
-    let bar = (4.0 * PPQ) as u32;
     let length = end.div_ceil(bar).max(1).saturating_mul(bar);
     (records, length)
 }
@@ -249,19 +274,6 @@ fn encode(id: u8, data: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(data);
 }
 
-/// The events of a stream with no header, each as its id and data.
-fn bare_events(raw: &[u8]) -> Vec<(u8, Vec<u8>)> {
-    // The stream is read as FL 25's (event 199 first), so its extended events read whole.
-    let mut file = b"FLhd\x06\x00\x00\x00\x00\x00\x01\x00\x60\x00FLdt".to_vec();
-    let version = text("25.2.5.5319");
-    let mut head = Vec::new();
-    encode(events::EV_VERSION, &version, &mut head);
-    file.extend_from_slice(&((head.len() + raw.len()) as u32).to_le_bytes());
-    file.extend_from_slice(&head);
-    file.extend_from_slice(raw);
-    events::load(&file).map(|f| f.events.iter().skip(1).map(|e| (e.id, e.data.to_vec())).collect()).unwrap_or_default()
-}
-
 fn assemble(
     song: &Arrangement,
     title: &str,
@@ -272,16 +284,17 @@ fn assemble(
     track_names: &[(String, bool)],
 ) -> Vec<u8> {
     let Ok(template) = events::load(TEMPLATE) else { return Vec::new() };
-    let all = template.events;
+    let all: Vec<&Event<'_>> = template.events.iter().filter(|e| !NOT_TAKEN.contains(&e.id)).collect();
     let sampler_block: Vec<&Event<'_>> = {
         let start = all.iter().position(|e| e.id == EV_CHANNEL_NEW);
         let end = all.iter().position(|e| e.id == EV_ARRANGEMENT_NEW);
         match (start, end) {
-            (Some(s), Some(e)) if s < e => all.get(s..e).unwrap_or_default().iter().collect(),
+            (Some(s), Some(e)) if s < e => all.get(s..e).unwrap_or_default().to_vec(),
             _ => Vec::new(),
         }
     };
-    let audio_block = bare_events(AUDIO_CHANNEL);
+    let Ok(audio_template) = events::load(AUDIO_TEMPLATE) else { return Vec::new() };
+    let audio_block = audio_channel_block(&audio_template.events);
     let mut body = Vec::new();
     let mut patterns_written = false;
     let mut channels_written = false;
@@ -296,7 +309,7 @@ fn assemble(
         }
     };
     let mut skipping_channel = false;
-    for e in &all {
+    for e in all {
         let data: &[u8] = &e.data;
         if skipping_channel {
             if e.id == EV_ARRANGEMENT_NEW {
@@ -352,17 +365,17 @@ fn assemble(
                         }
                         Channel::Audio(path) => {
                             let name = crate::paths::stem(crate::paths::file_name(path));
-                            for (id, data) in &audio_block {
-                                match *id {
-                                    EV_CHANNEL_NEW => encode(*id, &number, &mut body),
+                            for t in &audio_block {
+                                match t.id {
+                                    EV_CHANNEL_NEW => encode(t.id, &number, &mut body),
                                     EV_SAMPLE_LIST_END => {
                                         encode(EV_SAMPLE_PATH, &text(path), &mut body);
-                                        encode(*id, data, &mut body);
+                                        encode(t.id, &t.data, &mut body);
                                     }
-                                    _ => encode(*id, data, &mut body),
+                                    _ => encode(t.id, &t.data, &mut body),
                                 }
                                 // The channel's name follows the block of settings that starts it, as FL writes it.
-                                if *id == EV_CHANNEL_SETTINGS {
+                                if t.id == EV_CHANNEL_SETTINGS {
                                     encode(EV_PLUGIN_NAME, &text(name), &mut body);
                                 }
                             }
@@ -419,6 +432,19 @@ fn assemble(
     out
 }
 
+/// FL's audio clip channel: the recipe save's third channel (number 2), up to the next channel or the arrangements,
+/// without its sample's path and name.
+fn audio_channel_block<'a, 'b>(all: &'b [Event<'a>]) -> Vec<&'b Event<'a>> {
+    let Some(start) = all.iter().position(|e| e.id == EV_CHANNEL_NEW && e.int() == 2) else { return Vec::new() };
+    all.iter()
+        .skip(start)
+        .enumerate()
+        .take_while(|(i, e)| *i == 0 || !matches!(e.id, EV_CHANNEL_NEW | EV_ARRANGEMENT_NEW))
+        .map(|(_, e)| e)
+        .filter(|e| !matches!(e.id, EV_SAMPLE_PATH | EV_PLUGIN_NAME))
+        .collect()
+}
+
 /// The playlist's items, in FL 25's 80 bytes each.
 fn playlist(items: &[Item]) -> Vec<u8> {
     let mut out = Vec::with_capacity(items.len() * 80);
@@ -440,6 +466,10 @@ fn playlist(items: &[Item]) -> Vec<u8> {
                 put(&mut r, 28, &(if whole { -1.0f32 } else { to }).to_le_bytes());
                 put(&mut r, 36, &fade_in.max(0.0).to_le_bytes());
                 put(&mut r, 44, &fade_out.max(0.0).to_le_bytes());
+                put(&mut r, 52, &1.0f32.to_le_bytes());
+                if fade_in > 0.0 || fade_out > 0.0 {
+                    put(&mut r, 56, &[3]);
+                }
             }
             None => put(&mut r, 24, &[0xff; 8]),
         }

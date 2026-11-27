@@ -1897,7 +1897,10 @@ fn open_as_copy(page: &Page, save: &mo_library::Save, daw: daw_copy::Daw) {
     let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
     let chosen = crate::settings::value(&shell::daw_exe_key(daw.name()));
     let (db, path, name) = (page.db.clone(), save.path.clone(), save.name.clone());
+    // A second press while the first is still writing would make a second copy: the first is the one that counts.
+    let Some(converting) = Converting::start(&path) else { return };
     let started = background::spawn("Copy for DAW", move || {
+        let _converting = converting;
         if !shell::exists(&path) {
             feed.start(&format!("Can't find {name}"), "").failed(MOVED_OR_DELETED);
             return;
@@ -1909,7 +1912,17 @@ fn open_as_copy(page: &Page, save: &mo_library::Save, daw: daw_copy::Daw) {
                 lib.setting(bitwig::EXPORT_FOLDER_KEY).map_err(|e| format!("Couldn't read the settings: {e}"))
             })
             .and_then(|setting| bitwig::export_folder(setting.as_deref(), bitwig::documents().as_deref()));
-        let made = root.and_then(|root| background::on_pool(move || daw_copy::copy_for(Path::new(&path), &root, daw)));
+        let locator = sound_library::locator(Some(&sound_library::database_beside(&db)));
+        let made = root.and_then(|root| {
+            background::on_pool(move || {
+                let find = |sample: &str| locator.locate_to_use(sample, &path);
+                // A damaged song can make a reader give up: that's one warning, and the card says so.
+                mo_catch::catch(std::panic::AssertUnwindSafe(|| {
+                    daw_copy::copy_for(Path::new(&path), &root, daw, &find)
+                }))
+                .unwrap_or_else(|_| Err("The song couldn't be read well enough to copy.".into()))
+            })
+        });
         match made {
             Ok(copy) => {
                 log::info("Copy for DAW", &format!("{name} became {}", copy.file.display()));

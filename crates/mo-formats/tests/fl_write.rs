@@ -23,12 +23,16 @@ fn events_of(raw: &[u8]) -> Vec<(u8, Vec<u8>)> {
 }
 
 #[test]
-fn the_template_is_fls_empty_project_without_anything_of_solomons() {
-    let recipe = std::fs::read(save("fl", "MO Recipe 01 empty.flp")).unwrap();
-    let template = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fl/template/fl25-empty.flp")).unwrap();
-    let own: Vec<_> = events_of(&recipe).into_iter().filter(|(id, _)| ![200, 202, 237].contains(id)).collect();
-    assert_eq!(events_of(&template), own);
-    assert_eq!(template[..14], recipe[..14], "the same header: FL 25, one channel, 96 ticks a beat");
+fn nothing_of_whoever_saved_the_empty_project_goes_into_a_new_one() {
+    let song = view_of(&std::fs::read(save("fl", "MO Recipe 01 empty.flp")).unwrap());
+    let written = write::write(&song, "New", 46_000.25);
+    let ours = events_of(&written.bytes);
+    // No registration text and no project folder; the one date is the new project's.
+    assert!(!ours.iter().any(|(id, _)| [200, 202].contains(id)));
+    let dates: Vec<_> = ours.iter().filter(|(id, _)| *id == 237).collect();
+    assert_eq!(dates.len(), 1);
+    assert_eq!(dates[0].1[..8], 46_000.25f64.to_le_bytes());
+    assert_eq!(written.bytes[..14], std::fs::read(save("fl", "MO Recipe 01 empty.flp")).unwrap()[..14]);
 }
 
 #[test]
@@ -140,7 +144,7 @@ fn a_song_reads_back_as_it_went_in() {
     assert_eq!(drums.audio[0].path, r"C:\Samples\Loop.wav");
     assert!((drums.audio[0].from - 0.3).abs() < 1e-4);
     assert!((drums.fade_in - 0.5).abs() < 1e-3, "{}", drums.fade_in);
-    assert_eq!(written.left_out.len(), 1, "{:?}", written.left_out);
+    assert_eq!(written.left_out.len(), 2, "{:?}", written.left_out);
     let info = fl::read_bytes(&written.bytes);
     assert_eq!(info.samples, [r"C:\Samples\Loop.wav"]);
 }
@@ -205,4 +209,21 @@ fn bitwig_and_studio_one_saves_keep_their_notes_audio_and_markers_in_fl() {
         let beats = |a: &Arrangement| a.markers.iter().map(|m| (m.beat * 96.0).round() as i64).collect::<Vec<_>>();
         assert_eq!(beats(&back), beats(&original), "{name}");
     }
+}
+
+#[test]
+fn a_pattern_is_whole_bars_of_the_songs_time_signature() {
+    let mut song = made_up_song();
+    song.signature = TimeSignature::new(3, 4).unwrap();
+    let mut lead = PreviewLane::new("Lead", LaneKind::Instrument);
+    lead.clips = vec![PreviewClip {
+        start: 0.0,
+        length: 6.0,
+        notes: vec![note(0.0, 1.0, 60, 40000, false)],
+        ..PreviewClip::default()
+    }];
+    song.lanes = vec![lead];
+    let back = view_of(&write::write(&song, "Waltz", 46_000.0).bytes);
+    let clip = &back.lanes[0].clips[0];
+    assert_eq!((clip.start, clip.length), (0.0, 3.0));
 }

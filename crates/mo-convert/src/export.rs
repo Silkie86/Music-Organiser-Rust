@@ -2,17 +2,17 @@
 //! markers, tracks, notes, audio clips) as the readers give it, written by that DAW's writer in `mo-formats`.
 //!
 //! Safety, the same as every export: the song is only read. The new project goes in the export folder under a name no
-//! file has yet ("Name", then "Name (2)"...), opened so that it can't replace a file that's there (`create_new`), and
-//! is read back with the app's own reader before it counts. A copy that doesn't read back is taken away again, so a
+//! file has yet ("Name", then "Name (2)"...). It's written under a temporary name first, read back from the disk with
+//! the app's own reader and checked (every note and every audio clip there), and only then given its name, in a way
+//! that fails when a file has that name ([`crate::save`]). A copy that doesn't check out is taken away again, so a
 //! half-written or wrong file is never left behind. Nothing is ever written over.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use mo_formats::arrangement::{self, Arrangement};
 use mo_formats::paths;
 
-use crate::save::safe_file_name;
+use crate::save::{LONGEST_FILE_NAME, cut, safe_file_name, save_checked_new};
 
 /// A DAW the app writes new projects for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,68 +65,111 @@ pub fn file_for(project: &Path, export_root: &Path, daw: Daw, name: &str) -> Pat
     export_root.join(song).join(daw.name()).join(format!("{}.{}", safe_file_name(name), daw.extension()))
 }
 
+/// The names a copy may have: the song's own, then "Name (2)", "Name (3)"... A long name is shortened to leave room
+/// for the number, so each number is its own file.
+fn names(stem: &str) -> impl Iterator<Item = String> + '_ {
+    (1..1000).map(move |n| {
+        if n == 1 {
+            safe_file_name(stem)
+        } else {
+            let number = format!(" ({n})");
+            format!("{}{number}", cut(stem, LONGEST_FILE_NAME - number.len()))
+        }
+    })
+}
+
 /// Reads `project` and writes it as a new project for `daw` in the export folder, never over a file that's there.
-/// Reads and writes the disk: never on the window's thread.
-pub fn copy_for(project: &Path, export_root: &Path, daw: Daw) -> Result<Exported, String> {
+/// `find` says where a sample the song names is on this computer (it may have moved, or be named from the song's
+/// folder): the new project names the file there. Reads and writes the disk: never on the window's thread.
+pub fn copy_for(
+    project: &Path,
+    export_root: &Path,
+    daw: Daw,
+    find: &dyn Fn(&str) -> Option<String>,
+) -> Result<Exported, String> {
     if daw.owns(project) {
         return Err(format!("This is already a {} project.", daw.name()));
     }
     let raw = std::fs::read(project).map_err(|e| format!("Couldn't read the song: {e}"))?;
     let views = arrangement::read_bytes(project, &raw);
-    let song = views.into_iter().next().ok_or("The app can't read this kind of project's arrangement.")?;
+    let mut song = views.into_iter().next().ok_or("The app can't read this kind of project's arrangement.")?;
     if song.lanes.is_empty() && !song.notes.is_empty() {
         return Err(song.notes.join(" "));
     }
-    let title = paths::stem(&project.to_string_lossy()).to_owned();
-    let (bytes, left_out) = daw.write(&song, &title);
+    let missing = find_samples(&mut song, find);
+    let stem = paths::stem(&project.to_string_lossy()).to_owned();
+    let (bytes, mut left_out) = daw.write(&song, &stem);
     if bytes.is_empty() {
         return Err("The new project couldn't be put together.".into());
     }
-    let stem = paths::stem(&project.to_string_lossy()).to_owned();
-    let file = (1..1000)
-        .map(|n| if n == 1 { stem.clone() } else { format!("{stem} ({n})") })
-        .map(|name| file_for(project, export_root, daw, &name))
-        .find(|f| !f.exists())
-        .ok_or("Every name for the copy is taken.")?;
-    write_new(&file, &bytes).map_err(|e| format!("Couldn't save {}: {e}", file.display()))?;
-    // Read back as the app reads that DAW's projects: a copy that doesn't is taken away again.
-    let back = arrangement::read_bytes(&file, &bytes);
-    let notes = |a: &[Arrangement]| a.first().map_or(0, Arrangement::note_count);
-    if back.first().is_none_or(|a| a.notes.iter().any(|n| n.contains("couldn't be read")))
-        || notes(&back) < notes(std::slice::from_ref(&song)).min(1)
-    {
-        let _ = std::fs::remove_file(&file);
-        return Err("The new project didn't read back as it was written, so it was taken away again.".into());
+    if !missing.is_empty() {
+        left_out.push(format!(
+            "Samples not found on this computer (the copy names them as the song does): {}.",
+            missing.join(", ")
+        ));
     }
-    let mut message = format!("Saved a copy for {} as {}.", daw.name(), file.display());
-    if !left_out.is_empty() {
-        message.push_str(" Not carried over: ");
-        message.push_str(&left_out.join(" "));
+    let wanted = counts(&song);
+    // Read back as the app reads that DAW's projects, from the disk: every note and audio clip must be there.
+    let check = |file: &Path, written: &[u8]| -> Option<String> {
+        let back = arrangement::read_bytes(file, written);
+        match back.first() {
+            None => Some("it didn't read back".into()),
+            Some(a) if a.notes.iter().any(|n| n.contains("couldn't be read")) => Some("it didn't read back".into()),
+            Some(a) if counts(a) != wanted => Some("it didn't read back as it was written".into()),
+            Some(_) => None,
+        }
+    };
+    for name in names(&stem) {
+        let file = file_for(project, export_root, daw, &name);
+        if file.exists() {
+            continue;
+        }
+        if let Some(folder) = file.parent() {
+            std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't make {}: {e}", folder.display()))?;
+        }
+        // False when the name was taken while this saved (a second press, another program): the next name is tried.
+        if save_checked_new(&file, &bytes, |b| check(&file, b))? {
+            let mut message = format!("Saved a copy for {} as {}.", daw.name(), file.display());
+            if !left_out.is_empty() {
+                message.push_str(" Not carried over: ");
+                message.push_str(&left_out.join(" "));
+            }
+            return Ok(Exported { file, left_out, message });
+        }
     }
-    Ok(Exported { file, left_out, message })
+    Err("Every name for the copy is taken.".into())
 }
 
-/// Writes `bytes` as a new file: its folders are made, and the file is opened so that it can't be one that's there
-/// already. A file that couldn't be written whole is taken away again.
-pub fn write_new(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(folder) = file.parent() {
-        std::fs::create_dir_all(folder)?;
-    }
-    let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(file)?;
-    let written = out.write_all(bytes).and_then(|()| out.sync_all());
-    if let Err(e) = written {
-        drop(out);
-        let _ = std::fs::remove_file(file);
-        return Err(e);
-    }
-    Ok(())
+/// The song's notes and audio clips, as a written copy must keep them.
+fn counts(song: &Arrangement) -> (usize, usize) {
+    let audio = song.lanes.iter().flat_map(|l| &l.clips).map(|c| c.audio.len()).sum();
+    (song.note_count(), audio)
 }
 
-/// Now as FL Studio's dates count: days since 30 December 1899, in UTC.
+/// Points each audio clip at its sample where it is on this computer; the samples that aren't anywhere, by name.
+fn find_samples(song: &mut Arrangement, find: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+    let mut missing: Vec<String> = Vec::new();
+    for part in song.lanes.iter_mut().flat_map(|l| &mut l.clips).flat_map(|c| &mut c.audio) {
+        match find(&part.path) {
+            Some(found) => part.path = found,
+            None => {
+                let name = paths::file_name(&part.path).to_owned();
+                if !missing.contains(&name) {
+                    missing.push(name);
+                }
+            }
+        }
+    }
+    missing
+}
+
+/// Now as FL Studio's dates count: days since 30 December 1899, in the computer's own time (as FL dates a project).
 fn delphi_now() -> f64 {
-    let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+    let now = chrono::Local::now();
+    let seconds = now.timestamp() as f64 + f64::from(now.timestamp_subsec_millis()) / 1000.0;
+    let local = seconds + f64::from(now.offset().local_minus_utc());
     // 1 January 1970 is day 25569.
-    25_569.0 + seconds / 86_400.0
+    25_569.0 + local / 86_400.0
 }
 
 #[cfg(test)]
@@ -140,13 +183,53 @@ mod tests {
         d
     }
 
+    /// Every sample where the song names it.
+    fn as_named(sample: &str) -> Option<String> {
+        Some(sample.to_owned())
+    }
+
     #[test]
-    fn a_new_file_is_never_written_over_one_thats_there() {
-        let d = dir("write-new");
-        let file = d.join("a").join("Song.flp");
-        write_new(&file, b"first").unwrap();
-        assert!(write_new(&file, b"second").is_err());
-        assert_eq!(std::fs::read(&file).unwrap(), b"first");
+    fn a_file_thats_there_is_never_written_over() {
+        let d = dir("not-over");
+        let song = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mo-formats/tests/fixtures/recipe/studio-one/MO Recipe 02 notes.song");
+        let root = d.join("Exports");
+        let there = file_for(&song, &root, Daw::FlStudio, "MO Recipe 02 notes");
+        std::fs::create_dir_all(there.parent().unwrap()).unwrap();
+        std::fs::write(&there, b"mine").unwrap();
+        let copy = copy_for(&song, &root, Daw::FlStudio, &as_named).unwrap();
+        assert_eq!(copy.file.file_name().unwrap(), "MO Recipe 02 notes (2).flp");
+        assert_eq!(std::fs::read(&there).unwrap(), b"mine");
+        // Nothing of the save's temporary name is left.
+        let left: Vec<_> =
+            std::fs::read_dir(there.parent().unwrap()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 2, "{left:?}");
+    }
+
+    #[test]
+    fn a_long_name_is_shortened_to_leave_room_for_its_number() {
+        let long = "x".repeat(200);
+        let all: Vec<String> = names(&long).take(3).collect();
+        assert_eq!(all[0].chars().count(), LONGEST_FILE_NAME);
+        assert!(all[1].ends_with(" (2)") && all[1].chars().count() == LONGEST_FILE_NAME);
+        assert_ne!(all[1], all[2]);
+    }
+
+    #[test]
+    fn a_sample_found_elsewhere_is_named_where_it_is_and_one_found_nowhere_is_said() {
+        let d = dir("samples");
+        let song = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mo-formats/tests/fixtures/recipe/studio-one/MO Recipe 04 audio clip.song");
+        let nowhere = copy_for(&song, &d, Daw::FlStudio, &|_| None).unwrap();
+        assert!(nowhere.left_out.iter().any(|l| l.starts_with("Samples not found")), "{:?}", nowhere.left_out);
+        let found = copy_for(&song, &d, Daw::FlStudio, &|_| Some(r"D:\Found\Loop.wav".to_owned())).unwrap();
+        assert!(!found.left_out.iter().any(|l| l.starts_with("Samples not found")));
+        let info = mo_formats::fl::read_bytes(&std::fs::read(&found.file).unwrap());
+        assert!(
+            !info.samples.is_empty() && info.samples.iter().all(|s| s == r"D:\Found\Loop.wav"),
+            "{:?}",
+            info.samples
+        );
     }
 
     #[test]
@@ -155,14 +238,17 @@ mod tests {
         let song = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../mo-formats/tests/fixtures/recipe/studio-one/MO Recipe 02 notes.song");
         let root = d.join("Exports");
-        let first = copy_for(&song, &root, Daw::FlStudio).unwrap();
+        let first = copy_for(&song, &root, Daw::FlStudio, &as_named).unwrap();
         assert_eq!(first.file, root.join("MO Recipe 02 notes").join("FL Studio").join("MO Recipe 02 notes.flp"));
-        let second = copy_for(&song, &root, Daw::FlStudio).unwrap();
+        let second = copy_for(&song, &root, Daw::FlStudio, &as_named).unwrap();
         assert_eq!(second.file.file_name().unwrap(), "MO Recipe 02 notes (2).flp");
         let back = arrangement::read(&first.file).unwrap().remove(0);
         let original = arrangement::read(&song).unwrap().remove(0);
         assert_eq!(back.note_count(), original.note_count());
         assert!(back.note_count() > 0);
-        assert!(copy_for(&first.file, &root, Daw::FlStudio).is_err(), "an FL project isn't converted for FL");
+        assert!(
+            copy_for(&first.file, &root, Daw::FlStudio, &as_named).is_err(),
+            "an FL project isn't converted for FL"
+        );
     }
 }

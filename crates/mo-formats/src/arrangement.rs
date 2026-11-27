@@ -346,7 +346,7 @@ pub fn read_bytes(path: &Path, raw: &[u8]) -> Vec<Arrangement> {
             Err(_) => vec![unreadable(crate::bitwig::arrangement::VIEW, "This project")],
         },
         "als" => match crate::ableton::LiveSet::open(raw) {
-            Ok(set) => set.arrangements(),
+            Ok(set) => set.in_folder(path.parent()).arrangements(),
             Err(_) => vec![unreadable(crate::ableton::arrangement::VIEW, "This set")],
         },
         "song" => match crate::studio_one::Song::open(raw) {
