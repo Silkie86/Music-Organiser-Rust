@@ -7,8 +7,11 @@
 //! never moves a hit, it only shows or hides the weaker ones, so a slider can change it live without looking again.
 //!
 //! The level is measured as `mo_audio::stretch::hits` measures it (the energy of the sound's sample-to-sample change
-//! plus a quarter of its own, every 2.7 ms), and each hit's frame is where its attack starts, half a millisecond
-//! early, so a cut there keeps the whole attack.
+//! plus a quarter of its own, every 2.7 ms). A rise is counted from the quietest of the three steps before it, or from
+//! the noise floor when that's louder (50 dB under the loudest moment): so the start of a sound out of silence rises
+//! by how loud it is, and quiet room noise at a file's start is no hit next to the attack after it. Each hit's frame
+//! is where its attack starts, [`LEAD_SECONDS`] early, so a cut there keeps the whole attack, even after
+//! `edit::part`'s fade in.
 
 use crate::AudioData;
 
@@ -23,6 +26,14 @@ pub const MOST_RISE_DB: f32 = 60.0;
 
 /// The shortest time between two hits, either side: a hit is the biggest rise within this of it.
 pub const GAP_SECONDS: f64 = 0.030;
+
+/// How long before its attack a hit's frame is: as long as a cut's fade in (`edit::EDGE_IN_SECONDS`), so the fade is
+/// over before the attack starts.
+pub const LEAD_SECONDS: f64 = crate::edit::EDGE_IN_SECONDS;
+
+/// How far back an attack is looked for, before the step that rose most: a slow attack (a pluck, a sung word) rises
+/// over several steps.
+const ATTACK_LOOK_BACK_SECONDS: f64 = 0.025;
 
 /// How far under the sound's loudest moment a hit may be (dB), and the quietest level that's a hit at all: quieter is
 /// noise.
@@ -61,16 +72,18 @@ pub fn find_in(sound: &[f32], rate: u32) -> Vec<Hit> {
         .collect();
     let Some(loudest) = levels.iter().copied().reduce(f64::max) else { return Vec::new() };
     let floor = (loudest - FLOOR_UNDER_LOUDEST_DB).max(FLOOR_DB);
-    // How much each step rose on the quietest of the three before it; before the sound starts is silence.
+    // How much each step rose on the quietest of the three before it, or on the floor when that's louder (and at the
+    // very start, where there's nothing before).
     let rises: Vec<f64> = (0..levels.len())
         .map(|k| {
             if levels[k] <= floor {
                 return 0.0;
             }
-            let before = levels[k.saturating_sub(3)..k].iter().copied().reduce(f64::min).unwrap_or(-240.0);
+            let before = levels[k.saturating_sub(3)..k].iter().copied().reduce(f64::min).unwrap_or(floor).max(floor);
             (levels[k] - before).min(f64::from(MOST_RISE_DB))
         })
         .collect();
+    let look_back = (rate as f64 * ATTACK_LOOK_BACK_SECONDS / hop as f64).ceil() as usize;
     let gap = (rate as f64 * GAP_SECONDS / hop as f64).ceil().max(1.0) as usize;
     let mut found: Vec<Hit> = Vec::new();
     for k in 0..rises.len() {
@@ -84,7 +97,14 @@ pub fn find_in(sound: &[f32], rate: u32) -> Vec<Hit> {
         if !biggest {
             continue;
         }
-        let at = attack_start(sound, k.saturating_sub(1) * hop, (k + 2) * hop, rate);
+        // A slow attack started rising some steps before its biggest rise: back to the first step of that run (never
+        // past the hit before), so the attack is looked for from where it started.
+        let after_last = found.last().map_or(0, |h| h.at / hop + 1);
+        let mut first = k;
+        while first > after_last && k - first < look_back && rises[first - 1] >= f64::from(LEAST_RISE_DB) {
+            first -= 1;
+        }
+        let at = attack_start(sound, first.saturating_sub(1).max(after_last) * hop, (k + 2) * hop, rate);
         // Two hits never share a frame, and they stay in order (an attack found early can't pass the one before).
         if found.last().is_some_and(|h| h.at >= at) {
             continue;
@@ -122,13 +142,15 @@ pub fn snap(at: usize, hits: &[Hit], rise_db: f32, within: usize) -> usize {
 }
 
 /// The first frame of an attack found between `from` and `to`: where the sound first jumps by a fifth of the
-/// attack's biggest jump (sample to sample: a low tail before it barely moves), half a millisecond before it.
+/// attack's biggest jump (sample to sample: a low tail before it barely moves), [`LEAD_SECONDS`] before it, but never
+/// before `from`'s step (the hit before's).
 fn attack_start(sound: &[f32], from: usize, to: usize, rate: usize) -> usize {
     let span = sound.get(from..to.min(sound.len())).unwrap_or_default();
     let jumps = || span.windows(2).map(|w| (clean(w[1]) - clean(w[0])).abs());
     let most = jumps().fold(0.0f32, f32::max);
     let first = jumps().position(|j| j >= most * 0.2).unwrap_or(0);
-    (from + first).saturating_sub(rate / 2000)
+    let lead = (rate as f64 * LEAD_SECONDS).round() as usize;
+    (from + first).saturating_sub(lead)
 }
 
 /// A sample as it's measured: one that isn't a number (a damaged file) is silence.
@@ -164,11 +186,12 @@ pub(crate) mod tests {
         let found = find_in(&sound, 48_000);
         assert_eq!(found.len(), at.len(), "{found:?}");
         for (h, &want) in found.iter().zip(&at) {
-            // Within a millisecond before the attack, never after it (a cut there keeps the whole attack).
-            assert!(h.at <= want && want - h.at <= 48, "{} for {want}", h.at);
+            // Within two milliseconds before the attack, never after it (a cut there keeps the whole attack).
+            assert!(h.at <= want && want - h.at <= 96, "{} for {want}", h.at);
         }
-        // The first comes out of silence, as far as a rise is counted; after it, the louder a hit, the bigger its rise.
-        assert_eq!(found[0].rise_db, MOST_RISE_DB);
+        // The first comes out of silence, as far as the floor (50 dB under the loudest); after it, the louder a hit,
+        // the bigger its rise.
+        assert!(found[0].rise_db >= 45.0, "{found:?}");
         let rise = |i: usize| found[i].rise_db;
         assert!(rise(1) < rise(3) && rise(3) < rise(2).min(rise(4)), "{found:?}");
     }
@@ -204,6 +227,36 @@ pub(crate) mod tests {
         sound[5_000] = f32::INFINITY;
         assert_eq!(find_in(&sound, 48_000).len(), 1);
         assert!(find_in(&[0.5; 3], 0).len() <= 1, "a rate of 0 doesn't stop it");
+    }
+
+    #[test]
+    fn quiet_noise_before_the_first_hit_is_no_hit() {
+        // Room noise 45 dB down, then a kick 15 ms in.
+        let mut sound = drums(20_000, &[(720, 0.9)]);
+        let mut seed = 7u32;
+        for s in &mut sound {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *s += ((seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.01;
+        }
+        let found = find_in(&sound, 48_000);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].at <= 720 && 720 - found[0].at <= 96, "{found:?}");
+    }
+
+    #[test]
+    fn a_slow_attack_is_found_where_it_starts() {
+        // A 1760 Hz tone ringing at 0.3, then one that swells in over 10 ms from frame 24,000.
+        let tone = |i: usize| (i as f32 * 1_760.0 * std::f32::consts::TAU / 48_000.0).sin();
+        let sound: Vec<f32> = (0..36_000)
+            .map(|i| {
+                let swell = if i < 24_000 { 0.0 } else { ((i - 24_000) as f32 / 480.0).min(1.0) * 0.9 };
+                0.3 * tone(i) + swell * tone(i * 3 / 2)
+            })
+            .collect();
+        let found = find_in(&sound, 48_000);
+        let near: Vec<&Hit> = found.iter().filter(|h| h.at.abs_diff(24_000) < 2_400).collect();
+        assert_eq!(near.len(), 1, "{found:?}");
+        assert!(near[0].at <= 24_000 + 48, "{found:?}: inside the attack");
     }
 
     #[test]

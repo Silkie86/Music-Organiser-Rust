@@ -222,21 +222,21 @@ fn float_wavs_keep_what_goes_over_full_scale() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-audio");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("written-32.wav");
-    let channels = vec![vec![0.5f32, -1.0, 2.0], vec![0.0, f32::NAN, -2.5]];
+    let channels = vec![vec![0.5f32, -1.0, 2.0, f32::NEG_INFINITY], vec![0.0, f32::NAN, -2.5, 0.25]];
     write_wav(&path, &channels, 44100, 32).unwrap();
     let bytes = std::fs::read(&path).unwrap();
-    // RIFF, an 18-byte fmt (float, empty extension), fact (3 frames), then the data.
+    // RIFF, an 18-byte fmt (float, empty extension), fact (4 frames), then the data.
     assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len() - 8);
     assert_eq!(&bytes[12..16], b"fmt ");
     assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 18);
     assert_eq!(u16::from_le_bytes(bytes[20..22].try_into().unwrap()), 3);
     assert_eq!(&bytes[38..42], b"fact");
-    assert_eq!(u32::from_le_bytes(bytes[46..50].try_into().unwrap()), 3);
+    assert_eq!(u32::from_le_bytes(bytes[46..50].try_into().unwrap()), 4);
     assert_eq!(&bytes[50..54], b"data");
-    assert_eq!(bytes.len(), 58 + 3 * 2 * 4);
+    assert_eq!(bytes.len(), 58 + 4 * 2 * 4);
     let a = read(&path, 60.0).unwrap();
     assert_eq!(a.sample_rate, 44100);
-    assert_eq!(a.channels, vec![vec![0.5, -1.0, 2.0], vec![0.0, 0.0, -2.5]], "not clipped; damage as silence");
+    assert_eq!(a.channels, vec![vec![0.5, -1.0, 2.0, -1.0], vec![0.0, 0.0, -2.5, 0.25]], "not clipped; damage tamed");
     assert!(mo_audio::reads_exactly(&path));
 }
 

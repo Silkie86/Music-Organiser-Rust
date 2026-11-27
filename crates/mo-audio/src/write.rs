@@ -11,7 +11,8 @@ use crate::AudioError;
 ///
 /// The file is written beside its final name first and then renamed, so a stopped or failed export never leaves half
 /// a file, under the real name or beside it. `bits` is 16 or 24 (whole numbers, louder samples clipped), or 32 (floats,
-/// kept as they are; a sample that isn't a number is written as silence).
+/// kept as they are, except that a sample that isn't a number is written as silence and an endless one as full
+/// scale).
 pub fn write_wav(path: &Path, channels: &[Vec<f32>], sample_rate: u32, bits: u16) -> Result<(), AudioError> {
     if bits != 16 && bits != 24 && bits != 32 {
         return Err(AudioError::NotSupported(format!("Writing {bits}-bit WAV files")));
@@ -75,7 +76,15 @@ fn write_part(part: &Path, head: &[u8], channels: &[Vec<f32>], frames: usize, bi
         for ch in channels {
             let v = ch.get(i).copied().unwrap_or(0.0);
             if bits == 32 {
-                out.write_all(&(if v.is_finite() { v } else { 0.0 }).to_le_bytes())?;
+                // Not a number: silence. Endless: full scale, as 16 and 24 bits clip it.
+                let v = if v.is_nan() {
+                    0.0
+                } else if v.is_infinite() {
+                    v.signum()
+                } else {
+                    v
+                };
+                out.write_all(&v.to_le_bytes())?;
                 continue;
             }
             let v = v.clamp(-1.0, 1.0);

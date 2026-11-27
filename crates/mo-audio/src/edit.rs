@@ -87,10 +87,12 @@ pub enum Edit {
     Gain { db: f32, span: Option<Span> },
     /// Turns the whole sound up or down so its loudest sample is `peak_db` (0 is full scale). A silent sound stays.
     Normalise { peak_db: f32 },
-    /// Makes these frames (the whole sound for `None`) loop without a click: the sound just past the loop's end (or
-    /// just before its start) is crossfaded over `frames` into its start (or its end), so the end runs into the start
-    /// as the sound itself ran on. The loop keeps its length when there is sound outside it to cross with; a loop
-    /// of the whole sound has none, and comes out `frames` shorter. Leaves the loop only.
+    /// Makes these frames (the whole sound for `None`) loop without a click: the loop's end is crossfaded over
+    /// `frames` into the sound just before its start, so the end runs into the start as the sound itself ran on, and
+    /// the start (often a downbeat's hit) stays as it was picked. With too little sound before the start, the start
+    /// is crossfaded from the sound just past the end instead; with too little on either side, the crossfade is as
+    /// long as there is sound to cross with. A loop of the whole sound has none: it comes out `frames` shorter.
+    /// Leaves the loop only.
     LoopCrossfade { span: Option<Span>, frames: usize },
 }
 
@@ -102,8 +104,18 @@ pub const EDGE_OUT_SECONDS: f64 = 0.003;
 /// How long a gain or reverse eases in and out at its edges inside a sound (seconds), at most a quarter of it.
 const EASE_SECONDS: f64 = 0.002;
 
+/// The most a gain or a normalise turns a sound up or down (dB): past it a float overflows.
+const MOST_DB: f32 = 96.0;
+
+/// Whether `audio` holds the whole of its file, so an edit of it can be saved: a read capped short of the file's
+/// length (the analysis reads only a minute) mustn't be saved as if it were the sound.
+pub fn is_whole(audio: &AudioData) -> bool {
+    audio.sample_rate > 0 && audio.seconds() + 1.0 / f64::from(audio.sample_rate) >= audio.file_seconds * 0.999
+}
+
 /// The sound `audio` with `edits` applied in turn. Its notes (tempo, root note, loop) are kept; an edit list that
-/// leaves no sound gives an empty one.
+/// leaves no sound gives an empty one. What comes out is the whole of the edited sound (its `file_seconds` is its own
+/// length), so check [`is_whole`] on what goes in before saving it.
 pub fn apply(audio: &AudioData, edits: &[Edit]) -> AudioData {
     let mut out = audio.clone();
     // Every channel the same length, even one the file left short.
@@ -135,10 +147,14 @@ fn apply_one(audio: &mut AudioData, edit: Edit) {
         Edit::Fade { span, way, curve } => {
             let Some(span) = span.within(frames) else { return };
             let n = span.len();
+            // One frame is no fade either way.
+            if n < 2 {
+                return;
+            }
             for ch in &mut audio.channels {
                 for (i, s) in ch[span.start..span.end].iter_mut().enumerate() {
                     // From the first frame's silence to the last frame's full level (a fade in), or back.
-                    let x = if n <= 1 { 1.0 } else { i as f32 / (n - 1) as f32 };
+                    let x = i as f32 / (n - 1) as f32;
                     *s *= match way {
                         Way::In => curve.gain(x),
                         Way::Out => curve.gain(1.0 - x),
@@ -150,9 +166,13 @@ fn apply_one(audio: &mut AudioData, edit: Edit) {
             let Some(span) = span.unwrap_or(Span { start: 0, end: frames }).within(frames) else { return };
             let ease = ease_frames(rate, span, frames);
             for ch in &mut audio.channels {
-                let before: Vec<f32> = ch[span.start..span.end].to_vec();
-                ch[span.start..span.end].reverse();
-                cross_edges(&mut ch[span.start..span.end], &before, ease);
+                let part = &mut ch[span.start..span.end];
+                // Only the edges are crossed back to what was there: only they are kept.
+                let n = part.len();
+                let head: Vec<f32> = part[..ease.0].to_vec();
+                let tail: Vec<f32> = part[n - ease.1..].to_vec();
+                part.reverse();
+                cross_edges(part, &head, &tail);
             }
         }
         Edit::Gain { db, span } => {
@@ -160,7 +180,7 @@ fn apply_one(audio: &mut AudioData, edit: Edit) {
             if !db.is_finite() {
                 return;
             }
-            let g = 10f32.powf(db / 20.0);
+            let g = 10f32.powf(db.clamp(-MOST_DB, MOST_DB) / 20.0);
             let (ease_in, ease_out) = ease_frames(rate, span, frames);
             for ch in &mut audio.channels {
                 let part = &mut ch[span.start..span.end];
@@ -183,7 +203,10 @@ fn apply_one(audio: &mut AudioData, edit: Edit) {
             if peak < 1e-6 {
                 return;
             }
-            let g = 10f32.powf(peak_db / 20.0) / peak;
+            let g = 10f32.powf(peak_db.clamp(-MOST_DB, MOST_DB) / 20.0) / peak;
+            if !g.is_finite() {
+                return;
+            }
             for s in audio.channels.iter_mut().flatten() {
                 *s *= g;
             }
@@ -202,19 +225,24 @@ fn ease_frames(rate: u32, span: Span, frames: usize) -> (usize, usize) {
     (if span.start == 0 { 0 } else { ease }, if span.end >= frames { 0 } else { ease })
 }
 
-/// Crosses `now` back to `before` over its first `ease.0` frames and its last `ease.1`, so it joins what's on either
-/// side as `before` did.
-fn cross_edges(now: &mut [f32], before: &[f32], (ease_in, ease_out): (usize, usize)) {
+/// Crosses the start of `now` back to `head` (what its first frames were) and its end back to `tail` (what its last
+/// were), so it joins what's on either side as they did.
+fn cross_edges(now: &mut [f32], head: &[f32], tail: &[f32]) {
     let n = now.len();
-    for i in 0..ease_in.min(n) {
+    let (ease_in, ease_out) = (head.len().min(n), tail.len().min(n));
+    for (i, (s, &was)) in now.iter_mut().zip(head).enumerate() {
         let w = (i + 1) as f32 / (ease_in + 1) as f32;
-        now[i] = before[i] * (1.0 - w) + now[i] * w;
+        *s = was * (1.0 - w) + *s * w;
     }
-    for j in 0..ease_out.min(n) {
-        let i = n - 1 - j;
+    for (j, (s, &was)) in now[n - ease_out..].iter_mut().rev().zip(tail.iter().rev()).enumerate() {
         let w = (j + 1) as f32 / (ease_out + 1) as f32;
-        now[i] = before[i] * (1.0 - w) + now[i] * w;
+        *s = was * (1.0 - w) + *s * w;
     }
+}
+
+/// Frames every channel of `audio` has: a file can leave one short.
+fn frames_of(audio: &AudioData) -> usize {
+    audio.channels.iter().map(Vec::len).min().unwrap_or(0)
 }
 
 /// The loudest sample of `audio`, on any channel (0 to 1, or more for a float file that goes over).
@@ -226,7 +254,7 @@ pub fn peak(audio: &AudioData) -> f32 {
 /// [`EDGE_IN_SECONDS`] when it starts inside the sound and out over [`EDGE_OUT_SECONDS`] when it ends inside it.
 /// Its notes are kept, except that it's no longer known to be a loop.
 pub fn part(audio: &AudioData, span: Span) -> AudioData {
-    let frames = audio.len();
+    let frames = frames_of(audio);
     let span = span.within(frames).unwrap_or(Span { start: frames, end: frames });
     let rate = f64::from(audio.sample_rate);
     let mut out = AudioData {
@@ -265,8 +293,11 @@ impl AudioData {
 
 /// [`Edit::LoopCrossfade`]'s work: the loop `span` of `audio` (inside it) crossed over `cross` frames.
 fn looped(audio: &AudioData, span: Span, cross: usize) -> AudioData {
-    let frames = audio.len();
-    let n = cross.min(span.len() / 2);
+    let frames = frames_of(audio);
+    let (before, after) = (span.start, frames - span.end);
+    let whole = before == 0 && after == 0;
+    // Never more than half the loop, nor (unless it's the whole sound) more than the sound there is to cross with.
+    let n = cross.min(span.len() / 2).min(if whole { usize::MAX } else { before.max(after) });
     let mut out = AudioData {
         channels: audio.channels.iter().map(|ch| ch[span.start..span.end].to_vec()).collect(),
         embedded_is_loop: Some(true),
@@ -276,33 +307,35 @@ fn looped(audio: &AudioData, span: Span, cross: usize) -> AudioData {
         out.file_seconds = out.seconds();
         return out;
     }
-    // Equal power: what crosses is two different moments of the sound, which don't cancel or add up like one. The
-    // weights reach exactly 0 and 1 at the frames that join the loop's two ends, so the wrap is seamless.
-    let fade_in = |x: f32| Curve::EqualPower.gain(x);
-    let fade_out = |x: f32| Curve::EqualPower.gain(1.0 - x);
-    let at = |i: usize| i as f32 / n as f32;
-    let after = |i: usize| (i + 1) as f32 / n as f32;
     let len = span.len();
-    if frames - span.end >= n {
-        // The sound after the end runs on into the start: the start crosses from it to itself.
-        for (o, ch) in out.channels.iter_mut().zip(&audio.channels) {
-            for i in 0..n {
-                o[i] = ch[span.start + i] * fade_in(at(i)) + ch[span.end + i] * fade_out(at(i));
-            }
-        }
-    } else if span.start >= n {
-        // The sound before the start runs on from the end: the end crosses from itself to it.
-        for (o, ch) in out.channels.iter_mut().zip(&audio.channels) {
-            for i in 0..n {
-                o[len - n + i] = ch[span.end - n + i] * fade_out(after(i)) + ch[span.start - n + i] * fade_in(after(i));
-            }
-        }
+    // The two sides that cross, as they are: the loop's end and the sound before its start, or the sound past its
+    // end and its start, or (the whole sound) its end and its start.
+    let (from, to, ends) = if before >= n {
+        (span.end - n, span.start - n, true)
+    } else if after >= n {
+        (span.end, span.start, false)
     } else {
-        // The whole sound: its last `n` frames cross into its start, and are taken off the end.
-        for o in &mut out.channels {
-            for i in 0..n {
-                o[i] = o[i] * fade_in(at(i)) + o[len - n + i] * fade_out(at(i));
+        (len - n, 0, false)
+    };
+    // Equal power when the two sides are unlike (two moments that don't add up as one), equal gain when they're
+    // alike (a loop cut to whole cycles or bars, where equal power would swell by up to 3 dB and could clip).
+    let alike = likeness(audio, from, to, n) >= 0.5;
+    let curve = if alike { Curve::Linear } else { Curve::EqualPower };
+    // The weights reach exactly 0 and 1 at the frames that join the loop's two ends, so the wrap is seamless.
+    for (o, ch) in out.channels.iter_mut().zip(&audio.channels) {
+        for i in 0..n {
+            if ends {
+                // The end crosses from itself into the sound before the start: its last frame is the one before it.
+                let x = (i + 1) as f32 / n as f32;
+                o[len - n + i] = ch[from + i] * curve.gain(1.0 - x) + ch[to + i] * curve.gain(x);
+            } else {
+                // The start crosses from the sound past the end (for the whole sound, its own last frames, taken off
+                // the end below) into itself: its first frame is the one after the end.
+                let x = i as f32 / n as f32;
+                o[i] = ch[to + i] * curve.gain(x) + ch[from + i] * curve.gain(1.0 - x);
             }
+        }
+        if whole {
             o.truncate(len - n);
         }
     }
@@ -310,17 +343,34 @@ fn looped(audio: &AudioData, span: Span, cross: usize) -> AudioData {
     out
 }
 
-/// The parts a sound `frames` long falls into when cut at `cuts` (frames, in any order): from each cut to the next,
-/// the last to the end. Cuts at the start, past the end, or twice at one frame count once; a sound with no cuts is
-/// one part. The part before the first cut is left out when `skip_lead` says to (silence before the first hit).
-pub fn slices(frames: usize, cuts: &[usize], skip_lead: bool) -> Vec<Span> {
+/// How alike `n` frames of `audio` from `a` and from `b` are (their channels mixed): their correlation, -1 to 1 (0
+/// when either is silent).
+fn likeness(audio: &AudioData, a: usize, b: usize, n: usize) -> f32 {
+    let (mut ab, mut aa, mut bb) = (0.0f64, 0.0f64, 0.0f64);
+    for ch in &audio.channels {
+        for i in 0..n {
+            let (x, y) = (f64::from(ch[a + i]), f64::from(ch[b + i]));
+            ab += x * y;
+            aa += x * x;
+            bb += y * y;
+        }
+    }
+    if aa <= 1e-12 || bb <= 1e-12 { 0.0 } else { (ab / (aa * bb).sqrt()) as f32 }
+}
+
+/// The parts a sound `frames` long falls into when cut at `cuts` (frames, in any order): from its start to the first
+/// cut, from each cut to the next, and from the last to the end. A cut at the start or past the end, or twice at one
+/// frame, counts once; a sound with no cuts is one part, and an empty one has none. The part before the first hit is
+/// often silence: [`has_sound`] tells.
+pub fn slices(frames: usize, cuts: &[usize]) -> Vec<Span> {
+    if frames == 0 {
+        return Vec::new();
+    }
     let mut at: Vec<usize> = cuts.iter().copied().filter(|&c| c > 0 && c < frames).collect();
     at.sort_unstable();
     at.dedup();
     let mut starts = Vec::with_capacity(at.len() + 1);
-    if !skip_lead || at.is_empty() {
-        starts.push(0);
-    }
+    starts.push(0);
     starts.extend(at);
     starts
         .iter()
@@ -331,7 +381,7 @@ pub fn slices(frames: usize, cuts: &[usize], skip_lead: bool) -> Vec<Span> {
 
 /// Whether the frames of `span` of `audio` have any sound in them: a sample louder than `level` (0 to 1).
 pub fn has_sound(audio: &AudioData, span: Span, level: f32) -> bool {
-    let Some(span) = span.within(audio.len()) else { return false };
+    let Some(span) = span.within(frames_of(audio)) else { return false };
     audio.channels.iter().any(|ch| ch[span.start..span.end].iter().any(|s| s.is_finite() && s.abs() > level))
 }
 
@@ -414,6 +464,11 @@ mod tests {
             assert!(close(fout.channels[0][899 + 25], fin.channels[0][100 - 25]));
         }
         assert!(Curve::EqualPower.gain(0.5) > 0.7 && Curve::Exponential.gain(0.5) < 0.3);
+        // One frame is no fade either way.
+        let a = sound(vec![vec![1.0; 10]]);
+        for way in [Way::In, Way::Out] {
+            assert_eq!(apply(&a, &[Edit::Fade { span: Span::new(5, 6), way, curve: Curve::Linear }]), apply(&a, &[]));
+        }
     }
 
     #[test]
@@ -457,6 +512,11 @@ mod tests {
         let all = apply(&a, &[Edit::Gain { db: 6.0206, span: None }]);
         assert!(all.channels[0].iter().all(|&s| close(s, 1.0)));
         assert_eq!(apply(&a, &[Edit::Gain { db: f32::NAN, span: None }]), apply(&a, &[]));
+        // However far it's turned, every sample stays a number.
+        let loud = apply(&sound(vec![vec![0.0, 1.0, 0.0]]), &[Edit::Gain { db: 900.0, span: None }]);
+        assert!(loud.channels[0].iter().all(|s| s.is_finite()), "{loud:?}");
+        let loud = apply(&sound(vec![vec![0.0, 1e-5, 0.0]]), &[Edit::Normalise { peak_db: 1e9 }]);
+        assert!(loud.channels[0].iter().all(|s| s.is_finite()), "{loud:?}");
     }
 
     #[test]
@@ -497,6 +557,34 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_keeps_its_start_as_picked_when_there_is_sound_before_it() {
+        let a = sound(vec![sine(48_000, 440.0)]);
+        let span = Span::new(10_000, 30_037);
+        let out = apply(&a, &[Edit::LoopCrossfade { span: Some(span), frames: 480 }]);
+        assert_eq!(out.channels[0][..19_000], a.channels[0][10_000..29_000], "the downbeat is untouched");
+        // With no sound before it, the start crosses from the sound after the end, and the length is kept.
+        let span = Span::new(100, 20_037);
+        let out = apply(&a, &[Edit::LoopCrossfade { span: Some(span), frames: 480 }]);
+        assert_eq!(out.len(), span.len());
+        let (wrap, inside) = wrap_step(&out.channels[0]);
+        assert!(wrap <= inside * 1.01, "{wrap} > {inside}");
+        // Little sound on either side: a shorter crossfade, and still the same length.
+        let a = sound(vec![sine(10_000, 440.0)]);
+        let out = apply(&a, &[Edit::LoopCrossfade { span: Some(Span::new(100, 9_900)), frames: 480 }]);
+        assert_eq!(out.len(), 9_800);
+        let (wrap, inside) = wrap_step(&out.channels[0]);
+        assert!(wrap <= inside * 1.01, "{wrap} > {inside}");
+    }
+
+    #[test]
+    fn a_loop_cut_to_whole_cycles_doesnt_swell_where_it_crosses() {
+        // 480 Hz at 48 kHz: 100 frames a cycle, and the loop is 200 whole cycles.
+        let a = sound(vec![sine(48_000, 480.0).iter().map(|s| s * 1.6).collect()]);
+        let out = apply(&a, &[Edit::LoopCrossfade { span: Some(Span::new(10_000, 30_000)), frames: 2_000 }]);
+        assert!(peak(&out) <= 0.8 + 1e-3, "{}", peak(&out));
+    }
+
+    #[test]
     fn a_loop_of_the_whole_sound_comes_out_shorter_by_its_crossfade() {
         let a = sound(vec![sine(30_037, 440.0), sine(30_037, 220.0)]);
         let out = apply(&a, &[Edit::LoopCrossfade { span: None, frames: 1_000 }]);
@@ -522,15 +610,29 @@ mod tests {
         let whole = part(&a, Span::new(0, 4_800));
         assert_eq!(whole.channels, a.channels);
         assert_eq!(part(&a, Span::new(9_000, 9_500)).len(), 0, "nothing of it is there");
+        // A channel the file left short: the part stops where it does.
+        let short = sound(vec![vec![0.5; 100], vec![0.5; 50]]);
+        assert_eq!(part(&short, Span::new(10, 90)).channels.iter().map(Vec::len).collect::<Vec<_>>(), [40, 40]);
+        assert!(!has_sound(&sound(vec![vec![0.0; 100], vec![0.5; 50]]), Span::new(60, 90), 0.1));
     }
 
     #[test]
     fn slices_run_from_each_cut_to_the_next() {
         let s = |v: &[(usize, usize)]| v.iter().map(|&(a, b)| Span::new(a, b)).collect::<Vec<_>>();
-        assert_eq!(slices(100, &[50, 20, 20, 0, 100, 300], false), s(&[(0, 20), (20, 50), (50, 100)]));
-        assert_eq!(slices(100, &[50, 20], true), s(&[(20, 50), (50, 100)]));
-        assert_eq!(slices(100, &[], true), s(&[(0, 100)]));
-        assert_eq!(slices(0, &[], false), s(&[(0, 0)]));
+        assert_eq!(slices(100, &[50, 20, 20, 0, 100, 300],), s(&[(0, 20), (20, 50), (50, 100)]));
+        // A hit at the very start is the first slice's start, never lost.
+        assert_eq!(slices(100, &[0, 50]), s(&[(0, 50), (50, 100)]));
+        assert_eq!(slices(100, &[]), s(&[(0, 100)]));
+        assert!(slices(0, &[]).is_empty());
+    }
+
+    #[test]
+    fn only_a_whole_read_is_whole() {
+        let mut a = sound(vec![vec![0.0; 48_000]]);
+        assert!(is_whole(&a));
+        a.file_seconds = 180.0;
+        assert!(!is_whole(&a), "a read capped at a second of three minutes");
+        assert!(!is_whole(&AudioData::default()));
     }
 
     #[test]
