@@ -130,10 +130,7 @@ impl LiveSet {
         }
         // Every audio file the set points at, wherever: clips, Simplers, Samplers, Drum Racks. Not a frozen track's
         // audio, which Live made itself and keeps in the project.
-        for e in set.descendants().filter(|e| e.has_tag_name("FileRef")) {
-            if e.ancestors().any(|a| a.has_tag_name("FreezeSequencer")) {
-                continue;
-            }
+        for e in file_refs_not_frozen(set) {
             let path = self.file_ref_path(e);
             if !path.is_empty() && textscan::is_audio_path(&path) {
                 info.samples.push(path);
@@ -520,50 +517,89 @@ const EFFECT_NAMES: [(&str, &str); 14] = [
     ("Hybrid", "Hybrid Reverb"),
 ];
 
+/// Every `FileRef` in the set, in the file's order, but none inside a `FreezeSequencer` (a frozen track's audio). The
+/// frozen parts are left out as the walk meets them, rather than each `FileRef` looking up through everything above it:
+/// a damaged or made-up set nested thousands deep would take minutes that way.
+fn file_refs_not_frozen<'a, 'i>(set: Node<'a, 'i>) -> Vec<Node<'a, 'i>> {
+    let mut found = Vec::new();
+    let mut next = vec![set];
+    while let Some(e) = next.pop() {
+        if e.has_tag_name("FreezeSequencer") {
+            continue;
+        }
+        if e.has_tag_name("FileRef") {
+            found.push(e);
+        }
+        // In reverse, so the first is taken first.
+        next.extend(e.children().rev().filter(Node::is_element));
+    }
+    found
+}
+
 /// Every device on a track, racks' insides too, in order. A plugin on a MIDI track before any instrument is its
 /// instrument (a VST2 says which it is); everything after an instrument is an effect.
 fn devices(track: Node<'_, '_>, out: &mut Vec<PluginRef>) {
     let Some(chain) = at(track, &["DeviceChain", "DeviceChain", "Devices"]) else { return };
-    let mut instrument_seen = !track.has_tag_name("MidiTrack");
-    walk_devices(chain, &mut instrument_seen, out);
+    walk_devices(chain, !track.has_tag_name("MidiTrack"), out);
 }
 
-fn walk_devices(devices: Node<'_, '_>, instrument_seen: &mut bool, out: &mut Vec<PluginRef>) {
-    for d in devices.children().filter(Node::is_element) {
+/// Walks the device lists in order, a rack's chains straight after the rack. It keeps its own list of where it is
+/// rather than calling itself for each rack inside a rack, so a damaged or made-up set with racks nested thousands
+/// deep can't run the thread out of stack (which ends the app at once); and each element is looked at once.
+fn walk_devices(devices: Node<'_, '_>, instrument_seen: bool, out: &mut Vec<PluginRef>) {
+    // Each list being walked, with whether an instrument was seen in it so far. The top one is the one being walked.
+    let mut lists = vec![(devices.children(), instrument_seen)];
+    while let Some((list, seen)) = lists.last_mut() {
+        let Some(d) = list.next() else {
+            lists.pop();
+            continue;
+        };
+        if !d.is_element() {
+            continue;
+        }
         let tag = d.tag_name().name();
         // What was seen before this device: a plugin inside an Instrument Rack is the rack's instrument.
-        let before = *instrument_seen;
+        let before = *seen;
         let plugin = match tag {
-            "PluginDevice" => plugin_device(d, *instrument_seen),
-            "AuPluginDevice" => au_device(d, *instrument_seen),
+            "PluginDevice" => plugin_device(d, *seen),
+            "AuPluginDevice" => au_device(d, *seen),
             t if t.starts_with("MxDevice") => Some(max_device(d)),
             t => Some(live_device(t)),
         };
         if let Some(p) = plugin {
             if p.kind == PluginKind::Instrument {
-                *instrument_seen = true;
+                *seen = true;
             }
             out.push(p);
         }
         // A rack's chains: `Branches/*/DeviceChain/MidiToAudioDeviceChain|AudioToAudioDeviceChain/Devices`.
-        // A Drum Rack's return chains (`ReturnBranches`) hold effects only.
+        // A Drum Rack's return chains (`ReturnBranches`) hold effects only. Walked next, in order, before the
+        // device after the rack.
+        let mut chains = Vec::new();
         for (list, seen_at_start) in [("Branches", before), ("ReturnBranches", true)] {
-            let Some(branches) = child(d, list) else { continue };
-            for chain in branches.descendants().filter(|e| e.has_tag_name("Devices")) {
-                // Only a branch's own device list, not one inside a device further down (walked from there).
-                let parent_device = chain.ancestors().skip(1).find(|a| is_device(*a));
-                if parent_device == Some(d) {
-                    let mut seen = seen_at_start;
-                    walk_devices(chain, &mut seen, out);
-                }
+            if let Some(branches) = child(d, list) {
+                chains.extend(own_device_lists(branches).into_iter().map(|c| (c.children(), seen_at_start)));
             }
         }
+        lists.extend(chains.into_iter().rev());
     }
 }
 
-/// Whether an element is a device in a device list.
-fn is_device(e: Node<'_, '_>) -> bool {
-    e.parent_element().is_some_and(|p| p.has_tag_name("Devices"))
+/// The device lists inside a rack's `Branches`, in order: only the rack's own chains, not a list inside a device
+/// further down (that one is walked from its own device). Each element is looked at once.
+fn own_device_lists<'a, 'i>(branches: Node<'a, 'i>) -> Vec<Node<'a, 'i>> {
+    let mut found = Vec::new();
+    let mut next = vec![branches];
+    while let Some(e) = next.pop() {
+        if e.has_tag_name("Devices") {
+            // Everything in a device list is a device: its own lists are its own.
+            found.push(e);
+            continue;
+        }
+        // In reverse, so the first is taken first (the lists come out in the file's order).
+        next.extend(e.children().rev().filter(Node::is_element));
+    }
+    found
 }
 
 fn plugin_device(d: Node<'_, '_>, instrument_seen: bool) -> Option<PluginRef> {

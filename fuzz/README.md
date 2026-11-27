@@ -26,6 +26,16 @@ Each "target" is a small program in `fuzz_targets/` that hands the fuzzer's byte
 | `studio_one`    | Studio One `.song` (a zip of XML): the project list's reader, notes, plugin states, arrangement |
 | `midi_smf`      | Standard MIDI Files (`.mid`)                                                        |
 | `midi_clip`     | MIDI Clip Files (`.midi2`, MIDI 2.0)                                                |
+| `ableton`       | Ableton Live `.als` (gzipped XML): the project list's reader, notes, arrangement     |
+| `song_shape`    | The Board's song shape and the arrangement, from an FL, Bitwig, Ableton or Studio One save |
+| `midi_find`     | The MIDI page: the parts the index finds in a MIDI file or any song, and a song as it plays |
+| `shapes`        | The Curves page: Serum `.XferShape`/`.shp`, LFO Tool `.fxp`, Vital, Duck, Bitwig `.bwcurve`, FL and Bitwig knob moves |
+| `presets`       | Plugin presets (`.fxp`, `.fxb`, `.vstpreset`, `.bwpreset`) and Serum 1's settings in them |
+| `audio`         | Sound files (WAV, AIFF, MP3, FLAC, OGG, M4A, AAC): the player, the waveform, the analysis |
+| `stored`        | What the app reads back from its own databases (a part's notes, chords, a sound's held notes): a damaged database must not take down the CLAP plugin in a DAW |
+
+Where one target reads several kinds of file, the made-up file's first byte picks the kind (its file ending), and the
+rest is the file.
 
 ## How to run it
 
@@ -39,13 +49,19 @@ cargo install cargo-fuzz
 It runs on Linux and macOS (on Windows, use WSL). From the top of the repository:
 
 ```
-# 1. Make the seeds: the made-up projects the tests build (never Solomon's files), written into fuzz/corpus/<target>/.
+# 1. Make the seeds: the made-up projects the tests build and the recipe saves (never Solomon's own files), written into
+#    fuzz/corpus/<target>/.
 cargo test -p mo-formats --test fuzz_seeds -- --ignored
 
-# 2. Fuzz one target for 10 minutes. -timeout counts a file that takes over 10 seconds as a hang.
+# 2. Fuzz one target for 10 minutes. -timeout counts a file that takes over 10 seconds as a hang, and -malloc_limit_mb
+#    a file that makes the reader ask for over 512 MB at once (the app would run out of memory on a full PC).
 cd fuzz
-cargo +nightly fuzz run fl -- -max_total_time=600 -timeout=10 -rss_limit_mb=2048
+cargo +nightly fuzz run fl -- -max_total_time=600 -timeout=10 -rss_limit_mb=2048 -malloc_limit_mb=512
 ```
+
+The targets that read the app's databases build SQLite in, twice over, which the fuzzer's memory checker takes for a
+mistake ("odr-violation") before it starts: set `ASAN_OPTIONS=detect_odr_violation=0` first (`export
+ASAN_OPTIONS=detect_odr_violation=0`).
 
 `cargo +nightly fuzz list` shows the targets. The fuzzer prints a line every so often; `exec/s` is how many files a
 second it tries, and `cov` is how much of the reader's code it has reached. It keeps the interesting files it made in
@@ -66,6 +82,18 @@ cargo +nightly fuzz run fl artifacts/fl/minimized-from-...
 Fix the reader so it returns an error or a warning instead, and add a test in `crates/mo-formats/tests/` that feeds the
 small file's bytes, written out in the test as a byte list (`b"..."` or `[0x46, 0x4c, ...]`), so it never comes back.
 A fix that only turns a panic into an error doesn't change what the reader finds in good files, so its version stays.
+
+## The tests that run on every change
+
+The fuzzer needs nightly Rust and hours, so it isn't part of CI. Three kinds of test do a smaller version of the same on
+every change, with the same broken files each time:
+
+- `broken_saves.rs` (mo-formats), `broken_presets.rs` (mo-presets), `broken_sounds.rs` (mo-audio): every reader on
+  copies of every test save cut short at many places and changed in a few bytes (a fixed random seed). A panic a reader
+  catches itself counts too: the file still loses what it would have shown.
+- `deep_saves.rs` (mo-formats): racks in racks, objects in objects and tags in tags thousands deep, read on a thread with
+  a 1 MiB stack. Running out of stack ends the app at once, with no warning and nothing caught.
+- `big_saves.rs` (mo-formats): saves with hundreds of tracks and tens of thousands of clips, each read in good time.
 
 `fuzz/corpus`, `fuzz/artifacts` and `fuzz/target` are never committed (see `.gitignore`); `fuzz/target` can grow to a
 few gigabytes, so delete it when you're done.

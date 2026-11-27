@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+pub mod ableton;
 pub mod bitwig;
 pub mod midi;
 pub mod studio_one;

@@ -23,5 +23,7 @@ ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 serde_json = "1.0.154"
 
 [dev-dependencies]
+# The broken-saves test notes a reader's panic as a failed file, not the end of the test.
+mo-catch = { path = "../mo-catch" }
 # Random Bitwig files and object trees for the round-trip tests (spec 11.2).
 proptest = { version = "1", default-features = false, features = ["std"] }

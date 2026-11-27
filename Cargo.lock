@@ -3308,6 +3308,7 @@ dependencies = [
  "chrono",
  "flate2",
  "indexmap",
+ "mo-catch",
  "proptest",
  "regex",
  "roxmltree",
