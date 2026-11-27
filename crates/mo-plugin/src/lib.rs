@@ -294,8 +294,11 @@ impl MainThread<'_> {
 impl PluginStateImpl for MainThread<'_> {
     fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
         use std::io::Write;
-        let knobs = &self.shared.instance.knobs;
-        let state = state::write(self.panel.get(), |k| knobs.get(k));
+        let instance = &self.shared.instance;
+        let from = threads::lock(&instance.record_from).clone();
+        let record =
+            state::Record { from: &from, side: instance.record_side.load(std::sync::atomic::Ordering::Relaxed) };
+        let state = state::write(self.panel.get(), |k| instance.knobs.get(k), record);
         output.write_all(state.as_bytes()).map_err(|_| PluginError::Message("The DAW didn't take the plugin's state"))
     }
 
@@ -319,6 +322,15 @@ impl PluginStateImpl for MainThread<'_> {
         }
         if let (false, Some(params)) = (kept.knobs.is_empty(), self.params) {
             params.rescan(&self.host, ParamRescanFlags::VALUES);
+        }
+        // What Record records from, as the project left it (the 26 Nov review's CP-4, kept with the project too): the
+        // next window opens on it. An input that isn't there now is shown, and recorded from, as the DAW's input
+        // (`window.rs`), with its name kept for when it's back.
+        if let Some(from) = kept.record_from.clone() {
+            *threads::lock(&self.shared.instance.record_from) = from;
+        }
+        if let Some(side) = kept.record_side {
+            self.shared.instance.record_side.store(side, std::sync::atomic::Ordering::Relaxed);
         }
         log::line("State", &format!("The DAW handed back the plugin's state: {kept:?}"));
         Ok(())

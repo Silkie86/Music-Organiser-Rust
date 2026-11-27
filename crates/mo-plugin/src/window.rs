@@ -1467,6 +1467,17 @@ impl Shown {
     /// What Record has to tell (how the take is going, or what became of it), and what Listen hears.
     fn record_said(&self) {
         if let Some(inputs) = take(&self.slots.inputs) {
+            // The input Record was left on (by the project, or the last window), now the system has said what's
+            // there: one that isn't (a sound card unplugged) is shown, and recorded from, as the DAW's input, with no
+            // error. Its name stays kept, so the project still has it for when the card is back.
+            let kept = lock(&self.instance.record_from).clone();
+            let shown = crate::record::kept_input(&kept, &inputs);
+            if shown != self.panel.get_record_from().as_str() {
+                if shown.is_empty() {
+                    crate::log::line("Record", &format!("{kept} isn't there now: Record records from the DAW's input"));
+                }
+                self.panel.set_record_from(shown.into());
+            }
             *self.record_menu.inputs.borrow_mut() = inputs;
         }
         self.record_levels();
