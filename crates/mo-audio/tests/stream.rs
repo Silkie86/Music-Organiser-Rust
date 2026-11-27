@@ -111,8 +111,18 @@ fn at(seconds: f64) -> f32 {
 fn player() -> (Player, Fake, Receiver<String>) {
     let fake = Fake::default();
     let (ended, rx) = channel();
-    let player = Player::with_outputs(Box::new(fake.clone()), move |key| {
+    let player = Player::with_outputs(Box::new(fake.clone()), move |key, _| {
         let _ = ended.send(key.to_owned());
+    });
+    (player, fake, rx)
+}
+
+/// [`player`], telling each end with why the sound's file couldn't be read on, when it couldn't.
+fn player_saying_why() -> (Player, Fake, Receiver<(String, Option<String>)>) {
+    let fake = Fake::default();
+    let (ended, rx) = channel();
+    let player = Player::with_outputs(Box::new(fake.clone()), move |key, why| {
+        let _ = ended.send((key.to_owned(), why.map(ToString::to_string)));
     });
     (player, fake, rx)
 }
@@ -233,4 +243,47 @@ fn a_stream_no_longer_wanted_stops_waiting_for_its_first_part() {
     let (player, _fake, _ended) = player();
     assert_eq!(player.play_stream_if(stream, "unwanted", || Err("overtaken")), Err("overtaken"));
     assert_eq!(player.playing(), None);
+}
+
+/// The whole-app review of 26 Nov, AD-5: when a long sound's read failed part way (the drive unplugged, the file moved
+/// or renamed: a WAV is opened again for each part), or a move's new read couldn't open the file, the sound just ended,
+/// as if it had played to its end, with nothing said. Its end now says why, for the page to say so and log it.
+#[test]
+fn a_sound_whose_file_cant_be_read_on_ends_saying_why() {
+    let path = long_file("goes-away.wav");
+    let (player, fake, ended) = player_saying_why();
+    play(&player, &path, 0.0);
+    fake.pull(100);
+    std::fs::remove_file(&path).unwrap();
+    // What was read ahead plays, then it ends, saying why.
+    let mut end = None;
+    fake.play_until(|_| {
+        end = ended.try_recv().ok();
+        end.is_some()
+    });
+    let (key, why) = end.unwrap();
+    assert_eq!(key, "long");
+    assert!(why.is_some(), "it says why");
+    assert_eq!(player.playing(), None);
+    // A move in a sound whose file has gone ends it straight away, saying why.
+    let path = long_file("goes-away-then-moved.wav");
+    play(&player, &path, 0.0);
+    fake.pull(100);
+    std::fs::remove_file(&path).unwrap();
+    player.seek(30.0);
+    let mut end = None;
+    fake.play_until(|_| {
+        end = ended.try_recv().ok();
+        end.is_some()
+    });
+    assert!(end.unwrap().1.is_some(), "it says why");
+    // One played to its end says nothing.
+    let path = long_file("short-stays.wav");
+    play(&player, &path, 74.5);
+    let mut end = None;
+    fake.play_until(|_| {
+        end = ended.try_recv().ok();
+        end.is_some()
+    });
+    assert_eq!(end, Some(("long".to_owned(), None)));
 }

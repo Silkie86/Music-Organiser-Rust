@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use mo_formats::dates::RealDates;
 use mo_formats::{PluginRef, case, paths};
+use mo_library::dust_off::PutOff;
 use mo_library::read::{Installed, read_save};
 use mo_library::samples::SampleLocator;
 use mo_library::scan::{self, KnownFile};
@@ -92,8 +93,9 @@ pub struct Live {
     /// ([`crate::sound_scan::sounds_changed`]), and when a look that failed may be tried again.
     sounds_seen: u64,
     samples_after: Option<Instant>,
-    /// The songs put off the Dust off card, by key, with when they may come back ([`mo_library::dust_off`]).
-    later: HashMap<String, i64>,
+    /// The songs put off the Dust off card, by key and newest save, with when they may come back
+    /// ([`mo_library::dust_off`]).
+    later: Vec<PutOff>,
     /// The saves whose time in FL Studio has been looked for in the library ([`Live::learn_minutes`]).
     minutes_asked: HashSet<i64>,
     /// Each song's bounces, by its key, as last looked for ([`Live::set_all_bounces`]).
@@ -181,6 +183,11 @@ impl Mend {
 pub struct Updated {
     /// The saves read again or for the first time, by name.
     pub read: Vec<String>,
+    /// How many of [`Updated::read`] were new to the list.
+    pub new: usize,
+    /// Whether this was the first look at a folder (one just added, or a new library's): saves it found are "found",
+    /// not "updated". A new save the watch sees later (Save new version) is still an update.
+    pub first_look: bool,
     /// The saves found in a new folder, by name.
     pub moved: Vec<String>,
     /// How many saves' files have gone (moved somewhere the app doesn't watch, or deleted).
@@ -202,6 +209,8 @@ impl Updated {
     /// This and `more` together.
     pub fn and(mut self, more: Updated) -> Updated {
         self.read.extend(more.read);
+        self.new += more.new;
+        self.first_look |= more.first_look;
         self.moved.extend(more.moved);
         self.gone += more.gone;
         self.mended += more.mended;
@@ -224,6 +233,15 @@ impl Updated {
     /// app read it again".
     pub fn card(&self) -> (String, String) {
         let (r, m, g) = (self.read.len(), self.moved.len(), self.gone);
+        // A first look at a folder that only found saves new to the list: found, not "updated".
+        if self.first_look && r > 0 && self.new == r && m == 0 && g == 0 {
+            let title = match (r, self.read.first()) {
+                (1, Some(name)) => format!("Found {name}"),
+                (n, _) => format!("Found {} projects", mo_library::songs::thousands(n)),
+            };
+            let line = if r == 1 { "New in your project folders" } else { "New in your project folders, now listed" };
+            return (title, line.to_owned());
+        }
         let title = match (r + m + g, self.read.first().or(self.moved.first())) {
             (1, Some(name)) => format!("Updated {name}"),
             (1, None) => "Updated 1 project".to_owned(),
@@ -428,6 +446,18 @@ impl Live {
         &self.roots
     }
 
+    /// The project folders as Settings › Folders has them now, once one was added or taken off: the next
+    /// [`Live::catch_up`] walks them, so a folder added is listed this run, not from the next start. A save in a folder
+    /// taken off stays on the list, as at the next start.
+    pub fn set_roots(&mut self, roots: Vec<String>) {
+        self.roots = roots;
+    }
+
+    /// Whether the list has no saves at all (a new library before its first look at the folders).
+    pub fn is_empty(&self) -> bool {
+        self.saves.is_empty()
+    }
+
     /// Gives the song `key` `change`, as you gave it on its card (rule 14: every save of it gets it, its copies in other
     /// folders too): kept in the library ([`mo_library::song_fields::set_all_keeping`]: all of it or none) and then
     /// made to the saves held here, so the list shows what's kept. Call it on the thread that owns this list, as
@@ -448,7 +478,9 @@ impl Live {
     /// If the library can't keep it nothing is changed, here or there. What it did ([`ChangeMade`]): whether anything
     /// held here is different for it, and whether it's held here only.
     pub fn give(&mut self, key: &str, save_ids: &[i64], change: &Change) -> Result<ChangeMade, LibraryError> {
-        let Given { ids: save_ids, changes, keep } = self.given_to(key, save_ids, change);
+        let given = self.given_to(key, save_ids, change);
+        let Given { ids: save_ids, changes, keep } =
+            given.map_err(|why| LibraryError::Write { path: self.writes.clone().unwrap_or_default(), why })?;
         let held_only = if let Some(songs_db) = &self.writes {
             // By id and the path the library keeps each under: an id alone may be another save's there by now.
             let rows: Vec<SaveRow> = save_ids
@@ -494,11 +526,13 @@ impl Live {
     /// the newest holding the new tag alone would hide them (review SG-1). A tag taken off leaves every save the other
     /// tags the song shows, so none of an older save's that it never showed can show through (review SS-2); when it
     /// was the last one shown, every tag the song's saves hold goes with it.
-    fn given_to(&self, key: &str, save_ids: &[i64], change: &Change) -> Given {
+    ///
+    /// Why it can't be given: a to-do added to a song that shows the most it can have ([`Change::has_room`]).
+    fn given_to(&self, key: &str, save_ids: &[i64], change: &Change) -> Result<Given, String> {
         let real = RealDates::now();
         let grouped = songs::group_songs(&self.saves, &self.choices, &real);
         let Some(song) = grouped.iter().find(|s| s.key == key) else {
-            return Given { ids: save_ids.to_vec(), changes: vec![change.clone()], keep: Vec::new() };
+            return Ok(Given { ids: save_ids.to_vec(), changes: vec![change.clone()], keep: Vec::new() });
         };
         let ids: Vec<i64> = song.saves().chain(&song.copies).map(|s| s.id).collect();
         // The tags the song shows, to put on every save: not the hardware tags the newest save holds for hardware it
@@ -536,15 +570,18 @@ impl Live {
                 }
             }
             // The list the song shows goes to every save first: one added, ticked or taken off then changes the same
-            // list everywhere, whatever list the card had when it was clicked.
-            Ok(Change::AddTodo(_) | Change::TickTodo { .. } | Change::RemoveTodo { .. }) => {
-                changes.push(Change::Todos(shown_todos(song, &real)));
+            // list everywhere, whatever list the card had when it was clicked. One added only while there's room in
+            // it (review SZ-2).
+            Ok(todo @ (Change::AddTodo(_) | Change::TickTodo { .. } | Change::RemoveTodo { .. })) => {
+                let shown = shown_todos(song, &real);
+                todo.has_room(&shown)?;
+                changes.push(Change::Todos(shown));
             }
             _ => {}
         }
         changes.push(change.clone());
         let keep = copies_to_keep(song, &self.choices, &changes);
-        Given { ids, changes, keep }
+        Ok(Given { ids, changes, keep })
     }
 
     /// Makes `change` to the saves held here, the panel's copies of them too ([`Live::give`]).
@@ -572,7 +609,7 @@ impl Live {
     /// The list, grouped into songs.
     pub fn songs(&self) -> Songs {
         let mut songs = Songs::from_saves(&self.saves, &self.choices, self.tags.clone(), self.gap_months, self.asking);
-        songs.later.clone_from(&self.later);
+        songs.set_later(&self.later);
         songs.set_bounces(&self.bounces);
         songs.set_shapes(&self.shapes);
         songs.not_now.clone_from(&self.not_now);
@@ -646,6 +683,11 @@ impl Live {
         kept.map(|()| changed)
     }
 
+    /// The shape kept for save `id`, while the save's file is still as it was read (`mtime`, `size`).
+    pub fn shape_of(&self, id: i64, mtime: i64, size: i64) -> Option<mo_formats::shape::Shape> {
+        self.shapes.get(&id).filter(|k| k.mtime == mtime && k.size == size)?.shape.clone()
+    }
+
     /// Puts away the stage guess made from save `id` as it is at `mtime` ("not for this save"): kept in the library
     /// when it's the app's own, else until the app closes.
     /// Whether it's held here only, till the app closes.
@@ -697,15 +739,20 @@ impl Live {
     }
 
     /// Puts the song `key` off the Dust off card for about three months ([`crate::songs::NOT_NOW_DAYS`]): kept in the
-    /// library when it's the app's own, else until the app closes. Whether it's held here only, till the app closes.
+    /// library when it's the app's own, else until the app closes. Its newest save is kept with it, so it stays off
+    /// when its key changes (the 26 Nov review's SZ-4). Whether it's held here only, till the app closes.
     pub fn put_off(&mut self, key: &str) -> Result<bool, LibraryError> {
         let now = chrono::Local::now().timestamp();
         let until = now + crate::songs::NOT_NOW_DAYS * 86_400;
+        let real = RealDates::now();
+        let save =
+            songs::group_songs(&self.saves, &self.choices, &real).iter().find(|s| s.key == key).map(|s| s.latest.id);
+        let off = PutOff { key: key.to_owned(), save, until };
         if let Some(songs_db) = &self.writes {
-            mo_library::dust_off::put_off(songs_db, key, until, now)?;
+            mo_library::dust_off::put_off(songs_db, &off, now)?;
         }
-        self.later.retain(|_, t| *t > now);
-        self.later.insert(key.to_owned(), until);
+        self.later.retain(|o| o.until > now && o.key != off.key && (off.save.is_none() || o.save != off.save));
+        self.later.push(off);
         Ok(self.writes.is_none())
     }
 
@@ -1433,6 +1480,7 @@ impl Live {
                         done.quiet += 1;
                     } else {
                         done.read.push(detail.save.name.clone());
+                        done.new += 1;
                     }
                 }
             }
@@ -1725,7 +1773,7 @@ mod tests {
             reread_put: HashSet::new(),
             moved_notes: Vec::new(),
             stop: Arc::default(),
-            later: HashMap::new(),
+            later: Vec::new(),
             minutes_asked: HashSet::new(),
             bounces: HashMap::new(),
             shapes: HashMap::new(),
@@ -1867,7 +1915,7 @@ mod tests {
         assert!(live.give(&key, &[9], &Change::Rating(0)).unwrap().differs);
         assert_eq!(shown(&live).0, 9);
         // Noted once: a change finds it noted already.
-        assert!(live.given_to(&key, &[9], &Change::Rating(2)).keep.is_empty());
+        assert!(live.given_to(&key, &[9], &Change::Rating(2)).unwrap().keep.is_empty());
         // The song's copy found first, organised, stays shown after a change anyway: nothing is noted for it (rule 23).
         let first = Save { rating: 2, ..counted(save(1, "D:\\Old\\dub", "Didums_3")) };
         let mut live = super::tests::live(vec![first, counted(save(9, "E:\\Music\\dub", "Didums_3"))]);
@@ -1881,7 +1929,7 @@ mod tests {
         let later = Save { status: "Arranging".into(), ..counted(save(9, "E:\\Music\\dub", "Didums_3")) };
         let mut live = super::tests::live(vec![first, later]);
         assert_eq!(shown(&live).0, 1);
-        let given = live.given_to(&key, &[1], &Change::Rating(0));
+        let given = live.given_to(&key, &[1], &Change::Rating(0)).unwrap();
         assert_eq!(
             given.keep,
             [KeepCopy {
@@ -1972,6 +2020,30 @@ mod tests {
         assert!(live.give(&key, &[2], &Change::RemoveTodo { text: "A".into(), added: 1 }).unwrap().differs);
         assert_eq!(live.songs().rows[0].todos, [todo("B", 2)]);
         assert!(!live.give(&key, &[2], &Change::RemoveTodo { text: "A".into(), added: 1 }).unwrap().differs);
+    }
+
+    /// Review SZ-2: a song that shows the most to-dos it can have takes no more, and one that has more (from before
+    /// the limit was kept) can still be ticked and made shorter.
+    #[test]
+    fn a_full_to_do_list_takes_no_more_but_can_be_ticked_and_shortened() {
+        let todo = |text: &str, added: i64| mo_library::Todo { text: text.into(), done: false, added };
+        let most = mo_library::song_fields::MOST_TODOS as i64;
+        let full = Save { todos: (0..most).map(|n| todo("x", n)).collect(), ..save(1, "C:\\Music\\Night", "Night_1") };
+        let mut live = live(vec![full]);
+        let key = live.songs().rows[0].song.key.clone();
+        let why = live.give(&key, &[1], &Change::AddTodo(todo("one more", 999))).unwrap_err();
+        assert!(why.to_string().contains("to-dos at most"), "{why}");
+        assert_eq!(live.saves[0].todos.len(), most as usize, "nothing changed");
+        // Over the most: ticked, taken off, and with room again, added to.
+        live.saves[0].todos.push(todo("x", most));
+        let tick = Change::TickTodo { text: "x".into(), added: 3, done: true };
+        assert!(live.give(&key, &[1], &tick).unwrap().differs);
+        for added in [0, 1] {
+            assert!(live.give(&key, &[1], &Change::RemoveTodo { text: "x".into(), added }).unwrap().differs);
+        }
+        assert_eq!(live.saves[0].todos.len(), most as usize - 1);
+        assert!(live.give(&key, &[1], &Change::AddTodo(todo("one more", 999))).unwrap().differs);
+        assert!(live.give(&key, &[1], &Change::AddTodo(todo("and another", 1000))).is_err());
     }
 
     /// Review SS-2: taking off the last tag a song shows leaves it with none, rather than an older save's it never
@@ -2149,6 +2221,14 @@ mod tests {
         assert_eq!(gone.card(), ("Updated 1 project".into(), "Missing: moved or deleted".into()));
         let moved = Updated { moved: vec!["Night_11".into()], ..Updated::default() };
         assert_eq!(moved.card(), ("Updated Night_11".into(), "Found in its new folder".into()));
+        // A first look at a folder: every save read is new, so they're found, not updated.
+        let found = Updated { read: vec!["a".into(), "b".into()], new: 2, first_look: true, ..Updated::default() };
+        assert_eq!(found.card(), ("Found 2 projects".into(), "New in your project folders, now listed".into()));
+        let first = Updated { read: vec!["Night_1".into()], new: 1, first_look: true, ..Updated::default() };
+        assert_eq!(first.card(), ("Found Night_1".into(), "New in your project folders".into()));
+        // A new save the watch sees (Save new version) is still an update.
+        let saved = Updated { read: vec!["Night_2".into()], new: 1, ..Updated::default() };
+        assert_eq!(saved.card(), ("Updated Night_2".into(), "Saved in its folder, so the app read it again".into()));
         assert!(Updated::default().is_empty());
         // Saves read again only to mend their muted samples are kept, but not on the card.
         let mended = Updated { mended: 3, ..Updated::default() };
@@ -2384,7 +2464,7 @@ mod tests {
         assert_eq!(kept, [(case::to_lower(&path), String::new())]);
         assert_eq!(shown(&open()).0, second, "and at the next start");
         // A second change finds it noted already, and adds nothing.
-        assert!(live.given_to(&key, &ids, &Change::Rating(0)).keep.is_empty());
+        assert!(live.given_to(&key, &ids, &Change::Rating(0)).unwrap().keep.is_empty());
         assert!(live.give(&key, &ids, &Change::Rating(0)).unwrap().differs);
         let kept_rows = |db: &rusqlite::Connection| -> Vec<String> {
             let mut st = db.prepare("SELECT a FROM song_choices WHERE kind = 'kept'").unwrap();
@@ -2501,7 +2581,7 @@ mod tests {
         let mut live = open();
         let caught = live.catch_up();
         assert_eq!((caught.read.clone(), caught.quiet), (vec!["Night_1".to_owned()], 1));
-        assert_eq!(caught.card().0, "Updated Night_1");
+        assert_eq!(caught.card().0, "Updated Night_1", "the watch's own catch-up, not a first look");
         assert_eq!(shown(&live), ["Night"]);
         let kept = live.keep().unwrap().unwrap();
         assert_eq!(kept.written.put, 2, "{kept:?}");

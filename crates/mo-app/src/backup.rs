@@ -46,10 +46,11 @@ pub const PART_ENDING: &str = ".mo-part";
 /// Every file written through [`write_whole`] in the data folder: the Backup page's two, a data folder move's notes in
 /// the folder it moved to ([`crate::data_move`]), the Plugins page's moves under way
 /// ([`crate::plugins::moves_under_way`]) the Space page's note of what Fix wrote ([`crate::space_fix_note`]) and what its last look for Bitwig copies
-/// found ([`crate::space_bitwig_kept`]). A
+/// found ([`crate::space_bitwig_kept`]), and the CLAP plugin's widths ([`crate::widths::PLUGIN_FILE`], which two DAWs
+/// can write at once). A
 /// new caller adds its file's name here (or to [`WRITTEN_WHOLE_BESIDE_FIRST`]), so the start-up sweep clears what a
 /// crash leaves of it.
-pub const WRITTEN_WHOLE: [&str; 7] = [
+pub const WRITTEN_WHOLE: [&str; 8] = [
     SETTINGS_FILE,
     SONGS_FILE,
     crate::paths::MOVED_IN_FILE,
@@ -57,6 +58,7 @@ pub const WRITTEN_WHOLE: [&str; 7] = [
     crate::plugins::moves_under_way::FILE_NAME,
     crate::space_fix_note::FILE_NAME,
     crate::space_bitwig_kept::FILE_NAME,
+    crate::widths::PLUGIN_FILE,
 ];
 
 /// Every file written through [`write_whole`] beside the first data folder (`%LOCALAPPDATA%`): a data folder move's

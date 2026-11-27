@@ -155,7 +155,8 @@ pub fn watch_window(app: &crate::AppWindow) {
     use slint::ComponentHandle;
     use slint::winit_030::winit::event::WindowEvent;
     use slint::winit_030::{EventResult, WinitWindowAccessor};
-    let mut minimised = false;
+    // When the window was minimised, while it is.
+    let mut minimised: Option<Instant> = None;
     let mut hands = Hands::default();
     let weak = app.as_weak();
     app.window().on_winit_window_event(move |_, event| {
@@ -169,21 +170,7 @@ pub fn watch_window(app: &crate::AppWindow) {
                 crate::presets::came_to_front(&app);
             }
         }
-        let what = match event {
-            WindowEvent::Resized(size) if size.width == 0 || size.height == 0 => {
-                minimised = true;
-                "minimised"
-            }
-            WindowEvent::Resized(_) if std::mem::take(&mut minimised) => "restored",
-            WindowEvent::Resized(_) => "resized",
-            WindowEvent::Moved(_) => "moved",
-            WindowEvent::Focused(true) => "focused",
-            WindowEvent::Focused(false) => "lost focus",
-            WindowEvent::Occluded(true) => "hidden",
-            WindowEvent::Occluded(false) => "shown again",
-            WindowEvent::ScaleFactorChanged { .. } => "scale changed",
-            _ => return EventResult::Propagate,
-        };
+        let Some((what, minimised_for)) = event_name(event, &mut minimised) else { return EventResult::Propagate };
         window_event(what);
         if matches!(what, "minimised" | "restored" | "hidden" | "shown again") {
             log::info("Window", &format!("The window was {what}"));
@@ -191,6 +178,11 @@ pub fn watch_window(app: &crate::AppWindow) {
         if what == "restored"
             && let Some(app) = weak.upgrade()
         {
+            // Back from the taskbar no longer maximised is logged as any other way of leaving it (it's one resize to
+            // winit), looking back to when it was minimised: what asked for that size may have asked while the window
+            // sat on the taskbar (the whole-app review of 26 Nov, WI-1). First, so the line says what the restore
+            // itself brought back, before full screen is put back.
+            crate::settings::resized(&app, hands.on_the_frame(), minimised_for);
             crate::settings::restored(&app);
         }
         // A screen with another scale: the size picked in Settings goes back on at once, once Slint has taken the new
@@ -209,10 +201,39 @@ pub fn watch_window(app: &crate::AppWindow) {
         if what == "resized"
             && let Some(app) = weak.upgrade()
         {
-            crate::settings::resized(&app, hands.on_the_frame());
+            crate::settings::resized(&app, hands.on_the_frame(), None);
         }
         EventResult::Propagate
     });
+}
+
+/// What a window event is called in the freeze lines and the log ("resized", "minimised"...), or `None` for one that
+/// isn't noted; for "restored", with how long the window was minimised. `minimised` is when the window was minimised,
+/// while it is: a resize to nothing minimises it (on Windows a minimised window is a resize to nothing), and the next
+/// resize to a size is it coming back.
+fn event_name(
+    event: &slint::winit_030::winit::event::WindowEvent,
+    minimised: &mut Option<Instant>,
+) -> Option<(&'static str, Option<Duration>)> {
+    use slint::winit_030::winit::event::WindowEvent;
+    let what = match event {
+        WindowEvent::Resized(size) if size.width == 0 || size.height == 0 => {
+            minimised.get_or_insert_with(Instant::now);
+            "minimised"
+        }
+        WindowEvent::Resized(_) if minimised.is_some() => {
+            return Some(("restored", minimised.take().map(|at| at.elapsed())));
+        }
+        WindowEvent::Resized(_) => "resized",
+        WindowEvent::Moved(_) => "moved",
+        WindowEvent::Focused(true) => "focused",
+        WindowEvent::Focused(false) => "lost focus",
+        WindowEvent::Occluded(true) => "hidden",
+        WindowEvent::Occluded(false) => "shown again",
+        WindowEvent::ScaleFactorChanged { .. } => "scale changed",
+        _ => return None,
+    };
+    Some((what, None))
 }
 
 thread_local! {
@@ -621,6 +642,30 @@ pub fn line(waited: Duration, still_stuck: bool, page: &str, running: &[String],
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole-app review of 26 Nov, WI-1: the first resize to a size after a minimise is the restore, with how long
+    /// the window was minimised (so its line can look back that far), and only that one; a minimise seen twice keeps
+    /// when it began.
+    #[test]
+    fn a_restore_is_the_first_resize_after_a_minimise_and_says_how_long_it_was_minimised() {
+        use slint::winit_030::winit::dpi::PhysicalSize;
+        use slint::winit_030::winit::event::WindowEvent;
+        let mut minimised = None;
+        let size = |w, h| WindowEvent::Resized(PhysicalSize::new(w, h));
+        assert_eq!(event_name(&size(1440, 900), &mut minimised), Some(("resized", None)));
+        assert_eq!(event_name(&size(0, 0), &mut minimised), Some(("minimised", None)));
+        let began = minimised.expect("minimised");
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(event_name(&size(0, 0), &mut minimised), Some(("minimised", None)));
+        assert_eq!(minimised, Some(began));
+        let Some(("restored", Some(away))) = event_name(&size(1440, 900), &mut minimised) else {
+            panic!("not restored")
+        };
+        assert!(away >= Duration::from_millis(20), "{away:?}");
+        assert_eq!(event_name(&size(3440, 1400), &mut minimised), Some(("resized", None)));
+        assert_eq!(event_name(&WindowEvent::Focused(true), &mut minimised), Some(("focused", None)));
+        assert_eq!(event_name(&WindowEvent::RedrawRequested, &mut minimised), None);
+    }
 
     /// The marked step is kept for the whole app, so the tests that mark steps take turns.
     static TURN: Mutex<()> = Mutex::new(());

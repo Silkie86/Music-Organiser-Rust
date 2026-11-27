@@ -433,6 +433,10 @@ pub struct Songs {
     /// Which dates are real, as of when the list was made ([`RealDates`]): the save each song opens, the list's order,
     /// its dates and years, and each song's card go by these, so they agree for as long as the list lasts.
     pub real: RealDates,
+    /// The live tests' projects ("MO Live Test…", rule 10: [`Song::made_for_live_tests`]), left out of `rows` as every
+    /// song made for trying the app out is. Only the MIDI page's Fits my song offers them, so the beta checklist's
+    /// live steps can fit a part to that project and play it there (the 26 Nov review's SZ-1).
+    pub live_tests: Vec<Song>,
 }
 
 /// Two songs that may be saves of one: the app asks rather than guessing (the C# app's question).
@@ -470,8 +474,9 @@ const MOST_DOUBTS: usize = 5000;
 
 impl Songs {
     /// Groups the saves into songs and puts them in order, last saved first, leaving out the songs made for trying the
-    /// app out (Solomon's F12 note, 25 Nov 2026: [`mo_library::Song::made_for_tests`]). `asking` is whether to look
-    /// for songs that may be saves of one (`Some`), and then whether also across folders.
+    /// app out (Solomon's F12 note, 25 Nov 2026: [`mo_library::Song::made_for_tests`]); of those, the live tests'
+    /// projects are kept aside for Fits my song ([`Songs::live_tests`]). `asking` is whether to look for songs that
+    /// may be saves of one (`Some`), and then whether also across folders.
     pub fn from_saves(
         saves: &[Save],
         choices: &SongChoices,
@@ -481,8 +486,9 @@ impl Songs {
     ) -> Songs {
         // One set of real dates for the whole list ([`Songs::real`]).
         let real = RealDates::now();
-        let mut groups = songs::group_songs(saves, choices, &real);
-        groups.retain(|g| !g.made_for_tests());
+        let (tests, groups): (Vec<Song>, Vec<Song>) =
+            songs::group_songs(saves, choices, &real).into_iter().partition(Song::made_for_tests);
+        let live_tests = tests.into_iter().filter(Song::made_for_live_tests).collect();
         let found = asking.map(|across| songs::doubt_pairs(&groups, choices, across, MOST_DOUBTS)).unwrap_or_default();
         let mut rows: Vec<(usize, SongRow)> =
             groups.into_iter().map(|g| SongRow::new(g, gap_months, &real)).enumerate().collect();
@@ -512,7 +518,18 @@ impl Songs {
         let copies = rows.iter().map(|r| r.song.copies.len()).sum();
         let daws: BTreeSet<&str> = rows.iter().map(|r| r.song.latest.daw.as_str()).collect();
         let daws = daws.into_iter().map(str::to_owned).collect();
-        Songs { rows, saves, copies, tags, daws, doubts, later: HashMap::new(), not_now: HashSet::new(), real }
+        Songs {
+            rows,
+            saves,
+            copies,
+            tags,
+            daws,
+            doubts,
+            later: HashMap::new(),
+            not_now: HashSet::new(),
+            real,
+            live_tests,
+        }
     }
 
     /// The questions about the song at `row`.
@@ -781,6 +798,35 @@ pub struct SongChips {
 }
 
 impl Songs {
+    /// Sets which songs are put off the Dust off card ([`Songs::later`]) from what was put off (`put_off`): each song
+    /// by the key it had then, or by the save that was its newest then, wherever that save is now (its folder moved or
+    /// renamed, or the song joined to another: the 26 Nov review's SZ-4).
+    pub fn set_later(&mut self, put_off: &[mo_library::dust_off::PutOff]) {
+        // Put off twice (by its key and by its save): the later day.
+        fn keep<K: std::hash::Hash + Eq>(map: &mut HashMap<K, i64>, key: K, until: i64) {
+            let at = map.entry(key).or_insert(until);
+            *at = (*at).max(until);
+        }
+        let mut later: HashMap<String, i64> = HashMap::new();
+        let mut by_save: HashMap<i64, i64> = HashMap::new();
+        for off in put_off {
+            keep(&mut later, off.key.clone(), off.until);
+            if let Some(save) = off.save {
+                keep(&mut by_save, save, off.until);
+            }
+        }
+        if !by_save.is_empty() {
+            for row in &self.rows {
+                for save in row.song.saves().chain(&row.song.copies) {
+                    if let Some(&until) = by_save.get(&save.id) {
+                        keep(&mut later, row.song.key.clone(), until);
+                    }
+                }
+            }
+        }
+        self.later = later;
+    }
+
     /// Gives each song its bounces, by its key ([`crate::bounces::find`]): a song not in `found` has none.
     pub fn set_bounces(&mut self, found: &HashMap<String, Vec<crate::bounces::Bounce>>) {
         for row in &mut self.rows {
@@ -1482,6 +1528,37 @@ mod tests {
         };
         assert_eq!(names_later(false)[0], "Tape");
         assert_eq!(names_later(true)[0], "Tape", "Night is put off: not first either way");
+    }
+
+    /// Review SZ-4: a song put off stays off when its key changes (its folder moved or renamed, or it was joined to
+    /// another), found by the save that was its newest when it was put off.
+    #[test]
+    fn a_song_put_off_stays_off_when_its_folder_moves() {
+        use mo_library::dust_off::PutOff;
+        let now = day(2026, 6, 1);
+        let night = |folder: &str| Save {
+            id: 7,
+            minutes_spent: Some(41 * 60),
+            status: "Idea".into(),
+            folder: folder.into(),
+            path: format!(r"{folder}\Night.flp"),
+            ..save("Night", day(2025, 1, 1))
+        };
+        let tape = Save { id: 8, minutes_spent: Some(10 * 60), status: "Idea".into(), ..save("Tape", day(2024, 1, 1)) };
+        let key_of = |s: &Songs| s.rows.iter().find(|r| r.song.name == "Night").unwrap().song.key.clone();
+        let old_key = key_of(&songs(&[night(r"C:\beats"), tape.clone()]));
+        let until = day(2026, 9, 1).and_utc().timestamp();
+        // Moved to another folder: another key, the same save.
+        let mut moved = songs(&[night(r"D:\beats"), tape]);
+        assert_ne!(key_of(&moved), old_key);
+        let tape_row = moved.rows.iter().position(|r| r.song.name == "Tape").unwrap();
+        assert_eq!(moved.dusty(now).len(), 2);
+        moved.set_later(&[PutOff { key: old_key.clone(), save: Some(7), until }]);
+        assert_eq!(moved.dusty(now), [tape_row]);
+        assert_eq!(moved.dusty(day(2026, 9, 2)).len(), 2, "back when its day comes");
+        // One put off before its save was kept with it: by its key alone, so a moved song comes back.
+        moved.set_later(&[PutOff { key: old_key, save: None, until }]);
+        assert_eq!(moved.dusty(now).len(), 2);
     }
 
     #[test]

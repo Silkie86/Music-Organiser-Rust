@@ -34,6 +34,10 @@ SetupIconFile={#LogoIco}
 UninstallDisplayIcon={app}\{#ExeName}
 UninstallDisplayName={#AppName}
 WizardStyle=modern
+; The logo's pictures (tools/logo makes them), one per screen scale: Setup picks the nearest. The tall one is on the
+; first and last pages, the small one top right on the others.
+WizardImageFile={#LogoDir}\setup-side-100.bmp,{#LogoDir}\setup-side-150.bmp,{#LogoDir}\setup-side-200.bmp
+WizardSmallImageFile={#LogoDir}\setup-small-100.bmp,{#LogoDir}\setup-small-150.bmp,{#LogoDir}\setup-small-200.bmp
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputName}
 Compression=lzma2/max
@@ -102,6 +106,8 @@ const
   QueryLimitedRight = $00001000;
   // How long an update waits for the app that started it to end (UP-14), in milliseconds: five minutes.
   WaitForAppMs = 300000;
+  // How long an update started with no /WAITPID (by 0.9.0-beta.1) waits for the app that started it, in milliseconds.
+  OlderAppWaitMs = 5000;
   WaitTimedOut = $00000102;
 
 var
@@ -225,8 +231,16 @@ begin
     Result := CompareText(ExtractFileName(Copy(Name, 1, Size)), '{#ExeName}') = 0;
 end;
 
+// The app passes /UPDATED when it runs this setup to update itself.
+function StartAfterUpdate: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:UPDATED|no}') <> 'no');
+end;
+
 // An update the app started passes /WAITPID=<its process>: nothing is touched until that app has ended, however long
 // Windows takes over it (UP-14). Five minutes at most; then the setup goes on, and closes what's left itself.
+// An app from before /WAITPID (0.9.0-beta.1) passes none, and ends itself as it starts this: Windows is given a few
+// seconds to finish it off, so its files are free before they're replaced (the 26 Nov review's IN-2).
 function InitializeSetup: Boolean;
 var
   Pid: Integer;
@@ -235,7 +249,15 @@ begin
   Result := True;
   Pid := StrToIntDef(ExpandConstant('{param:WAITPID|0}'), 0);
   if Pid <= 0 then
+  begin
+    if StartAfterUpdate then
+    begin
+      Log('An update from an app that passes no /WAITPID: waiting ' + IntToStr(OlderAppWaitMs div 1000) +
+        ' seconds for it to end');
+      Sleep(OlderAppWaitMs);
+    end;
     Exit;
+  end;
   Handle := OpenProcess(SynchronizeRight or QueryLimitedRight, False, Pid);
   if Handle = 0 then
   begin
@@ -365,12 +387,6 @@ begin
       Tell('The setup couldn''t start the data folder in ' + Target + ' (can this account write there?). ' +
         '{#AppName} keeps its data in ' + FirstDataDir + ' for now; Settings > General can move it.');
   end;
-end;
-
-// The app passes /UPDATED when it runs this setup to update itself.
-function StartAfterUpdate: Boolean;
-begin
-  Result := WizardSilent and (ExpandConstant('{param:UPDATED|no}') <> 'no');
 end;
 
 // An update that stopped before its files went in (a file that couldn't be replaced, say): the old app is still in

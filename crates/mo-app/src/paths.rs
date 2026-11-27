@@ -66,16 +66,31 @@ pub fn first_has_data() -> bool {
     holds_data(&first_dir())
 }
 
-/// Whether `folder` holds anything but the launchers' own folders and the logs (the helper writes its log there at a
-/// login while the data's drive is missing, and so does a run opened with no data).
+/// Whether `folder` holds anything but the launchers' own folders, the logs and the app's lock files (the helper writes
+/// its log there at a login while the data's drive is missing, and a run opened with no data writes its log and holds
+/// its lock there: the whole-app review of 26 Nov, BD-3).
 fn holds_data(folder: &Path) -> bool {
     fs::read_dir(folder).is_ok_and(|entries| {
         entries.flatten().any(|e| {
             let name = e.file_name();
-            let skipped = crate::data_move::LAUNCHER_FOLDERS.iter().any(|l| name.eq_ignore_ascii_case(l));
+            let skipped = crate::data_move::LAUNCHER_FOLDERS.iter().any(|l| name.eq_ignore_ascii_case(l))
+                || crate::data_move::RUNNING_LOCKS.iter().any(|l| name.eq_ignore_ascii_case(l));
             !(skipped || name.eq_ignore_ascii_case("logs"))
         })
     })
+}
+
+/// Whether the first data folder is the old copy a move left: the data moved from it to another folder, and the move
+/// left its note there ([`crate::data_move::MOVED_OUT_FILE`]). Only then is opening on it while the moved folder's
+/// drive is missing opening on "the old copy from before the move". The whole-app review of 26 Nov, BD-3: after one
+/// run opened with no data, the box called the folder that run had written in "the old copy", though no move was
+/// ever made from it.
+pub fn first_is_old_copy() -> bool {
+    is_old_copy(&first_dir())
+}
+
+fn is_old_copy(folder: &Path) -> bool {
+    fs::symlink_metadata(folder.join(crate::data_move::MOVED_OUT_FILE)).is_ok_and(|m| m.is_file())
 }
 
 /// The system's own place for the app's data, where it starts out and where [`POINTER_FILE`] sits beside it.
@@ -170,8 +185,17 @@ mod tests {
         fs::create_dir_all(dir.join("logs")).unwrap();
         fs::create_dir_all(dir.join("run-latest-rust")).unwrap();
         assert!(!holds_data(&dir));
+        // A run opened with no data holds its lock file there, and the notes' (the whole-app review of 26 Nov, BD-3).
+        for lock in crate::data_move::RUNNING_LOCKS {
+            fs::write(dir.join(lock), "").unwrap();
+        }
+        assert!(!holds_data(&dir));
+        assert!(!is_old_copy(&dir));
         fs::write(dir.join("rust-settings.json"), "{}").unwrap();
         assert!(holds_data(&dir));
+        assert!(!is_old_copy(&dir), "data, but no move was made from it");
+        fs::write(dir.join(crate::data_move::MOVED_OUT_FILE), "moved").unwrap();
+        assert!(is_old_copy(&dir));
         let _ = fs::remove_dir_all(&dir);
         assert!(!holds_data(&dir), "no folder at all");
     }

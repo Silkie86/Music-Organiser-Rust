@@ -91,7 +91,7 @@ const EXPLAINED: &str = "DAWmate is copying a folder into this one. If this file
 /// use a half copy of an unchanged folder, and sent you to the Space page, which doesn't look for half copies. It
 /// promises nothing of a page: a move back and a move of the moved folders' home mark their copies too, and no page
 /// looks at those afterwards.
-const IN_USE: &str = "Music Organiser copied a folder into this one, and was putting this copy into use when it \
+const IN_USE: &str = "DAWmate copied a folder into this one, and was putting this copy into use when it \
                       stopped, so this may be the copy in use now (a link, or the folder's own name, may lead here): \
                       don't delete this folder. Only this file can go.";
 
@@ -1023,6 +1023,8 @@ mod tests {
         // Going into use, its words change, and what it holds says so.
         assert!(going_into_use(&copy));
         assert!(said(IN_USE) && !said(EXPLAINED) && said("don't delete this folder") && !said("page"));
+        // The app's own name, not the old one (whole-app review of 26 Nov, PG-5).
+        assert!(said("DAWmate copied") && !said("Music Organiser"));
         assert!(read_marker(&copy).is_some_and(|m| m.in_use && m.from == marker.from));
         // Not going into use after all (its swap didn't happen): a half copy again.
         not_in_use(&copy);

@@ -8,3 +8,6 @@ symphonia. Nothing from anyone's sample library.
 The two ADPCM WAVs are that tone squeezed by ffmpeg (`-fflags +bitexact`, `-c:a adpcm_ms` and `-c:a adpcm_ima_wav`).
 The test checks the reader's samples against a hash of ffmpeg's own decode of them (its first 11,025 frames, as the
 files' `fact` chunks say; ffmpeg also decodes the last block's padding).
+
+`tone-fragmented.m4a` is the tone as AAC 64k in a fragmented MP4 (`-movflags frag_keyframe+empty_moov`): it says it's
+0 long, so its length has to be counted.

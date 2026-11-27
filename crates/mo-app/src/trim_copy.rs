@@ -8,7 +8,8 @@
 //! using the original): the next drag reuses it, and an original changed since gets it made again.
 //!
 //! Loops go as they are: a loop's silence is part of its groove and its bar length. So do sounds with too little
-//! silence to hear, long ones, and ones that go over full scale (a 24-bit copy would clip them).
+//! silence to hear, long ones, ones that go over full scale (a 24-bit copy would clip them), and ones whose file names
+//! their root note (a copy holds only the sound, so a sampler could put it on the wrong key).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -116,9 +117,12 @@ pub fn for_drag(original: &Path, db: i32, folder: &Path) -> Made {
     let changed = meta.modified().ok();
     // Made before, and the original hasn't changed since: a copy carries its original's date (stamped as it's made,
     // so an original dated ahead of now, as a pack's files can be, keeps its copy rather than having it made again at
-    // every drag: DF-6). A copy made before copies were stamped is dated when it was made, after its original.
+    // every drag: DF-6), so the two dates are the same. Not only a later date: a file copied over the original keeps
+    // its own date, which may be older (from another pack, or brought back from Backup's Older versions), and it
+    // got the old sound's copy (the whole-app review of 26 Nov, BD-1). A copy made before copies were stamped is
+    // dated when it was made, so it's made again once.
     let fresh = |copy: &Path| {
-        std::fs::metadata(copy).is_ok_and(|c| c.is_file() && c.modified().ok().zip(changed).is_none_or(|(c, o)| c >= o))
+        std::fs::metadata(copy).is_ok_and(|c| c.is_file() && c.modified().ok().zip(changed).is_none_or(same_date))
     };
     if fresh(&copy) {
         return Made::Copy(copy);
@@ -169,6 +173,11 @@ fn make(original: &Path, db: i32, copy: &Path, folder: &Path, changed: Option<Sy
     if audio.embedded_is_loop == Some(true) {
         return Ok(Made::AsItIs(None));
     }
+    // The file names its root note (a melodic one-shot): the copy would hold only the sound, so a sampler could put it
+    // on the wrong key (the whole-app review of 26 Nov, BD-4).
+    if audio.embedded_root_note.is_some() {
+        return as_it_is(format!("{} names its root note, which a trimmed copy wouldn't keep", original.display()));
+    }
     let Some((start, end)) = mo_audio::trim::sound_span(&audio, mo_audio::trim::level_of_db(db)) else {
         return Ok(Made::AsItIs(None));
     };
@@ -196,6 +205,12 @@ fn make(original: &Path, db: i32, copy: &Path, folder: &Path, changed: Option<Sy
             Err(format!("couldn't write {}: {e}", copy.display()))
         }
     }
+}
+
+/// Whether a copy's date and its original's are the same (`(copy, original)`): within 2 s either way, a FAT drive's
+/// step.
+fn same_date((copy, original): (SystemTime, SystemTime)) -> bool {
+    copy.duration_since(original).unwrap_or_else(|e| e.duration()) <= std::time::Duration::from_secs(2)
 }
 
 /// Dates the file at `path` `when` (nothing for `None`); a rename keeps the date.
@@ -321,6 +336,53 @@ mod tests {
         stamp(&original, Some(later + std::time::Duration::from_secs(60))).unwrap();
         assert_eq!(for_drag(&original, -60, &copies), Made::Copy(copy.clone()));
         assert_ne!(std::fs::read(&copy).unwrap(), b"kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole-app review of 26 Nov, BD-1: another file copied over the original keeps its own, older date; its
+    /// copy is made again, not the old sound's dragged. A date a second off (a FAT drive's step) is the same.
+    #[test]
+    fn an_original_replaced_by_an_older_file_gets_its_copy_made_again() {
+        let dir = folder("older");
+        let original = dir.join("Kick 01.wav");
+        quiet_loud_quiet(&original);
+        let march = SystemTime::now() - std::time::Duration::from_secs(600 * 24 * 60 * 60);
+        stamp(&original, Some(march)).unwrap();
+        let copies = dir.join(FOLDER);
+        let Made::Copy(copy) = for_drag(&original, -60, &copies) else { panic!("no copy") };
+        std::fs::write(&copy, b"kept").unwrap();
+        stamp(&copy, Some(march + std::time::Duration::from_secs(1))).unwrap();
+        assert_eq!(for_drag(&original, -60, &copies), Made::Copy(copy.clone()));
+        assert_eq!(std::fs::read(&copy).unwrap(), b"kept", "a second off is the same date");
+        // Another kick, dated years before, copied over it.
+        stamp(&original, Some(march - std::time::Duration::from_secs(3 * 365 * 24 * 60 * 60))).unwrap();
+        assert_eq!(for_drag(&original, -60, &copies), Made::Copy(copy.clone()));
+        assert_ne!(std::fs::read(&copy).unwrap(), b"kept", "made again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole-app review of 26 Nov, BD-4: a sound whose file names its root note goes as it is, as a trimmed copy
+    /// (only the sound) would lose it and a sampler could put it on the wrong key.
+    #[test]
+    fn a_sound_that_names_its_root_note_goes_as_it_is() {
+        let dir = folder("root");
+        let original = dir.join("Bass Hit C2.wav");
+        quiet_loud_quiet(&original);
+        // A sampler chunk after the sound, its unity note C2 (36), and the RIFF size grown to hold it.
+        let mut bytes = std::fs::read(&original).unwrap();
+        let mut smpl = vec![0u8; 36];
+        smpl[12] = 36;
+        bytes.extend_from_slice(b"smpl");
+        bytes.extend_from_slice(&36u32.to_le_bytes());
+        bytes.extend_from_slice(&smpl);
+        let riff = u32::try_from(bytes.len() - 8).unwrap();
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        std::fs::write(&original, &bytes).unwrap();
+        assert_eq!(mo_audio::read(&original, 60.0).unwrap().embedded_root_note, Some(36));
+        let copies = dir.join(FOLDER);
+        let Made::AsItIs(Some(why)) = for_drag(&original, -60, &copies) else { panic!("trimmed") };
+        assert!(why.contains("root note"), "{why}");
+        assert!(!copies.exists(), "no copy made");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

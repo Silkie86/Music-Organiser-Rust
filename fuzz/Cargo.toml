@@ -15,6 +15,11 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 mo-formats = { path = "../crates/mo-formats" }
+mo-presets = { path = "../crates/mo-presets" }
+mo-midi = { path = "../crates/mo-midi" }
+mo-sounds = { path = "../crates/mo-sounds" }
+# Only reading sounds: without playing them, so no sound libraries are needed to build it.
+mo-audio = { path = "../crates/mo-audio", default-features = false }
 
 # The app's release builds stop on arithmetic that overflows (see the top Cargo.toml), so the fuzzer does too: an
 # overflow is a crash it should find. Line numbers are kept so a crash says where it happened.
@@ -60,6 +65,55 @@ bench = false
 [[bin]]
 name = "midi_clip"
 path = "fuzz_targets/midi_clip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ableton"
+path = "fuzz_targets/ableton.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "song_shape"
+path = "fuzz_targets/song_shape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shapes"
+path = "fuzz_targets/shapes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "presets"
+path = "fuzz_targets/presets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "audio"
+path = "fuzz_targets/audio.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "midi_find"
+path = "fuzz_targets/midi_find.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stored"
+path = "fuzz_targets/stored.rs"
 test = false
 doc = false
 bench = false

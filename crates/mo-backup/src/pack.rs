@@ -332,7 +332,7 @@ impl<'a> Packer<'a> {
         self.parts.part(&part);
         write_zip(items, song, dest, &part, stop)
             .and_then(|missing| {
-                check_zip(&part, items, dest, &missing, &self.from_memory, stop)
+                check_zip(&part, items, song, dest, &missing, &self.from_memory, stop)
                     .map(|(bytes, bad)| (bytes, missing, bad))
             })
             .and_then(|done| self.drive_there().map(|()| done))
@@ -698,11 +698,13 @@ fn copy_file(
 /// Reads every entry of the new zip back to the end from the drive itself ([`FromDrive`]; the zip checks each one's
 /// bytes against the check number it stored) and checks each is the size it should be. A kept file that doesn't read
 /// back right is only let through when its bytes are exactly those in the zip before (`old`): it was damaged there
-/// already, and is kept as it was. Gives the zip's size and those files' places. `missing` is the kept files left out
-/// because the zip before doesn't have them. `from_memory` is set when the system wouldn't read past its memory.
+/// already, and is kept as it was. The zip's own list ([`LIST`]) must read back as the one written for song `song`.
+/// Gives the zip's size and those files' places. `missing` is the kept files left out because the zip before doesn't
+/// have them. `from_memory` is set when the system wouldn't read past its memory.
 fn check_zip(
     part: &Path,
     items: &[Item],
+    song: u64,
     old: &Path,
     missing: &[String],
     from_memory: &AtomicBool,
@@ -712,6 +714,18 @@ fn check_zip(
     let items: Vec<&Item> = items.iter().filter(|i| !missing.contains(&i.inside)).collect();
     if archive.len() != items.len() + 1 {
         return Err(io::Error::other("The zip read back with the wrong number of files"));
+    }
+    // The list too, written last: one spoilt on the drive made the next run take the zip for one that isn't the
+    // app's, and pack the song again beside it with none of the files it kept (the whole-app review of 26 Nov, BD-2).
+    // Read to the end, which checks it against its check number, and it must say what was written.
+    let mut list = String::new();
+    let read = archive.by_name(LIST).map_err(io::Error::from).and_then(|mut l| l.read_to_string(&mut list));
+    if let Err(e) = read.and_then(|_| {
+        (list == list_text(song, items.iter().copied())).then_some(()).ok_or_else(|| io::Error::other("it differs"))
+    }) {
+        return Err(io::Error::other(format!(
+            "The zip's list read back wrongly ({e}): the backup drive may be failing"
+        )));
     }
     let mut buf = vec![0u8; BUFFER];
     let mut before: Option<ZipArchive<File>> = None;
@@ -791,4 +805,44 @@ fn raw_bytes_sum<R: Read + Seek>(
         }
     }
     Ok((hash.finalize().into(), total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole-app review of 26 Nov, BD-2: the check reads the zip's own list back too, so a list spoilt on its way
+    /// to the drive, or one that isn't the list written, fails the zip (the zip before stays), as a spoilt file does.
+    #[test]
+    fn the_read_back_check_reads_the_zips_list_too() {
+        let dir = std::env::temp_dir().join(format!("mo-backup-list-read-back-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let save = dir.join("Song.flp");
+        fs::write(&save, [7u8; 500]).unwrap();
+        let time = fs::metadata(&save).unwrap().modified().map(nanos).unwrap();
+        let items = [Item { source: Source::File(save), inside: "Song/Song.flp".into(), size: 500, time }];
+        let (stop, from_memory, none) = (AtomicBool::new(false), AtomicBool::new(false), dir.join("none.zip"));
+        let check = |part: &Path, song: u64| check_zip(part, &items, song, &none, &[], &from_memory, &stop);
+        let good = dir.join("good.zip.part");
+        assert!(write_zip(&items, 7, &none, &good, &stop).unwrap().is_empty());
+        assert!(check(&good, 7).is_ok());
+        // Not the list written: another song's.
+        assert!(check(&good, 8).unwrap_err().to_string().contains("list read back wrongly"));
+        // One byte of the list's bytes in the zip spoilt: the list is the last file, so its name's first place is
+        // its own header (30 bytes, then its name and extra field, then its bytes).
+        let mut bytes = fs::read(&good).unwrap();
+        let name = bytes.windows(LIST.len()).position(|w| w == LIST.as_bytes()).unwrap();
+        let header = name - 30;
+        let field = |at: usize| usize::from(u16::from_le_bytes([bytes[header + at], bytes[header + at + 1]]));
+        let packed = u32::from_le_bytes(bytes[header + 18..header + 22].try_into().unwrap()) as usize;
+        let data = name + field(26) + field(28);
+        assert!(packed > 2, "{packed}");
+        bytes[data + packed / 2] ^= 0x5a;
+        let spoilt = dir.join("spoilt.zip.part");
+        fs::write(&spoilt, &bytes).unwrap();
+        let e = check(&spoilt, 7).unwrap_err();
+        assert!(e.to_string().contains("list read back wrongly"), "{e}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

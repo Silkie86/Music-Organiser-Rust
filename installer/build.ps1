@@ -38,6 +38,10 @@ $version = $Matches[1]
 if ($version -notmatch '^(\d+)\.(\d+)\.(\d+)') { throw "the version $version doesn't start with three numbers" }
 $numbers = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
 
+# setup.iss lists the logo's pictures with commas between them, so their folder can't have a comma in its name.
+$logoDir = Split-Path -Parent (Join-Path $top $product['logo_ico'])
+if ($logoDir.Contains(',')) { throw "the logo's folder $logoDir has a comma in it; Inno Setup reads that as two files" }
+
 $exeFile = (Resolve-Path -LiteralPath $Exe).Path
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $outDir = (Resolve-Path -LiteralPath $Out).Path
@@ -62,6 +66,8 @@ $defines = @(
     "/DAppVersion=$version",
     "/DAppVersionNumbers=$numbers",
     "/DLogoIco=$(Join-Path $top $product['logo_ico'])",
+    # The installer's pictures sit beside the .ico (tools/logo makes them all).
+    "/DLogoDir=$logoDir",
     "/DExeFile=$exeFile",
     "/DExeName=music-organiser.exe",
     "/DOutputDir=$outDir",

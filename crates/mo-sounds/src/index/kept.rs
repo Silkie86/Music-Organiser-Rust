@@ -19,13 +19,16 @@
 //! are removed (rule 28), before the new one is written, so they never take its room: only plain files whose whole
 //! name is one this code gives ([`is_kept_name`]), never through a link, and a half-written one only once it's an hour
 //! old (another copy of the app may be writing it now; the app's start-up sweep clears those too,
-//! [`is_half_kept_name`]). The plugin never comes here: it writes none of the app's files.
+//! [`is_half_kept_name`]). A file removed while the app still reads it (the index is built again while the app runs,
+//! and the old index is still in use) gives its room back only once the old index is let go, on Windows as on Linux:
+//! the room check counts that room as coming back ([`room_coming_back`]). The plugin never comes here: it writes none
+//! of the app's files.
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
@@ -96,9 +99,55 @@ pub(super) struct InFile {
     size: usize,
     /// Whether a failed read has been reported (once is enough).
     told: AtomicBool,
+    /// Its line in [`OPEN`].
+    open: u64,
+}
+
+/// The kept files this app has open: a line for each [`InFile`], with the file's path and size, and whether a sweep
+/// has removed the file since. A file removed while it's open gives its room back to the drive only once it's closed
+/// (on Windows as on Linux), so until then the room isn't free, though it soon will be ([`room_coming_back`]).
+static OPEN: Mutex<Vec<Open>> = Mutex::new(Vec::new());
+
+/// A line of [`OPEN`].
+struct Open {
+    /// Which [`InFile`] it is.
+    id: u64,
+    path: PathBuf,
+    bytes: u64,
+    removed: bool,
+}
+
+/// The open files, whatever a thread that panicked holding them left: a line too many costs only a room check.
+fn open_files() -> std::sync::MutexGuard<'static, Vec<Open>> {
+    OPEN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How much room the kept files in `folder` that were removed while this app still reads them give back to the drive
+/// once they're closed: once the index that reads them is let go (when the index was built again while the app runs,
+/// just after the new one is kept). Each file counts once, however many indexes read it.
+pub fn room_coming_back(folder: &Path) -> u64 {
+    let open = open_files();
+    let mut seen: Vec<&Path> = Vec::new();
+    let mut back = 0u64;
+    for o in open.iter().filter(|o| o.removed && o.path.parent() == Some(folder)) {
+        if !seen.contains(&o.path.as_path()) {
+            seen.push(&o.path);
+            back = back.saturating_add(o.bytes);
+        }
+    }
+    back
 }
 
 impl InFile {
+    /// The numbers in `file`, at `path`: noted among the open files ([`OPEN`]) until it's let go.
+    fn new(file: File, path: PathBuf, numbers: usize, size: usize) -> InFile {
+        static IDS: AtomicU64 = AtomicU64::new(0);
+        let open = IDS.fetch_add(1, Ordering::Relaxed);
+        let bytes = (HEADER + numbers * size) as u64;
+        open_files().push(Open { id: open, path: path.clone(), bytes, removed: false });
+        InFile { file, path, numbers, size, told: AtomicBool::new(false), open }
+    }
+
     /// Fills `out` with the numbers from the `at`th on, as the heap held them (every row one after another). Says
     /// no when they can't be read (and reports it the first time): `out` is then not to be used.
     pub(super) fn read<T: Number>(&self, at: usize, out: &mut [T]) -> bool {
@@ -229,15 +278,7 @@ impl Against {
     /// The file, to read rows from as they're needed, once every row of the library was found in it and it has no
     /// others. None otherwise.
     pub(super) fn finish(self) -> Option<Arc<InFile>> {
-        (self.seen == self.numbers).then(|| {
-            Arc::new(InFile {
-                file: self.file,
-                path: self.path,
-                numbers: self.numbers,
-                size: self.size,
-                told: AtomicBool::new(false),
-            })
-        })
+        (self.seen == self.numbers).then(|| Arc::new(InFile::new(self.file, self.path, self.numbers, self.size)))
     }
 }
 
@@ -255,6 +296,13 @@ fn read_exact_at(file: &File, mut out: &mut [u8], mut offset: u64) -> std::io::R
         offset += n as u64;
     }
     Ok(())
+}
+
+/// Let go: its file is closed, and whatever room it held is the drive's again.
+impl Drop for InFile {
+    fn drop(&mut self) {
+        open_files().retain(|o| o.id != self.open);
+    }
 }
 
 impl std::fmt::Debug for InFile {
@@ -326,7 +374,8 @@ pub(super) fn keep<T: Number>(dim: usize, parts: &[Box<[T]>], folder: &Path) -> 
     let name: String = format!("{}{hash}{END}", T::START);
     let path = folder.join(&name);
     let bytes = (HEADER + numbers * size_of::<T>()) as u64;
-    // The files of other numbers of this kind go first, so they don't take the room this one needs.
+    // The files of other numbers of this kind go first, so they don't take the room this one needs. One the app still
+    // reads (the old index, while the new one is kept) gives its room back only once it's let go: `write` counts it.
     let removed = sweep(folder, &name, T::START);
 
     let mut written = false;
@@ -340,7 +389,7 @@ pub(super) fn keep<T: Number>(dim: usize, parts: &[Box<[T]>], folder: &Path) -> 
     }
     // Checked just now, or inside `write`: a plain file of exactly these numbers.
     let file = File::open(&path).map_err(|e| format!("the file couldn't be opened ({e})"))?;
-    let kept = InFile { file, path: path.clone(), numbers, size: size_of::<T>(), told: AtomicBool::new(false) };
+    let kept = InFile::new(file, path.clone(), numbers, size_of::<T>());
     Ok((Arc::new(kept), Kept { file: path, bytes, written, removed }))
 }
 
@@ -353,13 +402,22 @@ fn write<T: Number>(
     parts: &[Box<[T]>],
     bytes: u64,
 ) -> Result<(), String> {
+    let spare = SPARE.min(bytes);
+    // The room of older files removed while the app still reads them: free once the old index is let go, a moment
+    // after this one is kept. The file itself must fit now; the room left over may count it.
+    let back = room_coming_back(folder);
     match fs4::available_space(folder) {
-        Ok(free) if free < bytes.saturating_add(SPARE.min(bytes)) => {
+        Ok(free) if free < bytes || free.saturating_add(back) < bytes.saturating_add(spare) => {
+            let soon = if back > 0 {
+                format!(" (and {} MB more once the old index is let go)", back >> 20)
+            } else {
+                String::new()
+            };
             return Err(format!(
-                "the drive has {} MB free, and the file needs {} MB with {} MB left over",
+                "the drive has {} MB free{soon}, and the file needs {} MB with {} MB left over",
                 free >> 20,
                 bytes >> 20,
-                SPARE.min(bytes) >> 20
+                spare >> 20
             ));
         }
         _ => {}
@@ -447,6 +505,10 @@ fn sweep(folder: &Path, keep: &str, start: &str) -> usize {
         }
         if fs::remove_file(&path).is_ok() {
             removed += 1;
+            // Still read by an index of this app: its room comes back only once that index is let go.
+            for o in open_files().iter_mut().filter(|o| o.path == path) {
+                o.removed = true;
+            }
         }
     }
     removed

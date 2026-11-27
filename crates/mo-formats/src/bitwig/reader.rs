@@ -34,7 +34,10 @@ pub const DAW: &str = "Bitwig Studio";
 /// FS-5, so Space can tell another folder's save uses a project's copy) didn't raise it: only the songs library keeps a
 /// save's samples, and it reads every Bitwig save again once for it (`mo_library::song_writes::to_mend`); raising it
 /// would extract every save's MIDI, presets and curves again for nothing.
-pub const VERSION: u32 = 4;
+///
+/// 5 leaves a note muted in a clip out of the clip's notes, as FL Studio's reader does (the whole-app review of 26 Nov,
+/// CX-1): the MIDI page listed and played them, and its key and chord fits counted them.
+pub const VERSION: u32 = 5;
 
 /// Said when the plugin settings stored at the end of a project are missing or can't be opened.
 pub const ZIP_DAMAGED: &str = "The plugin settings stored in this project can't be read: the end of the file is \
@@ -58,6 +61,16 @@ const F_SAMPLE_FILE_REF: u32 = 0xd3b;
 const CLS_HARDWARE_IO: u32 = 0x461;
 // Fields.
 pub(super) const F_DEVICE_NAME: u32 = 0x9a;
+/// On a device's definition: 0 when it's switched off with its power button.
+const F_DEVICE_ON: u32 = 0xa3;
+/// Before Bitwig 6: one automated setting's curve, in a track's old timeline (0x15d) list 0x239.
+const CLS_OLD_CURVE: u32 = 0x122;
+const F_OLD_CURVES: u32 = 0x239;
+const F_OLD_CURVE_TARGET: u32 = 0x4cc;
+const F_OLD_CURVE_POINTS: u32 = 0x48e;
+const F_OLD_POINT_VALUE: u32 = 0x28f;
+/// An on/off setting's point (class 0x7d) has a yes or no here instead.
+const F_OLD_POINT_ON: u32 = 0x12e;
 const F_DEVICE_VENDOR: u32 = 0x9b;
 pub(super) const F_DEVICE_CATEGORY: u32 = 0x9c;
 /// What a device is: 0 an audio effect, 1 a note effect, 2 an instrument (as Bitwig 6.1 saves it, on its own devices
@@ -70,6 +83,8 @@ const F_TRACK_NAME: u32 = 0x15b;
 pub(super) const F_START: u32 = 0x2af;
 pub(super) const F_DURATION: u32 = 0x26;
 pub(super) const F_VELOCITY: u32 = 0xef;
+/// On a clip or a note: 1 when it's muted.
+const F_MUTED: u32 = 0x10f8;
 pub(super) const F_PITCH: u32 = 0xee;
 pub(super) const F_NOTES: u32 = 0x21f;
 pub(super) const F_FILE_PATH: u32 = 0x3b;
@@ -593,6 +608,31 @@ fn body_tracks(doc: &Document) -> (TrackTree<ObjId>, Option<ObjId>) {
 /// like a track), the effect (send) tracks, and the master's effects, each in the order the file has them. A device in
 /// a chain or layer inside a track counts for that track. Instruments and note effects are left out, and so is a
 /// deactivated track, with all on it: no sound goes through it.
+/// Each automated setting's values in a save from before Bitwig 6, which keeps them on the track itself: its old
+/// timeline (0x15d) lists one curve (class 0x122) a setting in 0x239, with 0x4cc what it moves and 0x48e.0x21f its
+/// points, 0x28f each one's value (0x12e on or off for an on/off setting) (found on Solomon's Bitwig 4.3 to 5.3 saves, 27 Nov 2026; Bitwig 6 has lanes in
+/// 0x2dc9 instead, read by [`super::arrangement`]). Nested tracks have theirs the same way.
+pub(crate) fn old_automation(doc: &Document) -> Vec<Vec<f64>> {
+    ids(doc)
+        .filter(|&o| {
+            let object = doc.obj(o);
+            object.class == CLS_OLD_CURVE && object.has(F_OLD_CURVE_TARGET)
+        })
+        // Only the curves a track's old timeline lists: the same class elsewhere is something else's.
+        .filter(|&o| doc.ancestor(o, |p, _| doc.field_list(p, F_OLD_CURVES).contains(&o)).is_some())
+        .map(|o| {
+            doc.field_obj(o, F_OLD_CURVE_POINTS)
+                .map(|list| {
+                    doc.field_list(list, F_NOTES)
+                        .into_iter()
+                        .filter_map(|p| doc.obj(p).num(F_OLD_POINT_VALUE).or_else(|| doc.obj(p).num(F_OLD_POINT_ON)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 pub(crate) fn chains(doc: &Document) -> crate::shape::Chains {
     let (body, master) = body_tracks(doc);
     let active: Vec<ObjId> =
@@ -609,6 +649,11 @@ pub(crate) fn chains(doc: &Document) -> crate::shape::Chains {
             continue;
         }
         if matches!(device_kind(object), PluginKind::Instrument | PluginKind::NoteEffect) {
+            continue;
+        }
+        // A device switched off with its power button does nothing to the sound: Solomon's template keeps a limiter
+        // on the master, usually off, so counting it would make every song look finished.
+        if object.num(F_DEVICE_ON) == Some(0.0) {
             continue;
         }
         let name = object.str(F_DEVICE_NAME);
@@ -734,7 +779,8 @@ pub fn track_names(doc: &Document) -> TrackNames {
 }
 
 /// One MIDI clip per Bitwig note clip, named after its track ("Bass 1", "Bass 2"...). Nothing for a file that didn't
-/// decode cleanly.
+/// decode cleanly. A muted note is left out, as in FL Studio's (MIDI has none); a muted clip is still one, as an FL
+/// pattern muted in the playlist is: a part you muted in the song is still a part.
 pub fn extract_midi(doc: &Document, names: &TrackNames) -> Vec<MidiClip> {
     if doc.root.is_none() || doc.body_error.is_some() {
         return Vec::new();
@@ -753,7 +799,7 @@ pub fn extract_midi(doc: &Document, names: &TrackNames) -> Vec<MidiClip> {
         let Some((_, notes)) = clips.get_mut(at) else { continue };
         for note in doc.field_list(lane, F_NOTES) {
             let n = doc.obj(note);
-            if n.class != CLS_NOTE {
+            if n.class != CLS_NOTE || n.num(F_MUTED).is_some_and(|m| m > 0.0) {
                 continue;
             }
             let start = n.num(F_START).unwrap_or(0.0);
@@ -1125,6 +1171,58 @@ pub fn each_blob_within(raw: &[u8], limits: BlobLimits, mut scan: impl FnMut(&[u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A save from before Bitwig 6: a track's old timeline lists its curves, one moving and one flat; a curve of the
+    /// same class that no timeline lists isn't the song's automation.
+    #[test]
+    fn a_pre_6_saves_automation_curves_are_found_on_its_tracks_old_timeline() {
+        use super::super::format::{Object, Slot, Value};
+        let mut raw = b"BtWg".to_vec();
+        raw.extend_from_slice(format!("000200010000{:08x}{:016x}00", 42, 0).as_bytes());
+        let mut doc = super::super::format::decode(raw).unwrap();
+        let curve = |doc: &mut Document, values: &[f64]| {
+            let points: Vec<Slot> = values
+                .iter()
+                .map(|&v| {
+                    let mut p = Object::new(0x108);
+                    p.set(F_OLD_POINT_VALUE, Value::F64(v));
+                    Slot::Obj(doc.add(p))
+                })
+                .collect();
+            let mut list = Object::new(0x6e);
+            list.set(F_NOTES, Value::List(points));
+            let list = doc.add(list);
+            let target = doc.add(Object::new(0x65));
+            let mut c = Object::new(CLS_OLD_CURVE);
+            c.set(F_OLD_CURVE_TARGET, Value::Obj(Slot::Obj(target)));
+            c.set(F_OLD_CURVE_POINTS, Value::Obj(Slot::Obj(list)));
+            doc.add(c)
+        };
+        let moving = curve(&mut doc, &[0.2, 0.9, 0.4]);
+        let flat = curve(&mut doc, &[0.5, 0.5]);
+        // An on/off setting's points (a Button modulator, a mute) say yes or no instead.
+        let switch = curve(&mut doc, &[]);
+        let ons: Vec<Slot> = [false, true, true, false]
+            .into_iter()
+            .map(|on| {
+                let mut p = Object::new(0x7d);
+                p.set(F_OLD_POINT_ON, Value::Bool(u8::from(on)));
+                Slot::Obj(doc.add(p))
+            })
+            .collect();
+        let list = doc.field_obj(switch, F_OLD_CURVE_POINTS).unwrap();
+        doc.obj_mut(list).set(F_NOTES, Value::List(ons));
+        let stray = curve(&mut doc, &[0.0, 1.0]);
+        let mut timeline = Object::new(0xe1);
+        timeline.set(F_OLD_CURVES, Value::List(vec![Slot::Obj(moving), Slot::Obj(flat), Slot::Obj(switch)]));
+        let timeline = doc.add(timeline);
+        doc.obj_mut(moving).parent = Some((timeline, F_OLD_CURVES));
+        doc.obj_mut(flat).parent = Some((timeline, F_OLD_CURVES));
+        doc.obj_mut(switch).parent = Some((timeline, F_OLD_CURVES));
+        let holder = doc.add(Object::new(0xe1));
+        doc.obj_mut(stray).parent = Some((holder, 0x1));
+        assert_eq!(old_automation(&doc), vec![vec![0.2, 0.9, 0.4], vec![0.5, 0.5], vec![0.0, 1.0, 1.0, 0.0]]);
+    }
 
     fn wide(s: &str) -> Vec<u8> {
         let units: Vec<u16> = s.encode_utf16().collect();

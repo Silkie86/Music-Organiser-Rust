@@ -145,6 +145,16 @@ fn start(path: String, from: f64) {
     }
 }
 
+/// Space on the Songs page (F1 Q2 C): pauses the bar when it's playing the bounce at `path`, else plays it there, of
+/// the song called `title`.
+pub fn play_or_pause(app: &AppWindow, path: &str, title: &str) {
+    if app.global::<SongPlayer>().get_playing() && BAR.with(|b| b.borrow().path == path) {
+        pause(app);
+    } else {
+        play(app, path, title);
+    }
+}
+
 /// Play or pause.
 fn toggle(app: &AppWindow) {
     if app.global::<SongPlayer>().get_playing() {
@@ -251,9 +261,19 @@ fn show_place(app: &AppWindow, at: f64) {
     bar.set_time(if seconds > 0.0 { format!("{} / {}", clock(at), clock(seconds)) } else { clock(at) }.into());
 }
 
-/// The player says the sound under `key` reached its end: the bar shows it paused, at its start again.
-pub fn ended(key: &str) {
-    let_go(key, true);
+/// The player says the sound under `key` reached its end: the bar shows it paused, at its start again. With `why`, its
+/// file couldn't be read on part way (a drive unplugged, the file moved or renamed): the log says so, and the bar shows
+/// it paused where it stopped (the whole-app review of 26 Nov, AD-5).
+pub fn ended(key: &str, why: Option<&str>) {
+    if let Some(why) = why
+        && let Some(path) = BAR.with(|b| {
+            let b = b.borrow();
+            (b.key.as_deref() == Some(key)).then(|| b.path.clone())
+        })
+    {
+        log::warning("Songs", &format!("Couldn't read on in {path}: {why}"));
+    }
+    let_go(key, why.is_none());
 }
 
 /// The bar's play under `key` is over: it reached its end (`at_end`), or another sound took its place. The bar shows it

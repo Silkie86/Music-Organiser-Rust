@@ -38,6 +38,10 @@ const TRIM_MOST: f64 = crate::MAX_SECONDS;
 /// output's thread can; letting them go stops the reader.
 pub(crate) type Parts = Consumer<Arc<AudioData>>;
 
+/// What a sound's read came to, said once it has finished: its whole length, or why it stopped (the file couldn't be
+/// read on).
+pub(crate) type Said = Receiver<Result<f64, AudioError>>;
+
 /// A sound file being read to play ([`super::Player::play_stream_if`]): its first part, read already, and the rest as
 /// it's read.
 pub struct Stream {
@@ -46,6 +50,9 @@ pub struct Stream {
     pub(super) source: Option<Source>,
     pub(super) first: Arc<AudioData>,
     pub(super) more: Parts,
+    /// What the read came to, once it has finished: why a sound that ends part way ended (none for parts made in
+    /// memory).
+    pub(super) said: Option<Said>,
     /// The frame of the file the first part starts at.
     pub(super) start: u64,
 }
@@ -79,8 +86,8 @@ impl Stream {
     /// Starts reading `path` from `from_seconds` in, on a thread of its own, and waits for its first part, so a file
     /// that can't be read says so here. With `quiet` (Trim silence's level) it starts past the silence at the file's
     /// start, when it plays from there. Past the file's end, it has nothing to play. Nor once `wanted` says it's no
-    /// longer wanted (another sound was asked for): it stops waiting then, as a place far into a long compressed file
-    /// is only reached by decoding all before it.
+    /// longer wanted (another sound was asked for): it stops waiting then, as a place far into a long WMA (or a file
+    /// that can't be gone into, [`crate::read_parts_from`]) is only reached by decoding all before it.
     pub fn open(
         path: &Path,
         from_seconds: f64,
@@ -126,7 +133,13 @@ impl Stream {
                 }
             }
         }
-        Ok(Stream { source: Some(Source { from: Origin::File(path.to_owned()), rate }), first, more, start })
+        Ok(Stream {
+            source: Some(Source { from: Origin::File(path.to_owned()), rate }),
+            first,
+            more,
+            said: Some(done),
+            start,
+        })
     }
 
     /// Starts making `maker`'s sound from `from_seconds` in, on a thread of its own, and waits for its first part. Past
@@ -140,6 +153,7 @@ impl Stream {
                 source: Some(Source { from: Origin::Made(maker), rate }),
                 first,
                 more,
+                said: Some(done),
                 start: frame_at(from_seconds, rate),
             }),
             Next::Unwanted => Ok(Stream::nothing()),
@@ -154,7 +168,7 @@ impl Stream {
     /// A stream with nothing to play: it ends as soon as it starts.
     fn nothing() -> Stream {
         let (_, more) = RingBuffer::new(1);
-        Stream { source: None, first: Arc::default(), more, start: 0 }
+        Stream { source: None, first: Arc::default(), more, said: None, start: 0 }
     }
 
     /// The file's sample rate (0 when it had nothing to play).
@@ -176,7 +190,7 @@ impl Stream {
         for p in parts {
             let _ = tx.push(p);
         }
-        Stream { source: None, first, more, start }
+        Stream { source: None, first, more, said: None, start }
     }
 }
 
@@ -184,12 +198,12 @@ impl Source {
     /// Starts reading the file again from `seconds` in, without waiting for it: the part to start with (nothing yet,
     /// so it fades in as the read comes) and the flow the rest comes through.
     pub(super) fn read_from(&self, seconds: f64) -> Result<(Arc<AudioData>, Box<Flow>), AudioError> {
-        let (more, _) = match &self.from {
+        let (more, said) = match &self.from {
             Origin::File(path) => read_on(path.clone(), seconds)?,
             Origin::Made(maker) => make_on(Arc::clone(maker), seconds)?,
         };
         let nothing = Arc::new(AudioData { sample_rate: self.rate, ..AudioData::default() });
-        Ok((nothing, Box::new(Flow::new(frame_at(seconds, self.rate), more))))
+        Ok((nothing, Box::new(Flow::new(frame_at(seconds, self.rate), more, Some(said)))))
     }
 }
 
@@ -231,7 +245,7 @@ fn tail(part: &AudioData, from: usize) -> AudioData {
 }
 
 /// What a stream's reader hands on: its parts (at most [`AHEAD`] waiting), and once it ends, what the read came to.
-type Reading = (Parts, Receiver<Result<f64, AudioError>>);
+type Reading = (Parts, Said);
 
 /// Reads `path` from `from_seconds` on, on a thread of its own. It waits while [`AHEAD`] parts wait to be played, and
 /// stops once the parts are let go (the play has gone), also while it's still on its way to where it starts. Its
@@ -285,8 +299,9 @@ fn hand_on(
                     }
                 }
             });
-            drop(parts);
+            // Said before the parts are let go, so whoever sees they've all come finds it there.
             let _ = said.send(read);
+            drop(parts);
         })
         .map_err(AudioError::Io)?;
     Ok((more, done))

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use mo_library::dust_off::PutOff;
 use mo_library::{Library, dust_off, songs_db};
 use rusqlite::Connection;
 
@@ -73,17 +74,25 @@ fn the_time_fl_had_a_save_open_is_read_from_its_details_in_both_libraries() {
 fn a_song_put_off_is_kept_with_when_it_comes_back_and_ones_come_back_are_let_go() {
     let dir = folder("put-off");
     let path = library(&dir);
-    let read = || dust_off::read(&Library::open_read_only(&path).unwrap()).unwrap();
+    let read = || {
+        let mut list = dust_off::read(&Library::open_read_only(&path).unwrap()).unwrap();
+        list.sort_by(|a, b| a.key.cmp(&b.key));
+        list
+    };
+    let off = |key: &str, save: Option<i64>, until: i64| PutOff { key: key.into(), save, until };
     assert!(read().is_empty());
-    assert!(dust_off::put_off(&path, "night", 500, 100).unwrap());
-    assert!(dust_off::put_off(&path, "kite", 300, 100).unwrap());
-    assert_eq!(read(), HashMap::from([("night".to_owned(), 500), ("kite".to_owned(), 300)]));
+    assert!(dust_off::put_off(&path, &off("night", Some(1), 500), 100).unwrap());
+    assert!(dust_off::put_off(&path, &off("kite", None, 300), 100).unwrap());
+    assert_eq!(read(), [off("kite", None, 300), off("night", Some(1), 500)]);
     // Put off again: one line for it, with the new day.
-    assert!(dust_off::put_off(&path, "night", 700, 100).unwrap());
-    assert_eq!(read(), HashMap::from([("night".to_owned(), 700), ("kite".to_owned(), 300)]));
+    assert!(dust_off::put_off(&path, &off("night", Some(1), 700), 100).unwrap());
+    assert_eq!(read(), [off("kite", None, 300), off("night", Some(1), 700)]);
     // Kite came back at 300: let go as the next is kept.
-    assert!(dust_off::put_off(&path, "tape", 900, 400).unwrap());
-    assert_eq!(read(), HashMap::from([("night".to_owned(), 700), ("tape".to_owned(), 900)]));
+    assert!(dust_off::put_off(&path, &off("tape", Some(3), 900), 400).unwrap());
+    assert_eq!(read(), [off("night", Some(1), 700), off("tape", Some(3), 900)]);
+    // Night under a new key (its folder moved), by its same save: one line for it again (review SZ-4).
+    assert!(dust_off::put_off(&path, &off("night moved", Some(1), 800), 400).unwrap());
+    assert_eq!(read(), [off("night moved", Some(1), 800), off("tape", Some(3), 900)]);
     assert_eq!(settings(&path)["export_folder"], r"C:\Exports");
 }
 
@@ -95,7 +104,8 @@ fn a_list_it_cant_read_is_left_as_it_is() {
         .unwrap()
         .execute("INSERT INTO settings (key, value) VALUES (?1, 'not a list')", [dust_off::SETTING])
         .unwrap();
-    assert!(dust_off::put_off(&path, "night", 500, 100).is_err());
+    let night = PutOff { key: "night".into(), save: None, until: 500 };
+    assert!(dust_off::put_off(&path, &night, 100).is_err());
     assert_eq!(settings(&path)[dust_off::SETTING], "not a list");
     assert!(dust_off::read(&Library::open_read_only(&path).unwrap()).unwrap().is_empty());
 }

@@ -941,19 +941,21 @@ static MAXIMISED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// the user may have done it (see `watchdog::Hands`), and what Slint asked of the window in the 30 s before, from the
 /// notes its patched copy keeps (vendor/i-slint-backend-winit/PATCHED.md), then what Windows sent the window in the same
 /// time (`screen_move::heard`). On 24 Nov it left maximised by itself 10 s after coming back from the taskbar, on Songs
-/// with no page change, and on 25 Nov with nothing asked at all; these lines are to name what did it.
-pub fn resized(app: &AppWindow, by_user: bool) {
+/// with no page change, and on 25 Nov with nothing asked at all; these lines are to name what did it. `minimised_for`:
+/// the resize is the window coming back from the taskbar after that long, and the line looks back to when it was
+/// minimised, if that's longer (the whole-app review of 26 Nov, WI-1).
+pub fn resized(app: &AppWindow, by_user: bool, minimised_for: Option<std::time::Duration>) {
     // A moment later, on the event loop: the app hears of the resize before Slint does, and Slint's own note that
     // winit says maximised changed comes as it handles it.
     let weak = app.as_weak();
     slint::Timer::single_shot(std::time::Duration::from_millis(0), move || {
         if let Some(app) = weak.upgrade() {
-            log_unmaximised(&app, by_user);
+            log_unmaximised(&app, by_user, minimised_for);
         }
     });
 }
 
-fn log_unmaximised(app: &AppWindow, by_user: bool) {
+fn log_unmaximised(app: &AppWindow, by_user: bool, minimised_for: Option<std::time::Duration>) {
     use slint::winit_030::WinitWindowAccessor;
     let Some((look, winit_scale)) = app.window().with_winit_window(|w| (look_at(w), w.scale_factor())) else {
         return;
@@ -970,23 +972,35 @@ fn log_unmaximised(app: &AppWindow, by_user: bool) {
         "not by the user: the pointer was inside the window (or not seen since it came to the front), or the app \
          wasn't in front; no Windows key or Alt+Space"
     };
-    let asked = i_slint_backend_winit::mo_probe::since(std::time::Duration::from_secs(30));
+    // Back from the taskbar, from a second before it was minimised (both lists keep only their last few dozen).
+    let back = minimised_for.map_or(std::time::Duration::from_secs(30), |away| {
+        (away + std::time::Duration::from_secs(1)).max(std::time::Duration::from_secs(30))
+    });
+    let secs = back.as_secs();
+    let asked = i_slint_backend_winit::mo_probe::since(back);
     let asked = if asked.is_empty() {
-        "Slint asked nothing of the window in the 30 s before".to_owned()
+        format!("Slint asked nothing of the window in the {secs} s before")
     } else {
-        format!("what Slint asked of the window in the 30 s before:\n  {}", asked.join("\n  "))
+        format!("what Slint asked of the window in the {secs} s before:\n  {}", asked.join("\n  "))
     };
-    let heard = crate::screen_move::heard(std::time::Duration::from_secs(30));
+    let heard = crate::screen_move::heard(back);
     let heard = if heard.is_empty() {
-        "\n  Windows sent no size, place or window-menu message in the 30 s before".to_owned()
+        format!("\n  Windows sent no size, place or window-menu message in the {secs} s before")
     } else {
-        format!("\nwhat Windows sent the window in the 30 s before:\n  {}", heard.join("\n  "))
+        format!("\nwhat Windows sent the window in the {secs} s before:\n  {}", heard.join("\n  "))
+    };
+    let what = match minimised_for {
+        Some(away) => format!(
+            "The window came back from the taskbar no longer maximised, {} s after it was minimised",
+            away.as_secs()
+        ),
+        None => "The window stopped being maximised".to_owned(),
     };
     log::info(
         "Window",
         &format!(
-            "The window stopped being maximised (page {place}): it is {}; {who}. Slint draws at scale {}, winit's \
-             scale is {winit_scale}; {asked}{heard}",
+            "{what} (page {place}): it is {}; {who}. Slint draws at scale {}, winit's scale is {winit_scale}; \
+             {asked}{heard}",
             look.words(),
             app.window().scale_factor(),
         ),
@@ -1327,6 +1341,10 @@ fn edit_folder(app: &AppWindow, list: FolderList, folder: String, add: bool) {
                 // it will. One taken off needs no scan: its sounds are kept as they are.
                 if add && list == FolderList::Samples {
                     scanning = crate::sounds::sample_folders_changed();
+                }
+                // And Songs walks a new project folder now, and stops watching one taken off.
+                if list == FolderList::Projects {
+                    scanning = crate::songs::project_folders_changed();
                 }
             }
             Ok(folders::Changed::AsItWas) => {}
@@ -1691,7 +1709,8 @@ fn install_fl(app: &AppWindow) {
         drop(writing);
         log_fl_install(&done, "Settings");
         let note = page::installed_note(&done);
-        let wrote = !done.went.is_empty();
+        // Only when every folder took it: else the look at the next start tries the rest again (DK-1).
+        let wrote = mo_app::daw_links::went_everywhere(&done);
         let _ = slint::invoke_from_event_loop(move || {
             if wrote {
                 kept_who_wrote(mo_app::daw_links::FL_BY_KEY);
@@ -1830,7 +1849,8 @@ fn install_bitwig(app: &AppWindow) {
         drop(writing);
         log_bitwig_install(&done, "Settings");
         let note = page::bitwig_installed_note(&done);
-        let wrote = !done.installed.went.is_empty();
+        // Only when every folder took it: else the look at the next start tries the rest again (DK-1).
+        let wrote = mo_app::daw_links::went_everywhere(&done.installed);
         let _ = slint::invoke_from_event_loop(move || {
             if wrote {
                 kept_who_wrote(mo_app::daw_links::BITWIG_BY_KEY);
@@ -1887,6 +1907,11 @@ fn take_out(app: &AppWindow, bitwig: bool) {
         }
         let note = page::taken_out_note(bitwig, &done);
         let _ = slint::invoke_from_event_loop(move || {
+            // A link taken out by hand counts as the first look, so the look never puts it back in by itself (DK-4).
+            let first_look = mo_app::daw_links::FIRST_LOOK_KEY;
+            if value(first_look).is_none_or(|v| v.trim().is_empty()) && !remember(first_look, "done") {
+                log::warning("Settings", "Couldn't keep that the DAWs' links were chosen by hand");
+            }
             PAGE.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
                     p.daws_installing = false;

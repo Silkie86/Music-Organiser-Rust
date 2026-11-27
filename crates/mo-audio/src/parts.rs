@@ -73,6 +73,13 @@ impl Parts {
         true
     }
 
+    /// Counts the first `frames` of the sound as handed on already: they come before where the read started
+    /// ([`crate::read_parts_from`]), and count in its length.
+    pub(crate) fn after(mut self, frames: u64) -> Parts {
+        self.handed = frames;
+        self
+    }
+
     /// How many frames have come: those handed on and those of the part being filled.
     #[cfg(windows)]
     pub(crate) fn frames(&self) -> u64 {

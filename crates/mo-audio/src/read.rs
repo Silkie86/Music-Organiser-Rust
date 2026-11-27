@@ -87,8 +87,10 @@ pub fn read_parts(
 
 /// [`read_parts`] from `from_seconds` into the file on (where a long sound plays from): the first part handed on starts
 /// at frame [`frame_at`]`(from_seconds, rate)`, and nothing is handed on past the end. A WAV or AIFF is read from there
-/// straight away; the other kinds are decoded from the start, and what comes before it isn't handed on: on the way
-/// there `each` is handed parts with no channels instead, only to say whether to go on.
+/// straight away; an MP3, FLAC, M4A, OGG or AAC is gone into there, and decoded from a moment before it. A WMA, a WAV
+/// that keeps Ogg Vorbis, or one of the others that can't be gone into that way (a chained Ogg, a place past the length
+/// the file says) is decoded from the start, and what comes before the place isn't handed on: on the way there `each`
+/// is handed parts with no channels instead, only to say whether to go on.
 pub fn read_parts_from(
     path: &Path,
     from_seconds: f64,
@@ -130,6 +132,12 @@ pub fn read_parts_from(
         return crate::wma::read_wma_parts(path, part_seconds, &mut |r, p| skipping.give(r, p));
     }
     if crate::other::is_other(path) {
+        if from_seconds > 0.0
+            && let Some(seconds) =
+                crate::other::read_other_parts_from(path, from_seconds, part_seconds, &mut *skipping.each)?
+        {
+            return Ok(seconds);
+        }
         return crate::other::read_other_parts(path, part_seconds, &mut |r, p| skipping.give(r, p));
     }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();

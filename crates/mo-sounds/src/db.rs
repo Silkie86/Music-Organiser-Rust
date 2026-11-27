@@ -111,6 +111,9 @@ pub struct KnownSound {
     pub size: i64,
     pub mtime: i64,
     pub has_clap: bool,
+    /// Its file was empty (0 bytes) when it was last listened to, though it had a sound before
+    /// ([`crate::Sound::is_empty_file`]): its row is kept while the file stays empty ([`crate::scan::plan`]).
+    pub empty: bool,
 }
 
 /// Everything [`SoundsDb::everything`] reads in its one pass over the library.
@@ -390,17 +393,19 @@ impl SoundsDb {
         let mut st = self.conn.prepare(match self.layout {
             Layout::Copy => {
                 "SELECT path, iif(typeof(size) = 'integer', size, 0), iif(typeof(mtime) = 'integer', mtime, 0),
-                     clap_numbers IS NOT NULL
+                     clap_numbers IS NOT NULL, error
                  FROM sounds"
             }
+            // Only the app's own library is scanned (and so ever says a file is empty).
             Layout::Formerly => {
                 "SELECT path, iif(typeof(size) = 'integer', size, 0), iif(typeof(mtime) = 'integer', mtime, 0),
-                     EXISTS (SELECT 1 FROM sound_hashes h WHERE h.sound_id = sounds.id AND h.clap_len IS NOT NULL)
+                     EXISTS (SELECT 1 FROM sound_hashes h WHERE h.sound_id = sounds.id AND h.clap_len IS NOT NULL),
+                     NULL
                  FROM sounds"
             }
             Layout::Library => {
                 "SELECT path, iif(typeof(size) = 'integer', size, 0), iif(typeof(mtime) = 'integer', mtime, 0),
-                     clap IS NOT NULL
+                     clap IS NOT NULL, NULL
                  FROM sounds"
             }
         })?;
@@ -410,7 +415,9 @@ impl SoundsDb {
                 _ => String::new(),
             };
             turns::give_way();
-            Ok(KnownSound { path, size: r.get(1)?, mtime: r.get(2)?, has_clap: r.get(3)? })
+            let empty = matches!(r.get_ref(4)?, rusqlite::types::ValueRef::Text(t)
+                if std::str::from_utf8(t).is_ok_and(crate::says_empty));
+            Ok(KnownSound { path, size: r.get(1)?, mtime: r.get(2)?, has_clap: r.get(3)?, empty })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }

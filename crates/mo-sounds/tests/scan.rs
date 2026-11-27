@@ -43,8 +43,10 @@ fn finds_sounds_leaving_out_shadows_hidden_folders_and_other_files() {
         ],
     );
     let root = dir.to_str().unwrap().to_owned();
-    let found = find_sounds(std::slice::from_ref(&root));
+    let (found, empty) = find_sounds(std::slice::from_ref(&root));
     let names: Vec<String> = found.files.iter().map(|f| rel(&root, &f.path)).collect();
+    // The empty one apart, never among the sounds.
+    assert_eq!(empty.iter().map(|f| rel(&root, &f.path)).collect::<Vec<_>>(), ["Kicks/Empty.wav"]);
     let mut expected = vec!["Kicks/Kick 1.wav", "Kicks/Kick 2.AIF", "Loops/Groove.flac"];
     // Windows decodes WMA; a Mac or Linux can't, so leaves it out.
     if cfg!(windows) {
@@ -65,13 +67,16 @@ fn plans_what_to_listen_to_follow_and_forget() {
             ("Same.wav", 7),
             ("Song.opus", 8),
             ("Empty.wav", 0),
+            ("Rendering.wav", 0),
+            ("Still rendering.wav", 0),
         ],
     );
     let root = dir.to_str().unwrap().to_owned();
-    let found = find_sounds(std::slice::from_ref(&root));
+    let (found, empty) = find_sounds(std::slice::from_ref(&root));
     let stamp = |name: &str| found.files.iter().find(|f| f.path.ends_with(name)).map(|f| (f.size, f.mtime)).unwrap();
     let at = |name: &str| dir.join(name).to_str().unwrap().to_owned();
-    let known = |path: String, (size, mtime): (i64, i64)| KnownSound { path, size, mtime, has_clap: false };
+    let known =
+        |path: String, (size, mtime): (i64, i64)| KnownSound { path, size, mtime, has_clap: false, empty: false };
     let unplugged = r"Z:\Unplugged".to_owned();
     let known = [
         // Renamed folder: follows, and isn't listened to again.
@@ -82,8 +87,13 @@ fn plans_what_to_listen_to_follow_and_forget() {
         known(at("Same.wav"), stamp("Same.wav")),
         // Gone for good.
         known(at("Gone.wav"), (1, 1)),
-        // Still there but empty now (0 bytes): forgotten, so the list never shows it.
+        // Still there but known only as empty (0 bytes: a copy that never finished): forgotten.
         known(at("Empty.wav"), (0, 1)),
+        // Had a sound, and its file is empty just now (a render over it): kept, and listened to so its row says it's
+        // empty and no list shows it (the whole-app review of 26 Nov, ST-3).
+        known(at("Rendering.wav"), (9, 1)),
+        // Its row says so already: nothing to do while it stays empty.
+        KnownSound { empty: true, ..known(at("Still rendering.wav"), (0, 2)) },
         // A file the app can't read, still there: kept.
         known(at("Song.opus"), (8, 1)),
         // On a drive that isn't plugged in: kept.
@@ -91,14 +101,21 @@ fn plans_what_to_listen_to_follow_and_forget() {
         // Outside every listed folder: kept, unlike the C# app.
         known(r"Q:\Elsewhere\Kick.wav".to_owned(), (4, 4)),
     ];
-    let p = plan(&found, &known, &[root.clone(), unplugged]);
+    let p = plan(&found, &empty, &known, &[root.clone(), unplugged.clone()]);
     let listen: Vec<String> = p.listen.iter().map(|f| rel(&root, &f.path)).collect();
-    assert_eq!(listen, ["New.wav", "Pack 2/Pad 90bpm.wav"]);
+    assert_eq!(listen, ["New.wav", "Pack 2/Pad 90bpm.wav", "Rendering.wav"]);
+    assert_eq!(p.listen[2].size, 0);
     let moves: Vec<(String, String)> = p.moves.iter().map(|(f, t)| (rel(&root, f), rel(&root, t))).collect();
     assert_eq!(moves.len(), 2);
     assert!(moves.contains(&("Pack/Kick.wav".into(), "Pack 2/Kick.wav".into())));
     assert!(moves.contains(&("Pack/Pad.wav".into(), "Pack 2/Pad 90bpm.wav".into())));
     assert_eq!(p.forget, [at("Gone.wav"), at("Empty.wav")]);
+    // A sound kept while its file was empty, once it's filled again: a changed file, listened to again.
+    fs::write(dir.join("Still rendering.wav"), [0u8; 12]).unwrap();
+    let (found, empty) = find_sounds(std::slice::from_ref(&root));
+    let p = plan(&found, &empty, &known, &[root.clone(), unplugged]);
+    assert!(p.listen.iter().any(|f| f.path == at("Still rendering.wav") && f.size == 12));
+    assert!(!p.forget.contains(&at("Still rendering.wav")) && !p.forget.contains(&at("Rendering.wav")));
 }
 
 /// A sample folder that holds a user's temp folder (his whole user folder, say): the files programs leave there, as FL
@@ -111,10 +128,10 @@ fn leaves_out_the_files_in_a_temp_folder_and_forgets_the_ones_taken_in_before() 
         &[("AppData/Local/Temp/Image-Line/{1FD56D3D}_U.wav", 3), ("Music/Samples/Temp/Kick.wav", 3)],
     );
     let root = dir.to_str().unwrap().to_owned();
-    let found = find_sounds(std::slice::from_ref(&root));
+    let (found, empty) = find_sounds(std::slice::from_ref(&root));
     let names: Vec<String> = found.files.iter().map(|f| rel(&root, &f.path)).collect();
     assert_eq!(names, ["Music/Samples/Temp/Kick.wav"]);
     let render = dir.join("AppData/Local/Temp/Image-Line/{1FD56D3D}_U.wav").to_str().unwrap().to_owned();
-    let known = [KnownSound { path: render.clone(), size: 99, mtime: 1, has_clap: false }];
-    assert_eq!(plan(&found, &known, std::slice::from_ref(&root)).forget, [render]);
+    let known = [KnownSound { path: render.clone(), size: 99, mtime: 1, has_clap: false, empty: false }];
+    assert_eq!(plan(&found, &empty, &known, std::slice::from_ref(&root)).forget, [render]);
 }

@@ -127,7 +127,9 @@ fn change(
     edit: impl FnOnce(&mut Vec<String>) -> bool,
 ) -> Result<Changed, LibraryError> {
     let write_error = |why: String| LibraryError::Write { path: library.to_owned(), why };
-    let sql = |e: rusqlite::Error| write_error(e.to_string());
+    // Another write holding the library past the wait is said as busy (try again in a moment), as every other writer
+    // of the library says it (the 26 Nov review's LY-1).
+    let sql = |e: rusqlite::Error| crate::song_writes::write_failed(library, e);
     let mut conn = open_for_settings(library)?;
     let table = if list == FolderList::Projects { "roots" } else { "settings" };
     let has: bool = conn

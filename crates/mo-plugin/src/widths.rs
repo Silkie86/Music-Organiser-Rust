@@ -2,9 +2,15 @@
 //! column, the folder tree and Chord check's takes. Kept in a small file of the plugin's own in the app's data folder
 //! (the plugin never writes the app's settings), shared by every copy of the plugin: a window opened later, in any
 //! project, comes up as you left the last one.
+//!
+//! Two DAWs running side by side (or Bitwig's plugin hosts) each have a copy of the plugin's code of their own, with
+//! the widths as that copy last saw them. So the file is read again as each window opens, and a part dragged is written
+//! into what the file has then: never over a part another program changed since (the 26 Nov review's WI-3).
 
-use std::path::PathBuf;
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use mo_app::widths::{self, Widths};
 use slint::ComponentHandle;
@@ -12,31 +18,55 @@ use slint::ComponentHandle;
 use crate::threads::lock;
 use crate::ui::Panel;
 
-/// What every copy of the plugin chose, as the file has it (read once, the first time a window opens).
-static CHOSEN: Mutex<Option<Widths>> = Mutex::new(None);
-/// Held while the file is written (every copy of the plugin writes the same file).
+/// The widths as this program has them: the file's as last read or written, with the parts dragged here since.
+#[derive(Default)]
+struct Chosen {
+    widths: Widths,
+    /// The parts dragged (or put back) here and not written to the file yet: the next write takes them there.
+    unwritten: Vec<&'static str>,
+}
+
+impl Chosen {
+    /// Takes in the file's widths `on_file`, but for the parts dragged here and not written yet; whether anything
+    /// changed.
+    fn take_in(&mut self, on_file: &Widths) -> bool {
+        let before = self.widths.clone();
+        for part in widths::PLUGIN_PARTS {
+            if !self.unwritten.contains(&part.name) {
+                self.widths.set(part.name, on_file.width(part.name));
+            }
+        }
+        self.widths != before
+    }
+}
+
+static CHOSEN: Mutex<Option<Chosen>> = Mutex::new(None);
+/// Goes up each time a read of the file changes [`CHOSEN`]: each open window then gives its panel the widths again
+/// ([`tick`]).
+static READ: AtomicU64 = AtomicU64::new(0);
+/// Held while the file is read and written again (every copy of the plugin in this program writes the same file).
 static WRITING: Mutex<()> = Mutex::new(());
+
+/// Works on the widths this program has.
+fn with_chosen<R>(work: impl FnOnce(&mut Chosen) -> R) -> R {
+    work(lock(&CHOSEN).get_or_insert_with(Chosen::default))
+}
 
 /// The file, or none in the tests (they never write the data folder, rule 11).
 fn file() -> Option<PathBuf> {
     (!cfg!(test)).then(|| mo_app::paths::data_dir().join(widths::PLUGIN_FILE))
 }
 
-/// The widths kept, read from the file the first time.
-fn chosen() -> Widths {
-    lock(&CHOSEN)
-        .get_or_insert_with(|| {
-            let text = file().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
-            Widths::read(text.trim())
-        })
-        .clone()
-}
-
-/// Gives the panel its parts' widths and wires its seams.
-pub fn connect(panel: &Panel) {
-    let kept = chosen();
-    for part in widths::PLUGIN_PARTS {
-        give(panel, part.name, kept.width(part.name));
+/// Gives the panel its parts' widths and wires its seams. The widths it has at once are this program's; the file is
+/// read again off the window's thread (the data drive may be asleep), and what it says comes to the panel through
+/// [`tick`]. The number to hand [`tick`] is returned.
+pub fn connect(panel: &Panel) -> u64 {
+    let seen = READ.load(Ordering::Acquire);
+    give_all(panel);
+    if let Some(file) = file()
+        && !crate::threads::background("mo-plugin-widths", move || read_again(&file))
+    {
+        crate::log::line("Widths", "Couldn't start reading the widths again: the ones read before are shown");
     }
     let data = panel.global::<crate::ui::Widths>();
     // A name not in the table (a slip in the panel; a test catches it) gets wide limits, as a seam with no part has.
@@ -45,57 +75,140 @@ pub fn connect(panel: &Panel) {
     data.on_usual(|name| widths::find(&name).map_or(0.0, |p| p.usual));
     data.on_resized(|name, width| {
         let Some(part) = widths::find(&name) else { return };
-        let got = change(|w| w.set(part.name, width));
+        let got = change(part.name, |w| w.set(part.name, width));
         crate::log::line("Widths", &format!("{} dragged to {width:.0}, kept as {got:.0}", part.name));
     });
     let weak = panel.as_weak();
     data.on_reset(move |name| {
         let Some(part) = widths::find(&name) else { return };
-        let width = change(|w| w.reset(part.name));
+        let width = change(part.name, |w| w.reset(part.name));
         crate::log::line("Widths", &format!("{} back to its usual {width:.0}", part.name));
         if let Some(panel) = weak.upgrade() {
             give(&panel, part.name, width);
         }
     });
+    seen
 }
 
-/// Changes the kept widths and writes the file, off the window's thread (a slow disk never holds a frame).
-fn change(how: impl FnOnce(&mut Widths) -> f32) -> f32 {
-    let (got, changed) = {
-        let mut chosen = lock(&CHOSEN);
-        let widths = chosen.get_or_insert_with(Widths::default);
-        let before = widths.value();
-        let got = how(widths);
-        (got, widths.value() != before)
-    };
-    if let (true, Some(file)) = (changed, file()) {
-        std::thread::spawn(move || {
-            // One write at a time, each of the widths as they are by then: the newest always lands last.
-            let _writing = lock(&WRITING);
-            let value = lock(&CHOSEN).as_ref().map(Widths::value).unwrap_or_default();
-            write(&file, &value);
-        });
+/// Gives the panel the widths again when a read of the file changed them since it last had them (`seen`, which
+/// [`connect`] started).
+pub fn tick(panel: &Panel, seen: &Cell<u64>) {
+    let read = READ.load(Ordering::Acquire);
+    if read != seen.get() {
+        seen.set(read);
+        give_all(panel);
+    }
+}
+
+/// Changes the widths this program has (the part called `name`) and writes the change to the file, off the window's
+/// thread at low priority (a slow disk never holds a frame, and the DAW's own work comes first).
+fn change(name: &'static str, how: impl FnOnce(&mut Widths) -> f32) -> f32 {
+    let (got, changed) = with_chosen(|chosen| {
+        let before = chosen.widths.value();
+        let got = how(&mut chosen.widths);
+        let changed = chosen.widths.value() != before;
+        if changed && !chosen.unwritten.contains(&name) {
+            chosen.unwritten.push(name);
+        }
+        (got, changed)
+    });
+    if let (true, Some(file)) = (changed, file())
+        && !crate::threads::background("mo-plugin-widths", move || write_now(&file))
+    {
+        crate::log::line("Widths", "Couldn't start writing the widths: the next change writes this one too");
     }
     got
 }
 
-/// Writes the file by a copy beside it and a rename, so a cut-off write never leaves half a file; an empty value
+/// Reads the file again and takes in what another program changed.
+fn read_again(file: &Path) {
+    let _writing = lock(&WRITING);
+    let Some(on_file) = read(file) else { return };
+    if with_chosen(|chosen| chosen.take_in(&on_file)) {
+        READ.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Writes the parts dragged here into what the file has now, then takes in the rest of it. One write at a time, and
+/// each takes every part dragged by then: the newest always lands last.
+fn write_now(file: &Path) {
+    let _writing = lock(&WRITING);
+    let on_file = read(file);
+    let (names, written) = {
+        let mut chosen = lock(&CHOSEN);
+        let chosen = chosen.get_or_insert_with(Chosen::default);
+        let names = std::mem::take(&mut chosen.unwritten);
+        if names.is_empty() {
+            // A write after the change that asked for this one took it already.
+            return;
+        }
+        // A file that couldn't be read just now: what this program has, whole, as before.
+        let written = match on_file {
+            Some(on_file) => merged(on_file, &chosen.widths, &names),
+            None => chosen.widths.clone(),
+        };
+        (names, written)
+    };
+    match write(file, &written.value()) {
+        Ok(()) => {
+            if with_chosen(|chosen| chosen.take_in(&written)) {
+                READ.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        Err(e) => {
+            crate::log::line("Widths", &format!("Couldn't keep the widths in {}: {e}", file.display()));
+            // Tried again with the next change.
+            with_chosen(|chosen| {
+                for name in names {
+                    if !chosen.unwritten.contains(&name) {
+                        chosen.unwritten.push(name);
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// What's written: the file's widths `on_file`, with the parts called `names` as this program has them (`mine`).
+fn merged(mut on_file: Widths, mine: &Widths, names: &[&str]) -> Widths {
+    for name in names {
+        // At its usual width, a part isn't kept: `set` takes it out.
+        on_file.set(name, mine.width(name));
+    }
+    on_file
+}
+
+/// The widths in the file (none chosen when there's no file); none when it can't be read just now.
+fn read(file: &Path) -> Option<Widths> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => Some(Widths::read(text.trim())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Widths::default()),
+        Err(e) => {
+            crate::log::line("Widths", &format!("Couldn't read the widths in {}: {e}", file.display()));
+            None
+        }
+    }
+}
+
+/// Writes the file whole or not at all, through a temporary name of this program's own beside it that the app's
+/// start-up sweep knows (`mo_app::backup::write_whole`): two DAWs writing at once never share one. An empty value
 /// takes the file away (nothing chosen: nothing kept).
-fn write(file: &std::path::Path, value: &str) {
-    let done = if value.is_empty() {
+fn write(file: &Path, value: &str) -> std::io::Result<()> {
+    if value.is_empty() {
         match std::fs::remove_file(file) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         }
     } else {
-        // Named as the app's start-up sweep knows a cut-off write of it (`mo_app::tidy`).
-        let mut next = file.as_os_str().to_owned();
-        next.push(mo_app::backup::PART_ENDING);
-        let next = PathBuf::from(next);
-        std::fs::write(&next, value).and_then(|()| std::fs::rename(&next, file))
-    };
-    if let Err(e) = done {
-        crate::log::line("Widths", &format!("Couldn't keep the widths in {}: {e}", file.display()));
+        mo_app::backup::write_whole(file, value)
+    }
+}
+
+/// Gives the panel every part's width as this program has it.
+fn give_all(panel: &Panel) {
+    let chosen = with_chosen(|chosen| chosen.widths.clone());
+    for part in widths::PLUGIN_PARTS {
+        give(panel, part.name, chosen.width(part.name));
     }
 }
 
@@ -112,6 +225,8 @@ fn give(panel: &Panel, name: &str, width: f32) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn every_plugin_part_has_a_line_in_give() {
         let source = include_str!("widths.rs");
@@ -132,5 +247,27 @@ mod tests {
             }
         }
         assert!(seen >= mo_app::widths::PLUGIN_PARTS.len(), "found only {seen} seams in panel.slint");
+    }
+
+    #[test]
+    fn a_part_dragged_here_is_written_into_what_the_file_has_now() {
+        // FL dragged the filter column to 260 and wrote it; Bitwig, which read the file before, drags the takes to 300.
+        let on_file = Widths::read("plugin.filters=260");
+        let mut mine = Widths::default();
+        mine.set("plugin.takes", 300.0);
+        let written = merged(on_file, &mine, &["plugin.takes"]);
+        assert_eq!(written.value(), "plugin.filters=260;plugin.takes=300");
+        // Put back to its usual width here: it goes from the file, FL's stays.
+        mine.reset("plugin.takes");
+        assert_eq!(merged(written, &mine, &["plugin.takes"]).value(), "plugin.filters=260");
+        // Read again, FL's width comes in, but not over a part dragged here and not written yet.
+        let mut chosen = Chosen { widths: Widths::read("plugin.folders=400"), unwritten: vec!["plugin.folders"] };
+        assert!(chosen.take_in(&Widths::read("plugin.filters=260;plugin.folders=200")));
+        assert_eq!(chosen.widths.value(), "plugin.filters=260;plugin.folders=400");
+        assert!(!chosen.take_in(&Widths::read("plugin.filters=260")));
+        // Once written, the file's word goes for that part too.
+        chosen.unwritten.clear();
+        assert!(chosen.take_in(&Widths::read("plugin.filters=260")));
+        assert_eq!(chosen.widths.value(), "plugin.filters=260");
     }
 }

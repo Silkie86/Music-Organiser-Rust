@@ -2838,6 +2838,19 @@ fn what_a_scan_found_is_kept_in_the_apps_own_library() {
     assert_eq!(count(&copy, "SELECT mtime FROM sounds WHERE id = ?1", *changed_id), unix(2026, 11, 6));
     assert_eq!(count(&copy, "SELECT COUNT(*) FROM sound_features WHERE sound_id = ?1", kick.id), 1);
     assert_eq!(count(&copy, "SELECT COUNT(*) FROM sound_features WHERE sound_id = ?1", unreadable.id), 0);
+    // Its file read empty (a render over it): listened to, its row says so and keeps your stars and tags; the next
+    // scan keeps it while it stays empty (the whole-app review of 26 Nov, ST-3).
+    let emptied = format!("Couldn't read the file: {}", mo_audio::EMPTY_FILE);
+    let kept = grow::keep(&old, &[listened(changed, 0, Err(emptied))]).unwrap();
+    assert_eq!(kept, Kept { updated: 1, ..Kept::default() });
+    let known = SoundsDb::open_read_only(&copy).unwrap().known_files().unwrap();
+    assert!(known.iter().any(|k| k.path == *changed && k.size == 0 && k.empty));
+    assert_eq!(known.iter().filter(|k| k.empty).count(), 1, "{:?}", unreadable.error);
+    let empty_now = SoundsDb::open_read_only(&copy).unwrap().all(now()).unwrap();
+    let empty_now = empty_now.iter().find(|s| s.path == *changed).unwrap();
+    assert!(empty_now.is_empty_file() && !unreadable.is_empty_file() && !kick.is_empty_file());
+    assert_eq!((empty_now.id, empty_now.rating), (*changed_id, 4));
+    assert!(empty_now.tags.contains(&"keep".to_owned()));
     // Moved and gone.
     let to = "E:\\Moved\\here.wav".to_owned();
     let tagged = count(&copy, "SELECT COUNT(*) FROM sound_tags WHERE sound_id = ?1", *moved_id);

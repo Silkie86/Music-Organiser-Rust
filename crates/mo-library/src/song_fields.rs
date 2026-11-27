@@ -33,7 +33,8 @@ pub const LONGEST_KEY: usize = 32;
 pub const LONGEST_NOTES: usize = 20_000;
 /// The longest to-do kept, in characters: one line.
 pub const LONGEST_TODO: usize = 200;
-/// The most to-dos a song keeps, done ones too.
+/// The most to-dos a song keeps, done ones too: one more isn't added to a song that has this many
+/// ([`Change::has_room`]).
 pub const MOST_TODOS: usize = 200;
 
 /// A save as the library has it: its id, and the path the library keeps it under. Only the row with both is changed,
@@ -62,7 +63,8 @@ pub enum Change {
     /// Take a tag off, whatever its letter case.
     RemoveTag(String),
     /// The song's whole to-do list: each one trimmed. `mo_app::live` gives it first with each change below, so every
-    /// save holds the list the song shows before one is added, ticked or taken off.
+    /// save holds the list the song shows before one is added, ticked or taken off. However long it is: it's the
+    /// list the song has already, and one over [`MOST_TODOS`] (an older app's) can still be ticked and made shorter.
     Todos(Vec<Todo>),
     /// Put a to-do at the end of the list, trimmed (one with the same words and time already there isn't put twice).
     AddTodo(Todo),
@@ -120,27 +122,36 @@ impl Change {
                 shown("a tag", &tag, LONGEST_TAG).map(|()| Change::AddTag(tag))
             }
             Change::RemoveTag(tag) => named(tag).map(Change::RemoveTag),
-            Change::Todos(todos) => {
-                if todos.len() > MOST_TODOS {
-                    return Err(format!("a song can have {MOST_TODOS} to-dos at most"));
-                }
-                todos
-                    .iter()
-                    .map(|t| {
-                        let text = t.text.trim();
-                        if text.is_empty() {
-                            return Err("a to-do needs some words".to_owned());
-                        }
-                        shown("a to-do", text, LONGEST_TODO).map(|()| Todo { text: text.to_owned(), ..t.clone() })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(Change::Todos)
-            }
+            Change::Todos(todos) => todos
+                .iter()
+                .map(|t| {
+                    let text = t.text.trim();
+                    if text.is_empty() {
+                        return Err("a to-do needs some words".to_owned());
+                    }
+                    shown("a to-do", text, LONGEST_TODO).map(|()| Todo { text: text.to_owned(), ..t.clone() })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Change::Todos),
             Change::AddTodo(t) => match Change::Todos(vec![t.clone()]).checked()? {
                 Change::Todos(mut one) if !one.is_empty() => Ok(Change::AddTodo(one.remove(0))),
                 _ => Err("a to-do needs some words".to_owned()),
             },
             Change::TickTodo { .. } | Change::RemoveTodo { .. } => Ok(self.clone()),
+        }
+    }
+
+    /// Why the change can't be made to a song that shows `todos` now: a to-do added to one that has [`MOST_TODOS`]
+    /// already (the 26 Nov review's SZ-2). Every other change has room, and so does a to-do that's there already
+    /// (it isn't put twice).
+    pub fn has_room(&self, todos: &[Todo]) -> Result<(), String> {
+        match self {
+            Change::AddTodo(t)
+                if todos.len() >= MOST_TODOS && !todos.iter().any(|o| same_todo(o, &t.text, t.added)) =>
+            {
+                Err(format!("a song can have {MOST_TODOS} to-dos at most: take off some that are done to add more"))
+            }
+            _ => Ok(()),
         }
     }
 

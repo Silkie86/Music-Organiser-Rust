@@ -399,6 +399,11 @@ fn about_seconds(seconds: f64) -> String {
 /// The card's headline when a part couldn't be put in its song; the line under it says why.
 pub const PUT_FAILED: &str = "Couldn't put the part in the song";
 
+/// The card's headline when another project came to the front in Bitwig just after the whole part had played into the
+/// song: the part is in, and only setting Bitwig back was cut off; the line under it says what may still be set (the
+/// 26 Nov review's LT-1).
+pub const PUT_IN_NOT_BACK: &str = "The part is in the song, but Bitwig isn't set back yet";
+
 /// The card's headline when you stopped a part being put in its song; the line under it says what Bitwig has of it
 /// (the link's words), or [`PUT_NOTHING`] when it was stopped before Bitwig recorded.
 pub const PUT_STOPPED: &str = "Stopped putting the part in the song";

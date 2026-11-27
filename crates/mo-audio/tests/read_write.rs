@@ -218,6 +218,29 @@ fn writes_wavs_that_read_back() {
 }
 
 #[test]
+fn float_wavs_keep_what_goes_over_full_scale() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-audio");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("written-32.wav");
+    let channels = vec![vec![0.5f32, -1.0, 2.0, f32::NEG_INFINITY], vec![0.0, f32::NAN, -2.5, 0.25]];
+    write_wav(&path, &channels, 44100, 32).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    // RIFF, an 18-byte fmt (float, empty extension), fact (4 frames), then the data.
+    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len() - 8);
+    assert_eq!(&bytes[12..16], b"fmt ");
+    assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 18);
+    assert_eq!(u16::from_le_bytes(bytes[20..22].try_into().unwrap()), 3);
+    assert_eq!(&bytes[38..42], b"fact");
+    assert_eq!(u32::from_le_bytes(bytes[46..50].try_into().unwrap()), 4);
+    assert_eq!(&bytes[50..54], b"data");
+    assert_eq!(bytes.len(), 58 + 4 * 2 * 4);
+    let a = read(&path, 60.0).unwrap();
+    assert_eq!(a.sample_rate, 44100);
+    assert_eq!(a.channels, vec![vec![0.5, -1.0, 2.0, -1.0], vec![0.0, 0.0, -2.5, 0.25]], "not clipped; damage tamed");
+    assert!(mo_audio::reads_exactly(&path));
+}
+
+#[test]
 fn an_odd_length_wav_is_padded() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-audio");
     std::fs::create_dir_all(&dir).unwrap();
@@ -302,10 +325,21 @@ fn parts_from(path: &Path, from: f64) -> (u32, Vec<Vec<f32>>, u32) {
     (rate, got, probes)
 }
 
+/// `got` is `want`, frame for frame, each sample within `off` of it.
+fn assert_same(got: &[Vec<f32>], want: &[Vec<f32>], off: f32, what: &str) {
+    assert_eq!(got.len(), want.len(), "{what}: channels");
+    for (g, w) in got.iter().zip(want) {
+        assert_eq!(g.len(), w.len(), "{what}: frames");
+        let most = g.iter().zip(w).fold(0f32, |m, (g, w)| m.max((g - w).abs()));
+        assert!(most <= off, "{what}: {most}");
+    }
+}
+
 #[test]
 fn reads_from_part_way_into_every_kind_of_file() {
     // Where a long song plays from after a click on its waveform: what's handed on is the same as the whole file read
-    // from there, for a WAV (read from there straight away) and the kinds decoded from their start.
+    // from there, for a WAV (read from there straight away), the kinds gone into there (decoded from a moment before
+    // it, the whole-app review of 26 Nov, AD-1), and WMA (decoded from its start).
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-audio");
     std::fs::create_dir_all(&dir).unwrap();
     let wav = dir.join("from-part-way.wav");
@@ -321,19 +355,35 @@ fn reads_from_part_way_into_every_kind_of_file() {
         let whole = read(path, 60.0).unwrap();
         let (rate, from_start, _) = parts_from(path, 0.0);
         assert_eq!((rate, &from_start), (whole.sample_rate, &whole.channels), "{}", path.display());
-        let at = usize::try_from(frame_at(0.2, whole.sample_rate)).unwrap();
-        let (rate, got, probes) = parts_from(path, 0.2);
-        assert_eq!(rate, whole.sample_rate, "{}", path.display());
-        let want: Vec<Vec<f32>> = whole.channels.iter().map(|c| c[at..].to_vec()).collect();
-        assert_eq!(got, want, "{}", path.display());
-        // A WAV goes straight there; the others are asked whether to go on as they're decoded on the way.
-        assert_eq!(probes > 0, path.extension().is_some_and(|e| e != "wav"), "{}", path.display());
+        // Near the start (decoded from there), and further in.
+        for from in [0.05, 0.2, 0.37] {
+            let at = usize::try_from(frame_at(from, whole.sample_rate)).unwrap();
+            let (rate, got, probes) = parts_from(path, from);
+            assert_eq!(rate, whole.sample_rate, "{} from {from}", path.display());
+            let want: Vec<Vec<f32>> = whole.channels.iter().map(|c| c[at..].to_vec()).collect();
+            // To the last bit; AAC's decoder comes out a little differently after a jump (some 70 dB down, unheard).
+            let aac = path.extension().is_some_and(|e| e == "m4a" || e == "aac");
+            assert_same(&got, &want, if aac { 1e-3 } else { 0.0 }, &format!("{} from {from}", path.display()));
+            // A WMA is asked whether to go on as it's decoded on the way there (once a whole part of 0.1 s lies before
+            // the place: at 0.05 s the first part already holds it); the others go straight there.
+            let wma = path.extension().is_some_and(|e| e == "wma");
+            assert_eq!(probes > 0, wma && from >= 0.1, "{} from {from}", path.display());
+        }
         // Past its end: nothing.
         assert_eq!(parts_from(path, 5.0).1, Vec::<Vec<f32>>::new(), "{}", path.display());
     }
+    // Two MP3s joined, from a place in the second (past the length the first one's header says): it can't be gone
+    // into there, so it's decoded from its start, and still comes from the right place.
+    let mp3 = std::fs::read(tone("tone.mp3")).unwrap();
+    let joined = fixture("joined, played part way.mp3", &[mp3.clone(), mp3].concat());
+    let whole = read(&joined, f64::INFINITY).unwrap();
+    let at = usize::try_from(frame_at(0.8, whole.sample_rate)).unwrap();
+    let (_, got, probes) = parts_from(&joined, 0.8);
+    assert_same(&got, &whole.channels.iter().map(|c| c[at..].to_vec()).collect::<Vec<_>>(), 0.0, "joined");
+    assert!(probes > 0, "decoded on the way there");
     // Told to stop on the way there, it stops: nothing is handed on.
     let mut handed = 0;
-    read_parts_from(&tone("tone.flac"), 0.4, 0.1, &mut |_, part| {
+    read_parts_from(&joined, 0.8, 0.1, &mut |_, part| {
         handed += usize::from(!part.is_empty());
         false
     })
@@ -843,4 +893,58 @@ fn a_whole_file_is_read_a_part_at_a_time() {
     if !cfg!(windows) {
         assert!(nothing(&tone("tone.wma")).to_string().contains("only be played on Windows"));
     }
+}
+
+/// The whole-app review of 26 Nov, AD-2: symphonia's MP3 reader takes where the sound ends from the first frame (its
+/// Info header's frame count), and trimmed every frame after it to nothing. So two MP3s joined end to end gave only
+/// the first (SN-18's own case, a mono part joined to a stereo one, lost its second half with it). Only the first
+/// one's encoder padding is trimmed now: the second plays on after it, as other players play it.
+#[test]
+fn two_mp3s_joined_end_to_end_are_both_read() {
+    let mp3 = std::fs::read(tone("tone.mp3")).unwrap();
+    let one = read(&tone("tone.mp3"), f64::INFINITY).unwrap();
+    // Its frames after the Info frame (which says how many there are), every one of them sound.
+    let sound_frames = mp3_frames(&mp3).len() - 1;
+    let joined = fixture("joined.mp3", &[mp3.clone(), mp3.clone()].concat());
+    let a = read(&joined, f64::INFINITY).unwrap();
+    // The first as it reads alone, then every frame of the second (its encoder's delay and padding are left in, as
+    // the first one's header can't say them).
+    assert_eq!((a.sample_rate, a.channels.len()), (22050, 2));
+    assert_eq!(a.len(), one.len() + sound_frames * 576);
+    assert_eq!(a.file_seconds, a.seconds());
+    let heard = |from: usize, to: usize| a.mono()[from..to].iter().fold(0f32, |m, s| m.max(s.abs()));
+    assert!(heard(one.len() + 2 * 576, a.len() - 2 * 576) > 0.05, "the second tone is heard");
+    // Read a part at a time (a waveform, a stream), it's the same.
+    let InParts { all, seconds, .. } = in_parts(&joined, 0.1).unwrap();
+    assert_eq!((all, seconds), (a.channels.clone(), a.file_seconds));
+    // Read for a minute's analysis, all of it comes, and the length is all of it, not what the first one's header
+    // says.
+    let first_minute = read(&joined, 60.0).unwrap();
+    assert_eq!((first_minute.len(), first_minute.file_seconds), (a.len(), a.file_seconds));
+    // The second one in mono (SN-18): it can't be decoded with the first, so it's silence as long as it is.
+    let frames = mp3_frames(&mp3);
+    let mut mono = mp3.clone();
+    for &at in &frames[1..] {
+        mono[at + 3] |= 0xC0;
+    }
+    let b = read(&fixture("joined, mono after.mp3", &[mp3.clone(), mono].concat()), f64::INFINITY).unwrap();
+    assert_eq!((b.len(), b.file_seconds), (a.len(), a.file_seconds));
+    assert!(b.mono()[one.len() + 576..].iter().all(|&s| s == 0.0), "the second one is silence");
+}
+
+/// The whole-app review of 26 Nov, AD-4: a file that says it's shorter than it is (a fragmented M4A says it's 0 long)
+/// was given what the read had come to when it stopped, so a minute's read of a longer one gave exactly a minute, and
+/// the Sounds page played it only so far. The rest is counted now, without decoding it.
+#[test]
+fn a_file_that_says_its_shorter_than_it_is_gets_its_whole_length() {
+    let path = tone("tone-fragmented.m4a");
+    let whole = read(&path, f64::INFINITY).unwrap();
+    assert!((whole.seconds() - 0.5).abs() < 0.06, "{}", whole.seconds());
+    let start = read(&path, 0.2).unwrap();
+    assert_eq!(start.len(), 4410);
+    // Counted from its packets' lengths, which end where the tone does: the decoder fills its last frame out.
+    assert!((start.file_seconds - whole.file_seconds).abs() < 0.02, "{} {}", start.file_seconds, whole.file_seconds);
+    // A file whose length is known is still only read as far as asked.
+    let flac = read(&tone("tone.flac"), 0.2).unwrap();
+    assert_eq!((flac.len(), flac.file_seconds), (4410, 0.5));
 }

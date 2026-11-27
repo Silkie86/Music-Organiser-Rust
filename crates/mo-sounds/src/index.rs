@@ -20,7 +20,7 @@ use crate::learn::Vectors;
 mod kept;
 pub use kept::{
     Kept, is_half_kept_name, is_kept_name, on_trouble as on_kept_trouble, remove_all as remove_kept,
-    remove_all_prints as remove_kept_prints,
+    remove_all_prints as remove_kept_prints, room_coming_back,
 };
 
 /// Unit-length vectors held in memory for fast likeness search: all in one block, a row per sound, in id order.

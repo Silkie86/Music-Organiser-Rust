@@ -3868,8 +3868,9 @@ final class Link {
      * Nothing touches a parameter while record is on (Bitwig can write automation then), and every step checks that Bitwig
      * still has the project the job started in: when another comes to the front, the transport would steer that one, so the
      * job stops touching anything and answers `abandoned`. What it had changed is kept (see Abandoned) and put back once its
-     * project is in front again (extension 3.32; the answer's `putBackLater` says so). If the extension stops meanwhile,
-     * record goes off and Bitwig stops (see emergency).
+     * project is in front again (extension 3.32; the answer's `putBackLater` says so). If the extension stops while the job
+     * runs, record goes off and Bitwig stops (see emergency). Once it was cut off, what it kept is put back then only if its
+     * project is in front, and forgotten otherwise (see exit): the app's words say to set it back by hand then.
      *
      * The answer's `decided` sums it up: `recorded` (the replay heard the clip's notes with the launcher clip not playing),
      * `nothing` (they were heard as it played, not in the replay), `cantTell` (no notes heard either time, so only a look at

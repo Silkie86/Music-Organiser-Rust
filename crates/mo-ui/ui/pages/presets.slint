@@ -142,7 +142,8 @@ export global PresetsData {
     // Where the list is turned to (list.slint's ListView keeps it): it's there again when the page is shown again.
     in-out property <length> list-y;
     in property <bool> panel-shown;
-    in-out property <length> panel-width: 400px;
+    // 0 until you drag the card: the page lays it out its usual way then (`Widths.list-width`).
+    in-out property <length> panel-width: 0px;
     callback close-panel();
     in property <PresetCard> card;
     in property <[PresetFact]> facts;
@@ -169,6 +170,8 @@ export global PresetsData {
     // To Serum 2: every Serum 1 sound shown, as .fxp files in Serum 2's user presets (shown when there are some).
     in property <int> serum1-shown;
     in property <ActionKey> serum2-shown-key;
+    // To Serum 2 is running: its button stops it (the whole-app review of 26 Nov, PZ-4).
+    in property <bool> serum2-running;
     callback serum2-shown();
 
     // The Curves section (the search box is shared: `search` holds the section's words on show).
@@ -673,9 +676,9 @@ export component PresetsPage inherits Rectangle {
                 alignment: center;
                 StudioButton {
                     horizontal-stretch: 0;
-                    text: "To Serum 2";
-                    enabled: !PresetsData.exporting;
-                    tip: PresetsData.serum2-shown-key.what + " (" + PresetsData.serum1-shown + "): Serum 2 loads them as they are, from User › From my songs";
+                    text: PresetsData.serum2-running ? "Stop" : "To Serum 2";
+                    enabled: PresetsData.serum2-running || !PresetsData.exporting;
+                    tip: PresetsData.serum2-running ? "Stop putting sounds in Serum 2 after the save it's on" : PresetsData.serum2-shown-key.what + " (" + PresetsData.serum1-shown + "): Serum 2 loads them as they are, from User › From my songs";
                     key: PresetsData.serum2-shown-key.key;
                     clicked => { PresetsData.serum2-shown(); }
                 }

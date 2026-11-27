@@ -121,19 +121,37 @@ impl Library {
     /// show. Worked out on the app's low-priority pool (never the DAW's threads). With Favourites on and sounds like
     /// them asked for, those show too once they're known ([`Library::read_like`]).
     pub fn view(&self, asked: &Asked) -> (Vec<usize>, SoundCounts) {
-        let like = match self.like() {
-            Like::Ready(like) if asked.filters.wants_like_favourites() => Some(like),
-            _ => None,
+        let (shown, counts, _) = self.view_settled(asked);
+        (shown, counts)
+    }
+
+    /// [`Library::view`], and whether it's this library's last word on `asked`: not while the sounds like your
+    /// favourites are asked for and not known yet (they're left out until then, and the list is worked out again once
+    /// they are). How far they've got is read once, for both, so a list worked out just as they became known is never
+    /// taken for one with them in (the 26 Nov review's CP-2).
+    pub fn view_settled(&self, asked: &Asked) -> (Vec<usize>, SoundCounts, bool) {
+        let wanted = asked.filters.wants_like_favourites();
+        let (like, settled) = match self.like() {
+            Like::Ready(like) if wanted => (Some(like), true),
+            Like::NotYet | Like::Reading if wanted => (None, false),
+            _ => (None, true),
         };
-        mo_app::background::on_pool(|| {
+        let (shown, counts) = mo_app::background::on_pool(|| {
             let list = like.map(|like| self.list.with_like_favourites(like));
             list.as_ref().unwrap_or(&self.list).view_counted(&asked.filters, asked.order, asked.seed)
-        })
+        });
+        (shown, counts, settled)
     }
 
     /// How far working out the sounds like your favourites has got.
     pub fn like(&self) -> Like {
         lock(&self.like).clone()
+    }
+
+    /// Sets how far working out the sounds like your favourites has got, as [`Library::read_like`] does at its end.
+    #[cfg(test)]
+    pub(crate) fn set_like(&self, like: Like) {
+        *lock(&self.like) = like;
     }
 
     /// Whether the sounds like your favourites should be worked out now for `asked`: they're asked for and haven't

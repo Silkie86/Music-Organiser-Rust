@@ -1,0 +1,19 @@
+[package]
+name = "mo-stagetune"
+description = "Tunes the Songs board's stage guess: measures each song's newest save and tries the lines between stages against the statuses you've given your songs."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "stagetune"
+path = "src/main.rs"
+
+[dependencies]
+mo-app = { path = "../../crates/mo-app" }
+mo-formats = { path = "../../crates/mo-formats" }
+mo-library = { path = "../../crates/mo-library" }
+rayon.workspace = true

@@ -1566,7 +1566,10 @@ pub fn serum2_plan(
 }
 
 /// What a put in Serum 2 says when it's done: how many went (or were there already), where, and what couldn't go.
-pub fn serum2_summary(done: &[Exported], failed_saves: &[String]) -> String {
+/// `picked` is how many sounds the saves it read were asked for: the ones that didn't go are those not in `done`'s
+/// files, since one line of trouble can stand for many sounds (a save where none could go, or picks gone from a save
+/// read again: the whole-app review of 26 Nov, PZ-5).
+pub fn serum2_summary(done: &[Exported], failed_saves: &[String], picked: usize) -> String {
     let files: usize = done.iter().map(|e| e.files.len()).sum();
     let mut text = if files == 0 {
         "No Serum 1 sounds went into Serum 2.".to_owned()
@@ -1582,9 +1585,11 @@ pub fn serum2_summary(done: &[Exported], failed_saves: &[String]) -> String {
     };
     let failed: Vec<&String> = done.iter().flat_map(|e| &e.failed).chain(failed_saves).collect();
     if !failed.is_empty() {
+        // Every line of trouble is at least one sound.
+        let sounds = picked.saturating_sub(files).max(failed.len());
         text += &format!(
             " {} couldn't go: {}",
-            thousands(failed.len()),
+            thousands(sounds),
             failed.iter().map(|f| f.as_str()).collect::<Vec<_>>().join("; ")
         );
         if !text.ends_with('.') {
@@ -1672,6 +1677,29 @@ pub fn export_room(free: Option<u64>, folder: &str, done: usize) -> Result<(), S
             Err(format!(
                 "{so_far}: only {} is free on the drive of {folder}, and an export keeps {} free. Make room there, or \
                  pick an export folder on another drive in Settings.",
+                crate::data_move::size_text(free),
+                crate::data_move::size_text(EXPORT_HEADROOM)
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether To Serum 2 may write its next save's sounds, from the free room on the drive of the Documents folder
+/// (`folder`) Serum 2's presets are in (`None` when it can't be told, which doesn't stop it). As [`export_room`]: his
+/// C: is nearly full, so it keeps [`EXPORT_HEADROOM`] free (the whole-app review of 26 Nov, PZ-4). `Err` is the card's
+/// line saying why it stopped, or didn't start, with how many saves it had done (`done`).
+pub fn serum2_room(free: Option<u64>, folder: &str, done: usize) -> Result<(), String> {
+    match free {
+        Some(free) if free < EXPORT_HEADROOM => {
+            let so_far = if done == 0 {
+                "No sounds went into Serum 2".to_owned()
+            } else {
+                format!("It stopped after {} saves", crate::backup::thousands(done))
+            };
+            Err(format!(
+                "{so_far}: only {} is free on the drive of {folder}, where Serum 2 keeps its presets, and the app \
+                 keeps {} free there. Make room on that drive, then try again.",
                 crate::data_move::size_text(free),
                 crate::data_move::size_text(EXPORT_HEADROOM)
             ))
@@ -2794,20 +2822,32 @@ mod tests {
             warning: None,
         };
         assert_eq!(
-            serum2_summary(&[e(&["Sub.fxp"], &[])], &[]),
+            serum2_summary(&[e(&["Sub.fxp"], &[])], &[], 1),
             "1 Serum 1 sound is in Serum 2's presets, under User › From my songs, a folder for each part: load it from \
              Serum 2's browser."
         );
         assert_eq!(
             serum2_summary(
                 &[e(&["Sub.fxp", "Hook.fxp"], &["Pad: its Serum 1 settings don't unpack"])],
-                &["Old: gone".to_owned()]
+                &["Old: gone".to_owned()],
+                4
             ),
             "2 Serum 1 sounds are in Serum 2's presets, under User › From my songs, a folder for each part: load them \
              from Serum 2's browser. \
              2 couldn't go: Pad: its Serum 1 settings don't unpack; Old: gone."
         );
-        assert_eq!(serum2_summary(&[], &[]), "No Serum 1 sounds went into Serum 2.");
+        assert_eq!(serum2_summary(&[], &[], 0), "No Serum 1 sounds went into Serum 2.");
+        // PZ-5 (26 Nov): one line of trouble can stand for many sounds, so the sounds are counted, not the lines: a
+        // save where none of its 4 could go is one line.
+        assert_eq!(
+            serum2_summary(&[], &["Night Bus: Lead: its Serum 1 settings don't unpack; Bass: the same".to_owned()], 4),
+            "No Serum 1 sounds went into Serum 2. 4 couldn't go: Night Bus: Lead: its Serum 1 settings don't unpack; \
+             Bass: the same."
+        );
+        assert!(
+            serum2_summary(&[e(&["Sub.fxp"], &["5 of the sounds picked aren't in the save any more"])], &[], 6)
+                .contains(" 5 couldn't go: ")
+        );
     }
 
     #[test]
@@ -2877,6 +2917,14 @@ mod tests {
         assert!(none.starts_with("Nothing was exported: only "), "{none}");
         let some = export_room(Some(1 << 20), "C:\\Exports", 12).unwrap_err();
         assert!(some.starts_with("It stopped after 12 saves: only "), "{some}");
+        // PZ-4 (26 Nov): To Serum 2 keeps the same room on the Documents drive, and says where to make room.
+        assert!(serum2_room(Some(EXPORT_HEADROOM), "C:\\Users\\S\\Documents", 0).is_ok());
+        assert!(serum2_room(None, "C:\\Users\\S\\Documents", 0).is_ok());
+        let none = serum2_room(Some(EXPORT_HEADROOM - 1), "C:\\Users\\S\\Documents", 0).unwrap_err();
+        assert!(none.starts_with("No sounds went into Serum 2: only "), "{none}");
+        assert!(!none.contains("Settings"), "the folder can't be picked: {none}");
+        let some = serum2_room(Some(1 << 20), "C:\\Users\\S\\Documents", 3).unwrap_err();
+        assert!(some.starts_with("It stopped after 3 saves: only "), "{some}");
     }
 
     #[test]

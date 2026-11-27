@@ -440,6 +440,14 @@ pub fn refresh_keys(app: &AppWindow) {
 
 /// The key sheet's two lists for `place`: its own keys, and the ones that work everywhere.
 fn show_key_rows(app: &AppWindow, shortcuts: &Shortcuts, place: Place) {
+    let help = mo_app::help::for_place(place);
+    app.set_help_what(help.what.into());
+    app.set_help_tips(ModelRc::new(VecModel::from(
+        help.tips.iter().map(|t| slint::SharedString::from(*t)).collect::<Vec<_>>(),
+    )));
+    // F1, or ? when F1 was given to something else, so the Help sign always names a key that works (rule 15).
+    let help_key = [shortcuts.key_of("app.helpF1"), shortcuts.key_of("app.help")].into_iter().find(|k| !k.is_empty());
+    app.set_help_key(help_key.unwrap_or_default().into());
     let (page, everywhere) = key_rows(shortcuts, place);
     app.set_page_key_rows(ModelRc::new(VecModel::from(page)));
     app.set_key_rows(ModelRc::new(VecModel::from(everywhere)));
@@ -587,14 +595,18 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
         // Where everything the app removes goes first, from any page.
         "app.recycleBin" => files::open_recycle_bin(feed),
         // Space plays the picked sound on the Sounds page, loops the picked part on the MIDI page, auditions the
-        // picked sound in Bitwig on Presets (X3-13) and plays the picked song's MIDI from its arrangement on Songs;
+        // picked sound in Bitwig on Presets (X3-13) and plays the picked song's newest bounce on Songs (review SZ-3),
+        // or its MIDI from the arrangement when it has no bounce (and stops the arrangement while that plays);
         // elsewhere it's left for the page (a button, a text box).
         "app.play" => {
             let place = app.get_place();
-            return (place == Place::Sounds.index() as i32 && sounds::toggle_play(&app))
+            let songs = place == Place::Songs.index() as i32;
+            return (songs && arrangement_play::playing() && arrangement_play::toggle_play(&app))
+                || (songs && songs::toggle_play(&app))
+                || (place == Place::Sounds.index() as i32 && sounds::toggle_play(&app))
                 || (place == Place::Midi.index() as i32 && midi::toggle_play(&app))
                 || (on_presets_page(place) && presets::toggle_play(&app))
-                || (place == Place::Songs.index() as i32 && arrangement_play::toggle_play(&app));
+                || (songs && arrangement_play::toggle_play(&app));
         }
         // Ctrl+F: the keys go to the page's search box, its words picked (review X3-22). The page on show sees the
         // count change; a page without a search box lets the key go on. Not while Ctrl+K or the F12 note is open, as

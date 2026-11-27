@@ -43,6 +43,7 @@ pub mod galaxy_look;
 pub mod galaxy_names;
 pub mod galaxy_picture;
 pub mod galaxy_view;
+pub mod help;
 pub mod helper;
 pub mod helper_start;
 pub mod install_choice;

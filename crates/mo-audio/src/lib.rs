@@ -1,4 +1,5 @@
-//! Sound files: reading them into samples, and writing WAV files (for kit exports).
+//! Sound files: reading them into samples, and writing WAV files (for kit exports and edited copies). [`edit`] makes
+//! light edits to a sound read whole, and [`hits`] finds where its hits are.
 //!
 //! WAV (PCM, float, and the Microsoft and IMA ADPCM kinds older packs use) and AIFF are read here, byte for byte as the C# app's `Sounds/AudioFile.cs` reads them, with the notes some
 //! sample packs keep inside them (an ACID chunk's tempo and loop flag, a sampler chunk's root note). MP3, FLAC, M4A,
@@ -9,8 +10,10 @@
 
 mod adpcm;
 pub mod dsp;
+pub mod edit;
 #[cfg(feature = "gm")]
 pub mod gm;
+pub mod hits;
 mod other;
 mod parts;
 #[cfg(feature = "play")]
@@ -37,8 +40,9 @@ pub use write::write_wav;
 ///
 /// 1: up to November 2026. 2: WAV files that keep Ogg Vorbis inside (FL Studio's own sounds). 3: chained Ogg files
 /// (streams joined one after another), and AAC files with a frame damaged into something the decoder doesn't do (the
-/// whole-app review of 19 Nov, SN-11 and SN-18).
-pub const READS: i64 = 3;
+/// whole-app review of 19 Nov, SN-11 and SN-18). 4: MP3s joined end to end, read whole, and files that say they're
+/// shorter than they are (a fragmented M4A) given their whole length (the whole-app review of 26 Nov, AD-2 and AD-4).
+pub const READS: i64 = 4;
 
 /// Whether this computer can decode this sound file (by its extension, ignoring case): WAV, AIFF, MP3, FLAC, M4A,
 /// OGG and AAC everywhere, WMA on Windows only. A sound it can't decode can be listed but not played or analysed.

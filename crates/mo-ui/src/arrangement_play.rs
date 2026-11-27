@@ -306,6 +306,11 @@ fn pick_sound(app: &AppWindow, sound: Option<Sound>) {
     }
 }
 
+/// Whether the arrangement is playing now.
+pub fn playing() -> bool {
+    STATE.with(|s| s.borrow().playing)
+}
+
 /// Space and the Play button: plays the song's MIDI from the playhead, or stops it. False when no arrangement is
 /// shown (so the key goes on).
 pub fn toggle_play(app: &AppWindow) -> bool {
