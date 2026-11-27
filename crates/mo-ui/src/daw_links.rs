@@ -57,7 +57,10 @@ struct Keep {
 /// Starts the look. `library`: the song library, for the FL Studio project folders that may have FL's user data
 /// folder above them.
 pub fn keep_up_to_date(library: PathBuf, feed: Feed) {
-    let installed = std::env::current_exe().is_ok_and(|exe| mo_app::update::installed(&exe));
+    // The installer's copy on Windows; on a Mac, the app run from its app bundle (installer/mac), which brings the
+    // extension and the plugin inside it.
+    let installed = std::env::current_exe()
+        .is_ok_and(|exe| mo_app::update::installed(&exe) || scripts::mac_app_contents(&exe).is_some());
     if !installed {
         log::info("DAW links", "A launcher build: the DAWs' links are left to Settings \u{203a} DAWs");
         return;
@@ -173,17 +176,29 @@ fn put_in(links: &Links, first_look: bool, newer: (bool, bool), done: &mut Done)
     }
 }
 
-/// The shared CLAP folder every DAW looks in, `Common Files\CLAP` (Solomon, 2026-11-25: here, with Windows' Yes).
-/// Windows only: the installer that puts the plugin beside the app is Windows only.
+/// The shared CLAP folder every DAW looks in: on Windows `Common Files\CLAP` (Solomon, 2026-11-25: here, with Windows'
+/// Yes); on a Mac the user's own `~/Library/Audio/Plug-Ins/CLAP`, which needs no administrator. Elsewhere none: the app
+/// brings no plugin with it there.
 fn clap_folder() -> Option<PathBuf> {
-    std::env::var_os("CommonProgramW6432")
-        .or_else(|| std::env::var_os("CommonProgramFiles"))
-        .map(|c| PathBuf::from(c).join("CLAP"))
+    if cfg!(windows) {
+        std::env::var_os("CommonProgramW6432")
+            .or_else(|| std::env::var_os("CommonProgramFiles"))
+            .map(|c| PathBuf::from(c).join("CLAP"))
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library").join("Audio").join("Plug-Ins").join("CLAP"))
+    } else {
+        None
+    }
 }
 
-/// The user's own CLAP folder, which DAWs look in too: only looked at for a test plugin put in by hand there.
+/// The other CLAP folder DAWs look in: only looked at for a test plugin put in by hand there. On Windows the user's
+/// own; on a Mac the one for every user (`/Library/Audio/Plug-Ins/CLAP`).
 fn own_clap_folder() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("Programs").join("Common").join("CLAP"))
+    if cfg!(target_os = "macos") {
+        Some(PathBuf::from("/Library/Audio/Plug-Ins/CLAP"))
+    } else {
+        std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("Programs").join("Common").join("CLAP"))
+    }
 }
 
 /// The administrator step: puts the plugin beside this program into `Common Files\CLAP` (written beside itself, read
@@ -229,7 +244,8 @@ fn put_in_plugin(plugin: &Plugin, feed: &Feed) -> (Option<(Step, Installed)>, As
         .into_iter()
         .flatten()
         .flat_map(|f| scripts::TEST_CLAP_PLUGIN_NAMES.map(|n| f.join(n)))
-        .find(|f| f.is_file());
+        // A file on Windows, a bundle folder on a Mac.
+        .find(|f| f.exists());
     if let Some(by_hand) = by_hand {
         log::info("DAW links", &format!("The plugin is left alone: {} is there already", by_hand.display()));
         return not;
@@ -251,6 +267,19 @@ fn put_in_plugin(plugin: &Plugin, feed: &Feed) -> (Option<(Step, Installed)>, As
     if in_use(&folder.join(scripts::CLAP_PLUGIN_NAME)) {
         log::info("DAW links", "A program has the CLAP plugin loaded: it's updated at a start when it's closed");
         return not;
+    }
+    // On a Mac the user's own CLAP folder takes it without asking anyone (a DAW that has the old one loaded keeps it
+    // until it loads plugins again).
+    if !cfg!(windows) {
+        let done = scripts::install_clap(&source, &folder);
+        for f in &done.went {
+            log::info("DAW links", &format!("Put the CLAP plugin in {}", f.display()));
+        }
+        for (f, why) in &done.failed {
+            log::warning("DAW links", &format!("Couldn't put the CLAP plugin in {}: {why}", f.display()));
+        }
+        let asked = if done.went.is_empty() { Asked::Failed } else { Asked::Went };
+        return (Some((step, done)), asked);
     }
     let admin = mo_space::admin::AsAdmin;
     if !mo_space::admin::Admin::can_ask(&admin) {

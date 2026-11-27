@@ -1,10 +1,12 @@
 #!/bin/bash
-# Makes the Mac download: DAWmate.app (the app) and DAWmate.clap (the CLAP plugin) in one .zip, from builds made with
+# Makes the Mac download: DAWmate.app in a .zip, with the CLAP plugin (Contents/PlugIns/DAWmate.clap) and the Bitwig
+# extension (Contents/Resources/extensions) inside it, which the app puts in by itself as it does on Windows
+# (mo-ui's daw_links). From builds made with
 #   cargo build --locked --profile dist --target <arch>-apple-darwin -p mo-ui --bin music-organiser
 #   cargo build --locked --profile dist --target <arch>-apple-darwin -p mo-plugin
 # for each of aarch64 (Apple silicon) and x86_64 (Intel): both go in one universal file.
 #
-#   installer/mac/package.sh <out folder>
+#   installer/mac/package.sh <out folder> <DAWmate.bwextension>
 #
 # The bundles are signed "ad hoc" (no Apple Developer ID): Apple silicon runs nothing unsigned, and a bundle's
 # Info.plist must be sealed by a signature. Not notarised, so the first open needs right-click, Open (docs/installer.md).
@@ -12,6 +14,9 @@
 set -euo pipefail
 
 out=${1:?"the out folder"}
+extension=${2:?"the built Bitwig extension"}
+[ -f "$extension" ] || { echo "no $extension"; exit 1; }
+extension=$(cd "$(dirname "$extension")" && pwd)/$(basename "$extension")
 top=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$top"
 
@@ -36,7 +41,8 @@ mkdir -p "$stage"
 
 # The app. Its program keeps the name it has everywhere (music-organiser); people see the bundle's name.
 app="$stage/$name.app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/extensions" "$app/Contents/PlugIns"
+cp "$extension" "$app/Contents/Resources/extensions/$name.bwextension"
 lipo -create -output "$app/Contents/MacOS/music-organiser" "$arm/music-organiser" "$intel/music-organiser"
 
 # The logo, as a Mac icon, from the same PNG the window uses (256 px: Finder scales it for the bigger sizes).
@@ -70,14 +76,17 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key><string>$minimum</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>$publisher</string>
+    <!-- Sending files to the Trash goes through Finder (so Finder's Put Back works): macOS asks once, with these words. -->
+    <key>NSAppleEventsUsageDescription</key><string>$name asks Finder to move files you remove to the Trash, so Put Back works.</string>
     <!-- Recording a take from the sound card's input: without these words macOS closes the app when it opens one. -->
     <key>NSMicrophoneUsageDescription</key><string>$name records a take from your sound card's input when you ask it to.</string>
 </dict>
 </plist>
 PLIST
 
-# The CLAP plugin: on a Mac a .clap is a bundle folder, its program inside.
-clap="$stage/$name.clap"
+# The CLAP plugin: on a Mac a .clap is a bundle folder, its program inside. It goes in the app's PlugIns; the app copies
+# it into ~/Library/Audio/Plug-Ins/CLAP itself.
+clap="$app/Contents/PlugIns/$name.clap"
 mkdir -p "$clap/Contents/MacOS"
 lipo -create -output "$clap/Contents/MacOS/$name" "$arm/libmo_plugin.dylib" "$intel/libmo_plugin.dylib"
 cat > "$clap/Contents/Info.plist" <<PLIST
@@ -108,9 +117,8 @@ $name $version for Mac (Apple silicon and Intel, macOS $minimum or later)
 1. Drag $name.app into Applications.
 2. The first time, right-click it and pick Open, then Open again: this test build isn't from an
    identified developer yet, so a plain double-click is refused.
-3. The CLAP plugin: copy $name.clap into your Library/Audio/Plug-Ins/CLAP folder (in Finder: Go, Go to
-   Folder, ~/Library/Audio/Plug-Ins/CLAP; make the CLAP folder if it isn't there), then rescan plugins
-   in your DAW.
+3. Half a minute after it starts, $name puts its Bitwig extension, its FL Studio script and its CLAP
+   plugin (in ~/Library/Audio/Plug-Ins/CLAP) in by itself, and says so. Restart your DAW to see them.
 TEXT
 
 zip="$out/$name-$version-mac.zip"

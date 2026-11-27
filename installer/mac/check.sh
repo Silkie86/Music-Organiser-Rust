@@ -1,11 +1,13 @@
 #!/bin/bash
 # Tries the Mac download the way a tester gets it, on a CI Mac (never on someone's own: it starts the app):
 #
-#   1. Both bundles are whole: Info.plist reads, the programs hold Apple silicon and Intel, the signatures check, and
-#      the plugin offers clap_entry (what a DAW looks for).
+#   1. The app's bundle and the plugin's inside it are whole: each Info.plist reads, the programs hold Apple silicon
+#      and Intel, the signatures check, the Bitwig extension is in, and the plugin offers clap_entry (what a DAW
+#      looks for).
 #   2. The app starts, with a data folder of its own (HOME is a scratch folder, so nothing of the machine's is read
 #      and the DAW links find no DAW), keeps running for a minute (past the DAW links' look at 30 s), writes its log
-#      and no crash log, and closes when asked (--close-for-setup, as the uninstaller asks on Windows).
+#      and no crash log, puts its CLAP plugin into ~/Library/Audio/Plug-Ins/CLAP (the scratch one) the same as the
+#      one it brought, and closes when asked (--close-for-setup, as the uninstaller asks on Windows).
 #
 #   installer/mac/check.sh dist/DAWmate-0.9.0-mac.zip
 #
@@ -33,7 +35,7 @@ check() { # check <what> <command...>
 
 ditto -x -k "$zip" "$work/unzipped"
 app="$work/unzipped/$name.app"
-clap="$work/unzipped/$name.clap"
+clap="$app/Contents/PlugIns/$name.clap"
 program="$app/Contents/MacOS/music-organiser"
 plugin="$clap/Contents/MacOS/$name"
 
@@ -48,6 +50,7 @@ check "the app has its icon" test -s "$app/Contents/Resources/logo.icns"
 offers_entry() { nm -gU -arch arm64 "$plugin" | grep -q ' _clap_entry$' && nm -gU -arch x86_64 "$plugin" | grep -q ' _clap_entry$'; }
 check "the plugin offers clap_entry" offers_entry
 check "the Read me is there" test -s "$work/unzipped/Read me.txt"
+check "the Bitwig extension is inside" test -s "$app/Contents/Resources/extensions/$name.bwextension"
 
 # The app, started as a tester's first start would be.
 home="$work/home"
@@ -62,6 +65,8 @@ has_log() { ls "$logs"/rust-session-*.log > /dev/null 2>&1; }
 check "the app wrote its log" has_log
 no_crash() { ! ls "$logs"/crash-*.log > /dev/null 2>&1; }
 check "no crash log" no_crash
+plugin_put_in() { diff -r "$clap" "$home/Library/Audio/Plug-Ins/CLAP/$name.clap"; }
+check "the app put its CLAP plugin in" plugin_put_in
 
 HOME="$home" "$program" --close-for-setup > "$work/close-output.txt" 2>&1
 ended() {

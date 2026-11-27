@@ -181,13 +181,13 @@ jobs:
           name: setup
           path: dist/*.exe
 
-  # The Mac download (installer/mac): the app and its CLAP plugin as DAWmate.app and DAWmate.clap, each one universal
-  # file for Apple silicon and Intel, signed ad hoc (no Apple Developer ID yet, so not notarised), in a .zip kept as
+  # The Mac download (installer/mac): DAWmate.app with its CLAP plugin and Bitwig extension inside, each program one
+  # universal file for Apple silicon and Intel, signed ad hoc (no Apple Developer ID yet, so not notarised), in a .zip kept as
   # this run's download. Tried by installer/mac/check.sh (the app starts, runs and closes) and clap-validator. Not put on
   # the release yet: Mac testers get it from the run's downloads until it's signed (docs/installer.md).
   mac:
     name: Mac app
-    needs: tag
+    needs: [tag, bitwig-extension]
     if: needs.tag.outputs.published != 'true'
     runs-on: macos-latest
     timeout-minutes: 150
@@ -212,8 +212,14 @@ jobs:
             cargo build --locked --profile dist --target "$target" -p mo-ui --bin music-organiser
             cargo build --locked --profile dist --target "$target" -p mo-plugin
           done
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bitwig-extension
+          path: bitwig
       - name: Make the .zip
-        run: echo "ZIP=$(installer/mac/package.sh dist | tail -n 1)" >> "$GITHUB_ENV"
+        run: |
+          ext=$(ls bitwig/*.bwextension | head -n 1)
+          echo "ZIP=$(installer/mac/package.sh dist "$ext" | tail -n 1)" >> "$GITHUB_ENV"
       - name: Try it
         run: installer/mac/check.sh "$ZIP"
       # The CLAP project's own checker loads the plugin as a DAW would and tries every rule of the format.
@@ -235,7 +241,7 @@ jobs:
           chmod +x "$validator"
           "$validator" --version
           ditto -x -k "$GITHUB_WORKSPACE/$ZIP" "$RUNNER_TEMP/plugin"
-          "$validator" validate "$RUNNER_TEMP/plugin/DAWmate.clap"
+          "$validator" validate "$RUNNER_TEMP/plugin/DAWmate.app/Contents/PlugIns/DAWmate.clap"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mac

@@ -451,3 +451,107 @@ fn the_clap_plugin_goes_in_from_beside_the_app_and_is_checked_by_its_bytes() {
     assert!(done.went.is_empty() && done.failed.len() == 1, "{done:?}");
     assert_eq!(fs::read(folder.join(CLAP_PLUGIN_NAME)).unwrap(), b"plugin 2");
 }
+
+/// A Mac app bundle as installer/mac/package.sh makes it: the program, the plugin's bundle in PlugIns, the Bitwig
+/// extension in Resources.
+fn mac_app(root: &Path, plugin: &[u8]) -> (PathBuf, PathBuf) {
+    let contents = root.join("Applications").join("DAWmate.app").join("Contents");
+    fs::create_dir_all(contents.join("MacOS")).unwrap();
+    let app = contents.join("MacOS").join("music-organiser");
+    fs::write(&app, b"app").unwrap();
+    let bundle = contents.join("PlugIns").join(CLAP_PLUGIN_NAME);
+    fs::create_dir_all(bundle.join("Contents").join("MacOS")).unwrap();
+    fs::write(bundle.join("Contents").join("Info.plist"), b"<plist/>").unwrap();
+    fs::write(bundle.join("Contents").join("MacOS").join("DAWmate"), plugin).unwrap();
+    (app, bundle)
+}
+
+#[test]
+fn a_mac_app_bundle_brings_its_plugin_and_extension_inside_it() {
+    let root = fixture("mac-app");
+    let (app, bundle) = mac_app(&root, b"plugin");
+    let contents = root.join("Applications").join("DAWmate.app").join("Contents");
+    assert_eq!(mac_app_contents(&app), Some(contents.as_path()));
+    assert_eq!(clap_plugin_source(&app), Some(bundle));
+    assert_eq!(bitwig_extension_source(&app), None);
+    let extension = contents.join("Resources").join("extensions").join(BITWIG_EXTENSION_NAME);
+    fs::create_dir_all(extension.parent().unwrap()).unwrap();
+    fs::write(&extension, b"extension").unwrap();
+    assert_eq!(bitwig_extension_source(&app), Some(extension));
+    // Only a real bundle counts: a build folder named like one part of it doesn't.
+    assert_eq!(mac_app_contents(&root.join("target").join("MacOS").join("music-organiser")), None);
+    assert_eq!(mac_app_contents(&root.join("DAWmate").join("Contents").join("MacOS").join("music-organiser")), None);
+}
+
+#[test]
+fn a_mac_plugin_bundle_goes_in_whole_and_is_checked_file_by_file() {
+    let root = fixture("mac-clap");
+    let (_, bundle) = mac_app(&root, b"plugin 2");
+    let folder = root.join("Library").join("Audio").join("Plug-Ins").join("CLAP");
+    // Another plugin in the folder is never touched.
+    fs::create_dir_all(folder.join("Other.clap")).unwrap();
+    fs::write(folder.join("Other.clap").join("x"), b"theirs").unwrap();
+    assert_eq!(clap_state(&bundle, &folder), ScriptState::NotInstalled);
+
+    let done = install_clap(&bundle, &folder);
+    assert_eq!(done.went, std::slice::from_ref(&folder), "{done:?}");
+    let program = folder.join(CLAP_PLUGIN_NAME).join("Contents").join("MacOS").join("DAWmate");
+    assert_eq!(fs::read(&program).unwrap(), b"plugin 2");
+    assert_eq!(clap_state(&bundle, &folder), ScriptState::Installed);
+    // Nothing beside it is left: no part or old folder.
+    let mut names: Vec<_> = fs::read_dir(&folder).unwrap().map(|e| e.unwrap().file_name()).collect();
+    names.sort();
+    assert_eq!(names, ["DAWmate.clap", "Other.clap"]);
+
+    // A newer build: outdated, then updated in place, and a file the old one had that the new one hasn't goes.
+    fs::write(folder.join(CLAP_PLUGIN_NAME).join("Contents").join("stale"), b"old").unwrap();
+    assert_eq!(clap_state(&bundle, &folder), ScriptState::Outdated);
+    fs::write(bundle.join("Contents").join("MacOS").join("DAWmate"), b"plugin 3").unwrap();
+    let done = install_clap(&bundle, &folder);
+    assert!(done.failed.is_empty(), "{done:?}");
+    assert_eq!(fs::read(&program).unwrap(), b"plugin 3");
+    assert!(!folder.join(CLAP_PLUGIN_NAME).join("Contents").join("stale").exists());
+    assert_eq!(clap_state(&bundle, &folder), ScriptState::Installed);
+    assert_eq!(fs::read(folder.join("Other.clap").join("x")).unwrap(), b"theirs");
+
+    // A cut-off install's leftovers are cleared, and the install still goes in.
+    fs::create_dir_all(folder.join("DAWmate.clap.mo-part").join("half")).unwrap();
+    fs::create_dir_all(folder.join("DAWmate.clap.mo-old")).unwrap();
+    let done = install_clap(&bundle, &folder);
+    assert!(done.failed.is_empty(), "{done:?}");
+    assert!(!folder.join("DAWmate.clap.mo-part").exists() && !folder.join("DAWmate.clap.mo-old").exists());
+
+    // A file where the bundle goes isn't the plugin's: it's left, and the install says why.
+    let other = root.join("other-folder");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join(CLAP_PLUGIN_NAME), b"a file").unwrap();
+    let done = install_clap(&bundle, &other);
+    assert!(done.went.is_empty() && done.failed.len() == 1, "{done:?}");
+    assert_eq!(fs::read(other.join(CLAP_PLUGIN_NAME)).unwrap(), b"a file");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_mac_plugin_bundle_keeps_its_program_runnable_and_never_follows_a_link() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = fixture("mac-clap-unix");
+    let (_, bundle) = mac_app(&root, b"plugin");
+    let program = bundle.join("Contents").join("MacOS").join("DAWmate");
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let folder = root.join("CLAP");
+    assert!(install_clap(&bundle, &folder).failed.is_empty());
+    let copied = folder.join(CLAP_PLUGIN_NAME).join("Contents").join("MacOS").join("DAWmate");
+    assert_eq!(fs::metadata(&copied).unwrap().permissions().mode() & 0o777, 0o755);
+
+    // A link where the bundle goes (to a folder of someone's): left as it is, and what it leads to is untouched.
+    let theirs = root.join("theirs");
+    fs::create_dir_all(&theirs).unwrap();
+    fs::write(theirs.join("keep"), b"keep").unwrap();
+    let linked = root.join("linked");
+    fs::create_dir_all(&linked).unwrap();
+    std::os::unix::fs::symlink(&theirs, linked.join(CLAP_PLUGIN_NAME)).unwrap();
+    let done = install_clap(&bundle, &linked);
+    assert!(done.went.is_empty() && done.failed.len() == 1, "{done:?}");
+    assert_eq!(fs::read(theirs.join("keep")).unwrap(), b"keep");
+    assert_eq!(clap_state(&bundle, &linked), ScriptState::Outdated);
+}

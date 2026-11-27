@@ -275,10 +275,15 @@ pub const BITWIG_SCRIPT_NAME: &str = "MusicOrganiser.control.js";
 /// The older script's folder in Bitwig's `Controller Scripts`.
 const BITWIG_SCRIPT_FOLDER: &str = "Music Organiser";
 
-/// The built extension the app installs: next to the app in `extensions` (where the launcher puts it), or, when the
-/// app runs from a build in a copy of the repo, the one Maven built there (`extensions/bitwig-java/target`).
+/// The built extension the app installs: next to the app in `extensions` (where the launcher and the installer put
+/// it; in a Mac app bundle, `Contents/Resources/extensions`), or, when the app runs from a build in a copy of the repo,
+/// the one Maven built there (`extensions/bitwig-java/target`).
 pub fn bitwig_extension_source(app: &Path) -> Option<PathBuf> {
-    let beside = app.parent()?.join("extensions").join(BITWIG_EXTENSION_NAME);
+    // A Mac app bundle keeps it in Contents/Resources/extensions.
+    let beside = match mac_app_contents(app) {
+        Some(contents) => contents.join("Resources").join("extensions").join(BITWIG_EXTENSION_NAME),
+        None => app.parent()?.join("extensions").join(BITWIG_EXTENSION_NAME),
+    };
     if beside.is_file() {
         return Some(beside);
     }
@@ -508,14 +513,43 @@ pub const CLAP_PLUGIN_NAME: &str = "DAWmate.clap";
 /// one is there the app leaves its own out: a DAW would list the plugin twice.
 pub const TEST_CLAP_PLUGIN_NAMES: [&str; 2] = ["DAWmate (test).clap", "Music Organiser (test).clap"];
 
-/// The plugin the installer put beside the app (`plugins\DAWmate.clap`), if it's there.
+/// The `Contents` folder of the Mac app bundle `app` runs from (`DAWmate.app/Contents/MacOS/music-organiser`), if it
+/// runs from one. What the app brings with it is there, as a Mac app keeps it: the Bitwig extension in
+/// `Resources/extensions` and the CLAP plugin bundle in `PlugIns` (`installer/mac/package.sh`).
+pub fn mac_app_contents(app: &Path) -> Option<&Path> {
+    let macos = app.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    let named = |p: &Path, name: &str| p.file_name().is_some_and(|n| n == name);
+    let is_app = bundle.extension().is_some_and(|e| e.eq_ignore_ascii_case("app"));
+    (named(macos, "MacOS") && named(contents, "Contents") && is_app).then_some(contents)
+}
+
+/// The plugin the app brought with it, if it's there: on Windows the file the installer put beside the app
+/// (`plugins\DAWmate.clap`); in a Mac app bundle the plugin's own bundle folder in `Contents/PlugIns`.
 pub fn clap_plugin_source(app: &Path) -> Option<PathBuf> {
+    if let Some(contents) = mac_app_contents(app) {
+        let bundle = contents.join("PlugIns").join(CLAP_PLUGIN_NAME);
+        return real_folder(&bundle).then_some(bundle);
+    }
     Some(app.parent()?.join("plugins").join(CLAP_PLUGIN_NAME)).filter(|f| f.is_file())
 }
 
-/// Whether the plugin in `folder` is the one `source` holds, byte for byte.
+/// Whether the plugin in `folder` is the one `source` holds, byte for byte: one file, or (on a Mac) a bundle folder,
+/// every file in it with the same name and bytes and nothing more.
 pub fn clap_state(source: &Path, folder: &Path) -> ScriptState {
-    let Ok(theirs) = fs::read(folder.join(CLAP_PLUGIN_NAME)) else { return ScriptState::NotInstalled };
+    let theirs = folder.join(CLAP_PLUGIN_NAME);
+    if real_folder(source) {
+        if fs::symlink_metadata(&theirs).is_err() {
+            return ScriptState::NotInstalled;
+        }
+        return if same_tree(source, &theirs).unwrap_or(false) {
+            ScriptState::Installed
+        } else {
+            ScriptState::Outdated
+        };
+    }
+    let Ok(theirs) = fs::read(theirs) else { return ScriptState::NotInstalled };
     match fs::read(source) {
         Ok(built) if built == theirs => ScriptState::Installed,
         _ => ScriptState::Outdated,
@@ -523,14 +557,128 @@ pub fn clap_state(source: &Path, folder: &Path) -> ScriptState {
 }
 
 /// Puts the plugin from `source` into `folder` as [`CLAP_PLUGIN_NAME`]: written beside itself, read back, then put in
-/// place, so one that can't be (a DAW has it open) leaves the old one as it was.
+/// place, so one that can't be (a DAW has it open) leaves the old one as it was. A bundle folder (a Mac's plugin) is
+/// copied whole the same way ([`install_bundle`]).
 pub fn install_clap(source: &Path, folder: &Path) -> Installed {
     let mut done = Installed::default();
-    match fs::read(source).and_then(|bytes| write_checked(folder, CLAP_PLUGIN_NAME, &bytes)) {
+    let placed = if real_folder(source) {
+        install_bundle(source, folder, CLAP_PLUGIN_NAME)
+    } else {
+        fs::read(source).and_then(|bytes| write_checked(folder, CLAP_PLUGIN_NAME, &bytes))
+    };
+    match placed {
         Ok(()) => done.went.push(folder.to_owned()),
         Err(e) => done.failed.push((folder.to_owned(), e.to_string())),
     }
     done
+}
+
+/// Whether `path` is a folder itself (not a link to one).
+fn real_folder(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
+/// Every file in the folder `root`, by its path inside it, with its size, in name order. A link anywhere inside, or
+/// anything that isn't a plain file or folder, is an error: a plugin bundle the app made holds none.
+fn listing(root: &Path) -> io::Result<Vec<(PathBuf, u64)>> {
+    fn walk(root: &Path, inside: &Path, out: &mut Vec<(PathBuf, u64)>) -> io::Result<()> {
+        let mut entries = fs::read_dir(root.join(inside))?.collect::<io::Result<Vec<_>>>()?;
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            let kind = entry.file_type()?;
+            let path = inside.join(entry.file_name());
+            if kind.is_dir() {
+                walk(root, &path, out)?;
+            } else if kind.is_file() {
+                out.push((path, entry.metadata()?.len()));
+            } else {
+                return Err(io::Error::other(format!("{} is a link", root.join(&path).display())));
+            }
+        }
+        Ok(())
+    }
+    if !real_folder(root) {
+        return Err(io::Error::other(format!("{} isn't a folder", root.display())));
+    }
+    let mut out = Vec::new();
+    walk(root, Path::new(""), &mut out)?;
+    Ok(out)
+}
+
+/// Whether the folders `a` and `b` hold the same files (names, sizes, then bytes), one file read at a time.
+fn same_tree(a: &Path, b: &Path) -> io::Result<bool> {
+    let files = listing(a)?;
+    if listing(b)? != files {
+        return Ok(false);
+    }
+    for (inside, _) in &files {
+        if fs::read(a.join(inside))? != fs::read(b.join(inside))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Copies the bundle folder `source` into `folder` (made if it isn't there) as `name`: first whole beside it
+/// (`name.mo-part`), each file synced, then read back and checked against `source`; then the copy that's there (only a
+/// folder of that name, never a link or a file) is moved aside (`name.mo-old`), the new one put in its place, and the
+/// old one taken out. If the new one can't be put in place, the old one goes back. What a cut-off install left beside
+/// it (`.mo-part`, `.mo-old` folders of this name) is cleared first; nothing else in `folder` is touched (rule 28).
+fn install_bundle(source: &Path, folder: &Path, name: &str) -> io::Result<()> {
+    let files = listing(source)?;
+    fs::create_dir_all(folder)?;
+    let target = folder.join(name);
+    let part = folder.join(format!("{name}.mo-part"));
+    let old = folder.join(format!("{name}.mo-old"));
+    if fs::symlink_metadata(&target).is_ok_and(|m| !m.is_dir()) {
+        return Err(io::Error::other(format!("{} is there and isn't the plugin's folder", target.display())));
+    }
+    clear_own(&part)?;
+    clear_own(&old)?;
+    let copied = (|| {
+        for (inside, _) in &files {
+            let to = part.join(inside);
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            // fs::copy keeps the file's permissions: a Mac plugin's program keeps its x bit.
+            fs::copy(source.join(inside), &to)?;
+            fs::File::open(&to)?.sync_all()?;
+        }
+        if !same_tree(source, &part)? {
+            return Err(io::Error::other("the copy read back wasn't the one written"));
+        }
+        Ok(())
+    })();
+    if let Err(e) = copied {
+        let _ = clear_own(&part);
+        return Err(e);
+    }
+    let had_one = real_folder(&target);
+    if had_one && let Err(e) = fs::rename(&target, &old) {
+        let _ = clear_own(&part);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&part, &target) {
+        if had_one {
+            let _ = fs::rename(&old, &target);
+        }
+        let _ = clear_own(&part);
+        return Err(e);
+    }
+    // The new one is in place; an old one that can't be taken out now is cleared by the next install.
+    let _ = clear_own(&old);
+    Ok(())
+}
+
+/// Takes out `path` if it's there: only a real folder (a link or a file of that name is an error, never followed).
+fn clear_own(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+        Ok(m) if m.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => Err(io::Error::other(format!("{} is there and isn't a folder", path.display()))),
+    }
 }
 
 /// Whether `path` is a plain file itself (not a link to one).
