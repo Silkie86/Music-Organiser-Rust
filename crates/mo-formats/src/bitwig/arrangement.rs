@@ -616,7 +616,7 @@ fn automation_lanes(
 }
 
 /// Whether a track is deactivated, and whether it's silent: deactivated, or muted in its mixer.
-fn switched_off(doc: &Document, track: ObjId) -> (bool, bool) {
+pub(super) fn switched_off(doc: &Document, track: ObjId) -> (bool, bool) {
     let disabled = doc.obj(track).num(F_ACTIVE) == Some(0.0);
     let mute = field_obj(doc, track, F_MIXER).and_then(|m| field_obj(doc, m, F_MIXER_MUTE));
     (disabled, disabled || mute.and_then(|m| doc.obj(m).num(F_ON)).is_some_and(|on| on != 0.0))

@@ -26,6 +26,7 @@ pub mod song_fields;
 pub mod song_writes;
 pub mod songs;
 pub mod songs_db;
+pub mod stage;
 pub mod watch;
 
 pub use db::{

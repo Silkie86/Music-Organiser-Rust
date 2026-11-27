@@ -589,6 +589,49 @@ fn body_tracks(doc: &Document) -> (TrackTree<ObjId>, Option<ObjId>) {
     (tree, field_obj(doc, project, F_MASTER_TRACK))
 }
 
+/// The project's mixer for its shape ([`crate::shape`]): each track's effects (a group's own count too, as it's mixed
+/// like a track), the effect (send) tracks, and the master's effects, each in the order the file has them. A device in
+/// a chain or layer inside a track counts for that track. Instruments and note effects are left out, and so is a
+/// deactivated track, with all on it: no sound goes through it.
+pub(crate) fn chains(doc: &Document) -> crate::shape::Chains {
+    let (body, master) = body_tracks(doc);
+    let active: Vec<ObjId> =
+        body.tracks.iter().copied().filter(|&t| !super::arrangement::switched_off(doc, t).0).collect();
+    let at: HashMap<ObjId, usize> = active.iter().enumerate().map(|(i, &t)| (t, i)).collect();
+    let sends: HashSet<ObjId> = body.effect_tracks.iter().copied().collect();
+    let all: HashSet<ObjId> = body.tracks.iter().chain(&body.effect_tracks).chain(&master).copied().collect();
+    let mut chains =
+        crate::shape::Chains { tracks: vec![Vec::new(); active.len()], sends: sends.len() as u32, master: Vec::new() };
+    for o in ids(doc) {
+        let object = doc.obj(o);
+        if !object.has(F_DEVICE_NAME) || !matches!(object.class, CLS_BITWIG_DEVICE | CLS_VST3_PLUGIN | CLS_VST2_PLUGIN)
+        {
+            continue;
+        }
+        if matches!(device_kind(object), PluginKind::Instrument | PluginKind::NoteEffect) {
+            continue;
+        }
+        let name = object.str(F_DEVICE_NAME);
+        if name.is_empty() {
+            continue;
+        }
+        let Some(track) = doc.ancestor(o, |p, _| all.contains(&p)) else { continue };
+        if Some(track) == master {
+            chains.master.push(name.to_owned());
+        } else if let Some(list) = at.get(&track).and_then(|&i| chains.tracks.get_mut(i)) {
+            list.push(name.to_owned());
+        }
+    }
+    // A group with no effects of its own only gathers its tracks: not a mixer track to count.
+    let mut i = 0;
+    chains.tracks.retain(|list| {
+        let group = active.get(i).is_some_and(|&t| !doc.field_list(t, F_GROUP_TRACKS).is_empty());
+        i += 1;
+        !(group && list.is_empty())
+    });
+    chains
+}
+
 /// The names Bitwig shows for the tracks, from the "structure" summary in the metadata.
 fn structure_names(doc: &Document) -> Option<TrackTree<String>> {
     let Some(Value::Blob(blob)) = doc.meta("structure") else { return None };

@@ -381,7 +381,64 @@ pub(crate) fn begin_own<'c>(conn: &'c mut Connection, songs_db: &Path) -> Result
     }
     // A library made before to-dos gets their table with its first write (only ever added, rule 6).
     tx.execute_batch(crate::songs_db::TODOS).map_err(sql)?;
+    // And the saves' shapes, for the Songs board.
+    tx.execute_batch(crate::stage::SHAPES).map_err(sql)?;
     Ok(tx)
+}
+
+/// One save's shape to keep ([`keep_shapes`]): the save's id, its file as it was when the shape was read (its time
+/// and size, as the library has them), and the shape, or `None` when it has none.
+#[derive(Clone, Debug)]
+pub struct ShapeRead {
+    pub id: i64,
+    pub mtime: i64,
+    pub size: i64,
+    pub shape: Option<mo_formats::shape::Shape>,
+}
+
+/// Keeps these saves' shapes in the app's own `songs.db` at `songs_db`, all or none, each with the file it's of (its
+/// time and size) and the shape reader's version ([`mo_formats::shape::VERSION`]). A save the library has read again
+/// since (its time or size differ now) or no longer has is left out: its shape would be of another file. Says how many
+/// were kept.
+pub fn keep_shapes(songs_db: &Path, shapes: &[ShapeRead]) -> Result<usize, LibraryError> {
+    let sql = |e| write_failed(songs_db, e);
+    let mut conn = open_to_write(songs_db)?;
+    let tx = begin_own(&mut conn, songs_db)?;
+    let mut kept = 0;
+    {
+        let mut st = tx
+            .prepare(
+                "INSERT OR REPLACE INTO shapes \
+                 (project_id, mtime, size, version, seconds, bars, markers, automation, tracks, eq, compressed, sends, \
+                  master) \
+                 SELECT ?1, ?11, ?12, ?13, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10 \
+                 WHERE EXISTS (SELECT 1 FROM projects WHERE id = ?1 AND mtime = ?11 AND size = ?12)",
+            )
+            .map_err(sql)?;
+        for r in shapes {
+            let s = r.shape.as_ref();
+            let n = |f: fn(&mo_formats::shape::Shape) -> u32| s.map(|s| f(s) as i64);
+            kept += st
+                .execute(params![
+                    r.id,
+                    s.map(|s| s.seconds),
+                    s.map(|s| s.bars),
+                    n(|s| s.markers),
+                    n(|s| s.automation),
+                    n(|s| s.tracks),
+                    n(|s| s.eq),
+                    n(|s| s.compressed),
+                    n(|s| s.sends),
+                    s.map(|s| s.master.join("\n")),
+                    r.mtime,
+                    r.size,
+                    mo_formats::shape::VERSION,
+                ])
+                .map_err(sql)?;
+        }
+    }
+    tx.commit().map_err(sql)?;
+    Ok(kept)
 }
 
 /// Keeps `batch` in the app's own `songs.db` at `songs_db`, all of it or none.
