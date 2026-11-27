@@ -3359,6 +3359,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "sha2",
+ "smol_str 0.3.7",
 ]
 
 [[package]]

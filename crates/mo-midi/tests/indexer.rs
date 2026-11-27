@@ -107,6 +107,11 @@ fn reads_only_what_changed_and_stores_notes_once() {
     assert_eq!(bass.role, Role::Bass);
     assert_eq!(bass.role_why.words(), "Single notes, low down, and its name agrees", "the Basslines folder says so");
     assert_eq!(bass.source.daw, "MIDI");
+    // Its short names, note hash and shape are held in the part, not a piece of memory each (hundreds of thousands
+    // of parts are held at once, and Windows keeps small pieces let go).
+    assert_eq!(bass.hash.len(), 16);
+    let held = [&bass.hash, &bass.part, &bass.clip, &bass.track_name, &bass.members, &bass.source.daw];
+    assert!(held.iter().all(|t| !t.is_heap_allocated()), "{held:?}");
     assert_eq!(store.notes(bass.id, &bass.hash).unwrap().len(), 8);
     assert_eq!(store.notes(bass.id, &bass.hash).unwrap()[0].velocity7(), 100);
     let catalogue = Catalogue::new(all);
@@ -176,8 +181,8 @@ fn your_corrections_win_over_the_csharp_apps() {
     run(&mut store, &dir, false);
     let hash = store.all(&HashMap::new(), &HashMap::new()).unwrap()[0].hash.clone();
 
-    let cs_roles = HashMap::from([(hash.clone(), Role::Arp)]);
-    let cs_octaves = HashMap::from([(hash.clone(), 1)]);
+    let cs_roles = HashMap::from([(hash.to_string(), Role::Arp)]);
+    let cs_octaves = HashMap::from([(hash.to_string(), 1)]);
     let p = &store.all(&cs_roles, &cs_octaves).unwrap()[0];
     assert_eq!((p.role(), p.your_octave), (Role::Arp, Some(1)), "the C# app's, read live");
 
@@ -361,7 +366,7 @@ fn keeps_the_key_and_reads_it_again_when_the_finder_gets_better() {
     assert!(all.iter().all(|p| p.cut == Some(false)));
 
     // An older finder's readings: read again from the stored notes, to the same answer, without opening the files.
-    let before: Vec<_> = all.iter().map(|p| (p.key_fact, p.features.clone())).collect();
+    let before: Vec<_> = all.iter().map(|p| (p.key_fact, p.features)).collect();
     rusqlite::Connection::open(&db).unwrap().execute("UPDATE keys SET version = 1, fact = NULL", []).unwrap();
     std::fs::remove_file(dir.join("Tune.mid")).unwrap();
     std::fs::write(dir.join("Tune.mid"), b"gone").unwrap();
@@ -371,7 +376,7 @@ fn keeps_the_key_and_reads_it_again_when_the_finder_gets_better() {
             .unwrap();
     assert_eq!(again.rekeyed, 2);
     let after: Vec<_> =
-        store.all(&HashMap::new(), &HashMap::new()).unwrap().iter().map(|p| (p.key_fact, p.features.clone())).collect();
+        store.all(&HashMap::new(), &HashMap::new()).unwrap().iter().map(|p| (p.key_fact, p.features)).collect();
     assert_eq!(after, before);
 }
 

@@ -51,6 +51,7 @@ use crate::analyser;
 use crate::extract::Found;
 use crate::fit;
 use crate::index::{MidiError, MidiIndex, Source, SourceKind, StoredPhrase};
+use crate::index::{features_at, short_text};
 use crate::keys;
 use crate::made::made;
 use crate::member::PhraseMember;
@@ -1211,7 +1212,7 @@ impl MidiStore {
             let path: String = r.get(1)?;
             let kind = if r.get::<_, i64>(2)? == 1 { SourceKind::File } else { SourceKind::Project };
             let source = Source {
-                daw: daw_of(&path, kind).to_owned(),
+                daw: daw_of(&path, kind).into(),
                 path,
                 kind,
                 mtime: r.get(3)?,
@@ -1365,7 +1366,7 @@ fn parts_between(
     let mut list = Vec::new();
     while let Some(r) = rows.next()? {
         let Some(source) = sources.get(&r.get::<_, i64>(1)?) else { continue };
-        let hash: String = r.get(7)?;
+        let hash = short_text(r, 7)?;
         let mut chroma = [0u8; 12];
         for (to, from) in chroma.iter_mut().zip(r.get_ref(12)?.as_blob().unwrap_or_default()) {
             *to = *from;
@@ -1378,18 +1379,18 @@ fn parts_between(
         let your_role = if r.get::<_, bool>(20)? {
             r.get::<_, Option<i64>>(6)?.map(Role::from_code)
         } else {
-            cs_roles.get(&hash).copied()
+            cs_roles.get(hash.as_str()).copied()
         };
         let your_octave = if r.get::<_, bool>(21)? {
             r.get::<_, Option<i64>>(15)?.map(|o| o.clamp(-10, 10) as i32)
         } else {
-            cs_octaves.get(&hash).copied()
+            cs_octaves.get(hash.as_str()).copied()
         };
         list.push(StoredPhrase {
             id: r.get(0)?,
             source: Arc::clone(source),
-            part: r.get(2)?,
-            clip: r.get(3)?,
+            part: short_text(r, 2)?,
+            clip: short_text(r, 3)?,
             role: Role::from_code(r.get(4)?),
             role_why: role_why(r.get_ref(5)?),
             your_role,
@@ -1402,11 +1403,11 @@ fn parts_between(
             chroma,
             // The chords come with mo-harmony's chord reader.
             chords: Vec::new(),
-            features: r.get(13)?,
-            members: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+            features: features_at(r, 13)?,
+            members: short_text(r, 14)?,
             program: r.get::<_, Option<i64>>(16)?.filter(|p| (0..128).contains(p)).map(|p| p as u8),
             drums: r.get(17)?,
-            track_name: r.get(18)?,
+            track_name: short_text(r, 18)?,
             hash,
             your_octave,
             // 0: kept for notes with no shape.
@@ -1433,6 +1434,11 @@ fn newest_first(mut list: Vec<StoredPhrase>) -> Vec<StoredPhrase> {
 const PIECE_AT_LEAST: usize = 20_000;
 /// The most pieces [`MidiStore::all`] reads at once: past this the disk and the memory bus are the limit, not cores.
 const MOST_PIECES: usize = 8;
+/// Each piece's SQLite cache, in KB. A piece reads its parts in order, once, and the tables beside them (each part's
+/// notes, key and shape) in close to the same order, so all a cache does is keep the tables' top pages: 2 MB is
+/// plenty, and eight pieces at once no longer hold 64 MB between them while they read (rule 23's spirit: memory the
+/// read doesn't need stays the system's).
+const PIECE_CACHE_KB: i64 = 2_000;
 /// How many times [`MidiStore::all`] reads in pieces before it reads as one, when the index is written meanwhile.
 const TRIES_IN_PIECES: usize = 2;
 
@@ -1455,7 +1461,7 @@ fn open_piece(path: &Path) -> Result<Connection, MidiError> {
     conn.busy_timeout(Duration::from_secs(2)).map_err(open_error)?;
     conn.pragma_update(None, "query_only", true).map_err(open_error)?;
     conn.pragma_update(None, "temp_store", "MEMORY").map_err(open_error)?;
-    conn.pragma_update(None, "cache_size", -8_000).map_err(open_error)?;
+    conn.pragma_update(None, "cache_size", -PIECE_CACHE_KB).map_err(open_error)?;
     Ok(conn)
 }
 

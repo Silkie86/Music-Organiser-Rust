@@ -268,14 +268,14 @@ fn compare(p: &StoredPhrase, notes: &[NoteEvent], folders: &[String]) -> Vec<Dif
             diffs.push(Diff { field, detail: format!("{cs} → {rust}") });
         }
     };
-    check(&mut diffs, "hash", p.hash.clone(), a.hash.clone());
+    check(&mut diffs, "hash", p.hash.to_string(), a.hash.clone());
     check(&mut diffs, "notes", p.notes.to_string(), notes.len().to_string());
     check(&mut diffs, "bars", p.bars.to_string(), a.bars.to_string());
     check(&mut diffs, "lowest", p.lowest.to_string(), a.lowest.to_string());
     check(&mut diffs, "highest", p.highest.to_string(), a.highest.to_string());
     check(&mut diffs, "chroma", format!("{:?}", p.chroma), format!("{:?}", analyser::bytes(&a.chroma, true)));
     let features = analyser::bytes(&a.features, false);
-    if p.features != features {
+    if p.features[..] != features[..] {
         // Off by one somewhere is a float rounding the other way; more is a real difference.
         let worst = p.features.iter().zip(&features).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(u8::MAX);
         let field = if worst <= 1 && p.features.len() == features.len() { "features (off by 1)" } else { "features" };

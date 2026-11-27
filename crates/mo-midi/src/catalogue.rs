@@ -28,14 +28,14 @@ pub struct Entry {
     pub phrase: StoredPhrase,
     /// The other files with the same notes (older saves of the song, or the same pattern in another project), newest
     /// first.
-    pub other_sources: Vec<Arc<Source>>,
+    pub other_sources: Box<[Arc<Source>]>,
     /// The instrument it's for, when its names, plugin, channel or General MIDI sound say. How the app knows is
     /// worked out when it's asked for ([`Entry::instrument_why`]), not kept for every part.
     pub instrument: Option<Family>,
     /// For a phrase joined from clips that play back to back: those clips, and where each sits in it.
-    pub members: Vec<PhraseMember>,
+    pub members: Box<[PhraseMember]>,
     /// The longer phrases these notes are part of (as places in [`Catalogue::entries`]), longest first.
-    pub within: Vec<usize>,
+    pub within: Box<[usize]>,
     /// [`Entry::key_group`], or [`NO_GROUP`].
     key_group: u32,
     /// [`Entry::in_keys`]: how many, or 0 for none; and whether they're octaves.
@@ -45,6 +45,9 @@ pub struct Entry {
     text_at: usize,
     text_len: u32,
 }
+
+/// How many entries' search texts [`Catalogue::new`] makes into one text at a time.
+const TEXT_RUN: usize = 4_096;
 
 /// [`Entry::key_group`] when there's none.
 const NO_GROUP: u32 = u32::MAX;
@@ -234,57 +237,70 @@ impl Catalogue {
             .collect();
         let count = seen.len();
         drop(seen);
-        let mut firsts: Vec<StoredPhrase> = Vec::with_capacity(count);
+        // The first of each set of notes stays where it is in the list, moved up over the copies (the list isn't
+        // copied: a second list of every part would double what the reading holds at its height). A copy keeps only
+        // its file; its names are held in the part itself, almost always, so letting it go here is quick.
         let mut others: Vec<Vec<Arc<Source>>> = vec![Vec::new(); count];
-        // The copies' own words aren't kept: they're let go together on another thread, not one by one here (about
-        // two parts in five are copies).
-        let mut copies = Vec::with_capacity(phrase_count - count);
-        for (p, at) in phrases.into_iter().zip(goes_to) {
-            if at == firsts.len() {
-                firsts.push(p);
-            } else {
-                if let Some(list) = others.get_mut(at) {
-                    list.push(Arc::clone(&p.source));
-                }
-                copies.push(p);
+        let mut entry_of = goes_to.into_iter();
+        let mut kept = 0;
+        phrases.retain(|p| {
+            let at = entry_of.next().unwrap_or(usize::MAX);
+            if at == kept {
+                kept += 1;
+                return true;
             }
-        }
-        rayon::spawn(move || drop(copies));
-        // Names, instruments and search text are worked out on every core: hundreds of thousands of parts. So is the
-        // folder each loop that may be in other keys is in (see below).
-        type Made = (Vec<Entry>, (Vec<Option<String>>, Vec<String>));
-        let (mut entries, (folders, texts)): Made = firsts
+            if let Some(list) = others.get_mut(at) {
+                list.push(Arc::clone(&p.source));
+            }
+            false
+        });
+        drop(entry_of);
+        phrases.shrink_to_fit();
+        let firsts = phrases;
+        // Names and instruments are worked out on every core: hundreds of thousands of parts.
+        let mut entries: Vec<Entry> = firsts
             .into_par_iter()
             .zip(others)
             .map(|(phrase, other_sources)| {
                 let instrument = instrument_of(&phrase).map(|i| i.family);
-                let search_text = search_text_of(&phrase, phrase.role(), instrument);
-                let members = PhraseMember::decode(&phrase.members);
-                let entry = Entry {
+                let members = PhraseMember::decode(&phrase.members).into_boxed_slice();
+                Entry {
                     phrase,
-                    other_sources,
+                    other_sources: other_sources.into_boxed_slice(),
                     instrument,
                     members,
-                    within: Vec::new(),
+                    within: Box::default(),
                     key_group: NO_GROUP,
                     in_keys: 0,
                     in_octaves: false,
                     text_at: 0,
                     text_len: 0,
-                };
-                let p = &entry.phrase;
-                let in_keys = p.shape.is_some() && !entry.is_project() && !p.drums && entry.role() != Role::Drums;
-                let folder = in_keys.then(|| folder_key(&p.source.path));
-                (entry, (folder, search_text))
+                }
             })
-            .unzip();
-        // The search texts go into one text, each entry keeping where its own is.
-        let mut text = String::with_capacity(texts.iter().map(String::len).sum());
-        for (entry, words) in entries.iter_mut().zip(&texts) {
-            (entry.text_at, entry.text_len) = (text.len(), text_len(words));
+            .collect();
+        // The search texts go into one text, each entry keeping where its own is. Made a run of entries at a time on
+        // every core, each run's into a text of its own, so no part's text is ever a piece of memory of its own: a
+        // few hundred thousand small ones at once would stay the app's after they're let go (Windows keeps them).
+        let runs: Vec<String> = entries
+            .par_chunks_mut(TEXT_RUN)
+            .map(|run| {
+                let mut text = String::new();
+                for e in run {
+                    let words = search_text_of(&e.phrase, e.phrase.role(), e.instrument);
+                    (e.text_at, e.text_len) = (text.len(), text_len(&words));
+                    text.push_str(&words);
+                }
+                text
+            })
+            .collect();
+        let mut text = String::with_capacity(runs.iter().map(String::len).sum());
+        for (run, words) in entries.chunks_mut(TEXT_RUN).zip(&runs) {
+            for e in run {
+                e.text_at += text.len();
+            }
             text.push_str(words);
         }
-        rayon::spawn(move || drop(texts));
+        drop(runs);
         // The places in the order of their hashes, sorted with each hash beside its place (the entries themselves
         // are big and far apart), and only the places kept.
         let mut hashed: Vec<(&str, u32)> = entries
@@ -313,26 +329,49 @@ impl Catalogue {
             }
         }
         drop(places);
-        for (member, phrase) in within {
-            if let Some(e) = entries.get_mut(member) {
-                e.within.push(phrase);
+        // Each clip's phrases in one piece, in the order they were found (newest first).
+        within.sort_by_key(|&(member, _)| member);
+        for run in within.chunk_by(|a, b| a.0 == b.0) {
+            if let Some(e) = run.first().and_then(|&(member, _)| entries.get_mut(member)) {
+                e.within = run.iter().map(|&(_, phrase)| phrase).collect();
             }
         }
         // The same loop in other keys: a pack's files in one folder with the same shape. Only `.mid` files (a song
         // playing its riff on another root is another part of the song), only side by side in one folder (a short,
         // plain shape, such as a held chord, is in many places), never drums (a drum pattern moved is other drums).
-        let mut by_shape: HashMap<(String, i64), Vec<usize>> = HashMap::new();
-        for (at, (e, folder)) in entries.iter().zip(folders).enumerate() {
-            if let Some((folder, shape)) = folder.zip(e.phrase.shape) {
-                by_shape.entry((folder, shape)).or_default().push(at);
+        // Gathered by a number made from the folder's name rather than by the name itself, so no file's folder is
+        // held while the gathering lasts; the few gathered together are told apart by the name itself after.
+        let mut by_shape: HashMap<(u64, i64), Vec<usize>> = HashMap::new();
+        for (at, e) in entries.iter().enumerate() {
+            let p = &e.phrase;
+            let in_keys = !e.is_project() && !p.drums && e.role() != Role::Drums;
+            if let Some(shape) = p.shape.filter(|_| in_keys) {
+                by_shape.entry((number_of(&folder_key(&p.source.path)), shape)).or_default().push(at);
             }
         }
+        let folder_of = |at: usize| entries.get(at).map(|e| folder_key(&e.phrase.source.path)).unwrap_or_default();
+        let by_shape: Vec<Vec<usize>> = by_shape
+            .into_values()
+            .filter(|g| g.len() > 1)
+            .flat_map(|g| {
+                // Almost always one folder; two folders whose names make the same number are split again here.
+                let mut folders: Vec<(String, Vec<usize>)> = Vec::new();
+                for at in g {
+                    let folder = folder_of(at);
+                    match folders.iter_mut().find(|(f, _)| *f == folder) {
+                        Some((_, list)) => list.push(at),
+                        None => folders.push((folder, vec![at])),
+                    }
+                }
+                folders.into_iter().map(|(_, list)| list)
+            })
+            .collect();
         let mut line_count = entries.len();
         // One loop saved as several files: two tracks of one file (a tune doubled, a riff played again higher) are two
         // parts, so each group holds one part a file. A file's next track with the shape starts or joins the next
         // group: the "Lead" of each key's file together, and the "Lead high" of each together.
         let mut groups: Vec<Vec<usize>> = Vec::new();
-        for g in by_shape.into_values().filter(|g| g.len() > 1) {
+        for g in by_shape.into_iter().filter(|g| g.len() > 1) {
             let mut split: Vec<Vec<usize>> = Vec::new();
             for at in g {
                 let Some(src) = entries.get(at).map(|e| &e.phrase.source) else { continue };
@@ -453,7 +492,7 @@ impl Catalogue {
     /// The parts that match `q`, best or newest first, with how many matched in all.
     pub fn search(&self, q: &Query) -> (Vec<Hit>, usize) {
         if let Some(part) = q.within {
-            let phrases = self.entries.get(part).map(|e| e.within.as_slice()).unwrap_or_default();
+            let phrases = self.entries.get(part).map(|e| &e.within[..]).unwrap_or_default();
             let hits = phrases.iter().take(q.limit).map(|&entry| Hit { entry, likeness: None }).collect();
             return (hits, phrases.len());
         }
@@ -514,6 +553,14 @@ impl Catalogue {
 /// the same loop in other keys is looked for.
 pub(crate) fn folder_key(path: &str) -> String {
     case::to_lower(path.rfind(['\\', '/']).and_then(|cut| path.get(..cut)).unwrap_or(""))
+}
+
+/// A number for a text that's the same each time (`std`'s hasher, with its fixed keys): for gathering by it.
+fn number_of(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// What's typed into a search, as the words [`Catalogue::matches`] takes: split at spaces, in small letters.
@@ -674,12 +721,12 @@ pub(crate) mod tests {
             key_fact: None,
             chroma: [0; 12],
             chords: Vec::new(),
-            features: vec![0; 48],
+            features: [0; 48],
             hash: hash.into(),
-            members: String::new(),
+            members: Default::default(),
             program: None,
             drums: false,
-            track_name: String::new(),
+            track_name: Default::default(),
             your_octave: None,
             shape: None,
             cut: None,
@@ -772,8 +819,8 @@ pub(crate) mod tests {
     fn clips_know_the_phrases_they_are_in() {
         let c = sample();
         let joined = c.find("J").unwrap();
-        assert_eq!(c.entries[c.find("A").unwrap()].within, vec![joined]);
-        assert_eq!(c.entries[c.find("B").unwrap()].within, vec![joined]);
+        assert_eq!(c.entries[c.find("A").unwrap()].within[..], [joined]);
+        assert_eq!(c.entries[c.find("B").unwrap()].within[..], [joined]);
         assert_eq!(c.entries[joined].clip_count(), 2);
         let (hits, n) = c.search(&Query { within: c.find("A"), ..Query::default() });
         assert_eq!((n, hits[0].entry), (1, joined));
@@ -878,9 +925,9 @@ pub(crate) mod tests {
         let mut c = sample();
         let shape = |v: &[u8]| -> Vec<u8> { v.iter().copied().chain(std::iter::repeat(0)).take(48).collect() };
         let (a, b, k) = (c.find("A").unwrap(), c.find("B").unwrap(), c.find("C").unwrap());
-        c.entries[a].phrase.features = shape(&[255, 200, 10]);
-        c.entries[b].phrase.features = shape(&[0, 0, 255]);
-        c.entries[k].phrase.features = shape(&[250, 190, 20]);
+        c.entries[a].phrase.features = crate::features_of(&shape(&[255, 200, 10]));
+        c.entries[b].phrase.features = crate::features_of(&shape(&[0, 0, 255]));
+        c.entries[k].phrase.features = crate::features_of(&shape(&[250, 190, 20]));
         let (hits, _) = c.search(&Query { like: Some(a), ..Query::default() });
         assert_eq!(hits[0].entry, k);
         assert!(hits[0].likeness.unwrap() > 0.99);

@@ -763,7 +763,7 @@ impl YourOctaves {
 
     /// The octaves you chose for a part's notes: here, else as the catalogue has them; none when you haven't.
     pub fn of(&self, phrase: &StoredPhrase) -> Option<i32> {
-        self.0.get(&phrase.hash).copied().unwrap_or(phrase.your_octave)
+        self.0.get(phrase.hash.as_str()).copied().unwrap_or(phrase.your_octave)
     }
 }
 

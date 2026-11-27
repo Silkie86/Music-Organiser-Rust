@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use mo_formats::{NoteAttribute, NoteEvent, case, velocity};
 use rusqlite::{Connection, ErrorCode, InterruptHandle, OpenFlags, OptionalExtension, Row};
+use smol_str::SmolStr;
 
+use crate::analyser::FEATURE_COUNT;
 use crate::chord::PhraseChord;
 use crate::roles::{Role, RoleWhy};
 
@@ -78,7 +80,7 @@ pub struct Source {
     pub path: String,
     pub kind: SourceKind,
     /// "FL Studio", "Bitwig", "Studio One", or "MIDI" for a `.mid` file.
-    pub daw: String,
+    pub daw: SmolStr,
     /// When the file was last written, as Unix seconds, when it was read.
     pub mtime: i64,
     pub size: i64,
@@ -134,6 +136,31 @@ impl Key {
     }
 }
 
+/// A part's shape for "more like this" ([`crate::analyser::features`]), each number 0 to 1 as 0 to 255: held inside
+/// the part, not in a piece of memory of its own.
+pub type Features = [u8; FEATURE_COUNT];
+
+/// The shape as a database keeps it: an older or damaged row's shorter one is made up with zeros, which change no
+/// likeness ([`crate::catalogue::likeness`] adds nothing for a zero), and anything past the last number is left out.
+pub fn features_of(stored: &[u8]) -> Features {
+    let mut features = [0; FEATURE_COUNT];
+    for (to, from) in features.iter_mut().zip(stored) {
+        *to = *from;
+    }
+    features
+}
+
+/// A blob column of `r` as a part's shape ([`features_of`]), all zeros for none.
+pub(crate) fn features_at(r: &Row<'_>, i: usize) -> rusqlite::Result<Features> {
+    Ok(features_of(r.get_ref(i)?.as_blob_or_null()?.unwrap_or_default()))
+}
+
+/// A text column of `r` as a short text held in place ([`SmolStr`]: up to 23 bytes without a piece of memory of its
+/// own), "" for none; read where SQLite has it, never through a `String` first.
+pub(crate) fn short_text(r: &Row<'_>, i: usize) -> rusqlite::Result<SmolStr> {
+    Ok(r.get_ref(i)?.as_str_or_null()?.map(SmolStr::new).unwrap_or_default())
+}
+
 /// One part as the index keeps it, without its notes (they're read when the part is shown, with
 /// [`MidiIndex::notes`]).
 #[derive(Clone, Debug)]
@@ -143,9 +170,9 @@ pub struct StoredPhrase {
     /// Shared by every part from the same file.
     pub source: Arc<Source>,
     /// The track, channel or `.mid` track name.
-    pub part: String,
+    pub part: SmolStr,
     /// The pattern or clip name, or the `.mid` file's name; with " · bars 9–16" for a piece of a longer part.
-    pub clip: String,
+    pub clip: SmolStr,
     /// What the C# app guessed it is.
     pub role: Role,
     /// Why, for the card ([`RoleWhy::words`]).
@@ -166,17 +193,17 @@ pub struct StoredPhrase {
     /// The chords in order, a repeated chord once, with no timing.
     pub chords: Vec<PhraseChord>,
     /// The part's shape for "more like this", each number 0 to 1 as 0 to 255.
-    pub features: Vec<u8>,
+    pub features: Features,
     /// The same notes give the same hash, so a pattern kept through 20 saves is one entry.
-    pub hash: String,
+    pub hash: SmolStr,
     /// For a phrase joined from clips, its clips ([`crate::PhraseMember::encode`]); else "".
-    pub members: String,
+    pub members: SmolStr,
     /// The General MIDI program a `.mid` file sets for the part's channel.
     pub program: Option<u8>,
     /// On MIDI channel 10 (a `.mid` file) or played by an unpitched drum plugin (a project).
     pub drums: bool,
     /// A `.mid` track's own name where `part` leaves it out, such as "Keyscape", else "".
-    pub track_name: String,
+    pub track_name: SmolStr,
     /// The octaves you moved these notes by, or none.
     pub your_octave: Option<i32>,
     /// The notes' shape in any key ([`crate::analyser::shape_of`]): the same loop moved up or down has the same one.
@@ -392,7 +419,7 @@ fn source_of(r: &Row<'_>, path: String) -> rusqlite::Result<Source> {
     Ok(Source {
         path,
         kind: SourceKind::from_db(&r.get::<_, Option<String>>(18)?.unwrap_or_default()),
-        daw: r.get::<_, Option<String>>(19)?.unwrap_or_default(),
+        daw: short_text(r, 19)?,
         mtime: r.get::<_, Option<i64>>(20)?.unwrap_or(0),
         size: r.get::<_, Option<i64>>(21)?.unwrap_or(0),
         tempo: r.get(22)?,
@@ -418,8 +445,8 @@ fn phrase_of(r: &Row<'_>, source: Arc<Source>) -> rusqlite::Result<StoredPhrase>
     Ok(StoredPhrase {
         id: r.get(0)?,
         source,
-        part: text(2)?,
-        clip: text(3)?,
+        part: short_text(r, 2)?,
+        clip: short_text(r, 3)?,
         role: Role::from_name(&text(4)?),
         // The C# app stored the words: the same as this app's, or none.
         role_why: RoleWhy::from_words(&text(5)?),
@@ -432,13 +459,13 @@ fn phrase_of(r: &Row<'_>, source: Arc<Source>) -> rusqlite::Result<StoredPhrase>
         key_fact: None,
         chroma,
         chords: PhraseChord::decode(&text(15)?),
-        features: r.get::<_, Option<Vec<u8>>>(16)?.unwrap_or_default(),
-        hash: text(17)?,
-        members: text(23)?,
+        features: features_at(r, 16)?,
+        hash: short_text(r, 17)?,
+        members: short_text(r, 23)?,
         your_octave: r.get::<_, Option<i64>>(24)?.map(|o| o.clamp(-10, 10) as i32),
         program: r.get::<_, Option<i64>>(25)?.filter(|p| (0..128).contains(p)).map(|p| p as u8),
         drums: int(26)? == 1,
-        track_name: text(27)?,
+        track_name: short_text(r, 27)?,
         shape: None,
         cut: None,
     })

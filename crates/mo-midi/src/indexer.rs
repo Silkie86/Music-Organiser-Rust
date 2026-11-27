@@ -531,7 +531,7 @@ mod tests {
     /// Each part's key and "more like this" numbers, by its file's name.
     fn keys_of(store: &MidiStore) -> HashMap<String, (Option<KeyFact>, Vec<u8>)> {
         let all = store.all(&HashMap::new(), &HashMap::new()).unwrap();
-        all.into_iter().map(|p| (p.clip, (p.key_fact, p.features))).collect()
+        all.into_iter().map(|p| (p.clip.to_string(), (p.key_fact, p.features.to_vec()))).collect()
     }
 
     /// The key finder, but for notes that start on one of `bad`: there it stops, as a bug in it would.
