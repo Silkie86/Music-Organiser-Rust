@@ -1,4 +1,5 @@
-//! Sound files: reading them into samples, and writing WAV files (for kit exports).
+//! Sound files: reading them into samples, and writing WAV files (for kit exports and edited copies). [`edit`] makes
+//! light edits to a sound read whole, and [`hits`] finds where its hits are.
 //!
 //! WAV (PCM, float, and the Microsoft and IMA ADPCM kinds older packs use) and AIFF are read here, byte for byte as the C# app's `Sounds/AudioFile.cs` reads them, with the notes some
 //! sample packs keep inside them (an ACID chunk's tempo and loop flag, a sampler chunk's root note). MP3, FLAC, M4A,
@@ -9,8 +10,10 @@
 
 mod adpcm;
 pub mod dsp;
+pub mod edit;
 #[cfg(feature = "gm")]
 pub mod gm;
+pub mod hits;
 mod other;
 mod parts;
 #[cfg(feature = "play")]
