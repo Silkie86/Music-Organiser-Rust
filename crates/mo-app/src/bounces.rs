@@ -54,13 +54,18 @@ impl Folders {
     /// The bounces of the song `row`, newest first. `rivals`: the names of the other songs saved in its folders
     /// ([`rivals`]), so a file named for a longer one ("Night Drive.wav" beside "Night" and "Night Drive") goes to it.
     pub fn of(&mut self, row: &SongRow, rivals: &[String]) -> Vec<Bounce> {
-        let names = names_of(row);
+        self.of_song(&BounceSong::of(row), rivals)
+    }
+
+    /// [`Folders::of`] for a song as [`songs`] gives it.
+    fn of_song(&mut self, song: &BounceSong, rivals: &[String]) -> Vec<Bounce> {
+        let names = &song.names;
         if names.is_empty() {
             return Vec::new();
         }
         let mut found: Vec<Bounce> = Vec::new();
-        for folder in folders_of(row) {
-            for bounce in self.files(&folder) {
+        for folder in &song.folders {
+            for bounce in self.files(folder) {
                 let stem = Path::new(&bounce.name).file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
                 let Some(own) = names.iter().filter(|n| starts_with_name(&stem, n)).map(String::len).max() else {
                     continue;
@@ -94,27 +99,63 @@ impl Folders {
     }
 }
 
+/// What finding a song's bounces needs of it: a few names and folders, not the whole song with every save (the list
+/// isn't copied to look for them on a thread of its own).
+#[derive(Clone, Debug, Default)]
+pub struct BounceSong {
+    key: String,
+    /// Its name, plain: what the other songs in its folders are told apart by.
+    plain: String,
+    /// [`names_of`].
+    names: Vec<String>,
+    /// [`folders_of`].
+    folders: Vec<PathBuf>,
+}
+
+impl BounceSong {
+    fn of(row: &SongRow) -> BounceSong {
+        BounceSong {
+            key: row.song.key.clone(),
+            plain: plain(&row.song.name),
+            names: names_of(row),
+            folders: folders_of(row),
+        }
+    }
+}
+
+/// What [`find_for`] needs of each song in `rows`.
+pub fn songs(rows: &[SongRow]) -> Vec<BounceSong> {
+    rows.iter().map(BounceSong::of).collect()
+}
+
 /// The bounces of every song, by its key: only songs that have some.
 pub fn find(rows: &[SongRow]) -> HashMap<String, Vec<Bounce>> {
+    find_for(&songs(rows))
+}
+
+/// [`find`] for the songs as [`songs`] gives them.
+pub fn find_for(songs: &[BounceSong]) -> HashMap<String, Vec<Bounce>> {
     // The songs saved in each folder, by their plain names: a song's rivals.
-    let mut in_folder: HashMap<PathBuf, Vec<(usize, String)>> = HashMap::new();
-    for (i, row) in rows.iter().enumerate() {
-        for folder in folders_of(row) {
-            in_folder.entry(folder).or_default().push((i, plain(&row.song.name)));
+    let mut in_folder: HashMap<&Path, Vec<(usize, &str)>> = HashMap::new();
+    for (i, song) in songs.iter().enumerate() {
+        for folder in &song.folders {
+            in_folder.entry(folder).or_default().push((i, &song.plain));
         }
     }
     let mut folders = Folders::default();
-    rows.iter()
+    songs
+        .iter()
         .enumerate()
-        .filter_map(|(i, r)| {
-            let rivals: Vec<String> = folders_of(r)
+        .filter_map(|(i, song)| {
+            let rivals: Vec<String> = song
+                .folders
                 .iter()
-                .flat_map(|f| in_folder.get(f).into_iter().flatten())
+                .flat_map(|f| in_folder.get(f.as_path()).into_iter().flatten())
                 .filter(|(j, _)| *j != i)
-                .map(|(_, n)| n.clone())
+                .map(|(_, n)| (*n).to_owned())
                 .collect();
-            let found = folders.of(r, &rivals);
-            (!found.is_empty()).then(|| (r.song.key.clone(), found))
+            let found = folders.of_song(song, &rivals);
+            (!found.is_empty()).then(|| (song.key.clone(), found))
         })
         .collect()
 }

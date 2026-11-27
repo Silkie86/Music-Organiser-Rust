@@ -98,8 +98,7 @@ impl<'a> Fingerprints<'a> {
             }
             return Cow::Borrowed(&[]);
         };
-        let Some((clap_dim, clap_only)) = self.clap else { return f };
-        let mut v = vec![0f32; clap_dim + f.len()];
+        let Some(_) = self.clap else { return f };
         let c = self.index.clap.as_ref().and_then(|c| {
             let got = c.get(id);
             if got.is_none() && c.contains(id) {
@@ -107,6 +106,47 @@ impl<'a> Fingerprints<'a> {
             }
             got
         });
+        Cow::Owned(self.joined(&f, c.as_deref()))
+    }
+
+    /// The fingerprints of `ids`, in their order, as [`Fingerprints::get`] gives each. Held in memory, each is asked
+    /// for on its own (lent, not copied); kept in a file, they're read a part of the file at a time
+    /// ([`crate::index::VectorIndex::each`]) rather than one read for each sound.
+    pub fn many(&self, ids: &[i64]) -> Vec<Cow<'a, [f32]>> {
+        let clap = self.clap.and(self.index.clap.as_deref());
+        if !self.index.features.is_kept_in_a_file() && !clap.is_some_and(|c| c.is_kept_in_a_file()) {
+            return ids.par_iter().map(|id| self.get(*id)).collect();
+        }
+        let features = self.index.features.each(ids, |_, row| row.to_vec());
+        let claps = clap.map(|c| c.each(ids, |_, row| row.to_vec()));
+        features
+            .into_par_iter()
+            .enumerate()
+            .map(|(k, f)| {
+                let id = ids[k];
+                let Some(f) = f else {
+                    if self.index.features.contains(id) {
+                        self.unread.store(true, Ordering::Relaxed);
+                    }
+                    return Cow::Borrowed(&[][..]);
+                };
+                // Without the CLAP numbers to hand, each is still made as long as the space's, as `get` does.
+                let Some(claps) = &claps else {
+                    return Cow::Owned(if self.clap.is_some() { self.joined(&f, None) } else { f });
+                };
+                let c = claps[k].as_deref();
+                if c.is_none() && clap.is_some_and(|c| c.contains(id)) {
+                    self.unread.store(true, Ordering::Relaxed);
+                }
+                Cow::Owned(self.joined(&f, c))
+            })
+            .collect()
+    }
+
+    /// A sound's measurements `f` joined with its CLAP numbers `c` (if it has them), as the space weighs them.
+    fn joined(&self, f: &[f32], c: Option<&[f32]>) -> Vec<f32> {
+        let Some((clap_dim, clap_only)) = self.clap else { return f.to_vec() };
+        let mut v = vec![0f32; clap_dim + f.len()];
         let c = c.filter(|c| c.len() == clap_dim);
         let (wc, wf) = match c {
             None => (0f32, 1f32),
@@ -122,7 +162,7 @@ impl<'a> Fingerprints<'a> {
             *out = x * wf;
         }
         unit(&mut v);
-        Cow::Owned(v)
+        v
     }
 }
 
@@ -178,10 +218,10 @@ pub fn update(
     cancel: &AtomicBool,
 ) -> Option<Updated> {
     let prints = fingerprints(index, space);
-    let vector = |id: i64| prints.get(id);
+    let vector: &Vector<'_> = &prints;
     let new_ids: Vec<i64> = prints.ids.iter().copied().filter(|id| !saved.contains_key(id)).collect();
     if fresh || saved.is_empty() || new_ids.len() > prints.ids.len() / 5 {
-        let map = layout(prints.ids, &vector, SEED, progress, cancel)?;
+        let map = layout(prints.ids, vector, SEED, progress, cancel)?;
         if prints.unread() {
             return None;
         }
@@ -191,7 +231,7 @@ pub fn update(
     let mut save = HashMap::new();
     if !new_ids.is_empty() {
         let mapped: Vec<i64> = prints.ids.iter().copied().filter(|id| map.contains_key(id)).collect();
-        save = place_new(&new_ids, &mapped, &vector, &map);
+        save = place_new(&new_ids, &mapped, vector, &map);
         if prints.unread() {
             return None;
         }
@@ -207,8 +247,37 @@ pub struct Step {
     pub done: u32,
 }
 
-/// A sound's fingerprint, lent or made when asked for. It must be safe to ask from several threads at once.
-pub type Vector<'v> = dyn Fn(i64) -> Cow<'v, [f32]> + Sync + 'v;
+/// Sounds' fingerprints, lent or made when asked for. They must be safe to ask for from several threads at once.
+pub trait Vectors<'v>: Sync {
+    /// One sound's.
+    fn one(&self, id: i64) -> Cow<'v, [f32]>;
+    /// Many sounds', in their order: what the layout asks for, so a source that reads them from a file can read many
+    /// at a time.
+    fn many(&self, ids: &[i64]) -> Vec<Cow<'v, [f32]>> {
+        ids.par_iter().map(|id| self.one(*id)).collect()
+    }
+}
+
+impl<'v, F: Fn(i64) -> Cow<'v, [f32]> + Sync> Vectors<'v> for F {
+    fn one(&self, id: i64) -> Cow<'v, [f32]> {
+        self(id)
+    }
+}
+
+impl<'a> Vectors<'a> for Fingerprints<'a> {
+    fn one(&self, id: i64) -> Cow<'a, [f32]> {
+        self.get(id)
+    }
+    fn many(&self, ids: &[i64]) -> Vec<Cow<'a, [f32]>> {
+        Fingerprints::many(self, ids)
+    }
+}
+
+/// A sound's fingerprint, lent or made when asked for ([`Vectors`]).
+pub type Vector<'v> = dyn Vectors<'v> + 'v;
+
+/// How many sounds' fingerprints the layout holds at once when it goes through every sound.
+const AT_ONCE: usize = 8_192;
 
 /// Lays out the sounds `ids`, fetching each fingerprint from `vector` when it's needed. The same ids and seed always
 /// give the same map. `None` when `cancel` was set. As C#'s `GalaxyMap.Layout`.
@@ -340,11 +409,11 @@ pub fn place_new(
         sample.sort_by_key(|id| hash(*id));
         sample.truncate(size);
     }
-    let vectors: Vec<Cow<'_, [f32]>> = sample.par_iter().map(|id| vector(*id)).collect();
-    new_ids
-        .par_iter()
-        .filter_map(|&id| {
-            let v = vector(id);
+    let vectors: Vec<Cow<'_, [f32]>> = vector.many(&sample);
+    // A few thousand new sounds' fingerprints at a time: all at once could be most of the library's.
+    let mut placed = HashMap::new();
+    for some in new_ids.chunks(AT_ONCE) {
+        placed.par_extend(some.par_iter().zip(vector.many(some)).filter_map(|(&id, v)| {
             // The 3 most alike, most alike first; on a tie, the one met first.
             let mut best = [(f32::NEG_INFINITY, None::<i64>); 3];
             for (w, other) in vectors.iter().zip(&sample) {
@@ -364,8 +433,9 @@ pub fn place_new(
             let x = (x + (jitter.unit() - 0.5) * 0.004).clamp(0.0, 1.0);
             let y = (y + (jitter.unit() - 0.5) * 0.004).clamp(0.0, 1.0);
             Some((id, StarPoint { x: x as f32, y: y as f32 }))
-        })
-        .collect()
+        }));
+    }
+    placed
 }
 
 /// Spreads ids evenly, so taking the first few of a big library is a fair sample.
@@ -448,7 +518,7 @@ fn pca(ids: &[i64], vector: &Vector<'_>, seed: u64, stop: &dyn Fn() -> bool) -> 
         sample_ids.sort_by_key(|id| hash(*id));
         sample_ids.truncate(PCA_SAMPLE);
     }
-    let x: Vec<Cow<'_, [f32]>> = sample_ids.par_iter().map(|id| vector(*id)).collect();
+    let x: Vec<Cow<'_, [f32]>> = vector.many(&sample_ids);
     let count = x.len() as f64;
     let d = x.iter().map(|v| v.len()).max().unwrap_or(0);
     let mut mean = vec![0f64; d];
@@ -518,12 +588,15 @@ fn pca(ids: &[i64], vector: &Vector<'_>, seed: u64, stop: &dyn Fn() -> bool) -> 
     let dims = comps.len();
     let mut rows = vec![0f32; n * dims];
     if dims > 0 {
-        rows.par_chunks_mut(dims).zip(ids.par_iter()).for_each(|(r, id)| {
-            let v = vector(*id);
-            for (out, comp) in r.iter_mut().zip(&comps) {
-                *out = v.iter().zip(&mean).zip(comp).map(|((x, m), c)| (f64::from(*x) - m) * c).sum::<f64>() as f32;
-            }
-        });
+        // A few thousand sounds at a time, each part's fingerprints read together, then let go.
+        for (part, some) in rows.chunks_mut(dims * AT_ONCE).zip(ids.chunks(AT_ONCE)) {
+            let vs = vector.many(some);
+            part.par_chunks_mut(dims).zip(vs.par_iter()).for_each(|(r, v)| {
+                for (out, comp) in r.iter_mut().zip(&comps) {
+                    *out = v.iter().zip(&mean).zip(comp).map(|((x, m), c)| (f64::from(*x) - m) * c).sum::<f64>() as f32;
+                }
+            });
+        }
     }
     let reduced = Reduced { dims, rows };
     let mut init = vec![0f64; 2 * n];
