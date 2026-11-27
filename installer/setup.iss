@@ -34,6 +34,10 @@ SetupIconFile={#LogoIco}
 UninstallDisplayIcon={app}\{#ExeName}
 UninstallDisplayName={#AppName}
 WizardStyle=modern
+; The logo's pictures (tools/logo makes them), one per screen scale: Setup picks the nearest. The tall one is on the
+; first and last pages, the small one top right on the others.
+WizardImageFile={#LogoDir}\setup-side-100.bmp,{#LogoDir}\setup-side-150.bmp,{#LogoDir}\setup-side-200.bmp
+WizardSmallImageFile={#LogoDir}\setup-small-100.bmp,{#LogoDir}\setup-small-150.bmp,{#LogoDir}\setup-small-200.bmp
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputName}
 Compression=lzma2/max

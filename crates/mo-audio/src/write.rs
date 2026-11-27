@@ -1,4 +1,5 @@
-//! Writing 16- or 24-bit PCM WAV files (kit exports), as the C# `WavWriter` writes them.
+//! Writing 16- or 24-bit PCM WAV files (kit exports), as the C# `WavWriter` writes them, and 32-bit float ones (an
+//! edited sound that goes over full scale keeps what's over, rather than being clipped).
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -6,10 +7,12 @@ use std::path::Path;
 
 use crate::AudioError;
 
-/// Writes `channels` (all the same length, samples from -1 to 1, louder ones clipped) to a new WAV file at `path`.
+/// Writes `channels` (all the same length, samples from -1 to 1) to a new WAV file at `path`.
 ///
 /// The file is written beside its final name first and then renamed, so a stopped or failed export never leaves half
-/// a file, under the real name or beside it. `bits` is 16 or 24.
+/// a file, under the real name or beside it. `bits` is 16 or 24 (whole numbers, louder samples clipped), or 32 (floats,
+/// kept as they are, except that a sample that isn't a number is written as silence and an endless one as full
+/// scale).
 pub fn write_wav(path: &Path, channels: &[Vec<f32>], sample_rate: u32, bits: u16) -> Result<(), AudioError> {
     let (head, frames) = head(channels, sample_rate, bits)?;
     let part = path.with_extension("wav.part");
@@ -30,10 +33,10 @@ pub(crate) fn write_wav_into(file: File, channels: &[Vec<f32>], sample_rate: u32
     write_part(file, &head, channels, frames, bits).map_err(AudioError::from)
 }
 
-/// A WAV file's header for `channels` (all the same length) at `sample_rate`, `bits` 16 or 24, and how many frames
-/// follow it.
+/// A WAV file's header for `channels` (all the same length) at `sample_rate`, `bits` 16, 24 or 32 (floats), and how
+/// many frames follow it.
 fn head(channels: &[Vec<f32>], sample_rate: u32, bits: u16) -> Result<(Vec<u8>, usize), AudioError> {
-    if bits != 16 && bits != 24 {
+    if bits != 16 && bits != 24 && bits != 32 {
         return Err(AudioError::NotSupported(format!("Writing {bits}-bit WAV files")));
     }
     let Some(frames) = channels.first().map(Vec::len) else {
@@ -49,21 +52,32 @@ fn head(channels: &[Vec<f32>], sample_rate: u32, bits: u16) -> Result<(Vec<u8>, 
     let block = u16::try_from(channels.len() * bytes).map_err(|_| too_many())?;
     let too_big = || AudioError::Format("Too long for a WAV file".into());
     let data_bytes = frames.checked_mul(usize::from(block)).ok_or_else(too_big)?;
-    let data_size = u32::try_from(data_bytes).ok().filter(|n| *n <= u32::MAX - 37).ok_or_else(too_big)?;
+    let data_size = u32::try_from(data_bytes).ok().filter(|n| *n <= u32::MAX - 59).ok_or_else(too_big)?;
 
-    let mut head = Vec::with_capacity(44);
+    let float = bits == 32;
+    // A float file's `fmt ` chunk carries an empty extension size, and a `fact` chunk follows it with the frame count,
+    // as the WAV rules ask of anything that isn't whole numbers.
+    let (fmt_size, fact) = if float { (18u32, 12u32) } else { (16, 0) };
+    let frames32 = u32::try_from(frames).map_err(|_| too_big())?;
+    let mut head = Vec::with_capacity(58);
     head.extend_from_slice(b"RIFF");
     // RIFF chunks are padded to an even length; the pad counts in the file's size but not the data's.
     let pad = data_size & 1;
-    head.extend_from_slice(&(36 + data_size + pad).to_le_bytes());
+    head.extend_from_slice(&(4 + 8 + fmt_size + fact + 8 + data_size + pad).to_le_bytes());
     head.extend_from_slice(b"WAVEfmt ");
-    head.extend_from_slice(&16u32.to_le_bytes());
-    head.extend_from_slice(&1u16.to_le_bytes());
+    head.extend_from_slice(&fmt_size.to_le_bytes());
+    head.extend_from_slice(&(if float { 3u16 } else { 1u16 }).to_le_bytes());
     head.extend_from_slice(&n.to_le_bytes());
     head.extend_from_slice(&sample_rate.to_le_bytes());
     head.extend_from_slice(&sample_rate.wrapping_mul(u32::from(block)).to_le_bytes());
     head.extend_from_slice(&block.to_le_bytes());
     head.extend_from_slice(&bits.to_le_bytes());
+    if float {
+        head.extend_from_slice(&0u16.to_le_bytes());
+        head.extend_from_slice(b"fact");
+        head.extend_from_slice(&4u32.to_le_bytes());
+        head.extend_from_slice(&frames32.to_le_bytes());
+    }
     head.extend_from_slice(b"data");
     head.extend_from_slice(&data_size.to_le_bytes());
     Ok((head, frames))
@@ -75,7 +89,20 @@ fn write_part(part: File, head: &[u8], channels: &[Vec<f32>], frames: usize, bit
     out.write_all(head)?;
     for i in 0..frames {
         for ch in channels {
-            let v = ch.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+            let v = ch.get(i).copied().unwrap_or(0.0);
+            if bits == 32 {
+                // Not a number: silence. Endless: full scale, as 16 and 24 bits clip it.
+                let v = if v.is_nan() {
+                    0.0
+                } else if v.is_infinite() {
+                    v.signum()
+                } else {
+                    v
+                };
+                out.write_all(&v.to_le_bytes())?;
+                continue;
+            }
+            let v = v.clamp(-1.0, 1.0);
             // C# rounds half to even (Math.Round).
             if bits == 16 {
                 out.write_all(&((v * 32767.0).round_ties_even() as i16).to_le_bytes())?;

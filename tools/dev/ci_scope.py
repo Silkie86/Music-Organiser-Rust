@@ -64,7 +64,7 @@ def packages():
 def scope(changed, crates, full=False):
     """What to check for these changed files (paths from the repo's root, with forward slashes); `full` checks all."""
     result = {"full": full, "test": set(), "ui": False, "formats": False, "galaxy": False, "launcher": False,
-              "installer": False}
+              "installer": False, "logo": False}
     read_by = set()
     for path in changed:
         read_by.update(reader for prefix, reader in READ_BY if path.startswith(prefix))
@@ -72,6 +72,10 @@ def scope(changed, crates, full=False):
             result["installer"] = True
         if path.startswith("tools/galaxycheck/"):
             result["galaxy"] = True
+            continue
+        # The tool that makes the logo's pictures: a workspace of its own, run by hand, checked on its own.
+        if path.startswith("tools/logo/"):
+            result["logo"] = True
             continue
         if path.startswith(("installer/", "assets/")) or path == "product.toml":
             result["installer"] = True
@@ -109,7 +113,7 @@ def scope(changed, crates, full=False):
     result["check"] = check | read_by
     if result["full"]:
         result.update(test=set(crates), check=set(crates), ui=True, formats=True, galaxy=True, launcher=True,
-                      installer=True)
+                      installer=True, logo=True)
     return result
 
 
@@ -131,6 +135,7 @@ def main():
         f"galaxy={str(s['galaxy']).lower()}",
         f"launcher={str(s['launcher']).lower()}",
         f"installer={str(s['installer']).lower()}",
+        f"logo={str(s['logo']).lower()}",
         f"rust={str(bool(s['check'])).lower()}",
     ]
     print("\n".join(lines))
