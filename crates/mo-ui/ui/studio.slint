@@ -1470,8 +1470,12 @@ export component ToggleChip inherits Rectangle {
     in property <string> key;
     // A short figure after the sign (how many are waiting, say): the chip widens to hold it.
     in property <string> badge;
+    // The sign and its words both, for a chip that changes what a whole strip does (the Edit strip's Slices).
+    in property <bool> with-words;
     callback clicked;
-    width: root.icon == "" ? label.preferred-width + 24px : root.badge != "" ? 30px + badge-label.preferred-width + 12px : 40px;
+    width: root.icon == "" ? label.preferred-width + 24px
+        : root.with-words ? 30px + label.preferred-width + 12px
+        : root.badge != "" ? 30px + badge-label.preferred-width + 12px : 40px;
     height: 28px;
     border-top-left-radius: joined-left ? 0 : 14px;
     border-bottom-left-radius: joined-left ? 0 : 14px;
@@ -1482,7 +1486,8 @@ export component ToggleChip inherits Rectangle {
     background: on ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
     animate background, border-color { duration: Motion.tap; }
     label := Text {
-        visible: root.icon == "";
+        x: root.icon != "" && root.with-words ? 30px : (parent.width - self.width) / 2;
+        visible: root.icon == "" || root.with-words;
         text: root.text;
         color: root.on ? Theme.text : root.dim ? Theme.faint : Theme.muted;
         font-size: Type.meta;
@@ -1498,7 +1503,7 @@ export component ToggleChip inherits Rectangle {
         font-weight: 500;
     }
     if root.icon != "": Path {
-        x: root.badge != "" ? 12px : (parent.width - self.width) / 2;
+        x: root.badge != "" || root.with-words ? 12px : (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 14px;
         height: 14px;
@@ -3324,6 +3329,8 @@ export global Icons {
     out property <string> normalise: "M 2.5 3 L 13.5 3 M 2.5 13 L 13.5 13 M 5.5 10 L 5.5 6 M 8 11.5 L 8 4.5 M 10.5 9.5 L 10.5 6.5";
     // Two arrows round a loop: crossfade a loop so it joins without a click.
     out property <string> crossfade: "M 11.5 4.5 L 5.5 4.5 A 2.75 2.75 0 0 0 5.5 10 L 6 10 M 4.5 11.5 L 10.5 11.5 A 2.75 2.75 0 0 0 10.5 6 L 10 6 M 9.5 2.5 L 11.5 4.5 L 9.5 6.5 M 6.5 9.5 L 4.5 11.5 L 6.5 13.5";
+    // Scissors: cut the sound into slices for a drum machine's pads.
+    out property <string> slices: "M 2.5 11.5 A 2 2 0 1 0 6.5 11.5 A 2 2 0 1 0 2.5 11.5 M 9.5 11.5 A 2 2 0 1 0 13.5 11.5 A 2 2 0 1 0 9.5 11.5 M 5.9 10 L 12.5 1.5 M 10.1 10 L 3.5 1.5";
     // A stopwatch: the tempo.
     out property <string> tempo: "M 6 1.5 L 10 1.5 M 8 1.5 L 8 3.5 M 13.5 9 A 5.5 5.5 0 1 1 2.5 9 A 5.5 5.5 0 1 1 13.5 9 M 8 9 L 10.5 6.5";
     // A note: the pitch.

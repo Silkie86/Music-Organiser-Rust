@@ -216,3 +216,139 @@ fn once_bitwig_adds_no_drum_machine_kits_go_on_the_selected_one() {
     assert_eq!(card(&feed).0, "Kit #4 is in Bitwig");
     assert_eq!(bitwig.world().pads(0).unwrap().keys().copied().collect::<Vec<_>>(), [36, 38]);
 }
+
+#[test]
+fn a_sounds_slices_go_on_a_drum_machines_pads_from_c1() {
+    let dir = fixtures("to-bitwig-slices");
+    let files: Vec<PathBuf> = (1..=20)
+        .map(|n| PathBuf::from(sound(&dir, &format!("Garage Loop 128 {n:02} (slice 5e6f7a8b, 1a2b3c4d).wav"))))
+        .collect();
+    // One to a pad, a note up each from C1, with names short enough for a pad.
+    let pads = to_bitwig::slice_pads(&files);
+    assert_eq!(pads.len(), 20);
+    assert_eq!((pads[0].note, pads[0].name.as_str()), (36, "Slice 1"));
+    assert_eq!((pads[19].note, pads[19].name.as_str()), (55, "Slice 20"));
+    assert_eq!(pads[4].path, files[4].to_string_lossy());
+    assert_eq!(to_bitwig::slice_pad_name(0), "C1");
+    assert_eq!(to_bitwig::slice_pad_name(1), "C#1");
+    assert_eq!(to_bitwig::slice_pad_name(19), "G2");
+    // However many there are, each has a pad of its own.
+    let most = to_bitwig::slice_pads(&vec![files[0].clone(); 64]);
+    assert_eq!(most.last().map(|p| p.note), Some(99));
+
+    let bitwig = FakeBitwig::start().unwrap();
+    let kits = Kits::new();
+    let feed = Feed::default();
+    let job = to_bitwig::slices_card(&feed, "Garage Loop 128", pads.len());
+    assert_eq!(
+        card(&feed),
+        ("Sending 20 slices of Garage Loop 128 to Bitwig".into(), "Making the slices".into(), State::Running)
+    );
+    assert!(to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Garage Loop 128", &pads, None));
+    // Said in a line, not pad by pad.
+    assert_eq!(
+        card(&feed),
+        (
+            "Garage Loop 128 (sliced) is in Bitwig".into(),
+            "20 slices on a Drum Machine on a new track, C1 to G2".into(),
+            State::Done
+        )
+    );
+    let world = bitwig.world();
+    let track = world.tracks.iter().position(|t| t.name == "Garage Loop 128 (sliced)").unwrap();
+    let on = world.pads(track).unwrap();
+    assert_eq!(on.keys().copied().collect::<Vec<_>>(), (36..56).collect::<Vec<u8>>());
+    assert_eq!(on[&36].name, "Slice 1");
+    assert_eq!(on[&55].name, "Slice 20");
+}
+
+#[test]
+fn slices_that_dont_go_in_say_why_on_their_card() {
+    let dir = fixtures("to-bitwig-slices-not-in");
+    let files = vec![PathBuf::from(sound(&dir, "Loop 01.wav")), PathBuf::from(sound(&dir, "Loop 02.wav"))];
+    let pads = to_bitwig::slice_pads(&files);
+
+    // One slice: its one pad is named, with no "to".
+    let bitwig = FakeBitwig::start().unwrap();
+    let feed = Feed::default();
+    let one = to_bitwig::slices_card(&feed, "Loop", 1);
+    assert_eq!(card(&feed).0, "Sending 1 slice of Loop to Bitwig");
+    assert!(to_bitwig::send_slices(one, &bitwig.bitwig(), &Kits::new(), "Loop", &pads[..1], None));
+    assert_eq!(card(&feed).1, "1 slice on a Drum Machine on a new track, C1");
+
+    // Bitwig quietly didn't load one: the card says which, as a kit's does.
+    let bitwig = FakeBitwig::start().unwrap();
+    bitwig.world().unloadable = vec!["Loop 02.wav".into()];
+    let feed = Feed::default();
+    let job = to_bitwig::slices_card(&feed, "Loop", 2);
+    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &Kits::new(), "Loop", &pads, None));
+    let (title, why, state) = card(&feed);
+    assert_eq!((title.as_str(), state), ("Loop (sliced) didn't go in cleanly", State::Failed));
+    assert!(why.contains("Slice 2"), "{why}");
+
+    // "Let the app make changes" is off: nothing changes in Bitwig.
+    let bitwig = FakeBitwig::start().unwrap();
+    bitwig.world().changes = false;
+    let feed = Feed::default();
+    let job = to_bitwig::slices_card(&feed, "Loop", 2);
+    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &Kits::new(), "Loop", &pads, None));
+    let (title, why, state) = card(&feed);
+    assert_eq!((title.as_str(), state), (to_bitwig::SLICES_FAILED, State::Failed));
+    assert!(why.contains("\"Let the app make changes\""), "{why}");
+    assert!(bitwig.world().track("Loop (sliced)").is_none());
+
+    // No Drum Machine for the ID: the selected one from then on, as for kits.
+    let bitwig = FakeBitwig::start().unwrap();
+    let kits = Kits::new();
+    let wrong = DeviceId::SAMPLER.to_string();
+    let feed = Feed::default();
+    let job = to_bitwig::slices_card(&feed, "Loop", 2);
+    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Loop", &pads, Some(&wrong)));
+    // What to do about it is said of the slices: they aren't a kit of the Kits'.
+    assert_eq!(
+        card(&feed),
+        (
+            "Bitwig didn't add a Drum Machine".into(),
+            "Add one to a track yourself, select it, and send the slices again.".into(),
+            State::Failed
+        )
+    );
+    assert!(kits.on_the_selected());
+    {
+        let mut world = bitwig.world();
+        let bass = world.tracks.iter().position(|t| t.name == "Bass").unwrap();
+        world.selected_device = Some((bass, 0));
+    }
+    let feed = Feed::default();
+    let job = to_bitwig::slices_card(&feed, "Loop", 2);
+    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Loop", &pads, None));
+    assert_eq!(
+        card(&feed),
+        (
+            to_bitwig::SLICES_FAILED.into(),
+            "The selected device isn't a Drum Machine. Select one and send the slices again.".into(),
+            State::Failed
+        )
+    );
+    // Once one is selected, the slices go on it.
+    {
+        let mut world = bitwig.world();
+        let drum_machine = FakeDevice { pads: Some(BTreeMap::new()), ..FakeDevice::new("Drum Machine", "instrument") };
+        let mut drums = FakeTrack::new("Drums 2", "Instrument", vec![drum_machine]);
+        drums.id = "test-drums".into();
+        world.tracks.insert(0, drums);
+        world.selected_device = Some((0, 0));
+    }
+    let feed = Feed::default();
+    let job = to_bitwig::slices_card(&feed, "Loop", 2);
+    assert!(to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Loop", &pads, None));
+    assert_eq!(
+        card(&feed),
+        (
+            "Loop (sliced) is in Bitwig".into(),
+            "2 slices on the Drum Machine selected in Bitwig, C1 to C#1".into(),
+            State::Done
+        )
+    );
+    assert_eq!(bitwig.world().pads(0).unwrap().keys().copied().collect::<Vec<_>>(), [36, 37]);
+}

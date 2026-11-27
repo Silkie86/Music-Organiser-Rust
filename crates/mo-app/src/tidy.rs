@@ -38,7 +38,9 @@
 //!   (`<copy>.<number>.wav` or `.wav.part`, [`crate::trim_copy::is_half_made`]), an hour old. Never the copies: DAW
 //!   projects use them.
 //! - `Edited sounds\` in the export folder: a part of a sound the card was still cutting out, named as trimmed copies
-//!   are while they're made ([`crate::edit_copy::is_half_made`]), an hour old. Never the copies.
+//!   are while they're made ([`crate::edit_copy::is_half_made`]), an hour old. Never the copies. The same in each
+//!   folder of slices there (a folder the app named, `mo_sounds::trimmed::is_slices_folder`, and no link): a slice
+//!   still being cut. Never the slices, nor their folders.
 //! - `updates\`: a fetched setup (`DAWmate-Setup-<version>.exe`, its `.sha256` and its `.log`) once that version or a
 //!   newer one runs, only when the installed copy runs (a launcher's build leaves the installed copy's update be), and
 //!   a fetch cut short (`… .exe.mo-part`), an hour old.
@@ -404,6 +406,15 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     // The same for a part of a sound its card was still cutting out (`edit_copy`).
     if let Some(edited) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::edit_copy::FOLDER])) {
         done.add(remove_older(&edited, crate::edit_copy::is_half_made, WRITING, now, false));
+        // And for a slice the Edit strip was still cutting, in the folders of slices there: only the folders named as
+        // the app names them, and never through a link.
+        for slices in fs::read_dir(&edited).into_iter().flatten().flatten() {
+            let name = slices.file_name();
+            let named = name.to_str().is_some_and(mo_sounds::trimmed::is_slices_folder);
+            if named && let Some(folder) = name.to_str().and_then(|n| real_folder(&edited, &[n])) {
+                done.add(remove_older(&folder, crate::edit_copy::is_half_made, WRITING, now, false));
+            }
+        }
     }
     // A Record take the plugin was still saving when the DAW stopped (DF-5) is mended, never thrown away: it's his
     // audio (the 19 Nov review's DA-1). Only one with nothing saved in it goes. Only the app's own take names.
@@ -1927,6 +1938,36 @@ mod tests {
         fs::write(&gone[0], b"x").unwrap();
         sweep(&places, SystemTime::now(), &bin);
         assert!(gone[0].exists());
+    }
+
+    #[test]
+    fn half_made_slices_go_from_the_slices_folders_and_nothing_else() {
+        let dir = test_folder("slices");
+        let exports = dir.join("Music Organiser Exports");
+        let places = Places { exports: Some(exports.clone()), ..test_places(&dir) };
+        let bin = TestBin(dir.join("bin"));
+        let edited = exports.join(crate::edit_copy::FOLDER);
+        let original = "D:\\Samples\\Loop.wav";
+        let slices = edited.join(mo_sounds::trimmed::slices_folder(original, "cuts"));
+        // A folder of the user's own, with a name like a half-made slice's in it.
+        let own = edited.join("My slices");
+        fs::create_dir_all(&slices).unwrap();
+        fs::create_dir_all(&own).unwrap();
+        let slice = mo_sounds::trimmed::slice_name(original, "cuts", 1);
+        let stem = slice.strip_suffix(".wav").unwrap().to_owned();
+        let gone = [slices.join(format!("{stem}.4242.wav")), slices.join(format!("{stem}.4242.wav.part"))];
+        let kept = [slices.join(&slice), slices.join("01.wav"), own.join(format!("{stem}.4242.wav"))];
+        for f in gone.iter().chain(&kept) {
+            fs::write(f, b"x").unwrap();
+        }
+        sweep(&places, SystemTime::now() + WRITING + Duration::from_secs(60), &bin);
+        for f in &gone {
+            assert!(!f.exists(), "{} should go", f.display());
+        }
+        for f in &kept {
+            assert!(f.exists(), "{} should stay", f.display());
+        }
+        assert!(slices.is_dir(), "the folder itself stays");
     }
 
     #[test]

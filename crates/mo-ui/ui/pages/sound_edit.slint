@@ -4,8 +4,12 @@
 // or down, and crossfade a loop. Undo and redo step through the edits; holding O (or the A/B button) plays the
 // original. The edit is dragged out, or saved, as a copy in the export folder's Edited sounds: the file itself never
 // changes (rule 2). Tempo, pitch and Tail wait for the stretcher. The work is in Rust (mo-ui `sounds/edit_strip.rs`).
+//
+// Its Slices (mock-up 9) cut the edit at its hits, or on the beats, for a drum machine's pads: a line at each cut, to
+// drag or double-click away (a double-click between two adds one), a click in a slice to hear it, and Send to put them
+// on a Drum Machine in Bitwig from C1 or in a numbered folder (mo-ui `sounds/edit_strip/slices.rs`).
 
-import { Theme, Type, Space, Heights, Well, Caps, Dot, StudioButton, TempoStepper, DragHandle, InfoTip, Waveform, Icons, Tip, HoverSense, RowSeam, FadeHandle, Widths } from "../studio.slint";
+import { Theme, Type, Space, Heights, Well, Caps, Dot, StudioButton, TempoStepper, DragHandle, InfoTip, Waveform, Icons, Tip, HoverSense, RowSeam, FadeHandle, Widths, MenuChip, StudioSlider, ToggleChip, MenuCard, MenuLine, Groove } from "../studio.slint";
 
 // A mark on the strip's ruler: where (0 to 1 across the waveform), what it says, and whether it's a bar's (brighter).
 export struct EditMark {
@@ -14,10 +18,19 @@ export struct EditMark {
     bar: bool,
 }
 
-// One edit made so far, as a chip under the waveform; the last one (the one Undo takes back) is lit.
+// One edit made so far, as a chip under the waveform; the last one (the one Undo takes back) is lit. With the Slices
+// on, the chips are the pads ("1 → C1").
 export struct EditChip {
     text: string,
     last: bool,
+}
+
+// A cut on the Slices' waveform: where (0 to 1 across the part on show), the number of the slice it starts, and how
+// much room there is to the next line (0 to 1 across), for its number.
+export struct SliceCut {
+    at: float,
+    number: int,
+    room: float,
 }
 
 export global SoundEdit {
@@ -72,7 +85,32 @@ export global SoundEdit {
     in property <string> drag-text: "Drag the edit";
     in property <bool> lifted;
     in property <bool> landed;
+    // The Slices: on (the tools give way to the slicing's), the cuts on show, the slice picked (0 to 1 across; none
+    // unless `slice-to` is past `slice-from`), and where the first cut is (what's before it is in no slice).
+    in property <bool> slicing;
+    in property <[SliceCut]> cuts;
+    in property <float> slice-from;
+    in property <float> slice-to;
+    in property <float> first-cut;
+    // What the cuts go by ("Hits (20)", "Every beat"…) and the choices; whether it's the hits (the sensitivity then
+    // counts); how big a hit must be, 0 (only the biggest) to 1 (the smallest too); and how far each slice runs.
+    in property <string> cut-at;
+    in property <[string]> cut-at-choices;
+    in property <bool> cut-at-hits;
+    in-out property <float> sensitivity: 0.5;
+    in property <string> each;
+    in property <[string]> each-choices;
+    // The Send button's words ("Send 20 slices") and whether there's anything to send (and none on their way); each
+    // slice's pad, by its note's name as Bitwig has it ("C1", "C#1"…), for its menu; what the menu's folder line says
+    // ("A numbered folder, 01 … 20"), and where the slices are saved.
+    in property <string> send-text: "Send the slices";
+    in property <bool> can-send;
+    in property <[string]> pads;
+    in property <string> to-folder-text: "A numbered folder";
+    in property <string> saved-in;
     // The keys from the shortcut list, for the tips.
+    in property <string> slices-key;
+    in property <string> bitwig-key;
     in property <string> edit-key;
     in property <string> undo-key;
     in property <string> redo-key;
@@ -105,6 +143,20 @@ export global SoundEdit {
     // Zoomed in on the part picked (`true`), or the whole sound.
     callback zoom(bool);
     callback close();
+    // The Slices' choices.
+    callback cut-at-picked(string);
+    callback sensitivity-moved(float);
+    callback sensitivity-released(float);
+    callback each-picked(string);
+    // A press on the Slices' waveform at `at` (0 to 1 across), a line within `within` of it taken hold of, Shift held
+    // or not (no snapping to the hits); the mouse moved with it held (`far` once it has gone too far to be a click);
+    // let go (`cut-short` when the window lost the mouse); and a double-click.
+    callback slice-down(float, float, bool);
+    callback slice-move(float, bool, bool);
+    callback slice-up(bool);
+    callback slice-double();
+    // Whether a cut's line is within `within` of `at` (0 to 1 across): the mouse there takes hold of it.
+    pure callback slice-near(float, float) -> bool;
 }
 
 // A square button with a sign, for the strip's tools.
@@ -180,83 +232,145 @@ export component EditStrip inherits Rectangle {
                 clicked => { SoundEdit.close(); }
             }
         }
-        // The tools, then undo, redo, A/B, and what to do with the edit.
+        // The tools (or the Slices' choices), then undo, redo, A/B, and what to do with the edit (or the slices).
         HorizontalLayout {
             spacing: Space.xs;
-            ToolButton {
-                icon: Icons.trim;
-                tip: "Keep only the part picked";
-                key: SoundEdit.trim-key;
-                enabled: root.on && SoundEdit.has-part;
-                clicked => { SoundEdit.tool("sounds.editTrim"); }
-            }
-            ToolButton {
-                icon: Icons.fade-in;
-                tip: SoundEdit.has-part ? "Fade in across the part picked" : "Fade in at the start (drag its yellow handle to make it longer)";
-                key: SoundEdit.fade-in-key;
-                enabled: root.on;
-                clicked => { SoundEdit.tool("sounds.editFadeIn"); }
-            }
-            ToolButton {
-                icon: Icons.fade-out;
-                tip: SoundEdit.has-part ? "Fade out across the part picked" : "Fade out at the end (drag its yellow handle to make it longer)";
-                key: SoundEdit.fade-out-key;
-                enabled: root.on;
-                clicked => { SoundEdit.tool("sounds.editFadeOut"); }
-            }
-            ToolButton {
-                icon: Icons.reverse;
-                tip: SoundEdit.has-part ? "Play the part picked backwards" : "Play it backwards";
-                key: SoundEdit.reverse-key;
-                enabled: root.on;
-                clicked => { SoundEdit.tool("sounds.editReverse"); }
-            }
-            ToolButton {
-                icon: Icons.normalise;
-                tip: "Normalise: its loudest moment at full scale";
-                key: SoundEdit.normalise-key;
-                enabled: root.on;
-                clicked => { SoundEdit.tool("sounds.editNormalise"); }
-            }
-            VerticalLayout {
-                alignment: center;
-                TempoStepper {
-                    bpm-text: SoundEdit.gain-text;
-                    changed: SoundEdit.gain-changed;
+            if !SoundEdit.slicing: HorizontalLayout {
+                spacing: Space.xs;
+                ToolButton {
+                    icon: Icons.trim;
+                    tip: "Keep only the part picked";
+                    key: SoundEdit.trim-key;
+                    enabled: root.on && SoundEdit.has-part;
+                    clicked => { SoundEdit.tool("sounds.editTrim"); }
+                }
+                ToolButton {
+                    icon: Icons.fade-in;
+                    tip: SoundEdit.has-part ? "Fade in across the part picked" : "Fade in at the start (drag its yellow handle to make it longer)";
+                    key: SoundEdit.fade-in-key;
                     enabled: root.on;
-                    down-tip: SoundEdit.has-part ? "Turn the part picked down" : "Turn it down";
-                    up-tip: SoundEdit.has-part ? "Turn the part picked up" : "Turn it up";
-                    value-tip: "Half a dB a step";
-                    reset-tip: "Back to no gain";
-                    slower-key: SoundEdit.quieter-key;
-                    faster-key: SoundEdit.louder-key;
-                    stepped(by) => { SoundEdit.gain-stepped(by); }
-                    reset => { SoundEdit.gain-reset(); }
+                    clicked => { SoundEdit.tool("sounds.editFadeIn"); }
+                }
+                ToolButton {
+                    icon: Icons.fade-out;
+                    tip: SoundEdit.has-part ? "Fade out across the part picked" : "Fade out at the end (drag its yellow handle to make it longer)";
+                    key: SoundEdit.fade-out-key;
+                    enabled: root.on;
+                    clicked => { SoundEdit.tool("sounds.editFadeOut"); }
+                }
+                ToolButton {
+                    icon: Icons.reverse;
+                    tip: SoundEdit.has-part ? "Play the part picked backwards" : "Play it backwards";
+                    key: SoundEdit.reverse-key;
+                    enabled: root.on;
+                    clicked => { SoundEdit.tool("sounds.editReverse"); }
+                }
+                ToolButton {
+                    icon: Icons.normalise;
+                    tip: "Normalise: its loudest moment at full scale";
+                    key: SoundEdit.normalise-key;
+                    enabled: root.on;
+                    clicked => { SoundEdit.tool("sounds.editNormalise"); }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TempoStepper {
+                        bpm-text: SoundEdit.gain-text;
+                        changed: SoundEdit.gain-changed;
+                        enabled: root.on;
+                        down-tip: SoundEdit.has-part ? "Turn the part picked down" : "Turn it down";
+                        up-tip: SoundEdit.has-part ? "Turn the part picked up" : "Turn it up";
+                        value-tip: "Half a dB a step";
+                        reset-tip: "Back to no gain";
+                        slower-key: SoundEdit.quieter-key;
+                        faster-key: SoundEdit.louder-key;
+                        stepped(by) => { SoundEdit.gain-stepped(by); }
+                        reset => { SoundEdit.gain-reset(); }
+                    }
+                }
+                ToolButton {
+                    icon: Icons.crossfade;
+                    tip: SoundEdit.has-part ? "Make the part picked loop without a click (it keeps only the loop)" : "Make it loop without a click";
+                    key: SoundEdit.loop-key;
+                    enabled: root.on;
+                    clicked => { SoundEdit.tool("sounds.editLoop"); }
+                }
+                ToolButton {
+                    icon: Icons.slices;
+                    tip: "Slices: cut it at its hits for a drum machine's pads";
+                    key: SoundEdit.slices-key;
+                    enabled: root.on;
+                    clicked => { SoundEdit.tool("sounds.editSlices"); }
+                }
+                Rectangle { width: Space.sm; }
+                // Waiting for the stretcher (the 1.1 plan's step 5): greyed, with why in their tips.
+                ToolButton {
+                    icon: Icons.tempo;
+                    tip: "Tempo: once you've picked the stretcher by ear";
+                    enabled: false;
+                }
+                ToolButton {
+                    icon: Icons.pitch;
+                    tip: "Pitch: once you've picked the stretcher by ear";
+                    enabled: false;
+                }
+                ToolButton {
+                    icon: Icons.tail;
+                    tip: "Tail: once you've picked the stretcher by ear";
+                    enabled: false;
                 }
             }
-            ToolButton {
-                icon: Icons.crossfade;
-                tip: SoundEdit.has-part ? "Make the part picked loop without a click (it keeps only the loop)" : "Make it loop without a click";
-                key: SoundEdit.loop-key;
-                enabled: root.on;
-                clicked => { SoundEdit.tool("sounds.editLoop"); }
-            }
-            Rectangle { width: Space.sm; }
-            // Waiting for the stretcher (the 1.1 plan's step 5): greyed, with why in their tips.
-            ToolButton {
-                icon: Icons.tempo;
-                tip: "Tempo: once you've picked the stretcher by ear";
-                enabled: false;
-            }
-            ToolButton {
-                icon: Icons.pitch;
-                tip: "Pitch: once you've picked the stretcher by ear";
-                enabled: false;
-            }
-            ToolButton {
-                icon: Icons.tail;
-                tip: "Tail: once you've picked the stretcher by ear";
-                enabled: false;
+            // The Slices' choices: what the cuts go by, how big a hit must be, and how far each slice runs; then the
+            // Slices chip, lit, to go back to the tools.
+            if SoundEdit.slicing: HorizontalLayout {
+                // As wide as its choices and no wider: the room left over is the row's, before undo.
+                horizontal-stretch: 0;
+                spacing: Space.sm;
+                VerticalLayout {
+                    alignment: center;
+                    MenuChip {
+                        name: "Cut at";
+                        value: SoundEdit.cut-at;
+                        choices: SoundEdit.cut-at-choices;
+                        has-any: false;
+                        lights: false;
+                        picked(c) => { SoundEdit.cut-at-picked(c); }
+                    }
+                }
+                if SoundEdit.cut-at-hits: StudioSlider {
+                    low: "Sensitivity";
+                    tip: "How big a hit must be to get a cut: further right, smaller ones too";
+                    value <=> SoundEdit.sensitivity;
+                    moved(v) => { SoundEdit.sensitivity-moved(v); }
+                    released(v) => { SoundEdit.sensitivity-released(v); }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    MenuChip {
+                        name: "Each slice";
+                        value: SoundEdit.each;
+                        choices: SoundEdit.each-choices;
+                        has-any: false;
+                        lights: false;
+                        picked(c) => { SoundEdit.each-picked(c); }
+                    }
+                }
+                Rectangle {
+                    width: 1px;
+                    background: Theme.stroke;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    ToggleChip {
+                        icon: Icons.slices;
+                        text: "Slices";
+                        with-words: true;
+                        on: true;
+                        tip: "back to the edit's tools";
+                        key: SoundEdit.slices-key;
+                        clicked => { SoundEdit.tool("sounds.editSlices"); }
+                    }
+                }
             }
             Rectangle { horizontal-stretch: 1; }
             ToolButton {
@@ -281,7 +395,7 @@ export component EditStrip inherits Rectangle {
                 held(down) => { SoundEdit.hear-original(down); }
             }
             Rectangle { width: Space.sm; }
-            DragHandle {
+            if !SoundEdit.slicing: DragHandle {
                 width: 170px;
                 text: SoundEdit.drag-text;
                 tip: "Drag the sound as edited into your DAW or a folder: a copy in " + SoundEdit.folder-text;
@@ -291,13 +405,102 @@ export component EditStrip inherits Rectangle {
                 drag-out => { SoundEdit.drag-edit(); }
                 drag-let-go => { SoundEdit.drag-let-go(); }
             }
-            StudioButton {
+            if !SoundEdit.slicing: StudioButton {
                 text: "Save copy";
                 main: true;
                 tip: "Save the sound as edited, a copy in " + SoundEdit.folder-text + " (the file itself never changes)";
                 key: SoundEdit.save-key;
                 enabled: root.on && SoundEdit.has-edits;
                 clicked => { SoundEdit.tool("sounds.editSave"); }
+            }
+            // Send: its menu opens above it (the strip is at the foot of the window), with the two places the slices
+            // can go, and the pad each one lands on (four across, as a Drum Machine's page; eight for more than
+            // sixteen).
+            if SoundEdit.slicing: send := HorizontalLayout {
+                property <int> across: SoundEdit.pads.length > 16 ? 8 : 4;
+                property <int> rows: ceil(SoundEdit.pads.length / self.across);
+                property <length> pad-width: 66px;
+                property <length> pad-height: 28px;
+                property <length> menu-width: max(320px, self.across * self.pad-width + Space.xs + 2 * Space.sm);
+                property <length> menu-height: 2 * Space.xs + 26px + 32px + self.rows * self.pad-height + Space.xs + 32px + 2px + 26px;
+                send-button := StudioButton {
+                    text: SoundEdit.send-text;
+                    main: true;
+                    menu: true;
+                    tip: "Each slice becomes a file of its own, for a drum machine's pads";
+                    enabled: root.on && SoundEdit.can-send;
+                    clicked => { send-menu.show(); }
+                }
+                send-menu := PopupWindow {
+                    x: send-button.width - send.menu-width;
+                    y: -send.menu-height - Space.xs;
+                    width: send.menu-width;
+                    height: send.menu-height;
+                    MenuCard {
+                        HorizontalLayout {
+                            padding-left: Space.md;
+                            Caps {
+                                text: "SEND THE SLICES TO";
+                                height: 26px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        MenuLine {
+                            text: "A Drum Machine in Bitwig, from C1";
+                            key: SoundEdit.bitwig-key;
+                            clicked => { SoundEdit.tool("sounds.editSlicesBitwig"); }
+                        }
+                        Rectangle {
+                            height: send.rows * send.pad-height + Space.xs;
+                            for note[i] in SoundEdit.pads: Rectangle {
+                                x: Space.sm + mod(i, send.across) * send.pad-width;
+                                y: floor(i / send.across) * send.pad-height;
+                                width: send.pad-width - Space.xs;
+                                height: send.pad-height - Space.xs;
+                                border-radius: Theme.radius;
+                                border-width: 1px;
+                                border-color: Theme.here-colour.transparentize(50%);
+                                background: Theme.here-colour.transparentize(90%);
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: Space.xs;
+                                    Text {
+                                        text: i + 1;
+                                        color: Theme.text;
+                                        font-family: Theme.number-font;
+                                        font-size: Type.meta;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: note;
+                                        color: Theme.muted;
+                                        font-family: Theme.number-font;
+                                        font-size: Type.meta;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                        MenuLine {
+                            text: SoundEdit.to-folder-text;
+                            key: SoundEdit.save-key;
+                            clicked => { SoundEdit.tool("sounds.editSave"); }
+                        }
+                        Groove { }
+                        HorizontalLayout {
+                            padding-left: Space.md;
+                            padding-right: Space.md;
+                            Text {
+                                text: SoundEdit.saved-in;
+                                color: Theme.faint;
+                                font-size: Type.meta;
+                                height: 26px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
             }
         }
         // The ruler over the waveform: bars and beats when the tempo's known, else seconds.
@@ -336,8 +539,8 @@ export component EditStrip inherits Rectangle {
                     played: SoundEdit.playing ? SoundEdit.played : 1;
                     seconds: SoundEdit.view-seconds;
                     from-seconds: SoundEdit.view-from;
-                    can-seek: true;
-                    can-pick: true;
+                    can-seek: !SoundEdit.slicing;
+                    can-pick: !SoundEdit.slicing;
                     pick-from: SoundEdit.pick-from;
                     pick-to: SoundEdit.pick-to;
                     hit-marks: SoundEdit.hit-marks;
@@ -350,7 +553,7 @@ export component EditStrip inherits Rectangle {
                     part-let-go => { SoundEdit.drag-let-go(); }
                 }
                 // The fades: their curves, and a handle at the top of each to drag.
-                if root.on && SoundEdit.fade-in-curve != "": Path {
+                if root.on && !SoundEdit.slicing && SoundEdit.fade-in-curve != "": Path {
                     width: parent.width;
                     height: parent.height;
                     commands: SoundEdit.fade-in-curve;
@@ -360,7 +563,7 @@ export component EditStrip inherits Rectangle {
                     stroke: Theme.warning;
                     stroke-width: 1.5px;
                 }
-                if root.on && SoundEdit.fade-out-curve != "": Path {
+                if root.on && !SoundEdit.slicing && SoundEdit.fade-out-curve != "": Path {
                     width: parent.width;
                     height: parent.height;
                     commands: SoundEdit.fade-out-curve;
@@ -370,7 +573,7 @@ export component EditStrip inherits Rectangle {
                     stroke: Theme.warning;
                     stroke-width: 1.5px;
                 }
-                if root.on && SoundEdit.fade-in-shown: FadeHandle {
+                if root.on && !SoundEdit.slicing && SoundEdit.fade-in-shown: FadeHandle {
                     y: 0;
                     at: SoundEdit.fade-in;
                     room: wave.width;
@@ -379,7 +582,7 @@ export component EditStrip inherits Rectangle {
                     moving(at) => { SoundEdit.fade-moving(true, at); }
                     let-go => { SoundEdit.fade-let-go(true); }
                 }
-                if root.on && SoundEdit.fade-out-shown: FadeHandle {
+                if root.on && !SoundEdit.slicing && SoundEdit.fade-out-shown: FadeHandle {
                     y: 0;
                     at: SoundEdit.fade-out;
                     room: wave.width;
@@ -387,6 +590,84 @@ export component EditStrip inherits Rectangle {
                     key: SoundEdit.fade-out-key;
                     moving(at) => { SoundEdit.fade-moving(false, at); }
                     let-go => { SoundEdit.fade-let-go(false); }
+                }
+                // The Slices: what's before the first cut dimmed, the slice picked lit, and a line at each cut with
+                // its slice's number at the top and a small handle at the foot. The mouse is the page's: a press on a
+                // line moves it, a click in a slice plays it, a press in one that moves carries it out.
+                if root.on && SoundEdit.slicing: Rectangle {
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * clamp(SoundEdit.first-cut, 0, 1);
+                        background: Theme.well.transparentize(45%);
+                    }
+                    if SoundEdit.slice-to > SoundEdit.slice-from: Rectangle {
+                        x: parent.width * SoundEdit.slice-from;
+                        width: parent.width * (SoundEdit.slice-to - SoundEdit.slice-from);
+                        background: Theme.here-colour.transparentize(80%);
+                    }
+                    for c in SoundEdit.cuts: Rectangle {
+                        x: c.at * parent.width;
+                        width: 1px;
+                        background: Theme.here-colour;
+                    }
+                    for c in SoundEdit.cuts: Path {
+                        x: c.at * parent.width - 4px;
+                        y: parent.height - 6px;
+                        width: 8px;
+                        height: 6px;
+                        viewbox-width: 8;
+                        viewbox-height: 6;
+                        commands: "M 0 6 L 4 0 L 8 6 Z";
+                        fill: Theme.here-colour;
+                    }
+                    // Its number, where there's room for it before the next line.
+                    for c in SoundEdit.cuts: Rectangle {
+                        x: min(c.at * parent.width, parent.width - self.width);
+                        y: 2px;
+                        width: number.preferred-width + 6px;
+                        height: number.preferred-height + 2px;
+                        visible: c.room * parent.width >= self.width + 1px;
+                        border-radius: 2px;
+                        background: Theme.here-colour;
+                        number := Text {
+                            text: c.number;
+                            color: Theme.well;
+                            font-family: Theme.number-font;
+                            font-size: Type.caps;
+                            font-weight: 600;
+                        }
+                    }
+                    slice-touch := TouchArea {
+                        // How near a line a press takes hold of it.
+                        property <length> line-room: 5px;
+                        // Where the press was, and whether it's held: whether it has gone too far to be a click.
+                        property <length> down-x;
+                        property <length> down-y;
+                        property <bool> held;
+                        mouse-cursor: SoundEdit.slice-near(self.mouse-x / max(1px, self.width), self.line-room / max(1px, self.width))
+                            ? MouseCursor.ew-resize : MouseCursor.pointer;
+                        pointer-event(e) => {
+                            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                                self.held = true;
+                                self.down-x = self.mouse-x;
+                                self.down-y = self.mouse-y;
+                                SoundEdit.slice-down(self.mouse-x / max(1px, self.width), self.line-room / max(1px, self.width), e.modifiers.shift);
+                            } else if e.kind == PointerEventKind.move && self.held {
+                                SoundEdit.slice-move(self.mouse-x / max(1px, self.width), e.modifiers.shift,
+                                    abs(self.mouse-x - self.down-x) > 3px || abs(self.mouse-y - self.down-y) > 3px);
+                            } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left && self.held {
+                                self.held = false;
+                                SoundEdit.slice-up(false);
+                            } else if e.kind == PointerEventKind.cancel && self.held {
+                                self.held = false;
+                                SoundEdit.slice-up(true);
+                            } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.right && SoundEdit.playing {
+                                // A right click stops it, as on any waveform.
+                                SoundEdit.stop();
+                            }
+                        }
+                        double-clicked => { SoundEdit.slice-double(); }
+                    }
                 }
             }
             if !root.on: Text {
@@ -406,33 +687,48 @@ export component EditStrip inherits Rectangle {
             height: 26px;
             VerticalLayout {
                 alignment: center;
-                Caps { text: "EDITS"; }
+                Caps { text: SoundEdit.slicing ? "PADS" : "EDITS"; }
             }
             Rectangle { width: Space.xs; }
-            if SoundEdit.chips.length == 0: Text {
-                text: "None yet";
-                color: Theme.faint;
-                font-size: Type.meta;
-                vertical-alignment: center;
-            }
-            for c in SoundEdit.chips: Rectangle {
-                width: chip-text.preferred-width + 2 * Space.sm;
-                border-radius: self.height / 2;
-                border-width: 1px;
-                border-color: c.last ? Theme.accent : Theme.edge;
-                background: Theme.surface-raised;
-                chip-text := Text {
-                    text: c.text;
-                    color: c.last ? Theme.text : Theme.muted;
+            // The chips: when there are more than fit, the oldest run off the left (the newest is the one Undo takes
+            // back), so a long list of edits never pushes the strip wider.
+            Rectangle {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                clip: true;
+                if SoundEdit.chips.length == 0: Text {
+                    x: 0;
+                    height: parent.height;
+                    text: "None yet";
+                    color: Theme.faint;
                     font-size: Type.meta;
-                    font-family: Theme.number-font;
+                    vertical-alignment: center;
+                }
+                HorizontalLayout {
+                    x: min(0px, parent.width - self.width);
+                    width: self.preferred-width;
+                    spacing: Space.xs;
+                    for c in SoundEdit.chips: Rectangle {
+                        width: chip-text.preferred-width + 2 * Space.sm;
+                        border-radius: self.height / 2;
+                        border-width: 1px;
+                        border-color: c.last ? Theme.accent : Theme.edge;
+                        background: Theme.surface-raised;
+                        chip-text := Text {
+                            text: c.text;
+                            color: c.last ? Theme.text : Theme.muted;
+                            font-size: Type.meta;
+                            font-family: Theme.number-font;
+                        }
+                    }
                 }
             }
-            Rectangle { horizontal-stretch: 1; }
             VerticalLayout {
                 alignment: center;
                 InfoTip {
-                    text: "The file on disk never changes: what you save or drag out is a copy in " + SoundEdit.folder-text + ". Your edits wait here while the app is open, sound by sound, until you come back to them.";
+                    text: SoundEdit.slicing
+                        ? "A line at every cut: drag one to move it (it snaps to the hits; hold Shift for none), double-click one to take it away, or between two to add one. Click a slice to hear it, or drag it out on its own. The slices you send are saved in a folder of their own in " + SoundEdit.folder-text + "; the file on disk never changes."
+                        : "The file on disk never changes: what you save or drag out is a copy in " + SoundEdit.folder-text + ". Your edits wait here while the app is open, sound by sound, until you come back to them.";
                 }
             }
         }

@@ -119,7 +119,7 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
     action("sounds.editRedo", "Redo the edit that was undone", "Ctrl+Shift+Z"),
     action(
         "sounds.editSave",
-        "Save the edited sound as a copy in Edited sounds (the file itself never changes)",
+        "Save the edited sound as a copy in Edited sounds, or its slices in a folder there (the file never changes)",
         "Ctrl+S",
     ),
     action("sounds.editOriginal", "Hold to hear the original sound while you edit it", "O"),
@@ -135,6 +135,13 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
         "Crossfade the part picked (the whole sound with none) so it loops without a click",
         "Alt+L",
     ),
+    // Its Slices (slice to pads): Alt and a letter, as its tools. Saving them is the strip's Save.
+    action(
+        "sounds.editSlices",
+        "Slice the sound in the Edit strip for a drum machine's pads, or go back to its tools",
+        "Alt+S",
+    ),
+    action("sounds.editSlicesBitwig", "Send the slices to a Drum Machine in Bitwig, one to a pad from C1", "Alt+B"),
 ];
 
 /// The Plugins page's own actions, with the C# ids. Clean up and Uninstall join with the page's second part.

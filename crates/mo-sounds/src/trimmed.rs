@@ -1,8 +1,9 @@
 //! Names of the copies the app makes of a sound to drag into a DAW: the trimmed copies Trim silence makes
-//! (`mo_app::trim_copy`), the parts picked on a sound's card and the sounds edited in the Edit strip
-//! (`mo_app::edit_copy`). Each is the original's name, what was done, and a mark made from the original's path, so a
-//! project that uses a copy still counts as using the original ([`crate::usage`]): "Kick 01 (trimmed -60 dB,
-//! 1a2b3c4d).wav", "Loop 128 (part 1.406-1.875 s, 1a2b3c4d).wav", "Loop 128 (edited 5e6f7a8b, 1a2b3c4d).wav".
+//! (`mo_app::trim_copy`), the parts picked on a sound's card, the sounds edited in the Edit strip and the slices it
+//! cuts for a drum machine's pads (`mo_app::edit_copy`). Each is the original's name, what was done, and a mark made
+//! from the original's path, so a project that uses a copy still counts as using the original ([`crate::usage`]):
+//! "Kick 01 (trimmed -60 dB, 1a2b3c4d).wav", "Loop 128 (part 1.406-1.875 s, 1a2b3c4d).wav", "Loop 128 (edited
+//! 5e6f7a8b, 1a2b3c4d).wav", "Loop 128 01 (slice 5e6f7a8b, 1a2b3c4d).wav".
 
 use mo_formats::case;
 
@@ -34,9 +35,40 @@ pub fn part_name(path: &str, from: f64, to: f64) -> String {
 /// another (the edits written out in full), which goes into the name as eight hex digits, so the same edits saved again
 /// are the same copy and other edits are another.
 pub fn edit_name(path: &str, edits: &str) -> String {
+    format!("{} (edited {}, {}).wav", stem_of(path), key_of(edits), mark(path))
+}
+
+/// The folder the slices of the sound at `path` go in ("Loop 128 slices (5e6f7a8b)"): `slicing` is any text that tells
+/// one slicing from another (what was read, its edits and its cuts, written out in full), which goes into the name as
+/// eight hex digits. So the same slicing again is the same folder, and another slicing never changes the slices a
+/// project already uses.
+pub fn slices_folder(path: &str, slicing: &str) -> String {
+    format!("{} slices ({})", stem_of(path), key_of(slicing))
+}
+
+/// The file name of slice `number` (from 1) of the sound at `path`, in [`slices_folder`]: numbered so the slices sort
+/// in their order ("Loop 128 01 (slice 5e6f7a8b, 1a2b3c4d).wav").
+pub fn slice_name(path: &str, slicing: &str, number: usize) -> String {
+    format!("{} {number:02} (slice {}, {}).wav", stem_of(path), key_of(slicing), mark(path))
+}
+
+/// Whether `name` is a folder of slices ([`slices_folder`]): for the start-up sweep, which looks in them for slices
+/// whose making was cut short.
+pub fn is_slices_folder(name: &str) -> bool {
+    name.strip_suffix(')')
+        .and_then(|n| n.rsplit_once(" slices ("))
+        .is_some_and(|(stem, key)| !stem.is_empty() && is_key(key))
+}
+
+/// Eight hex digits that tell one text from another.
+fn key_of(text: &str) -> String {
     let mut h = crate::compact::Hash::new();
-    h.bytes(edits.as_bytes());
-    format!("{} (edited {:08x}, {}).wav", stem_of(path), h.0 as u32, mark(path))
+    h.bytes(text.as_bytes());
+    format!("{:08x}", h.0 as u32)
+}
+
+fn is_key(key: &str) -> bool {
+    key.len() == 8 && key.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The start of a copy's name: the original's name without its extension, cut to [`NAME_KEPT`] characters.
@@ -47,7 +79,8 @@ fn stem_of(path: &str) -> String {
     if stem.trim().is_empty() { "Sound".to_owned() } else { stem }
 }
 
-/// The mark in a copy's file name ([`copy_name`], [`part_name`], [`edit_name`]), or `None` for any other name.
+/// The mark in a copy's file name ([`copy_name`], [`part_name`], [`edit_name`], [`slice_name`]), or `None` for any
+/// other name.
 pub fn mark_in(file_name: &str) -> Option<&str> {
     let rest = file_name.strip_suffix(").wav").or_else(|| file_name.strip_suffix(").WAV"))?;
     let (head, mark) = rest.rsplit_once(", ")?;
@@ -58,13 +91,12 @@ pub fn mark_in(file_name: &str) -> Option<&str> {
         number(level.strip_prefix('-').unwrap_or(level))
     } else if let Some(span) = what.strip_prefix("part ").and_then(|w| w.strip_suffix(" s")) {
         span.split_once('-').is_some_and(|(from, to)| seconds(from) && seconds(to))
-    } else if let Some(key) = what.strip_prefix("edited ") {
-        key.len() == 8 && key.bytes().all(|b| b.is_ascii_hexdigit())
+    } else if let Some(key) = what.strip_prefix("edited ").or_else(|| what.strip_prefix("slice ")) {
+        is_key(key)
     } else {
         false
     };
-    let ok = made && mark.len() == 8 && mark.bytes().all(|b| b.is_ascii_hexdigit());
-    ok.then_some(mark)
+    (made && is_key(mark)).then_some(mark)
 }
 
 #[cfg(test)]
@@ -108,6 +140,26 @@ mod tests {
         assert_ne!(name, edit_name("D:\\Samples\\Loop 128.wav", "[Normalise { peak_db: 0.0 }]"));
         assert_eq!(mark_in("Loop (edited 12345, 1234abcd).wav"), None);
         assert_eq!(mark_in("Loop (edited nothing!, 1234abcd).wav"), None);
+    }
+
+    #[test]
+    fn slices_are_numbered_in_a_folder_of_their_slicing() {
+        let path = "D:\\Samples\\Loop 128.wav";
+        let folder = slices_folder(path, "cuts a");
+        assert!(folder.starts_with("Loop 128 slices (") && is_slices_folder(&folder), "{folder}");
+        assert_ne!(folder, slices_folder(path, "cuts b"), "another slicing, another folder");
+        let (first, tenth) = (slice_name(path, "cuts a", 1), slice_name(path, "cuts a", 10));
+        assert!(
+            first.starts_with("Loop 128 01 (slice ") && tenth.starts_with("Loop 128 10 (slice "),
+            "{first} {tenth}"
+        );
+        assert!(first < tenth, "they sort in their order");
+        assert_eq!(mark_in(&first), Some(mark(path).as_str()));
+        assert_eq!(mark_in("Loop 01 (slice 1234, 1234abcd).wav"), None);
+        // Not the app's folders: a name of the user's own.
+        for name in ["Loop slices", "Loop slices (final)", " slices (1234abcd)", "Loop slices (1234abcd) 2"] {
+            assert!(!is_slices_folder(name), "{name}");
+        }
     }
 
     #[test]
