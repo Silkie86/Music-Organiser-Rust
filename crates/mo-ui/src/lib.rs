@@ -474,7 +474,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> (Vec<KeyRow>, Vec<KeyRow>) {
     page.extend(list_keys(place).iter().map(|(key, what)| row(key, what)));
     let mut everywhere: Vec<KeyRow> =
         APP_ACTIONS.iter().filter(|a| is_built(a.id)).map(|a| row(shortcuts.key_of(a.id), a.what)).collect();
-    everywhere.push(row("F12", "Write a note for Claude about what's on screen"));
+    everywhere.push(row("F12", "Write a note about what's on screen"));
     (page, everywhere)
 }
 

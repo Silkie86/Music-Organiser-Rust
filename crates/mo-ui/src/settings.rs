@@ -251,7 +251,9 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         apply_helper(true, app.as_weak());
     }
     crate::midi::smallest_part(None, smallest_part(&setup.settings));
-    crate::beta::connect(app, &setup.folder, setup.live, setup.feed.clone());
+    // The beta checklist and its daily self-check are Solomon's: on a tester's copy, with no Developer tab, neither
+    // reads nor writes anything.
+    crate::beta::connect(app, &setup.folder, setup.live && mo_app::developer::on(), setup.feed.clone());
     PAGE.with(|p| {
         *p.borrow_mut() = Some(Page {
             outputs: page::outputs(&[], setup.settings.get(SOUND_OUTPUT_KEY), cfg!(windows)),
@@ -344,7 +346,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
 
     let data = app.global::<SettingsData>();
     data.set_tabs(ModelRc::new(VecModel::from(
-        Tab::ALL.iter().map(|t| SharedString::from(t.name())).collect::<Vec<_>>(),
+        Tab::shown().iter().map(|t| SharedString::from(t.name())).collect::<Vec<_>>(),
     )));
     data.set_fonts(strings(FONTS.iter().copied()));
     data.set_sizes(strings(page::size_labels()));
@@ -646,6 +648,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         }
     });
     data.on_open_fact(open_fact);
+    data.on_open_notes(|| open_own_folder(&mo_app::note::notes_dir()));
+    data.on_open_logs(|| open_own_folder(&mo_app::paths::logs_dir()));
     let weak = app.as_weak();
     data.on_move_data(move || {
         let weak = weak.clone();
@@ -1055,6 +1059,11 @@ fn change(key: &str, value: &str) {
             }
         });
     }
+}
+
+/// Marks this data folder as Solomon's (`mo_app::developer`), so his installed copy shows Settings › Developer too.
+pub fn keep_developer() {
+    change(mo_app::developer::SETTING_KEY, "1");
 }
 
 /// A setting as it stands: this app's change, else the C# app's choice (for the pages that remember things). Before
@@ -2320,6 +2329,15 @@ fn show(app: &AppWindow) {
 }
 
 /// A Developer fact's button: open its folder, or show this run's log in its folder.
+/// Opens one of the app's own folders (notes, logs), made first if nothing has been saved in it yet.
+fn open_own_folder(dir: &Path) {
+    let Some(feed) = PAGE.with(|p| p.borrow().as_ref().map(|p| p.feed.clone())) else { return };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::warning("Settings", &format!("Couldn't make {}: {e}", dir.display()));
+    }
+    crate::files::open_folder(&feed, &dir.display().to_string());
+}
+
 fn open_fact(i: i32) {
     let found = PAGE.with(|p| {
         let p = p.borrow();

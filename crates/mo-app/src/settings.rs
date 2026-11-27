@@ -35,6 +35,12 @@ pub enum Tab {
 impl Tab {
     pub const ALL: [Tab; 5] = [Tab::General, Tab::Folders, Tab::Daws, Tab::Shortcuts, Tab::Developer];
 
+    /// The tabs on show: every one on Solomon's own copy, all but Developer on a beta tester's
+    /// ([`crate::developer`]).
+    pub fn shown() -> &'static [Tab] {
+        if crate::developer::on() { &Tab::ALL } else { &Tab::ALL[..4] }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Tab::General => "General",
@@ -50,7 +56,7 @@ impl Tab {
     }
 
     pub fn from_index(i: usize) -> Option<Tab> {
-        Tab::ALL.get(i).copied()
+        Tab::shown().get(i).copied()
     }
 
     /// The tab Settings opens on, from the `settings_tab` setting (the last one used, as in the C# app). The C# app's
@@ -61,7 +67,8 @@ impl Tab {
             "Folders" | "Projects" | "Sounds" | "Plugins" | "MIDI" => Tab::Folders,
             "DAWs" | "DAW links" => Tab::Daws,
             "Shortcuts" => Tab::Shortcuts,
-            "Developer" => Tab::Developer,
+            // Only where it shows: a tester's copy opens General instead.
+            "Developer" if crate::developer::on() => Tab::Developer,
             _ => Tab::General,
         }
     }
@@ -607,7 +614,7 @@ pub fn key_lines(keys: &crate::shortcuts::Shortcuts, search: &str) -> Vec<KeyLin
 /// The Shortcuts tab's words above the list.
 pub const KEYS_NOTE: &str = "Keys that work on every page come first, then each page's own. Click a key and press the \
                              one you want (Esc stops listening); the same idea has the same key on every page. F12 \
-                             stays the note for Claude, and F1 or ? on a page shows its help and keys.";
+                             writes a note, and F1 or ? on a page shows its help and keys.";
 
 /// The credit Slint's royalty-free licence asks for (decided 2026-10-30), with what it means.
 /// How a DAW's link stands, for a row on the DAWs tab: a short state, whether it's working, and the facts under it.

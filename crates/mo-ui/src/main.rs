@@ -127,6 +127,12 @@ fn main() -> Result<(), slint::PlatformError> {
         mo_library::list_copy::keep(&library, &data.join(mo_library::list_copy::FILE_NAME));
     }
     let (settings, writable) = mo_ui::settings::load(&data, &library);
+    // Solomon's own copy shows Settings › Developer; a beta tester's (installed, on a data folder no launcher build has
+    // run on) doesn't.
+    let installed = std::env::current_exe().is_ok_and(|exe| mo_app::update::installed(&exe));
+    let developer_saved = settings.get(mo_app::developer::SETTING_KEY);
+    mo_app::developer::set(mo_app::developer::decide(installed, developer_saved));
+    let keep_developer = mo_app::developer::keeps_setting(installed, developer_saved);
     let shortcuts = Shortcuts::from_setting(settings.get(mo_app::shortcuts::SETTING_KEY));
     // Settings' pace: how many low-priority threads background work gets, from now until the app closes.
     let pace = Pace::from_setting(settings.get(mo_app::app_settings::PACE_KEY));
@@ -206,6 +212,9 @@ fn main() -> Result<(), slint::PlatformError> {
             feed: feed.clone(),
         },
     );
+    if keep_developer {
+        mo_ui::settings::keep_developer();
+    }
     mo_ui::startup::step("Settings page");
     // The widths you dragged the side cards and columns to, kept in the settings.
     mo_ui::widths::connect(&app);
