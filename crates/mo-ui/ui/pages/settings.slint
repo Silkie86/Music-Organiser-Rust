@@ -1243,7 +1243,7 @@ component DeveloperTab inherits VerticalLayout {
     alignment: start;
     SettingsCard {
         title: "Beta checklist";
-        intro: "Try each step with your own songs, sounds and DAWs, and mark how it went. Your marks and notes are kept in the data folder, where Claude reads them; a Problem keeps the log's last lines with it, so Claude can see why. The Self-check steps at the end the app marks by itself, once a day.";
+        intro: "Try each step with your own songs, sounds and DAWs, and mark how it went. Your marks and notes are kept in the data folder; a Problem keeps the log's last lines with it, so the reason can be seen. The Self-check steps at the end the app marks by itself, once a day.";
         HorizontalLayout {
             spacing: Space.md;
             Text {
@@ -1287,7 +1287,7 @@ component DeveloperTab inherits VerticalLayout {
     }
     SettingsCard {
         title: "This build";
-        intro: "Which app is running, and where it keeps its files. Claude reads the logs from these folders.";
+        intro: "Which app is running, and where it keeps its files. The logs in these folders say what the app did.";
         for f[i] in SettingsData.facts: FactLine {
             fact: f;
             clicked => { SettingsData.open-fact(i); }
