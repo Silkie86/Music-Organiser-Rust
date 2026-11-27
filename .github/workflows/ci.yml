@@ -116,15 +116,22 @@ jobs:
         run: |
           cargo fmt --all --check
           cargo fmt --all --check --manifest-path tools/galaxycheck/Cargo.toml
+          cargo fmt --all --check --manifest-path fuzz/Cargo.toml
       # An out-of-date Cargo.lock fails here, with Cargo's own words, not first in the release's locked build (TC-2).
       - name: Cargo.lock is up to date
         if: runner.os == 'Linux'
         run: |
           cargo metadata --locked --format-version 1 > /dev/null
           cargo metadata --locked --format-version 1 --manifest-path tools/galaxycheck/Cargo.toml > /dev/null
+          cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
       - name: Clippy
         if: needs.scope.outputs.rust == 'true'
         run: cargo clippy ${{ needs.scope.outputs.check }} --all-targets
+      # The fuzzer's targets (fuzz/README.md) still build after a reader changes: they run by hand with nightly Rust, so
+      # nothing else would notice. Checked with the app's own build folder, which has most of what they use.
+      - name: Fuzz targets still build
+        if: needs.scope.outputs.rust == 'true' && runner.os == 'Linux'
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins --target-dir target
       # Linux also runs the tests of every crate that uses a changed one; Windows and Mac only the changed crates'.
       - name: Tests
         if: needs.scope.outputs.test != '' && runner.os != 'Linux'

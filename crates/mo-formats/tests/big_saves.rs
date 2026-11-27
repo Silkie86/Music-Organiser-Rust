@@ -147,4 +147,3 @@ fn a_big_midi_file_reads_in_good_time() {
     println!("MIDI file {} bytes", raw.len());
     timed("MIDI", MOST, || drop(mo_formats::midi::read_from(&raw, Path::new("/mo-test-nowhere/big.mid"))));
 }
-
