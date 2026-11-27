@@ -89,8 +89,8 @@ CI.
 
 ## The Mac download (a test build, not signed yet)
 
-The Release workflow's **Mac app** job (on every run, try-outs too) builds the app and the CLAP plugin for Apple
-silicon and Intel and makes `DAWmate-<version>-mac.zip` (`installer/mac/package.sh`): `DAWmate.app` and a Read me.
+The Release workflow's two **Mac build** jobs (on every run, try-outs too) build the app and the CLAP plugin for Apple
+silicon and for Intel side by side (about an hour and a half each from cold); the **Mac app** job joins them and makes `DAWmate-<version>-mac.zip` (`installer/mac/package.sh`): `DAWmate.app` and a Read me.
 It's kept as the run's `mac` download, not put on the release.
 
 - **Inside the app** (as a Mac app keeps what it brings): the CLAP plugin's bundle in `Contents/PlugIns/DAWmate.clap`
