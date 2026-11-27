@@ -26,6 +26,7 @@ use crate::presets::PresetBlob;
 use crate::textscan;
 
 pub mod arrangement;
+pub mod write;
 
 pub const DAW: &str = "Studio One";
 /// Goes up by one whenever the reader finds more (or different) things in the same files (rule 7). 2 is the C#
