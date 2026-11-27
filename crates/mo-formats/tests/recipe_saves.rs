@@ -120,6 +120,19 @@ fn notes() {
 }
 
 #[test]
+fn fender_midi_comes_from_the_media_pool() {
+    // Studio One keeps a part's notes in the media pool (`Performances/*.musicx`), not in song.xml: the MIDI page
+    // found no parts in 945 of Solomon's songs with notes until these were read (real-song test, 27 Nov 2026).
+    let raw = std::fs::read(save("studio-one", "MO Recipe 02 notes.song")).unwrap();
+    let clips = mo_formats::studio_one::Song::open(&raw).unwrap().midi();
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].ppq, 960);
+    let (_, notes) = &clips[0].tracks[0];
+    let got: Vec<_> = notes.iter().map(|n| (n.start, n.length, n.key)).collect();
+    assert_eq!(got, [(0, 960, 60), (960, 960, 62), (1920, 960, 64), (2880, 960, 67)]);
+}
+
+#[test]
 fn fl_volume_automation_goes_from_full_to_half_over_bar_1() {
     let a = fl("03 automation");
     let points: Vec<_> = lane(&a, LaneKind::Automation).clips[0].points.iter().map(|p| (p.beat, p.value)).collect();

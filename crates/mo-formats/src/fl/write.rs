@@ -160,7 +160,7 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
                     }
                 };
                 // FL repeats a pattern clip longer than its pattern: the clip stops where its notes' bars do.
-                let length = ticks(clip.length).unwrap_or(0).min(key.2).max(1);
+                let length = clip_ticks(clip).min(key.2);
                 items.push(Item { at, length, what: PATTERN_BASE + number, track, muted: clip.muted, audio: None });
             } else if clip.audio.is_empty() && clip.points.is_empty() {
                 // A clip with nothing in it (an empty pattern laid out as a section): an empty pattern of its name,
@@ -251,12 +251,29 @@ fn ticks(beats: f64) -> Option<u32> {
     (t.is_finite() && (0.0..u32::MAX as f64).contains(&t)).then_some(t as u32)
 }
 
+/// How long a clip of notes is in the written project's ticks: at least one, so its notes have a tick to be on.
+fn clip_ticks(clip: &PreviewClip) -> u32 {
+    ticks(clip.length).unwrap_or(0).max(1)
+}
+
 /// A clip's notes as a pattern's records, and how long the pattern is: its notes' last bar.
+///
+/// Every note the reader gives is in the clip, so it stays in it here: one that rounds to the clip's end tick or
+/// past it (a note 0.00003 of a beat before a Bitwig clip's end) starts on the clip's last tick instead, and one a
+/// hair before its start (-1e-14 of a beat) on its first. FL doesn't play a note at or after the end of its playlist
+/// item, so without this such a note was lost and the copy refused to save (the real-song test of 27 Nov 2026: 87
+/// of Solomon's Bitwig and Studio One saves).
 fn pattern_notes(clip: &PreviewClip, channel: u16, bar: u32) -> (Vec<[u8; 24]>, u32) {
     let mut records = Vec::new();
     let mut end = 0u32;
+    let last_tick = clip_ticks(clip).saturating_sub(1);
     for n in &clip.notes {
-        let (Some(at), Some(length)) = (ticks(n.start), ticks(n.length)) else { continue };
+        let at = (n.start * PPQ).round();
+        if !at.is_finite() {
+            continue;
+        }
+        let at = at.clamp(0.0, f64::from(last_tick)) as u32;
+        let Some(length) = ticks(n.length) else { continue };
         let length = length.max(1);
         end = end.max(at.saturating_add(length));
         let mut r = [0u8; 24];

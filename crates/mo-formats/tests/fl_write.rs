@@ -227,3 +227,38 @@ fn a_pattern_is_whole_bars_of_the_songs_time_signature() {
     let clip = &back.lanes[0].clips[0];
     assert_eq!((clip.start, clip.length), (0.0, 3.0));
 }
+
+#[test]
+fn a_note_on_a_clips_last_hair_stays_in_the_clip() {
+    // Seen on Solomon's songs (real-song test, 27 Nov 2026): a Bitwig note 0.00003 of a beat before its clip's end,
+    // and a Studio One one a hair before its clip's start. Rounded to FL's ticks, the first landed on the end, where
+    // FL doesn't play it, so the copy lost it and refused to save.
+    let clip = PreviewClip {
+        name: "Bass".into(),
+        start: 128.0,
+        length: 64.0,
+        notes: vec![
+            note(-2.8e-14, 0.5, 39, 40000, false),
+            note(32.0, 1.0, 41, 40000, false),
+            note(63.999_965_667_724_61, 0.000_034_332_275_390_625, 46, 40000, false),
+        ],
+        ..PreviewClip::default()
+    };
+    let mut bass = PreviewLane::new("Bass", LaneKind::Instrument);
+    bass.clips = vec![clip];
+    let song = Arrangement {
+        view: "test",
+        tempo: 140.0,
+        signature: TimeSignature::FOUR_FOUR,
+        lanes: vec![bass],
+        markers: Vec::new(),
+        notes: Vec::new(),
+    };
+    let back = view_of(&write::write(&song, "Edge", 46_000.0).bytes);
+    assert_eq!(back.note_count(), 3);
+    let clip = &back.lanes[0].clips[0];
+    let starts: Vec<f64> = clip.notes.iter().map(|n| n.start).collect();
+    // On the clip's first tick, in its middle, and on its last tick (64 beats is 6,144 ticks at 96 a beat).
+    assert_eq!(starts, [0.0, 32.0, 6143.0 / 96.0]);
+    assert!(clip.notes.iter().all(|n| n.start + n.length <= clip.length + 1e-9));
+}

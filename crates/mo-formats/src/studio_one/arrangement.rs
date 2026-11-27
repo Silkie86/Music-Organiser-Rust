@@ -521,10 +521,14 @@ impl Song<'_> {
                                     .reduce(f64::max)
                                     .unwrap_or(4.0);
                             }
+                            // A note that starts at the part's end doesn't play. The end is worked out through the
+                            // tempo map, so it can come out a hair (1e-13 of a beat) after a note that starts right on
+                            // it: such a note is left out as Studio One leaves it out (seen on Solomon's songs, where
+                            // it made a copy for FL Studio refuse to save).
                             let notes = all
                                 .iter()
                                 .filter(from_offset)
-                                .filter(|n| n.start < offset + length)
+                                .filter(|n| n.start < offset + length - 1e-9)
                                 .take_while(|_| budget.take())
                                 .map(|n| PreviewNote {
                                     start: n.start - offset,
@@ -556,7 +560,8 @@ impl Song<'_> {
                                 // damaged pattern's steps all past the part, or a loop too short to move `at` on).
                                 'passes: while at < length - 1e-9 {
                                     let mut placed = false;
-                                    for n in steps.iter().filter(|n| at + n.start < length) {
+                                    // As for a note part: a step on the part's end doesn't play.
+                                    for n in steps.iter().filter(|n| at + n.start < length - 1e-9) {
                                         if !budget.take() {
                                             break 'passes;
                                         }
@@ -713,6 +718,11 @@ impl Song<'_> {
     }
 
     /// What each clip id in the media pool points at (ids by lower case: Studio One's don't care about letter case).
+    /// Each music part's notes file in the media pool, by its clipID in lower case.
+    pub(super) fn music_files(&mut self) -> HashMap<String, String> {
+        self.pool().music
+    }
+
     fn pool(&mut self) -> Pool {
         let mut pool = Pool::default();
         let Some(text) = self.xml("Song/mediapool.xml") else { return pool };
@@ -876,7 +886,7 @@ impl Song<'_> {
 
     /// A part's notes from its .musicx file: binary JSON holding {timeFormat, events: [{start, pitch, length,
     /// velocity, mute}]}, in beats; a note with no start is at 0.
-    fn musicx_notes(&mut self, entry: &str) -> Vec<PreviewNote> {
+    pub(super) fn musicx_notes(&mut self, entry: &str) -> Vec<PreviewNote> {
         let Some(bytes) = self.entry(entry) else { return Vec::new() };
         let Some(Ubjson::Object(root)) = Ubjson::read(&bytes) else { return Vec::new() };
         let field = |o: &[(String, Ubjson)], key: &str| o.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
@@ -907,7 +917,7 @@ impl Song<'_> {
     }
 
     /// A pattern part's first variation: its steps as notes, and how many beats it takes before it repeats.
-    fn pattern_notes(&mut self, entry: &str) -> (Vec<PreviewNote>, f64) {
+    pub(super) fn pattern_notes(&mut self, entry: &str) -> (Vec<PreviewNote>, f64) {
         let Some(text) = self.xml(entry) else { return (Vec::new(), 0.0) };
         let Ok(doc) = parse(&text) else { return (Vec::new(), 0.0) };
         let Some(p) = elements(doc.root_element()).find(|e| e.tag_name().name() == "PatternPerformance") else {
