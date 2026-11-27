@@ -10,13 +10,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 mod common;
+// Not in `common`: other crates' tests take `common` by its path, and this needs mo-catch.
+#[path = "common/broken.rs"]
+mod broken;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use broken::*;
 use common::ableton::*;
 use common::bitwig::*;
-use common::broken::*;
 use common::midi::*;
 use common::studio_one::*;
 use common::*;
