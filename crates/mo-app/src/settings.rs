@@ -607,7 +607,7 @@ pub fn key_lines(keys: &crate::shortcuts::Shortcuts, search: &str) -> Vec<KeyLin
 /// The Shortcuts tab's words above the list.
 pub const KEYS_NOTE: &str = "Keys that work on every page come first, then each page's own. Click a key and press the \
                              one you want (Esc stops listening); the same idea has the same key on every page. F12 \
-                             stays the note for Claude, and F1 or ? on a page shows its keys.";
+                             stays the note for Claude, and F1 or ? on a page shows its help and keys.";
 
 /// The credit Slint's royalty-free licence asks for (decided 2026-10-30), with what it means.
 /// How a DAW's link stands, for a row on the DAWs tab: a short state, whether it's working, and the facts under it.

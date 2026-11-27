@@ -437,6 +437,14 @@ pub fn refresh_keys(app: &AppWindow) {
 
 /// The key sheet's two lists for `place`: its own keys, and the ones that work everywhere.
 fn show_key_rows(app: &AppWindow, shortcuts: &Shortcuts, place: Place) {
+    let help = mo_app::help::for_place(place);
+    app.set_help_what(help.what.into());
+    app.set_help_tips(ModelRc::new(VecModel::from(
+        help.tips.iter().map(|t| slint::SharedString::from(*t)).collect::<Vec<_>>(),
+    )));
+    // F1, or ? when F1 was given to something else, so the Help sign always names a key that works (rule 15).
+    let help_key = [shortcuts.key_of("app.helpF1"), shortcuts.key_of("app.help")].into_iter().find(|k| !k.is_empty());
+    app.set_help_key(help_key.unwrap_or_default().into());
     let (page, everywhere) = key_rows(shortcuts, place);
     app.set_page_key_rows(ModelRc::new(VecModel::from(page)));
     app.set_key_rows(ModelRc::new(VecModel::from(everywhere)));

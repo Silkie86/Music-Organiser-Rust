@@ -31,8 +31,8 @@ const fn action(id: &'static str, what: &'static str, default_key: &'static str)
 /// Every action that works everywhere in the app. Pages add their own lists later (`songs.*`, `playground.*`…);
 /// a page's own key beats one of these.
 pub const APP_ACTIONS: &[Action] = &[
-    action("app.help", "Show the keys for this page", "?"),
-    action("app.helpF1", "Show the keys for this page (the help key)", "F1"),
+    action("app.help", "Help and keys for this page", "?"),
+    action("app.helpF1", "Help and keys for this page (the help key)", "F1"),
     action("app.jump", "Jump to anything: songs, sounds, presets, MIDI parts, plugins, settings", "Ctrl+K"),
     action("app.goProjects", "Go to Songs", "Ctrl+1"),
     action("app.goSounds", "Go to Sounds", "Ctrl+2"),
