@@ -1957,7 +1957,10 @@ fn pick(app: &AppWindow, row: Option<usize>) {
     data.set_detail_message("Reading…".into());
     fill_panel(app);
     look_for_bounces(app);
-    with_picked(|_, r| crate::arrangement::show_song(app, Some(&r.song.latest.path), r.song.latest.file_missing));
+    with_picked(|_, r| {
+        crate::arrangement_play::for_song(&r.song.key);
+        crate::arrangement::show_song(app, Some(&r.song.latest.path), r.song.latest.file_missing);
+    });
     READER.with(|slot| {
         if let Some(reader) = slot.borrow().as_ref() {
             reader.ask((asked, id));

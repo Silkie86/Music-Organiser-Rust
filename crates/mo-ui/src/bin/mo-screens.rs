@@ -850,6 +850,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     shots.push(("arrangement-light.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &graphite);
+    // The song's MIDI: the playhead moved by a click on the ruler, and the Sounds panel open on the bass, with its
+    // sounds to pick from.
+    mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
+    let header = arrangement.get_header_width();
+    arrangement.invoke_grab(header + 160.0, 6.0);
+    arrangement.invoke_let_go();
+    arrangement.set_sounds_open(true);
+    arrangement.invoke_pick_line(2);
+    let sounds = capture(&window);
+    if !arrangement.get_playhead_shown() || arrangement.get_sound_open() != 2 || !arrangement.get_can_play() {
+        return Err(
+            "arrangement-sounds.png: no playhead after a click on the ruler, or the bass's sounds aren't open".into()
+        );
+    }
+    shots.push(("arrangement-sounds.png".into(), sounds));
+    arrangement.invoke_pick_line(2);
+    arrangement.set_sounds_open(false);
+    mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
     // A song with things to look at, its Health strip open.
     mo_ui::songs::show_picked(&app, 1, sample_detail(), Tab::Overview);
     app.global::<mo_ui::SongsData>().set_health_open(true);

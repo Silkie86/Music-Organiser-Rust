@@ -2,7 +2,7 @@
 // on a background thread, and the graphics card draws them into a picture (mo-ui's arrangement.rs and canvas.rs; the
 // processor where there's no card); the words are laid on top here, in the app's own fonts, each clipped to its strip:
 // track names on the left, the ruler along the top, clip names on the timeline.
-import { Theme, CutText, Type, Space, ToggleChip, PointerPad, HoverNote, Seam, Widths } from "../studio.slint";
+import { Theme, CutText, Type, Space, ToggleChip, PointerPad, HoverNote, Seam, Widths, StudioButton, Icons, CloseButton, Caps, LinkText, ValueLine } from "../studio.slint";
 
 // How a label on the picture looks.
 export enum ArrKind {
@@ -23,6 +23,25 @@ export struct ArrLabel {
     text: string,
     kind: ArrKind,
     muted: bool,
+}
+
+// One of the song's instruments in the Sounds panel, and the General MIDI sound it plays with (mo-ui's
+// arrangement_play.rs).
+export struct ArrSound {
+    name: string,
+    sound: string,
+    // The sound and why it was matched, or that you picked it.
+    tip: string,
+    // You picked it (it isn't the one matched).
+    yours: bool,
+    colour: color,
+    has-colour: bool,
+}
+
+// A sound to pick in the panel's open line: its name, and whether it's the one playing.
+export struct ArrChoice {
+    name: string,
+    on: bool,
 }
 
 // What the preview shows and what it reports, filled and answered by mo-ui's arrangement.rs.
@@ -69,6 +88,70 @@ export global ArrangementData {
     callback side-let-go();
     callback double-clicked();
     callback left();
+
+    // Playing the song's MIDI with General MIDI sounds (mo-ui's arrangement_play.rs): Play, the playhead (a click on
+    // the ruler moves it), and the Sounds panel, where each instrument's sound can be changed.
+    in property <bool> can-play;
+    in property <string> play-tip;
+    in property <string> play-key;
+    in property <bool> playing;
+    // Under the picture: why it can't play (no SoundFont, say).
+    in property <string> play-note;
+    in property <bool> playhead-shown;
+    in property <length> playhead-x;
+    callback toggle-play();
+    // While it plays: where the playhead is now.
+    callback tick();
+    in property <[ArrSound]> sounds;
+    in property <string> sounds-badge;
+    in-out property <bool> sounds-open;
+    // The line whose sounds are shown to pick from (-1 none), the family shown there, and its sounds.
+    in property <int> sound-open: -1;
+    in property <[string]> families;
+    in property <int> family-shown;
+    in property <[ArrChoice]> family-sounds;
+    callback pick-line(int);
+    callback show-family(int);
+    callback pick-sound(int);
+    callback matched-sound();
+}
+
+// The sounds to pick from under an open line: General MIDI's families, then the family's sounds.
+component SoundPicker inherits VerticalLayout {
+    in property <bool> yours;
+    padding-left: Space.sm;
+    padding-right: Space.sm;
+    padding-bottom: Space.sm;
+    spacing: Space.sm;
+    FlexboxLayout {
+        spacing: Space.xs;
+        for f[j] in ArrangementData.families: ToggleChip {
+            text: f;
+            on: j == ArrangementData.family-shown;
+            clicked => { ArrangementData.show-family(j); }
+        }
+    }
+    Rectangle {
+        height: 1px;
+        background: Theme.stroke;
+    }
+    FlexboxLayout {
+        spacing: Space.xs;
+        for c[k] in ArrangementData.family-sounds: ToggleChip {
+            text: c.name;
+            on: c.on;
+            clicked => { ArrangementData.pick-sound(k); }
+        }
+    }
+    if root.yours: HorizontalLayout {
+        alignment: start;
+        LinkText {
+            text: "Back to the matched sound";
+            tint: Theme.muted;
+            font-size: Type.meta;
+            clicked => { ArrangementData.matched-sound(); }
+        }
+    }
 }
 
 component Words inherits Rectangle {
@@ -102,12 +185,33 @@ component Words inherits Rectangle {
 // The drawn arrangement, with its view chips, summary and notes above it.
 export component ArrangementPreview inherits VerticalLayout {
     spacing: Space.sm;
+    // The playhead follows the song while its MIDI plays.
+    Timer {
+        interval: 33ms;
+        running: ArrangementData.playing;
+        triggered => { ArrangementData.tick(); }
+    }
     // In a narrow panel the chips and the summary wrap onto lines of their own, so none runs past its edge. Chips
     // only when there's more than one view.
     FlexboxLayout {
         spacing: Space.sm;
         cross-axis-alignment: center;
         vertical-stretch: 0;
+        StudioButton {
+            icon: ArrangementData.playing ? Icons.stop : Icons.play;
+            tip: ArrangementData.playing ? "Stop" : ArrangementData.play-tip;
+            key: ArrangementData.play-key;
+            enabled: ArrangementData.can-play || ArrangementData.playing;
+            clicked => { ArrangementData.toggle-play(); }
+        }
+        if ArrangementData.sounds.length > 0: ToggleChip {
+            icon: Icons.keys;
+            badge: ArrangementData.sounds-badge;
+            text: "Sounds";
+            tip: "The General MIDI sound each instrument plays with; click one to change it";
+            on: ArrangementData.sounds-open;
+            clicked => { ArrangementData.sounds-open = !ArrangementData.sounds-open; }
+        }
         for v[i] in ArrangementData.views.length > 1 ? ArrangementData.views : []: ToggleChip {
             text: v;
             on: i == ArrangementData.view;
@@ -121,6 +225,12 @@ export component ArrangementPreview inherits VerticalLayout {
             font-size: Type.meta;
             vertical-alignment: center;
         }
+    }
+    if ArrangementData.play-note != "": Text {
+        text: ArrangementData.play-note;
+        color: Theme.warning;
+        font-size: Type.meta;
+        wrap: word-wrap;
     }
     for n in ArrangementData.notes: Text {
         text: n;
@@ -167,6 +277,24 @@ export component ArrangementPreview inherits VerticalLayout {
                 width: 1px;
                 height: max(0px, parent.height - ArrangementData.ruler-height);
                 background: Theme.muted;
+            }
+            // The playhead: where the song's MIDI plays from, or is playing now.
+            if ArrangementData.playhead-shown: Rectangle {
+                x: ArrangementData.playhead-x - 1px;
+                y: 0;
+                width: 2px;
+                height: parent.height;
+                background: Theme.accent;
+            }
+            if ArrangementData.playhead-shown: Path {
+                x: ArrangementData.playhead-x - 5px;
+                y: 0;
+                width: 10px;
+                height: 7px;
+                viewbox-width: 10;
+                viewbox-height: 7;
+                commands: "M 0 0 L 10 0 L 5 7 Z";
+                fill: Theme.accent;
             }
             Words {
                 x: 0;
@@ -255,6 +383,59 @@ export component ArrangementPreview inherits VerticalLayout {
                 at-y: ArrangementData.hover-y;
                 room-width: parent.width;
                 room-height: parent.height;
+            }
+            // Each instrument's sound, over the timeline's right: on top of all, so it takes the mouse first.
+            if ArrangementData.sounds-open: Rectangle {
+                width: min(340px, max(240px, parent.width - ArrangementData.header-width - 2 * Space.sm));
+                x: parent.width - self.width - Space.sm;
+                y: ArrangementData.ruler-height + Space.xs;
+                height: max(0px, parent.height - self.y - Space.sm);
+                background: Theme.surface-raised;
+                border-radius: Theme.radius;
+                border-width: 1px;
+                border-color: Theme.edge;
+                drop-shadow-color: Theme.shadow;
+                drop-shadow-blur: 12px;
+                // Clicks and the wheel on it stay on it.
+                TouchArea {
+                    scroll-event(e) => { accept }
+                }
+                VerticalLayout {
+                    padding: Space.xs;
+                    spacing: Space.xs;
+                    HorizontalLayout {
+                        padding-left: Space.sm;
+                        Caps {
+                            text: "SOUNDS";
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        CloseButton {
+                            tip: "Close";
+                            clicked => { ArrangementData.sounds-open = false; }
+                        }
+                    }
+                    Flickable {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            alignment: start;
+                            for s[i] in ArrangementData.sounds: VerticalLayout {
+                                ValueLine {
+                                    name: s.name;
+                                    value: s.sound;
+                                    tip: s.tip;
+                                    changed: s.yours;
+                                    tint: s.has-colour ? s.colour : Theme.faint;
+                                    open: i == ArrangementData.sound-open;
+                                    clicked => { ArrangementData.pick-line(i); }
+                                }
+                                if i == ArrangementData.sound-open: SoundPicker {
+                                    yours: s.yours;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

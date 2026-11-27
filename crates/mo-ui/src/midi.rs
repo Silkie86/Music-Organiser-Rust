@@ -3699,6 +3699,26 @@ pub fn sample() -> Loaded {
 
 /// The SoundFont read last, kept for the next part: reading GeneralUser GS takes a moment and 31 MB.
 static FONT: std::sync::Mutex<Option<(PathBuf, mo_audio::gm::Font)>> = std::sync::Mutex::new(None);
+/// The SoundFont at `path`, read once and kept ([`FONT`]) for the next part, and for the Songs page's arrangement.
+/// Reading it takes a moment: call it off the window's thread.
+pub fn font_at(path: &Path) -> Result<mo_audio::gm::Font, String> {
+    let mut kept = FONT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match kept.as_ref() {
+        Some((at, font)) if at == path => Ok(font.clone()),
+        _ => {
+            let font = mo_audio::gm::open(path)?;
+            *kept = Some((path.to_owned(), font.clone()));
+            Ok(font)
+        }
+    }
+}
+
+/// The SoundFont parts play with as the MIDI page last found it (none when it hasn't looked yet, or there's none),
+/// for the Songs page's arrangement; it looks again itself when this has none ([`look_for_soundfont`]).
+pub fn soundfont_found() -> Option<PathBuf> {
+    soundfont()
+}
+
 /// The newest play asked for: a loop made for an older ask (or after Stop) isn't played.
 static PLAY_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// The newest play that reached the player.
@@ -3975,6 +3995,7 @@ fn play_from(app: &AppWindow, at: usize, resume: bool) {
     crate::sounds::stop_for_another(app);
     crate::curve_editor::call_off_tone();
     crate::song_player::stop_for_another(app);
+    crate::arrangement_play::stop_for_another(app);
     data.set_playing(true);
     data.set_play_note("".into());
     // A loop made again while it plays keeps its own note (that only its first bars play) until the new one starts
@@ -4125,17 +4146,7 @@ fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<M
     if heard.is_empty() {
         return Err("Every note in it is muted, so there's nothing to hear.".to_owned());
     }
-    let font = {
-        let mut kept = FONT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match kept.as_ref() {
-            Some((path, font)) if *path == ask.font => font.clone(),
-            _ => {
-                let font = mo_audio::gm::open(&ask.font)?;
-                *kept = Some((ask.font.clone(), font.clone()));
-                font
-            }
-        }
-    };
+    let font = font_at(&ask.font)?;
     // Your speed goes for the song's parts too: they're made at the same tempo as the part.
     let with = match (&ask.with, ask.speed) {
         (Some(with), Some(speed)) => Some(Arc::new(SongBars { tempo: Some(speed), ..SongBars::clone(with) })),

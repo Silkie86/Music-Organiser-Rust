@@ -191,6 +191,155 @@ pub fn render_together(font: &Font, parts: &[Part]) -> Result<AudioData, String>
     })
 }
 
+/// A whole song's parts played by one synth as a band plays them ([`render_together`]'s channels and sounds), once
+/// through from any place in it and made as it plays ([`crate::play::Maker`]): a song of any length starts at once
+/// and never sits in memory whole. Each part's notes are placed by its own tempo and ticks to a beat; its `length` is
+/// left alone (nothing goes round).
+pub struct SongSound {
+    font: Font,
+    /// Every note: where it starts and ends (frames at [`RATE`]), its channel, key and velocity, by where it starts.
+    notes: Vec<(usize, usize, i32, u8, u8)>,
+    /// The sound each channel is set to.
+    sounds: Vec<(i32, u8)>,
+    /// Where the last note ends, in frames.
+    end: usize,
+}
+
+/// How long a song's sound goes on past its last note's end, for the last notes' tails: two seconds.
+const TAIL_FRAMES: usize = 2 * RATE as usize;
+
+/// How far before where it's asked to start a song's synth starts playing, unheard, so the notes held over that place
+/// and the tails of the ones just before are there as it starts (a note held from further back still starts there).
+const WARM_FRAMES: usize = RATE as usize;
+
+/// How long each part of a song's sound is as it's handed on: half a second, as a file's parts are read (so the
+/// player's few parts ahead are eight seconds of it).
+const SONG_PART_FRAMES: usize = (RATE / 2) as usize;
+
+impl SongSound {
+    pub fn new(font: &Font, parts: &[Part]) -> SongSound {
+        let at =
+            |part: &Part, ticks: i64| (ticks.max(0) as f64 * frames_per_tick(part.tempo, part.ppq)).round() as usize;
+        let channels = channels_of(parts);
+        let mut notes = Vec::with_capacity(parts.iter().map(|part| part.notes.len()).sum());
+        for (part, &channel) in parts.iter().zip(&channels) {
+            for n in part.notes {
+                let on = at(part, n.start);
+                let off = at(part, n.start.saturating_add(n.length.max(1))).max(on + 1);
+                notes.push((on, off, channel, n.key.min(127), n.velocity.clamp(1, 127)));
+            }
+        }
+        notes.sort_unstable();
+        let end = notes.iter().map(|n| n.1).max().unwrap_or(0);
+        SongSound { font: Arc::clone(font), notes, sounds: sounds_of(parts, &channels), end }
+    }
+
+    /// How long it plays, in seconds: to its last note's end.
+    pub fn seconds(&self) -> f64 {
+        self.end as f64 / f64::from(RATE)
+    }
+
+    /// Makes the sound from frame `from` to the end, a part at a time, handing each to `put` until it says stop. None
+    /// past the end.
+    fn make_from(&self, from: usize, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) -> Result<(), String> {
+        let total = self.end + TAIL_FRAMES;
+        if from >= total {
+            return Ok(());
+        }
+        let mut settings = SynthesizerSettings::new(RATE as i32);
+        settings.maximum_polyphony = VOICES_TOGETHER;
+        settings.enable_reverb_and_chorus = true;
+        let mut synth =
+            Synthesizer::new(&self.font, &settings).map_err(|e| format!("The synth wouldn't start: {e:?}"))?;
+        for &(channel, program) in &self.sounds {
+            synth.process_midi_message(channel, 0xC0, i32::from(program), 0);
+        }
+        let warm = from.saturating_sub(WARM_FRAMES);
+        // Every note on and off from `warm` on: (frame, off before on at the same frame, channel, key, velocity). A
+        // note held over `warm` starts there.
+        let mut events: Vec<(usize, bool, i32, u8, u8)> = Vec::new();
+        for &(on, off, channel, key, velocity) in &self.notes {
+            if off <= warm {
+                continue;
+            }
+            events.push((on.max(warm), false, channel, key, velocity));
+            events.push((off, true, channel, key, 0));
+        }
+        events.sort_unstable_by_key(|&(frame, off, channel, key, _)| (frame, !off, channel, key));
+
+        let mut part = (vec![0.0f32; SONG_PART_FRAMES], vec![0.0f32; SONG_PART_FRAMES]);
+        let mut filled = 0;
+        let mut scratch = (vec![0.0f32; 4096], vec![0.0f32; 4096]);
+        let mut done = warm;
+        // Makes the sound up to `to`: unheard before `from`, then into parts handed on as each fills. False once
+        // they're no longer wanted.
+        let mut render_to = |synth: &mut Synthesizer, done: &mut usize, to: usize| -> bool {
+            let to = to.min(total);
+            while *done < to {
+                if *done < from {
+                    let n = (to.min(from) - *done).min(scratch.0.len());
+                    synth.render(&mut scratch.0[..n], &mut scratch.1[..n]);
+                    *done += n;
+                    continue;
+                }
+                let n = (to - *done).min(SONG_PART_FRAMES - filled);
+                synth.render(&mut part.0[filled..filled + n], &mut part.1[filled..filled + n]);
+                filled += n;
+                *done += n;
+                if filled == SONG_PART_FRAMES {
+                    filled = 0;
+                    let whole =
+                        std::mem::replace(&mut part, (vec![0.0f32; SONG_PART_FRAMES], vec![0.0f32; SONG_PART_FRAMES]));
+                    if !put(vec![whole.0, whole.1]) {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+        // How many notes hold each key of each channel down, as in `render_together`.
+        let mut held = [[0u32; 128]; CHANNELS];
+        for (frame, off, channel, key, velocity) in events {
+            if frame > done && !render_to(&mut synth, &mut done, frame) {
+                return Ok(());
+            }
+            let Some(holding) = held.get_mut(channel as usize).and_then(|keys| keys.get_mut(usize::from(key))) else {
+                continue;
+            };
+            if off {
+                *holding = holding.saturating_sub(1);
+                if *holding == 0 {
+                    synth.note_off(channel, i32::from(key));
+                }
+            } else {
+                *holding += 1;
+                synth.note_on(channel, i32::from(key), i32::from(velocity));
+            }
+        }
+        if !render_to(&mut synth, &mut done, total) {
+            return Ok(());
+        }
+        if filled > 0 {
+            part.0.truncate(filled);
+            part.1.truncate(filled);
+            put(vec![part.0, part.1]);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "play")]
+impl crate::play::Maker for SongSound {
+    fn rate(&self) -> u32 {
+        RATE
+    }
+
+    fn make(&self, seconds: f64, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) -> Result<(), String> {
+        let from = if seconds.is_finite() { (seconds.max(0.0) * f64::from(RATE)).round() as usize } else { 0 };
+        self.make_from(from, put)
+    }
+}
+
 /// The synth's MIDI channels.
 const CHANNELS: usize = 16;
 
@@ -572,5 +721,50 @@ mod tests {
         println!("together and added up differ by {furthest} at the most, the loudest being {loudest}");
         assert!(loudest > 0.01 && furthest < 1e-3, "off by {furthest}, loudest {loudest}");
         println!("how loud each is: {:?}, together {}", alone.iter().map(level).collect::<Vec<_>>(), level(&together));
+    }
+
+    /// With a real SoundFont (MO_SOUNDFONT=path): a song made as it plays goes once through to its last note's end and
+    /// its tail, in short parts, and made from part way through a held chord, the chord is heard from the first frame.
+    #[test]
+    #[ignore = "needs a SoundFont: MO_SOUNDFONT=path cargo test -p mo-audio --features gm -- --ignored"]
+    fn a_song_is_made_once_through_from_any_place_with_a_real_soundfont() {
+        let Some(path) = std::env::var_os("MO_SOUNDFONT") else { return };
+        let font = open(Path::new(&path)).unwrap();
+        // Eight beats of a held chord, and a kick on each beat, at 120: four seconds.
+        let chord: Vec<Note> =
+            [60, 64, 67].iter().map(|&key| Note { start: 0, length: 8 * 96, key, velocity: 100 }).collect();
+        let kick: Vec<Note> = (0..8).map(|i| Note { start: i * 96, length: 48, key: 36, velocity: 110 }).collect();
+        let part = |notes, program, drums| Part { notes, ppq: 96, length: 0, tempo: 120.0, program, drums };
+        let song = SongSound::new(&font, &[part(&chord, 4, false), part(&kick, 0, true)]);
+        assert!((song.seconds() - 4.0).abs() < 1e-6, "{}", song.seconds());
+
+        let mut parts: Vec<Vec<Vec<f32>>> = Vec::new();
+        let started = std::time::Instant::now();
+        song.make_from(0, &mut |part| {
+            parts.push(part);
+            true
+        })
+        .unwrap();
+        println!("six seconds made in {:?}", started.elapsed());
+        assert!(parts.iter().all(|p| p.len() == 2 && p[0].len() == p[1].len() && p[0].len() <= SONG_PART_FRAMES));
+        let frames: usize = parts.iter().map(|p| p[0].len()).sum();
+        assert_eq!(frames, 4 * RATE as usize + TAIL_FRAMES);
+        let loud = parts.iter().flat_map(|p| &p[0]).fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(loud > 0.01 && loud < 1.5, "{loud}");
+
+        // From two seconds in: the chord sounds at once, and it stops when asked.
+        let mut first: Option<Vec<f32>> = None;
+        let mut handed = 0;
+        song.make_from(2 * RATE as usize, &mut |part| {
+            handed += 1;
+            first.get_or_insert(part[0].clone());
+            handed < 3
+        })
+        .unwrap();
+        assert_eq!(handed, 3);
+        let start = first.unwrap()[..256].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(start > 0.001, "{start}");
+        // Past its tail: nothing.
+        song.make_from(7 * RATE as usize, &mut |_| panic!("nothing to make")).unwrap();
     }
 }

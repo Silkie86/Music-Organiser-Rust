@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod app_settings;
 pub mod arrangement;
+pub mod arrangement_play;
 pub mod background;
 pub mod backup;
 pub mod backup_gone;
