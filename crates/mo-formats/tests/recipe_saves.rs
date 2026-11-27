@@ -133,6 +133,39 @@ fn fender_midi_comes_from_the_media_pool() {
 }
 
 #[test]
+fn fender_midi_is_what_the_arrangement_plays_in_every_save() {
+    // Cut to what each part shows, transposed as the part is (save 09), the playing take only: the same notes as the
+    // arrangement, part by part.
+    for entry in std::fs::read_dir(save("studio-one", "")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "song") {
+            continue;
+        }
+        let raw = std::fs::read(&path).unwrap();
+        let mut song = mo_formats::studio_one::Song::open(&raw).unwrap();
+        let a = song.arrangement();
+        let midi: Vec<(i64, u8)> =
+            song.midi().iter().flat_map(|c| &c.tracks).flat_map(|(_, n)| n).map(|n| (n.start, n.key)).collect();
+        let shown: Vec<(i64, u8)> = a
+            .lanes
+            .iter()
+            .filter(|l| l.kind == LaneKind::Instrument && !l.layer)
+            .flat_map(|l| &l.clips)
+            .flat_map(|c| &c.notes)
+            .map(|n| ((n.start * 960.0).round() as i64, n.key))
+            .collect();
+        assert_eq!(midi, shown, "{}", path.display());
+    }
+    let raw = std::fs::read(save("studio-one", "MO Recipe 09 transpose.song")).unwrap();
+    let clips = mo_formats::studio_one::Song::open(&raw).unwrap().midi();
+    let keys: Vec<u8> = clips.iter().flat_map(|c| &c.tracks).flat_map(|(_, n)| n).map(|n| n.key).collect();
+    let a = fender("09 transpose");
+    let shown: Vec<u8> = lane(&a, LaneKind::Instrument).clips.iter().flat_map(|c| &c.notes).map(|n| n.key).collect();
+    assert!(!keys.is_empty());
+    assert_eq!(keys, shown);
+}
+
+#[test]
 fn fl_volume_automation_goes_from_full_to_half_over_bar_1() {
     let a = fl("03 automation");
     let points: Vec<_> = lane(&a, LaneKind::Automation).clips[0].points.iter().map(|p| (p.beat, p.value)).collect();

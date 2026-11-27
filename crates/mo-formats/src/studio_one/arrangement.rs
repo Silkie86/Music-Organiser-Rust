@@ -718,11 +718,6 @@ impl Song<'_> {
     }
 
     /// What each clip id in the media pool points at (ids by lower case: Studio One's don't care about letter case).
-    /// Each music part's notes file in the media pool, by its clipID in lower case.
-    pub(super) fn music_files(&mut self) -> HashMap<String, String> {
-        self.pool().music
-    }
-
     fn pool(&mut self) -> Pool {
         let mut pool = Pool::default();
         let Some(text) = self.xml("Song/mediapool.xml") else { return pool };
@@ -886,7 +881,7 @@ impl Song<'_> {
 
     /// A part's notes from its .musicx file: binary JSON holding {timeFormat, events: [{start, pitch, length,
     /// velocity, mute}]}, in beats; a note with no start is at 0.
-    pub(super) fn musicx_notes(&mut self, entry: &str) -> Vec<PreviewNote> {
+    fn musicx_notes(&mut self, entry: &str) -> Vec<PreviewNote> {
         let Some(bytes) = self.entry(entry) else { return Vec::new() };
         let Some(Ubjson::Object(root)) = Ubjson::read(&bytes) else { return Vec::new() };
         let field = |o: &[(String, Ubjson)], key: &str| o.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
@@ -917,7 +912,7 @@ impl Song<'_> {
     }
 
     /// A pattern part's first variation: its steps as notes, and how many beats it takes before it repeats.
-    pub(super) fn pattern_notes(&mut self, entry: &str) -> (Vec<PreviewNote>, f64) {
+    fn pattern_notes(&mut self, entry: &str) -> (Vec<PreviewNote>, f64) {
         let Some(text) = self.xml(entry) else { return (Vec::new(), 0.0) };
         let Ok(doc) = parse(&text) else { return (Vec::new(), 0.0) };
         let Some(p) = elements(doc.root_element()).find(|e| e.tag_name().name() == "PatternPerformance") else {

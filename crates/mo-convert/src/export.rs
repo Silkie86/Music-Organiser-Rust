@@ -105,10 +105,12 @@ pub fn copy_for(
     }
     let raw = std::fs::read(project).map_err(|e| format!("Couldn't read the song: {e}"))?;
     let mut views = arrangement::read_bytes(project, &raw);
-    // The first view, unless it's empty and another isn't: an FL song played in pattern mode has nothing in its
-    // playlist, and its second view lays its patterns out one after another, as it opens in Bitwig (1,743 of
-    // Solomon's FL saves in the real-song test of 27 Nov 2026 couldn't be copied before).
-    let chosen = views.iter().position(|v| !v.lanes.is_empty()).unwrap_or(0);
+    // The first view, unless nothing plays in it (no notes, no audio) and something does in another: an FL song
+    // played in pattern mode has no patterns in its playlist (an automation clip may be there on its own), and its
+    // second view lays its patterns out one after another, as it opens in Bitwig (1,743 of Solomon's FL saves in the
+    // real-song test of 27 Nov 2026 couldn't be copied before).
+    let plays = |v: &Arrangement| counts(v) != (0, 0);
+    let chosen = if views.first().is_some_and(plays) { 0 } else { views.iter().position(plays).unwrap_or(0) };
     let first_view = views.first().map(|v| v.view);
     if views.is_empty() {
         return Err("The app can't read this kind of project's arrangement.".into());
@@ -123,10 +125,6 @@ pub fn copy_for(
     let missing = find_samples(&mut song, find);
     let stem = paths::stem(&project.to_string_lossy()).to_owned();
     let (bytes, mut left_out) = daw.write(&song, &stem);
-    // Why the copy is laid out as it is, first.
-    if let Some(why) = why_not_first {
-        left_out.insert(0, why);
-    }
     if bytes.is_empty() {
         return Err("The new project couldn't be put together.".into());
     }
@@ -158,6 +156,11 @@ pub fn copy_for(
         // False when the name was taken while this saved (a second press, another program): the next name is tried.
         if save_checked_new(&file, &bytes, |b| check(&file, b))? {
             let mut message = format!("Saved a copy for {} as {}.", daw.name(), file.display());
+            // Why the copy is laid out as it is, before what didn't go across.
+            if let Some(why) = &why_not_first {
+                message.push(' ');
+                message.push_str(why);
+            }
             if !left_out.is_empty() {
                 message.push_str(" Not carried over: ");
                 message.push_str(&left_out.join(" "));
@@ -298,7 +301,8 @@ mod tests {
         let views = arrangement::read(&flp).unwrap();
         assert!(views[0].lanes.is_empty() && views[1].note_count() > 0, "{views:?}");
         let copy = copy_for(&flp, &d.join("Exports"), Daw::StudioOne, &as_named).unwrap();
-        assert!(copy.left_out[0].contains("As it opens in Bitwig"), "{:?}", copy.left_out);
+        assert!(copy.message.contains("so the copy is laid out \"As it opens in Bitwig\""), "{}", copy.message);
+        assert!(!copy.left_out.iter().any(|l| l.contains("laid out")), "{:?}", copy.left_out);
         let back = arrangement::read(&copy.file).unwrap().remove(0);
         assert_eq!(back.note_count(), views[1].note_count());
     }

@@ -262,3 +262,55 @@ fn a_note_on_a_clips_last_hair_stays_in_the_clip() {
     assert_eq!(starts, [0.0, 32.0, 6143.0 / 96.0]);
     assert!(clip.notes.iter().all(|n| n.start + n.length <= clip.length + 1e-9));
 }
+
+#[test]
+fn a_clip_that_starts_before_the_song_starts_with_it() {
+    // A Studio One part a 20th of a beat before the song's start (seen on Solomon's songs): FL's playlist has nothing
+    // before its start, so the whole clip, and every note in it, was left out and the copy refused to save.
+    let clip = PreviewClip {
+        name: "Diva".into(),
+        start: -0.0459,
+        length: 8.0459,
+        notes: vec![note(0.0, 1.0, 44, 40000, false), note(2.0459, 1.0, 46, 40000, false)],
+        ..PreviewClip::default()
+    };
+    let mut keys = PreviewLane::new("Diva", LaneKind::Instrument);
+    keys.clips = vec![clip];
+    let mut drums = PreviewLane::new("Loop", LaneKind::Audio);
+    drums.clips = vec![PreviewClip {
+        start: -1.0,
+        length: 5.0,
+        audio: vec![AudioPart {
+            path: r"C:\Loops\Loop.wav".into(),
+            start: 0.0,
+            length: 5.0,
+            from: 0.5,
+            seconds_per_beat: Some(0.5),
+            ..AudioPart::default()
+        }],
+        ..PreviewClip::default()
+    }];
+    let song = Arrangement {
+        view: "test",
+        tempo: 120.0,
+        signature: TimeSignature::FOUR_FOUR,
+        lanes: vec![keys, drums],
+        markers: Vec::new(),
+        notes: Vec::new(),
+    };
+    let written = write::write(&song, "Early", 46_000.0);
+    assert!(
+        written.left_out.iter().any(|l| l.contains("a note before the song's start plays")),
+        "{:?}",
+        written.left_out
+    );
+    let back = view_of(&written.bytes);
+    assert_eq!(back.note_count(), 2);
+    let starts: Vec<f64> =
+        back.lanes[0].clips.iter().flat_map(|c| c.notes.iter().map(move |n| c.start + n.start)).collect();
+    assert_eq!(starts, [0.0, 2.0]);
+    // The audio is cut at the song's start: a beat (half a second) later into the file, a beat shorter.
+    let part = &back.lanes[1].clips[0].audio[0];
+    assert_eq!(back.lanes[1].clips[0].start, 0.0);
+    assert!((part.from - 1.0).abs() < 1e-3 && (part.length - 4.0).abs() < 1e-3, "{part:?}");
+}

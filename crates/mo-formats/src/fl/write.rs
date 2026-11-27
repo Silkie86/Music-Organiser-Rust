@@ -1,4 +1,4 @@
-//! Writes a new FL Studio 25 project from a song's arrangement (any DAW's, as the readers give it): its tempo, time
+﻿//! Writes a new FL Studio 25 project from a song's arrangement (any DAW's, as the readers give it): its tempo, time
 //! signature, markers, tracks and their names, a pattern for each clip of notes, and its audio clips. What can't go
 //! across (plugins and their settings, automation, a stretched clip's stretch) is listed in [`Written::left_out`].
 //!
@@ -28,7 +28,7 @@ use super::events::{
     self, EV_CHANNEL_NEW, EV_PATTERN_NAME, EV_PATTERN_NEW, EV_PATTERN_NOTES, EV_PLAYLIST, EV_PLUGIN_NAME,
     EV_SAMPLE_PATH, EV_TEMPO, EV_TITLE, Event,
 };
-use crate::arrangement::{Arrangement, LaneKind, PreviewClip};
+use crate::arrangement::{Arrangement, AudioPart, LaneKind, PreviewClip, PreviewNote};
 
 /// FL Studio 25's empty project (recipe save 01).
 const TEMPLATE: &[u8] = include_bytes!("../../tests/fixtures/recipe/fl/MO Recipe 01 empty.flp");
@@ -117,6 +117,7 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
     let mut automation = false;
     let mut too_many_patterns = false;
     let mut gain = false;
+    let mut early_notes = 0usize;
     // A pattern is whole bars of the song's time signature.
     let bar = ticks(song.signature.beats()).unwrap_or(4 * PPQ as u32).max(1);
 
@@ -137,6 +138,17 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
         track_names.push((lane.name.clone(), lane.muted));
         let mut sampler: Option<u16> = None;
         for clip in &lane.clips {
+            // A clip that starts before the song does (a Studio One part a 20th of a beat early, seen on Solomon's
+            // songs) starts with the song instead: FL's playlist has nothing before its start.
+            let from_start;
+            let clip = if clip.start < 0.0 && clip.start + clip.length > 0.0 {
+                let (moved, early) = from_song_start(clip, 60.0 / tempo);
+                early_notes += early;
+                from_start = moved;
+                &from_start
+            } else {
+                clip
+            };
             let Some(at) = ticks(clip.start) else { continue };
             if !clip.notes.is_empty() {
                 let channel = *sampler.get_or_insert_with(|| {
@@ -220,6 +232,13 @@ pub fn write(song: &Arrangement, title: &str, created: f64) -> Written {
     if gain {
         left_out.push("Audio clips' own volume: they play at full volume.".into());
     }
+    if early_notes > 0 {
+        left_out.push(format!(
+            "Where {} before the song's start play{}: on its very start.",
+            if early_notes == 1 { "a note".to_owned() } else { format!("{early_notes} notes") },
+            if early_notes == 1 { "s" } else { "" }
+        ));
+    }
     if automation {
         left_out.push("Automation.".into());
     }
@@ -245,31 +264,87 @@ fn tempo_of(song: &Arrangement) -> f64 {
     if song.tempo.is_finite() { song.tempo.clamp(SLOWEST, FASTEST) } else { 120.0 }
 }
 
+/// A clip that starts before the song, from the song's start: its notes where they were (one before the start on the
+/// start), its audio cut at the start. Also how many notes were moved to the start. `spb` is the song's seconds a beat,
+/// for audio that doesn't say its own.
+fn from_song_start(clip: &PreviewClip, spb: f64) -> (PreviewClip, usize) {
+    let shift = clip.start;
+    let mut early = 0;
+    let notes = clip
+        .notes
+        .iter()
+        .map(|n| {
+            let start = n.start + shift;
+            if start < 0.0 {
+                early += 1;
+            }
+            PreviewNote { start: start.max(0.0), ..*n }
+        })
+        .collect();
+    let audio = clip
+        .audio
+        .iter()
+        .filter_map(|p| {
+            let start = p.start + shift;
+            if start >= 0.0 {
+                return Some(AudioPart { start, ..p.clone() });
+            }
+            let cut = -start;
+            if p.length <= cut {
+                return None;
+            }
+            // A reversed part plays from its end back to `from`, so cutting its start leaves `from` where it is.
+            let from = if p.reversed { p.from } else { p.from + cut * p.seconds_per_beat.unwrap_or(spb) };
+            Some(AudioPart { start: 0.0, length: p.length - cut, from, ..p.clone() })
+        })
+        .collect();
+    let moved = PreviewClip {
+        name: clip.name.clone(),
+        start: 0.0,
+        length: clip.length + shift,
+        muted: clip.muted,
+        notes,
+        audio,
+        points: Vec::new(),
+        colour: clip.colour,
+        fade_in: (clip.fade_in + shift).max(0.0),
+        fade_out: clip.fade_out.min(clip.length + shift),
+        parts: clip.parts.clone(),
+    };
+    (moved, early)
+}
+
 /// Beats in the written project's ticks, when they're a place in the song (not before its start or past FL's end).
 fn ticks(beats: f64) -> Option<u32> {
     let t = (beats * PPQ).round();
     (t.is_finite() && (0.0..u32::MAX as f64).contains(&t)).then_some(t as u32)
 }
 
-/// How long a clip of notes is in the written project's ticks: at least one, so its notes have a tick to be on.
+/// How long a clip of notes is in the written project's ticks: at least one, so its notes have a tick to be on, and
+/// all of FL's ticks for one longer than they reach (a damaged save's clip can be 1e20 beats long).
 fn clip_ticks(clip: &PreviewClip) -> u32 {
-    ticks(clip.length).unwrap_or(0).max(1)
+    match ticks(clip.length) {
+        Some(t) => t.max(1),
+        None if clip.length > 0.0 => u32::MAX,
+        None => 1,
+    }
 }
 
 /// A clip's notes as a pattern's records, and how long the pattern is: its notes' last bar.
 ///
-/// Every note the reader gives is in the clip, so it stays in it here: one that rounds to the clip's end tick or
-/// past it (a note 0.00003 of a beat before a Bitwig clip's end) starts on the clip's last tick instead, and one a
-/// hair before its start (-1e-14 of a beat) on its first. FL doesn't play a note at or after the end of its playlist
-/// item, so without this such a note was lost and the copy refused to save (the real-song test of 27 Nov 2026: 87
-/// of Solomon's Bitwig and Studio One saves).
+/// A note the reader gives in the clip stays in it here: one that rounds onto the clip's end tick (a note 0.00003 of
+/// a beat before a Bitwig clip's end) starts on the clip's last tick instead, and one that rounds to a tick before its
+/// start (a hair before it) on its first. FL doesn't play a note at or after the end of its playlist item, so without
+/// this such a note was lost and the copy refused to save (the real-song test of 27 Nov 2026: 87 of Solomon's Bitwig
+/// and Studio One saves). Only rounding is put right: a note further out is left out, so the copy's check sees it.
 fn pattern_notes(clip: &PreviewClip, channel: u16, bar: u32) -> (Vec<[u8; 24]>, u32) {
     let mut records = Vec::new();
     let mut end = 0u32;
     let last_tick = clip_ticks(clip).saturating_sub(1);
     for n in &clip.notes {
         let at = (n.start * PPQ).round();
-        if !at.is_finite() {
+        // Within a tick of the clip's edges, rounding moved it there; further out, the note isn't the clip's.
+        if !(-1.0..=f64::from(last_tick) + 1.0).contains(&at) {
             continue;
         }
         let at = at.clamp(0.0, f64::from(last_tick)) as u32;

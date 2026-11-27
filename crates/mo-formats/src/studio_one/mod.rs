@@ -193,44 +193,65 @@ impl<'a> Song<'a> {
         info.dedupe()
     }
 
-    /// The notes of each instrument part. Positions are in quarter notes unless the part (or its track) says its time
-    /// format is seconds, when the song's tempo turns them into beats. Studio One has changed this between versions,
-    /// so the app calls Studio One's MIDI export experimental.
+    /// The notes of each instrument part, as the song plays them: each part's notes as the arrangement reads them
+    /// ([`Song::arrangement`]), so from where Studio One keeps them (`NoteEvent`s in `song.xml` in older songs; the
+    /// media pool's `.musicx` or `.pattern` file, found by the part's clipID, from Studio One 4 on), cut to what the
+    /// part shows of them, transposed as the part is, the track's playing take only, and timed through the song's tempo
+    /// map where a part counts in seconds. Muted parts and tracks are still parts. Studio One has changed its layout
+    /// between versions, so the app calls Studio One's MIDI export experimental.
     ///
-    /// Older songs keep a part's notes in `song.xml` itself (`NoteEvent`s in the part, on a `MusicTrack`). Newer ones
-    /// put the part on a `MediaTrack` (mediaType Music) and its notes in the media pool, a file for each part
-    /// (`Performances/*.musicx`, or a pattern part's `.pattern`) found by its clipID, as the arrangement reads them: the
-    /// real-song test of 27 Nov 2026 found 945 of Solomon's 1,677 songs with notes gave no parts at all before these
-    /// were read. A pattern part gives its first variation's steps once.
+    /// Before reader version 5 only `MusicTrack`s with notes in `song.xml` were read: the real-song test of 27 Nov 2026
+    /// found 945 of Solomon's 1,677 songs with notes gave the MIDI page no parts at all. That layout is still read
+    /// ([`Song::inline_midi`]) when the arrangement finds no notes.
     pub fn midi(&mut self) -> Vec<MidiClip> {
+        let song = self.arrangement();
+        let ticks = |beats: f64| (beats * MIDI_PPQ as f64).round_ties_even() as i64;
+        // A place a damaged song gives that no song reaches is left out, as the arrangement's own limit has it.
+        let placed = |beats: f64| beats.is_finite() && beats.abs() <= crate::arrangement::MOST_BEATS;
+        let mut clips = Vec::new();
+        for lane in song.lanes.iter().filter(|l| l.kind == crate::arrangement::LaneKind::Instrument && !l.layer) {
+            for (i, part) in lane.clips.iter().enumerate() {
+                let name = if part.name.is_empty() || part.name == lane.name {
+                    format!("{} part {}", lane.name, i + 1)
+                } else {
+                    part.name.clone()
+                };
+                let mut clip = MidiClip { name, ppq: MIDI_PPQ, ..MidiClip::default() };
+                let notes = clip.track(&lane.name);
+                notes.extend(part.notes.iter().filter(|n| placed(n.start) && placed(n.length)).map(|n| NoteEvent {
+                    start: ticks(n.start),
+                    length: ticks(n.length).max(1),
+                    key: n.key,
+                    velocity: n.velocity,
+                    muted: n.muted,
+                    step: false,
+                    attribute: NoteAttribute::NONE,
+                }));
+                if !notes.is_empty() {
+                    clips.push(clip);
+                }
+            }
+        }
+        if clips.is_empty() { self.inline_midi() } else { clips }
+    }
+
+    /// The oldest layout's parts: a `MusicTrack` with its notes as `NoteEvent`s in the part itself (as the C# reader
+    /// read them), for a song the arrangement finds no notes in. Positions are in quarter notes unless the part (or its
+    /// track) says its time format is seconds, when the song's tempo turns them into beats.
+    fn inline_midi(&mut self) -> Vec<MidiClip> {
         let from_meta = self.meta_tempo();
         let Some(text) = self.xml("Song/song.xml") else { return Vec::new() };
         let Ok(song) = parse(&text) else { return Vec::new() };
         // The song's tempo as the project list reads it: the metainfo's, the song's own after that, or 120.
         let tempo = from_meta.or_else(|| song_tempo(song.root_element())).unwrap_or(120.0);
-        let music = self.music_files();
         let mut clips = Vec::new();
-        // An instrument track, as the arrangement reads them: Studio One 3 on saves it as a MediaTrack whose mediaType
-        // is Music.
-        let instrument = |e: &Node<'_, '_>| match e.tag_name().name() {
-            "MusicTrack" | "InstrumentTrack" => true,
-            "MediaTrack" => attr(*e, "mediaType") != "Audio",
-            _ => false,
-        };
-        for track in elements(song.root_element()).filter(instrument) {
+        for track in elements(song.root_element()).filter(|e| e.tag_name().name() == "MusicTrack") {
             let track_name = match attr(track, "name") {
                 "" => "Track",
                 n => n,
             };
-            let parts = elements(track)
-                .skip(1)
-                .filter(|e| matches!(e.tag_name().name(), "MusicPart" | "NotePart" | "MusicPatternPart"));
+            let parts = elements(track).skip(1).filter(|e| matches!(e.tag_name().name(), "MusicPart" | "NotePart"));
             for (i, part) in parts.enumerate() {
-                let pooled = match music.get(&attr(part, "clipID").to_lowercase()) {
-                    Some(file) if part.tag_name().name() == "MusicPatternPart" => self.pattern_notes(file).0,
-                    Some(file) => self.musicx_notes(file),
-                    None => Vec::new(),
-                };
                 let format = format!("{}{}", attr(part, "timeFormat"), attr(track, "timeFormat"));
                 let seconds = format.to_lowercase().contains("seconds");
                 let beats = |v: f64| if seconds { v * tempo / 60.0 } else { v };
@@ -254,19 +275,6 @@ impl<'a> Song<'a> {
                         step: false,
                         attribute: NoteAttribute::NONE,
                     });
-                }
-                // The media pool's file only when the part holds no notes of its own; its notes are in beats.
-                if notes.is_empty() {
-                    let ticks = |beats: f64| (beats * MIDI_PPQ as f64).round_ties_even() as i64;
-                    notes.extend(pooled.iter().map(|n| NoteEvent {
-                        start: ticks(n.start),
-                        length: ticks(n.length).max(1),
-                        key: n.key,
-                        velocity: n.velocity,
-                        muted: n.muted,
-                        step: false,
-                        attribute: NoteAttribute::NONE,
-                    }));
                 }
                 if !notes.is_empty() {
                     clips.push(clip);
