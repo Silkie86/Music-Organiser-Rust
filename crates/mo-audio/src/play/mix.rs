@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
-use super::stream::Parts;
-use crate::AudioData;
+use super::stream::{Parts, Said};
+use crate::{AudioData, AudioError};
 
 /// How long a sound takes to fade out when another replaces it or it's stopped, and to fade in when it starts part way
 /// through: 3 ms, too short to hear as a fade, long enough that the jump isn't a click.
@@ -46,9 +46,9 @@ pub(crate) enum FromMixer {
     Ended(u64),
     /// A sound the output has finished with, to be freed off the output thread.
     Done(Arc<AudioData>),
-    /// What's left of a sound played as it's read, to be let go off the output thread: its parts, and the channel they
-    /// came through (which stops its reader).
-    DoneFlow(Box<Flow>),
+    /// What's left of the sound `id`, played as it's read, to be let go off the output thread: its parts, and the
+    /// channel they came through (which stops its reader).
+    DoneFlow(u64, Box<Flow>),
 }
 
 /// A sound played as it's read ([`crate::play::Stream`]): what comes after the part playing, as it comes. Made on the
@@ -62,14 +62,26 @@ pub(crate) struct Flow {
     next: Option<Arc<AudioData>>,
     /// Where the parts come from. The reader waits while it's full, and stops once this is let go.
     more: Parts,
+    /// What the read came to, once it has finished (none for parts made in memory): read only on the player's thread.
+    said: Option<Said>,
     /// Every part has come: the reader has finished.
     all: bool,
 }
 
 impl Flow {
-    /// The parts that come through `more`, after one starting at frame `offset` of the file.
-    pub(crate) fn new(offset: u64, more: Parts) -> Flow {
-        Flow { offset, before: None, next: None, more, all: false }
+    /// The parts that come through `more`, after one starting at frame `offset` of the file, and what the read came to
+    /// through `said`.
+    pub(crate) fn new(offset: u64, more: Parts, said: Option<Said>) -> Flow {
+        Flow { offset, before: None, next: None, more, said, all: false }
+    }
+
+    /// Why its read stopped before the file's end (the drive unplugged, the file moved or renamed), once every part it
+    /// read has played. Never waits: the reader says it before it lets the parts go.
+    pub(crate) fn why_ended(&self) -> Option<AudioError> {
+        if !self.all {
+            return None;
+        }
+        self.said.as_ref()?.try_recv().ok()?.err()
     }
 
     /// The part after the one playing, if it has come.
@@ -100,9 +112,16 @@ pub(crate) struct Place {
     count: AtomicU64,
     id: AtomicU64,
     seconds: AtomicU64,
+    /// How many frames the output has asked for while a sound played: it's working while this goes up.
+    played: AtomicU64,
 }
 
 impl Place {
+    /// How many frames the output has asked for while a sound played.
+    pub(crate) fn played(&self) -> u64 {
+        self.played.load(Ordering::Relaxed)
+    }
+
     /// The place of the sound `id`, or `None` if the output hasn't played any of it yet.
     pub(crate) fn of(&self, id: u64) -> Option<f64> {
         // The writer takes a few nanoseconds, so this tries again only a handful of times; the bound is only a guard.
@@ -177,6 +196,10 @@ impl Mixer {
             return;
         }
         self.take_orders();
+        if self.voice.is_some() {
+            let frames = (out.len() / channels) as u64;
+            self.place.played.store(self.place.played().saturating_add(frames), Ordering::Relaxed);
+        }
         let fade_step = 1.0 / (FADE_SECONDS * rate as f32).max(1.0);
         if let Some(v) = &mut self.fading
             && add(v, out, rate, channels, fade_step, &mut self.to_player)
@@ -265,7 +288,7 @@ impl Mixer {
     fn retire(&mut self, v: Voice) {
         (self.to_player)(FromMixer::Done(v.sound));
         if let Some(flow) = v.flow {
-            (self.to_player)(FromMixer::DoneFlow(flow));
+            (self.to_player)(FromMixer::DoneFlow(v.id, flow));
         }
     }
 }
@@ -643,7 +666,7 @@ mod tests {
         for p in parts {
             tx.push(p).unwrap();
         }
-        (first, Box::new(Flow::new(offset, rx)), (!done).then_some(tx))
+        (first, Box::new(Flow::new(offset, rx, None)), (!done).then_some(tx))
     }
 
     fn play_flow(tx: &Sender<ToMixer>, first: Arc<AudioData>, flow: Box<Flow>) {
@@ -666,7 +689,7 @@ mod tests {
         assert!(matches!(got.last(), Some(FromMixer::Ended(1))));
         // The parts played, and what's left of the flow, go back to be freed.
         assert_eq!(got.iter().filter(|m| matches!(m, FromMixer::Done(_))).count(), 2);
-        assert_eq!(got.iter().filter(|m| matches!(m, FromMixer::DoneFlow(_))).count(), 1);
+        assert_eq!(got.iter().filter(|m| matches!(m, FromMixer::DoneFlow(1, _))).count(), 1);
     }
 
     #[test]
@@ -736,7 +759,7 @@ mod tests {
         tx.send(ToMixer::Stop).unwrap();
         m.render(&mut out, 1000, 1);
         let got: Vec<_> = rx.try_iter().collect();
-        assert!(got.iter().any(|m| matches!(m, FromMixer::DoneFlow(_))));
+        assert!(got.iter().any(|m| matches!(m, FromMixer::DoneFlow(1, _))));
         assert!(!got.iter().any(|m| matches!(m, FromMixer::Ended(_))));
         // Let go on the player's thread: the reader sees it has gone, so it stops.
         let more = more.unwrap();
