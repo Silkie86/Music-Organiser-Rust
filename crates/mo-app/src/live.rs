@@ -646,6 +646,11 @@ impl Live {
         kept.map(|()| changed)
     }
 
+    /// The shape kept for save `id`, while the save's file is still as it was read (`mtime`, `size`).
+    pub fn shape_of(&self, id: i64, mtime: i64, size: i64) -> Option<mo_formats::shape::Shape> {
+        self.shapes.get(&id).filter(|k| k.mtime == mtime && k.size == size)?.shape.clone()
+    }
+
     /// Puts away the stage guess made from save `id` as it is at `mtime` ("not for this save"): kept in the library
     /// when it's the app's own, else until the app closes.
     /// Whether it's held here only, till the app closes.

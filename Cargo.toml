@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/formatlab", "tools/miditwin", "tools/stretchear", "tools/theorybench", "tools/twin"]
+members = ["crates/*", "tools/formatlab", "tools/miditwin", "tools/stagetune", "tools/stretchear", "tools/theorybench", "tools/twin"]
 # The galaxy check is a workspace of its own, so its wgpu never gets mixed into the app's build.
 # The fuzzer (fuzz/) is one too: it's built with nightly Rust by cargo-fuzz.
 # vendor/femtovg and vendor/i-slint-backend-winit are patched copies of libraries (below), not the app's own crates.
