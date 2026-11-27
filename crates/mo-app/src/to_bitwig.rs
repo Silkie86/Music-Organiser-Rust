@@ -230,6 +230,15 @@ pub fn slices_card(feed: &Feed, name: &str, slices: usize) -> Job {
     feed.start(&format!("Sending {} of {name} to Bitwig", slices_text(slices)), "Making the slices")
 }
 
+/// What the card says once the slices are made and saved, while Bitwig takes them (its pads take a few seconds).
+pub const SLICES_WAITING: &str = "Waiting for Bitwig";
+
+/// The slices are made and saved: `job`'s card ([`slices_card`]) says it's Bitwig's turn, halfway along. (It said
+/// "Making the slices" all the while Bitwig loaded them.)
+pub fn slices_made(job: &Job) {
+    job.progress(0.5, Some(SLICES_WAITING));
+}
+
 /// The card's headline when slices couldn't be sent at all; the line under it is the error.
 pub const SLICES_FAILED: &str = "Couldn't send the slices";
 

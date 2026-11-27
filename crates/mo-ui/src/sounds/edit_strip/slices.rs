@@ -10,6 +10,7 @@
 //! the edit as it is. Each sound's slicing is kept with its edits, so going to another sound and back finds it.
 
 use std::fmt::Write as _;
+use std::hash::{DefaultHasher, Hasher as _};
 use std::panic::AssertUnwindSafe;
 
 use mo_app::edit_copy::{self, LEAST_SLICE_SECONDS, MOST_SLICES};
@@ -71,6 +72,12 @@ impl Default for Slicing {
 }
 
 impl Slicing {
+    /// Whether its choices are the ones a sound starts with (wherever its cuts are).
+    fn as_usual(&self) -> bool {
+        let usual = Slicing::default();
+        (self.cut_at, self.sensitivity, self.to_end) == (usual.cut_at, usual.sensitivity, usual.to_end)
+    }
+
     /// The slice `i` (from 0) of a sound `seconds` long: from and to, in seconds.
     fn slice(&self, i: usize, seconds: f64) -> Option<(f64, f64)> {
         let from = *self.cuts.get(i)?;
@@ -147,6 +154,15 @@ pub(super) struct Sliced {
     /// The edits of the edit the cuts are in: with others, it's sliced afresh. None until it's first sliced.
     of: Option<Vec<Edit>>,
     pub(super) history: History<Slicing>,
+}
+
+impl Sliced {
+    /// Whether there's anything of it to keep when the strip goes to another sound: the Slices on, a change to
+    /// undo or redo, or choices of his own (an edit made since then cut the sound afresh by them, with nothing to
+    /// undo: they're still his).
+    pub(super) fn worth_keeping(&self) -> bool {
+        self.on || self.history.has_steps() || !self.history.now.as_usual()
+    }
 }
 
 /// A press on the Slices' waveform, while the button is down.
@@ -256,9 +272,10 @@ pub(super) fn toggle(app: &AppWindow) -> bool {
 /// Esc with the Slices on: the slice picked goes; with none, the Slices go off. Whether it did either.
 pub(super) fn escape(o: &mut Opened) -> bool {
     let Some(sliced) = o.sliced.as_mut().filter(|s| s.on) else { return false };
+    // A line being dragged stays where it has got to, one step for undo: the press is over.
+    sliced.history.end_live();
     o.slice_press = None;
     if o.slice.take().is_none() {
-        sliced.history.end_live();
         sliced.on = false;
     }
     true
@@ -356,113 +373,130 @@ fn each_picked(app: &AppWindow, choice: &str) {
     change(app, false, |slicing, _, _| Slicing { to_end, ..slicing.clone() });
 }
 
-/// A press on the Slices' waveform, `at` (0 to 1 across what's shown): on a line no further off than `within`, to
-/// drag it; in a slice, to play it or carry it out; `shift` for no snapping to the hits.
+/// A press on the Slices' waveform of the sound `o`, `at` (0 to 1 across what's shown): on a line no further off
+/// than `within`, to drag it; in a slice, to play it or carry it out; `shift` for no snapping to the hits.
+fn press(o: &mut Opened, at: f64, within: f64, shift: bool) {
+    let (from, to) = view(o);
+    let long = (to - from).max(1e-9);
+    let Some((slicing, made)) = now(o) else { return };
+    let (at, within) = (from + at.clamp(0.0, 1.0) * long, within.max(0.0) * long);
+    let on = match slicing.cut_near(at, within) {
+        Some(cut) => On::Line { cut, moved: false },
+        None => {
+            slicing.slice_at(at, made.audio.seconds()).map_or(On::Nothing, |slice| On::Slice { slice, carried: false })
+        }
+    };
+    o.slice_press = Some(Press { at, within, shift, on });
+}
+
 fn down(at: f64, within: f64, shift: bool) {
     STRIP.with(|s| {
-        let mut s = s.borrow_mut();
-        let Some(o) = s.sound.as_mut() else { return };
-        let (from, to) = view(o);
-        let long = (to - from).max(1e-9);
-        let Some((slicing, made)) = now(o) else { return };
-        let (at, within) = (from + at.clamp(0.0, 1.0) * long, within.max(0.0) * long);
-        let on = match slicing.cut_near(at, within) {
-            Some(cut) => On::Line { cut, moved: false },
-            None => slicing
-                .slice_at(at, made.audio.seconds())
-                .map_or(On::Nothing, |slice| On::Slice { slice, carried: false }),
-        };
-        o.slice_press = Some(Press { at, within, shift, on });
+        if let Some(o) = s.borrow_mut().sound.as_mut() {
+            press(o, at, within, shift);
+        }
     });
 }
 
-/// The mouse moved with the button down, to `at` (0 to 1 across what's shown); `far` once it has gone too far from
-/// the press to be a click. A line follows it (to the hit nearby, unless `shift`); a slice is carried out of the app.
-fn moved(app: &AppWindow, at: f64, shift: bool, far: bool) {
-    enum Then {
-        Nothing,
-        Show,
-        Carry((f64, f64)),
-    }
-    let then = STRIP.with(|s| {
-        let mut s = s.borrow_mut();
-        let Some(o) = s.sound.as_mut() else { return Then::Nothing };
-        let (from, to) = view(o);
-        let Some((slicing, made)) = now(o) else { return Then::Nothing };
-        let seconds = made.audio.seconds();
-        let Some((on, within)) = o.slice_press.as_ref().map(|press| (press.on, press.within)) else {
-            return Then::Nothing;
-        };
-        match on {
-            On::Line { cut, moved } if moved || far => {
-                let at = from + at.clamp(0.0, 1.0) * (to - from);
-                let at = if shift {
-                    at
-                } else {
-                    let hits: Vec<f64> = made.all_hits.iter().map(|(hit, _)| *hit).collect();
-                    part::snap_to(&hits, at, within * SNAP_OVER_HOLD)
-                };
-                let next = slicing.moved(cut, at, seconds);
-                if let Some(press) = o.slice_press.as_mut() {
-                    press.on = On::Line { cut, moved: true };
-                }
-                let (Some(next), Some(sliced)) = (next, o.sliced.as_mut()) else { return Then::Nothing };
-                sliced.history.live(next);
-                Then::Show
+/// What the mouse moving with the button down came to.
+#[derive(Debug, PartialEq)]
+enum Dragged {
+    Nothing,
+    /// A line moved: the strip shows it.
+    Line,
+    /// A slice (from and to, in seconds) is carried out of the app.
+    Carry((f64, f64)),
+}
+
+/// The mouse moved with the button down on the sound `o`, to `at` (0 to 1 across what's shown); `far` once it has
+/// gone too far from the press to be a click. A line follows it (to the hit nearby, unless `shift`); a slice is
+/// carried out of the app.
+fn drag(o: &mut Opened, at: f64, shift: bool, far: bool) -> Dragged {
+    let (from, to) = view(o);
+    let Some((slicing, made)) = now(o) else { return Dragged::Nothing };
+    let seconds = made.audio.seconds();
+    let Some((on, within)) = o.slice_press.as_ref().map(|press| (press.on, press.within)) else {
+        return Dragged::Nothing;
+    };
+    match on {
+        On::Line { cut, moved } if moved || far => {
+            let at = from + at.clamp(0.0, 1.0) * (to - from);
+            let at = if shift {
+                at
+            } else {
+                let hits: Vec<f64> = made.all_hits.iter().map(|(hit, _)| *hit).collect();
+                part::snap_to(&hits, at, within * SNAP_OVER_HOLD)
+            };
+            let next = slicing.moved(cut, at, seconds);
+            if let Some(press) = o.slice_press.as_mut() {
+                press.on = On::Line { cut, moved: true };
             }
-            On::Slice { slice, carried: false } if far => {
-                let Some(span) = slicing.slice(slice, seconds) else { return Then::Nothing };
-                if let Some(press) = o.slice_press.as_mut() {
-                    press.on = On::Slice { slice, carried: true };
-                }
-                o.slice = Some(slice);
-                Then::Carry(span)
-            }
-            _ => Then::Nothing,
+            let (Some(next), Some(sliced)) = (next, o.sliced.as_mut()) else { return Dragged::Nothing };
+            sliced.history.live(next);
+            Dragged::Line
         }
-    });
-    match then {
-        Then::Nothing => {}
-        Then::Show => super::show(app),
-        Then::Carry(span) => {
+        On::Slice { slice, carried: false } if far => {
+            let Some(span) = slicing.slice(slice, seconds) else { return Dragged::Nothing };
+            if let Some(press) = o.slice_press.as_mut() {
+                press.on = On::Slice { slice, carried: true };
+            }
+            o.slice = Some(slice);
+            Dragged::Carry(span)
+        }
+        _ => Dragged::Nothing,
+    }
+}
+
+fn moved(app: &AppWindow, at: f64, shift: bool, far: bool) {
+    let dragged = STRIP.with(|s| s.borrow_mut().sound.as_mut().map_or(Dragged::Nothing, |o| drag(o, at, shift, far)));
+    match dragged {
+        Dragged::Nothing => {}
+        Dragged::Line => super::show(app),
+        Dragged::Carry(span) => {
             super::show(app);
             carry(app, Some(span));
         }
     }
 }
 
-/// The button came up (`cut_short`: the window lost the mouse). A line dragged stays where it is, one step for undo;
-/// a click on a slice (or on its line) picks it and plays it; a slice carried that hadn't got going is let go.
-fn up(app: &AppWindow, cut_short: bool) {
-    enum Then {
-        Nothing,
-        Show,
-        Play(usize),
-        LetGo,
-    }
-    let then = STRIP.with(|s| {
-        let mut s = s.borrow_mut();
-        let Some(o) = s.sound.as_mut() else { return Then::Nothing };
-        let Some(press) = o.slice_press.take() else { return Then::Nothing };
-        match press.on {
-            On::Line { moved: true, .. } => {
-                if let Some(sliced) = o.sliced.as_mut() {
-                    sliced.history.end_live();
-                }
-                Then::Show
+/// What the button coming up came to.
+#[derive(Debug, PartialEq)]
+enum Released {
+    Nothing,
+    /// A line was dragged: the strip shows where it stays.
+    Line,
+    /// A click on a slice (or on its line): it's picked and played.
+    Play(usize),
+    /// A slice carried that hadn't got going is let go.
+    LetGo,
+}
+
+/// The button came up on the sound `o` (`cut_short`: the window lost the mouse). A line dragged stays where it is,
+/// one step for undo; a click on a slice (or on its line) picks it and plays it; a slice carried that hadn't got
+/// going is let go.
+fn release(o: &mut Opened, cut_short: bool) -> Released {
+    let Some(press) = o.slice_press.take() else { return Released::Nothing };
+    match press.on {
+        On::Line { moved: true, .. } => {
+            if let Some(sliced) = o.sliced.as_mut() {
+                sliced.history.end_live();
             }
-            On::Line { cut: slice, moved: false } | On::Slice { slice, carried: false } if !cut_short => {
-                Then::Play(slice)
-            }
-            On::Slice { carried: true, .. } => Then::LetGo,
-            _ => Then::Nothing,
+            Released::Line
         }
-    });
-    match then {
-        Then::Nothing => {}
-        Then::Show => super::show(app),
-        Then::Play(slice) => play(app, slice),
-        Then::LetGo => crate::drag::let_go(app),
+        On::Line { cut: slice, moved: false } | On::Slice { slice, carried: false } if !cut_short => {
+            Released::Play(slice)
+        }
+        On::Slice { carried: true, .. } => Released::LetGo,
+        _ => Released::Nothing,
+    }
+}
+
+fn up(app: &AppWindow, cut_short: bool) {
+    let released = STRIP.with(|s| s.borrow_mut().sound.as_mut().map_or(Released::Nothing, |o| release(o, cut_short)));
+    match released {
+        Released::Nothing => {}
+        Released::Line => super::show(app),
+        Released::Play(slice) => play(app, slice),
+        Released::LetGo => crate::drag::let_go(app),
     }
 }
 
@@ -481,39 +515,43 @@ fn play(app: &AppWindow, slice: usize) {
     play_edit(app, from, Some(till));
 }
 
-/// A double-click, where the press was: on a line, the line goes; elsewhere, there's a cut there (on the hit nearby,
-/// unless Shift is held).
-fn double(app: &AppWindow) {
-    let changed = STRIP.with(|s| {
-        let mut s = s.borrow_mut();
-        let Some(o) = s.sound.as_mut() else { return false };
-        let Some((slicing, made)) = now(o) else { return false };
-        let Some((at, within, shift)) = o.slice_press.as_ref().map(|press| (press.at, press.within, press.shift))
-        else {
-            return false;
-        };
-        let next = match slicing.cut_near(at, within) {
-            Some(cut) => slicing.without_cut(cut),
-            None => {
-                let at = if shift {
-                    at
-                } else {
-                    let hits: Vec<f64> = made.all_hits.iter().map(|(hit, _)| *hit).collect();
-                    part::snap_to(&hits, at, within * SNAP_OVER_HOLD)
-                };
-                slicing.with_cut(at, made.audio.seconds())
-            }
-        };
-        // The button coming up is no click.
-        if let Some(press) = o.slice_press.as_mut() {
-            press.on = On::Nothing;
+/// A double-click on the sound `o`, where the press was: on a line, the line goes; elsewhere, there's a cut there
+/// (on the hit nearby, unless Shift is held). Whether the cuts changed.
+///
+/// The toolkit calls any second press soon after a click, close by, a double-click as it's let go, however far the
+/// mouse went in between, and says so before it says the button came up. So a click on a line and then, at once, a
+/// drag of it (or of a slice, out of the app) comes here too: that's a drag, left for the button coming up to end.
+fn double_click(o: &mut Opened) -> bool {
+    let Some((slicing, made)) = now(o) else { return false };
+    let Some(press) = o.slice_press.as_ref() else { return false };
+    if matches!(press.on, On::Line { moved: true, .. } | On::Slice { carried: true, .. }) {
+        return false;
+    }
+    let (at, within, shift) = (press.at, press.within, press.shift);
+    let next = match slicing.cut_near(at, within) {
+        Some(cut) => slicing.without_cut(cut),
+        None => {
+            let at = if shift {
+                at
+            } else {
+                let hits: Vec<f64> = made.all_hits.iter().map(|(hit, _)| *hit).collect();
+                part::snap_to(&hits, at, within * SNAP_OVER_HOLD)
+            };
+            slicing.with_cut(at, made.audio.seconds())
         }
-        let (Some(next), Some(sliced)) = (next, o.sliced.as_mut()) else { return false };
-        sliced.history.change(next);
-        o.slice = None;
-        true
-    });
-    if !changed {
+    };
+    // The button coming up is no click.
+    if let Some(press) = o.slice_press.as_mut() {
+        press.on = On::Nothing;
+    }
+    let (Some(next), Some(sliced)) = (next, o.sliced.as_mut()) else { return false };
+    sliced.history.change(next);
+    o.slice = None;
+    true
+}
+
+fn double(app: &AppWindow) {
+    if !STRIP.with(|s| s.borrow_mut().sound.as_mut().is_some_and(double_click)) {
         return;
     }
     // The first of the two clicks played a slice that's another now.
@@ -607,6 +645,7 @@ pub(super) fn send(app: &AppWindow, to: To) -> bool {
             }
             // A panic in it is logged as a crash and fails the card as it goes; Send still comes back.
             (Ok(files), To::Bitwig) => mo_catch::catch_crash(AssertUnwindSafe(|| {
+                to_bitwig::slices_made(&job);
                 let pads = to_bitwig::slice_pads(&files);
                 let bitwig = to_bitwig::Bitwig::default();
                 to_bitwig::send_slices(job, &bitwig, &kit::KITS_TO_BITWIG, &name, &pads, setting.as_deref())
@@ -678,7 +717,7 @@ pub(super) fn wire(app: &AppWindow) {
             double(&app);
         }
     });
-    data.on_slice_near(|at, within| near(f64::from(at), f64::from(within)));
+    data.on_slice_near(|at, within, _| near(f64::from(at), f64::from(within)));
 }
 
 /// The strip with no Slices on show.
@@ -689,7 +728,19 @@ pub(super) fn show_none(data: &SoundEdit) {
     data.set_slice_from(0.0);
     data.set_slice_to(0.0);
     data.set_first_cut(0.0);
+    data.set_cuts_mark(0);
     data.set_can_send(false);
+}
+
+/// A number that's another whenever the lines the mouse can take hold of are others: where the cuts are, and the
+/// stretch of the sound that's shown.
+fn cuts_mark(cuts: &[f64], from: f64, to: f64) -> i32 {
+    let mut mark = DefaultHasher::new();
+    for at in cuts.iter().chain([&from, &to]) {
+        mark.write_u64(at.to_bits());
+    }
+    let mark = mark.finish();
+    (mark ^ (mark >> 32)) as i32
 }
 
 /// The Slices of the sound `o` as they are now (`sending`: slices are on their way, so Send waits).
@@ -730,11 +781,13 @@ pub(super) fn show(data: &SoundEdit, o: &Opened, sending: bool) {
         data.set_slice_from(0.0);
         data.set_slice_to(0.0);
         data.set_first_cut(0.0);
+        data.set_cuts_mark(0);
         data.set_can_send(false);
         data.set_send_text("Send the slices".into());
         return;
     };
     let (from, to) = view(o);
+    data.set_cuts_mark(cuts_mark(&slicing.cuts, from, to));
     let long = (to - from).max(1e-9);
     let across = |t: f64| ((t - from) / long) as f32;
     // The cuts in sight, each with the room to the next line (its number shows where there's room for it).
@@ -834,7 +887,7 @@ mod tests {
 
     use mo_audio::AudioData;
 
-    use super::super::{Edits, Source, make};
+    use super::super::{Edits, Source, Strip, make, stash};
     use super::*;
 
     fn slicing(cuts: &[f64]) -> Slicing {
@@ -935,6 +988,213 @@ mod tests {
         assert!(escape(&mut o) && o.slice.is_none() && on(&o));
         assert!(escape(&mut o) && !on(&o));
         assert!(!escape(&mut o));
+    }
+
+    /// A press at `seconds` into the two-second sound (all of it on show), a line within 20 ms of it taking hold.
+    fn press_at(o: &mut Opened, seconds: f64, shift: bool) {
+        press(o, seconds / 2.0, 0.01, shift);
+    }
+
+    #[test]
+    fn a_click_on_a_line_then_at_once_a_drag_of_it_is_a_drag() {
+        let mut o = opened();
+        slices_on(&mut o);
+        // A click on the second line picks its slice and plays it.
+        press_at(&mut o, 0.5, true);
+        assert_eq!(release(&mut o, false), Released::Play(1));
+        // At once, a press on it again: not far yet, it's still a click; further, the line follows the mouse (Shift:
+        // to no hit nearby).
+        press_at(&mut o, 0.5, true);
+        assert_eq!(drag(&mut o, 0.26, true, false), Dragged::Nothing);
+        assert_eq!(drag(&mut o, 0.3, true, true), Dragged::Line);
+        assert_eq!(cuts(&o), [0.0, 0.6, 1.0, 1.5]);
+        // The toolkit calls that second press a double-click as it's let go: the line stays, and it's still a drag.
+        assert!(!double_click(&mut o));
+        assert_eq!(cuts(&o), [0.0, 0.6, 1.0, 1.5]);
+        assert_eq!(steps(&o), (false, false), "no step until it's let go");
+        assert_eq!(release(&mut o, false), Released::Line);
+        assert_eq!(steps(&o), (true, false), "one step for undo");
+        assert!(o.sliced.as_mut().unwrap().history.undo());
+        assert_eq!(cuts(&o), [0.0, 0.5, 1.0, 1.5]);
+    }
+
+    #[test]
+    fn a_click_in_a_slice_then_at_once_a_carry_of_it_adds_no_cut() {
+        let mut o = opened();
+        slices_on(&mut o);
+        press_at(&mut o, 0.7, false);
+        assert_eq!(release(&mut o, false), Released::Play(1));
+        press_at(&mut o, 0.7, false);
+        assert_eq!(drag(&mut o, 0.36, false, false), Dragged::Nothing, "not far yet: still a click");
+        assert_eq!(drag(&mut o, 0.4, false, true), Dragged::Carry((0.5, 1.0)));
+        assert_eq!(o.slice, Some(1), "the slice carried is the one picked");
+        assert_eq!(drag(&mut o, 0.45, false, true), Dragged::Nothing, "carried once");
+        // The toolkit's double-click as it's let go: no cut where the press was.
+        assert!(!double_click(&mut o));
+        assert_eq!(cuts(&o), [0.0, 0.5, 1.0, 1.5]);
+        assert_eq!(release(&mut o, false), Released::LetGo);
+        assert_eq!(steps(&o), (false, false));
+    }
+
+    #[test]
+    fn a_double_click_takes_a_line_away_or_adds_a_cut() {
+        let mut o = opened();
+        slices_on(&mut o);
+        // On a line: the first click plays its slice; the second takes the line away, and its letting go is no click.
+        press_at(&mut o, 0.5, false);
+        assert_eq!(release(&mut o, false), Released::Play(1));
+        press_at(&mut o, 0.5, false);
+        assert!(double_click(&mut o));
+        assert_eq!(cuts(&o), [0.0, 1.0, 1.5]);
+        assert_eq!(release(&mut o, false), Released::Nothing);
+        // Between lines: a cut there, on the hit nearby (the small one a quarter of a second in)...
+        press_at(&mut o, 0.26, false);
+        assert!(double_click(&mut o));
+        assert_eq!(cuts(&o), [0.0, 0.25, 1.0, 1.5]);
+        assert_eq!(release(&mut o, false), Released::Nothing);
+        // ...or just where the press was, with Shift held.
+        press_at(&mut o, 0.52, true);
+        assert!(double_click(&mut o));
+        assert_eq!(cuts(&o), [0.0, 0.25, 0.52, 1.0, 1.5]);
+        assert_eq!(release(&mut o, false), Released::Nothing);
+        // Where the hit nearby has a line already there's no room for one: nothing changes, and it's still no click.
+        press_at(&mut o, 0.275, false);
+        assert!(!double_click(&mut o));
+        assert_eq!(cuts(&o), [0.0, 0.25, 0.52, 1.0, 1.5]);
+        assert_eq!(release(&mut o, false), Released::Nothing);
+        // Each was a step for undo.
+        let history = &mut o.sliced.as_mut().unwrap().history;
+        assert_eq!(history.undo.len(), 3);
+        assert!(history.undo() && history.undo() && history.undo() && !history.undo());
+        assert_eq!(cuts(&o), [0.0, 0.5, 1.0, 1.5]);
+    }
+
+    #[test]
+    fn a_press_before_the_first_cut_or_cut_short_plays_nothing() {
+        let mut o = opened();
+        slices_on(&mut o);
+        // The first line taken away: what comes before the first cut is in no slice.
+        let without = now(&o).unwrap().0.without_cut(0).unwrap();
+        o.sliced.as_mut().unwrap().history.change(without);
+        press_at(&mut o, 0.2, false);
+        assert_eq!(drag(&mut o, 0.3, false, true), Dragged::Nothing);
+        assert_eq!(release(&mut o, false), Released::Nothing);
+        // The window lost the mouse: a press in a slice is no click, and a line dragged stays where it got to.
+        press_at(&mut o, 0.7, false);
+        assert_eq!(release(&mut o, true), Released::Nothing);
+        press_at(&mut o, 1.0, true);
+        assert_eq!(drag(&mut o, 0.55, true, true), Dragged::Line);
+        assert_eq!(release(&mut o, true), Released::Line);
+        assert_eq!(cuts(&o), [0.5, 1.1, 1.5]);
+        // With no press, the button coming up and the mouse moving are nothing.
+        assert_eq!(release(&mut o, false), Released::Nothing);
+        assert_eq!(drag(&mut o, 0.5, false, true), Dragged::Nothing);
+        assert!(!double_click(&mut o));
+    }
+
+    #[test]
+    fn a_line_dragged_snaps_to_the_hit_nearby_unless_shift_is_held() {
+        let mut o = opened();
+        slices_on(&mut o);
+        // The second line, dragged to near the small hit a quarter of a second in.
+        press_at(&mut o, 0.5, false);
+        assert_eq!(drag(&mut o, 0.13, false, true), Dragged::Line);
+        assert_eq!(cuts(&o), [0.0, 0.25, 1.0, 1.5], "on the hit");
+        assert_eq!(drag(&mut o, 0.13, true, true), Dragged::Line);
+        assert_eq!(cuts(&o), [0.0, 0.26, 1.0, 1.5], "where the mouse is");
+        // Back where it began: no step for undo.
+        assert_eq!(drag(&mut o, 0.25, true, true), Dragged::Line);
+        assert_eq!(release(&mut o, false), Released::Line);
+        assert_eq!((cuts(&o), steps(&o)), (vec![0.0, 0.5, 1.0, 1.5], (false, false)));
+    }
+
+    #[test]
+    fn esc_while_a_line_is_dragged_leaves_it_there_with_a_step_for_undo() {
+        let mut o = opened();
+        slices_on(&mut o);
+        o.slice = Some(2);
+        press_at(&mut o, 1.0, true);
+        assert_eq!(drag(&mut o, 0.55, true, true), Dragged::Line);
+        assert_eq!(steps(&o), (false, false), "no step while it's dragged");
+        // Esc lets the slice picked go, and the line stays where it got to.
+        assert!(escape(&mut o) && on(&o) && o.slice.is_none());
+        assert_eq!(cuts(&o), [0.0, 0.5, 1.1, 1.5]);
+        assert_eq!(steps(&o), (true, false));
+        // The press is over: the mouse moving on, and the button coming up, do nothing more.
+        assert_eq!(drag(&mut o, 0.6, true, true), Dragged::Nothing);
+        assert!(!double_click(&mut o));
+        assert_eq!(release(&mut o, false), Released::Nothing);
+        assert_eq!(cuts(&o), [0.0, 0.5, 1.1, 1.5]);
+        // With no slice picked, Esc turns the Slices off: the step waits with the cuts.
+        press_at(&mut o, 0.5, true);
+        assert_eq!(drag(&mut o, 0.3, true, true), Dragged::Line);
+        assert!(escape(&mut o) && !on(&o));
+        assert_eq!(release(&mut o, false), Released::Nothing);
+        slices_on(&mut o);
+        assert_eq!(cuts(&o), [0.0, 0.6, 1.1, 1.5]);
+        assert_eq!(o.sliced.as_ref().unwrap().history.undo.len(), 2);
+    }
+
+    #[test]
+    fn slices_with_choices_of_his_own_are_worth_keeping() {
+        assert!(!Sliced::default().worth_keeping());
+        // On; or off with a change to undo.
+        assert!(Sliced { on: true, ..Sliced::default() }.worth_keeping());
+        let mut stepped = Sliced::default();
+        stepped.history.change(slicing(&[0.5]));
+        assert!(stepped.worth_keeping());
+        // Off, and cut afresh by an edit since (so nothing to undo): the cuts alone are nothing to keep, as the
+        // scissors make them again; his choices are.
+        let cut = |now: Slicing| Sliced { history: History { now, ..History::default() }, ..Sliced::default() };
+        assert!(!cut(slicing(&[0.0, 0.5])).worth_keeping());
+        assert!(cut(Slicing { sensitivity: 0.8, ..Slicing::default() }).worth_keeping());
+        assert!(cut(Slicing { to_end: true, ..Slicing::default() }).worth_keeping());
+        assert!(cut(Slicing { cut_at: CutAt::Beats(1.0), ..Slicing::default() }).worth_keeping());
+    }
+
+    #[test]
+    fn going_to_another_sound_keeps_the_slices_worth_keeping() {
+        // Slices turned on and off again, with nothing changed: nothing of the sound to keep.
+        let mut o = opened();
+        slices_on(&mut o);
+        o.sliced.as_mut().unwrap().on = false;
+        let mut strip = Strip { sound: Some(o), ..Strip::default() };
+        stash(&mut strip);
+        assert!(strip.sound.is_none() && strip.kept.is_empty());
+        // A sensitivity of his own, off: kept, with no edits.
+        let mut o = opened();
+        slices_on(&mut o);
+        let sliced = o.sliced.as_mut().unwrap();
+        sliced.history = History { now: Slicing { sensitivity: 0.8, ..slicing(&[0.0]) }, ..History::default() };
+        sliced.on = false;
+        strip.sound = Some(o);
+        stash(&mut strip);
+        assert_eq!(strip.kept.len(), 1);
+        assert_eq!(strip.kept[0].sliced.as_ref().map(|s| s.history.now.sensitivity), Some(0.8));
+        // A line being dragged as the sound goes is where it was dragged to, one step for undo; the sound's kept
+        // once, the newest of it.
+        let mut o = opened();
+        slices_on(&mut o);
+        press_at(&mut o, 0.5, true);
+        assert_eq!(drag(&mut o, 0.3, true, true), Dragged::Line);
+        strip.sound = Some(o);
+        stash(&mut strip);
+        assert_eq!(strip.kept.len(), 1);
+        let kept = strip.kept[0].sliced.as_ref().unwrap();
+        assert_eq!(kept.history.now.cuts, [0.0, 0.6, 1.0, 1.5]);
+        assert!(kept.on && kept.history.undo.len() == 1 && kept.history.live.is_none());
+    }
+
+    #[test]
+    fn the_cuts_mark_is_another_for_other_lines_or_another_stretch_shown() {
+        let mark = cuts_mark(&[0.0, 0.5, 1.0], 0.0, 2.0);
+        assert_eq!(mark, cuts_mark(&[0.0, 0.5, 1.0], 0.0, 2.0));
+        assert_ne!(mark, cuts_mark(&[0.0, 0.6, 1.0], 0.0, 2.0), "a line moved");
+        assert_ne!(mark, cuts_mark(&[0.0, 0.5], 0.0, 2.0), "the last line taken away");
+        assert_ne!(mark, cuts_mark(&[0.5, 1.0], 0.0, 2.0), "the line at the sound's start taken away");
+        assert_ne!(mark, cuts_mark(&[0.0, 0.5, 1.0], 0.5, 2.0), "zoomed in");
+        assert_ne!(mark, cuts_mark(&[0.0, 0.5, 1.0], 0.0, 1.5));
+        assert_ne!(cuts_mark(&[], 0.0, 2.0), cuts_mark(&[0.0], 0.0, 2.0));
     }
 
     #[test]

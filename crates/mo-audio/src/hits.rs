@@ -13,14 +13,28 @@
 //! - **its highs**: the same, with its own energy counting next to nothing ([`LOWS_IN_HIGHS`]). A hat over a long
 //!   808 or a bass note adds little to the whole sound, and is a hit all the same.
 //!
-//! Both are held for [`HOLD_SECONDS`], and a step's biggest jumps are left out of its change
-//! ([`JUMPS_LEFT_OUT`]): a low note's level comes and goes with its wave, and without these a kick's tail, a bass
-//! note or a creaky voice was a row of hits.
+//! A low note's level comes and goes with its wave: a step is shorter than half a wave of anything under 190 Hz, so
+//! read step by step, a kick's tail, a bass note or a creaky voice was a row of hits. Three things keep a wave from
+//! being one:
+//!
+//! - a step's biggest jumps are left out of its change ([`JUMPS_LEFT_OUT`]): a saw or a square bass jumps once or
+//!   twice a wave and barely moves between;
+//! - each level is read **held**: the most it has been in the last [`HOLD_SECONDS`]. Held that long, a wave no
+//!   longer shows, and an attack still shows at once;
+//! - and each is read **followed**: held, but let go as the sound dies away ([`HIGHS_LET_GO_DB`],
+//!   [`OWN_LET_GO_DB`]). A rise is measured in the followed level, and counts in full only where the held level
+//!   rose with it ([`HELD_RISE_DB`]).
+//!
+//! The held level alone would do for a wave, but it runs a hold behind a sound that's dying away: a hit that rings
+//! into the next one (open hats, a roll, a fast break) still stood at its full level when the next came, which then
+//! rose by too little to be a hit. The followed level has died away by then, as the sound has; and the crests of a
+//! wave, which do rise in the followed level, never rise in the held one.
 //!
 //! A rise is counted from the quietest of the three steps before it, or from the noise floor when that's louder
 //! (50 dB under the loudest moment): so the start of a sound out of silence rises by how loud it is, and quiet room
-//! noise at a file's start is no hit next to the attack after it. Each hit's frame is where its attack starts,
-//! [`LEAD_SECONDS`] early, so a cut there keeps the whole attack, even after `edit::part`'s fade in.
+//! noise at a file's start is no hit next to the attack after it. Each hit's frame is where its attack starts
+//! (`attack_start`), [`LEAD_SECONDS`] early, so a cut there keeps the whole attack, even after `edit::part`'s fade
+//! in.
 
 use crate::AudioData;
 
@@ -44,12 +58,29 @@ pub const LEAD_SECONDS: f64 = crate::edit::EDGE_IN_SECONDS;
 /// over several steps.
 const ATTACK_LOOK_BACK_SECONDS: f64 = 0.025;
 
-/// How long a step's energy counts for: half a wave of 20 Hz, the lowest note there is. A step is shorter than half
-/// a wave of anything under 190 Hz, so a low note read step by step is all but silent at each crossing of its wave
-/// and full again a few milliseconds on: a kick's 50 Hz tail "rose" by 12 dB a hundred times a second, and got a hit
-/// every 70 ms. A buzzing low note's highs come and go the same way, once a wave. Held this long, a wave no longer
-/// shows, and an attack still shows at once. (Longer would hide the second of two hats 40 ms apart behind the first.)
+/// How long a level is held: half a wave of 20 Hz, the lowest note there is. A step is shorter than half a wave of
+/// anything under 190 Hz, so a low note read step by step is all but silent at each crossing of its wave and full
+/// again a few milliseconds on: a kick's 50 Hz tail "rose" by 12 dB a hundred times a second, and got a hit every
+/// 70 ms. A buzzing low note's highs come and go the same way, once a wave. Held this long, a wave no longer shows.
+/// Longer would hide the hits of a fast roll (one every 36 ms) behind each other; so a buzz slower than some 36
+/// pulses a second (the creakiest of voices) can't be told from a roll, and reads as a row of hits.
 pub const HOLD_SECONDS: f64 = 0.025;
+
+/// How far the followed level of a sound's change (its highs) is let go in one hold, in dB. Less, and a hat in a
+/// fast roll (one every 40 ms) still stands on the hat before it; more, and each pulse of a buzzing voice rises
+/// from where the last was let go to, by enough to pass for a hit.
+pub const HIGHS_LET_GO_DB: f64 = 14.0;
+
+/// How far the followed level of a sound's own energy is let go in one hold, in dB: less than its highs are, since
+/// a low note's own energy does come and go, twice a wave, and each crest rises by as far as the last was let go
+/// (2 dB for a 40 Hz note: far from a hit). More, and a kick's tail beating against a bass note is a row of weak
+/// hits; less, and a kick over a bass note is found less often.
+pub const OWN_LET_GO_DB: f64 = 4.5;
+
+/// How far the held level must rise for a rise of the followed level to count in full, in dB. Where it rose by
+/// less, the rise counts for that share (half of it at 1.5 dB), and for nothing where the held level didn't rise:
+/// that's a wave's crest, or a sound that only stopped dying away.
+pub const HELD_RISE_DB: f64 = 3.0;
 
 /// How much of a sound's own energy counts in the level of its highs (a quarter of it counts in the whole sound's):
 /// 30 dB down. The ear is some 20 to 25 dB keener to a hat's highs than to a bass note's lows, so a hat that sounds
@@ -69,12 +100,91 @@ pub const JUMPS_LEFT_OUT: f64 = 0.1;
 const FLOOR_UNDER_LOUDEST_DB: f64 = 50.0;
 const FLOOR_DB: f64 = -90.0;
 
-/// One hit: the frame its attack starts at (half a millisecond early) and how big its rise was, in dB, from
+/// Where an attack starts is looked for by level first, in stretches a step long, this many to a step: so to a
+/// third of a millisecond.
+const ATTACK_STRETCHES_A_STEP: usize = 8;
+
+/// An attack is on by the first stretch whose level is this far over the most it was in the hold before (dB): more
+/// than a steady hiss wavers by.
+const ATTACK_OVER_BEFORE_DB: f64 = 1.5;
+
+/// ...and no further than this under the most it gets to (dB): a fifth of the attack's biggest jump, as its first
+/// frame is found by. A bass note swelling a little under a hat is far further under the hat than this.
+const ATTACK_UNDER_MOST_DB: f64 = 14.0;
+
+/// How long before that stretch's end the attack's first frame is looked for, in steps: an attack that's only just
+/// louder than what came before fills this much of the stretch before the stretch is over it.
+const ATTACK_BACK_STEPS: f64 = 0.75;
+
+/// One hit: the frame its attack starts at (a millisecond early) and how big its rise was, in dB, from
 /// [`LEAST_RISE_DB`] to [`MOST_RISE_DB`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit {
     pub at: usize,
     pub rise_db: f32,
+}
+
+/// The two energies of a stretch of sound: of its sample-to-sample change (its highs) without its biggest jumps, and
+/// its own.
+#[derive(Clone, Copy, Debug, Default)]
+struct Energy {
+    change: f64,
+    own: f64,
+}
+
+impl Energy {
+    /// Of `stretch`, which the sample `last` comes before, counted as `frames` long: where it's shorter (at the
+    /// sound's start), the rest is the silence before it. `jumps` is room to work in.
+    fn of(stretch: &[f32], mut last: f32, frames: usize, jumps: &mut Vec<f64>) -> Self {
+        let mut own = 0.0f64;
+        jumps.clear();
+        for &x in stretch {
+            let x = clean(x);
+            let jump = f64::from(x - last);
+            jumps.push(jump * jump);
+            own += f64::from(x) * f64::from(x);
+            last = x;
+        }
+        let frames = frames.max(stretch.len()).max(1);
+        let left_out = ((frames as f64 * JUMPS_LEFT_OUT).round() as usize).min(frames - 1);
+        let kept = jumps.len().saturating_sub(left_out);
+        if kept > 0 && kept < jumps.len() {
+            // The smallest `kept` of them come first.
+            jumps.select_nth_unstable_by(kept - 1, f64::total_cmp);
+        }
+        let change: f64 = jumps[..kept].iter().sum();
+        Self { change: change / frames as f64, own: own / frames as f64 }
+    }
+
+    /// The whole sound's energy: its highs and a quarter of its own.
+    fn whole(self) -> f64 {
+        self.change + 0.25 * self.own
+    }
+
+    /// Its highs' energy: its own counts next to nothing.
+    fn highs(self) -> f64 {
+        self.change + LOWS_IN_HIGHS * self.own
+    }
+
+    /// The whole sound's energy, or its highs'.
+    fn by(self, highs: bool) -> f64 {
+        if highs { self.highs() } else { self.whole() }
+    }
+
+    /// The bigger of each energy.
+    fn most(self, other: Self) -> Self {
+        Self { change: self.change.max(other.change), own: self.own.max(other.own) }
+    }
+
+    /// The smaller of each energy.
+    fn least(self, other: Self) -> Self {
+        Self { change: self.change.min(other.change), own: self.own.min(other.own) }
+    }
+
+    /// Halfway between the two.
+    fn with(self, other: Self) -> Self {
+        Self { change: (self.change + other.change) / 2.0, own: (self.own + other.own) / 2.0 }
+    }
 }
 
 /// The hits in `audio` (its channels mixed to one), in order.
@@ -86,43 +196,18 @@ pub fn find(audio: &AudioData) -> Vec<Hit> {
 pub fn find_in(sound: &[f32], rate: u32) -> Vec<Hit> {
     let rate = rate.max(1) as usize;
     let hop = (rate / 375).max(16); // 128 frames at 48 kHz, under 3 ms
-    // Each step's energy: of the sound's sample-to-sample change (its highs) without its biggest jumps, and its own.
     let mut jumps: Vec<f64> = Vec::with_capacity(hop);
-    let energies: Vec<(f64, f64)> = sound
+    let energies: Vec<Energy> = sound
         .chunks(hop)
-        .scan(0.0f32, |last, chunk| {
-            let mut own = 0.0f64;
-            jumps.clear();
-            for &x in chunk {
-                let x = clean(x);
-                let jump = f64::from(x - *last);
-                jumps.push(jump * jump);
-                own += f64::from(x) * f64::from(x);
-                *last = x;
-            }
-            let frames = chunk.len();
-            let kept = frames - ((frames as f64 * JUMPS_LEFT_OUT).round() as usize).min(frames - 1);
-            if kept < frames {
-                // The smallest `kept` of them come first.
-                jumps.select_nth_unstable_by(kept - 1, f64::total_cmp);
-            }
-            let change: f64 = jumps[..kept].iter().sum();
-            Some((change / frames as f64, own / frames as f64))
+        .scan(0.0f32, |last, step| {
+            let energy = Energy::of(step, *last, step.len(), &mut jumps);
+            *last = step.last().copied().map_or(*last, clean);
+            Some(energy)
         })
         .collect();
-    // The two levels of each step, from the most its change and its own energy have been in the last `hold` steps.
-    let hold = (rate as f64 * HOLD_SECONDS / hop as f64).ceil().max(1.0) as usize;
-    let level = |energy: f64| 10.0 * (energy + 1e-12).log10();
-    let (whole, highs): (Vec<f64>, Vec<f64>) = (0..energies.len())
-        .map(|k| {
-            let (change, own) = energies[(k + 1).saturating_sub(hold)..=k]
-                .iter()
-                .fold((0.0f64, 0.0f64), |most, e| (most.0.max(e.0), most.1.max(e.1)));
-            (level(change + 0.25 * own), level(change + LOWS_IN_HIGHS * own))
-        })
-        .unzip();
+    let (rises_whole, rises_highs) = rises(&energies, rate, hop);
     // A step's rise: the bigger of the whole sound's and its highs'.
-    let rises: Vec<f64> = rises_of(&whole).into_iter().zip(rises_of(&highs)).map(|(w, h)| w.max(h)).collect();
+    let rises: Vec<f64> = rises_whole.iter().zip(&rises_highs).map(|(w, h)| w.max(*h)).collect();
     let look_back = (rate as f64 * ATTACK_LOOK_BACK_SECONDS / hop as f64).ceil() as usize;
     let gap = (rate as f64 * GAP_SECONDS / hop as f64).ceil().max(1.0) as usize;
     let mut found: Vec<Hit> = Vec::new();
@@ -145,7 +230,8 @@ pub fn find_in(sound: &[f32], rate: u32) -> Vec<Hit> {
         while first > after_last && k - first < look_back && rises[first - 1] >= f64::from(LEAST_RISE_DB) / 2.0 {
             first -= 1;
         }
-        let at = attack_start(sound, first.saturating_sub(1).max(after_last) * hop, (k + 2) * hop, rate);
+        let span = first.saturating_sub(1).max(after_last) * hop..((k + 2) * hop).min(sound.len());
+        let at = attack_start(sound, span, (k + 1) * hop, rises_highs[k] > rises_whole[k], rate, hop, &mut jumps);
         // Two hits never share a frame, and they stay in order (an attack found early can't pass the one before).
         if found.last().is_some_and(|h| h.at >= at) {
             continue;
@@ -153,6 +239,49 @@ pub fn find_in(sound: &[f32], rate: u32) -> Vec<Hit> {
         found.push(Hit { at, rise_db: rise as f32 });
     }
     found
+}
+
+/// How much each step rose (dB), in the whole sound's level and in its highs': the rise of its followed level,
+/// counted in full where its held level rose by [`HELD_RISE_DB`] with it, for less where that rose by less, and for
+/// nothing where it didn't.
+fn rises(energies: &[Energy], rate: usize, hop: usize) -> (Vec<f64>, Vec<f64>) {
+    let hold = (rate as f64 * HOLD_SECONDS / hop as f64).ceil().max(1.0) as usize;
+    let level = |energy: f64| 10.0 * (energy + 1e-12).log10();
+    // What's left of an energy one step on, let go by so many dB a hold.
+    let left = |db: f64| 10f64.powf(-db / hold as f64 / 10.0);
+    let (left_of_change, left_of_own) = (left(HIGHS_LET_GO_DB), left(OWN_LET_GO_DB));
+    let steps = energies.len();
+    let (mut followed_whole, mut followed_highs) = (Vec::with_capacity(steps), Vec::with_capacity(steps));
+    let (mut held_whole, mut held_highs) = (Vec::with_capacity(steps), Vec::with_capacity(steps));
+    let mut let_go = Energy::default();
+    for k in 0..steps {
+        let since = (k + 1).saturating_sub(hold);
+        // Held: the most of the hold, each step taken with the one before it. A short pulse (a creaky voice's, the
+        // edge of a saw's wave) falls now in one step, now across two; step by step, its level rose by up to 3 dB
+        // each time it fell in one.
+        let held = (since..=k).fold(Energy::default(), |most, j| {
+            most.most(if j == 0 { energies[0] } else { energies[j].with(energies[j - 1]) })
+        });
+        // Followed: the most of the hold too, but no more than what the loudest step so far has been let go to.
+        let most = energies[since..=k].iter().fold(Energy::default(), |most, e| most.most(*e));
+        let_go = Energy {
+            change: energies[k].change.max(let_go.change * left_of_change),
+            own: energies[k].own.max(let_go.own * left_of_own),
+        };
+        let followed = most.least(let_go);
+        followed_whole.push(level(followed.whole()));
+        followed_highs.push(level(followed.highs()));
+        held_whole.push(level(held.whole()));
+        held_highs.push(level(held.highs()));
+    }
+    let counted = |followed: &[f64], held: &[f64]| -> Vec<f64> {
+        rises_of(followed)
+            .into_iter()
+            .zip(rises_of(held))
+            .map(|(rise, held)| rise * (held / HELD_RISE_DB).clamp(0.0, 1.0))
+            .collect()
+    };
+    (counted(&followed_whole, &held_whole), counted(&followed_highs, &held_highs))
 }
 
 /// How much each step of `levels` (dB) rose on the quietest of the three before it, or on the floor when that's
@@ -198,16 +327,61 @@ pub fn snap(at: usize, hits: &[Hit], rise_db: f32, within: usize) -> usize {
         .unwrap_or(at)
 }
 
-/// The first frame of an attack found between `from` and `to`: where the sound first jumps by a fifth of the
-/// attack's biggest jump (sample to sample: a low tail before it barely moves), [`LEAD_SECONDS`] before it, but never
-/// before `from`'s step (the hit before's).
-fn attack_start(sound: &[f32], from: usize, to: usize, rate: usize) -> usize {
-    let span = sound.get(from..to.min(sound.len())).unwrap_or_default();
-    let jumps = || span.windows(2).map(|w| (clean(w[1]) - clean(w[0])).abs());
-    let most = jumps().fold(0.0f32, f32::max);
-    let first = jumps().position(|j| j >= most * 0.2).unwrap_or(0);
+/// The first frame of the attack found in `span`, [`LEAD_SECONDS`] before it. `risen` is where the step that rose
+/// most ends (the attack is on by then), and `highs` says the hit was found by its highs, not by the whole sound.
+///
+/// It's looked for in two goes. First by level, in stretches a step long, an eighth of a step apart: the attack is
+/// on by the first stretch whose level is over the most it was in the hold before `span` by
+/// [`ATTACK_OVER_BEFORE_DB`], and within [`ATTACK_UNDER_MOST_DB`] of the most it gets to. Then by the frame, in the
+/// three quarters of a step before that stretch's end: the first that jumps by a fifth of the biggest jump there (a
+/// low tail before an attack barely moves from sample to sample).
+///
+/// The second go alone, over the whole span, put a hit on the edge of a bass's wave: a saw or a square bass under
+/// the drums jumps as far as a hat does, so a hit's frame landed up to 5 ms before the drum, or after it. And where
+/// the hit before still rang, on that: a few milliseconds early. The first go isn't fooled by either: a wave's edges
+/// are among the jumps left out, what's left of them was there in the hold before, and a tail is quieter than it
+/// was. Where no stretch passes by `risen` (a weak hit, soon after a louder sound), the whole span is looked in: a
+/// frame found there is early, never late.
+fn attack_start(
+    sound: &[f32],
+    span: std::ops::Range<usize>,
+    risen: usize,
+    highs: bool,
+    rate: usize,
+    hop: usize,
+    jumps: &mut Vec<f64>,
+) -> usize {
+    let (from, to) = (span.start, span.end.min(sound.len()));
+    let stride = (hop / ATTACK_STRETCHES_A_STEP).max(1);
+    // The energy of the stretch that ends at `end`.
+    let mut ending = |end: usize| {
+        let start = end.saturating_sub(hop);
+        let last = if start == 0 { 0.0 } else { clean(sound[start - 1]) };
+        Energy::of(&sound[start..end], last, hop, jumps).by(highs)
+    };
+    // The most the level was in the hold before the span.
+    let hold = (rate as f64 * HOLD_SECONDS).ceil() as usize;
+    let mut before = 0.0f64;
+    let mut end = from;
+    while end > 0 && from - end <= hold {
+        before = before.max(ending(end));
+        end = end.saturating_sub(stride);
+    }
+    let ends: Vec<usize> = (1..).map(|j| from + j * stride).take_while(|&end| end <= to).collect();
+    let stretches: Vec<f64> = ends.iter().map(|&end| ending(end)).collect();
+    let most = stretches.iter().copied().fold(0.0f64, f64::max);
+    let ratio = |db: f64| 10f64.powf(db / 10.0);
+    let least = (before * ratio(ATTACK_OVER_BEFORE_DB)).max(most * ratio(-ATTACK_UNDER_MOST_DB));
+    let on = stretches.iter().position(|&energy| energy > 0.0 && energy >= least).filter(|&on| ends[on] <= risen);
+    let looked_in = match on {
+        Some(on) => ends[on].saturating_sub((hop as f64 * ATTACK_BACK_STEPS) as usize).max(from)..ends[on],
+        None => from..to,
+    };
+    let jumped = || sound[looked_in.clone()].windows(2).map(|w| (clean(w[1]) - clean(w[0])).abs());
+    let biggest = jumped().fold(0.0f32, f32::max);
+    let first = jumped().position(|jump| jump >= biggest * 0.2).unwrap_or(0);
     let lead = (rate as f64 * LEAD_SECONDS).round() as usize;
-    (from + first).saturating_sub(lead)
+    (looked_in.start + first).saturating_sub(lead)
 }
 
 /// A sample as it's measured: one that isn't a number (a damaged file) is silence.
@@ -361,13 +535,91 @@ pub(crate) mod tests {
             let saw: Vec<f32> = (0..44_100).map(|i| (i as f32 * hz / 44_100.0).fract() - 0.5).collect();
             in_place(&find_in(&saw, 44_100), &[0]);
         }
-        // A creaky low voice: a pulse every 18 ms, each ringing for a few milliseconds.
-        let pulse = |i: usize| {
-            let t = (i % 794) as f32 / 44_100.0;
-            0.4 * (-t / 0.003).exp() * (std::f32::consts::TAU * 700.0 * t).sin()
-        };
-        let voice: Vec<f32> = (0..44_100).map(pulse).collect();
-        in_place(&find_in(&voice, 44_100), &[0]);
+        // A creaky low voice: a pulse every 18 ms, each ringing for a few milliseconds; and every 22 and 14 ms,
+        // where a pulse falls now in one step, now across two.
+        for every in [794, 980, 630] {
+            let pulse = |i: usize| {
+                let t = (i % every) as f32 / 44_100.0;
+                0.4 * (-t / 0.003).exp()
+                    * ((std::f32::consts::TAU * 700.0 * t).sin() + 0.6 * (std::f32::consts::TAU * 1_200.0 * t).sin())
+            };
+            let voice: Vec<f32> = (0..88_200).map(pulse).collect();
+            in_place(&find_in(&voice, 44_100), &[0]);
+        }
+    }
+
+    /// Made-up hits at 44.1 kHz that ring: noise (hiss when `hiss`, else a snare's noise and tone) from each frame of
+    /// `at`, dying away to a third in `decay` frames.
+    fn ringing(len: usize, at: &[usize], decay: f32, hiss: bool) -> Vec<f32> {
+        let mut sound = vec![0.0f32; len];
+        let (mut seed, mut last) = (77u32, 0.0f32);
+        for &from in at {
+            for (i, s) in sound[from..].iter_mut().take((decay * 8.0) as usize).enumerate() {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let white = (seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0;
+                let voice = if hiss {
+                    (white - last) * 0.5
+                } else {
+                    0.7 * white + 0.3 * (i as f32 * 190.0 * std::f32::consts::TAU / 44_100.0).sin()
+                };
+                *s += 0.5 * (-(i as f32) / decay).exp() * voice;
+                last = white;
+            }
+        }
+        sound
+    }
+
+    #[test]
+    fn hits_that_ring_into_each_other_are_all_hits() {
+        // Sixteen hits as loud as each other, each still ringing when the next comes: open hats a 16th apart, a
+        // snare roll, a fast roll of hats. (frames between them, frames to die away to a third, hiss)
+        for (every, decay, hiss) in
+            [(3_660, 2_205.0, false), (2_756, 1_544.0, false), (2_381, 882.0, false), (1_764, 662.0, true)]
+        {
+            let at: Vec<usize> = (0..16).map(|k| 2_000 + k * every).collect();
+            let sound = ringing(every * 18 + 44_100, &at, decay, hiss);
+            let found = find_in(&sound, 44_100);
+            assert_eq!(found.len(), at.len(), "every {every}, decay {decay}: {found:?}");
+            for (h, &want) in found.iter().zip(&at) {
+                assert!(h.at <= want && want - h.at <= 110, "every {every}: {} for {want}", h.at);
+            }
+            // Each rises by what the usual sensitivity keeps: it died away that far before the next.
+            assert!(found.iter().all(|h| h.rise_db >= USUAL_RISE_DB), "every {every}, decay {decay}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn drums_over_a_buzzing_bass_start_where_the_drums_do() {
+        // Hats an 8th apart at 120, each a little off the grid (so it starts anywhere in a step and in the bass's
+        // wave), over a saw bass, a square one, and a saw with its highs taken off: a bass's wave jumps once or
+        // twice a wave, as far as a hat does or further.
+        let at: Vec<usize> = (1..16).map(|k| k * 11_025 + (k * 37) % 113).collect();
+        // A bass: its name, its note (Hz), its wave by how far through it is (0 to 1), and how much of its highs is
+        // left (1: all).
+        type Bass = (&'static str, f32, fn(f32) -> f32, f32);
+        let basses: [Bass; 4] = [
+            ("a saw", 55.0, |phase| 2.0 * phase - 1.0, 1.0),
+            ("a higher saw", 164.8, |phase| 2.0 * phase - 1.0, 1.0),
+            ("a square", 82.4, |phase| if phase < 0.5 { 1.0 } else { -1.0 }, 1.0),
+            ("a duller saw", 55.0, |phase| 2.0 * phase - 1.0, 0.35),
+        ];
+        for (name, hz, shape, open) in basses {
+            let mut sound = hats(11_025 * 17, &at, 0.5);
+            let mut dull = (0.0f32, 0.0f32);
+            for (i, s) in sound.iter_mut().enumerate() {
+                let raw = shape((i as f32 * hz / 44_100.0).fract());
+                dull.0 += open * (raw - dull.0);
+                dull.1 += open * (dull.0 - dull.1);
+                *s += 0.3 * dull.1;
+            }
+            let found = find_in(&sound, 44_100);
+            // The bass's own start, then the hats: each within 2.5 ms before the hat, never after it.
+            assert_eq!(found.len(), at.len() + 1, "{name}: {found:?}");
+            assert_eq!(found[0].at, 0, "{name}");
+            for (h, &want) in found[1..].iter().zip(&at) {
+                assert!(h.at <= want && want - h.at <= 110, "{name}: {} for {want}", h.at);
+            }
+        }
     }
 
     #[test]

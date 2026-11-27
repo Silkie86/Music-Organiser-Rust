@@ -5153,12 +5153,21 @@ fn slices_shots(
         return Err("sounds-slices.png: the third and fourth lines aren't on show".into());
     };
     let to = third + (fourth - third) * 0.4;
+    // The mouse over a line takes hold of it; the lines' mark is what has its shape worked out again.
+    let mark = edit.get_cuts_mark();
+    let held = |at: f32| edit.invoke_slice_near(at, within, edit.get_cuts_mark());
+    if !held(third) || held(to) {
+        return Err("sounds-slices.png: the mouse takes hold of a line where there's none, or of none on one".into());
+    }
     edit.invoke_slice_down(third, within, true);
     edit.invoke_slice_move(to, true, true);
     edit.invoke_slice_up(false);
     let near = |i: usize, at: f32| line(i).is_some_and(|now| (now - at).abs() < 1e-4);
     if !near(2, to) || cuts() != hits || !edit.get_can_undo() {
         return Err("sounds-slices.png: dragging the third line didn't move its cut".into());
+    }
+    if edit.get_cuts_mark() == mark || held(third) || !held(to) {
+        return Err("sounds-slices.png: the mouse's shape didn't follow the line that was dragged".into());
     }
     mo_ui::sounds::run_action(app, "sounds.editUndo");
     let back = near(2, third) && edit.get_can_redo();

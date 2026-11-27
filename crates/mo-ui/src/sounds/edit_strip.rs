@@ -592,8 +592,8 @@ fn load(app: &AppWindow) {
     }
 }
 
-/// Puts the open sound's edits and slicing with the kept ones (only a sound with edits, or with something to undo or
-/// redo), the newest last, and lets the sound go.
+/// Puts the open sound's edits and slicing with the kept ones (only a sound with edits, with something to undo or
+/// redo, or with Slices worth keeping), the newest last, and lets the sound go.
 fn stash(s: &mut Strip) {
     let Some(mut o) = s.sound.take() else { return };
     s.kept.retain(|k| !(k.id == o.id && k.source == o.source));
@@ -601,7 +601,7 @@ fn stash(s: &mut Strip) {
     if let Some(sliced) = o.sliced.as_mut() {
         sliced.history.end_live();
     }
-    let sliced = o.sliced.filter(|sliced| sliced.on || sliced.history.has_steps());
+    let sliced = o.sliced.filter(slices::Sliced::worth_keeping);
     if !o.edits.now.is_empty() || o.edits.has_steps() || sliced.is_some() {
         s.kept.push(Kept { id: o.id, source: o.source, edits: o.edits, sliced });
         if s.kept.len() > KEPT {
@@ -1140,13 +1140,13 @@ fn play_edit(app: &AppWindow, from: f64, till: Option<f64>) {
 
 /// O held (`on`) or let go, or the A/B button: the original plays from the moment the edit has got to, and the edit
 /// comes back from the same moment as it's let go. With nothing playing, the original plays while it's held (from the
-/// start of the part picked, if there is one). Whether it did anything.
+/// start of the part picked, or of the slice picked with the Slices on, if there is one). Whether it did anything.
 fn hear_original(app: &AppWindow, on: bool) -> bool {
     let Some((original, edited, edits, pick, held)) = STRIP.with(|s| {
         let s = s.borrow();
         let o = s.sound.as_ref().filter(|_| s.open)?;
         let made = o.made.as_ref()?;
-        Some((o.original.clone()?, made.audio.clone(), made.edits.clone(), o.pick, o.held))
+        Some((o.original.clone()?, made.audio.clone(), made.edits.clone(), part_now(o), o.held))
     }) else {
         return false;
     };

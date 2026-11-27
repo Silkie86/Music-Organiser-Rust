@@ -155,8 +155,11 @@ export global SoundEdit {
     callback slice-move(float, bool, bool);
     callback slice-up(bool);
     callback slice-double();
-    // Whether a cut's line is within `within` of `at` (0 to 1 across): the mouse there takes hold of it.
-    pure callback slice-near(float, float) -> bool;
+    // Whether a cut's line is within `within` of `at` (0 to 1 across): the mouse there takes hold of it. It's asked
+    // with `cuts-mark`, which is another number whenever the lines (or the stretch shown) are others: the mouse's
+    // shape is worked out again then, though the mouse hasn't moved.
+    pure callback slice-near(float, float, int) -> bool;
+    in property <int> cuts-mark;
 }
 
 // A square button with a sign, for the strip's tools.
@@ -648,7 +651,8 @@ export component EditStrip inherits Rectangle {
                         property <length> down-x;
                         property <length> down-y;
                         property <bool> held;
-                        mouse-cursor: SoundEdit.slice-near(self.mouse-x / max(1px, self.width), self.line-room / max(1px, self.width))
+                        mouse-cursor: SoundEdit.slice-near(self.mouse-x / max(1px, self.width),
+                            self.line-room / max(1px, self.width), SoundEdit.cuts-mark)
                             ? MouseCursor.ew-resize : MouseCursor.pointer;
                         pointer-event(e) => {
                             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {

@@ -10,6 +10,11 @@ use mo_formats::case;
 /// The longest part of the original's name a copy's name keeps, so the copy's name stays well inside Windows' limits.
 const NAME_KEPT: usize = 100;
 
+/// The longest part of it a slice keeps: a slice's path carries the name twice, in its folder's name and in its own,
+/// and with a hundred characters of it each, a slice of a sound with a long name was past the 260 characters many
+/// programs (a sampler it's dragged to, Explorer) take a path to be at most.
+const SLICE_NAME_KEPT: usize = 60;
+
 /// The mark for a sound at `path`: eight hex digits, the same for the same file however its path is written (letter
 /// case, slashes), on every run and every Rust version.
 pub fn mark(path: &str) -> String {
@@ -39,17 +44,25 @@ pub fn edit_name(path: &str, edits: &str) -> String {
 }
 
 /// The folder the slices of the sound at `path` go in ("Loop 128 slices (5e6f7a8b)"): `slicing` is any text that tells
-/// one slicing from another (what was read, its edits and its cuts, written out in full), which goes into the name as
-/// eight hex digits. So the same slicing again is the same folder, and another slicing never changes the slices a
-/// project already uses.
+/// one slicing of it from another (what was read, its edits and its cuts, written out in full), which goes into the
+/// name as eight hex digits, with the sound's path ([`slicing_key`]). So the same slicing again is the same folder,
+/// another slicing never changes the slices a project already uses, and two sounds of the same name, cut alike, each
+/// have a folder of their own.
 pub fn slices_folder(path: &str, slicing: &str) -> String {
-    format!("{} slices ({})", stem_of(path), key_of(slicing))
+    format!("{} slices ({})", slice_stem_of(path), slicing_key(path, slicing))
 }
 
 /// The file name of slice `number` (from 1) of the sound at `path`, in [`slices_folder`]: numbered so the slices sort
-/// in their order ("Loop 128 01 (slice 5e6f7a8b, 1a2b3c4d).wav").
+/// in their order ("Loop 128 01 (slice 5e6f7a8b, 1a2b3c4d).wav"), with its folder's eight digits and the sound's mark.
 pub fn slice_name(path: &str, slicing: &str, number: usize) -> String {
-    format!("{} {number:02} (slice {}, {}).wav", stem_of(path), key_of(slicing), mark(path))
+    format!("{} {number:02} (slice {}, {}).wav", slice_stem_of(path), slicing_key(path, slicing), mark(path))
+}
+
+/// Eight hex digits that tell one slicing of the sound at `path` from another, and from the same slicing of another
+/// sound: with the slicing alone, two sounds called "Loop 128.wav" in two packs, both cut on their beats, had one
+/// folder between them, their slices side by side in it.
+fn slicing_key(path: &str, slicing: &str) -> String {
+    key_of(&format!("{} {slicing}", mark(path)))
 }
 
 /// Whether `name` is a folder of slices ([`slices_folder`]): for the start-up sweep, which looks in them for slices
@@ -73,9 +86,21 @@ fn is_key(key: &str) -> bool {
 
 /// The start of a copy's name: the original's name without its extension, cut to [`NAME_KEPT`] characters.
 fn stem_of(path: &str) -> String {
+    stem_cut(path, NAME_KEPT)
+}
+
+/// The start of a slice's name and of its folder's: cut to [`SLICE_NAME_KEPT`] characters, with no space left at its
+/// end (the other copies' names keep theirs: a copy made before is found again by its name).
+fn slice_stem_of(path: &str) -> String {
+    stem_cut(path, SLICE_NAME_KEPT).trim_end().to_owned()
+}
+
+/// The name of the file at `path` without its extension, cut to `kept` characters ("Sound" for a file with no name
+/// to speak of).
+fn stem_cut(path: &str, kept: usize) -> String {
     let file = crate::file_name(path);
     let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-    let stem: String = stem.chars().take(NAME_KEPT).collect();
+    let stem: String = stem.chars().take(kept).collect();
     if stem.trim().is_empty() { "Sound".to_owned() } else { stem }
 }
 
@@ -163,10 +188,42 @@ mod tests {
     }
 
     #[test]
+    fn two_sounds_of_the_same_name_cut_alike_have_a_folder_each() {
+        let (a, b) = ("D:\\Pack A\\Loop 128.wav", "D:\\Pack B\\Loop 128.wav");
+        assert_ne!(slices_folder(a, "cuts"), slices_folder(b, "cuts"));
+        assert!(
+            slices_folder(a, "cuts").starts_with("Loop 128 slices (") && is_slices_folder(&slices_folder(b, "cuts"))
+        );
+        // The same sound, however its path is written: the same digits (and so, on Windows, the same folder).
+        let digits = |name: &str| name.rsplit_once('(').map(|(_, rest)| rest[..8].to_owned()).unwrap();
+        assert_eq!(digits(&slices_folder(a, "cuts")), digits(&slices_folder("d:/pack a/loop 128.WAV", "cuts")));
+        // A slice carries its folder's digits.
+        let slice = slice_name(a, "cuts", 3);
+        assert!(slice.contains(&format!("(slice {}, {})", digits(&slices_folder(a, "cuts")), mark(a))), "{slice}");
+    }
+
+    #[test]
+    fn a_slices_path_stays_short_for_a_long_name() {
+        let long = format!("D:\\{}.wav", "x".repeat(300));
+        let (folder, slice) = (slices_folder(&long, "cuts"), slice_name(&long, "cuts", 64));
+        // The folder, a separator and the slice: with the export folder's path before them, well inside 260.
+        assert!(folder.chars().count() + 1 + slice.chars().count() <= 180, "{} + {}", folder.len(), slice.len());
+        assert!(is_slices_folder(&folder) && mark_in(&slice).is_some());
+        // A name cut at a space has no space left before what follows it.
+        let spaced = format!("D:\\{} tail.wav", "y".repeat(59));
+        assert!(slices_folder(&spaced, "cuts").starts_with(&format!("{} slices (", "y".repeat(59))));
+    }
+
+    #[test]
     fn a_long_name_is_cut_short() {
         let long = format!("D:\\{}.flac", "x".repeat(300));
         let name = copy_name(&long, -40);
         assert!(name.len() < 140, "{}", name.len());
         assert!(mark_in(&name).is_some());
+        // The copies made before slices keep their names to the letter (a copy is found again by its name): a
+        // space at the end of the original's name stays.
+        assert!(copy_name("D:\\Kick .wav", -60).starts_with("Kick  (trimmed -60 dB, "));
+        assert!(edit_name("D:\\Kick .wav", "[]").starts_with("Kick  (edited "));
+        assert!(slice_name("D:\\Kick .wav", "cuts", 1).starts_with("Kick 01 (slice "));
     }
 }

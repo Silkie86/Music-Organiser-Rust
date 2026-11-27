@@ -719,6 +719,15 @@ mod tests {
         let edited = slices_in(&source, &audio, changed, "[Reverse(None)]", &spans, &copies).unwrap();
         assert_ne!(edited[0].parent(), made[0].parent());
         assert_eq!(std::fs::read(&made[1]).unwrap(), b"kept");
+        // Another sound of the same name (in another pack), cut the same: a folder of its own.
+        let pack = dir.join("Pack B");
+        std::fs::create_dir_all(&pack).unwrap();
+        let twin = Source { path: pack.join("Loop 128.wav"), span: None };
+        ramp(&twin.path);
+        let ToEdit { audio: twin_audio, changed: twin_changed } = read_to_edit(&twin).unwrap();
+        let twins = slices_in(&twin, &twin_audio, twin_changed, "[]", &spans, &copies).unwrap();
+        assert_ne!(twins[0].parent(), made[0].parent());
+        assert_eq!(std::fs::read_dir(made[0].parent().unwrap()).unwrap().count(), 3, "only its own three");
         // None, too many, or a file changed since it was read: no slices.
         assert!(slices_in(&source, &audio, changed, "[]", &[], &copies).is_err());
         let many = vec![Span::new(0, 10); MOST_SLICES + 1];

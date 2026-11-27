@@ -244,6 +244,12 @@ fn a_sounds_slices_go_on_a_drum_machines_pads_from_c1() {
         card(&feed),
         ("Sending 20 slices of Garage Loop 128 to Bitwig".into(), "Making the slices".into(), State::Running)
     );
+    // Made and saved: the card says whose turn it is while Bitwig loads them.
+    to_bitwig::slices_made(&job);
+    assert_eq!(
+        card(&feed),
+        ("Sending 20 slices of Garage Loop 128 to Bitwig".into(), "Waiting for Bitwig".into(), State::Running)
+    );
     assert!(to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Garage Loop 128", &pads, None));
     // Said in a line, not pad by pad.
     assert_eq!(
