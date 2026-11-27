@@ -57,6 +57,7 @@ use crate::made::made;
 use crate::member::PhraseMember;
 use crate::roles::{Role, RoleWhy};
 use mo_harmony::{KeyFact, Slot};
+use smol_str::SmolStr;
 
 mod slots;
 
@@ -1149,17 +1150,65 @@ impl MidiStore {
     /// Every part, newest file first (a date that isn't real last), without its notes, as the page lists them.
     /// `cs_roles` and `cs_octaves` are the C# app's corrections when they're not yet taken in
     /// ([`BroughtUp::old_roles`]), which the index's own win over; empty once they are.
-    ///
-    /// A big index is read in several pieces at once, each on a connection of its own, on the threads of the pool
-    /// it's called in (the page calls it in its low-priority one): a made-up index of 359,000 parts took 1.9 s as one
-    /// read and 0.7 s in four pieces (19 Nov 2026). The pieces each see the index as it is when their read starts,
-    /// so if anything was written to it meanwhile (its reading is going on) it's read again, and after that as one
-    /// read: the list is always of one moment, as one statement's is.
+    /// Read as [`MidiStore::read_parts`] says: a made-up index of 359,000 parts took 1.9 s as one read and 0.7 s
+    /// in four pieces (19 Nov 2026).
     pub fn all(
         &self,
         cs_roles: &HashMap<String, Role>,
         cs_octaves: &HashMap<String, i32>,
     ) -> Result<Vec<StoredPhrase>, MidiError> {
+        let list = self.read_parts(cs_roles, cs_octaves, |_, _| Ok(None))?.0;
+        Ok(newest_first(list))
+    }
+
+    /// Every part sorted into sets of the same notes, as [`crate::Catalogue::from_grouped`] takes them: the same
+    /// catalogue as [`MidiStore::all`]'s list makes, with only the newest copy of each set of notes read in full.
+    /// For each other copy only its file is kept, found in a first quick look at every part's id, file and notes:
+    /// on a long-used index most parts are older saves of the same notes (146,747 of 358,990 on 26 Nov 2026), and
+    /// their names, keys and shapes were read only to be let go again.
+    pub fn grouped(
+        &self,
+        cs_roles: &HashMap<String, Role>,
+        cs_octaves: &HashMap<String, i32>,
+    ) -> Result<crate::Grouped, MidiError> {
+        let dates = RealDates::now();
+        let (firsts, groups) =
+            self.read_parts(cs_roles, cs_octaves, |conn, sources| Ok(Some(copies_of(conn, sources, &dates)?)))?;
+        let Some(Groups { order, others, .. }) = groups else {
+            return Ok(crate::Grouped::of(self.all(cs_roles, cs_octaves)?, dates));
+        };
+        // The newest of each set in the order the quick look found them in.
+        let mut read: Vec<Option<StoredPhrase>> = firsts.into_iter().map(Some).collect();
+        read.sort_unstable_by_key(|p| p.as_ref().map(|p| p.id));
+        let ids: Vec<i64> = read.iter().map(|p| p.as_ref().map_or(i64::MIN, |p| p.id)).collect();
+        let mut grouped = crate::Grouped { firsts: Vec::with_capacity(order.len()), others: Vec::new(), dates };
+        for (id, copies) in order.into_iter().zip(others) {
+            let Some(p) = ids.binary_search(&id).ok().and_then(|at| read.get_mut(at)).and_then(Option::take) else {
+                // A part the quick look saw that the full read didn't. It can't be (both looked at one moment of the
+                // index, and leave out the same parts), but if a later change made them disagree, every part is
+                // read in full as before rather than a set of notes going missing from the list.
+                drop((read, grouped));
+                return Ok(crate::Grouped::of(self.all(cs_roles, cs_octaves)?, dates));
+            };
+            grouped.firsts.push(p);
+            grouped.others.push(copies);
+        }
+        Ok(grouped)
+    }
+
+    /// The parts [`MidiStore::all`] and [`MidiStore::grouped`] read, in no order, and what `look` found first in
+    /// the same moment of the index (with the parts it gives back, [`Groups::keep`], the only ones read in full).
+    ///
+    /// A big index is read in several pieces at once, each on a connection of its own, on the threads of the pool
+    /// it's called in (the page calls it in its low-priority one). The pieces each see the index as it is when
+    /// their read starts, so if anything was written to it meanwhile (its reading is going on) it's read again, and
+    /// after that as one read: the list is always of one moment, as one statement's is.
+    fn read_parts(
+        &self,
+        cs_roles: &HashMap<String, Role>,
+        cs_octaves: &HashMap<String, i32>,
+        look: impl Fn(&Connection, &HashMap<i64, Arc<Source>>) -> Result<Option<Groups>, MidiError>,
+    ) -> Result<(Vec<StoredPhrase>, Option<Groups>), MidiError> {
         use rayon::prelude::*;
         // Not `self` in what the threads share: its connection is one thread's.
         let (path, has) = (self.path.as_path(), (self.has_keys, self.has_shapes));
@@ -1170,24 +1219,30 @@ impl MidiStore {
                 break;
             }
             let sources = self.sources()?;
+            let groups = look(&self.conn, &sources)?;
+            let keep = groups.as_ref().map(|g| g.keep.as_slice());
             let read: Vec<Result<Vec<StoredPhrase>, MidiError>> = pieces
                 .par_iter()
-                .map(|&(from, to)| parts_between(&open_piece(path)?, has, from, to, &sources, cs_roles, cs_octaves))
+                .map(|&(from, to)| {
+                    parts_between(&open_piece(path)?, has, from, to, &sources, (cs_roles, cs_octaves), keep)
+                })
                 .collect();
             let mut list = Vec::new();
             for piece in read {
                 list.append(&mut piece?);
             }
             if self.written()? == before {
-                return Ok(newest_first(list));
+                return Ok((list, groups));
             }
         }
         // A small index, or one that kept being written: one read, in one view of it.
         let view = self.conn.unchecked_transaction()?;
         let sources = self.sources()?;
-        let list = parts_between(&self.conn, has, i64::MIN, i64::MAX, &sources, cs_roles, cs_octaves)?;
+        let groups = look(&self.conn, &sources)?;
+        let keep = groups.as_ref().map(|g| g.keep.as_slice());
+        let list = parts_between(&self.conn, has, i64::MIN, i64::MAX, &sources, (cs_roles, cs_octaves), keep)?;
         view.commit()?;
-        Ok(newest_first(list))
+        Ok((list, groups))
     }
 
     /// A number that changes each time another connection writes to the index (SQLite's `data_version`).
@@ -1334,16 +1389,74 @@ impl MidiStore {
     }
 }
 
+/// What [`copies_of`] found: which parts are the newest copy of their notes.
+struct Groups {
+    /// The newest part of each set of notes, newest file first (a date that isn't real last), by id.
+    order: Vec<i64>,
+    /// Beside each of `order`, every other file with the same notes, newest first.
+    others: Vec<Vec<Arc<Source>>>,
+    /// `order`'s ids in order: the parts read in full.
+    keep: Vec<i64>,
+}
+
+/// Every part's id, file and notes, sorted as [`MidiStore::all`] sorts its list (by `real`), into sets of the same
+/// notes (the same note hash, as [`crate::Catalogue::new`] sorts them): the newest of each, and the files of the
+/// rest. Parts whose file or notes aren't there are left out, as [`parts_between`] leaves them out. Small: three
+/// numbers a part while it lasts, and each set's notes by a number, not their hash.
+fn copies_of(conn: &Connection, sources: &HashMap<i64, Arc<Source>>, real: &RealDates) -> Result<Groups, MidiError> {
+    let mut sets: HashMap<i64, u32> = HashMap::new();
+    {
+        let mut by_hash: HashMap<SmolStr, u32> = HashMap::new();
+        let mut st = conn.prepare("SELECT id, hash FROM notes")?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let next = u32::try_from(by_hash.len()).unwrap_or(u32::MAX);
+            let set = *by_hash.entry(short_text(r, 1)?).or_insert(next);
+            sets.insert(r.get(0)?, set);
+        }
+    }
+    let mut parts: Vec<(i64, u32, &Arc<Source>)> = Vec::new();
+    let mut st = conn.prepare("SELECT id, file, notes FROM parts")?;
+    let mut rows = st.query([])?;
+    while let Some(r) = rows.next()? {
+        let (Some(source), Some(&set)) = (sources.get(&r.get::<_, i64>(1)?), sets.get(&r.get::<_, i64>(2)?)) else {
+            continue;
+        };
+        parts.push((r.get(0)?, set, source));
+    }
+    drop(sets);
+    parts.sort_unstable_by_key(|&(id, _, s)| (!real.seconds(s.mtime), std::cmp::Reverse(s.mtime), id));
+    let mut at_set: HashMap<u32, usize> = HashMap::new();
+    let (mut order, mut others) = (Vec::new(), Vec::<Vec<Arc<Source>>>::new());
+    for (id, set, source) in parts {
+        match at_set.get(&set) {
+            Some(&at) => {
+                if let Some(list) = others.get_mut(at) {
+                    list.push(Arc::clone(source));
+                }
+            }
+            None => {
+                at_set.insert(set, order.len());
+                order.push(id);
+                others.push(Vec::new());
+            }
+        }
+    }
+    let mut keep = order.clone();
+    keep.sort_unstable();
+    Ok(Groups { order, others, keep })
+}
+
 /// The parts with ids `from` to `to` of the index `conn` has open (with its `keys` and `shapes` tables or not), in
-/// no order, each with its file's facts from `sources`.
+/// no order, each with its file's facts from `sources`; only those in `keep` (ids in order) when it's given.
 fn parts_between(
     conn: &Connection,
     (has_keys, has_shapes): (bool, bool),
     from: i64,
     to: i64,
     sources: &HashMap<i64, Arc<Source>>,
-    cs_roles: &HashMap<String, Role>,
-    cs_octaves: &HashMap<String, i32>,
+    (cs_roles, cs_octaves): (&HashMap<String, Role>, &HashMap<String, i32>),
+    keep: Option<&[i64]>,
 ) -> Result<Vec<StoredPhrase>, MidiError> {
     // A key not read yet (version 0) has no word on whether it's cut.
     let (key_fact, key_cut, keys_join) = if has_keys {
@@ -1365,6 +1478,13 @@ fn parts_between(
     let mut rows = st.query([from, to])?;
     let mut list = Vec::new();
     while let Some(r) = rows.next()? {
+        // A part left out (another copy of notes a newer part has) is passed over before any of its text is read
+        // or any of it is held. SQLite has still looked it up with its notes, key and shape: as quick as reading
+        // all of them was (bench, 27 Nov 2026), and with half as much held at the height of the read.
+        let id: i64 = r.get(0)?;
+        if keep.is_some_and(|ids| ids.binary_search(&id).is_err()) {
+            continue;
+        }
         let Some(source) = sources.get(&r.get::<_, i64>(1)?) else { continue };
         let hash = short_text(r, 7)?;
         let mut chroma = [0u8; 12];
@@ -1387,7 +1507,7 @@ fn parts_between(
             cs_octaves.get(hash.as_str()).copied()
         };
         list.push(StoredPhrase {
-            id: r.get(0)?,
+            id,
             source: Arc::clone(source),
             part: short_text(r, 2)?,
             clip: short_text(r, 3)?,
