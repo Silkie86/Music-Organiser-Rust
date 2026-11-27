@@ -181,6 +181,67 @@ jobs:
           name: setup
           path: dist/*.exe
 
+  # The Mac download (installer/mac): the app and its CLAP plugin as DAWmate.app and DAWmate.clap, each one universal
+  # file for Apple silicon and Intel, signed ad hoc (no Apple Developer ID yet, so not notarised), in a .zip kept as
+  # this run's download. Tried by installer/mac/check.sh (the app starts, runs and closes) and clap-validator. Not put on
+  # the release yet: Mac testers get it from the run's downloads until it's signed (docs/installer.md).
+  mac:
+    name: Mac app
+    needs: tag
+    if: needs.tag.outputs.published != 'true'
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      # The oldest macOS the app is built for (Big Sur, the first with Apple silicon); Info.plist says the same.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # the stable branch
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: dist-mac
+          save-if: ${{ github.event_name == 'push' || inputs.release }}
+      - name: Build the app and the CLAP plugin (dist), for Apple silicon and Intel
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --locked --profile dist --target "$target" -p mo-ui --bin music-organiser
+            cargo build --locked --profile dist --target "$target" -p mo-plugin
+          done
+      - name: Make the .zip
+        run: echo "ZIP=$(installer/mac/package.sh dist | tail -n 1)" >> "$GITHUB_ENV"
+      - name: Try it
+        run: installer/mac/check.sh "$ZIP"
+      # The CLAP project's own checker loads the plugin as a DAW would and tries every rule of the format.
+      - name: The CLAP plugin passes clap-validator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/validator" "$RUNNER_TEMP/plugin"
+          gh release download --repo free-audio/clap-validator --pattern '*mac*' --dir "$RUNNER_TEMP/validator"
+          cd "$RUNNER_TEMP/validator"
+          for f in *; do
+            case "$f" in
+              *.tar.gz) tar -xzf "$f" ;;
+              *.zip) ditto -x -k "$f" . ;;
+            esac
+          done
+          validator=$(find . -type f -name clap-validator | head -n 1)
+          [ -n "$validator" ] || { ls -R; echo "no clap-validator in the download"; exit 1; }
+          chmod +x "$validator"
+          "$validator" --version
+          ditto -x -k "$GITHUB_WORKSPACE/$ZIP" "$RUNNER_TEMP/plugin"
+          "$validator" validate "$RUNNER_TEMP/plugin/DAWmate.clap"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac
+          path: dist/*.zip
+          if-no-files-found: error
+
   # The only job that writes: it puts the tried setup on a draft release.
   release:
     name: Draft release

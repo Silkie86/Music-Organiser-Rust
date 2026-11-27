@@ -86,3 +86,20 @@ installer\build.ps1 -Exe target\dist\music-organiser.exe -BitwigExtension extens
 
 Never run `installer\check.ps1` on your own PC. It puts your data folder aside while it works, and it's meant only for
 CI.
+
+## The Mac download (a test build, not signed yet)
+
+The Release workflow's **Mac app** job (on every run, try-outs too) builds the app and the CLAP plugin for Apple
+silicon and Intel and makes `DAWmate-<version>-mac.zip` (`installer/mac/package.sh`): `DAWmate.app`, `DAWmate.clap`
+and a Read me. It's kept as the run's `mac` download, not put on the release.
+
+- **Signed ad hoc only.** Apple silicon runs nothing unsigned, so the bundles carry a signature with no name. Without an
+  Apple Developer ID (99 USD a year) and notarisation, macOS refuses a double-click on the first open: right-click,
+  Open, Open. Signing and notarising for real is a choice for Solomon before Mac builds go on the release.
+- **Tried on GitHub's Mac** by `installer/mac/check.sh`: the bundles are whole (Info.plist, both chips, signatures,
+  `clap_entry`), and the app starts with a scratch data folder, runs a minute, writes no crash log and closes when
+  asked. Then `clap-validator` (the CLAP project's checker) loads the plugin as a DAW would.
+- **No installer.** The app is dragged into Applications; the plugin is copied into `~/Library/Audio/Plug-Ins/CLAP` by
+  hand (the app's own DAW links put it in on Windows only for now).
+- `Info.plist` says why the app may use the sound card's input (recording a take): without that line macOS closes an
+  app the moment it opens one.
