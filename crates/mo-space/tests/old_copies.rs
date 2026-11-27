@@ -115,12 +115,14 @@ fn every_old_copy_and_folder_left_behind_is_listed_with_its_size_biggest_first()
     // Not in the records (Link again cut off after its swap: the whole-app review of 26 Nov, PG-2), the folder set
     // aside is found all the same, saying where its files went, and checked against them.
     let unrecorded = remind(&moved, &[], &[], &stop).unwrap();
-    let found = unrecorded.leftovers.iter().find(|l| l.path == home.path).unwrap();
-    assert!(matches!(&found.what, Left::Kept(h) if h.note == home.note && h.copy == home.copy), "{found:?}");
-    assert_eq!(
-        (found.now_in.as_str(), found.only.clone(), found.can_go()),
-        (steam.to.as_str(), Some(Vec::new()), true)
+    // By key: the folder found on the disk is spelt with the system's own separators (backslashes on Windows).
+    let found = unrecorded.leftovers.iter().find(|l| key(&l.path) == key(&home.path));
+    let found = found.unwrap_or_else(|| panic!("{} not in {:?}", home.path, unrecorded.leftovers));
+    assert!(
+        matches!(&found.what, Left::Kept(h) if h.note == home.note && key(&h.copy) == key(&home.copy)),
+        "{found:?}"
     );
+    assert_eq!((key(&found.now_in), found.only.clone(), found.can_go()), (key(&steam.to), Some(Vec::new()), true));
 
     // Something saved into an old copy after the move is named, and that one can't go until you've looked.
     write(Path::new(&presets.old_copy), "late.fxp", "late");
