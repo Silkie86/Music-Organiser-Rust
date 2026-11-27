@@ -1,5 +1,6 @@
 /target/
 /tools/galaxycheck/target/
+/tools/logo/target/
 # The launcher's build folder (-BuildDir), wherever it ends up
 MusicOrganiser-build/
 **/*.rs.bk

@@ -1,0 +1,20 @@
+# Makes the logo's pictures from its SVGs in assets/logo (tools/logo/draw.py draws those). A workspace of its own: it's
+# run by hand only when the logo changes, so its SVG library never gets into the app's build.
+[workspace]
+
+[package]
+name = "logomake"
+description = "Makes the DAWmate logo's .png, .ico, .icns and installer pictures from the SVGs in assets/logo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "logomake"
+path = "src/main.rs"
+
+[dependencies]
+resvg = "0.50"
+ico = "0.6"
+icns = "0.5"
+image = { version = "0.25", default-features = false, features = ["bmp", "png"] }

@@ -38,6 +38,7 @@ jobs:
       galaxy: ${{ steps.scope.outputs.galaxy }}
       launcher: ${{ steps.scope.outputs.launcher }}
       installer: ${{ steps.scope.outputs.installer }}
+      logo: ${{ steps.scope.outputs.logo }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -117,6 +118,7 @@ jobs:
           cargo fmt --all --check
           cargo fmt --all --check --manifest-path tools/galaxycheck/Cargo.toml
           cargo fmt --all --check --manifest-path fuzz/Cargo.toml
+          cargo fmt --all --check --manifest-path tools/logo/Cargo.toml
       # An out-of-date Cargo.lock fails here, with Cargo's own words, not first in the release's locked build (TC-2).
       - name: Cargo.lock is up to date
         if: runner.os == 'Linux'
@@ -124,6 +126,11 @@ jobs:
           cargo metadata --locked --format-version 1 > /dev/null
           cargo metadata --locked --format-version 1 --manifest-path tools/galaxycheck/Cargo.toml > /dev/null
           cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
+          cargo metadata --locked --format-version 1 --manifest-path tools/logo/Cargo.toml > /dev/null
+      # The tool that makes the logo's pictures (tools/logo) is a workspace of its own, run by hand: it still has to build.
+      - name: Logo tool clippy
+        if: runner.os == 'Linux' && needs.scope.outputs.logo == 'true'
+        run: cargo clippy --locked --manifest-path tools/logo/Cargo.toml --all-targets -- -D warnings
       - name: Clippy
         if: needs.scope.outputs.rust == 'true'
         run: cargo clippy ${{ needs.scope.outputs.check }} --all-targets
@@ -229,7 +236,7 @@ jobs:
           path: dist/*.exe
 
   # Every library the app uses (deny.toml): no known security holes, only licences that let the app be shared, and
-  # only from crates.io. The galaxy check's libraries too.
+  # only from crates.io. The galaxy check's and the logo tool's libraries too.
   deny:
     name: Libraries
     runs-on: ubuntu-latest
@@ -240,6 +247,9 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
         with:
           manifest-path: tools/galaxycheck/Cargo.toml
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
+        with:
+          manifest-path: tools/logo/Cargo.toml
 
   screenshots:
     name: Screenshots
