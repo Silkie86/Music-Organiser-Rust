@@ -133,6 +133,11 @@ export component AppWindow inherits Window {
 
     // The key sheet (F1 or ?).
     // The key sheet's lines: the page's own keys, then the ones that work everywhere.
+    // The page's help on the key sheet (mo_app::help).
+    in property <string> help-what;
+    in property <[string]> help-tips;
+    // The help key, beside Help on the rail.
+    in property <string> help-key;
     in property <[KeyRow]> page-key-rows;
     in property <[KeyRow]> key-rows;
     in-out property <bool> sheet-open;
@@ -362,6 +367,15 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle { }
+                    // Help: the key sheet, for whoever doesn't know F1 or ? yet (a beta tester on their first day).
+                    RailItem {
+                        tint: Theme.muted;
+                        text: "Help";
+                        icon: Icons.help;
+                        key: root.help-key;
+                        lit-bar: false;
+                        clicked => { root.sheet-open = !root.sheet-open; }
+                    }
                     RailItem {
                         tint: Theme.place(root.settings-place);
                         text: root.places[root.settings-place].name;
@@ -472,6 +486,9 @@ export component AppWindow inherits Window {
         }
 
         if root.sheet-open: KeySheet {
+            page-name: root.place >= 0 && root.place < root.places.length ? root.places[root.place].name : "";
+            help-what: root.help-what;
+            help-tips: root.help-tips;
             page-rows: root.page-key-rows;
             rows: root.key-rows;
             close => {
