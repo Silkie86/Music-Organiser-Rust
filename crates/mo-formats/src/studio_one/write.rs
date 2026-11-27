@@ -93,7 +93,7 @@ pub fn write(song: &Arrangement, title: &str, format: &FormatOf) -> Written {
         let music = has_notes || (empty && lane.kind == LaneKind::Instrument);
         if music {
             instruments = true;
-            for (track, clips) in music_tracks(lane, &name) {
+            for (track, clips) in crate::arrangement::instrument_parts(lane, &name) {
                 let events = out.music_events(&track, &clips);
                 out.track(false, &track, lane, &events);
             }
@@ -133,49 +133,6 @@ pub fn write(song: &Arrangement, title: &str, format: &FormatOf) -> Written {
     let song_end = if end > EMPTY_END - 16.0 { (end / 4.0).ceil() * 4.0 + 16.0 } else { EMPTY_END };
     let bytes = assemble(song, title, tempo, out.tracks, song_end, &out).unwrap_or_default();
     Written { bytes, left_out }
-}
-
-/// A lane's clips of notes as Studio One's instrument tracks: one, or one for each instrument when its clips hold
-/// several (an FL pattern plays a part for each of its channels), named after it.
-fn music_tracks(lane: &crate::arrangement::PreviewLane, name: &str) -> Vec<(String, Vec<PreviewClip>)> {
-    let part_of = |c: &PreviewClip, n: &PreviewNote| -> String {
-        if c.parts.len() > 1 { c.parts.get(usize::from(n.part)).cloned().unwrap_or_default() } else { String::new() }
-    };
-    let mut names: Vec<String> = Vec::new();
-    for c in &lane.clips {
-        for n in &c.notes {
-            let part = part_of(c, n);
-            if !names.contains(&part) {
-                names.push(part);
-            }
-        }
-    }
-    // A clip with nothing in it at all (an empty pattern laid out as a section) stays, on the first track.
-    let empty = |c: &PreviewClip| c.notes.is_empty() && c.audio.is_empty() && c.points.is_empty();
-    if names.len() <= 1 {
-        let clips = lane.clips.iter().filter(|c| !c.notes.is_empty() || empty(c)).cloned().collect();
-        return vec![(name.to_owned(), clips)];
-    }
-    names
-        .into_iter()
-        .enumerate()
-        .map(|(i, part)| {
-            let clips = lane
-                .clips
-                .iter()
-                .filter_map(|c| {
-                    let notes: Vec<PreviewNote> = c.notes.iter().filter(|n| part_of(c, n) == part).copied().collect();
-                    (!notes.is_empty() || (i == 0 && empty(c))).then(|| PreviewClip {
-                        notes,
-                        parts: Vec::new(),
-                        ..c.clone()
-                    })
-                })
-                .collect();
-            let track = if part.trim().is_empty() { name.to_owned() } else { part };
-            (track, clips)
-        })
-        .collect()
 }
 
 /// What the tracks add to each of the song's files.
@@ -633,7 +590,7 @@ fn replace_value(text: &str, before: &str, value: &str) -> Option<String> {
 }
 
 /// Text as an XML attribute's value.
-fn attr(s: &str) -> String {
+pub(crate) fn attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

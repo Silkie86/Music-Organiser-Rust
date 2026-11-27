@@ -19,6 +19,7 @@ use crate::save::{LONGEST_FILE_NAME, cut, safe_file_name, save_checked_new};
 pub enum Daw {
     FlStudio,
     StudioOne,
+    AbletonLive,
 }
 
 impl Daw {
@@ -27,6 +28,7 @@ impl Daw {
         match self {
             Daw::FlStudio => mo_formats::fl::DAW,
             Daw::StudioOne => mo_formats::studio_one::DAW,
+            Daw::AbletonLive => mo_formats::ableton::DAW,
         }
     }
 
@@ -34,6 +36,7 @@ impl Daw {
         match self {
             Daw::FlStudio => "flp",
             Daw::StudioOne => "song",
+            Daw::AbletonLive => "als",
         }
     }
 
@@ -42,20 +45,26 @@ impl Daw {
         project.extension().is_some_and(|e| e.eq_ignore_ascii_case(self.extension()))
     }
 
-    fn write(self, song: &Arrangement, title: &str) -> (Vec<u8>, Vec<String>) {
+    /// The song as a project for this DAW, to go in `folder`; and what couldn't go across.
+    fn write(self, song: &Arrangement, title: &str, folder: &Path) -> (Vec<u8>, Vec<String>) {
+        // What Studio One and Live keep about each audio file, from its header, when it's on this computer.
+        let format = |path: &str| {
+            crate::sample::format_of(Path::new(path)).map(|(rate, channels, seconds)| {
+                mo_formats::studio_one::write::SampleFormat { rate, channels, seconds }
+            })
+        };
         match self {
             Daw::FlStudio => {
                 let w = mo_formats::fl::write::write(song, title, delphi_now());
                 (w.bytes, w.left_out)
             }
             Daw::StudioOne => {
-                // What Studio One keeps about each audio file, from its header, when it's on this computer.
-                let format = |path: &str| {
-                    crate::sample::format_of(Path::new(path)).map(|(rate, channels, seconds)| {
-                        mo_formats::studio_one::write::SampleFormat { rate, channels, seconds }
-                    })
-                };
                 let w = mo_formats::studio_one::write::write(song, title, &format);
+                (w.bytes, w.left_out)
+            }
+            // A set has no title of its own: its file's name is its name.
+            Daw::AbletonLive => {
+                let w = mo_formats::ableton::write::write(song, &format, Some(&folder.to_string_lossy()));
                 (w.bytes, w.left_out)
             }
         }
@@ -111,7 +120,8 @@ pub fn copy_for(
     }
     let missing = find_samples(&mut song, find);
     let stem = paths::stem(&project.to_string_lossy()).to_owned();
-    let (bytes, mut left_out) = daw.write(&song, &stem);
+    let folder = file_for(project, export_root, daw, &stem).parent().map(Path::to_path_buf).unwrap_or_default();
+    let (bytes, mut left_out) = daw.write(&song, &stem, &folder);
     if bytes.is_empty() {
         return Err("The new project couldn't be put together.".into());
     }
@@ -267,5 +277,35 @@ mod tests {
         let song_copy = copy_for(&first.file, &root, Daw::StudioOne, &as_named).unwrap();
         assert_eq!(song_copy.file.extension().unwrap(), "song");
         assert_eq!(arrangement::read(&song_copy.file).unwrap().remove(0).note_count(), original.note_count());
+        // And as a Live set, which reads back the same too.
+        let set = copy_for(&song, &root, Daw::AbletonLive, &as_named).unwrap();
+        assert_eq!(set.file, root.join("MO Recipe 02 notes").join("Ableton Live").join("MO Recipe 02 notes.als"));
+        assert_eq!(arrangement::read(&set.file).unwrap().remove(0).note_count(), original.note_count());
+        assert!(
+            copy_for(&set.file, &root, Daw::AbletonLive, &as_named).is_err(),
+            "a Live set isn't converted for Live"
+        );
+    }
+
+    #[test]
+    fn a_bitwig_song_s_audio_goes_into_a_live_set_by_its_path_and_from_the_set_s_folder() {
+        let d = dir("copy-for-live");
+        let song = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mo-formats/tests/fixtures/recipe/bitwig/MO Recipe 12 gain and fades.bwproject");
+        let root = d.join("Exports");
+        let sample = d.join("Samples").join("Tone.wav");
+        let found = sample.to_string_lossy().into_owned();
+        let set = copy_for(&song, &root, Daw::AbletonLive, &|_| Some(found.clone())).unwrap();
+        let back = arrangement::read(&set.file).unwrap().remove(0);
+        let parts: Vec<_> = back.lanes.iter().flat_map(|l| &l.clips).flat_map(|c| &c.audio).collect();
+        assert!(!parts.is_empty());
+        assert!(parts.iter().all(|p| Path::new(&p.path) == sample), "{parts:?}");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(
+            &mut flate2::read::GzDecoder::new(&std::fs::read(&set.file).unwrap()[..]),
+            &mut xml,
+        )
+        .unwrap();
+        assert!(xml.contains("<RelativePath Value=\"../../../Samples/Tone.wav\" />"), "{xml}");
     }
 }

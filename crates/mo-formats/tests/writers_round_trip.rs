@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use mo_formats::ableton::write as live;
 use mo_formats::arrangement::{
     self, Arrangement, AudioPart, LaneKind, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, TimeSignature,
 };
@@ -130,10 +131,10 @@ fn audio_detail(song: &Arrangement) -> Vec<(i64, i64, i64, i64, i64, i64)> {
 }
 
 /// Every marker, as (where, its name). A tab or line break in a name may come back as a space (the Studio One copy
-/// writes names on one line), and a marker with no name comes back with its number ("#2"), so those aren't compared.
+/// writes names on one line), spaces around a name may go (Live's reader trims them), and a marker with no name comes back with its number ("#2"), so those aren't compared.
 fn markers(song: &Arrangement, grid: Grid) -> Vec<(i64, String)> {
     let name = |n: usize, name: &str| {
-        let line = name.replace(['\t', '\n', '\r'], " ");
+        let line = name.replace(['\t', '\n', '\r'], " ").trim().to_owned();
         if line.trim().is_empty() || line == format!("#{}", n + 1) { "unnamed".into() } else { line }
     };
     song.markers.iter().enumerate().map(|(n, m)| (grid.tick(m.beat), name(n, &m.name))).collect()
@@ -149,13 +150,23 @@ fn differences(save: &Arrangement, copy: &Arrangement, grid: Grid) -> Vec<String
         out.push(format!("time signature {:?} became {:?}", save.signature, copy.signature));
     }
     let (a, b) = (notes(save, grid), notes(copy, grid));
-    // FL keeps a velocity as 0 to 128, so it may move by up to half of one of those steps.
+    // FL keeps a velocity as 0 to 128, so it may move by up to half of one of those steps; Live's softest is 1 of 127.
+    let soft = |v: u16| i32::from(v.max(65_535 / 127));
     let near = |x: &Note, y: &Note| {
         (x.0, x.1, x.4) == (y.0, y.1, y.4)
             && (x.2 == y.2 || x.2 == -1)
-            && (i32::from(x.3) - i32::from(y.3)).abs() <= 65_535 / 256 + 1
+            && (soft(x.3) - soft(y.3)).abs() <= 65_535 / 256 + 1
     };
-    if a.len() != b.len() || !a.iter().zip(&b).all(|(x, y)| near(x, y)) {
+    // Each of the save's notes matched with one of the copy's (a step note's length can't be sorted by).
+    let mut unused = b.clone();
+    let all_found = a.iter().all(|x| match unused.iter().position(|y| near(x, y)) {
+        Some(i) => {
+            unused.swap_remove(i);
+            true
+        }
+        None => false,
+    });
+    if a.len() != b.len() || !all_found {
         out.push(format!("notes: {} became {}; first apart: {:?}", a.len(), b.len(), first_apart(&a, &b)));
     }
     let (a, b) = (note_clips(save, grid), note_clips(copy, grid));
@@ -198,6 +209,19 @@ fn every_recipe_save_comes_back_the_same_from_both_writers() {
                 let back = arrangement::read_bytes(Path::new("x.flp"), &written.bytes);
                 for d in differences(view, &back[0], FL) {
                     report.push(format!("{name} [{v}] → FL: {d} (left out {:?})", written.left_out));
+                }
+                checked += 1;
+            }
+            if ext != "als" {
+                let written = live::write(view, &any_format, Some("C:/Export/Song/Ableton Live"));
+                let back = arrangement::read_bytes(Path::new("x.als"), &written.bytes);
+                let mut found = differences(view, &back[0], FINE);
+                let (a, b) = (audio_detail(view), audio_detail(&back[0]));
+                if a != b {
+                    found.push(format!("audio details {a:?} became {b:?}"));
+                }
+                for d in found {
+                    report.push(format!("{name} [{v}] → Live: {d} (left out {:?})", written.left_out));
                 }
                 checked += 1;
             }
@@ -373,6 +397,14 @@ proptest! {
             found.push(format!("audio details {a:?} became {b:?}"));
         }
         prop_assert!(found.is_empty(), "Studio One: {found:#?}");
+        let live_copy = live::write(&song, &any_format, None);
+        let back = arrangement::read_bytes(Path::new("x.als"), &live_copy.bytes);
+        let mut found = differences(&song, &back[0], FINE);
+        let (a, b) = (audio_detail(&song), audio_detail(&back[0]));
+        if a != b {
+            found.push(format!("audio details {a:?} became {b:?}"));
+        }
+        prop_assert!(found.is_empty(), "Live: {found:#?}");
     }
 
     #[test]
@@ -389,6 +421,14 @@ proptest! {
             found.push(format!("audio details {a:?} became {b:?}"));
         }
         prop_assert!(found.is_empty(), "Studio One: {found:#?}");
+        let live_copy = live::write(&song, &any_format, None);
+        let back = arrangement::read_bytes(Path::new("x.als"), &live_copy.bytes);
+        let mut found = differences(&song, &back[0], FINE);
+        let (a, b) = (audio_detail(&song), audio_detail(&back[0]));
+        if a != b {
+            found.push(format!("audio details {a:?} became {b:?}"));
+        }
+        prop_assert!(found.is_empty(), "Live: {found:#?}");
     }
 }
 
