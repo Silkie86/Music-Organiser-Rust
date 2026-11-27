@@ -674,3 +674,61 @@ fn a_new_save_doesnt_take_on_to_dos_an_older_library_left_under_its_id() {
     song_writes::write(&songs, &put(read(2, TWO), None)).unwrap();
     assert!(todos(&songs, 2).is_empty());
 }
+
+#[test]
+fn a_saves_shape_is_kept_until_its_file_is_read_again() {
+    use mo_formats::shape::Shape;
+    use song_writes::ShapeRead;
+    let songs = library("shapes");
+    // Save 1's file as the library has it: 100, 10. A shape of another file (or a save it doesn't have) is left out.
+    let shape = Shape {
+        seconds: 232.5,
+        bars: 120.0,
+        markers: 5,
+        automation: 14,
+        tracks: 12,
+        eq: 9,
+        compressed: 7,
+        sends: 2,
+        master: vec!["Pro-Q 3".into(), "Pro-L 2".into()],
+    };
+    let reads = [
+        ShapeRead { id: 1, mtime: 100, size: 10, shape: Some(shape.clone()) },
+        ShapeRead { id: 1, mtime: 99, size: 10, shape: None },
+        ShapeRead { id: 7, mtime: 100, size: 10, shape: None },
+    ];
+    assert_eq!(song_writes::keep_shapes(&songs, &reads).unwrap(), 1);
+    let lib = Library::open_read_only(&songs).unwrap();
+    assert_eq!(lib.shapes(&[1, 7]).unwrap(), [(1, Some(shape.clone()))].into());
+    drop(lib);
+
+    // A save read with no shape is kept so, and not read again.
+    let new = read(2, "C:\\Music\\Night\\Night_12.flp");
+    song_writes::write(&songs, &put(new.clone(), None)).unwrap();
+    let none = ShapeRead { id: 2, mtime: new.save.mtime, size: new.save.size, shape: None };
+    assert_eq!(song_writes::keep_shapes(&songs, std::slice::from_ref(&none)).unwrap(), 1);
+    let lib = Library::open_read_only(&songs).unwrap();
+    assert_eq!(lib.shapes(&[2]).unwrap(), [(2, None)].into());
+    drop(lib);
+
+    // A shape read by another version of the reader no longer counts (rule 7): it's read afresh.
+    Connection::open(&songs).unwrap().execute("UPDATE shapes SET version = 0 WHERE project_id = 2", []).unwrap();
+    let lib = Library::open_read_only(&songs).unwrap();
+    assert_eq!(lib.shapes(&[1, 2]).unwrap(), [(1, Some(shape.clone()))].into());
+    drop(lib);
+    assert_eq!(song_writes::keep_shapes(&songs, &[none]).unwrap(), 1);
+
+    // Save 1 read again (its file changed): its shape was of the old file, so it's read afresh.
+    let mut again = read(1, ONE);
+    again.save.status = "Mixing".into();
+    song_writes::write(&songs, &put(again, Some(ONE))).unwrap();
+    let lib = Library::open_read_only(&songs).unwrap();
+    assert_eq!(lib.shapes(&[1, 2]).unwrap(), [(2, None)].into());
+}
+
+#[test]
+fn a_library_before_shapes_has_none() {
+    let songs = library("no-shapes");
+    let lib = Library::open_read_only(&songs).unwrap();
+    assert!(lib.shapes(&[1]).unwrap().is_empty());
+}

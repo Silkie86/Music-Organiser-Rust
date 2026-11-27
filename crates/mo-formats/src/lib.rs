@@ -20,6 +20,7 @@ pub mod paths;
 pub mod plugins;
 pub mod presets;
 pub mod serum;
+pub mod shape;
 pub mod studio_one;
 pub mod textscan;
 pub mod vital;

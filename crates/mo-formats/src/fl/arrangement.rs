@@ -64,6 +64,14 @@ pub fn read(flp: &Flp<'_>) -> Vec<Arrangement> {
     views.into()
 }
 
+/// [`read`]'s playlist view alone, from the song already read (for a save's shape, `crate::shape`): the song is read
+/// once, and nothing else is built.
+pub(crate) fn playlist_of(flp: &Flp<'_>, song: &FlSong) -> Arrangement {
+    let playlist = read_playlist(flp);
+    let tempo = if song.tempo > 0.0 { song.tempo } else { 120.0 };
+    playlist_view(song, &playlist, tempo)
+}
+
 /// The song's time signature, and its first arrangement's markers in beats, as [`read`]'s playlist view gives them:
 /// for a reader that needs no more of the playlist (one pass over the events, no notes read).
 pub fn bars_and_markers(flp: &Flp<'_>) -> (TimeSignature, Vec<PreviewMarker>) {
