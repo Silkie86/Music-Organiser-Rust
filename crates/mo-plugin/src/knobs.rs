@@ -161,11 +161,11 @@ impl Knobs {
         }
     }
 
-    /// `knob` (Volume or a switch) as the project kept it, on the DAW's main thread as the project opens: it acts at
+    /// `knob` (Sounds like, Volume or a switch) as the project kept it, on the DAW's main thread as the project opens: it acts at
     /// once, and an open panel shows it. Not told to the DAW (that would be recorded as a turn of the knob): the DAW
     /// reads the knobs again instead. A list knob is never set here, as it would pick a line and play it.
     pub fn restore(&self, knob: Knob, value: f64, player: &Player) {
-        if knob.list().is_some() || knob == Knob::Like {
+        if knob.list().is_some() {
             return;
         }
         self.turn(knob, value, player, None);
@@ -279,10 +279,20 @@ impl Knobs {
         }
     }
 
-    /// The words a DAW was typed back into a value: "On", "50%", "-6 dB", a number.
+    /// The words a DAW was typed back into a value: "On", "50%", "-6 dB", "line 12 of 340", a number.
     pub fn read_words(id: ClapId, text: &str) -> Option<f64> {
         let knob = Knob::of(id.get())?;
         let text = text.trim().to_lowercase();
+        if knob.list().is_some() {
+            // What the DAW shows by a list knob, read back; a plain number is how far down the list.
+            if text == "nothing listed" {
+                return Some(0.0);
+            }
+            if let Some((at, lines)) = text.strip_prefix("line ").and_then(|rest| rest.split_once(" of ")) {
+                let (at, lines) = (at.trim().parse::<usize>().ok()?, lines.trim().parse::<usize>().ok()?);
+                return (1..=lines).contains(&at).then(|| value_of_line(at - 1, lines));
+            }
+        }
         if knob.switch() {
             return match text.as_str() {
                 "on" | "1" | "yes" => Some(1.0),
@@ -378,6 +388,16 @@ mod tests {
         assert_eq!(Knobs::read_words(id(Knob::Like), "40%"), Some(0.4));
         assert_eq!(Knobs::read_words(id(Knob::Like), "0.4"), Some(0.4));
         assert_eq!(Knobs::read_words(ClapId::new(99), "1"), None);
+        // A list knob's own words read back to the same line (CLAP's checker turns each knob's words back).
+        assert_eq!(Knobs::read_words(id(Knob::Preset), "nothing listed"), Some(0.0));
+        assert_eq!(Knobs::read_words(id(Knob::Sound), "line 1 of 340"), Some(0.0));
+        assert_eq!(Knobs::read_words(id(Knob::Sound), "Line 340 of 340"), Some(1.0));
+        assert_eq!(Knobs::read_words(id(Knob::Sound), "line 0 of 340"), None);
+        assert_eq!(Knobs::read_words(id(Knob::Sound), "line 341 of 340"), None);
+        for value in [0.0, 0.1234, 0.5, 0.987, 1.0] {
+            let back = Knobs::read_words(id(Knob::Sound), &knobs.words_for(Knob::Sound, value)).unwrap();
+            assert_eq!(knobs.words_for(Knob::Sound, back), knobs.words_for(Knob::Sound, value));
+        }
     }
 
     #[test]

@@ -2,8 +2,8 @@
 //! saved or the track is copied, and hands it back when the project opens again.
 //!
 //! It's a few lines of plain text, a name and a value on each, under a first line that names it: the size the window
-//! was dragged to, and where Volume, Loop, Match tempo and In time were left (the knobs that are settings; the list
-//! knobs and Sounds like start again with the panel, by design). A line this version doesn't know is skipped, and so
+//! was dragged to, and where Sounds like, Volume, Loop, Match tempo and In time were left (the knobs that are settings;
+//! the list knobs start again with the panel, by design, as turning one plays a sound). A line this version doesn't know is skipped, and so
 //! is a value that makes no sense, so a project saved by a newer plugin (or a damaged one) still opens: a state that
 //! can't be read is never a reason for the DAW to refuse the project.
 
@@ -16,8 +16,13 @@ const NAMED: &str = "Music Organiser plugin state";
 pub const MOST: u64 = 64 * 1024;
 
 /// The knobs kept, with the name each has in the state (never change one: a project keeps it).
-pub const KNOBS: [(Knob, &str); 4] =
-    [(Knob::Volume, "volume"), (Knob::Loop, "loop"), (Knob::Match, "match"), (Knob::InTime, "in_time")];
+pub const KNOBS: [(Knob, &str); 5] = [
+    (Knob::Like, "like"),
+    (Knob::Volume, "volume"),
+    (Knob::Loop, "loop"),
+    (Knob::Match, "match"),
+    (Knob::InTime, "in_time"),
+];
 
 /// What's kept.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -74,7 +79,8 @@ mod tests {
     #[test]
     fn what_is_written_is_read_back() {
         let state = write((1040.0, 712.5), |k| if k == Knob::Volume { 0.4 } else { 1.0 });
-        let knobs = vec![(Knob::Volume, 0.4), (Knob::Loop, 1.0), (Knob::Match, 1.0), (Knob::InTime, 1.0)];
+        let knobs =
+            vec![(Knob::Like, 1.0), (Knob::Volume, 0.4), (Knob::Loop, 1.0), (Knob::Match, 1.0), (Knob::InTime, 1.0)];
         assert_eq!(read(&state), Kept { panel: Some((1040.0, 712.5)), knobs });
     }
 

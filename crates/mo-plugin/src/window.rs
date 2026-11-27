@@ -781,11 +781,17 @@ impl Shown {
             ticked: Cell::new(Instant::now()),
         };
         shown.fill_in();
-        // What the knobs were turned to while no panel was open isn't acted on now (a sound would play as it opens);
-        // the DAW's knobs are moved to what the panel shows instead.
+        // What the list knobs were turned to while no panel was open isn't acted on now (a sound would play as it
+        // opens); the DAW's knobs are moved to what the panel shows instead. Sounds like plays nothing: turned while
+        // the panel was shut, or kept with the project, the panel takes it up.
         let (knobs, player) = (&shown.instance.knobs, &shown.instance.player);
-        knobs.turned();
-        knobs.tell(Knob::Like, f64::from(shown.panel.get_like_favourites()));
+        if knobs.turned().contains(&Knob::Like) {
+            let like = knobs.get(Knob::Like) as f32;
+            shown.panel.set_like_favourites(like);
+            shown.panel.invoke_like_favourites_set(like);
+        } else {
+            knobs.tell(Knob::Like, f64::from(shown.panel.get_like_favourites()));
+        }
         knobs.tell(Knob::Loop, f64::from(u8::from(player.looping())));
         knobs.tell(Knob::Match, f64::from(u8::from(player.matching())));
         knobs.tell(Knob::InTime, f64::from(u8::from(player.in_time())));
