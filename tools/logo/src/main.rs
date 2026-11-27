@@ -58,7 +58,8 @@ fn main() {
     for name in ["wordmark-dark", "wordmark-light"] {
         let tree = load(&dir.join(format!("{name}.svg")));
         let height = 128;
-        let width = (tree.size().width() * height as f32 / tree.size().height()).ceil() as u32;
+        // Rounded down, so the drawing at its own shape fills it (a sliver at most is cut from the right-hand gap).
+        let width = (tree.size().width() * height as f32 / tree.size().height()).floor() as u32;
         save(&dir.join(format!("{name}.png")), &png(&render(&tree, width, height)));
     }
     println!("made the logo's pictures in {}", dir.display());
@@ -70,12 +71,14 @@ fn load(file: &Path) -> Tree {
         .unwrap_or_else(|e| panic!("{} isn't an SVG we can read: {e}", file.display()))
 }
 
-/// The drawing stretched to `w` by `h` pixels.
+/// The drawing on `w` by `h` pixels at its own shape, never stretched: scaled to fill the picture and centred, so when
+/// the shapes differ a little (Setup's sizes, a width rounded up to whole pixels) a sliver of the edge is cut off.
 fn render(tree: &Tree, w: u32, h: u32) -> Pixmap {
     let mut pixmap = Pixmap::new(w, h).expect("a picture of at least one pixel");
     let size = tree.size();
-    let fit = Transform::from_scale(w as f32 / size.width(), h as f32 / size.height());
-    resvg::render(tree, fit, &mut pixmap.as_mut());
+    let scale = (w as f32 / size.width()).max(h as f32 / size.height());
+    let (dx, dy) = ((w as f32 - size.width() * scale) / 2.0, (h as f32 - size.height() * scale) / 2.0);
+    resvg::render(tree, Transform::from_scale(scale, scale).post_translate(dx, dy), &mut pixmap.as_mut());
     pixmap
 }
 

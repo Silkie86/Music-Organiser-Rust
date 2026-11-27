@@ -13,7 +13,8 @@ fn the_real_file_has_every_key_and_its_logos() {
     let top = file.parent().unwrap();
     assert!(top.join(&product["logo_png"]).is_file());
     assert!(top.join(&product["logo_ico"]).is_file());
-    assert!(top.join(&product["logo_icns"]).is_file());
+    // The Mac's icon: no build reads it yet (the Mac app isn't bundled), so it's checked here, not by the build.
+    assert!(top.join(product.get("logo_icns").expect("product.toml names the Mac's icon")).is_file());
     // The installer's pictures, beside the .ico (installer/setup.iss names them).
     let pictures = top.join(&product["logo_ico"]).parent().unwrap().to_path_buf();
     for scale in ["100", "150", "200"] {

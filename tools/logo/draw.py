@@ -225,9 +225,18 @@ def main():
     }
     for size in SMALL:
         files[f"logo-{size}.svg"] = small_icon(size)
+    # Each file is written beside the old one, checked, then renamed over it (copy, check, rename), all of them
+    # written before any is put in place, so a failed run never leaves a mix of old and new drawings.
+    parts = []
     for name, text in files.items():
-        (OUT / name).write_text(text, encoding="ascii", newline="\n")
-        print("wrote", OUT / name)
+        part = OUT / (name + ".part")
+        part.write_text(text, encoding="ascii", newline="\n")
+        if part.read_text(encoding="ascii") != text:
+            raise SystemExit(f"{part} didn't write in full")
+        parts.append((part, OUT / name))
+    for part, final in parts:
+        part.replace(final)
+        print("wrote", final)
 
 
 if __name__ == "__main__":

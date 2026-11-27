@@ -2,7 +2,8 @@
 # Organiser" was the working title). The logo is "Dm, in the well" (Solomon, 2026-11-15; finished 2026-11-27):
 # tools/logo/draw.py draws the SVGs in assets/logo, and tools/logo (cargo run --release --manifest-path
 # tools/logo/Cargo.toml) makes the .png, .ico, .icns and the installer's pictures from them. Change either here: the
-# app (title bar, About, logs, Windows' file details) and the installer all follow. The version is the workspace's, in Cargo.toml.
+# app (title bar, About, logs, Windows' file details) and the installer all follow. The version is the workspace's, in
+# Cargo.toml.
 #
 # What does NOT follow, on purpose: the data folder (MusicOrganiser, so a rename never loses anyone's data), the
 # .exe's file name, and the IDs the DAWs know the app's links by (the Bitwig controller and CLAP plugin IDs, which

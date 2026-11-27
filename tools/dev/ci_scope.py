@@ -28,9 +28,8 @@ import sys
 # A change to any of these can change every crate.
 WHOLE = ("Cargo.toml", "Cargo.lock", "deny.toml", "rust-toolchain", "rust-toolchain.toml", ".cargo/", ".github/",
          "clippy.toml", "rustfmt.toml", "tools/dev/ci_scope.py")
-# Changes that never change what's built: notes, docs, the launcher's own scripts (checked on their own) and the tool
-# that makes the logo's pictures (run by hand; the pictures it makes are in assets/, which the installer check follows).
-NOTHING = ("docs/", "README", "CLAUDE.md", "screenshots/", "tools/dev/", "tools/logo/", ".gitignore", ".gitattributes")
+# Changes that never change what's built: notes, docs and the launcher's own scripts (checked on their own).
+NOTHING = ("docs/", "README", "CLAUDE.md", "screenshots/", "tools/dev/", ".gitignore", ".gitattributes")
 
 
 def packages():
@@ -49,10 +48,14 @@ def packages():
 def scope(changed, crates, full=False):
     """What to check for these changed files (paths from the repo's root, with forward slashes); `full` checks all."""
     result = {"full": full, "test": set(), "ui": False, "formats": False, "galaxy": False, "launcher": False,
-              "installer": False}
+              "installer": False, "logo": False}
     for path in changed:
         if path.startswith("tools/galaxycheck/"):
             result["galaxy"] = True
+            continue
+        # The tool that makes the logo's pictures: a workspace of its own, run by hand, checked on its own.
+        if path.startswith("tools/logo/"):
+            result["logo"] = True
             continue
         if path.startswith(("installer/", "assets/")) or path == "product.toml":
             result["installer"] = True
@@ -86,7 +89,7 @@ def scope(changed, crates, full=False):
     result["check"] = check
     if result["full"]:
         result.update(test=set(crates), check=set(crates), ui=True, formats=True, galaxy=True, launcher=True,
-                      installer=True)
+                      installer=True, logo=True)
     return result
 
 
@@ -108,6 +111,7 @@ def main():
         f"galaxy={str(s['galaxy']).lower()}",
         f"launcher={str(s['launcher']).lower()}",
         f"installer={str(s['installer']).lower()}",
+        f"logo={str(s['logo']).lower()}",
         f"rust={str(bool(s['check'])).lower()}",
     ]
     print("\n".join(lines))
