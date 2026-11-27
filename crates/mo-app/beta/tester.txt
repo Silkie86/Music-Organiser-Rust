@@ -1,0 +1,44 @@
+# The short list beta testers see on Settings > Developer in an installed copy (mo_app::beta::tester_steps; Solomon,
+# 27 Nov 2026: "Short tester list"). Same layout as checklist.txt:
+#   name | what to do | what you should see | how, step by step
+# under an "== Area" heading. Names start tester. and are never changed or reused (reword the step instead). The
+# Self-check steps share their names with checklist.txt and are marked by the app itself. Keep these steps to what
+# anyone with a DAW can try: no launcher, no drive letters, no Claude, no test projects.
+
+== Start
+tester.install | Install DAWmate with the setup and open it from the Start menu | It installs without an administrator question and opens in a few seconds | 1) Run the DAWmate setup you were sent (if Windows shows a blue box, click More info, then Run anyway). 2) Keep the folders it suggests unless you'd like your data elsewhere. 3) Finish, then open DAWmate from the Start menu
+tester.folders | In Settings > Folders, add the folders where your projects and your samples are | Songs lists your projects within a minute and Sounds fills with your samples | 1) Click Settings at the bottom left, then Folders. 2) Under Projects press Add and pick the folder your DAW saves songs in (DAWmate already looks in the usual FL Studio, Bitwig and Studio One folders). 3) Under Samples press Add and pick your sample folders. 4) Click Songs and Sounds and watch them fill
+tester.close | Use the app for a while, then close it | It closes at once and opens again next time as you left it | Use a few pages for five minutes or so, close DAWmate with the window's X, then open it again from the Start menu
+
+== Songs
+tester.songs | Open Songs, search for a song and pick a few chips | The list fills at once and the search and chips narrow it | 1) Click Songs on the left. 2) Type part of a song's name in the search box. 3) Click a few chips under it (a DAW, a year, a key) and watch the list get shorter
+tester.songs-open | Click one of your songs and open it from its card | Its arrangement shows on the card and the song opens in its own DAW | 1) Click a song: its card shows a picture of the arrangement, with the clips where they are in the song. 2) Press Open in... on the card (it names the DAW): the song opens in the DAW that made it
+tester.todos | On a song's card, add two to-dos, tick one, then close and open the app again | The to-dos are still there after the restart | 1) Click a song. 2) In its TO-DO box type something and press Enter, twice. 3) Tick the first one. 4) Close DAWmate and open it again: the song still has them
+
+== Sounds
+tester.sounds | Open Sounds, scroll fast, click a few sounds | Smooth scrolling, waveforms draw and each sound plays at once | 1) Click Sounds. 2) Scroll the list fast with the mouse wheel. 3) Click a few sounds: each plays straight away
+tester.sounds-filters | Use the type and key filters and the search together | The list narrows the way the chips say | On Sounds, pick a type on the left (Kick, say), a key, and type a word in the search: each makes the list shorter the way it says
+tester.drag | Drag a sound from DAWmate onto a track in your DAW | The sound lands on the track and plays | With your DAW open beside DAWmate, hold the mouse on a sound in the list, drag it onto an audio track or channel, let go and press play in your DAW
+
+== MIDI
+tester.midi | Open MIDI, pick a part and press Play | The notes draw at once and it plays in time | 1) Click MIDI on the left (add a MIDI folder in Settings > Folders first if the page is empty). 2) Click a part: its notes draw. 3) Press Play and listen
+
+== Presets
+tester.presets | Open Presets and look through your presets | Your synths' presets from your songs and preset files are listed | Click Presets and scroll through: presets from your songs and from preset files should be there, and the filters narrow them
+
+== Space
+tester.space | Open Space and wait for the cards to fill | The sizes look about right and nothing is removed unless you ask | Click Space and wait a little: each card says how much room something takes. Nothing goes anywhere until you tick it and press a button, and what goes can be put back
+
+== DAWs
+tester.daw-link | In Settings > DAWs, press Install for each DAW you use | Each DAW's row says it's linked once the DAW is open | 1) Click Settings, then DAWs. 2) Press Install on your DAW's row. 3) Open (or restart) the DAW. 4) Back in DAWmate the row says Linked or installed
+
+== Reporting
+tester.help | On any page, click the ? beside Settings at the bottom left | A short note says what the page is for, with its keys | Click a page on the left, then the ? at the bottom left. Press Esc to close it. Try it on a page you're not sure about
+tester.notes | Press F12 when something looks wrong, write what happened and press Save | The note and a picture of the screen are saved in the notes folder, to send on | 1) Press F12 anywhere in the app. 2) Write what you did and what went wrong. 3) Press Save. 4) The note and its picture are in the notes folder inside DAWmate's data folder (Settings > Developer shows where): send them on with a word about this step
+
+== Self-check
+# Marked by the app itself (mo_app::self_check), once a day and from Run the self-check; never by hand.
+auto.crashes | The app looks for crash logs from the last 7 days | None
+auto.freezes | The app looks for freezes of a second or more in its logs | None
+auto.errors | The app looks for error lines in its logs | None
+auto.start | The app reads how long each start took to the window | Usually 5 s or less

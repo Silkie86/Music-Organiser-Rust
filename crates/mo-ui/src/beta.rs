@@ -121,10 +121,15 @@ pub fn connect(app: &AppWindow, folder: &Path, live: bool, feed: Feed) {
             }
         }
     }
-    let steps = beta::steps();
+    // An installed copy nobody has marked the full list in shows testers their short list (Solomon, 27 Nov 2026).
+    // The screenshots show the full list.
+    let installed = live && std::env::current_exe().is_ok_and(|exe| mo_app::update::installed(&exe));
+    let tester = beta::for_tester(installed, &marks);
+    let steps = beta::steps_for(tester);
     let done = steps.iter().filter(|s| marks.current(s).is_some()).count();
     if live {
-        log::info("Beta", &format!("Checklist: {} steps, {done} marked so far", steps.len()));
+        let which = if tester { "the tester list" } else { "the full list" };
+        log::info("Beta", &format!("Checklist: {which}, {} steps, {done} marked so far", steps.len()));
     }
     let model = Rc::new(VecModel::default());
     let data = app.global::<SettingsData>();
