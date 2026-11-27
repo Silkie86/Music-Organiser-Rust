@@ -644,7 +644,8 @@ fn install_bundle(source: &Path, folder: &Path, name: &str) -> io::Result<()> {
             }
             // fs::copy keeps the file's permissions: a Mac plugin's program keeps its x bit.
             fs::copy(source.join(inside), &to)?;
-            fs::File::open(&to)?.sync_all()?;
+            // Synced through a handle that may write: Windows refuses to flush one opened only to read.
+            fs::OpenOptions::new().write(true).open(&to)?.sync_all()?;
         }
         unmark_download(&part)?;
         if !same_tree(source, &part)? {
