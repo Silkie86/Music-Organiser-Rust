@@ -341,8 +341,10 @@ fn reads_from_part_way_into_every_kind_of_file() {
             // To the last bit; AAC's decoder comes out a little differently after a jump (some 70 dB down, unheard).
             let aac = path.extension().is_some_and(|e| e == "m4a" || e == "aac");
             assert_same(&got, &want, if aac { 1e-3 } else { 0.0 }, &format!("{} from {from}", path.display()));
-            // A WMA is asked whether to go on as it's decoded on the way there; the others go straight there.
-            assert_eq!(probes > 0, path.extension().is_some_and(|e| e == "wma"), "{}", path.display());
+            // A WMA is asked whether to go on as it's decoded on the way there (once a whole part of 0.1 s lies before
+            // the place: at 0.05 s the first part already holds it); the others go straight there.
+            let wma = path.extension().is_some_and(|e| e == "wma");
+            assert_eq!(probes > 0, wma && from >= 0.1, "{} from {from}", path.display());
         }
         // Past its end: nothing.
         assert_eq!(parts_from(path, 5.0).1, Vec::<Vec<f32>>::new(), "{}", path.display());
