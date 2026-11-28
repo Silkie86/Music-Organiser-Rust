@@ -56,6 +56,9 @@ struct On {
     is_loop: bool,
 }
 
+/// The screen's picture, drawn: how often the screen had gone blank when it was asked for, and its pixels.
+type Drawn = (u64, SharedPixelBuffer<Rgba8Pixel>);
+
 /// What the strip's threads hand back to the window's thread, the newest of each.
 #[derive(Default)]
 struct Answers {
@@ -63,9 +66,8 @@ struct Answers {
     work: Mutex<Option<(u64, (i64, Answer))>>,
     /// A save that's done: its ask, and the copy or why there's none.
     saved: Mutex<Option<(u64, Result<PathBuf, String>)>>,
-    /// The screen's picture, drawn: its number, how often the screen had gone blank when it was asked for, and its
-    /// pixels.
-    picture: Mutex<Option<(u64, (u64, SharedPixelBuffer<Rgba8Pixel>))>>,
+    /// The screen's picture, drawn, with its number.
+    picture: Mutex<Option<(u64, Drawn)>>,
     /// The shortcut list as the app's settings have it, once they're read.
     keys: Mutex<Option<Shortcuts>>,
 }
@@ -113,8 +115,9 @@ pub(super) struct OnPanel {
     till: Cell<Option<f64>>,
     /// Whether the strip's play played at the last look: the strip shows itself again when that changes.
     was_playing: Cell<bool>,
-    /// Where the moment heard is in the sound's own file (0 its start, 1 its end), for the play head on its line.
-    head: Cell<Option<f32>>,
+    /// Where the moment heard is in the sound's own file (0 its start, 1 its end), for the play head on its line,
+    /// and where the play started there: what's between the two has played.
+    head: Cell<Option<(f32, f32)>>,
     /// The part of the sound's own file the strip is on, for its line.
     part: Cell<Option<(f32, f32)>>,
     on: RefCell<Option<On>>,
@@ -330,13 +333,14 @@ impl OnPanel {
         Some((open, at))
     }
 
-    /// Where the strip's play is on its sound's line, while it plays and the line is the one picked: its row, and how
-    /// far through the sound's own file the moment heard is.
-    pub(super) fn line_head(&self, panel: &Panel) -> Option<(i32, f32)> {
+    /// Where the strip's play is on its sound's line, while it plays and the line is the one picked: its row, how
+    /// far through the sound's own file the moment heard is, and how far through it the play started.
+    pub(super) fn line_head(&self, panel: &Panel) -> Option<(i32, f32, f32)> {
         if !self.plays() {
             return None;
         }
-        Some((i32::try_from(self.own_row(panel)?).ok()?, self.head.get()?))
+        let (at, from) = self.head.get()?;
+        Some((i32::try_from(self.own_row(panel)?).ok()?, at, from))
     }
 
     /// What the drag handle carries is being carried out of the window now (`on`), or isn't any more.
@@ -392,7 +396,7 @@ impl OnPanel {
                     data.set_played(now.at);
                     data.set_level_left(now.level[0]);
                     data.set_level_right(now.level[1]);
-                    self.head.set(now.in_file);
+                    self.head.set(now.in_file.zip(now.from_in_file));
                 }
                 // A play of the part picked has come to the part's end.
                 Ticked::Ended => Host::stop(self),
@@ -788,11 +792,12 @@ impl Host for OnPanel {
                 self.till.set(till);
                 self.say(&format!("Playing {name}"));
             }
-            // As for any sound that couldn't start: the panel says why.
+            // Not handed over: the panel says why, as for any sound that couldn't start. What was playing plays on and
+            // is still what's heard; a line still being read was called off by the try (it's the newest pick no more).
             Played::Not(why) => {
-                self.heard.set(None);
-                self.playing.set(None);
-                self.mine.set(None);
+                if self.heard.get().is_some_and(|(_, started)| !started) {
+                    self.heard.set(None);
+                }
                 self.say(&why);
             }
         }
@@ -800,14 +805,15 @@ impl Host for OnPanel {
     }
 
     /// Swapped in by the player itself at the moment the strip's play has got to, so nothing is heard twice or
-    /// missed: only while that play is still the one playing. Where it stops stays where it was (the strip's ticker
-    /// ends a play of the part picked at the part's end).
-    fn swap(&self, audio: Arc<AudioData>, place: &dyn Fn(f64) -> f64) -> bool {
+    /// missed: only while that play is still the one playing. The edit stops where the play was to stop, to the frame
+    /// (the end of the part picked); the original, while it's held, plays on.
+    fn swap(&self, audio: Arc<AudioData>, place: &dyn Fn(f64) -> f64, held: bool) -> bool {
         if !self.plays() {
             return false;
         }
         let (Some(n), Some((_, name))) = (self.mine.get(), self.file_name()) else { return false };
-        match self.player.swap_shared(n, audio, name, place) {
+        let till = self.till.get().filter(|_| !held);
+        match self.player.swap_shared(n, audio, name, place, till) {
             Some(Played::Playing(_, next)) => {
                 self.mine.set(Some(next));
                 self.playing.set(Some(next));
@@ -822,9 +828,12 @@ impl Host for OnPanel {
         }
     }
 
-    /// The strip's play is the sound the window knows as playing, and the player still has it.
+    /// The strip's play is what the window knows as heard and as playing, and the player still has it. A line
+    /// picked since is what's heard from that moment: the strip's play is over for the strip (it stops nothing, and
+    /// swaps nothing in), though it sounds on until the line's file is read, as one line does under the next.
     fn plays(&self) -> bool {
-        self.mine.get().is_some_and(|n| self.playing.get() == Some(n) && self.player.still_playing(n))
+        matches!(self.heard.get(), Some((Heard::Edit(_), _)))
+            && self.mine.get().is_some_and(|n| self.playing.get() == Some(n) && self.player.still_playing(n))
     }
 
     /// The strip's play, or the sound itself from a click on its line (being read still, or playing), or an edit of
@@ -1210,7 +1219,7 @@ mod tests {
         b.host.tick(&b.panel);
         assert_eq!(b.panel.get_edit_row(), 0);
         assert_eq!((b.panel.get_edit_from(), b.panel.get_edit_to()), (0.0, 0.0));
-        assert_eq!(b.host.line_head(&b.panel), Some((0, 0.0)));
+        assert_eq!(b.host.line_head(&b.panel), Some((0, 0.0, 0.0)));
         // Play again stops it.
         b.data().invoke_play();
         assert!(!b.data().get_playing() && b.heard.get().is_none() && b.playing.get().is_none());
@@ -1238,13 +1247,126 @@ mod tests {
         let _audio = b.player.start(RATE);
         b.data().invoke_play();
         b.host.tick(&b.panel);
-        let (row, at) = b.host.line_head(&b.panel).expect("the part plays");
-        assert!(row == 1 && (at - 0.25).abs() < 1e-3, "{row} {at}");
+        let (row, at, from) = b.host.line_head(&b.panel).expect("the part plays");
+        assert!(row == 1 && (at - 0.25).abs() < 1e-3 && (from - 0.25).abs() < 1e-3, "{row} {at} {from}");
         // The strip closed: its line is as any other.
         b.panel.invoke_edit();
         b.host.tick(&b.panel);
         assert_eq!(b.panel.get_edit_row(), -1);
         assert_eq!((b.panel.get_edit_from(), b.panel.get_edit_to()), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_line_is_lit_from_where_the_play_started_and_a_reversed_part_runs_back_from_there() {
+        let b = Bench::new();
+        let mut audio = b.player.start(RATE);
+        b.pick(1);
+        // The snare reversed, and a part of the edit picked, from a quarter to a half of it: that came from between a
+        // half and three quarters of the file.
+        b.read(Some((0.25, 0.5)), &[strip::REVERSE]);
+        b.host.tick(&b.panel);
+        assert!((b.panel.get_edit_from() - 0.5).abs() < 1e-3 && (b.panel.get_edit_to() - 0.75).abs() < 1e-3);
+        b.data().invoke_play();
+        b.host.tick(&b.panel);
+        let (_, at, from) = b.host.line_head(&b.panel).expect("the part plays");
+        assert!((at - 0.75).abs() < 1e-3 && (from - 0.75).abs() < 1e-3, "{at} {from}");
+        // A tenth of a second on (a twentieth of the file): the play head has gone left, from where it started.
+        let frames = RATE as usize / 10;
+        let (mut l, mut r) = (vec![0.0; frames], vec![0.0; frames]);
+        audio.fill(&mut l, &mut r);
+        b.host.tick(&b.panel);
+        let (_, at, from) = b.host.line_head(&b.panel).expect("it plays on");
+        assert!((at - 0.7).abs() < 1e-3 && (from - 0.75).abs() < 1e-3, "{at} {from}");
+    }
+
+    #[test]
+    fn a_line_picked_while_the_edit_plays_is_left_to_play() {
+        let b = Bench::new();
+        let mut audio = b.player.start(RATE);
+        b.pick(0);
+        b.read(None, &[]);
+        b.data().invoke_play();
+        let n = b.playing.get().expect("the edit plays");
+        let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
+        audio.fill(&mut l, &mut r);
+        assert!(b.host.plays());
+        // The snare's line is clicked: the window has its file read, and it's what's heard from now on (the edit
+        // sounds on until the file is there, as one line does under the next).
+        b.heard.set(Some((Heard::Line(11), false)));
+        b.pick(1);
+        // The strip goes to the snare and stops nothing: the snare's read isn't called off, and the edit sounds on.
+        assert_eq!(b.host.on().map(|(id, _)| id), Some(11));
+        assert_eq!(b.heard.get(), Some((Heard::Line(11), false)));
+        audio.fill(&mut l, &mut r);
+        assert!(b.player.still_playing(n) && l.iter().all(|s| *s != 0.0), "nothing was told to stop");
+        // For the strip its own play is over.
+        assert!(!b.host.plays() && !b.data().get_playing());
+    }
+
+    #[test]
+    fn an_edit_swapped_in_as_the_part_plays_still_stops_at_the_parts_end() {
+        let b = Bench::new();
+        let mut audio = b.player.start(RATE);
+        b.pick(0);
+        // The first half second of the kick's two.
+        b.read(Some((0.0, 0.25)), &[]);
+        b.data().invoke_play();
+        let n = b.playing.get().expect("the part plays");
+        let tenth = RATE as usize / 10;
+        let (mut l, mut r) = (vec![0.0; tenth], vec![0.0; tenth]);
+        audio.fill(&mut l, &mut r);
+        // Turned down as it plays: the edit made again takes over where the play is...
+        assert_eq!(strip::run_action(&*b.host, strip::QUIETER), Some(true));
+        let next = b.playing.get().expect("it plays on");
+        assert!(next > n && b.host.plays());
+        // ...and ends at the part's end by itself, to the frame, with no tick of the window's: four tenths more.
+        let (mut l, mut r) = (vec![0.0; RATE as usize], vec![0.0; RATE as usize]);
+        audio.fill(&mut l, &mut r);
+        assert_eq!(l.iter().filter(|s| **s != 0.0).count(), 4 * tenth);
+        assert!(!b.player.still_playing(next));
+    }
+
+    #[test]
+    fn a_play_that_cannot_be_handed_over_leaves_what_plays_as_it_is() {
+        let b = Bench::new();
+        let _audio = b.player.start(RATE);
+        b.pick(0);
+        b.read(None, &[]);
+        // The audio thread is behind, with no room for another ask, and the break's own file is what plays.
+        let mut n = 0;
+        while let Played::Playing(_, number) = b.player.play_shared(Arc::new(sound()), "break.wav".into(), 0.0, None) {
+            n = number;
+        }
+        b.heard.set(Some((Heard::Line(12), true)));
+        b.playing.set(Some(n));
+        // Play on the strip: the panel says why not, and the break is still what's heard.
+        b.data().invoke_play();
+        assert_eq!(b.panel.get_playing(), "Busy: try again");
+        assert_eq!((b.heard.get(), b.playing.get()), (Some((Heard::Line(12), true)), Some(n)));
+        assert!(!b.data().get_playing());
+        // A line still being read was called off by the try: it's heard no more.
+        b.heard.set(Some((Heard::Line(12), false)));
+        b.data().invoke_play();
+        assert_eq!(b.heard.get(), None);
+    }
+
+    #[test]
+    fn with_the_galaxy_open_the_strips_arrow_keys_are_still_its_own() {
+        let b = Bench::new();
+        let steps = Rc::new(Cell::new(0));
+        let stepped = Rc::clone(&steps);
+        b.panel.on_sky_arrow(move |_| stepped.set(stepped.get() + 1));
+        b.pick(0);
+        b.read(None, &[]);
+        // The Galaxy opens and takes the keys: an arrow goes from star to star.
+        b.panel.set_galaxy(true);
+        draw(&b.window);
+        b.key(Key::Named(NamedKey::ArrowUp), Code::ArrowUp, Modifiers::empty(), false);
+        assert_eq!((steps.get(), b.chips().len()), (1, 0));
+        // With Alt held it's the strip's key (louder), as the shortcut list says.
+        b.key(Key::Named(NamedKey::Alt), Code::AltLeft, Modifiers::ALT, false);
+        b.key(Key::Named(NamedKey::ArrowUp), Code::ArrowUp, Modifiers::ALT, false);
+        assert_eq!((steps.get(), b.chips().len()), (1, 1));
     }
 
     #[test]

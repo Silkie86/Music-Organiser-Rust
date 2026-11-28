@@ -2218,16 +2218,18 @@ impl Shown {
         // Edit strip plays is an edit: where that is in the sound's own file is the strip's to say.
         let line = match self.heard.get() {
             Some((Heard::Edit(_), _)) => self.edit.line_head(&self.panel),
+            // The line's own file: on a line the strip has a part of, the part is lit as far as it has played.
             _ => self.playing.get().and_then(|n| {
                 let at = self.instance.player.place(n)?;
                 let played = self.played.borrow();
                 let (row, sound, _) = played.as_ref()?;
-                (self.lines.sound(*row) == Some(*sound)).then_some((i32::try_from(*row).ok()?, at))
+                (self.lines.sound(*row) == Some(*sound)).then_some((i32::try_from(*row).ok()?, at, 0.0))
             }),
         };
         match line {
-            Some((row, at)) => {
+            Some((row, at, from)) => {
                 self.panel.set_playing_at(at);
+                self.panel.set_edit_played_from(from);
                 self.panel.set_playing_row(row);
             }
             None => self.panel.set_playing_row(-1),
@@ -2610,7 +2612,12 @@ impl WindowHandler for Shown {
                 let Some(text) = key_text(&key.key) else {
                     // A key Slint has no sign for (F5): the Edit strip's when the shortcut list gives it one of the
                     // strip's jobs. Any other is left to the DAW, as before.
-                    if !(down && self.edit.key(&self.panel, &key, sounding)) {
+                    if !down {
+                        // Let go: it stops the original, if it's the key held for that.
+                        self.edit.key_up(&key_base(&key));
+                        return EventStatus::Ignored;
+                    }
+                    if !self.edit.key(&self.panel, &key, sounding) {
                         return EventStatus::Ignored;
                     }
                     if !self.draws.waits_for_the_screen() {
@@ -3221,8 +3228,9 @@ fn ctrl_and_meta(held: Modifiers) -> (bool, bool) {
 /// [`key_name`] without Ctrl, Shift and Alt: the key itself ("T", "Space", "Up").
 ///
 /// With Ctrl or Alt held, some systems hand over what the key types then and not its letter: a control character for
-/// Ctrl+Z, a dagger for Alt+T on a Mac. The key's place on the keyboard names it then ("KeyT" is T), which is what
-/// the shortcut list means by Alt+T. AltGr is neither Ctrl nor Alt here: what it types is the key.
+/// Ctrl+Z, a dagger for Alt+T on a Mac. A control character says which letter it is. For anything else the key's
+/// place on the keyboard names it ("KeyT" is T), which is what the shortcut list means by Alt+T. AltGr is neither
+/// Ctrl nor Alt here: what it types is the key.
 fn key_base(key: &KeyboardEvent) -> String {
     let text = match &key.key {
         Key::Character(text) => text,
@@ -3263,6 +3271,11 @@ fn key_base(key: &KeyboardEvent) -> String {
     let (Some(typed), None) = (chars.next(), chars.next()) else { return String::new() };
     if typed == ' ' {
         return "Space".to_owned();
+    }
+    // Ctrl with a letter can come as that letter's control character (Ctrl+Z as the 26th): the letter is in it,
+    // wherever its key is on this keyboard (on a French one, where QWERTY has its W).
+    if key.modifiers.contains(Modifiers::CONTROL) && ('\u{1}'..='\u{1a}').contains(&typed) {
+        return char::from(b'A' + typed as u8 - 1).to_string();
     }
     let (ctrl, meta) = ctrl_and_meta(key.modifiers);
     let with_one = ctrl || meta || key.modifiers.contains(Modifiers::ALT);
@@ -3652,6 +3665,9 @@ mod tests {
         assert_eq!(key_name(&key(Key::Named(NamedKey::F5), Code::F5, none)), "F5");
         // What a key types with Ctrl or Alt held isn't its letter on every system: its place on the keyboard is.
         assert_eq!(key_name(&typed("\u{1a}", Code::KeyZ, ctrl)), "Ctrl+Z");
+        // A control character says its letter itself: on a French keyboard Z is where QWERTY has its W.
+        assert_eq!(key_base(&typed("\u{1a}", Code::KeyW, Modifiers::CONTROL)), "Z");
+        assert_eq!(key_base(&typed("\u{1}", Code::KeyQ, Modifiers::CONTROL)), "A");
         assert_eq!(key_name(&typed("\u{2020}", Code::KeyT, Modifiers::ALT)), "Alt+T");
         assert_eq!(key_name(&typed("\u{a1}", Code::Digit1, Modifiers::ALT)), "Alt+1");
         // AltGr types a sign of its own: it's neither Ctrl nor Alt.
@@ -3676,7 +3692,7 @@ mod tests {
     fn a_sounds_row_is_found_by_its_place_in_the_list_or_by_a_look_through_it() {
         let sounds = [(10, r"D:\Drums\kick.wav"), (11, r"D:\Drums\snare.wav"), (12, r"D:\Loops\break.wav")];
         let library =
-            Arc::new(Library::new(sounds.iter().map(|(id, path)| mo_sounds::Sound::new(*id, *path)).collect()));
+            Arc::new(Library::new(sounds.iter().map(|(id, path)| mo_sounds::Sound::new(*id, path)).collect()));
         let at = |id: i64| library.list.find(id).unwrap();
         let lines = Lines::default();
         // The list shows the break, then the kick.

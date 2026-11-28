@@ -420,6 +420,9 @@ export component Panel inherits Window {
     in property <int> edit-row: -1;
     in property <float> edit-from;
     in property <float> edit-to;
+    // Where in that file the play that's on its line started (as `playing-at` says where it is): the part is lit
+    // between the two.
+    in property <float> edit-played-from;
     // How high the strip is and where its top is in the window (no height while it isn't showing). The rest of the
     // panel ends above it. It's as high as it was dragged, but leaves the rest 360 while that leaves it its least.
     out property <length> edit-height: root.view == 0 && SoundEdit.shown
@@ -1267,6 +1270,11 @@ export component Panel inherits Window {
                             height: 0;
                             key-pressed(e) => {
                                 TipState.hide();
+                                // With the Edit strip open, an arrow with Alt, Ctrl or Cmd held is one of its keys
+                                // (Alt+Up turns the edit up), not a step to another star.
+                                if SoundEdit.shown && (e.modifiers.alt || e.modifiers.control || e.modifiers.meta) {
+                                    return reject;
+                                }
                                 if e.text == Key.LeftArrow {
                                     root.sky-arrow(-1);
                                 } else if e.text == Key.RightArrow {
@@ -1528,13 +1536,16 @@ export component Panel inherits Window {
                                                 image-fit: fill;
                                                 colorize: wave.tint.transparentize(25%);
                                             }
-                                            // What has played of it: from the part's start to the play head.
+                                            // What has played of it: from where the play started to the play
+                                            // head, whichever way it runs (right to left through a reverse).
                                             if i == root.playing-row: Rectangle {
-                                                x: 0;
-                                                width: max(0px, wave.width * root.playing-at - part-box.x);
+                                                property <float> first: min(root.edit-played-from, root.playing-at);
+                                                property <float> last: max(root.edit-played-from, root.playing-at);
+                                                x: max(0px, wave.width * self.first - part-box.x);
+                                                width: max(0px, min(part-box.width, wave.width * self.last - part-box.x) - self.x);
                                                 clip: true;
                                                 Image {
-                                                    x: -part-box.x;
+                                                    x: -part-box.x - parent.x;
                                                     y: 4px;
                                                     width: wave.width;
                                                     height: wave.height;

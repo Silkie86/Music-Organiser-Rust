@@ -135,9 +135,12 @@ pub trait Host {
     fn play(&self, audio: Arc<AudioData>, from: f64, till: Option<f64>);
 
     /// Plays `audio` in place of the strip's play, from where `place` puts the moment that play has got to (seconds
-    /// into what plays, to seconds into `audio`). Whether it did: not once the strip's play has stopped, or another
-    /// sound has started.
-    fn swap(&self, audio: Arc<AudioData>, place: &dyn Fn(f64) -> f64) -> bool;
+    /// into what plays, to seconds into `audio`). `held`: it's the original, heard for as long as its key is held,
+    /// which plays on past where the strip's play was to stop. Anything else is the edit (made again, or back after
+    /// the original) and stops there still: at the `till` of [`Host::play`], which is in the edit's own seconds (an
+    /// edit of another length is never swapped in: the play stops instead). Whether it did: not once the strip's
+    /// play has stopped, or another sound has started.
+    fn swap(&self, audio: Arc<AudioData>, place: &dyn Fn(f64) -> f64, held: bool) -> bool;
 
     /// Whether the strip's play is what plays now.
     fn plays(&self) -> bool;
@@ -1039,7 +1042,7 @@ fn took_made(host: &dyn Host, made: Made) {
         return;
     }
     // Swapped in where the edit has got to, unless it has stopped or another sound has started meanwhile.
-    let _ = host.swap(audio, &|at| at);
+    let _ = host.swap(audio, &|at| at, false);
 }
 
 /// Applies `next` (what `edit` makes of the open sound's edits, given its original; none for no change) as the new
@@ -1424,7 +1427,7 @@ pub fn hear_original(host: &dyn Host, on: bool) -> bool {
         if held.is_some() {
             return true;
         }
-        if plays && host.swap(original.clone(), &before) {
+        if plays && host.swap(original.clone(), &before, true) {
             set_held(Some(false));
         } else {
             // The stretch of the original the part (all of the edit, with none) came from, from its earlier end:
@@ -1450,7 +1453,7 @@ pub fn hear_original(host: &dyn Host, on: bool) -> bool {
             Some(false) => {
                 set_held(None);
                 if plays {
-                    let _ = host.swap(edited, &after);
+                    let _ = host.swap(edited, &after, false);
                 }
             }
         }
@@ -1475,13 +1478,15 @@ pub fn key_up(host: &dyn Host, name: &str) {
 /// what the strip's waveform shows, 0 to 1 while they're in sight and outside that while they aren't; what's between
 /// them is lit), and how far up the meter each side is lit. And where the moment heard is in the sound's own file (0
 /// its start, 1 its end), for a host that shows the file's own waveform too ([`Showing::file_part`]): where it came
-/// from, through the edits; none for a long sound only a part of which was read.
+/// from, through the edits, and where the moment the play started at came from (what has played is between the two:
+/// through a reverse the play runs from right to left there); none for a long sound only a part of which was read.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Playing {
     pub at: f32,
     pub from: f32,
     pub level: [f32; 2],
     pub in_file: Option<f32>,
+    pub from_in_file: Option<f32>,
 }
 
 /// What a tick of the host's ticker comes to, while the strip's play plays ([`tick`]).
@@ -1517,12 +1522,15 @@ pub fn tick(strip: &mut Strip, at: Option<f64>, till: Option<f64>) -> Ticked {
         return Ticked::Ended;
     }
     // And in the sound's own file: the original is that file, read whole; the edit's moment came from somewhere in it.
-    let in_file = o.source.span.is_none().then(|| {
-        let from = if held { frame } else { edit::place_before(original.len(), &made.edits, frame) };
-        (from as f64 / original.len().max(1) as f64).clamp(0.0, 1.0) as f32
-    });
+    let whole = original.len();
+    let before = |frame: usize| edit::place_before(whole, &made.edits, frame);
+    let of_file = |frame: usize| (frame as f64 / whole.max(1) as f64).clamp(0.0, 1.0) as f32;
+    let read_whole = o.source.span.is_none();
+    let in_file = read_whole.then(|| of_file(if held { frame } else { before(frame) }));
     // A play whose start wasn't seen is lit from here on.
     let played = o.played.get_or_insert(Played::starting(place));
+    // Where it started is kept as a moment of the edit, whichever of the two plays.
+    let from_in_file = read_whole.then(|| of_file(before((played.from * rate).round() as usize)));
     // The meter: as loud as what has played since the last tick gets, or falling back from where it was.
     let since = played.last.filter(|last| *last <= at).map_or(METER_TICK, |last| (at - last).min(METER_MOST));
     let loud = loudest(heard, at - since, at);
@@ -1533,7 +1541,7 @@ pub fn tick(strip: &mut Strip, at: Option<f64>, till: Option<f64>) -> Ticked {
     played.last = Some(at);
     played.place = place;
     let across = |t: f64| across(t, (from, to));
-    Ticked::At(Playing { at: across(place), from: across(played.from), level: played.level, in_file })
+    Ticked::At(Playing { at: across(place), from: across(played.from), level: played.level, in_file, from_in_file })
 }
 
 /// Where the moment `t` is across a stretch on show (from and to, all in seconds): 0 to 1 inside it, and no further
@@ -2573,6 +2581,13 @@ mod tests {
         // Only a part of a long sound was read: there's nowhere in its file to say.
         s.sound.as_mut().unwrap().source.span = Some((30.0, 31.0));
         assert_eq!(in_file(&mut s, 0.1), None);
+        // Where the play started is found the same way. Through the reverse it runs from right to left in the file:
+        // from frame 899 down to 699, two tenths of a second on.
+        let mut s = strip(1_000, vec![Edit::Trim(Span::new(500, 1_000)), Edit::Reverse(None)]);
+        let Ticked::At(start) = tick(&mut s, Some(0.1), None) else { panic!("it plays") };
+        let Ticked::At(later) = tick(&mut s, Some(0.3), None) else { panic!("it plays") };
+        let near = |a: Option<f32>, b: f32| (a.expect("in the file") - b).abs() < 1e-6;
+        assert!(near(start.from_in_file, 0.899) && near(later.from_in_file, 0.899) && near(later.in_file, 0.699));
     }
 
     #[test]
@@ -2617,6 +2632,8 @@ mod tests {
         plays: std::cell::Cell<bool>,
         /// Where the last play started (seconds into what it played).
         played_from: std::cell::Cell<Option<f64>>,
+        /// The swaps asked for: whether each was the original, held.
+        swaps: RefCell<Vec<bool>>,
         takes_saves: std::cell::Cell<bool>,
         saving: RefCell<Vec<u64>>,
         revealed: RefCell<Vec<PathBuf>>,
@@ -2657,7 +2674,8 @@ mod tests {
             self.plays.set(true);
             self.played_from.set(Some(from));
         }
-        fn swap(&self, _: Arc<AudioData>, _: &dyn Fn(f64) -> f64) -> bool {
+        fn swap(&self, _: Arc<AudioData>, _: &dyn Fn(f64) -> f64, held: bool) -> bool {
+            self.swaps.borrow_mut().push(held);
             self.plays.get()
         }
         fn plays(&self) -> bool {
@@ -3015,6 +3033,25 @@ mod tests {
         assert!(hear_original(&host, true));
         let played = host.strip.borrow().sound.as_ref().unwrap().played.expect("the original plays");
         assert_eq!((played.from, host.played_from.get()), (0.25, Some(0.25)));
+    }
+
+    #[test]
+    fn a_swap_says_whether_it_is_the_original_held() {
+        // A host that ends a play of the part itself, to the frame, lets the original play on past the part's end
+        // while it's held; the edit swapped back stops there again, and so does the edit made again as it plays.
+        let host = Fake::on(strip(1_000, vec![Edit::Gain { db: -6.0, span: None }]));
+        seek(&host, 0.3);
+        assert!(host.plays.get());
+        assert!(hear_original(&host, true));
+        assert!(hear_original(&host, false));
+        assert_eq!(*host.swaps.borrow(), [true, false]);
+        let again = {
+            let s = host.strip.borrow();
+            let o = s.sound.as_ref().unwrap();
+            make(o.original.as_ref().unwrap(), o.outline.as_ref().unwrap(), o.edits.now.clone())
+        };
+        took_made(&host, again);
+        assert_eq!(*host.swaps.borrow(), [true, false, false]);
     }
 
     #[test]

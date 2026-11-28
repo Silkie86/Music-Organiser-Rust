@@ -180,7 +180,7 @@ impl Voice {
     }
 
     /// A sound played from memory starts `seconds` into it instead of at its start.
-    fn from_seconds(mut self, seconds: f64) -> Voice {
+    fn starting(mut self, seconds: f64) -> Voice {
         if let Some(shared) = &self.shared {
             let frame = (seconds.max(0.0) * f64::from(shared.rate)).round();
             self.at = if frame.is_finite() { (frame as usize).min(shared.plays) } else { 0 };
@@ -426,7 +426,8 @@ pub enum Ask {
     /// playing, as [`Ask::Play`].
     Swap(Box<Voice>),
     /// Plays this in place of the sound playing, from where it was put and as much further as the one playing has
-    /// gone since it was at this frame ([`Player::swap_shared`]); with nothing playing, as [`Ask::Play`].
+    /// gone since it was at this frame ([`Player::swap_shared`], which hands it over straight after the sound it's
+    /// for: no other can be playing by then). With nothing playing, that sound has ended: this one isn't played.
     SwapAt(Box<Voice>, usize),
     Stop,
     /// The Loop switch, turned on or off.
@@ -442,10 +443,24 @@ struct Counts {
     ended: AtomicU64,
     /// Where the sound playing is in its whole file ([`Voice::place`]), as an `f32`'s bits.
     place: AtomicU32,
-    /// How many of the DAW's frames into its sound it is: for a sound played from memory, from that sound's start.
+    /// How many of the DAW's frames into its sound it is (for a sound played from memory, from that sound's start),
+    /// with which sound that is ([`tagged`]): the two are read as one, so never the place of one for another's.
     at: AtomicU64,
     /// How far the Volume knob is turned down (0 full, 1 silent), as an `f32`'s bits.
     down: AtomicU32,
+}
+
+/// The bits of [`Counts::at`] that are the place; the rest is the sound's number, as much of it as fits.
+const AT_BITS: u32 = 48;
+
+/// The place `at` in the `n`th sound started, as one number.
+fn tagged(n: u64, at: usize) -> u64 {
+    (n << AT_BITS) | (at as u64 & ((1 << AT_BITS) - 1))
+}
+
+/// The place in `tagged`, when it's the `n`th sound's.
+fn place_of(n: u64, tagged: u64) -> Option<usize> {
+    (tagged >> AT_BITS == (n << AT_BITS) >> AT_BITS).then_some((tagged & ((1 << AT_BITS) - 1)) as usize)
 }
 
 /// The audio thread's side: on the DAW's audio thread, from when the DAW starts the track's audio to when it stops it.
@@ -509,12 +524,13 @@ impl Playing {
                     }
                     self.start(voice);
                 }
-                Ok(Ask::SwapAt(mut voice, was)) => {
-                    if let Some(old) = &self.now {
+                Ok(Ask::SwapAt(mut voice, was)) => match &self.now {
+                    Some(old) => {
                         voice.take_over_from(old, was);
+                        self.start(voice);
                     }
-                    self.start(voice);
-                }
+                    None => self.pass_by(voice),
+                },
                 Ok(Ask::Stop) => {
                     self.let_cue_go();
                     self.retire(None);
@@ -603,7 +619,7 @@ impl Playing {
                 notes_in(&voice.notes, (from, voice.at), offset, last, sent, sounding);
             }
             counts.place.store(voice.place().to_bits(), Ordering::Release);
-            counts.at.store(voice.at as u64, Ordering::Release);
+            counts.at.store(tagged(counts.started.load(Ordering::Acquire), voice.at), Ordering::Release);
         }
         left[written..].fill(0.0);
         right[written..].fill(0.0);
@@ -632,10 +648,20 @@ impl Playing {
     /// whoever sees it has started never reads where the one before it had got to.
     fn start(&mut self, voice: Box<Voice>) {
         self.counts.place.store(voice.place().to_bits(), Ordering::Release);
-        self.counts.at.store(voice.at as u64, Ordering::Release);
+        // Only this thread counts the starts while the track's audio runs.
+        let n = self.counts.started.load(Ordering::Acquire) + 1;
+        self.counts.at.store(tagged(n, voice.at), Ordering::Release);
         self.counts.started.fetch_add(1, Ordering::AcqRel);
         self.let_cue_go();
         self.retire(Some(voice));
+    }
+
+    /// `voice` came to take over from a sound that has ended meanwhile (its own end, or the DAW stopped): it's counted
+    /// as started and ended, and goes back unplayed. Whoever handed it over sees it has ended, as the one before it.
+    fn pass_by(&mut self, voice: Box<Voice>) {
+        self.counts.started.fetch_add(1, Ordering::AcqRel);
+        self.counts.ended.fetch_add(1, Ordering::AcqRel);
+        self.hand_back(voice);
     }
 
     /// The sound playing now ends (the DAW stopped, or it played to its end). A loop is cued, to play again when the
@@ -834,8 +860,11 @@ pub struct Player {
     midi_out: AtomicBool,
     /// Makes the loops picked (a MIDI part, a curve), one at a time, newest first.
     maker: Maker,
-    /// The sound played from memory last handed over ([`Player::play_shared`]): its number, and the frame it starts
-    /// at, which is where it is until the audio thread has taken it.
+    /// Held while a sound is handed over, or a stop is: the last look at whether its pick is still the newest, the
+    /// ask of the audio thread and the count of it are one step. So the newest pick is the last one handed over (a
+    /// file read for an older one never starts after it, or after a stop), and each gets the number the audio thread
+    /// starts it as. In it, the sound played from memory last handed over ([`Player::play_shared`]): its number, and
+    /// the frame it starts at, which is where it is until the audio thread has taken it.
     shared: Mutex<Option<(u64, usize)>>,
 }
 
@@ -1065,9 +1094,16 @@ impl Player {
                     }
                     _ => None,
                 };
-                match self.voice_from(&pick, audio, rate, stretched) {
-                    Ok(voice) if self.looping() => self.hand_over(Box::new(voice.looped().in_beats(beats)), name),
-                    Ok(voice) => self.hand_over(Box::new(voice), name),
+                let voice = match self.voice_from(&pick, audio, rate, stretched) {
+                    Ok(voice) if self.looping() => Ok(voice.looped().in_beats(beats)),
+                    made => made,
+                };
+                match voice {
+                    // Made ready meanwhile (turned to the DAW's rate): a newer pick, or a stop, still wins.
+                    Ok(voice) => match self.hand_over_pick(pick.number, Box::new(voice), name, false) {
+                        Some(played) => played,
+                        None => return,
+                    },
                     Err(why) => Played::Not(why),
                 }
             }
@@ -1135,7 +1171,7 @@ impl Player {
                         Voice::notes_only(frames.max(1), &notes, rate)
                     }
                 };
-                self.hand_over_as(Box::new(voice.always_looped().in_beats(beats)), name.into(), swap)
+                self.hand_over_pick(number, Box::new(voice.always_looped().in_beats(beats)), name.into(), swap)?
             }
         };
         match &played {
@@ -1203,8 +1239,9 @@ impl Player {
         if rate == 0 {
             return Played::Not(NOT_STARTED.into());
         }
-        let voice = Voice::shared(audio, rate).till(till).from_seconds(from);
-        self.hand_over_shared(Box::new(voice), name, Ask::Play)
+        let voice = Voice::shared(audio, rate).till(till).starting(from);
+        let mut shared = lock(&self.shared);
+        self.hand_over_shared(&mut shared, Box::new(voice), name, Ask::Play)
     }
 
     /// Plays `audio` straight from memory in place of the `n`th sound handed over, itself played from memory and
@@ -1217,22 +1254,33 @@ impl Player {
         audio: Arc<mo_audio::AudioData>,
         name: String,
         place: &dyn Fn(f64) -> f64,
+        till: Option<f64>,
     ) -> Option<Played> {
         let rate = self.rate.load(Ordering::Acquire);
         if rate == 0 {
             return None;
         }
-        let was = self.frame(n)?;
-        let voice = Voice::shared(audio, rate).from_seconds(place(was as f64 / f64::from(rate)));
-        Some(self.hand_over_shared(Box::new(voice), name, |voice| Ask::SwapAt(voice, was)))
+        let mut shared = lock(&self.shared);
+        // Another sound handed over since (a line's file, read meanwhile) is what plays next: it isn't swapped out.
+        if self.handed.load(Ordering::Acquire) != n {
+            return None;
+        }
+        let was = self.frame_noted(n, *shared)?;
+        let voice = Voice::shared(audio, rate).till(till).starting(place(was as f64 / f64::from(rate)));
+        Some(self.hand_over_shared(&mut shared, Box::new(voice), name, |voice| Ask::SwapAt(voice, was)))
     }
 
-    /// Hands over a sound played from memory, and notes where it starts ([`Player::frame`]).
-    fn hand_over_shared(&self, voice: Box<Voice>, name: String, ask: impl FnOnce(Box<Voice>) -> Ask) -> Played {
+    /// Hands over a sound played from memory, and notes where it starts ([`Player::frame`]), with the hand-overs'
+    /// lock held (`shared`).
+    fn hand_over_shared(
+        &self,
+        shared: &mut Option<(u64, usize)>,
+        voice: Box<Voice>,
+        name: String,
+        ask: impl FnOnce(Box<Voice>) -> Ask,
+    ) -> Played {
         let starts = voice.at;
-        // Held while it's handed over, so the note is of the newest one handed over.
-        let mut shared = lock(&self.shared);
-        let played = self.hand_over_with(voice, name, ask);
+        let played = self.hand_over_held(voice, name, ask);
         if let Played::Playing(_, n) = &played {
             *shared = Some((*n, starts));
         }
@@ -1243,14 +1291,23 @@ impl Player {
     /// ([`Player::play_shared`]): where it has got to; where it starts, until the audio thread has taken it; none
     /// once it has ended.
     fn frame(&self, n: u64) -> Option<usize> {
+        let noted = *lock(&self.shared);
+        self.frame_noted(n, noted)
+    }
+
+    /// [`Player::frame`], given the note of the sound played from memory last handed over ([`Player::shared`]).
+    fn frame_noted(&self, n: u64, noted: Option<(u64, usize)>) -> Option<usize> {
         let started = self.counts.started.load(Ordering::Acquire);
         if started == n {
-            return (self.counts.ended.load(Ordering::Acquire) < started)
-                .then(|| self.counts.at.load(Ordering::Acquire) as usize);
+            if self.counts.ended.load(Ordering::Acquire) >= started {
+                return None;
+            }
+            // Told with its sound's number: not the place of the next one, started while this is read.
+            return place_of(n, self.counts.at.load(Ordering::Acquire));
         }
         // Not taken yet: where it was told to start. (Not once the track's audio has stopped: nothing is waiting.)
         let waiting = started < n && self.rate.load(Ordering::Acquire) != 0;
-        (*lock(&self.shared)).filter(|(shared, _)| waiting && *shared == n).map(|(_, starts)| starts)
+        noted.filter(|(shared, _)| waiting && *shared == n).map(|(_, starts)| starts)
     }
 
     /// [`Player::frame`] in seconds: where the `n`th sound handed over, played from memory, is in its sound.
@@ -1259,17 +1316,20 @@ impl Player {
         (rate != 0).then(|| self.frame(n)).flatten().map(|frame| frame as f64 / f64::from(rate))
     }
 
-    fn hand_over(&self, voice: Box<Voice>, name: String) -> Played {
-        self.hand_over_as(voice, name, false)
+    /// Hands over the sound read or made for the pick numbered `number`, to play (in place of what plays, from its
+    /// place, when `swap`), unless a newer pick or a stop has come since (none then): looked at with the hand-overs'
+    /// lock held, so the newest pick is the last one handed over.
+    fn hand_over_pick(&self, number: u64, voice: Box<Voice>, name: String, swap: bool) -> Option<Played> {
+        let _handing = lock(&self.shared);
+        if self.picks.load(Ordering::Acquire) != number {
+            return None;
+        }
+        Some(self.hand_over_held(voice, name, if swap { Ask::Swap } else { Ask::Play }))
     }
 
-    /// Hands `voice` to the audio thread to play, in place of what plays from its place when `swap`.
-    fn hand_over_as(&self, voice: Box<Voice>, name: String, swap: bool) -> Played {
-        self.hand_over_with(voice, name, if swap { Ask::Swap } else { Ask::Play })
-    }
-
-    /// Hands `voice` to the audio thread with the ask `ask` makes of it.
-    fn hand_over_with(&self, mut voice: Box<Voice>, name: String, ask: impl FnOnce(Box<Voice>) -> Ask) -> Played {
+    /// Hands `voice` to the audio thread with the ask `ask` makes of it. The hand-overs' lock ([`Player::shared`]) is
+    /// held by the caller.
+    fn hand_over_held(&self, mut voice: Box<Voice>, name: String, ask: impl FnOnce(Box<Voice>) -> Ask) -> Played {
         // The sounds the audio thread is done with are freed here first: with the panel shut nothing else frees them,
         // and the audio thread takes a new pick only with room to hand one back (the 14 Nov review's PL-3).
         self.tidy();
@@ -1286,6 +1346,8 @@ impl Player {
     pub fn stop(&self) {
         self.picks.fetch_add(1, Ordering::AcqRel);
         lock(&self.next).take();
+        // After any sound on its way over just now: none for an older pick comes after the stop.
+        let _handing = lock(&self.shared);
         let _ = self.ask(Ask::Stop);
     }
 
@@ -1327,6 +1389,19 @@ fn take_next(player: &Player) -> Option<Pick> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests hand their sounds over themselves, whatever was picked last.
+    impl Player {
+        fn hand_over(&self, voice: Box<Voice>, name: String) -> Played {
+            self.hand_over_as(voice, name, false)
+        }
+
+        /// In place of what plays, from its place, when `swap`.
+        fn hand_over_as(&self, voice: Box<Voice>, name: String, swap: bool) -> Played {
+            let _handing = lock(&self.shared);
+            self.hand_over_held(voice, name, if swap { Ask::Swap } else { Ask::Play })
+        }
+    }
 
     fn voice(len: usize) -> Box<Voice> {
         Box::new(Voice::new(&[vec![1.0; len]], 48_000, 48_000))
@@ -1973,7 +2048,8 @@ mod tests {
         assert_eq!(l, [1.0, 2.0].map(|x| x * LEVEL).to_vec());
         // A|B: the original, where the edit was trimmed from a second into it. Half a second into the edit is a
         // second and a half into the original: its 7th frame.
-        let held = number(player.swap_shared(n, Arc::clone(&original), "original".into(), &|at| at + 1.0).unwrap());
+        let held =
+            number(player.swap_shared(n, Arc::clone(&original), "original".into(), &|at| at + 1.0, None).unwrap());
         assert_eq!(player.seconds(held), Some(1.5), "where it starts, before the audio thread has taken it");
         playing.fill(&mut l, &mut r);
         assert_eq!(l, [70.0, 80.0].map(|x| x * LEVEL).to_vec());
@@ -1981,25 +2057,107 @@ mod tests {
         assert_eq!(player.seconds(held), Some(2.0));
         // Let go at once, and pressed again before the audio thread has taken either: each goes on from where the
         // one before it starts, so the original plays on from where it was.
-        let back = number(player.swap_shared(held, Arc::clone(&edit), "edit".into(), &|at| at - 1.0).unwrap());
-        let again = number(player.swap_shared(back, Arc::clone(&original), "original".into(), &|at| at + 1.0).unwrap());
+        let back = number(player.swap_shared(held, Arc::clone(&edit), "edit".into(), &|at| at - 1.0, None).unwrap());
+        let again =
+            number(player.swap_shared(back, Arc::clone(&original), "original".into(), &|at| at + 1.0, None).unwrap());
         playing.fill(&mut l, &mut r);
         assert_eq!(l, [90.0, 100.0].map(|x| x * LEVEL).to_vec());
         assert!(!player.still_playing(back) && player.still_playing(again));
-        // A swap is to the sound's end, not a part's: the last two frames, and it ends.
+        // With no end told, a swap is to the sound's end: the last two frames, and it ends.
         let (mut l, mut r) = (vec![9.0; 3], vec![9.0; 3]);
         playing.fill(&mut l, &mut r);
         assert_eq!(l, [110.0, 120.0, 0.0].map(|x| x * LEVEL).to_vec());
         // Ended: nothing to swap with any more, and nothing is asked of the audio thread.
-        assert!(player.swap_shared(again, Arc::clone(&edit), "edit".into(), &|at| at).is_none());
+        assert!(player.swap_shared(again, Arc::clone(&edit), "edit".into(), &|at| at, None).is_none());
         playing.fill(&mut l, &mut r);
         assert_eq!(l, vec![0.0; 3]);
         // Nor once the track's audio has stopped, when a play says why not.
         let n = number(player.play_shared(Arc::clone(&edit), "edit".into(), 0.0, None));
         player.stop_all();
-        assert!(player.swap_shared(n, Arc::clone(&original), "original".into(), &|at| at).is_none());
+        assert!(player.swap_shared(n, Arc::clone(&original), "original".into(), &|at| at, None).is_none());
         assert_eq!(player.seconds(n), None);
         assert_eq!(player.play_shared(edit, "edit".into(), 0.0, None), Played::Not(NOT_STARTED.into()));
+    }
+
+    #[test]
+    fn a_swap_stops_at_the_end_of_the_part_it_is_told() {
+        let player = Player::default();
+        let mut playing = player.start(4);
+        let edit = in_memory(4, (1..=8).map(|n| n as f32).collect(), None);
+        let louder = in_memory(4, (1..=8).map(|n| n as f32 * 2.0).collect(), None);
+        // A play of the part from the start to a second and a half in: frames 0 to 5.
+        let n = number(player.play_shared(edit, "edit".into(), 0.0, Some(1.5)));
+        let (mut l, mut r) = (vec![9.0; 2], vec![9.0; 2]);
+        playing.fill(&mut l, &mut r);
+        // The edit made again (turned up) as it plays: it goes on from the same moment and still stops at the part's
+        // end, to the frame, by itself.
+        let next = number(player.swap_shared(n, louder, "edit".into(), &|at| at, Some(1.5)).unwrap());
+        let (mut l, mut r) = (vec![9.0; 6], vec![9.0; 6]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, [6.0, 8.0, 10.0, 12.0, 0.0, 0.0].map(|x| x * LEVEL).to_vec());
+        assert!(playing.now.is_none() && !player.still_playing(next));
+    }
+
+    #[test]
+    fn a_swap_is_off_once_another_sound_was_handed_over_or_the_play_has_ended() {
+        let player = Player::default();
+        let mut playing = player.start(4);
+        let edit = in_memory(4, vec![0.5; 8], None);
+        let n = number(player.play_shared(Arc::clone(&edit), "edit".into(), 0.0, None));
+        let (mut l, mut r) = (vec![9.0; 2], vec![9.0; 2]);
+        playing.fill(&mut l, &mut r);
+        // A line's file, read meanwhile, is handed over (the audio thread hasn't taken it yet): it's what plays next,
+        // and the swap isn't put in its place.
+        let line = number(player.hand_over(Box::new(Voice::new(&[vec![0.25; 8]], 4, 4)), "line".into()));
+        assert!(player.swap_shared(n, Arc::clone(&edit), "edit".into(), &|at| at, None).is_none());
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.25 * LEVEL; 2]);
+        assert!(player.still_playing(line));
+        // The DAW stops as a swap is on its way: the play it was for has stopped with it by the time the audio thread
+        // gets to the swap. The swapped sound doesn't start it again: it counts as come and gone.
+        let song = |playing| Some(Song { playing, beats: 0.0, tempo: Some(120.0), bar: None });
+        let n = number(player.play_shared(Arc::clone(&edit), "edit".into(), 0.0, None));
+        playing.fill_in_song(&mut l, &mut r, song(true));
+        assert!(player.still_playing(n));
+        let next = number(player.swap_shared(n, edit, "edit".into(), &|at| at, None).unwrap());
+        playing.fill_in_song(&mut l, &mut r, song(false));
+        assert_eq!(l, vec![0.0; 2]);
+        assert!(playing.now.is_none() && !player.still_playing(n) && !player.still_playing(next));
+        assert_eq!(player.seconds(next), None);
+    }
+
+    #[test]
+    fn a_place_is_told_with_its_sounds_number() {
+        assert_eq!(place_of(7, tagged(7, 1234)), Some(1234));
+        // The next sound's start isn't taken for where this one has got to.
+        assert_eq!(place_of(7, tagged(8, 0)), None);
+        // A number past what fits beside the place still tells neighbours apart.
+        let far = (1 << 16) + 3;
+        assert_eq!(place_of(far, tagged(far, 5)), Some(5));
+        assert_eq!(place_of(far, tagged(far + 1, 5)), None);
+    }
+
+    #[test]
+    fn a_sound_made_ready_for_an_older_pick_is_not_handed_over() {
+        let player = Player::default();
+        let mut playing = player.start(4);
+        let voice = |value: f32| Box::new(Voice::new(&[vec![value; 4]], 4, 4));
+        // The newest pick's sound is handed over.
+        let pick = player.picks.fetch_add(1, Ordering::AcqRel) + 1;
+        assert!(player.hand_over_pick(pick, voice(0.5), "newest".into(), false).is_some());
+        // A play from memory since (the Edit strip's): the sound made ready for the pick before isn't.
+        let n = number(player.play_shared(in_memory(4, vec![0.25; 4], None), "edit".into(), 0.0, None));
+        assert!(player.hand_over_pick(pick, voice(0.5), "older".into(), false).is_none());
+        let (mut l, mut r) = (vec![9.0; 2], vec![9.0; 2]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.25 * LEVEL; 2]);
+        assert!(player.still_playing(n));
+        // Nor after a stop.
+        let pick = player.picks.fetch_add(1, Ordering::AcqRel) + 1;
+        player.stop();
+        assert!(player.hand_over_pick(pick, voice(0.5), "stopped".into(), false).is_none());
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.0; 2]);
     }
 
     #[test]
@@ -2009,7 +2167,7 @@ mod tests {
         // edit was waiting for.
         let mut old = Voice::shared(in_memory(4, vec![0.0; 8], None), 4);
         (old.at, old.wait, old.fresh, old.timed) = (5, 3, false, true);
-        let mut new = Voice::shared(in_memory(4, vec![0.0; 12], None), 4).from_seconds(1.5);
+        let mut new = Voice::shared(in_memory(4, vec![0.0; 12], None), 4).starting(1.5);
         assert_eq!(new.at, 6);
         new.take_over_from(&old, 2);
         assert_eq!((new.at, new.wait, new.fresh, new.timed), (9, 3, false, true));
