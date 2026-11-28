@@ -150,6 +150,17 @@ jobs:
       - name: Clippy
         if: needs.scope.outputs.rust == 'true'
         run: cargo clippy ${{ needs.scope.outputs.check }} --all-targets
+      # The plugin on its own, as a release builds it (release.yml). The steps around this one build it together with
+      # the app whenever both are checked (on main, always), and Cargo then builds a crate they share with what both
+      # ask of it: mo-ui asks mo-audio for the app's player (its "play" feature) and the plugin doesn't. So code that
+      # only the player used looked used here and wasn't in the plugin's own build (#800's song sound: five warnings,
+      # which are errors in these checks), and a pull request that changed only the plugin would have failed on them.
+      # A feature the plugin needs but only the app asks for would show here too, not first in a release. About a
+      # minute. On a pull request Linux checks it; on main, and in a run started by hand, Windows and Mac do too (the
+      # plugin has code of its own for each).
+      - name: The plugin on its own
+        if: contains(needs.scope.outputs.check, 'mo-plugin') && (runner.os == 'Linux' || github.event_name != 'pull_request')
+        run: cargo check --locked -p mo-plugin
       # The fuzzer's targets (fuzz/README.md) still build after a reader changes: they run by hand with nightly Rust, so
       # nothing else would notice. Checked with the app's own build folder, which has most of what they use.
       - name: Fuzz targets still build
