@@ -66,8 +66,11 @@ jobs:
       matrix:
         os: ${{ github.event_name == 'pull_request' && fromJSON('["windows-latest", "ubuntu-latest"]') || fromJSON('["windows-latest", "macos-latest", "ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
-    # A hung test fails within the hour rather than at GitHub's 6 (review TC-1).
-    timeout-minutes: 60
+    # A hung test fails within the hour rather than at GitHub's 6 (review TC-1). A run on main, or one started by hand,
+    # checks every crate and gets 90 minutes: a new Rust version empties every saved build (1.100.1 on 2026-11-27 did),
+    # and from nothing Windows took 57 minutes. A job stopped at its limit saves no build, so the next run starts from
+    # nothing too. (Linux takes 24 minutes from nothing and Mac 15, now their builds leave out debugging info: below.)
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 90 }}
     steps:
       - name: Stop if working out what changed failed
         if: needs.scope.result != 'success'
@@ -82,6 +85,16 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      # The checks' builds on Linux and Mac leave out debugging info (Cargo.toml keeps file names and line numbers for
+      # crash logs): it was over half of each big binary (384 of mo-screens' 650 MB), all written, linked and never
+      # read, and it is what main's full runs ran out on (2026-11-27). With it Mac took over an hour; without it, 15
+      # minutes from nothing. With it the Linux machine stopped answering part way through the tests, with no log to
+      # say why: most likely out of memory (it has 16 GB; its disk had 107 GB free); without it, 24 minutes from
+      # nothing. A failed test still says its file and line. Windows keeps it: mo-ui's stuck-thread test finds a
+      # function by name there. Set before the cache step, so the saved build is one made this way.
+      - name: No debugging info in the builds on Linux and Mac
+        if: runner.os != 'Windows'
+        run: echo "CARGO_PROFILE_DEV_DEBUG=none" >> "$GITHUB_ENV"
       # Rust's own linker on Windows, much quicker than Microsoft's link.exe at linking the 50-odd test binaries. Set
       # before the cache step so the cached libraries are built with it (a change of linker rebuilds every library with
       # a build script). Only for the checks: the installer job and the releases keep link.exe.
@@ -149,6 +162,24 @@ jobs:
       - name: Tests (and the crates that use them)
         if: needs.scope.outputs.rust == 'true' && runner.os == 'Linux'
         run: cargo test ${{ needs.scope.outputs.check }}
+      # What the build took, so the next job that runs out of something isn't a guess: the disk, and how much memory
+      # had to be moved out to the disk to make room (a lot means the machine was short of memory).
+      - name: How much room the build took
+        if: always() && runner.os != 'Windows'
+        run: |
+          # Only to read: nothing here may fail the job.
+          set +e
+          df -h .
+          [ -d target ] && du -sh target
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            free -m
+            grep -E '^(pswpout|oom_kill) ' /proc/vmstat
+            cat /proc/pressure/memory
+          else
+            sysctl vm.swapusage
+            vm_stat
+          fi
+          exit 0
 
   # The galaxy check is a workspace of its own (so its wgpu stays out of the app); checked on Windows, where it runs.
   # A job of its own so it runs beside the Windows tests instead of after them (it added about 5 minutes to Windows).
