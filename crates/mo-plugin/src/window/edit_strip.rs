@@ -1,38 +1,46 @@
 //! The Edit strip along the bottom of the panel's Sounds tab, on the plugin's side (the 1.1 plan's light sample edits;
 //! its look is Solomon's "Build it like this" of 27 Nov 2026, pictures 12 to 14). The strip itself has no screen and is
-//! the app's too ([`mo_app::edit_strip`]): the sound open in it, its edits and their undo, what plays, and everything
-//! it shows. This is what the panel gives it ([`Host`]): the sound picked in the list, the plugin's player (the edit
-//! plays through the track), threads of its own to read, make and draw on (newest wins, rule 12), and its place on the
-//! screen ([`SoundEdit`]).
+//! the app's too ([`mo_app::edit_strip`]): the sound open in it, its edits and their undo, its Slices, what plays, and
+//! everything it shows. This is what the panel gives it ([`Host`]): the sound picked in the list, the plugin's player
+//! (the edit, a slice or a pad plays through the track), threads of its own to read, make, send and draw on (newest
+//! wins, rule 12), and its place on the screen ([`SoundEdit`]).
 //!
 //! The strip is kept by the plugin, not by the window ([`crate::Instance::edit_strip`]): with the window closed and
 //! opened again each sound's edits are where they were, for as long as the plugin stays loaded.
 //!
-//! What it writes is what the app's strip writes: a copy of an edit, saved or dragged out, in the export folder's
-//! Edited sounds. Never the sound's own file (rule 2), and nothing in the app's settings or databases.
+//! What it writes is what the app's strip writes: a copy of an edit, saved or dragged out, and a sound's slices, each
+//! a file of its own, in the export folder's Edited sounds. Never the sound's own file (rule 2), and nothing in the
+//! app's settings or databases.
+//!
+//! The slices go where the app's go, by the app's own code ([`deliver`]): on a Drum Machine on a new track of the
+//! song, through the DAWmate extension in Bitwig (offered only while Bitwig is the DAW the plugin is in, as "In
+//! Bitwig's Sampler" is), or to their folder, which is opened. With no cards here, the panel's line says how a send
+//! ended, and the strip itself says beside Send when one failed. A send is the plugin's and not the window's
+//! ([`Sends`]): one that ends once its window has gone is heard by the next window.
 //!
 //! Its screen is a picture the strip works out ([`screen::scene`]), drawn by the processor on a thread of its own, as
-//! the curve editor's is here. Its Slices come with the plugin's next step: until then their key is faint.
+//! the curve editor's is here.
 
 use super::{Heard, Lines, Slots, take};
 use crate::audition::{Played, Player};
 use crate::library;
-use crate::threads::{OneAtATime, background, newer};
+use crate::threads::{OneAtATime, background, lock, newer};
 use crate::{EditChip, EditMark, EditRoom, Panel, SliceCut, SoundEdit, Theme};
 use keyboard_types::{Key, KeyboardEvent, NamedKey};
 use mo_app::edit_copy::{self, Unread};
 use mo_app::edit_strip::screen::{self, Colours, Room, Wave};
-use mo_app::edit_strip::slices;
+use mo_app::edit_strip::slices::{self, NotSent};
 use mo_app::edit_strip::{self as strip, Answer, Carried, Host, Picked, Saving, Showing, Strip, Ticked, Work};
 use mo_app::shapes::Colour;
-use mo_app::shell;
 use mo_app::shortcuts::{self, Shortcuts};
+use mo_app::{shell, to_bitwig};
 use mo_audio::AudioData;
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,6 +53,20 @@ const GLOW: Duration = Duration::from_millis(120);
 
 /// The action Space has in the shortcut list: with the strip open on the picked sound, it plays the edit.
 const PLAY: &str = "app.play";
+
+/// Where slices go in Bitwig while the plugin stays loaded: on a new Drum Machine on a new track, until Bitwig once
+/// doesn't add one; from then on, on the Drum Machine selected there (as the app's kits and slices go).
+static KITS: to_bitwig::Kits = to_bitwig::Kits::new();
+
+/// What's said of a send that stopped at a bug of the plugin's own.
+const STOPPED: &str = "Something went wrong (see the crash note).";
+
+/// What's said of a send the computer wouldn't start a thread for.
+const NOT_STARTED: &str = "The computer couldn't start the work (it may be short of memory). Try again.";
+
+/// How long the way a send ended is news: for so long the panel's line says it again whenever it has gone blank
+/// ([`OnPanel::news_again`]).
+const NEWS: Duration = Duration::from_secs(10);
 
 /// The sound the strip is open on, as the list had it when the strip opened on it: the list may be searched or worked
 /// out again while the strip stays on its sound.
@@ -70,6 +92,51 @@ struct Answers {
     picture: Mutex<Option<(u64, Drawn)>>,
     /// The shortcut list as the app's settings have it, once they're read.
     keys: Mutex<Option<Shortcuts>>,
+}
+
+/// The sends of the strip's slices, kept by the plugin and not by a window ([`crate::Instance::edit_sends`]), as the
+/// strip is. A send goes on when its window goes: in Bitwig the slices' new track is selected as they arrive, which
+/// can put the plugin's window away. The next window then hears how it ended, so its Send says where the slices are
+/// instead of offering them again (a second press would put a second Drum Machine in the song).
+#[derive(Default)]
+pub(crate) struct Sends {
+    /// Counts them: a count or an end that isn't the newest send's is nobody's.
+    count: AtomicU64,
+    /// The newest send, by its number: how many of its slices have their file so far, and how it ended.
+    made: Mutex<Option<(u64, usize)>>,
+    sent: Mutex<Option<(u64, Ended)>>,
+}
+
+impl Sends {
+    /// The newest send's number (0 before the first).
+    fn newest(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// The number of a send that starts now: the newest from here on.
+    fn next(&self) -> u64 {
+        self.count.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+/// How a send of slices ended: for the strip ([`slices::sent`]), what the panel's line says of it, and their folder
+/// when that's to be opened (it's where they were sent).
+struct Ended {
+    went: Result<(), NotSent>,
+    said: String,
+    folder: Option<String>,
+}
+
+impl Ended {
+    /// They're where they were sent: the line says so (`said`).
+    fn there(said: String) -> Ended {
+        Ended { went: Ok(()), said, folder: None }
+    }
+
+    /// They couldn't be sent: the line says what the strip says beside Send.
+    fn not(sent: NotSent) -> Ended {
+        Ended { said: format!("{}: {}", sent.title, sent.why), went: Err(sent), folder: None }
+    }
 }
 
 /// The strip's lists as the screen has them: kept, and changed line by line, so the window keeps what it has laid out
@@ -131,19 +198,31 @@ pub(super) struct OnPanel {
     keys: RefCell<Shortcuts>,
     /// When what the drag handle carried landed: its glow goes a moment later.
     landed: Cell<Option<Instant>>,
+    /// Whether Bitwig is the DAW the plugin is in: only there do the slices go on a Drum Machine.
+    in_bitwig: bool,
+    /// The plugin's sends of slices, and the one this window started, by its number (none: it has started none).
+    sends: Arc<Sends>,
+    asked: Cell<Option<u64>>,
+    /// How the last send ended, as the panel's line said it, and when: said again there while it's news
+    /// ([`OnPanel::news_again`]).
+    news: RefCell<Option<(Instant, String)>>,
 }
 
 impl OnPanel {
-    /// The strip's host on `panel`, with the strip as the last window left it (`strip`), the list's lines, and what
-    /// the window knows of what plays (`heard`, `playing`).
+    /// The strip's host on `panel`, with the strip as the last window left it (`strip`), the plugin's sends of slices
+    /// (`sends`), the list's lines, what the window knows of what plays (`heard`, `playing`), and whether the DAW it's
+    /// in is Bitwig.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         panel: &Panel,
         strip: Strip,
+        sends: Arc<Sends>,
         lines: Rc<Lines>,
         player: Arc<Player>,
         slots: Arc<Slots>,
         heard: Rc<Cell<Option<(Heard, bool)>>>,
         playing: Rc<Cell<Option<u64>>>,
+        in_bitwig: bool,
     ) -> Rc<OnPanel> {
         Rc::new(OnPanel {
             panel: panel.as_weak(),
@@ -166,6 +245,10 @@ impl OnPanel {
             lists: Lists::default(),
             keys: RefCell::default(),
             landed: Cell::new(None),
+            in_bitwig,
+            sends,
+            asked: Cell::new(None),
+            news: RefCell::new(None),
         })
     }
 
@@ -174,7 +257,7 @@ impl OnPanel {
         // What's picked on the strip's screen wears the Sounds place's colour, as in the app.
         panel.global::<Theme>().set_here(i32::try_from(mo_app::places::Place::Sounds.index()).unwrap_or(1));
         let data = panel.global::<SoundEdit>();
-        data.set_can_slice(false);
+        data.set_can_bitwig(self.in_bitwig);
         data.set_kept_while("while the plugin stays loaded".into());
         let me = Rc::clone(self);
         panel.on_edit(move || {
@@ -229,6 +312,33 @@ impl OnPanel {
         data.on_close(move || strip::close(&*me));
         let me = Rc::clone(self);
         data.on_show_saved(move || strip::show_saved(&*me));
+        // The Slices: where they're cut, a line dragged, a slice or a pad clicked.
+        let me = Rc::clone(self);
+        data.on_cut_at_picked(move |choice| slices::cut_at_picked(&*me, &choice));
+        let me = Rc::clone(self);
+        data.on_sensitivity_moved(move |to| slices::sensitivity_moved(&*me, to));
+        let me = Rc::clone(self);
+        data.on_sensitivity_released(move |_| slices::end_live(&*me));
+        let me = Rc::clone(self);
+        data.on_each_picked(move |choice| slices::each_picked(&*me, &choice));
+        let me = Rc::clone(self);
+        data.on_slice_down(move |at, within, shift| {
+            slices::down(&mut me.strip.borrow_mut(), f64::from(at), f64::from(within), shift);
+        });
+        let me = Rc::clone(self);
+        data.on_slice_move(move |at, shift, far| slices::moved(&*me, f64::from(at), shift, far));
+        let me = Rc::clone(self);
+        data.on_slice_up(move |cut_short| slices::up(&*me, cut_short));
+        let me = Rc::clone(self);
+        data.on_slice_double(move || slices::double(&*me));
+        let me = Rc::clone(self);
+        data.on_slice_near(move |at, within, _| slices::near(&me.strip.borrow(), f64::from(at), f64::from(within)));
+        let me = Rc::clone(self);
+        data.on_pad_pressed(move |slice| {
+            if let Ok(slice) = usize::try_from(slice) {
+                slices::pad_pressed(&*me, slice);
+            }
+        });
         self.show_keys(panel, Shortcuts::default());
         if !HERE {
             // The keys as the app's Settings have them: its settings file is read, never written, and off the
@@ -266,9 +376,10 @@ impl OnPanel {
     }
 
     /// One of the strip's tools, by its id in the shortcut list (its key or its button): whether it did anything,
-    /// none for an id that isn't the strip's. The Slices' own wait for the plugin's next step.
+    /// none for an id that isn't the strip's. A Drum Machine in Bitwig is a place for the slices only while Bitwig is
+    /// the DAW the plugin is in: anywhere else its key does nothing, as its line isn't in Send's menu.
     fn tool(&self, id: &str) -> Option<bool> {
-        if id == slices::SLICES || id == slices::TO_BITWIG {
+        if id == slices::TO_BITWIG && !self.in_bitwig {
             return Some(false);
         }
         strip::run_action(self, id)
@@ -276,8 +387,8 @@ impl OnPanel {
 
     /// A key on its way down that nothing in the panel used (no box is being typed in): whether the strip took it.
     /// Its keys are its own on the Sounds tab, where it is. Esc is the window's first, to stop what's heard
-    /// (`sounding`: it had something to stop); with nothing to stop, it lets the part picked on the strip go, then
-    /// closes the strip.
+    /// (`sounding`: it had something to stop); with nothing to stop, it takes the strip's steps back one at a time
+    /// ([`OnPanel::escape`]).
     pub(super) fn key(&self, panel: &Panel, key: &KeyboardEvent, sounding: bool) -> bool {
         if panel.get_view() != 0 {
             return false;
@@ -320,7 +431,8 @@ impl OnPanel {
         strip::hear_original(self, false);
     }
 
-    /// Esc with nothing playing: the part picked on the strip goes, then the strip. Whether it did one.
+    /// Esc with nothing playing: the slice picked goes, then the Slices; the part picked on the strip goes, then the
+    /// strip. Whether it did one.
     fn escape(&self) -> bool {
         strip::escape(self)
     }
@@ -354,8 +466,9 @@ impl OnPanel {
         self.landed.set(Some(Instant::now()));
     }
 
-    /// The window is going: the strip, put away for the next one ([`strip::put_away`]), each sound's edits kept. None
-    /// if it's in the middle of something, which it isn't as a window closes.
+    /// The window is going: the strip, put away for the next one ([`strip::put_away`]), each sound's edits kept, and
+    /// slices on their way still on their way ([`Sends`]). None if it's in the middle of something, which it isn't
+    /// as a window closes.
     pub(super) fn put_away(&self) -> Option<Strip> {
         let mut strip = std::mem::take(&mut *self.strip.try_borrow_mut().ok()?);
         strip::put_away(&mut strip);
@@ -376,6 +489,22 @@ impl OnPanel {
         }
         if let Some((number, (shown, pixels))) = take(&self.answers.picture) {
             self.put_up(panel, shown, number, pixels);
+        }
+        // A send of slices, this window's or one the window before it started ([`Sends`]): Send counts along as
+        // they're made, and the panel's line says how it ended.
+        let newest = self.sends.newest();
+        if let Some((send, made)) = take(&self.sends.made)
+            && send == newest
+        {
+            slices::made(self, made);
+        }
+        if let Some((send, ended)) = take(&self.sends.sent)
+            && send == newest
+            && let Some(folder) = self.ended(send, ended)
+            && !HERE
+        {
+            // Their folder is opened from here, not from the send's own thread, which is a low one ([`launch`]).
+            launch(format!("open {folder}"), move || shell::open(&folder, None, shell::Os::THIS));
         }
         // Another line picked in the list (a click, an arrow key, the DAW's knob): the strip edits that sound now.
         let open = strip::open_on(&self.strip.borrow());
@@ -421,6 +550,35 @@ impl OnPanel {
         if self.landed.get().is_some_and(|at| at.elapsed() >= GLOW) {
             self.landed.set(None);
             panel.global::<SoundEdit>().set_landed(false);
+        }
+        self.news_again(panel);
+    }
+
+    /// A send of slices ended (the send numbered `send`): Send comes back, and the panel's line says how it went,
+    /// which is news for a while ([`OnPanel::news_again`]). The folder this window is to open: theirs, where that's
+    /// where they went and this is the window they were sent from (in one opened since, a folder coming up with
+    /// nothing pressed would be a surprise; its line says where they are).
+    fn ended(&self, send: u64, ended: Ended) -> Option<String> {
+        let Ended { went, said, folder } = ended;
+        slices::sent(self, went);
+        self.say(&said);
+        *self.news.borrow_mut() = Some((Instant::now(), said));
+        folder.filter(|_| self.asked.get() == Some(send))
+    }
+
+    /// Says how the last send ended again while the panel's line has nothing to say. Whatever plays wipes the line as
+    /// it ends or is stopped, and a slice heard while the slices were on their way ends a moment after they got
+    /// there: the line would say where they went for the blink of an eye. Only while it's news ([`NEWS`]): after
+    /// that it goes the way of anything else the line said.
+    fn news_again(&self, panel: &Panel) {
+        let mut news = self.news.borrow_mut();
+        if news.as_ref().is_some_and(|(since, _)| since.elapsed() > NEWS) {
+            *news = None;
+        }
+        if let Some((_, said)) = news.as_ref()
+            && panel.get_playing().is_empty()
+        {
+            panel.set_playing(said.into());
         }
     }
 
@@ -700,6 +858,8 @@ impl Host for OnPanel {
             saved_in,
             sending,
             sent,
+            send_note,
+            send_detail,
             made,
             making,
             foot_name,
@@ -724,6 +884,8 @@ impl Host for OnPanel {
         data.set_sending(sending.is_some());
         data.set_send_progress(sending.unwrap_or(0.0));
         data.set_sent(sent);
+        data.set_send_note(send_note.into());
+        data.set_send_detail(send_detail.into());
         data.set_pads_made(number(made));
         data.set_pads_making(making);
         data.set_to_folder_text(to_folder_text.into());
@@ -916,29 +1078,104 @@ impl Host for OnPanel {
         started
     }
 
-    /// In its folder, in Explorer: started from a thread of its own at the usual priority, as a program started
-    /// takes the priority of the thread that starts it (on Linux and a Mac), and the plugin's other threads are low.
+    /// In its folder, in Explorer.
     fn reveal(&self, copy: PathBuf) {
         if HERE {
             return;
         }
-        let started = std::thread::Builder::new().name("mo-plugin-reveal".into()).spawn(move || {
-            let _ = mo_catch::catch_crash(AssertUnwindSafe(|| {
-                let path = copy.to_string_lossy().into_owned();
-                let launch = shell::reveal(&path, shell::folder_of(&path), shell::exists(&path), shell::Os::THIS);
-                if let Err(e) = shell::run(&launch) {
-                    crate::log::line("Edit", &format!("Couldn't show {path} in its folder: {e}"));
-                }
-            }));
+        let path = copy.to_string_lossy().into_owned();
+        launch(format!("show {path} in its folder"), move || {
+            shell::reveal(&path, shell::folder_of(&path), shell::exists(&path), shell::Os::THIS)
         });
-        if let Err(e) = started {
-            crate::log::line("Edit", &format!("Couldn't start showing the copy in its folder: {e}"));
-        }
     }
 
-    /// The Slices come with the plugin's next step.
-    fn send(&self, _: slices::To, _: slices::Slices) -> bool {
-        false
+    /// On a thread of its own ([`deliver`]). The strip counts the slices along as they're made, and Send comes back
+    /// once it's done, at a window's next tick ([`OnPanel::tick`]): this window's, or the next one's if this one has
+    /// gone by then ([`Sends`]). The panel's line says how it ended, and the plugin's log keeps it. Always taken: a
+    /// send that couldn't start is one that failed, and is said as one.
+    fn send(&self, to: slices::To, slices: slices::Slices) -> bool {
+        let send = self.sends.next();
+        self.asked.set(Some(send));
+        // How the send before this one ended is news no more.
+        *self.news.borrow_mut() = None;
+        // The tests: nothing is written and nothing is sent. They say themselves how far it has got and how it ended.
+        if HERE {
+            return true;
+        }
+        let sends = Arc::clone(&self.sends);
+        let started = background("mo-plugin-edit-slices", move || {
+            let there = |made: usize| *lock(&sends.made) = Some((send, made));
+            // Answered however it went: the strip's Send waits for this.
+            let ended = mo_catch::catch_crash(AssertUnwindSafe(|| deliver(to, slices, &there)))
+                .unwrap_or_else(|_| Ended::not(NotSent::stopped(STOPPED)));
+            *lock(&sends.sent) = Some((send, ended));
+        });
+        if !started {
+            crate::log::line("Edit", "Couldn't start sending the slices");
+            *lock(&self.sends.sent) = Some((send, Ended::not(NotSent::stopped(NOT_STARTED))));
+        }
+        true
+    }
+}
+
+/// Sends `slices` where they're to go, as the app's strip does and by the same code: each in a file of its own, made
+/// now or found made before, in a folder for this slicing in the export folder's Edited sounds (`there` is told how
+/// many have theirs so far); then on a Drum Machine on a new track in Bitwig, one to a pad from C1, or their folder is
+/// handed back to be opened. How it ended, which the plugin's log keeps too. Waits for the disk and for Bitwig: never
+/// on the window's thread.
+fn deliver(to: slices::To, slices: slices::Slices, there: &dyn Fn(usize)) -> Ended {
+    let began = Instant::now();
+    let slices::Slices { source, changed, audio, what, spans, name, .. } = slices;
+    let count = to_bitwig::slices_text(spans.len());
+    let files = match edit_copy::slices_to_keep(&source, &audio, changed, &what, &spans, there) {
+        Ok(files) => files,
+        Err(why) => {
+            crate::log::line("Edit", &format!("Couldn't make the slices of {name}: {why}"));
+            return Ended::not(NotSent::not_made(why));
+        }
+    };
+    match to {
+        slices::To::Folder => {
+            let folder =
+                files.first().and_then(|file| file.parent()).map(|folder| folder.to_string_lossy().into_owned());
+            let named = folder.as_deref().map(library::name).unwrap_or_default().to_owned();
+            crate::log::took("Edit", &format!("Saved {count} of {name} in {named}"), began);
+            Ended { folder, ..Ended::there(format!("Saved {count} of {name}: {named}, in {}", edit_copy::FOLDER)) }
+        }
+        slices::To::Bitwig => {
+            let pads = to_bitwig::slice_pads(&files);
+            // The Drum Machine is Bitwig's own: the ID the old app kept for it is in the app's library, which the
+            // plugin doesn't open for this.
+            let went = to_bitwig::slices_into_bitwig(&to_bitwig::Bitwig::default(), &KITS, &name, &pads, None);
+            let said = format!("{}: {}", went.title, went.detail);
+            if went.went_in {
+                crate::log::took("Edit", &said, began);
+                Ended::there(said)
+            } else {
+                crate::log::line("Edit", &format!("{count} of {name} didn't go into Bitwig as asked. {said}"));
+                Ended::not(NotSent::not_in_bitwig(went))
+            }
+        }
+    }
+}
+
+/// Starts what `make` makes (Explorer, Finder or the file manager) from a thread of its own at the usual priority, as
+/// a program started takes the priority of the thread that starts it (on Linux and a Mac), and the plugin's other
+/// threads are low. So it's called from the window's thread only: a thread started from a low one is as low. `what`
+/// it's for, for the log when it can't ("show ... in its folder").
+fn launch(what: String, make: impl FnOnce() -> shell::Launch + Send + 'static) {
+    let started = std::thread::Builder::new().name("mo-plugin-reveal".into()).spawn({
+        let what = what.clone();
+        move || {
+            let _ = mo_catch::catch_crash(AssertUnwindSafe(|| {
+                if let Err(e) = shell::run(&make()) {
+                    crate::log::line("Edit", &format!("Couldn't {what}: {e}"));
+                }
+            }));
+        }
+    });
+    if let Err(e) = started {
+        crate::log::line("Edit", &format!("Couldn't start a thread to {what}: {e}"));
     }
 }
 
@@ -1030,7 +1267,7 @@ fn refill<T: Clone + PartialEq + 'static>(model: &VecModel<T>, rows: Vec<T>) {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{draw, test_panel};
-    use super::super::{key_in, key_text};
+    use super::super::{key_in, key_text, menu_open, press_on_strip};
     use super::*;
     use crate::SoundLine;
     use crate::library::Library;
@@ -1049,6 +1286,24 @@ mod tests {
         a
     }
 
+    /// Two seconds with four drum hits in them, half a second apart from a tenth of a second in: the scissors cut it
+    /// in four at its hits.
+    fn beats() -> AudioData {
+        let rate = RATE as usize;
+        let mut left = vec![0.0f32; 2 * rate];
+        let mut seed = 12_345u32;
+        for hit in 0..4 {
+            for (i, s) in left[rate / 10 + hit * rate / 2..].iter_mut().enumerate() {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0;
+                *s += 0.9 * (-(i as f32) / 2_400.0).exp() * (0.6 * noise + 0.4 * (i as f32 * 0.07).sin());
+            }
+        }
+        let mut a = AudioData { sample_rate: RATE, channels: vec![left], ..AudioData::default() };
+        a.file_seconds = a.seconds();
+        a
+    }
+
     /// A panel with four sounds in its list (a kick, a snare, a break and a five-minute set, on rows 0 to 3) and the
     /// strip on it, wired as the window wires them, with what the window knows of what plays. Nothing is behind it: no
     /// DAW, no files.
@@ -1061,10 +1316,18 @@ mod tests {
         heard: Rc<Cell<Option<(Heard, bool)>>>,
         playing: Rc<Cell<Option<u64>>>,
         player: Arc<Player>,
+        /// The plugin's sends of slices: every window's of the bench's.
+        sends: Arc<Sends>,
     }
 
     impl Bench {
+        /// One whose DAW is Bitwig.
         fn new() -> Bench {
+            Bench::in_daw(true)
+        }
+
+        /// One whose DAW is Bitwig (`in_bitwig`), or another.
+        fn in_daw(in_bitwig: bool) -> Bench {
             let (panel, window) = test_panel();
             let mut set = mo_sounds::Sound::new(13, r"D:\Mixes\set.wav");
             set.analysis = Some(mo_sounds::SoundAnalysis { seconds: 300.0, ..Default::default() });
@@ -1079,19 +1342,40 @@ mod tests {
             panel.set_sounds(ModelRc::from(Rc::clone(&lines) as Rc<dyn Model<Data = SoundLine>>));
             let (heard, playing) = (Rc::new(Cell::new(None)), Rc::new(Cell::new(None)));
             let player = Arc::new(Player::default());
+            let sends = Arc::new(Sends::default());
             let host = OnPanel::new(
                 &panel,
                 Strip::default(),
+                Arc::clone(&sends),
                 Rc::clone(&lines),
                 Arc::clone(&player),
                 Arc::default(),
                 Rc::clone(&heard),
                 Rc::clone(&playing),
+                in_bitwig,
             );
             host.fill_in(&panel);
-            let bench = Bench { panel, window, host, lines, library, heard, playing, player };
+            let bench = Bench { panel, window, host, lines, library, heard, playing, player, sends };
             bench.list(&[10, 11, 12, 13]);
             bench
+        }
+
+        /// The next window's strip, on the same panel here: the strip as the last window left it (`kept`), and the
+        /// plugin's sends. Its DAW is Bitwig.
+        fn next_window(&self, kept: Strip) -> Rc<OnPanel> {
+            let next = OnPanel::new(
+                &self.panel,
+                kept,
+                Arc::clone(&self.sends),
+                Rc::clone(&self.lines),
+                Arc::clone(&self.player),
+                Arc::default(),
+                Rc::clone(&self.heard),
+                Rc::clone(&self.playing),
+                true,
+            );
+            next.fill_in(&self.panel);
+            next
         }
 
         /// The list shows these sounds, by their ids, in this order.
@@ -1114,6 +1398,37 @@ mod tests {
         /// made and a part of it picked (0 to 1 of it). Opens the strip first if it's closed.
         fn read(&self, part: Option<(f64, f64)>, tools: &[&str]) {
             strip::for_screens(&*self.host, sound(), part, tools);
+        }
+
+        /// The strip, open on the sound picked, gets a drum part with four hits in it ([`beats`]), and its scissors
+        /// are on: four slices.
+        fn slice(&self) {
+            strip::for_screens(&*self.host, beats(), None, &[slices::SLICES]);
+            assert_eq!(self.data().get_send_text(), "Send 4 slices");
+        }
+
+        /// The thread of the send on its way says so many slices have their file, and the window's timer has run
+        /// since.
+        fn made(&self, count: usize) {
+            *lock(&self.sends.made) = Some((self.sends.newest(), count));
+            self.host.tick(&self.panel);
+        }
+
+        /// The send on its way is done, and the window's timer has run since.
+        fn sent(&self, ended: Ended) {
+            *lock(&self.sends.sent) = Some((self.sends.newest(), ended));
+            self.host.tick(&self.panel);
+        }
+
+        /// A click at a point of the panel, as the window hands it on: a press on the strip gives the lists the keys
+        /// first.
+        fn click(&self, x: f32, y: f32) {
+            use slint::platform::{PointerEventButton, WindowEvent};
+            let (position, button) = (slint::LogicalPosition::new(x, y), PointerEventButton::Left);
+            self.window.dispatch_event(WindowEvent::PointerMoved { position });
+            press_on_strip(&self.panel, y);
+            self.window.dispatch_event(WindowEvent::PointerPressed { position, button });
+            self.window.dispatch_event(WindowEvent::PointerReleased { position, button });
         }
 
         /// A key on its way down, as the window hands it on: to what has the keys in the panel first, then to the
@@ -1146,9 +1461,9 @@ mod tests {
         assert!(b.data().get_shown() && !b.data().get_ready());
         assert_eq!(b.data().get_name(), "snare");
         assert_eq!(b.host.on(), Some((11, b.library.list.find(11))));
-        // Read: ready to edit, with nothing of the Slices' yet (they come with the plugin's next step).
+        // Read: ready to edit, with its Slices off.
         b.read(None, &[]);
-        assert!(b.data().get_ready() && !b.data().get_can_slice() && !b.data().get_slicing());
+        assert!(b.data().get_ready() && !b.data().get_slicing());
         assert_eq!(b.data().get_kept_while(), "while the plugin stays loaded");
         // The same button closes it.
         b.panel.invoke_edit();
@@ -1390,10 +1705,14 @@ mod tests {
         assert!(b.chips().is_empty());
         b.key(Key::Named(NamedKey::ArrowDown), Code::ArrowDown, alt, false);
         assert_eq!((b.panel.get_picked(), b.chips().len()), (0, 1));
-        // With nothing to redo, Ctrl+Shift+Z is still the strip's. The Slices' key waits for the plugin's next step.
+        // With nothing to redo, Ctrl+Shift+Z is still the strip's.
         b.letter("Z", Code::KeyZ, ctrl | Modifiers::SHIFT);
+        assert_eq!(b.chips().len(), 1);
+        // Alt+S is the scissors' key: the Slices on, and off again.
         b.letter("s", Code::KeyS, alt);
-        assert!(!b.data().get_slicing() && b.chips().len() == 1);
+        assert!(b.data().get_slicing());
+        b.letter("s", Code::KeyS, alt);
+        assert!(!b.data().get_slicing());
         // Space plays the edit and stops it.
         let _audio = b.player.start(RATE);
         b.letter(" ", Code::Space, none);
@@ -1510,23 +1829,263 @@ mod tests {
         // The window closes: the strip is put away, closed, for the next one.
         let kept = b.host.put_away().expect("nothing is in the middle of it");
         assert!(strip::open_on(&kept).is_none());
-        // The next window's strip, on the same panel here: closed, and with the kick's edits once it's opened on it.
-        let next = OnPanel::new(
-            &b.panel,
-            kept,
-            Rc::clone(&b.lines),
-            Arc::clone(&b.player),
-            Arc::default(),
-            Rc::clone(&b.heard),
-            Rc::clone(&b.playing),
-        );
-        next.fill_in(&b.panel);
+        // The next window's strip: closed, and with the kick's edits once it's opened on it.
+        let next = b.next_window(kept);
         strip::show(&*next);
         assert!(!b.data().get_shown());
         b.panel.invoke_edit();
         strip::for_screens(&*next, sound(), None, &[]);
         assert!(b.data().get_shown());
         assert_eq!(b.chips().len(), 2);
+    }
+
+    #[test]
+    fn the_scissors_cut_the_sound_at_its_hits_and_a_pad_or_a_click_plays_a_slice_through_the_track() {
+        let b = Bench::new();
+        let mut audio = b.player.start(RATE);
+        b.pick(2);
+        b.slice();
+        // Four hits: four cuts, and a pad for each from C1, as a Drum Machine has them.
+        assert!(b.data().get_slicing() && b.data().get_cut_at_hits());
+        assert_eq!(b.data().get_cuts().row_count(), 4);
+        let pads: Vec<String> = b.data().get_pads().iter().map(|pad| pad.to_string()).collect();
+        assert_eq!(pads, ["C1", "C#1", "D1", "D#1"]);
+        // The third pad pressed: its slice is the one picked, and plays through the track.
+        b.data().invoke_pad_pressed(2);
+        let n = b.playing.get().expect("the slice plays");
+        assert_eq!(b.heard.get(), Some((Heard::Edit(12), true)));
+        assert_eq!(b.panel.get_playing(), "Playing break.wav");
+        assert!(b.data().get_playing() && b.data().get_slice_number() == 3);
+        // It stops at the next cut by itself, to the frame: half a second on.
+        let (mut l, mut r) = (vec![0.0; RATE as usize], vec![0.0; RATE as usize]);
+        audio.fill(&mut l, &mut r);
+        let sounded = l.iter().filter(|s| **s != 0.0).count();
+        assert!(sounded.abs_diff(RATE as usize / 2) < 200, "{sounded} frames sounded");
+        assert!(!b.player.still_playing(n));
+        b.host.tick(&b.panel);
+        assert!(!b.data().get_playing() && b.data().get_slice_number() == 3);
+        // A click in the first slice on the screen (a little after its cut) picks that one and plays it.
+        let first = b.data().get_cuts().row_data(0).expect("the first cut").at;
+        b.data().invoke_slice_down(first + 0.02, 0.005, false);
+        b.data().invoke_slice_up(false);
+        assert!(b.data().get_playing() && b.data().get_slice_number() == 1);
+        assert!(b.playing.get().is_some_and(|next| next > n));
+        // Esc with nothing to stop: the slice picked goes, then the Slices, then the strip.
+        Host::stop(&*b.host);
+        let esc = || b.key(Key::Named(NamedKey::Escape), Code::Escape, Modifiers::empty(), false);
+        esc();
+        assert!(b.data().get_slicing() && b.data().get_slice_number() == 0);
+        esc();
+        assert!(!b.data().get_slicing() && b.data().get_shown());
+        esc();
+        assert!(!b.data().get_shown());
+    }
+
+    #[test]
+    fn a_send_counts_the_slices_along_and_the_panels_line_says_how_it_ended() {
+        let b = Bench::new();
+        b.pick(2);
+        b.slice();
+        // To Bitwig (its line in Send's menu): Send counts along as the send's thread makes them, at the window's
+        // ticks, and their pads fill. In the tests nothing is written and nothing is sent.
+        b.data().invoke_tool(slices::TO_BITWIG.into());
+        assert!(b.data().get_sending() && !b.data().get_can_send());
+        assert_eq!(b.data().get_send_text(), "Making 1 of 4");
+        b.made(2);
+        assert_eq!((b.data().get_send_text().as_str(), b.data().get_pads_made()), ("Making 3 of 4", 2));
+        b.made(4);
+        assert_eq!(b.data().get_send_text(), "Waiting for Bitwig");
+        // They're in: Send says so, and the panel's line says where.
+        let said = "break (sliced) is in Bitwig: 4 slices on a Drum Machine on a new track, C1 to D#1";
+        b.sent(Ended::there(said.into()));
+        assert!(b.data().get_sent() && !b.data().get_sending() && b.data().get_can_send());
+        assert_eq!(b.data().get_send_text(), "In Bitwig");
+        assert_eq!(b.panel.get_playing(), said);
+        // To their folder next (Save's key, with the Slices on). A count or an end from the send before is nobody's.
+        b.data().invoke_tool(strip::SAVE.into());
+        assert_eq!(b.data().get_send_text(), "Making 1 of 4");
+        *lock(&b.sends.made) = Some((1, 3));
+        *lock(&b.sends.sent) = Some((1, Ended::there("The send before".into())));
+        b.host.tick(&b.panel);
+        assert!(b.data().get_sending() && b.data().get_pads_made() == 0);
+        assert_eq!(b.panel.get_playing(), said);
+        b.made(4);
+        // Saved: their folder is this window's to open, as the one they were sent from (never opened in the tests).
+        let folder = r"E:\Exports\Edited sounds\break slices (0a1b2c3d)".to_owned();
+        let ended = Ended { folder: Some(folder.clone()), ..Ended::there("Saved 4 slices of break".into()) };
+        assert_eq!(b.host.ended(b.sends.newest(), ended), Some(folder));
+        assert_eq!(b.data().get_send_text(), "Saved");
+        assert_eq!(b.panel.get_playing(), "Saved 4 slices of break");
+    }
+
+    #[test]
+    fn a_send_that_ends_once_its_window_has_gone_is_heard_by_the_next_window() {
+        let b = Bench::new();
+        b.pick(2);
+        b.slice();
+        b.data().invoke_tool(slices::TO_BITWIG.into());
+        b.made(2);
+        // The window goes while they're on their way (Bitwig selects their new track as they arrive, which can put
+        // the plugin's window away), and the send ends with no window there: they're in Bitwig.
+        let kept = b.host.put_away().expect("nothing is in the middle of it");
+        let said = "break (sliced) is in Bitwig: 4 slices on a Drum Machine on a new track, C1 to D#1";
+        *lock(&b.sends.made) = Some((b.sends.newest(), 4));
+        *lock(&b.sends.sent) = Some((b.sends.newest(), Ended::there(said.into())));
+        // The next window: its line says how the send ended, at its first tick.
+        let next = b.next_window(kept);
+        next.tick(&b.panel);
+        assert_eq!(b.panel.get_playing(), said);
+        // With the strip open on the break again, cut as it was, Send says where its slices are: it doesn't offer
+        // to send them a second time.
+        b.panel.invoke_edit();
+        strip::for_screens(&*next, beats(), None, &[]);
+        assert!(b.data().get_slicing() && b.data().get_sent() && !b.data().get_sending());
+        assert_eq!(b.data().get_send_text(), "In Bitwig");
+        // To their folder next, and again the window goes first. Until the send ends, the window after it waits for
+        // them too: Send can't be pressed.
+        b.data().invoke_tool(strip::SAVE.into());
+        assert!(b.data().get_sending());
+        let kept = next.put_away().expect("nothing is in the middle of it");
+        let last = b.next_window(kept);
+        b.panel.invoke_edit();
+        strip::for_screens(&*last, beats(), None, &[]);
+        assert!(b.data().get_sending() && !b.data().get_can_send());
+        // Saved: the line says where they are, and Send too. Their folder stays shut: it's opened by the window they
+        // were sent from, and here it would come up with nothing pressed.
+        let folder = Some(r"E:\Exports\Edited sounds\break slices (0a1b2c3d)".to_owned());
+        let ended = Ended { folder, ..Ended::there("Saved 4 slices of break".into()) };
+        assert_eq!(last.ended(b.sends.newest(), ended), None);
+        assert_eq!(b.panel.get_playing(), "Saved 4 slices of break");
+        assert_eq!(b.data().get_send_text(), "Saved");
+    }
+
+    #[test]
+    fn how_a_send_ended_is_said_again_once_a_sound_heard_meanwhile_has_ended() {
+        let b = Bench::new();
+        let _audio = b.player.start(RATE);
+        b.pick(2);
+        b.slice();
+        b.data().invoke_tool(slices::TO_BITWIG.into());
+        // A pad pressed while they're on their way: the line says what plays.
+        b.data().invoke_pad_pressed(0);
+        assert_eq!(b.panel.get_playing(), "Playing break.wav");
+        // They're in: the line says so. The slice ends a moment later, and the window wipes its line, as it does when
+        // anything that plays ends: at the strip's next tick the line says how the send ended again.
+        let said = "break (sliced) is in Bitwig: 4 slices on a Drum Machine on a new track, C1 to D#1";
+        b.sent(Ended::there(said.into()));
+        assert_eq!(b.panel.get_playing(), said);
+        b.panel.set_playing("".into());
+        b.host.tick(&b.panel);
+        assert_eq!(b.panel.get_playing(), said);
+        // The same when what plays is stopped (Esc, Play).
+        b.data().invoke_pad_pressed(1);
+        Host::stop(&*b.host);
+        assert_eq!(b.panel.get_playing(), "");
+        b.host.tick(&b.panel);
+        assert_eq!(b.panel.get_playing(), said);
+        // Only while the line has nothing to say: what it says since stays.
+        b.panel.set_playing("Playing kick.wav".into());
+        b.host.tick(&b.panel);
+        assert_eq!(b.panel.get_playing(), "Playing kick.wav");
+        // After a while it's news no more: the line wiped stays blank.
+        let long_ago = Instant::now().checked_sub(NEWS + Duration::from_secs(1)).expect("a clock that has run a while");
+        b.host.news.borrow_mut().as_mut().expect("how the send ended").0 = long_ago;
+        b.panel.set_playing("".into());
+        b.host.tick(&b.panel);
+        assert_eq!(b.panel.get_playing(), "");
+        // Nor is it news once the slices are sent again: the line is the new send's to speak on.
+        b.data().invoke_tool(strip::SAVE.into());
+        b.sent(Ended::there("Saved 4 slices of break".into()));
+        b.data().invoke_tool(slices::TO_BITWIG.into());
+        b.panel.set_playing("".into());
+        b.host.tick(&b.panel);
+        assert_eq!(b.panel.get_playing(), "");
+    }
+
+    #[test]
+    fn slices_that_could_not_be_sent_say_so_beside_send_and_on_the_panels_line() {
+        let b = Bench::new();
+        b.pick(2);
+        b.slice();
+        b.data().invoke_tool(slices::TO_BITWIG.into());
+        let not_sent = NotSent { title: "Couldn't send the slices".into(), why: "Bitwig isn't answering.".into() };
+        b.sent(Ended::not(not_sent));
+        // Send is as it was, with the note beside it; the panel's line says the same.
+        assert!(!b.data().get_sending() && !b.data().get_sent() && b.data().get_can_send());
+        assert_eq!(b.data().get_send_text(), "Send 4 slices");
+        assert_eq!(b.data().get_send_note(), "Couldn't send the slices");
+        assert_eq!(b.data().get_send_detail(), "Bitwig isn't answering.");
+        assert_eq!(b.panel.get_playing(), "Couldn't send the slices: Bitwig isn't answering.");
+        // Sent again: the note is past.
+        b.data().invoke_tool(slices::TO_BITWIG.into());
+        assert!(b.data().get_sending() && b.data().get_send_note().is_empty());
+        // A send the computer wouldn't start a thread for is said as one that failed.
+        b.sent(Ended::not(NotSent::stopped(NOT_STARTED)));
+        assert!(!b.data().get_sending() && b.data().get_can_send());
+        assert_eq!(b.data().get_send_note(), "Couldn't send the slices");
+        assert_eq!(b.data().get_send_detail(), NOT_STARTED);
+        assert_eq!(b.panel.get_playing(), format!("Couldn't send the slices: {NOT_STARTED}"));
+    }
+
+    #[test]
+    fn a_drum_machine_in_bitwig_is_a_place_for_the_slices_only_inside_bitwig() {
+        let alt = Modifiers::ALT;
+        let ctrl = if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL };
+        // In another DAW: Send's menu has no line for it, and its key does nothing.
+        let b = Bench::in_daw(false);
+        draw(&b.window);
+        b.pick(2);
+        b.slice();
+        assert!(!b.data().get_can_bitwig());
+        b.letter("b", Code::KeyB, alt);
+        assert!(!b.data().get_sending());
+        // Nor does the key go on to the list.
+        assert_eq!(b.panel.get_picked(), 2);
+        // Their folder is a place for them everywhere (Ctrl+S, with the Slices on).
+        b.letter("s", Code::KeyS, ctrl);
+        assert!(b.data().get_sending());
+        // In Bitwig the line is there, and the key sends them.
+        let b = Bench::new();
+        draw(&b.window);
+        b.pick(2);
+        b.slice();
+        assert!(b.data().get_can_bitwig());
+        b.letter("b", Code::KeyB, alt);
+        assert!(b.data().get_sending());
+    }
+
+    #[test]
+    fn a_press_on_a_line_of_sends_menu_still_picks_it() {
+        let b = Bench::new();
+        b.pick(2);
+        b.slice();
+        draw(&b.window);
+        slint::platform::update_timers_and_animations();
+        draw(&b.window);
+        // Send, at the right end of the strip's foot (looked for from the right edge in): its menu opens above it.
+        let menu = || menu_open(b.window.window());
+        let y = b.panel.get_edit_top() + b.panel.get_edit_height() - 28.0;
+        let mut x = 1275.0;
+        while !menu() && x > 1100.0 {
+            x -= 10.0;
+            b.click(x, y);
+        }
+        assert!(menu(), "Send's menu opened");
+        // A press on one of its lines (looked for upwards from the button, well in from the menu's edge; each press
+        // closes the menu): the press is on the strip, so the lists get the keys first, and the line is still picked.
+        // The slices are on their way: to their folder, the menu's lowest line.
+        let mut up = 28.0;
+        while !b.data().get_sending() && up < 140.0 {
+            if !menu() {
+                b.click(x, y);
+            }
+            b.click(x - 80.0, y - up);
+            up += 8.0;
+        }
+        assert!(b.data().get_sending(), "a line of Send's menu was picked");
+        assert!(!menu());
+        b.sent(Ended::there(String::new()));
+        assert_eq!(b.data().get_send_text(), "Saved");
     }
 
     #[test]

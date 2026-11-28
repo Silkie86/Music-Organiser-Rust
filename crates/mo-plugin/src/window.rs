@@ -16,6 +16,8 @@ mod edit_strip;
 mod midi_tab;
 mod presets_tab;
 
+pub(crate) use edit_strip::Sends;
+
 use crate::audition::{Own, Played};
 use crate::galaxy::{self, Sky};
 use crate::gpu::Gpu;
@@ -797,16 +799,19 @@ impl Shown {
         // What the last window left playing: a click on it still stops it, and a part still follows the tempo.
         let left = lock(&instance.left_playing).take().unwrap_or_default();
         let (heard, playing) = (Rc::new(Cell::new(left.heard)), Rc::new(Cell::new(left.playing)));
-        // The Edit strip as the last window left it: each sound's edits are where they were.
+        // The Edit strip as the last window left it: each sound's edits are where they were. And the plugin's sends
+        // of slices: one the last window started is heard here.
         let strip = lock(&instance.edit_strip).take().unwrap_or_default();
         let edit = edit_strip::OnPanel::new(
             &panel,
             strip,
+            Arc::clone(&instance.edit_sends),
             Rc::clone(&lines),
             Arc::clone(&instance.player),
             Arc::clone(&slots),
             Rc::clone(&heard),
             Rc::clone(&playing),
+            in_bitwig(&instance.host),
         );
         let shown = Shown {
             context,
@@ -961,7 +966,7 @@ impl Shown {
         let lines = Rc::clone(&self.lines);
         let slots = Arc::clone(&self.slots);
         let player = Arc::clone(&self.instance.player);
-        panel.set_in_bitwig(self.instance.host.starts_with("Bitwig"));
+        panel.set_in_bitwig(in_bitwig(&self.instance.host));
         let sampler_slots = Arc::clone(&self.slots);
         let sampler_lines = Rc::clone(&self.lines);
         let weak = panel.as_weak();
@@ -2512,21 +2517,33 @@ impl Shown {
         }
     }
 
-    /// The mouse is going down on the Edit strip: the keys go to the lists, as a click on a line gives them (the
-    /// panel's `list-keys`), so a box that was being typed in doesn't take the strip's keys from then on (Space, Alt+T).
-    /// The strip has nothing to type in.
+    /// The mouse is going down where it is: if that's on the Edit strip, the lists get the keys ([`press_on_strip`]).
     fn press_on_the_strip(&self) {
-        let (top, height) = (self.panel.get_edit_top(), self.panel.get_edit_height());
-        let y = self.pointer.get().y;
-        if height > 0.0 && y >= top && y < top + height {
-            self.panel.invoke_keys_to_lists();
-        }
+        press_on_strip(&self.panel, self.pointer.get().y);
     }
+}
+
+/// The mouse is going down `y` points down the panel: on the Edit strip, the keys go to the lists, as a click on a line
+/// gives them (the panel's `list-keys`), so a box that was being typed in doesn't take the strip's keys from then on
+/// (Space, Alt+T). The strip has nothing to type in. Its menus (Cut at, Each slice, Send) are the panel's own popups:
+/// a press on one of their lines still picks it.
+fn press_on_strip(panel: &Panel, y: f32) {
+    let (top, height) = (panel.get_edit_top(), panel.get_edit_height());
+    if height > 0.0 && y >= top && y < top + height {
+        panel.invoke_keys_to_lists();
+    }
+}
+
+/// Whether the DAW the plugin is in (`host`, as it names itself) is Bitwig: only there does the panel offer Bitwig's
+/// Sampler, and a Drum Machine for a sound's slices.
+fn in_bitwig(host: &str) -> bool {
+    host.starts_with("Bitwig")
 }
 
 impl Drop for Shown {
     /// What's playing plays on with the window closed: the next window takes it ([`LeftPlaying`]). And the Edit strip
-    /// waits for the next window with each sound's edits ([`crate::Instance::edit_strip`]).
+    /// waits for the next window with each sound's edits ([`crate::Instance::edit_strip`]); slices on their way go
+    /// on, and the next window hears how their send ended ([`Sends`]).
     fn drop(&mut self) {
         let part = self.part.try_borrow_mut().ok().and_then(|mut part| part.take());
         let left = LeftPlaying { heard: self.heard.get(), playing: self.playing.get(), part };
@@ -3680,7 +3697,8 @@ mod tests {
         assert_eq!(key_base(&typed("O", Code::KeyO, Modifiers::SHIFT)), "O");
         // Every key the Edit strip has in the shortcut list is one the window can name.
         let keys = mo_app::shortcuts::Shortcuts::default();
-        for id in [mo_app::edit_strip::EDIT, mo_app::edit_strip::SAVE, mo_app::edit_strip::LOUDER, "app.play"] {
+        let strips = mo_app::shortcuts::SOUNDS_ACTIONS.iter().map(|a| a.id).filter(|id| id.starts_with("sounds.edit"));
+        for id in strips.chain(["app.play"]) {
             let listed = keys.key_of(id);
             let last = listed.rsplit('+').next().unwrap();
             let named = ["Up", "Down", "Space"].contains(&last) || (last.len() == 1 && last.is_ascii());

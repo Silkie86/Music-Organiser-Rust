@@ -5429,8 +5429,41 @@ fn slices_shots(
     if !mo_ui::sounds::escape(app) || edit.get_slice_number() != 0 {
         return Err("sounds-slices-sending.png: Esc didn't let the slice picked go".into());
     }
+    // First a send that couldn't be made (how it ended is said by hand, with words like the link's own): the strip
+    // says so beside Send, in red, over why, and Send is as it was.
+    let not_sent = (
+        "Couldn't send the slices",
+        "Bitwig isn't answering. Check that Bitwig Studio is open, with the DAWmate controller added (Settings > \
+         Controllers > Add controller > DAWmate > DAW link).",
+    );
+    hover(window, -1.0, -1.0);
+    capture(window);
+    let unsent = capture(window);
+    if !mo_ui::sounds::run_action(app, "sounds.editSlicesBitwig") || !edit.get_sending() {
+        return Err("sounds-slices-not-sent.png: Send to Bitwig didn't take the slices".into());
+    }
+    mo_ui::sounds::edit_slices_sent_for_screens(app, Err(not_sent));
+    let said = edit.get_send_note() == not_sent.0 && edit.get_send_detail() == not_sent.1;
+    if !said || edit.get_sending() || edit.get_sent() || !edit.get_can_send() {
+        return Err(format!(
+            "sounds-slices-not-sent.png: with the slices not sent the strip says \"{}\" beside \"{}\"",
+            edit.get_send_note(),
+            edit.get_send_text()
+        ));
+    }
+    hover(window, -1.0, -1.0);
+    capture(window);
+    let failed = capture(window);
+    if failed == unsent {
+        return Err("sounds-slices-not-sent.png: nothing on the strip says the slices weren't sent".into());
+    }
+    shots.push(("sounds-slices-not-sent.png".into(), failed));
+    // Sent again, that's past: this send says how it goes itself.
     let pads_made = || usize::try_from(edit.get_pads_made()).unwrap_or(usize::MAX);
     let begun = mo_ui::sounds::run_action(app, "sounds.editSlicesBitwig") && edit.get_sending() && !edit.get_can_send();
+    if !edit.get_send_note().is_empty() {
+        return Err("sounds-slices-sending.png: sent again, the strip still says the slices weren't sent".into());
+    }
     if !begun || edit.get_send_text() != format!("Making 1 of {hits}") || pads_made() != 0 || !edit.get_pads_making() {
         return Err(format!("sounds-slices-sending.png: a send just begun says \"{}\"", edit.get_send_text()));
     }
@@ -5459,7 +5492,7 @@ fn slices_shots(
             edit.get_send_text()
         ));
     }
-    mo_ui::sounds::edit_slices_sent_for_screens(app, true);
+    mo_ui::sounds::edit_slices_sent_for_screens(app, Ok(()));
     let there = !edit.get_sending() && edit.get_sent() && edit.get_can_send() && pads_made() == hits;
     if !there || edit.get_send_text() != "In Bitwig" {
         return Err(format!(
@@ -5549,7 +5582,7 @@ fn slices_shots(
         return Err("sounds-slices-sent.png: Save with the Slices on didn't send them to their folder".into());
     }
     mo_ui::sounds::edit_slices_made_for_screens(app, hits);
-    mo_ui::sounds::edit_slices_sent_for_screens(app, true);
+    mo_ui::sounds::edit_slices_sent_for_screens(app, Ok(()));
     if edit.get_sending() || !edit.get_sent() || edit.get_send_text() != "Saved" {
         return Err(format!(
             "sounds-slices-sent.png: with the slices saved the button says \"{}\"",

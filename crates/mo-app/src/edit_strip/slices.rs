@@ -6,7 +6,8 @@
 //! slices to the strip's host ([`Host::send`]), which puts each in a file of its own in a folder for this slicing in
 //! the export folder's Edited sounds ([`edit_copy::slices_to_keep`]) and then on a Drum Machine in Bitwig, one to a
 //! pad from C1 (the Kits' way in), or just opens their folder. The button counts along as they're made ("Making 13 of
-//! 20", [`made`]) while their pads fill, and says where they are once they're there ("In Bitwig", [`sent`]).
+//! 20", [`made`]) while their pads fill, and says where they are once they're there ("In Bitwig", [`sent`]). Slices
+//! that couldn't be sent say so beside the button, with why ([`NotSent`]), for as long as they're the ones on show.
 //!
 //! While the Slices are on, undo and redo step through the cuts, and the edit's own tools wait: the cuts are always of
 //! the edit as it is. Each sound's slicing is kept with its edits, so going to another sound and back finds it.
@@ -166,14 +167,23 @@ pub(super) struct Sliced {
     pub(super) history: History<Slicing>,
     /// The slices that last went where they were sent: Send says so while they're the ones on show.
     sent: Option<Sent>,
+    /// The slices that last couldn't be sent, and why: said beside Send while they're the ones on show, until they're
+    /// sent again or the strip closes. (A send that fails while the strip is closed is said through its next
+    /// opening: it's news then.)
+    not_sent: Option<Failed>,
 }
 
 impl Sliced {
     /// Whether there's anything of it to keep when the strip goes to another sound: the Slices on, a change to
     /// undo or redo, choices of his own (an edit made since then cut the sound afresh by them, with nothing to
-    /// undo: they're still his), or slices that went somewhere (Send says so again when he's back).
+    /// undo: they're still his), or slices that went somewhere or couldn't be sent (Send says so again when he's
+    /// back).
     pub(super) fn worth_keeping(&self) -> bool {
-        self.on || self.history.has_steps() || !self.history.now.as_usual() || self.sent.is_some()
+        self.on
+            || self.history.has_steps()
+            || !self.history.now.as_usual()
+            || self.sent.is_some()
+            || self.not_sent.is_some()
     }
 }
 
@@ -230,6 +240,38 @@ struct Sent {
     edits: Vec<Edit>,
     spans: Vec<Span>,
     to: To,
+}
+
+/// Slices that couldn't be sent: the edit they're cut from, each one's frames, and what's said of it.
+struct Failed {
+    edits: Vec<Edit>,
+    spans: Vec<Span>,
+    said: NotSent,
+}
+
+/// Why slices didn't get where they were sent, as the strip says it beside Send: a headline ("Couldn't send the
+/// slices") and the line under it (what went wrong, and what to do about it).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotSent {
+    pub title: String,
+    pub why: String,
+}
+
+impl NotSent {
+    /// The slices' files couldn't be made ([`edit_copy::slices_to_keep`] says `why`).
+    pub fn not_made(why: String) -> NotSent {
+        NotSent { title: "Couldn't make the slices".to_owned(), why }
+    }
+
+    /// Bitwig didn't take them as asked: the words are the send's own ([`to_bitwig::slices_into_bitwig`]).
+    pub fn not_in_bitwig(went: to_bitwig::SlicesWent) -> NotSent {
+        NotSent { title: went.title, why: went.detail }
+    }
+
+    /// The send stopped at a bug: `why` says where to read of it (the app's log, the plugin's crash note).
+    pub fn stopped(why: &str) -> NotSent {
+        NotSent { title: to_bitwig::SLICES_FAILED.to_owned(), why: why.to_owned() }
+    }
 }
 
 /// Slices for the strip's host to send ([`Host::send`]): what [`edit_copy::slices_to_keep`] makes their files from.
@@ -303,6 +345,10 @@ pub struct Showing {
     /// These slices are where they were sent: the button says where, with a tick (and can be pressed, to send them
     /// again).
     pub sent: bool,
+    /// These slices couldn't be sent: what's said of it beside the button, a headline and why (both empty
+    /// otherwise).
+    pub send_note: String,
+    pub send_detail: String,
     /// How many of these slices have their file, as a send has made them: their pads are filled, from the first. And
     /// whether the next one is being made now (its pad is lit).
     pub made: usize,
@@ -344,6 +390,8 @@ impl Default for Showing {
             saved_in: String::new(),
             sending: None,
             sent: false,
+            send_note: String::new(),
+            send_detail: String::new(),
             made: 0,
             making: false,
             foot_name: String::new(),
@@ -773,8 +821,15 @@ pub(super) fn send(host: &dyn Host, to: To) -> bool {
         })
     };
     let Some((slices, sending)) = ready else { return false };
-    // On their way before the host has them, so a host that counts along at once has something to count on.
-    host.strip().borrow_mut().sending = Some(sending);
+    {
+        let mut s = host.strip().borrow_mut();
+        // A send that failed before is past: this one says how it goes itself.
+        if let Some(sliced) = s.sound.as_mut().and_then(|o| o.sliced.as_mut()) {
+            sliced.not_sent = None;
+        }
+        // On their way before the host has them, so a host that counts along at once has something to count on.
+        s.sending = Some(sending);
+    }
     if !host.send(to, slices) {
         host.strip().borrow_mut().sending = None;
     }
@@ -796,10 +851,13 @@ pub fn made(host: &dyn Host, count: usize) {
     }
 }
 
-/// The slices handed to the host ([`Host::send`]) are where they were sent (`went`), or couldn't be: Send comes back,
-/// and says where they are for as long as they're the slices on show. (How it went is the host's to say besides: a
-/// send that failed leaves Send as it was.)
-pub fn sent(host: &dyn Host, went: bool) {
+/// The slices handed to the host ([`Host::send`]) are where they were sent, or couldn't be (`went`: why not): Send
+/// comes back, and says where they are for as long as they're the slices on show; or the strip says beside it that
+/// they couldn't be sent, and why. (A host with cards says how it went on one besides.)
+///
+/// How it went is kept with the sound they're of, open or put by, so it's there too when the send ends with another
+/// sound open, with the strip closed, or at the host after the one that sent them ([`super::put_away`]).
+pub fn sent(host: &dyn Host, went: Result<(), NotSent>) {
     {
         let mut s = host.strip().borrow_mut();
         let Some(sending) = s.sending.take() else { return };
@@ -810,11 +868,22 @@ pub fn sent(host: &dyn Host, went: bool) {
             Some(o) => o.sliced.as_mut(),
             None => kept.iter_mut().find(|k| sending.is_of(k.id, &k.source)).and_then(|k| k.sliced.as_mut()),
         };
-        if let (true, Some(sliced)) = (went, sliced) {
-            sliced.sent = Some(Sent { edits: sending.edits, spans: sending.spans, to: sending.to });
+        match (went, sliced) {
+            (Ok(()), Some(sliced)) => {
+                sliced.sent = Some(Sent { edits: sending.edits, spans: sending.spans, to: sending.to });
+            }
+            (Err(said), Some(sliced)) => {
+                sliced.not_sent = Some(Failed { edits: sending.edits, spans: sending.spans, said });
+            }
+            (_, None) => {}
         }
     }
     show(host);
+}
+
+/// The strip is closing: a send that failed before now is past, for the sound whose slicing this is.
+pub(super) fn closed(sliced: &mut Sliced) {
+    sliced.not_sent = None;
 }
 
 /// A number that's another whenever the lines the mouse can take hold of are others: where the cuts are, and the
@@ -915,6 +984,10 @@ pub(super) fn showing(o: &Opened, sending: Option<&Sending>) -> Showing {
         }
         (None, None) => format!("Send {}", to_bitwig::slices_text(slices)),
     };
+    // These very slices couldn't be sent: said beside the button, until they're on their way again.
+    if let Some(failed) = sliced.not_sent.as_ref().filter(|f| on_way.is_none() && these(&f.edits, &f.spans)) {
+        (show.send_note, show.send_detail) = (failed.said.title.clone(), failed.said.why.clone());
+    }
     (show.foot_name, show.foot_facts) = foot(o, slices);
     show
 }

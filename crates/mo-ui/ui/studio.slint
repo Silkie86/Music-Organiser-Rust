@@ -5379,12 +5379,15 @@ export component DoneNote inherits Rectangle {
     callback clicked;
     // No wider than this: the lines are cut short with "…".
     in property <length> most: 420px;
+    // And, where its lines are longer, no narrower than this: in a row short of room it gives way down to here, and
+    // from there on what's beside it does.
+    in property <length> least: 0px;
     property <length> sign: 16px;
     property <length> lines-x: self.sign + Space.sm;
     property <length> first-wide: first.preferred-width + (root.failed ? 0px : Space.sm + self.sign);
     // As wide as its lines, and narrower where a row has less room for it.
     property <length> natural: min(root.most, self.lines-x + max(self.first-wide, second.preferred-width));
-    min-width: 0px;
+    min-width: min(self.natural, root.least);
     preferred-width: self.natural;
     max-width: self.natural;
     horizontal-stretch: 0;
@@ -5431,7 +5434,8 @@ export component DoneNote inherits Rectangle {
         font-size: Type.tiny;
         overflow: elide;
     }
-    // One that failed isn't clicked, and says the whole of why while the mouse rests on it.
+    // One that failed isn't clicked, and says the whole of why while the mouse rests on it (after its first line,
+    // where that's cut short too).
     touch := TouchArea {
         mouse-cursor: root.failed ? MouseCursor.default : MouseCursor.pointer;
         clicked => {
@@ -5441,7 +5445,7 @@ export component DoneNote inherits Rectangle {
         }
     }
     Tip {
-        text: root.failed ? root.detail : root.tip;
+        text: !root.failed ? root.tip : first.width + 1px < first.preferred-width ? root.text + ": " + root.detail : root.detail;
         hovering: touch.has-hover && !touch.pressed;
         at-y: root.height + Space.xs;
     }

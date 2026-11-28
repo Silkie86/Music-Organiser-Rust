@@ -242,12 +242,21 @@ pub fn slices_made(job: &Job) {
 /// The card's headline when slices couldn't be sent at all; the line under it is the error.
 pub const SLICES_FAILED: &str = "Couldn't send the slices";
 
+/// How a send of a sound's slices went ([`slices_into_bitwig`]): whether they went in as asked, and the words for it,
+/// a headline ("Loop 128 (sliced) is in Bitwig") and the line under it ("20 slices on a Drum Machine on a new track,
+/// C1 to G2"; or what went wrong and what to do about it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlicesWent {
+    pub went_in: bool,
+    pub title: String,
+    pub detail: String,
+}
+
 /// Puts a sound's slices ([`slice_pads`]) on a Drum Machine in the project open in Bitwig, where `kits` says (as a kit
-/// goes: [`send_kit`]), on a track named for the sound ("Loop 128 (sliced)"), and ends `job`'s card ([`slices_card`])
-/// with how it went: "Loop 128 (sliced) is in Bitwig", "20 slices on a Drum Machine on a new track, C1 to G2"; or what
-/// went wrong and what to do about it. Returns whether they went in as asked. Waits for Bitwig, so never call it on
-/// the window's thread.
-pub fn send_slices(job: Job, to: &Bitwig, kits: &Kits, name: &str, pads: &[Pad], setting: Option<&str>) -> bool {
+/// goes: [`send_kit`]), on a track named for the sound ("Loop 128 (sliced)"), and says how it went, for whoever shows
+/// it: the app's card ([`send_slices`]), or the plugin's own line. Waits for Bitwig, so never call it on the window's
+/// thread.
+pub fn slices_into_bitwig(to: &Bitwig, kits: &Kits, name: &str, pads: &[Pad], setting: Option<&str>) -> SlicesWent {
     match to.send_kit(&format!("{name} (sliced)"), pads, kits.target(setting)) {
         Ok(sent) => {
             if !sent.drum_machine {
@@ -255,7 +264,7 @@ pub fn send_slices(job: Job, to: &Bitwig, kits: &Kits, name: &str, pads: &[Pad],
                 kits.use_the_selected();
             }
             let went_in = sent.went_in();
-            match (sent.filled.first(), sent.filled.last()) {
+            let detail = match (sent.filled.first(), sent.filled.last()) {
                 // All of them, where they were sent: said in a line, not pad by pad.
                 (Some(first), Some(last)) if went_in && sent.skipped.is_empty() => {
                     let place = match sent.target {
@@ -267,19 +276,29 @@ pub fn send_slices(job: Job, to: &Bitwig, kits: &Kits, name: &str, pads: &[Pad],
                     } else {
                         format!("{} to {}", bitwig::note_name(first.note), bitwig::note_name(last.note))
                     };
-                    job.done_as(&sent.title(), &format!("{} on {place}, {pads}", slices_text(sent.filled.len())));
+                    format!("{} on {place}, {pads}", slices_text(sent.filled.len()))
                 }
-                _ if went_in => job.done_as(&sent.title(), &of_slices(&sent.detail())),
-                _ => job.failed_as(&sent.title(), &of_slices(&sent.detail())),
-            }
-            went_in
+                _ => of_slices(&sent.detail()),
+            };
+            SlicesWent { went_in, title: sent.title(), detail }
         }
         // Nothing changed in Bitwig.
-        Err(e) => {
-            job.failed_as(SLICES_FAILED, &of_slices(&e.to_string()));
-            false
-        }
+        Err(e) => SlicesWent { went_in: false, title: SLICES_FAILED.to_owned(), detail: of_slices(&e.to_string()) },
     }
+}
+
+/// [`slices_into_bitwig`] for the app, where a send has a card: ends `job`'s card ([`slices_card`]) with how it went
+/// ("Loop 128 (sliced) is in Bitwig", "20 slices on a Drum Machine on a new track, C1 to G2"; or what went wrong and
+/// what to do about it), and hands the same back for the Edit strip to say. Waits for Bitwig, so never call it on the
+/// window's thread.
+pub fn send_slices(job: Job, to: &Bitwig, kits: &Kits, name: &str, pads: &[Pad], setting: Option<&str>) -> SlicesWent {
+    let went = slices_into_bitwig(to, kits, name, pads, setting);
+    if went.went_in {
+        job.done_as(&went.title, &went.detail);
+    } else {
+        job.failed_as(&went.title, &went.detail);
+    }
+    went
 }
 
 /// The link's words about a kit, said of a sound's slices: they go the kits' way in, so the link (and the extension

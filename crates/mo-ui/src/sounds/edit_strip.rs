@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use mo_app::background::{self, Newest};
 pub(super) use mo_app::edit_strip::EDIT;
 use mo_app::edit_strip::screen::{self, Colours, Room, Wave};
-use mo_app::edit_strip::slices::{self, Slices, To};
+use mo_app::edit_strip::slices::{self, NotSent, Slices, To};
 use mo_app::edit_strip::{self as strip, Carried, Host, Picked, Saving, Showing, Strip, Ticked, Work};
 use mo_app::shortcuts::Shortcuts;
 use mo_app::{edit_copy, log, shell, to_bitwig};
@@ -278,7 +278,7 @@ impl Host for OnPage<'_> {
     }
 
     /// On a thread of its own; a card says how it went. The strip counts the slices along as they're made, and Send
-    /// comes back once it's done.
+    /// comes back once it's done; slices that couldn't be sent say so beside it too, with the card's words.
     fn send(&self, to: To, slices: Slices) -> bool {
         let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return false };
         // The screenshots: nothing is written and nothing is sent. They say themselves how far it has got
@@ -313,12 +313,12 @@ impl Host for OnPage<'_> {
                 edit_copy::slices_to_keep(&source, &audio, changed, &what, &spans, &there)
             }))
             .unwrap_or_else(|_| Err("Something went wrong: the log says what.".to_owned()));
-            // Whether they're where they were sent; and whether that's in Bitwig.
+            // Whether they're where they were sent, or why not; and whether that's in Bitwig.
             let (went, went_in) = match (saved, to) {
                 (Err(why), _) => {
                     log::warning("Sounds", &format!("Couldn't make the slices of {name}: {why}"));
                     job.failed(&why);
-                    (false, false)
+                    (Err(NotSent::not_made(why)), false)
                 }
                 (Ok(files), To::Folder) => {
                     let folder = files.first().and_then(|f| f.parent()).map(std::path::Path::to_path_buf);
@@ -332,18 +332,21 @@ impl Host for OnPage<'_> {
                     if let Some(folder) = folder {
                         crate::files::open_folder(&feed, &folder.to_string_lossy());
                     }
-                    (true, false)
+                    (Ok(()), false)
                 }
                 // A panic in it is logged as a crash and fails the card as it goes; Send still comes back.
                 (Ok(files), To::Bitwig) => {
-                    let went_in = mo_catch::catch_crash(AssertUnwindSafe(|| {
+                    let went = mo_catch::catch_crash(AssertUnwindSafe(|| {
                         to_bitwig::slices_made(&job);
                         let pads = to_bitwig::slice_pads(&files);
                         let bitwig = to_bitwig::Bitwig::default();
                         to_bitwig::send_slices(job, &bitwig, &kit::KITS_TO_BITWIG, &name, &pads, setting.as_deref())
-                    }))
-                    .unwrap_or(false);
-                    (went_in, went_in)
+                    }));
+                    match went {
+                        Ok(went) if went.went_in => (Ok(()), true),
+                        Ok(went) => (Err(NotSent::not_in_bitwig(went)), false),
+                        Err(_) => (Err(NotSent::stopped("Something went wrong: the log says what.")), false),
+                    }
                 }
             };
             let _ = slint::invoke_from_event_loop(move || {
@@ -913,6 +916,8 @@ fn show(app: &AppWindow, showing: Showing) {
         saved_in,
         sending,
         sent,
+        send_note,
+        send_detail,
         made,
         making,
         foot_name,
@@ -937,6 +942,8 @@ fn show(app: &AppWindow, showing: Showing) {
     data.set_sending(sending.is_some());
     data.set_send_progress(sending.unwrap_or(0.0));
     data.set_sent(sent);
+    data.set_send_note(send_note.into());
+    data.set_send_detail(send_detail.into());
     data.set_pads_made(number(made));
     data.set_pads_making(making);
     data.set_to_folder_text(to_folder_text.into());
@@ -986,8 +993,10 @@ pub fn slices_made_for_screens(app: &AppWindow, count: usize) {
     slices::made(&host(app), count);
 }
 
-/// For the screenshots: the slices on their way are where they were sent (`went`), or couldn't be.
-pub fn slices_sent_for_screens(app: &AppWindow, went: bool) {
+/// For the screenshots: the slices on their way are where they were sent, or couldn't be (`went`: what's said of it,
+/// a headline and why).
+pub fn slices_sent_for_screens(app: &AppWindow, went: Result<(), (&str, &str)>) {
+    let went = went.map_err(|(title, why)| NotSent { title: title.to_owned(), why: why.to_owned() });
     slices::sent(&host(app), went);
 }
 
