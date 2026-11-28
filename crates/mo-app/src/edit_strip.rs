@@ -168,8 +168,9 @@ pub trait Host {
 
     /// Sends `slices`: each a file of its own in a folder for this slicing in Edited sounds
     /// ([`edit_copy::slices_to_keep`]), then put on a Drum Machine in Bitwig, or their folder opened; away from the
-    /// window's thread, saying how it went. Whether they're on their way: Send then waits until the host calls
-    /// [`slices::sent`] (once they're there or couldn't be; never before this comes back).
+    /// window's thread, saying how it went. Whether they're on their way: Send then counts along as the host says how
+    /// many have their file ([`slices::made`]), and waits until it calls [`slices::sent`] (once they're there or
+    /// couldn't be), both back on the window's thread.
     fn send(&self, to: slices::To, slices: slices::Slices) -> bool;
 }
 
@@ -350,8 +351,9 @@ struct Opened {
     pressed: bool,
     /// Its Slices, once they've been on: whether they're on now, and where the cuts are.
     sliced: Option<slices::Sliced>,
-    /// The slice picked (its number less one), heard as it's clicked.
+    /// The slice picked (its number less one), heard as it's clicked; and how many times one has been picked.
     slice: Option<usize>,
+    slice_picks: i32,
     /// What a press on the Slices' waveform is doing, while the button is down.
     slice_press: Option<slices::Press>,
     /// The strip's play of it, while that plays.
@@ -381,6 +383,7 @@ impl Opened {
             pressed: false,
             sliced: None,
             slice: None,
+            slice_picks: 0,
             slice_press: None,
             played: None,
         }
@@ -409,8 +412,8 @@ pub struct Strip {
     asked: u64,
     /// The key that hears the original, as the shortcut list has it ("O").
     original_key: String,
-    /// Slices are on their way to Bitwig or a folder: Send waits until they're there.
-    sending: bool,
+    /// The slices on their way to Bitwig or a folder: Send waits until they're there.
+    sending: Option<slices::Sending>,
     /// The room its screen has, as its host laid it out (none until it has).
     room: Option<Room>,
     /// The waveform's columns as last worked out, kept while they're still the ones to show.
@@ -554,8 +557,10 @@ pub struct Showing {
     pub too_loud: bool,
     /// The level meter: the edit's own loudest moment while nothing plays, the level as it plays while it does.
     pub levels: Levels,
-    /// What the drag handle carries ("Drag the edit", "Drag the part").
+    /// What the drag handle carries ("Drag the edit", "Drag the part"; with the Slices on, "Drag slice 5"), and
+    /// whether there's anything for it to carry: with the Slices on, only once a slice is picked.
     pub drag_text: String,
+    pub can_drag: bool,
     /// The Save button: what it says ("Save copy", "Saving…", "Saved"), whether it can be pressed (saved, it still
     /// can: a copy that has gone since is made again), and whether the copy of these very edits is saved. Beside it,
     /// how the last save went, in two lines: "Saved in Edited sounds" over the copy's name, or (`save_failed`)
@@ -611,6 +616,7 @@ impl Default for Showing {
             too_loud: false,
             levels: Levels::default(),
             drag_text: "Drag the edit".to_owned(),
+            can_drag: true,
             save_text: SAVE_COPY.to_owned(),
             can_save: false,
             saved: false,
@@ -849,7 +855,9 @@ fn stash(s: &mut Strip) {
     if let Some(sliced) = o.sliced.as_mut() {
         sliced.history.end_live();
     }
-    let sliced = o.sliced.filter(slices::Sliced::worth_keeping);
+    // Slices of it still on their way are worth keeping its slicing for: where they went is kept with it.
+    let on_way = s.sending.as_ref().is_some_and(|sending| sending.is_of(o.id, &o.source));
+    let sliced = o.sliced.filter(|sliced| on_way || sliced.worth_keeping());
     if !o.edits.now.is_empty() || o.edits.has_steps() || sliced.is_some() {
         s.kept.push(Kept { id: o.id, source: o.source, edits: o.edits, sliced });
         if s.kept.len() > KEPT {
@@ -1594,10 +1602,19 @@ pub fn drag(host: &dyn Host, part: bool) {
 }
 
 /// The drag handle picked up: it carries what its words say, the part picked or with none the edit (the sound itself,
-/// with no edits either).
+/// with no edits either). With the Slices on, the slice picked, and nothing until one is.
 pub fn drag_handle(host: &dyn Host) {
-    let pick = host.strip().borrow().sound.as_ref().and_then(|o| o.pick.filter(|_| !slices::on(o)));
-    carry(host, pick);
+    let part = {
+        let s = host.strip().borrow();
+        let Some(o) = s.sound.as_ref() else { return };
+        if slices::on(o) {
+            let Some(slice) = slices::picked(o) else { return };
+            Some(slice)
+        } else {
+            o.pick
+        }
+    };
+    carry(host, part);
 }
 
 /// Drags the edit out of the app, or only `part` of it (from and to, seconds into the edit: the part picked, or a
@@ -1666,19 +1683,21 @@ fn showing(s: &mut Strip, plays: bool) -> Showing {
     show.has_edits = !o.edits.now.is_empty();
     let rate = f64::from(o.original.as_ref().map_or(1, |a| a.sample_rate.max(1)));
     show.chips = if slicing { Vec::new() } else { chips(&o.edits.now, rate) };
-    show.slices = slices::showing(o, *sending);
+    show.slices = slices::showing(o, sending.as_ref());
     show.original = o.held.is_some();
     let gain = gain_now(o);
     show.gain_text = db_text(gain);
     show.gain_changed = gain != 0.0;
-    show.drag_text = if !slicing && o.pick.is_some() {
-        "Drag the part"
+    show.drag_text = if slicing {
+        slices::drag_text(o)
+    } else if o.pick.is_some() {
+        "Drag the part".to_owned()
     } else if o.edits.now.is_empty() {
-        "Drag the sound"
+        "Drag the sound".to_owned()
     } else {
-        "Drag the edit"
-    }
-    .to_owned();
+        "Drag the edit".to_owned()
+    };
+    show.can_drag = !slicing || slices::picked(o).is_some();
     // The Save button, and how the save of these very edits went.
     show.can_save = o.original.is_some() && show.has_edits;
     match copy_of(o, copy.as_ref()).map(|c| &c.state) {
@@ -1785,7 +1804,12 @@ fn showing(s: &mut Strip, plays: bool) -> Showing {
         });
         (shown.into(), before)
     };
-    let hits = made.hits.iter().filter(|hit| **hit >= from && **hit <= to).map(|hit| across(*hit)).collect();
+    // The hits' marks along the foot: not with the Slices on, when the slices' numbers are there.
+    let hits = if slicing {
+        Vec::new()
+    } else {
+        made.hits.iter().filter(|hit| **hit >= from && **hit <= to).map(|hit| across(*hit)).collect()
+    };
     let marks = show.ruler.iter().map(|mark| (mark.at, mark.bar)).collect();
     let next = Wave { room, columns: shown, before, original: held, marks, hits };
     // The same one again while nothing in it has changed: the host draws its picture only when it's given another.
@@ -2453,6 +2477,9 @@ mod tests {
         saving: RefCell<Vec<u64>>,
         revealed: RefCell<Vec<PathBuf>>,
         carried: RefCell<Vec<&'static str>>,
+        /// The sends asked for (where to, and how many slices), and whether it takes them.
+        takes_sends: std::cell::Cell<bool>,
+        sends: RefCell<Vec<(slices::To, usize)>>,
     }
 
     impl Fake {
@@ -2514,8 +2541,9 @@ mod tests {
         fn reveal(&self, copy: PathBuf) {
             self.revealed.borrow_mut().push(copy);
         }
-        fn send(&self, _: slices::To, _: slices::Slices) -> bool {
-            false
+        fn send(&self, to: slices::To, slices: slices::Slices) -> bool {
+            self.sends.borrow_mut().push((to, slices.spans.len()));
+            self.takes_sends.get()
         }
     }
 
@@ -2596,6 +2624,216 @@ mod tests {
         drag_handle(&host);
         // A part of a sound with no edits is a trim of it: an edit all the same.
         assert_eq!(*host.carried.borrow(), ["the sound", "an edit", "an edit"]);
+        assert!(host.shown().can_drag);
+    }
+
+    #[test]
+    fn with_the_slices_on_the_drag_handle_carries_the_slice_picked() {
+        // A sound with two hits: two slices once the scissors are on.
+        let mut strip = strip(1_000, Vec::new());
+        let o = strip.sound.as_mut().unwrap();
+        o.pick = Some((0.1, 0.4));
+        let made = o.made.as_mut().unwrap();
+        made.all_hits = [(0.0, 40.0), (0.5, 40.0)].into();
+        made.hits = [0.0, 0.5].into();
+        let host = Fake::on(strip);
+        show(&host);
+        assert_eq!(host.shown().wave.expect("a wave").hits, [0.0, 0.5], "the hits' marks, with the Slices off");
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        let now = host.shown();
+        // None picked: nothing to carry (the part picked before isn't the Slices'), and no hits' marks, as the
+        // slices' numbers are along the foot.
+        assert_eq!((now.drag_text.as_str(), now.can_drag, now.slices.slice), ("Drag a slice", false, 0));
+        assert!(now.wave.expect("a wave").hits.is_empty());
+        drag_handle(&host);
+        assert!(host.carried.borrow().is_empty());
+        // A pad pressed picks its slice and plays it; the handle then carries that slice, a trim of the sound.
+        slices::pad_pressed(&host, 1);
+        assert_eq!(host.played_from.get(), Some(0.5));
+        let now = host.shown();
+        assert_eq!((now.drag_text.as_str(), now.can_drag, now.slices.slice), ("Drag slice 2", true, 2));
+        drag_handle(&host);
+        assert_eq!(*host.carried.borrow(), ["an edit"]);
+        // A pad with no slice on it does nothing. The same pad again is one more pick of the same slice: the pads
+        // turn back to its page.
+        let picks = host.shown().slices.picks;
+        slices::pad_pressed(&host, 7);
+        assert_eq!((host.shown().slices.slice, host.shown().slices.picks), (2, picks));
+        slices::pad_pressed(&host, 1);
+        assert_eq!((host.shown().slices.slice, host.shown().slices.picks), (2, picks + 1));
+        // The Slices off again: the part picked before is what it carries.
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        let now = host.shown();
+        assert_eq!((now.drag_text.as_str(), now.can_drag), ("Drag the part", true));
+        assert_eq!(now.wave.expect("a wave").hits, [0.0, 0.5]);
+    }
+
+    /// A sound two seconds long with a hit every half second, read and made: the one with this `id` in the host's
+    /// list.
+    fn four_hits(id: i64) -> Opened {
+        let mut o = opened(2_000, Vec::new());
+        (o.id, o.source.path) = (id, format!("{id}.wav").into());
+        let mut made = make(o.original.as_ref().unwrap(), o.outline.as_ref().unwrap(), Vec::new());
+        made.all_hits = [(0.0, 40.0), (0.5, 40.0), (1.0, 40.0), (1.5, 40.0)].into();
+        o.made = Some(made);
+        o
+    }
+
+    /// A strip open on such a sound, on a host that takes sends, with the scissors on: four slices.
+    fn four_slices() -> Fake {
+        let host = Fake::on(Strip { open: true, sound: Some(four_hits(1)), room: Some(room()), ..Strip::default() });
+        host.takes_sends.set(true);
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        host
+    }
+
+    /// Opens `next` in place of the open sound, as picking another in the list does once it's read: the one that was
+    /// open is put by with its edits and slicing, and `next` gets back what was put by of it.
+    fn open_instead(host: &Fake, mut next: Opened) {
+        {
+            let mut s = host.strip.borrow_mut();
+            stash(&mut s);
+            if let Some(at) = s.kept.iter().position(|k| k.id == next.id && k.source == next.source) {
+                let kept = s.kept.remove(at);
+                (next.edits, next.sliced) = (kept.edits, kept.sliced);
+            }
+            s.sound = Some(next);
+        }
+        show(host);
+    }
+
+    /// What the strip last showed of a send: the button's words, whether it can be pressed, how far along its bar is,
+    /// whether the slices are there, how many pads are filled, and whether the next is being made.
+    fn send_shown(host: &Fake) -> (String, bool, Option<f32>, bool, usize, bool) {
+        let now = host.shown().slices;
+        (now.send_text, now.can_send, now.sending, now.sent, now.made, now.making)
+    }
+
+    #[test]
+    fn a_send_counts_the_slices_along_and_says_where_they_are() {
+        let host = four_slices();
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
+        // Sent to Bitwig: the button counts along as the host makes them, and their pads fill.
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        assert_eq!(*host.sends.borrow(), [(slices::To::Bitwig, 4)]);
+        assert_eq!(send_shown(&host), ("Making 1 of 4".into(), false, Some(0.0), false, 0, true));
+        // Asked again meanwhile: they're on their way already.
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(false));
+        assert_eq!(host.sends.borrow().len(), 1);
+        slices::made(&host, 2);
+        assert_eq!(send_shown(&host), ("Making 3 of 4".into(), false, Some(0.5), false, 2, true));
+        // A count that gets there late never takes one back.
+        slices::made(&host, 1);
+        assert_eq!(send_shown(&host), ("Making 3 of 4".into(), false, Some(0.5), false, 2, true));
+        // All made (a count past the last is all of them): it's Bitwig's turn.
+        slices::made(&host, 9);
+        assert_eq!(send_shown(&host), ("Waiting for Bitwig".into(), false, Some(1.0), false, 4, false));
+        // They're in: the button says so, and can be pressed again; their pads stay filled.
+        slices::sent(&host, true);
+        assert_eq!(send_shown(&host), ("In Bitwig".into(), true, None, true, 4, false));
+        // Cut another way, they're other slices, still to send; back as they went, it says so again.
+        slices::each_picked(&host, "to the sound's end");
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
+        assert_eq!(run_action(&host, UNDO), Some(true));
+        assert_eq!(send_shown(&host), ("In Bitwig".into(), true, None, true, 4, false));
+        // To their folder (Save, with the Slices on): it counts along as far as the last, and says "Saved".
+        assert_eq!(run_action(&host, SAVE), Some(true));
+        assert_eq!(*host.sends.borrow(), [(slices::To::Bitwig, 4), (slices::To::Folder, 4)]);
+        assert_eq!(send_shown(&host), ("Making 1 of 4".into(), false, Some(0.0), false, 0, true));
+        slices::made(&host, 4);
+        assert_eq!(send_shown(&host), ("Making 4 of 4".into(), false, Some(1.0), false, 4, false));
+        slices::sent(&host, true);
+        assert_eq!(send_shown(&host), ("Saved".into(), true, None, true, 4, false));
+    }
+
+    #[test]
+    fn a_send_not_taken_or_of_other_slices_leaves_send_as_it_was() {
+        let host = four_slices();
+        // The host can't take them: Send is as it was.
+        host.takes_sends.set(false);
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        assert_eq!(host.sends.borrow().len(), 1);
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
+        // A count, or an end, with no send on its way is nobody's.
+        slices::made(&host, 3);
+        slices::sent(&host, true);
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
+        // Taken, and the sound cut another way while they're on their way: these aren't the slices being sent, so
+        // nothing counts along here, and Send waits for that send to end.
+        host.takes_sends.set(true);
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        slices::made(&host, 1);
+        slices::each_picked(&host, "to the sound's end");
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), false, None, false, 0, false));
+        slices::made(&host, 4);
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), false, None, false, 0, false));
+        // They went: Send comes back for these, and the ones that went are remembered as they were cut.
+        slices::sent(&host, true);
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
+        assert_eq!(run_action(&host, UNDO), Some(true));
+        assert_eq!(send_shown(&host), ("In Bitwig".into(), true, None, true, 4, false));
+        // Sent again, and that one fails: its card says so, and here they're still where the first send put them.
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        assert_eq!(send_shown(&host), ("Making 1 of 4".into(), false, Some(0.0), false, 0, true));
+        slices::sent(&host, false);
+        assert_eq!(send_shown(&host), ("In Bitwig".into(), true, None, true, 4, false));
+        // A send that fails with none before it leaves Send as it was.
+        slices::each_picked(&host, "to the sound's end");
+        assert_eq!(run_action(&host, SAVE), Some(true));
+        slices::sent(&host, false);
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
+    }
+
+    #[test]
+    fn a_send_that_ends_with_another_sound_open_is_kept_with_its_own_sound() {
+        let host = four_slices();
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        slices::made(&host, 2);
+        assert_eq!(send_shown(&host), ("Making 3 of 4".into(), false, Some(0.5), false, 2, true));
+        // Another sound opened meanwhile, cut just the same: the slices on their way aren't its own, so nothing
+        // counts along on it, and its Send waits for them.
+        open_instead(&host, four_hits(2));
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), false, None, false, 0, false));
+        slices::made(&host, 4);
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), false, None, false, 0, false));
+        // They're in Bitwig: this sound's Send comes back, and it has sent nothing itself.
+        slices::sent(&host, true);
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
+        // Back on the first sound, its slices are where they went.
+        open_instead(&host, four_hits(1));
+        assert_eq!(send_shown(&host), ("In Bitwig".into(), true, None, true, 4, false));
+        // And a send that ends once its sound's slicing is no longer kept is nobody's: nothing is said of it.
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        host.strip.borrow_mut().sound = Some(four_hits(2));
+        slices::sent(&host, true);
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
+    }
+
+    #[test]
+    fn where_the_slices_went_is_kept_with_the_slices_off_and_another_sound_open() {
+        let host = four_slices();
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        // The Slices off and another sound opened while they're on their way: its slicing, as usual as it is, is
+        // kept for them. Then they're in Bitwig.
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        assert!(!host.shown().slices.on);
+        open_instead(&host, four_hits(2));
+        slices::sent(&host, true);
+        // Back on the first sound with its Slices on again: they're the ones that went.
+        open_instead(&host, four_hits(1));
+        assert!(!host.shown().slices.on);
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        assert_eq!(send_shown(&host), ("In Bitwig".into(), true, None, true, 4, false));
+        // Put by once more with the Slices off and nothing on its way: where they went is still kept.
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        open_instead(&host, four_hits(2));
+        open_instead(&host, four_hits(1));
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        assert_eq!(send_shown(&host), ("In Bitwig".into(), true, None, true, 4, false));
+        // A sound with its Slices off, as usual and never sent, isn't kept at all.
+        assert_eq!(host.strip.borrow().kept.len(), 0);
     }
 
     #[test]

@@ -5293,11 +5293,12 @@ fn edit_look_shots(
     Ok(())
 }
 
-/// The Edit strip's Slices (slice to pads, mock-up 9), on the drum loop the strip's own picture left picked: cut at its
-/// hits, with a slice picked; then Send's menu, with the pad each slice goes on. Checked after: a line dragged, taken
-/// away and put back; the cuts on the beats; the sensitivity; undo and redo; the edit's own tools waiting; Esc's
-/// steps; and the slicing kept for the sound's next opening. Last, that a long list of edits doesn't push the strip
-/// wider than the page.
+/// The Edit strip's Slices (slice to pads, mock-up 9; their look is mock-up 13), on the drum loop the strip's own
+/// picture left picked: cut at its hits, with the fifth slice playing from its pad; then Send's menu; then a send to
+/// Bitwig counting along with its pads filling, and the slices in Bitwig (mock-up 14's last moment). Checked besides:
+/// the pads' second page; a line dragged, taken away and put back; the cuts on the beats; the sensitivity; undo and
+/// redo; the edit's own tools waiting; Esc's steps; and the slicing kept for the sound's next opening. Last, that a
+/// long list of edits doesn't push the strip wider than the page.
 fn slices_shots(
     app: &mo_ui::AppWindow,
     window: &MinimalSoftwareWindow,
@@ -5344,15 +5345,71 @@ fn slices_shots(
     {
         return Err("sounds-slices.png: a click in the fifth slice didn't pick it".into());
     }
-    // The strip's foot names it, with how long it is and the pad it goes on.
+    // The strip's foot names it, with how long it is and the pad it goes on; and the drag handle carries it.
     if edit.get_slice_name() != "Slice 5" || !edit.get_slice_facts().ends_with("pad E1") {
         let (name, facts) = (edit.get_slice_name(), edit.get_slice_facts());
         return Err(format!("sounds-slices.png: with the fifth slice picked the foot says \"{name}\", \"{facts}\""));
     }
+    if edit.get_slice_number() != 5 || edit.get_drag_text() != "Drag slice 5" || !edit.get_can_drag() {
+        return Err(format!(
+            "sounds-slices.png: with the fifth slice picked the handle says \"{}\"",
+            edit.get_drag_text()
+        ));
+    }
     hover(window, -1.0, -1.0);
     capture(window);
     let sliced = capture(window);
-    shots.push(("sounds-slices.png".into(), sliced.clone()));
+    // The pads: a press on the sixth plays its slice (nothing really plays here, so where it has got to is said by
+    // hand), and the fifth's again; that's the picture, with the slice lit as far as it has played.
+    let playing_from = |pad: (f32, f32), number: i32| {
+        click(window, pad.0, pad.1);
+        let plays = edit.get_playing() && edit.get_slice_number() == number;
+        plays.then(|| f64::from(edit.get_view_from() + edit.get_slice_from() * edit.get_view_seconds()))
+    };
+    if playing_from(SLICES_PAD_6, 6).is_none() || edit.get_slice_name() != "Slice 6" {
+        return Err("sounds-slices.png: a press on the sixth pad didn't play its slice; have the pads moved?".into());
+    }
+    let Some(slice_from) = playing_from(SLICES_PAD_5, 5) else {
+        return Err("sounds-slices.png: a press on the fifth pad didn't play its slice; have the pads moved?".into());
+    };
+    mo_ui::sounds::edit_played_for_screens(app, slice_from + SLICE_PLAYED);
+    let (lit_from, head) = (edit.get_played_from(), edit.get_played());
+    if (lit_from - edit.get_slice_from()).abs() > 1e-3 || head <= lit_from || head >= edit.get_slice_to() {
+        return Err(format!(
+            "sounds-slices.png: the play is lit from {lit_from} to {head}, not inside the fifth slice"
+        ));
+    }
+    hover(window, -1.0, -1.0);
+    capture(window);
+    shots.push(("sounds-slices.png".into(), capture(window)));
+    mo_ui::sounds::stop_on_escape(app);
+    if capture(window) != sliced {
+        return Err("sounds-slices.png: stopped, the strip isn't as it was before its pads were pressed".into());
+    }
+    // More than sixteen slices: the pads have a second page, which a click on its dot turns to, and a slice picked
+    // on the first turns back.
+    if hits > 16 {
+        click(window, SLICES_PAGE_2.0, SLICES_PAGE_2.1);
+        hover(window, -1.0, -1.0);
+        let second = capture(window);
+        if second == sliced {
+            return Err(
+                "sounds-slices.png: a click on the pads' second dot didn't turn their page; has it moved?".into()
+            );
+        }
+        // The first pad there is the seventeenth slice's.
+        if playing_from(SLICES_PAD_1, 17).is_none() {
+            return Err(
+                "sounds-slices.png: on the pads' second page the first pad isn't the seventeenth slice's".into()
+            );
+        }
+        mo_ui::sounds::stop_on_escape(app);
+        click_at((fifth + sixth) / 2.0);
+        hover(window, -1.0, -1.0);
+        if capture(window) != sliced {
+            return Err("sounds-slices.png: the pads' page didn't follow the slice picked back to the first".into());
+        }
+    }
     // Send's menu, opened with the mouse: above its button, as the strip is at the foot of the window.
     click(window, SLICES_SEND.0, SLICES_SEND.1);
     hover(window, -1.0, -1.0);
@@ -5367,6 +5424,51 @@ fn slices_shots(
     if capture(window) != sliced {
         return Err("sounds-slices-send.png: a click away from Send's menu didn't close it".into());
     }
+    // Sent to Bitwig, with no slice picked (nothing is written or sent here: how far it has got is said by hand). The
+    // button counts along as the slices are made, and their pads fill.
+    if !mo_ui::sounds::escape(app) || edit.get_slice_number() != 0 {
+        return Err("sounds-slices-sending.png: Esc didn't let the slice picked go".into());
+    }
+    let pads_made = || usize::try_from(edit.get_pads_made()).unwrap_or(usize::MAX);
+    let begun = mo_ui::sounds::run_action(app, "sounds.editSlicesBitwig") && edit.get_sending() && !edit.get_can_send();
+    if !begun || edit.get_send_text() != format!("Making 1 of {hits}") || pads_made() != 0 || !edit.get_pads_making() {
+        return Err(format!("sounds-slices-sending.png: a send just begun says \"{}\"", edit.get_send_text()));
+    }
+    // Another send waits for this one.
+    if mo_ui::sounds::run_action(app, "sounds.editSave") || edit.get_send_text() != format!("Making 1 of {hits}") {
+        return Err("sounds-slices-sending.png: a second send was taken while the first is on its way".into());
+    }
+    let made = SLICES_MADE.min(hits - 1);
+    mo_ui::sounds::edit_slices_made_for_screens(app, made);
+    let along = (edit.get_send_progress() - made as f32 / hits as f32).abs() < 1e-6;
+    if edit.get_send_text() != format!("Making {} of {hits}", made + 1) || pads_made() != made || !along {
+        return Err(format!(
+            "sounds-slices-sending.png: with {made} of {hits} slices made the button says \"{}\", {} along",
+            edit.get_send_text(),
+            edit.get_send_progress()
+        ));
+    }
+    hover(window, -1.0, -1.0);
+    capture(window);
+    shots.push(("sounds-slices-sending.png".into(), capture(window)));
+    // All made: it's Bitwig's turn. Then they're in: the button says so, and can be pressed again.
+    mo_ui::sounds::edit_slices_made_for_screens(app, hits);
+    if edit.get_send_text() != "Waiting for Bitwig" || edit.get_pads_making() || !edit.get_sending() {
+        return Err(format!(
+            "sounds-slices-sent.png: with every slice made the button says \"{}\"",
+            edit.get_send_text()
+        ));
+    }
+    mo_ui::sounds::edit_slices_sent_for_screens(app, true);
+    let there = !edit.get_sending() && edit.get_sent() && edit.get_can_send() && pads_made() == hits;
+    if !there || edit.get_send_text() != "In Bitwig" {
+        return Err(format!(
+            "sounds-slices-sent.png: with the slices in Bitwig the button says \"{}\"",
+            edit.get_send_text()
+        ));
+    }
+    capture(window);
+    shots.push(("sounds-slices-sent.png".into(), capture(window)));
     // A line dragged moves its cut; undo puts it back, and redo moves it again.
     let (Some(third), Some(fourth)) = (line(2), line(3)) else {
         return Err("sounds-slices.png: the third and fourth lines aren't on show".into());
@@ -5417,8 +5519,8 @@ fn slices_shots(
     }
     edit.invoke_each_picked("to the next cut".into());
     // Back at the hits. The sensitivity up takes smaller hits too, and down only the biggest; let go, it's one undo.
-    edit.invoke_cut_at_picked(format!("Hits ({hits})").into());
-    if cuts() != hits || !edit.get_cut_at_hits() {
+    edit.invoke_cut_at_picked("Hits".into());
+    if cuts() != hits || !edit.get_cut_at_hits() || edit.get_cut_at() != "Hits" {
         return Err("sounds-slices.png: Cut at Hits didn't put the cuts back at the hits".into());
     }
     edit.invoke_sensitivity_moved(1.0);
@@ -5433,13 +5535,27 @@ fn slices_shots(
     if cuts() != hits || (edit.get_sensitivity() - 0.5).abs() > 1e-6 {
         return Err("sounds-slices.png: the sensitivity slider let go wasn't one step for undo".into());
     }
-    // With the Slices on, the edit's own tools wait; Save and Send are the slices' (nothing is written here).
+    // With the Slices on, the edit's own tools wait.
     let edits = mo_ui::sounds::edit_state_for_screens().2;
     if mo_ui::sounds::run_action(app, "sounds.editReverse") || mo_ui::sounds::edit_state_for_screens().2 != edits {
         return Err("sounds-slices.png: an edit's tool worked with the Slices on".into());
     }
-    mo_ui::sounds::run_action(app, "sounds.editSlicesBitwig");
-    mo_ui::sounds::run_action(app, "sounds.editSave");
+    // The cuts are back where they were when the slices went to Bitwig, and the button says so again. Save is the
+    // slices' too: to their folder (nothing is written here), and then it says "Saved".
+    if !edit.get_sent() || edit.get_send_text() != "In Bitwig" {
+        return Err("sounds-slices-sent.png: back at the cuts that went to Bitwig, the button doesn't say so".into());
+    }
+    if !mo_ui::sounds::run_action(app, "sounds.editSave") || !edit.get_sending() {
+        return Err("sounds-slices-sent.png: Save with the Slices on didn't send them to their folder".into());
+    }
+    mo_ui::sounds::edit_slices_made_for_screens(app, hits);
+    mo_ui::sounds::edit_slices_sent_for_screens(app, true);
+    if edit.get_sending() || !edit.get_sent() || edit.get_send_text() != "Saved" {
+        return Err(format!(
+            "sounds-slices-sent.png: with the slices saved the button says \"{}\"",
+            edit.get_send_text()
+        ));
+    }
     // Esc: the slice picked goes, then the Slices (the strip stays, with the edit's tools), then the strip.
     click_at((fifth + sixth) / 2.0);
     if !mo_ui::sounds::escape(app) || mo_ui::sounds::edit_slices_for_screens().1.is_some() || !edit.get_slicing() {
@@ -5447,6 +5563,9 @@ fn slices_shots(
     }
     if !edit.get_slice_name().is_empty() || !edit.get_slice_facts().starts_with("Pads C1 to ") {
         return Err(format!("sounds-slices.png: with no slice picked the foot says \"{}\"", edit.get_slice_facts()));
+    }
+    if edit.get_slice_number() != 0 || edit.get_drag_text() != "Drag a slice" || edit.get_can_drag() {
+        return Err(format!("sounds-slices.png: with no slice picked the handle says \"{}\"", edit.get_drag_text()));
     }
     if !mo_ui::sounds::escape(app) || edit.get_slicing() || !edit.get_shown() {
         return Err("sounds-slices.png: a second Esc didn't turn the Slices off and leave the strip open".into());
@@ -5485,6 +5604,19 @@ fn slices_shots(
 /// name in the strip's row of tools, where a click does nothing but close a menu.
 const SLICES_SEND: (f32, f32) = (1319.0, 854.0);
 const SLICES_AWAY: (f32, f32) = (380.0, 591.0);
+
+/// The Slices' pads, in the usual window with the strip at its usual height: the first (bottom left), the fifth and
+/// the sixth (the row above it), and the second of the dots under them, which turns to their second page.
+const SLICES_PAD_1: (f32, f32) = (1185.0, 788.0);
+const SLICES_PAD_5: (f32, f32) = (1185.0, 740.0);
+const SLICES_PAD_6: (f32, f32) = (1232.0, 740.0);
+const SLICES_PAGE_2: (f32, f32) = (1263.0, 817.0);
+
+/// How far into its slice the play has got for the Slices' picture (seconds): under half of a slice of the drum loop.
+const SLICE_PLAYED: f64 = 0.1;
+
+/// How many slices have their file in the picture of a send counting along: twelve, as mock-up 14 has it.
+const SLICES_MADE: usize = 12;
 
 /// Enough edits that their chips are wider than the Edit strip.
 const MANY_EDITS: usize = 40;

@@ -8,11 +8,13 @@
 // the stretcher. The work is in Rust, with no screen, so the plugin shows the same strip (mo-app `edit_strip.rs`;
 // mo-ui `sounds/edit_strip.rs` is the app's side of it).
 //
-// Its Slices (mock-up 9) cut the edit at its hits, or on the beats, for a drum machine's pads: a line at each cut, to
-// drag or double-click away (a double-click between two adds one), a click in a slice to hear it, and Send to put them
-// on a Drum Machine in Bitwig from C1 or in a numbered folder (mo-app `edit_strip/slices.rs`).
+// Its Slices (mock-up 9; their look is mock-up 13) cut the edit at its hits, or on the beats, for a drum machine's
+// pads: a line at each cut, to drag or double-click away (a double-click between two adds one), each slice's number in
+// a cell along the screen's foot, a click in a slice to hear it, the pads they go on beside the screen (a press plays
+// one too), and Send to put them on a Drum Machine in Bitwig from C1 or in a numbered folder (mo-app
+// `edit_strip/slices.rs`).
 
-import { Theme, Type, Space, Heights, Well, Caps, Dot, StudioButton, TempoStepper, DragHandle, InfoTip, Waveform, Icons, RowSeam, FadeHandle, Widths, MenuChip, StudioSlider, MenuCard, MenuLine, Groove, CutText, PlayKey, JoinedKeys, JoinedKey, IconKey, ABSwitch, LevelMeter, ScreenTag, DoneNote } from "../studio.slint";
+import { Theme, Type, Space, Heights, Well, Caps, Dot, StudioButton, TempoStepper, DragHandle, InfoTip, Waveform, Icons, RowSeam, FadeHandle, Widths, MenuChip, StudioSlider, MenuCard, MenuLine, Groove, CutText, PlayKey, JoinedKeys, JoinedKey, IconKey, ABSwitch, LevelMeter, ScreenTag, DoneNote, PadGrid, CountingKey, MouseField } from "../studio.slint";
 
 // A mark on the strip's ruler: where (0 to 1 across the waveform), what it says, and whether it's a bar's (brighter).
 export struct EditMark {
@@ -29,7 +31,7 @@ export struct EditChip {
 }
 
 // A cut on the Slices' waveform: where (0 to 1 across the part on show), the number of the slice it starts, and how
-// much room there is to the next line (0 to 1 across), for its number.
+// much room there is to the next line (0 to 1 across): how wide its slice's cell is.
 export struct SliceCut {
     at: float,
     number: int,
@@ -120,8 +122,10 @@ export global SoundEdit {
     in property <bool> over;
     // Where copies go, for the tips ("Exports\Edited sounds").
     in property <string> folder-text: "Edited sounds";
-    // What the drag handle carries ("Drag the edit"), and whether it's being carried or has just landed.
+    // What the drag handle carries ("Drag the edit"; with the Slices on, "Drag slice 5"), whether there's anything for
+    // it to carry (with the Slices on, only once a slice is picked), and whether it's being carried or has just landed.
     in property <string> drag-text: "Drag the edit";
+    in property <bool> can-drag: true;
     in property <bool> lifted;
     in property <bool> landed;
     // The Save button: what it says ("Save copy", "Saving…", "Saved"), whether it can be pressed, and whether the copy
@@ -140,7 +144,15 @@ export global SoundEdit {
     in property <float> slice-from;
     in property <float> slice-to;
     in property <float> first-cut;
-    // What the cuts go by ("Hits (20)", "Every beat"…) and the choices; whether it's the hits (the sensitivity then
+    // The slice picked by its number, from 1 (0 for none): its cell along the screen's foot is lit, and its pad; and
+    // a count that changes with every pick, of the same slice too (the pads turn back to its page). And the slice
+    // that runs in from before the stretch on show, zoomed in past its cut: its number (0 for none) and how far
+    // across it runs. It has no line in sight, but its cell.
+    in property <int> slice-number;
+    in property <int> slice-picks;
+    in property <int> lead-number;
+    in property <float> lead-room;
+    // What the cuts go by ("Hits", "Every beat"…) and the choices; whether it's the hits (the sensitivity then
     // counts); how big a hit must be, 0 (only the biggest) to 1 (the smallest too); and how far each slice runs.
     in property <string> cut-at;
     in property <[string]> cut-at-choices;
@@ -149,13 +161,23 @@ export global SoundEdit {
     in property <string> each;
     in property <[string]> each-choices;
     // The Send button's words ("Send 20 slices") and whether there's anything to send (and none on their way); each
-    // slice's pad, by its note's name as Bitwig has it ("C1", "C#1"…), for its menu; what the menu's folder line says
-    // ("A numbered folder, 01 … 20"), and where the slices are saved.
+    // slice's pad, by its note's name as Bitwig has it ("C1", "C#1"…): one for every slice, in sight or not, so they
+    // count the cuts too; what Send's menu says of their folder ("A numbered folder, 01 … 20"), and where the slices
+    // are saved.
     in property <string> send-text: "Send the slices";
     in property <bool> can-send;
     in property <[string]> pads;
     in property <string> to-folder-text: "A numbered folder";
     in property <string> saved-in;
+    // These slices are on their way (`sending`): the button is a bar that fills as they're made (`send-progress`, 0
+    // to 1), its words counting along ("Making 13 of 20", then "Waiting for Bitwig"), and their pads fill, the first
+    // `pads-made` of them, the next one lit while it's being made (`pads-making`). Once they're where they were sent
+    // (`sent`), the button says where ("In Bitwig"), with a tick.
+    in property <bool> sending;
+    in property <float> send-progress;
+    in property <bool> sent;
+    in property <int> pads-made;
+    in property <bool> pads-making;
     // What the strip's foot says with the Slices on: the slice picked ("Slice 5") and its length and pad
     // ("0.23 s · pad E1"); with none picked, only the pads they all go on ("Pads C1 to G3").
     in property <string> slice-name;
@@ -223,6 +245,8 @@ export global SoundEdit {
     // shape is worked out again then, though the mouse hasn't moved.
     pure callback slice-near(float, float, int) -> bool;
     in property <int> cuts-mark;
+    // A pad pressed: its slice (from 0) is picked and plays.
+    callback pad-pressed(int);
 }
 
 // A thin upright line between two groups of a row of tools.
@@ -236,6 +260,29 @@ component ToolsGap inherits VerticalLayout {
     }
 }
 
+// A slice's cell along the foot of the strip's screen, as wide as its slice: its number, where there's room for it.
+// The one picked is lit; the one a click would play (the mouse is over its slice, and not on a line) a little.
+component SliceCell inherits Rectangle {
+    in property <int> number;
+    in property <bool> picked;
+    in property <bool> under-mouse;
+    visible: self.width >= 2px;
+    border-radius: 2px;
+    background: root.picked ? Theme.accent : root.under-mouse ? Theme.surface-raised.brighter(40%) : Theme.surface-raised;
+    Text {
+        width: parent.width;
+        height: parent.height;
+        visible: self.preferred-width + 4px <= parent.width;
+        text: root.number;
+        color: root.picked ? Theme.accent-text : root.under-mouse ? Theme.text : Theme.muted;
+        font-family: Theme.number-font;
+        font-size: Type.tiny;
+        font-weight: root.picked ? 700 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 // The strip's screen: the waveform as a picture (drawn in Rust for the room this says it has, mo-app's
 // `edit_strip::screen`), and laid on it here what moves with the mouse or as it plays, so none of that draws the
 // picture again: the part picked, the fades, the play head, the ruler's numbers.
@@ -244,6 +291,8 @@ component EditScreen inherits Well {
     // How far in from its sides the waveform starts and ends, and how high the ruler's band along its top is.
     property <length> inset: 10px;
     property <length> band: 20px;
+    // How high the slices' cells along its foot are.
+    property <length> cells: 16px;
     property <color> pick: Theme.here-colour;
     view := Rectangle {
         x: 1px;
@@ -252,10 +301,11 @@ component EditScreen inherits Well {
         height: parent.height - 2px;
         clip: true;
         // How wide the waveform itself is, and where it reaches up to and down to at full scale: under it is the
-        // foot, with the hits' marks.
+        // foot, with the hits' marks; or, with the Slices on, the slices' cells.
         property <length> wide: max(1px, self.width - 2 * root.inset);
         property <length> top: root.band + 5px;
-        property <length> bottom: self.height - 12px;
+        property <length> foot: SoundEdit.slicing ? root.cells + 6px : 12px;
+        property <length> bottom: self.height - self.foot;
         property <float> scale: 1px / 1phx;
         // How high one of the picture's three screens is.
         property <length> one: SoundEdit.wave-picture.height / 3 * 1phx;
@@ -269,6 +319,9 @@ component EditScreen inherits Well {
         property <float> lit-to: clamp(max(SoundEdit.played-from, SoundEdit.played), 0, 1);
         property <length> head-x: root.inset + SoundEdit.played * self.wide;
         property <bool> head: root.on && SoundEdit.playing && SoundEdit.played >= 0 && SoundEdit.played <= 1;
+        // How far down the play head's line runs: to the screen's foot, or with the Slices on to their cells, so it
+        // never runs through a slice's number.
+        property <length> head-foot: SoundEdit.slicing ? self.height - root.cells - 3px : self.height;
         // The fade whose handle is being dragged: 1 the fade in's, 2 the fade out's.
         property <int> fade-drag;
         function laid-out() {
@@ -289,6 +342,9 @@ component EditScreen inherits Well {
             self.laid-out();
         }
         changed height => {
+            self.laid-out();
+        }
+        changed foot => {
             self.laid-out();
         }
         changed scale => {
@@ -480,66 +536,88 @@ component EditScreen inherits Well {
             drag-part => { SoundEdit.drag-part(); }
             part-let-go => { SoundEdit.drag-let-go(); }
         }
-        // The Slices: what's before the first cut dimmed, the slice picked lit, and a line at each cut with its
-        // slice's number at the top and a small handle at the foot. The mouse is the page's: a press on a line moves
-        // it, a click in a slice plays it, a press in one that moves carries it out.
+        // The Slices: what's before the first cut dimmed, the slice picked lit, a line at each cut with a small
+        // handle at its top, and along the foot a cell for each slice with its number (the one picked lit, the one
+        // under the mouse a little). The mouse is the page's: a press on a line moves it, a click in a slice (or its
+        // cell) plays it, a press in one that moves carries it out.
         if root.on && SoundEdit.slicing: Rectangle {
+            // Where the cells start: the lines run down to them.
+            property <length> cells-y: self.height - root.cells - 3px;
             x: root.inset;
             y: root.band;
             width: view.wide;
             height: parent.height - root.band;
+            // The screen's own face behind the cells' row, from the waveform's foot down: the ruler's lines end there,
+            // and only the cuts' lines reach the cells.
+            Rectangle {
+                x: -root.inset;
+                y: parent.cells-y - 3px;
+                width: view.width;
+                height: parent.height - self.y;
+                background: Theme.well;
+            }
             Rectangle {
                 x: 0;
                 width: parent.width * clamp(SoundEdit.first-cut, 0, 1);
+                height: parent.cells-y - 3px;
                 background: Theme.well.transparentize(45%);
             }
             if SoundEdit.slice-to > SoundEdit.slice-from: Rectangle {
                 x: parent.width * SoundEdit.slice-from;
+                y: 0;
                 width: parent.width * (SoundEdit.slice-to - SoundEdit.slice-from);
+                height: parent.cells-y;
                 background: root.pick.transparentize(80%);
             }
             for c in SoundEdit.cuts: Rectangle {
                 x: c.at * parent.width;
+                y: 0;
                 width: 1px;
-                background: root.pick;
+                height: parent.cells-y;
+                background: root.pick.transparentize(30%);
             }
             for c in SoundEdit.cuts: Path {
                 x: c.at * parent.width - 4px;
-                y: parent.height - 6px;
-                width: 8px;
+                y: 0;
+                width: 9px;
                 height: 6px;
-                viewbox-width: 8;
+                viewbox-width: 9;
                 viewbox-height: 6;
-                commands: "M 0 6 L 4 0 L 8 6 Z";
+                commands: "M 0 0 L 9 0 L 4.5 6 Z";
                 fill: root.pick;
             }
-            // Its number, where there's room for it before the next line.
-            for c in SoundEdit.cuts: Rectangle {
-                x: min(c.at * parent.width, parent.width - self.width);
-                y: 2px;
-                width: number.preferred-width + 6px;
-                height: number.preferred-height + 2px;
-                visible: c.room * parent.width >= self.width + 1px;
-                border-radius: 2px;
-                background: root.pick;
-                number := Text {
-                    text: c.number;
-                    color: Theme.well;
-                    font-family: Theme.number-font;
-                    font-size: Type.caps;
-                    font-weight: 600;
-                }
+            if SoundEdit.lead-number > 0: SliceCell {
+                x: 1px;
+                y: parent.cells-y;
+                width: max(0px, SoundEdit.lead-room * parent.width - 2px);
+                height: root.cells;
+                number: SoundEdit.lead-number;
+                picked: SoundEdit.lead-number == SoundEdit.slice-number;
+                under-mouse: slice-touch.in-slice && slice-touch.mouse-x < SoundEdit.lead-room * parent.width;
             }
-            slice-touch := TouchArea {
+            for c in SoundEdit.cuts: SliceCell {
+                x: c.at * parent.width + 1px;
+                y: parent.cells-y;
+                width: max(0px, c.room * parent.width - 2px);
+                height: root.cells;
+                number: c.number;
+                picked: c.number == SoundEdit.slice-number;
+                under-mouse: slice-touch.in-slice && slice-touch.mouse-x >= c.at * parent.width
+                    && slice-touch.mouse-x < (c.at + c.room) * parent.width;
+            }
+            slice-touch := MouseField {
                 // How near a line a press takes hold of it.
                 property <length> line-room: 5px;
                 // Where the press was, and whether it's held: whether it has gone too far to be a click.
                 property <length> down-x;
                 property <length> down-y;
                 property <bool> held;
-                mouse-cursor: SoundEdit.slice-near(self.mouse-x / max(1px, self.width),
-                    self.line-room / max(1px, self.width), SoundEdit.cuts-mark)
-                    ? MouseCursor.ew-resize : MouseCursor.pointer;
+                // The mouse is on a line: a press there takes hold of the line, and the cursor says so. Elsewhere over
+                // the screen it's in a slice, which a click plays: that slice's cell says so.
+                property <bool> on-line: SoundEdit.slice-near(self.mouse-x / max(1px, self.width),
+                    self.line-room / max(1px, self.width), SoundEdit.cuts-mark);
+                property <bool> in-slice: self.inside && !self.on-line;
+                mouse-cursor: self.on-line ? MouseCursor.ew-resize : MouseCursor.pointer;
                 pointer-event(e) => {
                     if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                         self.held = true;
@@ -617,7 +695,7 @@ component EditScreen inherits Well {
             x: self.leftward ? view.head-x : view.head-x - self.trail;
             y: root.band;
             width: self.trail;
-            height: parent.height - root.band;
+            height: view.head-foot - root.band;
             background: self.leftward
                 ? @linear-gradient(90deg, Theme.text.transparentize(90%) 0%, Theme.text.transparentize(100%) 100%)
                 : @linear-gradient(90deg, Theme.text.transparentize(100%) 0%, Theme.text.transparentize(90%) 100%);
@@ -626,7 +704,7 @@ component EditScreen inherits Well {
             x: view.head-x - 1px;
             y: root.band;
             width: 2px;
-            height: parent.height - root.band;
+            height: view.head-foot - root.band;
             background: Theme.text;
         }
         if view.head: Path {
@@ -676,36 +754,81 @@ component EditScreen inherits Well {
     }
 }
 
-// The Slices' choices: what the cuts go by, how big a hit must be to get one, and how far each slice runs.
+// What one of the Slices' choices is, said before its chip.
+component ChoiceName inherits Text {
+    color: Theme.muted;
+    font-size: Type.meta;
+    vertical-alignment: center;
+}
+
+// The Slices' choices: what the cuts go by, how big a hit must be to get one (with how many cuts that gives, counted
+// as the slider moves), and how far each slice runs.
 component SliceChoices inherits HorizontalLayout {
-    spacing: Space.sm;
-    VerticalLayout {
-        alignment: center;
-        MenuChip {
-            name: "Cut at";
-            value: SoundEdit.cut-at;
-            choices: SoundEdit.cut-at-choices;
-            has-any: false;
-            lights: false;
-            picked(c) => { SoundEdit.cut-at-picked(c); }
+    // How long the Sensitivity's track is: shorter where the row of tools is tight.
+    in property <length> track: 120px;
+    spacing: Space.md;
+    HorizontalLayout {
+        spacing: Space.sm;
+        ChoiceName { text: "Cut at"; }
+        VerticalLayout {
+            alignment: center;
+            MenuChip {
+                name: "Cut at";
+                bare: true;
+                value: SoundEdit.cut-at;
+                choices: SoundEdit.cut-at-choices;
+                has-any: false;
+                lights: false;
+                picked(c) => { SoundEdit.cut-at-picked(c); }
+            }
         }
     }
-    if SoundEdit.cut-at-hits: StudioSlider {
-        low: "Sensitivity";
-        tip: "How big a hit must be to get a cut: further right, smaller ones too";
-        value <=> SoundEdit.sensitivity;
-        moved(v) => { SoundEdit.sensitivity-moved(v); }
-        released(v) => { SoundEdit.sensitivity-released(v); }
+    if SoundEdit.cut-at-hits: HorizontalLayout {
+        spacing: Space.sm;
+        StudioSlider {
+            low: "Sensitivity";
+            tip: "How big a hit must be to get a cut: further right, smaller ones too";
+            track-width: root.track;
+            value <=> SoundEdit.sensitivity;
+            moved(v) => { SoundEdit.sensitivity-moved(v); }
+            released(v) => { SoundEdit.sensitivity-released(v); }
+        }
+        // As wide whatever the count, so nothing after it moves as the slider does.
+        HorizontalLayout {
+            width: 56px;
+            alignment: start;
+            spacing: Space.xs;
+            Text {
+                text: SoundEdit.pads.length;
+                color: Theme.text;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            Text {
+                text: SoundEdit.pads.length == 1 ? "cut" : "cuts";
+                color: Theme.muted;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+        }
     }
-    VerticalLayout {
-        alignment: center;
-        MenuChip {
-            name: "Each slice";
-            value: SoundEdit.each;
-            choices: SoundEdit.each-choices;
-            has-any: false;
-            lights: false;
-            picked(c) => { SoundEdit.each-picked(c); }
+    HorizontalLayout {
+        spacing: Space.sm;
+        ChoiceName { text: "Each slice"; }
+        VerticalLayout {
+            alignment: center;
+            MenuChip {
+                name: "Each slice";
+                bare: true;
+                value: SoundEdit.each;
+                choices: SoundEdit.each-choices;
+                has-any: false;
+                lights: false;
+                picked(c) => { SoundEdit.each-picked(c); }
+            }
         }
     }
 }
@@ -725,15 +848,19 @@ export component EditStrip inherits Rectangle {
     // What the row of tools has room for, by how wide the strip is. Its parts are as wide whatever the sound, so
     // each of these is where they stop fitting, added up: Play 36, the name (240 beside the edit's tools, 200 beside
     // the Slices' choices, and at least 120), the edit's tools 407 (505 with the three that wait for the stretcher),
-    // the Slices key and choices up to 672, undo to close 233, 8 between each two, and 12 at each end.
+    // the Slices key and choices up to 594 (with the longest of the choices' words, "to the sound's end") and the
+    // Sensitivity's track, undo to close 233, 8 between each two, and 12 at each end.
     //   The name: it would be squeezed under 120 below this (the Slices' own row always has room for it).
     property <bool> named: SoundEdit.slicing || self.width >= 860px;
     //   The three tools that wait for the stretcher, beside the name at its full width.
     property <bool> roomy: self.width >= 1088px;
     //   So little room that the keys are narrower (a small window).
     property <bool> tight: !SoundEdit.slicing && self.width < 724px;
-    //   The Slices' choices beside the Slices key; under this they have a row of their own.
-    property <bool> one-row: self.width >= 1150px;
+    //   The Slices' choices beside the Slices key; under this they have a row of their own. The Sensitivity's track
+    //   gives way first, from 120 down to 64, so the name keeps 176: room for a heading as long as "64 slices ·
+    //   16 bars" under it, whatever the choices say.
+    property <bool> one-row: self.width >= 1170px;
+    property <length> track: clamp(self.width - 1106px, 64px, 120px);
     Rectangle {
         y: 0;
         height: 1px;
@@ -937,7 +1064,9 @@ export component EditStrip inherits Rectangle {
                                 clicked => { SoundEdit.tool("sounds.editSlices"); }
                             }
                         }
-                        if root.one-row: SliceChoices { }
+                        if root.one-row: SliceChoices {
+                            track: root.track;
+                        }
                     }
                 }
                 Rectangle {
@@ -1015,16 +1144,38 @@ export component EditStrip inherits Rectangle {
                 SliceChoices { }
             }
         }
-        // The screen, and the level beside it.
-        HorizontalLayout {
+        // The screen, and the level beside it; between them, with the Slices on, the pads. Placed by hand, as the row
+        // of tools is, so that whether the pads show can go by how wide the strip is: they give way where the screen
+        // would be left too narrow, or the row is too low for them.
+        screen-row := Rectangle {
+            property <bool> pads: SoundEdit.slicing && root.width >= 900px && self.height >= 128px;
+            property <length> pads-wide: 200px;
             vertical-stretch: 1;
-            spacing: Space.sm;
+            min-height: 80px;
             EditScreen {
+                x: 0px;
+                y: 0px;
+                width: max(0px, meter.x - Space.sm - (screen-row.pads ? screen-row.pads-wide + Space.sm : 0px));
+                height: parent.height;
                 on: root.on;
-                horizontal-stretch: 1;
-                min-height: 80px;
             }
-            LevelMeter {
+            if screen-row.pads: PadGrid {
+                x: meter.x - Space.sm - self.width;
+                y: 0px;
+                width: screen-row.pads-wide;
+                height: parent.height;
+                pads: SoundEdit.pads;
+                picked: SoundEdit.slice-number;
+                picks: SoundEdit.slice-picks;
+                made: SoundEdit.pads-made;
+                making: SoundEdit.pads-making;
+                enabled: root.on;
+                pressed(slice) => { SoundEdit.pad-pressed(slice); }
+            }
+            meter := LevelMeter {
+                x: parent.width - self.width;
+                y: 0px;
+                height: parent.height;
                 left: SoundEdit.level-left;
                 right: SoundEdit.level-right;
                 left-hold: SoundEdit.hold-left;
@@ -1123,14 +1274,20 @@ export component EditStrip inherits Rectangle {
                         : "The file on disk never changes: what you save or drag out is a copy in " + SoundEdit.folder-text + ". Your edits wait here while the app is open, sound by sound, until you come back to them.";
                 }
             }
-            if !SoundEdit.slicing: VerticalLayout {
+            // The drag handle: the edit's (or the part's); with the Slices on, the slice picked's, and it waits until
+            // one is.
+            VerticalLayout {
                 alignment: center;
                 horizontal-stretch: 0;
                 DragHandle {
                     width: 170px;
                     text: SoundEdit.drag-text;
-                    tip: "Drag it into your DAW or a folder, as edited: a copy in " + SoundEdit.folder-text;
-                    lit: SoundEdit.has-edits;
+                    tip: !SoundEdit.slicing ? "Drag it into your DAW or a folder, as edited: a copy in " + SoundEdit.folder-text
+                        : SoundEdit.can-drag ? "Drag this slice into your DAW or a folder: a copy in " + SoundEdit.folder-text
+                        : "Click a slice, or its pad, to pick it: then it can be dragged out from here";
+                    lit: SoundEdit.slicing ? SoundEdit.can-drag : SoundEdit.has-edits;
+                    draggable: SoundEdit.can-drag;
+                    cursor: SoundEdit.can-drag ? MouseCursor.grab : MouseCursor.default;
                     lifted: SoundEdit.lifted;
                     landed: SoundEdit.landed;
                     drag-out => { SoundEdit.drag-handle(); }
@@ -1152,28 +1309,42 @@ export component EditStrip inherits Rectangle {
                 }
             }
             // Send: its menu opens above it (the strip is at the foot of the window), with the two places the slices
-            // can go, and the pad each one lands on (four across, as a Drum Machine's page; eight for more than
-            // sixteen).
+            // can go; and, where the strip has no room for the pads themselves, the pad each one lands on (four
+            // across, as a Drum Machine's page; eight for more than sixteen). While the slices are on their way the
+            // button is a bar that counts them along; once they're there it says where, and a click sends them again.
             if SoundEdit.slicing: VerticalLayout {
                 alignment: center;
                 horizontal-stretch: 0;
-                send := HorizontalLayout {
+                send := Rectangle {
+                    property <bool> pads: !screen-row.pads;
                     property <int> across: SoundEdit.pads.length > 16 ? 8 : 4;
                     property <int> rows: ceil(SoundEdit.pads.length / self.across);
                     property <length> pad-width: 66px;
                     property <length> pad-height: 28px;
-                    property <length> menu-width: max(320px, self.across * self.pad-width + Space.xs + 2 * Space.sm);
-                    property <length> menu-height: 2 * Space.xs + 26px + 32px + self.rows * self.pad-height + Space.xs + 32px + 2px + 26px;
-                    // As wide as Drag the edit whatever it says ("Send 9 slices", "Send 10 slices"), so nothing beside
-                    // it moves as the Sensitivity changes how many there are.
+                    property <length> pads-height: self.pads ? self.rows * self.pad-height + Space.xs : 0px;
+                    // As wide as its longest line and that line's key ("A Drum Machine in Bitwig, from C1", Alt+B).
+                    property <length> menu-width: self.pads ? max(400px, self.across * self.pad-width + Space.xs + 2 * Space.sm) : 400px;
+                    property <length> menu-height: 2 * Space.xs + 26px + 32px + self.pads-height + 32px + 2px + 26px;
+                    // As wide as Drag the edit whatever it says ("Send 9 slices", "Making 10 of 20"), so nothing beside
+                    // it moves as the Sensitivity changes how many there are, or as a send counts along.
+                    width: 170px;
+                    height: Heights.button;
                     send-button := StudioButton {
-                        width: 170px;
+                        width: parent.width;
+                        visible: !SoundEdit.sending;
                         text: SoundEdit.send-text;
                         main: true;
-                        menu: true;
-                        tip: "Each slice becomes a file of its own, for a drum machine's pads";
+                        menu: !SoundEdit.sent;
+                        done: SoundEdit.sent;
+                        tip: SoundEdit.sent ? "Click to send them again, or somewhere else"
+                            : "Each slice becomes a file of its own, for a drum machine's pads";
                         enabled: root.on && SoundEdit.can-send;
                         clicked => { send-menu.show(); }
+                    }
+                    if SoundEdit.sending: CountingKey {
+                        width: parent.width;
+                        text: SoundEdit.send-text;
+                        progress: SoundEdit.send-progress;
                     }
                     send-menu := PopupWindow {
                         x: send-button.width - send.menu-width;
@@ -1194,8 +1365,8 @@ export component EditStrip inherits Rectangle {
                                 key: SoundEdit.bitwig-key;
                                 clicked => { SoundEdit.tool("sounds.editSlicesBitwig"); }
                             }
-                            Rectangle {
-                                height: send.rows * send.pad-height + Space.xs;
+                            if send.pads: Rectangle {
+                                height: send.pads-height;
                                 for note[i] in SoundEdit.pads: Rectangle {
                                     x: Space.sm + mod(i, send.across) * send.pad-width;
                                     y: floor(i / send.across) * send.pad-height;

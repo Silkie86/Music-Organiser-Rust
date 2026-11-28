@@ -233,16 +233,18 @@ pub fn slice_spans(cuts: &[usize], frames: usize, to_end: bool) -> Vec<edit::Spa
 /// The slices `spans` of the sound `source` as the Edit strip made it (`audio`: what was read, when its file was last
 /// changed `read_changed`, with its edits made; `what` tells those edits from others), each a file of its own, made
 /// now or before, in a folder for this slicing in [`FOLDER`] in the export folder: their paths, in order; or why
-/// there are none. Never on the window's thread.
+/// there are none. `there` is told how many have their file so far, after each one, for whoever counts along. Never
+/// on the window's thread.
 pub fn slices_to_keep(
     source: &Source,
     audio: &mo_audio::AudioData,
     read_changed: Option<SystemTime>,
     what: &str,
     spans: &[edit::Span],
+    there: &dyn Fn(usize),
 ) -> Result<Vec<PathBuf>, String> {
     let folder = crate::trim_copy::exports_now()?.join(FOLDER);
-    slices_in(source, audio, read_changed, what, spans, &folder)
+    slices_in(source, audio, read_changed, what, spans, &folder, there)
 }
 
 /// [`slices_to_keep`]'s work, with the slicings' folders kept in `folder`.
@@ -253,6 +255,7 @@ pub fn slices_in(
     what: &str,
     spans: &[edit::Span],
     folder: &Path,
+    there: &dyn Fn(usize),
 ) -> Result<Vec<PathBuf>, String> {
     let original = &source.path;
     if spans.is_empty() {
@@ -279,6 +282,7 @@ pub fn slices_in(
             }
         }
         made.push(copy);
+        there(made.len());
     }
     Ok(made)
 }
@@ -697,7 +701,10 @@ mod tests {
         let ToEdit { audio, changed } = read_to_edit(&source).unwrap();
         let copies = dir.join("Edited sounds");
         let spans = slice_spans(&[0, 250, 600], audio.len(), false);
-        let made = slices_in(&source, &audio, changed, "[]", &spans, &copies).unwrap();
+        let counted = std::cell::RefCell::new(Vec::new());
+        let made =
+            slices_in(&source, &audio, changed, "[]", &spans, &copies, &|n| counted.borrow_mut().push(n)).unwrap();
+        assert_eq!(*counted.borrow(), (1..=spans.len()).collect::<Vec<_>>(), "counted along, one by one");
         assert_eq!(made.len(), 3);
         let into = made[0].parent().unwrap();
         assert_eq!(into.parent(), Some(copies.as_path()));
@@ -714,13 +721,14 @@ mod tests {
         assert_eq!(lengths, [250, 350, 400]);
         // The same slicing again: the slices made before, as they are.
         std::fs::write(&made[1], b"kept").unwrap();
-        assert_eq!(slices_in(&source, &audio, changed, "[]", &spans, &copies).unwrap(), made);
+        assert_eq!(slices_in(&source, &audio, changed, "[]", &spans, &copies, &|_| {}).unwrap(), made);
         assert_eq!(std::fs::read(&made[1]).unwrap(), b"kept");
         // Other cuts, or the same cuts of other edits: another folder, and the first one's slices stay as they were.
         let other =
-            slices_in(&source, &audio, changed, "[]", &[Span::new(0, 500), Span::new(500, 1_000)], &copies).unwrap();
+            slices_in(&source, &audio, changed, "[]", &[Span::new(0, 500), Span::new(500, 1_000)], &copies, &|_| {})
+                .unwrap();
         assert_ne!(other[0].parent(), made[0].parent());
-        let edited = slices_in(&source, &audio, changed, "[Reverse(None)]", &spans, &copies).unwrap();
+        let edited = slices_in(&source, &audio, changed, "[Reverse(None)]", &spans, &copies, &|_| {}).unwrap();
         assert_ne!(edited[0].parent(), made[0].parent());
         assert_eq!(std::fs::read(&made[1]).unwrap(), b"kept");
         // Another sound of the same name (in another pack), cut the same: a folder of its own.
@@ -729,15 +737,15 @@ mod tests {
         let twin = Source { path: pack.join("Loop 128.wav"), span: None };
         ramp(&twin.path);
         let ToEdit { audio: twin_audio, changed: twin_changed } = read_to_edit(&twin).unwrap();
-        let twins = slices_in(&twin, &twin_audio, twin_changed, "[]", &spans, &copies).unwrap();
+        let twins = slices_in(&twin, &twin_audio, twin_changed, "[]", &spans, &copies, &|_| {}).unwrap();
         assert_ne!(twins[0].parent(), made[0].parent());
         assert_eq!(std::fs::read_dir(made[0].parent().unwrap()).unwrap().count(), 3, "only its own three");
         // None, too many, or a file changed since it was read: no slices.
-        assert!(slices_in(&source, &audio, changed, "[]", &[], &copies).is_err());
+        assert!(slices_in(&source, &audio, changed, "[]", &[], &copies, &|_| {}).is_err());
         let many = vec![Span::new(0, 10); MOST_SLICES + 1];
-        assert!(slices_in(&source, &audio, changed, "[]", &many, &copies).is_err());
+        assert!(slices_in(&source, &audio, changed, "[]", &many, &copies, &|_| {}).is_err());
         let earlier = changed.and_then(|c| c.checked_sub(std::time::Duration::from_secs(60)));
-        let stale = slices_in(&source, &audio, earlier, "[]", &[Span::new(0, 100)], &copies);
+        let stale = slices_in(&source, &audio, earlier, "[]", &[Span::new(0, 100)], &copies, &|_| {});
         assert!(stale.as_ref().is_err_and(|e| e.contains("has changed")), "{stale:?}");
         // Nothing half made is left.
         let left: Vec<String> = std::fs::read_dir(into)

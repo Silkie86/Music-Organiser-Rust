@@ -15,7 +15,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use mo_app::background::{self, Newest};
 pub(super) use mo_app::edit_strip::EDIT;
@@ -276,12 +276,14 @@ impl Host for OnPage<'_> {
         crate::files::reveal(&feed, &path, shell::folder_of(&path));
     }
 
-    /// On a thread of its own; a card says how it went, and Send comes back once it's done.
+    /// On a thread of its own; a card says how it went. The strip counts the slices along as they're made, and Send
+    /// comes back once it's done.
     fn send(&self, to: To, slices: Slices) -> bool {
         let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return false };
-        // The screenshots: nothing is written and nothing is sent.
+        // The screenshots: nothing is written and nothing is sent. They say themselves how far it has got
+        // ([`slices_made_for_screens`]) and how it ended ([`slices_sent_for_screens`]).
         if HERE.with(|h| *h.borrow()) {
-            return false;
+            return true;
         }
         let Slices { id, source, changed, audio, what, spans, name } = slices;
         let count = to_bitwig::slices_text(spans.len());
@@ -293,15 +295,29 @@ impl Host for OnPage<'_> {
         let weak = self.app.as_weak();
         let started = background::spawn("Slices", move || {
             background::lower_priority();
+            // How many have their file so far, for the strip to count along, on the window's thread: one telling on
+            // its way at a time, which says the newest count when it gets there (rule 12).
+            let counted = Arc::new((AtomicUsize::new(0), AtomicBool::new(false)));
+            let there = |made: usize| {
+                counted.0.store(made, Ordering::Release);
+                if !counted.1.swap(true, Ordering::AcqRel) {
+                    let counted = counted.clone();
+                    let _ = weak.upgrade_in_event_loop(move |app| {
+                        counted.1.store(false, Ordering::Release);
+                        slices::made(&host(&app), counted.0.load(Ordering::Acquire));
+                    });
+                }
+            };
             let saved = mo_catch::catch_crash(AssertUnwindSafe(|| {
-                edit_copy::slices_to_keep(&source, &audio, changed, &what, &spans)
+                edit_copy::slices_to_keep(&source, &audio, changed, &what, &spans, &there)
             }))
             .unwrap_or_else(|_| Err("Something went wrong: the log says what.".to_owned()));
-            let went_in = match (saved, to) {
+            // Whether they're where they were sent; and whether that's in Bitwig.
+            let (went, went_in) = match (saved, to) {
                 (Err(why), _) => {
                     log::warning("Sounds", &format!("Couldn't make the slices of {name}: {why}"));
                     job.failed(&why);
-                    false
+                    (false, false)
                 }
                 (Ok(files), To::Folder) => {
                     let folder = files.first().and_then(|f| f.parent()).map(std::path::Path::to_path_buf);
@@ -315,20 +331,23 @@ impl Host for OnPage<'_> {
                     if let Some(folder) = folder {
                         crate::files::open_folder(&feed, &folder.to_string_lossy());
                     }
-                    false
+                    (true, false)
                 }
                 // A panic in it is logged as a crash and fails the card as it goes; Send still comes back.
-                (Ok(files), To::Bitwig) => mo_catch::catch_crash(AssertUnwindSafe(|| {
-                    to_bitwig::slices_made(&job);
-                    let pads = to_bitwig::slice_pads(&files);
-                    let bitwig = to_bitwig::Bitwig::default();
-                    to_bitwig::send_slices(job, &bitwig, &kit::KITS_TO_BITWIG, &name, &pads, setting.as_deref())
-                }))
-                .unwrap_or(false),
+                (Ok(files), To::Bitwig) => {
+                    let went_in = mo_catch::catch_crash(AssertUnwindSafe(|| {
+                        to_bitwig::slices_made(&job);
+                        let pads = to_bitwig::slice_pads(&files);
+                        let bitwig = to_bitwig::Bitwig::default();
+                        to_bitwig::send_slices(job, &bitwig, &kit::KITS_TO_BITWIG, &name, &pads, setting.as_deref())
+                    }))
+                    .unwrap_or(false);
+                    (went_in, went_in)
+                }
             };
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = weak.upgrade() {
-                    slices::sent(&host(&app));
+                    slices::sent(&host(&app), went);
                     // Its slices went into Bitwig: that counts towards how liked the sound is, as a send of it does.
                     if went_in {
                         did::sent(&app, &[id]);
@@ -508,6 +527,12 @@ pub(super) fn wire(app: &AppWindow) {
         }
     });
     data.on_slice_near(|at, within, _| STRIP.with(|s| slices::near(&s.borrow(), f64::from(at), f64::from(within))));
+    let weak = app.as_weak();
+    data.on_pad_pressed(move |slice| {
+        if let (Some(app), Ok(slice)) = (weak.upgrade(), usize::try_from(slice)) {
+            slices::pad_pressed(&host(&app), slice);
+        }
+    });
 }
 
 /// The strip's tips, with each tool's key from the shortcut list (rule 15).
@@ -800,6 +825,7 @@ fn show(app: &AppWindow, showing: Showing) {
         too_loud,
         levels,
         drag_text,
+        can_drag,
         save_text,
         can_save,
         saved,
@@ -854,6 +880,7 @@ fn show(app: &AppWindow, showing: Showing) {
     data.set_peak_text(peak_text.into());
     data.set_over(over);
     data.set_drag_text(drag_text.into());
+    data.set_can_drag(can_drag);
     data.set_save_text(save_text.into());
     data.set_can_save(can_save);
     data.set_saved(saved);
@@ -866,6 +893,10 @@ fn show(app: &AppWindow, showing: Showing) {
         slice_from,
         slice_to,
         first_cut,
+        slice,
+        picks,
+        lead,
+        lead_room,
         cut_at,
         cut_at_choices,
         cut_at_hits,
@@ -877,6 +908,10 @@ fn show(app: &AppWindow, showing: Showing) {
         pads,
         to_folder_text,
         saved_in,
+        sending,
+        sent,
+        made,
+        making,
         foot_name,
         foot_facts,
         cuts_mark,
@@ -885,12 +920,22 @@ fn show(app: &AppWindow, showing: Showing) {
     data.set_slice_from(slice_from);
     data.set_slice_to(slice_to);
     data.set_first_cut(first_cut);
+    let number = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
+    data.set_slice_number(number(slice));
+    data.set_slice_picks(picks);
+    data.set_lead_number(number(lead));
+    data.set_lead_room(lead_room);
     data.set_cut_at(cut_at.into());
     data.set_cut_at_hits(cut_at_hits);
     data.set_sensitivity(sensitivity);
     data.set_each(each.into());
     data.set_send_text(send_text.into());
     data.set_can_send(can_send);
+    data.set_sending(sending.is_some());
+    data.set_send_progress(sending.unwrap_or(0.0));
+    data.set_sent(sent);
+    data.set_pads_made(number(made));
+    data.set_pads_making(making);
     data.set_to_folder_text(to_folder_text.into());
     data.set_saved_in(saved_in.into());
     data.set_slice_name(foot_name.into());
@@ -908,11 +953,7 @@ fn show(app: &AppWindow, showing: Showing) {
         let marks = ruler.into_iter().map(|m| EditMark { at: m.at, text: m.text.into(), bar: m.bar });
         canvas::refill(&l.ruler, marks.collect());
         canvas::refill(&l.chips, chips.into_iter().map(|c| EditChip { text: c.text.into(), last: c.last }).collect());
-        let cuts = cuts.into_iter().map(|c| SliceCut {
-            at: c.at,
-            number: i32::try_from(c.number).unwrap_or(i32::MAX),
-            room: c.room,
-        });
+        let cuts = cuts.into_iter().map(|c| SliceCut { at: c.at, number: number(c.number), room: c.room });
         canvas::refill(&l.cuts, cuts.collect());
         canvas::refill(&l.cut_at_choices, words(cut_at_choices));
         canvas::refill(&l.each_choices, words(each_choices));
@@ -935,6 +976,16 @@ pub fn state_for_screens() -> (bool, bool, usize) {
 /// For the screenshots: how many cuts the sound's Slices have (none with them off), and the slice picked.
 pub fn slices_state_for_screens() -> (usize, Option<usize>) {
     STRIP.with(|s| slices::state_for_screens(&s.borrow()))
+}
+
+/// For the screenshots, where nothing is written or sent: `count` of the slices on their way have their file.
+pub fn slices_made_for_screens(app: &AppWindow, count: usize) {
+    slices::made(&host(app), count);
+}
+
+/// For the screenshots: the slices on their way are where they were sent (`went`), or couldn't be.
+pub fn slices_sent_for_screens(app: &AppWindow, went: bool) {
+    slices::sent(&host(app), went);
 }
 
 /// For the screenshots, where nothing really plays: the strip's play has got to `at` seconds into what it plays, as
