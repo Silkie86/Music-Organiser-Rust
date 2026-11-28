@@ -127,6 +127,14 @@ pub fn edit_to_keep(
     edit_in(source, audio, read_changed, edits, &folder)
 }
 
+/// The file name of the copy of `source` with `edits`: its mark is of the part read (to the millisecond) and every
+/// edit, written out in full, so the same edits of the same part are the same copy.
+pub fn edit_file_name(source: &Source, edits: &[edit::Edit]) -> String {
+    let ms = |s: f64| if s.is_finite() { (s.max(0.0) * 1000.0).round() as u64 } else { 0 };
+    let what = format!("{:?} {edits:?}", source.span.map(|(from, to)| (ms(from), ms(to))));
+    mo_sounds::trimmed::edit_name(&source.path.to_string_lossy(), &what)
+}
+
 /// [`edit_to_keep`]'s work, with copies kept in `folder`.
 pub fn edit_in(
     source: &Source,
@@ -140,11 +148,7 @@ pub fn edit_in(
         return Err("There are no edits to save yet.".to_owned());
     }
     let changed = unchanged_since(original, read_changed)?;
-    // The part read (to the millisecond) and every edit, written out in full: the same edits of the same part are the
-    // same copy.
-    let ms = |s: f64| if s.is_finite() { (s.max(0.0) * 1000.0).round() as u64 } else { 0 };
-    let what = format!("{:?} {edits:?}", source.span.map(|(from, to)| (ms(from), ms(to))));
-    let copy = folder.join(mo_sounds::trimmed::edit_name(&original.to_string_lossy(), &what));
+    let copy = folder.join(edit_file_name(source, edits));
     if fresh(&copy, changed) {
         return Ok(copy);
     }

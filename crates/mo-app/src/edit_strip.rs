@@ -16,6 +16,10 @@
 //! is kept fine enough to draw any part of it at once, so zooming in waits for nothing. Each sound's edits are kept
 //! while the app is open, so going to another sound and back finds them where they were.
 //!
+//! Its screen is worked out here too ([`screen`]; the look of Solomon's "Build it like this" of 27 Nov 2026, pictures
+//! 12 to 14): the waveform as one picture, which takes a fade's shape while its handle is still being dragged, the
+//! level as it plays, what would clip, and how a save went, so the strip answers the hand that's on it.
+//!
 //! Its Slices cut the edit for a drum machine's pads ([`slices`], mock-up 9).
 
 use std::cell::RefCell;
@@ -32,14 +36,10 @@ use mo_audio::hits::USUAL_RISE_DB;
 use crate::edit_copy::{self, Source, Unread};
 use crate::{log, sound_part};
 
+pub mod screen;
 pub mod slices;
 
-/// How many lines across the strip's waveform is.
-const POINTS: usize = 600;
-
-/// How fine the edit's outline is kept: the loudest sample of every quarter of a millisecond (half a million steps for
-/// two minutes, 2 MB), so even a zoom in on a short part draws at once.
-const STEP_SECONDS: f64 = 0.000_25;
+use screen::{Column, Outline, Room, Wave};
 
 /// A gain step, up or down (dB).
 const GAIN_STEP_DB: f32 = 0.5;
@@ -63,6 +63,32 @@ const ACROSS: Curve = Curve::Linear;
 
 /// How many sounds' edits are kept while the app is open.
 const KEPT: usize = 64;
+
+/// The level meter's foot, in dB under full scale (its top is full scale): a level that low lights nothing.
+const METER_FOOT_DB: f32 = -42.0;
+
+/// How far up the meter (0 to 1) its lights turn amber: the last 6 dB under full scale.
+pub const METER_AMBER: f32 = 1.0 - 6.0 / 42.0;
+
+/// How fast a level falls back on the meter, in meters a second: 40 dB a second.
+const METER_FALL: f32 = 40.0 / 42.0;
+
+/// How much of the sound a tick of the meter looks at when it can't tell how far the play has come since the last one
+/// (the first tick, a play moved elsewhere), and the most it takes as one tick's (seconds).
+const METER_TICK: f64 = 0.04;
+const METER_MOST: f64 = 0.25;
+
+/// How far over full scale a peak may be before it counts as over (the rounding of a normalise).
+const OVER: f32 = 1.0 + 1e-4;
+
+/// A sound no louder than this is silence: the meter has no number for it.
+const SILENCE: f32 = 1e-5;
+
+/// How near a hit an edge of the part picked is on it (seconds): a snap puts it right there.
+const ON_HIT: f64 = 1e-4;
+
+/// What the Save button says until a copy is asked for.
+const SAVE_COPY: &str = "Save copy";
 
 /// The ids of the strip's actions in the shortcut list.
 pub const EDIT: &str = "sounds.edit";
@@ -133,8 +159,12 @@ pub trait Host {
     fn let_go(&self);
 
     /// Saves `edit` as a copy in Edited sounds ([`edit_copy::edit_to_keep`]), away from the window's thread, and says
-    /// how it went. Whether it was taken.
+    /// how it went with [`saved`] (its `ask`, and the copy or why there's none), back on the window's thread. Whether
+    /// it was taken: one that is always gets its [`saved`], or Save would wait for good.
     fn save(&self, edit: Saving) -> bool;
+
+    /// Shows the saved copy `copy` in its folder.
+    fn reveal(&self, copy: PathBuf);
 
     /// Sends `slices`: each a file of its own in a folder for this slicing in Edited sounds
     /// ([`edit_copy::slices_to_keep`]), then put on a Drum Machine in Bitwig, or their folder opened; away from the
@@ -169,8 +199,9 @@ pub enum Carried {
 }
 
 /// An edit to save as a copy: what the strip read (`source`, as `original`, when its file was last changed
-/// `changed`), its edits, and the sound's name for the words about it.
+/// `changed`), its edits, and the sound's name for the words about it. `ask` is this save's number, for [`saved`].
 pub struct Saving {
+    pub ask: u64,
     pub source: Source,
     pub original: Arc<AudioData>,
     pub changed: Option<SystemTime>,
@@ -246,14 +277,48 @@ type Edits = History<Vec<Edit>>;
 pub struct Made {
     edits: Vec<Edit>,
     audio: Arc<AudioData>,
-    /// Its outline: the loudest sample, on any channel, of each step [`STEP_SECONDS`] long (as near as whole frames go;
-    /// `step` is how long each is).
-    steps: Arc<[f32]>,
-    step: f64,
+    /// Its outline, fine enough to draw any stretch of it at once ([`screen`]).
+    outline: Arc<Outline>,
     /// Where its hits are (seconds), those that rise by [`USUAL_RISE_DB`] or more.
     hits: Arc<[f64]>,
     /// Every hit, with how much it rises (dB): where the Slices' cuts go, as big as their sensitivity asks.
     all_hits: Arc<[(f64, f32)]>,
+}
+
+/// A sound as it was read to edit: its samples, when its file was last changed, and its outline.
+pub struct Read {
+    audio: Arc<AudioData>,
+    changed: Option<SystemTime>,
+    outline: Arc<Outline>,
+}
+
+impl Read {
+    /// `audio`, as read from a file last changed `changed`, with its outline worked out. Never on the window's thread.
+    fn of(audio: AudioData, changed: Option<SystemTime>) -> Read {
+        let outline = Arc::new(Outline::of(&audio));
+        Read { audio: Arc::new(audio), changed, outline }
+    }
+}
+
+/// The strip's play of a sound, as its ticks follow it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Played {
+    /// Where it started, in seconds into the edit: what has played since is lit.
+    from: f64,
+    /// Where it has got to, in seconds into the edit: where it started, until its first tick.
+    place: f64,
+    /// Where the player was at the last tick (seconds into what plays): none before the first, or once what plays is
+    /// another sound (the original in the edit's place).
+    last: Option<f64>,
+    /// How far up the meter each side is lit (0 to 1).
+    level: [f32; 2],
+}
+
+impl Played {
+    /// A play that starts `from` seconds into the edit.
+    fn starting(from: f64) -> Played {
+        Played { from, place: from, last: None, level: [0.0; 2] }
+    }
 }
 
 /// The sound the strip edits.
@@ -265,6 +330,8 @@ struct Opened {
     bpm: Option<f64>,
     /// Read and ready (none while it's read, or when it couldn't be: `note` says why).
     original: Option<Arc<AudioData>>,
+    /// The original's outline, read with it.
+    outline: Option<Arc<Outline>>,
     /// When its file was last changed as it was read: a copy is made only of the file as it still is.
     changed: Option<SystemTime>,
     note: String,
@@ -287,6 +354,37 @@ struct Opened {
     slice: Option<usize>,
     /// What a press on the Slices' waveform is doing, while the button is down.
     slice_press: Option<slices::Press>,
+    /// The strip's play of it, while that plays.
+    played: Option<Played>,
+}
+
+impl Opened {
+    /// The sound `id` (what's read of it, its name, its type's colour and its tempo), as it is before it's read:
+    /// with no edits, nothing picked and nothing playing.
+    fn new(id: i64, source: Source, name: String, colour: i32, bpm: Option<f64>) -> Opened {
+        Opened {
+            id,
+            source,
+            name,
+            colour,
+            bpm,
+            original: None,
+            outline: None,
+            changed: None,
+            note: String::new(),
+            edits: Edits::default(),
+            made: None,
+            pick: None,
+            zoom: None,
+            dragging: None,
+            held: None,
+            pressed: false,
+            sliced: None,
+            slice: None,
+            slice_press: None,
+            played: None,
+        }
+    }
 }
 
 /// A sound's edits and slicing, kept while the app is open: by its id and what was read of it (a long sound's part).
@@ -313,17 +411,54 @@ pub struct Strip {
     original_key: String,
     /// Slices are on their way to Bitwig or a folder: Send waits until they're there.
     sending: bool,
+    /// The room its screen has, as its host laid it out (none until it has).
+    room: Option<Room>,
+    /// The waveform's columns as last worked out, kept while they're still the ones to show.
+    columns: Option<Columns>,
+    /// The screen's waveform as last shown: handed out again while nothing in it has changed, so a host draws its
+    /// picture only when it's given another.
+    wave: Option<Arc<Wave>>,
+    /// The copy last asked for (being saved, saved, or why it couldn't be), and how many have been.
+    copy: Option<Copy>,
+    saves: u64,
+}
+
+/// The columns of the strip's waveform, and what they were worked out for: the edit made (by its outline, which is
+/// another for every make), whether it's the original under it that's shown, the stretch on show, and how many columns
+/// (a column each `per` seconds, the first starting at `from`).
+struct Columns {
+    of: Arc<Outline>,
+    original: bool,
+    from: f64,
+    per: f64,
+    columns: Arc<[Column]>,
+}
+
+/// A copy of a sound's edit, asked for with Save: whose (the sound, what was read of it, and the edits), and how far
+/// it has got.
+struct Copy {
+    ask: u64,
+    id: i64,
+    source: Source,
+    edits: Vec<Edit>,
+    state: CopyState,
+}
+
+enum CopyState {
+    Saving,
+    Saved(PathBuf),
+    Failed(String),
 }
 
 /// A read or a make, for the host's thread ([`Host::work`]).
 pub enum Work {
     Read(Source),
-    Make { original: Arc<AudioData>, edits: Vec<Edit> },
+    Make { original: Arc<AudioData>, outline: Arc<Outline>, edits: Vec<Edit> },
 }
 
 /// What came back from the host's thread ([`answer`]).
 pub enum Answer {
-    Read(Result<(Arc<AudioData>, Option<SystemTime>), Unread>),
+    Read(Result<Read, Unread>),
     Made(Result<Made, String>),
 }
 
@@ -335,12 +470,23 @@ pub struct Mark {
     pub bar: bool,
 }
 
-/// One edit made so far, as a chip under the waveform; the last one (the one Undo takes back) is lit. With the Slices
-/// on, the chips are the pads ("1 → C1").
+/// One edit made so far, as a chip under the waveform; the last one (the one Undo takes back) is lit. None with the
+/// Slices on: the strip's foot then says which slice is picked.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chip {
     pub text: String,
     pub last: bool,
+}
+
+/// The level meter beside the strip's screen: how far up it each side is lit (left, right; 0 to 1 of it, its top is
+/// full scale), the highest each side gets (a light of its own, held above), that as a number ("−3.0", "+6.0": dB
+/// against full scale; empty for silence), and whether it goes over full scale.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Levels {
+    pub level: [f32; 2],
+    pub hold: [f32; 2],
+    pub peak_text: String,
+    pub over: bool,
 }
 
 /// Everything the strip shows, for its host to copy onto the screen. All of it is given every time: what a sound still
@@ -351,37 +497,44 @@ pub struct Showing {
     pub open: bool,
     /// Where copies go, for the tips ("the export folder's Edited sounds").
     pub folder_text: String,
-    /// The sound it edits: its name, its type's colour, and what's picked ("0.47 s picked · 1 beat", or how long it is
-    /// with nothing picked).
+    /// The sound it edits: its name, its type's colour, and what it is ("3.75 s · 128 BPM · 2 bars"; with the Slices
+    /// on, how many there are and the one picked).
     pub name: String,
     pub colour: i32,
-    pub picked_text: String,
+    pub facts: String,
+    /// Its tempo, for the length of a part as it's picked ([`part_text`]): 0 when that isn't known.
+    pub bpm: f32,
     /// Why there's nothing to edit (it couldn't be read, it's too long): shown where the waveform goes. Empty for none.
     pub note: String,
     /// Read and ready to edit.
     pub ready: bool,
-    /// The edit's waveform over the part on show (the whole of it unless zoomed in), a path `points` across and 100
-    /// high; how long that part lasts and where it starts (seconds); and the hits as marks along its foot, a path 1000
-    /// across and 10 high.
-    pub shape: String,
-    pub points: usize,
+    /// The screen's waveform over the part on show (the whole of it unless zoomed in), for [`screen::scene`]: the same
+    /// one again while nothing in it has changed, and none until the host has said what room its screen has
+    /// ([`laid_out`]). How long the part on show lasts and where it starts (seconds).
+    pub wave: Option<Arc<Wave>>,
     pub view_seconds: f32,
     pub view_from: f32,
     pub zoomed: bool,
-    pub hit_marks: String,
-    /// The part picked on it (0 to 1 across the part on show; none unless `pick_to` is past `pick_from`), and whether
-    /// there's a part to zoom in on (with the Slices on, the slice picked).
+    /// The part picked on it (0 to 1 across the part on show; none unless `pick_to` is past `pick_from`), whether
+    /// each of its edges is on a hit (that hit's mark is lit), and whether there's a part to zoom in on (with the
+    /// Slices on, the slice picked).
     pub has_part: bool,
     pub pick_from: f32,
     pub pick_to: f32,
+    pub pick_on_hits: (bool, bool),
     /// The fades' handles, 0 to 1 across (where the fade in ends and the fade out starts), each shown only while its
-    /// end of the sound is in sight; and their curves, paths 1000 across and 100 high.
+    /// end of the sound is in sight; their curves, paths 1000 across and 100 high (none for a fade that isn't there);
+    /// what each takes away, the same way, a shape to shade; and, while one's handle is dragged, how long it is now
+    /// ("Fade out 620 ms").
     pub fade_in: f32,
     pub fade_out: f32,
     pub fade_in_shown: bool,
     pub fade_out_shown: bool,
     pub fade_in_curve: String,
     pub fade_out_curve: String,
+    pub fade_in_shade: String,
+    pub fade_out_shade: String,
+    pub fade_text: String,
     pub ruler: Vec<Mark>,
     pub chips: Vec<Chip>,
     pub can_undo: bool,
@@ -390,12 +543,29 @@ pub struct Showing {
     pub has_edits: bool,
     /// The original is what's heard (O, or A/B, is held).
     pub original: bool,
-    /// The gain of the part picked (or the whole sound), as the stepper shows it ("Gain −1.5 dB"), and whether it's
-    /// been changed from none.
+    /// The strip's play, while it plays: where it started and where it has got to, as [`Playing`] has them (the
+    /// host's ticker moves them on from here).
+    pub played: Option<(f32, f32)>,
+    /// The gain of the part picked (or the whole sound), as the stepper shows it ("−1.5 dB"), and whether it's been
+    /// changed from none.
     pub gain_text: String,
     pub gain_changed: bool,
-    /// What the drag handle carries ("Drag the edit").
+    /// The edit goes over full scale somewhere: its tops are red, and Normalise would bring it back.
+    pub too_loud: bool,
+    /// The level meter: the edit's own loudest moment while nothing plays, the level as it plays while it does.
+    pub levels: Levels,
+    /// What the drag handle carries ("Drag the edit", "Drag the part").
     pub drag_text: String,
+    /// The Save button: what it says ("Save copy", "Saving…", "Saved"), whether it can be pressed (saved, it still
+    /// can: a copy that has gone since is made again), and whether the copy of these very edits is saved. Beside it,
+    /// how the last save went, in two lines: "Saved in Edited sounds" over the copy's name, or (`save_failed`)
+    /// "Couldn't save the copy" over why. Empty for none.
+    pub save_text: String,
+    pub can_save: bool,
+    pub saved: bool,
+    pub save_note: String,
+    pub save_detail: String,
+    pub save_failed: bool,
     /// The Slices.
     pub slices: slices::Showing,
 }
@@ -408,33 +578,45 @@ impl Default for Showing {
             folder_text: folder_text(),
             name: String::new(),
             colour: 0,
-            picked_text: String::new(),
+            facts: String::new(),
+            bpm: 0.0,
             note: String::new(),
             ready: false,
-            shape: String::new(),
-            points: 0,
+            wave: None,
             view_seconds: 0.0,
             view_from: 0.0,
             zoomed: false,
-            hit_marks: String::new(),
             has_part: false,
             pick_from: 0.0,
             pick_to: 0.0,
+            pick_on_hits: (false, false),
             fade_in: 0.0,
             fade_out: 0.0,
             fade_in_shown: false,
             fade_out_shown: false,
             fade_in_curve: String::new(),
             fade_out_curve: String::new(),
+            fade_in_shade: String::new(),
+            fade_out_shade: String::new(),
+            fade_text: String::new(),
             ruler: Vec::new(),
             chips: Vec::new(),
             can_undo: false,
             can_redo: false,
             has_edits: false,
             original: false,
-            gain_text: gain_text(0.0),
+            played: None,
+            gain_text: db_text(0.0),
             gain_changed: false,
+            too_loud: false,
+            levels: Levels::default(),
             drag_text: "Drag the edit".to_owned(),
+            save_text: SAVE_COPY.to_owned(),
+            can_save: false,
+            saved: false,
+            save_note: String::new(),
+            save_detail: String::new(),
+            save_failed: false,
             slices: slices::Showing::default(),
         }
     }
@@ -543,6 +725,10 @@ pub fn close(host: &dyn Host) {
         s.open = false;
         stash(&mut s);
         s.asked += 1;
+        // A save that failed is past once the strip is closed.
+        if s.copy.as_ref().is_some_and(|c| matches!(c.state, CopyState::Failed(_))) {
+            s.copy = None;
+        }
         was
     };
     if !was_open {
@@ -644,26 +830,8 @@ fn load(host: &dyn Host) {
             })
             .unwrap_or_default();
         s.asked += 1;
-        s.sound = Some(Opened {
-            id,
-            source: source.clone(),
-            name,
-            colour,
-            bpm,
-            original: None,
-            changed: None,
-            note: if too_long { Unread::TooLong.to_string() } else { String::new() },
-            edits,
-            made: None,
-            pick: None,
-            zoom: None,
-            dragging: None,
-            held: None,
-            pressed: false,
-            sliced,
-            slice: None,
-            slice_press: None,
-        });
+        let note = if too_long { Unread::TooLong.to_string() } else { String::new() };
+        s.sound = Some(Opened { note, edits, sliced, ..Opened::new(id, source.clone(), name, colour, bpm) });
         s.asked
     };
     show(host);
@@ -694,30 +862,35 @@ fn stash(s: &mut Strip) {
 pub fn answer(work: Work) -> Answer {
     match work {
         Work::Read(source) => {
-            Answer::Read(edit_copy::read_to_edit(&source).map(|read| (Arc::new(read.audio), read.changed)))
+            Answer::Read(edit_copy::read_to_edit(&source).map(|read| Read::of(read.audio, read.changed)))
         }
-        Work::Make { original, edits } => Answer::Made(
-            mo_catch::catch_crash(AssertUnwindSafe(|| make(&original, edits)))
+        Work::Make { original, outline, edits } => Answer::Made(
+            mo_catch::catch_crash(AssertUnwindSafe(|| make(&original, &outline, edits)))
                 .map_err(|_| "Couldn't make the edit: the log says why.".to_owned()),
         ),
     }
 }
 
-/// The edit of `original` by `edits`, its outline and its hits.
-fn make(original: &AudioData, edits: Vec<Edit>) -> Made {
-    let audio = if edits.is_empty() { original.clone() } else { edit::apply(original, &edits) };
-    let rate = f64::from(audio.sample_rate.max(1));
-    let each = ((rate * STEP_SECONDS).round() as usize).max(1);
-    let frames = audio.channels.iter().map(Vec::len).min().unwrap_or(0);
-    let steps: Arc<[f32]> = (0..frames.div_ceil(each))
-        .map(|i| {
-            let (from, to) = (i * each, ((i + 1) * each).min(frames));
-            audio.channels.iter().map(|c| c[from..to].iter().fold(0.0f32, |m, s| m.max(s.abs()))).fold(0.0, f32::max)
-        })
-        .collect();
+/// The edit of `original` (whose outline is `outline`) by `edits`, with its outline and its hits. With no edits it's
+/// the original itself: nothing is copied.
+fn make(original: &Arc<AudioData>, outline: &Arc<Outline>, edits: Vec<Edit>) -> Made {
+    let (audio, outline) = if edits.is_empty() {
+        (original.clone(), outline.clone())
+    } else {
+        let audio = edit::apply(original, &edits);
+        let outline = Arc::new(Outline::of(&audio));
+        (Arc::new(audio), outline)
+    };
     let all_hits: Arc<[(f64, f32)]> = edit_copy::hits_in(&audio).into();
     let hits: Arc<[f64]> = all_hits.iter().filter(|(_, rise)| *rise >= USUAL_RISE_DB).map(|(at, _)| *at).collect();
-    Made { edits, audio: Arc::new(audio), steps, step: each as f64 / rate, hits, all_hits }
+    Made { edits, audio, outline, hits, all_hits }
+}
+
+/// For the tests: the edit of `audio` by `edits`.
+#[cfg(test)]
+fn make_of(audio: &AudioData, edits: Vec<Edit>) -> Made {
+    let read = Read::of(audio.clone(), None);
+    make(&read.audio, &read.outline, edits)
 }
 
 /// A read or a make came back: taken only while it's the newest asked for, of the sound still open.
@@ -730,7 +903,7 @@ pub fn arrived(host: &dyn Host, ask: u64, id: i64, answer: Answer) {
         return;
     }
     match answer {
-        Answer::Read(Ok((audio, changed))) => {
+        Answer::Read(Ok(Read { audio, changed, outline })) => {
             // A part picked on the card of a sound read whole is where the strip starts, while it has no edits.
             let card_part = host.card_part();
             if let Some(o) = host.strip().borrow_mut().sound.as_mut() {
@@ -738,6 +911,7 @@ pub fn arrived(host: &dyn Host, ask: u64, id: i64, answer: Answer) {
                     o.pick = card_part.filter(|(from, to)| *to <= audio.seconds() + 1e-6 && from < to);
                 }
                 o.original = Some(audio);
+                o.outline = Some(outline);
                 o.changed = changed;
                 o.note.clear();
             }
@@ -781,11 +955,11 @@ fn make_again(host: &dyn Host) {
     let job = {
         let mut s = host.strip().borrow_mut();
         let work = s.sound.as_ref().and_then(|o| {
-            let original = o.original.clone()?;
+            let (original, outline) = (o.original.clone()?, o.outline.clone()?);
             if o.made.as_ref().is_some_and(|m| m.edits == o.edits.now) {
                 return None;
             }
-            Some((o.id, Work::Make { original, edits: o.edits.now.clone() }))
+            Some((o.id, Work::Make { original, outline, edits: o.edits.now.clone() }))
         });
         work.map(|(id, work)| {
             s.asked += 1;
@@ -1172,6 +1346,8 @@ fn play_edit(host: &dyn Host, from: f64, till: Option<f64>) {
         s.sound.as_mut().and_then(|o| {
             let audio = o.made.as_ref()?.audio.clone();
             o.held = None;
+            // What plays from here on is lit.
+            o.played = Some(Played::starting(from));
             Some(audio)
         })
     };
@@ -1182,7 +1358,8 @@ fn play_edit(host: &dyn Host, from: f64, till: Option<f64>) {
 
 /// O held (`on`) or let go, or the A/B button: the original plays from the moment the edit has got to, and the edit
 /// comes back from the same moment as it's let go. With nothing playing, the original plays while it's held (from the
-/// start of the part picked, or of the slice picked with the Slices on, if there is one). Whether it did anything.
+/// start of the part picked, or of the slice picked with the Slices on, if there is one: where that stretch starts in
+/// the original, which is where its end came from if the edit reversed it). Whether it did anything.
 pub fn hear_original(host: &dyn Host, on: bool) -> bool {
     let opened = {
         let s = host.strip().borrow();
@@ -1200,6 +1377,10 @@ pub fn hear_original(host: &dyn Host, on: bool) -> bool {
     let set_held = |held: Option<bool>| {
         if let Some(o) = host.strip().borrow_mut().sound.as_mut() {
             o.held = held;
+            // What plays is another sound from here: the meter takes it up afresh.
+            if let Some(played) = o.played.as_mut() {
+                played.last = None;
+            }
         }
     };
     if on {
@@ -1210,7 +1391,14 @@ pub fn hear_original(host: &dyn Host, on: bool) -> bool {
         if plays && host.swap(original.clone(), &before) {
             set_held(Some(false));
         } else {
-            host.play(original, before(pick.map_or(0.0, |(from, _)| from)), None);
+            // The stretch of the original the part (all of the edit, with none) came from, from its earlier end:
+            // through a reverse that's where the part's last moment came from.
+            let (from, to) = pick.unwrap_or((0.0, edited.seconds()));
+            let start = before(from).min(before((to - 1.0 / rate).max(from)));
+            if let Some(o) = host.strip().borrow_mut().sound.as_mut() {
+                o.played = Some(Played::starting(after(start)));
+            }
+            host.play(original, start, None);
             set_held(Some(true));
         }
     } else {
@@ -1247,55 +1435,152 @@ pub fn key_up(host: &dyn Host, name: &str) {
     }
 }
 
+/// Where the strip's play has got to, for its host to show: the play head and where the play started (both across
+/// what the strip's waveform shows, 0 to 1 while they're in sight and outside that while they aren't; what's between
+/// them is lit), and how far up the meter each side is lit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Playing {
+    pub at: f32,
+    pub from: f32,
+    pub level: [f32; 2],
+}
+
 /// What a tick of the host's ticker comes to, while the strip's play plays ([`tick`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Ticked {
     /// Nothing to show yet (the player hasn't the play, or the sound has gone): it goes on.
     Waiting,
-    /// It goes on, and is here: 0 to 1 across what the strip's waveform shows.
-    At(f32),
+    /// It goes on, and is here.
+    At(Playing),
     /// A play of the part picked has come to the part's end: it stops.
     Ended,
 }
 
 /// The host's ticker, while the strip's play plays: `at` is where the player is (seconds into what it plays; none
 /// until it has the play), and `till` where the play stops (seconds into the edit: the end of the part it's of). The
-/// strip's waveform shows where the edit has got to; a play of the part picked stops at its end.
-pub fn tick(strip: &Strip, at: Option<f64>, till: Option<f64>) -> Ticked {
+/// strip's waveform shows where the edit has got to and its meter how loud that is; a play of the part picked stops
+/// at its end.
+pub fn tick(strip: &mut Strip, at: Option<f64>, till: Option<f64>) -> Ticked {
     let Some(at) = at else { return Ticked::Waiting };
-    let Some(o) = strip.sound.as_ref() else { return Ticked::Waiting };
+    let Some(o) = strip.sound.as_mut() else { return Ticked::Waiting };
+    let (from, to) = view(o);
     let (Some(made), Some(original)) = (o.made.as_ref(), o.original.as_ref()) else { return Ticked::Waiting };
     let held = o.held.is_some();
-    // Hearing the original: where that is in the edit.
-    let at = if held {
+    // What's heard, and where that is in the edit: hearing the original, where the moment it has got to went.
+    let (heard, place) = if held {
         let rate = f64::from(original.sample_rate.max(1));
-        edit::place_after(original.len(), &made.edits, (at * rate).round() as usize) as f64 / rate
+        (original, edit::place_after(original.len(), &made.edits, (at * rate).round() as usize) as f64 / rate)
     } else {
-        at
+        (&made.audio, at)
     };
-    if !held && till.is_some_and(|till| at >= till) {
+    if !held && till.is_some_and(|till| place >= till) {
         return Ticked::Ended;
     }
-    let (from, to) = view(o);
-    Ticked::At(((at - from) / (to - from).max(1e-9)).clamp(0.0, 1.0) as f32)
+    // A play whose start wasn't seen is lit from here on.
+    let played = o.played.get_or_insert(Played::starting(place));
+    // The meter: as loud as what has played since the last tick gets, or falling back from where it was.
+    let since = played.last.filter(|last| *last <= at).map_or(METER_TICK, |last| (at - last).min(METER_MOST));
+    let loud = loudest(heard, at - since, at);
+    let fall = METER_FALL * since as f32;
+    for (level, loud) in played.level.iter_mut().zip(loud) {
+        *level = meter_place(loud).max(*level - fall);
+    }
+    played.last = Some(at);
+    played.place = place;
+    let across = |t: f64| across(t, (from, to));
+    Ticked::At(Playing { at: across(place), from: across(played.from), level: played.level })
 }
 
-/// Saves the edit as a copy in Edited sounds; the host says how it went. Whether there was an edit to save.
+/// Where the moment `t` is across a stretch on show (from and to, all in seconds): 0 to 1 inside it, and no further
+/// outside it than its own width again, which is out of sight either way.
+fn across(t: f64, (from, to): (f64, f64)) -> f32 {
+    ((t - from) / (to - from).max(1e-9)).clamp(-1.0, 2.0) as f32
+}
+
+/// How far up the meter (0 to 1) a level is: 1 is full scale, where the meter tops out, and [`METER_FOOT_DB`] its
+/// foot.
+fn meter_place(level: f32) -> f32 {
+    if level > 0.0 { ((20.0 * level.log10() - METER_FOOT_DB) / -METER_FOOT_DB).clamp(0.0, 1.0) } else { 0.0 }
+}
+
+/// The loudest sample on the left and on the right of `audio` from `from` to `to` seconds (the one channel's twice,
+/// for a sound with one): nothing, for a stretch with no samples in it.
+fn loudest(audio: &AudioData, from: f64, to: f64) -> [f32; 2] {
+    let rate = f64::from(audio.sample_rate.max(1));
+    let side = |ch: &Vec<f32>| {
+        let first = ((from * rate).floor().max(0.0) as usize).min(ch.len());
+        let past = ((to * rate).ceil().max(0.0) as usize).clamp(first, ch.len());
+        ch[first..past].iter().filter(|s| s.is_finite()).fold(0.0f32, |most, s| most.max(s.abs()))
+    };
+    let left = audio.channels.first().map_or(0.0, side);
+    [left, audio.channels.get(1).map_or(left, side)]
+}
+
+/// Saves the edit as a copy in Edited sounds: the host says how it went ([`saved`]), and the strip shows it while the
+/// edits are still the ones saved. Whether there was an edit to save, and the host took it.
 fn save(host: &dyn Host) -> bool {
     let edit = {
+        let mut s = host.strip().borrow_mut();
+        let ask = s.saves + 1;
+        let edit = s.sound.as_ref().and_then(|o| {
+            let original = o.original.clone().filter(|_| !o.edits.now.is_empty())?;
+            let (source, changed, edits, name) = (o.source.clone(), o.changed, o.edits.now.clone(), o.name.clone());
+            Some((o.id, Saving { ask, source, original, changed, edits, name }))
+        });
+        let Some((id, edit)) = edit else { return false };
+        // The copy of these very edits is on its way already.
+        let same = |c: &Copy| c.id == id && c.source == edit.source && c.edits == edit.edits;
+        if s.copy.as_ref().is_some_and(|c| matches!(c.state, CopyState::Saving) && same(c)) {
+            return true;
+        }
+        s.saves = ask;
+        let (source, edits) = (edit.source.clone(), edit.edits.clone());
+        s.copy = Some(Copy { ask, id, source, edits, state: CopyState::Saving });
+        edit
+    };
+    let ask = edit.ask;
+    let taken = host.save(edit);
+    if !taken {
+        // Not taken: nothing is being saved.
+        let mut s = host.strip().borrow_mut();
+        if s.copy.as_ref().is_some_and(|c| c.ask == ask) {
+            s.copy = None;
+        }
+    }
+    show(host);
+    taken
+}
+
+/// A save came back ([`Host::save`]): the copy it made, or why there's none. Only the last one asked for counts.
+pub fn saved(host: &dyn Host, ask: u64, how: Result<PathBuf, String>) {
+    {
+        let mut s = host.strip().borrow_mut();
+        let Some(copy) = s.copy.as_mut().filter(|c| c.ask == ask) else { return };
+        copy.state = match how {
+            Ok(path) => CopyState::Saved(path),
+            Err(why) => CopyState::Failed(why),
+        };
+    }
+    show(host);
+}
+
+/// The copy of `o`'s edits as they are now, if that's the one last asked for.
+fn copy_of<'a>(o: &Opened, copy: Option<&'a Copy>) -> Option<&'a Copy> {
+    copy.filter(|c| c.id == o.id && c.source == o.source && c.edits == o.edits.now)
+}
+
+/// The words about the saved copy clicked: the host shows it in its folder.
+pub fn show_saved(host: &dyn Host) {
+    let path = {
         let s = host.strip().borrow();
-        s.sound.as_ref().and_then(|o| {
-            Some(Saving {
-                source: o.source.clone(),
-                original: o.original.clone()?,
-                changed: o.changed,
-                edits: o.edits.now.clone(),
-                name: o.name.clone(),
-            })
+        s.sound.as_ref().and_then(|o| match &copy_of(o, s.copy.as_ref())?.state {
+            CopyState::Saved(path) => Some(path.clone()),
+            _ => None,
         })
     };
-    let Some(edit) = edit.filter(|edit| !edit.edits.is_empty()) else { return false };
-    host.save(edit)
+    if let Some(path) = path {
+        host.reveal(path);
+    }
 }
 
 /// Drags the edit out of the app (its part, for `part`: a press inside the part picked on the strip that moved), as a
@@ -1306,6 +1591,13 @@ pub fn drag(host: &dyn Host, part: bool) {
         return;
     }
     carry(host, pick.filter(|_| part));
+}
+
+/// The drag handle picked up: it carries what its words say, the part picked or with none the edit (the sound itself,
+/// with no edits either).
+pub fn drag_handle(host: &dyn Host) {
+    let pick = host.strip().borrow().sound.as_ref().and_then(|o| o.pick.filter(|_| !slices::on(o)));
+    carry(host, pick);
 }
 
 /// Drags the edit out of the app, or only `part` of it (from and to, seconds into the edit: the part picked, or a
@@ -1332,116 +1624,307 @@ fn carry(host: &dyn Host, part: Option<(f64, f64)>) {
 
 /// Shows the strip as it is now.
 pub fn show(host: &dyn Host) {
-    let showing = showing(&host.strip().borrow());
+    let plays = host.plays();
+    let showing = showing(&mut host.strip().borrow_mut(), plays);
     host.show(showing);
 }
 
-/// The strip as it is now.
-fn showing(s: &Strip) -> Showing {
+/// The host laid the strip's screen out, or its size or how many pixels there are to a point changed: the room its
+/// waveform has from now on. The strip shows itself again when that's another room.
+pub fn laid_out(host: &dyn Host, room: Room) {
+    {
+        let mut s = host.strip().borrow_mut();
+        if s.room == Some(room) {
+            return;
+        }
+        s.room = Some(room);
+    }
+    show(host);
+}
+
+/// The strip as it is now. `plays`: its play is what plays ([`Host::plays`]).
+fn showing(s: &mut Strip, plays: bool) -> Showing {
     let mut show = Showing { open: s.open, ..Showing::default() };
-    let Some(o) = s.sound.as_ref() else { return show };
-    // With the Slices on, undo and redo are the cuts', and the chips name the pads.
+    let Strip { sound, columns, wave, room, copy, sending, .. } = s;
+    let Some(o) = sound.as_mut() else {
+        (*columns, *wave) = (None, None);
+        return show;
+    };
+    // A play that has stopped lights nothing any more.
+    if !plays {
+        o.played = None;
+    }
+    let o = &*o;
+    // With the Slices on, undo and redo are the cuts', and there are no chips: the foot says which slice is picked.
     let slicing = slices::on(o);
     (show.can_undo, show.can_redo) =
         if slicing { slices::steps(o) } else { (!o.edits.undo.is_empty(), !o.edits.redo.is_empty()) };
     show.name.clone_from(&o.name);
     show.colour = o.colour;
+    show.bpm = o.bpm.map_or(0.0, |bpm| bpm as f32);
     show.note.clone_from(&o.note);
     show.has_edits = !o.edits.now.is_empty();
-    show.chips = if slicing { slices::pad_chips(o) } else { chips(o) };
-    show.slices = slices::showing(o, s.sending);
+    let rate = f64::from(o.original.as_ref().map_or(1, |a| a.sample_rate.max(1)));
+    show.chips = if slicing { Vec::new() } else { chips(&o.edits.now, rate) };
+    show.slices = slices::showing(o, *sending);
     show.original = o.held.is_some();
     let gain = gain_now(o);
-    show.gain_text = gain_text(gain);
+    show.gain_text = db_text(gain);
     show.gain_changed = gain != 0.0;
-    show.drag_text = if o.edits.now.is_empty() { "Drag the sound" } else { "Drag the edit" }.to_owned();
-    let (Some(original), Some(made)) = (o.original.as_ref(), o.made.as_ref()) else { return show };
+    show.drag_text = if !slicing && o.pick.is_some() {
+        "Drag the part"
+    } else if o.edits.now.is_empty() {
+        "Drag the sound"
+    } else {
+        "Drag the edit"
+    }
+    .to_owned();
+    // The Save button, and how the save of these very edits went.
+    show.can_save = o.original.is_some() && show.has_edits;
+    match copy_of(o, copy.as_ref()).map(|c| &c.state) {
+        Some(CopyState::Saving) => {
+            show.save_text = "Saving\u{2026}".to_owned();
+            show.can_save = false;
+        }
+        Some(CopyState::Saved(path)) => {
+            show.save_text = "Saved".to_owned();
+            show.saved = true;
+            show.save_note = format!("Saved in {}", edit_copy::FOLDER);
+            show.save_detail = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        }
+        Some(CopyState::Failed(why)) => {
+            show.save_note = "Couldn't save the copy".to_owned();
+            show.save_detail.clone_from(why);
+            show.save_failed = true;
+        }
+        None => {}
+    }
+    let (Some(original), Some(made)) = (o.original.as_ref(), o.made.as_ref()) else {
+        (*columns, *wave) = (None, None);
+        return show;
+    };
     show.ready = o.note.is_empty();
+    let held = o.held.is_some();
     let seconds = made.audio.seconds();
     let (from, to) = view(o);
     let long = (to - from).max(1e-9);
     let across = |t: f64| ((t - from) / long) as f32;
-    // The waveform over what's shown, at full scale (so a gain shows), its lines the loudest of their share.
-    let first = ((from / made.step).floor() as usize).min(made.steps.len());
-    let past = ((to / made.step).ceil() as usize).clamp(first, made.steps.len());
-    let lines = sound_part::lines(&made.steps[first..past], POINTS);
-    show.shape = wave_path(&lines);
-    show.points = lines.len();
+    show.played =
+        o.played.map(|played| (self::across(played.from, (from, to)), self::across(played.place, (from, to))));
     show.view_seconds = long as f32;
     show.view_from = from as f32;
     show.zoomed = o.zoom.is_some();
-    let hits: Vec<f64> = made.hits.iter().filter(|h| **h >= from && **h <= to).map(|h| (h - from) / long).collect();
-    show.hit_marks = sound_part::marks(&hits);
+    // With the Slices on: how many there are, and the one picked (which the zoom goes to).
+    show.facts = if slicing { slices::heading(o, seconds) } else { facts(seconds, o.bpm) };
+    let on_hit = |t: f64| made.hits.iter().any(|hit| (hit - t).abs() < ON_HIT);
     match o.pick {
-        // The Slices have their own: how many, and the one picked (which the zoom goes to).
-        _ if slicing => {
-            show.has_part = slices::picked(o).is_some();
-            show.picked_text = slices::heading(o, seconds);
-        }
+        _ if slicing => show.has_part = slices::picked(o).is_some(),
         Some((a, b)) => {
             show.has_part = true;
-            show.pick_from = across(a);
-            show.pick_to = across(b);
-            show.picked_text = picked_text(b - a, o.bpm);
+            (show.pick_from, show.pick_to) = (across(a), across(b));
+            show.pick_on_hits = (on_hit(a), on_hit(b));
         }
-        None => show.picked_text = sound_part::length_text(seconds),
-    }
-    // The corner fades: as the edits make them, or where a handle is being dragged.
-    let rate = f64::from(original.sample_rate.max(1));
-    let (fade_in, fade_out) = corners(original.len(), &made.edits);
-    let mut fade_in = fade_in.map_or(0.0, |(_, n)| n as f64 / rate);
-    let mut fade_out = seconds - fade_out.map_or(0.0, |(_, n)| n as f64 / rate);
-    match o.dragging {
-        Some((true, at)) => fade_in = at.min(fade_out),
-        Some((false, at)) => fade_out = at.max(fade_in),
         None => {}
     }
+    // The corner fades, how long each is: as the edit on show has them; as the edits have them now, when they're all
+    // that an edit still being made changes; or where a handle is being dragged. The waveform takes their shape at
+    // once, with no wait for the edit to be made.
+    let was = corner_seconds(original.len(), &made.edits, rate);
+    let only_fades = made.edits != o.edits.now
+        && length_after(original, &o.edits.now) == made.audio.len()
+        && without_corners(original.len(), &made.edits) == without_corners(original.len(), &o.edits.now);
+    let mut now = if only_fades { corner_seconds(original.len(), &o.edits.now, rate) } else { was };
+    match o.dragging {
+        Some((true, at)) => now.0 = at.min(seconds - now.1).max(0.0),
+        Some((false, at)) => now.1 = (seconds - at.max(now.0)).max(0.0),
+        None => {}
+    }
+    let (fade_in, fade_out) = (now.0, seconds - now.1);
     show.fade_in = across(fade_in);
     show.fade_out = across(fade_out);
-    show.fade_in_shown = from <= 1e-9 || fade_in > from;
-    show.fade_out_shown = to >= seconds - 1e-9 || fade_out < to;
-    show.fade_in_curve = fade_curve(across(0.0), across(fade_in), true);
-    show.fade_out_curve = fade_curve(across(fade_out), across(seconds), false);
-    show.ruler = ruler(from, to, o.bpm);
+    // A handle that's being dragged stays, wherever it has got to: taken away, its drag would never end.
+    show.fade_in_shown = from <= 1e-9 || fade_in > from || matches!(o.dragging, Some((true, _)));
+    show.fade_out_shown = to >= seconds - 1e-9 || fade_out < to || matches!(o.dragging, Some((false, _)));
+    (show.fade_in_curve, show.fade_in_shade) = fade_paths(across(0.0), across(fade_in), true);
+    (show.fade_out_curve, show.fade_out_shade) = fade_paths(across(fade_out), across(seconds), false);
+    if let Some((fade_in, _)) = o.dragging.filter(|_| !slicing) {
+        // The edits as they'd be with the handle let go here: its chip counts along.
+        let next = with_corner(o, original, fade_in, if fade_in { now.0 } else { now.1 });
+        show.fade_text = fade_text(&next, original.len(), rate, fade_in);
+        show.chips = chips(&next, rate);
+    }
+    // The meter: what's heard (the original, while that's held) at its loudest; and as it plays, the level it has
+    // got to.
+    let heard = o.outline.as_ref().filter(|_| held).unwrap_or(&made.outline);
+    let hold = heard.peaks().map(meter_place);
+    show.levels = Levels {
+        level: o.played.map_or(hold, |played| played.level),
+        hold,
+        peak_text: peak_text(heard.peak()),
+        over: heard.peak() > OVER,
+    };
+    show.too_loud = made.outline.peak() > OVER;
+    // The ruler has as many marks as the screen has room for, a number beside each: all of them until the host has
+    // said what room there is. Then the screen's waveform.
+    let room = room.filter(Room::fits);
+    let most = room.map_or(MOST_MARKS, |room| ((room.width - 2.0 * room.inset) / MARK_ROOM).clamp(1.0, MOST_MARKS));
+    show.ruler = ruler(from, to, o.bpm, most);
+    let Some(room) = room else {
+        (*columns, *wave) = (None, None);
+        return show;
+    };
+    let made_columns = columns_now(columns, &room, o, (original, made), (from, to));
+    let (shown, before) = if held || now == was {
+        (made_columns, None)
+    } else {
+        let per = room.per_column(to - from);
+        let (shown, changed) = screen::refaded(&made_columns, (from, per, seconds), was, now);
+        // While the handle is dragged, how the sound was shows behind what it's becoming.
+        let before = changed.filter(|_| o.dragging.is_some()).map(|(first, past)| {
+            (first, made_columns[first..past].iter().map(|c| (c.top, c.bottom)).collect::<Arc<[_]>>())
+        });
+        (shown.into(), before)
+    };
+    let hits = made.hits.iter().filter(|hit| **hit >= from && **hit <= to).map(|hit| across(*hit)).collect();
+    let marks = show.ruler.iter().map(|mark| (mark.at, mark.bar)).collect();
+    let next = Wave { room, columns: shown, before, original: held, marks, hits };
+    // The same one again while nothing in it has changed: the host draws its picture only when it's given another.
+    let next = match wave.take() {
+        Some(last) if *last == next => last,
+        _ => Arc::new(next),
+    };
+    *wave = Some(next.clone());
+    show.wave = Some(next);
     show
 }
 
-/// "Gain −1.5 dB", "Gain +2.0 dB", "Gain 0.0 dB".
-fn gain_text(db: f32) -> String {
-    if db.abs() < 0.01 {
-        "Gain 0.0 dB".to_owned()
+/// The waveform's columns for the sound `o` (read as `original`, its edit `made`) over the stretch on show, a column
+/// to each of the room's pixels: the edit's; or, while the original is held, the original's, each moment of it where
+/// the edit has it. Worked out once and kept (`kept`) until the edit, the stretch or the room is another.
+fn columns_now(
+    kept: &mut Option<Columns>,
+    room: &Room,
+    o: &Opened,
+    (original, made): (&Arc<AudioData>, &Made),
+    (from, to): (f64, f64),
+) -> Arc<[Column]> {
+    let held = o.held.is_some();
+    let (count, per) = (room.columns(), room.per_column(to - from));
+    if let Some(c) = kept.as_ref()
+        && Arc::ptr_eq(&c.of, &made.outline)
+        && c.original == held
+        && c.from == from
+        && c.per == per
+        && c.columns.len() == count
+    {
+        return c.columns.clone();
+    }
+    let columns: Arc<[Column]> = match o.outline.as_ref().filter(|_| held) {
+        Some(outline) => {
+            let rate = f64::from(original.sample_rate.max(1));
+            let (frames, seconds) = (original.len(), made.audio.seconds());
+            // Where a moment of the edit came from in the original: nowhere, outside the edit.
+            let place = |at: f64| {
+                if (0.0..=seconds).contains(&at) {
+                    edit::place_before(frames, &made.edits, (at * rate).round() as usize) as f64 / rate
+                } else {
+                    f64::NAN
+                }
+            };
+            screen::columns(original, outline, from, per, count, &place)
+        }
+        None => screen::columns(&made.audio, &made.outline, from, per, count, &|at| at),
+    }
+    .into();
+    *kept = Some(Columns { of: made.outline.clone(), original: held, from, per, columns: columns.clone() });
+    columns
+}
+
+/// How long the corner fades among `edits` are, in and out (seconds at `rate` frames a second; 0 for none), of a
+/// sound `frames` long before them.
+fn corner_seconds(frames: usize, edits: &[Edit], rate: f64) -> (f64, f64) {
+    let (fade_in, fade_out) = corners(frames, edits);
+    let seconds = |corner: Corner| corner.map_or(0.0, |(_, long)| long as f64 / rate);
+    (seconds(fade_in), seconds(fade_out))
+}
+
+/// `edits` (of a sound `frames` long before them) without their corner fades: two lists that leave the same differ
+/// only in those.
+fn without_corners(frames: usize, edits: &[Edit]) -> Vec<Edit> {
+    let (fade_in, fade_out) = corners(frames, edits);
+    let corner = |i: usize| [fade_in, fade_out].iter().any(|c| c.is_some_and(|(at, _)| at == i));
+    edits.iter().enumerate().filter(|(i, _)| !corner(*i)).map(|(_, e)| *e).collect()
+}
+
+/// A number of dB with its sign: "−3.0", "+2.0", "0.0".
+fn signed(db: f32) -> String {
+    if db.abs() < 0.05 {
+        "0.0".to_owned()
     } else if db < 0.0 {
-        format!("Gain \u{2212}{:.1} dB", -db)
+        format!("\u{2212}{:.1}", -db)
     } else {
-        format!("Gain +{db:.1} dB")
+        format!("+{db:.1}")
     }
 }
 
-/// What's picked, as the strip's heading says it: "0.47 s picked · 1 beat" (with the tempo known).
-fn picked_text(seconds: f64, bpm: Option<f64>) -> String {
-    let mut text = format!("{} picked", sound_part::length_text(seconds));
-    if let Some(bpm) = bpm {
-        let beats = seconds * bpm / 60.0;
-        let whole = beats.round();
-        if whole >= 1.0 && (beats - whole).abs() < 0.08 {
-            let bars = whole / 4.0;
-            if whole >= 8.0 && bars.fract() == 0.0 {
-                let _ = write!(text, " · {bars} bar{}", if bars == 1.0 { "" } else { "s" });
-            } else {
-                let _ = write!(text, " · {whole} beat{}", if whole == 1.0 { "" } else { "s" });
-            }
-        } else if beats >= 0.1 {
-            let _ = write!(text, " · {beats:.1} beats");
-        }
+/// A gain as the stepper says it: "−1.5 dB", "+2.0 dB", "0.0 dB".
+fn db_text(db: f32) -> String {
+    format!("{} dB", signed(db))
+}
+
+/// A gain as its chip says it: "Gain −1.5 dB".
+fn gain_text(db: f32) -> String {
+    format!("Gain {}", db_text(db))
+}
+
+/// The loudest a sound gets (1 is full scale) as the meter's foot says it, in dB against full scale: "−3.0", "+6.0";
+/// nothing for silence.
+fn peak_text(peak: f32) -> String {
+    if peak > SILENCE { signed(20.0 * peak.log10()) } else { String::new() }
+}
+
+/// What a sound is, under its name: how long, and with its tempo known that and the beats or bars it comes to
+/// ("3.75 s · 128 BPM · 2 bars").
+fn facts(seconds: f64, bpm: Option<f64>) -> String {
+    let mut text = sound_part::length_text(seconds);
+    if let Some(bpm) = bpm.filter(|bpm| *bpm > 0.0) {
+        let _ = write!(text, " \u{b7} {} BPM", (bpm * 10.0).round() / 10.0);
+        beats(&mut text, seconds, bpm);
     }
     text
 }
 
-/// The edits as chips: "Fade in 6 ms", "Gain −1.5 dB"…, the last one lit.
-fn chips(o: &Opened) -> Vec<Chip> {
-    let rate = f64::from(o.original.as_ref().map_or(1, |a| a.sample_rate.max(1)));
-    let count = o.edits.now.len();
-    o.edits.now.iter().enumerate().map(|(i, e)| Chip { text: chip_text(e, rate), last: i + 1 == count }).collect()
+/// How long a part of the sound is, as the badge over it says it: "0.94 s", and with the tempo known (`bpm` over 0)
+/// "0.94 s · 2 beats".
+pub fn part_text(seconds: f64, bpm: f64) -> String {
+    let mut text = sound_part::length_text(seconds);
+    if bpm > 0.0 {
+        beats(&mut text, seconds, bpm);
+    }
+    text
+}
+
+/// Adds the beats `seconds` come to at `bpm` to `text`: " · 1 beat", " · 4 bars" for whole bars from two up,
+/// " · 1.5 beats"; nothing for less than a tenth of one.
+fn beats(text: &mut String, seconds: f64, bpm: f64) {
+    let beats = seconds * bpm / 60.0;
+    let whole = beats.round();
+    if whole >= 1.0 && (beats - whole).abs() < 0.08 {
+        let bars = whole / 4.0;
+        if whole >= 8.0 && bars.fract() == 0.0 {
+            let _ = write!(text, " \u{b7} {bars} bars");
+        } else {
+            let _ = write!(text, " \u{b7} {whole} beat{}", if whole == 1.0 { "" } else { "s" });
+        }
+    } else if beats >= 0.1 {
+        let _ = write!(text, " \u{b7} {beats:.1} beats");
+    }
+}
+
+/// `edits` as chips: "Fade in 6 ms", "Gain −1.5 dB"…, the last one lit.
+fn chips(edits: &[Edit], rate: f64) -> Vec<Chip> {
+    let count = edits.len();
+    edits.iter().enumerate().map(|(i, e)| Chip { text: chip_text(e, rate), last: i + 1 == count }).collect()
 }
 
 fn chip_text(e: &Edit, rate: f64) -> String {
@@ -1463,39 +1946,48 @@ fn span_length(seconds: f64) -> String {
     if seconds < 1.0 { format!("{} ms", (seconds * 1000.0).round()) } else { sound_part::length_text(seconds) }
 }
 
-/// The lines of a waveform at full scale, as a path `lines.len()` across and 100 high: each a line up and down from
-/// the middle, as long as its loudest sample (full scale is the whole height).
-fn wave_path(lines: &[f32]) -> String {
-    let mut out = String::with_capacity(lines.len() * 16);
-    for (i, p) in lines.iter().enumerate() {
-        let half = (f64::from(*p) * 50.0).clamp(0.5, 50.0);
-        let _ = write!(out, "M{i}.5 {:.1}V{:.1}", 50.0 - half, 50.0 + half);
+/// What a fade's handle says while it's dragged, of `edits` as they'd be with it let go there (of a sound `frames`
+/// long before them): "Fade out 620 ms"; or, back in its corner, "No fade out".
+fn fade_text(edits: &[Edit], frames: usize, rate: f64, fade_in: bool) -> String {
+    let (fade_in_now, fade_out_now) = corners(frames, edits);
+    let way = if fade_in { "in" } else { "out" };
+    match if fade_in { fade_in_now } else { fade_out_now } {
+        Some((_, long)) => format!("Fade {way} {}", span_length(long as f64 / rate)),
+        None => format!("No fade {way}"),
     }
-    out
 }
 
-/// A corner fade's curve over the waveform, a path 1000 across and 100 high: from silence at the bottom at `from` to
-/// full at the top at `to` (0 to 1 across, either may be out of sight), a fade in; or the other way, a fade out. None
-/// for a fade that isn't there.
-fn fade_curve(from: f32, to: f32, fade_in: bool) -> String {
+/// A corner fade over the waveform, as two paths 1000 across and 100 high: its curve, from silence at the bottom at
+/// `from` to full at the top at `to` (0 to 1 across, either may be out of sight) for a fade in, or the other way for
+/// a fade out; and what it takes away, the shape between the curve and the top. Both empty for a fade that isn't
+/// there.
+fn fade_paths(from: f32, to: f32, fade_in: bool) -> (String, String) {
     if to - from <= 1e-6 {
-        return String::new();
+        return (String::new(), String::new());
     }
-    let mut out = String::new();
+    let mut curve = String::new();
     const STEPS: usize = 24;
     for i in 0..=STEPS {
         let x = i as f32 / STEPS as f32;
         let level = if fade_in { CORNER.gain(x) } else { CORNER.gain(1.0 - x) };
         let px = (from + (to - from) * x) * 1000.0;
         let py = 100.0 - level * 100.0;
-        let _ = write!(out, "{}{px:.1} {py:.1}", if i == 0 { "M" } else { " L" });
+        let _ = write!(curve, "{}{px:.1} {py:.1}", if i == 0 { "M" } else { " L" });
     }
-    out
+    // Up to the top at the fade's silent end, and back along the curve.
+    let corner = if fade_in { from } else { to } * 1000.0;
+    let shade = format!("{curve} L{corner:.1} 0.0 Z");
+    (curve, shade)
 }
 
+/// The most marks the ruler ever has, and how far apart its marks are at the least (points): room for a number beside
+/// each ("12.3").
+const MOST_MARKS: f64 = 18.0;
+const MARK_ROOM: f64 = 40.0;
+
 /// The ruler's marks between `from` and `to` seconds: bars and beats from the start when the tempo is known ("1",
-/// "1.2", "1.3", "1.4", "2"…), else seconds; never more than about a dozen and a half.
-fn ruler(from: f64, to: f64, bpm: Option<f64>) -> Vec<Mark> {
+/// "1.2", "1.3", "1.4", "2"…), else seconds; never more than `most` of them (or one more, at the very end).
+fn ruler(from: f64, to: f64, bpm: Option<f64>, most: f64) -> Vec<Mark> {
     let long = to - from;
     if long <= 0.0 {
         return Vec::new();
@@ -1504,14 +1996,13 @@ fn ruler(from: f64, to: f64, bpm: Option<f64>) -> Vec<Mark> {
     let mut mark = |t: f64, text: String, bar: bool| {
         marks.push(Mark { at: ((t - from) / long) as f32, text, bar });
     };
-    const MOST: f64 = 18.0;
     match bpm {
         Some(bpm) => {
             let beat = 60.0 / bpm;
-            // Every beat, or every so many bars.
+            // Every beat, every other beat, or every so many bars.
             let beats_each = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
                 .into_iter()
-                .find(|n| long / (beat * n) <= MOST)
+                .find(|n| long / (beat * n) <= most)
                 .unwrap_or(256.0);
             let each = beat * beats_each;
             let mut k = (from / each).ceil() as i64;
@@ -1529,7 +2020,7 @@ fn ruler(from: f64, to: f64, bpm: Option<f64>) -> Vec<Mark> {
         None => {
             let each = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0]
                 .into_iter()
-                .find(|e| long / e <= MOST)
+                .find(|e| long / e <= most)
                 .unwrap_or(60.0);
             let decimals = if each >= 1.0 {
                 0
@@ -1569,7 +2060,7 @@ pub fn for_screens(host: &dyn Host, audio: AudioData, part: Option<(f64, f64)>, 
         let s = host.strip().borrow();
         (s.asked, s.sound.as_ref().map_or(0, |o| o.id))
     };
-    arrived(host, ask, id, Answer::Read(Ok((Arc::new(audio), None))));
+    arrived(host, ask, id, Answer::Read(Ok(Read::of(audio, None))));
     for id in tools {
         run_action(host, id);
     }
@@ -1601,25 +2092,12 @@ mod tests {
     }
 
     fn opened(frames: usize, edits: Vec<Edit>) -> Opened {
+        let read = Read::of(sound(frames), None);
         Opened {
-            id: 1,
-            source: Source { path: "a.wav".into(), span: None },
-            name: "a".into(),
-            colour: 0,
-            bpm: None,
-            original: Some(Arc::new(sound(frames))),
-            changed: None,
-            note: String::new(),
+            original: Some(read.audio),
+            outline: Some(read.outline),
             edits: Edits { now: edits, ..Edits::default() },
-            made: None,
-            pick: None,
-            zoom: None,
-            dragging: None,
-            held: None,
-            pressed: false,
-            sliced: None,
-            slice: None,
-            slice_press: None,
+            ..Opened::new(1, Source { path: "a.wav".into(), span: None }, "a".into(), 0, None)
         }
     }
 
@@ -1705,30 +2183,42 @@ mod tests {
 
     #[test]
     fn the_ruler_counts_bars_and_beats_or_seconds() {
+        let texts = |marks: &[Mark]| marks.iter().map(|m| m.text.clone()).collect::<Vec<_>>();
         // 120 BPM: a beat is half a second.
-        let marks = ruler(0.0, 2.0, Some(120.0));
-        let texts: Vec<&str> = marks.iter().map(|m| m.text.as_str()).collect();
-        assert_eq!(texts, ["1", "1.2", "1.3", "1.4", "2"]);
+        let marks = ruler(0.0, 2.0, Some(120.0), MOST_MARKS);
+        assert_eq!(texts(&marks), ["1", "1.2", "1.3", "1.4", "2"]);
         assert!(marks[0].bar && !marks[1].bar);
         assert!((marks[4].at - 1.0).abs() < 1e-6);
         // Long: every so many bars, never too many.
-        assert!(ruler(0.0, 120.0, Some(120.0)).len() <= 18);
-        let marks = ruler(0.25, 1.0, None);
+        assert!(ruler(0.0, 120.0, Some(120.0), MOST_MARKS).len() <= 18);
+        let marks = ruler(0.25, 1.0, None, MOST_MARKS);
         assert!(marks.len() <= 18 && marks.first().is_some_and(|m| m.at >= 0.0));
-        assert_eq!(
-            ruler(0.0, 3.0, None).iter().map(|m| m.text.as_str()).collect::<Vec<_>>()[..3],
-            ["0.0", "0.2", "0.4"]
-        );
+        assert_eq!(texts(&ruler(0.0, 3.0, None, MOST_MARKS))[..3], ["0.0", "0.2", "0.4"]);
+        // A narrow screen has room for fewer: four bars at 128 BPM count every other beat with room for 13 marks, and
+        // only the bars with room for 6.
+        let bars = 16.0 * 60.0 / 128.0;
+        assert_eq!(ruler(0.0, bars, Some(128.0), MOST_MARKS).len(), 17);
+        assert_eq!(texts(&ruler(0.0, bars, Some(128.0), 13.0)), ["1", "1.3", "2", "2.3", "3", "3.3", "4", "4.3", "5"]);
+        assert_eq!(texts(&ruler(0.0, bars, Some(128.0), 6.0)), ["1", "2", "3", "4", "5"]);
+        assert_eq!(texts(&ruler(0.0, 3.0, None, 6.0)), ["0.0", "0.5", "1.0", "1.5", "2.0", "2.5", "3.0"]);
     }
 
     #[test]
-    fn what_is_picked_reads_in_beats_with_the_tempo_known() {
-        assert_eq!(picked_text(0.47, None), "0.47 s picked");
-        assert_eq!(picked_text(0.469, Some(128.0)), "0.47 s picked · 1 beat");
-        assert_eq!(picked_text(7.5, Some(128.0)), "7.50 s picked · 4 bars");
-        assert_eq!(picked_text(0.7, Some(128.0)), "0.70 s picked · 1.5 beats");
-        assert_eq!(gain_text(-1.5), "Gain \u{2212}1.5 dB");
+    fn lengths_read_in_beats_with_the_tempo_known() {
+        assert_eq!(part_text(0.47, 0.0), "0.47 s");
+        assert_eq!(part_text(0.469, 128.0), "0.47 s · 1 beat");
+        assert_eq!(part_text(0.9375, 128.0), "0.94 s · 2 beats");
+        assert_eq!(part_text(7.5, 128.0), "7.50 s · 4 bars");
+        assert_eq!(part_text(0.7, 128.0), "0.70 s · 1.5 beats");
+        assert_eq!(facts(3.75, Some(128.0)), "3.75 s · 128 BPM · 2 bars");
+        assert_eq!(facts(2.0, Some(90.5)), "2.00 s · 90.5 BPM · 3 beats");
+        assert_eq!(facts(1.2, None), "1.20 s");
+        assert_eq!(db_text(-1.5), "\u{2212}1.5 dB");
+        assert_eq!(db_text(0.0), "0.0 dB");
         assert_eq!(gain_text(2.0), "Gain +2.0 dB");
+        assert_eq!(peak_text(0.5), "\u{2212}6.0");
+        assert_eq!(peak_text(2.0), "+6.0");
+        assert_eq!((peak_text(1.0), peak_text(0.0)), ("0.0".to_owned(), String::new()));
         assert_eq!(
             chip_text(&Edit::Fade { span: Span::new(0, 6), way: Way::In, curve: CORNER }, 1_000.0),
             "Fade in 6 ms"
@@ -1736,24 +2226,462 @@ mod tests {
     }
 
     #[test]
-    fn a_fades_curve_runs_from_silence_to_full() {
-        let curve = fade_curve(0.0, 0.5, true);
+    fn a_fades_curve_runs_from_silence_to_full_with_what_it_takes_away_above_it() {
+        let (curve, shade) = fade_paths(0.0, 0.5, true);
         assert!(curve.starts_with("M0.0 100.0") && curve.ends_with("500.0 0.0"), "{curve}");
-        let curve = fade_curve(0.5, 1.0, false);
+        assert_eq!(shade, format!("{curve} L0.0 0.0 Z"));
+        let (curve, shade) = fade_paths(0.5, 1.0, false);
         assert!(curve.starts_with("M500.0 0.0") && curve.ends_with("1000.0 100.0"), "{curve}");
-        assert!(fade_curve(0.3, 0.3, true).is_empty());
+        assert_eq!(shade, format!("{curve} L1000.0 0.0 Z"));
+        assert_eq!(fade_paths(0.3, 0.3, true), (String::new(), String::new()));
     }
 
     #[test]
-    fn the_outline_is_the_loudest_of_each_step_at_full_scale() {
+    fn the_edit_is_the_original_itself_until_there_are_edits() {
         let mut a = sound(4_000);
         a.channels[0][1_500] = -0.9;
-        let made = make(&a, Vec::new());
-        assert_eq!(made.steps.len(), 4_000);
-        assert!((made.steps[1_500] - 0.9).abs() < 1e-6);
-        let made = make(&a, vec![Edit::Gain { db: -6.0, span: None }]);
-        assert!(made.steps[0] < 0.26, "a gain shows: {}", made.steps[0]);
-        let path = wave_path(&[1.0, 0.0]);
-        assert_eq!(path, "M0.5 0.0V100.0M1.5 49.5V50.5");
+        let read = Read::of(a, None);
+        let made = make(&read.audio, &read.outline, Vec::new());
+        assert!(Arc::ptr_eq(&made.audio, &read.audio) && Arc::ptr_eq(&made.outline, &read.outline));
+        assert!((made.outline.peak() - 0.9).abs() < 1e-6);
+        let (high, low) = made.outline.steps_for_tests();
+        assert_eq!((high.len(), high[1_500], low[1_500]), (4_000, 0.0, -0.9));
+        // With edits it's a sound of its own, and its outline is the edit's: a gain shows.
+        let made = make(&read.audio, &read.outline, vec![Edit::Gain { db: -6.0, span: None }]);
+        assert!(!Arc::ptr_eq(&made.audio, &read.audio) && !Arc::ptr_eq(&made.outline, &read.outline));
+        assert!((made.outline.peak() - 0.451).abs() < 1e-3, "a gain shows: {}", made.outline.peak());
+    }
+
+    #[test]
+    fn two_lists_that_differ_only_in_their_corner_fades_leave_the_same_without_them() {
+        let fade = |frames: usize| Edit::Fade { span: Span::new(1_000 - frames, 1_000), way: Way::Out, curve: CORNER };
+        let gain = Edit::Gain { db: -3.0, span: None };
+        assert_eq!(without_corners(1_000, &[gain, fade(100)]), [gain]);
+        assert_eq!(without_corners(1_000, &[fade(400), gain]), without_corners(1_000, &[gain]));
+        assert_eq!(corner_seconds(1_000, &[gain, fade(100)], 1_000.0), (0.0, 0.1));
+        // A fade a trim has baked in is no corner's any more: it stays.
+        let baked = [fade(100), Edit::Trim(Span::new(0, 950))];
+        assert_eq!(without_corners(1_000, &baked), baked);
+        assert_eq!(corner_seconds(1_000, &baked, 1_000.0), (0.0, 0.0));
+    }
+
+    fn room() -> Room {
+        Room { width: 120.0, height: 100.0, inset: 10.0, band: 20.0, top: 24.0, bottom: 96.0, scale: 1.0 }
+    }
+
+    /// A strip open on a sound `frames` long with `edits`, read and made, with room for a waveform 100 columns wide.
+    fn strip(frames: usize, edits: Vec<Edit>) -> Strip {
+        let mut o = opened(frames, edits.clone());
+        o.made = Some(make(o.original.as_ref().unwrap(), o.outline.as_ref().unwrap(), edits));
+        Strip { open: true, sound: Some(o), room: Some(room()), ..Strip::default() }
+    }
+
+    /// Makes the open sound's edit again from its edits as they are now, as a make that came back does.
+    fn made_again(s: &mut Strip) {
+        let o = s.sound.as_mut().unwrap();
+        o.made = Some(make(o.original.as_ref().unwrap(), o.outline.as_ref().unwrap(), o.edits.now.clone()));
+    }
+
+    #[test]
+    fn the_waveform_is_handed_out_again_until_something_in_it_changes() {
+        let mut s = strip(1_000, Vec::new());
+        let wave = showing(&mut s, false).wave.expect("there's room: a waveform");
+        assert_eq!((wave.columns.len(), wave.original, wave.before.is_none()), (100, false, true));
+        // From this far out (10 ms a column) it's drawn the same above and below, as far as it gets either way.
+        let first = wave.columns[0];
+        assert!((first.top, first.bottom) == (0.5, -0.5) && (first.body - 0.6).abs() < 1e-6, "{first:?}");
+        // The ruler's marks go behind it: as many as this room has space for a number beside (half a second apart),
+        // the whole seconds' brighter.
+        assert_eq!((wave.marks.len(), wave.marks[0], wave.marks[1]), (3, (0.0, true), (0.5, false)));
+        // Shown again with nothing changed: the very same one, so the host draws nothing.
+        assert!(Arc::ptr_eq(&showing(&mut s, false).wave.unwrap(), &wave));
+        // Zoomed in on its first half: another.
+        s.sound.as_mut().unwrap().zoom = Some((0.0, 0.5));
+        let zoomed = showing(&mut s, false).wave.unwrap();
+        assert!(!Arc::ptr_eq(&zoomed, &wave) && zoomed.marks != wave.marks);
+        // Another room: as many columns as it has pixels.
+        s.room = Some(Room { width: 220.0, ..room() });
+        assert_eq!(showing(&mut s, false).wave.unwrap().columns.len(), 200);
+        // No room a waveform fits in: none, and nothing kept of the last.
+        s.room = Some(Room { width: 12.0, ..room() });
+        assert!(showing(&mut s, false).wave.is_none() && s.columns.is_none() && s.wave.is_none());
+        s.room = None;
+        assert!(showing(&mut s, false).wave.is_none());
+        // A strip with no sound in it keeps nothing either.
+        let mut s = strip(1_000, Vec::new());
+        assert!(showing(&mut s, false).wave.is_some() && s.columns.is_some());
+        s.sound = None;
+        assert!(showing(&mut s, false).wave.is_none() && s.columns.is_none() && s.wave.is_none());
+    }
+
+    #[test]
+    fn a_fade_reshapes_the_waveform_while_its_handle_is_dragged() {
+        let mut s = strip(1_000, Vec::new());
+        let plain = showing(&mut s, false).wave.unwrap();
+        // The fade out's handle dragged back to 0.6 s: the last 0.4 s fall away at once, with no edit made.
+        s.sound.as_mut().unwrap().dragging = Some((false, 0.6));
+        let dragged = showing(&mut s, false);
+        let wave = dragged.wave.clone().unwrap();
+        assert_eq!(wave.columns[60], plain.columns[60]);
+        assert!(wave.columns[61].top < 0.5 && wave.columns[99].top < 0.05, "{:?}", wave.columns[99]);
+        // How it was shows behind, over the columns the fade changes.
+        let (first, before) = wave.before.clone().expect("how it was");
+        assert_eq!((first, before.len(), before[0]), (61, 39, (0.5, -0.5)));
+        assert_eq!(dragged.fade_text, "Fade out 400 ms");
+        assert_eq!(dragged.chips, [Chip { text: "Fade out 400 ms".into(), last: true }]);
+        assert!((dragged.fade_out - 0.6).abs() < 1e-6 && dragged.fade_out_curve.starts_with("M600.0 0.0"));
+        assert!(dragged.fade_out_shade.ends_with(" L1000.0 0.0 Z") && dragged.fade_in_shade.is_empty());
+        // Let go: the edits have the fade before the edit is made with it. The waveform keeps its shape meanwhile,
+        // with nothing behind it now, and the handle stays where it was let go.
+        let o = s.sound.as_mut().unwrap();
+        o.dragging = None;
+        o.edits.change(vec![Edit::Fade { span: Span::new(600, 1_000), way: Way::Out, curve: CORNER }]);
+        let waiting = showing(&mut s, false);
+        let kept = waiting.wave.clone().unwrap();
+        assert!(kept.columns == wave.columns && kept.before.is_none() && waiting.fade_text.is_empty());
+        assert!((waiting.fade_out - 0.6).abs() < 1e-6);
+        // Made: the edit's own columns, as good as the same.
+        made_again(&mut s);
+        let made = showing(&mut s, false).wave.unwrap();
+        let apart =
+            made.columns.iter().zip(kept.columns.iter()).map(|(a, b)| (a.top - b.top).abs()).fold(0.0, f32::max);
+        assert!(apart < 0.02, "{apart}");
+        // Dragged back into its corner: no fade, the sound back up, and the fade there was behind it.
+        s.sound.as_mut().unwrap().dragging = Some((false, 1.0));
+        let none = showing(&mut s, false);
+        assert_eq!(none.fade_text, "No fade out");
+        assert!(none.chips.is_empty());
+        let back = none.wave.unwrap();
+        assert!((back.columns[80].top - 0.5).abs() < 0.02, "{:?}", back.columns[80]);
+        assert_eq!(back.before.as_ref().map(|(first, _)| *first), Some(61));
+        // Another edit than a fade waiting to be made: the waveform waits for it.
+        let o = s.sound.as_mut().unwrap();
+        o.dragging = None;
+        o.edits.change(vec![o.edits.now[0], Edit::Reverse(None)]);
+        assert!(showing(&mut s, false).wave.unwrap().columns == made.columns);
+    }
+
+    #[test]
+    fn the_original_shows_in_grey_while_it_is_held() {
+        let mut s = strip(1_000, vec![Edit::Gain { db: -6.0, span: None }, Edit::Trim(Span::new(500, 1_000))]);
+        let edit = showing(&mut s, false);
+        let wave = edit.wave.clone().unwrap();
+        assert!(!wave.original && wave.columns[0].top < 0.3, "{:?}", wave.columns[0]);
+        s.sound.as_mut().unwrap().held = Some(true);
+        let held = showing(&mut s, true);
+        let original = held.wave.clone().unwrap();
+        // The half second the trim kept, as it was before the gain; and the meter reads the original too.
+        assert!(held.original && original.original && original.columns.len() == 100);
+        assert!((original.columns[50].top - 0.5).abs() < 1e-6, "{:?}", original.columns[50]);
+        assert_eq!((edit.levels.peak_text.as_str(), held.levels.peak_text.as_str()), ("\u{2212}12.0", "\u{2212}6.0"));
+        // Let go: the edit again, with nothing worked out afresh but its columns.
+        s.sound.as_mut().unwrap().held = None;
+        assert!(showing(&mut s, false).wave.unwrap().columns == wave.columns);
+    }
+
+    #[test]
+    fn the_meter_reads_decibels_up_to_full_scale() {
+        assert_eq!(meter_place(1.0), 1.0);
+        assert_eq!(meter_place(4.0), 1.0, "over full scale is its top");
+        assert_eq!((meter_place(0.0), meter_place(f32::NAN), meter_place(0.001)), (0.0, 0.0, 0.0));
+        // The last 6 dB under full scale are amber.
+        assert!((meter_place(0.501_187) - METER_AMBER).abs() < 1e-4);
+        // Left and right apart, from the samples themselves.
+        let both =
+            AudioData { sample_rate: RATE, channels: vec![vec![0.25; 100], vec![-0.5; 100]], ..AudioData::default() };
+        assert_eq!(loudest(&both, 0.01, 0.02), [0.25, 0.5]);
+        assert_eq!(loudest(&both, 0.5, 0.6), [0.0, 0.0], "past its end");
+        assert_eq!(loudest(&both, 0.05, 0.05), [0.0, 0.0], "no time at all");
+        assert_eq!(loudest(&sound(100), -1.0, 0.05), [0.5, 0.5], "one channel is both sides");
+    }
+
+    #[test]
+    fn the_meter_shows_the_edits_loudest_then_the_level_as_it_plays() {
+        // Half a second at 0.5 and then a second of silence, turned up 12 dB: about 2, well over full scale.
+        let mut s = strip(1_500, Vec::new());
+        {
+            let o = s.sound.as_mut().unwrap();
+            let mut quiet = sound(1_500);
+            quiet.channels[0][500..].fill(0.0);
+            let read = Read::of(quiet, None);
+            (o.original, o.outline) = (Some(read.audio), Some(read.outline));
+            o.edits.change(vec![Edit::Gain { db: 12.0, span: None }]);
+        }
+        made_again(&mut s);
+        let rest = showing(&mut s, false);
+        assert!(rest.too_loud && rest.levels.over);
+        assert_eq!((rest.levels.level, rest.levels.hold), ([1.0; 2], [1.0; 2]));
+        assert_eq!(rest.levels.peak_text, "+6.0");
+        // It plays from 0.2 s: the meter starts from nothing, and takes the level of what has played.
+        s.sound.as_mut().unwrap().played = Some(Played::starting(0.2));
+        assert_eq!(showing(&mut s, true).levels.level, [0.0; 2]);
+        let Ticked::At(playing) = tick(&mut s, Some(0.3), None) else { panic!("it plays") };
+        assert!((playing.at - 0.2).abs() < 1e-6 && (playing.from - 0.2 / 1.5).abs() < 1e-6, "{playing:?}");
+        assert_eq!(playing.level, [1.0; 2]);
+        // Shown meanwhile (a tool used as it plays): the meter stays where the play has it.
+        assert_eq!(showing(&mut s, true).levels.level, [1.0; 2]);
+        // Into the silence: it falls back, 40 dB a second, over what has played since.
+        let Ticked::At(playing) = tick(&mut s, Some(0.6), None) else { panic!("it plays") };
+        assert_eq!(playing.level, [1.0; 2], "0.3 s to 0.6 s still has the sound in it");
+        let Ticked::At(playing) = tick(&mut s, Some(0.7), None) else { panic!("it plays") };
+        assert!((playing.level[0] - (1.0 - METER_FALL * 0.1)).abs() < 1e-5, "{:?}", playing.level);
+        let Ticked::At(same) = tick(&mut s, Some(0.7), None) else { panic!("it plays") };
+        assert_eq!(same.level, playing.level, "no time gone by: no fall");
+        // A long wait between two ticks counts as a quarter of a second at most.
+        let Ticked::At(later) = tick(&mut s, Some(1.4), None) else { panic!("it plays") };
+        assert!((later.level[0] - (playing.level[0] - METER_FALL * 0.25)).abs() < 1e-5, "{:?}", later.level);
+        // A play of a part ends at the part's end; one whose start wasn't seen is lit from where it's first seen.
+        assert_eq!(tick(&mut s, Some(0.5), Some(0.4)), Ticked::Ended);
+        s.sound.as_mut().unwrap().played = None;
+        let Ticked::At(found) = tick(&mut s, Some(0.75), None) else { panic!("it plays") };
+        assert_eq!((found.at, found.from), (0.5, 0.5));
+        assert_eq!(tick(&mut s, None, None), Ticked::Waiting);
+        // Stopped: the meter is back at the edit's loudest, and nothing is lit.
+        assert_eq!(showing(&mut s, false).levels.level, [1.0; 2]);
+        assert!(s.sound.as_ref().unwrap().played.is_none());
+    }
+
+    /// A host that only keeps what it's asked.
+    #[derive(Default)]
+    struct Fake {
+        strip: RefCell<Strip>,
+        shown: RefCell<Option<Showing>>,
+        plays: std::cell::Cell<bool>,
+        /// Where the last play started (seconds into what it played).
+        played_from: std::cell::Cell<Option<f64>>,
+        takes_saves: std::cell::Cell<bool>,
+        saving: RefCell<Vec<u64>>,
+        revealed: RefCell<Vec<PathBuf>>,
+        carried: RefCell<Vec<&'static str>>,
+    }
+
+    impl Fake {
+        fn on(strip: Strip) -> Fake {
+            let host = Fake { strip: RefCell::new(strip), ..Fake::default() };
+            host.takes_saves.set(true);
+            host
+        }
+
+        /// The strip as it was last shown.
+        fn shown(&self) -> Showing {
+            self.shown.borrow().clone().expect("shown")
+        }
+    }
+
+    impl Host for Fake {
+        fn strip(&self) -> &RefCell<Strip> {
+            &self.strip
+        }
+        fn picked(&self) -> Option<Picked> {
+            None
+        }
+        fn card_part(&self) -> Option<(f64, f64)> {
+            None
+        }
+        fn show(&self, showing: Showing) {
+            *self.shown.borrow_mut() = Some(showing);
+        }
+        fn work(&self, _: u64, _: i64, _: Work) {}
+        fn play(&self, _: Arc<AudioData>, from: f64, _: Option<f64>) {
+            self.plays.set(true);
+            self.played_from.set(Some(from));
+        }
+        fn swap(&self, _: Arc<AudioData>, _: &dyn Fn(f64) -> f64) -> bool {
+            self.plays.get()
+        }
+        fn plays(&self) -> bool {
+            self.plays.get()
+        }
+        fn picked_plays(&self) -> bool {
+            self.plays.get()
+        }
+        fn stop(&self) {
+            self.plays.set(false);
+        }
+        fn played(&self) {}
+        fn carry(&self, what: Carried) {
+            self.carried.borrow_mut().push(match what {
+                Carried::Whole => "the sound",
+                Carried::Part(..) => "its part",
+                Carried::Edit { .. } => "an edit",
+            });
+        }
+        fn let_go(&self) {}
+        fn save(&self, edit: Saving) -> bool {
+            self.saving.borrow_mut().push(edit.ask);
+            self.takes_saves.get()
+        }
+        fn reveal(&self, copy: PathBuf) {
+            self.revealed.borrow_mut().push(copy);
+        }
+        fn send(&self, _: slices::To, _: slices::Slices) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_save_shows_how_it_went_while_the_edits_are_the_ones_saved() {
+        let host = Fake::on(strip(1_000, vec![Edit::Reverse(None)]));
+        show(&host);
+        let now = host.shown();
+        assert_eq!((now.save_text.as_str(), now.can_save, now.saved), ("Save copy", true, false));
+        assert_eq!(run_action(&host, SAVE), Some(true));
+        assert_eq!(*host.saving.borrow(), [1]);
+        assert_eq!((host.shown().save_text.as_str(), host.shown().can_save), ("Saving\u{2026}", false));
+        // Asked again meanwhile: that copy is on its way already.
+        assert_eq!(run_action(&host, SAVE), Some(true));
+        assert_eq!(host.saving.borrow().len(), 1);
+        // An answer to some other save is nobody's.
+        saved(&host, 7, Err("no".into()));
+        assert_eq!(host.shown().save_text, "Saving\u{2026}");
+        saved(&host, 1, Ok("Edited sounds/a (edit 1f).wav".into()));
+        let now = host.shown();
+        assert_eq!((now.save_text.as_str(), now.saved, now.can_save), ("Saved", true, true));
+        assert_eq!((now.save_note.as_str(), now.save_detail.as_str()), ("Saved in Edited sounds", "a (edit 1f).wav"));
+        // Saved, and Save can still be pressed: a copy that has gone since is made again (the host knows if it's there).
+        assert_eq!(run_action(&host, SAVE), Some(true));
+        assert_eq!(*host.saving.borrow(), [1, 2]);
+        assert_eq!(host.shown().save_text, "Saving\u{2026}");
+        saved(&host, 2, Ok("Edited sounds/a (edit 1f).wav".into()));
+        assert!(host.shown().saved);
+        show_saved(&host);
+        assert_eq!(*host.revealed.borrow(), [PathBuf::from("Edited sounds/a (edit 1f).wav")]);
+        // Another edit: that copy isn't of this one, and there's none to show.
+        assert_eq!(run_action(&host, NORMALISE), Some(true));
+        let now = host.shown();
+        assert!(!now.saved && now.can_save && now.save_note.is_empty() && now.save_text == "Save copy");
+        show_saved(&host);
+        assert_eq!(host.revealed.borrow().len(), 1);
+        // Undone: these are the edits that copy is of.
+        assert_eq!(run_action(&host, UNDO), Some(true));
+        assert!(host.shown().saved);
+        // A save the host doesn't take leaves nothing waiting.
+        host.takes_saves.set(false);
+        assert_eq!(run_action(&host, REDO), Some(true));
+        assert_eq!(run_action(&host, SAVE), Some(false));
+        assert!(host.shown().can_save && host.shown().save_note.is_empty());
+        // One that fails says why, and Save can be tried again; closing the strip puts that behind it.
+        host.takes_saves.set(true);
+        assert_eq!(run_action(&host, SAVE), Some(true));
+        saved(&host, 4, Err("The disk is full.".into()));
+        let failed = host.shown();
+        assert!(failed.save_failed && failed.can_save && !failed.saved);
+        assert_eq!(
+            (failed.save_note.as_str(), failed.save_detail.as_str()),
+            ("Couldn't save the copy", "The disk is full.")
+        );
+        close(&host);
+        assert!(host.strip.borrow().copy.is_none());
+        // With no edits there's nothing to save.
+        let host = Fake::on(strip(1_000, Vec::new()));
+        assert_eq!(run_action(&host, SAVE), Some(false));
+        assert!(host.saving.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_drag_handle_carries_the_part_picked_or_the_edit() {
+        let host = Fake::on(strip(1_000, Vec::new()));
+        let words = || {
+            show(&host);
+            host.shown().drag_text
+        };
+        assert_eq!(words(), "Drag the sound");
+        drag_handle(&host);
+        host.strip.borrow_mut().sound.as_mut().unwrap().pick = Some((0.1, 0.4));
+        assert_eq!(words(), "Drag the part");
+        drag_handle(&host);
+        host.strip.borrow_mut().sound.as_mut().unwrap().pick = None;
+        assert_eq!(run_action(&host, REVERSE), Some(true));
+        assert_eq!(words(), "Drag the edit");
+        drag_handle(&host);
+        // A part of a sound with no edits is a trim of it: an edit all the same.
+        assert_eq!(*host.carried.borrow(), ["the sound", "an edit", "an edit"]);
+    }
+
+    #[test]
+    fn a_play_is_lit_from_where_it_started() {
+        let host = Fake::on(strip(1_000, Vec::new()));
+        // A click 0.3 of the way along plays from there.
+        seek(&host, 0.3);
+        assert!(host.plays.get());
+        // Shown before its first tick: the play head is where it starts.
+        show(&host);
+        assert_eq!(host.shown().played, Some((0.3, 0.3)));
+        let Ticked::At(playing) = tick(&mut host.strip.borrow_mut(), Some(0.5), None) else { panic!("it plays") };
+        assert_eq!((playing.from, playing.at), (0.3, 0.5));
+        show(&host);
+        assert_eq!(host.shown().played, Some((0.3, 0.5)));
+        // Zoomed in past where it started: that's out of sight, and what's in sight up to the play head is lit.
+        host.strip.borrow_mut().sound.as_mut().unwrap().zoom = Some((0.4, 0.9));
+        show(&host);
+        let (from, at) = host.shown().played.expect("it plays on");
+        assert!(from < 0.0 && (at - 0.2).abs() < 1e-6, "{from} {at}");
+        host.strip.borrow_mut().sound.as_mut().unwrap().zoom = None;
+        // O held: the original takes over, and the meter takes it up where it is.
+        assert!(hear_original(&host, true));
+        let played = host.strip.borrow().sound.as_ref().unwrap().played.expect("still playing");
+        assert_eq!((played.from, played.last), (0.3, None));
+        assert!(host.shown().original);
+        // Stopped: nothing's lit at the next show.
+        host.stop();
+        show(&host);
+        assert!(host.strip.borrow().sound.as_ref().unwrap().played.is_none());
+        assert_eq!(host.shown().played, None);
+        assert!(hear_original(&host, false));
+        // O held with nothing playing: the original plays, from the start of the part picked.
+        host.strip.borrow_mut().sound.as_mut().unwrap().pick = Some((0.25, 0.5));
+        assert!(hear_original(&host, true));
+        let played = host.strip.borrow().sound.as_ref().unwrap().played.expect("the original plays");
+        assert_eq!((played.from, host.played_from.get()), (0.25, Some(0.25)));
+    }
+
+    #[test]
+    fn the_original_of_a_reversed_edit_is_held_from_where_the_part_came_from() {
+        // The whole sound reversed, nothing playing, O held: the original from its start, which is where the edit's
+        // end came from (not from its last moment, where the edit's start came from and nothing would be heard).
+        let host = Fake::on(strip(1_000, vec![Edit::Reverse(None)]));
+        assert!(hear_original(&host, true));
+        assert_eq!(host.played_from.get(), Some(0.0));
+        // What it plays is the edit's end: the play head starts there and runs back.
+        let played = host.strip.borrow().sound.as_ref().unwrap().played.expect("the original plays");
+        assert_eq!(played.from, 0.999);
+        assert!(hear_original(&host, false));
+        // With a part picked: the stretch that part came from, 0.5 to 0.75 s of the original.
+        host.strip.borrow_mut().sound.as_mut().unwrap().pick = Some((0.25, 0.5));
+        assert!(hear_original(&host, true));
+        assert_eq!(host.played_from.get(), Some(0.5));
+        let played = host.strip.borrow().sound.as_ref().unwrap().played.expect("the original plays");
+        assert_eq!(played.from, 0.499);
+    }
+
+    #[test]
+    fn a_fades_handle_stays_while_it_is_dragged_out_of_sight() {
+        // A fade in of 0.4 s, zoomed in on 0.2 to 0.9 s: its handle is in sight.
+        let fade = Edit::Fade { span: Span::new(0, 400), way: Way::In, curve: CORNER };
+        let host = Fake::on(strip(1_000, vec![fade]));
+        host.strip.borrow_mut().sound.as_mut().unwrap().zoom = Some((0.2, 0.9));
+        show(&host);
+        assert!(host.shown().fade_in_shown && !host.shown().fade_out_shown);
+        // Dragged to the screen's left edge, where a fade that short ends out of sight: the handle stays while it's
+        // held (taken away, nothing would ever let it go), and is gone once it's let go there.
+        fade_moving(&host, true, 0.0);
+        assert!(host.shown().fade_in_shown);
+        assert!(host.strip.borrow().sound.as_ref().unwrap().dragging.is_some());
+        fade_let_go(&host, true);
+        assert!(host.strip.borrow().sound.as_ref().unwrap().dragging.is_none());
+        assert!(!host.shown().fade_in_shown);
+    }
+
+    #[test]
+    fn the_room_laid_out_shows_the_strip_when_it_is_another() {
+        let host = Fake::on(Strip { room: None, ..strip(1_000, Vec::new()) });
+        show(&host);
+        assert!(host.shown().wave.is_none(), "no room yet");
+        laid_out(&host, room());
+        assert_eq!(host.shown().wave.expect("a room").room, room());
+        // The same room again: nothing to show.
+        *host.shown.borrow_mut() = None;
+        laid_out(&host, room());
+        assert!(host.shown.borrow().is_none());
     }
 }

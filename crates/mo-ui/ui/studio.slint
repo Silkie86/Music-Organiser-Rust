@@ -50,6 +50,9 @@ export global Theme {
     public pure function spill-of(lit: color) -> color {
         lit.transparentize(light ? 88% : 82%)
     }
+    // The face of a sunk key that's on (a lit key in a row of tools, the round Play key while it plays): the accent,
+    // faint, on the dark behind it.
+    out property <color> lit-face: accent.mix(background, light ? 0.2 : 0.13);
 
     // How things went, the same in every theme: missing or failed, a warning, all good.
     out property <color> missing: #F0616D;
@@ -728,7 +731,8 @@ export component RowSeam inherits Rectangle {
 
 // A fade's handle on the Edit strip's waveform (the 1.1 plan's light sample edits): a dot along the top where the fade
 // ends (at the sound's own start or end while there's none), dragged along to make the fade longer or shorter. The
-// page draws the fade's curve to it, and moves it as it's dragged.
+// page draws the fade's curve to it, and moves it as it's dragged. With no fade there yet it's a ring (`hollow`); it
+// fills, with light round it, while it's dragged.
 export component FadeHandle inherits Rectangle {
     // Where it is, from 0 to 1 of `room` (the waveform's width).
     in property <float> at;
@@ -736,6 +740,7 @@ export component FadeHandle inherits Rectangle {
     in property <string> tip;
     in property <string> key;
     in property <color> tint: Theme.warning;
+    in property <bool> hollow;
     // Dragged to `at` (0 to 1 of the room), and let go there.
     callback moving(float);
     callback let-go();
@@ -746,15 +751,24 @@ export component FadeHandle inherits Rectangle {
     width: 16px;
     height: 16px;
     x: root.at * root.room - self.width / 2;
+    if root.dragging: Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 22px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.tint.transparentize(82%);
+    }
     Rectangle {
+        property <bool> ring: root.hollow && !root.dragging;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: touch.has-hover || root.dragging ? 12px : 10px;
         height: self.width;
         border-radius: self.width / 2;
-        background: root.tint;
-        border-width: 1px;
-        border-color: Theme.edge;
+        background: self.ring ? Theme.well : root.tint;
+        border-width: 2px;
+        border-color: self.ring ? root.tint : Theme.well;
     }
     touch := TouchArea {
         mouse-cursor: MouseCursor.ew-resize;
@@ -881,28 +895,30 @@ export component StudioButton inherits Rectangle {
     // them on one line.
     in property <length> fold-width;
     callback clicked;
-    // Pressed (true) and let go (false), for a button that does something while it's held (the Edit strip's A/B: hear
-    // the original while it's held).
+    // Pressed (true) and let go (false), for a button that does something while it's held.
     callback held(bool);
+    // What it does is done (the Edit strip's "Saved"): an outline in the accent on a lit face, and a tick after its
+    // words. A click does it again (a saved copy that has gone since is made again).
+    in property <bool> done;
     property <bool> down: touch.pressed;
     changed down => { root.held(self.down); }
-    // The room either side of its words (and the menu arrow's).
-    property <length> edges: root.menu ? 38px : 24px;
+    // The room either side of its words (and the menu arrow's, or the tick's).
+    property <length> edges: root.menu ? 38px : root.done ? 46px : 24px;
     property <bool> folded: root.fold-width > 0 && root.icon == "" && label.preferred-width + root.edges > root.fold-width;
     min-width: icon != "" ? 32px : label.preferred-width + root.edges;
     // Folded, the same room above and below its words as on one line (32 px round a line of 20).
     height: root.folded ? max(Heights.button, label.preferred-height + 12px) : Heights.button;
     border-radius: Theme.radius;
     border-width: 1px;
-    border-color: root.flat ? Theme.stroke : Theme.edge;
+    border-color: root.done ? Theme.accent : root.flat ? Theme.stroke : Theme.edge;
     property <bool> flat: quiet && !main;
-    background: !enabled ? Theme.surface : main
+    background: root.done ? (touch.pressed ? Theme.well : Theme.lit-face) : !enabled ? Theme.surface : main
         ? (touch.pressed ? Theme.accent.darker(15%) : @linear-gradient(180deg, Theme.accent.brighter(12%) 0%, Theme.accent.darker(6%) 100%))
         : flat ? (touch.pressed ? Theme.well : touch.has-hover ? Theme.hover : transparent)
         : (touch.pressed ? Theme.well : @linear-gradient(180deg, (touch.has-hover ? Theme.hover : Theme.surface-raised).brighter(8%) 0%, Theme.surface-raised.darker(6%) 100%));
     animate background { duration: Motion.tap; }
     // The page's one lit button glows a little past its own edge, like a lamp behind a key.
-    if root.main && root.enabled: Rectangle {
+    if root.main && root.enabled && !root.done: Rectangle {
         x: -2px;
         y: -2px;
         width: parent.width + 4px;
@@ -917,16 +933,17 @@ export component StudioButton inherits Rectangle {
         height: 1px;
         x: parent.border-radius;
         width: parent.width - 2 * parent.border-radius;
-        background: touch.pressed || root.flat ? transparent : Theme.shine;
+        background: touch.pressed || root.flat || root.done ? transparent : Theme.shine;
     }
     label := Text {
-        x: (parent.width - self.width - (root.menu ? 14px : 0px)) / 2;
+        x: (parent.width - self.width - (root.menu ? 14px : root.done ? 22px : 0px)) / 2;
         width: root.folded ? root.fold-width - root.edges : self.preferred-width;
         wrap: root.fold-width > 0 ? TextWrap.word-wrap : TextWrap.no-wrap;
         // A button with an icon shows only the icon; its words go in `tip`.
         visible: root.icon == "";
         text: root.text;
-        color: !root.enabled ? Theme.faint : root.main ? Theme.accent-text : root.danger ? Theme.missing : Theme.text;
+        color: root.done ? Theme.accent
+            : !root.enabled ? Theme.faint : root.main ? Theme.accent-text : root.danger ? Theme.missing : Theme.text;
         font-size: Type.body;
         font-weight: 500;
         vertical-alignment: center;
@@ -944,6 +961,17 @@ export component StudioButton inherits Rectangle {
         stroke-width: 1.5px;
         // Play and stop are solid, as on any transport.
         fill: root.icon == Icons.play || root.icon == Icons.stop || root.icon == Icons.pause ? label.color : transparent;
+    }
+    if root.done && root.icon == "": Path {
+        x: label.x + label.width + 8px;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: Icons.tick;
+        stroke: Theme.accent;
+        stroke-width: 2px;
     }
     if root.menu: Path {
         x: label.x + label.width + 6px;
@@ -1542,24 +1570,32 @@ export component TempoStepper inherits Rectangle {
     in property <string> down-tip: "Slower";
     in property <string> up-tip: "Faster";
     in property <string> value-tip: "The tempo it plays at";
+    // Sunk into a row of tools, as tall as its keys (the Edit strip's gain): a changed value is in bright words, with
+    // no outline in the accent. And `warn`: what it's set to is too much (the edit goes over full scale), in amber.
+    in property <bool> sunk;
+    in property <bool> warn;
     callback stepped(int);
     callback reset();
-    height: 28px;
+    height: root.sunk ? Heights.button : 28px;
     width: minus.width + value.width + plus.width;
-    border-radius: 14px;
-    border-width: 2px;
-    border-color: root.changed && root.enabled ? Theme.accent : Theme.edge;
-    background: Theme.surface-raised;
-    animate border-color { duration: Motion.tap; }
+    border-radius: self.height / 2;
+    border-width: root.sunk ? 1px : 2px;
+    border-color: root.warn && root.enabled ? Theme.warning.transparentize(45%)
+        : root.sunk ? Theme.stroke
+        : root.changed && root.enabled ? Theme.accent : Theme.edge;
+    background: root.warn && root.enabled ? Theme.warning.mix(Theme.background, 0.1)
+        : root.sunk ? Theme.background : Theme.surface-raised;
+    animate border-color, background { duration: Motion.tap; }
+    property <color> sign: !root.enabled ? Theme.faint : root.sunk ? Theme.muted : Theme.text;
     minus := Rectangle {
         x: 0;
         width: 28px;
-        border-top-left-radius: 14px;
-        border-bottom-left-radius: 14px;
+        border-top-left-radius: root.height / 2;
+        border-bottom-left-radius: root.height / 2;
         background: minus-touch.has-hover && root.enabled ? Theme.hover : transparent;
         Text {
             text: "−";
-            color: root.enabled ? Theme.text : Theme.faint;
+            color: minus-touch.has-hover && root.enabled ? Theme.text : root.sign;
             font-size: Type.body;
             font-weight: 600;
         }
@@ -1580,7 +1616,7 @@ export component TempoStepper inherits Rectangle {
         background: value-touch.has-hover && root.changed && root.enabled ? Theme.hover : transparent;
         words := Text {
             text: root.bpm-text;
-            color: !root.enabled ? Theme.faint : root.changed ? Theme.text : Theme.muted;
+            color: !root.enabled ? Theme.faint : root.warn ? Theme.warning : root.changed ? Theme.text : Theme.muted;
             font-size: Type.meta;
             font-weight: 500;
             font-family: Theme.number-font;
@@ -1598,12 +1634,12 @@ export component TempoStepper inherits Rectangle {
     plus := Rectangle {
         x: minus.width + value.width;
         width: 28px;
-        border-top-right-radius: 14px;
-        border-bottom-right-radius: 14px;
+        border-top-right-radius: root.height / 2;
+        border-bottom-right-radius: root.height / 2;
         background: plus-touch.has-hover && root.enabled ? Theme.hover : transparent;
         Text {
             text: "+";
-            color: root.enabled ? Theme.text : Theme.faint;
+            color: plus-touch.has-hover && root.enabled ? Theme.text : root.sign;
             font-size: Type.body;
             font-weight: 600;
         }
@@ -3306,6 +3342,8 @@ export global Icons {
     out property <string> todo: "M 1.5 3.5 L 3 5 L 5.5 2.2 M 8 3.8 L 14.5 3.8 M 1.5 8.5 L 3 10 L 5.5 7.2 M 8 8.8 L 14.5 8.8 M 2 13.5 L 5 13.5 M 8 13.5 L 14.5 13.5";
     // A cross: clear it, take it away.
     out property <string> clear: "M 4 4 L 12 12 M 12 4 L 4 12";
+    // A tick: done.
+    out property <string> tick: "M 3 8.5 L 6.5 12 L 13 4.5";
     // An i in a ring: how this works (its words in the tooltip).
     out property <string> info: "M 14.5 8 A 6.5 6.5 0 1 1 1.5 8 A 6.5 6.5 0 1 1 14.5 8 M 8 7 L 8 11.5 M 8 4.4 L 8 4.6";
     // A question mark in a ring: help (the key sheet, from the rail).
@@ -4487,6 +4525,14 @@ export component Waveform inherits Rectangle {
     // The hits, as a path of short lines along its foot, 1000 across and 10 high.
     in property <string> hit-marks;
     in property <color> pick-tint: Theme.here-colour;
+    // Only the mouse: the page draws the waveform, the part, the hits and the play head itself (the Edit strip's
+    // screen, where they're a picture with things laid on it) and reads here what the press is doing. The line under
+    // the mouse stays, without its time.
+    in property <bool> bare;
+    // Whether each edge of the part is on a hit, as the page knows it. `from-on-hit` and `to-on-hit` say the same of
+    // the part as it shows, while an edge is dragged too.
+    in property <bool> pick-from-on-hit;
+    in property <bool> pick-to-on-hit;
     // The mouse came over it, or the sound under a mouse resting on it changed: the page finds the hits, so they're
     // there to snap to by the time a part is picked.
     callback wants-hits();
@@ -4503,16 +4549,22 @@ export component Waveform inherits Rectangle {
     // to count (then letting go isn't a click).
     property <int> doing;
     property <float> fixed;
-    property <float> moving;
+    out property <float> moving;
     property <bool> moved;
+    property <bool> fixed-on-hit;
+    property <bool> moving-on-hit;
     property <bool> has-part: root.can-pick && root.pick-to > root.pick-from;
     // Wide enough on the waveform for a press near an edge to move it; a narrower part is carried out from anywhere
     // on it.
     property <bool> roomy: (root.pick-to - root.pick-from) * root.width > 3 * root.edge-room;
-    property <bool> changing: root.doing == 1 || root.doing == 2;
-    property <float> shown-from: root.changing ? min(root.fixed, root.moving) : root.pick-from;
-    property <float> shown-to: root.changing ? max(root.fixed, root.moving) : root.pick-to;
-    property <bool> shows-part: root.can-pick && root.shown-to > root.shown-from && (root.doing != 1 || root.moved);
+    out property <bool> changing: root.doing == 1 || root.doing == 2;
+    out property <float> shown-from: root.changing ? min(root.fixed, root.moving) : root.pick-from;
+    out property <float> shown-to: root.changing ? max(root.fixed, root.moving) : root.pick-to;
+    out property <bool> shows-part: root.can-pick && root.shown-to > root.shown-from && (root.doing != 1 || root.moved);
+    out property <bool> from-on-hit: !root.changing ? root.pick-from-on-hit
+        : root.moving <= root.fixed ? root.moving-on-hit : root.fixed-on-hit;
+    out property <bool> to-on-hit: !root.changing ? root.pick-to-on-hit
+        : root.moving > root.fixed ? root.moving-on-hit : root.fixed-on-hit;
     // How near an edge a press moves it, and how near a hit an edge snaps to it.
     property <length> edge-room: 5px;
     property <length> snap-room: 8px;
@@ -4547,7 +4599,7 @@ export component Waveform inherits Rectangle {
         }
     }
     // The card's picture, shown pixel for pixel: see-through where it hasn't played yet, full where it has.
-    if root.on-card: Image {
+    if !root.bare && root.on-card: Image {
         x: -root.drawn.x * 1phx;
         y: -root.drawn.y * 1phx;
         width: root.drawn.picture.width * 1phx;
@@ -4555,7 +4607,7 @@ export component Waveform inherits Rectangle {
         source: root.drawn.picture;
         opacity: root.played >= 1 ? 1 : 0.45;
     }
-    if root.on-card && root.played < 1: Rectangle {
+    if !root.bare && root.on-card && root.played < 1: Rectangle {
         x: 0;
         width: root.width * clamp(root.played, 0, 1);
         clip: true;
@@ -4568,7 +4620,7 @@ export component Waveform inherits Rectangle {
         }
     }
     // Without a card, the path.
-    if !root.on-card: Path {
+    if !root.bare && !root.on-card: Path {
         width: root.width;
         height: root.height;
         commands: root.shape;
@@ -4578,7 +4630,7 @@ export component Waveform inherits Rectangle {
         stroke: root.played >= 1 ? root.tint : root.tint.transparentize(55%);
         stroke-width: root.line;
     }
-    if !root.on-card && root.played < 1: Rectangle {
+    if !root.bare && !root.on-card && root.played < 1: Rectangle {
         x: 0;
         width: root.width * clamp(root.played, 0, 1);
         clip: true;
@@ -4595,7 +4647,7 @@ export component Waveform inherits Rectangle {
         }
     }
     // The part picked: what's outside it dimmed, its inside lit, a line at each edge.
-    if root.shows-part: Rectangle {
+    if !root.bare && root.shows-part: Rectangle {
         Rectangle {
             x: 0;
             width: root.width * root.shown-from;
@@ -4623,7 +4675,7 @@ export component Waveform inherits Rectangle {
         }
     }
     // The hits, short marks along the foot: where a part's edges snap to.
-    if root.can-pick && root.hit-marks != "": Path {
+    if !root.bare && root.can-pick && root.hit-marks != "": Path {
         y: root.height - 6px;
         width: root.width;
         height: 6px;
@@ -4635,7 +4687,7 @@ export component Waveform inherits Rectangle {
         stroke-width: 1.5px;
         opacity: 0.8;
     }
-    if root.playing && root.played < 1: Rectangle {
+    if !root.bare && root.playing && root.played < 1: Rectangle {
         x: min(root.width * clamp(root.played, 0, 1), root.width - 2px);
         width: 2px;
         background: Theme.text;
@@ -4672,21 +4724,29 @@ export component Waveform inherits Rectangle {
                     root.doing = 2;
                     root.fixed = root.pick-to;
                     root.moving = root.pick-from;
+                    root.fixed-on-hit = root.pick-to-on-hit;
+                    root.moving-on-hit = root.pick-from-on-hit;
                 } else if root.on-edge(self.mouse-x, root.pick-to) {
                     root.doing = 2;
                     root.fixed = root.pick-from;
                     root.moving = root.pick-to;
+                    root.fixed-on-hit = root.pick-from-on-hit;
+                    root.moving-on-hit = root.pick-to-on-hit;
                 } else if root.inside(self.mouse-x) {
                     root.doing = 3;
                 } else {
                     root.doing = 1;
                     root.fixed = root.snap(root.place(self.mouse-x), root.snap-within(e.modifiers.shift));
                     root.moving = root.fixed;
+                    // An edge that isn't where the mouse is has gone to a hit.
+                    root.fixed-on-hit = root.fixed != root.place(self.mouse-x);
+                    root.moving-on-hit = root.fixed-on-hit;
                 }
             } else if root.can-pick && e.kind == PointerEventKind.move && self.pressed {
                 if root.changing && (root.moved || abs(self.mouse-x - self.pressed-x) > 3px) {
                     root.moved = true;
                     root.moving = root.snap(root.place(self.mouse-x), root.snap-within(e.modifiers.shift));
+                    root.moving-on-hit = root.moving != root.place(self.mouse-x);
                 } else if root.doing == 3
                     && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
                     root.moved = true;
@@ -4715,7 +4775,7 @@ export component Waveform inherits Rectangle {
             }
         }
     }
-    if root.can-seek && area.has-hover && root.seconds > 0: Rectangle {
+    if root.can-seek && area.has-hover && (root.bare || root.seconds > 0): Rectangle {
         property <float> at: root.from-seconds + clamp(area.mouse-x / root.width, 0, 1) * root.seconds;
         property <string> time: at >= 60
             ? floor(at / 60) + ":" + (mod(floor(at), 60) < 10 ? "0" : "") + mod(floor(at), 60)
@@ -4723,9 +4783,9 @@ export component Waveform inherits Rectangle {
         Rectangle {
             x: area.mouse-x;
             width: 1px;
-            background: Theme.muted;
+            background: root.bare ? Theme.text.transparentize(60%) : Theme.muted;
         }
-        Rectangle {
+        if !root.bare: Rectangle {
             x: area.mouse-x + 4px + label.preferred-width + 6px > root.width
                 ? area.mouse-x - 4px - label.preferred-width - 6px
                 : area.mouse-x + 4px;
@@ -4741,6 +4801,435 @@ export component Waveform inherits Rectangle {
                 font-size: Type.meta;
             }
         }
+    }
+}
+
+// The Edit strip's own parts (its new look, Solomon's "Build it like this" of 27 Nov 2026, pictures 12 to 14). The
+// strip is the app's and the plugin's alike, so its parts are here with the shared style.
+
+// The round Play key at the head of a row of tools: a triangle on a raised cap; while its sound plays it's lit in the
+// accent, with light round it, and shows the square that stops it.
+export component PlayKey inherits Rectangle {
+    in property <bool> playing;
+    in property <bool> enabled: true;
+    in property <string> tip;
+    in property <string> key;
+    callback clicked;
+    width: 36px;
+    height: 36px;
+    // The light round it while it plays.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: self.width / 2;
+        background: Theme.spill;
+        opacity: root.playing ? 1 : 0;
+        animate opacity { duration: Motion.settle; }
+    }
+    Rectangle {
+        border-radius: self.width / 2;
+        border-width: 1px;
+        border-color: root.playing ? Theme.accent : touch.has-hover && root.enabled ? Theme.muted : Theme.stroke;
+        background: root.playing ? Theme.lit-face
+            : touch.pressed ? Theme.well
+            : touch.has-hover && root.enabled ? Theme.hover : Theme.surface-raised;
+        animate background, border-color { duration: Motion.tap; }
+    }
+    Path {
+        // The triangle sits a hair right of the middle, where it looks centred.
+        x: (parent.width - self.width) / 2 + (root.playing ? 0px : 1px);
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: root.playing ? Icons.stop : Icons.play;
+        fill: !root.enabled ? Theme.faint : root.playing ? Theme.accent : Theme.text;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    Tip {
+        text: root.tip;
+        key: root.key;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
+    }
+}
+
+// A row of keys joined in one sunk cap (the Edit strip's tools): its children are `JoinedKey`s, side by side with a
+// seam between each two. The first says `first` and the last `last`, for the cap's round ends.
+export component JoinedKeys inherits Rectangle {
+    width: row.preferred-width;
+    height: Heights.button;
+    border-radius: Theme.radius + 2px;
+    border-width: 1px;
+    border-color: Theme.stroke;
+    background: Theme.background;
+    row := HorizontalLayout {
+        padding: 1px;
+        @children
+    }
+}
+
+// One key of a `JoinedKeys`: a drawn sign (one of the `Icons`), and its words beside it for a key that says what the
+// whole row is doing while it's on (the Edit strip's Slices). `lit` is on: its face and its sign in the accent, a line
+// of light under it. `hot` is the key that fits what's picked or heard right now (Trim with a part picked, Normalise
+// when it's too loud): its sign in the accent. A key that can't be used is faint, and still says what it does when the
+// mouse rests on it.
+export component JoinedKey inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> lit;
+    in property <bool> hot;
+    in property <bool> first;
+    in property <bool> last;
+    // Narrower, for a row with little room.
+    in property <bool> tight;
+    in property <string> tip;
+    in property <string> key;
+    callback clicked;
+    property <length> round: Theme.radius + 1px;
+    property <color> ink: !root.enabled ? Theme.faint.transparentize(50%)
+        : root.lit || root.hot ? Theme.accent
+        : touch.has-hover ? Theme.text : Theme.text.transparentize(14%);
+    width: root.text != "" ? 34px + label.preferred-width + Space.md : root.tight ? 32px : 36px;
+    Rectangle {
+        border-top-left-radius: root.first ? root.round : 0;
+        border-bottom-left-radius: root.first ? root.round : 0;
+        border-top-right-radius: root.last ? root.round : 0;
+        border-bottom-right-radius: root.last ? root.round : 0;
+        background: root.lit ? Theme.lit-face
+            : !root.enabled ? transparent
+            : touch.pressed ? Theme.well
+            : touch.has-hover ? Theme.hover : transparent;
+        animate background { duration: Motion.tap; }
+    }
+    // The seam before it.
+    if !root.first: Rectangle {
+        x: 0;
+        width: 1px;
+        background: Theme.surface-raised;
+    }
+    Path {
+        x: root.text != "" ? Space.md : (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: root.icon;
+        stroke: root.ink;
+        stroke-width: 1.5px;
+    }
+    label := Text {
+        x: 34px;
+        visible: root.text != "";
+        text: root.text;
+        color: root.ink;
+        font-size: Type.meta;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+    // The line of light under a key that's on.
+    if root.lit: Rectangle {
+        x: Space.sm;
+        y: parent.height - 3px;
+        width: parent.width - 2 * Space.sm;
+        height: 2px;
+        border-radius: 1px;
+        background: Theme.accent;
+    }
+    touch := TouchArea {
+        clicked => {
+            if root.enabled {
+                root.clicked();
+            }
+        }
+    }
+    Tip {
+        text: root.tip;
+        key: root.key;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
+    }
+}
+
+// A sign on its own in a row of tools, with no cap round it (the Edit strip's undo, redo and zoom): it brightens
+// under the mouse. One that can't be used is faint, and still says what it does when the mouse rests on it.
+export component IconKey inherits Rectangle {
+    in property <string> icon;
+    in property <bool> enabled: true;
+    in property <bool> tight;
+    in property <string> tip;
+    in property <string> key;
+    callback clicked;
+    width: root.tight ? 28px : 30px;
+    height: Heights.button;
+    border-radius: Theme.radius;
+    background: !root.enabled ? transparent : touch.pressed ? Theme.well : touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: Motion.tap; }
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: root.icon;
+        stroke: !root.enabled ? Theme.faint.transparentize(50%)
+            : touch.has-hover ? Theme.text : Theme.text.transparentize(14%);
+        stroke-width: 1.5px;
+    }
+    touch := TouchArea {
+        clicked => {
+            if root.enabled {
+                root.clicked();
+            }
+        }
+    }
+    Tip {
+        text: root.tip;
+        key: root.key;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
+    }
+}
+
+// A and B, to hear a thing as it was against how it is now (the Edit strip's original against the edit): B is lit while
+// the edit is what's heard, A while the original is. Held down, anywhere on it, it's the original (`held`).
+export component ABSwitch inherits Rectangle {
+    in property <bool> original;
+    in property <bool> enabled: true;
+    in property <string> tip;
+    in property <string> key;
+    callback held(bool);
+    property <bool> down: touch.pressed;
+    changed down => { root.held(self.down); }
+    property <length> letter: 28px;
+    width: 2 * self.letter + 2px;
+    height: 28px;
+    border-radius: Theme.radius + 2px;
+    border-width: 1px;
+    border-color: Theme.stroke;
+    background: Theme.background;
+    for name[i] in ["A", "B"]: Rectangle {
+        property <bool> on: root.enabled && (i == 0) == root.original;
+        x: 1px + i * root.letter;
+        y: 1px;
+        width: root.letter;
+        height: parent.height - 2px;
+        border-top-left-radius: i == 0 ? Theme.radius + 1px : 0;
+        border-bottom-left-radius: i == 0 ? Theme.radius + 1px : 0;
+        border-top-right-radius: i == 1 ? Theme.radius + 1px : 0;
+        border-bottom-right-radius: i == 1 ? Theme.radius + 1px : 0;
+        // The one that's heard is lifted, with a line of light under it, as a picked view is.
+        background: self.on ? Theme.hover : transparent;
+        animate background { duration: Motion.tap; }
+        Text {
+            text: name;
+            color: parent.on ? Theme.text : !root.enabled ? Theme.faint.transparentize(50%) : Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.small;
+            font-weight: parent.on ? 600 : 500;
+        }
+        Rectangle {
+            x: Space.xs;
+            y: parent.height - 2px;
+            width: parent.width - 2 * Space.xs;
+            height: 2px;
+            border-radius: 1px;
+            background: Theme.accent;
+            visible: parent.on;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+    }
+    Tip {
+        text: root.tip;
+        key: root.key;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
+    }
+}
+
+// The level beside the Edit strip's screen, as a mixer's channel shows it: two columns of lights (left and right) in a
+// well of their own, lit from the foot up to the level now and amber near full scale, with one light held at the
+// highest each side gets, a red one across the top when that's over full scale, and the highest as a number at the
+// foot.
+export component LevelMeter inherits Well {
+    // How far up each side is lit, and the highest each gets: 0 to 1 of the lights' height, the top is full scale.
+    in property <float> left;
+    in property <float> right;
+    in property <float> left-hold;
+    in property <float> right-hold;
+    // From how far up (0 to 1) the lights are amber.
+    in property <float> amber-from: 0.86;
+    in property <bool> over;
+    // The highest it gets, as a number ("−3.0").
+    in property <string> text;
+    in property <string> tip;
+    width: 42px;
+    property <length> pitch: 5px;
+    property <length> column: 8px;
+    property <length> gap: 4px;
+    property <length> lights-x: (self.width - 2 * self.column - self.gap) / 2;
+    // Under the light for over full scale, and above the number.
+    property <length> lights-y: Space.sm + 6px;
+    property <length> lights-high: max(0px, number.y - Space.xs - self.lights-y);
+    property <int> count: max(1, floor(self.lights-high / self.pitch));
+    // How many lights a level lights.
+    pure function lights(level: float) -> int {
+        round(clamp(level, 0, 1) * root.count)
+    }
+    Rectangle {
+        x: root.lights-x;
+        y: Space.sm;
+        width: 2 * root.column + root.gap;
+        height: 3px;
+        border-radius: 1px;
+        background: root.over ? Theme.missing : Theme.stroke.transparentize(40%);
+    }
+    for side in 2: Rectangle {
+        property <int> lit: root.lights(side == 0 ? root.left : root.right);
+        property <int> held: root.lights(side == 0 ? root.left-hold : root.right-hold);
+        x: root.lights-x + side * (root.column + root.gap);
+        y: root.lights-y;
+        width: root.column;
+        height: root.lights-high;
+        // From the foot up.
+        for i in root.count: Rectangle {
+            y: parent.height - (i + 1) * root.pitch;
+            height: root.pitch - 2px;
+            border-radius: 1px;
+            background: i < parent.lit || i + 1 == parent.held
+                ? ((i + 1) / root.count > root.amber-from ? Theme.warning : Theme.accent)
+                : Theme.stroke.transparentize(40%);
+        }
+    }
+    number := Text {
+        x: 0;
+        y: parent.height - self.height - Space.xs;
+        width: parent.width;
+        height: Type.tiny + 4px;
+        text: root.text;
+        color: root.over ? Theme.missing : Theme.muted;
+        font-family: Theme.number-font;
+        font-size: Type.tiny;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    sense := TouchArea { }
+    Tip {
+        text: root.tip;
+        hovering: sense.has-hover && !sense.pressed;
+        at-x: -Space.xl;
+        at-y: root.height + Space.xs;
+    }
+}
+
+// A few words laid on a drawn view, in a pill tinted with what they're about (how long the part picked on the Edit
+// strip's screen is, how long a fade is while it's dragged, "Original"): dark behind them, so they read over a
+// waveform.
+export component ScreenTag inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: Theme.text;
+    width: words.preferred-width + 2 * Space.sm;
+    height: words.preferred-height + Space.xs;
+    border-radius: self.height / 2;
+    border-width: 1px;
+    border-color: root.tint.transparentize(56%);
+    background: root.tint.mix(Theme.well, 0.1);
+    words := Text {
+        text: root.text;
+        color: root.tint.mix(Theme.text, 0.4);
+        font-family: Theme.number-font;
+        font-size: Type.small;
+        font-weight: 500;
+    }
+}
+
+// A thing that's been done, said in two lines beside the button that did it, with a way to it (the Edit strip's saved
+// copy: "Saved in Edited sounds" over the copy's name; a click shows it in its folder). `failed` says in red that it
+// wasn't, over why, and a click does nothing.
+export component DoneNote inherits Rectangle {
+    in property <string> text;
+    in property <string> detail;
+    in property <bool> failed;
+    in property <string> tip;
+    callback clicked;
+    // No wider than this: the lines are cut short with "…".
+    in property <length> most: 420px;
+    property <length> sign: 16px;
+    property <length> lines-x: self.sign + Space.sm;
+    property <length> first-wide: first.preferred-width + (root.failed ? 0px : Space.sm + self.sign);
+    // As wide as its lines, and narrower where a row has less room for it.
+    property <length> natural: min(root.most, self.lines-x + max(self.first-wide, second.preferred-width));
+    min-width: 0px;
+    preferred-width: self.natural;
+    max-width: self.natural;
+    horizontal-stretch: 0;
+    height: first.preferred-height + second.preferred-height;
+    Path {
+        x: 0;
+        y: (first.preferred-height - self.height) / 2;
+        width: root.sign;
+        height: root.sign;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: root.failed ? Icons.clear : Icons.tick;
+        stroke: root.failed ? Theme.missing : Theme.accent;
+        stroke-width: 2px;
+    }
+    first := Text {
+        x: root.lines-x;
+        y: 0;
+        width: min(self.preferred-width, root.width - root.lines-x - (root.failed ? 0px : Space.sm + root.sign));
+        text: root.text;
+        color: root.failed ? Theme.missing : touch.has-hover ? Theme.text : Theme.text.transparentize(10%);
+        font-size: Type.meta;
+        overflow: elide;
+    }
+    // The way to it: its folder.
+    if !root.failed: Path {
+        x: first.x + first.width + Space.sm;
+        y: (first.preferred-height - self.height) / 2;
+        width: root.sign;
+        height: root.sign;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: Icons.folder;
+        stroke: touch.has-hover ? Theme.text : Theme.muted;
+        stroke-width: 1.5px;
+    }
+    second := Text {
+        x: root.lines-x;
+        y: first.preferred-height;
+        width: root.width - root.lines-x;
+        text: root.detail;
+        color: Theme.faint;
+        font-family: Theme.number-font;
+        font-size: Type.tiny;
+        overflow: elide;
+    }
+    // One that failed isn't clicked, and says the whole of why while the mouse rests on it.
+    touch := TouchArea {
+        mouse-cursor: root.failed ? MouseCursor.default : MouseCursor.pointer;
+        clicked => {
+            if !root.failed {
+                root.clicked();
+            }
+        }
+    }
+    Tip {
+        text: root.failed ? root.detail : root.tip;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
     }
 }
 

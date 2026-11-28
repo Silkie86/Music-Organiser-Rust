@@ -522,6 +522,7 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
     arrangement::set_look(app, look);
     piano_roll::look_changed(app);
     curve_editor::look_changed(app);
+    sounds::look_changed(app);
 }
 
 pub(crate) fn rgb(c: u32) -> Color {
