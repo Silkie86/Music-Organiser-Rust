@@ -176,15 +176,19 @@ export global SoundEdit {
     in property <bool> sending;
     in property <float> send-progress;
     in property <bool> sent;
+    // These slices couldn't be sent: said beside Send in red, over why (the whole of it in the note's tip). "" for
+    // nothing to say.
+    in property <string> send-note;
+    in property <string> send-detail;
     in property <int> pads-made;
     in property <bool> pads-making;
     // What the strip's foot says with the Slices on: the slice picked ("Slice 5") and its length and pad
     // ("0.23 s · pad E1"); with none picked, only the pads they all go on ("Pads C1 to G3").
     in property <string> slice-name;
     in property <string> slice-facts;
-    // Whether the Slices are here yet (the plugin's strip gets them in its next step: until then their key is faint,
-    // with why in its tip), and how long the edits wait, as the tip says it.
-    in property <bool> can-slice: true;
+    // Whether a Drum Machine in Bitwig is one of the places the slices can go: always from the app; from the plugin,
+    // only while Bitwig is the DAW it's in. And how long the edits wait, as the tip says it.
+    in property <bool> can-bitwig: true;
     in property <string> kept-while: "while the app is open";
     // The keys from the shortcut list, for the tips.
     in property <string> play-key;
@@ -1025,9 +1029,9 @@ export component EditStrip inherits Rectangle {
                                 last: true;
                                 tight: root.tight;
                                 icon: Icons.slices;
-                                tip: SoundEdit.can-slice ? "Slices: cut it at its hits for a drum machine's pads" : "Slices: coming to the plugin next";
-                                key: SoundEdit.can-slice ? SoundEdit.slices-key : "";
-                                enabled: root.on && SoundEdit.can-slice;
+                                tip: "Slices: cut it at its hits for a drum machine's pads";
+                                key: SoundEdit.slices-key;
+                                enabled: root.on;
                                 clicked => { SoundEdit.tool("sounds.editSlices"); }
                             }
                         }
@@ -1202,11 +1206,12 @@ export component EditStrip inherits Rectangle {
             // The chips: when there are more than fit, the oldest run off the left (the newest is the one Undo takes
             // back), so a long list of edits never pushes the strip wider. They share what room there is with the
             // words about a save, in a small window. With the Slices on, the slice picked is named here instead, with
-            // how long it is and its pad.
+            // how long it is and its pad: as wide as those words (and a dot to spare, so no rounding cuts them
+            // short), and in a small window a note beside it (a send that failed) is cut short before they are.
             Rectangle {
-                horizontal-stretch: 1;
+                horizontal-stretch: SoundEdit.slicing ? 0 : 1;
                 min-width: 0px;
-                preferred-width: 200px;
+                preferred-width: SoundEdit.slicing ? foot-facts.x + foot-facts.preferred-width + 1px : 200px;
                 clip: true;
                 if !SoundEdit.slicing && SoundEdit.chips.length == 0: Text {
                     x: 0px;
@@ -1217,28 +1222,34 @@ export component EditStrip inherits Rectangle {
                     font-size: Type.meta;
                     vertical-alignment: center;
                 }
-                if SoundEdit.slicing: HorizontalLayout {
+                // The slice's name, then its facts, placed by hand so that neither is ever a stub of itself where
+                // room is short: the facts are cut short first, and go when there's no room for the first of them
+                // ("· 6.56 s…", "Pads C1…"); the name is there whole or not at all (the app's smallest window,
+                // beside a send that failed, has no room for it).
+                foot-name := Text {
                     x: 0px;
                     y: 0px;
-                    width: parent.width;
                     height: parent.height;
-                    alignment: start;
-                    spacing: Space.sm;
-                    if SoundEdit.slice-name != "": Text {
-                        text: SoundEdit.slice-name;
-                        color: Theme.text;
-                        font-family: Theme.number-font;
-                        font-size: Type.meta;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: (SoundEdit.slice-name != "" ? "\u{00b7} " : "") + SoundEdit.slice-facts;
-                        color: SoundEdit.cuts.length == 0 ? Theme.faint : Theme.muted;
-                        font-family: Theme.number-font;
-                        font-size: Type.meta;
-                        vertical-alignment: center;
-                    }
+                    visible: SoundEdit.slicing && parent.width >= self.preferred-width;
+                    text: SoundEdit.slice-name;
+                    color: Theme.text;
+                    font-family: Theme.number-font;
+                    font-size: Type.meta;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                foot-facts := Text {
+                    x: SoundEdit.slice-name == "" ? 0px : foot-name.preferred-width + Space.sm;
+                    y: 0px;
+                    width: max(0px, parent.width - self.x);
+                    height: parent.height;
+                    visible: SoundEdit.slicing && self.width >= min(self.preferred-width, 80px);
+                    text: (SoundEdit.slice-name != "" ? "\u{00b7} " : "") + SoundEdit.slice-facts;
+                    color: SoundEdit.cuts.length == 0 ? Theme.faint : Theme.muted;
+                    font-family: Theme.number-font;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                    overflow: elide;
                 }
                 if !SoundEdit.slicing: HorizontalLayout {
                     x: min(0px, parent.width - self.width);
@@ -1270,6 +1281,18 @@ export component EditStrip inherits Rectangle {
                     failed: SoundEdit.save-failed;
                     tip: "Show the copy in its folder";
                     clicked => { SoundEdit.show-saved(); }
+                }
+            }
+            // A send that failed: it gives way before the slice's name does, down to its first line ("Couldn't send
+            // the slices").
+            if SoundEdit.send-note != "" && SoundEdit.slicing: VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                DoneNote {
+                    text: SoundEdit.send-note;
+                    detail: SoundEdit.send-detail;
+                    failed: true;
+                    least: 180px;
                 }
             }
             VerticalLayout {
@@ -1315,15 +1338,16 @@ export component EditStrip inherits Rectangle {
                     clicked => { SoundEdit.tool("sounds.editSave"); }
                 }
             }
-            // Send: its menu opens above it (the strip is at the foot of the window), with the two places the slices
-            // can go; and, where the strip has no room for the pads themselves, the pad each one lands on (four
+            // Send: its menu opens above it (the strip is at the foot of the window), with the places the slices can
+            // go (a Drum Machine in Bitwig, where that can be reached, and a folder of their own); and, under the Drum
+            // Machine's line where the strip has no room for the pads themselves, the pad each one lands on (four
             // across, as a Drum Machine's page; eight for more than sixteen). While the slices are on their way the
             // button is a bar that counts them along; once they're there it says where, and a click sends them again.
             if SoundEdit.slicing: VerticalLayout {
                 alignment: center;
                 horizontal-stretch: 0;
                 send := Rectangle {
-                    property <bool> pads: !screen-row.pads;
+                    property <bool> pads: !screen-row.pads && SoundEdit.can-bitwig;
                     property <int> across: SoundEdit.pads.length > 16 ? 8 : 4;
                     property <int> rows: ceil(SoundEdit.pads.length / self.across);
                     property <length> pad-width: 66px;
@@ -1331,7 +1355,7 @@ export component EditStrip inherits Rectangle {
                     property <length> pads-height: self.pads ? self.rows * self.pad-height + Space.xs : 0px;
                     // As wide as its longest line and that line's key ("A Drum Machine in Bitwig, from C1", Alt+B).
                     property <length> menu-width: self.pads ? max(400px, self.across * self.pad-width + Space.xs + 2 * Space.sm) : 400px;
-                    property <length> menu-height: 2 * Space.xs + 26px + 32px + self.pads-height + 32px + 2px + 26px;
+                    property <length> menu-height: 2 * Space.xs + 26px + (SoundEdit.can-bitwig ? 32px : 0px) + self.pads-height + 32px + 2px + 26px;
                     // As wide as Drag the edit whatever it says ("Send 9 slices", "Making 10 of 20"), so nothing beside
                     // it moves as the Sensitivity changes how many there are, or as a send counts along.
                     width: 170px;
@@ -1367,7 +1391,7 @@ export component EditStrip inherits Rectangle {
                                     vertical-alignment: center;
                                 }
                             }
-                            MenuLine {
+                            if SoundEdit.can-bitwig: MenuLine {
                                 text: "A Drum Machine in Bitwig, from C1";
                                 key: SoundEdit.bitwig-key;
                                 clicked => { SoundEdit.tool("sounds.editSlicesBitwig"); }

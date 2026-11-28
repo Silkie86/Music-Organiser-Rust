@@ -124,6 +124,9 @@ pub struct Instance {
     /// are where they were for as long as the plugin stays loaded (none before the first window, and while one is
     /// open: the window has it then).
     pub(crate) edit_strip: Mutex<Option<mo_app::edit_strip::Strip>>,
+    /// The sends of the strip's slices (to Bitwig, or to their folder): the plugin's and not a window's, so one that
+    /// ends once its window has gone is heard by the next ([`window::Sends`]).
+    pub(crate) edit_sends: Arc<window::Sends>,
     /// The shuffled order's seed: the same each time the window opens, so it opens on the list it showed.
     pub seed: u64,
     /// Keeps what the window read while the plugin is loaded ([`kept`]).
@@ -196,6 +199,7 @@ impl DefaultPluginFactory for MoPlugin {
                 record_loaded: std::sync::atomic::AtomicU64::new(0),
                 left_playing: Mutex::new(None),
                 edit_strip: Mutex::new(None),
+                edit_sends: Arc::default(),
                 seed: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos() as u64),

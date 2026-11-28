@@ -401,6 +401,18 @@ struct Kept {
     sliced: Option<slices::Sliced>,
 }
 
+impl Kept {
+    /// Lets its slicing go when that isn't worth keeping (`on_way`: slices of it are on their way, and where they go
+    /// is kept with it). Whether anything of the sound is left to keep: edits, something to undo or redo, or its
+    /// slicing.
+    fn left_to_keep(&mut self, on_way: bool) -> bool {
+        if !on_way && self.sliced.as_ref().is_some_and(|sliced| !sliced.worth_keeping()) {
+            self.sliced = None;
+        }
+        !self.edits.now.is_empty() || self.edits.has_steps() || self.sliced.is_some()
+    }
+}
+
 /// The strip's state: one to a window, kept by its [`Host`].
 #[derive(Default)]
 pub struct Strip {
@@ -747,26 +759,44 @@ pub fn close(host: &dyn Host) {
 fn shut(s: &mut Strip) -> bool {
     let was_open = s.open;
     s.open = false;
+    // What failed while the strip was open is past once it closes: a save, and a send of slices (the open sound's,
+    // and each one's put by, which isn't kept for that alone any longer). What fails with the strip closed is news
+    // still, and waits to be said when it's next open on its sound ([`slices::sent`]): a strip that's closed
+    // already, shut once more as its host goes ([`put_away`]), keeps it.
+    if was_open {
+        if s.copy.as_ref().is_some_and(|c| matches!(c.state, CopyState::Failed(_))) {
+            s.copy = None;
+        }
+        let Strip { sound, kept, sending, .. } = &mut *s;
+        if let Some(sliced) = sound.as_mut().and_then(|o| o.sliced.as_mut()) {
+            slices::closed(sliced);
+        }
+        kept.retain_mut(|k| {
+            if let Some(sliced) = k.sliced.as_mut() {
+                slices::closed(sliced);
+            }
+            k.left_to_keep(sending.as_ref().is_some_and(|sending| sending.is_of(k.id, &k.source)))
+        });
+    }
     stash(s);
     s.asked += 1;
-    // A save that failed is past once the strip is closed.
-    if s.copy.as_ref().is_some_and(|c| matches!(c.state, CopyState::Failed(_))) {
-        s.copy = None;
-    }
     was_open
 }
 
 /// Puts the strip away when its host goes and another will take it up (the plugin's window closes, and the strip waits
 /// for the next one): closed, each sound's edits kept, and nothing left that was the old host's. That's the room its
-/// screen had and the waveform shown there; and a save or a send still on its way, whose answer has nobody to come
-/// back to (it's finished all the same: the copy is made, and Save finds it there the next time).
+/// screen had and the waveform shown there; and a save still on its way, whose answer has nobody to come back to (it's
+/// finished all the same: the copy is made, and Save finds it there the next time).
+///
+/// Slices on their way stay on their way: Send waits for them at the next host too, which hears how their send ended
+/// and says so here ([`slices::sent`]). Forgotten, they'd be offered again while they were going where they were
+/// sent, and a second press would put them there twice (a second Drum Machine in Bitwig).
 pub fn put_away(strip: &mut Strip) {
     shut(strip);
     (strip.room, strip.columns, strip.wave) = (None, None, None);
     if strip.copy.as_ref().is_some_and(|c| matches!(c.state, CopyState::Saving)) {
         strip.copy = None;
     }
-    strip.sending = None;
 }
 
 /// Stops the strip's own play, if that's what plays (a right-click on its waveform; the strip closing).
@@ -888,9 +918,9 @@ fn stash(s: &mut Strip) {
     }
     // Slices of it still on their way are worth keeping its slicing for: where they went is kept with it.
     let on_way = s.sending.as_ref().is_some_and(|sending| sending.is_of(o.id, &o.source));
-    let sliced = o.sliced.filter(|sliced| on_way || sliced.worth_keeping());
-    if !o.edits.now.is_empty() || o.edits.has_steps() || sliced.is_some() {
-        s.kept.push(Kept { id: o.id, source: o.source, edits: o.edits, sliced });
+    let mut kept = Kept { id: o.id, source: o.source, edits: o.edits, sliced: o.sliced };
+    if kept.left_to_keep(on_way) {
+        s.kept.push(kept);
         if s.kept.len() > KEPT {
             s.kept.remove(0);
         }
@@ -2871,6 +2901,18 @@ mod tests {
         (now.send_text, now.can_send, now.sending, now.sent, now.made, now.making)
     }
 
+    /// What a host says of slices it couldn't send.
+    fn not_sent() -> slices::NotSent {
+        slices::NotSent { title: "Couldn't send the slices".into(), why: "Bitwig isn't open.".into() }
+    }
+
+    /// What the strip last said, beside Send, of slices that couldn't be sent: its headline and why (empty for
+    /// nothing said).
+    fn send_note(host: &Fake) -> (String, String) {
+        let now = host.shown().slices;
+        (now.send_note, now.send_detail)
+    }
+
     #[test]
     fn a_send_counts_the_slices_along_and_says_where_they_are() {
         let host = four_slices();
@@ -2891,7 +2933,7 @@ mod tests {
         slices::made(&host, 9);
         assert_eq!(send_shown(&host), ("Waiting for Bitwig".into(), false, Some(1.0), false, 4, false));
         // They're in: the button says so, and can be pressed again; their pads stay filled.
-        slices::sent(&host, true);
+        slices::sent(&host, Ok(()));
         assert_eq!(send_shown(&host), ("In Bitwig".into(), true, None, true, 4, false));
         // Cut another way, they're other slices, still to send; back as they went, it says so again.
         slices::each_picked(&host, "to the sound's end");
@@ -2904,7 +2946,7 @@ mod tests {
         assert_eq!(send_shown(&host), ("Making 1 of 4".into(), false, Some(0.0), false, 0, true));
         slices::made(&host, 4);
         assert_eq!(send_shown(&host), ("Making 4 of 4".into(), false, Some(1.0), false, 4, false));
-        slices::sent(&host, true);
+        slices::sent(&host, Ok(()));
         assert_eq!(send_shown(&host), ("Saved".into(), true, None, true, 4, false));
     }
 
@@ -2918,7 +2960,7 @@ mod tests {
         assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
         // A count, or an end, with no send on its way is nobody's.
         slices::made(&host, 3);
-        slices::sent(&host, true);
+        slices::sent(&host, Ok(()));
         assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
         // Taken, and the sound cut another way while they're on their way: these aren't the slices being sent, so
         // nothing counts along here, and Send waits for that send to end.
@@ -2930,20 +2972,147 @@ mod tests {
         slices::made(&host, 4);
         assert_eq!(send_shown(&host), ("Send 4 slices".into(), false, None, false, 0, false));
         // They went: Send comes back for these, and the ones that went are remembered as they were cut.
-        slices::sent(&host, true);
+        slices::sent(&host, Ok(()));
         assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
         assert_eq!(run_action(&host, UNDO), Some(true));
         assert_eq!(send_shown(&host), ("In Bitwig".into(), true, None, true, 4, false));
-        // Sent again, and that one fails: its card says so, and here they're still where the first send put them.
+        // Sent again, and that one fails: the strip says so beside Send, and they're still where the first send put
+        // them.
         assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
         assert_eq!(send_shown(&host), ("Making 1 of 4".into(), false, Some(0.0), false, 0, true));
-        slices::sent(&host, false);
+        slices::sent(&host, Err(not_sent()));
         assert_eq!(send_shown(&host), ("In Bitwig".into(), true, None, true, 4, false));
+        assert_eq!(send_note(&host), ("Couldn't send the slices".into(), "Bitwig isn't open.".into()));
         // A send that fails with none before it leaves Send as it was.
         slices::each_picked(&host, "to the sound's end");
         assert_eq!(run_action(&host, SAVE), Some(true));
-        slices::sent(&host, false);
+        slices::sent(&host, Err(not_sent()));
         assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
+    }
+
+    #[test]
+    fn slices_that_could_not_be_sent_say_so_beside_send_until_they_are_sent_again() {
+        let host = four_slices();
+        assert_eq!(send_note(&host), (String::new(), String::new()));
+        // Sent, and they couldn't be: the strip says so beside Send, with why, and Send is as it was.
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        assert_eq!(send_note(&host).0, "");
+        slices::sent(&host, Err(not_sent()));
+        assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
+        assert_eq!(send_note(&host), ("Couldn't send the slices".into(), "Bitwig isn't open.".into()));
+        // Cut another way they're other slices, which nothing was said of; back as they were, it's said again.
+        slices::each_picked(&host, "to the sound's end");
+        assert_eq!(send_note(&host).0, "");
+        assert_eq!(run_action(&host, UNDO), Some(true));
+        assert_eq!(send_note(&host).0, "Couldn't send the slices");
+        // It's kept with its sound: another sound, cut just the same, says nothing of it; back on this one it's there.
+        open_instead(&host, four_hits(2));
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        assert_eq!(send_note(&host).0, "");
+        open_instead(&host, four_hits(1));
+        assert_eq!(send_note(&host).0, "Couldn't send the slices");
+        // Sent again: that's past at once, and this send says how it goes itself.
+        assert_eq!(run_action(&host, SAVE), Some(true));
+        assert_eq!(send_note(&host).0, "");
+        slices::sent(&host, Ok(()));
+        assert_eq!(send_shown(&host), ("Saved".into(), true, None, true, 4, false));
+        assert_eq!(send_note(&host).0, "");
+        // One that fails is past once the strip closes, too: open again, Send says where they went before, and no
+        // more.
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        slices::sent(&host, Err(not_sent()));
+        assert_eq!(send_note(&host).0, "Couldn't send the slices");
+        close(&host);
+        host.strip.borrow_mut().open = true;
+        open_instead(&host, four_hits(1));
+        assert_eq!(send_shown(&host), ("Saved".into(), true, None, true, 4, false));
+        assert_eq!(send_note(&host).0, "");
+        // A send still on its way as the strip closes, which then fails, is news still: it's said when its sound is
+        // open again, and is past once the strip closes after that.
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        close(&host);
+        slices::sent(&host, Err(not_sent()));
+        host.strip.borrow_mut().open = true;
+        open_instead(&host, four_hits(1));
+        assert_eq!(send_note(&host).0, "Couldn't send the slices");
+        close(&host);
+        host.strip.borrow_mut().open = true;
+        open_instead(&host, four_hits(1));
+        assert_eq!(send_note(&host).0, "");
+    }
+
+    #[test]
+    fn slices_that_could_not_be_sent_are_kept_so_with_the_slices_off_and_another_sound_open() {
+        let host = four_slices();
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        slices::sent(&host, Err(not_sent()));
+        // The Slices off and another sound opened: the first one's slicing, as usual as it is, is kept for what was
+        // said of it. Back on it with its Slices on again, it's said again.
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        open_instead(&host, four_hits(2));
+        assert_eq!(host.strip.borrow().kept.len(), 1);
+        open_instead(&host, four_hits(1));
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        assert_eq!(send_note(&host).0, "Couldn't send the slices");
+        // The strip closed with that sound put by, its Slices off: what was said is past, and a sound kept for that
+        // alone isn't kept any more.
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        open_instead(&host, four_hits(2));
+        assert_eq!(host.strip.borrow().kept.len(), 1);
+        close(&host);
+        assert_eq!(host.strip.borrow().kept.len(), 0);
+        // Nor is the sound that's open as the strip closes.
+        host.strip.borrow_mut().open = true;
+        open_instead(&host, four_hits(1));
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        slices::sent(&host, Err(not_sent()));
+        assert_eq!(run_action(&host, slices::SLICES), Some(true));
+        close(&host);
+        assert_eq!(host.strip.borrow().kept.len(), 0);
+    }
+
+    #[test]
+    fn slices_on_their_way_as_the_strip_is_put_away_are_answered_at_its_next_host() {
+        let host = four_slices();
+        assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
+        slices::made(&host, 2);
+        // The host goes while they're on their way (the plugin's window, put away as Bitwig selects their new track).
+        let mut s = host.strip.take();
+        put_away(&mut s);
+        assert!(open_on(&s).is_none() && s.sending.is_some());
+        // The next host has the strip. Open on the sound again, Send still waits for them, as far along as it was:
+        // they can't be sent a second time.
+        let next = Fake::on(s);
+        next.takes_sends.set(true);
+        next.strip.borrow_mut().open = true;
+        open_instead(&next, four_hits(1));
+        assert_eq!(send_shown(&next), ("Making 3 of 4".into(), false, Some(0.5), false, 2, true));
+        assert_eq!(run_action(&next, slices::TO_BITWIG), Some(false));
+        assert!(next.sends.borrow().is_empty());
+        // It hears how the send ended, and says so to the strip: they're where they were sent.
+        slices::made(&next, 4);
+        slices::sent(&next, Ok(()));
+        assert_eq!(send_shown(&next), ("In Bitwig".into(), true, None, true, 4, false));
+        // A send that fails with the strip put away is said beside Send once its sound is open again: also when the
+        // host that heard of it went too, with the strip never opened there.
+        assert_eq!(run_action(&next, slices::TO_BITWIG), Some(true));
+        let mut s = next.strip.take();
+        put_away(&mut s);
+        let heard = Fake::on(s);
+        slices::sent(&heard, Err(not_sent()));
+        let mut s = heard.strip.take();
+        put_away(&mut s);
+        let last = Fake::on(s);
+        last.strip.borrow_mut().open = true;
+        open_instead(&last, four_hits(1));
+        assert_eq!(send_shown(&last), ("In Bitwig".into(), true, None, true, 4, false));
+        assert_eq!(send_note(&last).0, "Couldn't send the slices");
+        // Said, it's past once the strip closes.
+        close(&last);
+        last.strip.borrow_mut().open = true;
+        open_instead(&last, four_hits(1));
+        assert_eq!(send_note(&last).0, "");
     }
 
     #[test]
@@ -2960,7 +3129,7 @@ mod tests {
         slices::made(&host, 4);
         assert_eq!(send_shown(&host), ("Send 4 slices".into(), false, None, false, 0, false));
         // They're in Bitwig: this sound's Send comes back, and it has sent nothing itself.
-        slices::sent(&host, true);
+        slices::sent(&host, Ok(()));
         assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
         // Back on the first sound, its slices are where they went.
         open_instead(&host, four_hits(1));
@@ -2968,7 +3137,7 @@ mod tests {
         // And a send that ends once its sound's slicing is no longer kept is nobody's: nothing is said of it.
         assert_eq!(run_action(&host, slices::TO_BITWIG), Some(true));
         host.strip.borrow_mut().sound = Some(four_hits(2));
-        slices::sent(&host, true);
+        slices::sent(&host, Ok(()));
         assert_eq!(run_action(&host, slices::SLICES), Some(true));
         assert_eq!(send_shown(&host), ("Send 4 slices".into(), true, None, false, 0, false));
     }
@@ -2982,7 +3151,7 @@ mod tests {
         assert_eq!(run_action(&host, slices::SLICES), Some(true));
         assert!(!host.shown().slices.on);
         open_instead(&host, four_hits(2));
-        slices::sent(&host, true);
+        slices::sent(&host, Ok(()));
         // Back on the first sound with its Slices on again: they're the ones that went.
         open_instead(&host, four_hits(1));
         assert!(!host.shown().slices.on);

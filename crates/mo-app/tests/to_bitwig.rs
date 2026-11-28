@@ -250,7 +250,7 @@ fn a_sounds_slices_go_on_a_drum_machines_pads_from_c1() {
         card(&feed),
         ("Sending 20 slices of Garage Loop 128 to Bitwig".into(), "Waiting for Bitwig".into(), State::Running)
     );
-    assert!(to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Garage Loop 128", &pads, None));
+    assert!(to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Garage Loop 128", &pads, None).went_in);
     // Said in a line, not pad by pad.
     assert_eq!(
         card(&feed),
@@ -260,12 +260,25 @@ fn a_sounds_slices_go_on_a_drum_machines_pads_from_c1() {
             State::Done
         )
     );
-    let world = bitwig.world();
-    let track = world.tracks.iter().position(|t| t.name == "Garage Loop 128 (sliced)").unwrap();
-    let on = world.pads(track).unwrap();
-    assert_eq!(on.keys().copied().collect::<Vec<_>>(), (36..56).collect::<Vec<u8>>());
-    assert_eq!(on[&36].name, "Slice 1");
-    assert_eq!(on[&55].name, "Slice 20");
+    {
+        let world = bitwig.world();
+        let track = world.tracks.iter().position(|t| t.name == "Garage Loop 128 (sliced)").unwrap();
+        let on = world.pads(track).unwrap();
+        assert_eq!(on.keys().copied().collect::<Vec<_>>(), (36..56).collect::<Vec<u8>>());
+        assert_eq!(on[&36].name, "Slice 1");
+        assert_eq!(on[&55].name, "Slice 20");
+    }
+    // The same send with no card to say it on (the plugin's): its words are the card's.
+    let went = to_bitwig::slices_into_bitwig(&bitwig.bitwig(), &kits, "Hats", &pads[..2], None);
+    assert_eq!(
+        went,
+        to_bitwig::SlicesWent {
+            went_in: true,
+            title: "Hats (sliced) is in Bitwig".into(),
+            detail: "2 slices on a Drum Machine on a new track, C1 to C#1".into(),
+        }
+    );
+    assert!(bitwig.world().track("Hats (sliced)").is_some());
 }
 
 #[test]
@@ -279,7 +292,7 @@ fn slices_that_dont_go_in_say_why_on_their_card() {
     let feed = Feed::default();
     let one = to_bitwig::slices_card(&feed, "Loop", 1);
     assert_eq!(card(&feed).0, "Sending 1 slice of Loop to Bitwig");
-    assert!(to_bitwig::send_slices(one, &bitwig.bitwig(), &Kits::new(), "Loop", &pads[..1], None));
+    assert!(to_bitwig::send_slices(one, &bitwig.bitwig(), &Kits::new(), "Loop", &pads[..1], None).went_in);
     assert_eq!(card(&feed).1, "1 slice on a Drum Machine on a new track, C1");
 
     // Bitwig quietly didn't load one: the card says which, as a kit's does.
@@ -287,7 +300,7 @@ fn slices_that_dont_go_in_say_why_on_their_card() {
     bitwig.world().unloadable = vec!["Loop 02.wav".into()];
     let feed = Feed::default();
     let job = to_bitwig::slices_card(&feed, "Loop", 2);
-    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &Kits::new(), "Loop", &pads, None));
+    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &Kits::new(), "Loop", &pads, None).went_in);
     let (title, why, state) = card(&feed);
     assert_eq!((title.as_str(), state), ("Loop (sliced) didn't go in cleanly", State::Failed));
     assert!(why.contains("Slice 2"), "{why}");
@@ -297,7 +310,7 @@ fn slices_that_dont_go_in_say_why_on_their_card() {
     bitwig.world().changes = false;
     let feed = Feed::default();
     let job = to_bitwig::slices_card(&feed, "Loop", 2);
-    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &Kits::new(), "Loop", &pads, None));
+    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &Kits::new(), "Loop", &pads, None).went_in);
     let (title, why, state) = card(&feed);
     assert_eq!((title.as_str(), state), (to_bitwig::SLICES_FAILED, State::Failed));
     assert!(why.contains("\"Let the app make changes\""), "{why}");
@@ -309,7 +322,7 @@ fn slices_that_dont_go_in_say_why_on_their_card() {
     let wrong = DeviceId::SAMPLER.to_string();
     let feed = Feed::default();
     let job = to_bitwig::slices_card(&feed, "Loop", 2);
-    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Loop", &pads, Some(&wrong)));
+    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Loop", &pads, Some(&wrong)).went_in);
     // What to do about it is said of the slices: they aren't a kit of the Kits'.
     assert_eq!(
         card(&feed),
@@ -327,7 +340,7 @@ fn slices_that_dont_go_in_say_why_on_their_card() {
     }
     let feed = Feed::default();
     let job = to_bitwig::slices_card(&feed, "Loop", 2);
-    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Loop", &pads, None));
+    assert!(!to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Loop", &pads, None).went_in);
     assert_eq!(
         card(&feed),
         (
@@ -347,7 +360,7 @@ fn slices_that_dont_go_in_say_why_on_their_card() {
     }
     let feed = Feed::default();
     let job = to_bitwig::slices_card(&feed, "Loop", 2);
-    assert!(to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Loop", &pads, None));
+    assert!(to_bitwig::send_slices(job, &bitwig.bitwig(), &kits, "Loop", &pads, None).went_in);
     assert_eq!(
         card(&feed),
         (
