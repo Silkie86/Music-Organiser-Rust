@@ -1,7 +1,7 @@
 //! The widths of the plugin's parts you can drag wider or narrower ([`mo_app::widths::PLUGIN_PARTS`]): the filter
-//! column, the folder tree, Chord check's takes, and how high the Edit strip is. Kept in a small file of the plugin's own in the app's data folder
-//! (the plugin never writes the app's settings), shared by every copy of the plugin: a window opened later, in any
-//! project, comes up as you left the last one.
+//! column, the folder tree, Chord check's takes, and how high the Edit strip is. Kept in a small file of the plugin's
+//! own in the app's data folder (the plugin never writes the app's settings), shared by every copy of the plugin: a
+//! window opened later, in any project, comes up as you left the last one.
 //!
 //! Two DAWs running side by side (or Bitwig's plugin hosts) each have a copy of the plugin's code of their own, with
 //! the widths as that copy last saw them. So the file is read again as each window opens, and a part dragged is written

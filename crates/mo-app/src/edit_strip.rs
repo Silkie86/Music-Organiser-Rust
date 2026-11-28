@@ -801,6 +801,12 @@ pub fn sound_picked(host: &dyn Host) {
     }
 }
 
+/// The sound the strip is open on, by its id: none while it's closed. A host whose list goes on by itself (the
+/// plugin's) goes by this to see when another sound is picked there ([`sound_picked`]).
+pub fn open_on(strip: &Strip) -> Option<i64> {
+    strip.sound.as_ref().filter(|_| strip.open).map(|o| o.id)
+}
+
 /// The part picked on the card changed: a sound too long to edit whole is edited a part at a time, so the strip
 /// takes the new part (the last part's edits are kept, and come back with it).
 pub fn card_part_changed(host: &dyn Host) {
@@ -2574,13 +2580,14 @@ mod tests {
         let host = Fake::on(strip(1_000, vec![Edit::Reverse(None)]));
         show(&host);
         assert!(host.strip.borrow().wave.is_some());
+        assert_eq!(open_on(&host.strip.borrow()), Some(1));
         // A copy saved, and then another on its way as the host goes.
         assert_eq!(run_action(&host, SAVE), Some(true));
         saved(&host, 1, Ok("Edited sounds/a (edit 1f).wav".into()));
         let mut s = host.strip.take();
         let asked = s.asked;
         put_away(&mut s);
-        assert!(!s.open && s.sound.is_none());
+        assert!(!s.open && s.sound.is_none() && open_on(&s).is_none());
         assert!(s.room.is_none() && s.columns.is_none() && s.wave.is_none());
         // Its edits wait with the kept ones, and an answer still on its way for the old host is nobody's.
         assert_eq!(s.kept.len(), 1);

@@ -1,12 +1,13 @@
 // The test plugin's panel: what shows inside the DAW's plugin window. Built from the app's own style (studio.slint),
 // so it looks like the app. Its views: Sounds (the app's sound library as a list or as the Galaxy, click to play
-// through the track, with the app's own filters and orders), MIDI, Presets,
+// through the track, with the app's own filters and orders, and its Edit strip along the bottom), MIDI, Presets,
 // Chords (Chord check: the chord the notes played in make, as the app's chord reader names it) and DAW check (every
 // CLAP extension the DAW was asked for, and whether it has it).
 
 import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar, ToggleChip, DragHandle, MenuItem, Panel as Card, TipLayer, TipState, CutText, Icons, MenuCard, Seam, Widths, FilterSearch } from "../../mo-ui/ui/studio.slint";
 import { CurveBench, GridStrip, CurveEditorData, EditorDot, ClipTile, RulerMark } from "../../mo-ui/ui/pages/curve_editor.slint";
-export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem, Widths, FilterSearch }
+import { EditStrip, SoundEdit, EditMark, EditChip, EditRoom, SliceCut } from "../../mo-ui/ui/pages/sound_edit.slint";
+export { FilterView, FilterChoice, YearBar, Theme, CurveEditorData, EditorDot, ClipTile, RulerMark, MenuItem, Widths, FilterSearch, SoundEdit, EditMark, EditChip, EditRoom, SliceCut }
 import { ListView } from "../../mo-ui/ui/list.slint";
 import { FolderTree, PickStrip, TreeLine, TreePick, MixPart } from "../../mo-ui/ui/folder_tree.slint";
 import { RightClickMenu } from "../../mo-ui/ui/studio.slint";
@@ -411,6 +412,24 @@ export component Panel inherits Window {
         }
     }
     in property <float> playing-at;
+    // The Edit strip (the app's own `EditStrip`, E), along the bottom of the Sounds tab: `edit` opens it on the sound
+    // picked, and closes it.
+    callback edit();
+    // The row of the sound the strip is on (-1: none, or the list doesn't show it), and the part of that sound's own
+    // file the strip is on (0 its start, 1 its end; both 0 for the whole file): its line shows the part.
+    in property <int> edit-row: -1;
+    in property <float> edit-from;
+    in property <float> edit-to;
+    // How high the strip is and where its top is in the window (no height while it isn't showing). The rest of the
+    // panel ends above it. It's as high as it was dragged, but leaves the rest 360 while that leaves it its least.
+    out property <length> edit-height: root.view == 0 && SoundEdit.shown
+        ? max(Widths.least("plugin.edit"), min(Widths.most("plugin.edit"), Widths.sounds-edit, root.height - 360px)) : 0px;
+    out property <length> edit-top: root.height - root.edit-height;
+    // Gives the lists the keys, as a click on a line does: the window asks at a press on the strip, so a box that was
+    // being typed in doesn't take the strip's keys.
+    public function keys-to-lists() {
+        list-keys.focus();
+    }
     // What's typed in the search box: kept while another tab shows, as the list keeps it.
     in-out property <string> search-text;
     callback search(string);
@@ -638,6 +657,9 @@ export component Panel inherits Window {
     default-font-size: Type.body;
 
     VerticalLayout {
+        // Down to the Edit strip, while it shows (from the top: with a height of its own it would sit in the middle).
+        y: 0;
+        height: root.height - root.edit-height;
         padding: Space.lg;
         spacing: Space.md;
 
@@ -938,6 +960,22 @@ export component Panel inherits Window {
                         main: root.recording || root.record-open;
                         tip: root.record-open ? "Fold recording away" : "Record from the DAW or a sound card";
                         clicked => { root.record-open = !root.record-open; }
+                    }
+                    // Opens the Edit strip on the sound picked in the list, and closes it; lit while the strip shows.
+                    StudioButton {
+                        horizontal-stretch: 0;
+                        sign: Icons.edit;
+                        text: "Edit";
+                        open: SoundEdit.shown;
+                        enabled: SoundEdit.shown || (root.picked >= 0 && !root.galaxy);
+                        tip: SoundEdit.shown ? "Close the Edit strip (your edits wait here until you come back)"
+                            : self.enabled ? "Edit the picked sound: trim, fade, reverse, turn it up or down. Its file never changes"
+                            : "Pick a sound in the list to edit it";
+                        key: SoundEdit.edit-key;
+                        clicked => {
+                            list-keys.focus();
+                            root.edit();
+                        }
                     }
                     if root.in-bitwig && root.picked >= 0: StudioButton {
                         horizontal-stretch: 0;
@@ -1464,17 +1502,65 @@ export component Panel inherits Window {
                                     alignment: center;
                                     // The size mo-plugin's waves.rs makes the picture for.
                                     wave := Image {
+                                        property <color> tint: Theme.sound-type(sound.colour);
+                                        // The Edit strip is on a part of this sound: its waveform stands back, and the
+                                        // part shows in a box of its own, lit as far as it has played.
+                                        property <bool> mirrored: i == root.edit-row && root.edit-to > root.edit-from;
                                         width: root.wave-width;
                                         height: 30px;
                                         source: sound.wave;
                                         image-fit: fill;
-                                        colorize: Theme.sound-type(sound.colour);
+                                        colorize: self.mirrored ? self.tint.transparentize(70%) : self.tint;
+                                        if wave.mirrored: part-box := Rectangle {
+                                            x: parent.width * root.edit-from;
+                                            y: -4px;
+                                            width: max(2px, parent.width * (root.edit-to - root.edit-from));
+                                            height: parent.height + 8px;
+                                            background: Theme.here-colour.transparentize(88%);
+                                            clip: true;
+                                            // The part's own stretch of the waveform, in its colour.
+                                            Image {
+                                                x: -part-box.x;
+                                                y: 4px;
+                                                width: wave.width;
+                                                height: wave.height;
+                                                source: sound.wave;
+                                                image-fit: fill;
+                                                colorize: wave.tint.transparentize(25%);
+                                            }
+                                            // What has played of it: from the part's start to the play head.
+                                            if i == root.playing-row: Rectangle {
+                                                x: 0;
+                                                width: max(0px, wave.width * root.playing-at - part-box.x);
+                                                clip: true;
+                                                Image {
+                                                    x: -part-box.x;
+                                                    y: 4px;
+                                                    width: wave.width;
+                                                    height: wave.height;
+                                                    source: sound.wave;
+                                                    image-fit: fill;
+                                                    colorize: Theme.text.mix(wave.tint, 0.75);
+                                                }
+                                            }
+                                            // Its two ends.
+                                            Rectangle {
+                                                x: 0;
+                                                width: 1.5px;
+                                                background: Theme.here-colour;
+                                            }
+                                            Rectangle {
+                                                x: parent.width - self.width;
+                                                width: 1.5px;
+                                                background: Theme.here-colour;
+                                            }
+                                        }
                                         // Where it's playing now.
                                         if i == root.playing-row: Rectangle {
                                             x: min(parent.width - self.width, max(0px, parent.width * root.playing-at - self.width / 2));
-                                            y: -3px;
+                                            y: wave.mirrored ? -4px : -3px;
                                             width: 2px;
-                                            height: parent.height + 6px;
+                                            height: parent.height - 2 * self.y;
                                             border-radius: 1px;
                                             background: Theme.text;
                                         }
@@ -2522,6 +2608,16 @@ export component Panel inherits Window {
                 font-size: Type.small;
             }
         }
+    }
+    // The Edit strip (E), along the bottom of the Sounds tab from edge to edge, as on the app's Sounds page: the list
+    // stays usable above it.
+    if root.view == 0 && SoundEdit.shown: EditStrip {
+        x: 0;
+        y: root.edit-top;
+        width: root.width;
+        height: root.edit-height;
+        part: "plugin.edit";
+        most-height: root.height - 360px;
     }
     // The tips the panel's controls give (the 19 Nov review's PN-1): a `Tip` only fills in TipState, and this draws
     // it, over everything, as the app's window does.
