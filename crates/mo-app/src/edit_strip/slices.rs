@@ -5,7 +5,8 @@
 //! A click in a slice plays it, and a press in one that moves carries that slice out of the app. Send hands the
 //! slices to the strip's host ([`Host::send`]), which puts each in a file of its own in a folder for this slicing in
 //! the export folder's Edited sounds ([`edit_copy::slices_to_keep`]) and then on a Drum Machine in Bitwig, one to a
-//! pad from C1 (the Kits' way in), or just opens their folder.
+//! pad from C1 (the Kits' way in), or just opens their folder. The button counts along as they're made ("Making 13 of
+//! 20", [`made`]) while their pads fill, and says where they are once they're there ("In Bitwig", [`sent`]).
 //!
 //! While the Slices are on, undo and redo step through the cuts, and the edit's own tools wait: the cuts are always of
 //! the edit as it is. Each sound's slicing is kept with its edits, so going to another sound and back finds it.
@@ -30,8 +31,7 @@ pub const TO_BITWIG: &str = "sounds.editSlicesBitwig";
 /// part's edges.
 const SNAP_OVER_HOLD: f64 = 1.6;
 
-/// What the menus call the choices: the cuts at the hits ("Hits (20)", with how many), or on the beats, so many
-/// apart; and how far each slice runs.
+/// What the menus call the choices: the cuts at the hits, or on the beats, so many apart; and how far each slice runs.
 const HITS: &str = "Hits";
 const ON_BEATS: [(&str, f64); 4] =
     [("Every bar", 4.0), ("Every beat", 1.0), ("Every half beat", 0.5), ("Every quarter beat", 0.25)];
@@ -42,6 +42,13 @@ const TO_END: &str = "to the sound's end";
 /// What the Send button says until there are slices to count, and the strip's foot until there are any.
 const SEND: &str = "Send the slices";
 const NO_SLICES: &str = "No slices yet";
+
+/// What the Send button says once the slices on show are where they were sent.
+const IN_BITWIG: &str = "In Bitwig";
+const SAVED: &str = "Saved";
+
+/// What the drag handle says until a slice is picked: it carries nothing until then.
+const DRAG_A_SLICE: &str = "Drag a slice";
 
 /// What the Send menu's folder line says until there are slices to count.
 const TO_FOLDER: &str = "A numbered folder";
@@ -157,14 +164,16 @@ pub(super) struct Sliced {
     /// The edits of the edit the cuts are in: with others, it's sliced afresh. None until it's first sliced.
     of: Option<Vec<Edit>>,
     pub(super) history: History<Slicing>,
+    /// The slices that last went where they were sent: Send says so while they're the ones on show.
+    sent: Option<Sent>,
 }
 
 impl Sliced {
     /// Whether there's anything of it to keep when the strip goes to another sound: the Slices on, a change to
-    /// undo or redo, or choices of his own (an edit made since then cut the sound afresh by them, with nothing to
-    /// undo: they're still his).
+    /// undo or redo, choices of his own (an edit made since then cut the sound afresh by them, with nothing to
+    /// undo: they're still his), or slices that went somewhere (Send says so again when he's back).
     pub(super) fn worth_keeping(&self) -> bool {
-        self.on || self.history.has_steps() || !self.history.now.as_usual()
+        self.on || self.history.has_steps() || !self.history.now.as_usual() || self.sent.is_some()
     }
 }
 
@@ -195,6 +204,32 @@ pub enum To {
     Bitwig,
     /// Just their folder, numbered.
     Folder,
+}
+
+/// Slices on their way ([`send`]): which, where to, and how many have their file so far.
+pub(super) struct Sending {
+    /// The sound they're of (by its id in the host's list, and what was read of it), the edit they're cut from and
+    /// each one's frames: the strip counts them along only while those are the slices it shows.
+    id: i64,
+    source: Source,
+    edits: Vec<Edit>,
+    spans: Vec<Span>,
+    to: To,
+    made: usize,
+}
+
+impl Sending {
+    /// Whether they're slices of this sound: by its id in the host's list, and what was read of it.
+    pub(super) fn is_of(&self, id: i64, source: &Source) -> bool {
+        self.id == id && self.source == *source
+    }
+}
+
+/// Slices that went where they were sent: the edit they're cut from, each one's frames, and where.
+struct Sent {
+    edits: Vec<Edit>,
+    spans: Vec<Span>,
+    to: To,
 }
 
 /// Slices for the strip's host to send ([`Host::send`]): what [`edit_copy::slices_to_keep`] makes their files from.
@@ -235,7 +270,16 @@ pub struct Showing {
     pub slice_from: f32,
     pub slice_to: f32,
     pub first_cut: f32,
-    /// What the cuts go by ("Hits (20)", "Every beat"…) and the choices; whether it's the hits (the sensitivity then
+    /// The slice picked by its number, from 1 (0 for none): its cell along the screen's foot is lit, and its pad.
+    /// And how many times one has been picked in this sound: it changes with every pick, of the same slice too, so
+    /// the pads can turn back to its page.
+    pub slice: usize,
+    pub picks: i32,
+    /// The slice that runs in from before the stretch on show, when the view is zoomed in past its cut: its number (0
+    /// for none) and how far across it runs (0 to 1). It has no line in sight, but its cell along the foot.
+    pub lead: usize,
+    pub lead_room: f32,
+    /// What the cuts go by ("Hits", "Every beat"…) and the choices; whether it's the hits (the sensitivity then
     /// counts); how big a hit must be, 0 (only the biggest) to 1 (the smallest too); and how far each slice runs.
     pub cut_at: String,
     pub cut_at_choices: Vec<String>,
@@ -243,14 +287,26 @@ pub struct Showing {
     pub sensitivity: f32,
     pub each: String,
     pub each_choices: Vec<String>,
-    /// The Send button's words ("Send 20 slices") and whether there's anything to send (and none on their way); each
-    /// slice's pad, by its note's name as Bitwig has it ("C1", "C#1"…), for its menu; what the menu's folder line says
-    /// ("A numbered folder, 01 … 20"), and where the slices are saved.
+    /// The Send button's words ("Send 20 slices"; "Making 13 of 20", then "Waiting for Bitwig", while these slices
+    /// are on their way; "In Bitwig" or "Saved" once they're there) and whether there's anything to send (and none on
+    /// their way); each slice's pad, by its note's name as Bitwig has it ("C1", "C#1"…): one for every slice there
+    /// is, in sight or not, so they count the cuts too; what Send's menu says of their folder ("A numbered folder,
+    /// 01 … 20"), and where the slices are saved.
     pub send_text: String,
     pub can_send: bool,
     pub pads: Vec<String>,
     pub to_folder_text: String,
     pub saved_in: String,
+    /// These slices are on their way: how far along the making is, 0 to 1 (the button is a bar that fills). None
+    /// while no send of them is.
+    pub sending: Option<f32>,
+    /// These slices are where they were sent: the button says where, with a tick (and can be pressed, to send them
+    /// again).
+    pub sent: bool,
+    /// How many of these slices have their file, as a send has made them: their pads are filled, from the first. And
+    /// whether the next one is being made now (its pad is lit).
+    pub made: usize,
+    pub making: bool,
     /// What the strip's foot says: the slice picked by its number ("Slice 5"), with how long it is and the pad it goes
     /// on ("0.23 s · pad E1"). With none picked, no number, and the pads they all go on ("Pads C1 to G3"); "No slices
     /// yet" until there are cuts.
@@ -271,6 +327,10 @@ impl Default for Showing {
             slice_from: 0.0,
             slice_to: 0.0,
             first_cut: 0.0,
+            slice: 0,
+            picks: 0,
+            lead: 0,
+            lead_room: 0.0,
             cut_at: String::new(),
             cut_at_choices: Vec::new(),
             cut_at_hits: usual.cut_at == CutAt::Hits,
@@ -282,6 +342,10 @@ impl Default for Showing {
             pads: Vec::new(),
             to_folder_text: TO_FOLDER.to_owned(),
             saved_in: String::new(),
+            sending: None,
+            sent: false,
+            made: 0,
+            making: false,
             foot_name: String::new(),
             foot_facts: NO_SLICES.to_owned(),
             cuts_mark: 0,
@@ -430,7 +494,7 @@ pub fn end_live(host: &dyn Host) {
 /// "Cut at" picked from its menu, by its line's words: the cuts go where that puts them (the same one again puts
 /// them back there, after lines moved by hand).
 pub fn cut_at_picked(host: &dyn Host, choice: &str) {
-    let cut_at = if choice.starts_with(HITS) {
+    let cut_at = if choice == HITS {
         CutAt::Hits
     } else if let Some((_, beats)) = ON_BEATS.iter().find(|(name, _)| *name == choice) {
         CutAt::Beats(*beats)
@@ -526,7 +590,7 @@ fn drag(o: &mut Opened, at: f64, shift: bool, far: bool) -> Dragged {
             if let Some(press) = o.slice_press.as_mut() {
                 press.on = On::Slice { slice, carried: true };
             }
-            o.slice = Some(slice);
+            pick(o, slice);
             Dragged::Carry(span)
         }
         _ => Dragged::Nothing,
@@ -590,12 +654,23 @@ pub fn up(host: &dyn Host, cut_short: bool) {
     }
 }
 
+/// A pad pressed: its slice (from 0) is picked and plays, as a click in it on the screen does.
+pub fn pad_pressed(host: &dyn Host, slice: usize) {
+    play(host, slice);
+}
+
+/// The slice `slice` (from 0) of the sound `o` is the one picked now: one more pick, the same slice again or not.
+fn pick(o: &mut Opened, slice: usize) {
+    o.slice = Some(slice);
+    o.slice_picks = o.slice_picks.wrapping_add(1);
+}
+
 /// Picks the slice `slice` (from 0) and plays it.
 fn play(host: &dyn Host, slice: usize) {
     let span = host.strip().borrow_mut().sound.as_mut().and_then(|o| {
         let (slicing, made) = now(o)?;
         let span = slicing.slice(slice, made.audio.seconds())?;
-        o.slice = Some(slice);
+        pick(o, slice);
         Some(span)
     });
     let Some((from, till)) = span else { return };
@@ -666,18 +741,26 @@ fn spans(slicing: &Slicing, made: &Made) -> Vec<Span> {
 }
 
 /// Sends the slices: the host puts each in a file of its own, saved in a folder for this slicing in Edited sounds
-/// (made now, or the ones made before), then on a Drum Machine in Bitwig, or opens their folder; Send waits until
-/// they're there ([`sent`]). Whether there were slices to send.
+/// (made now, or the ones made before), then on a Drum Machine in Bitwig, or opens their folder; Send counts along
+/// ([`made`]) and waits until they're there ([`sent`]). Whether there were slices to send.
 pub(super) fn send(host: &dyn Host, to: To) -> bool {
     let ready = {
         let s = host.strip().borrow();
-        s.sound.as_ref().filter(|_| !s.sending).and_then(|o| {
+        s.sound.as_ref().filter(|_| s.sending.is_none()).and_then(|o| {
             let (slicing, made) = now(o)?;
             let spans = spans(slicing, made);
             if spans.is_empty() {
                 return None;
             }
-            Some(Slices {
+            let sending = Sending {
+                id: o.id,
+                source: o.source.clone(),
+                edits: made.edits.clone(),
+                spans: spans.clone(),
+                to,
+                made: 0,
+            };
+            let slices = Slices {
                 id: o.id,
                 source: o.source.clone(),
                 changed: o.changed,
@@ -685,20 +768,52 @@ pub(super) fn send(host: &dyn Host, to: To) -> bool {
                 what: format!("{:?}", made.edits),
                 spans,
                 name: o.name.clone(),
-            })
+            };
+            Some((slices, sending))
         })
     };
-    let Some(slices) = ready else { return false };
-    if host.send(to, slices) {
-        host.strip().borrow_mut().sending = true;
-        show(host);
+    let Some((slices, sending)) = ready else { return false };
+    // On their way before the host has them, so a host that counts along at once has something to count on.
+    host.strip().borrow_mut().sending = Some(sending);
+    if !host.send(to, slices) {
+        host.strip().borrow_mut().sending = None;
     }
+    show(host);
     true
 }
 
-/// The slices handed to the host ([`Host::send`]) are where they were sent, or couldn't be: Send comes back.
-pub fn sent(host: &dyn Host) {
-    host.strip().borrow_mut().sending = false;
+/// So many of the slices handed to the host ([`Host::send`]) have their file now: Send counts along, and their pads
+/// fill. A count that gets here late never takes one back.
+pub fn made(host: &dyn Host, count: usize) {
+    let more = host.strip().borrow_mut().sending.as_mut().is_some_and(|sending| {
+        let count = count.min(sending.spans.len());
+        let more = count > sending.made;
+        sending.made = sending.made.max(count);
+        more
+    });
+    if more {
+        show(host);
+    }
+}
+
+/// The slices handed to the host ([`Host::send`]) are where they were sent (`went`), or couldn't be: Send comes back,
+/// and says where they are for as long as they're the slices on show. (How it went is the host's to say besides: a
+/// send that failed leaves Send as it was.)
+pub fn sent(host: &dyn Host, went: bool) {
+    {
+        let mut s = host.strip().borrow_mut();
+        let Some(sending) = s.sending.take() else { return };
+        // Kept with the sound they're of: the one that's open, or one put by since (with its slicing, as slices of
+        // it were on their way).
+        let Strip { sound, kept, .. } = &mut *s;
+        let sliced = match sound.as_mut().filter(|o| sending.is_of(o.id, &o.source)) {
+            Some(o) => o.sliced.as_mut(),
+            None => kept.iter_mut().find(|k| sending.is_of(k.id, &k.source)).and_then(|k| k.sliced.as_mut()),
+        };
+        if let (true, Some(sliced)) = (went, sliced) {
+            sliced.sent = Some(Sent { edits: sending.edits, spans: sending.spans, to: sending.to });
+        }
+    }
     show(host);
 }
 
@@ -713,23 +828,19 @@ fn cuts_mark(cuts: &[f64], from: f64, to: f64) -> i32 {
     (mark ^ (mark >> 32)) as i32
 }
 
-/// The Slices of the sound `o` as they are now (`sending`: slices are on their way, so Send waits).
-pub(super) fn showing(o: &Opened, sending: bool) -> Showing {
+/// The Slices of the sound `o` as they are now (`sending`: slices are on their way, so Send waits; and counts along,
+/// when they're this sound's as it's sliced now).
+pub(super) fn showing(o: &Opened, sending: Option<&Sending>) -> Showing {
     let Some(sliced) = o.sliced.as_ref().filter(|s| s.on) else { return Showing::default() };
     let slicing = &sliced.history.now;
     let ready = now(o);
-    // What the cuts go by: the hits, with how many cuts they give; or the beats, for a sound whose tempo is known.
-    let at_hits = match (slicing.cut_at, ready) {
-        (CutAt::Hits, _) => slicing.cuts.len(),
-        (CutAt::Beats(_), Some((_, made))) => cuts_for(made, None, CutAt::Hits, slicing.sensitivity).len(),
-        (CutAt::Beats(_), None) => 0,
-    };
-    let hits_line = format!("{HITS} ({at_hits})");
+    // What the cuts go by: the hits; or the beats, for a sound whose tempo is known.
     let cut_at = match slicing.cut_at {
-        CutAt::Hits => hits_line.clone(),
-        CutAt::Beats(beats) => ON_BEATS.iter().find(|(_, b)| *b == beats).map_or(HITS, |(name, _)| *name).to_owned(),
-    };
-    let mut cut_at_choices = vec![hits_line];
+        CutAt::Hits => HITS,
+        CutAt::Beats(beats) => ON_BEATS.iter().find(|(_, b)| *b == beats).map_or(HITS, |(name, _)| *name),
+    }
+    .to_owned();
+    let mut cut_at_choices = vec![HITS.to_owned()];
     if o.bpm.is_some() {
         cut_at_choices.extend(ON_BEATS.iter().map(|(name, _)| (*name).to_owned()));
     }
@@ -762,19 +873,64 @@ pub(super) fn showing(o: &Opened, sending: bool) -> Showing {
         })
         .collect();
     show.first_cut = slicing.cuts.first().map_or(0.0, |first| across(*first).clamp(0.0, 1.0));
+    // Zoomed in past a cut, the slice it starts still runs in from the left, as far as the first line in sight.
+    let first_in_sight = shown.first().map_or(to, |&(_, cut)| cut);
+    if let Some(before) = slicing.cuts.iter().rposition(|cut| *cut < from).filter(|_| first_in_sight > from) {
+        (show.lead, show.lead_room) = (before + 1, across(first_in_sight).clamp(0.0, 1.0));
+    }
     (show.slice_from, show.slice_to) =
         picked(o).map_or((0.0, 0.0), |(a, b)| (across(a).clamp(0.0, 1.0), across(b).clamp(0.0, 1.0)));
+    (show.slice, show.picks) = (picked_number(o), o.slice_picks);
     let slices = slicing.cuts.len();
     show.pads = (0..slices).map(to_bitwig::slice_pad_name).collect();
-    show.can_send = slices > 0 && !sending;
-    show.send_text = format!("Send {}", to_bitwig::slices_text(slices));
+    show.can_send = slices > 0 && sending.is_none();
     show.to_folder_text =
         if slices > 1 { format!("{TO_FOLDER}, 01 \u{2026} {slices:02}") } else { TO_FOLDER.to_owned() };
     // Where they're saved: the folder this slicing has, by its name.
-    let folder = edit_copy::slices_folder_name(&o.source, &format!("{:?}", made.edits), &spans(slicing, made));
+    let spans = spans(slicing, made);
+    let folder = edit_copy::slices_folder_name(&o.source, &format!("{:?}", made.edits), &spans);
     show.saved_in = format!("Saved in {}: {folder}", edit_copy::FOLDER);
+    // A send of these very slices (this edit, cut just so): on its way, the button counts along and their pads
+    // fill; there, the button says where. Any other slices are still to send.
+    let these = |edits: &[Edit], frames: &[Span]| *edits == made.edits[..] && *frames == spans[..];
+    let on_way = sending.filter(|s| s.is_of(o.id, &o.source) && these(&s.edits, &s.spans));
+    let there = sliced.sent.as_ref().filter(|s| these(&s.edits, &s.spans));
+    show.send_text = match (on_way, there) {
+        (Some(s), _) => {
+            let of = s.spans.len();
+            (show.made, show.making) = (s.made.min(of), s.made < of);
+            show.sending = Some(show.made as f32 / of.max(1) as f32);
+            match s.to {
+                To::Bitwig if !show.making => to_bitwig::SLICES_WAITING.to_owned(),
+                _ => format!("Making {} of {of}", (show.made + 1).min(of)),
+            }
+        }
+        (None, Some(s)) => {
+            (show.sent, show.made) = (true, slices);
+            match s.to {
+                To::Bitwig => IN_BITWIG,
+                To::Folder => SAVED,
+            }
+            .to_owned()
+        }
+        (None, None) => format!("Send {}", to_bitwig::slices_text(slices)),
+    };
     (show.foot_name, show.foot_facts) = foot(o, slices);
     show
+}
+
+/// The slice picked, by its number from 1; 0 for none.
+fn picked_number(o: &Opened) -> usize {
+    o.slice.filter(|_| picked(o).is_some()).map_or(0, |slice| slice + 1)
+}
+
+/// What the drag handle says with the Slices on: the slice it carries, by its number ("Drag slice 5"); "Drag a
+/// slice" until one is picked.
+pub(super) fn drag_text(o: &Opened) -> String {
+    match picked_number(o) {
+        0 => DRAG_A_SLICE.to_owned(),
+        number => format!("Drag slice {number}"),
+    }
 }
 
 /// What the strip's foot says of the sound's `slices`: the one picked by its number, with how long it is and the pad
@@ -890,7 +1046,7 @@ mod tests {
         let added = now(&o).unwrap().0.with_cut(0.25, 2.0).unwrap();
         o.sliced.as_mut().unwrap().history.change(added);
         o.sliced.as_mut().unwrap().on = false;
-        assert!(now(&o).is_none() && !showing(&o, false).on);
+        assert!(now(&o).is_none() && !showing(&o, None).on);
         slices_on(&mut o);
         assert_eq!(cuts(&o), [0.0, 0.25, 0.5, 1.0, 1.5]);
         assert_eq!(steps(&o), (true, false), "and its steps for undo");
@@ -1123,7 +1279,7 @@ mod tests {
         let twenty = Slicing { cuts: (0..20).map(|i| f64::from(i) * 0.1).collect(), ..Slicing::default() };
         o.sliced.as_mut().unwrap().history.change(twenty);
         let foot = |o: &Opened| {
-            let show = showing(o, false);
+            let show = showing(o, None);
             (show.foot_name, show.foot_facts)
         };
         let said = |name: &str, facts: &str| (name.to_owned(), facts.to_owned());
@@ -1143,7 +1299,59 @@ mod tests {
         assert_eq!(foot(&o), said("", "Pad C1"));
         o.sliced.as_mut().unwrap().history.change(Slicing::default());
         assert_eq!(foot(&o), said("", "No slices yet"));
-        assert_eq!(showing(&opened(), false).foot_facts, "No slices yet", "and with the Slices off");
+        assert_eq!(showing(&opened(), None).foot_facts, "No slices yet", "and with the Slices off");
+    }
+
+    #[test]
+    fn the_slices_are_counted_by_their_pads_and_the_one_picked_has_its_number() {
+        let mut o = opened();
+        slices_on(&mut o);
+        // Cut at its four big hits. With no tempo known there are no beats to cut on.
+        let show = showing(&o, None);
+        assert_eq!((show.cut_at.as_str(), show.pads.len(), show.slice), ("Hits", 4, 0));
+        assert_eq!(show.cut_at_choices, ["Hits"]);
+        assert_eq!(drag_text(&o), "Drag a slice");
+        // One picked: its number, from 1, for its cell and its pad; the drag handle carries it.
+        o.slice = Some(2);
+        assert_eq!((showing(&o, None).slice, drag_text(&o).as_str()), (3, "Drag slice 3"));
+        // With a tempo, the beats are choices too, each by its own words.
+        o.bpm = Some(120.0);
+        let show = showing(&o, None);
+        assert_eq!(show.cut_at_choices, ["Hits", "Every bar", "Every beat", "Every half beat", "Every quarter beat"]);
+        // One cut left: a slice picked that's no longer there counts as none.
+        o.sliced.as_mut().unwrap().history.change(slicing(&[0.5]));
+        assert_eq!((showing(&o, None).slice, drag_text(&o).as_str()), (0, "Drag a slice"));
+        // Zoomed in on one slice, the pads still count them all.
+        o.sliced.as_mut().unwrap().history.change(slicing(&[0.0, 0.5, 1.0, 1.5]));
+        o.zoom = Some((0.5, 1.0));
+        let show = showing(&o, None);
+        assert_eq!((show.cuts.len(), show.pads.len()), (2, 4));
+    }
+
+    #[test]
+    fn a_slice_that_runs_in_from_before_the_stretch_on_show_has_its_cell() {
+        let mut o = opened();
+        slices_on(&mut o);
+        let lead = |o: &Opened| {
+            let show = showing(o, None);
+            (show.lead, show.lead_room)
+        };
+        // The whole sound on show: every slice starts in sight.
+        assert_eq!(lead(&o), (0, 0.0));
+        // Zoomed in from 0.75 s to 1.25 s: slice 2 runs in as far as the line at 1 s, half way across.
+        o.zoom = Some((0.75, 1.25));
+        assert_eq!(lead(&o), (2, 0.5));
+        assert_eq!(showing(&o, None).cuts, [Cut { at: 0.5, number: 3, room: 0.5 }]);
+        // Zoomed in on a slice from its own line: nothing runs in.
+        o.zoom = Some((0.5, 1.0));
+        assert_eq!(lead(&o), (0, 0.0));
+        // Zoomed in inside one slice: it's all there is to see.
+        o.zoom = Some((0.6, 0.9));
+        assert_eq!((lead(&o), showing(&o, None).cuts.len()), ((2, 1.0), 0));
+        // Before the first cut there's no slice to run in.
+        o.sliced.as_mut().unwrap().history.change(slicing(&[0.5, 1.0]));
+        o.zoom = Some((0.1, 0.4));
+        assert_eq!(lead(&o), (0, 0.0));
     }
 
     #[test]

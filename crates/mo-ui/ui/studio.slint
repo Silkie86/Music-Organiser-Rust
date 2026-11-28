@@ -898,8 +898,10 @@ export component StudioButton inherits Rectangle {
     // Pressed (true) and let go (false), for a button that does something while it's held.
     callback held(bool);
     // What it does is done (the Edit strip's "Saved"): an outline in the accent on a lit face, and a tick after its
-    // words. A click does it again (a saved copy that has gone since is made again).
+    // words. A click does it again (a saved copy that has gone since is made again); while it can't be pressed it
+    // looks like any button that can't, and keeps its tick.
     in property <bool> done;
+    property <bool> lit-done: root.done && root.enabled;
     property <bool> down: touch.pressed;
     changed down => { root.held(self.down); }
     // The room either side of its words (and the menu arrow's, or the tick's).
@@ -910,9 +912,9 @@ export component StudioButton inherits Rectangle {
     height: root.folded ? max(Heights.button, label.preferred-height + 12px) : Heights.button;
     border-radius: Theme.radius;
     border-width: 1px;
-    border-color: root.done ? Theme.accent : root.flat ? Theme.stroke : Theme.edge;
+    border-color: root.lit-done ? Theme.accent : root.flat ? Theme.stroke : Theme.edge;
     property <bool> flat: quiet && !main;
-    background: root.done ? (touch.pressed ? Theme.well : Theme.lit-face) : !enabled ? Theme.surface : main
+    background: root.lit-done ? (touch.pressed ? Theme.well : Theme.lit-face) : !enabled ? Theme.surface : main
         ? (touch.pressed ? Theme.accent.darker(15%) : @linear-gradient(180deg, Theme.accent.brighter(12%) 0%, Theme.accent.darker(6%) 100%))
         : flat ? (touch.pressed ? Theme.well : touch.has-hover ? Theme.hover : transparent)
         : (touch.pressed ? Theme.well : @linear-gradient(180deg, (touch.has-hover ? Theme.hover : Theme.surface-raised).brighter(8%) 0%, Theme.surface-raised.darker(6%) 100%));
@@ -933,7 +935,7 @@ export component StudioButton inherits Rectangle {
         height: 1px;
         x: parent.border-radius;
         width: parent.width - 2 * parent.border-radius;
-        background: touch.pressed || root.flat || root.done ? transparent : Theme.shine;
+        background: touch.pressed || root.flat || root.lit-done ? transparent : Theme.shine;
     }
     label := Text {
         x: (parent.width - self.width - (root.menu ? 14px : root.done ? 22px : 0px)) / 2;
@@ -942,7 +944,7 @@ export component StudioButton inherits Rectangle {
         // A button with an icon shows only the icon; its words go in `tip`.
         visible: root.icon == "";
         text: root.text;
-        color: root.done ? Theme.accent
+        color: root.lit-done ? Theme.accent
             : !root.enabled ? Theme.faint : root.main ? Theme.accent-text : root.danger ? Theme.missing : Theme.text;
         font-size: Type.body;
         font-weight: 500;
@@ -970,7 +972,7 @@ export component StudioButton inherits Rectangle {
         viewbox-width: 16;
         viewbox-height: 16;
         commands: Icons.tick;
-        stroke: Theme.accent;
+        stroke: label.color;
         stroke-width: 2px;
     }
     if root.menu: Path {
@@ -1203,6 +1205,8 @@ export component StudioSlider inherits HorizontalLayout {
     in property <string> low;
     in property <string> high;
     in property <string> tip;
+    // How long its track is: shorter in a row of tools that has little room.
+    in property <length> track-width: 120px;
     in-out property <float> value;
     callback moved(float);
     callback released(float);
@@ -1214,7 +1218,7 @@ export component StudioSlider inherits HorizontalLayout {
         vertical-alignment: center;
     }
     track := Rectangle {
-        width: 120px;
+        width: root.track-width;
         height: 28px;
         Rectangle {
             y: (parent.height - self.height) / 2;
@@ -5130,6 +5134,196 @@ export component LevelMeter inherits Well {
         hovering: sense.has-hover && !sense.pressed;
         at-x: -Space.xl;
         at-y: root.height + Space.xs;
+    }
+}
+
+// A main button while what it started counts along (the Edit strip's "Making 13 of 20"): its words over a bar that
+// fills from the left as far as `progress` (0 to 1), in steps, as the count goes. It takes no press: what it counts
+// is on its way.
+export component CountingKey inherits Rectangle {
+    in property <string> text;
+    in property <float> progress;
+    // How far the bar has got, inside the key's edge.
+    property <length> filled: clamp(root.progress, 0, 1) * (self.width - 2px);
+    height: Heights.button;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.accent;
+    background: Theme.lit-face;
+    Rectangle {
+        x: 1px;
+        y: 1px;
+        width: root.filled;
+        height: root.height - 2px;
+        border-radius: max(0px, Theme.radius - 1px);
+        background: Theme.accent;
+    }
+    // Its words twice, each cut where the bar has got to: dark over what's done, light over what's still to do.
+    Rectangle {
+        x: 0px;
+        width: 1px + root.filled;
+        height: root.height;
+        clip: true;
+        Text {
+            x: 0px;
+            width: root.width;
+            height: root.height;
+            text: root.text;
+            color: Theme.accent-text;
+            font-size: Type.body;
+            font-weight: 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    Rectangle {
+        x: 1px + root.filled;
+        width: max(0px, root.width - self.x);
+        height: root.height;
+        clip: true;
+        Text {
+            x: -parent.x;
+            width: root.width;
+            height: root.height;
+            text: root.text;
+            color: Theme.text;
+            font-size: Type.body;
+            font-weight: 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// A drum machine's pads, as the Edit strip's Slices show the ones their slices go on: four across and four up, the first
+// at the bottom left, sixteen to a page. Each says its slice's number and its note; the pad of the slice picked is lit,
+// and a press on one plays its slice. More than sixteen have more pages: the dots under the pads say which is on show
+// (a click on one goes to it), and the page follows the slice picked. While the slices are being made into files
+// their pads fill, from the first, and the page follows the one being made; once they're all made it turns back to
+// the slice picked, or to the first page.
+export component PadGrid inherits Well {
+    // Each slice's pad, by its note's name ("C1"); the slice picked, by its number from 1 (0 for none).
+    in property <[string]> pads;
+    in property <int> picked;
+    // A count that changes with every pick, of the same slice too: the page turns to that slice's.
+    in property <int> picks;
+    // How many of them have their slice's file, from the first: those pads are filled. And whether the next one is
+    // being made now: its pad is lit round its edge, and the page turns to it.
+    in property <int> made;
+    in property <bool> making;
+    in property <bool> enabled: true;
+    // A pad pressed: its slice, from 0.
+    callback pressed(int);
+    property <int> pages: max(1, ceil(root.pads.length / 16));
+    // The page asked for, and the one on show (there may be fewer pages by now).
+    property <int> page;
+    property <int> shown: clamp(root.page, 0, root.pages - 1);
+    property <length> edge: Space.sm;
+    property <length> gap: Space.xs;
+    property <length> dots: root.pages > 1 ? 12px : 0px;
+    property <length> pad-wide: (self.width - 2 * self.edge - 3 * self.gap) / 4;
+    property <length> pad-high: (self.height - 2 * self.edge - self.dots - 3 * self.gap) / 4;
+    // Room for the note under the number; a low pad has only its number.
+    property <bool> roomy: self.pad-high >= 34px;
+    // The page with the pad being made on it; else the one with the slice picked.
+    function follow() {
+        if root.making {
+            root.page = floor(root.made / 16);
+        } else if root.picked > 0 {
+            root.page = floor((root.picked - 1) / 16);
+        }
+    }
+    init => {
+        self.follow();
+    }
+    changed picked => {
+        self.follow();
+    }
+    changed picks => {
+        self.follow();
+    }
+    changed made => {
+        self.follow();
+    }
+    changed making => {
+        if !root.making && root.picked == 0 {
+            root.page = 0;
+        }
+        self.follow();
+    }
+    for i in 16: Rectangle {
+        property <int> slice: root.shown * 16 + i;
+        property <bool> has: self.slice < root.pads.length;
+        property <bool> lit: self.has && self.slice + 1 == root.picked;
+        property <bool> made: self.has && self.slice < root.made;
+        property <bool> making: self.has && root.making && self.slice == root.made;
+        x: root.edge + mod(i, 4) * (root.pad-wide + root.gap);
+        y: root.edge + (3 - floor(i / 4)) * (root.pad-high + root.gap);
+        width: root.pad-wide;
+        height: root.pad-high;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: self.lit || self.making ? Theme.accent
+            : self.made ? Theme.here-colour.transparentize(45%)
+            : self.has ? Theme.stroke : Theme.stroke.transparentize(55%);
+        background: self.lit ? Theme.accent
+            : !self.has ? transparent
+            : touch.pressed ? Theme.well
+            : self.making ? Theme.lit-face
+            : self.made && touch.has-hover ? Theme.here-colour.transparentize(78%)
+            : self.made ? Theme.here-colour.transparentize(87%)
+            : touch.has-hover ? Theme.hover : Theme.surface;
+        if self.has: Text {
+            x: root.roomy ? 6px : 0px;
+            y: root.roomy ? 3px : 0px;
+            width: root.roomy ? self.preferred-width : parent.width;
+            height: root.roomy ? self.preferred-height : parent.height;
+            text: parent.slice + 1;
+            color: parent.lit ? Theme.accent-text : parent.making ? Theme.accent : Theme.text;
+            font-family: Theme.number-font;
+            font-size: Type.small;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        if self.has && root.roomy: Text {
+            x: parent.width - self.width - 5px;
+            y: parent.height - self.height - 3px;
+            text: root.pads[parent.slice];
+            color: parent.lit ? Theme.accent-text : Theme.faint;
+            font-family: Theme.number-font;
+            font-size: Type.tiny;
+        }
+        touch := TouchArea {
+            enabled: parent.has && root.enabled;
+            pointer-event(e) => {
+                // As a drum pad: it plays as it's pressed.
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    root.pressed(parent.slice);
+                }
+            }
+        }
+    }
+    if root.pages > 1: HorizontalLayout {
+        x: 0px;
+        y: root.height - root.edge - root.dots + 3px;
+        width: root.width;
+        height: root.dots - 3px;
+        alignment: center;
+        for p in root.pages: Rectangle {
+            width: 14px;
+            Rectangle {
+                width: 5px;
+                height: 5px;
+                border-radius: 2.5px;
+                background: p == root.shown ? Theme.text : dot-touch.has-hover ? Theme.muted : Theme.stroke.brighter(60%);
+            }
+            dot-touch := TouchArea {
+                clicked => {
+                    root.page = p;
+                }
+            }
+        }
     }
 }
 
