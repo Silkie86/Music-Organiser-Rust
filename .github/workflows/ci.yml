@@ -66,8 +66,11 @@ jobs:
       matrix:
         os: ${{ github.event_name == 'pull_request' && fromJSON('["windows-latest", "ubuntu-latest"]') || fromJSON('["windows-latest", "macos-latest", "ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
-    # A hung test fails within the hour rather than at GitHub's 6 (review TC-1).
-    timeout-minutes: 60
+    # A hung test fails within the hour rather than at GitHub's 6 (review TC-1). A run on main, or one started by hand,
+    # checks every crate and gets longer: 90 minutes, and 120 on Mac. A new Rust version empties every saved build
+    # (1.100.1 on 2026-11-27 did), and from nothing Windows took 57 minutes. Mac was already at an hour with its saved
+    # build; from nothing it was stopped before it could save one, so the next run started from nothing too.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || (matrix.os == 'macos-latest' && 120 || 90) }}
     steps:
       - name: Stop if working out what changed failed
         if: needs.scope.result != 'success'
@@ -77,11 +80,28 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
+      # The Linux machine stopped answering part way through the tests, with no log to say why (main, 2026-11-27):
+      # most likely a full disk, as the build writes tens of GB and GitHub only promises 14 free. GitHub's machines
+      # come with tools for other languages that nothing here uses; taking them away makes room.
+      - name: Make room on the Linux disk
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc /usr/share/swift \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # the stable branch
         with:
           toolchain: stable
           components: rustfmt, clippy
+      # The checks' builds on Linux and Mac leave out debugging info (Cargo.toml keeps file names and line numbers for
+      # crash logs): it was over half of each big binary (384 of mo-screens' 650 MB), all written, linked and never
+      # read. A failed test still says its file and line. Windows keeps it: mo-ui's stuck-thread test finds a function
+      # by name there. Set before the cache step, so the saved build is one made this way.
+      - name: No debugging info in the builds on Linux and Mac
+        if: runner.os != 'Windows'
+        run: echo "CARGO_PROFILE_DEV_DEBUG=none" >> "$GITHUB_ENV"
       # Rust's own linker on Windows, much quicker than Microsoft's link.exe at linking the 50-odd test binaries. Set
       # before the cache step so the cached libraries are built with it (a change of linker rebuilds every library with
       # a build script). Only for the checks: the installer job and the releases keep link.exe.
@@ -149,6 +169,24 @@ jobs:
       - name: Tests (and the crates that use them)
         if: needs.scope.outputs.rust == 'true' && runner.os == 'Linux'
         run: cargo test ${{ needs.scope.outputs.check }}
+      # What the build took, so the next job that runs out of something isn't a guess: the disk, and how much memory
+      # had to be moved out to the disk to make room (a lot means the machine was short of memory).
+      - name: How much room the build took
+        if: always() && runner.os != 'Windows'
+        run: |
+          # Only to read: nothing here may fail the job.
+          set +e
+          df -h .
+          [ -d target ] && du -sh target
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            free -m
+            grep -E '^(pswpout|oom_kill) ' /proc/vmstat
+            cat /proc/pressure/memory
+          else
+            sysctl vm.swapusage
+            vm_stat
+          fi
+          exit 0
 
   # The galaxy check is a workspace of its own (so its wgpu stays out of the app); checked on Windows, where it runs.
   # A job of its own so it runs beside the Windows tests instead of after them (it added about 5 minutes to Windows).
