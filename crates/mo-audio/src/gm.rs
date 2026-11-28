@@ -239,9 +239,10 @@ impl SongSound {
         self.end as f64 / f64::from(RATE)
     }
 
-    /// Makes the sound from frame `from` to the end, a part at a time, handing each to `put` until it says stop. None
-    /// past the end.
-    fn make_from(&self, from: usize, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) -> Result<(), String> {
+    /// Makes the sound from frame `from` (frames at [`RATE`]) to the end, a part at a time, handing each to `put` until
+    /// it says stop. None past the end. The app's player asks through [`crate::play::Maker`], which only a build with
+    /// that player has (the `play` feature); a build without it (the plugin's) has this.
+    pub fn make_from(&self, from: usize, put: &mut dyn FnMut(Vec<Vec<f32>>) -> bool) -> Result<(), String> {
         let total = self.end + TAIL_FRAMES;
         if from >= total {
             return Ok(());
